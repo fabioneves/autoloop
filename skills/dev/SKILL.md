@@ -365,9 +365,10 @@ and plan against **`origin/<base>`** (`git grep`/`git show` on the committed tre
 working tree, which A's implementer owns), then dispatch B's plan review as a second background
 job. How to background is host idiom — Claude: `run_in_background` on the `codex exec`/
 `opencode run`/Agent dispatch; native Codex: **prefer the native codex background terminal —
-run the dispatch through the `unified_exec` background job (requires
-`experimental_use_unified_exec_tool`; the same mechanism codex uses to auto-background a long
-gate) and return control to do B's staging while it runs. `/ps` lists it, `/stop` closes it, and
+run the dispatch through the `unified_exec` background job (requires the `[features] unified_exec`
+config flag — `--enable unified_exec` or `[features].unified_exec = true`; the flat
+`experimental_use_unified_exec_tool` key is deprecated; the same mechanism codex uses to
+auto-background a long gate) and return control to do B's staging while it runs. `/ps` lists it, `/stop` closes it, and
 codex's own "running Ns" line is the heartbeat — so on this host the sleep-poll loop below is the
 FALLBACK, used only when `unified_exec` is unavailable.** The reviewer still runs as a fresh
 `codex exec --sandbox read-only` command inside that terminal, so its OS-enforced isolation and
@@ -840,7 +841,7 @@ long run scans: run banner (once) → unit banner → step line → normal narra
   ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
   ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
   ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-  ∞ dev · v0.39.7 · starting
+  ∞ dev · v0.39.8 · starting
   ```
 
   Never re-print it per unit or per step; the smaller markers below carry the rhythm. Missed the
