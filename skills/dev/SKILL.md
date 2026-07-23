@@ -331,13 +331,14 @@ findings yourself; non-interactive rules apply (no cross-model offers, no user q
 
 **Overlap (depth 1) — on EVERY host, not just Claude.** "One unit at a time" serializes the
 *worked* unit — the checkout, the implementer, the gate. While unit A waits on a background
-engine job (step 5 implementation, step 8 round 1), stage the NEXT eligible issue B through its
+dispatch — an engine job OR a host-thread implementer/reviewer (docs/small lane), at step 5
+implementation or step 8 round 1 — stage the NEXT eligible issue B through its
 read-only stages 1–3: premise-check
 and plan against **`origin/<base>`** (`git grep`/`git show` on the committed tree — never A's
 working tree, which A's implementer owns), then dispatch B's plan review as a second background
 job. How to background is host idiom — Claude: `run_in_background` on the `codex exec`/
 `opencode run`/Agent dispatch; native Codex: spawn the worker and DEFER the blocking collab wait
-until B's staging is done; native opencode: same deferred-wait idiom on the task dispatch — but the rule is host-neutral: an engine dispatch collected by an immediate blocking wait
+until B's staging is done; native opencode: same deferred-wait idiom on the task dispatch — but the rule is host-neutral: any background dispatch (engine or host-thread) collected by an immediate blocking wait
 while an eligible issue sat unstaged is wasted wall-clock, and the run record's `overlap:` line
 says which it was (`staged #<B>` / `none eligible`). Hard limits: at most ONE unit staged
 ahead; never two implementers; never claim B (step 4)

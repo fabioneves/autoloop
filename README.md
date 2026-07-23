@@ -350,8 +350,9 @@ Autoloop spends depth where it changes the outcome and keeps every wait visible:
 
 - **One-call scan:** repository facts, tree state, queue provenance, blocked issues, owned PRs,
   orphan candidates, and close-out facts arrive in one startup scan.
-- **Depth-one overlap:** while one unit waits on a background engine job, the next issue may move
-  through read-only premise, plan, and plan-review stages against `origin/<base>`. Checkout,
+- **Depth-one overlap:** while one unit waits on a background dispatch — an engine job, or a
+  host-thread implementer/reviewer in the docs/small lane — the next issue may move through
+  read-only premise, plan, and plan-review stages against `origin/<base>`. Checkout,
   implementation, claim, and gate stay serial.
 - **Docs lane:** mechanically verified docs-only changes use fresh host threads for every role;
   writer ≠ reviewer and the full gate still apply. The final diff is reclassified before ready.
