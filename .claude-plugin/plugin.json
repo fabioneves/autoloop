@@ -1,10 +1,10 @@
 {
   "name": "autoloop",
-  "version": "0.38.4",
+  "version": "0.39.0",
   "dependencies": [
     "agent-skills"
   ],
-  "description": "A standing, self-prompting development loop for Claude Code, Codex CLI, and opencode: labelled GitHub issues in, gated + independently reviewed PRs out. Writer ≠ reviewer, always; L2 — a human merges. Skills: autoloop:setup (scaffold/configure a repo), autoloop:dev (forward path: issue → plan → implement → gate → simplify → fresh review → ready PR), autoloop:pitcrew (return path: revise open loop PRs), autoloop:shape (spec → PR-sized issues; lint mode for existing ones).",
+  "description": "A standing, self-prompting development loop for Claude Code, Codex CLI, and opencode: labelled GitHub issues in, gated + independently reviewed PRs out. Writer ≠ reviewer, always; L2 — a human merges. Skills: autoloop:setup (scaffold/configure a repo), autoloop:dev (forward path: issue → plan → implement → gate → simplify → fresh review → ready PR), autoloop:pitcrew (return path: revise open loop PRs), autoloop:shape (spec → PR-sized issues; lint mode for existing ones), autoloop:queue-trace (read-only spec ⇄ queue reconciliation: coverage, traceability, exit accounting).",
   "author": {
     "name": "Fábio Neves"
   }

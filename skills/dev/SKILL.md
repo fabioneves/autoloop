@@ -773,7 +773,7 @@ long run scans: run banner (once) → unit banner → step line → normal narra
   ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
   ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
   ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-  ∞ dev · v0.38.4 · starting
+  ∞ dev · v0.39.0 · starting
   ```
 
   Never re-print it per unit or per step; the smaller markers below carry the rhythm. Missed the

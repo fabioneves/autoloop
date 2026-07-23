@@ -10,7 +10,7 @@
 <strong>Labelled GitHub issues in. Gated, independently reviewed PRs out.</strong>
 
 <p>
-  <img alt="release v0.38.4" src="https://img.shields.io/badge/release-v0.38.4-8b5cf6?style=flat-square">
+  <img alt="release v0.39.0" src="https://img.shields.io/badge/release-v0.39.0-8b5cf6?style=flat-square">
   <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
   <img alt="writer does not equal reviewer" src="https://img.shields.io/badge/invariant-writer_%E2%89%A0_reviewer-a78bfa?style=flat-square">
   <img alt="human controlled merge" src="https://img.shields.io/badge/authority-human_merge-f59e0b?style=flat-square">
@@ -261,6 +261,7 @@ Codex CLI, and opencode use the same process definitions.
 |---|---|
 | [`autoloop:setup`](skills/setup/SKILL.md) | Fresh install, reconfiguration, migrations, global defaults, and read-only doctor checks. |
 | [`autoloop:shape`](skills/shape/SKILL.md) | Interactive queue feeder: description/spec → verified, PR-sized issues; `shape lint #N` grades existing issues. It never labels them. |
+| [`autoloop:queue-trace`](skills/queue-trace/SKILL.md) | Read-only spec ⇄ queue reconciliation: which spec tasks have issues, which issues trace to a task, per-milestone exit accounting; `queue-trace annotate` emits (never runs) the commands to add a missing task ID. |
 | [`autoloop:dev`](skills/dev/SKILL.md) | Forward path: trusted issue → reviewed plan → implementation → independent code review → full gate → ready PR. |
 | [`autoloop:pitcrew`](skills/pitcrew/SKILL.md) | Return path: human feedback / red CI / conflicts → revised, re-gated, re-reviewed PR. |
 | [`autoloop:lean-code`](skills/lean-code/SKILL.md) | Lean, self-documenting source with near-zero inline comments; rationale belongs in commits and PRs. |

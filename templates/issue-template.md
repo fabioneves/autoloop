@@ -24,6 +24,13 @@ labels: []
 <!-- The ONE module/directory this touches (e.g. `src/billing/`). One module per issue —
      cross-module work is split into multiple issues chained via Blocked by. -->
 
+## Task
+
+<!-- Spec-driven repos: the spec task ID this unit delivers (e.g. `API-TASK-042`), so the queue
+     traces back to the spec for coverage and milestone exit accounting — see autoloop:queue-trace.
+     No matching spec task (a one-off fix/chore) → `none`. No spec at all → omit this section.
+     A traceability aid: never invent an ID, never validated, never gated. -->
+
 ## Evidence / premises
 
 <!-- Symbols, routes, tables this issue assumes exist — with file:line where known.

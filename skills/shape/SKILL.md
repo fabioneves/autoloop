@@ -47,6 +47,9 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
 4. **Write each issue** using the repo's loop-unit template (`.github/ISSUE_TEMPLATE/loop-unit.md`,
    scaffolded by setup): Context · Acceptance criteria (each an observable, testable assertion —
    "X returns Y", "the gate stays green", never "works well") · Boundary (the one module) ·
+   Task (when shaping from a spec that has a task-ID scheme, the spec task ID this unit delivers,
+   so the queue stays traceable for `autoloop:queue-trace` — `none` for a genuine out-of-spec unit;
+   omit the section entirely when the repo has no spec, and never invent an ID) ·
    Evidence / premises (with `file:line`) · Blocked by · Out of scope (explicit non-goals guard
    the boundary better than anything else). **Title format: `<type>: <summary>`** — the
    conventional-commit type as the intake guess (`feat:`, `fix:`, `chore:`, `ci:`, `docs:`, or
