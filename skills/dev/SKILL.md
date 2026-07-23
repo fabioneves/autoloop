@@ -354,8 +354,15 @@ read-only stages 1–3: premise-check
 and plan against **`origin/<base>`** (`git grep`/`git show` on the committed tree — never A's
 working tree, which A's implementer owns), then dispatch B's plan review as a second background
 job. How to background is host idiom — Claude: `run_in_background` on the `codex exec`/
-`opencode run`/Agent dispatch; native Codex: spawn the worker and DEFER the blocking collab wait
-until B's staging is done; native opencode: same deferred-wait idiom on the task dispatch — but the rule is host-neutral: any background dispatch (engine or host-thread) collected by an immediate blocking wait
+`opencode run`/Agent dispatch; native Codex: **prefer the native codex background terminal —
+run the dispatch through the `unified_exec` background job (requires
+`experimental_use_unified_exec_tool`; the same mechanism codex uses to auto-background a long
+gate) and return control to do B's staging while it runs. `/ps` lists it, `/stop` closes it, and
+codex's own "running Ns" line is the heartbeat — so on this host the sleep-poll loop below is the
+FALLBACK, used only when `unified_exec` is unavailable.** The reviewer still runs as a fresh
+`codex exec --sandbox read-only` command inside that terminal, so its OS-enforced isolation and
+the fresh-process contract are unchanged. Native opencode: spawn the worker and DEFER the blocking
+collab wait until B's staging is done — but the rule is host-neutral: any background dispatch (engine or host-thread) collected by an immediate blocking wait
 while an eligible issue sat unstaged is wasted wall-clock, and the run record's `overlap:` line
 says which it was (`staged #<B>` / `none eligible`). Hard limits: at most ONE unit staged
 ahead; never two implementers; never claim B (step 4)
@@ -371,8 +378,14 @@ while the engine grinds, and a turn that has ended can emit no heartbeat and no 
 Hold the wait in-turn with bounded poll commands (~3 minutes each: a short-sleep loop that
 tails the dispatch log), and after each poll emit the heartbeat pair — chat line + task
 elapsed refresh (chat markers below). The completion notification is the backstop if the host
-ends the turn anyway, never the plan. Validate every collected review against its verdict
-schema — invalid or empty counts as a dead dispatch (engine-down fallback).
+ends the turn anyway, never the plan. **On native Codex the background terminal replaces the
+sleep-poll loop: codex tracks the job (`/ps`), surfaces its own elapsed heartbeat, and signals
+completion — collect the terminal's captured output then, and skip the manual poll/heartbeat
+machinery (the terminal IS the visible wait).** Whatever the collection route, the checks are
+unchanged: validate every collected review against its verdict
+schema — invalid or empty counts as a dead dispatch (engine-down fallback) — and the reviewer
+integrity checks (HEAD/worktree fingerprint, transcript scan) still gate acceptance exactly as
+for a directly-collected `codex exec`.
 
 **Docs lane — zero engine dispatches.** At step 1, classify mechanically: a unit rides the docs
 lane iff `node tools/agentic/escalate-paths.mjs` reports no hits for the planned paths AND every
@@ -791,7 +804,7 @@ long run scans: run banner (once) → unit banner → step line → normal narra
   ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
   ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
   ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-  ∞ dev · v0.39.3 · starting
+  ∞ dev · v0.39.4 · starting
   ```
 
   Never re-print it per unit or per step; the smaller markers below carry the rhythm. Missed the
