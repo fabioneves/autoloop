@@ -298,9 +298,26 @@ the human sees the degradation. Never block a unit on an upstream runtime failur
 skip the review instead — a host-thread review is degraded; no review is a violation. (Salvage
 first: check the dead job's log for a verdict before discarding a round.)
 
-**Engine outage mode — degrade to host, keep probing, resume.** The fallback engaging flips
-the run into outage mode (chat marker: `⚠ engine outage — running on host threads until the
-engine recovers`). The loop KEEPS GOING: while in outage mode, implementer dispatches go
+**Not every dead dispatch is an outage — separate the deterministic sandbox-init failure.**
+When a reviewer `codex exec` dies **at launch, before any task progress**, with a
+sandbox-initialization error — its read-only sandbox cannot be created (e.g. *"inner read-only
+sandbox cannot initialize inside the outer sandbox"*, a Landlock/Seatbelt setup failure, or an
+egress escalation rejected by the environment's risk guard) — the cause is NOT the engine: the
+**orchestrator session is itself OS-sandboxed** (codex 0.145+ runs a trusted project under
+`workspace-write`), so the nested OS-enforced reviewer can never start. This is **deterministic**
+— every retry and every recovery probe dies identically — so do NOT enter outage mode (probing is
+futile) and do NOT count it toward the transient tally. Fall back to a host-thread review for THIS
+unit so the queue isn't blocked, but surface it LOUDLY and DISTINCTLY: chat marker
+`⚠ reviewer sandbox cannot initialize — orchestrator is OS-sandboxed; relaunch codex --sandbox danger-full-access (see setup)`,
+and record it as an **environment/config failure with the relaunch remedy** — never as
+`engine unavailable`. It is a per-session condition the human fixes by relaunching the orchestrator
+unsandboxed; the loop cannot wait it out. (Preflight flags this at Prime via the write-outside-workspace
+probe; this is the runtime backstop for a dispatch that reaches the fallback anyway.)
+
+**Engine outage mode — degrade to host, keep probing, resume.** The fallback engaging for a
+GENUINE upstream outage (5xx / rate limit / connect failures — NOT the deterministic sandbox-init
+case above) flips the run into outage mode (chat marker: `⚠ engine outage — running on host
+threads until the engine recovers`). The loop KEEPS GOING: while in outage mode, implementer dispatches go
 straight to fresh host-session subagents (writer ≠ reviewer holds — distinct fresh threads),
 and each NEW review dispatch tries the engine **once** — that single attempt IS the recovery
 probe (read-only review dispatches are the only probes; never probe with a write-capable
@@ -774,7 +791,7 @@ long run scans: run banner (once) → unit banner → step line → normal narra
   ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
   ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
   ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-  ∞ dev · v0.39.2 · starting
+  ∞ dev · v0.39.3 · starting
   ```
 
   Never re-print it per unit or per step; the smaller markers below carry the rhythm. Missed the

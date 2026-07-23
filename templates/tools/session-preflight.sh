@@ -52,6 +52,22 @@ fi
 # direct `codex exec` when Claude hosts a codex profile).
 if grep -q '"profile": *"codex"' docs/agentic/STATE.md 2>/dev/null; then
   echo 'INFO  engine profile is codex — Prime must verify this host is declared and its Codex dispatch surface is available'
+  # Nested-sandbox check. Codex 0.145+ runs a trusted project under workspace-write (an OS
+  # sandbox). The OS-enforced reviewer (`codex exec --sandbox read-only`) then cannot initialize
+  # its own nested sandbox and dies at launch — which the loop misreads as an "engine outage"
+  # and silently degrades to same-model host-thread review. Detect it without an API call: a
+  # sandboxed session cannot write outside its workspace roots (repo, /tmp, $TMPDIR), so a write
+  # to $HOME is blocked iff the orchestrator is sandboxed. (Claude+codex orchestrators run
+  # unsandboxed → write succeeds → PASS, correctly.)
+  if command -v codex >/dev/null 2>&1; then
+    probe="$HOME/.autoloop_sandbox_probe.$$"
+    if touch "$probe" 2>/dev/null; then
+      rm -f "$probe"
+      echo 'PASS  orchestrator not OS-sandboxed — the codex exec read-only reviewer can initialize'
+    else
+      echo 'FAIL  orchestrator is OS-sandboxed (cannot write outside the workspace) — the `codex exec --sandbox read-only` reviewer cannot initialize its nested sandbox and dies at launch, degrading every review to same-model host threads (the loop misreports this as an "engine outage"). Relaunch codex with `--sandbox danger-full-access`, or set `default_permissions = ":danger-full-access"` in ~/.codex/config.toml, then restart. (codex 0.145 trusted-project default is workspace-write.)'
+    fi
+  fi
 fi
 
 exit 0
