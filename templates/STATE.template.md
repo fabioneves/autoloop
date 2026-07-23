@@ -147,7 +147,9 @@ that writes an artifact never reviews it.**
 - **Caps** (Config → `caps`): drain the eligible `loop-ready` queue (one PR per issue) until the
   wall-clock budget (`runWallClockHours`, checked **between** units) is spent or no eligible issue
   remains. Per unit: ≤ `gateRetriesPerUnit` gate-failed rounds (then `loop-blocked` + close the
-  draft PR); ≤ `reviseRoundsPerPr` pitcrew revise-rounds per PR **lifetime** (persisted as
+  draft PR); ≤ `codeReviewRoundsPerUnit` step-8 code-review convergence rounds (default 3 when
+  unset; then `loop-blocked` on an unresolved Critical/Major); ≤ `reviseRoundsPerPr` pitcrew
+  revise-rounds per PR **lifetime** (persisted as
   `[loop revise-round N]` markers in PR comments — state lives in GitHub). Past the ~60-min per-unit
   soft cap, commit + push what exists (the draft claim becomes an orphan the next run adopts) and
   stop the unit.

@@ -689,7 +689,7 @@ PRs; blocked = `loop-blocked`. **Respect `## Blocked by`**: skip an issue while 
    recorded in the run record and surfaced for the human (digest; propose an issue), never gated
    on in this unit: round 1 was the full-diff pass, and re-litigating code it accepted is how
    rounds fail to converge. A round that applies zero fixes and accepts all rebuts is clean —
-   stop. Cap ~3 rounds; when capped with an unresolved
+   stop. Cap `cfg.caps.codeReviewRoundsPerUnit` rounds (default 3 when the key is unset); when capped with an unresolved
    Major, comment the finding, remove `loop-ready`, `loop-started`, and the current `loop:*` step
    label, add `loop-blocked` plus the reason gate, then close the draft PR.
 
@@ -826,7 +826,7 @@ long run scans: run banner (once) → unit banner → step line → normal narra
   ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
   ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
   ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-  ∞ dev · v0.39.5 · starting
+  ∞ dev · v0.39.6 · starting
   ```
 
   Never re-print it per unit or per step; the smaller markers below carry the rhythm. Missed the
