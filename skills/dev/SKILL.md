@@ -696,8 +696,22 @@ PRs; blocked = `loop-blocked`. **Respect `## Blocked by`**: skip an issue while 
 9. **Gate (orchestrator).** `gh issue edit <N> --remove-label loop:08-code-review --add-label
    loop:09-gate`. ONE full gate on the final, review-converged tree: with the tree clean, run
    **`cfg.gate.command`** — it, not any opinion, decides
-   done — and record the gated commit (`git rev-parse HEAD`). Only a full-gate SHA may become the
-   ready head. **Green is necessary, not
+   done — and record the gated commit (`git rev-parse HEAD`). Only a gated SHA may become the
+   ready head.
+   **Scaffold-only diffs gate on the scaffold, not the app.** First classify the FINAL diff
+   (`git diff --name-only origin/<base>...HEAD`): when it is non-empty AND **every** path lies
+   inside the loop's own scaffold — `tools/agentic/**`, `docs/agentic/**`, `.codex/**`,
+   `.claude/**`, `.agents/**`, `.githooks/**` — AND none is app-affecting (`.github/workflows/**`,
+   `Dockerfile*`, `docker-compose*`, `.env*`) nor `tools/agentic/gate.mjs` itself, then
+   `cfg.gate.command` (which exercises the APP) proves nothing this change touched. Run the
+   **scaffold gate** instead: `--self-test` on every vendored `tools/agentic/*.mjs` that supports
+   it, `node tools/agentic/config-contract.mjs docs/agentic/STATE.md`, `bash -n` on each changed
+   `tools/agentic/*.sh`, and a JSON parse of each changed `.json` — all green IS the gate result,
+   recorded on the gated SHA exactly like `cfg.gate.command`. **Fail-closed:** any path outside the
+   scaffold set, a mixed app+scaffold diff, a change to `tools/agentic/gate.mjs`, or any doubt →
+   run `cfg.gate.command` unchanged (the gate wrapper is always proven by the app gate it wraps).
+   The rest of step 9 — clean-tree recheck, red-gate handling, gated-SHA recording — is identical
+   whichever gate ran. **Green is necessary, not
    sufficient**: when the unit's behavior can be exercised against real data without side effects,
    feed the changed code the Evidence capture (read-only inputs, computed outputs) and eyeball the
    result against the acceptance criteria. Never start the project's live/watch service for this. A
@@ -826,7 +840,7 @@ long run scans: run banner (once) → unit banner → step line → normal narra
   ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
   ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
   ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-  ∞ dev · v0.39.6 · starting
+  ∞ dev · v0.39.7 · starting
   ```
 
   Never re-print it per unit or per step; the smaller markers below carry the rhythm. Missed the

@@ -157,7 +157,7 @@ first output at Prime — before any tool call — is the run banner, once:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.39.6 · starting
+∞ pitcrew · v0.39.7 · starting
 ```
 
 (Missed the first-output rule? Print it with your very next text output — late beats never.)
