@@ -1,0 +1,38 @@
+{
+  "name": "autoloop",
+  "version": "0.38.4",
+  "description": "A standing development loop for Codex CLI, Claude Code, and opencode: labelled GitHub issues in, gated and independently reviewed PRs out.",
+  "author": {
+    "name": "Fábio Neves",
+    "url": "https://github.com/fabioneves"
+  },
+  "homepage": "https://github.com/fabioneves/autoloop",
+  "repository": "https://github.com/fabioneves/autoloop",
+  "keywords": [
+    "codex",
+    "claude-code",
+    "opencode",
+    "github",
+    "development-loop",
+    "code-review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Autoloop",
+    "shortDescription": "Issues in; reviewed, gated PRs out",
+    "longDescription": "Run a guarded GitHub issue-to-PR loop with independent planning and code reviews, objective gates, and human-controlled merging.",
+    "developerName": "Fábio Neves",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write",
+      "GitHub",
+      "Subagents"
+    ],
+    "defaultPrompt": [
+      "Set up autoloop in this repository.",
+      "Run one autoloop development cycle.",
+      "Check this repository's autoloop health."
+    ]
+  }
+}

@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="210" viewBox="0 0 1200 210" role="img" aria-labelledby="title desc">
+  <title id="title">Autoloop's four guardrails</title>
+  <desc id="desc">Four guardrails cover trusted input, independent review, exact evidence, and human authority.</desc>
+  <style>
+    .number { font: 700 13px Inter, ui-sans-serif, system-ui, sans-serif; }
+    .title { fill: #111827; font: 700 19px Inter, ui-sans-serif, system-ui, sans-serif; }
+    .copy { fill: #475569; font: 400 14px Inter, ui-sans-serif, system-ui, sans-serif; }
+    .rule { fill: #334155; font: 600 13px Inter, ui-sans-serif, system-ui, sans-serif; }
+  </style>
+
+  <rect width="1200" height="210" fill="#ffffff"/>
+
+  <g transform="translate(0 8)">
+    <circle cx="20" cy="20" r="20" fill="#cffafe"/>
+    <text x="20" y="25" text-anchor="middle" class="number" fill="#0e7490">01</text>
+    <text x="0" y="72" class="title">Trusted input</text>
+    <text x="0" y="104" class="copy">A maintainer labels after reading.</text>
+    <text x="0" y="126" class="copy">Later edits invalidate that trust.</text>
+    <text x="0" y="174" class="rule">The queue cannot authorize itself.</text>
+  </g>
+
+  <line x1="290" y1="0" x2="290" y2="194" stroke="#e2e8f0"/>
+
+  <g transform="translate(310 8)">
+    <circle cx="20" cy="20" r="20" fill="#ede9fe"/>
+    <text x="20" y="25" text-anchor="middle" class="number" fill="#6d28d9">02</text>
+    <text x="0" y="72" class="title">Independent review</text>
+    <text x="0" y="104" class="copy">A different fresh thread reviews.</text>
+    <text x="0" y="126" class="copy">Zero parent context prevents echo.</text>
+    <text x="0" y="174" class="rule">Writer ≠ reviewer.</text>
+  </g>
+
+  <line x1="600" y1="0" x2="600" y2="194" stroke="#e2e8f0"/>
+
+  <g transform="translate(620 8)">
+    <circle cx="20" cy="20" r="20" fill="#dcfce7"/>
+    <text x="20" y="25" text-anchor="middle" class="number" fill="#15803d">03</text>
+    <text x="0" y="72" class="title">Exact evidence</text>
+    <text x="0" y="104" class="copy">Review, gate, and pushed head</text>
+    <text x="0" y="126" class="copy">bind to one commit.</text>
+    <text x="0" y="148" class="copy">CI joins when present.</text>
+    <text x="0" y="190" class="rule">Opinion never replaces the gate.</text>
+  </g>
+
+  <line x1="910" y1="0" x2="910" y2="194" stroke="#e2e8f0"/>
+
+  <g transform="translate(930 8)">
+    <circle cx="20" cy="20" r="20" fill="#fef3c7"/>
+    <text x="20" y="25" text-anchor="middle" class="number" fill="#b45309">04</text>
+    <text x="0" y="72" class="title">Human authority</text>
+    <text x="0" y="104" class="copy">A human merges by default.</text>
+    <text x="0" y="126" class="copy">Ratified policy is the exception.</text>
+    <text x="0" y="174" class="rule">Automation cannot widen itself.</text>
+  </g>
+</svg>

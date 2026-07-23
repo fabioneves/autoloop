@@ -1,0 +1,56 @@
+{
+  "//": "Claude Code hook fragment merged into the host repo's .claude/settings.json by autoloop:setup. Paths point at the VENDORED tools in the host repo — never at the plugin — so guard behavior stays under the repo's own review.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/tools/agentic/session-preflight.sh\"",
+            "timeout": 30,
+            "statusMessage": "autoloop preflight (read-only checks)"
+          },
+          {
+            "type": "command",
+            "command": "printf '\\n## autoloop — auto-primed STATE (docs/agentic/STATE.md)\\n\\n'; cat \"$CLAUDE_PROJECT_DIR/docs/agentic/STATE.md\" 2>/dev/null"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "s=\"$CLAUDE_PROJECT_DIR/tools/agentic/command-guard.mjs\"; if [ -f \"$s\" ]; then node \"$s\"; else echo \"autoloop: command guard $s not found — refusing commands until autoloop:setup is re-run\" >&2; exit 2; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/tools/agentic/label-swap-reminder.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/tools/agentic/writeback-check.mjs\"",
+            "timeout": 45
+          }
+        ]
+      }
+    ]
+  }
+}

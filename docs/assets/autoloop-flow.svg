@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
+  <title id="title">Autoloop forward and return paths</title>
+  <desc id="desc">Five stages take a trusted issue through planning, implementation, review, and the objective gate to a ready pull request. A smaller Pitcrew row returns feedback, failed CI, or conflicts through revision and re-verification to the same pull request.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L9 4.5L0 9Z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-return" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L9 4.5L0 9Z" fill="#e11d48"/>
+    </marker>
+    <style>
+      .lane { fill: #64748b; font: 700 12px Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 1.8px; }
+      .step { font: 700 11px Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.7px; }
+      .card-title { fill: #111827; font: 700 19px Inter, ui-sans-serif, system-ui, sans-serif; }
+      .copy { fill: #475569; font: 400 13px Inter, ui-sans-serif, system-ui, sans-serif; }
+      .rule { fill: #334155; font: 600 13px Inter, ui-sans-serif, system-ui, sans-serif; }
+      .flow { fill: none; stroke: #64748b; stroke-width: 2.25; marker-end: url(#arrow); }
+      .return-flow { fill: none; stroke: #e11d48; stroke-width: 2.25; marker-end: url(#arrow-return); }
+    </style>
+  </defs>
+
+  <rect width="1200" height="430" fill="#ffffff"/>
+  <text x="0" y="13" class="lane">FORWARD PATH</text>
+
+  <path class="flow" d="M224 108H238"/>
+  <path class="flow" d="M468 108H482"/>
+  <path class="flow" d="M712 108H726"/>
+  <path class="flow" d="M956 108H970"/>
+
+  <g transform="translate(0 28)">
+    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
+    <rect width="224" height="5" rx="2.5" fill="#0891b2"/>
+    <text x="16" y="33" class="step" fill="#0e7490">01 · TRUST</text>
+    <text x="16" y="66" class="card-title">Trusted issue</text>
+    <text x="16" y="96" class="copy">Shape is optional.</text>
+    <text x="16" y="118" class="copy">A maintainer reads the issue</text>
+    <text x="16" y="140" class="copy">and applies loop-ready last.</text>
+  </g>
+
+  <g transform="translate(244 28)">
+    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
+    <rect width="224" height="5" rx="2.5" fill="#7c3aed"/>
+    <text x="16" y="33" class="step" fill="#6d28d9">02 · PLAN</text>
+    <text x="16" y="66" class="card-title">Reviewed plan</text>
+    <text x="16" y="96" class="copy">Verify premises and scope.</text>
+    <text x="16" y="118" class="copy">A fresh reviewer challenges</text>
+    <text x="16" y="140" class="copy">the complete plan.</text>
+  </g>
+
+  <g transform="translate(488 28)">
+    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
+    <rect width="224" height="5" rx="2.5" fill="#2563eb"/>
+    <text x="16" y="33" class="step" fill="#1d4ed8">03 · BUILD</text>
+    <text x="16" y="66" class="card-title">Built change</text>
+    <text x="16" y="96" class="copy">A draft PR freezes the plan.</text>
+    <text x="16" y="118" class="copy">A fresh implementer writes;</text>
+    <text x="16" y="140" class="copy">the orchestrator simplifies.</text>
+  </g>
+
+  <g transform="translate(732 28)">
+    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
+    <rect width="224" height="5" rx="2.5" fill="#16a34a"/>
+    <text x="16" y="33" class="step" fill="#15803d">04 · PROVE</text>
+    <text x="16" y="66" class="card-title">Proven head</text>
+    <text x="16" y="96" class="copy">Diff review + fresh review.</text>
+    <text x="16" y="118" class="copy">One full objective gate.</text>
+    <text x="16" y="140" class="copy">Pushed head = gated SHA.</text>
+  </g>
+
+  <g transform="translate(976 28)">
+    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
+    <rect width="224" height="5" rx="2.5" fill="#d97706"/>
+    <text x="16" y="33" class="step" fill="#b45309">05 · DELIVER</text>
+    <text x="16" y="66" class="card-title">Ready PR</text>
+    <text x="16" y="96" class="copy">CI passes when present.</text>
+    <text x="16" y="118" class="copy">A human merges by default;</text>
+    <text x="16" y="140" class="copy">ratified policy is the exception.</text>
+  </g>
+
+  <text x="0" y="226" class="lane" fill="#be123c">PITCREW RETURN PATH</text>
+  <path class="return-flow" d="M270 298H304"/>
+  <path class="return-flow" d="M580 298H614"/>
+  <path class="return-flow" d="M890 298H924"/>
+  <path class="return-flow" d="M1088 244V194"/>
+
+  <g transform="translate(0 244)">
+    <rect width="270" height="108" rx="8" fill="#fff1f2"/>
+    <text x="16" y="30" class="step" fill="#be123c">TRIGGER</text>
+    <text x="16" y="61" class="card-title">PR needs attention</text>
+    <text x="16" y="88" class="copy">Feedback · failed CI · conflict</text>
+  </g>
+
+  <g transform="translate(310 244)">
+    <rect width="270" height="108" rx="8" fill="#fff1f2"/>
+    <text x="16" y="30" class="step" fill="#be123c">DIAGNOSE + REVISE</text>
+    <text x="16" y="61" class="card-title">Fix only what changed</text>
+    <text x="16" y="88" class="copy">Prove ownership; fresh implementer.</text>
+  </g>
+
+  <g transform="translate(620 244)">
+    <rect width="270" height="108" rx="8" fill="#fff1f2"/>
+    <text x="16" y="30" class="step" fill="#be123c">RE-PROVE</text>
+    <text x="16" y="61" class="card-title">Fresh review + full gate</text>
+    <text x="16" y="88" class="copy">Verify the new pushed head.</text>
+  </g>
+
+  <g transform="translate(930 244)">
+    <rect width="270" height="108" rx="8" fill="#fff1f2"/>
+    <text x="16" y="30" class="step" fill="#be123c">RETURN</text>
+    <text x="16" y="61" class="card-title">Same PR, ready again</text>
+    <text x="16" y="88" class="copy">Resolve threads; return to human.</text>
+  </g>
+
+  <text x="0" y="406" class="rule">Writer ≠ reviewer</text>
+  <text x="254" y="406" class="rule">Full gate on final tree</text>
+  <text x="520" y="406" class="rule">Remote head = gated SHA</text>
+  <text x="834" y="406" class="rule">Human merge by default</text>
+</svg>

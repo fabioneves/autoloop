@@ -1,0 +1,22 @@
+{
+  "name": "autoloop",
+  "description": "Autoloop and its engineering-skill dependency for Claude Code.",
+  "owner": {
+    "name": "Fábio Neves"
+  },
+  "plugins": [
+    {
+      "name": "autoloop",
+      "source": "./",
+      "description": "Dual-host standing dev loop for Claude Code and Codex CLI: issues in, gated + independently reviewed PRs out. Writer ≠ reviewer; a human merges."
+    },
+    {
+      "name": "agent-skills",
+      "source": {
+        "source": "github",
+        "repo": "addyosmani/agent-skills"
+      },
+      "description": "Dependency of autoloop (mirrored listing so it auto-installs from this marketplace): production-grade engineering skills covering spec, plan, build, verify, review, and ship. Upstream: github.com/addyosmani/agent-skills (MIT)."
+    }
+  ]
+}

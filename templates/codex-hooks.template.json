@@ -1,0 +1,72 @@
+{
+  "description": "Autoloop hooks wired to repo-vendored guard scripts. Codex exposes no project-dir env var (verified absent in codex 0.144.5 binaries), so the repo root is resolved via git from the hook's cwd; every hook fails LOUD when the vendored script is missing (wrong toplevel from a nested checkout), and the command guard fails CLOSED.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "r=\"$(git rev-parse --show-toplevel)\"; s=\"$r/tools/agentic/session-preflight.sh\"; if [ -f \"$s\" ]; then bash \"$s\"; else echo \"autoloop: $s not found — launch Codex from the repo root or re-run autoloop:setup\" >&2; fi",
+            "timeout": 30,
+            "statusMessage": "autoloop preflight (read-only checks)"
+          },
+          {
+            "type": "command",
+            "command": "r=\"$(git rev-parse --show-toplevel)\"; f=\"$r/docs/agentic/STATE.md\"; if [ -f \"$f\" ]; then printf '\\n## autoloop — auto-primed STATE (docs/agentic/STATE.md)\\n\\n'; cat \"$f\"; else echo \"autoloop: $f not found — this repo is not set up (autoloop:setup) or Codex was launched outside the repo root\" >&2; fi"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "s=\"$(git rev-parse --show-toplevel)/tools/agentic/command-guard.mjs\"; if [ -f \"$s\" ]; then node \"$s\"; else echo \"autoloop: command guard $s not found — refusing commands until Codex runs from the repo root\" >&2; exit 2; fi",
+            "timeout": 15,
+            "statusMessage": "checking autoloop command policy"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "s=\"$(git rev-parse --show-toplevel)/tools/agentic/label-swap-reminder.mjs\"; if [ -f \"$s\" ]; then node \"$s\"; else echo \"autoloop: label-swap reminder $s not found\" >&2; fi",
+            "timeout": 10,
+            "statusMessage": "autoloop label-swap rider reminder"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "s=\"$(git rev-parse --show-toplevel)/tools/agentic/subagent-transcript.mjs\"; if [ -f \"$s\" ]; then node \"$s\"; else echo \"autoloop: transcript capture $s not found — subagent transcript NOT captured this stop\" >&2; fi",
+            "timeout": 20,
+            "statusMessage": "capturing subagent transcript"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "s=\"$(git rev-parse --show-toplevel)/tools/agentic/writeback-check.mjs\"; if [ -f \"$s\" ]; then node \"$s\"; else echo \"autoloop: writeback check $s not found (nested checkout?) — write-back contract NOT verified this Stop\" >&2; fi",
+            "timeout": 45,
+            "statusMessage": "checking autoloop write-back"
+          }
+        ]
+      }
+    ]
+  }
+}
