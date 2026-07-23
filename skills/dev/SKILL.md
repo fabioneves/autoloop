@@ -49,12 +49,21 @@ loop's own killed implementer output: a **resumable orphan** handled by step 1's
 draft PR, HEAD past the claim commit, out-of-boundary or escalate-touching paths, or any doubt
 about provenance — is a human WIP: stop and report; never guess. The SessionStart preflight hook already
 verified `gh` auth/access — trust its PASS lines when they are in context; re-run `gh auth
-status` only when they are absent. **Base-branch first:** ONE chained command does the whole
-check-and-switch:
+status` only when they are absent. **Base-branch first — but decide a dirty tree BEFORE any
+switch.** `git switch` carries uncommitted work onto the target branch, so switching off a dirty
+unit branch relocates a killed-implementer's WIP onto `<cfg.baseBranch>` and disqualifies it from
+the loop-owned-orphan exception above — the branch is no longer `<type>/gh-<N>-<slug>`, so the
+resumable orphan hard-stops as a "dirty on base" human WIP instead of resuming. (This is the
+incident this rule encodes.) So the attribution rule above is evaluated on the **current** branch,
+first; the base switch runs **only when the tree is clean**. ONE chained command enforces exactly
+that — it switches iff not already on base AND clean:
 ```bash
 git status --porcelain=v1 --untracked-files=all; b=$(git rev-parse --abbrev-ref HEAD); \
-  [ "$b" = "<cfg.baseBranch>" ] || { git fetch origin && git switch <cfg.baseBranch> && git pull --ff-only; }
+  [ "$b" = "<cfg.baseBranch>" ] || [ -n "$(git status --porcelain=v1 --untracked-files=all)" ] \
+  || { git fetch origin && git switch <cfg.baseBranch> && git pull --ff-only; }
 ```
+A dirty tree therefore stays on the current branch for the attribution rule to resolve (resume the
+loop-owned orphan in place, or stop on a human WIP) — it is never switched away first.
 If it switched (a previous session's unit branch was left checked out — its scaffold is a
 historical snapshot), **re-read STATE from disk and re-parse cfg** — the SessionStart
 injection was cat'd from the old branch and is stale the moment the branch changes. Every
@@ -841,7 +850,7 @@ long run scans: run banner (once) → unit banner → step line → normal narra
   ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
   ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
   ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-  ∞ dev · v0.39.8 · starting
+  ∞ dev · v0.39.9 · starting
   ```
 
   Never re-print it per unit or per step; the smaller markers below carry the rhythm. Missed the
