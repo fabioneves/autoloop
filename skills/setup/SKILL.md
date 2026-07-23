@@ -12,7 +12,7 @@ banner**, exactly this static fenced mark (once; never repeat it later):
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.39.4 · starting
+∞ setup · v0.39.5 · starting
 ```
 
 Missed it? If any tool call already happened this run without the banner, print it with your very

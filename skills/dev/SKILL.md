@@ -36,8 +36,18 @@ Parse the ```json autoloop-config``` block — referenced below as **cfg** (`cfg
 **Preflight:** `gh` CLI installed + `gh auth status` OK (+ this repo resolves — the vendored
 session-preflight distinguishes not-installed / not-authenticated / no-access); **clean
 checkout** — `git status --porcelain=v1
---untracked-files=all` must print nothing (a dirty tree is a human's work-in-progress: never
-stash, discard, or commit it — stop and report). The SessionStart preflight hook already
+--untracked-files=all` must print nothing. A dirty tree is a human's work-in-progress **by
+default**: never stash, discard, or commit it — stop and report. **The ONE exception is a
+provably loop-owned in-flight unit** (a killed mid-implementation): the tree is dirty AND checked
+out on a branch matching `<type>/gh-<N>-<slug>` that has an open draft loop PR (`Closes #N`), HEAD
+is the loop's own `chore: claim #<N>` commit, the issue carries `loop-started` + a `loop:*` step
+label with its plan comment and trusted label (the full adoption provenance in step 1), AND every
+dirty path lies inside that unit's plan boundary and touches no escalate path
+(`node tools/agentic/escalate-paths.mjs --working-tree`). ALL holding → the dirty tree is the
+loop's own killed implementer output: a **resumable orphan** handled by step 1's adoption
+(checkpoint-commit, then resume), NOT a stop. ANY check failing — on `<baseBranch>`, no matching
+draft PR, HEAD past the claim commit, out-of-boundary or escalate-touching paths, or any doubt
+about provenance — is a human WIP: stop and report; never guess. The SessionStart preflight hook already
 verified `gh` auth/access — trust its PASS lines when they are in context; re-run `gh auth
 status` only when they are absent. **Base-branch first:** ONE chained command does the whole
 check-and-switch:
@@ -472,8 +482,20 @@ PRs; blocked = `loop-blocked`. **Respect `## Blocked by`**: skip an issue while 
    PR's head repo is THIS repo (no forks); the linked issue passes the trusted-label +
    edited-after-label checks; the branch history starts from the loop's `chore: claim #<N>` commit;
    the plan comment is on the issue. Any check fails → leave it for a human, note it in the digest,
-   move on. On adoption, always redo step 6 and the gate on the *current* head before later stages,
-   and reconcile labels: ensure `loop-started` is present, swap any stale `loop:*` step label to
+   move on. **Recover a killed mid-implementation first:** when the adopted orphan's working tree
+   is dirty with provably loop-owned WIP (the Preflight carve-out — its own branch, HEAD at its
+   `chore: claim` commit, every dirty path inside the plan boundary, no escalate path), the dirty
+   files ARE this unit's implementer output that never got committed — checkpoint-commit them on
+   the branch (`git add -A && git commit -m "wip: recover #<N> implementer output (loop-resumed)"`)
+   before anything else. This preserves the work; it is never discarded. **Resume from the step
+   actually reached, not always step 6:** if the head is claim-only or the implementation is
+   otherwise incomplete (no implementer commit past the claim, or the frozen plan's boundary is
+   not yet realized in the diff — a checkpoint of partial WIP included), re-dispatch the
+   implementer (step 5) with the frozen reviewed plan from the issue comment — the implementer is
+   stateless and builds on whatever is already on the branch, so a checkpoint or a claim-only head
+   both resume cleanly. Only when the implementation is present and the unit died at/after step 6
+   do you redo step 6 and the gate on the *current* head before later stages. Either way,
+   reconcile labels: ensure `loop-started` is present, swap any stale `loop:*` step label to
    the step being resumed.
    Otherwise take the top eligible `loop-ready` issue not already claimed by an open PR; verify the
    label was applied by a trusted maintainer AND the body wasn't edited after labeling (STATE →
@@ -804,7 +826,7 @@ long run scans: run banner (once) → unit banner → step line → normal narra
   ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
   ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
   ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-  ∞ dev · v0.39.4 · starting
+  ∞ dev · v0.39.5 · starting
   ```
 
   Never re-print it per unit or per step; the smaller markers below carry the rhythm. Missed the

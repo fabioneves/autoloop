@@ -14,6 +14,9 @@
 // Usage:
 //   node tools/agentic/escalate-paths.mjs [<git range>]   # default: origin/<base>...HEAD
 //     → prints matched files; exit 1 if any escalate path was touched, 0 if none
+//   node tools/agentic/escalate-paths.mjs --working-tree   # uncommitted + untracked paths
+//     → for the Prime dirty-tree attribution check (is a killed implementer's WIP clear of
+//       escalate paths?); same exit contract (1 if any escalate path is dirty, 0 if none)
 //   node tools/agentic/escalate-paths.mjs --self-test
 
 import { execSync } from 'node:child_process';
@@ -132,15 +135,27 @@ function baseRange() {
 function main() {
   const args = process.argv.slice(2);
   if (args.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  const range = args.find((a) => !a.startsWith('-')) ?? baseRange();
   let files;
-  try {
-    files = execSync(`git diff --name-only ${range}`, { encoding: 'utf8' })
-      .split('\n')
-      .filter(Boolean);
-  } catch (e) {
-    console.error(`escalate-paths: git diff failed for range "${range}": ${e.message}`);
-    process.exit(2);
+  if (args.includes('--working-tree')) {
+    // Uncommitted + untracked paths, for the Prime dirty-tree attribution check.
+    try {
+      const tracked = execSync('git diff --name-only HEAD', { encoding: 'utf8' }).split('\n').filter(Boolean);
+      const untracked = execSync('git ls-files --others --exclude-standard', { encoding: 'utf8' }).split('\n').filter(Boolean);
+      files = [...new Set([...tracked, ...untracked])];
+    } catch (e) {
+      console.error(`escalate-paths: git working-tree read failed: ${e.message}`);
+      process.exit(2);
+    }
+  } else {
+    const range = args.find((a) => !a.startsWith('-')) ?? baseRange();
+    try {
+      files = execSync(`git diff --name-only ${range}`, { encoding: 'utf8' })
+        .split('\n')
+        .filter(Boolean);
+    } catch (e) {
+      console.error(`escalate-paths: git diff failed for range "${range}": ${e.message}`);
+      process.exit(2);
+    }
   }
   const hits = matchEscalate(files);
   for (const { file, glob } of hits) console.log(`ESCALATE  ${file}  (matched ${glob})`);

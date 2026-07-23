@@ -1,6 +1,6 @@
 {
   "name": "autoloop",
-  "version": "0.39.4",
+  "version": "0.39.5",
   "description": "A standing development loop for Codex CLI, Claude Code, and opencode: labelled GitHub issues in, gated and independently reviewed PRs out.",
   "author": {
     "name": "Fábio Neves",

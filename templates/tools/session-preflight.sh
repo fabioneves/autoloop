@@ -44,7 +44,7 @@ dirty=$(git status --porcelain=v1 --untracked-files=all 2>/dev/null | wc -l)
 if [ "$dirty" -eq 0 ]; then
   echo 'PASS  clean checkout'
 else
-  echo "NOTE  checkout has $dirty uncommitted path(s) — fine interactively; the loop's preflight requires a clean tree (never stash/discard someone's work — stop and report)"
+  echo "NOTE  checkout has $dirty uncommitted path(s) — fine interactively; the loop requires a clean tree UNLESS this is a provably loop-owned in-flight unit (dirty on a gh-<N> branch with its open draft PR + claim-commit HEAD + in-boundary paths → adoption checkpoints and resumes). Otherwise it is a human's WIP: never stash/discard — stop and report."
 fi
 
 # 3. Engine profile reminder. config-contract validates the declared static host matrix; the skill

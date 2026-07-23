@@ -348,8 +348,14 @@ escalate-list or the NEVER-DO rules.
   that mutates tracked files is an incident).
 - **What's gated must be what's pushed.** Commit every fix, record the gated `git rev-parse HEAD`,
   and verify the PR's `headRefOid` equals it before resolving threads or marking ready.
-- **A dirty checkout is a hard preflight stop.** A human's work-in-progress would ride into the
-  loop's commits. Never stash, discard, or commit it — stop and report.
+- **A dirty checkout is a hard preflight stop — with ONE exception.** By default a human's
+  work-in-progress would ride into the loop's commits: never stash, discard, or commit it — stop
+  and report. The exception is a **provably loop-owned in-flight unit** (a killed
+  mid-implementation): dirty tree on a `<type>/gh-<N>-<slug>` branch with an open draft loop PR
+  (`Closes #N`), HEAD at the loop's own `chore: claim #<N>` commit, full adoption provenance on the
+  issue, and every dirty path inside the plan boundary with no escalate path. All holding → it is
+  the loop's own uncommitted implementer output — a resumable orphan (adoption checkpoint-commits
+  and resumes), not a stop. Any check failing or any provenance doubt → treat as human WIP: stop.
 - **Untrusted text never touches shell source.** Issue/plan/review text reaches GitHub via
   `--body-file` scratch files (written with the host's safe file-editing surface outside the repo);
   slugs, titles, and
