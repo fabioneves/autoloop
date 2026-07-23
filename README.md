@@ -10,7 +10,7 @@
 <strong>Labelled GitHub issues in. Gated, independently reviewed PRs out.</strong>
 
 <p>
-  <img alt="release v0.39.0" src="https://img.shields.io/badge/release-v0.39.0-8b5cf6?style=flat-square">
+  <img alt="release v0.39.2" src="https://img.shields.io/badge/release-v0.39.2-8b5cf6?style=flat-square">
   <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
   <img alt="writer does not equal reviewer" src="https://img.shields.io/badge/invariant-writer_%E2%89%A0_reviewer-a78bfa?style=flat-square">
   <img alt="human controlled merge" src="https://img.shields.io/badge/authority-human_merge-f59e0b?style=flat-square">
