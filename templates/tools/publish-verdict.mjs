@@ -1,28 +1,90 @@
 #!/usr/bin/env node
-// SHA-bound verdict publisher. Posts the loop's
-// gate/review verdicts as GitHub commit statuses so the human merging sees, ON the merge
-// page, that the head they merge is the exact SHA the loop gated and the reviewer reviewed — any
-// later push silently invalidates the verdict (statuses are SHA-bound).
+// SHA-bound verdict publisher. Posts gate/review CheckRuns through the caller's
+// GitHub App identity so the merge gate can authenticate both the head and producer.
 //
 // Deliberately narrow:
-//   - closed context enum: agentic/gate, agentic/review
+//   - closed name enum: agentic/gate, agentic/review
 //   - only `success` can be posted — absence is the failure signal; a red gate/review
-//     is never published (and NEVER post a status for a pass that didn't happen)
-//   - with the shared maintainer login this is evidence, not proof: real integrity
-//     arrives with the dedicated machine identity (STATE.md → L2, post-MVP)
+//     is never published
+//   - details arrive through a file, never shell arguments
 //
-// Usage: node tools/agentic/publish-verdict.mjs <gate|review> <40-hex sha> [description]
+// Usage: node tools/agentic/publish-verdict.mjs <gate|review> <40-hex sha>
+//        [--summary-file <path>] [--expect-app-id <positive integer>]
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const CONTEXTS = new Set(['gate', 'review']);
 const SHA_RE = /^[0-9a-f]{40}$/;
+
+export function buildCheckRun(ctx, sha, summary) {
+  const text = typeof summary === 'string' && summary.length > 0
+    ? summary.slice(0, 65535)
+    : 'Verified by the Autoloop development workflow.';
+  return {
+    name: `agentic/${ctx}`,
+    head_sha: sha,
+    status: 'completed',
+    conclusion: 'success',
+    output: {
+      title: `Autoloop ${ctx} passed`,
+      summary: text,
+    },
+  };
+}
+
+export function hasTrustedProducer(checkRun, trustedAppIds) {
+  return (
+    Array.isArray(trustedAppIds)
+    && trustedAppIds.some((id) => Number.isInteger(id) && id > 0 && id === checkRun?.app?.id)
+  );
+}
 
 // Pure arg validation — closed context enum + lowercase 40-hex SHA. Exported for --self-test.
 export function validateArgs(ctx, sha) {
   if (!CONTEXTS.has(ctx)) return { ok: false, error: `context must be one of: ${[...CONTEXTS].join(', ')}` };
   if (!SHA_RE.test(sha ?? '')) return { ok: false, error: 'second arg must be the full 40-hex (lowercase) gated SHA (git rev-parse HEAD)' };
   return { ok: true };
+}
+
+export function parseArgs(args) {
+  const [ctx, sha, ...rest] = args;
+  const parsed = {
+    ctx,
+    sha,
+    summaryFile: null,
+    expectedAppId: null,
+    selfTest: args.length === 1 && args[0] === '--self-test',
+    error: null,
+  };
+  if (parsed.selfTest) return parsed;
+  const valid = validateArgs(ctx, sha);
+  if (!valid.ok) {
+    parsed.error = valid.error;
+    return parsed;
+  }
+  for (let index = 0; index < rest.length; index += 1) {
+    const flag = rest[index];
+    const value = rest[index + 1];
+    if (flag === '--summary-file' && parsed.summaryFile === null && value && !value.startsWith('-')) {
+      parsed.summaryFile = value;
+      index += 1;
+      continue;
+    }
+    if (flag === '--expect-app-id' && parsed.expectedAppId === null && /^\d+$/.test(value ?? '')) {
+      parsed.expectedAppId = Number(value);
+      if (!Number.isSafeInteger(parsed.expectedAppId) || parsed.expectedAppId < 1) {
+        parsed.error = '--expect-app-id must be a positive safe integer';
+        return parsed;
+      }
+      index += 1;
+      continue;
+    }
+    parsed.error = `unknown, duplicate, or incomplete option: ${flag ?? 'missing'}`;
+    return parsed;
+  }
+  return parsed;
 }
 
 function selfTest() {
@@ -37,37 +99,117 @@ function selfTest() {
     [['gate', 'g'.repeat(40)], false], // non-hex
     [['gate', undefined], false],
   ];
-  let ok = true;
+  let passed = 0;
   for (const [[ctx, sha], expect] of cases) {
-    if (validateArgs(ctx, sha).ok !== expect) {
+    if (validateArgs(ctx, sha).ok === expect) {
+      passed += 1;
+    } else {
       console.error(`FAIL [expect ${expect}]: ctx=${ctx} sha=${String(sha).slice(0, 8)}`);
-      ok = false;
     }
   }
-  console.log(ok ? `self-test OK (${cases.length} cases)` : 'self-test FAILED');
-  return ok;
+  const payload = buildCheckRun('gate', 'a'.repeat(40), 'gate passed');
+  if (
+    payload.name !== 'agentic/gate'
+    || payload.head_sha !== 'a'.repeat(40)
+    || payload.status !== 'completed'
+    || payload.conclusion !== 'success'
+  ) {
+    console.error('FAIL verdict publishes as a completed CheckRun');
+  } else passed += 1;
+  if (hasTrustedProducer({ app: { id: 42, slug: 'autoloop-verdicts' } }, [42])) {
+    passed += 1;
+  } else {
+    console.error('FAIL configured GitHub App producer is accepted');
+  }
+  if (!hasTrustedProducer({ app: { id: 7, slug: 'unknown' } }, [42])) {
+    passed += 1;
+  } else {
+    console.error('FAIL unconfigured producer is rejected');
+  }
+  const parsed = parseArgs([
+    'review',
+    'a'.repeat(40),
+    '--summary-file',
+    '/tmp/review.json',
+    '--expect-app-id',
+    '42',
+  ]);
+  if (!parsed.error && parsed.summaryFile === '/tmp/review.json' && parsed.expectedAppId === 42) {
+    passed += 1;
+  } else {
+    console.error('FAIL closed CLI options parse');
+  }
+  const inline = parseArgs(['gate', 'a'.repeat(40), 'untrusted inline summary']);
+  if (inline.error) passed += 1;
+  else console.error('FAIL inline summary is rejected');
+  const total = cases.length + 5;
+  console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
+  return passed === total;
 }
 
 function main() {
-  if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  const [ctx, sha, ...desc] = process.argv.slice(2);
-  const valid = validateArgs(ctx, sha);
-  if (!valid.ok) {
-    console.error(`publish-verdict: ${valid.error}`);
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
+  if (parsed.error) {
+    console.error(`publish-verdict: ${parsed.error}`);
     process.exit(2);
   }
-  const description = (desc.join(' ') || 'verified by the dev loop').slice(0, 140);
+  let summary;
   try {
-    execSync(
-      `gh api repos/{owner}/{repo}/statuses/${sha} ` +
-        `-f state=success -f context=agentic/${ctx} -f description=${JSON.stringify(description)}`,
-      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 },
+    summary = parsed.summaryFile === null ? undefined : readFileSync(parsed.summaryFile, 'utf8');
+  } catch (error) {
+    console.error(`publish-verdict: summary file could not be read: ${error.message}`);
+    process.exit(1);
+  }
+  const payload = buildCheckRun(parsed.ctx, parsed.sha, summary);
+  try {
+    const output = execFileSync(
+      'gh',
+      [
+        'api',
+        'repos/{owner}/{repo}/check-runs',
+        '--method',
+        'POST',
+        '--input',
+        '-',
+      ],
+      {
+        input: JSON.stringify(payload),
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 15000,
+      },
     );
-    console.log(`posted agentic/${ctx}=success on ${sha.slice(0, 12)}`);
-  } catch (e) {
-    console.error(`publish-verdict: gh api failed: ${e.message}`);
+    const checkRun = JSON.parse(output);
+    if (
+      checkRun.name !== payload.name
+      || checkRun.head_sha !== parsed.sha
+      || checkRun.status !== 'completed'
+      || checkRun.conclusion !== 'success'
+    ) {
+      throw new Error('GitHub returned a mismatched CheckRun');
+    }
+    if (
+      parsed.expectedAppId !== null
+      && !hasTrustedProducer(checkRun, [parsed.expectedAppId])
+    ) {
+      throw new Error(`CheckRun producer app ${checkRun.app?.id ?? 'unknown'} is not expected app ${parsed.expectedAppId}`);
+    }
+    console.log(
+      `posted ${payload.name}=success on ${parsed.sha.slice(0, 12)} via app ${checkRun.app?.id ?? 'unknown'}`,
+    );
+  } catch (error) {
+    console.error(`publish-verdict: gh api failed: ${error.message}`);
     process.exit(1);
   }
 }
 
-main();
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    return false;
+  }
+})();
+if (isMain) main();
