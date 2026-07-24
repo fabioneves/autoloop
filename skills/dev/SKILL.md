@@ -308,7 +308,10 @@ Post one issue run record via body file containing:
 - versioned measurements and recovery outcomes.
 
 Post one end-of-run digest and scoreboard, not one per tool phase. `stats.mjs` is presentation
-only; `measurement-contract.mjs` is the baseline/regression authority.
+only; `measurement-contract.mjs` is the baseline/regression authority. Persist the validated raw
+record with `node tools/agentic/measurement-contract.mjs --record`; unobservable provider fields
+are null with a typed reason, never inferred zero. Do not claim a p95 below 20 comparable samples
+or a stable budget below 100.
 
 Invalidate relevant snapshot sections, re-derive state, and take the next unit unless
 `RuntimeContract.finish()` authorizes:
