@@ -1,7 +1,7 @@
 {
   "name": "autoloop",
-  "version": "0.39.9",
-  "description": "A standing development loop for Codex CLI, Claude Code, and opencode: labelled GitHub issues in, gated and independently reviewed PRs out.",
+  "version": "0.40.0",
+  "description": "A native-first development loop for Codex CLI, Claude Code, and opencode: labelled GitHub issues in, gated and independently reviewed PRs out; a human merges by default.",
   "author": {
     "name": "Fábio Neves",
     "url": "https://github.com/fabioneves"
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Autoloop",
     "shortDescription": "Issues in; reviewed, gated PRs out",
-    "longDescription": "Run a guarded GitHub issue-to-PR loop with independent planning and code reviews, objective gates, and human-controlled merging.",
+    "longDescription": "Run a guarded, native-first GitHub issue-to-PR loop with independent planning and code reviews, objective gates, invocation-scoped engine selection, and human-controlled merging.",
     "developerName": "Fábio Neves",
     "category": "Developer Tools",
     "capabilities": [

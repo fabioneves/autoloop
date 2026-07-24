@@ -4,8 +4,9 @@ A standing, self-prompting development loop for **{{PROJECT_NAME}}**, run in one
 Codex CLI, or opencode session. It takes each eligible **`loop-ready` GitHub issue**: **the orchestrator** (the session) plans it, **the reviewer**
 reviews the plan, **the implementer** builds it, **the orchestrator** reviews + fixes the diff and runs the objective
 gate, a **fresh reviewer thread** reviews the code, then it opens a PR that `Closes #N` and moves
-to the next eligible issue; a human merges. Writer and reviewer are never the same thread. You don't prompt
-the steps.
+to the next eligible issue; a human merges by default. A code writer never reviews that code.
+Plans receive one independent adversarial review followed by recorded dispositions. You don't
+prompt the steps.
 
 **Source of truth is git/GitHub:** queue = open `loop-ready` issues · in-progress = open PRs whose
 body `Closes #N` · done = merged PRs · blocked = `loop-blocked` issues. `STATE.md` is standing
@@ -19,11 +20,14 @@ config (mission, config block, caps, lessons), **not** the queue.
 | `docs/agentic/STATE.md` | standing config — mission, config block, autonomy, caps, lessons |
 | `autoloop:dev` (plugin skill) | **forward path** — issue → ready PR |
 | `autoloop:pitcrew` (plugin skill) | **return path** — revises the loop's PRs from review / CI / conflicts |
-| Supported hosts + engine profile (STATE → Config) | declared Claude/Codex/opencode host matrix and its native or exec dispatch |
+| Current invocation | bare = safe native route; `with claude` / `with codex` / `with opencode` = explicit selector for this invocation |
 | `{{CHECKLIST_PATH}}` | the criteria both reviewers grade against |
 | `{{GATE_COMMAND}}` | the objective gate — the only source of "done" |
-| `tools/agentic/*` (vendored) | preflight, command guard, write-back check, escalate classifier, loop-scope predicate, one-call run scan |
+| `tools/agentic/*` (vendored) | project/runtime contracts, preflight, guards, lifecycle checks, and one-call run scan |
 | Host continuation | Claude: `/loop` + `/goal`; Codex CLI: `/goal` and manual reruns; opencode: manual reruns or cron + `opencode run` |
+
+Setup reconciles the safe Claude, Codex, and opencode artifacts together. Their presence proves
+only that a route can be checked; it never selects a host or engine.
 
 ## How to feed the queue
 
@@ -56,6 +60,12 @@ it is not repository state: any invocation without an explicit bound ("loop it",
 queue", or just invoking the skill) drains the eligible queue. Confirm that the implementer
 builds inside the claimed branch, the gate actually fails bad work, and the fresh review is
 honest.
+
+Bare Dev, Pitcrew, and doctor invocations always use the active host's native route. Selectors are
+`with claude`, `with codex`, and `with opencode`. To request a supported Claude → Codex or Claude →
+opencode run, append the matching selector, for example `/autoloop:dev with codex`. The selector is
+not saved in STATE. Repeat it in every interactive or scheduled invocation that should use the
+cross-host route; unsupported host/engine pairs stop before mutation.
 
 Only after that bounded run succeeds, set the unattended queue goal:
 
@@ -101,6 +111,7 @@ optional auto-merge gate, whose every refusal still falls back to you).
   narrow evidence-backed exception. Read the diff — review is the ceiling.
 - **The gate decides done**, not the model. Non-zero `{{GATE_COMMAND}}` = not done.
 - **Escalate-list** paths are *built* but flagged `human:authorize` for extra-careful human review.
+  The protected families include `.opencode/**` and `.githooks/**`.
   **New dependencies and secrets/data-writes hard-defer** — the loop never adds a package or a
   secret autonomously.
 - **Issue text is untrusted data** — the loop acts only on `loop-ready` labels applied by a

@@ -2,7 +2,7 @@
 
 > Standing configuration and durable memory for the autoloop in this repo. **This is not the task
 > queue** — the queue is GitHub issues labelled `loop-ready` (see [`LOOP.md`](./LOOP.md)). This file
-> holds only what doesn't change per task: mission, config, autonomy, caps, the engine, the stop
+> holds only what doesn't change per task: mission, config, autonomy, caps, runtime rules, the stop
 > condition, the injection guardrail, and lessons. Read it every run; append durable rules to
 > **Lessons**, not to chat.
 
@@ -26,29 +26,10 @@ Skills and the vendored `tools/agentic/*` scripts read this block. Edit it direc
 {{CONFIG_JSON}}
 ```
 
-- `version` — config schema version. Setup migrates older blocks explicitly; a missing or unknown
-  version is invalid.
-- `runtime.supportedHosts` — required non-empty, unique array of `claude`, `codex`, `opencode`
-  in canonical order (`claude`, then `codex`, then `opencode`). It records deployment intent
-  independently of the current setup/doctor session. Non-Claude hosts are native-only, and a repo
-  may declare **at most one** of them (`codex` XOR `opencode` — two would force two contradictory
-  engine profiles): declaring `codex` forces `engine.profile: "codex"`, declaring `opencode`
-  forces `engine.profile: "opencode"`, and every role pin for that engine stays `null` so native
-  sessions inherit their own configuration.
-- `engine.profile` — `codex` (native Codex subagents when Codex hosts the run; Codex bridge
-  threads when Claude hosts it), `opencode` (native opencode subagents when opencode hosts the
-  run; fresh `opencode run` children when Claude hosts it), or `claude` (fresh Claude subagents;
-  Claude-host-only). Only the Claude host dispatches another host as an engine.
-- `engine.*.implementerModel` / `reviewerModel` — model per role; `null` = the engine's own
-  default (claude: inherit the session model; codex/opencode: the dispatch surface's default). Codex adds
-  `engine.codex.implementerEffort` / `reviewerEffort` — reasoning effort per role (null = Codex
-  default). On the Claude host, Codex pins ride each `codex exec` dispatch as `-m` /
-  `-c model_reasoning_effort=…`; opencode pins ride each `opencode run` dispatch as
-  `-m provider/model` (no effort pins — opencode's `--variant` is deferred until a repo needs it).
-  Whatever the pin, the unit record discloses the **actual** model read from the dispatch's event
-  stream, never the pin alone. Native sessions inherit their own configuration; whenever
-  `runtime.supportedHosts` declares a non-Claude host, setup requires that engine's role pins to
-  stay `null`. The orchestrator always runs the session model (`/model` — the human's knob).
+- `version` — config schema version; v0.40.0 requires `0.25.0`. Setup migrates older blocks through
+  a visible diff. A missing, older, or unknown version is invalid at runtime.
+- `baseBranch` — the configured short branch name used by every base-aware claim, lane, guard,
+  delivery, and merge check.
 - `gate.command` — the objective gate; exit 0 is the only "done". `gate.quickCommand` (optional,
   default null) — a faster scoped variant for inner-loop iteration only; the last gate before a
   PR goes ready is always the full `gate.command`. `gate.setupCommand` (optional)
@@ -56,39 +37,79 @@ Skills and the vendored `tools/agentic/*` scripts read this block. Edit it direc
 - `merge.policy` — `ratified` (the vendored, human-ratified `tools/agentic/auto-merge.mjs`
   auto-merges only the narrow reversible class), `auto` (same tool in `all-green` mode: every
   loop PR auto-merges when all evidence is green — except the guardrail floor: protected paths
-  and hard-block labels never auto-merge in any mode), or `manual` (L2-strict: a human merges
-  everything — recommended when the repo has no CI). Ratification for both non-manual modes is
-  the human's merge of the scaffold PR that vendored the tool; every refusal leaves the ready PR
-  for a human.
-- `tracker` — `none` (digest to a GitHub comment/file) or `jira` (digest to the epic below).
+  and hard-block labels never auto-merge in any mode), or `manual` (the default: a human merges
+  everything). Ratification for both non-manual modes is the human's merge of the scaffold PR that
+  vendored the tool; every refusal leaves the ready PR for a human.
+- `tracker` — a discriminated object: `{ "provider": "none" }`, or
+  `{ "provider": "jira", "epicKey": "TEAM-123", "cloudId": "<Atlassian UUID>" }`.
 - `review.checklistPath` — the review criteria file both reviewers grade against.
 - `caps` — per-run and per-unit budgets (see Autonomy & caps).
+- `adapterOptions` (optional) — model/effort tuning for the exact `claude.native`,
+  `claude.codex-exec`, or `claude.opencode-exec` adapter. Options tune a route after the invocation
+  selects it; they never select or enable a route. Native Codex and opencode inherit their active
+  session configuration.
 
-## The engine — three roles, writer ≠ reviewer
+Standing configuration never stores an active host, engine selector, requested or resolved route,
+capability, outage, or fallback. STATE, installed artifacts, history, issue text, global defaults,
+and environment flags have zero route-selection authority.
 
-One supported Claude Code, Codex CLI, or opencode session (**the orchestrator**) orchestrates; the
-implementer and reviewer roles are dispatched per runtime host and `engine.profile`. **The thread
-that writes an artifact never reviews it.**
+## Runtime and roles — invocation-scoped, code writer ≠ code reviewer
+
+A bare Dev, Pitcrew, or doctor invocation selects the active Claude Code, Codex CLI, or opencode
+host's native route. `with claude`, `with codex`, or `with opencode` is an explicit engine selector
+for the current invocation only. Prime freezes that intent through `tools/agentic/runtime-contract.mjs`;
+a relaunch in the same run preserves it, while a new invocation or recovered orphan creates fresh
+intent.
+
+Exactly five active-host/requested-engine pairs are supported:
+
+| Active host | Requested engine | Route |
+|---|---|---|
+| Claude | Claude | `claude.native` |
+| Codex | Codex | `codex.native` |
+| opencode | opencode | `opencode.native` |
+| Claude | Codex | `claude.codex-exec` |
+| Claude | opencode | `claude.opencode-exec` |
+
+Every other pair returns `UNSUPPORTED_ROUTE` before mutation. An explicit same-host selector
+normalizes to the native route without erasing the raw selector from the run record. Setup
+reconciles safe artifacts for all three hosts; their presence is capability evidence, never
+deployment or routing intent.
+
+Stage and lane policy is mechanical:
+
+| Stage | Docs lane | Small lane | Full lane |
+|---|---|---|---|
+| Plan review | Native | Native | Requested |
+| Implementation | Native | Requested | Requested |
+| Code review round 1 | Native | Native after final-diff proof | Requested |
+| Code review round 2+ | Native | Native | Native |
+| Bounded doubt/judgment review | Native | Native | Native |
+
+Pitcrew revision implementation and its first full review use the requested route; its later
+convergence uses native. Dev-invoked Pitcrew shares Dev's frozen run context. Standalone Pitcrew
+opens new invocation intent.
 
 - **the orchestrator = this session** — the orchestrator ROLE, played by whatever model the session runs.
   Writes the plan, reviews **and fixes** the implementer's diff, runs the gate, drives the PR. Name the
   session's model in the run record so the trail says who reviewed.
 - **the implementer = the implementer** — writes the code; never reviews.
-  - Native Codex + `codex`: a fresh native worker subagent; serialize writers.
-  - Claude + `codex`: `codex exec --sandbox workspace-write`, prompt via stdin scratch file,
+  - Native Claude: a fresh writable Agent-tool thread.
+  - Native Codex: a fresh writable worker; serialize writers.
+  - Native opencode: a fresh writable task agent; serialize writers.
+  - Claude → Codex: fresh `codex exec --sandbox workspace-write`, prompt via stdin scratch file,
     host background for long runs.
-  - Native opencode + `opencode`: a fresh task-tool subagent with write scope; serialize writers.
-  - Claude + `opencode`: fresh `opencode run --auto --format json` with
-    `AUTOLOOP_ENGINE_CHILD=1` in the child environment (`-m <engine.opencode.implementerModel>`
-    when pinned), prompt via stdin scratch file, host background for long runs. FORBIDDEN:
+  - Claude → opencode: fresh `opencode run --auto --format json` with
+    `AUTOLOOP_ENGINE_CHILD=1` in the child environment, prompt via stdin scratch file, host
+    background for long runs. FORBIDDEN:
     `--continue`, `--session`, `--fork`, `--share` (fresh process per dispatch is the
-    writer ≠ reviewer guarantee).
-  - `claude` profile: a **fresh** general-purpose subagent (Agent tool) per dispatch,
-    `model: <engine.claude.implementerModel>` (omit when null).
+    code-writer/code-reviewer separation guarantee).
 - **the reviewer = the reviewer** — reviews the plan, then (a fresh thread) the code; never writes.
-  - Native Codex + `codex`: dispatch the reviewer as a fresh `codex exec --sandbox read-only`
+  - Native Claude: a fresh read-only Agent-tool thread.
+  - Native Codex: dispatch every healthy review as a fresh `codex exec --sandbox read-only`
     process (OS-enforced: writes and network egress blocked; web search, apps, and `approvals_reviewer`
-    auto-review pinned off), NOT an in-session subagent. Codex
+    auto-review pinned off), including docs, small, full, and convergence reviews. This supersedes
+    the earlier docs/small host-session decision. Codex
     Multi-Agent V2 subagents inherit the workspace-write orchestrator and reapply its overrides to
     the child, so a custom-agent `default_permissions = ":read-only"` is an overridable default, not
     a lock (openai/codex#33314); the OS sandbox set at `codex exec` launch is the only real barrier.
@@ -97,37 +118,33 @@ that writes an artifact never reviews it.**
     `codex exec` is unavailable does the reviewer fall back to a DEGRADED in-session `agent_type`
     spawn with mandatory fingerprint/transcript integrity checks (detection, not prevention),
     disclosed per unit. A live parent permission override is
-    a hard stop because Codex reapplies it after the custom-agent defaults. On Codex CLI 0.144.5–0.144.6,
-    where the spawn schema has the known upstream gap of no `agent_type`, use an untyped fresh
-    reviewer with `fork_turns = "none"` and the standard adversarial read-only prompt in disclosed
-    prompt-level isolation mode; missing `fork_turns` remains a hard stop, and once `agent_type`
-    is exposed typed selection is required. In that mode fingerprint `HEAD`,
-    `git status --porcelain`, and the worktree (`git diff --stat | sha1sum`) before/after and
-    invalidate any mutating review; when the scaffold's SubagentStop capture hook is installed,
+    a hard stop because Codex reapplies it after the custom-agent defaults. If the spawn schema has
+    no `agent_type`, use an untyped fresh reviewer with `fork_turns = "none"` and the standard
+    adversarial read-only prompt in disclosed prompt-level isolation mode; missing `fork_turns`
+    remains a hard stop, and once `agent_type` is exposed typed selection is required. In that mode
+    fingerprint `HEAD`, `git status --porcelain`, and the tracked worktree before/after with
+    `git diff --binary HEAD | node tools/agentic/release-verify.mjs --fingerprint-stdin`; invalidate
+    any mutating review. When the scaffold's SubagentStop capture hook is installed,
     also scan the captured transcript under `.git/autoloop/subagent-transcripts/` after first
     verifying it contains the child's own activity (unverifiable or absent → record
     `transcript: unavailable`). Record the prompt-level posture in every unit.
-  - Claude + `codex`: every review is `codex exec --sandbox read-only` (OS-enforced) with
+  - Claude → Codex: every review is `codex exec --sandbox read-only` (OS-enforced) with
     `--output-schema` so the verdict returns as validated JSON; prompt via stdin scratch file;
     fresh process per dispatch. FORBIDDEN: interactive `codex`, the `resume` subcommand, any
     `--dangerously-*` flag, and reading/editing `~/.codex/*` files.
-  - Native opencode + `opencode`: every review is a fresh `autoloop-reviewer` typed subagent
+  - Native opencode: every review is a fresh `autoloop-reviewer` typed subagent
     from `.opencode/agent/autoloop-reviewer.md` — host-enforced isolation: `permission: deny`
     strips edit/bash/task/webfetch/websearch from the child's toolset entirely, and the
     vendored plugin captures each child's own messages (attributable — agent + parentID +
     per-message model identity) into `.git/autoloop/subagent-transcripts/` as conduct evidence.
     The agent file must omit model overrides.
-  - Claude + `opencode`: every review is fresh
+  - Claude → opencode: every review is fresh
     `opencode run --auto --agent autoloop-reviewer --format json` with
-    `AUTOLOOP_ENGINE_CHILD=1` (`-m <engine.opencode.reviewerModel>` when pinned); the reviewer
-    is instructed to end with a fenced JSON verdict, parsed from the event stream (no valid
-    verdict = dead dispatch). The stream doubles as the captured transcript; the actual model
-    per message is disclosed from it. Same forbidden flags as the implementer route.
-  - `claude` profile: a **fresh** read-only subagent per review round,
-    `model: <engine.claude.reviewerModel>` (omit when null).
+    `AUTOLOOP_ENGINE_CHILD=1`; the reviewer ends with a fenced JSON verdict parsed from the event
+    stream (no valid verdict = dead dispatch). The stream doubles as the captured transcript; the
+    actual model per message is disclosed from it. Same forbidden flags as the implementer route.
 - Cross-model diversity is deliberate: a reviewer on a different model/engine than the writer
-  catches shared blind spots. Under the `claude` profile, consider pinning different implementer
-  and reviewer models.
+  catches shared blind spots, but it never overrides the safe route contract.
 - **No Copilot, no external reviewer.** the reviewer + the orchestrator are the review, per artifact: the orchestrator plans → the reviewer
   reviews the plan; the implementer writes code → the orchestrator reviews+fixes → a fresh reviewer thread reviews the code.
 
@@ -155,7 +172,7 @@ that writes an artifact never reviews it.**
   stop the unit.
 - **Serialize the worked unit.** One CLAIMED unit at a time in the main checkout — finish its PR
   before claiming the next. Read-only staging of the next unit (premise-check / plan /
-  plan review against `origin/<base>`, depth 1) during engine waits is allowed
+  plan review against `origin/<base>`, depth 1) during route-dispatch waits is allowed
   (autoloop:dev → Efficiency); never two implementers, never a second claim.
 
 ### Escalate-list (build allowed; never *merge* autonomously)
@@ -167,7 +184,7 @@ list in sync with this one):
 - **secrets / env**: `.env*`, credential storage, key material.
 - **deploy / ops**: `Dockerfile*`, `docker-compose*`, `.github/workflows/*`, release flow.
 - **the loop's own guardrails**: `tools/**`, `.claude/**`, `.codex/**`, `.opencode/**`, `.agents/**`,
-  `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`, `docs/agentic/STATE.md`.
+  `.githooks/**`, `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`, `docs/agentic/STATE.md`.
 {{ESCALATE_PATHS}}
 
 **Two build-time hard-defers** (never build; `loop-blocked` + reason gate): a **new dependency**
@@ -242,17 +259,17 @@ built into the unit). **A rebut is a proposal, not closure**: each re-review is 
 thread that receives the prior findings + dispositions and explicitly **accepts or rejects each
 rebut** — rejection may rest on the finding's original evidence; the writer's say-so never closes a
 blocker. Accepted rebut = closed (doesn't re-block without new evidence); rejected = still blocking
-(fix or park). Cap ~3 review rounds; capped with an unresolved Major → `loop-blocked`, the human
-arbitrates. **The engine reviewer reviews code at most once per unit (round 1)** — convergence
-rounds run on fresh host-session threads (maintainer's standing decision: round 1 spends the
-cross-model depth; rounds 2+ verify fixes and adjudicate rebuts, and a bridge dispatch costs
-10–20+ min). **Rounds 2+ gate only on rebut adjudication and Critical/Major findings inside the
-fix delta since the previous round** — findings on code round 1 accepted are recorded and
-surfaced for the human, never gated on in the unit (that is how rounds converge instead of
-re-litigating). A finding never authorizes weakening an invariant or touching the escalate-list.
+  (fix or park). Cap ~3 review rounds; capped with an unresolved Major → `loop-blocked`, the human
+  arbitrates. Round 1 follows the stage/lane table and reviews the full artifact. **Rounds 2+ use
+  the safe native route and gate only on rebut adjudication and Critical/Major findings inside the
+  fix delta since the previous round** — findings on code round 1 accepted are recorded and
+  surfaced for the human, never gated on in the unit (that is how rounds converge instead of
+  re-litigating). Healthy native Codex convergence review remains a fresh external
+  `codex exec --sandbox read-only`, not a host-session shortcut. A finding never authorizes
+  weakening an invariant or touching the escalate-list.
 
-**Plans are the deliberate exception — the maintainer's standing decision: the engine reviewer
-is dispatched ONCE per unit, never re-dispatched for a plan revision.** On `REVISE` the
+**Plans are the deliberate exception — the plan reviewer is dispatched ONCE per unit, never
+re-dispatched for a plan revision.** On `REVISE` the
 orchestrator dispositions every Critical/Major itself (`fix` — revise and verify against the
 revised text — or a one-line `rebut`), records every finding → disposition in the run record,
 and proceeds with the revised plan. The plan actually implemented is re-checked downstream by
@@ -294,11 +311,11 @@ selection/adoption, and its timeline events survive removal — durations stay d
 ## Digest (end of every run)
 
 Git/GitHub is the source of truth; the tracker gets only the **end-of-run digest** — never
-per-action chatter. Per Config → `tracker`:
+per-action chatter. Per Config → `tracker.provider`:
 - `none`: post the digest as a GitHub comment (or print it) — units landed / blocked / deferred,
   with PR + issue links.
-- `jira`: one comment on epic **{{JIRA_EPIC}}** (cloudId `{{JIRA_CLOUD_ID}}`) via the Atlassian
-  MCP; fall back to a GitHub comment when MCP is unavailable.
+- `jira`: post one comment to `tracker.epicKey` through the Atlassian connection identified by
+  `tracker.cloudId`; fall back to a GitHub comment when MCP is unavailable.
 
 The digest also lists every issue currently `loop-delivered` with its **awaiting-merge age**
 (time since the `loop-delivered` label event) — once units are cheap, the human merge queue is
