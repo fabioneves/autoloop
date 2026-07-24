@@ -249,7 +249,38 @@ const MAX_STORE_RECORDS = 10_000;
 const MAX_DATA_DEPTH = 32;
 const MAX_DATA_NODES = 100_000;
 const STORE_KEY_FILE = '.measurement-auth-key';
+const STORE_LOCK_REF = 'refs/autoloop/measurement-store-lock';
+const STORE_LOCK_TIMEOUT_MS = 15_000;
 const TRUSTED_RECORDS = new WeakMap();
+const GIT_CONTEXT = resolve(process.cwd());
+
+function sanitizedGitEnvironment() {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
+  );
+}
+
+function gitArguments(args) {
+  return ['--no-replace-objects', '-C', GIT_CONTEXT, ...args];
+}
+
+function gitExec(args, options = {}) {
+  return execFileSync('git', gitArguments(args), {
+    encoding: 'utf8',
+    env: sanitizedGitEnvironment(),
+    timeout: 10_000,
+    ...options,
+  });
+}
+
+function gitSpawn(args, options = {}) {
+  return spawnSync('git', gitArguments(args), {
+    encoding: 'utf8',
+    env: sanitizedGitEnvironment(),
+    timeout: 10_000,
+    ...options,
+  });
+}
 
 function plainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -285,6 +316,10 @@ function validateDataGraph(value) {
     seen.add(current.value);
     if (!Array.isArray(current.value) && !plainObject(current.value)) {
       errors.push(`${current.path}: expected plain JSON data`);
+      continue;
+    }
+    if (Array.isArray(current.value) && current.value.length > MAX_DATA_NODES) {
+      errors.push(`${current.path}: array exceeds ${MAX_DATA_NODES} entries`);
       continue;
     }
     let descriptors;
@@ -331,6 +366,10 @@ function denseArray(errors, path, value, minimum = 0, maximum = 10_000) {
     errors.push(`${path}: expected an array`);
     return false;
   }
+  if (value.length < minimum || value.length > maximum) {
+    errors.push(`${path}: expected ${minimum}..${maximum} entries`);
+    return false;
+  }
   const descriptors = Object.getOwnPropertyDescriptors(value);
   for (const key of Reflect.ownKeys(descriptors)) {
     if (
@@ -342,9 +381,6 @@ function denseArray(errors, path, value, minimum = 0, maximum = 10_000) {
       errors.push(`${path}: array contains non-data or named properties`);
       return false;
     }
-  }
-  if (value.length < minimum || value.length > maximum) {
-    errors.push(`${path}: expected ${minimum}..${maximum} entries`);
   }
   for (let index = 0; index < value.length; index += 1) {
     if (!Object.hasOwn(value, index)) errors.push(`${path}[${index}]: sparse arrays are invalid`);
@@ -1250,6 +1286,7 @@ function validateRecordSet(records) {
   }
   const byId = new Map();
   const byObservation = new Map();
+  const byTerminalEvidence = new Map();
   const bySemanticObservation = new Map();
   for (const [index, recordValue] of records.entries()) {
     const existing = byId.get(recordValue?.recordId);
@@ -1272,6 +1309,17 @@ function validateRecordSet(records) {
       invalidIndexes.add(observationExisting);
     } else {
       byObservation.set(observationKey, index);
+    }
+    const terminalEvidence = recordValue?.observation?.terminalEvidenceFingerprint;
+    const terminalExisting = byTerminalEvidence.get(terminalEvidence);
+    if (terminalExisting !== undefined) {
+      errors.push(
+        `records[${index}].observation.terminalEvidenceFingerprint: duplicate of records[${terminalExisting}]`,
+      );
+      invalidIndexes.add(index);
+      invalidIndexes.add(terminalExisting);
+    } else {
+      byTerminalEvidence.set(terminalEvidence, index);
     }
     if (validateMeasurement(recordValue).ok) {
       const semantic = observationFingerprint(recordValue);
@@ -2073,6 +2121,21 @@ export function evaluateBudget(spec, baselineRecords, currentRecords) {
       errors: ['current observations must be independent from source observations'],
     };
   }
+  const baselineTerminalEvidence = new Set(
+    baselineRecords.map(
+      (recordValue) => recordValue.observation.terminalEvidenceFingerprint,
+    ),
+  );
+  if (
+    currentRecords.some((recordValue) =>
+      baselineTerminalEvidence.has(recordValue.observation.terminalEvidenceFingerprint))
+  ) {
+    return {
+      ok: false,
+      status: 'refused',
+      errors: ['current terminal evidence must be independent from source evidence'],
+    };
+  }
   if (!budgetEvidenceMatches(spec.source, baselineRecords, spec.workload, spec.mode)) {
     return {
       ok: false,
@@ -2191,6 +2254,153 @@ function fsyncDirectory(directory) {
   }
 }
 
+function processIdentity(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/u);
+    if (fields[19]) return `proc:${fields[19]}`;
+  } catch {}
+  try {
+    const started = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    }).trim();
+    return started ? `ps:${started}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function processOwnerAlive(owner) {
+  if (!plainObject(owner) || !Number.isInteger(owner.pid) || owner.pid < 1) return null;
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    if (error?.code === 'EPERM') return true;
+    return null;
+  }
+  const identity = processIdentity(owner.pid);
+  if (owner.processIdentity !== null && identity !== null) {
+    return owner.processIdentity === identity;
+  }
+  return true;
+}
+
+function readStoreLockOid() {
+  const result = gitSpawn(
+    ['rev-parse', '--verify', '--quiet', STORE_LOCK_REF],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  if (result.status === 1) return null;
+  if (result.status !== 0) throw new Error('cannot inspect measurement store lock');
+  const oid = result.stdout.trim();
+  if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/u.test(oid)) {
+    throw new Error('measurement store lock has an invalid object ID');
+  }
+  return oid;
+}
+
+function readStoreLockOwner(oid) {
+  try {
+    const owner = JSON.parse(gitExec(['cat-file', 'blob', oid], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    }));
+    const errors = [];
+    if (!exactObject(
+      errors,
+      'lockOwner',
+      owner,
+      [
+        'version',
+        'pid',
+        'processIdentity',
+        'nonce',
+        'storeFingerprint',
+        'createdAt',
+      ],
+    )) throw new Error('shape');
+    if (
+      owner.version !== 1
+      || !Number.isInteger(owner.pid)
+      || owner.pid < 1
+      || !(owner.processIdentity === null || typeof owner.processIdentity === 'string')
+      || !UUID_RE.test(owner.nonce ?? '')
+      || !HASH_RE.test(owner.storeFingerprint ?? '')
+      || !canonicalTimestamp(owner.createdAt)
+    ) throw new Error('fields');
+    return owner;
+  } catch {
+    throw new Error('measurement store lock owner metadata is invalid');
+  }
+}
+
+function updateStoreLock(newOid, expectedOid) {
+  const args = newOid === null
+    ? ['update-ref', '-d', STORE_LOCK_REF, expectedOid]
+    : ['update-ref', STORE_LOCK_REF, newOid, expectedOid];
+  return gitSpawn(args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'ignore', 'ignore'],
+    timeout: 2_000,
+  }).status === 0;
+}
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function acquireStoreLock(directory) {
+  const owner = {
+    version: 1,
+    pid: process.pid,
+    processIdentity: processIdentity(process.pid),
+    nonce: randomUUID(),
+    storeFingerprint: fingerprint(resolve(directory)),
+    createdAt: new Date().toISOString(),
+  };
+  const payload = `${JSON.stringify(owner)}\n`;
+  const ownedOid = gitExec(['hash-object', '-w', '--stdin'], {
+    encoding: 'utf8',
+    input: payload,
+    stdio: ['pipe', 'pipe', 'ignore'],
+    timeout: 2_000,
+  }).trim();
+  const zeroOid = '0'.repeat(ownedOid.length);
+  const deadline = Date.now() + STORE_LOCK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const existingOid = readStoreLockOid();
+    if (existingOid === null) {
+      if (updateStoreLock(ownedOid, zeroOid)) return { ownedOid, owner };
+    } else {
+      const existingOwner = readStoreLockOwner(existingOid);
+      const alive = processOwnerAlive(existingOwner);
+      if (alive === null) throw new Error('measurement store lock owner cannot be verified');
+      if (!alive && updateStoreLock(ownedOid, existingOid)) return { ownedOid, owner };
+    }
+    sleepSync(20);
+  }
+  throw new Error('measurement store lock timed out');
+}
+
+function withStoreLock(directory, operation) {
+  const lock = acquireStoreLock(directory);
+  let operationError;
+  try {
+    return operation();
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    if (!updateStoreLock(null, lock.ownedOid) && operationError === undefined) {
+      throw new Error('measurement store lock ownership changed before release');
+    }
+  }
+}
+
 function recoverPublications(directory) {
   const names = readdirSync(directory);
   const temporaries = names.filter((name) => /^\.tmp-[0-9a-f-]{36}$/u.test(name));
@@ -2263,6 +2473,10 @@ function atomicCreate(path, payload, mode) {
     descriptor = undefined;
     linkSync(temporary, path);
     linked = true;
+    if (
+      process.env.AUTOLOOP_MEASUREMENT_SELF_TEST === '1'
+      && path.endsWith('.json')
+    ) sleepSync(500);
     unlinkSync(temporary);
     fsyncDirectory(directory);
   } catch (error) {
@@ -2361,7 +2575,7 @@ export function persistMeasurement(recordValue, directory) {
   const raw = recordContent(recordValue);
   let liveRevision;
   try {
-    liveRevision = execFileSync('git', ['rev-parse', 'HEAD'], {
+    liveRevision = gitExec(['rev-parse', 'HEAD'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 10_000,
@@ -2385,25 +2599,28 @@ export function persistMeasurement(recordValue, directory) {
   raw.capturedAt = capturedAt;
   const validation = validateMeasurement(raw);
   if (!validation.ok) return { ok: false, errors: validation.errors };
-  let authority;
+  let target;
   try {
-    authority = measurementStoreAuthority(directory, true);
+    target = ensureMeasurementDirectory(directory, true);
   } catch (error) {
     return { ok: false, errors: [`record persistence failed: ${error.message}`] };
   }
-  const authenticated = authenticateRecord(raw, authority, capturedAt);
-  const path = join(authority.target, `${recordValue.recordId}.json`);
   try {
-    const payload = `${JSON.stringify(authenticated)}\n`;
-    if (Buffer.byteLength(payload) > MAX_RECORD_BYTES) {
-      throw new Error(`record exceeds ${MAX_RECORD_BYTES} bytes`);
-    }
-    atomicCreate(path, payload, 0o600);
-    return {
-      ok: true,
-      path,
-      contentFingerprint: authenticated.provenance.contentFingerprint,
-    };
+    return withStoreLock(target, () => {
+      const authority = measurementStoreAuthority(target, true);
+      const authenticated = authenticateRecord(raw, authority, capturedAt);
+      const path = join(authority.target, `${recordValue.recordId}.json`);
+      const payload = `${JSON.stringify(authenticated)}\n`;
+      if (Buffer.byteLength(payload) > MAX_RECORD_BYTES) {
+        throw new Error(`record exceeds ${MAX_RECORD_BYTES} bytes`);
+      }
+      atomicCreate(path, payload, 0o600);
+      return {
+        ok: true,
+        path,
+        contentFingerprint: authenticated.provenance.contentFingerprint,
+      };
+    });
   } catch (error) {
     return { ok: false, errors: [`record persistence failed: ${error.message}`] };
   }
@@ -2412,9 +2629,7 @@ export function persistMeasurement(recordValue, directory) {
 export function readMeasurements(directory) {
   const records = [];
   const errors = [];
-  let names;
   const target = resolve(directory);
-  let authority;
   try {
     lstatSync(target);
   } catch (error) {
@@ -2423,6 +2638,18 @@ export function readMeasurements(directory) {
   }
   try {
     ensureMeasurementDirectory(target, false);
+    return withStoreLock(target, () => readMeasurementsLocked(target));
+  } catch (error) {
+    return { ok: false, records, errors: [`measurement store read failed: ${error.message}`] };
+  }
+}
+
+function readMeasurementsLocked(target) {
+  const records = [];
+  const errors = [];
+  let names;
+  let authority;
+  try {
     recoverPublications(target);
     if (readdirSync(target).length === 0) return { ok: true, records, errors };
     authority = measurementStoreAuthority(target, false);
@@ -2482,7 +2709,7 @@ function unavailable(reason = 'fixture provider did not expose this field') {
 let cachedFixtureRevision;
 
 function fixtureRevision() {
-  cachedFixtureRevision ??= execFileSync('git', ['rev-parse', 'HEAD'], {
+  cachedFixtureRevision ??= gitExec(['rev-parse', 'HEAD'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 10_000,
@@ -2756,6 +2983,61 @@ function concurrentPersist(recordValue, directory) {
   return Promise.all([launch(), launch()]);
 }
 
+async function concurrentPublishAndRead(recordValue, directory, expectedRecords) {
+  const writerSource = [
+    `import { persistMeasurement } from ${JSON.stringify(import.meta.url)};`,
+    'const record = JSON.parse(process.argv[1]);',
+    'process.exit(persistMeasurement(record, process.argv[2]).ok ? 0 : 1);',
+  ].join('');
+  const readerSource = [
+    `import { readMeasurements } from ${JSON.stringify(import.meta.url)};`,
+    'const result = readMeasurements(process.argv[1]);',
+    `process.exit(result.ok && result.records.length === ${expectedRecords} ? 0 : 1);`,
+  ].join('');
+  const writer = spawn(
+    process.execPath,
+    ['--input-type=module', '--eval', writerSource, JSON.stringify(recordValue), directory],
+    {
+      env: { ...process.env, AUTOLOOP_MEASUREMENT_SELF_TEST: '1' },
+      stdio: 'ignore',
+    },
+  );
+  const writerResult = new Promise((resolveProcess) => {
+    writer.on('error', () => resolveProcess(2));
+    writer.on('close', (code) => resolveProcess(code));
+  });
+  const deadline = Date.now() + 5_000;
+  let observedWindow = false;
+  while (Date.now() < deadline) {
+    const names = readdirSync(directory);
+    if (
+      names.some((name) => name === `${recordValue.recordId}.json`)
+      && names.some((name) => name.startsWith('.tmp-'))
+    ) {
+      observedWindow = true;
+      break;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  const readerStartedAt = Date.now();
+  const reader = spawn(
+    process.execPath,
+    ['--input-type=module', '--eval', readerSource, directory],
+    { stdio: 'ignore' },
+  );
+  const readerResult = new Promise((resolveProcess) => {
+    reader.on('error', () => resolveProcess(2));
+    reader.on('close', (code) => resolveProcess(code));
+  });
+  const [writerStatus, readerStatus] = await Promise.all([writerResult, readerResult]);
+  return {
+    writerStatus,
+    readerStatus,
+    observedWindow,
+    readerDurationMs: Date.now() - readerStartedAt,
+  };
+}
+
 async function selfTest() {
   const valid = fixtureRecord();
   const unknown = { ...valid, actualRoute: 'retired-top-level-route' };
@@ -2838,6 +3120,15 @@ async function selfTest() {
     baseline,
     reusedObservationCurrent,
   );
+  const reusedTerminalCurrent = trustFixtureRecords(current.map((recordValue, index) => ({
+    ...recordContent(recordValue),
+    observation: {
+      ...recordValue.observation,
+      terminalEvidenceFingerprint:
+        baseline[index].observation.terminalEvidenceFingerprint,
+    },
+  })));
+  const reusedTerminalBudget = evaluateBudget(budget, baseline, reusedTerminalCurrent);
   const shortBaseline = trustFixtureRecords(fixtureRecords(20, 'safe-system'));
   const shortSource = buildBudgetSource(shortBaseline);
   const provisionalBudget = evaluateBudget(
@@ -3041,6 +3332,7 @@ async function selfTest() {
   providerChanged.observation = {
     ...providerChanged.observation,
     runId: '723e4567-e89b-42d3-a456-426614174001',
+    terminalEvidenceFingerprint: '7'.repeat(64),
   };
   providerChanged.segments[0].telemetry.provider = observed('other-provider');
   const providerSummary = summarizeMeasurements([valid, providerChanged]);
@@ -3049,6 +3341,7 @@ async function selfTest() {
   nativeBare.observation = {
     ...nativeBare.observation,
     runId: 'd23e4567-e89b-42d3-a456-426614174001',
+    terminalEvidenceFingerprint: 'd'.repeat(64),
   };
   nativeBare.selector = 'native';
   nativeBare.requestedEngine = 'claude';
@@ -3066,6 +3359,7 @@ async function selfTest() {
   nativeExplicit.observation = {
     ...nativeExplicit.observation,
     runId: 'e23e4567-e89b-42d3-a456-426614174001',
+    terminalEvidenceFingerprint: 'e'.repeat(64),
   };
   nativeExplicit.selector = 'claude';
   const nativeSelectorSummary = summarizeMeasurements([nativeBare, nativeExplicit]);
@@ -3208,6 +3502,11 @@ async function selfTest() {
     },
   }));
   const semanticCloneSummary = summarizeMeasurements(semanticClones);
+  const repeatedTerminalEvidence = fixtureRecords(100, 'safe-system');
+  repeatedTerminalEvidence.forEach((recordValue) => {
+    recordValue.observation.terminalEvidenceFingerprint = 'f'.repeat(64);
+  });
+  const repeatedTerminalSummary = summarizeMeasurements(repeatedTerminalEvidence);
   const duplicateObservation = [
     valid,
     {
@@ -3231,6 +3530,107 @@ async function selfTest() {
     nestingCursor = nestingCursor.child;
   }
   const nestingBombRecord = { ...valid, retiredBomb: nestingBomb };
+  const oversizedDenseErrors = [];
+  const oversizedDense = new Array(MAX_STORE_RECORDS + 1).fill(null);
+  const oversizedDenseResult = denseArray(
+    oversizedDenseErrors,
+    'fixture.large',
+    oversizedDense,
+    0,
+    MAX_STORE_RECORDS,
+  );
+  const publishReadStore = join(
+    tmpdir(),
+    `autoloop-measurement-publish-read-${randomUUID()}`,
+  );
+  persistMeasurement(valid, publishReadStore);
+  const racingRecord = fixtureRecord(101, {
+    recordId: 'b43e4567-e89b-42d3-a456-426614174000',
+    observation: {
+      runId: 'b43e4567-e89b-42d3-a456-426614174001',
+      unitId: 'race-reader',
+      terminalEvidenceFingerprint: '4'.repeat(64),
+    },
+  });
+  const publishReadRace = await concurrentPublishAndRead(
+    racingRecord,
+    publishReadStore,
+    2,
+  );
+  const publishReadFinal = readMeasurements(publishReadStore);
+  const staleOwner = {
+    version: 1,
+    pid: process.pid,
+    processIdentity: 'proc:stale-process-instance',
+    nonce: randomUUID(),
+    storeFingerprint: fingerprint(publishReadStore),
+    createdAt: new Date().toISOString(),
+  };
+  const staleOwnerOid = gitExec(['hash-object', '-w', '--stdin'], {
+    encoding: 'utf8',
+    input: `${JSON.stringify(staleOwner)}\n`,
+    stdio: ['pipe', 'pipe', 'ignore'],
+  }).trim();
+  const staleInstalled = updateStoreLock(
+    staleOwnerOid,
+    '0'.repeat(staleOwnerOid.length),
+  );
+  const staleRecovered = readMeasurements(publishReadStore);
+  const staleReleased = readStoreLockOid() === null;
+  const deadOwner = {
+    ...staleOwner,
+    pid: 99_999_999,
+    processIdentity: null,
+    nonce: randomUUID(),
+  };
+  const deadOwnerOid = gitExec(['hash-object', '-w', '--stdin'], {
+    input: `${JSON.stringify(deadOwner)}\n`,
+    stdio: ['pipe', 'pipe', 'ignore'],
+  }).trim();
+  const deadInstalled = updateStoreLock(
+    deadOwnerOid,
+    '0'.repeat(deadOwnerOid.length),
+  );
+  const deadRecovered = readMeasurements(publishReadStore);
+  const deadReleased = readStoreLockOid() === null;
+  const hostileGitStore = join(
+    tmpdir(),
+    `autoloop-measurement-hostile-git-${randomUUID()}`,
+  );
+  const hostileGitKeys = [
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_CONFIG_COUNT',
+    'GIT_CONFIG_KEY_0',
+    'GIT_CONFIG_VALUE_0',
+  ];
+  const savedGitEnvironment = Object.fromEntries(
+    hostileGitKeys.map((key) => [key, process.env[key]]),
+  );
+  const trustedMeasurementDirectory = measurementDirectory();
+  process.env.GIT_DIR = join(hostileGitStore, 'attacker.git');
+  process.env.GIT_WORK_TREE = hostileGitStore;
+  process.env.GIT_OBJECT_DIRECTORY = join(hostileGitStore, 'objects');
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = 'core.repositoryformatversion';
+  process.env.GIT_CONFIG_VALUE_0 = '999';
+  let hostileGitRevision;
+  let hostileMeasurementDirectory;
+  let hostileGitPersist;
+  try {
+    hostileGitRevision = gitExec(['rev-parse', 'HEAD'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    hostileMeasurementDirectory = measurementDirectory();
+    hostileGitPersist = persistMeasurement(valid, hostileGitStore);
+  } finally {
+    for (const key of hostileGitKeys) {
+      if (savedGitEnvironment[key] === undefined) delete process.env[key];
+      else process.env[key] = savedGitEnvironment[key];
+    }
+  }
+  const hostileGitRead = readMeasurements(hostileGitStore);
   const concurrentStore = join(tmpdir(), `autoloop-measurement-race-${randomUUID()}`);
   const concurrentStatuses = await concurrentPersist(valid, concurrentStore);
   const concurrentRead = readMeasurements(concurrentStore);
@@ -3256,6 +3656,8 @@ async function selfTest() {
   rmSync(emptyStore, { recursive: true, force: true });
   rmSync(publicationStore, { recursive: true, force: true });
   rmSync(invalidAvoidedStore, { recursive: true, force: true });
+  rmSync(publishReadStore, { recursive: true, force: true });
+  rmSync(hostileGitStore, { recursive: true, force: true });
   rmSync(concurrentStore, { recursive: true, force: true });
   const cases = [
     ['mixed-route unit is valid', validateMeasurement(valid).ok],
@@ -3315,8 +3717,13 @@ async function selfTest() {
     ['UUID-renamed semantic clones cannot inflate sample counts',
       semanticCloneSummary.invalid.length > 0
       && semanticCloneSummary.unitCohorts.length === 0],
+    ['shared terminal evidence cannot inflate sample counts',
+      repeatedTerminalSummary.invalid.length > 0
+      && repeatedTerminalSummary.unitCohorts.length === 0],
     ['bounded graph validation rejects nesting bombs without recursion failure',
       !validateMeasurement(nestingBombRecord).ok],
+    ['oversized arrays stop before descriptor or element traversal',
+      !oversizedDenseResult && oversizedDenseErrors.length === 1],
     ['even median averages the middle pair', totalMetric?.median === 149.5],
     ['nearest-rank p95 is emitted at 20 samples', twenty.unitCohorts[0]
       ?.metrics['unit.timing.totalMs']?.p95 === 118],
@@ -3349,6 +3756,8 @@ async function selfTest() {
     ['duplicate current IDs refuse budget evaluation', duplicateCurrentBudget.status === 'refused'],
     ['current budgets reject reused source observation identities',
       reusedObservationBudget.status === 'refused'],
+    ['current budgets reject reused source terminal evidence',
+      reusedTerminalBudget.status === 'refused'],
     ['budget stays provisional below stable floor', provisionalBudget.status === 'provisional'],
     ['p95 budget refuses below reporting floor', refusedBudget.status === 'refused'],
     ['raw record persists once at mode 0600', persisted.ok && !duplicate.ok
@@ -3374,6 +3783,24 @@ async function selfTest() {
       emptyStoreRead.ok && emptyStoreRead.records.length === 0 && emptyStoreWrite.ok],
     ['hard-link publication crash state is recovered before reading',
       recoveredPublication.ok && recoveredPublication.records.length === 1],
+    ['active publish and concurrent recovery reader remain mutually excluded',
+      publishReadRace.observedWindow
+      && publishReadRace.writerStatus === 0
+      && publishReadRace.readerStatus === 0
+      && publishReadRace.readerDurationMs >= 300
+      && publishReadFinal.ok
+      && publishReadFinal.records.length === 2],
+    ['stale PID-instance lock is replaced by exact Git-ref CAS and released',
+      staleInstalled && staleRecovered.ok && staleReleased],
+    ['dead-PID lock is replaced by exact Git-ref CAS and released',
+      deadInstalled && deadRecovered.ok && deadReleased],
+    ['ambient Git directory, worktree, object, and config overrides cannot redirect capture',
+      hostileGitRevision === fixtureRevision()
+      && hostileMeasurementDirectory === trustedMeasurementDirectory
+      && hostileGitPersist.ok
+      && hostileGitRead.ok
+      && hostileGitRead.records.length === 1
+      && readStoreLockOid() === null],
     ['invalid authenticated avoided evidence fails the store summary',
       !invalidAvoidedSummary.ok
       && invalidAvoidedSummary.summary.unitCohorts.length === 0],
@@ -3429,17 +3856,12 @@ function parseArgs(args) {
 }
 
 function measurementDirectory() {
-  const gitPath = execFileSync(
-    'git',
+  const gitPath = gitExec(
     ['rev-parse', '--git-path', 'autoloop/measurements/v1'],
-    {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 10_000,
-    },
+    { stdio: ['ignore', 'pipe', 'pipe'] },
   ).trim();
   if (!gitPath) throw new Error('git returned an empty measurement path');
-  return resolve(process.cwd(), gitPath);
+  return resolve(GIT_CONTEXT, gitPath);
 }
 
 function readJsonInput() {

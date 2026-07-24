@@ -27,10 +27,20 @@ write-once mode-`0600` file below the current worktree's Git path at
 that store, not globally immutable or independently attested. A duplicate UUID, symlink anywhere
 in the store path, non-regular or multiply linked record, wrong owner or mode, oversized input or
 file, sparse array, unknown field, retired field, or invalid route combination is rejected.
-Temporary writes are fsynced and linked under the final UUID only after completion. On restart,
-the reader removes an unlinked temporary or completes the unlink side of an unambiguous two-link
-publication before opening a final record. A missing authority in a non-empty store is corruption
-and can never rotate into a new key; a genuinely empty store can initialize once.
+Temporary writes are fsynced and linked under the final UUID only after completion. Publication
+and recovery share one repository-wide Git-ref compare-and-swap lock, so a reader cannot recover
+an active writer's two-link window. The lock owner is a Git blob bound to PID, process-instance
+identity, nonce, store fingerprint, and time. Exact-old-OID acquisition/release is ABA-safe; a
+crashed or PID-reused owner can be replaced only after its process identity is proved stale. On
+restart, the lock holder removes an unlinked temporary or completes the unlink side of an
+unambiguous two-link publication before opening a final record. A missing authority in a non-empty
+store is corruption and can never rotate into a new key; a genuinely empty store can initialize
+once.
+
+Live HEAD, Git-path resolution, object writes, and lock-ref operations all use one explicit
+repository context with replacement objects disabled and every ambient `GIT_*` override removed.
+Caller `GIT_DIR`, worktree/object-directory, or injected config variables cannot redirect capture
+or locking.
 
 The HMAC authenticates what this local tool retained. It proves live HEAD and tool-clock capture.
 Checkpoint and run/unit/terminal-evidence identity are explicitly marked operator/run-record
@@ -51,9 +61,12 @@ engine observations. Segment cohorts add their stage, round, and role. Each oper
 explicit allowed-to-vary fields: summaries vary none; checkpoint comparisons vary revision,
 checkpoint, capture identity, and terminal outcome; budget-current evaluation varies those same
 fields while retaining the complete runtime identity.
-Duplicate record IDs, duplicate run/unit identities, and exact semantic observation clones are
-invalid and excluded from aggregates. Invalid authenticated avoided-cost/control evidence makes
-`--summarize-store` fail nonzero rather than returning a healthy partial claim.
+Duplicate record IDs, duplicate run/unit identities, duplicate terminal-evidence fingerprints,
+and exact semantic observation clones are invalid and excluded from aggregates. Budget source and
+current cohorts must also have disjoint run/unit identities and terminal-evidence fingerprints.
+This is equality-based replay detection, not independent attestation. Invalid authenticated
+avoided-cost/control evidence makes `--summarize-store` fail nonzero rather than returning a
+healthy partial claim.
 
 ## Record contract
 
