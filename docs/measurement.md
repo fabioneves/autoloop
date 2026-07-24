@@ -26,16 +26,20 @@ write-once mode-`0600` file below the current worktree's Git path at
 `0700`; its private authority key is mode `0600`. Records are tamper-evident and authenticated to
 that store, not globally immutable or independently attested. A duplicate UUID, symlink anywhere
 in the store path, non-regular or multiply linked record, wrong owner or mode, oversized input or
-file, sparse array, unknown field, retired field, or invalid route combination is rejected.
+file, graph node with more than 10,000 own properties, sparse array, unknown field, retired field,
+or invalid route combination is rejected. Graph width is checked from the own-key list before
+property descriptors are materialized or children are queued.
 Temporary writes are fsynced and linked under the final UUID only after completion. Publication
 and recovery share one repository-wide Git-ref compare-and-swap lock, so a reader cannot recover
 an active writer's two-link window. The lock owner is a Git blob bound to PID, process-instance
-identity, nonce, store fingerprint, and time. Exact-old-OID acquisition/release is ABA-safe; a
-crashed or PID-reused owner can be replaced only after its process identity is proved stale. On
-restart, the lock holder removes an unlinked temporary or completes the unlink side of an
-unambiguous two-link publication before opening a final record. A missing authority in a non-empty
-store is corruption and can never rotate into a new key; a genuinely empty store can initialize
-once.
+identity, nonce, store fingerprint, and time. Exact-old-OID acquisition/release is ABA-safe.
+Symbolic lock refs are rejected, and acquire, takeover, and release use no-dereference ref updates,
+so a ref-type race cannot mutate the symbolic target. A crashed, zombie, or PID-reused owner can be
+replaced only after its process state or identity proves it stale; an owner whose liveness or
+identity cannot be verified remains held fail-closed. On restart, the lock holder removes an
+unlinked temporary or completes the unlink side of an unambiguous two-link publication before
+opening a final record. A missing authority in a non-empty store is corruption and can never
+rotate into a new key; a genuinely empty store can initialize once.
 
 Live HEAD, Git-path resolution, object writes, and lock-ref operations all use one explicit
 repository context with replacement objects disabled and every ambient `GIT_*` override removed.

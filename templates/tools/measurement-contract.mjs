@@ -248,6 +248,7 @@ const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_STORE_RECORDS = 10_000;
 const MAX_DATA_DEPTH = 32;
 const MAX_DATA_NODES = 100_000;
+const MAX_DATA_WIDTH = MAX_STORE_RECORDS;
 const STORE_KEY_FILE = '.measurement-auth-key';
 const STORE_LOCK_REF = 'refs/autoloop/measurement-store-lock';
 const STORE_LOCK_TIMEOUT_MS = 15_000;
@@ -283,13 +284,17 @@ function gitSpawn(args, options = {}) {
 }
 
 function plainObject(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) return false;
+  if (!hasPlainObjectPrototype(value)) return false;
   const descriptors = Object.getOwnPropertyDescriptors(value);
   return Reflect.ownKeys(descriptors).every(
     (key) => typeof key === 'string' && !descriptors[key].get && !descriptors[key].set,
   );
+}
+
+function hasPlainObjectPrototype(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function validateDataGraph(value) {
@@ -314,23 +319,46 @@ function validateDataGraph(value) {
       continue;
     }
     seen.add(current.value);
-    if (!Array.isArray(current.value) && !plainObject(current.value)) {
+    const array = Array.isArray(current.value);
+    if (!array && !hasPlainObjectPrototype(current.value)) {
       errors.push(`${current.path}: expected plain JSON data`);
       continue;
     }
-    if (Array.isArray(current.value) && current.value.length > MAX_DATA_NODES) {
+    if (array && current.value.length > MAX_DATA_NODES) {
       errors.push(`${current.path}: array exceeds ${MAX_DATA_NODES} entries`);
       continue;
     }
-    let descriptors;
+    let keys;
     try {
-      descriptors = Object.getOwnPropertyDescriptors(current.value);
+      keys = Reflect.ownKeys(current.value);
     } catch {
       errors.push(`${current.path}: property inspection failed`);
       continue;
     }
-    for (const [key, descriptor] of Object.entries(descriptors)) {
+    const width = keys.length - (array ? 1 : 0);
+    if (width > MAX_DATA_WIDTH) {
+      errors.push(
+        `${current.path}: exceeds ${MAX_DATA_WIDTH} own properties`,
+      );
+      continue;
+    }
+    for (const key of keys) {
       if (key === 'length') continue;
+      if (typeof key !== 'string') {
+        errors.push(`${current.path}: symbol properties are invalid`);
+        continue;
+      }
+      let descriptor;
+      try {
+        descriptor = Object.getOwnPropertyDescriptor(current.value, key);
+      } catch {
+        errors.push(`${current.path}.${key}: property inspection failed`);
+        continue;
+      }
+      if (!descriptor) {
+        errors.push(`${current.path}.${key}: property disappeared during inspection`);
+        continue;
+      }
       if (descriptor.get || descriptor.set) {
         errors.push(`${current.path}.${key}: accessors are invalid`);
         continue;
@@ -2254,34 +2282,59 @@ function fsyncDirectory(directory) {
   }
 }
 
-function processIdentity(pid) {
+function processStatus(pid) {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/u);
-    if (fields[19]) return `proc:${fields[19]}`;
+    if (fields[0] && fields[19]) {
+      return { identity: `proc:${fields[19]}`, state: fields[0] };
+    }
   } catch {}
+  let state = null;
+  try {
+    state = execFileSync('ps', ['-p', String(pid), '-o', 'stat='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    }).trim();
+  } catch {}
+  let identity = null;
   try {
     const started = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2_000,
     }).trim();
-    return started ? `ps:${started}` : null;
-  } catch {
-    return null;
-  }
+    if (started) identity = `ps:${started}`;
+  } catch {}
+  return { identity, state: state || null };
 }
 
-function processOwnerAlive(owner) {
+function processIdentity(pid) {
+  return processStatus(pid).identity;
+}
+
+function processOwnerAlive(
+  owner,
+  inspectProcess = processStatus,
+  signalProcess = (pid) => process.kill(pid, 0),
+) {
   if (!plainObject(owner) || !Number.isInteger(owner.pid) || owner.pid < 1) return null;
   try {
-    process.kill(owner.pid, 0);
+    signalProcess(owner.pid);
   } catch (error) {
     if (error?.code === 'ESRCH') return false;
     if (error?.code === 'EPERM') return true;
     return null;
   }
-  const identity = processIdentity(owner.pid);
+  let status;
+  try {
+    status = inspectProcess(owner.pid);
+  } catch {
+    return null;
+  }
+  if (status?.state?.startsWith('Z')) return false;
+  const identity = status?.identity ?? null;
   if (owner.processIdentity !== null && identity !== null) {
     return owner.processIdentity === identity;
   }
@@ -2289,13 +2342,38 @@ function processOwnerAlive(owner) {
 }
 
 function readStoreLockOid() {
-  const result = gitSpawn(
-    ['rev-parse', '--verify', '--quiet', STORE_LOCK_REF],
+  const symbolic = gitSpawn(
+    ['symbolic-ref', '--quiet', '--no-recurse', STORE_LOCK_REF],
     { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
   );
-  if (result.status === 1) return null;
+  if (symbolic.status === 0) {
+    throw new Error('measurement store lock must not be symbolic');
+  }
+  if (symbolic.status !== 1) {
+    throw new Error('cannot inspect measurement store lock');
+  }
+  const result = gitSpawn(
+    [
+      'for-each-ref',
+      '--format=%(refname)%09%(objectname)%09%(symref)',
+      STORE_LOCK_REF,
+    ],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+  );
   if (result.status !== 0) throw new Error('cannot inspect measurement store lock');
-  const oid = result.stdout.trim();
+  const matching = result.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.split('\t'))
+    .filter(([refname]) => refname === STORE_LOCK_REF);
+  if (matching.length === 0) return null;
+  if (matching.length !== 1 || matching[0].length !== 3) {
+    throw new Error('measurement store lock inspection is ambiguous');
+  }
+  const [, oid, symbolicTarget] = matching[0];
+  if (symbolicTarget) {
+    throw new Error('measurement store lock must not be symbolic');
+  }
   if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/u.test(oid)) {
     throw new Error('measurement store lock has an invalid object ID');
   }
@@ -2338,15 +2416,22 @@ function readStoreLockOwner(oid) {
   }
 }
 
-function updateStoreLock(newOid, expectedOid) {
+function compareAndSwapStoreLock(newOid, expectedOid) {
   const args = newOid === null
-    ? ['update-ref', '-d', STORE_LOCK_REF, expectedOid]
-    : ['update-ref', STORE_LOCK_REF, newOid, expectedOid];
+    ? ['update-ref', '--no-deref', '-d', STORE_LOCK_REF, expectedOid]
+    : ['update-ref', '--no-deref', STORE_LOCK_REF, newOid, expectedOid];
   return gitSpawn(args, {
     encoding: 'utf8',
     stdio: ['ignore', 'ignore', 'ignore'],
     timeout: 2_000,
   }).status === 0;
+}
+
+function updateStoreLock(newOid, expectedOid) {
+  const existingOid = readStoreLockOid();
+  const absentOid = '0'.repeat(expectedOid.length);
+  if ((existingOid ?? absentOid) !== expectedOid) return false;
+  return compareAndSwapStoreLock(newOid, expectedOid);
 }
 
 function sleepSync(milliseconds) {
@@ -3530,6 +3615,35 @@ async function selfTest() {
     nestingCursor = nestingCursor.child;
   }
   const nestingBombRecord = { ...valid, retiredBomb: nestingBomb };
+  const hostileWidthFixture = (array) => {
+    const target = array ? [] : {};
+    const keys = Array.from(
+      { length: MAX_STORE_RECORDS + 1 },
+      (_, index) => `key${index}`,
+    );
+    if (array) keys.unshift('length');
+    let descriptorReads = 0;
+    return {
+      value: new Proxy(target, {
+        ownKeys: () => keys,
+        getOwnPropertyDescriptor: (object, key) => {
+          descriptorReads += 1;
+          if (key === 'length') return Reflect.getOwnPropertyDescriptor(object, key);
+          return {
+            configurable: true,
+            enumerable: true,
+            value: null,
+            writable: true,
+          };
+        },
+      }),
+      descriptorReads: () => descriptorReads,
+    };
+  };
+  const wideObject = hostileWidthFixture(false);
+  const wideObjectGraph = validateDataGraph(wideObject.value);
+  const wideNamedArray = hostileWidthFixture(true);
+  const wideNamedArrayGraph = validateDataGraph(wideNamedArray.value);
   const oversizedDenseErrors = [];
   const oversizedDense = new Array(MAX_STORE_RECORDS + 1).fill(null);
   const oversizedDenseResult = denseArray(
@@ -3593,6 +3707,115 @@ async function selfTest() {
   );
   const deadRecovered = readMeasurements(publishReadStore);
   const deadReleased = readStoreLockOid() === null;
+  const currentProcessIdentity = processIdentity(process.pid);
+  const zombieOwnerIsDead = processOwnerAlive(
+    { pid: process.pid, processIdentity: currentProcessIdentity },
+    () => ({ identity: currentProcessIdentity, state: 'Z' }),
+    () => {},
+  ) === false;
+  const unverifiableOwnerStaysLive = processOwnerAlive(
+    { pid: process.pid, processIdentity: currentProcessIdentity },
+    () => ({ identity: null, state: null }),
+    () => {},
+  ) === true;
+  const symbolicTargetRef = `refs/autoloop/measurement-lock-target-${randomUUID()}`;
+  const zeroOid = '0'.repeat(staleOwnerOid.length);
+  const symbolicTargetInstalled = gitSpawn(
+    ['update-ref', '--no-deref', symbolicTargetRef, staleOwnerOid, zeroOid],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  ).status === 0;
+  const directLockInstalled = updateStoreLock(staleOwnerOid, zeroOid);
+  const racedExpectedOid = readStoreLockOid();
+  const symbolicRaceInstalled = gitSpawn(
+    ['symbolic-ref', STORE_LOCK_REF, symbolicTargetRef],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  ).status === 0;
+  let symbolicReadRejected = false;
+  try {
+    readStoreLockOid();
+  } catch {
+    symbolicReadRejected = true;
+  }
+  let symbolicUpdateRejected = false;
+  try {
+    updateStoreLock(deadOwnerOid, racedExpectedOid);
+  } catch {
+    symbolicUpdateRejected = true;
+  }
+  const stableSymbolicTargetPreserved = gitExec(
+    ['rev-parse', '--verify', symbolicTargetRef],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  ).trim() === staleOwnerOid;
+  const symbolicLockTarget = gitSpawn(
+    ['symbolic-ref', '--quiet', STORE_LOCK_REF],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  ).stdout.trim();
+  const racedCasUpdated = compareAndSwapStoreLock(deadOwnerOid, racedExpectedOid);
+  let racedLockIsDirect = false;
+  try {
+    racedLockIsDirect = readStoreLockOid() === deadOwnerOid;
+  } catch {}
+  const racedLockTarget = gitSpawn(
+    ['symbolic-ref', '--quiet', STORE_LOCK_REF],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  ).stdout.trim();
+  const racedTargetPreserved = gitExec(
+    ['rev-parse', '--verify', symbolicTargetRef],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  ).trim() === staleOwnerOid;
+  const racedRefStateSafe = racedCasUpdated
+    ? racedLockIsDirect && racedLockTarget === ''
+    : racedLockTarget === symbolicTargetRef;
+  gitSpawn(
+    ['update-ref', '--no-deref', '-d', STORE_LOCK_REF],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  );
+  const releaseTargetRef = `refs/autoloop/measurement-release-target-${randomUUID()}`;
+  const releaseTargetInstalled = gitSpawn(
+    ['update-ref', '--no-deref', releaseTargetRef, deadOwnerOid, zeroOid],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  ).status === 0;
+  const releaseLockInstalled = updateStoreLock(deadOwnerOid, zeroOid);
+  const releaseExpectedOid = readStoreLockOid();
+  const releaseRaceInstalled = gitSpawn(
+    ['symbolic-ref', STORE_LOCK_REF, releaseTargetRef],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  ).status === 0;
+  const racedReleaseDeleted = compareAndSwapStoreLock(null, releaseExpectedOid);
+  const releaseTargetPreserved = gitExec(
+    ['rev-parse', '--verify', releaseTargetRef],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  ).trim() === deadOwnerOid;
+  const releaseLockAbsent = readStoreLockOid() === null;
+  gitSpawn(
+    ['update-ref', '--no-deref', '-d', STORE_LOCK_REF],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  );
+  gitSpawn(
+    ['update-ref', '--no-deref', '-d', symbolicTargetRef],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  );
+  gitSpawn(
+    ['update-ref', '--no-deref', '-d', releaseTargetRef],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  );
+  const missingSymbolicTargetRef =
+    `refs/autoloop/measurement-missing-target-${randomUUID()}`;
+  const brokenSymbolicInstalled = gitSpawn(
+    ['symbolic-ref', STORE_LOCK_REF, missingSymbolicTargetRef],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  ).status === 0;
+  let brokenSymbolicRejected = false;
+  try {
+    readStoreLockOid();
+  } catch {
+    brokenSymbolicRejected = true;
+  }
+  gitSpawn(
+    ['update-ref', '--no-deref', '-d', STORE_LOCK_REF],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+  );
+  const symbolicFixtureClean = readStoreLockOid() === null;
   const hostileGitStore = join(
     tmpdir(),
     `autoloop-measurement-hostile-git-${randomUUID()}`,
@@ -3760,6 +3983,18 @@ async function selfTest() {
       reusedTerminalBudget.status === 'refused'],
     ['budget stays provisional below stable floor', provisionalBudget.status === 'provisional'],
     ['p95 budget refuses below reporting floor', refusedBudget.status === 'refused'],
+    ['wide objects stop at the graph-width bound before descriptor amplification',
+      !wideObjectGraph.ok
+      && wideObjectGraph.errors.includes(
+        `record: exceeds ${MAX_STORE_RECORDS} own properties`,
+      )
+      && wideObject.descriptorReads() === 0],
+    ['wide arrays with named properties stop at the graph-width bound',
+      !wideNamedArrayGraph.ok
+      && wideNamedArrayGraph.errors.includes(
+        `record: exceeds ${MAX_STORE_RECORDS} own properties`,
+      )
+      && wideNamedArray.descriptorReads() === 0],
     ['raw record persists once at mode 0600', persisted.ok && !duplicate.ok
       && persistedMode === 0o600],
     ['two no-replace writers admit exactly one complete record', persisted.ok && !duplicate.ok
@@ -3794,6 +4029,29 @@ async function selfTest() {
       staleInstalled && staleRecovered.ok && staleReleased],
     ['dead-PID lock is replaced by exact Git-ref CAS and released',
       deadInstalled && deadRecovered.ok && deadReleased],
+    ['zombie lock owners are recoverable while unverifiable identities fail closed',
+      zombieOwnerIsDead && unverifiableOwnerStaysLive],
+    ['symbolic lock refs and ref-type races never mutate their targets',
+      symbolicTargetInstalled
+      && directLockInstalled
+      && racedExpectedOid === staleOwnerOid
+      && symbolicRaceInstalled
+      && symbolicReadRejected
+      && symbolicUpdateRejected
+      && stableSymbolicTargetPreserved
+      && symbolicLockTarget === symbolicTargetRef
+      && racedTargetPreserved
+      && racedRefStateSafe
+      && releaseTargetInstalled
+      && releaseLockInstalled
+      && releaseExpectedOid === deadOwnerOid
+      && releaseRaceInstalled
+      && racedReleaseDeleted
+      && releaseTargetPreserved
+      && releaseLockAbsent
+      && brokenSymbolicInstalled
+      && brokenSymbolicRejected
+      && symbolicFixtureClean],
     ['ambient Git directory, worktree, object, and config overrides cannot redirect capture',
       hostileGitRevision === fixtureRevision()
       && hostileMeasurementDirectory === trustedMeasurementDirectory
