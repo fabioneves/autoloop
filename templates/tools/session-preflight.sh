@@ -29,17 +29,34 @@ else
   echo 'FAIL  gh installed but not authenticated — run `gh auth login`; the loop must not run'
 fi
 if ! command -v node >/dev/null 2>&1; then
-  echo 'FAIL  node not installed — the vendored guard hooks (command-guard, writeback-check) cannot run'
+  echo 'FAIL  node not installed — the vendored runtime contracts cannot run'
 else
   config_contract="$REPO_DIR/tools/agentic/config-contract.mjs"
+  release_contract="$REPO_DIR/tools/agentic/release-verify.mjs"
+  runtime_contract="$REPO_DIR/tools/agentic/runtime-contract.mjs"
   if [ -f "$config_contract" ]; then
     node "$config_contract" "$REPO_DIR/docs/agentic/STATE.md" 2>&1 || true
   else
     echo 'FAIL  tools/agentic/config-contract.mjs missing — re-run autoloop:setup before the loop runs'
   fi
+  if [ -f "$release_contract" ]; then
+    release_result=$(node "$release_contract" --self-test 2>&1)
+    release_status=$?
+    echo "$release_result" | tail -1
+    if [ "$release_status" -ne 0 ]; then
+      echo 'FAIL  release verification helpers failed their self-test — re-run autoloop:setup'
+    fi
+  else
+    echo 'FAIL  tools/agentic/release-verify.mjs missing — re-run autoloop:setup before the loop runs'
+  fi
+  if [ -f "$runtime_contract" ]; then
+    echo 'PASS  RuntimeContract present — the skill must attest the live host and selected route'
+  else
+    echo 'FAIL  tools/agentic/runtime-contract.mjs missing — route selection cannot run'
+  fi
 fi
 
-# 2. Clean main checkout (loop precondition; dirty is fine for interactive work)
+# 2. Clean checkout (loop precondition; dirty is fine for interactive work)
 dirty=$(git status --porcelain=v1 --untracked-files=all 2>/dev/null | wc -l)
 if [ "$dirty" -eq 0 ]; then
   echo 'PASS  clean checkout'
@@ -47,27 +64,9 @@ else
   echo "NOTE  checkout has $dirty uncommitted path(s) — fine interactively; the loop requires a clean tree UNLESS this is a provably loop-owned in-flight unit (dirty on a gh-<N> branch with its open draft PR + claim-commit HEAD + in-boundary paths → adoption checkpoints and resumes). Otherwise it is a human's WIP: never stash/discard — stop and report."
 fi
 
-# 3. Engine profile reminder. config-contract validates the declared static host matrix; the skill
-# performs active-host membership and capability checks (native named subagents on Codex, or
-# direct `codex exec` when Claude hosts a codex profile).
-if grep -q '"profile": *"codex"' docs/agentic/STATE.md 2>/dev/null; then
-  echo 'INFO  engine profile is codex — Prime must verify this host is declared and its Codex dispatch surface is available'
-  # Nested-sandbox check. Codex 0.145+ runs a trusted project under workspace-write (an OS
-  # sandbox). The OS-enforced reviewer (`codex exec --sandbox read-only`) then cannot initialize
-  # its own nested sandbox and dies at launch — which the loop misreads as an "engine outage"
-  # and silently degrades to same-model host-thread review. Detect it without an API call: a
-  # sandboxed session cannot write outside its workspace roots (repo, /tmp, $TMPDIR), so a write
-  # to $HOME is blocked iff the orchestrator is sandboxed. (Claude+codex orchestrators run
-  # unsandboxed → write succeeds → PASS, correctly.)
-  if command -v codex >/dev/null 2>&1; then
-    probe="$HOME/.autoloop_sandbox_probe.$$"
-    if touch "$probe" 2>/dev/null; then
-      rm -f "$probe"
-      echo 'PASS  orchestrator not OS-sandboxed — the codex exec read-only reviewer can initialize'
-    else
-      echo 'FAIL  orchestrator is OS-sandboxed (cannot write outside the workspace) — the `codex exec --sandbox read-only` reviewer cannot initialize its nested sandbox and dies at launch, degrading every review to same-model host threads (the loop misreports this as an "engine outage"). Relaunch codex with `--sandbox danger-full-access`, or set `default_permissions = ":danger-full-access"` in ~/.codex/config.toml, then restart. (codex 0.145 trusted-project default is workspace-write.)'
-    fi
-  fi
-fi
+# 3. Routing is deliberately not inferred here. A hook script cannot prove which live host
+# integration invoked it. Dev/Setup/Pitcrew attest that fact from their effective tool surface,
+# then RuntimeContract selects only the requested route and reachable safe fallback.
+echo 'INFO  route not inferred by preflight — active host evidence is invocation-scoped'
 
 exit 0
