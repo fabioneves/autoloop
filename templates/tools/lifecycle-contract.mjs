@@ -2,10 +2,11 @@
 
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { parseLoopBranchIssue } from './claim-contract.mjs';
+import { finalizeHead } from './delivery-contract.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/i;
-const BRANCH_RE = /^(feat|fix|chore|docs|refactor|test|perf|build|ci)\/gh-(\d+)-[a-z0-9-]+$/;
 const PHASES = new Set([
   'intent-recorded',
   'local-claim',
@@ -23,11 +24,11 @@ function transition(state, action, code, detail = {}) {
 }
 
 function validIntent(intentValue) {
-  const branch = BRANCH_RE.exec(intentValue?.branch ?? '');
+  const branchIssue = parseLoopBranchIssue(intentValue?.branch);
   return (
-    Number.isInteger(intentValue?.issue) &&
+    Number.isSafeInteger(intentValue?.issue) &&
     intentValue.issue > 0 &&
-    Number(branch?.[2]) === intentValue.issue &&
+    branchIssue === intentValue.issue &&
     HASH_RE.test(intentValue.issueBodyHash ?? '') &&
     HASH_RE.test(intentValue.planHash ?? '') &&
     SHA_RE.test(intentValue.plannedBaseOid ?? '') &&
@@ -186,11 +187,12 @@ export function reconcileLifecycle(input) {
   }
   if (
     facts.remoteClaim.branch !== intentValue.branch ||
-    !SHA_RE.test(facts.remoteClaim.headOid ?? '') ||
-    facts.remoteClaim.containsClaimCommit === false
+    !SHA_RE.test(facts.remoteClaim.headOid ?? '')
   ) {
     return artifactMismatch('remote-claim');
   }
+  if (facts.remoteClaim.containsClaimCommit == null) return inspect('remote-claim');
+  if (facts.remoteClaim.containsClaimCommit !== true) return artifactMismatch('remote-claim');
 
   if (facts.planComment?.complete !== true) return inspect('plan-comment');
   if (facts.planComment.exists !== true) {
@@ -220,14 +222,27 @@ export function reconcileLifecycle(input) {
 
   if (facts.delivery?.complete !== true) return inspect('delivery');
   if (facts.delivery.exists !== true) {
-    if (input.marker.headOid) {
-      return transition('act', 'restore-delivered', 'DELIVERED_STATE_MISSING', {
-        headOid: input.marker.headOid,
-      });
-    }
-    return transition('resume', 'resume-unit', 'ACTIVE_DRAFT_RECOVERED');
+    if (!input.marker.headOid) return transition('resume', 'resume-unit', 'ACTIVE_DRAFT_RECOVERED');
   }
-  if (!SHA_RE.test(facts.delivery.headOid ?? '')) return artifactMismatch('delivery');
+  const finalizedDelivery = finalizeHead(facts.delivery.headEvidence);
+  if (!finalizedDelivery.canMarkDelivered) return inspect('delivery');
+  if (
+    finalizedDelivery.headOid !== facts.remoteClaim.headOid ||
+    (input.marker.headOid && finalizedDelivery.headOid !== input.marker.headOid)
+  ) {
+    return artifactMismatch('delivery');
+  }
+  if (facts.delivery.exists !== true) {
+    return transition('act', 'restore-delivered', 'DELIVERED_STATE_MISSING', {
+      headOid: input.marker.headOid,
+    });
+  }
+  if (
+    !SHA_RE.test(facts.delivery.headOid ?? '') ||
+    facts.delivery.headOid !== finalizedDelivery.headOid
+  ) {
+    return artifactMismatch('delivery');
+  }
   if (input.marker.headOid && input.marker.headOid !== facts.delivery.headOid) {
     return artifactMismatch('delivery');
   }
@@ -297,6 +312,7 @@ export function reconcileLifecycle(input) {
 }
 
 const SHA = 'a'.repeat(40);
+const OTHER_SHA = 'f'.repeat(40);
 const HASH = 'b'.repeat(64);
 
 function intent() {
@@ -315,6 +331,23 @@ function intent() {
 
 function marker(overrides = {}) {
   return { v: 1, ...intent(), phase: 'intent-recorded', ...overrides };
+}
+
+function headEvidence(overrides = {}) {
+  return {
+    committedHead: SHA,
+    reviewedHead: SHA,
+    gatedHead: SHA,
+    remoteHead: SHA,
+    ci: {
+      complete: true,
+      requirementsComplete: true,
+      requiredChecks: [],
+      headOid: SHA,
+      checks: [],
+    },
+    ...overrides,
+  };
 }
 
 function observed(overrides = {}) {
@@ -354,6 +387,28 @@ function selfTest() {
       expected: ['wait', 'inspect-remote-claim'],
     },
     {
+      name: 'absent claim containment evidence is incomplete',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA }),
+        observed: observed({
+          remoteClaim: { complete: true, exists: true, branch: 'feat/gh-7-contract', headOid: SHA },
+        }),
+      },
+      expected: ['wait', 'inspect-remote-claim'],
+    },
+    {
+      name: 'remote identity mismatch outranks absent containment evidence',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA }),
+        observed: observed({
+          remoteClaim: { complete: true, exists: true, branch: 'feat/gh-8-contract', headOid: SHA },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
+    },
+    {
       name: 'missing remote claim is repaired',
       input: { intent: intent(), marker: marker({ claimCommit: SHA }), observed: observed({ remoteClaim: { complete: true, exists: false } }) },
       expected: ['act', 'ensure-remote-claim'],
@@ -383,25 +438,133 @@ function selfTest() {
       input: {
         intent: intent(),
         marker: marker({ claimCommit: SHA, pr: 12 }),
-        observed: observed({ delivery: { complete: true, exists: true, headOid: SHA } }),
+        observed: observed({
+          delivery: { complete: true, exists: true, headOid: SHA, headEvidence: headEvidence() },
+        }),
       },
       expected: ['act', 'bind-ready-head'],
+    },
+    {
+      name: 'delivered head without finalization evidence is incomplete',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12 }),
+        observed: observed({ delivery: { complete: true, exists: true, headOid: SHA } }),
+      },
+      expected: ['wait', 'inspect-delivery'],
     },
     {
       name: 'missing delivered label is restored for a bound ready head',
       input: {
         intent: intent(),
         marker: marker({ claimCommit: SHA, pr: 12, headOid: SHA }),
-        observed: observed(),
+        observed: observed({
+          delivery: { complete: true, exists: false, headEvidence: headEvidence() },
+        }),
       },
       expected: ['act', 'restore-delivered'],
+    },
+    {
+      name: 'missing finalization evidence cannot restore delivered',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12, headOid: SHA }),
+        observed: observed(),
+      },
+      expected: ['wait', 'inspect-delivery'],
+    },
+    {
+      name: 'incomplete CI evidence cannot restore delivered',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12, headOid: SHA }),
+        observed: observed({
+          delivery: {
+            complete: true,
+            exists: false,
+            headEvidence: headEvidence({
+              ci: {
+                complete: false,
+                requirementsComplete: true,
+                requiredChecks: [],
+                headOid: SHA,
+                checks: [],
+              },
+            }),
+          },
+        }),
+      },
+      expected: ['wait', 'inspect-delivery'],
+    },
+    {
+      name: 'stale finalized head cannot restore delivered',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12, headOid: SHA }),
+        observed: observed({
+          delivery: {
+            complete: true,
+            exists: false,
+            headEvidence: headEvidence({
+              committedHead: OTHER_SHA,
+              reviewedHead: OTHER_SHA,
+              gatedHead: OTHER_SHA,
+              remoteHead: OTHER_SHA,
+              ci: {
+                complete: true,
+                requirementsComplete: true,
+                requiredChecks: [],
+                headOid: OTHER_SHA,
+                checks: [],
+              },
+            }),
+          },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
+    },
+    {
+      name: 'advanced remote head cannot restore delivered',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12, headOid: SHA }),
+        observed: observed({
+          remoteClaim: {
+            complete: true,
+            exists: true,
+            branch: 'feat/gh-7-contract',
+            headOid: OTHER_SHA,
+            containsClaimCommit: true,
+          },
+          delivery: {
+            complete: true,
+            exists: false,
+            headEvidence: headEvidence({
+              committedHead: OTHER_SHA,
+              reviewedHead: OTHER_SHA,
+              gatedHead: OTHER_SHA,
+              remoteHead: OTHER_SHA,
+              ci: {
+                complete: true,
+                requirementsComplete: true,
+                requiredChecks: [],
+                headOid: OTHER_SHA,
+                checks: [],
+              },
+            }),
+          },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
     },
     {
       name: 'premerge evidence precedes merge',
       input: {
         intent: { ...intent(), mergePolicy: 'auto' },
         marker: marker({ mergePolicy: 'auto', claimCommit: SHA, pr: 12, headOid: SHA }),
-        observed: observed({ delivery: { complete: true, exists: true, headOid: SHA } }),
+        observed: observed({
+          delivery: { complete: true, exists: true, headOid: SHA, headEvidence: headEvidence() },
+        }),
       },
       expected: ['act', 'write-premerge-record'],
     },
@@ -411,7 +574,7 @@ function selfTest() {
         intent: { ...intent(), mergePolicy: 'auto' },
         marker: marker({ mergePolicy: 'auto', claimCommit: SHA, pr: 12, headOid: SHA }),
         observed: observed({
-          delivery: { complete: true, exists: true, headOid: SHA },
+          delivery: { complete: true, exists: true, headOid: SHA, headEvidence: headEvidence() },
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       },
@@ -423,7 +586,7 @@ function selfTest() {
         intent: intent(),
         marker: marker({ claimCommit: SHA, pr: 12, headOid: SHA, premergeRecord: 'record-1' }),
         observed: observed({
-          delivery: { complete: true, exists: true, headOid: SHA },
+          delivery: { complete: true, exists: true, headOid: SHA, headEvidence: headEvidence() },
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       },
@@ -435,7 +598,7 @@ function selfTest() {
         intent: { ...intent(), mergePolicy: 'ratified' },
         marker: marker({ mergePolicy: 'ratified', claimCommit: SHA, pr: 12, headOid: SHA, premergeRecord: 'record-1' }),
         observed: observed({
-          delivery: { complete: true, exists: true, headOid: SHA },
+          delivery: { complete: true, exists: true, headOid: SHA, headEvidence: headEvidence() },
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       },
@@ -454,7 +617,7 @@ function selfTest() {
           mergeSubmitted: true,
         }),
         observed: observed({
-          delivery: { complete: true, exists: true, headOid: SHA },
+          delivery: { complete: true, exists: true, headOid: SHA, headEvidence: headEvidence() },
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       },
@@ -466,7 +629,7 @@ function selfTest() {
         intent: { ...intent(), mergePolicy: 'auto' },
         marker: marker({ mergePolicy: 'auto', claimCommit: SHA, pr: 12, headOid: SHA, premergeRecord: 'record-1' }),
         observed: observed({
-          delivery: { complete: true, exists: true, headOid: SHA },
+          delivery: { complete: true, exists: true, headOid: SHA, headEvidence: headEvidence() },
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
           merge: { complete: true, merged: true, headOid: SHA, mergeOid: 'e'.repeat(40) },
         }),
@@ -479,7 +642,7 @@ function selfTest() {
         intent: { ...intent(), mergePolicy: 'auto' },
         marker: marker({ mergePolicy: 'auto', claimCommit: SHA, pr: 12, headOid: SHA, premergeRecord: 'record-1' }),
         observed: observed({
-          delivery: { complete: true, exists: true, headOid: SHA },
+          delivery: { complete: true, exists: true, headOid: SHA, headEvidence: headEvidence() },
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
           merge: { complete: true, merged: true, headOid: SHA, mergeOid: 'e'.repeat(40) },
           finalRecord: { complete: true, exists: true, headOid: SHA, mergeOid: 'e'.repeat(40) },
@@ -491,6 +654,37 @@ function selfTest() {
       name: 'identity mismatch blocks recovery',
       input: { intent: intent(), marker: marker({ issue: 8 }), observed: observed() },
       expected: ['block', 'identity-mismatch'],
+    },
+    {
+      name: 'leading-zero intent branch is noncanonical',
+      input: {
+        intent: { ...intent(), branch: 'feat/gh-07-contract' },
+        marker: null,
+        observed: observed(),
+      },
+      expected: ['block', 'invalid-intent'],
+    },
+    {
+      name: 'empty slug segment intent branch is noncanonical',
+      input: {
+        intent: { ...intent(), branch: 'feat/gh-7-contract--repair' },
+        marker: null,
+        observed: observed(),
+      },
+      expected: ['block', 'invalid-intent'],
+    },
+    {
+      name: 'unsafe integer intent branch is noncanonical',
+      input: {
+        intent: {
+          ...intent(),
+          issue: Number.MAX_SAFE_INTEGER + 1,
+          branch: `feat/gh-${Number.MAX_SAFE_INTEGER + 1}-contract`,
+        },
+        marker: null,
+        observed: observed(),
+      },
+      expected: ['block', 'invalid-intent'],
     },
     {
       name: 'orphan recovery uses new invocation routing intent',

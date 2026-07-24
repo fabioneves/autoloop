@@ -28,6 +28,19 @@ import {
   extractConfig,
   validateConfig,
 } from './config-contract.mjs';
+import { LOOP_BRANCH_RE } from './claim-contract.mjs';
+
+const BRANCH_CREATION_FLAGS = new Set([
+  '-c',
+  '-C',
+  '-b',
+  '-B',
+  '--create',
+  '--force-create',
+  '--orphan',
+]);
+const CURRENT_BRANCH_REFS = new Set(['HEAD', '@']);
+const BULK_PUSH_FLAGS = new Set(['--all', '--branches', '--mirror']);
 
 // Strip heredoc bodies so text INSIDE a body (e.g. a PR description that quotes
 // "gh pr merge") never false-positives.
@@ -134,18 +147,30 @@ function gitSubcommandIndex(words, subcommand) {
   return -1;
 }
 
-function switchTarget(words) {
+function switchTarget(words, baseBranch) {
   const switchIndex = gitSubcommandIndex(words, 'switch');
   const checkoutIndex = gitSubcommandIndex(words, 'checkout');
   const index = switchIndex === -1 ? checkoutIndex : switchIndex;
   if (index === -1) return null;
-  const branchFlags = new Set(['-c', '-C', '-b', '-B']);
+  const checkout = checkoutIndex !== -1;
+  if (checkout && words.slice(index + 1).includes('--')) return null;
+  const tracking = words.slice(index + 1).some(
+    (word) => word === '-t' || word === '--track' || word.startsWith('--track='),
+  );
   for (let i = index + 1; i < words.length; i += 1) {
     const word = words[i];
-    if (word === '--') return null;
-    if (branchFlags.has(word)) return words[i + 1] ?? null;
+    if (BRANCH_CREATION_FLAGS.has(word)) return words[i + 1] ?? null;
+    const branchFlag = [...BRANCH_CREATION_FLAGS].find((flag) => word.startsWith(`${flag}=`));
+    if (branchFlag) return word.slice(branchFlag.length + 1) || null;
+    if (word === '--detach') return null;
     if (word.startsWith('-')) continue;
-    return word;
+    if (!checkout) return word === '-' ? baseBranch : tracking ? trackedBranch(word) : word;
+    if (tracking) return trackedBranch(word);
+    const target = normalizedBranch(word);
+    if (target === baseBranch || LOOP_BRANCH_RE.test(target) || word.startsWith('refs/heads/')) {
+      return word;
+    }
+    return word === '-' ? baseBranch : null;
   }
   return null;
 }
@@ -154,10 +179,30 @@ function normalizedBranch(ref) {
   return String(ref ?? '').replace(/^refs\/heads\//, '');
 }
 
+function refTargetsBranch(ref, branch) {
+  const pattern = normalizedBranch(ref);
+  const wildcard = pattern.indexOf('*');
+  if (wildcard === -1) return pattern === branch;
+  const prefix = pattern.slice(0, wildcard);
+  const suffix = pattern.slice(wildcard + 1);
+  return (
+    branch.length >= prefix.length + suffix.length
+    && branch.startsWith(prefix)
+    && branch.endsWith(suffix)
+  );
+}
+
+function trackedBranch(ref) {
+  const remoteRef = String(ref ?? '').replace(/^refs\/remotes\//, '');
+  const separator = remoteRef.indexOf('/');
+  return separator === -1 ? remoteRef : remoteRef.slice(separator + 1);
+}
+
 function pushTargetsBase(words, branches, baseBranch) {
   const index = gitSubcommandIndex(words, 'push');
   if (index === -1) return false;
   const args = words.slice(index + 1);
+  if (args.some((arg) => BULK_PUSH_FLAGS.has(arg))) return true;
   const deleteMode = args.includes('--delete') || args.includes('-d');
   const optionsWithValues = new Set([
     '--repo',
@@ -180,10 +225,14 @@ function pushTargetsBase(words, branches, baseBranch) {
   if (refspecs.length === 0) return branches.has(baseBranch);
   return refspecs.some((refspec) => {
     const clean = refspec.replace(/^\+/, '');
+    if (clean === ':') return true;
     const colon = clean.lastIndexOf(':');
+    if (colon === -1 && CURRENT_BRANCH_REFS.has(clean) && branches.has(baseBranch)) {
+      return true;
+    }
     const destination = colon === -1 ? clean : clean.slice(colon + 1);
     if (!destination && !deleteMode) return false;
-    return normalizedBranch(destination) === baseBranch;
+    return refTargetsBranch(destination, baseBranch);
   });
 }
 
@@ -237,7 +286,7 @@ export function evaluate(rawCmd, branch, options = {}) {
           `Blocked: \`git push\` targets configured base "${baseBranch}" — the base takes PRs only.`,
       };
     }
-    const target = switchTarget(words);
+    const target = switchTarget(words, baseBranch);
     if (target && segment.next === '&&') possibleBranches = new Set([normalizedBranch(target)]);
     else if (target && segment.next === ';') possibleBranches.add(normalizedBranch(target));
   }
@@ -383,6 +432,16 @@ function selfTest() {
     ['git switch feat/gh-3-z; git commit -m "unsafe after uncertain switch"', 'trunk', true, 'trunk'],
     ['git switch feat/gh-3-z | git commit -m "unsafe pipeline"', 'trunk', true, 'trunk'],
     ['git switch feat/gh-3-z && git commit -m "safe target"', 'trunk', false, 'trunk'],
+    ['git checkout feat/gh-3-z && git commit -m "safe target"', 'trunk', false, 'trunk'],
+    ['git checkout -b feat/gh-3-z && git commit -m "safe target"', 'trunk', false, 'trunk'],
+    ['git checkout README.md && git commit -m "unsafe path restore"', 'trunk', true, 'trunk'],
+    ['git checkout ./README.md && git commit -m "unsafe path restore"', 'trunk', true, 'trunk'],
+    ['git checkout . && git commit -m "unsafe path restore"', 'trunk', true, 'trunk'],
+    ['git checkout HEAD -- README.md && git commit -m "unsafe path restore"', 'trunk', true, 'trunk'],
+    ['git -C . checkout README.md && git -C . commit -m "unsafe path restore"', 'trunk', true, 'trunk'],
+    ['git checkout --track origin/trunk && git commit -m "unsafe tracked base"', 'feat/gh-3-z', true, 'trunk'],
+    ['git switch --track origin/trunk && git commit -m "unsafe tracked base"', 'feat/gh-3-z', true, 'trunk'],
+    ['git switch --track origin/feat/gh-3-z && git commit -m "safe tracked unit"', 'trunk', false, 'trunk'],
     ['git commit -m "allowed on main"', 'main', false, 'trunk'],
     ['git commit -m "fix: y" -m "Co-Authored-By: Claude <n@a.com>"', 'feat/gh-2-y', true],
     ['git push --force origin feat/gh-2-y', 'feat/gh-2-y', true],
@@ -392,6 +451,16 @@ function selfTest() {
     ["git push origin '+refs/heads/main'", 'main', true], // quoted +refspec force
     ['git push origin feat/gh-2-y', 'feat/gh-2-y', false], // normal push, no force
     ['git push --set-upstream origin feat/gh-2-y', 'feat/gh-2-y', false],
+    ['git push origin HEAD', 'trunk', true, 'trunk'],
+    ['git push origin @', 'trunk', true, 'trunk'],
+    ['git push origin HEAD', 'feat/gh-2-y', false, 'trunk'],
+    ['git switch feat/gh-2-y && git push origin HEAD', 'trunk', false, 'trunk'],
+    ['git push --all origin', 'feat/gh-2-y', true, 'trunk'],
+    ['git push --branches origin', 'feat/gh-2-y', true, 'trunk'],
+    ['git push --mirror origin', 'feat/gh-2-y', true, 'trunk'],
+    ['git push origin :', 'feat/gh-2-y', true, 'trunk'],
+    ["git push origin 'refs/heads/*:refs/heads/*'", 'feat/gh-2-y', true, 'trunk'],
+    ["git push origin 'refs/heads/feat/*:refs/heads/feat/*'", 'feat/gh-2-y', false, 'trunk'],
     ['git push origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
     ['git push origin HEAD:refs/heads/trunk', 'feat/gh-2-y', true, 'trunk'],
     ['git push origin :trunk', 'feat/gh-2-y', true, 'trunk'],
