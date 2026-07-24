@@ -24,14 +24,6 @@ const HARD_LABELS = new Set([
   'needs-secret',
 ]);
 
-function producerIds(requiredChecks, names) {
-  return new Set(
-    requiredChecks
-      .filter((check) => names.has(check?.name))
-      .flatMap((check) => Array.isArray(check.appIds) ? check.appIds : []),
-  );
-}
-
 function requiredCheckMap(checks, reasons, path) {
   const map = new Map();
   if (!Array.isArray(checks)) {
@@ -129,7 +121,11 @@ function validateChecks(pr, configuredChecks, reasons) {
     else if (!new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']).has(conclusion)) {
       reasons.push(`triggered CheckRun ${check?.name ?? 'unknown'} is not green`);
     }
-    if (String(check?.name ?? '').startsWith('agentic/') && !configuredChecks.has(check.name)) {
+    if (
+      String(check?.name ?? '').startsWith('agentic/')
+      && check.name !== 'agentic/human-authorization'
+      && !configuredChecks.has(check.name)
+    ) {
       reasons.push(`unconfigured agentic CheckRun present: ${check.name}`);
     }
   }
@@ -153,10 +149,7 @@ function validateAuthorization(config, pr, reasons) {
     reasons.push('Path A authorization label is missing or invalid');
   }
   if (authorization.headOid !== pr.headRefOid) reasons.push('Path A authorization is not bound to the current head');
-  const attestationIds = producerIds(
-    config.requiredChecks,
-    new Set(REQUIRED_ATTESTATIONS),
-  );
+  const attestationIds = new Set(config.authorizationAppIds ?? []);
   const check = authorization.check;
   if (
     check?.name !== 'agentic/human-authorization'
@@ -181,6 +174,8 @@ export function authorizeMerge(input) {
     || !new Set(['ratified', 'auto']).has(config.mergePolicy)
     || typeof config.loopLogin !== 'string'
     || config.loopLogin.length === 0
+    || !Array.isArray(config.authorizationAppIds)
+    || config.authorizationAppIds.some((id) => !Number.isInteger(id) || id < 1)
   ) {
     reasons.push('merge authorization config is invalid');
   }
@@ -267,6 +262,7 @@ function fixture(overrides = {}) {
     baseFreshnessStrategy: 'direct-strict',
     loopLogin: 'autoloop[bot]',
     trustedHumanLogins: ['maintainer'],
+    authorizationAppIds: [42],
     requiredChecks: [
       ...REQUIRED_ATTESTATIONS.map((name) => ({ name, appIds: [42] })),
       { name: 'ci', appIds: [7] },
