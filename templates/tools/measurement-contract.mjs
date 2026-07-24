@@ -46,10 +46,17 @@ const ROUTE_CATALOG = Object.freeze({
 const ROUTES = new Set(Object.keys(ROUTE_CATALOG));
 const LANES = new Set(['docs', 'small', 'full']);
 const STAGES = new Set([
+  'premise',
+  'selection',
+  'planning',
   'plan-review',
+  'claim',
   'implementation',
+  'simplify',
+  'diff-review',
   'code-review',
   'judgment-review',
+  'recovery',
   'gate',
   'delivery',
 ]);
@@ -102,8 +109,19 @@ const RECORD_KEYS = [
   'instrumentationOverhead',
   'segments',
   'unit',
+  'observation',
 ];
-const PROVENANCE_KEYS = ['kind', 'storeId', 'authenticatedAt', 'contentFingerprint', 'mac'];
+const OBSERVATION_KEYS = ['runId', 'unitId', 'terminalEvidenceFingerprint'];
+const PROVENANCE_KEYS = [
+  'kind',
+  'storeId',
+  'authenticatedAt',
+  'contentFingerprint',
+  'observationFingerprint',
+  'capture',
+  'mac',
+];
+const CAPTURE_KEYS = ['revisionSource', 'timeSource', 'checkpointSource', 'observationSource'];
 const INTENT_KEYS = ['flow', 'source'];
 const OVERHEAD_KEYS = ['durationMs', 'githubApi', 'subprocesses', 'remoteMutations'];
 const SEGMENT_KEYS = [
@@ -228,6 +246,8 @@ const EVIDENCE_KEYS = ['statistic', 'value', 'sampleCount'];
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_STORE_RECORDS = 10_000;
+const MAX_DATA_DEPTH = 32;
+const MAX_DATA_NODES = 100_000;
 const STORE_KEY_FILE = '.measurement-auth-key';
 const TRUSTED_RECORDS = new WeakMap();
 
@@ -239,6 +259,55 @@ function plainObject(value) {
   return Reflect.ownKeys(descriptors).every(
     (key) => typeof key === 'string' && !descriptors[key].get && !descriptors[key].set,
   );
+}
+
+function validateDataGraph(value) {
+  const errors = [];
+  const stack = [{ value, depth: 0, path: 'record' }];
+  const seen = new Set();
+  let nodes = 0;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    nodes += 1;
+    if (nodes > MAX_DATA_NODES) {
+      errors.push(`record: exceeds ${MAX_DATA_NODES} data nodes`);
+      break;
+    }
+    if (current.depth > MAX_DATA_DEPTH) {
+      errors.push(`${current.path}: exceeds maximum depth ${MAX_DATA_DEPTH}`);
+      continue;
+    }
+    if (current.value === null || typeof current.value !== 'object') continue;
+    if (seen.has(current.value)) {
+      errors.push(`${current.path}: cyclic or aliased objects are invalid`);
+      continue;
+    }
+    seen.add(current.value);
+    if (!Array.isArray(current.value) && !plainObject(current.value)) {
+      errors.push(`${current.path}: expected plain JSON data`);
+      continue;
+    }
+    let descriptors;
+    try {
+      descriptors = Object.getOwnPropertyDescriptors(current.value);
+    } catch {
+      errors.push(`${current.path}: property inspection failed`);
+      continue;
+    }
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (key === 'length') continue;
+      if (descriptor.get || descriptor.set) {
+        errors.push(`${current.path}.${key}: accessors are invalid`);
+        continue;
+      }
+      stack.push({
+        value: descriptor.value,
+        depth: current.depth + 1,
+        path: `${current.path}.${key}`,
+      });
+    }
+  }
+  return { ok: errors.length === 0, errors };
 }
 
 function exactObject(errors, path, value, keys, optional = []) {
@@ -357,10 +426,16 @@ function validateTiming(errors, path, value, segment = false) {
   if (
     components.every((key) => finiteNumber(value[key]))
     && finiteNumber(value.totalMs)
-    && components.reduce((sum, key) => sum + value[key], 0) > value.totalMs
+    && components.reduce((sum, key) => sum + value[key], 0) !== value.totalMs
   ) {
-    errors.push(`${path}: active and wait components exceed totalMs`);
+    errors.push(`${path}: active and wait components must equal totalMs`);
   }
+  if (
+    plainObject(value.steps)
+    && finiteNumber(value.totalMs)
+    && Object.values(value.steps).filter(finiteNumber).reduce((sum, duration) => sum + duration, 0)
+      > value.totalMs
+  ) errors.push(`${path}.steps: step durations cannot exceed totalMs`);
 }
 
 function validateTelemetry(errors, path, value, segment = false) {
@@ -399,7 +474,20 @@ function expectedRole(stage) {
 
 function expectedSegmentRoute(recordValue, segment) {
   const native = nativeRoute(recordValue.activeHost);
-  if (['judgment-review', 'gate', 'delivery'].includes(segment.stage)) return native;
+  if (
+    [
+      'premise',
+      'selection',
+      'planning',
+      'claim',
+      'simplify',
+      'diff-review',
+      'judgment-review',
+      'recovery',
+      'gate',
+      'delivery',
+    ].includes(segment.stage)
+  ) return native;
   if (recordValue.intent?.flow === 'pitcrew') {
     if (segment.stage === 'plan-review') return null;
     if (segment.stage === 'code-review' && segment.round >= 2) return native;
@@ -688,8 +776,14 @@ function validateUnit(errors, recordValue) {
 
   const segments = Array.isArray(recordValue.segments) ? recordValue.segments : [];
   validateSegmentGrammar(errors, recordValue, segments);
+  const dispatchStages = new Set([
+    'plan-review',
+    'implementation',
+    'code-review',
+    'judgment-review',
+  ]);
   const dispatchSegments = segments.filter(
-    (segment) => !['gate', 'delivery'].includes(segment.stage),
+    (segment) => dispatchStages.has(segment.stage),
   );
   if (integer(value.dispatch?.count) && value.dispatch.count !== dispatchSegments.length) {
     errors.push(`unit.dispatch.count: expected ${dispatchSegments.length} from segments`);
@@ -710,6 +804,26 @@ function validateUnit(errors, recordValue) {
   );
   if (finiteNumber(value.timing?.totalMs) && segmentDuration > value.timing.totalMs) {
     errors.push('unit.timing.totalMs: cannot be shorter than its segment durations');
+  }
+  if (
+    finiteNumber(value.timing?.timeToFirstSelectionMs)
+    && value.timing?.steps?.selection !== value.timing.timeToFirstSelectionMs
+  ) {
+    errors.push(
+      'unit.timing.timeToFirstSelectionMs: must equal unit.timing.steps.selection',
+    );
+  }
+  const selectionIndex = segments.findIndex((segment) => segment?.stage === 'selection');
+  if (selectionIndex >= 0 && finiteNumber(value.timing?.timeToFirstSelectionMs)) {
+    const throughSelection = segments.slice(0, selectionIndex + 1).reduce(
+      (sum, segment) => sum + segment.timing.totalMs,
+      0,
+    );
+    if (value.timing.timeToFirstSelectionMs !== throughSelection) {
+      errors.push(
+        `unit.timing.timeToFirstSelectionMs: expected ${throughSelection} through selection`,
+      );
+    }
   }
   const reviewRounds = new Set(
     segments
@@ -771,12 +885,10 @@ function validateSegmentGrammar(errors, recordValue, segments) {
   for (const [key, count] of counts) {
     if (count > 1) errors.push(`segments: duplicate stage/round ${key}`);
   }
-  for (const stage of ['plan-review', 'implementation', 'judgment-review', 'gate', 'delivery']) {
+  for (const stage of STAGES) {
+    if (stage === 'code-review') continue;
     const count = segments.filter((segment) => segment.stage === stage).length;
     if (count > 1) errors.push(`segments: ${stage} may appear at most once`);
-  }
-  if (segments.filter((segment) => segment.stage === 'implementation').length !== 1) {
-    errors.push('segments: exactly one implementation segment is required');
   }
   const reviews = segments
     .filter((segment) => segment.stage === 'code-review')
@@ -784,17 +896,38 @@ function validateSegmentGrammar(errors, recordValue, segments) {
   reviews.forEach((round, index) => {
     if (round !== index + 1) errors.push('segments: code-review rounds must be contiguous from 1');
   });
-  const ranks = flow === 'dev'
-    ? { 'plan-review': 0, implementation: 1, 'code-review': 2, 'judgment-review': 3, gate: 4, delivery: 5 }
-    : { implementation: 0, 'code-review': 1, 'judgment-review': 2, gate: 3, delivery: 4 };
-  if (flow === 'dev' && segments[0]?.stage !== 'plan-review') {
-    errors.push('segments: Dev must begin with plan-review');
-  }
+  const orderedStages = flow === 'dev'
+    ? [
+      'premise',
+      'selection',
+      'recovery',
+      'planning',
+      'plan-review',
+      'claim',
+      'implementation',
+      'simplify',
+      'diff-review',
+      'code-review',
+      'judgment-review',
+      'gate',
+      'delivery',
+    ]
+    : [
+      'premise',
+      'selection',
+      'recovery',
+      'claim',
+      'implementation',
+      'simplify',
+      'diff-review',
+      'code-review',
+      'judgment-review',
+      'gate',
+      'delivery',
+    ];
+  const ranks = Object.fromEntries(orderedStages.map((stage, index) => [stage, index]));
   if (flow === 'pitcrew' && segments.some((segment) => segment.stage === 'plan-review')) {
     errors.push('segments: Pitcrew cannot contain plan-review');
-  }
-  if (segments.filter((segment) => segment.stage === 'code-review').length === 0) {
-    errors.push('segments: at least one code-review segment is required');
   }
   let previous = -1;
   for (const segment of segments) {
@@ -812,12 +945,54 @@ function validateSegmentGrammar(errors, recordValue, segments) {
   }
   const gates = segments.filter((segment) => segment.stage === 'gate').length;
   const deliveries = segments.filter((segment) => segment.stage === 'delivery').length;
+  const gateResult = recordValue.unit?.outcomes?.gate?.result;
+  if (gates === 0 && gateResult !== 'not-run') {
+    errors.push('unit.outcomes.gate.result: must be not-run when no gate segment exists');
+  }
+  if (gates === 1 && gateResult === 'not-run') {
+    errors.push('unit.outcomes.gate.result: gate segment requires an observed result');
+  }
+  if (gateResult === 'failed' && terminal?.stage !== 'gate') {
+    errors.push('unit.outcomes.gate.result: failed gate must be the terminal stage');
+  }
+  const mandatory = flow === 'dev'
+    ? [
+      'premise',
+      'selection',
+      'planning',
+      'plan-review',
+      'claim',
+      'implementation',
+      'simplify',
+      'diff-review',
+      'code-review',
+      'gate',
+      'delivery',
+    ]
+    : [
+      'premise',
+      'selection',
+      'claim',
+      'implementation',
+      'simplify',
+      'diff-review',
+      'code-review',
+      'gate',
+      'delivery',
+    ];
+  const lastRank = ranks[last?.stage];
+  for (const stage of mandatory) {
+    if (
+      ranks[stage] <= lastRank
+      && !segments.some((segment) => segment.stage === stage)
+    ) errors.push(`segments: missing required ${stage} before terminal ${last?.stage}`);
+  }
   if (terminal?.status === 'completed') {
     if (last?.stage !== 'delivery' || gates !== 1 || deliveries !== 1) {
       errors.push('unit.outcomes.terminal: completed units require one gate then one delivery');
     }
-    if (recordValue.unit?.outcomes?.gate?.result === 'not-run') {
-      errors.push('unit.outcomes.gate.result: completed units require a gate result');
+    if (!['first-pass', 'after-retry'].includes(gateResult)) {
+      errors.push('unit.outcomes.gate.result: completed units require a successful gate');
     }
   } else if (deliveries > 0) {
     errors.push('segments: only completed units may contain delivery');
@@ -833,6 +1008,10 @@ function validateSegmentGrammar(errors, recordValue, segments) {
   if (source === 'orphan-recovery' && recovery?.resumeKind !== 'resumed') {
     errors.push('unit.outcomes.recovery.resumeKind: orphan recovery must be resumed');
   }
+  if (
+    source !== 'invocation'
+    && !segments.some((segment) => segment.stage === 'recovery')
+  ) errors.push('segments: resumed/recovered intent requires a recovery segment');
   if (recovery?.resumeKind === 'fresh' && recovery?.recoveryKind !== 'not-needed') {
     errors.push('unit.outcomes.recovery.recoveryKind: fresh units require not-needed');
   }
@@ -845,6 +1024,8 @@ function validateSegmentGrammar(errors, recordValue, segments) {
 }
 
 export function validateMeasurement(value) {
+  const graph = validateDataGraph(value);
+  if (!graph.ok) return graph;
   const errors = [];
   if (!exactObject(errors, 'record', value, RECORD_KEYS, ['legacyProfile', 'provenance'])) {
     return { ok: false, errors };
@@ -855,6 +1036,8 @@ export function validateMeasurement(value) {
   if (!UUID_RE.test(value.recordId ?? '')) errors.push('recordId: expected a lowercase UUID v4');
   if (!canonicalTimestamp(value.capturedAt)) {
     errors.push('capturedAt: expected a canonical UTC timestamp');
+  } else if (Date.parse(value.capturedAt) > Date.now() + 5 * 60 * 1000) {
+    errors.push('capturedAt: future timestamps are invalid');
   }
   if (!SHA_RE.test(value.revision ?? '')) errors.push('revision: expected a lowercase commit OID');
   if (!NAME_RE.test(value.workload ?? '')) errors.push('workload: invalid workload identifier');
@@ -927,6 +1110,17 @@ export function validateMeasurement(value) {
   if (value.legacyProfile !== undefined) {
     requireEnum(errors, 'legacyProfile', value.legacyProfile, HOSTS);
   }
+  if (exactObject(errors, 'observation', value.observation, OBSERVATION_KEYS)) {
+    if (!UUID_RE.test(value.observation.runId ?? '')) {
+      errors.push('observation.runId: expected UUID v4');
+    }
+    if (!NAME_RE.test(value.observation.unitId ?? '')) {
+      errors.push('observation.unitId: invalid unit identifier');
+    }
+    if (!HASH_RE.test(value.observation.terminalEvidenceFingerprint ?? '')) {
+      errors.push('observation.terminalEvidenceFingerprint: expected sha256');
+    }
+  }
   if (value.provenance !== undefined) {
     if (exactObject(errors, 'provenance', value.provenance, PROVENANCE_KEYS)) {
       if (value.provenance.kind !== 'tool-authenticated') {
@@ -942,6 +1136,27 @@ export function validateMeasurement(value) {
         errors.push('provenance.contentFingerprint: expected sha256');
       } else if (value.provenance.contentFingerprint !== recordContentFingerprint(value)) {
         errors.push('provenance.contentFingerprint: record content changed');
+      }
+      if (!HASH_RE.test(value.provenance.observationFingerprint ?? '')) {
+        errors.push('provenance.observationFingerprint: expected sha256');
+      } else if (
+        value.provenance.observationFingerprint !== observationFingerprint(value)
+      ) {
+        errors.push('provenance.observationFingerprint: observation content changed');
+      }
+      if (exactObject(errors, 'provenance.capture', value.provenance.capture, CAPTURE_KEYS)) {
+        if (value.provenance.capture.revisionSource !== 'live-git-head') {
+          errors.push('provenance.capture.revisionSource: expected live-git-head');
+        }
+        if (value.provenance.capture.timeSource !== 'tool-clock') {
+          errors.push('provenance.capture.timeSource: expected tool-clock');
+        }
+        if (value.provenance.capture.checkpointSource !== 'operator-declared') {
+          errors.push('provenance.capture.checkpointSource: expected operator-declared');
+        }
+        if (value.provenance.capture.observationSource !== 'run-record-declared') {
+          errors.push('provenance.capture.observationSource: expected run-record-declared');
+        }
       }
       if (!HASH_RE.test(value.provenance.mac ?? '')) {
         errors.push('provenance.mac: expected sha256 HMAC');
@@ -982,9 +1197,18 @@ function recordContentFingerprint(recordValue) {
   return fingerprint(recordContent(recordValue));
 }
 
+function observationFingerprint(recordValue) {
+  const content = recordContent(recordValue);
+  delete content.recordId;
+  delete content.capturedAt;
+  delete content.observation;
+  return fingerprint(content);
+}
+
 function trustRecord(recordValue) {
   TRUSTED_RECORDS.set(recordValue, {
     contentFingerprint: recordValue.provenance.contentFingerprint,
+    observationFingerprint: recordValue.provenance.observationFingerprint,
     mac: recordValue.provenance.mac,
     storeId: recordValue.provenance.storeId,
   });
@@ -996,6 +1220,8 @@ function isTrustedRecord(recordValue) {
     trusted !== undefined
     && trusted.contentFingerprint === recordContentFingerprint(recordValue)
     && trusted.contentFingerprint === recordValue.provenance?.contentFingerprint
+    && trusted.observationFingerprint === observationFingerprint(recordValue)
+    && trusted.observationFingerprint === recordValue.provenance?.observationFingerprint
     && trusted.mac === recordValue.provenance?.mac
     && trusted.storeId === recordValue.provenance?.storeId
   );
@@ -1018,18 +1244,47 @@ const AVOIDED_EVIDENCE_PATHS = Object.freeze([
 
 function validateRecordSet(records) {
   const errors = [];
+  const invalidIndexes = new Set();
   if (!denseArray(errors, 'records', records, 0, MAX_STORE_RECORDS)) {
-    return { ok: false, errors };
+    return { ok: false, errors, invalidIndexes };
   }
   const byId = new Map();
+  const byObservation = new Map();
+  const bySemanticObservation = new Map();
   for (const [index, recordValue] of records.entries()) {
     const existing = byId.get(recordValue?.recordId);
     if (existing !== undefined) {
       errors.push(
         `records[${index}].recordId: duplicate of records[${existing}] even if content differs`,
       );
+      invalidIndexes.add(index);
+      invalidIndexes.add(existing);
     } else {
       byId.set(recordValue?.recordId, index);
+    }
+    const observationKey = `${recordValue?.observation?.runId}:${recordValue?.observation?.unitId}`;
+    const observationExisting = byObservation.get(observationKey);
+    if (observationExisting !== undefined) {
+      errors.push(
+        `records[${index}].observation: duplicate run/unit identity from records[${observationExisting}]`,
+      );
+      invalidIndexes.add(index);
+      invalidIndexes.add(observationExisting);
+    } else {
+      byObservation.set(observationKey, index);
+    }
+    if (validateMeasurement(recordValue).ok) {
+      const semantic = observationFingerprint(recordValue);
+      const semanticExisting = bySemanticObservation.get(semantic);
+      if (semanticExisting !== undefined) {
+        errors.push(
+          `records[${index}]: semantic observation clone of records[${semanticExisting}]`,
+        );
+        invalidIndexes.add(index);
+        invalidIndexes.add(semanticExisting);
+      } else {
+        bySemanticObservation.set(semantic, index);
+      }
     }
   }
   for (const [index, recordValue] of records.entries()) {
@@ -1038,10 +1293,12 @@ function validateRecordSet(records) {
       if (claim?.status !== 'verified') continue;
       if (!isTrustedRecord(recordValue)) {
         errors.push(`records[${index}].${definition.claim}: verified evidence is not authenticated`);
+        invalidIndexes.add(index);
       }
       const observedValue = valueAt(recordValue, definition.observed);
       if (claim.evidence?.observedValue !== observedValue) {
         errors.push(`records[${index}].${definition.claim}: observed value does not match record`);
+        invalidIndexes.add(index);
       }
       if (claim.method !== 'matched-control') continue;
       const controls = [];
@@ -1052,6 +1309,7 @@ function validateRecordSet(records) {
           errors.push(
             `records[${index}].${definition.claim}: control ${controlRef.recordId} is absent`,
           );
+          invalidIndexes.add(index);
           continue;
         }
         if (
@@ -1061,6 +1319,7 @@ function validateRecordSet(records) {
           errors.push(
             `records[${index}].${definition.claim}: control ${controlRef.recordId} is not the authenticated content`,
           );
+          invalidIndexes.add(index);
           continue;
         }
         if (
@@ -1072,6 +1331,7 @@ function validateRecordSet(records) {
           errors.push(
             `records[${index}].${definition.claim}: control ${controlRef.recordId} is from another cohort`,
           );
+          invalidIndexes.add(index);
           continue;
         }
         controls.push(control);
@@ -1084,11 +1344,12 @@ function validateRecordSet(records) {
           errors.push(
             `records[${index}].${definition.claim}: counterfactual does not replay controls`,
           );
+          invalidIndexes.add(index);
         }
       }
     }
   }
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, invalidIndexes };
 }
 
 function median(values) {
@@ -1375,7 +1636,7 @@ export function summarizeMeasurements(records) {
   const valid = [];
   records.forEach((recordValue, index) => {
     const result = validateMeasurement(recordValue);
-    if (result.ok) valid.push(recordValue);
+    if (result.ok && !uniqueness.invalidIndexes.has(index)) valid.push(recordValue);
     else invalid.push({ index, errors: result.errors });
   });
   const unitCohorts = grouped(valid, unitCohort).map(({ cohort, values }) => ({
@@ -1613,6 +1874,8 @@ function validateMode(errors, value) {
 }
 
 export function validateBudgetSpec(value) {
+  const graph = validateDataGraph(value);
+  if (!graph.ok) return graph;
   const errors = [];
   if (!exactObject(errors, 'budget', value, BUDGET_KEYS)) return { ok: false, errors };
   if (value.version !== BUDGET_VERSION) errors.push(`budget.version: expected ${BUDGET_VERSION}`);
@@ -1782,6 +2045,34 @@ export function evaluateBudget(spec, baselineRecords, currentRecords) {
       ],
     };
   }
+  const sourceIds = new Set(spec.source.records.map((recordValue) => recordValue.recordId));
+  if (
+    baselineRecords.length !== sourceIds.size
+    || baselineRecords.some((recordValue) => !sourceIds.has(recordValue.recordId))
+  ) {
+    return {
+      ok: false,
+      status: 'refused',
+      errors: ['baseline records must be exactly the named authenticated source set'],
+    };
+  }
+  const baselineObservations = new Set(
+    baselineRecords.map(
+      (recordValue) => `${recordValue.observation.runId}:${recordValue.observation.unitId}`,
+    ),
+  );
+  if (
+    currentRecords.some((recordValue) =>
+      baselineObservations.has(
+        `${recordValue.observation.runId}:${recordValue.observation.unitId}`,
+      ))
+  ) {
+    return {
+      ok: false,
+      status: 'refused',
+      errors: ['current observations must be independent from source observations'],
+    };
+  }
   if (!budgetEvidenceMatches(spec.source, baselineRecords, spec.workload, spec.mode)) {
     return {
       ok: false,
@@ -1805,7 +2096,22 @@ export function evaluateBudget(spec, baselineRecords, currentRecords) {
       errors: ['current records must be a disjoint matching post-optimization cohort'],
     };
   }
-  const baselineIdentity = strictCohortIdentity(baselineRecords[0], 'budgetCurrent');
+  const namedBaseline = spec.source.records
+    .map((sourceRecord) =>
+      baselineRecords.find((recordValue) => recordValue.recordId === sourceRecord.recordId));
+  const baselineIdentity = strictCohortIdentity(namedBaseline[0], 'budgetCurrent');
+  if (
+    namedBaseline.some(
+      (recordValue) =>
+        !sameValue(strictCohortIdentity(recordValue, 'budgetCurrent'), baselineIdentity),
+    )
+  ) {
+    return {
+      ok: false,
+      status: 'refused',
+      errors: ['named source records do not share the complete cohort identity'],
+    };
+  }
   if (
     currentRecords.some(
       (recordValue) =>
@@ -1860,9 +2166,9 @@ export function evaluateBudget(spec, baselineRecords, currentRecords) {
   return { ok: status === 'passed', status, metrics: results };
 }
 
-function ensureMeasurementDirectory(directory) {
+function ensureMeasurementDirectory(directory, create = true) {
   const target = resolve(directory);
-  mkdirSync(target, { recursive: true, mode: 0o700 });
+  if (create) mkdirSync(target, { recursive: true, mode: 0o700 });
   const info = lstatSync(target);
   if (
     !info.isDirectory()
@@ -1874,6 +2180,50 @@ function ensureMeasurementDirectory(directory) {
     throw new Error('measurement store must be a real directory');
   }
   return target;
+}
+
+function fsyncDirectory(directory) {
+  const descriptor = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function recoverPublications(directory) {
+  const names = readdirSync(directory);
+  const temporaries = names.filter((name) => /^\.tmp-[0-9a-f-]{36}$/u.test(name));
+  let changed = false;
+  for (const temporaryName of temporaries) {
+    const temporaryPath = join(directory, temporaryName);
+    const temporary = lstatSync(temporaryPath);
+    if (
+      !temporary.isFile()
+      || temporary.isSymbolicLink()
+      || (temporary.mode & 0o777) !== 0o600
+      || (typeof process.getuid === 'function' && temporary.uid !== process.getuid())
+    ) throw new Error(`${temporaryName}: invalid publication temporary`);
+    const finals = names.filter((name) => {
+      if (name.startsWith('.tmp-')) return false;
+      try {
+        const candidate = lstatSync(join(directory, name));
+        return candidate.dev === temporary.dev && candidate.ino === temporary.ino;
+      } catch {
+        return false;
+      }
+    });
+    if (temporary.nlink === 1 && finals.length === 0) {
+      unlinkSync(temporaryPath);
+      changed = true;
+    } else if (temporary.nlink === 2 && finals.length === 1) {
+      unlinkSync(temporaryPath);
+      changed = true;
+    } else {
+      throw new Error(`${temporaryName}: ambiguous publication state`);
+    }
+  }
+  if (changed) fsyncDirectory(directory);
 }
 
 function readDescriptor(path, maximum, expectedMode) {
@@ -1914,12 +2264,7 @@ function atomicCreate(path, payload, mode) {
     linkSync(temporary, path);
     linked = true;
     unlinkSync(temporary);
-    const directoryDescriptor = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY);
-    try {
-      fsyncSync(directoryDescriptor);
-    } finally {
-      closeSync(directoryDescriptor);
-    }
+    fsyncDirectory(directory);
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor);
     if (linked) {
@@ -1935,17 +2280,26 @@ function atomicCreate(path, payload, mode) {
 }
 
 function measurementStoreAuthority(directory, create = false) {
-  const target = ensureMeasurementDirectory(directory);
+  const target = ensureMeasurementDirectory(directory, create);
+  recoverPublications(target);
   const keyPath = join(target, STORE_KEY_FILE);
   if (create) {
+    let keyExists = true;
     try {
+      lstatSync(keyPath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      keyExists = false;
+    }
+    if (!keyExists) {
+      if (readdirSync(target).length !== 0) {
+        throw new Error('measurement authority is missing from a non-empty store');
+      }
       const authority = {
         storeId: randomUUID(),
         key: randomBytes(32).toString('hex'),
       };
       atomicCreate(keyPath, `${JSON.stringify(authority)}\n`, 0o600);
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error;
     }
   }
   const authority = JSON.parse(readDescriptor(keyPath, 1024, 0o600));
@@ -1966,17 +2320,26 @@ function provenanceMac(provenance, key) {
     storeId: provenance.storeId,
     authenticatedAt: provenance.authenticatedAt,
     contentFingerprint: provenance.contentFingerprint,
+    observationFingerprint: provenance.observationFingerprint,
+    capture: provenance.capture,
   }))).digest('hex');
 }
 
-function authenticateRecord(recordValue, authority) {
+function authenticateRecord(recordValue, authority, capturedAt) {
   const authenticated = {
     ...recordContent(recordValue),
     provenance: {
       kind: 'tool-authenticated',
       storeId: authority.storeId,
-      authenticatedAt: new Date().toISOString(),
+      authenticatedAt: capturedAt,
       contentFingerprint: recordContentFingerprint(recordValue),
+      observationFingerprint: observationFingerprint(recordValue),
+      capture: {
+        revisionSource: 'live-git-head',
+        timeSource: 'tool-clock',
+        checkpointSource: 'operator-declared',
+        observationSource: 'run-record-declared',
+      },
       mac: '',
     },
   };
@@ -1996,6 +2359,30 @@ function verifyAuthentication(recordValue, authority) {
 
 export function persistMeasurement(recordValue, directory) {
   const raw = recordContent(recordValue);
+  let liveRevision;
+  try {
+    liveRevision = execFileSync('git', ['rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10_000,
+    }).trim();
+  } catch (error) {
+    return { ok: false, errors: [`record persistence failed: cannot bind live HEAD: ${error.message}`] };
+  }
+  if (raw.checkpoint === 'legacy-workflow') {
+    return {
+      ok: false,
+      errors: ['record persistence failed: legacy import has no authenticated path'],
+    };
+  }
+  if (raw.revision !== liveRevision) {
+    return {
+      ok: false,
+      errors: [`record persistence failed: revision must equal live HEAD ${liveRevision}`],
+    };
+  }
+  const capturedAt = new Date().toISOString();
+  raw.capturedAt = capturedAt;
   const validation = validateMeasurement(raw);
   if (!validation.ok) return { ok: false, errors: validation.errors };
   let authority;
@@ -2004,7 +2391,7 @@ export function persistMeasurement(recordValue, directory) {
   } catch (error) {
     return { ok: false, errors: [`record persistence failed: ${error.message}`] };
   }
-  const authenticated = authenticateRecord(raw, authority);
+  const authenticated = authenticateRecord(raw, authority, capturedAt);
   const path = join(authority.target, `${recordValue.recordId}.json`);
   try {
     const payload = `${JSON.stringify(authenticated)}\n`;
@@ -2035,13 +2422,15 @@ export function readMeasurements(directory) {
     return { ok: false, records, errors: [`measurement store read failed: ${error.message}`] };
   }
   try {
+    ensureMeasurementDirectory(target, false);
+    recoverPublications(target);
+    if (readdirSync(target).length === 0) return { ok: true, records, errors };
     authority = measurementStoreAuthority(target, false);
     names = readdirSync(target).filter((name) => name.endsWith('.json')).sort();
     if (names.length > MAX_STORE_RECORDS) {
       return { ok: false, records, errors: [`measurement store exceeds ${MAX_STORE_RECORDS} records`] };
     }
   } catch (error) {
-    if (error?.code === 'ENOENT') return { ok: true, records, errors };
     return { ok: false, records, errors: [`measurement store read failed: ${error.message}`] };
   }
   for (const name of names) {
@@ -2069,12 +2458,36 @@ export function readMeasurements(directory) {
   return { ok: errors.length === 0, records, errors };
 }
 
+export function summarizeMeasurementStore(directory) {
+  const stored = readMeasurements(directory);
+  if (!stored.ok) return { ...stored, recordCount: stored.records.length };
+  const summary = summarizeMeasurements(stored.records);
+  return {
+    ok: summary.invalid.length === 0,
+    recordCount: stored.records.length,
+    records: stored.records,
+    errors: summary.invalid.flatMap((entry) => entry.errors),
+    summary,
+  };
+}
+
 function observed(value) {
   return { status: 'observed', value };
 }
 
 function unavailable(reason = 'fixture provider did not expose this field') {
   return { status: 'unavailable', reason };
+}
+
+let cachedFixtureRevision;
+
+function fixtureRevision() {
+  cachedFixtureRevision ??= execFileSync('git', ['rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 10_000,
+  }).trim();
+  return cachedFixtureRevision;
 }
 
 function fixtureSegment({
@@ -2123,17 +2536,24 @@ function fixtureRecord(totalMs = 100, overrides = {}) {
   const external = 'claude.codex-exec';
   const native = 'claude.native';
   const segments = [
-    fixtureSegment({ id: 'plan', stage: 'plan-review', requestedRoute: external }),
-    fixtureSegment({ id: 'write', stage: 'implementation', requestedRoute: external }),
-    fixtureSegment({ id: 'review-1', stage: 'code-review', requestedRoute: external }),
+    fixtureSegment({ id: 'premise', stage: 'premise', requestedRoute: native, totalMs: 5 }),
+    fixtureSegment({ id: 'selection', stage: 'selection', requestedRoute: native, totalMs: 5 }),
+    fixtureSegment({ id: 'planning', stage: 'planning', requestedRoute: native, totalMs: 5 }),
+    fixtureSegment({ id: 'plan', stage: 'plan-review', requestedRoute: external, totalMs: 5 }),
+    fixtureSegment({ id: 'claim', stage: 'claim', requestedRoute: native, totalMs: 5 }),
+    fixtureSegment({ id: 'write', stage: 'implementation', requestedRoute: external, totalMs: 5 }),
+    fixtureSegment({ id: 'simplify', stage: 'simplify', requestedRoute: native, totalMs: 5 }),
+    fixtureSegment({ id: 'diff-review', stage: 'diff-review', requestedRoute: native, totalMs: 5 }),
+    fixtureSegment({ id: 'review-1', stage: 'code-review', requestedRoute: external, totalMs: 5 }),
     fixtureSegment({
       id: 'review-2',
       stage: 'code-review',
       round: 2,
       requestedRoute: native,
+      totalMs: 5,
     }),
-    fixtureSegment({ id: 'gate', stage: 'gate', requestedRoute: native }),
-    fixtureSegment({ id: 'delivery', stage: 'delivery', requestedRoute: native }),
+    fixtureSegment({ id: 'gate', stage: 'gate', requestedRoute: native, totalMs: 5 }),
+    fixtureSegment({ id: 'delivery', stage: 'delivery', requestedRoute: native, totalMs: 5 }),
   ];
   const sum = (key) => segments.reduce(
     (value, segment) => value + (observationValue(segment.telemetry[key]) ?? 0),
@@ -2143,7 +2563,7 @@ function fixtureRecord(totalMs = 100, overrides = {}) {
     version: MEASUREMENT_VERSION,
     recordId: '123e4567-e89b-42d3-a456-426614174000',
     capturedAt: '2026-07-24T00:00:00.000Z',
-    revision: 'a'.repeat(40),
+    revision: fixtureRevision(),
     workload: 'fixture-full',
     checkpoint: 'safe-system',
     activeHost: 'claude',
@@ -2165,6 +2585,11 @@ function fixtureRecord(totalMs = 100, overrides = {}) {
       remoteMutations: 0,
     },
     segments,
+    observation: {
+      runId: 'f23e4567-e89b-42d3-a456-426614174000',
+      unitId: 'issue-1',
+      terminalEvidenceFingerprint: 'a'.repeat(64),
+    },
     unit: {
       timing: {
         timeToFirstSelectionMs: 10,
@@ -2186,7 +2611,7 @@ function fixtureRecord(totalMs = 100, overrides = {}) {
       calls: { githubApi: 4, subprocesses: 7, remoteMutations: 1 },
       dispatch: {
         count: 4,
-        durationMs: 40,
+        durationMs: 20,
         reviewRounds: 2,
         findings: { critical: 0, major: 1, minor: 1 },
         rebuts: { accepted: 1, rejected: 0 },
@@ -2222,6 +2647,13 @@ function fixtureRecords(count, checkpoint, totalMs = 100) {
   return Array.from({ length: count }, (_, index) => fixtureRecord(totalMs + index, {
     recordId: `123e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
     checkpoint,
+    observation: {
+      runId: `f23e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+      unitId: `issue-${index + 1}`,
+      terminalEvidenceFingerprint: createHash('sha256')
+        .update(`terminal-${checkpoint}-${index}`)
+        .digest('hex'),
+    },
   }));
 }
 
@@ -2234,6 +2666,13 @@ function trustFixtureRecords(records) {
         storeId: '323e4567-e89b-42d3-a456-426614174000',
         authenticatedAt: '2026-07-24T00:30:00.000Z',
         contentFingerprint: recordContentFingerprint(recordValue),
+        observationFingerprint: observationFingerprint(recordValue),
+        capture: {
+          revisionSource: 'live-git-head',
+          timeSource: 'tool-clock',
+          checkpointSource: 'operator-declared',
+          observationSource: 'run-record-declared',
+        },
         mac: createHash('sha256').update(`fixture-${index}`).digest('hex'),
       },
     };
@@ -2245,10 +2684,20 @@ function trustFixtureRecords(records) {
 function fixtureMatchedControl(subjectOverrides = {}, controlOverrides = {}) {
   const control = trustFixtureRecords([fixtureRecord(120, {
     recordId: 'b23e4567-e89b-42d3-a456-426614174000',
+    observation: {
+      runId: 'b23e4567-e89b-42d3-a456-426614174001',
+      unitId: 'control-1',
+      terminalEvidenceFingerprint: 'b'.repeat(64),
+    },
     ...controlOverrides,
   })])[0];
   const subject = fixtureRecord(100, {
     recordId: 'c23e4567-e89b-42d3-a456-426614174000',
+    observation: {
+      runId: 'c23e4567-e89b-42d3-a456-426614174001',
+      unitId: 'subject-1',
+      terminalEvidenceFingerprint: 'c'.repeat(64),
+    },
     ...subjectOverrides,
   });
   const evidence = {
@@ -2317,7 +2766,8 @@ async function selfTest() {
     requestedRoute: 'claude.native',
   });
   const invalidAdapter = structuredClone(valid);
-  invalidAdapter.segments[0].adapter = 'claude.native';
+  invalidAdapter.segments.find((segment) => segment.stage === 'implementation').adapter =
+    'claude.native';
   const unknownNested = structuredClone(valid);
   unknownNested.segments[0].telemetry.retiredTokens = observed(1);
   const invalidLaneRoute = structuredClone(valid);
@@ -2335,6 +2785,10 @@ async function selfTest() {
   const safe = fixtureRecords(20, 'safe-system', 100).map((recordValue, index) => ({
     ...recordValue,
     recordId: `323e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+    observation: {
+      ...recordValue.observation,
+      runId: `a23e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+    },
   }));
   const comparison = compareCheckpoints([...legacy, ...safe]);
   const baseline = trustFixtureRecords(fixtureRecords(100, 'safe-system'));
@@ -2343,14 +2797,47 @@ async function selfTest() {
   const current = trustFixtureRecords(fixtureRecords(100, 'post-optimization', 80).map((recordValue, index) => ({
     ...recordValue,
     recordId: `423e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+    observation: {
+      ...recordValue.observation,
+      runId: `423e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+    },
   })));
   const passedBudget = evaluateBudget(budget, baseline, current);
+  const reversedBaselineBudget = evaluateBudget(budget, [...baseline].reverse(), current);
+  const decoyBaseline = trustFixtureRecords([fixtureRecord(77, {
+    recordId: 'aa3e4567-e89b-42d3-a456-426614174000',
+    configFingerprint: '9'.repeat(64),
+    observation: {
+      runId: 'aa3e4567-e89b-42d3-a456-426614174001',
+      unitId: 'decoy',
+      terminalEvidenceFingerprint: '9'.repeat(64),
+    },
+  })])[0];
+  const decoyBaselineBudget = evaluateBudget(
+    budget,
+    [decoyBaseline, ...baseline],
+    current,
+  );
+  const revisedCurrent = trustFixtureRecords(current.map((recordValue) => ({
+    ...recordContent(recordValue),
+    revision: 'b'.repeat(40),
+  })));
+  const revisedCurrentBudget = evaluateBudget(budget, baseline, revisedCurrent);
   const failedBudget = evaluateBudget(
     { ...budget, limits: { ...budget.limits, unitTimeP95Ms: 100 } },
     baseline,
     current,
   );
   const duplicateCurrentBudget = evaluateBudget(budget, baseline, [current[0], current[0]]);
+  const reusedObservationCurrent = trustFixtureRecords(current.map((recordValue, index) => ({
+    ...recordContent(recordValue),
+    observation: structuredClone(baseline[index].observation),
+  })));
+  const reusedObservationBudget = evaluateBudget(
+    budget,
+    baseline,
+    reusedObservationCurrent,
+  );
   const shortBaseline = trustFixtureRecords(fixtureRecords(20, 'safe-system'));
   const shortSource = buildBudgetSource(shortBaseline);
   const provisionalBudget = evaluateBudget(
@@ -2359,6 +2846,10 @@ async function selfTest() {
     trustFixtureRecords(fixtureRecords(20, 'post-optimization').map((recordValue, index) => ({
       ...recordValue,
       recordId: `523e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+      observation: {
+        ...recordValue.observation,
+        runId: `523e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+      },
     }))),
   );
   const tinyBaseline = trustFixtureRecords(fixtureRecords(19, 'safe-system'));
@@ -2369,6 +2860,10 @@ async function selfTest() {
     trustFixtureRecords(fixtureRecords(19, 'post-optimization').map((recordValue, index) => ({
       ...recordValue,
       recordId: `623e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+      observation: {
+        ...recordValue.observation,
+        runId: `623e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+      },
     }))),
   );
   const claim = structuredClone(valid);
@@ -2446,6 +2941,39 @@ async function selfTest() {
   completedAtReview.segments = completedAtReview.segments.slice(0, 4);
   completedAtReview.unit.dispatch.count = 4;
   completedAtReview.unit.outcomes.terminal.stage = 'code-review';
+  const earlyPlanFailure = structuredClone(valid);
+  earlyPlanFailure.segments = earlyPlanFailure.segments.slice(
+    0,
+    earlyPlanFailure.segments.findIndex((segment) => segment.stage === 'plan-review') + 1,
+  );
+  earlyPlanFailure.unit.dispatch = {
+    ...earlyPlanFailure.unit.dispatch,
+    count: 1,
+    durationMs: 5,
+    reviewRounds: 0,
+  };
+  for (const key of UNIT_TELEMETRY_KEYS) {
+    const values = earlyPlanFailure.segments.map(
+      (segment) => observationValue(segment.telemetry[key]),
+    );
+    earlyPlanFailure.unit.telemetry[key] = values.every((value) => value !== null)
+      ? observed(values.reduce((sum, value) => sum + value, 0))
+      : unavailable('early plan failure did not expose this field');
+  }
+  earlyPlanFailure.unit.outcomes.terminal = {
+    status: 'blocked',
+    stage: 'plan-review',
+    reason: 'fixture plan rejected',
+  };
+  earlyPlanFailure.unit.outcomes.gate = { result: 'not-run', localGreenCiRed: false };
+  const completedFailedGate = structuredClone(valid);
+  completedFailedGate.unit.outcomes.gate.result = 'failed';
+  const missingPremise = structuredClone(valid);
+  missingPremise.segments = missingPremise.segments.filter(
+    (segment) => segment.stage !== 'premise',
+  );
+  const incoherentSelection = structuredClone(valid);
+  incoherentSelection.unit.timing.timeToFirstSelectionMs = 11;
   const failedAtGate = structuredClone(valid);
   const removedDelivery = failedAtGate.segments.pop();
   failedAtGate.unit.outcomes.terminal = {
@@ -2471,13 +2999,21 @@ async function selfTest() {
   notRunRed.unit.outcomes.gate = { result: 'not-run', localGreenCiRed: true };
   const pitcrew = structuredClone(valid);
   pitcrew.intent.flow = 'pitcrew';
-  const removedPlan = pitcrew.segments[0];
-  pitcrew.segments = pitcrew.segments.filter((segment) => segment.stage !== 'plan-review');
+  const removedPlanning = pitcrew.segments.filter(
+    (segment) => ['planning', 'plan-review'].includes(segment.stage),
+  );
+  pitcrew.segments = pitcrew.segments.filter(
+    (segment) => !['planning', 'plan-review'].includes(segment.stage),
+  );
   pitcrew.unit.dispatch.count -= 1;
-  pitcrew.unit.dispatch.durationMs -= removedPlan.timing.totalMs;
+  pitcrew.unit.dispatch.durationMs -=
+    removedPlanning.find((segment) => segment.stage === 'plan-review').timing.totalMs;
   for (const key of UNIT_TELEMETRY_KEYS) {
     if (pitcrew.unit.telemetry[key].status === 'observed') {
-      pitcrew.unit.telemetry[key].value -= observationValue(removedPlan.telemetry[key]) ?? 0;
+      pitcrew.unit.telemetry[key].value -= removedPlanning.reduce(
+        (sum, segment) => sum + (observationValue(segment.telemetry[key]) ?? 0),
+        0,
+      );
     }
   }
   const relaunch = structuredClone(valid);
@@ -2487,12 +3023,33 @@ async function selfTest() {
     recoveryKind: 'resumed',
     contextParks: 1,
   };
+  const recoverySegment = fixtureSegment({
+    id: 'recovery',
+    stage: 'recovery',
+    requestedRoute: 'claude.native',
+    totalMs: 5,
+  });
+  relaunch.segments.splice(2, 0, recoverySegment);
+  for (const key of UNIT_TELEMETRY_KEYS) {
+    if (relaunch.unit.telemetry[key].status === 'observed') {
+      relaunch.unit.telemetry[key].value +=
+        observationValue(recoverySegment.telemetry[key]) ?? 0;
+    }
+  }
   const providerChanged = structuredClone(valid);
   providerChanged.recordId = '723e4567-e89b-42d3-a456-426614174000';
+  providerChanged.observation = {
+    ...providerChanged.observation,
+    runId: '723e4567-e89b-42d3-a456-426614174001',
+  };
   providerChanged.segments[0].telemetry.provider = observed('other-provider');
   const providerSummary = summarizeMeasurements([valid, providerChanged]);
   const nativeBare = structuredClone(valid);
   nativeBare.recordId = 'd23e4567-e89b-42d3-a456-426614174000';
+  nativeBare.observation = {
+    ...nativeBare.observation,
+    runId: 'd23e4567-e89b-42d3-a456-426614174001',
+  };
   nativeBare.selector = 'native';
   nativeBare.requestedEngine = 'claude';
   nativeBare.requestedRoute = 'claude.native';
@@ -2506,6 +3063,10 @@ async function selfTest() {
   });
   const nativeExplicit = structuredClone(nativeBare);
   nativeExplicit.recordId = 'e23e4567-e89b-42d3-a456-426614174000';
+  nativeExplicit.observation = {
+    ...nativeExplicit.observation,
+    runId: 'e23e4567-e89b-42d3-a456-426614174001',
+  };
   nativeExplicit.selector = 'claude';
   const nativeSelectorSummary = summarizeMeasurements([nativeBare, nativeExplicit]);
   const arbitraryEvidence = structuredClone(valid);
@@ -2568,6 +3129,108 @@ async function selfTest() {
   fchmodSync(directoryDescriptor, 0o755);
   closeSync(directoryDescriptor);
   const widenedDirectoryRead = readMeasurements(widenedDirectoryStore);
+  const missingAuthorityStore = join(
+    tmpdir(),
+    `autoloop-measurement-missing-authority-${randomUUID()}`,
+  );
+  const missingAuthorityInitial = persistMeasurement(valid, missingAuthorityStore);
+  unlinkSync(join(missingAuthorityStore, STORE_KEY_FILE));
+  const missingAuthorityRead = readMeasurements(missingAuthorityStore);
+  const missingAuthorityWrite = persistMeasurement({
+    ...valid,
+    recordId: 'ab3e4567-e89b-42d3-a456-426614174000',
+  }, missingAuthorityStore);
+  const emptyStore = join(tmpdir(), `autoloop-measurement-empty-${randomUUID()}`);
+  mkdirSync(emptyStore, { mode: 0o700 });
+  const emptyStoreRead = readMeasurements(emptyStore);
+  const emptyStoreWrite = persistMeasurement(valid, emptyStore);
+  const publicationStore = join(tmpdir(), `autoloop-measurement-publication-${randomUUID()}`);
+  const publicationPersist = persistMeasurement(valid, publicationStore);
+  linkSync(
+    publicationPersist.path,
+    join(publicationStore, `.tmp-${randomUUID()}`),
+  );
+  const recoveredPublication = readMeasurements(publicationStore);
+  const invalidAvoidedStore = join(
+    tmpdir(),
+    `autoloop-measurement-invalid-avoided-${randomUUID()}`,
+  );
+  const invalidAvoided = structuredClone(valid);
+  invalidAvoided.recordId = 'ac3e4567-e89b-42d3-a456-426614174000';
+  invalidAvoided.observation = {
+    runId: 'ac3e4567-e89b-42d3-a456-426614174001',
+    unitId: 'invalid-avoided',
+    terminalEvidenceFingerprint: 'a'.repeat(64),
+  };
+  const absentEvidence = {
+    observedValue: invalidAvoided.unit.timing.totalMs,
+    counterfactualValue: invalidAvoided.unit.timing.totalMs + 10,
+    controlRecords: [{
+      recordId: 'ad3e4567-e89b-42d3-a456-426614174000',
+      contentFingerprint: 'd'.repeat(64),
+    }],
+  };
+  invalidAvoided.unit.outcomes.avoidedRework.avoidedTime = {
+    status: 'verified',
+    value: 10,
+    unit: 'milliseconds',
+    method: 'matched-control',
+    evidence: {
+      ...absentEvidence,
+      fingerprint: fingerprint({
+        method: 'matched-control',
+        unit: 'milliseconds',
+        ...absentEvidence,
+      }),
+    },
+  };
+  persistMeasurement(invalidAvoided, invalidAvoidedStore);
+  const invalidAvoidedSummary = summarizeMeasurementStore(invalidAvoidedStore);
+  const spoofedRevision = persistMeasurement({
+    ...valid,
+    revision: 'f'.repeat(40),
+    recordId: 'ae3e4567-e89b-42d3-a456-426614174000',
+  }, join(tmpdir(), `autoloop-measurement-spoof-${randomUUID()}`));
+  const legacyImport = persistMeasurement({
+    ...valid,
+    checkpoint: 'legacy-workflow',
+    recordId: 'af3e4567-e89b-42d3-a456-426614174000',
+  }, join(tmpdir(), `autoloop-measurement-legacy-${randomUUID()}`));
+  const futureRecord = structuredClone(valid);
+  futureRecord.capturedAt = '2999-01-01T00:00:00.000Z';
+  const semanticClones = Array.from({ length: 100 }, (_, index) => ({
+    ...structuredClone(valid),
+    recordId: `b13e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+    observation: {
+      runId: `b23e4567-e89b-42d3-a456-${String(426614174000 + index).padStart(12, '0')}`,
+      unitId: `clone-${index}`,
+      terminalEvidenceFingerprint: createHash('sha256').update(`clone-${index}`).digest('hex'),
+    },
+  }));
+  const semanticCloneSummary = summarizeMeasurements(semanticClones);
+  const duplicateObservation = [
+    valid,
+    {
+      ...structuredClone(valid),
+      recordId: 'b33e4567-e89b-42d3-a456-426614174000',
+      unit: {
+        ...structuredClone(valid.unit),
+        timing: {
+          ...structuredClone(valid.unit.timing),
+          totalMs: 101,
+          activeMs: 71,
+        },
+      },
+    },
+  ];
+  const duplicateObservationSummary = summarizeMeasurements(duplicateObservation);
+  const nestingBomb = {};
+  let nestingCursor = nestingBomb;
+  for (let depth = 0; depth < MAX_DATA_DEPTH + 5; depth += 1) {
+    nestingCursor.child = {};
+    nestingCursor = nestingCursor.child;
+  }
+  const nestingBombRecord = { ...valid, retiredBomb: nestingBomb };
   const concurrentStore = join(tmpdir(), `autoloop-measurement-race-${randomUUID()}`);
   const concurrentStatuses = await concurrentPersist(valid, concurrentStore);
   const concurrentRead = readMeasurements(concurrentStore);
@@ -2589,6 +3252,10 @@ async function selfTest() {
   rmSync(oversizedStore, { recursive: true, force: true });
   rmSync(widenedStore, { recursive: true, force: true });
   rmSync(widenedDirectoryStore, { recursive: true, force: true });
+  rmSync(missingAuthorityStore, { recursive: true, force: true });
+  rmSync(emptyStore, { recursive: true, force: true });
+  rmSync(publicationStore, { recursive: true, force: true });
+  rmSync(invalidAvoidedStore, { recursive: true, force: true });
   rmSync(concurrentStore, { recursive: true, force: true });
   const cases = [
     ['mixed-route unit is valid', validateMeasurement(valid).ok],
@@ -2621,6 +3288,11 @@ async function selfTest() {
     ['delivery before gate is rejected', !validateMeasurement(deliveryBeforeGate).ok],
     ['missing implementation is rejected', !validateMeasurement(missingImplementation).ok],
     ['completed at an arbitrary segment is rejected', !validateMeasurement(completedAtReview).ok],
+    ['legitimate early plan-review failure is retained', validateMeasurement(earlyPlanFailure).ok],
+    ['completed units reject a failed gate', !validateMeasurement(completedFailedGate).ok],
+    ['completed units require premise cost', !validateMeasurement(missingPremise).ok],
+    ['time to first selection reconciles with its unit step',
+      !validateMeasurement(incoherentSelection).ok],
     ['failed terminal outcome reconciles with the final gate', validateMeasurement(failedAtGate).ok],
     ['unit unavailable contradicting all-observed segments is rejected',
       !validateMeasurement(allObservedUnitUnavailable).ok],
@@ -2638,6 +3310,13 @@ async function selfTest() {
     ['duplicate IDs invalidate summaries even when contents differ',
       duplicateSummary.invalid.length > 0],
     ['duplicate IDs invalidate checkpoint comparison', !duplicateComparison.ok],
+    ['duplicate run/unit observation identity invalidates summaries',
+      duplicateObservationSummary.invalid.length > 0],
+    ['UUID-renamed semantic clones cannot inflate sample counts',
+      semanticCloneSummary.invalid.length > 0
+      && semanticCloneSummary.unitCohorts.length === 0],
+    ['bounded graph validation rejects nesting bombs without recursion failure',
+      !validateMeasurement(nestingBombRecord).ok],
     ['even median averages the middle pair', totalMetric?.median === 149.5],
     ['nearest-rank p95 is emitted at 20 samples', twenty.unitCohorts[0]
       ?.metrics['unit.timing.totalMs']?.p95 === 118],
@@ -2661,8 +3340,15 @@ async function selfTest() {
     ['outcome mutation after authentication invalidates exact source replay',
       !mutatedOutcomeSource.ok],
     ['stable matching budget passes', passedBudget.status === 'passed'],
+    ['budget cohort derives from named source independent of caller order',
+      reversedBaselineBudget.status === 'passed'],
+    ['extra decoy baseline cohort is refused', decoyBaselineBudget.status === 'refused'],
+    ['current checkpoint may use a different exact revision by declared policy',
+      revisedCurrentBudget.status === 'passed'],
     ['stable regression fails its metric limit', failedBudget.status === 'failed'],
     ['duplicate current IDs refuse budget evaluation', duplicateCurrentBudget.status === 'refused'],
+    ['current budgets reject reused source observation identities',
+      reusedObservationBudget.status === 'refused'],
     ['budget stays provisional below stable floor', provisionalBudget.status === 'provisional'],
     ['p95 budget refuses below reporting floor', refusedBudget.status === 'refused'],
     ['raw record persists once at mode 0600', persisted.ok && !duplicate.ok
@@ -2682,6 +3368,25 @@ async function selfTest() {
     ['oversized stdin is rejected before JSON parsing', oversizedInput.status === 2],
     ['widened record modes are rejected rather than repaired', !widenedRead.ok],
     ['widened store modes are rejected rather than repaired', !widenedDirectoryRead.ok],
+    ['missing authority with records is corruption, not an empty store',
+      !missingAuthorityRead.ok && !missingAuthorityWrite.ok],
+    ['an actually empty store is healthy and may initialize once',
+      emptyStoreRead.ok && emptyStoreRead.records.length === 0 && emptyStoreWrite.ok],
+    ['hard-link publication crash state is recovered before reading',
+      recoveredPublication.ok && recoveredPublication.records.length === 1],
+    ['invalid authenticated avoided evidence fails the store summary',
+      !invalidAvoidedSummary.ok
+      && invalidAvoidedSummary.summary.unitCohorts.length === 0],
+    ['persistence rejects a caller-spoofed revision', !spoofedRevision.ok],
+    ['legacy import remains unavailable without separate authenticated provenance',
+      !legacyImport.ok],
+    ['future caller timestamps are rejected by validation', !validateMeasurement(futureRecord).ok],
+    ['persisted capture binds live HEAD and labels trust sources precisely',
+      stored.records[0]?.revision === fixtureRevision()
+      && stored.records[0]?.provenance.capture.revisionSource === 'live-git-head'
+      && stored.records[0]?.provenance.capture.timeSource === 'tool-clock'
+      && stored.records[0]?.provenance.capture.checkpointSource === 'operator-declared'
+      && stored.records[0]?.provenance.capture.observationSource === 'run-record-declared'],
   ];
   let passed = 0;
   for (const [name, ok] of cases) {
@@ -2789,19 +3494,15 @@ async function main() {
   }
   if (parsed.mode === 'self-test') process.exit(await selfTest() ? 0 : 1);
   if (parsed.mode === 'summarize-store') {
-    let stored;
+    let result;
     try {
-      stored = readMeasurements(measurementDirectory());
+      result = summarizeMeasurementStore(measurementDirectory());
     } catch (error) {
       console.error(`measurement-contract: cannot resolve Git measurement storage: ${error.message}`);
       process.exit(1);
     }
-    if (!stored.ok) writeResult(stored, false);
-    writeResult({
-      ok: true,
-      recordCount: stored.records.length,
-      summary: summarizeMeasurements(stored.records),
-    });
+    delete result.records;
+    writeResult(result, result.ok);
   }
   const input = readJsonInput();
   if (!input.ok) {
@@ -2887,4 +3588,11 @@ const isMain = (() => {
     return false;
   }
 })();
-if (isMain) await main();
+if (isMain) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(`measurement-contract: ${error.message}`);
+    process.exit(1);
+  }
+}

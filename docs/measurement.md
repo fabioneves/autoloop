@@ -1,7 +1,7 @@
 # Workflow measurement
 
 Autoloop measurement-v1 records workflow cost as local, recomputable evidence. The contract can
-describe a single completed unit that crosses several stages, review rounds, routes, and adapters;
+describe a terminal completed, blocked, or failed unit across stages, review rounds, routes, and adapters;
 it does not flatten that unit into one misleading route. The measurement tool never posts records
 to GitHub or sends them to another service.
 
@@ -18,16 +18,25 @@ Each terminal unit emits one strict measurement-v1 JSON object:
 node tools/agentic/measurement-contract.mjs --record < /tmp/autoloop-measurement.json
 ```
 
-The tool validates every field, adds a content fingerprint and store-local HMAC provenance, then
-atomically creates one write-once mode-`0600` file below the current worktree's Git path at
+The tool rejects normal `legacy-workflow` import, binds `revision` to the live checkout HEAD,
+replaces `capturedAt` with its current clock, validates every field, and adds content and semantic
+observation fingerprints plus store-local HMAC provenance. It then atomically creates one
+write-once mode-`0600` file below the current worktree's Git path at
 `autoloop/measurements/v1/<recordId>.json`. The directory is owned by the current user at mode
 `0700`; its private authority key is mode `0600`. Records are tamper-evident and authenticated to
 that store, not globally immutable or independently attested. A duplicate UUID, symlink anywhere
 in the store path, non-regular or multiply linked record, wrong owner or mode, oversized input or
 file, sparse array, unknown field, retired field, or invalid route combination is rejected.
-Temporary writes are fsynced and linked under the final UUID only after completion, so a reader
-cannot consume a partial final record. `legacyProfile` is the only optional retired field and has
-no route-selection authority.
+Temporary writes are fsynced and linked under the final UUID only after completion. On restart,
+the reader removes an unlinked temporary or completes the unlink side of an unambiguous two-link
+publication before opening a final record. A missing authority in a non-empty store is corruption
+and can never rotate into a new key; a genuinely empty store can initialize once.
+
+The HMAC authenticates what this local tool retained. It proves live HEAD and tool-clock capture.
+Checkpoint and run/unit/terminal-evidence identity are explicitly marked operator/run-record
+declarations; the tool does not claim independent truth for them. A separate authenticated legacy
+import path does not exist yet, so legacy data cannot enter the enforceable local budget store.
+`legacyProfile` is the only optional retired field and has no route-selection authority.
 
 Summarize retained records with:
 
@@ -42,20 +51,24 @@ engine observations. Segment cohorts add their stage, round, and role. Each oper
 explicit allowed-to-vary fields: summaries vary none; checkpoint comparisons vary revision,
 checkpoint, capture identity, and terminal outcome; budget-current evaluation varies those same
 fields while retaining the complete runtime identity.
+Duplicate record IDs, duplicate run/unit identities, and exact semantic observation clones are
+invalid and excluded from aggregates. Invalid authenticated avoided-cost/control evidence makes
+`--summarize-store` fail nonzero rather than returning a healthy partial claim.
 
 ## Record contract
 
 The top-level record identifies:
 
-- the exact revision, workload, and checkpoint: `legacy-workflow`, `safe-system`, or
-  `post-optimization`;
+- the live revision, workload, and declared checkpoint: `safe-system` or `post-optimization`;
+- a declared run ID, unit ID, and terminal-evidence fingerprint used to prevent duplicate
+  observations;
 - active host, raw selector, requested engine, invocation route, Dev/Pitcrew intent, and intent
   source;
 - final lane, merge policy, base-freshness strategy, configuration/capability/outage
   fingerprints, and any outage transition; and
 - measurement duration and API/process/mutation overhead.
 
-`segments` is a non-empty ordered list of route-bearing work. Each segment records its stage,
+`segments` is a non-empty ordered list of route-bearing and orchestration work. Each segment records its stage,
 round, writer/reviewer/orchestrator role, nominal requested route, actual route, adapter,
 degradation, timing, dynamic step timings, and telemetry. The validator enforces the closed
 five-route catalog and the stage/lane policy:
@@ -66,6 +79,14 @@ five-route catalog and the stage/lane policy:
 - full-lane first review uses the invocation route;
 - Pitcrew implementation and first review use the invocation route, with later review native; and
 - judgment, gate, and delivery segments are attributed to the active host's native route.
+
+Dev records include premise validation, selection, planning, plan review, claim, implementation,
+simplification, orchestrator diff review, code-review rounds, gate, and delivery. Pitcrew omits
+planning/plan review and includes recovery when resuming. A blocked or failed record may terminate
+at a valid early prefix such as plan review; a completed record must reach delivery after a
+successful gate. Active/wait components reconcile exactly to each segment and unit total,
+dispatch totals reconcile to engine-dispatch segments, aggregate telemetry reconciles to segments,
+and time-to-first-selection equals its named unit step.
 
 Only an implementation segment may record a cross-host-to-native outage fallback. Its degradation
 must be explicit. The adapter always equals the actual closed-catalog route.
@@ -193,14 +214,19 @@ node tools/agentic/measurement-contract.mjs --evaluate-budget \
 
 `--budget-source` and `--evaluate-budget` accept record IDs, then load the corresponding
 authenticated records from the local store. Caller-supplied record JSON cannot seed or enforce a
-budget. The evaluator replays every named source content fingerprint and authentication tag and
-refuses changed, duplicated, missing, unauthenticated, or cohort-mismatched evidence. It also
+budget. The evaluator requires the baseline input to equal the named source set exactly, rejects
+extra decoy records, and derives the cohort from named records independently of caller ordering.
+Source records share one exact revision. Current `post-optimization` records may use a different
+revision, while every other strict runtime identity dimension remains fixed. The evaluator replays
+every named source content fingerprint and authentication tag and refuses changed, duplicated,
+missing, unauthenticated, or cohort-mismatched evidence. It also
 refuses a median below its declared reporting floor or a p95 below at least 20 observations. A
 valid result remains `provisional` until both source and current metrics meet the declared stable
 floor, which is at least 100 observations. Only stable evidence returns `passed` or `failed`; a
 provisional overage is reported as `withinLimit: false` without being called a regression.
 
-Capture the manual safe-system baseline on the same repeatable workloads as any genuine legacy
-evidence. Then establish mode-specific budgets from the safe baseline and retain the raw records
-for every accepted optimization. No current project budget should be treated as active until those
-real samples and operator-selected limits exist.
+Capture the manual safe-system baseline on the same repeatable workloads as any genuine,
+separately retained legacy comparison evidence. Legacy comparison remains descriptive until an
+authenticated import exists. Establish mode-specific budgets only from the authenticated safe
+baseline and retain the raw records for every accepted optimization. No current project budget
+should be treated as active until those real samples and operator-selected limits exist.
