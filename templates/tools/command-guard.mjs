@@ -131,8 +131,14 @@ function shellWords(command) {
   return words;
 }
 
+function executableIndex(words, executable) {
+  return words.findIndex(
+    (word) => word === executable || word.endsWith(`/${executable}`),
+  );
+}
+
 function gitSubcommandIndex(words, subcommand) {
-  const git = words.indexOf('git');
+  const git = executableIndex(words, 'git');
   if (git === -1) return -1;
   const optionsWithValues = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace']);
   for (let i = git + 1; i < words.length; i += 1) {
@@ -145,6 +151,31 @@ function gitSubcommandIndex(words, subcommand) {
     return word === subcommand ? i : -1;
   }
   return -1;
+}
+
+function hasCommandLineGitAlias(words) {
+  const git = executableIndex(words, 'git');
+  if (git === -1) return false;
+  for (let index = git + 1; index < words.length; index += 1) {
+    const word = words[index];
+    if (word === '-c') {
+      const setting = words[index + 1] ?? '';
+      if (/^(?:alias\.|include(?:if\..+)?\.path(?:=|$))/i.test(setting)) {
+        return true;
+      }
+      index += 1;
+      continue;
+    }
+    if (
+      /^-calias\./i.test(word)
+      || /^-cinclude(?:if\..+)?\.path(?:=|$)/i.test(word)
+      || /^--config-env=(?:alias\.|include(?:if\..+)?\.path=)/i.test(word)
+    ) {
+      return true;
+    }
+    if (!word.startsWith('-')) return false;
+  }
+  return false;
 }
 
 function switchTarget(words, baseBranch) {
@@ -204,24 +235,30 @@ function pushTargetsBase(words, branches, baseBranch) {
   const args = words.slice(index + 1);
   if (args.some((arg) => BULK_PUSH_FLAGS.has(arg))) return true;
   const deleteMode = args.includes('--delete') || args.includes('-d');
-  const optionsWithValues = new Set([
+  const optionsWithValues = [
     '--repo',
     '--receive-pack',
     '--exec',
     '--push-option',
     '-o',
-  ]);
+  ];
   const positional = [];
+  let repositoryFromOption = false;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (optionsWithValues.has(arg)) {
+    if (optionsWithValues.includes(arg)) {
+      if (arg === '--repo') repositoryFromOption = true;
       i += 1;
+      continue;
+    }
+    if (optionsWithValues.some((option) => arg.startsWith(`${option}=`))) {
+      if (arg.startsWith('--repo=')) repositoryFromOption = true;
       continue;
     }
     if (arg.startsWith('-')) continue;
     positional.push(arg);
   }
-  const refspecs = positional.slice(1);
+  const refspecs = positional.slice(repositoryFromOption ? 0 : 1);
   if (refspecs.length === 0) return branches.has(baseBranch);
   return refspecs.some((refspec) => {
     const clean = refspec.replace(/^\+/, '');
@@ -237,7 +274,7 @@ function pushTargetsBase(words, branches, baseBranch) {
 }
 
 function isInlineGhBody(words) {
-  const gh = words.indexOf('gh');
+  const gh = executableIndex(words, 'gh');
   if (gh === -1) return false;
   const scope = words.findIndex((word, index) => index > gh && (word === 'pr' || word === 'issue'));
   const action = words[scope + 1];
@@ -271,6 +308,14 @@ export function evaluate(rawCmd, branch, options = {}) {
   let possibleBranches = new Set(branch ? [branch] : []);
   for (const segment of segments) {
     const words = shellWords(segment.command);
+    if (hasCommandLineGitAlias(words)) {
+      return {
+        block: true,
+        reason:
+          'Blocked: command-scoped Git aliases or config includes can hide a protected mutation. '
+          + 'Run the canonical Git subcommand without an alias override.',
+      };
+    }
     if (gitSubcommandIndex(words, 'commit') !== -1 && possibleBranches.has(baseBranch)) {
       return {
         block: true,
@@ -463,12 +508,17 @@ function selfTest() {
     ["git push origin 'refs/heads/feat/*:refs/heads/feat/*'", 'feat/gh-2-y', false, 'trunk'],
     ['git push origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
     ['git push origin HEAD:refs/heads/trunk', 'feat/gh-2-y', true, 'trunk'],
+    ['/usr/bin/git push origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
+    ['git push --repo origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
+    ['git push --repo=origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
+    ['git -c alias.ship=push ship origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
     ['git push origin :trunk', 'feat/gh-2-y', true, 'trunk'],
     ['git push --delete origin trunk', 'feat/gh-2-y', true, 'trunk'],
     ['gh pr create --draft --title "t" --body "inline"', 'feat/gh-2-y', true],
     ['gh --repo o/r pr create --title "t" --body "inline"', 'feat/gh-2-y', true],
     ['gh --hostname github.example pr comment 4 -b "inline"', 'feat/gh-2-y', true],
     ['gh issue comment 5 -b "hi"', 'feat/gh-2-y', true],
+    ['/usr/bin/gh issue comment 5 -b "hi"', 'feat/gh-2-y', true],
     ['gh pr create --draft --title "t" --body-file /tmp/b.md', 'feat/gh-2-y', false],
     ['gh pr review 5 --request-changes --body-file /tmp/r.md', 'main', false],
     // gh api: merge/protection mutations blocked, reads pass
