@@ -18,11 +18,16 @@ Each terminal unit emits one strict measurement-v1 JSON object:
 node tools/agentic/measurement-contract.mjs --record < /tmp/autoloop-measurement.json
 ```
 
-The tool validates every field and creates one immutable mode-`0600` file below the current
-worktree's Git path at `autoloop/measurements/v1/<recordId>.json`. The directory is mode `0700`.
-A duplicate UUID, symlinked store, widened file mode, sparse array, unknown field, retired field,
-or invalid route combination is rejected. `legacyProfile` is the only optional retired field and
-has no route-selection authority.
+The tool validates every field, adds a content fingerprint and store-local HMAC provenance, then
+atomically creates one write-once mode-`0600` file below the current worktree's Git path at
+`autoloop/measurements/v1/<recordId>.json`. The directory is owned by the current user at mode
+`0700`; its private authority key is mode `0600`. Records are tamper-evident and authenticated to
+that store, not globally immutable or independently attested. A duplicate UUID, symlink anywhere
+in the store path, non-regular or multiply linked record, wrong owner or mode, oversized input or
+file, sparse array, unknown field, retired field, or invalid route combination is rejected.
+Temporary writes are fsynced and linked under the final UUID only after completion, so a reader
+cannot consume a partial final record. `legacyProfile` is the only optional retired field and has
+no route-selection authority.
 
 Summarize retained records with:
 
@@ -30,10 +35,13 @@ Summarize retained records with:
 node tools/agentic/measurement-contract.mjs --summarize-store
 ```
 
-The result contains separate unit and segment cohorts. Unit cohorts preserve the complete set of
-actual routes used by the unit. Segment cohorts add stage, round, role, requested and actual route,
-adapter, degradation, provider, model, and engine identity. Configuration, capability, and outage
-fingerprints prevent unlike runtime states from being pooled.
+The result contains separate unit and segment cohorts. One shared cohort identity preserves flow,
+intent source, raw selector, requested engine and route, every requested and actual segment route,
+lane, merge/base policy, configuration/capability/outage state, degradation, and provider/model/
+engine observations. Segment cohorts add their stage, round, and role. Each operation reports its
+explicit allowed-to-vary fields: summaries vary none; checkpoint comparisons vary revision,
+checkpoint, capture identity, and terminal outcome; budget-current evaluation varies those same
+fields while retaining the complete runtime identity.
 
 ## Record contract
 
@@ -89,9 +97,13 @@ The unit also records:
 - staged-ahead use and scope/lane misses; and
 - resumed claims, audit backfills, avoided duplicate scans, and prevented false doctor failures.
 
-An estimated avoided-time or avoided-operation claim is valid only with an evidence fingerprint
-and one of `matched-control`, `non-mutating-replay`, or `labeled-counterfactual`. A matched-control
-claim also names its control record IDs. A label or lane decision by itself is not avoided-cost
+Every avoided-time field is either typed `unavailable` with a reason or `verified` with a
+tamper-evident evidence bundle. The bundle names the observed and counterfactual values, their
+arithmetic, the method, and any exact authenticated control record IDs and content fingerprints.
+Matched controls must exist in the same supplied record set, authenticate to the local store, and
+share the complete comparable cohort; the tool replays their median. Until an external experiment
+attestation is integrated, `non-mutating-replay` and `labeled-counterfactual` cannot be marked
+verified and must remain typed unavailable. A label or lane decision by itself is not avoided-cost
 evidence.
 
 ## Summary and statistical bar
@@ -125,10 +137,12 @@ node tools/agentic/measurement-contract.mjs --compare post-optimization \
   < /tmp/legacy-and-post-records.json
 ```
 
-The comparison admits manual-to-manual records only. It matches workload, observed actual-route
-set, lane, and base-freshness strategy. It never uses `legacyProfile` as a route. Unmatched cohorts
-remain visible instead of being coerced into a comparison. The legacy-to-safe delta is the
-aggregate cost of the safety migration, not attribution to an individual repair.
+The comparison admits manual-to-manual records only. It matches the shared strict cohort identity,
+allowing only revision, checkpoint, capture identity, and terminal outcome to vary. It never uses
+`legacyProfile` as a route. Duplicate record IDs invalidate the complete input, including when the
+duplicate contents differ. Unmatched cohorts remain visible instead of being coerced into a
+comparison. The legacy-to-safe delta is the aggregate cost of the safety migration, not
+attribution to an individual repair.
 
 A newly safe non-manual mode is a separate safe-only cohort unless its legacy behavior can be
 measured through a non-mutating replay.
@@ -137,14 +151,19 @@ measured through a non-mutating replay.
 
 Budgets are exact mode/workload contracts. A mode fixes active host, selector, requested engine and
 route, observed actual-route set, lane, merge policy, and base-freshness strategy. Every budget
-contains the safe-system revision, sorted source record IDs, a recomputable cohort fingerprint,
-and the source statistic and sample count for each metric.
+contains the safe-system revision, sorted source record IDs plus their content fingerprints and
+store-authentication tags, a recomputable cohort fingerprint, and the source statistic and sample
+count for each metric.
 
 Create the source evidence from one homogeneous safe-system cohort:
 
+```json
+{ "recordIds": ["<safe-system-record-uuid>", "<safe-system-record-uuid>"] }
+```
+
 ```bash
 node tools/agentic/measurement-contract.mjs --budget-source \
-  < /tmp/safe-system-cohort.json
+  < /tmp/safe-system-record-ids.json
 ```
 
 The operator adds justified maxima and declared sample floors to that evidence. The fixed budget
@@ -162,8 +181,8 @@ Evaluate it with a strict envelope:
 ```json
 {
   "budget": {},
-  "baselineRecords": [],
-  "currentRecords": []
+  "baselineRecordIds": ["<safe-system-record-uuid>"],
+  "currentRecordIds": ["<post-optimization-record-uuid>"]
 }
 ```
 
@@ -172,12 +191,14 @@ node tools/agentic/measurement-contract.mjs --evaluate-budget \
   < /tmp/autoloop-budget-evaluation.json
 ```
 
-The evaluator replays the named safe-system records and refuses changed or missing source
-evidence. It also refuses a median below its declared reporting floor or a p95 below at least 20
-observations. A valid result remains `provisional` until both source and current metrics meet the
-declared stable floor, which is at least 100 observations. Only stable evidence returns `passed`
-or `failed`; a provisional overage is reported as `withinLimit: false` without being called a
-regression.
+`--budget-source` and `--evaluate-budget` accept record IDs, then load the corresponding
+authenticated records from the local store. Caller-supplied record JSON cannot seed or enforce a
+budget. The evaluator replays every named source content fingerprint and authentication tag and
+refuses changed, duplicated, missing, unauthenticated, or cohort-mismatched evidence. It also
+refuses a median below its declared reporting floor or a p95 below at least 20 observations. A
+valid result remains `provisional` until both source and current metrics meet the declared stable
+floor, which is at least 100 observations. Only stable evidence returns `passed` or `failed`; a
+provisional overage is reported as `withinLimit: false` without being called a regression.
 
 Capture the manual safe-system baseline on the same repeatable workloads as any genuine legacy
 evidence. Then establish mode-specific budgets from the safe baseline and retain the raw records
