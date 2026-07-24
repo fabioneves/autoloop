@@ -15,9 +15,7 @@
 import { execSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-
-const LOOP_BRANCH_RE = /^(feat|fix|chore|docs|refactor|test|perf|build|ci)\/gh-\d+-/;
-const CLOSES_RE = /\b(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed))\s+#(\d+)/i;
+import { CLAIM_CONTRACT_FIXTURES, parseLoopClaim } from './claim-contract.mjs';
 const STEP_KEYS = ['01-premise', '02-plan', '03-plan-review', '04-claim', '05-implement',
   '06-simplify', '07-diff-review', '08-code-review', '09-gate'];
 
@@ -78,9 +76,10 @@ export function aggregate(units) {
   const dist = (values) => {
     const v = values.filter((x) => x != null).sort((a, b) => a - b);
     if (!v.length) return null;
+    const middle = Math.floor(v.length / 2);
     return {
       n: v.length,
-      median: v[Math.floor((v.length - 1) / 2)],
+      median: v.length % 2 ? v[middle] : (v[middle - 1] + v[middle]) / 2,
       mean: Math.round(v.reduce((a, b) => a + b, 0) / v.length),
       min: v[0], max: v[v.length - 1],
     };
@@ -94,15 +93,17 @@ function gh(cmd) {
   return JSON.parse(execSync(`gh ${cmd}`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }));
 }
 
-function discoverIssues(limit) {
-  const prs = gh(`pr list --state all --json headRefName,body --limit ${limit}`);
+export function claimedIssues(prs) {
   const nums = new Set();
-  for (const pr of prs) {
-    if (!LOOP_BRANCH_RE.test(pr.headRefName ?? '')) continue;
-    const m = CLOSES_RE.exec(pr.body ?? '');
-    if (m) nums.add(Number(m[5]));
+  for (const pr of prs ?? []) {
+    const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
+    if (claim.valid) nums.add(claim.issue);
   }
   return [...nums].sort((a, b) => a - b);
+}
+
+function discoverIssues(limit) {
+  return claimedIssues(gh(`pr list --state all --json headRefName,body --limit ${limit}`));
 }
 
 function fetchTimeline(issue) {
@@ -137,6 +138,14 @@ function selfTest() {
   ];
   const s = computeUnitStats(events);
   const agg = aggregate([{ issue: 7, stats: s }, { issue: 7, stats: s }]);
+  const even = aggregate([
+    { stats: { steps: {}, totalMs: 1000 } },
+    { stats: { steps: {}, totalMs: 3000 } },
+  ]);
+  const cohort = claimedIssues(CLAIM_CONTRACT_FIXTURES.map((fixture) => ({
+    headRefName: fixture.branch,
+    body: fixture.body,
+  })));
   const checks = [
     ['total 35m17s', s.totalMs === 2117000],
     ['outcome delivered', s.terminalLabel === 'loop-delivered'],
@@ -147,6 +156,8 @@ function selfTest() {
     ['stranded 04+07', s.stranded.join(',') === 'loop:04-claim,loop:07-diff-review'],
     ['gate not stranded', s.steps['09-gate'].stranded === false],
     ['agg n=2 median total', agg.total.n === 2 && agg.total.median === 2117000],
+    ['even median averages middle values', even.total.median === 2000],
+    ['canonical claim cohort', cohort.join(',') === '5,7,9,12'],
     ['fmt', fmtMs(2117000) === '35m 17s' && fmtMs(44000) === '44s' && fmtMs(null) === '—'],
     ['empty unit', computeUnitStats([]).totalMs === null],
   ];

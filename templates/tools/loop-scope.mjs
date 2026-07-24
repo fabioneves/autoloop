@@ -15,29 +15,38 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import {
+  CLAIM_CONTRACT_FIXTURES,
+  CLOSES_RE,
+  LOOP_BRANCH_RE,
+  parseLoopClaim,
+} from './claim-contract.mjs';
 
-// Types exactly as autoloop:dev step 4 enumerates them.
-export const LOOP_BRANCH_RE = /^(feat|fix|chore|docs|refactor|test|perf|build|ci)\/gh-\d+-/;
-// Closing keyword (optional colon) + `#N`. KEEP IN SYNC with scan.mjs's CLOSES_RE.
-export const CLOSES_RE = /\b(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed)):?\s+#\d+/i;
+export { CLOSES_RE, LOOP_BRANCH_RE };
 
 export function inScope({ branch, body }) {
-  if (!LOOP_BRANCH_RE.test(branch ?? '')) {
+  const claim = parseLoopClaim({ branch, body });
+  if (claim.reasonCode === 'BRANCH_CLAIM_MISSING') {
     return { inScope: false, reason: `branch "${branch}" is not a loop branch (<type>/gh-<N>-…)` };
   }
-  if (!CLOSES_RE.test(body ?? '')) {
+  if (claim.reasonCode === 'BODY_CLAIM_MISSING') {
     return { inScope: false, reason: 'PR body does not claim an issue (no "Closes #N")' };
   }
-  return { inScope: true, reason: 'loop-owned (branch convention + Closes #N)' };
+  if (claim.reasonCode === 'BODY_CLAIM_AMBIGUOUS') {
+    return { inScope: false, reason: 'PR body claims more than one issue' };
+  }
+  if (claim.reasonCode === 'ISSUE_MISMATCH') {
+    return {
+      inScope: false,
+      reason: `branch issue #${claim.branchIssue} does not match body issue #${claim.bodyIssue}`,
+    };
+  }
+  return { inScope: true, reason: `loop-owned (branch convention + ${claim.normalizedClosing})` };
 }
 
 function selfTest() {
   const cases = [
-    [{ branch: 'feat/gh-12-add-thing', body: 'Closes #12' }, true],
-    [{ branch: 'fix/gh-3-null-guard', body: 'Fixes #3\n\ndetails' }, true],
-    [{ branch: 'feat/gh-5-colon', body: 'Closes: #5' }, true], // GitHub's colon form links too
-    [{ branch: 'feat/gh-12-add-thing', body: 'no claim here' }, false],
-    [{ branch: 'feature/gh-12-x', body: 'Closes #12' }, false], // "feature" is not our type list
+    ...CLAIM_CONTRACT_FIXTURES.map((fixture) => [fixture, fixture.valid]),
     [{ branch: 'hardening/deployment-operations', body: 'Closes #9' }, false],
     [{ branch: 'develop', body: 'Closes #1' }, false],
     [{ branch: '', body: '' }, false],

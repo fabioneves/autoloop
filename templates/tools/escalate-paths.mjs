@@ -1,99 +1,260 @@
 #!/usr/bin/env node
-// Deterministic escalate-path classifier (vendored by autoloop:setup).
-// "Did this diff touch an escalate path" must not be a judgment call reading a diff —
-// a miss silently drops the `human:authorize` flag the human merger relies on. This
-// transcribes docs/agentic/STATE.md → Escalate-list into globs, PLUS self-protection:
-// the loop flags changes to its own guardrails (tools/, .claude/, .codex/, .agents/,
-// AGENTS.override.md, AGENTS.md, CLAUDE.md, docs/agentic/).
-// The script is the mechanical floor; the orchestrator's judgment can add paths, never remove.
-//
-// ADAPT ME: the list below ships with only the universal entries. Add your project's
-// escalate paths (auth, secrets, schema, safety boundaries, deploy) — keep it in sync
-// with STATE.md → Escalate-list, and extend the self-test when you do.
-//
-// Usage:
-//   node tools/agentic/escalate-paths.mjs [<git range>]   # default: origin/<base>...HEAD
-//     → prints matched files; exit 1 if any escalate path was touched, 0 if none
-//   node tools/agentic/escalate-paths.mjs --working-tree   # uncommitted + untracked paths
-//     → for the Prime dirty-tree attribution check (is a killed implementer's WIP clear of
-//       escalate paths?); same exit contract (1 if any escalate path is dirty, 0 if none)
-//   node tools/agentic/escalate-paths.mjs --self-test
 
-import { execSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import {
+  HUMAN_AUTHORIZATION_GLOBS,
+  PATH_POLICY_FIXTURES,
+  classifyLaneProof,
+  globToRe,
+  matchHumanAuthorization,
+} from './lane-contract.mjs';
 
 export const ESCALATE_PATHS = [
-  // --- universal: secrets / env (root AND nested — a nested .env is the same secret surface) ---
-  '.env*',
-  '**/.env*',
-  // --- universal: deploy / ops / CI (root and nested) ---
-  '.github/workflows/**',
-  'Dockerfile*',
-  '**/Dockerfile*',
-  'docker-compose*',
-  '**/docker-compose*',
-  // --- universal: the loop's own guardrails and process definitions ---
-  'tools/**',
-  '.claude/**',
-  '.codex/**',
-  '.agents/**',
-  '.githooks/**',
-  // Guidance files at ANY depth — both hosts honor nested per-directory AGENTS.md/CLAUDE.md,
-  // so a nested file is the same injection surface as the root one.
-  'AGENTS.override.md',
-  'AGENTS.md',
-  'CLAUDE.md',
-  '**/AGENTS.override.md',
-  '**/AGENTS.md',
-  '**/CLAUDE.md',
-  'docs/agentic/STATE.md',
-  // --- PROJECT-SPECIFIC (add yours; examples): ---
+  ...HUMAN_AUTHORIZATION_GLOBS,
   // 'src/auth/**',
   // 'src/db/schema/**',
   // 'src/payments/**',
 ];
 
-// Minimal glob → regex: '**' = any path segment(s), '*' = within a segment.
-export function globToRe(glob) {
-  const re = glob
-    .split(/(\*\*|\*)/)
-    .map((part) => {
-      if (part === '**') return '.*';
-      if (part === '*') return '[^/]*';
-      return part.replace(/[.+^${}()|[\]\\?]/g, '\\$&');
-    })
-    .join('');
-  // Case-insensitive to match auto-merge's protected floor and to stay robust on
-  // case-insensitive filesystems (a `TOOLS/` or `.Env` must not slip past the escalate flag).
-  return new RegExp(`^${re}$`, 'i');
-}
-
-const RES = ESCALATE_PATHS.map((g) => ({ glob: g, re: globToRe(g) }));
+export { globToRe };
 
 export function matchEscalate(files) {
-  const hits = [];
-  for (const f of files ?? []) {
-    const m = RES.find(({ re }) => re.test(f));
-    if (m) hits.push({ file: f, glob: m.glob });
+  return matchHumanAuthorization(files, ESCALATE_PATHS);
+}
+
+function positiveInteger(value) {
+  if (!/^\d+$/.test(value ?? '')) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+export function parseNameStatusZ(raw) {
+  const tokens = String(raw).split('\0');
+  if (tokens.at(-1) === '') tokens.pop();
+  const files = [];
+  let complete = true;
+  for (let index = 0; index < tokens.length;) {
+    const status = tokens[index++];
+    const code = /^[ACDMRTUXB]/.test(status) ? status[0] : null;
+    const previousPath = code === 'R' || code === 'C' ? tokens[index++] : null;
+    const path = tokens[index++];
+    if (
+      !code ||
+      !path ||
+      path.includes('\ufffd') ||
+      ((code === 'R' || code === 'C') && (!previousPath || previousPath.includes('\ufffd')))
+    ) {
+      complete = false;
+    }
+    files.push({ status, previousPath: previousPath ?? null, path: path ?? null });
   }
-  return hits;
+  return { complete, files };
+}
+
+export function parseNumstatZ(raw) {
+  const tokens = String(raw).split('\0');
+  if (tokens.at(-1) === '') tokens.pop();
+  const files = [];
+  let complete = true;
+  for (let index = 0; index < tokens.length;) {
+    const header = /^([^\t]*)\t([^\t]*)\t(.*)$/s.exec(tokens[index++]);
+    if (!header) {
+      complete = false;
+      continue;
+    }
+    const additions = positiveInteger(header[1]);
+    const deletions = positiveInteger(header[2]);
+    const previousPath = header[3] === '' ? tokens[index++] : null;
+    const path = header[3] === '' ? tokens[index++] : header[3];
+    if (
+      additions === null ||
+      deletions === null ||
+      !path ||
+      path.includes('\ufffd') ||
+      (header[3] === '' && (!previousPath || previousPath.includes('\ufffd')))
+    ) {
+      complete = false;
+    }
+    files.push({ previousPath: previousPath ?? null, path: path ?? null, additions, deletions });
+  }
+  return { complete, files };
+}
+
+export function mergeFinalDiff(nameStatus, numstat, headOid, persistedData = null) {
+  let complete =
+    nameStatus.complete === true &&
+    numstat.complete === true &&
+    nameStatus.files.length === numstat.files.length;
+  const files = nameStatus.files.map((statusEntry, index) => {
+    const statsEntry = numstat.files[index] ?? {};
+    if (
+      statusEntry.path !== statsEntry.path ||
+      statusEntry.previousPath !== statsEntry.previousPath
+    ) {
+      complete = false;
+    }
+    return {
+      ...statusEntry,
+      additions: statsEntry.additions ?? null,
+      deletions: statsEntry.deletions ?? null,
+      contentRead: false,
+      previousContentRead: false,
+      contentHash: null,
+    };
+  });
+  return {
+    complete,
+    headOid,
+    changedFiles: files.length,
+    files,
+    persistedData,
+  };
+}
+
+function gitText(args) {
+  return execFileSync('git', args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 20000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+function gitBytes(args) {
+  return execFileSync('git', args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 20000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+function flagValue(args, flag) {
+  const index = args.indexOf(flag);
+  return index === -1 ? null : args[index + 1] ?? null;
+}
+
+function booleanFlag(args, flag) {
+  const value = flagValue(args, flag);
+  return value === 'true' ? true : value === 'false' ? false : null;
+}
+
+function resolveBase(args) {
+  const ref = flagValue(args, '--base');
+  const expectedOid = flagValue(args, '--base-oid')?.toLowerCase() ?? null;
+  if (!ref) return { configuredBase: { ref: '', oid: '' }, error: '--base is required' };
+  try {
+    const oid = gitText(['rev-parse', '--verify', `${ref}^{commit}`]).trim().toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(oid)) {
+      return { configuredBase: { ref, oid: '' }, error: `configured base "${ref}" did not resolve to a commit` };
+    }
+    if (expectedOid && expectedOid !== oid) {
+      return {
+        configuredBase: { ref, oid: '' },
+        error: `configured base "${ref}" resolved to ${oid}, not supplied OID ${expectedOid}`,
+      };
+    }
+    return { configuredBase: { ref, oid }, error: null };
+  } catch (error) {
+    return {
+      configuredBase: { ref, oid: '' },
+      error: `configured base "${ref}" is unavailable: ${String(error.message).slice(0, 160)}`,
+    };
+  }
+}
+
+function plannedPaths(args) {
+  const paths = [];
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === '--planned-path' && args[index + 1]) paths.push(args[++index]);
+    if (args[index] === '--planned-paths') {
+      while (args[index + 1] && !args[index + 1].startsWith('--')) paths.push(args[++index]);
+    }
+  }
+  return paths;
+}
+
+function plannedInput(args) {
+  const jsonPath = flagValue(args, '--planned-json');
+  if (jsonPath) return JSON.parse(readFileSync(jsonPath, 'utf8'));
+  const files = plannedPaths(args).map((path) => ({
+    path,
+    contentRead: args.includes('--content-read-all'),
+  }));
+  return {
+    complete: true,
+    files,
+    estimatedChangedLines: positiveInteger(flagValue(args, '--estimated-lines')),
+    persistedData: booleanFlag(args, '--persisted-data'),
+  };
+}
+
+function plannedSubject(args) {
+  return {
+    kind: 'plan',
+    artifactVersion: positiveInteger(flagValue(args, '--artifact-version')),
+    fingerprint: flagValue(args, '--artifact-fingerprint')?.toLowerCase() ?? '',
+  };
+}
+
+function withContentEvidence(final, range, args) {
+  if (!args.includes('--content-read-all')) return final;
+  const paths = final.files.flatMap(({ previousPath, path }) => previousPath ? [previousPath, path] : [path]);
+  if (!paths.every((path) => /^docs\//i.test(path) || /\.md$/i.test(path))) return final;
+  try {
+    gitBytes(['diff', '--binary', '--no-ext-diff', '--no-textconv', '--find-renames=50%', range]);
+    const evidenceHash = createHash('sha256')
+      .update(`${range}\0${paths.sort().join('\0')}`)
+      .digest('hex');
+    return {
+      ...final,
+      files: final.files.map((file) => ({
+        ...file,
+        contentRead: true,
+        previousContentRead: ['R', 'C'].includes(file.status?.[0]),
+        contentHash: createHash('sha256')
+          .update(`${evidenceHash}\0${file.previousPath ?? ''}\0${file.path}`)
+          .digest('hex'),
+      })),
+    };
+  } catch {
+    return final;
+  }
+}
+
+function finalInput(configuredBase, args) {
+  const headOid = gitText(['rev-parse', '--verify', 'HEAD^{commit}']).trim().toLowerCase();
+  const range = `${configuredBase.oid}...${headOid}`;
+  const nameStatus = parseNameStatusZ(gitText(['diff', '--name-status', '-z', '--find-renames=50%', range]));
+  const numstat = parseNumstatZ(gitText(['diff', '--numstat', '-z', '--find-renames=50%', range]));
+  const final = mergeFinalDiff(nameStatus, numstat, headOid, booleanFlag(args, '--persisted-data'));
+  const { headOid: ignoredHeadOid, ...evidence } = withContentEvidence(final, range, args);
+  return {
+    evidence,
+    subject: { kind: 'head', headOid },
+  };
+}
+
+function proofPaths(laneProof) {
+  const { decisionEvidence, mode } = laneProof;
+  return mode === 'planned'
+    ? decisionEvidence.files.map(({ path }) => path)
+    : decisionEvidence.files.flatMap(({ previousPath, path }) =>
+      previousPath ? [previousPath, path] : [path]);
 }
 
 function selfTest() {
   const cases = [
     ['.env.example', true],
-    ['apps/web/.env.local', true], // nested env — same secret surface
-    ['.ENV.local', true], // case-insensitive
+    ['apps/web/.env.local', true],
+    ['.ENV.local', true],
     ['.github/workflows/ci.yml', true],
     ['Dockerfile', true],
-    ['deploy/Dockerfile.prod', true], // nested Dockerfile
+    ['deploy/Dockerfile.prod', true],
     ['docker-compose.yml', true],
-    ['k8s/docker-compose.prod.yml', true], // nested compose
-    ['tools/agentic/command-guard.mjs', true],
-    ['.claude/settings.json', true],
-    ['.codex/hooks.json', true],
-    ['.agents/plugins/marketplace.json', true],
+    ['k8s/docker-compose.prod.yml', true],
     ['AGENTS.override.md', true],
     ['AGENTS.md', true],
     ['CLAUDE.md', true],
@@ -105,6 +266,7 @@ function selfTest() {
     ['docs/agentic/LOOP.md', false],
     ['src/index.ts', false],
     ['README.md', false],
+    ...PATH_POLICY_FIXTURES.map(({ path, humanAuthorization }) => [path, humanAuthorization]),
   ];
   let ok = true;
   for (const [file, expect] of cases) {
@@ -114,60 +276,119 @@ function selfTest() {
       ok = false;
     }
   }
-  console.log(ok ? `self-test OK (${cases.length} cases)` : 'self-test FAILED');
+  const nameStatus = parseNameStatusZ('M\u0000src/a.mjs\u0000R100\u0000docs/old.md\u0000docs/new.md\u0000');
+  const numstat = parseNumstatZ('2\t1\tsrc/a.mjs\u00000\t0\t\u0000docs/old.md\u0000docs/new.md\u0000');
+  const merged = mergeFinalDiff(nameStatus, numstat, '3'.repeat(40), false);
+  const subject = plannedSubject([
+    '--artifact-version',
+    '3',
+    '--artifact-fingerprint',
+    'A'.repeat(64),
+  ]);
+  const incompleteSubject = plannedSubject([]);
+  const traversalProof = classifyLaneProof({
+    mode: 'planned',
+    configuredBase: { ref: 'origin/main', oid: '1'.repeat(40) },
+    subject,
+    planned: {
+      complete: true,
+      estimatedChangedLines: 1,
+      files: [{ path: '../.opencode/plugins/autoloop.js', contentRead: true }],
+      persistedData: false,
+    },
+  });
+  const diffChecks = [
+    ['name-status complete', nameStatus.complete && nameStatus.files.length === 2],
+    ['rename sides retained', nameStatus.files[1].previousPath === 'docs/old.md' && nameStatus.files[1].path === 'docs/new.md'],
+    ['numstat complete', numstat.complete && numstat.files[0].additions === 2 && numstat.files[0].deletions === 1],
+    ['diff merge complete', merged.complete && merged.changedFiles === 2],
+    ['binary numstat opaque', parseNumstatZ('-\t-\tasset.png\u0000').complete === false],
+    ['planned subject parsed', subject.artifactVersion === 3 && subject.fingerprint === 'a'.repeat(64)],
+    ['missing planned subject remains typed', incompleteSubject.artifactVersion === null && incompleteSubject.fingerprint === ''],
+    ['normalized traversal is incomplete', traversalProof.decisionEvidence.sourceComplete === false],
+    ['normalized traversal is not reported as a path', proofPaths(traversalProof).length === 0],
+  ];
+  for (const [name, passed] of diffChecks) {
+    if (!passed) {
+      console.error(`FAIL: ${name}`);
+      ok = false;
+    }
+  }
+  console.log(ok ? `self-test OK (${cases.length + diffChecks.length} checks)` : 'self-test FAILED');
   return ok;
 }
 
-function baseRange() {
-  try {
-    const base = execSync('gh repo view --json defaultBranchRef -q .defaultBranchRef.name', {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 10000,
-    }).trim();
-    if (base) return `origin/${base}...HEAD`;
-  } catch {
-    /* fall through */
+function outputResult(files, laneProof, args, sourceComplete, error = null) {
+  const hits = matchEscalate(files);
+  if (args.includes('--json')) {
+    console.log(JSON.stringify({ laneProof, escalationHits: hits, sourceComplete, error }, null, 2));
+  } else {
+    for (const { file, glob } of hits) console.log(`ESCALATE  ${file}  (matched ${glob})`);
+    console.log(`LANE_PROOF ${JSON.stringify(laneProof)}`);
+    if (error) console.error(`escalate-paths: ${error}`);
+    else if (hits.length) console.log('→ apply `human:authorize` and record the matched path');
+    else console.log('no escalate paths touched');
   }
-  return 'origin/main...HEAD';
+  if (!sourceComplete) return 2;
+  return hits.length ? 1 : 0;
 }
 
 function main() {
   const args = process.argv.slice(2);
   if (args.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  let files;
   if (args.includes('--working-tree')) {
-    // Uncommitted + untracked paths, for the Prime dirty-tree attribution check.
     try {
-      const tracked = execSync('git diff --name-only HEAD', { encoding: 'utf8' }).split('\n').filter(Boolean);
-      const untracked = execSync('git ls-files --others --exclude-standard', { encoding: 'utf8' }).split('\n').filter(Boolean);
-      files = [...new Set([...tracked, ...untracked])];
-    } catch (e) {
-      console.error(`escalate-paths: git working-tree read failed: ${e.message}`);
-      process.exit(2);
-    }
-  } else {
-    const range = args.find((a) => !a.startsWith('-')) ?? baseRange();
-    try {
-      files = execSync(`git diff --name-only ${range}`, { encoding: 'utf8' })
-        .split('\n')
-        .filter(Boolean);
-    } catch (e) {
-      console.error(`escalate-paths: git diff failed for range "${range}": ${e.message}`);
+      const tracked = gitText(['diff', '--name-only', '-z', 'HEAD']).split('\0').filter(Boolean);
+      const untracked = gitText(['ls-files', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean);
+      const files = [...new Set([...tracked, ...untracked])];
+      const hits = matchEscalate(files);
+      for (const { file, glob } of hits) console.log(`ESCALATE  ${file}  (matched ${glob})`);
+      if (hits.length) console.log('→ apply `human:authorize` and record the matched path');
+      else console.log('no escalate paths touched');
+      process.exit(hits.length ? 1 : 0);
+    } catch (error) {
+      console.error(`escalate-paths: git working-tree read failed: ${error.message}`);
       process.exit(2);
     }
   }
-  const hits = matchEscalate(files);
-  for (const { file, glob } of hits) console.log(`ESCALATE  ${file}  (matched ${glob})`);
-  if (hits.length > 0) {
-    console.log('→ self-apply the `human:authorize` label and call it out in the PR body (STATE → Escalate-list)');
-    process.exit(1);
+
+  const base = resolveBase(args);
+  const mode = args.includes('--planned-json') || args.includes('--planned-path') || args.includes('--planned-paths')
+    ? 'planned'
+    : 'final';
+  let evidence;
+  let subject = mode === 'planned'
+    ? plannedSubject(args)
+    : { kind: 'head', headOid: '' };
+  let evidenceError = base.error;
+  try {
+    if (mode === 'planned') {
+      evidence = plannedInput(args);
+    } else if (base.error) {
+      evidence = { complete: false, changedFiles: null, files: [], persistedData: null };
+    } else {
+      ({ evidence, subject } = finalInput(base.configuredBase, args));
+    }
+  } catch (error) {
+    evidenceError = `unable to read ${mode} evidence: ${String(error.message).slice(0, 160)}`;
+    evidence = mode === 'planned'
+      ? { complete: false, files: [], estimatedChangedLines: null, persistedData: null }
+      : { complete: false, changedFiles: null, files: [], persistedData: null };
   }
-  console.log('no escalate paths touched');
-  process.exit(0);
+  const laneProof = classifyLaneProof(
+    {
+      mode,
+      configuredBase: base.configuredBase,
+      subject,
+      [mode]: evidence,
+    },
+    { extraHumanAuthorizationGlobs: ESCALATE_PATHS },
+  );
+  const files = proofPaths(laneProof);
+  const sourceComplete = laneProof.decisionEvidence.sourceComplete;
+  process.exit(outputResult(files, laneProof, args, sourceComplete, evidenceError));
 }
 
-// realpath compare — the naive `file://` string check fails open on encoded paths and symlinks.
 const isMain = (() => {
   if (!process.argv[1]) return false;
   try {

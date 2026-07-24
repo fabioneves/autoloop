@@ -19,10 +19,7 @@
 import { execSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-
-const LOOP_BRANCH_RE = /^(feat|fix|chore|docs|refactor|test|perf|build|ci)\/gh-(\d+)-/;
-// Loop-owned claim: closing keyword (optional colon) + `#N`. KEEP IN SYNC with loop-scope.mjs.
-const CLOSES_RE = /\b(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed)):?\s+#(\d+)/i;
+import { CLAIM_CONTRACT_FIXTURES, parseLoopClaim } from './claim-contract.mjs';
 
 function sh(cmd, timeout = 20000) {
   return execSync(cmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout });
@@ -41,10 +38,9 @@ export function classifyPrs(prs) {
   const loopOwned = [];
   const human = [];
   for (const pr of prs ?? []) {
-    const branchMatch = LOOP_BRANCH_RE.exec(pr.headRefName ?? '');
-    const closes = CLOSES_RE.exec(pr.body ?? '');
-    if (branchMatch && closes) {
-      loopOwned.push({ ...pr, issue: Number(closes[5] ?? closes[4]), orphanCandidate: !!pr.isDraft });
+    const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
+    if (claim.valid) {
+      loopOwned.push({ ...pr, issue: claim.issue, orphanCandidate: !!pr.isDraft });
     } else {
       human.push({ number: pr.number, headRefName: pr.headRefName });
     }
@@ -69,12 +65,12 @@ export function blockedBy(body) {
 }
 
 function selfTest() {
-  const prs = [
-    { number: 1, headRefName: 'feat/gh-7-x', body: 'Closes #7', isDraft: true },
-    { number: 2, headRefName: 'feat/gh-8-y', body: 'Closes #8', isDraft: false },
-    { number: 3, headRefName: 'feature/TMSLA-1', body: 'Closes #9', isDraft: false },
-    { number: 4, headRefName: 'fix/gh-9-z', body: 'no claim', isDraft: false },
-  ];
+  const prs = CLAIM_CONTRACT_FIXTURES.map((fixture, index) => ({
+    number: index + 1,
+    headRefName: fixture.branch,
+    body: fixture.body,
+    isDraft: index === 0,
+  }));
   const { loopOwned, human } = classifyPrs(prs);
   const prov = labelProvenance([
     { event: 'labeled', label: { name: 'loop-ready' }, actor: { login: 'a' }, created_at: 't1' },
@@ -82,10 +78,12 @@ function selfTest() {
     { event: 'labeled', label: { name: 'loop-ready' }, actor: { login: 'b' }, created_at: 't3' },
   ]);
   const blocked = blockedBy('body\n## Blocked by\n- #12\n- #34\n\n## Next\n#99');
+  const expectedIssues = CLAIM_CONTRACT_FIXTURES.filter((fixture) => fixture.valid)
+    .map((fixture) => fixture.issue);
   const ok =
-    loopOwned.length === 2 && loopOwned[0].issue === 7 && loopOwned[0].orphanCandidate === true &&
-    loopOwned[1].issue === 8 && loopOwned[1].orphanCandidate === false &&
-    human.length === 2 &&
+    loopOwned.map((pr) => pr.issue).join(',') === expectedIssues.join(',') &&
+    loopOwned[0].orphanCandidate === true &&
+    human.length === CLAIM_CONTRACT_FIXTURES.filter((fixture) => !fixture.valid).length &&
     prov.labeledBy === 'b' && prov.labeledAt === 't3' &&
     labelProvenance([]) === null &&
     blocked.length === 2 && blocked[0] === 12 && blocked[1] === 34 &&
