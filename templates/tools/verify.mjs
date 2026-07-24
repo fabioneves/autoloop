@@ -39,27 +39,7 @@ function checkJson(path) {
 
 function pluginChecks(root) {
   const toolsDir = resolve(root, 'templates', 'tools');
-  const toolNames = readdirSync(toolsDir)
-    .filter((name) => name.endsWith('.mjs'))
-    .sort();
-  const checks = [];
-
-  for (const name of toolNames) {
-    const path = join(toolsDir, name);
-    checks.push({
-      name: `syntax ${name}`,
-      execute: () => run(process.execPath, ['--check', path], root),
-    });
-    if (
-      name !== basename(fileURLToPath(import.meta.url))
-      && readFileSync(path, 'utf8').includes('--self-test')
-    ) {
-      checks.push({
-        name: `self-test ${name}`,
-        execute: () => run(process.execPath, [path, '--self-test'], root),
-      });
-    }
-  }
+  const checks = toolChecks(root, toolsDir);
 
   checks.push({
     name: 'syntax opencode plugin',
@@ -110,6 +90,70 @@ function pluginChecks(root) {
   return checks;
 }
 
+function toolChecks(root, toolsDir) {
+  const checks = [];
+  const toolNames = readdirSync(toolsDir)
+    .filter((name) => name.endsWith('.mjs'))
+    .sort();
+  for (const name of toolNames) {
+    const path = join(toolsDir, name);
+    checks.push({
+      name: `syntax ${name}`,
+      execute: () => run(process.execPath, ['--check', path], root),
+    });
+    if (
+      name !== basename(fileURLToPath(import.meta.url))
+      && readFileSync(path, 'utf8').includes('--self-test')
+    ) {
+      checks.push({
+        name: `self-test ${name}`,
+        execute: () => run(process.execPath, [path, '--self-test'], root),
+      });
+    }
+  }
+  return checks;
+}
+
+function installChecks(root) {
+  const toolsDir = resolve(root, 'tools', 'agentic');
+  const checks = toolChecks(root, toolsDir);
+  checks.push({
+    name: 'ProjectConfig',
+    execute: () => run(
+      process.execPath,
+      [
+        resolve(toolsDir, 'config-contract.mjs'),
+        resolve(root, 'docs', 'agentic', 'STATE.md'),
+      ],
+      root,
+    ),
+  });
+  checks.push({
+    name: 'shell session-preflight',
+    execute: () => run(
+      'bash',
+      ['-n', resolve(toolsDir, 'session-preflight.sh')],
+      root,
+    ),
+  });
+  for (const relativePath of [
+    '.claude/settings.json',
+    '.codex/hooks.json',
+    'opencode.json',
+  ]) {
+    try {
+      readFileSync(resolve(root, relativePath));
+    } catch {
+      continue;
+    }
+    checks.push({
+      name: `json ${relativePath}`,
+      execute: () => checkJson(resolve(root, relativePath)),
+    });
+  }
+  return checks;
+}
+
 function selfTest() {
   const success = run(process.execPath, ['--version'], process.cwd());
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
@@ -135,10 +179,13 @@ function parseArgs(args) {
   if (args.length === 2 && args[0] === '--plugin-root' && args[1]) {
     return { mode: 'plugin', root: args[1], error: null };
   }
+  if (args.length === 2 && args[0] === '--install-root' && args[1]) {
+    return { mode: 'install', root: args[1], error: null };
+  }
   return {
     mode: null,
     root: null,
-    error: 'expected --plugin-root <path> or --self-test',
+    error: 'expected --plugin-root <path>, --install-root <path>, or --self-test',
   };
 }
 
@@ -150,8 +197,10 @@ function main() {
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
 
+  const root = resolve(parsed.root);
+  const checks = parsed.mode === 'plugin' ? pluginChecks(root) : installChecks(root);
   const failures = [];
-  for (const check of pluginChecks(resolve(parsed.root))) {
+  for (const check of checks) {
     const result = check.execute();
     if (result.ok) {
       console.log(`PASS ${check.name}`);

@@ -213,6 +213,7 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 | `tools/agentic/claim-contract.mjs` | `tools/claim-contract.mjs` | Canonical branch/body ownership parser |
 | `tools/agentic/command-guard.mjs` | `tools/command-guard.mjs` | Structured command/ref guard |
 | `tools/agentic/config-contract.mjs` | `tools/config-contract.mjs` | ProjectConfig and migration |
+| `tools/agentic/contract-lint.mjs` | `tools/contract-lint.mjs` | Forward-artifact contract drift |
 | `tools/agentic/delivery-contract.mjs` | `tools/delivery-contract.mjs` | Exact-head CI/delivery transition |
 | `tools/agentic/escalate-paths.mjs` | `tools/escalate-paths.mjs` | Configured-base lane-proof CLI |
 | `tools/agentic/label-swap-reminder.mjs` | same name | Label transition reminder |
@@ -225,12 +226,12 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 | `tools/agentic/run-scope.mjs` | `tools/run-scope.mjs` | Runtime open/finish compatibility wrapper |
 | `tools/agentic/runtime-contract.mjs` | `tools/runtime-contract.mjs` | Route/stage/capability/relaunch policy |
 | `tools/agentic/scan.mjs` | `tools/scan.mjs` | Complete typed startup snapshot |
+| `tools/agentic/snapshot-contract.mjs` | `tools/snapshot-contract.mjs` | Snapshot completeness and invalidation |
 | `tools/agentic/session-preflight.sh` | same name | Session injection |
 | `tools/agentic/stats.mjs` | `tools/stats.mjs` | Presentation statistics only |
 | `tools/agentic/subagent-transcript.mjs` | same name | Attributable transcript capture |
+| `tools/agentic/verify.mjs` | `tools/verify.mjs` | Canonical installed-contract verification |
 | `tools/agentic/writeback-check.mjs` | same name | Canonical writeback checks |
-
-When the snapshot contract is a separate template, vendor it beside `scan.mjs`.
 
 `publish-verdict.mjs`, `merge-authorization-contract.mjs`, and a filled
 `auto-merge.reference.mjs` are required only for a non-manual installation. Never invoke the
@@ -282,15 +283,8 @@ codex --version 2>/dev/null || echo codex:absent
 opencode --version 2>/dev/null || echo opencode:absent
 echo "=== config ==="
 node tools/agentic/config-contract.mjs docs/agentic/STATE.md 2>&1
-echo "=== self-tests ==="
-for f in tools/agentic/*.mjs; do
-  rg -q -- "--self-test" "$f" || continue
-  printf "%s: " "$f"
-  node "$f" --self-test 2>&1 | tail -1
-done
-echo "=== artifacts ==="
-node tools/agentic/adapter-contract.mjs --self-test
-node tools/agentic/release-verify.mjs --self-test
+echo "=== contracts ==="
+node tools/agentic/verify.mjs --install-root .
 echo "=== sizes ==="
 wc -c docs/agentic/STATE.md docs/agentic/ARCH.md 2>/dev/null
 ```
