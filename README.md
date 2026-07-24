@@ -383,11 +383,15 @@ Autoloop spends depth where it changes the outcome and keeps every wait visible:
   runs last on the review-converged tree.
 - **Idle exit:** no actionable PRs and no eligible issues means a clean stop, not a polling loop.
 
-The versioned [measurement contract](docs/measurement.md) retains immutable local raw records and
-reports comparable medians and nearest-rank p95s by workload, route, lane, and policy. Unknown
-provider telemetry carries a reason instead of becoming a zero. p95 is withheld below 20 samples,
-and performance budgets stay provisional below 100, so safety overhead and later efficiency gains
-remain measurable without overclaiming.
+The versioned [measurement contract](docs/measurement.md) atomically retains one write-once local
+unit record with a content fingerprint and store-local authentication, then reports strict unit
+and segment cohorts, medians, nearest-rank p95s, dynamic step metrics, and outcome rates. Unknown
+provider, model, token, context, cost, or avoided-cost evidence is typed unavailable instead of
+zero. Matched-checkpoint comparison is manual-to-manual; mode/workload budgets load authenticated
+record IDs from the local store, replay every named safe-system fingerprint, and refuse or stay
+provisional below metric-specific floors. The pipeline ships without fabricated baseline samples
+or preselected limits: real legacy/safe/post records and operator-derived budgets still have to be
+captured.
 
 ## Observable and recoverable
 

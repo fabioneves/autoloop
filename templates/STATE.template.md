@@ -303,6 +303,18 @@ establishes infeasibility or a hard-defer defers immediately instead.
 the defer flow.** The guardrail verifies *who applied* `loop-ready`; cycling it would launder the
 trust chain through the loop's own login.
 
+Workflow measurements are local evidence, never routing or lifecycle authority. One terminal unit
+retains reconciled aggregates plus separate stage/round/route/adapter segments and an explicit
+terminal outcome. The persistence tool adds a content fingerprint and store-local authentication
+before an atomic write-once create. Provider and avoided-cost facts that cannot be verified use
+typed unavailable reasons. Legacy-to-safe comparisons hold the complete flow/intent/route/config/
+capability/outage/degradation/provider/model/engine cohort identity constant except for explicitly
+declared checkpoint fields. Budget commands load authenticated store record IDs and replay exact
+source contents; caller JSON cannot become enforceable evidence. A p95 needs 20 observed values
+for that metric; a budget remains provisional until its named safe-system source and current cohort
+both meet the declared stable floor of at least 100. Missing historical records are never
+fabricated.
+
 **Step labels are breadcrumbs, never decision inputs.** `loop-started` and the `loop:*` labels are
 the loop's own progress trail — truth stays git/GitHub (open PRs, merged PRs, gate verdicts), and
 no check may key off a step label. A stale step label from a crashed run is reconciled at the next

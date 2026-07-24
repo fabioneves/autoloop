@@ -309,9 +309,16 @@ Post one issue run record via body file containing:
 
 Post one end-of-run digest and scoreboard, not one per tool phase. `stats.mjs` is presentation
 only; `measurement-contract.mjs` is the baseline/regression authority. Persist the validated raw
-record with `node tools/agentic/measurement-contract.mjs --record`; unobservable provider fields
-are null with a typed reason, never inferred zero. Do not claim a p95 below 20 comparable samples
-or a stable budget below 100.
+unit record with `node tools/agentic/measurement-contract.mjs --record`; the tool adds a content
+fingerprint and store-local authentication before its atomic write-once create. Record every
+dispatch, gate, and delivery stage as its own round/route/adapter segment while retaining
+reconciled unit aggregates and an explicit terminal outcome. Unobservable provider, model, token,
+context, cost, or avoided-cost evidence uses a typed unavailable reason, never inferred zero. A
+legacy checkpoint must be genuine retained evidence, not a current run relabelled after the fact.
+Budget source/evaluation commands take record IDs and load authenticated store records; caller
+JSON is never enforceable evidence. Do not claim a p95 below 20 observed values for that metric or
+enforce a budget until both its named safe-system source and current cohort meet the declared
+stable floor of at least 100.
 
 Invalidate relevant snapshot sections, re-derive state, and take the next unit unless
 `RuntimeContract.finish()` authorizes:
