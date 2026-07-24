@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { CLAIM_CONTRACT_FIXTURES, parseLoopClaim } from './claim-contract.mjs';
 import {
   SNAPSHOT_SECTIONS,
+  blockedByIssueNumbers,
   collectPaginated,
   combineSections,
   completeSection,
@@ -348,12 +349,6 @@ export function labelProvenance(timeline) {
     : null;
 }
 
-export function blockedBy(body) {
-  const section = /##\s*Blocked by([\s\S]*?)(\n##\s|$)/i.exec(body ?? '');
-  if (!section) return [];
-  return [...section[1].matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
-}
-
 async function fetchRepo() {
   try {
     const data = await ghJson(['repo', 'view', '--json', 'nameWithOwner,defaultBranchRef']);
@@ -531,7 +526,7 @@ async function fetchQueue(openIssues, repo) {
       && provenance.labeledAt.length > 0;
     const item = {
       ...issue,
-      blockedBy: blockedBy(issue.body),
+      blockedBy: blockedByIssueNumbers(issue.body),
       provenance,
     };
     return {
@@ -916,11 +911,17 @@ function focusSection(section, predicate) {
     : incompleteSection(section.error.code, section.error.message, items);
 }
 
-function focusAuthorVerification(section, number) {
+function focusAuthorVerification(section, number, issueNumber) {
   const items = section.items
     .map((author) => ({
       ...author,
-      evidence: author.evidence.filter((item) => item.prNumber === number),
+      evidence: author.evidence.filter((item) =>
+        item.prNumber === number
+        || (
+          item.kind === 'queue-label'
+          && Number.isSafeInteger(issueNumber)
+          && item.issueNumber === issueNumber
+        )),
     }))
     .filter((author) => author.evidence.length > 0);
   return section.complete
@@ -929,6 +930,9 @@ function focusAuthorVerification(section, number) {
 }
 
 function focusPr(snapshot, number) {
+  const issueNumber = snapshot.sections.openPrs.items
+    .find((pr) => pr.number === number && pr.ownership === 'loop')
+    ?.issue;
   const sections = {
     ...snapshot.sections,
     openPrs: focusSection(snapshot.sections.openPrs, (pr) => pr.number === number),
@@ -939,6 +943,7 @@ function focusPr(snapshot, number) {
     authorVerification: focusAuthorVerification(
       snapshot.sections.authorVerification,
       number,
+      issueNumber,
     ),
   };
   return createSnapshot({ scannedAt: snapshot.scannedAt, sections });
@@ -957,7 +962,7 @@ async function selfTest() {
     { event: 'labeled', label: { name: 'loop-blocked' }, actor: { login: 'x' }, created_at: 't2' },
     { event: 'labeled', label: { name: 'loop-ready' }, actor: { login: 'b' }, created_at: 't3' },
   ]);
-  const blocked = blockedBy('body\n## Blocked by\n- #12\n- #34\n\n## Next\n#99');
+  const blocked = blockedByIssueNumbers('body\n## Blocked by\n- #12\n- #34\n\n## Next\n#99');
   const expectedIssues = CLAIM_CONTRACT_FIXTURES
     .filter((fixture) => fixture.valid)
     .map((fixture) => fixture.issue);
@@ -1058,6 +1063,45 @@ async function selfTest() {
       },
     ],
   }]);
+  focusedSections.openPrs = completeSection([{
+    number: 3,
+    title: 'loop PR',
+    body: 'Closes #7',
+    isDraft: false,
+    reviewDecision: 'APPROVED',
+    headRefName: 'feat/gh-7-loop-pr',
+    headRefOid: 'a'.repeat(40),
+    baseRefName: 'main',
+    mergeStateStatus: 'CLEAN',
+    mergeable: 'MERGEABLE',
+    mergedAt: null,
+    updatedAt: '2026-01-01T00:00:02Z',
+    author: 'writer',
+    headRepository: 'owner/repo',
+    statusCheckState: 'SUCCESS',
+    statusCheckRollup: [],
+    issue: 7,
+    orphanCandidate: false,
+    ownership: 'loop',
+  }]);
+  focusedSections.authorVerification = completeSection([
+    ...focusedSections.authorVerification.items,
+    {
+      login: 'labeler',
+      roleName: 'maintain',
+      permission: 'write',
+      evidence: [{
+        kind: 'queue-label',
+        issueNumber: 7,
+        author: 'labeler',
+        authorAssociation: null,
+        body: '',
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: null,
+        url: null,
+      }],
+    },
+  ]);
   const focused = focusPr(createSnapshot({
     scannedAt: '2026-01-01T00:00:00.000Z',
     sections: focusedSections,
@@ -1083,7 +1127,8 @@ async function selfTest() {
     ],
     [
       'blocked-by section parsing',
-      blocked.join(',') === '12,34' && blockedBy('no section #5').length === 0,
+      blocked.join(',') === '12,34'
+        && blockedByIssueNumbers('no section #5').length === 0,
     ],
     ['durable body hash changes on edits', issueBefore.bodySha256 !== issueAfter.bodySha256],
     [
@@ -1122,9 +1167,18 @@ async function selfTest() {
     ],
     [
       'focused author evidence excludes other PRs',
-      focused.sections.authorVerification.items.length === 1
-        && focused.sections.authorVerification.items[0].evidence.length === 1
-        && focused.sections.authorVerification.items[0].evidence[0].prNumber === 3,
+      focused.sections.authorVerification.items.some((author) =>
+        author.login === 'reviewer'
+        && author.evidence.length === 1
+        && author.evidence[0].prNumber === 3),
+    ],
+    [
+      'focused author evidence retains matching queue provenance',
+      focused.sections.authorVerification.items.length === 2
+        && focused.sections.authorVerification.items.some((author) =>
+          author.login === 'labeler'
+          && author.evidence.length === 1
+          && author.evidence[0].issueNumber === 7),
     ],
     [
       'partial combinations remain incomplete',

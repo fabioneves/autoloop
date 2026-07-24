@@ -2,6 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { parseLoopClaim } from './claim-contract.mjs';
 
 export const SNAPSHOT_VERSION = 1;
 export const SNAPSHOT_SECTIONS = Object.freeze([
@@ -75,6 +76,85 @@ const SNAPSHOT_KEYS = [
 ];
 const SECTION_KEYS = ['complete', 'error', 'items'];
 const INVALIDATION_KEYS = ['reasonCodes', 'sections'];
+const ISSUE_ITEM_KEYS = [
+  'number',
+  'title',
+  'body',
+  'bodySha256',
+  'updatedAt',
+  'lastEditedAt',
+  'labels',
+];
+const CHECK_CONTEXT_KEYS = [
+  'kind',
+  'name',
+  'status',
+  'conclusion',
+  'detailsUrl',
+];
+const PULL_REQUEST_ITEM_KEYS = [
+  'number',
+  'title',
+  'body',
+  'isDraft',
+  'reviewDecision',
+  'headRefName',
+  'headRefOid',
+  'baseRefName',
+  'mergeStateStatus',
+  'mergeable',
+  'mergedAt',
+  'updatedAt',
+  'author',
+  'headRepository',
+  'statusCheckState',
+  'statusCheckRollup',
+  'issue',
+  'orphanCandidate',
+  'ownership',
+];
+const QUEUE_ITEM_KEYS = [
+  ...ISSUE_ITEM_KEYS,
+  'blockedBy',
+  'provenance',
+];
+const COMMENT_EVIDENCE_KEYS = [
+  'kind',
+  'id',
+  'prNumber',
+  'author',
+  'authorAssociation',
+  'body',
+  'state',
+  'createdAt',
+  'updatedAt',
+  'url',
+];
+const LABEL_EVIDENCE_KEYS = [
+  'kind',
+  'issueNumber',
+  'author',
+  'authorAssociation',
+  'body',
+  'createdAt',
+  'updatedAt',
+  'url',
+];
+const REVIEW_THREAD_ITEM_KEYS = [
+  'id',
+  'prNumber',
+  'path',
+  'line',
+  'originalLine',
+  'isOutdated',
+  'comments',
+];
+const AUTHOR_VERIFICATION_ITEM_KEYS = [
+  'login',
+  'roleName',
+  'permission',
+  'evidence',
+];
 const ROLE_PERMISSIONS = new Set(['admin', 'none', 'read', 'write']);
 const REVIEW_STATES = new Set([
   'APPROVED',
@@ -82,6 +162,38 @@ const REVIEW_STATES = new Set([
   'COMMENTED',
   'DISMISSED',
   'PENDING',
+]);
+const REVIEW_DECISIONS = new Set(['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED']);
+const MERGEABLE_STATES = new Set(['CONFLICTING', 'MERGEABLE', 'UNKNOWN']);
+const MERGE_STATE_STATUSES = new Set([
+  'BEHIND',
+  'BLOCKED',
+  'CLEAN',
+  'DIRTY',
+  'DRAFT',
+  'HAS_HOOKS',
+  'UNKNOWN',
+  'UNSTABLE',
+]);
+const STATUS_STATES = new Set(['ERROR', 'EXPECTED', 'FAILURE', 'PENDING', 'SUCCESS']);
+const CHECK_STATUS_STATES = new Set([
+  'COMPLETED',
+  'IN_PROGRESS',
+  'PENDING',
+  'QUEUED',
+  'REQUESTED',
+  'WAITING',
+]);
+const CHECK_CONCLUSION_STATES = new Set([
+  'ACTION_REQUIRED',
+  'CANCELLED',
+  'FAILURE',
+  'NEUTRAL',
+  'SKIPPED',
+  'STALE',
+  'STARTUP_FAILURE',
+  'SUCCESS',
+  'TIMED_OUT',
 ]);
 const INVALIDATED_SECTIONS = {
   GIT_MUTATION: ['tree'],
@@ -111,11 +223,66 @@ function sha256(value) {
   return createHash('sha256').update(stableJson(value)).digest('hex');
 }
 
+function sha256Text(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
 function hasExactKeys(value, keys) {
-  return value !== null
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
+  if (
+    value === null
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))
+    || typeof value.toJSON === 'function'
+  ) {
+    return false;
+  }
+  const ownKeys = Reflect.ownKeys(value);
+  if (
+    ownKeys.some((key) => typeof key !== 'string')
+    || ownKeys.sort().join('\0') !== [...keys].sort().join('\0')
+  ) {
+    return false;
+  }
+  return ownKeys.every((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable === true
+      && Object.hasOwn(descriptor, 'value')
+      && !Object.hasOwn(descriptor, 'get')
+      && !Object.hasOwn(descriptor, 'set');
+  });
+}
+
+function isDenseJsonArray(value) {
+  if (
+    !Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Array.prototype
+    || typeof value.toJSON === 'function'
+  ) {
+    return false;
+  }
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== value.length + 1) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (ownKeys[index] !== String(index)) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(value, ownKeys[index]);
+    if (
+      descriptor?.enumerable !== true
+      || !Object.hasOwn(descriptor, 'value')
+      || Object.hasOwn(descriptor, 'get')
+      || Object.hasOwn(descriptor, 'set')
+    ) {
+      return false;
+    }
+  }
+  if (ownKeys[value.length] !== 'length') return false;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  return lengthDescriptor?.value === value.length
+    && lengthDescriptor.enumerable === false
+    && lengthDescriptor.configurable === false
+    && typeof lengthDescriptor.writable === 'boolean';
 }
 
 function deepFreeze(value) {
@@ -149,7 +316,7 @@ function validError(error) {
 
 function validSection(section) {
   return hasExactKeys(section, SECTION_KEYS)
-    && Array.isArray(section.items)
+    && isDenseJsonArray(section.items)
     && typeof section.complete === 'boolean'
     && (
       (section.complete === true && section.error === null)
@@ -179,7 +346,14 @@ function nullableString(value) {
 }
 
 function validDateTime(value) {
-  return typeof value === 'string' && Number.isFinite(Date.parse(value));
+  if (typeof value !== 'string') return false;
+  const match =
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?Z$/.exec(value);
+  if (!match) return false;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return false;
+  const normalized = `${match[1]}.${(match[2] ?? '').padEnd(3, '0')}Z`;
+  return new Date(timestamp).toISOString() === normalized;
 }
 
 function nullableDateTime(value) {
@@ -190,76 +364,111 @@ function positiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
 
+function validObjectId(value) {
+  return typeof value === 'string'
+    && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value);
+}
+
 function validIssueItem(item) {
-  return isRecord(item)
+  return hasExactKeys(item, ISSUE_ITEM_KEYS)
     && positiveInteger(item.number)
     && typeof item.title === 'string'
     && typeof item.body === 'string'
     && typeof item.bodySha256 === 'string'
     && /^[0-9a-f]{64}$/.test(item.bodySha256)
+    && item.bodySha256 === sha256Text(item.body)
     && validDateTime(item.updatedAt)
     && nullableDateTime(item.lastEditedAt)
-    && Array.isArray(item.labels)
+    && isDenseJsonArray(item.labels)
     && item.labels.every(nonEmptyString)
     && new Set(item.labels).size === item.labels.length;
 }
 
 function validCheckContext(item) {
-  return isRecord(item)
-    && ['check-run', 'status-context'].includes(item.kind)
-    && nonEmptyString(item.name)
-    && nonEmptyString(item.status)
-    && nullableString(item.conclusion)
-    && nullableString(item.detailsUrl);
+  if (
+    !hasExactKeys(item, CHECK_CONTEXT_KEYS)
+    || !['check-run', 'status-context'].includes(item.kind)
+    || !nonEmptyString(item.name)
+    || !nullableString(item.detailsUrl)
+  ) {
+    return false;
+  }
+  if (item.kind === 'check-run') {
+    return CHECK_STATUS_STATES.has(item.status)
+      && (item.conclusion === null || CHECK_CONCLUSION_STATES.has(item.conclusion));
+  }
+  return STATUS_STATES.has(item.status) && item.conclusion === null;
 }
 
 function validPullRequestItem(item) {
   const loopOwned = item?.ownership === 'loop';
-  return isRecord(item)
+  const claim = parseLoopClaim({
+    branch: item?.headRefName,
+    body: item?.body,
+  });
+  return hasExactKeys(item, PULL_REQUEST_ITEM_KEYS)
     && positiveInteger(item.number)
     && typeof item.title === 'string'
     && typeof item.body === 'string'
     && typeof item.isDraft === 'boolean'
-    && nullableString(item.reviewDecision)
+    && (item.reviewDecision === null || REVIEW_DECISIONS.has(item.reviewDecision))
     && nonEmptyString(item.headRefName)
-    && typeof item.headRefOid === 'string'
-    && /^[0-9a-f]{40,64}$/.test(item.headRefOid)
+    && validObjectId(item.headRefOid)
     && nonEmptyString(item.baseRefName)
-    && nullableString(item.mergeStateStatus)
-    && nullableString(item.mergeable)
+    && MERGE_STATE_STATUSES.has(item.mergeStateStatus)
+    && MERGEABLE_STATES.has(item.mergeable)
     && nullableDateTime(item.mergedAt)
     && validDateTime(item.updatedAt)
     && nullableString(item.author)
     && nullableString(item.headRepository)
-    && nullableString(item.statusCheckState)
-    && Array.isArray(item.statusCheckRollup)
+    && (item.statusCheckState === null || STATUS_STATES.has(item.statusCheckState))
+    && isDenseJsonArray(item.statusCheckRollup)
     && item.statusCheckRollup.every(validCheckContext)
     && (item.issue === null || positiveInteger(item.issue))
     && typeof item.orphanCandidate === 'boolean'
     && ['human', 'loop'].includes(item.ownership)
     && loopOwned === positiveInteger(item.issue)
+    && loopOwned === claim.valid
+    && (!loopOwned || claim.issue === item.issue)
     && item.orphanCandidate === (loopOwned && item.isDraft);
 }
 
 function validProvenance(value) {
-  return isRecord(value)
+  return hasExactKeys(value, ['labeledBy', 'labeledAt'])
     && nonEmptyString(value.labeledBy)
     && validDateTime(value.labeledAt);
 }
 
 function validQueueItem(item, complete) {
-  return validIssueItem(item)
-    && Array.isArray(item.blockedBy)
+  return hasExactKeys(item, QUEUE_ITEM_KEYS)
+    && ISSUE_ITEM_KEYS.every((key) => key in item)
+    && validIssueItem(Object.fromEntries(
+      ISSUE_ITEM_KEYS.map((key) => [key, item[key]]),
+    ))
+    && isDenseJsonArray(item.blockedBy)
     && item.blockedBy.every(positiveInteger)
+    && stableJson(item.blockedBy) === stableJson(blockedByIssueNumbers(item.body))
     && (
       validProvenance(item.provenance)
       || (!complete && item.provenance === null)
     );
 }
 
+export function blockedByIssueNumbers(body) {
+  const section = /##\s*Blocked by([\s\S]*?)(\n##\s|$)/i.exec(body ?? '');
+  if (!section) return [];
+  return [...new Set(
+    [...section[1].matchAll(/#([1-9]\d*)/g)]
+      .map((match) => Number(match[1])),
+  )];
+}
+
 function validEvidenceItem(item, requireAuthor = false) {
+  const expectedKeys = item?.kind === 'queue-label'
+    ? LABEL_EVIDENCE_KEYS
+    : COMMENT_EVIDENCE_KEYS;
   if (
-    !isRecord(item)
+    !hasExactKeys(item, expectedKeys)
     || !['issue-comment', 'queue-label', 'review', 'review-thread-comment'].includes(item.kind)
     || !(nonEmptyString(item.author) || (!requireAuthor && item.author === null))
     || !nullableString(item.authorAssociation)
@@ -271,59 +480,63 @@ function validEvidenceItem(item, requireAuthor = false) {
     return false;
   }
   if (item.kind === 'queue-label') {
-    return positiveInteger(item.issueNumber)
-      && (item.state === null || item.state === undefined);
+    return positiveInteger(item.issueNumber);
   }
   return positiveInteger(item.prNumber)
     && nonEmptyString(item.id)
     && (
       item.kind === 'review'
         ? REVIEW_STATES.has(item.state)
-        : item.state === null || item.state === undefined
+        : item.state === null
     );
 }
 
 function validReviewThreadItem(item) {
-  return isRecord(item)
+  return hasExactKeys(item, REVIEW_THREAD_ITEM_KEYS)
     && nonEmptyString(item.id)
     && positiveInteger(item.prNumber)
     && nonEmptyString(item.path)
     && (item.line === null || positiveInteger(item.line))
     && (item.originalLine === null || positiveInteger(item.originalLine))
     && typeof item.isOutdated === 'boolean'
-    && Array.isArray(item.comments)
+    && isDenseJsonArray(item.comments)
     && item.comments.every((comment) =>
       comment?.kind === 'review-thread-comment'
       && validEvidenceItem(comment));
 }
 
 function validAuthorVerificationItem(item, complete) {
-  return isRecord(item)
+  return hasExactKeys(item, AUTHOR_VERIFICATION_ITEM_KEYS)
     && nonEmptyString(item.login)
     && nullableString(item.roleName)
     && (
       ROLE_PERMISSIONS.has(item.permission)
       || (!complete && item.permission === null)
     )
-    && Array.isArray(item.evidence)
+    && isDenseJsonArray(item.evidence)
     && item.evidence.length > 0
     && item.evidence.every((evidence) =>
       validEvidenceItem(evidence, true) && evidence.author === item.login);
 }
 
 const SECTION_ITEM_VALIDATORS = Object.freeze({
-  repo: (item) => isRecord(item)
+  repo: (item) => hasExactKeys(
+    item,
+    ['owner', 'name', 'nameWithOwner', 'defaultBranch'],
+  )
     && nonEmptyString(item.owner)
     && nonEmptyString(item.name)
     && item.nameWithOwner === `${item.owner}/${item.name}`
     && nonEmptyString(item.defaultBranch),
-  tree: (item) => isRecord(item)
-    && Array.isArray(item.dirtyEntries)
+  tree: (item) => hasExactKeys(
+    item,
+    ['dirtyEntries', 'dirtyPaths', 'branch', 'headOid'],
+  )
+    && isDenseJsonArray(item.dirtyEntries)
     && item.dirtyEntries.every((entry) => typeof entry === 'string')
     && item.dirtyPaths === item.dirtyEntries.length
     && nonEmptyString(item.branch)
-    && typeof item.headOid === 'string'
-    && /^[0-9a-f]{40,64}$/.test(item.headOid),
+    && validObjectId(item.headOid),
   openPrs: validPullRequestItem,
   queue: validQueueItem,
   blockedIssues: validIssueItem,
@@ -347,7 +560,7 @@ function validSnapshotSection(name, section) {
 }
 
 export function completeSection(items = []) {
-  if (!Array.isArray(items)) {
+  if (!isDenseJsonArray(items)) {
     return incompleteSection(
       'SECTION_ITEMS_INVALID',
       'complete snapshot sections require an item array',
@@ -362,14 +575,14 @@ export function completeSection(items = []) {
 
 export function incompleteSection(code, message, items = []) {
   return {
-    items: Array.isArray(items) ? items : [],
+    items: isDenseJsonArray(items) ? items : [],
     complete: false,
     error: errorRecord(code, message),
   };
 }
 
 export function combineSections(sections) {
-  if (!Array.isArray(sections) || sections.some((section) => !validSection(section))) {
+  if (!isDenseJsonArray(sections) || sections.some((section) => !validSection(section))) {
     return incompleteSection(
       'SECTION_COMBINATION_INVALID',
       'cannot combine invalid snapshot sections',
@@ -418,7 +631,7 @@ export async function collectPaginated(
     if (
       !response
       || typeof response !== 'object'
-      || !Array.isArray(response.items)
+      || !isDenseJsonArray(response.items)
       || !(
         response.nextCursor === null
         || (typeof response.nextCursor === 'string' && response.nextCursor.length > 0)
@@ -458,7 +671,7 @@ export async function collectPaginated(
 
 export async function mapBounded(values, concurrency, worker) {
   if (
-    !Array.isArray(values)
+    !isDenseJsonArray(values)
     || !Number.isSafeInteger(concurrency)
     || concurrency < 1
     || typeof worker !== 'function'
@@ -516,7 +729,7 @@ export function issueSnapshotItem(issue = {}) {
     number: Number.isSafeInteger(issue.number) && issue.number > 0 ? issue.number : null,
     title: typeof issue.title === 'string' ? issue.title : '',
     body,
-    bodySha256: createHash('sha256').update(body).digest('hex'),
+    bodySha256: sha256Text(body),
     updatedAt: typeof issue.updatedAt === 'string' ? issue.updatedAt : null,
     lastEditedAt: typeof issue.lastEditedAt === 'string' ? issue.lastEditedAt : null,
     labels: [...new Set(labels)].sort(),
@@ -586,8 +799,8 @@ export function verifySnapshot(snapshot) {
         validSnapshotSection(name, snapshot.sections[name]))
       || snapshot.generation !== snapshotGeneration(snapshot.scannedAt, snapshot.sections)
       || !hasExactKeys(snapshot.invalidation, INVALIDATION_KEYS)
-      || !Array.isArray(snapshot.invalidation.reasonCodes)
-      || !Array.isArray(snapshot.invalidation.sections)
+      || !isDenseJsonArray(snapshot.invalidation.reasonCodes)
+      || !isDenseJsonArray(snapshot.invalidation.sections)
       || !snapshot.invalidation.reasonCodes.every((reason) =>
         SNAPSHOT_INVALIDATION_REASONS.includes(reason))
       || !snapshot.invalidation.sections.every((name) => SNAPSHOT_SECTIONS.includes(name))
@@ -658,7 +871,7 @@ export function invalidateSnapshot(snapshot, reasonCode) {
 export function absenceDecision(snapshot, sectionNames, matches) {
   if (
     !verifySnapshot(snapshot)
-    || !Array.isArray(sectionNames)
+    || !isDenseJsonArray(sectionNames)
     || sectionNames.length === 0
     || sectionNames.some((name) => !SNAPSHOT_SECTIONS.includes(name))
     || new Set(sectionNames).size !== sectionNames.length
@@ -721,6 +934,34 @@ async function selfTest() {
       checks.push([name, false]);
     }
   };
+  const pullRequestItem = (overrides = {}) => ({
+    number: 8,
+    title: 'loop unit',
+    body: 'Closes #7',
+    isDraft: false,
+    reviewDecision: 'APPROVED',
+    headRefName: 'feat/gh-7-loop-unit',
+    headRefOid: 'a'.repeat(40),
+    baseRefName: 'main',
+    mergeStateStatus: 'CLEAN',
+    mergeable: 'MERGEABLE',
+    mergedAt: null,
+    updatedAt: '2026-01-01T00:00:00Z',
+    author: 'actor',
+    headRepository: 'owner/repo',
+    statusCheckState: 'SUCCESS',
+    statusCheckRollup: [{
+      kind: 'check-run',
+      name: 'ci',
+      status: 'COMPLETED',
+      conclusion: 'SUCCESS',
+      detailsUrl: null,
+    }],
+    issue: 7,
+    orphanCandidate: false,
+    ownership: 'loop',
+    ...overrides,
+  });
 
   await check('pagination reaches the terminal page', async () => {
     const pages = new Map([
@@ -895,6 +1136,221 @@ async function selfTest() {
       sections,
     });
     return snapshot.sections.openIssues.complete === false;
+  });
+  await check('issue body hashes are recomputed before proving completeness', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.openIssues = completeSection([{
+      ...issueSnapshotItem({
+        number: 7,
+        title: 'provenance',
+        body: 'actual',
+        updatedAt: '2026-01-01T00:00:00Z',
+        lastEditedAt: null,
+        labels: [],
+      }),
+      bodySha256: '0'.repeat(64),
+    }]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:00.000Z',
+      sections,
+    });
+    return snapshot.sections.openIssues.complete === false
+      && verifySnapshot(snapshot)
+      && repositoryAbsenceDecision(snapshot, 'selection', () => false).ok === false;
+  });
+  await check('section item schemas reject unknown fields', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.openIssues = completeSection([{
+      ...issueSnapshotItem({
+        number: 7,
+        title: 'strict',
+        body: 'body',
+        updatedAt: '2026-01-01T00:00:00Z',
+        lastEditedAt: null,
+        labels: [],
+      }),
+      smuggledAuthority: true,
+    }]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:00.000Z',
+      sections,
+    });
+    return snapshot.sections.openIssues.complete === false;
+  });
+  await check('GitHub actionability enums are closed and kind-specific', () => {
+    const validSections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    validSections.openPrs = completeSection([pullRequestItem()]);
+    const valid = createSnapshot({
+      scannedAt: '2026-01-01T00:00:00.000Z',
+      sections: validSections,
+    });
+    const invalidSections = { ...validSections };
+    invalidSections.openPrs = completeSection([pullRequestItem({
+      reviewDecision: 'BOGUS',
+      mergeStateStatus: 'BOGUS',
+      mergeable: 'BOGUS',
+      statusCheckState: 'BOGUS',
+      statusCheckRollup: [{
+        kind: 'check-run',
+        name: 'ci',
+        status: 'BOGUS',
+        conclusion: 'BOGUS',
+        detailsUrl: null,
+      }],
+    })]);
+    const invalid = createSnapshot({
+      scannedAt: '2026-01-01T00:00:00.000Z',
+      sections: invalidSections,
+    });
+    return valid.sections.openPrs.complete === true
+      && invalid.sections.openPrs.complete === false;
+  });
+  await check('sparse and serialization-active arrays fail closed', () => {
+    const sparse = new Array(1);
+    const hugeSparse = [];
+    hugeSparse.length = 2 ** 32 - 1;
+    const active = [];
+    Object.defineProperty(active, 'toJSON', {
+      value: () => [null],
+    });
+    return completeSection(sparse).complete === false
+      && completeSection(hugeSparse).complete === false
+      && completeSection(active).complete === false;
+  });
+  await check('serialization-active records fail closed before fingerprinting', () => {
+    const inherited = Object.create({ toJSON: () => null });
+    Object.assign(inherited, {
+      owner: 'owner',
+      name: 'repo',
+      nameWithOwner: 'owner/repo',
+      defaultBranch: 'main',
+    });
+    const hidden = {
+      owner: 'owner',
+      name: 'repo',
+      nameWithOwner: 'owner/repo',
+      defaultBranch: 'main',
+    };
+    Object.defineProperty(hidden, 'toJSON', {
+      value: () => null,
+    });
+    return [inherited, hidden].every((item) => {
+      const sections = Object.fromEntries(
+        SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+      );
+      sections.repo = completeSection([item]);
+      const snapshot = createSnapshot({
+        scannedAt: '2026-01-01T00:00:00.000Z',
+        sections,
+      });
+      return snapshot.sections.repo.complete === false
+        && verifySnapshot(snapshot)
+        && verifySnapshot(JSON.parse(JSON.stringify(snapshot)));
+    });
+  });
+  await check('freshness timestamps require canonical GitHub UTC values', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.openIssues = completeSection([issueSnapshotItem({
+      number: 7,
+      title: 'timestamp',
+      body: 'body',
+      updatedAt: '1',
+      lastEditedAt: null,
+      labels: [],
+    })]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:00.000Z',
+      sections,
+    });
+    return snapshot.sections.openIssues.complete === false
+      && !validDateTime('2026-02-30T00:00:00Z')
+      && validDateTime('2026-02-28T00:00:00Z')
+      && validDateTime('2026-02-28T00:00:00.12Z');
+  });
+  await check('Git object IDs accept only exact SHA-1 or SHA-256 lengths', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.tree = completeSection([{
+      dirtyEntries: [],
+      dirtyPaths: 0,
+      branch: 'main',
+      headOid: 'a'.repeat(41),
+    }]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:00.000Z',
+      sections,
+    });
+    return snapshot.sections.tree.complete === false
+      && validObjectId('a'.repeat(40))
+      && validObjectId('a'.repeat(64))
+      && !validObjectId('a'.repeat(41));
+  });
+  await check('queue dependencies are recomputed from the issue body', () => {
+    const issue = issueSnapshotItem({
+      number: 7,
+      title: 'dependency',
+      body: '## Blocked by\n- #12',
+      updatedAt: '2026-01-01T00:00:00Z',
+      lastEditedAt: null,
+      labels: ['loop-ready'],
+    });
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.queue = completeSection([{
+      ...issue,
+      blockedBy: [],
+      provenance: {
+        labeledBy: 'maintainer',
+        labeledAt: '2026-01-01T00:00:01Z',
+      },
+    }]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:02.000Z',
+      sections,
+    });
+    return snapshot.sections.queue.complete === false
+      && stableJson(blockedByIssueNumbers(issue.body)) === stableJson([12]);
+  });
+  await check('loop ownership is recomputed from the canonical claim', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.openPrs = completeSection([{
+      number: 8,
+      title: 'forged',
+      body: 'no claim',
+      isDraft: false,
+      reviewDecision: null,
+      headRefName: 'feature/no-claim',
+      headRefOid: 'a'.repeat(40),
+      baseRefName: 'main',
+      mergeStateStatus: null,
+      mergeable: null,
+      mergedAt: null,
+      updatedAt: '2026-01-01T00:00:00Z',
+      author: 'actor',
+      headRepository: 'owner/repo',
+      statusCheckState: null,
+      statusCheckRollup: [],
+      issue: 7,
+      orphanCandidate: false,
+      ownership: 'loop',
+    }]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:01.000Z',
+      sections,
+    });
+    return snapshot.sections.openPrs.complete === false;
   });
   await check('malformed snapshot envelopes fail closed without throwing', () => {
     const malformed = {
