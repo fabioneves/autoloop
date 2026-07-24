@@ -387,7 +387,8 @@ The versioned [measurement contract](docs/measurement.md) atomically retains one
 unit record bound to live HEAD/tool time with content, observation, and store authentication, then
 reports strict unit and segment cohorts, medians, nearest-rank p95s, dynamic step metrics, and
 outcome rates. Checkpoint and run identity remain declared rather than independently attested;
-duplicate observations and invalid evidence fail closed. Unknown
+duplicate run/unit or terminal-evidence identities and invalid evidence fail closed. A Git-ref CAS
+lock serializes publication and crash recovery across processes. Unknown
 provider, model, token, context, cost, or avoided-cost evidence is typed unavailable instead of
 zero. Matched-checkpoint comparison is manual-to-manual; mode/workload budgets load authenticated
 record IDs from the local store, replay every named safe-system fingerprint, and refuse or stay

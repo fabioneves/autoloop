@@ -309,9 +309,11 @@ terminal outcome. Segments include premise, selection, planning/plan review wher
 claim, implementation, simplify, orchestrator diff review, code review, recovery when used, gate,
 and delivery. The persistence tool binds live HEAD/tool time and adds content/observation
 fingerprints plus store authentication before an atomic write-once create; checkpoint and run/unit
-evidence remain declared rather than independently attested. Duplicate observations and invalid
-evidence fail closed. Provider and avoided-cost facts that cannot be verified use typed
-unavailable reasons. Legacy-to-safe comparisons hold the complete flow/intent/route/config/
+evidence remain declared rather than independently attested. A Git-ref CAS lock serializes
+publication/recovery. Duplicate run/unit or terminal-evidence identities and invalid evidence fail
+closed within a cohort and across independent baseline/current cohorts. Provider and avoided-cost
+facts that cannot be verified use typed unavailable reasons. Legacy-to-safe comparisons hold the
+complete flow/intent/route/config/
 capability/outage/degradation/provider/model/engine cohort identity constant except for explicitly
 declared checkpoint fields. Budget commands load authenticated store record IDs and replay exact
 source contents; caller JSON cannot become enforceable evidence. A p95 needs 20 observed values

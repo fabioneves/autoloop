@@ -312,7 +312,10 @@ only; `measurement-contract.mjs` is the baseline/regression authority. Persist t
 unit record with `node tools/agentic/measurement-contract.mjs --record`; the tool binds live HEAD
 and tool time, then adds content/observation fingerprints and store authentication before its
 atomic write-once create. Checkpoint and run/unit evidence remain declared, not independently
-attested. Record premise, selection, planning, plan review, claim, implementation, simplification,
+attested. Give every unit a unique run/unit identity and terminal-evidence fingerprint; equality
+replay in one cohort or across baseline/current cohorts fails closed. Publication and recovery use
+the shared Git-ref CAS lock. Record premise, selection, planning, plan review, claim,
+implementation, simplification,
 orchestrator diff review, every code-review round, recovery when used, gate, and delivery as
 ordered segments while retaining reconciled unit aggregates and an explicit terminal outcome.
 Unobservable provider, model, token,
