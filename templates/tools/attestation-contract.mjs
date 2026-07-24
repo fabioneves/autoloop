@@ -6,9 +6,15 @@ import { fileURLToPath } from 'node:url';
 const SHA_RE = /^[0-9a-f]{40}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const LABELS = new Set(['risk:pure-deletion', 'risk:mechanical-refactor']);
-const KINDS = new Set(['ownership', 'policy', 'human-authorization']);
+const KINDS = new Set(['gate', 'ownership', 'policy', 'human-authorization']);
 const BASE_KEYS = ['kind', 'v', 'headOid'];
 const KEYS = {
+  gate: [
+    ...BASE_KEYS,
+    'commandHash',
+    'configHash',
+    'repositoryFingerprint',
+  ],
   policy: [
     ...BASE_KEYS,
     'issue',
@@ -63,7 +69,13 @@ export function validateAttestation(value, expected = {}) {
   if (expected.kind !== undefined && value.kind !== expected.kind) errors.push('attestation kind mismatch');
   if (expected.headOid !== undefined && value.headOid !== expected.headOid) errors.push('attestation head mismatch');
 
-  if (value.kind === 'ownership') {
+  if (value.kind === 'gate') {
+    if (!HASH_RE.test(value.commandHash ?? '')) errors.push('commandHash must be SHA-256');
+    if (!HASH_RE.test(value.configHash ?? '')) errors.push('configHash must be SHA-256');
+    if (!HASH_RE.test(value.repositoryFingerprint ?? '')) {
+      errors.push('repositoryFingerprint must be SHA-256');
+    }
+  } else if (value.kind === 'ownership') {
     if (!Number.isInteger(value.issue) || value.issue < 1) errors.push('issue must be positive');
     if (!HASH_RE.test(value.issueBodyHash ?? '')) errors.push('issueBodyHash must be SHA-256');
     if (!SHA_RE.test(value.claimCommitOid ?? '')) errors.push('claimCommitOid must be a commit OID');
@@ -135,6 +147,14 @@ function policyFixture() {
 }
 
 function selfTest() {
+  const gate = {
+    kind: 'gate',
+    v: 1,
+    headOid: 'a'.repeat(40),
+    commandHash: 'b'.repeat(64),
+    configHash: 'c'.repeat(64),
+    repositoryFingerprint: 'd'.repeat(64),
+  };
   const ownership = {
     kind: 'ownership',
     v: 1,
@@ -158,6 +178,10 @@ function selfTest() {
   };
   const policy = policyFixture();
   const cases = [
+    ['gate round trip', parseAttestation(serializeAttestation(gate), {
+      kind: 'gate',
+      headOid: gate.headOid,
+    }).ok],
     ['ownership round trip', parseAttestation(serializeAttestation(ownership), {
       kind: 'ownership',
       headOid: ownership.headOid,
@@ -188,6 +212,10 @@ function selfTest() {
     ['authorization without label event identity rejected', validateAttestation({
       ...authorization,
       labelEventId: null,
+    }).length > 0],
+    ['gate without command identity rejected', validateAttestation({
+      ...gate,
+      commandHash: null,
     }).length > 0],
   ];
   const failures = cases.filter(([, ok]) => !ok);

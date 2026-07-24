@@ -64,7 +64,7 @@ export const REVERSIBLE_PATHS = ['docs/**'];
 export const EXTRA_PROTECTED_PATHS = [];
 // Authorization mode:
 //   'classified' — only the reversible class auto-merges: Path A (human risk label)
-//                  or Path B (REVERSIBLE_PATHS allowlist + ≤20 files / ≤400 lines).
+//                  or Path B (REVERSIBLE_PATHS allowlist + ≤20 files / ≤700 lines).
 //   'all-green'  — every loop PR auto-merges when ALL evidence is green (verdicts,
 //                  CI, clean merge state, no unresolved threads) — EXCEPT the floor
 //                  that never auto-merges in any mode: protected paths (structural +
@@ -81,6 +81,10 @@ export const REQUIRED_CI_CHECK_APPS = {};
 export const REQUIRED_APPROVING_REVIEW_COUNT = 1;
 export const REQUIRE_CODE_OWNER_REVIEWS = false;
 export const BASE_FRESHNESS_STRATEGY = 'direct-strict';
+// This is separately human-ratified merge authority, not a live read of ProjectConfig. New
+// scaffolds align it with caps.sliceMaxLines, but changing either value never silently changes the
+// other.
+export const REVERSIBLE_MAX_LINES = 700;
 // ── end repo config — everything below is the generic engine ──
 
 export const REQUIRED_VERDICTS = ['agentic/gate', 'agentic/review'];
@@ -103,6 +107,8 @@ const REVERSIBLE_RES = REVERSIBLE_PATHS.map(globToRe);
 
 const REPO_SLUG = `${REPOSITORY.owner}/${REPOSITORY.name}`;
 const HEAD_SHA = 'a'.repeat(40);
+const BASE_SHA = 'e'.repeat(40);
+const CLAIM_SHA = 'd'.repeat(40);
 const LOOP_ISSUE = 7;
 const ISSUE_BODY_HASH = 'b'.repeat(64);
 const FROZEN_PLAN_HASH = 'c'.repeat(64);
@@ -133,6 +139,7 @@ const CORE_QUERY = `
         state
         isDraft
         baseRefName
+        baseRefOid
         headRefName
         headRefOid
         body
@@ -461,6 +468,7 @@ function fetchPullRequestCore(number) {
     state: upper(pr.state),
     isDraft: pr.isDraft,
     baseRefName: pr.baseRefName,
+    baseRefOid: pr.baseRefOid,
     headRefName: pr.headRefName,
     headRefOid: pr.headRefOid,
     body: pr.body,
@@ -1093,17 +1101,45 @@ function fetchLiveServerPolicy() {
   });
 }
 
-function fetchPrCommitOids(number) {
-  const pages = ghPaginated(`repos/${REPO_SLUG}/pulls/${number}/commits?per_page=100`);
-  const oids = [];
+export function collectPrCommitMetadata(pages) {
+  const commits = [];
+  const seen = new Set();
   for (const page of pages) {
     if (!Array.isArray(page)) throw new Error('PR commits page was not an array');
     for (const commit of page) {
-      if (/^[0-9a-f]{40}$/i.test(commit?.sha ?? '')) oids.push(commit.sha.toLowerCase());
-      else throw new Error('PR commits response contained an invalid OID');
+      const oid = commit?.sha;
+      const message = commit?.commit?.message;
+      const parents = commit?.parents;
+      if (
+        !/^[0-9a-f]{40}$/i.test(oid ?? '')
+        || typeof message !== 'string'
+        || !Array.isArray(parents)
+        || parents.length === 0
+        || parents.some((parent) => !/^[0-9a-f]{40}$/i.test(parent?.sha ?? ''))
+      ) {
+        throw new Error('PR commits response contained invalid commit metadata');
+      }
+      const normalizedOid = oid.toLowerCase();
+      if (seen.has(normalizedOid)) throw new Error('PR commits response repeated a commit OID');
+      seen.add(normalizedOid);
+      commits.push({
+        oid: normalizedOid,
+        message,
+        parentOids: parents.map((parent) => parent.sha.toLowerCase()),
+      });
     }
   }
-  return oids;
+  if (commits.length === 0) throw new Error('PR commits response was empty');
+  if (commits.length >= 250) {
+    throw new Error('PR commit provenance reached GitHub endpoint limit and may be truncated');
+  }
+  return commits;
+}
+
+function fetchPrCommitMetadata(number) {
+  return collectPrCommitMetadata(
+    ghPaginated(`repos/${REPO_SLUG}/pulls/${number}/commits?per_page=100`),
+  );
 }
 
 function parsedCheckAttestation(checkRuns, name, kind, headOid) {
@@ -1118,11 +1154,12 @@ function parsedCheckAttestation(checkRuns, name, kind, headOid) {
   return { value: parsed.attestation, check: normalizedCheckRun(candidates[0]) };
 }
 
-export function deriveAttestedEvidence(inputs, commitOids = []) {
+export function deriveAttestedEvidence(inputs, commitMetadata = null) {
   const result = {
     ownership: null,
     lifecycle: null,
     authorization: null,
+    gateEvidenceVerified: false,
     executorIdentity: null,
     serverPolicy: null,
     linkedIssue: null,
@@ -1150,13 +1187,37 @@ export function deriveAttestedEvidence(inputs, commitOids = []) {
     'human-authorization',
     headOid,
   );
+  const gate = parsedCheckAttestation(
+    inputs.checkRuns,
+    'agentic/gate',
+    'gate',
+    headOid,
+  );
+  result.gateEvidenceVerified = gate !== null;
 
   if (ownership && ownership.value.issue === issue) {
+    const commits = Array.isArray(commitMetadata)
+      ? commitMetadata.map((commit) => ({
+        oid: commit?.oid,
+        message: commit?.message,
+        parentOids: Array.isArray(commit?.parentOids) ? [...commit.parentOids] : commit?.parentOids,
+      }))
+      : null;
     result.ownership = {
       complete: true,
       issue: ownership.value.issue,
       issueBodyHash: ownership.value.issueBodyHash,
-      claimCommitAncestor: commitOids.includes(ownership.value.claimCommitOid),
+      claimCommitAncestor:
+        Array.isArray(commits)
+        && commits.some((commit) => commit.oid === ownership.value.claimCommitOid),
+      claimCommit: {
+        complete: Array.isArray(commits),
+        issue: ownership.value.issue,
+        headOid: ownership.value.headOid,
+        baseOid: inputs?.baseRefOid,
+        oid: ownership.value.claimCommitOid,
+        commits,
+      },
       frozenPlanPresent: true,
       frozenPlanHash: ownership.value.frozenPlanHash,
       frozenPlanCommentId: ownership.value.frozenPlanCommentId,
@@ -1226,6 +1287,7 @@ function emptyInputs() {
     state: null,
     isDraft: null,
     baseRefName: null,
+    baseRefOid: null,
     headRefName: null,
     headRefOid: null,
     body: null,
@@ -1250,6 +1312,7 @@ function emptyInputs() {
     ownership: null,
     lifecycle: null,
     authorization: null,
+    gateEvidenceVerified: false,
     serverPolicy: null,
     fetchReasons: [],
   };
@@ -1288,13 +1351,13 @@ function fetchInputs(number) {
   }
 
   const claim = parseLoopClaim({ branch: inputs.headRefName, body: inputs.body });
-  let commitOids = [];
+  let commitMetadata = null;
   try {
-    commitOids = fetchPrCommitOids(number);
+    commitMetadata = fetchPrCommitMetadata(number);
   } catch (error) {
-    inputs.fetchReasons.push(`PR commit ancestry fetch failed: ${errorMessage(error)}`);
+    inputs.fetchReasons.push(`PR commit provenance fetch failed: ${errorMessage(error)}`);
   }
-  Object.assign(inputs, deriveAttestedEvidence(inputs, commitOids));
+  Object.assign(inputs, deriveAttestedEvidence(inputs, commitMetadata));
 
   if (claim.valid) {
     try {
@@ -1406,6 +1469,7 @@ function mergeAuthorizationInput(pr, path) {
       state: upper(pr.state),
       isDraft: pr.isDraft,
       baseRefName: pr.baseRefName,
+      baseRefOid: pr.baseRefOid,
       headRefName: pr.headRefName,
       headRefOid: pr.headRefOid,
       headRepository: {
@@ -1424,6 +1488,7 @@ function mergeAuthorizationInput(pr, path) {
       linkedIssue: pr.linkedIssue,
       ownership: pr.ownership,
       lifecycle: pr.lifecycle,
+      gateEvidenceVerified: pr.gateEvidenceVerified,
       path,
       authorization: pr.authorization,
       checks: Array.isArray(pr.checkRuns) ? pr.checkRuns.map(normalizedCheckRun) : null,
@@ -1578,7 +1643,9 @@ export function decide(pr) {
   const pathA = SAFE_LABELS.some((label) => labels.includes(label));
   const hasKnownSize = Number.isInteger(pr.changedFiles) && Number.isInteger(pr.additions) && Number.isInteger(pr.deletions);
   const pathBFiles = entries.length > 0 && paths.length > 0 && paths.every(pathBAllowed);
-  const pathBSize = hasKnownSize && pr.changedFiles <= 20 && pr.additions + pr.deletions <= 400;
+  const pathBSize = hasKnownSize
+    && pr.changedFiles <= 20
+    && pr.additions + pr.deletions <= REVERSIBLE_MAX_LINES;
   const pathB = pathBFiles && pathBSize && pr.filePaginationComplete === true && !malformed && pr.changedFiles === entries.length;
   // 'all-green' authorizes any complete, well-formed changed-file set; every other
   // check in this function (protected paths, hard-block labels, evidence, threads,
@@ -1600,7 +1667,7 @@ export function decide(pr) {
         if (!hasKnownSize) reasons.push('not authorized: Path B changed-file size is unknown');
         else {
           if (pr.changedFiles > 20) reasons.push(`not authorized: Path B has too many files (${pr.changedFiles} > 20)`);
-          if (pr.additions + pr.deletions > 400) reasons.push(`not authorized: Path B has too many changed lines (${pr.additions + pr.deletions} > 400)`);
+          if (pr.additions + pr.deletions > REVERSIBLE_MAX_LINES) reasons.push(`not authorized: Path B has too many changed lines (${pr.additions + pr.deletions} > ${REVERSIBLE_MAX_LINES})`);
         }
       }
     }
@@ -1778,6 +1845,7 @@ function makeInput({
     state: 'OPEN',
     isDraft: false,
     baseRefName: BASE_BRANCH,
+    baseRefOid: BASE_SHA,
     headRefName,
     body,
     headRefOid: HEAD_SHA,
@@ -1822,6 +1890,25 @@ function makeInput({
       complete: true,
       issueBodyHash: ISSUE_BODY_HASH,
       claimCommitAncestor: true,
+      claimCommit: {
+        complete: true,
+        issue: LOOP_ISSUE,
+        headOid: HEAD_SHA,
+        baseOid: BASE_SHA,
+        oid: CLAIM_SHA,
+        commits: [
+          {
+            oid: CLAIM_SHA,
+            message: `chore: claim #${LOOP_ISSUE}`,
+            parentOids: [BASE_SHA],
+          },
+          {
+            oid: HEAD_SHA,
+            message: 'feat: implement safe change',
+            parentOids: [CLAIM_SHA],
+          },
+        ],
+      },
       frozenPlanPresent: true,
       frozenPlanHash: FROZEN_PLAN_HASH,
       frozenPlanCommentId: 'IC_kwDOAutoloop7',
@@ -1834,6 +1921,7 @@ function makeInput({
       headOid: HEAD_SHA,
       premergeRecord: true,
     },
+    gateEvidenceVerified: true,
     authorization: {
       complete: true,
       pullRequest: 138,
@@ -1886,6 +1974,12 @@ function protectedFixture(name, path) {
   return { name, input: makeInput({ files: [path], labels: ['risk:pure-deletion'] }), expectExit: 1, expectCalls: 0 };
 }
 
+function invalidClaimFixture(name, mutate) {
+  const input = makeInput();
+  input.ownership.claimCommit = mutate(input.ownership.claimCommit);
+  return { name, input, expectExit: 1, expectCalls: 0 };
+}
+
 // Declarative, network-free fixtures for the policy and orchestration.
 export const FIXTURES = [
   {
@@ -1931,6 +2025,12 @@ export const FIXTURES = [
     expectCalls: 0,
   },
   {
+    name: 'successful gate CheckRun without typed gate evidence blocks',
+    input: makeInput({ gateEvidenceVerified: false }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
     name: 'failing review on Path A',
     input: makeInput({
       labels: ['risk:pure-deletion'],
@@ -1971,6 +2071,20 @@ export const FIXTURES = [
     expectExit: 1,
     expectCalls: 0,
   },
+  invalidClaimFixture('claim commit later in the PR blocks', (claimCommit) => ({
+    ...claimCommit,
+    commits: [...claimCommit.commits].reverse(),
+  })),
+  invalidClaimFixture('claim commit with a non-canonical message blocks', (claimCommit) => ({
+    ...claimCommit,
+    commits: claimCommit.commits.map((commit, index) =>
+      index === 0 ? { ...commit, message: 'chore: claim issue 7' } : commit),
+  })),
+  invalidClaimFixture('claim commit parent not equal to base blocks', (claimCommit) => ({
+    ...claimCommit,
+    commits: claimCommit.commits.map((commit, index) =>
+      index === 0 ? { ...commit, parentOids: ['f'.repeat(40)] } : commit),
+  })),
   {
     name: 'missing linked issue and ownership evidence blocks',
     input: makeInput({ linkedIssue: null, ownership: null }),
@@ -2096,6 +2210,8 @@ export const FIXTURES = [
   protectedFixture('protected secret path segment', 'lib/utils/secret-store.ts'),
   protectedFixture('protected token path segment', 'lib/utils/api-token.ts'),
   protectedFixture('protected credential path segment', 'lib/services/credentialVault.ts'),
+  protectedFixture('protected credential storage', 'config/credentials.yml'),
+  protectedFixture('protected private key material', 'certs/private-key.pem'),
   protectedFixture('protected nested .env file', 'apps/web/.env.local'),
   protectedFixture("the tool's own path with everything green", 'tools/agentic/auto-merge.mjs'),
   protectedFixture('protected .github/**', '.github/workflows/ci.yml'),
@@ -2132,7 +2248,10 @@ export const FIXTURES = [
   protectedFixture('protected nested CLAUDE.md', 'packages/web/CLAUDE.md'),
   protectedFixture('protected nested AGENTS.override.md', 'a/b/AGENTS.override.md'),
   protectedFixture('protected docker-compose.yml', 'docker-compose.yml'),
+  protectedFixture('protected docker-compose.yaml', 'docker-compose.yaml'),
+  protectedFixture('protected nested docker-compose', 'deploy/docker-compose.prod.yml'),
   protectedFixture('protected Dockerfile*', 'Dockerfile.prod'),
+  protectedFixture('protected nested Dockerfile*', 'containers/Dockerfile.prod'),
   protectedFixture('protected nested package.json', 'packages/server/package.json'),
   protectedFixture('protected nested lockfile', 'packages/server/package-lock.json'),
   protectedFixture('protected nested *.lock file', 'packages/server/cache.lock'),
@@ -2162,14 +2281,18 @@ export const FIXTURES = [
     expectCalls: ALLOW_ALL ? 1 : 0,
   },
   {
-    name: `401 changed lines (size cap applies only to classified mode: ${AUTOMERGE_MODE})`,
-    input: makeInput({ additions: 201, deletions: 200 }),
+    name: `${REVERSIBLE_MAX_LINES + 1} changed lines (size cap applies only to classified mode: ${AUTOMERGE_MODE})`,
+    input: makeInput({ additions: Math.ceil((REVERSIBLE_MAX_LINES + 1) / 2), deletions: Math.floor((REVERSIBLE_MAX_LINES + 1) / 2) }),
     expectExit: ALLOW_ALL ? 0 : 1,
     expectCalls: ALLOW_ALL ? 1 : 0,
   },
   {
-    name: 'boundary exactly 20 files and exactly 400 lines → allow',
-    input: makeInput({ files: Array.from({ length: 20 }, (_, index) => allowedPathN(100 + index)), additions: 200, deletions: 200 }),
+    name: `boundary exactly 20 files and exactly ${REVERSIBLE_MAX_LINES} lines → allow`,
+    input: makeInput({
+      files: Array.from({ length: 20 }, (_, index) => allowedPathN(100 + index)),
+      additions: Math.ceil(REVERSIBLE_MAX_LINES / 2),
+      deletions: Math.floor(REVERSIBLE_MAX_LINES / 2),
+    }),
     expectExit: 0,
     expectCalls: 1,
     expectArgs: { sha: HEAD_SHA, squash: true },
@@ -2253,7 +2376,7 @@ function statusStampCases() {
     headOid: HEAD_SHA,
     issue: LOOP_ISSUE,
     issueBodyHash: ISSUE_BODY_HASH,
-    claimCommitOid: 'd'.repeat(40),
+    claimCommitOid: CLAIM_SHA,
     frozenPlanHash: FROZEN_PLAN_HASH,
     frozenPlanCommentId: 'IC_kwDOAutoloop7',
     frozenPlanAuthor: LOOP_LOGIN,
@@ -2266,6 +2389,14 @@ function statusStampCases() {
     delivered: true,
     premergeRecord: 'record-1',
   };
+  const gate = {
+    kind: 'gate',
+    v: 1,
+    headOid: HEAD_SHA,
+    commandHash: '6'.repeat(64),
+    configHash: '7'.repeat(64),
+    repositoryFingerprint: '8'.repeat(64),
+  };
   const authorization = {
     kind: 'human-authorization',
     v: 1,
@@ -2276,6 +2407,18 @@ function statusStampCases() {
     labelEventId: 12001,
     labeledAt: '2026-07-24T00:03:00Z',
   };
+  const commitMetadata = [
+    {
+      oid: CLAIM_SHA,
+      message: `chore: claim #${LOOP_ISSUE}`,
+      parentOids: [BASE_SHA],
+    },
+    {
+      oid: HEAD_SHA,
+      message: 'feat: implement safe change',
+      parentOids: [CLAIM_SHA],
+    },
+  ];
   const evidence = deriveAttestedEvidence({
     ...base,
     checkRuns: [
@@ -2285,6 +2428,9 @@ function statusStampCases() {
         }
         if (check.name === 'agentic/policy') {
           return { ...check, output: { summary: serializeAttestation(policy) } };
+        }
+        if (check.name === 'agentic/gate') {
+          return { ...check, output: { summary: serializeAttestation(gate) } };
         }
         return check;
       }),
@@ -2297,13 +2443,18 @@ function statusStampCases() {
         output: { summary: serializeAttestation(authorization) },
       },
     ],
-  }, [ownership.claimCommitOid]);
+  }, commitMetadata);
   cases.push({
     name: 'trusted exact-head attestations hydrate merge evidence',
     ok:
       evidence.ownership?.claimCommitAncestor === true
+      && evidence.ownership?.claimCommit?.commits?.[0]?.message
+        === `chore: claim #${LOOP_ISSUE}`
+      && evidence.ownership?.claimCommit?.baseOid === BASE_SHA
+      && evidence.ownership?.claimCommit?.headOid === HEAD_SHA
       && evidence.ownership?.frozenPlanCommentId === ownership.frozenPlanCommentId
       && evidence.lifecycle?.premergeRecord === true
+      && evidence.gateEvidenceVerified === true
       && evidence.authorization?.pullRequest === 138
       && evidence.authorization?.actor === TRUSTED_HUMAN_LOGINS[0]
       && evidence.serverPolicy === null,
@@ -2317,12 +2468,85 @@ function statusStampCases() {
       head_sha: HEAD_SHA,
       output: { summary: serializeAttestation({ ...ownership, headOid: 'e'.repeat(40) }) },
     }],
-  }, [ownership.claimCommitOid]);
+  }, commitMetadata);
   cases.push({
     name: 'stale attestation cannot hydrate ownership',
     ok: staleEvidence.ownership === null,
   });
+  const staleGateEvidence = deriveAttestedEvidence({
+    ...base,
+    checkRuns: [{
+      name: 'agentic/gate',
+      status: 'completed',
+      conclusion: 'success',
+      head_sha: HEAD_SHA,
+      output: {
+        summary: serializeAttestation({ ...gate, headOid: 'f'.repeat(40) }),
+      },
+    }],
+  }, commitMetadata);
+  cases.push({
+    name: 'stale typed gate evidence cannot authorize merge',
+    ok: staleGateEvidence.gateEvidenceVerified === false,
+  });
   return cases;
+}
+
+function prCommitMetadataCases() {
+  const first = {
+    sha: CLAIM_SHA,
+    commit: { message: `chore: claim #${LOOP_ISSUE}` },
+    parents: [{ sha: BASE_SHA }],
+  };
+  const last = {
+    sha: HEAD_SHA,
+    commit: { message: 'feat: implement safe change' },
+    parents: [{ sha: CLAIM_SHA }],
+  };
+  const normalized = collectPrCommitMetadata([[first], [last]]);
+  let malformedRejected = false;
+  try {
+    collectPrCommitMetadata([[{ ...first, parents: [] }]]);
+  } catch {
+    malformedRejected = true;
+  }
+  let duplicateRejected = false;
+  try {
+    collectPrCommitMetadata([[first, first]]);
+  } catch {
+    duplicateRejected = true;
+  }
+  let endpointLimitRejected = false;
+  try {
+    collectPrCommitMetadata([Array.from({ length: 250 }, (_, index) => ({
+      sha: index.toString(16).padStart(40, '0'),
+      commit: { message: `commit ${index}` },
+      parents: [{ sha: BASE_SHA }],
+    }))]);
+  } catch {
+    endpointLimitRejected = true;
+  }
+  return [
+    {
+      name: 'PR commit metadata preserves API order and parents',
+      ok:
+        normalized[0]?.oid === CLAIM_SHA
+        && normalized[0]?.parentOids?.[0] === BASE_SHA
+        && normalized.at(-1)?.oid === HEAD_SHA,
+    },
+    {
+      name: 'PR commit metadata rejects missing parents',
+      ok: malformedRejected,
+    },
+    {
+      name: 'PR commit metadata rejects duplicate OIDs',
+      ok: duplicateRejected,
+    },
+    {
+      name: 'PR commit metadata rejects the potentially truncated endpoint limit',
+      ok: endpointLimitRejected,
+    },
+  ];
 }
 
 function restPaginationCases() {
@@ -2735,6 +2959,7 @@ function selfTest() {
   let failed = 0;
   for (const check of [
     ...statusStampCases(),
+    ...prCommitMetadataCases(),
     ...restPaginationCases(),
     ...liveEvidenceCases(),
   ]) {

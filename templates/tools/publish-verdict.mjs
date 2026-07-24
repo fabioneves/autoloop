@@ -5,20 +5,37 @@
 // Deliberately narrow:
 //   - closed agentic context enum
 //   - only `success` can be posted; absence is the failure signal
+//   - gate executes the configured command itself on the exact clean checkout
 //   - ownership, policy, and human authorization require a strict attestation file
+//   - review requires authenticated convergence plus the exact clean live checkout
 //   - details arrive through a file, never shell arguments
 //
 // Usage: node tools/agentic/publish-verdict.mjs <context> <40-hex sha>
-//        [--summary-file <path> | --attestation-file <path>]
+//        [--attestation-file <path> | --review-evidence-file <path>]
 //        [--expect-app-id <positive integer>]
 
-import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import {
   serializeAttestation,
   validateAttestation,
 } from './attestation-contract.mjs';
+import {
+  extractConfig,
+  validateConfig,
+} from './config-contract.mjs';
+import { authorizeReviewPublication } from './review-contract.mjs';
+import { snapshotExecutionRepository } from './route-adapter-contract.mjs';
 
 const CONTEXTS = new Set([
   'gate',
@@ -29,6 +46,47 @@ const CONTEXTS = new Set([
 ]);
 const ATTESTATION_CONTEXTS = new Set(['ownership', 'policy', 'human-authorization']);
 const SHA_RE = /^[0-9a-f]{40}$/;
+const MAX_REVIEW_EVIDENCE_BYTES = 32 * 1024 * 1024;
+const MAX_AUXILIARY_EVIDENCE_BYTES = 1024 * 1024;
+const REPOSITORY_PART_RE =
+  /^[a-z0-9](?:[a-z0-9._-]{0,99})$/;
+const HOST_RE =
+  /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
+
+function readBoundedNoFollow(path, maximum) {
+  const descriptor = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
+  try {
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile() || stats.size > maximum) {
+      throw new Error(`evidence file must be a regular file of at most ${maximum} bytes`);
+    }
+    return readFileSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function reviewSummary(
+  evidence,
+  sha,
+  liveCheckout,
+  authorizer = authorizeReviewPublication,
+) {
+  const authorization = authorizer(evidence, sha, liveCheckout);
+  if (!authorization.authorized) {
+    throw new Error(
+      `review evidence is not clean and live-checkout-bound (${authorization.code})`,
+    );
+  }
+  return (
+    `Authenticated review convergence: ${authorization.code}; `
+    + `round ${evidence.round}; receipt `
+    + `${authorization.runtimeReceiptFingerprint}.`
+  );
+}
 
 export function buildCheckRun(ctx, sha, summary, completedAt = new Date().toISOString()) {
   const text = typeof summary === 'string' && summary.length > 0
@@ -55,6 +113,100 @@ export function hasTrustedProducer(checkRun, trustedAppIds) {
   );
 }
 
+export function buildGitHubApiArgs(repository) {
+  if (
+    repository === null
+    || typeof repository !== 'object'
+    || Array.isArray(repository)
+    || Object.keys(repository).sort().join(',') !== 'host,owner,repo'
+    || !HOST_RE.test(repository.host ?? '')
+    || !REPOSITORY_PART_RE.test(repository.owner ?? '')
+    || !REPOSITORY_PART_RE.test(repository.repo ?? '')
+  ) {
+    throw new Error('publication repository target is invalid');
+  }
+  return [
+    'api',
+    '--hostname',
+    repository.host,
+    `repos/${repository.owner}/${repository.repo}/check-runs`,
+    '--method',
+    'POST',
+    '-H',
+    'Accept: application/vnd.github+json',
+    '-H',
+    'X-GitHub-Api-Version: 2026-03-10',
+    '--input',
+    '-',
+  ];
+}
+
+function samePublicationSnapshot(left, right) {
+  if (
+    left?.checkout === undefined
+    || right?.checkout === undefined
+    || left?.repository === undefined
+    || right?.repository === undefined
+  ) {
+    return false;
+  }
+  return (
+    left.checkout.root === right.checkout.root
+    && left.checkout.repositoryFingerprint
+      === right.checkout.repositoryFingerprint
+    && left.checkout.branch === right.checkout.branch
+    && left.checkout.headOid === right.checkout.headOid
+    && left.checkout.clean === right.checkout.clean
+    && left.repository?.host === right.repository?.host
+    && left.repository.owner === right.repository.owner
+    && left.repository.repo === right.repository.repo
+  );
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+export function gateSummary(config, sha, before, after, result) {
+  const errors = validateConfig(config);
+  if (errors.length > 0) {
+    throw new Error(`ProjectConfig is invalid: ${errors.join('; ')}`);
+  }
+  if (
+    before?.checkout?.headOid !== sha
+    || before.checkout.clean !== true
+    || after?.checkout?.headOid !== sha
+    || after.checkout.clean !== true
+    || !samePublicationSnapshot(before, after)
+  ) {
+    throw new Error('gate checkout is not the exact unchanged clean requested head');
+  }
+  if (result?.error || result?.signal || result?.status !== 0) {
+    throw new Error(
+      `configured gate did not exit 0`
+      + (result?.signal ? ` (signal ${result.signal})` : '')
+      + (Number.isInteger(result?.status) ? ` (exit ${result.status})` : ''),
+    );
+  }
+  return serializeAttestation({
+    kind: 'gate',
+    v: 1,
+    headOid: sha,
+    commandHash: sha256(config.gate.command),
+    configHash: sha256(JSON.stringify(config)),
+    repositoryFingerprint: after.checkout.repositoryFingerprint,
+  });
+}
+
+function runGate(command, cwd) {
+  return spawnSync(command, {
+    cwd,
+    env: process.env,
+    shell: true,
+    stdio: 'inherit',
+  });
+}
+
 // Pure arg validation — closed context enum + lowercase 40-hex SHA. Exported for --self-test.
 export function validateArgs(ctx, sha) {
   if (!CONTEXTS.has(ctx)) return { ok: false, error: `context must be one of: ${[...CONTEXTS].join(', ')}` };
@@ -69,6 +221,7 @@ export function parseArgs(args) {
     sha,
     summaryFile: null,
     attestationFile: null,
+    reviewEvidenceFile: null,
     expectedAppId: null,
     selfTest: args.length === 1 && args[0] === '--self-test',
     error: null,
@@ -97,6 +250,16 @@ export function parseArgs(args) {
       index += 1;
       continue;
     }
+    if (
+      flag === '--review-evidence-file'
+      && parsed.reviewEvidenceFile === null
+      && value
+      && !value.startsWith('-')
+    ) {
+      parsed.reviewEvidenceFile = value;
+      index += 1;
+      continue;
+    }
     if (flag === '--expect-app-id' && parsed.expectedAppId === null && /^\d+$/.test(value ?? '')) {
       parsed.expectedAppId = Number(value);
       if (!Number.isSafeInteger(parsed.expectedAppId) || parsed.expectedAppId < 1) {
@@ -110,11 +273,31 @@ export function parseArgs(args) {
     return parsed;
   }
   if (ATTESTATION_CONTEXTS.has(ctx)) {
-    if (parsed.attestationFile === null || parsed.summaryFile !== null) {
-      parsed.error = `${ctx} requires --attestation-file and forbids --summary-file`;
+    if (
+      parsed.attestationFile === null
+      || parsed.summaryFile !== null
+      || parsed.reviewEvidenceFile !== null
+    ) {
+      parsed.error =
+        `${ctx} requires --attestation-file and forbids other evidence files`;
     }
-  } else if (parsed.attestationFile !== null) {
-    parsed.error = `${ctx} does not accept --attestation-file`;
+  } else if (ctx === 'review') {
+    if (
+      parsed.reviewEvidenceFile === null
+      || parsed.summaryFile !== null
+      || parsed.attestationFile !== null
+    ) {
+      parsed.error =
+        'review requires --review-evidence-file and forbids other evidence files';
+    }
+  } else if (ctx === 'gate') {
+    if (
+      parsed.summaryFile !== null
+      || parsed.attestationFile !== null
+      || parsed.reviewEvidenceFile !== null
+    ) {
+      parsed.error = 'gate executes cfg.gate.command and forbids caller-authored evidence';
+    }
   }
   return parsed;
 }
@@ -165,12 +348,16 @@ function selfTest() {
   const parsed = parseArgs([
     'review',
     'a'.repeat(40),
-    '--summary-file',
+    '--review-evidence-file',
     '/tmp/review.json',
     '--expect-app-id',
     '42',
   ]);
-  if (!parsed.error && parsed.summaryFile === '/tmp/review.json' && parsed.expectedAppId === 42) {
+  if (
+    !parsed.error
+    && parsed.reviewEvidenceFile === '/tmp/review.json'
+    && parsed.expectedAppId === 42
+  ) {
     passed += 1;
   } else {
     console.error('FAIL closed CLI options parse');
@@ -198,6 +385,22 @@ function selfTest() {
     '/tmp/gate.json',
   ]).error) passed += 1;
   else console.error('FAIL gate rejects an attestation file');
+  if (parseArgs([
+    'gate',
+    'a'.repeat(40),
+    '--summary-file',
+    '/tmp/gate.txt',
+  ]).error) passed += 1;
+  else console.error('FAIL gate rejects caller-authored summary evidence');
+  if (parseArgs(['review', 'a'.repeat(40)]).error) passed += 1;
+  else console.error('FAIL review requires authenticated transition evidence');
+  if (parseArgs([
+    'review',
+    'a'.repeat(40),
+    '--summary-file',
+    '/tmp/review.txt',
+  ]).error) passed += 1;
+  else console.error('FAIL review rejects caller-authored summary evidence');
   const ownership = {
     kind: 'ownership',
     v: 1,
@@ -247,7 +450,144 @@ function selfTest() {
   } else {
     console.error('FAIL human authorization publishes immutable label-event identity');
   }
-  const total = cases.length + 10;
+  const reviewCheckout = {
+    root: '/repo',
+    repositoryFingerprint: 'b'.repeat(64),
+    branch: 'feature/review',
+    headOid: 'a'.repeat(40),
+    clean: true,
+  };
+  let forwardedCheckout = null;
+  const reviewConsumerSummary = reviewSummary(
+    { round: 2 },
+    reviewCheckout.headOid,
+    reviewCheckout,
+    (_evidence, _sha, checkout) => {
+      forwardedCheckout = checkout;
+      return {
+        authorized: true,
+        code: 'REVIEW_CLEAN',
+        runtimeReceiptFingerprint: 'c'.repeat(64),
+      };
+    },
+  );
+  if (
+    forwardedCheckout === reviewCheckout
+    && reviewConsumerSummary.includes('round 2')
+    && reviewConsumerSummary.includes('c'.repeat(64))
+  ) {
+    passed += 1;
+  } else {
+    console.error('FAIL review publisher forwards live checkout to the authorizer');
+  }
+  try {
+    reviewSummary(
+      { round: 1 },
+      reviewCheckout.headOid,
+      reviewCheckout,
+      () => ({
+        authorized: false,
+        code: 'INVALID_REVIEW_EVIDENCE',
+        runtimeReceiptFingerprint: null,
+      }),
+    );
+    console.error('FAIL review publisher rejects denied authorization');
+  } catch {
+    passed += 1;
+  }
+  const originalGhRepo = process.env.GH_REPO;
+  try {
+    process.env.GH_REPO = 'attacker/redirect';
+    const apiArgs = buildGitHubApiArgs({
+      host: 'github.example.com',
+      owner: 'autoloop',
+      repo: 'review-fixture',
+    });
+    if (
+      apiArgs[1] === '--hostname'
+      && apiArgs[2] === 'github.example.com'
+      && apiArgs[3] === 'repos/autoloop/review-fixture/check-runs'
+      && !apiArgs.join(' ').includes('attacker')
+      && !apiArgs.join(' ').includes('{owner}')
+    ) {
+      passed += 1;
+    } else {
+      console.error('FAIL publication uses the explicit validated repository target');
+    }
+  } finally {
+    if (originalGhRepo === undefined) delete process.env.GH_REPO;
+    else process.env.GH_REPO = originalGhRepo;
+  }
+  try {
+    buildGitHubApiArgs({
+      host: 'github.com',
+      owner: '../attacker',
+      repo: 'review-fixture',
+    });
+    console.error('FAIL publication rejects an invalid repository target');
+  } catch {
+    passed += 1;
+  }
+  const gateConfig = {
+    version: '0.25.0',
+    baseBranch: 'main',
+    gate: { command: 'npm test', quickCommand: null, setupCommand: null },
+    merge: { policy: 'manual' },
+    tracker: { provider: 'none' },
+    review: { checklistPath: 'docs/agentic/checklist.md' },
+    caps: {
+      gateRetriesPerUnit: 2,
+      reviseRoundsPerPr: 3,
+      codeReviewRoundsPerUnit: 5,
+      sliceMaxLines: 700,
+      sliceMaxFiles: 10,
+    },
+  };
+  const gateSnapshot = {
+    checkout: {
+      root: '/repo',
+      repositoryFingerprint: 'b'.repeat(64),
+      branch: 'feature/gate',
+      headOid: 'a'.repeat(40),
+      clean: true,
+    },
+    repository: {
+      host: 'github.com',
+      owner: 'autoloop',
+      repo: 'fixture',
+    },
+  };
+  const gateEvidence = gateSummary(
+    gateConfig,
+    gateSnapshot.checkout.headOid,
+    gateSnapshot,
+    structuredClone(gateSnapshot),
+    { status: 0, signal: null, error: null },
+  );
+  if (
+    gateEvidence.includes('"kind":"gate"')
+    && gateEvidence.includes(`"commandHash":"${sha256(gateConfig.gate.command)}"`)
+  ) {
+    passed += 1;
+  } else {
+    console.error('FAIL gate evidence is derived from the executed config and clean head');
+  }
+  try {
+    gateSummary(
+      gateConfig,
+      gateSnapshot.checkout.headOid,
+      gateSnapshot,
+      {
+        ...structuredClone(gateSnapshot),
+        checkout: { ...gateSnapshot.checkout, clean: false },
+      },
+      { status: 0, signal: null, error: null },
+    );
+    console.error('FAIL gate evidence rejects a changed or dirty checkout');
+  } catch {
+    passed += 1;
+  }
+  const total = cases.length + 19;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }
@@ -260,18 +600,83 @@ function main() {
     process.exit(2);
   }
   let summary;
+  let publicationSnapshot;
   try {
-    if (parsed.attestationFile !== null) {
-      const attestation = JSON.parse(readFileSync(parsed.attestationFile, 'utf8'));
+    publicationSnapshot = snapshotExecutionRepository(process.cwd());
+    if (
+      publicationSnapshot.checkout.headOid !== parsed.sha
+      || publicationSnapshot.checkout.clean !== true
+    ) {
+      throw new Error('publication requires the exact clean live checkout at the requested SHA');
+    }
+    if (parsed.ctx === 'gate') {
+      const statePath = resolve(
+        publicationSnapshot.checkout.root,
+        'docs',
+        'agentic',
+        'STATE.md',
+      );
+      const config = extractConfig(
+        readBoundedNoFollow(
+          statePath,
+          MAX_AUXILIARY_EVIDENCE_BYTES,
+        ).toString('utf8'),
+      );
+      const configErrors = validateConfig(config);
+      if (configErrors.length > 0) {
+        throw new Error(`ProjectConfig is invalid: ${configErrors.join('; ')}`);
+      }
+      const gateResult = runGate(
+        config.gate.command,
+        publicationSnapshot.checkout.root,
+      );
+      const currentSnapshot = snapshotExecutionRepository(
+        publicationSnapshot.checkout.root,
+      );
+      summary = gateSummary(
+        config,
+        parsed.sha,
+        publicationSnapshot,
+        currentSnapshot,
+        gateResult,
+      );
+      publicationSnapshot = currentSnapshot;
+    } else if (parsed.attestationFile !== null) {
+      const attestation = JSON.parse(
+        readBoundedNoFollow(
+          parsed.attestationFile,
+          MAX_AUXILIARY_EVIDENCE_BYTES,
+        ).toString('utf8'),
+      );
       const errors = validateAttestation(attestation, {
         kind: parsed.ctx,
         headOid: parsed.sha,
       });
       if (errors.length > 0) throw new Error(errors.join('; '));
       summary = serializeAttestation(attestation);
+    } else if (parsed.reviewEvidenceFile !== null) {
+      const bytes = readBoundedNoFollow(
+        parsed.reviewEvidenceFile,
+        MAX_REVIEW_EVIDENCE_BYTES,
+      );
+      const evidence = JSON.parse(bytes.toString('utf8'));
+      summary = reviewSummary(
+        evidence,
+        parsed.sha,
+        publicationSnapshot.checkout,
+      );
     } else {
-      summary = parsed.summaryFile === null ? undefined : readFileSync(parsed.summaryFile, 'utf8');
+      throw new Error('publication evidence mode is missing');
     }
+    const currentSnapshot = snapshotExecutionRepository(
+      publicationSnapshot.checkout.root,
+    );
+    if (!samePublicationSnapshot(publicationSnapshot, currentSnapshot)) {
+      throw new Error(
+        'checkout or publication repository changed after evidence validation',
+      );
+    }
+    publicationSnapshot = currentSnapshot;
   } catch (error) {
     console.error(`publish-verdict: evidence file could not be read or validated: ${error.message}`);
     process.exit(1);
@@ -280,18 +685,7 @@ function main() {
   try {
     const output = execFileSync(
       'gh',
-      [
-        'api',
-        'repos/{owner}/{repo}/check-runs',
-        '--method',
-        'POST',
-        '-H',
-        'Accept: application/vnd.github+json',
-        '-H',
-        'X-GitHub-Api-Version: 2026-03-10',
-        '--input',
-        '-',
-      ],
+      buildGitHubApiArgs(publicationSnapshot.repository),
       {
         input: JSON.stringify(payload),
         encoding: 'utf8',

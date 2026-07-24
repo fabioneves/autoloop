@@ -5,14 +5,38 @@ import { pathToFileURL } from 'node:url';
 
 const SHARED_GUARDRAIL_ROOTS = ['tools', '.claude', '.codex', '.opencode', '.agents', '.githooks'];
 
-export const HUMAN_AUTHORIZATION_GLOBS = [
-  '.env*',
-  '**/.env*',
-  '.github/workflows/**',
+export const DEPLOYMENT_GUARDRAIL_GLOBS = [
   'Dockerfile*',
   '**/Dockerfile*',
   'docker-compose*',
   '**/docker-compose*',
+];
+
+export const HUMAN_AUTHORIZATION_GLOBS = [
+  '.env*',
+  '**/.env*',
+  '*credential*',
+  '**/*credential*',
+  '*private-key*',
+  '**/*private-key*',
+  '*private_key*',
+  '**/*private_key*',
+  '*.key',
+  '**/*.key',
+  '*.pem',
+  '**/*.pem',
+  '*.p12',
+  '**/*.p12',
+  '*.pfx',
+  '**/*.pfx',
+  'credentials/**',
+  '**/credentials/**',
+  'keys/**',
+  '**/keys/**',
+  'secrets/**',
+  '**/secrets/**',
+  '.github/workflows/**',
+  ...DEPLOYMENT_GUARDRAIL_GLOBS,
   ...SHARED_GUARDRAIL_ROOTS.map((root) => `${root}/**`),
   'AGENTS.override.md',
   'AGENTS.md',
@@ -30,6 +54,11 @@ export const PATH_POLICY_FIXTURES = [
   { path: '.opencode/plugins/autoloop.js', humanAuthorization: true, mergeProtected: true },
   { path: '.agents/plugins/marketplace.json', humanAuthorization: true, mergeProtected: true },
   { path: '.githooks/pre-push', humanAuthorization: true, mergeProtected: true },
+  { path: 'config/credentials.yml', humanAuthorization: true, mergeProtected: true },
+  { path: 'certs/private-key.pem', humanAuthorization: true, mergeProtected: true },
+  { path: 'docker-compose.yaml', humanAuthorization: true, mergeProtected: true },
+  { path: 'deploy/docker-compose.prod.yml', humanAuthorization: true, mergeProtected: true },
+  { path: 'containers/Dockerfile.prod', humanAuthorization: true, mergeProtected: true },
   { path: '.github/dependabot.yml', humanAuthorization: false, mergeProtected: true },
   { path: 'package.json', humanAuthorization: false, mergeProtected: true },
   { path: 'docs/agentic/ARCH.md', humanAuthorization: false, mergeProtected: false },
@@ -70,9 +99,18 @@ export function matchHumanAuthorization(files, globs = HUMAN_AUTHORIZATION_GLOBS
   return hits;
 }
 
+const DEPLOYMENT_GUARDRAIL_RES = DEPLOYMENT_GUARDRAIL_GLOBS.map(globToRe);
+
 const MERGE_PROTECTED_PATH_FAMILIES = [
   { name: 'cryptographic credential paths', matches: (path) => /(^|\/)[^/]*crypt[^/]*(\/|$)/i.test(path) },
   { name: 'secret/credential path segments', matches: (path) => /(^|\/)[^/]*(secret|credential|token)[^/]*(\/|$)/i.test(path) },
+  {
+    name: 'key material',
+    matches: (path) =>
+      /(^|\/)(?:keys?|certs?)(\/|$)/i.test(path)
+      || /(^|\/)[^/]*(?:private[-_]?key|keypair)[^/]*(\/|$)/i.test(path)
+      || /\.(?:jks|key|keystore|p12|pem|pfx)$/i.test(path),
+  },
   { name: 'env files', matches: (path) => /(^|\/)\.env[^/]*$/i.test(path) },
   ...SHARED_GUARDRAIL_ROOTS.map((root) => ({
     name: root,
@@ -83,8 +121,10 @@ const MERGE_PROTECTED_PATH_FAMILIES = [
   { name: 'docs/agentic', matches: (path) => /^docs\/agentic\//i.test(path) && !/^docs\/agentic\/ARCH\.md$/i.test(path) },
   { name: 'CLAUDE.md', matches: (path) => /(^|\/)CLAUDE\.md$/i.test(path) },
   { name: 'AGENTS guidance', matches: (path) => /(^|\/)AGENTS(?:\.override)?\.md$/i.test(path) },
-  { name: 'docker-compose.yml', matches: (path) => /^docker-compose\.yml$/i.test(path) },
-  { name: 'Dockerfile', matches: (path) => /^Dockerfile[^/]*$/i.test(path) },
+  {
+    name: 'container build/compose',
+    matches: (path) => DEPLOYMENT_GUARDRAIL_RES.some((pattern) => pattern.test(path)),
+  },
   { name: 'package.json', matches: (path) => path.split('/').some((part) => part.toLowerCase() === 'package.json') },
   { name: 'lockfile', matches: (path) => path.split('/').some((part) => /^(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|.+\.lock)$/i.test(part)) },
   { name: 'tsconfig', matches: (path) => /(^|\/)tsconfig[^/]*$/i.test(path) },

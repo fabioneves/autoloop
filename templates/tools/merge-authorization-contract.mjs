@@ -221,6 +221,44 @@ function validateOwnership(config, pr, reasons) {
     reasons.push('linked issue body identity is missing or changed');
   }
   if (ownership?.claimCommitAncestor !== true) reasons.push('claim commit ancestry is not proven');
+  const claimCommit = ownership?.claimCommit;
+  if (
+    claimCommit?.complete !== true
+    || !Array.isArray(claimCommit.commits)
+    || claimCommit.commits.length === 0
+  ) {
+    reasons.push('claim commit metadata is incomplete');
+  } else {
+    const malformed = claimCommit.commits.some((commit) =>
+      !SHA_RE.test(commit?.oid ?? '')
+      || typeof commit?.message !== 'string'
+      || !Array.isArray(commit?.parentOids)
+      || commit.parentOids.some((oid) => !SHA_RE.test(oid ?? '')));
+    if (malformed || new Set(claimCommit.commits.map((commit) => commit?.oid)).size !== claimCommit.commits.length) {
+      reasons.push('claim commit metadata is malformed or duplicated');
+    }
+    if (
+      claimCommit.issue !== pr.claim?.issue
+      || claimCommit.headOid !== pr.headRefOid
+      || claimCommit.baseOid !== pr.baseRefOid
+    ) {
+      reasons.push('claim commit metadata is not bound to the PR issue, head, and base');
+    }
+    const first = claimCommit.commits[0];
+    const last = claimCommit.commits.at(-1);
+    if (claimCommit.oid !== first?.oid) reasons.push('attested claim commit does not start the PR');
+    if (first?.message !== `chore: claim #${pr.claim?.issue}`) {
+      reasons.push('branch-starting claim commit message is not canonical');
+    }
+    if (
+      first?.parentOids?.length !== 1
+      || first.parentOids[0] !== pr.baseRefOid
+      || claimCommit.baseOid !== pr.baseRefOid
+    ) {
+      reasons.push('branch-starting claim commit is not parented by the current base');
+    }
+    if (last?.oid !== pr.headRefOid) reasons.push('claim commit metadata does not reach the current PR head');
+  }
   if (
     ownership?.frozenPlanPresent !== true
     || ownership?.frozenPlanCommentVerified !== true
@@ -322,6 +360,7 @@ export function authorizeMerge(input) {
   if (pr.state !== 'OPEN') reasons.push('PR is not open');
   if (pr.isDraft !== false) reasons.push('PR is still draft or draft state is unknown');
   if (pr.baseRefName !== config.baseBranch) reasons.push('PR base does not match the configured base');
+  if (!SHA_RE.test(pr.baseRefOid ?? '')) reasons.push('PR base OID is invalid');
   if (!SHA_RE.test(pr.headRefOid ?? '')) reasons.push('PR head OID is invalid');
   if (
     pr.headRepository?.owner !== config.repository?.owner
@@ -354,6 +393,9 @@ export function authorizeMerge(input) {
   if (pr.lifecycle?.delivered !== true) reasons.push('lifecycle is not delivered');
   if (pr.lifecycle?.headOid !== pr.headRefOid) reasons.push('lifecycle evidence is not bound to the current head');
   if (pr.lifecycle?.premergeRecord !== true) reasons.push('pre-merge audit record is missing');
+  if (pr.gateEvidenceVerified !== true) {
+    reasons.push('typed exact-head gate evidence is missing or invalid');
+  }
   if (pr.conversationsResolved !== true) reasons.push('review conversations are unresolved or unknown');
   if (pr.killSwitch?.complete !== true) reasons.push('kill-switch evidence is incomplete');
   if (pr.killSwitch?.active !== false) reasons.push('automerge kill switch is active or unknown');
@@ -377,6 +419,8 @@ export function authorizeMerge(input) {
 }
 
 const HEAD = 'a'.repeat(40);
+const BASE = 'e'.repeat(40);
+const CLAIM = 'd'.repeat(40);
 
 function fixture(overrides = {}) {
   const config = {
@@ -410,6 +454,7 @@ function fixture(overrides = {}) {
       state: 'OPEN',
       isDraft: false,
       baseRefName: 'main',
+      baseRefOid: BASE,
       headRefName: 'feat/gh-7-safe-change',
       headRefOid: HEAD,
       headRepository: { owner: 'owner', name: 'repo' },
@@ -441,6 +486,25 @@ function fixture(overrides = {}) {
         complete: true,
         issueBodyHash: 'b'.repeat(64),
         claimCommitAncestor: true,
+        claimCommit: {
+          complete: true,
+          issue: 7,
+          headOid: HEAD,
+          baseOid: BASE,
+          oid: CLAIM,
+          commits: [
+            {
+              oid: CLAIM,
+              message: 'chore: claim #7',
+              parentOids: [BASE],
+            },
+            {
+              oid: HEAD,
+              message: 'feat: implement safe change',
+              parentOids: [CLAIM],
+            },
+          ],
+        },
         frozenPlanPresent: true,
         frozenPlanHash: 'c'.repeat(64),
         frozenPlanCommentId: 'IC_kwDOAutoloop7',
@@ -453,6 +517,7 @@ function fixture(overrides = {}) {
         headOid: HEAD,
         premergeRecord: true,
       },
+      gateEvidenceVerified: true,
       path: 'A',
       authorization: {
         complete: true,
@@ -514,6 +579,59 @@ function selfTest() {
       pr: { ...base.pr, labels: ['risk:pure-deletion'] },
     }), true],
     ['branch/body issue mismatch blocks', fixture({ pr: { ...base.pr, claim: { ok: false, code: 'ISSUE_MISMATCH' } } }), false],
+    ['claim commit later in the PR blocks', fixture({
+      pr: {
+        ...base.pr,
+        ownership: {
+          ...base.pr.ownership,
+          claimCommit: {
+            ...base.pr.ownership.claimCommit,
+            commits: [...base.pr.ownership.claimCommit.commits].reverse(),
+          },
+        },
+      },
+    }), false],
+    ['claim commit with a non-canonical message blocks', fixture({
+      pr: {
+        ...base.pr,
+        ownership: {
+          ...base.pr.ownership,
+          claimCommit: {
+            ...base.pr.ownership.claimCommit,
+            commits: base.pr.ownership.claimCommit.commits.map((commit, index) =>
+              index === 0 ? { ...commit, message: 'chore: claim issue 7' } : commit),
+          },
+        },
+      },
+    }), false],
+    ['claim commit not parented by the current base blocks', fixture({
+      pr: {
+        ...base.pr,
+        ownership: {
+          ...base.pr.ownership,
+          claimCommit: {
+            ...base.pr.ownership.claimCommit,
+            commits: base.pr.ownership.claimCommit.commits.map((commit, index) =>
+              index === 0 ? { ...commit, parentOids: ['f'.repeat(40)] } : commit),
+          },
+        },
+      },
+    }), false],
+    ['claim commit metadata for a stale head blocks', fixture({
+      pr: {
+        ...base.pr,
+        ownership: {
+          ...base.pr.ownership,
+          claimCommit: {
+            ...base.pr.ownership.claimCommit,
+            headOid: 'f'.repeat(40),
+          },
+        },
+      },
+    }), false],
+    ['missing typed gate evidence blocks', fixture({
+      pr: { ...base.pr, gateEvidenceVerified: false },
+    }), false],
     ['missing frozen plan blocks', fixture({ pr: { ...base.pr, ownership: { ...base.pr.ownership, frozenPlanPresent: false } } }), false],
     ['unverified frozen-plan comment blocks', fixture({ pr: { ...base.pr, ownership: { ...base.pr.ownership, frozenPlanCommentVerified: false } } }), false],
     ['undelivered lifecycle blocks', fixture({ pr: { ...base.pr, lifecycle: { ...base.pr.lifecycle, delivered: false } } }), false],
