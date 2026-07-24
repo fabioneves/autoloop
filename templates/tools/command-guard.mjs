@@ -292,7 +292,9 @@ export function evaluate(rawCmd, branch, options = {}) {
           'raw surface (docs/agentic/STATE.md → Autonomy). Use human merge or the repo-ratified policy gate.',
       };
     }
-    if (/\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch)\b/.test(cmd)) {
+    if (
+      /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|enqueuePullRequest)\b/.test(cmd)
+    ) {
       return {
         block: true,
         reason:
@@ -404,6 +406,7 @@ function selfTest() {
     ['gh api repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true],
     ['gh api repos/o/r/merges -f base=main -f head=feat/gh-2-y', 'feat/gh-2-y', true],
     ["gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"})}'", 'feat/gh-2-y', true],
+    ["gh api graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'", 'feat/gh-2-y', true],
     ["gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:\"x\"})}'", 'feat/gh-2-y', false],
     ['gh api repos/o/r/branches/main/protection -X DELETE', 'main', true],
     ['gh api repos/o/r/branches/main/protection -f enforce_admins=false', 'main', true],
