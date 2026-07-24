@@ -305,15 +305,19 @@ trust chain through the loop's own login.
 
 Workflow measurements are local evidence, never routing or lifecycle authority. One terminal unit
 retains reconciled aggregates plus separate stage/round/route/adapter segments and an explicit
-terminal outcome. The persistence tool adds a content fingerprint and store-local authentication
-before an atomic write-once create. Provider and avoided-cost facts that cannot be verified use
-typed unavailable reasons. Legacy-to-safe comparisons hold the complete flow/intent/route/config/
+terminal outcome. Segments include premise, selection, planning/plan review where applicable,
+claim, implementation, simplify, orchestrator diff review, code review, recovery when used, gate,
+and delivery. The persistence tool binds live HEAD/tool time and adds content/observation
+fingerprints plus store authentication before an atomic write-once create; checkpoint and run/unit
+evidence remain declared rather than independently attested. Duplicate observations and invalid
+evidence fail closed. Provider and avoided-cost facts that cannot be verified use typed
+unavailable reasons. Legacy-to-safe comparisons hold the complete flow/intent/route/config/
 capability/outage/degradation/provider/model/engine cohort identity constant except for explicitly
 declared checkpoint fields. Budget commands load authenticated store record IDs and replay exact
 source contents; caller JSON cannot become enforceable evidence. A p95 needs 20 observed values
 for that metric; a budget remains provisional until its named safe-system source and current cohort
 both meet the declared stable floor of at least 100. Missing historical records are never
-fabricated.
+fabricated, and normal capture cannot import legacy records.
 
 **Step labels are breadcrumbs, never decision inputs.** `loop-started` and the `loop:*` labels are
 the loop's own progress trail — truth stays git/GitHub (open PRs, merged PRs, gate verdicts), and

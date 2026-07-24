@@ -384,14 +384,16 @@ Autoloop spends depth where it changes the outcome and keeps every wait visible:
 - **Idle exit:** no actionable PRs and no eligible issues means a clean stop, not a polling loop.
 
 The versioned [measurement contract](docs/measurement.md) atomically retains one write-once local
-unit record with a content fingerprint and store-local authentication, then reports strict unit
-and segment cohorts, medians, nearest-rank p95s, dynamic step metrics, and outcome rates. Unknown
+unit record bound to live HEAD/tool time with content, observation, and store authentication, then
+reports strict unit and segment cohorts, medians, nearest-rank p95s, dynamic step metrics, and
+outcome rates. Checkpoint and run identity remain declared rather than independently attested;
+duplicate observations and invalid evidence fail closed. Unknown
 provider, model, token, context, cost, or avoided-cost evidence is typed unavailable instead of
 zero. Matched-checkpoint comparison is manual-to-manual; mode/workload budgets load authenticated
 record IDs from the local store, replay every named safe-system fingerprint, and refuse or stay
 provisional below metric-specific floors. The pipeline ships without fabricated baseline samples
 or preselected limits: real legacy/safe/post records and operator-derived budgets still have to be
-captured.
+captured, and authenticated legacy import is not yet available.
 
 ## Observable and recoverable
 
