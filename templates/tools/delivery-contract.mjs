@@ -30,8 +30,29 @@ function classifyCheck(check) {
 }
 
 export function finalizeHead(input) {
-  if (!input || !SHA_RE.test(input.gatedHead ?? '') || !SHA_RE.test(input.remoteHead ?? '')) {
+  const headFields = [
+    'committedHead',
+    'reviewedHead',
+    'gatedHead',
+    'remoteHead',
+  ];
+  if (
+    !input
+    || headFields.some((field) => !SHA_RE.test(input[field] ?? ''))
+  ) {
     return result('error', 'INVALID_DELIVERY_INPUT');
+  }
+  if (input.committedHead !== input.reviewedHead) {
+    return result('re-review', 'REVIEW_HEAD_MISMATCH', {
+      committedHead: input.committedHead,
+      reviewedHead: input.reviewedHead,
+    });
+  }
+  if (input.reviewedHead !== input.gatedHead) {
+    return result('re-gate', 'GATE_HEAD_MISMATCH', {
+      reviewedHead: input.reviewedHead,
+      gatedHead: input.gatedHead,
+    });
   }
   if (input.gatedHead !== input.remoteHead) {
     return result('re-gate', 'REMOTE_HEAD_MISMATCH', {
@@ -39,7 +60,16 @@ export function finalizeHead(input) {
       remoteHead: input.remoteHead,
     });
   }
-  if (!input.ci || input.ci.complete !== true || !Array.isArray(input.ci.checks)) {
+  if (
+    !input.ci
+    || input.ci.complete !== true
+    || input.ci.requirementsComplete !== true
+    || !Array.isArray(input.ci.requiredChecks)
+    || input.ci.requiredChecks.some((name) =>
+      typeof name !== 'string' || name.length === 0)
+    || new Set(input.ci.requiredChecks).size !== input.ci.requiredChecks.length
+    || !Array.isArray(input.ci.checks)
+  ) {
     return result('awaiting-ci', 'CI_EVIDENCE_INCOMPLETE', { headOid: input.remoteHead });
   }
   if (input.ci.headOid !== input.remoteHead) {
@@ -48,23 +78,34 @@ export function finalizeHead(input) {
 
   let pending = false;
   const failedChecks = [];
+  const observedChecks = new Set();
   for (const check of input.ci.checks) {
     if (check?.headOid && check.headOid !== input.remoteHead) {
       pending = true;
       continue;
     }
+    const name = String(check?.name ?? check?.context ?? '');
+    if (name) observedChecks.add(name);
     const classification = classifyCheck(check);
     if (classification === 'pending') pending = true;
-    if (classification === 'failed') failedChecks.push(String(check?.name ?? check?.context ?? 'unknown'));
+    if (classification === 'failed') failedChecks.push(name || 'unknown');
   }
+  const missingChecks = input.ci.requiredChecks
+    .filter((name) => !observedChecks.has(name));
   if (failedChecks.length > 0) {
     return result('gate-red', 'CI_FAILED', {
       headOid: input.remoteHead,
       failedChecks,
     });
   }
+  if (missingChecks.length > 0) {
+    return result('awaiting-ci', 'CI_REQUIRED_CHECK_MISSING', {
+      headOid: input.remoteHead,
+      missingChecks,
+    });
+  }
   if (pending) return result('awaiting-ci', 'CI_PENDING', { headOid: input.remoteHead });
-  return result('delivered', input.ci.checks.length === 0 ? 'NO_CI' : 'CI_GREEN', {
+  return result('delivered', input.ci.requiredChecks.length === 0 ? 'NO_REQUIRED_CI' : 'CI_GREEN', {
     headOid: input.remoteHead,
   });
 }
@@ -74,45 +115,166 @@ function selfTest() {
   const other = 'b'.repeat(40);
   const cases = [
     {
-      name: 'verified current head with no configured CI is delivered',
-      input: { gatedHead: sha, remoteHead: sha, ci: { complete: true, headOid: sha, checks: [] } },
+      name: 'explicit complete no-required-CI policy is delivered',
+      input: {
+        committedHead: sha,
+        reviewedHead: sha,
+        gatedHead: sha,
+        remoteHead: sha,
+        ci: {
+          complete: true,
+          requirementsComplete: true,
+          requiredChecks: [],
+          headOid: sha,
+          checks: [],
+        },
+      },
       expected: 'delivered',
     },
     {
       name: 'pending check produces awaiting-ci',
       input: {
+        committedHead: sha,
+        reviewedHead: sha,
         gatedHead: sha,
         remoteHead: sha,
-        ci: { complete: true, headOid: sha, checks: [{ name: 'test', status: 'IN_PROGRESS', conclusion: null, headOid: sha }] },
+        ci: {
+          complete: true,
+          requirementsComplete: true,
+          requiredChecks: ['test'],
+          headOid: sha,
+          checks: [{ name: 'test', status: 'IN_PROGRESS', conclusion: null, headOid: sha }],
+        },
       },
       expected: 'awaiting-ci',
     },
     {
       name: 'incomplete check snapshot cannot prove delivery',
-      input: { gatedHead: sha, remoteHead: sha, ci: { complete: false, checks: [] } },
+      input: {
+        committedHead: sha,
+        reviewedHead: sha,
+        gatedHead: sha,
+        remoteHead: sha,
+        ci: {
+          complete: false,
+          requirementsComplete: true,
+          requiredChecks: [],
+          checks: [],
+        },
+      },
+      expected: 'awaiting-ci',
+    },
+    {
+      name: 'empty fetched checks without complete requirements cannot prove no CI',
+      input: {
+        committedHead: sha,
+        reviewedHead: sha,
+        gatedHead: sha,
+        remoteHead: sha,
+        ci: { complete: true, headOid: sha, checks: [] },
+      },
+      expected: 'awaiting-ci',
+    },
+    {
+      name: 'missing required check remains awaiting CI',
+      input: {
+        committedHead: sha,
+        reviewedHead: sha,
+        gatedHead: sha,
+        remoteHead: sha,
+        ci: {
+          complete: true,
+          requirementsComplete: true,
+          requiredChecks: ['test'],
+          headOid: sha,
+          checks: [],
+        },
+      },
       expected: 'awaiting-ci',
     },
     {
       name: 'failed check returns gate-red',
       input: {
+        committedHead: sha,
+        reviewedHead: sha,
         gatedHead: sha,
         remoteHead: sha,
-        ci: { complete: true, headOid: sha, checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'FAILURE', headOid: sha }] },
+        ci: {
+          complete: true,
+          requirementsComplete: true,
+          requiredChecks: ['test'],
+          headOid: sha,
+          checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'FAILURE', headOid: sha }],
+        },
       },
       expected: 'gate-red',
     },
     {
       name: 'stale green check cannot prove delivery',
       input: {
+        committedHead: sha,
+        reviewedHead: sha,
         gatedHead: sha,
         remoteHead: sha,
-        ci: { complete: true, headOid: sha, checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS', headOid: other }] },
+        ci: {
+          complete: true,
+          requirementsComplete: true,
+          requiredChecks: ['test'],
+          headOid: sha,
+          checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS', headOid: other }],
+        },
       },
       expected: 'awaiting-ci',
     },
     {
       name: 'remote head mismatch requires re-gate',
-      input: { gatedHead: sha, remoteHead: other, ci: { complete: true, headOid: other, checks: [] } },
+      input: {
+        committedHead: sha,
+        reviewedHead: sha,
+        gatedHead: sha,
+        remoteHead: other,
+        ci: {
+          complete: true,
+          requirementsComplete: true,
+          requiredChecks: [],
+          headOid: other,
+          checks: [],
+        },
+      },
+      expected: 're-gate',
+    },
+    {
+      name: 'unreviewed committed head requires another review',
+      input: {
+        committedHead: other,
+        reviewedHead: sha,
+        gatedHead: sha,
+        remoteHead: sha,
+        ci: {
+          complete: true,
+          requirementsComplete: true,
+          requiredChecks: [],
+          headOid: sha,
+          checks: [],
+        },
+      },
+      expected: 're-review',
+    },
+    {
+      name: 'ungated reviewed head requires another gate',
+      input: {
+        committedHead: other,
+        reviewedHead: other,
+        gatedHead: sha,
+        remoteHead: sha,
+        ci: {
+          complete: true,
+          requirementsComplete: true,
+          requiredChecks: [],
+          headOid: sha,
+          checks: [],
+        },
+      },
       expected: 're-gate',
     },
   ];
