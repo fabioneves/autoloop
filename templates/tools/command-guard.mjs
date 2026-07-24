@@ -22,8 +22,12 @@
 //         node tools/agentic/command-guard.mjs --self-test
 
 import { readFileSync, realpathSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  extractConfig,
+  validateConfig,
+} from './config-contract.mjs';
 
 // Strip heredoc bodies so text INSIDE a body (e.g. a PR description that quotes
 // "gh pr merge") never false-positives.
@@ -315,13 +319,48 @@ export function evaluate(rawCmd, branch, options = {}) {
 
 function currentBranch() {
   try {
-    return execSync('git rev-parse --abbrev-ref HEAD', {
+    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
   } catch {
     return null;
   }
+}
+
+export function loadConfiguredBase(statePath) {
+  const config = extractConfig(readFileSync(statePath, 'utf8'));
+  const errors = validateConfig(config);
+  if (errors.length > 0) {
+    throw new Error(`invalid ProjectConfig: ${errors.join('; ')}`);
+  }
+  return config.baseBranch;
+}
+
+export function parseArgs(args) {
+  if (args.length === 1 && args[0] === '--self-test') {
+    return { selfTest: true, statePath: null, error: null };
+  }
+  if (args.length === 0) {
+    return {
+      selfTest: false,
+      statePath: 'docs/agentic/STATE.md',
+      error: null,
+    };
+  }
+  if (
+    args.length === 2
+    && args[0] === '--config'
+    && typeof args[1] === 'string'
+    && args[1].length > 0
+  ) {
+    return { selfTest: false, statePath: args[1], error: null };
+  }
+  return {
+    selfTest: false,
+    statePath: null,
+    error: 'expected --config <STATE path> or --self-test',
+  };
 }
 
 function selfTest() {
@@ -383,12 +422,33 @@ function selfTest() {
       ok = false;
     }
   }
+  const argCases = [
+    ['default config path', [], 'docs/agentic/STATE.md'],
+    ['explicit config path', ['--config', '/repo/STATE.md'], '/repo/STATE.md'],
+    ['missing config value', ['--config'], null],
+    ['legacy base injection rejected', ['--base', 'main'], null],
+  ];
+  for (const [name, args, expectedPath] of argCases) {
+    const parsed = parseArgs(args);
+    const passed = expectedPath === null
+      ? parsed.error !== null
+      : parsed.error === null && parsed.statePath === expectedPath;
+    if (!passed) {
+      console.error(`FAIL [${name}]`);
+      ok = false;
+    }
+  }
   console.log(ok ? `self-test OK (${cases.length} cases)` : 'self-test FAILED');
   return ok;
 }
 
 function main() {
-  if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.error) {
+    console.error(`command-guard: ${parsed.error}`);
+    process.exit(1);
+  }
+  if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
 
   let payload;
   try {
@@ -399,8 +459,13 @@ function main() {
   const cmd = payload?.tool_input?.command;
   if (typeof cmd !== 'string') process.exit(0);
 
-  const baseFlag = process.argv.indexOf('--base');
-  const baseBranch = baseFlag === -1 ? 'main' : process.argv[baseFlag + 1];
+  let baseBranch;
+  try {
+    baseBranch = loadConfiguredBase(parsed.statePath);
+  } catch (error) {
+    console.error(`command-guard: cannot resolve configured base: ${error.message}`);
+    process.exit(1);
+  }
   const verdict = evaluate(cmd, currentBranch(), { baseBranch });
   if (verdict.block) {
     process.stderr.write(verdict.reason + '\n');

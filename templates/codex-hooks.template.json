@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "s=\"$(git rev-parse --show-toplevel)/tools/agentic/command-guard.mjs\"; if [ -f \"$s\" ]; then node \"$s\"; else echo \"autoloop: command guard $s not found — refusing commands until Codex runs from the repo root\" >&2; exit 2; fi",
+            "command": "r=\"$(git rev-parse --show-toplevel)\"; s=\"$r/tools/agentic/command-guard.mjs\"; c=\"$r/docs/agentic/STATE.md\"; if [ -f \"$s\" ]; then node \"$s\" --config \"$c\"; else echo \"autoloop: command guard $s not found — refusing commands until Codex runs from the repo root\" >&2; exit 2; fi",
             "timeout": 15,
             "statusMessage": "checking autoloop command policy"
           }
