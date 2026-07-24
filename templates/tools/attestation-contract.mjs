@@ -9,36 +9,30 @@ const LABELS = new Set(['risk:pure-deletion', 'risk:mechanical-refactor']);
 const KINDS = new Set(['ownership', 'policy', 'human-authorization']);
 const BASE_KEYS = ['kind', 'v', 'headOid'];
 const KEYS = {
-  ownership: [...BASE_KEYS, 'issue', 'issueBodyHash', 'claimCommitOid', 'frozenPlanHash'],
   policy: [
     ...BASE_KEYS,
     'issue',
-    'blocked',
-    'dependenciesClear',
     'delivered',
     'premergeRecord',
-    'serverPolicy',
   ],
-  'human-authorization': [...BASE_KEYS, 'actor', 'label'],
+  ownership: [
+    ...BASE_KEYS,
+    'issue',
+    'issueBodyHash',
+    'claimCommitOid',
+    'frozenPlanHash',
+    'frozenPlanCommentId',
+    'frozenPlanAuthor',
+  ],
+  'human-authorization': [
+    ...BASE_KEYS,
+    'pullRequest',
+    'actor',
+    'label',
+    'labelEventId',
+    'labeledAt',
+  ],
 };
-const SERVER_KEYS = [
-  'complete',
-  'strategy',
-  'strict',
-  'enforceAdmins',
-  'actorCanBypass',
-  'requiredConversationResolution',
-  'requiredApprovingReviewCount',
-  'dismissStaleReviews',
-  'requireLastPushApproval',
-  'forcePushesAllowed',
-  'deletionsAllowed',
-  'requiredChecks',
-  'queueAvailable',
-  'queueRequired',
-  'mergeGroupCi',
-  'asyncOutcomeRecovery',
-];
 
 function exactKeys(value, expected) {
   return (
@@ -49,49 +43,12 @@ function exactKeys(value, expected) {
   );
 }
 
-function validChecks(value) {
+function validTimestamp(value) {
   return (
-    Array.isArray(value)
-    && value.length > 0
-    && value.every((check) =>
-      exactKeys(check, ['name', 'appIds'])
-      && typeof check.name === 'string'
-      && check.name.length > 0
-      && Array.isArray(check.appIds)
-      && check.appIds.length > 0
-      && check.appIds.every((id) => Number.isInteger(id) && id > 0))
+    typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value)
+    && Number.isFinite(Date.parse(value))
   );
-}
-
-function validServerPolicy(value) {
-  if (!exactKeys(value, SERVER_KEYS)) return false;
-  if (
-    value.complete !== true
-    || !['direct-strict', 'merge-queue'].includes(value.strategy)
-    || typeof value.strict !== 'boolean'
-    || typeof value.enforceAdmins !== 'boolean'
-    || typeof value.actorCanBypass !== 'boolean'
-    || typeof value.requiredConversationResolution !== 'boolean'
-    || !Number.isInteger(value.requiredApprovingReviewCount)
-    || value.requiredApprovingReviewCount < 0
-    || typeof value.dismissStaleReviews !== 'boolean'
-    || typeof value.requireLastPushApproval !== 'boolean'
-    || typeof value.forcePushesAllowed !== 'boolean'
-    || typeof value.deletionsAllowed !== 'boolean'
-    || typeof value.queueAvailable !== 'boolean'
-    || typeof value.queueRequired !== 'boolean'
-    || typeof value.mergeGroupCi !== 'boolean'
-    || typeof value.asyncOutcomeRecovery !== 'boolean'
-    || !validChecks(value.requiredChecks)
-  ) {
-    return false;
-  }
-  return value.strategy === 'direct-strict'
-    ? value.strict === true
-    : value.queueAvailable === true
-      && value.queueRequired === true
-      && value.mergeGroupCi === true
-      && value.asyncOutcomeRecovery === true;
 }
 
 export function validateAttestation(value, expected = {}) {
@@ -111,18 +68,28 @@ export function validateAttestation(value, expected = {}) {
     if (!HASH_RE.test(value.issueBodyHash ?? '')) errors.push('issueBodyHash must be SHA-256');
     if (!SHA_RE.test(value.claimCommitOid ?? '')) errors.push('claimCommitOid must be a commit OID');
     if (!HASH_RE.test(value.frozenPlanHash ?? '')) errors.push('frozenPlanHash must be SHA-256');
+    if (typeof value.frozenPlanCommentId !== 'string' || value.frozenPlanCommentId.length === 0) {
+      errors.push('frozenPlanCommentId must be non-empty');
+    }
+    if (typeof value.frozenPlanAuthor !== 'string' || value.frozenPlanAuthor.length === 0) {
+      errors.push('frozenPlanAuthor must be non-empty');
+    }
   } else if (value.kind === 'policy') {
     if (!Number.isInteger(value.issue) || value.issue < 1) errors.push('issue must be positive');
-    for (const key of ['blocked', 'dependenciesClear', 'delivered']) {
-      if (typeof value[key] !== 'boolean') errors.push(`${key} must be boolean`);
-    }
+    if (typeof value.delivered !== 'boolean') errors.push('delivered must be boolean');
     if (typeof value.premergeRecord !== 'string' || value.premergeRecord.length === 0) {
       errors.push('premergeRecord must be non-empty');
     }
-    if (!validServerPolicy(value.serverPolicy)) errors.push('serverPolicy is invalid or incomplete');
   } else {
+    if (!Number.isInteger(value.pullRequest) || value.pullRequest < 1) {
+      errors.push('pullRequest must be positive');
+    }
     if (typeof value.actor !== 'string' || value.actor.length === 0) errors.push('actor must be non-empty');
     if (!LABELS.has(value.label)) errors.push('authorization label is unsupported');
+    if (!Number.isSafeInteger(value.labelEventId) || value.labelEventId < 1) {
+      errors.push('labelEventId must be a positive safe integer');
+    }
+    if (!validTimestamp(value.labeledAt)) errors.push('labeledAt must be a GitHub UTC timestamp');
   }
   return errors;
 }
@@ -162,28 +129,8 @@ function policyFixture() {
     v: 1,
     headOid: 'a'.repeat(40),
     issue: 7,
-    blocked: false,
-    dependenciesClear: true,
     delivered: true,
     premergeRecord: 'record-1',
-    serverPolicy: {
-      complete: true,
-      strategy: 'direct-strict',
-      strict: true,
-      enforceAdmins: true,
-      actorCanBypass: false,
-      requiredConversationResolution: true,
-      requiredApprovingReviewCount: 1,
-      dismissStaleReviews: true,
-      requireLastPushApproval: true,
-      forcePushesAllowed: false,
-      deletionsAllowed: false,
-      requiredChecks: [{ name: 'agentic/gate', appIds: [42] }],
-      queueAvailable: false,
-      queueRequired: false,
-      mergeGroupCi: false,
-      asyncOutcomeRecovery: false,
-    },
   };
 }
 
@@ -196,13 +143,18 @@ function selfTest() {
     issueBodyHash: 'b'.repeat(64),
     claimCommitOid: 'c'.repeat(40),
     frozenPlanHash: 'd'.repeat(64),
+    frozenPlanCommentId: 'IC_kwDOAutoloop7',
+    frozenPlanAuthor: 'autoloop[bot]',
   };
   const authorization = {
     kind: 'human-authorization',
     v: 1,
     headOid: 'a'.repeat(40),
+    pullRequest: 12,
     actor: 'maintainer',
     label: 'risk:pure-deletion',
+    labelEventId: 123456,
+    labeledAt: '2026-07-24T00:00:00Z',
   };
   const policy = policyFixture();
   const cases = [
@@ -225,17 +177,17 @@ function selfTest() {
       ...authorization,
       label: 'human:authorize',
     }).length > 0],
-    ['queue policy without merge_group rejected', validateAttestation({
+    ['caller-authored server policy rejected', validateAttestation({
       ...policy,
-      serverPolicy: {
-        ...policy.serverPolicy,
-        strategy: 'merge-queue',
-        strict: false,
-        queueAvailable: true,
-        queueRequired: true,
-        mergeGroupCi: false,
-        asyncOutcomeRecovery: true,
-      },
+      serverPolicy: { complete: true },
+    }).length > 0],
+    ['ownership without frozen-plan comment identity rejected', validateAttestation({
+      ...ownership,
+      frozenPlanCommentId: '',
+    }).length > 0],
+    ['authorization without label event identity rejected', validateAttestation({
+      ...authorization,
+      labelEventId: null,
     }).length > 0],
   ];
   const failures = cases.filter(([, ok]) => !ok);

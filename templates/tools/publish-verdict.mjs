@@ -206,6 +206,8 @@ function selfTest() {
     issueBodyHash: 'b'.repeat(64),
     claimCommitOid: 'c'.repeat(40),
     frozenPlanHash: 'd'.repeat(64),
+    frozenPlanCommentId: 'IC_kwDOAutoloop7',
+    frozenPlanAuthor: 'autoloop[bot]',
   };
   if (
     validateAttestation(ownership, {
@@ -223,7 +225,29 @@ function selfTest() {
   } else {
     console.error('FAIL ownership attestation builds a CheckRun');
   }
-  const total = cases.length + 9;
+  const authorization = {
+    kind: 'human-authorization',
+    v: 1,
+    headOid: 'a'.repeat(40),
+    pullRequest: 12,
+    actor: 'maintainer',
+    label: 'risk:pure-deletion',
+    labelEventId: 123456,
+    labeledAt: '2026-07-24T00:00:00Z',
+  };
+  if (
+    buildCheckRun(
+      'human-authorization',
+      authorization.headOid,
+      serializeAttestation(authorization),
+      '2026-07-24T00:00:00.000Z',
+    ).output.summary.includes('"labelEventId":123456')
+  ) {
+    passed += 1;
+  } else {
+    console.error('FAIL human authorization publishes immutable label-event identity');
+  }
+  const total = cases.length + 10;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }
