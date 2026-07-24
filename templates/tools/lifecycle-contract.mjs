@@ -33,21 +33,25 @@ function validIntent(intentValue) {
     SHA_RE.test(intentValue.plannedBaseOid ?? '') &&
     new Set(['native', 'claude', 'codex', 'opencode']).has(intentValue.selector) &&
     HASH_RE.test(intentValue.runIntentHash ?? '') &&
+    new Set(['invocation', 'relaunch', 'orphan-recovery']).has(intentValue.intentSource) &&
     new Set(['manual', 'ratified', 'auto']).has(intentValue.mergePolicy)
   );
 }
 
 function sameIdentity(intentValue, markerValue) {
-  return [
+  const claimMatches = [
     'issue',
     'issueBodyHash',
     'planHash',
     'branch',
     'plannedBaseOid',
-    'selector',
-    'runIntentHash',
-    'mergePolicy',
   ].every((key) => intentValue[key] === markerValue[key]);
+  if (!claimMatches) return false;
+  if (intentValue.intentSource !== 'relaunch') return true;
+  return (
+    intentValue.selector === markerValue.selector
+    && intentValue.runIntentHash === markerValue.runIntentHash
+  );
 }
 
 function inspect(section) {
@@ -221,6 +225,7 @@ function intent() {
     plannedBaseOid: SHA,
     selector: 'native',
     runIntentHash: 'd'.repeat(64),
+    intentSource: 'invocation',
     mergePolicy: 'manual',
   };
 }
@@ -402,6 +407,34 @@ function selfTest() {
     {
       name: 'identity mismatch blocks recovery',
       input: { intent: intent(), marker: marker({ issue: 8 }), observed: observed() },
+      expected: ['block', 'identity-mismatch'],
+    },
+    {
+      name: 'orphan recovery uses new invocation routing intent',
+      input: {
+        intent: {
+          ...intent(),
+          selector: 'codex',
+          runIntentHash: 'f'.repeat(64),
+          intentSource: 'orphan-recovery',
+        },
+        marker: marker({ claimCommit: SHA, pr: 12 }),
+        observed: observed(),
+      },
+      expected: ['resume', 'resume-unit'],
+    },
+    {
+      name: 'same-chain relaunch rejects conflicting routing intent',
+      input: {
+        intent: {
+          ...intent(),
+          selector: 'codex',
+          runIntentHash: 'f'.repeat(64),
+          intentSource: 'relaunch',
+        },
+        marker: marker({ claimCommit: SHA, pr: 12 }),
+        observed: observed(),
+      },
       expected: ['block', 'identity-mismatch'],
     },
   ];
