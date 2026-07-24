@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 const CONTEXTS = new Set(['gate', 'review']);
 const SHA_RE = /^[0-9a-f]{40}$/;
 
-export function buildCheckRun(ctx, sha, summary) {
+export function buildCheckRun(ctx, sha, summary, completedAt = new Date().toISOString()) {
   const text = typeof summary === 'string' && summary.length > 0
     ? summary.slice(0, 65535)
     : 'Verified by the Autoloop development workflow.';
@@ -27,6 +27,8 @@ export function buildCheckRun(ctx, sha, summary) {
     head_sha: sha,
     status: 'completed',
     conclusion: 'success',
+    started_at: completedAt,
+    completed_at: completedAt,
     output: {
       title: `Autoloop ${ctx} passed`,
       summary: text,
@@ -107,12 +109,13 @@ function selfTest() {
       console.error(`FAIL [expect ${expect}]: ctx=${ctx} sha=${String(sha).slice(0, 8)}`);
     }
   }
-  const payload = buildCheckRun('gate', 'a'.repeat(40), 'gate passed');
+  const payload = buildCheckRun('gate', 'a'.repeat(40), 'gate passed', '2026-07-24T00:00:00.000Z');
   if (
     payload.name !== 'agentic/gate'
     || payload.head_sha !== 'a'.repeat(40)
     || payload.status !== 'completed'
     || payload.conclusion !== 'success'
+    || payload.completed_at !== '2026-07-24T00:00:00.000Z'
   ) {
     console.error('FAIL verdict publishes as a completed CheckRun');
   } else passed += 1;
@@ -170,6 +173,10 @@ function main() {
         'repos/{owner}/{repo}/check-runs',
         '--method',
         'POST',
+        '-H',
+        'Accept: application/vnd.github+json',
+        '-H',
+        'X-GitHub-Api-Version: 2026-03-10',
         '--input',
         '-',
       ],
