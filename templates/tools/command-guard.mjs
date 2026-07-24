@@ -34,17 +34,174 @@ export function stripHeredocs(cmd) {
   );
 }
 
-// Branches that take PRs only. Covers the common defaults; add long-lived
-// release/integration branches your repo protects.
-const PERMANENT = new Set(['main', 'master', 'develop']);
+function shellSegments(cmd) {
+  const segments = [];
+  let quote = null;
+  let escaped = false;
+  let start = 0;
+  for (let i = 0; i < cmd.length; i += 1) {
+    const char = cmd[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    const pair = cmd.slice(i, i + 2);
+    const separator = pair === '&&' || pair === '||'
+      ? pair
+      : char === ';' || char === '\n' || char === '|' || char === '&'
+        ? ';'
+        : null;
+    if (!separator) continue;
+    segments.push({ command: cmd.slice(start, i).trim(), next: separator });
+    i += separator.length - 1;
+    start = i + 1;
+  }
+  segments.push({ command: cmd.slice(start).trim(), next: null });
+  return segments.filter((segment) => segment.command);
+}
+
+function shellWords(command) {
+  const words = [];
+  let word = '';
+  let quote = null;
+  let escaped = false;
+  let active = false;
+  for (const char of command) {
+    if (escaped) {
+      word += char;
+      escaped = false;
+      active = true;
+      continue;
+    }
+    if (char === '\\' && quote !== "'") {
+      escaped = true;
+      active = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      else word += char;
+      active = true;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      active = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (active) words.push(word);
+      word = '';
+      active = false;
+      continue;
+    }
+    word += char;
+    active = true;
+  }
+  if (active) words.push(word);
+  return words;
+}
+
+function gitSubcommandIndex(words, subcommand) {
+  const git = words.indexOf('git');
+  if (git === -1) return -1;
+  const optionsWithValues = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace']);
+  for (let i = git + 1; i < words.length; i += 1) {
+    const word = words[i];
+    if (optionsWithValues.has(word)) {
+      i += 1;
+      continue;
+    }
+    if (word.startsWith('-')) continue;
+    return word === subcommand ? i : -1;
+  }
+  return -1;
+}
+
+function switchTarget(words) {
+  const switchIndex = gitSubcommandIndex(words, 'switch');
+  const checkoutIndex = gitSubcommandIndex(words, 'checkout');
+  const index = switchIndex === -1 ? checkoutIndex : switchIndex;
+  if (index === -1) return null;
+  const branchFlags = new Set(['-c', '-C', '-b', '-B']);
+  for (let i = index + 1; i < words.length; i += 1) {
+    const word = words[i];
+    if (word === '--') return null;
+    if (branchFlags.has(word)) return words[i + 1] ?? null;
+    if (word.startsWith('-')) continue;
+    return word;
+  }
+  return null;
+}
+
+function normalizedBranch(ref) {
+  return String(ref ?? '').replace(/^refs\/heads\//, '');
+}
+
+function pushTargetsBase(words, branches, baseBranch) {
+  const index = gitSubcommandIndex(words, 'push');
+  if (index === -1) return false;
+  const args = words.slice(index + 1);
+  const deleteMode = args.includes('--delete') || args.includes('-d');
+  const optionsWithValues = new Set([
+    '--repo',
+    '--receive-pack',
+    '--exec',
+    '--push-option',
+    '-o',
+  ]);
+  const positional = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (optionsWithValues.has(arg)) {
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('-')) continue;
+    positional.push(arg);
+  }
+  const refspecs = positional.slice(1);
+  if (refspecs.length === 0) return branches.has(baseBranch);
+  return refspecs.some((refspec) => {
+    const clean = refspec.replace(/^\+/, '');
+    const colon = clean.lastIndexOf(':');
+    const destination = colon === -1 ? clean : clean.slice(colon + 1);
+    if (!destination && !deleteMode) return false;
+    return normalizedBranch(destination) === baseBranch;
+  });
+}
+
+function isInlineGhBody(words) {
+  const gh = words.indexOf('gh');
+  if (gh === -1) return false;
+  const scope = words.findIndex((word, index) => index > gh && (word === 'pr' || word === 'issue'));
+  const action = words[scope + 1];
+  if (scope === -1 || !new Set(['create', 'comment', 'review', 'edit']).has(action)) return false;
+  return words.some(
+    (word) => word === '--body' || word === '-b' || (word.startsWith('--body=') && !word.startsWith('--body-file=')),
+  );
+}
 
 /**
  * Pure rule evaluation — returns { block: boolean, reason?: string }.
  * `branch` is the CURRENT git branch (null when unknown → branch rules skip).
  */
-export function evaluate(rawCmd, branch) {
+export function evaluate(rawCmd, branch, options = {}) {
   if (typeof rawCmd !== 'string' || rawCmd.length === 0) return { block: false };
   const cmd = stripHeredocs(rawCmd);
+  const baseBranch = options.baseBranch ?? 'main';
 
   // 1. never merge
   if (/\bgh\b[^\n]*\bpr\b[^\n]*\bmerge\b/.test(cmd)) {
@@ -57,25 +214,32 @@ export function evaluate(rawCmd, branch) {
     };
   }
 
-  const isCommit = /\bgit\b[^\n]*\bcommit\b/.test(cmd);
-
-  // 2. no commits on permanent branches (unless the command itself switches first)
-  if (
-    isCommit &&
-    branch &&
-    PERMANENT.has(branch) &&
-    !/\bgit\s+(switch|checkout)\b/.test(cmd)
-  ) {
-    return {
-      block: true,
-      reason:
-        `Blocked: \`git commit\` on "${branch}" — permanent branches take PRs only. ` +
-        'Create a working branch first: <type>/gh-<N>-<slug> (autoloop:dev step 4).',
-    };
+  const segments = shellSegments(cmd);
+  let possibleBranches = new Set(branch ? [branch] : []);
+  for (const segment of segments) {
+    const words = shellWords(segment.command);
+    if (gitSubcommandIndex(words, 'commit') !== -1 && possibleBranches.has(baseBranch)) {
+      return {
+        block: true,
+        reason:
+          `Blocked: \`git commit\` on configured base "${baseBranch}" — the base takes PRs only. ` +
+          'Create a working branch first: <type>/gh-<N>-<slug> (autoloop:dev step 4).',
+      };
+    }
+    if (pushTargetsBase(words, possibleBranches, baseBranch)) {
+      return {
+        block: true,
+        reason:
+          `Blocked: \`git push\` targets configured base "${baseBranch}" — the base takes PRs only.`,
+      };
+    }
+    const target = switchTarget(words);
+    if (target && segment.next === '&&') possibleBranches = new Set([normalizedBranch(target)]);
+    else if (target && segment.next === ';') possibleBranches.add(normalizedBranch(target));
   }
 
   // 3. no co-author trailers (checked on the RAW command: the trailer rides in -m text)
-  if (isCommit && /Co-Authored-By:/i.test(rawCmd)) {
+  if (segments.some(({ command }) => gitSubcommandIndex(shellWords(command), 'commit') !== -1) && /Co-Authored-By:/i.test(rawCmd)) {
     return {
       block: true,
       reason:
@@ -102,10 +266,7 @@ export function evaluate(rawCmd, branch) {
   }
 
   // 5. gh bodies go via --body-file, never inline
-  if (
-    /\bgh\s+(pr|issue)\s+(create|comment|review|edit)\b/.test(cmd) &&
-    /(^|\s)(--body(?!-file)|-b)(\s|=)/.test(cmd)
-  ) {
+  if (segments.some(({ command }) => isInlineGhBody(shellWords(command)))) {
     return {
       block: true,
       reason:
@@ -165,16 +326,23 @@ function currentBranch() {
 
 function selfTest() {
   const cases = [
-    // [cmd, branch, expectBlock]
+    // [cmd, branch, expectBlock, baseBranch]
     ['gh pr merge 42', 'feat/gh-1-x', true],
     ['gh --repo o/r pr merge 42 --squash', 'feat/gh-1-x', true],
     ['gh pr view 42 --json mergeStateStatus,mergeable', 'develop', false], // no \bmerge\b
     ['gh pr list --search draft:false', 'main', false],
-    ['git commit -m "feat: x"', 'develop', true],
+    ['git commit -m "feat: x"', 'develop', true, 'develop'],
     ['git commit -m "feat: x"', 'main', true],
-    ['git commit -m "feat: x"', 'master', true],
+    ['git commit -m "feat: x"', 'master', true, 'master'],
     ['git commit -m "feat: x"', 'feat/gh-2-y', false],
     ['git switch -c feat/gh-3-z && git commit --allow-empty -m "chore: claim #3"', 'main', false],
+    ['git commit -m "unsafe first" && git switch feat/gh-3-z', 'trunk', true, 'trunk'],
+    ['git switch trunk && git commit -m "unsafe target"', 'feat/gh-3-z', true, 'trunk'],
+    ['git switch feat/gh-3-z || git commit -m "unsafe fallback"', 'trunk', true, 'trunk'],
+    ['git switch feat/gh-3-z; git commit -m "unsafe after uncertain switch"', 'trunk', true, 'trunk'],
+    ['git switch feat/gh-3-z | git commit -m "unsafe pipeline"', 'trunk', true, 'trunk'],
+    ['git switch feat/gh-3-z && git commit -m "safe target"', 'trunk', false, 'trunk'],
+    ['git commit -m "allowed on main"', 'main', false, 'trunk'],
     ['git commit -m "fix: y" -m "Co-Authored-By: Claude <n@a.com>"', 'feat/gh-2-y', true],
     ['git push --force origin feat/gh-2-y', 'feat/gh-2-y', true],
     ['git push -f', 'feat/gh-2-y', true],
@@ -183,7 +351,13 @@ function selfTest() {
     ["git push origin '+refs/heads/main'", 'main', true], // quoted +refspec force
     ['git push origin feat/gh-2-y', 'feat/gh-2-y', false], // normal push, no force
     ['git push --set-upstream origin feat/gh-2-y', 'feat/gh-2-y', false],
+    ['git push origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
+    ['git push origin HEAD:refs/heads/trunk', 'feat/gh-2-y', true, 'trunk'],
+    ['git push origin :trunk', 'feat/gh-2-y', true, 'trunk'],
+    ['git push --delete origin trunk', 'feat/gh-2-y', true, 'trunk'],
     ['gh pr create --draft --title "t" --body "inline"', 'feat/gh-2-y', true],
+    ['gh --repo o/r pr create --title "t" --body "inline"', 'feat/gh-2-y', true],
+    ['gh --hostname github.example pr comment 4 -b "inline"', 'feat/gh-2-y', true],
     ['gh issue comment 5 -b "hi"', 'feat/gh-2-y', true],
     ['gh pr create --draft --title "t" --body-file /tmp/b.md', 'feat/gh-2-y', false],
     ['gh pr review 5 --request-changes --body-file /tmp/r.md', 'main', false],
@@ -202,8 +376,8 @@ function selfTest() {
     ['git commit -F - <<\'MSG\'\nfeat: x\nMSG', 'feat/gh-2-y', false],
   ];
   let ok = true;
-  for (const [cmd, branch, expect] of cases) {
-    const got = evaluate(cmd, branch).block;
+  for (const [cmd, branch, expect, baseBranch] of cases) {
+    const got = evaluate(cmd, branch, { baseBranch }).block;
     if (got !== expect) {
       console.error(`FAIL [expect block=${expect}, got ${got}]: ${cmd.split('\n')[0]}`);
       ok = false;
@@ -225,7 +399,9 @@ function main() {
   const cmd = payload?.tool_input?.command;
   if (typeof cmd !== 'string') process.exit(0);
 
-  const verdict = evaluate(cmd, currentBranch());
+  const baseFlag = process.argv.indexOf('--base');
+  const baseBranch = baseFlag === -1 ? 'main' : process.argv[baseFlag + 1];
+  const verdict = evaluate(cmd, currentBranch(), { baseBranch });
   if (verdict.block) {
     process.stderr.write(verdict.reason + '\n');
     process.exit(2);
