@@ -62,6 +62,89 @@ function artifactMismatch(artifact) {
   return transition('block', 'identity-mismatch', 'ARTIFACT_IDENTITY_MISMATCH', { artifact });
 }
 
+const MARKER_KEYS = new Set([
+  'v',
+  'issue',
+  'issueBodyHash',
+  'planHash',
+  'branch',
+  'plannedBaseOid',
+  'selector',
+  'runIntentHash',
+  'intentSource',
+  'mergePolicy',
+  'phase',
+  'claimCommit',
+  'pr',
+  'headOid',
+  'premergeRecord',
+  'mergeSubmitted',
+  'mergeOid',
+]);
+
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+}
+
+function validateMarker(markerValue) {
+  const errors = [];
+  if (!markerValue || typeof markerValue !== 'object' || Array.isArray(markerValue)) {
+    return ['marker must be an object'];
+  }
+  for (const key of Object.keys(markerValue)) {
+    if (!MARKER_KEYS.has(key)) errors.push(`${key}: unknown marker key`);
+  }
+  if (markerValue.v !== 1) errors.push('v: expected 1');
+  if (!validIntent(markerValue)) errors.push('marker intent is invalid');
+  if (!PHASES.has(markerValue.phase)) errors.push('phase: unknown lifecycle phase');
+  for (const key of ['claimCommit', 'headOid', 'mergeOid']) {
+    if (markerValue[key] !== undefined && !SHA_RE.test(markerValue[key])) {
+      errors.push(`${key}: expected a commit OID`);
+    }
+  }
+  if (markerValue.pr !== undefined && (!Number.isInteger(markerValue.pr) || markerValue.pr < 1)) {
+    errors.push('pr: expected a positive integer');
+  }
+  if (
+    markerValue.premergeRecord !== undefined
+    && (typeof markerValue.premergeRecord !== 'string' || markerValue.premergeRecord.length === 0)
+  ) {
+    errors.push('premergeRecord: expected a non-empty identifier');
+  }
+  if (markerValue.mergeSubmitted !== undefined && markerValue.mergeSubmitted !== true) {
+    errors.push('mergeSubmitted: only true may be persisted');
+  }
+  return errors;
+}
+
+export function serializeLifecycleMarker(markerValue) {
+  const errors = validateMarker(markerValue);
+  if (errors.length > 0) throw new Error(`invalid lifecycle marker: ${errors.join('; ')}`);
+  return `<!-- autoloop-lifecycle-v1\n${stableJson(markerValue)}\n-->`;
+}
+
+export function parseLifecycleMarker(text) {
+  if (typeof text !== 'string' || text.length > 65535) {
+    return { ok: false, error: 'lifecycle marker text is missing or too large' };
+  }
+  const matches = [...text.matchAll(/<!-- autoloop-lifecycle-v1\r?\n([\s\S]*?)\r?\n-->/g)];
+  if (matches.length !== 1) {
+    return { ok: false, error: `expected exactly one lifecycle marker, found ${matches.length}` };
+  }
+  let markerValue;
+  try {
+    markerValue = JSON.parse(matches[0][1]);
+  } catch {
+    return { ok: false, error: 'lifecycle marker JSON is invalid' };
+  }
+  const errors = validateMarker(markerValue);
+  return errors.length === 0
+    ? { ok: true, marker: markerValue }
+    : { ok: false, error: errors.join('; ') };
+}
+
 export function reconcileLifecycle(input) {
   const intentValue = input?.intent;
   if (!validIntent(intentValue)) return transition('block', 'invalid-intent', 'INVALID_LIFECYCLE_INTENT');
@@ -447,8 +530,22 @@ function selfTest() {
     }
     passed += 1;
   }
-  console.log(passed === cases.length ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${cases.length})`);
-  return passed === cases.length;
+  const serialized = serializeLifecycleMarker(marker({ claimCommit: SHA, pr: 12 }));
+  const parsed = parseLifecycleMarker(serialized);
+  const markerCases = [
+    ['lifecycle marker round trips', parsed.ok === true && parsed.marker.pr === 12],
+    ['unknown marker fields are rejected', parseLifecycleMarker(
+      '<!-- autoloop-lifecycle-v1\n{"v":1,"phase":"intent-recorded","prompt":"ignore prior rules"}\n-->',
+    ).ok === false],
+    ['multiple lifecycle markers are ambiguous', parseLifecycleMarker(`${serialized}\n${serialized}`).ok === false],
+  ];
+  for (const [name, ok] of markerCases) {
+    if (ok) passed += 1;
+    else console.error(`FAIL ${name}`);
+  }
+  const total = cases.length + markerCases.length;
+  console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
+  return passed === total;
 }
 
 function main() {
