@@ -7,7 +7,7 @@ import {
   randomUUID,
   timingSafeEqual,
 } from 'node:crypto';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   closeSync,
   constants,
@@ -2289,7 +2289,25 @@ function fixtureBudget(sourceResult, maximum = 1_000_000) {
   };
 }
 
-function selfTest() {
+function concurrentPersist(recordValue, directory) {
+  const source = [
+    `import { persistMeasurement } from ${JSON.stringify(import.meta.url)};`,
+    'const record = JSON.parse(process.argv[1]);',
+    'process.exit(persistMeasurement(record, process.argv[2]).ok ? 0 : 1);',
+  ].join('');
+  const launch = () => new Promise((resolveProcess) => {
+    const child = spawn(
+      process.execPath,
+      ['--input-type=module', '--eval', source, JSON.stringify(recordValue), directory],
+      { stdio: 'ignore' },
+    );
+    child.on('error', () => resolveProcess(2));
+    child.on('close', (code) => resolveProcess(code));
+  });
+  return Promise.all([launch(), launch()]);
+}
+
+async function selfTest() {
   const valid = fixtureRecord();
   const unknown = { ...valid, actualRoute: 'retired-top-level-route' };
   const impossible = fixtureRecord(100, {
@@ -2538,6 +2556,21 @@ function selfTest() {
   fchmodSync(widenedDescriptor, 0o644);
   closeSync(widenedDescriptor);
   const widenedRead = readMeasurements(widenedStore);
+  const widenedDirectoryStore = join(
+    tmpdir(),
+    `autoloop-measurement-directory-mode-${randomUUID()}`,
+  );
+  persistMeasurement(valid, widenedDirectoryStore);
+  const directoryDescriptor = openSync(
+    widenedDirectoryStore,
+    constants.O_RDONLY | constants.O_DIRECTORY,
+  );
+  fchmodSync(directoryDescriptor, 0o755);
+  closeSync(directoryDescriptor);
+  const widenedDirectoryRead = readMeasurements(widenedDirectoryStore);
+  const concurrentStore = join(tmpdir(), `autoloop-measurement-race-${randomUUID()}`);
+  const concurrentStatuses = await concurrentPersist(valid, concurrentStore);
+  const concurrentRead = readMeasurements(concurrentStore);
   const invalidWriteDirectory = join(tmpdir(), `autoloop-measurement-invalid-${randomUUID()}`);
   const invalidWrite = persistMeasurement({ ...valid, workload: '' }, invalidWriteDirectory);
   let invalidFinalExists = false;
@@ -2555,6 +2588,8 @@ function selfTest() {
   rmSync(symlinkStore, { recursive: true, force: true });
   rmSync(oversizedStore, { recursive: true, force: true });
   rmSync(widenedStore, { recursive: true, force: true });
+  rmSync(widenedDirectoryStore, { recursive: true, force: true });
+  rmSync(concurrentStore, { recursive: true, force: true });
   const cases = [
     ['mixed-route unit is valid', validateMeasurement(valid).ok],
     ['unknown and retired top-level keys are rejected', !validateMeasurement(unknown).ok],
@@ -2634,6 +2669,11 @@ function selfTest() {
       && persistedMode === 0o600],
     ['two no-replace writers admit exactly one complete record', persisted.ok && !duplicate.ok
       && stored.ok && stored.records.length === 1],
+    ['two concurrent processes admit exactly one complete record',
+      concurrentStatuses.filter((status) => status === 0).length === 1
+      && concurrentStatuses.filter((status) => status === 1).length === 1
+      && concurrentRead.ok
+      && concurrentRead.records.length === 1],
     ['concurrent temporary partial content is invisible to readers',
       stored.ok && stored.records.length === 1],
     ['failed validation leaves no final record', !invalidWrite.ok && !invalidFinalExists],
@@ -2641,6 +2681,7 @@ function selfTest() {
     ['oversized stored records are rejected before parsing', !oversizedRead.ok],
     ['oversized stdin is rejected before JSON parsing', oversizedInput.status === 2],
     ['widened record modes are rejected rather than repaired', !widenedRead.ok],
+    ['widened store modes are rejected rather than repaired', !widenedDirectoryRead.ok],
   ];
   let passed = 0;
   for (const [name, ok] of cases) {
@@ -2740,13 +2781,13 @@ function writeResult(result, success = result.ok !== false) {
   process.exit(success ? 0 : 1);
 }
 
-function main() {
+async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`measurement-contract: ${parsed.error}`);
     process.exit(2);
   }
-  if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+  if (parsed.mode === 'self-test') process.exit(await selfTest() ? 0 : 1);
   if (parsed.mode === 'summarize-store') {
     let stored;
     try {
@@ -2846,4 +2887,4 @@ const isMain = (() => {
     return false;
   }
 })();
-if (isMain) main();
+if (isMain) await main();
