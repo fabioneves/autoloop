@@ -1,0 +1,7 @@
+{
+  "budgets": [],
+  "evidenceBundle": null,
+  "reason": "No authenticated safe-system and post-optimization event-derived cohorts have been retained.",
+  "status": "pending-evidence",
+  "version": 1
+}

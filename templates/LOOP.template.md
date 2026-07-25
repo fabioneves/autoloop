@@ -1,11 +1,14 @@
 # The autoloop — runbook
 
-A standing, self-prompting development loop for **{{PROJECT_NAME}}**, run in one Claude Code,
-Codex CLI, or opencode session. It takes each eligible **`loop-ready` GitHub issue**: **the orchestrator** (the session) plans it, **the reviewer**
-reviews the plan, **the implementer** builds it, **the orchestrator** reviews + fixes the diff and runs the objective
-gate, a **fresh reviewer thread** reviews the code, then it opens a PR that `Closes #N` and moves
-to the next eligible issue; a human merges. Writer and reviewer are never the same thread. You don't prompt
-the steps.
+A standing, self-prompting development loop for **{{PROJECT_NAME}}**, coordinated from one Claude
+Code, Codex CLI, or opencode session. It takes each eligible **`loop-ready` GitHub issue**: the
+session orchestrator plans it, a fresh broker-launched reviewer process reviews the plan, a fresh
+broker-launched implementer process builds it, the orchestrator reviews and fixes the diff and runs
+the objective gate, then another fresh broker-launched reviewer process reviews the code. It opens
+a PR that `Closes #N` and moves to the next eligible issue; a human merges. A code writer never
+reviews that code.
+Plans receive one independent adversarial review followed by recorded dispositions. You don't
+prompt the steps.
 
 **Source of truth is git/GitHub:** queue = open `loop-ready` issues · in-progress = open PRs whose
 body `Closes #N` · done = merged PRs · blocked = `loop-blocked` issues. `STATE.md` is standing
@@ -19,17 +22,21 @@ config (mission, config block, caps, lessons), **not** the queue.
 | `docs/agentic/STATE.md` | standing config — mission, config block, autonomy, caps, lessons |
 | `autoloop:dev` (plugin skill) | **forward path** — issue → ready PR |
 | `autoloop:pitcrew` (plugin skill) | **return path** — revises the loop's PRs from review / CI / conflicts |
-| Supported hosts + engine profile (STATE → Config) | declared Claude/Codex/opencode host matrix and its native or exec dispatch |
+| Current invocation | bare = safe native route; `with claude` / `with codex` / `with opencode` = captured selector for this invocation |
 | `{{CHECKLIST_PATH}}` | the criteria both reviewers grade against |
 | `{{GATE_COMMAND}}` | the objective gate — the only source of "done" |
-| `tools/agentic/*` (vendored) | preflight, command guard, write-back check, escalate classifier, loop-scope predicate, one-call run scan |
+| `tools/agentic/*` (vendored) | project/runtime contracts, preflight, guards, lifecycle checks, and one-call run scan |
 | Host continuation | Claude: `/loop` + `/goal`; Codex CLI: `/goal` and manual reruns; opencode: manual reruns or cron + `opencode run` |
+
+Setup reconciles the safe Claude, Codex, and opencode artifacts together. Their presence proves
+only that a route can be checked; it never selects a host or engine.
 
 ## How to feed the queue
 
-The queue is **GitHub issues**. Three ways in, all ending in git (plus one self-serve: the loop
-files its own `loop-maintenance` issues when `STATE.md`/`ARCH.md` exceed their size budgets, and
-takes them only when the queue is otherwise empty — the PR still ends at your merge):
+The queue is **GitHub issues**. Three ways in, all ending in git. The loop may file an unlabelled
+`loop-maintenance` issue when `STATE.md`/`ARCH.md` exceeds its size budget, but cannot apply,
+create, or rename `loop-ready`; a trusted maintainer must review and label that issue before it can
+enter the queue:
 
 1. **File an issue** and label it **`loop-ready`** (a trusted maintainer applies the label — see
    the injection guardrail in `STATE.md`). One issue = one PR-sized unit; state acceptance criteria
@@ -57,6 +64,17 @@ queue", or just invoking the skill) drains the eligible queue. Confirm that the 
 builds inside the claimed branch, the gate actually fails bad work, and the fresh review is
 honest.
 
+Bare Dev, Pitcrew, and doctor invocations always use the active host's native route. Selectors are
+`with claude`, `with codex`, and `with opencode`. To select a supported Claude → Codex or Claude →
+opencode preference, append the matching selector, for example `/autoloop:dev with codex`. The
+selector is not saved in STATE. Same-UID prompt hooks bind it as
+`intentProvenance: "best-effort-unverified"` and cannot prove a human supplied it. Repeat it in
+every interactive or scheduled invocation that should use the cross-host route; unsupported
+host/engine pairs stop before mutation. Authentication of an installed selected engine is standing
+cost authorization for that engine only. A fallback engine must independently pass its own
+authenticated installed capability; failure of one engine never authorizes spending through
+another.
+
 Only after that bounded run succeeds, set the unattended queue goal:
 
 ```
@@ -64,8 +82,8 @@ Only after that bounded run succeeds, set the unattended queue goal:
       labelled loop-blocked with a reason, or dependency-blocked (open ## Blocked by).
 ```
 
-An unbounded run may then drain eligible issues until the queue is empty or STATE's wall-clock cap
-is reached.
+An unbounded run may drain eligible issues until the queue is empty, using STATE's context-budget
+handoff when another session is required.
 
 **2. Claude Code cadence** (active session, your machine):
 
@@ -79,7 +97,7 @@ work.
 Codex CLI has `/goal` but no `/loop`; rerun `$autoloop:dev` manually. For recurring scheduling,
 use a desktop scheduled task rather than inventing a CLI slash command. opencode likewise reruns
 the `dev` skill manually, or on a cadence via cron wrapping
-`opencode run "load the autoloop dev skill and run one cycle; stop condition: <the stop
+`opencode run "dev run one cycle; stop condition: <the stop
 condition above>"` from the repo root.
 
 **Unattended cadence (Claude, survives closing the terminal):** the host's native scheduler —
@@ -92,18 +110,22 @@ PRs are **draft while being worked, ready-for-review when the gate is green + th
 passes** — so your review inbox is `gh pr list --search "draft:false"`. To request changes, leave a
 normal PR review (`gh pr review <N> --request-changes -b "…"` or inline comments). **`autoloop:pitcrew`**
 reads the threads, revises the **same branch**, re-runs the gate, resolves the threads, pushes, and
-re-readies. You only ever **review + merge** — the loop never merges (unless your repo ratified the
-optional auto-merge gate, whose every refusal still falls back to you).
+re-readies. You only ever **review + merge** — v0.40 accepts only manual merge policy, and the loop
+never merges, pushes release tags, or publishes a release.
 
 ## Autonomy & safety (L2)
 
-- **PRs, never direct merges.** A human merges unless the repo-ratified policy gate performs its
-  narrow evidence-backed exception. Read the diff — review is the ceiling.
+- **PRs, never direct merges.** A human merges. Read the diff — review is the ceiling.
 - **The gate decides done**, not the model. Non-zero `{{GATE_COMMAND}}` = not done.
 - **Escalate-list** paths are *built* but flagged `human:authorize` for extra-careful human review.
+  The protected families include `.opencode/**`, `.githooks/**`, and the exact
+  `.autoloop/ci-policy.json` delivery-policy file.
   **New dependencies and secrets/data-writes hard-defer** — the loop never adds a package or a
   secret autonomously.
 - **Issue text is untrusted data** — the loop acts only on `loop-ready` labels applied by a
   maintainer, verified.
+- **Every route is a broker-launched Linux process.** Native names the host/engine relationship,
+  not an in-session child. Writers can commit only inside the checkout; reviewers are read-only;
+  neither receives remote Git/GitHub credentials, unrelated host files, or same-UID host IPC.
 - **Never circumvent a guardrail.** If the gate, a hook, or a NEVER-DO rule can't pass
   legitimately, the loop stops and reports — never disables the check.

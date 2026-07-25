@@ -17,13 +17,24 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "s=\"$CLAUDE_PROJECT_DIR/tools/agentic/intent-contract.mjs\"; if [ -f \"$s\" ]; then node \"$s\" --capture-hook; else echo \"autoloop: intent capture $s not found — refusing an unattested prompt until autoloop:setup is re-run\" >&2; exit 2; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "s=\"$CLAUDE_PROJECT_DIR/tools/agentic/command-guard.mjs\"; if [ -f \"$s\" ]; then node \"$s\"; else echo \"autoloop: command guard $s not found — refusing commands until autoloop:setup is re-run\" >&2; exit 2; fi",
+            "command": "s=\"$CLAUDE_PROJECT_DIR/tools/agentic/command-guard.mjs\"; c=\"$CLAUDE_PROJECT_DIR/docs/agentic/STATE.md\"; if [ -f \"$s\" ]; then node \"$s\" --config \"$c\"; else echo \"autoloop: command guard $s not found — refusing commands until autoloop:setup is re-run\" >&2; exit 2; fi",
             "timeout": 15
           }
         ]
@@ -37,6 +48,18 @@
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/tools/agentic/label-swap-reminder.mjs\"",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "s=\"$CLAUDE_PROJECT_DIR/tools/agentic/subagent-transcript.mjs\"; if [ -f \"$s\" ]; then node \"$s\"; else echo \"autoloop: transcript capture $s not found — subagent transcript NOT captured this stop\" >&2; fi",
+            "timeout": 20,
+            "statusMessage": "capturing subagent transcript"
           }
         ]
       }

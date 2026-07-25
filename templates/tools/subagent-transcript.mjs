@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Subagent transcript capture for the autoloop (Codex SubagentStop hook + opencode plugin). On Codex CLI versions with the spawn-schema
-// gap (no `agent_type`, 0.144.5–0.144.6), reviews run in prompt-level isolation mode and the
-// orchestrator must scan the child's transcript "whenever the runtime exposes it". The runtime
-// exposes it HERE: Codex's SubagentStop hook payload carries `transcript_path` (manual, hooks
-// "Common input fields"). This hook copies that file plus the raw payload into
-// `.git/autoloop/subagent-transcripts/` — inside .git so captures can never be committed or
-// dirty the worktree.
+// Subagent transcript capture for the autoloop (Codex SubagentStop hook + opencode plugin).
+// Codex's SubagentStop hook payload carries `transcript_path` (manual, hooks "Common input
+// fields"). This hook copies that file plus the raw payload into the repository's common Git
+// directory under `autoloop/subagent-transcripts/` so captures can never be committed or dirty
+// any linked worktree. A Codex host-child route is unavailable when its typed agent/fresh-session
+// surface cannot be proven; transcript capture does not turn prompt-level isolation into a safe
+// fallback.
 //
 // CAVEAT the consumer must respect (autoloop:dev Prime): the manual describes `transcript_path`
 // as "the session transcript" and subagent hooks reuse the PARENT session id, so whether the
@@ -17,13 +17,33 @@
 // never wedge the turn. Prunes oldest captures beyond KEEP_FILES. --self-test runs the
 // pure-function fixtures.
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const CAPTURE_DIR = join(ROOT, '.git', 'autoloop', 'subagent-transcripts');
 const KEEP_FILES = 40; // ISO-stamped names sort chronologically; oldest pruned first
+
+export function resolveCaptureDirectory(root, readCommonDir = (cwd) => execFileSync(
+  'git',
+  ['rev-parse', '--git-common-dir'],
+  {
+    cwd,
+    encoding: 'utf8',
+    timeout: 15000,
+    maxBuffer: 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  },
+)) {
+  const commonRaw = String(readCommonDir(root) ?? '').trim();
+  if (!commonRaw) throw new Error('Git common directory is unavailable');
+  const common = isAbsolute(commonRaw)
+    ? resolve(commonRaw)
+    : resolve(root, commonRaw);
+  return join(common, 'autoloop', 'subagent-transcripts');
+}
 
 export function planCapture(payload, stamp, existingFiles) {
   const hasPath = payload && typeof payload.transcript_path === 'string' && payload.transcript_path;
@@ -43,7 +63,25 @@ export function planCapture(payload, stamp, existingFiles) {
   return plan;
 }
 
+export function normalizedMetadata(payload) {
+  const { messages, ...metadata } = payload ?? {};
+  if (
+    metadata.hook_event_name === 'SubagentStop'
+    && ['Explore', 'explore'].includes(
+      metadata.agent_type ?? metadata.agentType,
+    )
+  ) {
+    metadata.read_only = true;
+    metadata.permissions = {
+      ...(metadata.permissions ?? {}),
+      write: false,
+    };
+  }
+  return metadata;
+}
+
 function capture() {
+  const captureDir = resolveCaptureDirectory(ROOT);
   let raw = '';
   try {
     raw = readFileSync(0, 'utf8');
@@ -54,24 +92,25 @@ function capture() {
   } catch {
     process.stderr.write('autoloop: SubagentStop hook received unparseable stdin — payload not captured\n');
   }
-  mkdirSync(CAPTURE_DIR, { recursive: true });
+  mkdirSync(captureDir, { recursive: true });
   const stamp = `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`;
-  const plan = planCapture(payload, stamp, readdirSync(CAPTURE_DIR));
-  const { messages, ...meta } = payload ?? {};
-  writeFileSync(join(CAPTURE_DIR, plan.payloadFile), JSON.stringify(payload === null ? null : meta, null, 2) ?? 'null');
+  const plan = planCapture(payload, stamp, readdirSync(captureDir));
+  const meta = payload === null ? null : normalizedMetadata(payload);
+  writeFileSync(join(captureDir, plan.payloadFile), JSON.stringify(meta, null, 2) ?? 'null');
   if (plan.transcriptCopy) {
-    if (Array.isArray(messages)) {
+    if (Array.isArray(payload?.messages)) {
       writeFileSync(
-        join(CAPTURE_DIR, plan.transcriptCopy),
-        messages.map((m) => JSON.stringify(m)).join('\n') + (messages.length ? '\n' : ''),
+        join(captureDir, plan.transcriptCopy),
+        payload.messages.map((message) => JSON.stringify(message)).join('\n')
+          + (payload.messages.length ? '\n' : ''),
       );
     } else if (existsSync(payload.transcript_path)) {
-      copyFileSync(payload.transcript_path, join(CAPTURE_DIR, plan.transcriptCopy));
+      copyFileSync(payload.transcript_path, join(captureDir, plan.transcriptCopy));
     } else {
       process.stderr.write(`autoloop: transcript_path ${payload.transcript_path} not readable — payload captured without transcript\n`);
     }
   }
-  for (const f of plan.prune) rmSync(join(CAPTURE_DIR, f), { force: true });
+  for (const f of plan.prune) rmSync(join(captureDir, f), { force: true });
 }
 
 function selfTest() {
@@ -93,6 +132,94 @@ function selfTest() {
       ok = false;
       console.log(`self-test case failed: ${c.name} → ${JSON.stringify(plan)}`);
     }
+  }
+  const directoryCases = [
+    {
+      name: 'regular checkout',
+      root: '/srv/repo',
+      common: '.git\n',
+      want: '/srv/repo/.git/autoloop/subagent-transcripts',
+    },
+    {
+      name: 'linked worktree',
+      root: '/srv/worktrees/change',
+      common: '/srv/repo/.git\n',
+      want: '/srv/repo/.git/autoloop/subagent-transcripts',
+    },
+  ];
+  for (const c of directoryCases) {
+    const got = resolveCaptureDirectory(c.root, () => c.common);
+    if (got !== c.want) {
+      ok = false;
+      console.log(`self-test case failed: ${c.name} → ${got}`);
+    }
+  }
+  const explore = normalizedMetadata({
+    hook_event_name: 'SubagentStop',
+    agent_type: 'Explore',
+    messages: [],
+  });
+  if (
+    explore.messages !== undefined
+    || explore.read_only !== true
+    || explore.permissions?.write !== false
+  ) {
+    ok = false;
+    console.log('self-test case failed: Claude Explore metadata normalization');
+  }
+  // Git reports realpaths, so a macOS TMPDIR reached through /var -> /private/var
+  // would make the fixture root and the CLI's resolved root disagree.
+  const cliRoot = mkdtempSync(join(realpathSync(tmpdir()), 'autoloop-subagent-cli-'));
+  const cliToolDirectory = join(cliRoot, 'tools', 'agentic');
+  mkdirSync(cliToolDirectory, { recursive: true });
+  const cliEntrypoint = join(cliToolDirectory, 'subagent-transcript.mjs');
+  copyFileSync(fileURLToPath(import.meta.url), cliEntrypoint);
+  execFileSync('git', ['init', '-q', cliRoot], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    timeout: 10000,
+  });
+  const captureDir = resolveCaptureDirectory(cliRoot);
+  const inlineMessages = [
+    { info: { role: 'user', agent: 'autoloop-reviewer' } },
+    { info: { role: 'assistant', modelID: 'fixture-model' } },
+  ];
+  try {
+    execFileSync(process.execPath, [cliEntrypoint], {
+      input: JSON.stringify({
+        sessionID: 'fixture-inline-session',
+        agent: 'autoloop-reviewer',
+        metadata: { tools: ['glob', 'grep', 'list', 'read'] },
+        messages: inlineMessages,
+      }),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 15000,
+    });
+    const created = readdirSync(captureDir);
+    const payloadFile = created.find((name) => name.endsWith('-payload.json'));
+    const transcriptFile = created.find((name) =>
+      name.endsWith('-transcript.jsonl'));
+    const retainedPayload = payloadFile
+      ? JSON.parse(readFileSync(join(captureDir, payloadFile), 'utf8'))
+      : null;
+    const retainedMessages = transcriptFile
+      ? readFileSync(join(captureDir, transcriptFile), 'utf8')
+        .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+      : [];
+    if (
+      created.length !== 2
+      || retainedPayload?.agent !== 'autoloop-reviewer'
+      || retainedPayload?.messages !== undefined
+      || JSON.stringify(retainedMessages) !== JSON.stringify(inlineMessages)
+    ) {
+      ok = false;
+      console.log('self-test case failed: inline-message CLI capture');
+    }
+  } catch {
+    ok = false;
+    console.log('self-test case failed: inline-message CLI capture');
+  } finally {
+    rmSync(cliRoot, { recursive: true, force: true });
   }
   console.log(ok ? 'self-test OK' : 'self-test FAILED');
   return ok;

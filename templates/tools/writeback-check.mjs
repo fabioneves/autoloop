@@ -30,10 +30,9 @@ import { execSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const LOOP_BRANCH_RE = /^(feat|fix|chore|docs|refactor|test|perf|build|ci)\/gh-\d+-/;
-const CLOSES_RE = /\b(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed))\s+#\d+/i;
 
 function ghJson(cmd) {
   try {
@@ -55,8 +54,11 @@ export function checkPrs(prs) {
   const reminders = [];
   for (const pr of prs ?? []) {
     if (!LOOP_BRANCH_RE.test(pr.headRefName ?? '')) continue;
-    if (!CLOSES_RE.test(pr.body ?? '')) {
-      hard.push(`PR #${pr.number} (${pr.headRefName}) is a loop branch but claims no issue — add "Closes #N" to its body`);
+    const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
+    if (!claim.valid) {
+      hard.push(
+        `PR #${pr.number} (${pr.headRefName}) has invalid loop ownership (${claim.reasonCode}) — make its single closing claim match the branch issue`,
+      );
     } else if (pr.isDraft) {
       reminders.push(`PR #${pr.number} (${pr.headRefName}) is claimed but still draft — mid-unit, or a forgotten \`gh pr ready\` (autoloop:dev step 10)?`);
     }
@@ -74,9 +76,14 @@ export function checkMergedClosedGap(mergedPrs, openIssueNumbers) {
   const reminders = [];
   for (const pr of mergedPrs ?? []) {
     if (!LOOP_BRANCH_RE.test(pr.headRefName ?? '')) continue;
-    const closes = CLOSES_RE.exec(pr.body ?? '');
-    if (!closes) continue;
-    const issue = Number(closes[0].match(/\d+/)[0]);
+    const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
+    if (!claim.valid) {
+      reminders.push(
+        `Merged loop PR #${pr.number} has invalid ownership (${claim.reasonCode}) — reconcile its branch/body issue manually`,
+      );
+      continue;
+    }
+    const issue = claim.issue;
     if (open.has(issue)) {
       reminders.push(`Issue #${issue} is still OPEN but its loop PR #${pr.number} has MERGED — GitHub ignores closing keywords on non-default-base PRs (no link is ever created; it will NEVER close on its own): gh issue close ${issue} --comment "Merged via PR #${pr.number}"`);
     }
@@ -145,6 +152,8 @@ function selfTest() {
     { number: 2, headRefName: 'feat/gh-2-y', body: 'no claim', isDraft: false },
     { number: 3, headRefName: 'fix/gh-3-z', body: 'Fixes #3', isDraft: true },
     { number: 4, headRefName: 'hardening/human-branch', body: 'no claim', isDraft: false },
+    { number: 5, headRefName: 'fix/gh-5-colon', body: 'Closes: #5', isDraft: false },
+    { number: 6, headRefName: 'fix/gh-6-mismatch', body: 'Closes #7', isDraft: false },
   ];
   const { hard, reminders } = checkPrs(prs);
   const mergedGap = checkMergedClosedGap(
@@ -152,6 +161,7 @@ function selfTest() {
       { number: 20, headRefName: 'feat/gh-7-a', body: 'Closes #7' },
       { number: 21, headRefName: 'feat/gh-8-b', body: 'Closes #8' },
       { number: 22, headRefName: 'feature/human', body: 'Closes #9' },
+      { number: 23, headRefName: 'feat/gh-10-mismatch', body: 'Closes #11' },
     ],
     [7, 9, 15],
   );
@@ -175,9 +185,10 @@ function selfTest() {
     reminderJson = null;
   }
   const ok =
-    hard.length === 1 && hard[0].includes('#2') &&
+    hard.length === 2 && hard[0].includes('#2') && hard[1].includes('#6') &&
     reminders.length === 1 && reminders[0].includes('#3') &&
-    mergedGap.length === 1 && mergedGap[0].includes('#7') && mergedGap[0].includes('PR #20') &&
+    mergedGap.length === 2 && mergedGap[0].includes('#7') && mergedGap[0].includes('PR #20') &&
+    mergedGap[1].includes('PR #23') && mergedGap[1].includes('ISSUE_MISMATCH') &&
     blocked.length === 2 && blocked[0].includes('#9') && blocked[1].includes('#12') &&
     stranded.length === 1 && stranded[0].includes('#7') && stranded[0].includes('loop:04-claim') &&
     stranded[0].includes('--remove-label loop:07-diff-review') &&

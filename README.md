@@ -10,9 +10,9 @@
 <strong>Labelled GitHub issues in. Gated, independently reviewed PRs out.</strong>
 
 <p>
-  <img alt="release v0.39.9" src="https://img.shields.io/badge/release-v0.39.9-8b5cf6?style=flat-square">
+  <img alt="release v0.40.0" src="https://img.shields.io/badge/release-v0.40.0-8b5cf6?style=flat-square">
   <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
-  <img alt="writer does not equal reviewer" src="https://img.shields.io/badge/invariant-writer_%E2%89%A0_reviewer-a78bfa?style=flat-square">
+  <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square">
   <img alt="human controlled merge" src="https://img.shields.io/badge/authority-human_merge-f59e0b?style=flat-square">
 </p>
 
@@ -82,7 +82,7 @@ Pitcrew revises, re-reviews, and re-gates the same branch before returning it to
 | **Proof** | Reviewed plan, reviewed final diff, one full objective gate, CI when present, and pushed head all tied to the delivered SHA. |
 | **Output** | A ready PR with `Closes #N`, findings and dispositions, gate evidence, and per-step timings. |
 | **Return path** | Pitcrew handles review feedback, failed CI, and base conflicts on the existing PR. |
-| **Authority** | A human merges by default. Optional automation is limited by a repo-owned, human-ratified policy gate. |
+| **Authority** | v0.40 runs only with `merge.policy: manual`; a human merges. Prompt hooks grant no lifecycle, merge, or release authority. |
 | **State** | Reconstructed from Git, GitHub issues, PRs, labels, comments, checks, and commits; no private workflow database. |
 
 ## 🛡️ The four guardrails
@@ -94,12 +94,12 @@ authority stays human-owned.
 
 The entire system hangs from two invariants:
 
-1. **Writer ≠ reviewer, always.** The thread that wrote an artifact never reviews it. Plans,
-   code, orchestrator fixes, rebase resolutions, and later fix rounds all receive independent
-   fresh-thread review.
-2. **L2 — a human merges.** The loop opens and services PRs; it does not merge directly. A
-   repository may explicitly ratify a narrow, evidence-backed policy gate, but every refusal and
-   every protected change remains a human decision.
+1. **Code writer ≠ code reviewer, always.** Code, orchestrator fixes, rebase resolutions, and
+   later fix rounds receive independent fresh-context review. Plans receive one independent
+   adversarial review; the orchestrator records and dispositions its findings before freezing the
+   plan instead of starting a second plan-review round.
+2. **L2 — a human merges.** The loop opens and services PRs; v0.40 never merges directly and
+   rejects `ratified` or `auto` policy at run open.
 
 Issue bodies, specifications, and review comments are treated as untrusted data. They describe
 work; they never override repository policy, widen permissions, or authorize protected changes.
@@ -195,15 +195,22 @@ Maintainer alternative: symlink each `skills/<name>` directory from a working cl
    `opencode run` from the repo root. Every cycle services open PRs with Pitcrew before taking
    new queue work.
 
-> **You rarely type `autoloop:dev`.** It is the skill's *identifier*, not a command you memorize.
-> Three ways to run the forward path, all equivalent: invoke it directly (`/autoloop:dev` /
-> `$autoloop:dev`; on opencode the identifier is the bare `dev`);
-> wrap it in `/loop <interval> /goal <stop>` so a
-> cadence re-invokes it for you; or just ask in plain language (“run an autoloop cycle”, “drain
-> the queue”) — the host matches the request to the skill by its description. However invoked,
-> a run drains the eligible queue by default; it is single-unit only when your invocation says
-> so (“take ONE issue and stop”). The same holds for
-> the others: `setup`, `shape`, and `pitcrew` are identifiers you point at, not commands to recall.
+> **`autoloop:dev` is the skill identifier.** Invoke it directly (`/autoloop:dev` /
+> `$autoloop:dev`; on opencode the identifier is the bare `dev`), select that named skill in the
+> host UI, or wrap the explicit identifier in `/loop <interval> /goal <stop>` so a cadence
+> re-invokes it. Natural-language skill matching may help discovery, but Runtime does not infer
+> a flow from unconstrained prose. A run drains the eligible queue by default; it is single-unit
+> only when the invocation says so (“take ONE issue and stop”). The same holds for the others:
+> `setup`, `shape`, and `pitcrew` are identifiers you point at, not commands to recall.
+
+A bare Dev, Pitcrew, or doctor invocation selects the active host's native route. An explicit
+selector is `with claude`, `with codex`, or `with opencode` and lasts only for the current run.
+Supported cross-engine examples are `/autoloop:dev with codex` and
+`/autoloop:pitcrew with opencode`. Same-UID prompt hooks cannot prove who supplied this preference,
+so every v0.40 run records `intentProvenance: best-effort-unverified`. A selector is routing input,
+not user attribution or elevated authority. An installed, authenticated selected engine is the
+operator's standing authorization for its cost; fallback still requires independent capability
+for the fallback engine. No STATE field, issue text, or prior run selects an engine.
 
 Progress is visible on the issue itself: `loop-started`, then exactly one `loop:NN-<step>` label.
 The label timeline measures each step and the run record posts the durations.
@@ -221,7 +228,12 @@ The label timeline measures each step and the run record posts the durations.
 | `loop:07-diff-review` | Orchestrator | Reviews the simplified diff against the repo checklist, invariants, security, and domain rules; fixes problems. | Clean committed tree and recorded dispositions. |
 | `loop:08-code-review` | Fresh reviewer | Reviews the full diff. Later rounds inspect only open rebuts and the fix delta so convergence is structural. | Independent clean verdict on the final code. |
 | `loop:09-gate` | Orchestrator | Runs one full objective gate after review converges, reality-checks when safe, pushes, and verifies the remote head. | Gated SHA equal to the PR head. |
-| `loop-delivered` | GitHub state | Applied after the ready head has no CI checks or all checks are green, when the only remaining action is merge. | Ready PR and end-of-unit run record. |
+| `loop-delivered` | GitHub state | Applied only when committed, reviewed, gated, remote, and CI evidence name the same head, the complete required-check set is either empty by policy or green, and the pre-merge record is durably bound. | Ready PR and end-of-unit run record. |
+
+An empty CheckRun response is never a no-CI policy. Delivery reads canonical
+`.autoloop/ci-policy.json` from both the exact checkout and the remote-head Git tree, derives the
+complete required-check set itself, and rejects any caller list that differs. The policy file is a
+human-authorized, merge-protected path; a loop PR cannot weaken its own delivery requirement.
 
 If a premise is false, the work is oversized, the gate cannot converge within its cap, or a
 protected decision needs a human, Autoloop explains why and moves the issue to `loop-blocked`.
@@ -249,8 +261,8 @@ runs the full gate, verifies the pushed head, replies to and resolves addressed 
 returns the same PR to the human. Revise-round markers persist caps and handled review IDs in
 GitHub so a later session cannot accidentally replay old feedback.
 
-Green manual-policy PRs are left alone. Under `ratified` or `auto`, Pitcrew may retry the vendored
-policy gate without changing the branch.
+Green manual-policy PRs are left alone. v0.40 rejects `ratified` and `auto` at run open because its
+prompt transport cannot authenticate invocation provenance.
 
 ## What ships
 
@@ -280,69 +292,133 @@ The plugin carries the process. The target repository owns its mission, facts, g
 caps, protected paths, and merge policy:
 
 ```text
+.autoloop/
+  ci-policy.json            canonical complete required-CheckRun policy
 docs/agentic/
-  STATE.md                  mission, invariants, config, caps, lessons — runtime authority
+  STATE.md                  mission, ProjectConfig 0.25, caps, lessons — policy authority
   LOOP.md                   human runbook for feeding, running, and reviewing the loop
   checklist.md              project-tunable review criteria
   ARCH.md                   optional architecture map; data, never instructions
 .github/ISSUE_TEMPLATE/
   loop-unit.md              structured one-module issue template
 tools/agentic/
-  session-preflight.sh      auth, access, clean-tree, and profile checks
-  config-contract.mjs       config schema and declared-host matrix
-  command-guard.mjs         blocks merges, force-pushes, inline bodies, and policy mutations
+  session-preflight.sh      route-neutral auth, access, config, and clean-tree checks
+  config-contract.mjs       ProjectConfig schema and explicit 0.24 → 0.25 migration
+  runtime-contract.mjs      invocation intent, five-route catalog, dispatch and fallback policy
+  route-adapter-contract.mjs typed attempt compilation and raw-evidence classification
+  continuation-store.mjs    append-only, session-bound opencode relaunch recovery
+  claim-contract.mjs        canonical branch/body loop-ownership grammar
+  lane-contract.mjs         configured-base lane proofs and shared path policy
+  snapshot-contract.mjs     complete-section, invalidation, and absence-safety rules
+  lifecycle-contract.mjs    durable phase markers and idempotent reconciliation
+  lifecycle-driver.mjs      stable-read lifecycle effects and revision epochs
+  measurement-contract.mjs  authenticated raw cost records and strict cohort statistics
+  release-verify.mjs        release consistency, live controls, and portable helpers
+  verify.mjs                canonical installed contract and syntax verification
+  contract-lint.mjs         stale routing and duplicate-grammar detection
+  command-guard.mjs         blocks protected mutations plus opaque shell source and CLI aliases
   writeback-check.mjs       enforces terminal-state write-back
   loop-scope.mjs            proves Pitcrew ownership before branch mutation
   escalate-paths.mjs        deterministic human-authorization classifier
   scan.mjs                  one-call repository, queue, PR, and provenance scan
-  stats.mjs                 cross-unit step-timing telemetry
+  stats.mjs                 presentation-only cross-unit step timings
   label-swap-reminder.mjs   anchors step narration, task mirror, and required skill loads
-  publish-verdict.mjs       publishes SHA-bound gate and review statuses
-  auto-merge.mjs            optional repo-ratified merge policy engine
-.claude/settings.json       optional Claude hooks wired to the vendored guards
-.codex/hooks.json           optional equivalent Codex hooks
+  publish-verdict.mjs       universal exact-head gate/check/premerge/ready/delivered finalizer
+  auto-merge.mjs            dormant fail-closed reference policy engine
+.claude/settings.json       mandatory Claude intent and command-policy hooks
+.codex/hooks.json           mandatory equivalent Codex hooks
 .codex/agents/
-  autoloop-reviewer.toml    reviewer identity + read-only profile (the codex exec sandbox is the real barrier)
+  autoloop-reviewer.toml    reviewer identity + defense-in-depth defaults
 .opencode/plugins/
   autoloop.js               optional opencode plugin wiring the same vendored guards
 .opencode/agent/
-  autoloop-reviewer.md      typed read-only reviewer; permission denies strip its tools
+  autoloop-reviewer.md      closed-world reviewer; only in-worktree read/glob/grep/list survive
 opencode.json               instructions entry auto-priming STATE.md (merged, never clobbered)
 ```
+
+The command guard hardens literal model-issued shell operations; it is not an arbitrary-program
+sandbox. No-bypass repository rules remain the protected-branch enforcement boundary.
+
+Codex requires a human `/hooks` review for every new or hash-changed project hook. Static
+verification proves the definition and its vendored targets, not effective hash trust.
 
 Vendored means the repository's copy is authoritative. Updating the plugin never silently
 changes a guard or merge rule inside a configured project. Re-run setup to audit template drift,
 review the exact diff, and deliberately adopt a migration. `setup doctor` is read-only and audits
 the configured base ref rather than mistaking a parked unit branch for current state.
 
+Setup reconciles the safe repository artifacts for Claude Code, Codex CLI, and opencode together.
+Changing the active native host therefore needs no repository reconfiguration. Artifact presence
+is capability evidence only; it does not opt a repository into a host or select a route.
+
 Cross-project wizard preferences may live at `~/.config/autoloop/defaults.json`. They pre-fill
 setup only; runtime never reads them. Project facts and secrets do not belong there.
 
-## ⚙️ Runtime hosts and engine profiles
+## ⚙️ Runtime hosts and invocation routes
 
-Roles stay fixed; configuration chooses the dispatch surface.
+Roles stay fixed. A bare invocation means `native`; an explicit selector is preserved as a
+best-effort captured routing preference. It is never described as a verified user request.
+Historical records and capability results have zero route-selection authority. Only the selected
+engine's installed authenticated capability supplies standing cost authority; fallback requires
+its own independently authenticated capability.
 
-| Host + profile | Implementer | Plan/code reviewer | Isolation posture |
+v0.40.0 supports exactly five active-host/captured-preference pairs:
+
+| Active host | Captured engine preference | Route | Live verification |
 |---|---|---|---|
-| **Codex CLI + `codex`** | Fresh native worker; writers serialized. | Fresh `codex exec --sandbox read-only` process with a schema-validated JSON verdict. | OS-enforced: the reviewer is a fresh `codex exec` process — read-only sandbox set at launch (writes and network blocked), with web search, apps, and `approvals_reviewer` auto-review pinned off. In-session Multi-Agent V2 subagents inherit the workspace-write orchestrator and can't be locked read-only ([openai/codex#33314](https://github.com/openai/codex/issues/33314)), so the typed spawn is only a degraded, integrity-checked fallback when `codex exec` is unavailable. |
-| **Claude Code + `codex`** | Fresh non-interactive `codex exec --sandbox workspace-write`. | Fresh `codex exec --sandbox read-only` with a schema-validated JSON verdict. | Prompts travel through scratch files on stdin; every dispatch is a fresh process; the reviewer also pins web search, apps, and `approvals_reviewer` auto-review off; `resume` and dangerous flags are forbidden. |
-| **opencode + `opencode`** | Fresh task-tool subagent; writers serialized. | Fresh typed `autoloop-reviewer` subagent. | Host-enforced: `permission: deny` strips edit/bash/task/network tools from the child's toolset entirely; the vendored plugin captures each child's own attributable transcript (agent, parent, per-message model). |
-| **Claude Code + `opencode`** | Fresh non-interactive `opencode run --auto` (engine-child marked). | Fresh `opencode run --agent autoloop-reviewer` with a fenced JSON verdict parsed from the event stream. | Prompts travel through scratch files on stdin; the JSON event stream is the captured transcript; session-reuse and `--share` flags are forbidden. |
-| **Claude Code + `claude`** | Fresh Claude subagent. | A different fresh Claude subagent, optionally with a separate model pin. | Thread identity preserves writer ≠ reviewer even without cross-model diversity. |
+| Claude Code | Claude | Native Claude | verified |
+| Codex CLI | Codex | Native Codex | verified |
+| opencode | opencode | Native opencode | **untested** |
+| Claude Code | Codex | Claude → fresh `codex exec` | verified |
+| Claude Code | opencode | Claude → fresh `opencode run` | **untested** |
 
-Non-Claude hosts are native-only, and a repository declares at most one of them: declaring
-Codex CLI forces the `codex` profile, declaring opencode forces the `opencode` profile, and that
-engine's role pins stay `null` (`codex` + `opencode` together is invalid — only the Claude host
-orchestrates another host as an engine). The native-Codex reviewer's read-only barrier comes from
-its own `codex exec --sandbox read-only` process, so it holds regardless of the orchestrator
-session's permission mode.
+The other four host/engine pairs fail before mutation with `UNSUPPORTED_ROUTE`. An explicit
+same-host selector resolves to the same native route while remaining explicit in the run record.
+The same selection grammar applies to Dev, Pitcrew, and doctor.
 
-Reviewer prompts are deliberately adversarial: artifact plus contract, no parent conclusions.
-They forbid edits, delegation, elevation, GitHub mutation, network access, and write-capable
-connectors — but the real barrier is the OS sandbox of the reviewer's `codex exec` process, not the
-prompt. Where a host can only run an in-session reviewer (the degraded fallback), isolation is
-verified from the effective child, not inferred from a TOML file, agent file, or task name, and the
-degraded posture with its compensating integrity evidence is surfaced in the unit record and digest.
+The two OpenCode routes are statically verified but were not live-smoke tested against the v0.40.0
+invocation contract; see [`docs/opencode-smoke.md`](docs/opencode-smoke.md). Selecting
+`with opencode` runs an unverified route.
+
+Native describes the host/engine relationship, not process topology. All five routes are fresh
+broker-launched Linux processes: Claude print mode with structured output, `codex exec`, or
+`opencode run --pure`. Every typed writer receives writable checkout files and read-only Git
+metadata. After one valid complete typed result, the broker makes and verifies exactly one clean
+offline commit whose sole parent is the sealed starting HEAD. The OpenCode model further receives
+only checkout-scoped read/edit/glob/grep/list. Reviewers receive a read-only checkout. Each child
+has a private home, IPC, `/run`, `/tmp`, `/var/tmp`, and `/dev`, closed selective runtime mounts,
+and no unrelated host files. No process child receives GitHub CLI credentials, SSH keys/agents,
+Git credential helpers, broker sockets, or other same-UID host IPC.
+
+Reviewer prompts are adversarial: artifact plus contract, no parent conclusions. Route adapters
+also enforce their actual isolation boundary, launch flags, prompt transport, verdict schema, and
+capability checks. Every dispatch receipt binds `intentProvenance: "best-effort-unverified"` and
+distinguishes the captured preference, selected and actual routes, observable model identity,
+effective isolation, fallback, and degradation. Compatibility fields named `requestedEngine` and
+`requestedRoute` do not imply a verified user request.
+
+Runtime signatures come only from one process-bound, in-memory broker with a closed sequence
+ledger and no generic signing operation. The broker alone compiles launches, captures stdout and
+effects, and classifies the exact one-use attempt. An exact continuation target reuses that
+broker/socket/PID. A durable prompt intent prepares that exact target; target Runtime open and the
+persisted prompted transition may arrive in either order, and only both together revoke the source
+run/session. A target stop that wins the race defers teardown until that transfer completes. The
+target's terminal stop then removes the final broker authority. Process routes require a live
+`host.process-authority-isolation` smoke using `/usr/bin/bwrap` on Linux. The wrapper creates fresh
+PID, mount, home, `/run`, `/tmp`, `/var/tmp`, and `/dev` namespaces; mounts only the required
+engine/toolchain/runtime paths, provider authentication material, checkout, and scratch; seals Git
+configuration; and hides unrelated host files plus broker and host sockets. The trusted OpenCode
+engine retains provider network/authentication for inference, but its model-callable tools expose
+no shell, network, custom/MCP, credential, Git-metadata, or host-IPC path. No writer can
+authenticate remote Git or GitHub operations. v0.40 does not support live process routes on macOS.
+
+v0.40 live execution is Linux-only. On non-Linux hosts every route probe fails with
+`UNVERIFIABLE_ISOLATION` before issuing an attempt challenge or creating probe scratch state,
+because the supported hosts do not expose the required closed process-authority boundary
+there. The two-phase native prepare/complete operations remain synthetic contract-test scaffolding
+only; they are not an operational fallback. macOS CI verifies portable static contracts and does
+not advertise a live route. All five closed routes remain available for verified live smoke on
+Linux when their route-specific requirements pass.
 
 ## Efficient without hiding work
 
@@ -350,20 +426,51 @@ Autoloop spends depth where it changes the outcome and keeps every wait visible:
 
 - **One-call scan:** repository facts, tree state, queue provenance, blocked issues, owned PRs,
   orphan candidates, and close-out facts arrive in one startup scan.
-- **Depth-one overlap:** while one unit waits on a background dispatch — an engine job, or a
-  host-thread implementer/reviewer in the docs/small lane — the next issue may move through
+- **Depth-one overlap:** while one unit waits on a background dispatch, the next issue may move through
   read-only premise, plan, and plan-review stages against `origin/<base>`. Checkout,
   implementation, claim, and gate stay serial.
-- **Docs lane:** mechanically verified docs-only changes use fresh host threads for every role;
-  writer ≠ reviewer and the full gate still apply. The final diff is reclassified before ready.
-- **Small lane:** a non-escalated boundary of at most two files and roughly 50 changed lines can
-  use a fresh host thread for plan review while retaining the engine implementation, engine code
-  review, orchestrator checks, and full gate.
-- **One deep engine pass per artifact:** expensive cross-model plan and full-diff reviews happen
-  once; later convergence reviews the fix delta and open rebuts on fresh threads.
+- **Docs lane:** mechanically proven docs-only work stays on the safe native route for plan review,
+  implementation, and review; code writer ≠ code reviewer and the full gate still apply.
+- **Small lane:** a mechanically proven non-escalated change uses native plan review, the selected
+  route for implementation, then native first review after final-diff proof.
+- **Full lane:** plan review, implementation, and first full-artifact review use the selected
+  route. Later convergence uses the safe native route and reviews only the fix delta and open
+  rebuts.
 - **Two-tier gate:** an optional quick command gives inner-loop feedback; the full gate always
   runs last on the review-converged tree.
 - **Idle exit:** no actionable PRs and no eligible issues means a clean stop, not a polling loop.
+
+The versioned [measurement contract](docs/measurement.md) binds a Runtime-authenticated
+`run-start` immediately after Runtime opens and before startup work, derives
+unit/lane/capability/outage context from the broker's first exact plan, and
+retains write-once raw stage, command, and Runtime receipt events under live HEAD/tool time and
+local store authentication. Time to first selection includes the full pre-selection wall interval,
+and each dispatch preserves its own effective lane so final-diff promotion remains visible.
+Checkpoint identity remains declared rather than independently attested;
+each record also binds the SHA-256 of its retained, versioned benchmark manifest as
+`comparisonContextFingerprint` and a checkpoint-specific endpoint manifest as
+`checkpointEndpointFingerprint`. Duplicate run/unit or terminal-evidence identities and invalid
+evidence fail closed. A Git-ref CAS lock serializes publication and crash recovery across
+processes. Unknown provider, model, token, context, cost, or avoided-cost evidence is typed
+unavailable instead of zero. An independently reported provider unit total may remain observed
+across missing segment telemetry only with `provider-unit-total` provenance whose closed raw
+evidence binds the exact run, unit, metric, provider, and value; fully observed segments still
+reconcile exactly.
+
+Matched-checkpoint comparison is manual-to-manual. It holds workload, mode, comparison context, and
+stage-independent role/route/adapter/degradation/provider/model/engine identities fixed while
+requiring completed units and every provider/model/engine identity to be observed. Each checkpoint
+has one revision, configuration, and stable endpoint; those values may differ across checkpoints.
+Capability/outage facts may vary inside an endpoint but their exact value/count distributions stay
+in every matched or unmatched report; unmatched sides retain the same per-checkpoint identity
+checks. Mode/workload budgets load authenticated record IDs from the local store, require one
+completed revision/endpoint per side with the same configuration and runtime identity, replay every
+named safe-system fingerprint, and refuse or stay provisional below metric-specific floors.
+Terminal, gate, lifecycle, and provider-accounting producer capture is not yet available, so live
+v0.40 runs retain those references as typed unavailable and cannot finalize an aggregate or enter
+a budget. The pipeline ships without fabricated baseline samples or preselected limits: real
+legacy/safe/post records and operator-derived budgets still have to be captured, and authenticated
+legacy import is not yet available.
 
 ## Observable and recoverable
 
@@ -386,10 +493,10 @@ Recovery is designed into the state model:
 - genuine draft-PR orphans can be adopted after provenance verification;
 - stale step labels and non-default-base issue close-out are reconciled;
 - a red candidate head remains the current run's unfinished work while retries remain;
-- two dead or stalled engine review dispatches degrade to a fresh host review instead of skipping
-  review or abandoning the unit; and
-- outage mode keeps the loop moving, probes recovery only with read-only reviews, then resumes the
-  configured engine automatically when a valid verdict returns.
+- a route that passed preflight receives only the runtime contract's bounded retry and safe-native
+  fallback; no adapter improvises a second attempt; and
+- outage mode probes recovery only with read-only work, then resumes the invocation-selected route
+  when a valid verdict returns.
 
 Every degraded review is disclosed. “No review” is never the fallback.
 
@@ -397,23 +504,27 @@ Every degraded review is disclosed. “No review” is never the fallback.
 
 | Policy | Behavior |
 |---|---|
-| **`manual`** | The loop marks the PR ready; a human merges. Recommended when the repository has no CI. |
-| **`ratified`** | A human first merges the scaffold/policy PR. Thereafter the vendored gate may merge only the configured reversible class when gate, review, exact-SHA evidence, required CI, labels, paths, size, and merge state all pass. Default when CI exists. |
-| **`auto`** | The same ratified engine may merge any all-green loop PR, except the non-negotiable protected-path and hard-block floor. CI becomes the de-facto final reviewer. |
+| **`manual`** | The only v0.40 runtime policy. The loop marks the PR ready; a human merges. |
+| **`ratified`** | Reserved policy-engine configuration. v0.40 runtime open rejects it with `UNVERIFIABLE_INVOCATION_PROVENANCE`. |
+| **`auto`** | Reserved policy-engine configuration. v0.40 runtime open rejects it with `UNVERIFIABLE_INVOCATION_PROVENANCE`. |
 
-`automerge:halt` on any open issue pauses automated merges fail-closed. `human:authorize`,
-`do-not-merge`, protected paths, unresolved threads, requested changes, missing evidence, or any
-uncertain condition leave the PR for a person.
+Same-UID hooks provide useful transport and replay resistance but cannot authenticate a human
+invocation. v0.40 therefore refuses to use them for automatic merge. The retained non-manual policy
+engine remains fail-closed test/reference code for a future integration with authenticated
+invocation provenance.
 
-The policy file has a repository-owned configuration zone and a template-owned engine zone.
-Changing either lands through a PR that only a human can merge; that merge is the
-re-ratification. Autoloop cannot auto-merge changes to its own guards, manifests, workflows,
-agent configuration, or policy engine.
+The command guard blocks direct merge, `loop-ready` creation/application, and tag/release
+publication. Dev can act only on a pre-existing `loop-ready` event whose labeler role and
+post-label issue immutability are independently fetched. Pitcrew can act only on a previously
+loop-owned PR with fresh review, CI, and base evidence. Doctor is read-only.
 
 ## 🔐 Security model
 
 - **Queue trust is explicit.** The `loop-ready` labeler must have maintainer authority and the
   issue body must be unchanged since labeling.
+- **Lifecycle authority is authenticated.** Recovery accepts markers from current admins and
+  maintainers, plus the authenticated runner's own marker while that runner still has write;
+  untrusted lookalikes are ignored and incomplete role evidence fails closed.
 - **Untrusted text never becomes shell source.** Issue, plan, PR, and review bodies travel through
   validated scratch files and `--body-file`; branch slugs and titles use strict allowlists.
 - **Review isolation is verified.** Fresh context, read-only posture where the runtime supports
@@ -422,43 +533,72 @@ agent configuration, or policy engine.
 - **Guards are enforced at the tool layer.** Vendored hooks block direct merges, force-pushes,
   branch-protection changes, inline bodies, and other forbidden commands.
 - **Protected work stops for a human.** Deterministic escalate paths apply `human:authorize`;
-  comments and issue text cannot grant themselves authority.
-- **The exact SHA matters.** Review, gate, CI, pushed head, and optional policy verdicts must agree
-  on the same commit.
-- **Branch protection remains yours.** Autoloop never edits or claims to enforce repository branch
-  protection.
+  comments and issue text cannot grant themselves authority. Protected families include
+  `.opencode/**`, `.githooks/**`, and `.autoloop/ci-policy.json`.
+- **The exact SHA matters.** Review, gate, CI, pushed head, and the dormant non-manual reference
+  verdicts agree on the same commit.
+- **Branch protection remains yours.** Autoloop never edits repository protection. Under
+  the dormant non-manual reference policy, the gate reads it and every applicable ruleset live and
+  refuses when complete non-bypassable enforcement cannot be proved.
 
 For unattended scheduling, use a dedicated least-privilege machine identity and protect the base
 branch with the repository's required CI checks.
 
 ## Requirements
 
-- Claude Code, or Codex CLI **0.144.5+**, with `gh` installed, authenticated, and able to resolve
-  the target repository. This is Autoloop's conservative tested Codex CLI floor.
-- Native Codex reviews run as a fresh `codex exec --sandbox read-only` process (OS-enforced;
-  web/apps/auto-review pinned off). In-session typed spawns can't be locked read-only
-  ([openai/codex#33314](https://github.com/openai/codex/issues/33314)) and serve only as a degraded,
-  integrity-checked fallback when `codex exec` is unavailable.
+- Claude Code, Codex CLI **0.145.0+**, or opencode **1.18.3+**, with `gh` installed,
+  authenticated, and able to resolve the target repository. These are Autoloop's conservative
+  tested CLI floors.
+- Live routes require Linux and `/usr/bin/bwrap`. Every Claude, Codex, and opencode dispatch is a
+  fresh process behind the same broker-owned mount/credential boundary. A missing executable,
+  authentication, role posture, or isolation fact fails capability preflight and does not activate
+  fallback.
+- `bwrap` needs unprivileged user namespaces. Ubuntu 24.04 and later restrict them through AppArmor,
+  so an otherwise correct host reports `bwrap: setting up uid map: Permission denied` and no live
+  route. Load the distribution's `bwrap` AppArmor profile, or set
+  `kernel.apparmor_restrict_unprivileged_userns=0`, then rerun doctor.
 - An objective, one-shot gate command: test, build, lint, or a repository-specific composition.
   Prefer a sandboxed command with no live credentials, network, or production writes.
 - Optional `gate.quickCommand` for cheap inner-loop feedback. It never replaces the final full
   gate.
-- Optional POSIX shell support for project hooks (`bash`; macOS, Linux, WSL, or Git Bash). The
-  skills still enforce their own preflight and policy checks if hooks are skipped.
-- Optional Atlassian MCP connection when `tracker: "jira"` is configured.
+- POSIX shell support for project prompt hooks. They are mandatory best-effort transport and
+  replay binding, not attributable intent. Missing capture disables runtime; a valid capture opens
+  only manual policy and grants no lifecycle, merge, or release authority.
+- Optional Atlassian MCP connection when `tracker.provider: "jira"` is configured.
 
 ## Versioning
 
-Autoloop follows semver. Claude and Codex cache plugins by manifest version, so
-`.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` move together on every release.
-The `∞ <skill> · vX.Y.Z · starting` banner in `dev`, `pitcrew`, and `setup` is also versioned in
-the skill text; it reveals which cached skill the current session actually loaded before the
-first tool call.
+Autoloop follows semver. Root [`VERSION`](VERSION) is the canonical release value. Claude and Codex
+cache plugins by manifest version, so both manifests, the README badge, the changelog release, and
+the `∞ <skill> · vX.Y.Z · starting` banners in `dev`, `pitcrew`, and `setup` must agree with it.
+The banner reveals which cached skill the current session loaded before the first tool call.
+
+Before a release, run the portable Linux/macOS verification command:
+
+```bash
+node templates/tools/release-verify.mjs
+node templates/tools/release-verify.mjs --check-tag-policy --check-root .
+node templates/tools/release-verify.mjs --check-immutable-releases --check-root .
+```
+
+The two live checks bind the audited repository to the checkout's exact GitHub origin. They require
+an authenticated `AUTOLOOP_RELEASE_POLICY_TOKEN` (or `gh` authentication) that can read repository
+Administration settings and disclose ruleset bypass actors. Missing, insufficient, or redacted
+API evidence fails verification. When organization policy must enforce immutability, append
+`--require-owner-enforcement` to the immutable-release check.
+
+Tag CI repeats both live checks and additionally proves that `v<VERSION>` is an annotated tag on
+the exact checked-out commit reachable from `origin/main`. Configure the
+`AUTOLOOP_RELEASE_POLICY_TOKEN` Actions secret for that job; the workflow falls back to
+`github.token`, but honestly fails when that token cannot read the required live controls.
 
 Configured repositories record their scaffold contract version in the JSON block inside
-`docs/agentic/STATE.md`. Breaking config-shape changes bump the minor version while the project is
-`0.x`; re-running setup audits and migrates the repository-owned layer through a visible diff and,
-when policy is involved, a human-merged re-ratification PR.
+`docs/agentic/STATE.md`. v0.40.0 uses schema `0.25.0`. Breaking config-shape changes bump the minor
+version while the project is `0.x`; re-running setup audits and migrates the repository-owned layer
+through a visible diff and, when policy is involved, a human-reviewed and human-merged policy PR.
+
+Project governance lives in the [MIT License](LICENSE), [contribution guide](CONTRIBUTING.md),
+[security policy](SECURITY.md), and [changelog](CHANGELOG.md).
 
 ---
 

@@ -1,28 +1,24 @@
 #!/usr/bin/env node
 // ============================================================================
-// GENERIC RATIFIED AUTO-MERGE GATE — engine is generic; the REPO CONFIG block
-// below is filled by autoloop:setup from your repo's facts.
+// DORMANT NON-MANUAL MERGE REFERENCE — v0.40 Setup never installs or invokes
+// this file, and Runtime rejects every non-manual run before probing or mutation.
+// The generic REPO CONFIG block below exists only for fail-closed contract tests.
 //
 // The policy ENGINE (independently fetched, SHA-bound evidence; AND-gate;
-// kill-switch; CAS merge + confirmation) is battle-tested production code.
+// kill-switch; CAS merge + confirmation) remains reference code.
 // The self-test fixtures DERIVE from the config block, so `--self-test` stays
 // meaningful for any filled config — run it after every config change.
 //
-// RATIFICATION: this file only carries policy authority once a HUMAN has merged
-// the PR that vendors it into the repo (normally the autoloop:setup scaffold
-// PR — which may set `merge.policy: "ratified"` in the same PR, since nothing
-// takes effect until that human merge). When merge policy is `ratified`, the
-// scaffold MUST land via a PR — a direct commit would skip the ratifying merge.
-// The tool's own tools/** path stays protected so it can never authorize
-// changes to itself.
+// This file carries no v0.40 policy authority. A future release may reuse the
+// independently fetched, SHA-bound AND-gate only after adding authenticated
+// invocation provenance and a separately reviewed enablement path. Human-merging
+// this reference file or changing ProjectConfig cannot enable it in v0.40.
 // ============================================================================
-// Ratified auto-merge gate for the dev loop.
+// Dormant ratified auto-merge reference for a future dev loop.
 //
-// This is a ratified-policy model: the human merge of the PR that introduced this
-// tool grants the policy authority, not the loop that runs it. The policy is a pure
-// AND-gate over independently fetched, SHA-bound GitHub evidence. The tool can only
-// satisfy that policy or refuse; its own tools/** path is protected and can never be
-// authorized by this file.
+// The policy is a pure AND-gate over independently fetched, SHA-bound GitHub
+// evidence. Its own tools/** path is protected and can never be authorized by this
+// file. These properties are verified as dormant reference behavior only.
 //
 // Usage:
 //   node tools/agentic/auto-merge.mjs <prNumber> [--dry-run]
@@ -32,9 +28,36 @@
 // Exit 1 = normal refusal, ambiguous merge outcome, or self-test failure.
 // Exit 2 = usage error.
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import {
+  createPremergeRecord,
+  premergeRecordHash,
+  parseAttestation,
+  serializeAttestation,
+  serializePremergeRecord,
+} from './attestation-contract.mjs';
+import { parseLoopClaim } from './claim-contract.mjs';
+import {
+  canonicalCiPolicy,
+  finalizeHead,
+} from './delivery-contract.mjs';
+import {
+  lifecycleCommentNeverEdited,
+  lifecycleIdentityHash,
+  serializeLifecycleMarker,
+} from './lifecycle-contract.mjs';
+import { matchMergeProtected } from './lane-contract.mjs';
+import {
+  REQUIRED_ATTESTATIONS,
+  authorizeMerge,
+} from './merge-authorization-contract.mjs';
+import {
+  authorizePolicyPublication,
+  fetchPublicationCiPolicy,
+} from './publish-verdict.mjs';
 
 // ── REPO CONFIG — filled by autoloop:setup; the vendored copy in your repo is the policy ──
 export const REPOSITORY = { owner: 'your-org', name: 'your-repo' }; // setup: from `gh repo view`
@@ -53,7 +76,7 @@ export const REVERSIBLE_PATHS = ['docs/**'];
 export const EXTRA_PROTECTED_PATHS = [];
 // Authorization mode:
 //   'classified' — only the reversible class auto-merges: Path A (human risk label)
-//                  or Path B (REVERSIBLE_PATHS allowlist + ≤20 files / ≤400 lines).
+//                  or Path B (REVERSIBLE_PATHS allowlist + ≤20 files / ≤700 lines).
 //   'all-green'  — every loop PR auto-merges when ALL evidence is green (verdicts,
 //                  CI, clean merge state, no unresolved threads) — EXCEPT the floor
 //                  that never auto-merges in any mode: protected paths (structural +
@@ -62,6 +85,18 @@ export const EXTRA_PROTECTED_PATHS = [];
 //                  on the loop's own verdicts alone — setup must refuse to write it
 //                  unless the user explicitly accepts that in so many words.
 export const AUTOMERGE_MODE = 'classified';
+export const LOOP_LOGIN = 'autoloop[bot]';
+export const TRUSTED_HUMAN_LOGINS = ['maintainer'];
+export const TRUSTED_AUTOMATION_APP_IDS = [1];
+export const TRUSTED_AUTHORIZATION_APP_IDS = [2];
+export const REQUIRED_CI_CHECK_APPS = {};
+export const REQUIRED_APPROVING_REVIEW_COUNT = 1;
+export const REQUIRE_CODE_OWNER_REVIEWS = false;
+export const BASE_FRESHNESS_STRATEGY = 'direct-strict';
+// This is separately human-ratified merge authority, not a live read of ProjectConfig. New
+// scaffolds align it with caps.sliceMaxLines, but changing either value never silently changes the
+// other.
+export const REVERSIBLE_MAX_LINES = 700;
 // ── end repo config — everything below is the generic engine ──
 
 export const REQUIRED_VERDICTS = ['agentic/gate', 'agentic/review'];
@@ -84,6 +119,30 @@ const REVERSIBLE_RES = REVERSIBLE_PATHS.map(globToRe);
 
 const REPO_SLUG = `${REPOSITORY.owner}/${REPOSITORY.name}`;
 const HEAD_SHA = 'a'.repeat(40);
+const BASE_SHA = 'e'.repeat(40);
+const CLAIM_SHA = 'd'.repeat(40);
+const LOOP_ISSUE = 7;
+const ISSUE_BODY_HASH = 'b'.repeat(64);
+const FROZEN_PLAN_HASH = 'c'.repeat(64);
+const GH_API_HEADERS = [
+  '-H',
+  'Accept: application/vnd.github+json',
+  '-H',
+  'X-GitHub-Api-Version: 2026-03-10',
+];
+
+function requiredCheckContracts() {
+  return [
+    ...REQUIRED_ATTESTATIONS.map((name) => ({
+      name,
+      appIds: [...TRUSTED_AUTOMATION_APP_IDS],
+    })),
+    ...REQUIRED_CI_CHECKS.map((name) => ({
+      name,
+      appIds: [...(REQUIRED_CI_CHECK_APPS[name] ?? [])],
+    })),
+  ];
+}
 
 const CORE_QUERY = `
   query($owner:String!, $name:String!, $number:Int!) {
@@ -92,7 +151,10 @@ const CORE_QUERY = `
         state
         isDraft
         baseRefName
+        baseRefOid
+        headRefName
         headRefOid
+        body
         headRepository { name owner { login } }
         labels(first:100) {
           nodes { name }
@@ -166,6 +228,80 @@ const THREADS_QUERY = `
   }
 `;
 
+const ISSUE_QUERY = `
+  query($owner:String!,$name:String!,$number:Int!){
+    repository(owner:$owner,name:$name){
+      issue(number:$number){
+        id
+        number
+        state
+        body
+        createdAt
+        lastEditedAt
+        labels(first:100){
+          nodes{name}
+          pageInfo{hasNextPage endCursor}
+        }
+        comments(first:100){
+          nodes{
+            id
+            author{login}
+            body
+            createdAt
+            updatedAt
+            lastEditedAt
+          }
+          pageInfo{hasNextPage endCursor}
+        }
+      }
+    }
+  }
+`;
+
+const ISSUE_LABELS_QUERY = `
+  query($id:ID!,$cursor:String){
+    node(id:$id){
+      ... on Issue{
+        labels(first:100,after:$cursor){
+          nodes{name}
+          pageInfo{hasNextPage endCursor}
+        }
+      }
+    }
+  }
+`;
+
+const ISSUE_COMMENTS_QUERY = `
+  query($id:ID!,$cursor:String){
+    node(id:$id){
+      ... on Issue{
+        comments(first:100,after:$cursor){
+          nodes{
+            id
+            author{login}
+            body
+            createdAt
+            updatedAt
+            lastEditedAt
+          }
+          pageInfo{hasNextPage endCursor}
+        }
+      }
+    }
+  }
+`;
+
+const DEPENDENCY_QUERY = `
+  query($owner:String!,$name:String!,$number:Int!){
+    repository(owner:$owner,name:$name){
+      issue(number:$number){
+        number
+        state
+      }
+    }
+  }
+`;
+
 function upper(value) {
   return String(value ?? '').toUpperCase();
 }
@@ -175,18 +311,29 @@ function errorMessage(error) {
   return (parts.join(' — ').replace(/\s+/g, ' ').trim() || 'unknown error').slice(0, 500);
 }
 
-function ghJson(command, input) {
-  const output = execSync(command, {
+function ghJson(args, input) {
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string')) {
+    throw new Error('gh arguments must be a string array');
+  }
+  const output = execFileSync('gh', args, {
     input,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
     timeout: 15000,
+    maxBuffer: 64 * 1024 * 1024,
   });
   return JSON.parse(output);
 }
 
+function ghApiArgs(endpoint, extra = []) {
+  return ['api', endpoint, ...GH_API_HEADERS, ...extra];
+}
+
 function ghGraphql(query, variables) {
-  const response = ghJson('gh api graphql --input -', JSON.stringify({ query, variables }));
+  const response = ghJson(
+    ghApiArgs('graphql', ['--input', '-']),
+    JSON.stringify({ query, variables }),
+  );
   if (response.errors?.length) {
     throw new Error(response.errors.map((item) => item.message).join('; '));
   }
@@ -194,15 +341,76 @@ function ghGraphql(query, variables) {
   return response.data;
 }
 
-// Manual page-by-page pagination: the installed gh lacks `--paginate --slurp`
-// (verified live 2026-07-17 — "unknown flag: --slurp"), and bare `--paginate`
-// concatenates JSON documents that JSON.parse cannot read. Callers pass
-// per_page=100; a short page ends the walk. Page shapes: /pulls/{n}/files → array;
-// /commits/{sha}/status → {statuses:[]}; /commits/{sha}/check-runs → {check_runs:[]}.
-function ghPaginated(endpoint) {
+function parseIncludedResponse(output) {
+  const boundary = String(output).search(/\r?\n\r?\n/);
+  if (boundary < 0) throw new Error('GitHub response omitted HTTP headers');
+  const separator = /^\r?\n\r?\n/.exec(String(output).slice(boundary))?.[0];
+  if (!separator) throw new Error('GitHub response header boundary is invalid');
+  const headerText = String(output).slice(0, boundary);
+  const bodyText = String(output).slice(boundary + separator.length);
+  const headers = new Map();
+  const lines = headerText.split(/\r?\n/);
+  if (!/^HTTP\/\S+\s+2\d\d\b/.test(lines.shift() ?? '')) {
+    throw new Error('GitHub response status is not successful');
+  }
+  for (const line of lines) {
+    const match = /^([^:]+):\s*(.*)$/.exec(line);
+    if (match) headers.set(match[1].toLowerCase(), match[2]);
+  }
+  return { data: JSON.parse(bodyText), link: headers.get('link') ?? null };
+}
+
+function nextLink(link) {
+  if (link === null) return null;
+  if (typeof link !== 'string' || link.length === 0) {
+    throw new Error('GitHub Link header is malformed');
+  }
+  const next = [];
+  for (const match of link.matchAll(/<([^>]+)>\s*;\s*rel="([^"]+)"/g)) {
+    if (match[2].split(/\s+/).includes('next')) next.push(match[1]);
+  }
+  if (next.length > 1 || (/\brel="?next\b/i.test(link) && next.length !== 1)) {
+    throw new Error('GitHub Link header has an ambiguous next page');
+  }
+  if (next.length === 0) return null;
+  let url;
+  try {
+    url = new URL(next[0], 'https://api.github.com');
+  } catch {
+    throw new Error('GitHub next-page URL is invalid');
+  }
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw new Error('GitHub next-page URL is unsafe');
+  }
+  return url.href;
+}
+
+function fetchRestPage(endpoint) {
+  const args = ghApiArgs(endpoint);
+  const output = execFileSync(
+    'gh',
+    ['api', '--include', ...args.slice(1)],
+    {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 15000,
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
+  return parseIncludedResponse(output);
+}
+
+export function ghPaginated(endpoint, fetchPage = fetchRestPage) {
   const pages = [];
-  for (let page = 1; ; page += 1) {
-    const data = ghJson(`gh api ${JSON.stringify(`${endpoint}&page=${page}`)}`);
+  const seen = new Set();
+  let next = endpoint;
+  for (let page = 1; page <= 50; page += 1) {
+    if (typeof next !== 'string' || next.length === 0 || seen.has(next)) {
+      throw new Error('GitHub pagination repeated or omitted its next page');
+    }
+    seen.add(next);
+    const response = fetchPage(next);
+    const data = response?.data;
     pages.push(data);
     const items = Array.isArray(data)
       ? data
@@ -212,10 +420,10 @@ function ghPaginated(endpoint) {
           ? data.check_runs
           : null;
     if (!items) throw new Error('paginated page had an unrecognized shape');
-    if (items.length < 100) break;
-    if (page >= 50) throw new Error('pagination exceeded 50 pages — refusing rather than truncating');
+    next = nextLink(response?.link ?? null);
+    if (next === null) return pages;
   }
-  return pages;
+  throw new Error('pagination exceeded 50 pages — refusing rather than truncating');
 }
 
 function pageInfo(connection, label) {
@@ -274,10 +482,14 @@ function fetchPullRequestCore(number) {
   }
 
   return {
+    coreComplete: true,
     state: upper(pr.state),
     isDraft: pr.isDraft,
     baseRefName: pr.baseRefName,
+    baseRefOid: pr.baseRefOid,
+    headRefName: pr.headRefName,
     headRefOid: pr.headRefOid,
+    body: pr.body,
     headRepository: {
       owner: pr.headRepository?.owner?.login,
       name: pr.headRepository?.name,
@@ -389,13 +601,742 @@ function fetchRollup(headRefOid) {
   return result;
 }
 
+function sha256(value) {
+  return createHash('sha256').update(String(value)).digest('hex');
+}
+
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+}
+
+function blockedBy(body) {
+  const section = /##\s*Blocked by([\s\S]*?)(\n##\s|$)/i.exec(body ?? '');
+  if (!section) return [];
+  return [...new Set([...section[1].matchAll(/#([1-9]\d*)/g)].map((match) => Number(match[1])))];
+}
+
+function latestLabelEvent(events, label) {
+  return (events ?? []).filter(
+    (event) =>
+      new Set(['labeled', 'unlabeled']).has(event?.event)
+      && event?.label?.name === label,
+  ).at(-1) ?? null;
+}
+
+export function deriveLiveIssueEvidence(input) {
+  const issue = input?.issue;
+  const timeline = input?.timeline;
+  const comments = input?.comments;
+  const dependencies = input?.dependencies;
+  const permission = input?.loopReadyPermission;
+  const ownership = input?.ownership;
+  const policyAttestation = input?.policyAttestation;
+  const labels = Array.isArray(issue?.labels) ? issue.labels : [];
+  const expectedDependencies = blockedBy(issue?.body);
+  const dependencyItems = Array.isArray(dependencies?.items)
+    ? dependencies.items.map((dependency) => ({
+      number: dependency?.number,
+      state: upper(dependency?.state),
+    }))
+    : [];
+  const dependencyNumbers = dependencyItems.map((dependency) => dependency.number);
+  const dependenciesComplete =
+    dependencies?.complete === true
+    && dependencyItems.every((dependency) =>
+      Number.isSafeInteger(dependency.number) && dependency.number > 0)
+    && new Set(dependencyNumbers).size === dependencyNumbers.length
+    && expectedDependencies.length === dependencyItems.length
+    && expectedDependencies.every((number) => dependencyNumbers.includes(number));
+  const readyEvent = latestLabelEvent(timeline?.items, 'loop-ready');
+  const loopReadyComplete =
+    timeline?.complete === true
+    && readyEvent?.event === 'labeled'
+    && Number.isSafeInteger(readyEvent?.id)
+    && readyEvent.id > 0
+    && typeof readyEvent?.actor?.login === 'string'
+    && typeof readyEvent?.created_at === 'string'
+    && permission?.complete === true
+    && permission.login === readyEvent.actor.login
+    && typeof permission.roleName === 'string';
+  const commentMatches = Array.isArray(comments?.items)
+    ? comments.items.filter((comment) => comment?.id === ownership?.frozenPlanCommentId)
+    : [];
+  const planComment = commentMatches.length === 1 ? commentMatches[0] : null;
+  const frozenPlanCommentVerified =
+    comments?.complete === true
+    && ownership?.complete === true
+    && typeof ownership?.frozenPlanCommentId === 'string'
+    && ownership.frozenPlanCommentId.length > 0
+    && ownership?.frozenPlanAuthor === input?.loopLogin
+    && planComment?.author?.login === ownership.frozenPlanAuthor
+    && typeof planComment?.body === 'string'
+    && planComment.body.length > 0
+    && sha256(planComment.body) === ownership.frozenPlanHash;
+  const policyVerification = policyAttestation
+    ? authorizePolicyPublication(policyAttestation, {
+      complete: input?.policyLiveComplete === true,
+      loopAuthor: input?.loopLogin,
+      issue: { number: issue?.number },
+      pullRequest: input?.pullRequest,
+      comments,
+      checkRuns: input?.checkRuns,
+      ciPolicy: input?.ciPolicy,
+      delivery: input?.delivery,
+    })
+    : null;
+  const premergeObservation = policyVerification?.observation ?? null;
+  const premergeVerified = (
+    policyVerification?.authorized === true
+    && premergeObservation?.verified === true
+    && premergeObservation.pullRequest === policyAttestation?.pullRequest
+    && policyAttestation?.premergeRecordAuthor === input?.loopLogin
+    && issue?.number === policyAttestation?.issue
+  );
+  const hardLabels = new Set([
+    'human:authorize',
+    'human:legal',
+    'automerge:halt',
+    'do-not-merge',
+    'loop-blocked',
+    'needs-human',
+    'needs-dependency',
+    'needs-secret',
+  ]);
+  const complete =
+    issue?.complete === true
+    && issue?.labelsComplete === true
+    && Number.isSafeInteger(issue?.number)
+    && issue.number > 0
+    && typeof issue?.body === 'string'
+    && Array.isArray(issue?.labels)
+    && timeline?.complete === true
+    && comments?.complete === true
+    && dependenciesComplete;
+  return {
+    linkedIssue: {
+      complete,
+      number: issue?.number ?? null,
+      state: upper(issue?.state),
+      labels,
+      bodyHash: sha256(issue?.body ?? ''),
+      createdAt: issue?.createdAt ?? null,
+      lastEditedAt: issue?.lastEditedAt ?? null,
+      blocked: labels.some((label) => hardLabels.has(label)),
+      dependenciesClear:
+        dependenciesComplete
+        && dependencyItems.every((dependency) => dependency.state === 'CLOSED'),
+      dependenciesComplete,
+      dependencies: dependencyItems,
+      loopReady: {
+        complete: loopReadyComplete,
+        eventId: readyEvent?.id ?? null,
+        actor: readyEvent?.actor?.login ?? null,
+        labeledAt: readyEvent?.created_at ?? null,
+        roleName: permission?.roleName ?? null,
+      },
+    },
+    ownership: ownership
+      ? {
+        ...ownership,
+        frozenPlanPresent: planComment !== null,
+        frozenPlanCommentVerified,
+      }
+      : null,
+    lifecycle: policyAttestation
+      ? {
+        complete:
+          comments?.complete === true
+          && input?.checkRuns?.complete === true
+          && input?.ciPolicy?.complete === true
+          && premergeObservation?.complete === true,
+        delivered: policyAttestation.delivered,
+        headOid: policyAttestation.headOid,
+        premergeRecord: premergeVerified,
+        premergeRecordId: premergeVerified ? premergeObservation.id : null,
+        premergeRecordHash: premergeVerified ? premergeObservation.bodyHash : null,
+        premergeRecordAuthor: premergeVerified ? premergeObservation.author : null,
+        premergeRecordCommentId: premergeVerified ? premergeObservation.commentId : null,
+        premergeRecordIssue: premergeVerified ? premergeObservation.issue : null,
+        premergeRecordPullRequest:
+          premergeVerified ? premergeObservation.pullRequest : null,
+      }
+      : null,
+  };
+}
+
+export function deriveLiveAuthorizationEvidence(input) {
+  const authorization = input?.authorization;
+  if (!authorization) return null;
+  const timelineItems = Array.isArray(input?.timeline?.items) ? input.timeline.items : [];
+  const event = latestLabelEvent(timelineItems, authorization.label);
+  const eventIndex = timelineItems.lastIndexOf(event);
+  const headMutationEvents = new Set([
+    'committed',
+    'head_ref_deleted',
+    'head_ref_force_pushed',
+    'head_ref_restored',
+  ]);
+  const headEventIndex = timelineItems.findLastIndex((item) =>
+    headMutationEvents.has(item?.event));
+  const headEvent = timelineItems[headEventIndex];
+  const observedHeadOid = headEvent?.event === 'committed'
+    ? headEvent?.sha
+    : headEvent?.commit_id;
+  const afterCurrentHead =
+    input?.timeline?.complete === true
+    && headEventIndex >= 0
+    && String(observedHeadOid ?? '').toLowerCase() === String(input?.headOid ?? '').toLowerCase()
+    && eventIndex > headEventIndex;
+  const permission = input?.permission;
+  const eventVerified =
+    input?.timeline?.complete === true
+    && event?.event === 'labeled'
+    && event?.id === authorization.labelEventId
+    && event?.created_at === authorization.labeledAt
+    && event?.actor?.login === authorization.actor
+    && input?.prNumber === authorization.pullRequest
+    && input?.headOid === authorization.headOid
+    && Array.isArray(input?.labels)
+    && input.labels.includes(authorization.label)
+    && permission?.complete === true
+    && permission.login === authorization.actor
+    && new Set(['admin', 'maintain', 'write']).has(permission.roleName);
+  return {
+    ...authorization,
+    complete:
+      authorization.complete === true
+      && input?.timeline?.complete === true
+      && permission?.complete === true,
+    eventVerified,
+    afterCurrentHead,
+    roleName: permission?.roleName ?? null,
+  };
+}
+
+function emptyActorAllowances(value) {
+  if (value === undefined || value === null) return true;
+  return (
+    value
+    && typeof value === 'object'
+    && ['users', 'teams', 'apps'].every((key) =>
+      value[key] === undefined || (Array.isArray(value[key]) && value[key].length === 0))
+  );
+}
+
+function addRequiredCheck(checks, context, appId) {
+  if (typeof context !== 'string' || context.length === 0) return false;
+  if (!Number.isSafeInteger(appId) || appId < 1) return false;
+  const appIds = checks.get(context) ?? new Set();
+  appIds.add(appId);
+  checks.set(context, appIds);
+  return true;
+}
+
+export function deriveLiveServerPolicy(input) {
+  const protectionSection = input?.branchProtection;
+  const rulesSection = input?.branchRules;
+  const rulesetsSection = input?.rulesets;
+  const protection = protectionSection?.value;
+  let complete =
+    protectionSection?.complete === true
+    && rulesSection?.complete === true
+    && rulesetsSection?.complete === true
+    && protection
+    && typeof protection === 'object';
+  const statusChecks = protection?.required_status_checks;
+  const reviews = protection?.required_pull_request_reviews;
+  const requiredChecks = new Map();
+  const branchChecks = statusChecks?.checks;
+  const branchContexts = statusChecks?.contexts;
+  const branchCheckContexts = Array.isArray(branchChecks)
+    ? branchChecks.map((check) => check?.context)
+    : [];
+  if (
+    typeof statusChecks?.strict !== 'boolean'
+    || !Array.isArray(branchChecks)
+    || !Array.isArray(branchContexts)
+    || new Set(branchContexts).size !== branchContexts.length
+    || new Set(branchCheckContexts).size !== branchCheckContexts.length
+    || branchChecks.length !== branchContexts.length
+    || branchContexts.some((context) => !branchCheckContexts.includes(context))
+  ) {
+    complete = false;
+  }
+  for (const check of branchChecks ?? []) {
+    if (
+      !branchContexts?.includes(check?.context)
+      || !addRequiredCheck(requiredChecks, check?.context, check?.app_id)
+    ) {
+      complete = false;
+    }
+  }
+
+  let strict = statusChecks?.strict === true;
+  let approvingReviewCount = reviews?.required_approving_review_count;
+  let dismissStaleReviews = reviews?.dismiss_stale_reviews;
+  let requireLastPushApproval = reviews?.require_last_push_approval;
+  let requireCodeOwnerReviews = reviews?.require_code_owner_reviews;
+  let conversationResolution = protection?.required_conversation_resolution?.enabled;
+  let forcePushesAllowed = protection?.allow_force_pushes?.enabled;
+  let deletionsAllowed = protection?.allow_deletions?.enabled;
+  let queueRequired = false;
+  let actorCanBypass =
+    !emptyActorAllowances(reviews?.bypass_pull_request_allowances)
+    || protection?.enforce_admins?.enabled !== true;
+  if (
+    !Number.isInteger(approvingReviewCount)
+    || typeof dismissStaleReviews !== 'boolean'
+    || typeof requireLastPushApproval !== 'boolean'
+    || typeof requireCodeOwnerReviews !== 'boolean'
+    || typeof conversationResolution !== 'boolean'
+    || typeof forcePushesAllowed !== 'boolean'
+    || typeof deletionsAllowed !== 'boolean'
+    || typeof protection?.enforce_admins?.enabled !== 'boolean'
+  ) {
+    complete = false;
+  }
+
+  const rules = Array.isArray(rulesSection?.items) ? rulesSection.items : [];
+  const rulesets = Array.isArray(rulesetsSection?.items) ? rulesetsSection.items : [];
+  const rulesetIds = [...new Set(rules.map((rule) => rule?.ruleset_id))];
+  const detailIds = rulesets.map((ruleset) => ruleset?.id);
+  let bypassActorsVisible =
+    rulesetIds.length === rulesets.length
+    && rulesetIds.every((id) => Number.isSafeInteger(id) && detailIds.includes(id));
+  if (!bypassActorsVisible) complete = false;
+  for (const ruleset of rulesets) {
+    if (
+      !rulesetIds.includes(ruleset?.id)
+      || ruleset?.enforcement !== 'active'
+      || !Array.isArray(ruleset?.bypass_actors)
+    ) {
+      bypassActorsVisible = false;
+      complete = false;
+      continue;
+    }
+    if (ruleset.bypass_actors.length > 0) actorCanBypass = true;
+  }
+
+  for (const rule of rules) {
+    if (typeof rule?.type !== 'string' || !Number.isSafeInteger(rule?.ruleset_id)) {
+      complete = false;
+      continue;
+    }
+    const parameters = rule.parameters ?? {};
+    if (rule.type === 'required_status_checks') {
+      if (
+        typeof parameters.strict_required_status_checks_policy !== 'boolean'
+        || !Array.isArray(parameters.required_status_checks)
+      ) {
+        complete = false;
+        continue;
+      }
+      strict ||= parameters.strict_required_status_checks_policy;
+      for (const check of parameters.required_status_checks) {
+        if (!addRequiredCheck(requiredChecks, check?.context, check?.integration_id)) {
+          complete = false;
+        }
+      }
+    } else if (rule.type === 'pull_request') {
+      if (
+        !Number.isInteger(parameters.required_approving_review_count)
+        || typeof parameters.dismiss_stale_reviews_on_push !== 'boolean'
+        || typeof parameters.require_last_push_approval !== 'boolean'
+        || typeof parameters.require_code_owner_review !== 'boolean'
+        || typeof parameters.required_review_thread_resolution !== 'boolean'
+      ) {
+        complete = false;
+        continue;
+      }
+      approvingReviewCount = Math.max(
+        approvingReviewCount,
+        parameters.required_approving_review_count,
+      );
+      dismissStaleReviews ||= parameters.dismiss_stale_reviews_on_push;
+      requireLastPushApproval ||= parameters.require_last_push_approval;
+      requireCodeOwnerReviews ||= parameters.require_code_owner_review;
+      conversationResolution ||= parameters.required_review_thread_resolution;
+    } else if (rule.type === 'non_fast_forward') {
+      forcePushesAllowed = false;
+    } else if (rule.type === 'deletion') {
+      deletionsAllowed = false;
+    } else if (rule.type === 'merge_queue') {
+      queueRequired = true;
+    }
+  }
+
+  return {
+    complete: complete === true,
+    source: 'live',
+    strategy: 'direct-strict',
+    strict,
+    enforceAdmins: protection?.enforce_admins?.enabled === true,
+    actorCanBypass,
+    requiredConversationResolution: conversationResolution,
+    requiredApprovingReviewCount: approvingReviewCount,
+    requireCodeOwnerReviews,
+    dismissStaleReviews,
+    requireLastPushApproval,
+    forcePushesAllowed,
+    deletionsAllowed,
+    queueRequired,
+    rulesetsComplete:
+      rulesSection?.complete === true
+      && rulesetsSection?.complete === true
+      && rulesetIds.length === rulesets.length,
+    bypassActorsVisible,
+    requiredChecks: [...requiredChecks.entries()]
+      .map(([name, appIds]) => ({ name, appIds: [...appIds].sort((left, right) => left - right) }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+  };
+}
+
+function fetchPermission(login) {
+  const data = ghJson(ghApiArgs(
+    `repos/${REPO_SLUG}/collaborators/${encodeURIComponent(login)}/permission`,
+  ));
+  return {
+    complete:
+      data?.user?.login === login
+      && Number.isSafeInteger(data?.user?.id)
+      && typeof data?.role_name === 'string',
+    login: data?.user?.login ?? null,
+    id: data?.user?.id ?? null,
+    roleName: data?.role_name ?? null,
+  };
+}
+
+function fetchIssueRecord(number) {
+  const data = ghGraphql(ISSUE_QUERY, {
+    owner: REPOSITORY.owner,
+    name: REPOSITORY.name,
+    number: Number(number),
+  });
+  const issue = data.repository?.issue;
+  if (!issue) throw new Error(`linked #${number} is missing or is not an issue`);
+  const labels = (issue.labels?.nodes ?? []).map((label) => label?.name).filter(Boolean);
+  const comments = [...(issue.comments?.nodes ?? [])];
+
+  let labelPage = pageInfo(issue.labels, 'linked issue labels');
+  while (labelPage.hasNextPage) {
+    if (!labelPage.endCursor) throw new Error('linked issue label pagination had no endCursor');
+    const next = ghGraphql(ISSUE_LABELS_QUERY, {
+      id: issue.id,
+      cursor: labelPage.endCursor,
+    }).node?.labels;
+    if (!next) throw new Error('linked issue label pagination returned no connection');
+    labels.push(...(next.nodes ?? []).map((label) => label?.name).filter(Boolean));
+    labelPage = pageInfo(next, 'linked issue labels');
+  }
+
+  let commentPage = pageInfo(issue.comments, 'linked issue comments');
+  while (commentPage.hasNextPage) {
+    if (!commentPage.endCursor) throw new Error('linked issue comment pagination had no endCursor');
+    const next = ghGraphql(ISSUE_COMMENTS_QUERY, {
+      id: issue.id,
+      cursor: commentPage.endCursor,
+    }).node?.comments;
+    if (!next) throw new Error('linked issue comment pagination returned no connection');
+    comments.push(...(next.nodes ?? []));
+    commentPage = pageInfo(next, 'linked issue comments');
+  }
+
+  return {
+    issue: {
+      complete: true,
+      number: issue.number,
+      state: upper(issue.state),
+      body: issue.body,
+      labels,
+      labelsComplete: true,
+      createdAt: issue.createdAt,
+      lastEditedAt: issue.lastEditedAt,
+    },
+    comments: {
+      complete: true,
+      items: comments.map((comment) => ({
+        id: comment?.id,
+        author: { login: comment?.author?.login ?? null },
+        body: comment?.body,
+        neverEdited: lifecycleCommentNeverEdited(comment),
+      })),
+    },
+  };
+}
+
+function fetchTimeline(number) {
+  const pages = ghPaginated(
+    `repos/${REPO_SLUG}/issues/${number}/timeline?per_page=100`,
+  );
+  return {
+    complete: true,
+    items: pages.flatMap((page) => {
+      if (!Array.isArray(page)) throw new Error('issue timeline page was not an array');
+      return page;
+    }),
+  };
+}
+
+function fetchDependencies(body) {
+  const items = blockedBy(body).map((number) => {
+    const issue = ghGraphql(DEPENDENCY_QUERY, {
+      owner: REPOSITORY.owner,
+      name: REPOSITORY.name,
+      number,
+    }).repository?.issue;
+    if (!issue || issue.number !== number) {
+      throw new Error(`dependency #${number} is missing or is not an issue`);
+    }
+    return { number, state: upper(issue.state) };
+  });
+  return { complete: true, items };
+}
+
+function fetchLinkedIssueEvidence(number, ownership, policyAttestation, policyLive) {
+  const record = fetchIssueRecord(number);
+  const timeline = fetchTimeline(number);
+  const readyEvent = latestLabelEvent(timeline.items, 'loop-ready');
+  const loopReadyPermission = readyEvent?.actor?.login
+    ? fetchPermission(readyEvent.actor.login)
+    : { complete: false, login: null, roleName: null };
+  return deriveLiveIssueEvidence({
+    ...record,
+    timeline,
+    dependencies: fetchDependencies(record.issue.body),
+    loopReadyPermission,
+    ownership,
+    policyAttestation,
+    ...policyLive,
+    loopLogin: LOOP_LOGIN,
+  });
+}
+
+function fetchLiveAuthorization(number, headOid, labels, authorization) {
+  if (!authorization) return null;
+  const timeline = fetchTimeline(number);
+  const event = latestLabelEvent(timeline.items, authorization.label);
+  const permission = event?.actor?.login
+    ? fetchPermission(event.actor.login)
+    : { complete: false, login: null, roleName: null };
+  return deriveLiveAuthorizationEvidence({
+    authorization,
+    prNumber: number,
+    headOid,
+    labels,
+    timeline,
+    permission,
+  });
+}
+
+function fetchExecutorIdentity() {
+  const data = ghJson(ghApiArgs('user'));
+  return {
+    complete:
+      typeof data?.login === 'string'
+      && data.login.length > 0
+      && Number.isSafeInteger(data?.id)
+      && data.id > 0,
+    login: data?.login ?? null,
+    id: data?.id ?? null,
+  };
+}
+
+function fetchLiveServerPolicy() {
+  const branch = encodeURIComponent(BASE_BRANCH);
+  const branchProtection = ghJson(ghApiArgs(
+    `repos/${REPO_SLUG}/branches/${branch}/protection`,
+  ));
+  const rulePages = ghPaginated(
+    `repos/${REPO_SLUG}/rules/branches/${branch}?per_page=100`,
+  );
+  const branchRules = rulePages.flatMap((page) => {
+    if (!Array.isArray(page)) throw new Error('active branch rules page was not an array');
+    return page;
+  });
+  const rulesetIds = [...new Set(branchRules.map((rule) => rule?.ruleset_id))];
+  if (rulesetIds.some((id) => !Number.isSafeInteger(id) || id < 1)) {
+    throw new Error('active branch rule omitted a valid ruleset ID');
+  }
+  const rulesets = rulesetIds.map((id) =>
+    ghJson(ghApiArgs(`repos/${REPO_SLUG}/rulesets/${id}?includes_parents=true`)));
+  return deriveLiveServerPolicy({
+    branchProtection: { complete: true, value: branchProtection },
+    branchRules: { complete: true, items: branchRules },
+    rulesets: { complete: true, items: rulesets },
+  });
+}
+
+export function collectPrCommitMetadata(pages) {
+  const commits = [];
+  const seen = new Set();
+  for (const page of pages) {
+    if (!Array.isArray(page)) throw new Error('PR commits page was not an array');
+    for (const commit of page) {
+      const oid = commit?.sha;
+      const message = commit?.commit?.message;
+      const parents = commit?.parents;
+      if (
+        !/^[0-9a-f]{40}$/i.test(oid ?? '')
+        || typeof message !== 'string'
+        || !Array.isArray(parents)
+        || parents.length === 0
+        || parents.some((parent) => !/^[0-9a-f]{40}$/i.test(parent?.sha ?? ''))
+      ) {
+        throw new Error('PR commits response contained invalid commit metadata');
+      }
+      const normalizedOid = oid.toLowerCase();
+      if (seen.has(normalizedOid)) throw new Error('PR commits response repeated a commit OID');
+      seen.add(normalizedOid);
+      commits.push({
+        oid: normalizedOid,
+        message,
+        parentOids: parents.map((parent) => parent.sha.toLowerCase()),
+      });
+    }
+  }
+  if (commits.length === 0) throw new Error('PR commits response was empty');
+  if (commits.length >= 250) {
+    throw new Error('PR commit provenance reached GitHub endpoint limit and may be truncated');
+  }
+  return commits;
+}
+
+function fetchPrCommitMetadata(number) {
+  return collectPrCommitMetadata(
+    ghPaginated(`repos/${REPO_SLUG}/pulls/${number}/commits?per_page=100`),
+  );
+}
+
+function parsedCheckAttestation(checkRuns, name, kind, headOid) {
+  const candidates = (checkRuns ?? []).filter((checkRun) =>
+    checkRun?.name === name
+    && (checkRun.head_sha ?? checkRun.headSha ?? checkRun.headOid) === headOid
+    && upper(checkRun.status || (checkRun.conclusion ? 'completed' : '')) === 'COMPLETED'
+    && upper(checkRun.conclusion) === 'SUCCESS');
+  if (candidates.length !== 1) return null;
+  const parsed = parseAttestation(candidates[0]?.output?.summary, { kind, headOid });
+  if (!parsed.ok) return null;
+  return { value: parsed.attestation, check: normalizedCheckRun(candidates[0]) };
+}
+
+export function deriveAttestedEvidence(inputs, commitMetadata = null) {
+  const result = {
+    ownership: null,
+    lifecycle: null,
+    policyAttestation: null,
+    ciPolicy: null,
+    authorization: null,
+    gateEvidenceVerified: false,
+    executorIdentity: null,
+    serverPolicy: null,
+    linkedIssue: null,
+  };
+  const headOid = inputs?.headRefOid;
+  if (!/^[0-9a-f]{40}$/i.test(headOid ?? '') || !Array.isArray(inputs?.checkRuns)) return result;
+  const claim = parseLoopClaim({ branch: inputs?.headRefName, body: inputs?.body });
+  const issue = claim.valid ? claim.issue : null;
+
+  const ownership = parsedCheckAttestation(
+    inputs.checkRuns,
+    'agentic/ownership',
+    'ownership',
+    headOid,
+  );
+  const policy = parsedCheckAttestation(
+    inputs.checkRuns,
+    'agentic/policy',
+    'policy',
+    headOid,
+  );
+  const authorization = parsedCheckAttestation(
+    inputs.checkRuns,
+    'agentic/human-authorization',
+    'human-authorization',
+    headOid,
+  );
+  const gate = parsedCheckAttestation(
+    inputs.checkRuns,
+    'agentic/gate',
+    'gate',
+    headOid,
+  );
+  result.gateEvidenceVerified = gate !== null;
+
+  if (ownership && ownership.value.issue === issue) {
+    const commits = Array.isArray(commitMetadata)
+      ? commitMetadata.map((commit) => ({
+        oid: commit?.oid,
+        message: commit?.message,
+        parentOids: Array.isArray(commit?.parentOids) ? [...commit.parentOids] : commit?.parentOids,
+      }))
+      : null;
+    result.ownership = {
+      complete: true,
+      issue: ownership.value.issue,
+      issueBodyHash: ownership.value.issueBodyHash,
+      claimCommitAncestor:
+        Array.isArray(commits)
+        && commits.some((commit) => commit.oid === ownership.value.claimCommitOid),
+      claimCommit: {
+        complete: Array.isArray(commits),
+        issue: ownership.value.issue,
+        headOid: ownership.value.headOid,
+        baseOid: inputs?.baseRefOid,
+        oid: ownership.value.claimCommitOid,
+        commits,
+      },
+      frozenPlanPresent: true,
+      frozenPlanHash: ownership.value.frozenPlanHash,
+      frozenPlanCommentId: ownership.value.frozenPlanCommentId,
+      frozenPlanAuthor: ownership.value.frozenPlanAuthor,
+      frozenPlanCommentVerified: false,
+    };
+  }
+  if (
+    policy
+    && policy.value.issue === issue
+    && policy.value.pullRequest === inputs?.prNumber
+  ) {
+    result.policyAttestation = policy.value;
+  }
+  if (authorization && authorization.value.pullRequest === inputs?.prNumber) {
+    result.authorization = {
+      complete: true,
+      pullRequest: authorization.value.pullRequest,
+      actor: authorization.value.actor,
+      headOid: authorization.value.headOid,
+      label: authorization.value.label,
+      labelEventId: authorization.value.labelEventId,
+      labeledAt: authorization.value.labeledAt,
+      eventVerified: false,
+      roleName: null,
+      check: authorization.check,
+    };
+  }
+  return result;
+}
+
 function fetchKillSwitch() {
   try {
-    // --repo pins the switch to THIS repository: without it, gh resolves the repo
-    // from cwd/GH_REPO, and an invocation from another checkout would consult the
-    // wrong repo's issues while merging into this one.
-    const output = execSync(
-      `gh issue list --repo ${REPO_SLUG} --label automerge:halt --state open --json number --limit 1000`,
+    const output = execFileSync(
+      'gh',
+      [
+        'issue',
+        'list',
+        '--repo',
+        REPO_SLUG,
+        '--label',
+        'automerge:halt',
+        '--state',
+        'open',
+        '--json',
+        'number',
+        '--limit',
+        '1000',
+      ],
       { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 },
     );
     const issues = JSON.parse(output);
@@ -411,10 +1352,14 @@ function fetchKillSwitch() {
 
 function emptyInputs() {
   return {
+    coreComplete: false,
     state: null,
     isDraft: null,
     baseRefName: null,
+    baseRefOid: null,
+    headRefName: null,
     headRefOid: null,
+    body: null,
     headRepository: null,
     labels: [],
     changedFiles: null,
@@ -432,12 +1377,20 @@ function emptyInputs() {
     checkRuns: [],
     rollupComplete: false,
     killSwitch: { known: false, active: false },
+    linkedIssue: null,
+    ownership: null,
+    lifecycle: null,
+    authorization: null,
+    gateEvidenceVerified: false,
+    policyAttestation: null,
+    serverPolicy: null,
     fetchReasons: [],
   };
 }
 
 function fetchInputs(number) {
   const inputs = emptyInputs();
+  inputs.prNumber = number;
 
   try {
     Object.assign(inputs, fetchPullRequestCore(number));
@@ -467,64 +1420,113 @@ function fetchInputs(number) {
     inputs.fetchReasons.push('statuses/checks fetch skipped because the head SHA is unknown');
   }
 
+  const claim = parseLoopClaim({ branch: inputs.headRefName, body: inputs.body });
+  let commitMetadata = null;
+  try {
+    commitMetadata = fetchPrCommitMetadata(number);
+  } catch (error) {
+    inputs.fetchReasons.push(`PR commit provenance fetch failed: ${errorMessage(error)}`);
+  }
+  Object.assign(inputs, deriveAttestedEvidence(inputs, commitMetadata));
+
+  if (claim.valid) {
+    let delivery = null;
+    if (inputs.headRefOid) {
+      try {
+        inputs.ciPolicy = fetchPublicationCiPolicy({
+          host: 'github.com',
+          owner: REPOSITORY.owner,
+          repo: REPOSITORY.name,
+        }, inputs.headRefOid);
+      } catch (error) {
+        inputs.fetchReasons.push(`committed CI policy fetch failed: ${errorMessage(error)}`);
+      }
+      try {
+        delivery = finalizeHead({
+          schemaVersion: 1,
+          repository: `${REPOSITORY.owner}/${REPOSITORY.name}`,
+          pullRequest: inputs.prNumber,
+          committedHead: inputs.headRefOid,
+          reviewedHead: inputs.headRefOid,
+          gatedHead: inputs.headRefOid,
+        });
+        if (delivery.canMarkDelivered !== true) {
+          inputs.fetchReasons.push(
+            `live delivery evidence failed: ${delivery.code ?? 'DELIVERY_UNVERIFIED'}`,
+          );
+        }
+      } catch (error) {
+        inputs.fetchReasons.push(
+          `live delivery evidence failed closed: ${errorMessage(error)}`,
+        );
+      }
+    }
+    try {
+      const issueEvidence = fetchLinkedIssueEvidence(
+        claim.issue,
+        inputs.ownership,
+        inputs.policyAttestation,
+        {
+          policyLiveComplete:
+            inputs.coreComplete === true
+            && inputs.rollupComplete === true
+            && inputs.ciPolicy?.complete === true,
+          pullRequest: {
+            number: inputs.prNumber,
+            headOid: inputs.headRefOid,
+            headRefName: inputs.headRefName,
+            body: inputs.body,
+            merged: upper(inputs.state) === 'MERGED',
+            mergeOid: null,
+          },
+          checkRuns: {
+            complete: inputs.rollupComplete === true,
+            items: inputs.checkRuns,
+          },
+          ciPolicy: inputs.ciPolicy,
+          delivery,
+        },
+      );
+      inputs.linkedIssue = issueEvidence.linkedIssue;
+      inputs.ownership = issueEvidence.ownership;
+      inputs.lifecycle = issueEvidence.lifecycle;
+    } catch (error) {
+      inputs.fetchReasons.push(`linked-issue eligibility fetch failed: ${errorMessage(error)}`);
+    }
+  } else {
+    inputs.fetchReasons.push(`loop claim is invalid: ${claim.reasonCode}`);
+  }
+
+  if (SAFE_LABELS.some((label) => inputs.labels.includes(label))) {
+    try {
+      inputs.authorization = fetchLiveAuthorization(
+        number,
+        inputs.headRefOid,
+        inputs.labels,
+        inputs.authorization,
+      );
+    } catch (error) {
+      inputs.fetchReasons.push(`human-authorization event fetch failed: ${errorMessage(error)}`);
+    }
+  }
+
   const { fetchReasons: killSwitchReasons, ...killSwitch } = fetchKillSwitch();
   Object.assign(inputs, killSwitch);
   inputs.fetchReasons.push(...(killSwitchReasons ?? []));
+
+  try {
+    inputs.executorIdentity = fetchExecutorIdentity();
+  } catch (error) {
+    inputs.fetchReasons.push(`merge executor identity fetch failed: ${errorMessage(error)}`);
+  }
+
+  try {
+    inputs.serverPolicy = fetchLiveServerPolicy();
+  } catch (error) {
+    inputs.fetchReasons.push(`live server-policy fetch failed: ${errorMessage(error)}`);
+  }
   return inputs;
 }
-
-// Each family is default-deny because it protects a boundary whose risk cannot be
-// classified by a label. The tool's own tools/** family can never authorize changes to itself.
-// Generic families only — the repo's crown jewels arrive via EXTRA_PROTECTED_PATHS (config).
-const PROTECTED_PATH_FAMILIES = [
-  // Cryptographic material and algorithms (path segment anywhere in the tree).
-  { name: 'cryptographic credential paths', matches: (path) => /(^|\/)[^/]*(?:crypt)[^/]*(?:\/|$)/i.test(path) },
-  // Secret/credential/token-bearing path segments anywhere in the tree.
-  { name: 'secret/credential path segments', matches: (path) => /(^|\/)[^/]*(?:secret|credential|token)[^/]*(?:\/|$)/i.test(path) },
-  // Environment files anywhere.
-  { name: 'env files', matches: (path) => /(^|\/)\.env[^/]*$/i.test(path) },
-  // Loop, tooling, and enforcement machinery; this tool can never authorize itself.
-  { name: 'tools', matches: (path) => /^tools\//i.test(path) },
-  // CI workflows and repository automation.
-  { name: '.github', matches: (path) => /^\.github\//i.test(path) },
-  // Agent skills, hooks, and loop permissions.
-  { name: '.claude', matches: (path) => /^\.claude\//i.test(path) },
-  { name: '.codex', matches: (path) => /^\.codex\//i.test(path) },
-  { name: '.agents', matches: (path) => /^\.agents\//i.test(path) },
-  // Any root dotfile or dot-directory is governance or infrastructure by default.
-  { name: 'root dotfile/dot-directory', matches: (path) => /^\./.test(path) },
-  // Agentic state and loop policy prose — EXCEPT docs/agentic/ARCH.md, which is a curated map
-  // (DATA, not policy: no caps/escalate-list/invariants/review-criteria; readers verify every
-  // load-bearing claim, imperative text in it is drift). It changes as a normal byproduct of
-  // structural units, so protecting it would block their auto-merge for no governance gain. The
-  // rest of docs/agentic/ (STATE, checklist, LOOP, digests) stays protected.
-  { name: 'docs/agentic', matches: (path) => /^docs\/agentic\//i.test(path) && !/^docs\/agentic\/ARCH\.md$/i.test(path) },
-  // Repository critical rules — at ANY depth: both hosts honor nested guidance files.
-  { name: 'CLAUDE.md', matches: (path) => /(^|\/)CLAUDE\.md$/i.test(path) },
-  { name: 'AGENTS guidance', matches: (path) => /(^|\/)AGENTS(?:\.override)?\.md$/i.test(path) },
-  // Local orchestration and service topology.
-  { name: 'docker-compose.yml', matches: (path) => /^docker-compose\.yml$/i.test(path) },
-  // Image build and deployment boundary.
-  { name: 'Dockerfile', matches: (path) => /^Dockerfile[^/]*$/i.test(path) },
-  // Dependency manifests at any depth.
-  { name: 'package.json', matches: (path) => path.split('/').some((part) => part.toLowerCase() === 'package.json') },
-  // Dependency lockfiles at any depth.
-  {
-    name: 'lockfile',
-    matches: (path) => path.split('/').some((part) => /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|.+\.lock)$/i.test(part)),
-  },
-  // TypeScript compiler configuration at any depth.
-  { name: 'tsconfig', matches: (path) => /(^|\/)tsconfig[^/]*$/i.test(path) },
-  // Build / test-runner / lint tool configuration at any depth.
-  { name: 'build/test/lint config', matches: (path) => /(^|\/)(?:vite|vitest|eslint|postcss|tailwind|jest|webpack|rollup)\.config(?:\.[^/]+)?$/i.test(path) },
-  // Live data files and runtime persistence.
-  { name: 'data files', matches: (path) => /^data\//i.test(path) },
-  // Repo crown jewels from the config block (setup mirrors STATE's escalate-list).
-  ...EXTRA_PROTECTED_PATHS.map((glob) => ({
-    name: `extra-protected ${glob}`,
-    matches: (path) => globToRe(glob).test(path),
-  })),
-];
 
 function changedPaths(pr) {
   const entries = Array.isArray(pr.fileEntries)
@@ -556,6 +1558,81 @@ function isActionsCheckRun(checkRun) {
 
 function pathBAllowed(path) {
   return REVERSIBLE_RES.some((re) => re.test(path));
+}
+
+function normalizedCheckRun(checkRun) {
+  return {
+    name: checkRun?.name,
+    headOid: checkRun?.headOid ?? checkRun?.head_sha ?? checkRun?.headSha,
+    status: checkRun?.status ?? (checkRun?.conclusion ? 'COMPLETED' : null),
+    conclusion: checkRun?.conclusion,
+    app: {
+      id: checkRun?.app?.id,
+      slug: checkRun?.app?.slug,
+    },
+  };
+}
+
+function mergeAuthorizationInput(pr, path) {
+  const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
+  return {
+    config: {
+      repository: REPOSITORY,
+      baseBranch: BASE_BRANCH,
+      mergePolicy: AUTOMERGE_MODE === 'all-green' ? 'auto' : 'ratified',
+      baseFreshnessStrategy: BASE_FRESHNESS_STRATEGY,
+      loopLogin: LOOP_LOGIN,
+      trustedHumanLogins: TRUSTED_HUMAN_LOGINS,
+      automationAppIds: TRUSTED_AUTOMATION_APP_IDS,
+      authorizationAppIds: TRUSTED_AUTHORIZATION_APP_IDS,
+      requiredApprovingReviewCount: REQUIRED_APPROVING_REVIEW_COUNT,
+      requireCodeOwnerReviews: REQUIRE_CODE_OWNER_REVIEWS,
+      requiredChecks: requiredCheckContracts(),
+    },
+    pr: {
+      number: pr.prNumber,
+      complete: pr.coreComplete === true,
+      state: upper(pr.state),
+      isDraft: pr.isDraft,
+      baseRefName: pr.baseRefName,
+      baseRefOid: pr.baseRefOid,
+      headRefName: pr.headRefName,
+      headRefOid: pr.headRefOid,
+      headRepository: {
+        owner: pr.headRepository?.owner?.login ?? pr.headRepository?.owner,
+        name: pr.headRepository?.name,
+      },
+      labels: pr.labels,
+      reviewDecision: upper(pr.reviewDecision),
+      reviewRequests: pr.reviewRequests,
+      claim: {
+        ok: claim.valid,
+        issue: claim.issue,
+        branchIssue: claim.branchIssue,
+        bodyIssue: claim.bodyIssue,
+      },
+      linkedIssue: pr.linkedIssue,
+      ownership: pr.ownership,
+      lifecycle: pr.lifecycle,
+      gateEvidenceVerified: pr.gateEvidenceVerified,
+      path,
+      authorization: pr.authorization,
+      checks: Array.isArray(pr.checkRuns) ? pr.checkRuns.map(normalizedCheckRun) : null,
+      checksComplete: pr.rollupComplete === true,
+      conversationsResolved:
+        pr.threadPaginationComplete === true
+        && Array.isArray(pr.reviewThreads)
+        && pr.reviewThreads.every(
+          (thread) => thread.isResolved === true || thread.latestIsOutdated === true,
+        ),
+      killSwitch: {
+        complete: pr.killSwitch?.known === true,
+        active: pr.killSwitch?.active,
+      },
+    },
+    executorIdentity: pr.executorIdentity,
+    serverPolicy: pr.serverPolicy,
+  };
 }
 
 /**
@@ -617,7 +1694,10 @@ export function decide(pr) {
     (thread) => thread.isResolved !== true && thread.latestIsOutdated !== true,
   );
   if (unresolved.length > 0) reasons.push(`${unresolved.length} unresolved non-outdated review thread(s)`);
-  if (upper(pr.mergeStateStatus) !== 'CLEAN') {
+  if (
+    BASE_FRESHNESS_STRATEGY === 'direct-strict'
+    && upper(pr.mergeStateStatus) !== 'CLEAN'
+  ) {
     reasons.push(`mergeStateStatus is not CLEAN (status=${pr.mergeStateStatus ?? 'unknown'})`);
   }
 
@@ -627,15 +1707,9 @@ export function decide(pr) {
   for (const status of statuses) {
     if (status.sha !== headRefOid) reasons.push(`status context ${status.context ?? 'unknown'} is not on fetched headRefOid`);
   }
-  const agenticStatuses = headStatuses.filter((status) => String(status.context ?? '').startsWith('agentic/'));
-  for (const status of agenticStatuses) {
-    if (upper(status.state) !== 'SUCCESS') {
-      reasons.push(`agentic status is not SUCCESS: ${status.context}=${status.state ?? 'unknown'}`);
-    }
-  }
-  for (const context of REQUIRED_VERDICTS) {
-    if (!headStatuses.some((status) => status.context === context && upper(status.state) === 'SUCCESS')) {
-      reasons.push(`missing required ${context}=SUCCESS status on headRefOid`);
+  for (const status of headStatuses) {
+    if (String(status.context ?? '').startsWith('agentic/')) {
+      reasons.push(`agentic evidence must be an attributable CheckRun, not commit status ${status.context}`);
     }
   }
 
@@ -688,19 +1762,16 @@ export function decide(pr) {
   if (killSwitch?.known !== true) reasons.push('automerge:halt kill-switch state is unknown');
   else if (killSwitch.active === true) reasons.push('automerge:halt kill-switch is active; all automerges are paused');
 
-  const protectedMatches = new Map();
-  for (const family of PROTECTED_PATH_FAMILIES) {
-    const matchingPaths = paths.filter((path) => family.matches(path));
-    if (matchingPaths.length) protectedMatches.set(family.name, [...new Set(matchingPaths)]);
-  }
-  for (const [family, matchingPaths] of protectedMatches) {
-    reasons.push(`protected path (${family}): ${matchingPaths.join(', ')}`);
+  for (const hit of matchMergeProtected(paths, EXTRA_PROTECTED_PATHS)) {
+    reasons.push(`protected path (${hit.family}): ${hit.file}`);
   }
 
   const pathA = SAFE_LABELS.some((label) => labels.includes(label));
   const hasKnownSize = Number.isInteger(pr.changedFiles) && Number.isInteger(pr.additions) && Number.isInteger(pr.deletions);
   const pathBFiles = entries.length > 0 && paths.length > 0 && paths.every(pathBAllowed);
-  const pathBSize = hasKnownSize && pr.changedFiles <= 20 && pr.additions + pr.deletions <= 400;
+  const pathBSize = hasKnownSize
+    && pr.changedFiles <= 20
+    && pr.additions + pr.deletions <= REVERSIBLE_MAX_LINES;
   const pathB = pathBFiles && pathBSize && pr.filePaginationComplete === true && !malformed && pr.changedFiles === entries.length;
   // 'all-green' authorizes any complete, well-formed changed-file set; every other
   // check in this function (protected paths, hard-block labels, evidence, threads,
@@ -722,11 +1793,14 @@ export function decide(pr) {
         if (!hasKnownSize) reasons.push('not authorized: Path B changed-file size is unknown');
         else {
           if (pr.changedFiles > 20) reasons.push(`not authorized: Path B has too many files (${pr.changedFiles} > 20)`);
-          if (pr.additions + pr.deletions > 400) reasons.push(`not authorized: Path B has too many changed lines (${pr.additions + pr.deletions} > 400)`);
+          if (pr.additions + pr.deletions > REVERSIBLE_MAX_LINES) reasons.push(`not authorized: Path B has too many changed lines (${pr.additions + pr.deletions} > ${REVERSIBLE_MAX_LINES})`);
         }
       }
     }
   }
+
+  const authorization = authorizeMerge(mergeAuthorizationInput(pr, path));
+  reasons.push(...authorization.reasons.map((reason) => `merge authorization: ${reason}`));
 
   return { allow: reasons.length === 0, reasons, path };
 }
@@ -736,24 +1810,32 @@ function apiErrorStatus(error) {
   return /(?:HTTP|status|response)[^\d]{0,20}409\b/i.test(errorMessage(error)) ? 409 : null;
 }
 
-function defaultMergeExecutor(number) {
+function defaultMergeExecutor(number, expectedExecutor) {
   return ({ sha, squash }) => {
     if (squash !== true) throw new Error('merge executor requires squash=true');
-    const output = execSync(
-      `gh api repos/${REPO_SLUG}/pulls/${number}/merge --method PUT -f merge_method=squash -f sha=${sha}`,
-      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 },
+    const actualExecutor = fetchExecutorIdentity();
+    if (
+      actualExecutor.complete !== true
+      || actualExecutor.login !== LOOP_LOGIN
+      || actualExecutor.login !== expectedExecutor?.login
+      || actualExecutor.id !== expectedExecutor?.id
+    ) {
+      throw Object.assign(
+        new Error('merge credential identity changed or does not match the dedicated loop login'),
+        { code: 'EXECUTOR_IDENTITY_MISMATCH' },
+      );
+    }
+    return ghJson(
+      ghApiArgs(
+        `repos/${REPO_SLUG}/pulls/${number}/merge`,
+        ['--method', 'PUT', '-f', 'merge_method=squash', '-f', `sha=${sha}`],
+      ),
     );
-    return JSON.parse(output);
   };
 }
 
 function defaultConfirmMerged(number) {
-  const output = execSync(`gh api repos/${REPO_SLUG}/pulls/${number}`, {
-    encoding: 'utf8',
-    stdio: ['pipe', 'pipe', 'pipe'],
-    timeout: 15000,
-  });
-  const pr = JSON.parse(output);
+  const pr = ghJson(ghApiArgs(`repos/${REPO_SLUG}/pulls/${number}`));
   return { merged: pr.merged === true, headSha: pr.head?.sha ?? null };
 }
 
@@ -770,28 +1852,42 @@ export function run(inputs, {
   mergeExecutor,
   confirmMerged,
   sleep = shortSleep,
+  strategy = BASE_FRESHNESS_STRATEGY,
 } = {}) {
   const decision = decide(inputs);
   const result = { exitCode: decision.allow ? 0 : 1, decision, reasons: [...decision.reasons] };
-  if (!decision.allow || dryRun) return result;
+  if (!decision.allow) return result;
 
-  const execute = mergeExecutor ?? defaultMergeExecutor(inputs.prNumber);
-  const confirm = confirmMerged ?? (() => defaultConfirmMerged(inputs.prNumber));
+  if (strategy !== BASE_FRESHNESS_STRATEGY || strategy !== 'direct-strict') {
+    result.exitCode = 1;
+    result.reasons.push(
+      `unsupported submission strategy: ${strategy}; v0.40 enables direct-strict only`,
+    );
+    return result;
+  }
+  if (dryRun) return result;
+  const execute = mergeExecutor
+    ?? defaultMergeExecutor(inputs.prNumber, inputs.executorIdentity);
+  const confirm = confirmMerged
+    ?? (() => defaultConfirmMerged(inputs.prNumber));
   const mergeArgs = { sha: inputs.headRefOid, squash: true };
   try {
     const response = execute(mergeArgs);
-    // Only an explicit merged=true is success — anything else (false, missing,
-    // malformed) is a refusal, never assumed merged.
-    if (response?.merged !== true) {
-      const message = response?.message ?? 'GitHub did not confirm the merge';
-      result.exitCode = 1;
-      result.reasons.push(`merge refused by GitHub: ${message}`);
+    if (response?.merged === true) {
+      result.merged = true;
       return result;
     }
-    result.merged = true;
+    const message = response?.message ?? 'GitHub did not confirm the merge';
+    result.exitCode = 1;
+    result.reasons.push(`merge refused by GitHub: ${message}`);
     return result;
   } catch (error) {
     const message = errorMessage(error);
+    if (error?.code === 'EXECUTOR_IDENTITY_MISMATCH') {
+      result.exitCode = 1;
+      result.reasons.push(`merge executor precondition failed: ${message}`);
+      return result;
+    }
     if (apiErrorStatus(error) === 409) {
       result.exitCode = 1;
       result.reasons.push(`compare-and-swap merge refused (HTTP 409): ${message}`);
@@ -825,7 +1921,9 @@ export function run(inputs, {
       if (attempt < 3) sleep();
     }
     result.exitCode = 1;
-    result.reasons.push(`LOUD: MERGE OUTCOME UNKNOWN after 3 confirmation attempts; human must inspect immediately (${confirmationReasons.join('; ')})`);
+    result.reasons.push(
+      `LOUD: MERGE OUTCOME UNKNOWN after 3 confirmation attempts; human must inspect immediately (${confirmationReasons.join('; ')})`,
+    );
     return result;
   }
 }
@@ -845,24 +1943,40 @@ const NEUTRAL_PATH = 'zz-selftest/neutral-change.txt';
 const ALLOW_ALL = AUTOMERGE_MODE === 'all-green';
 
 function makeCheckRuns() {
-  return REQUIRED_CI_CHECKS.map((name) => ({
+  return requiredCheckContracts().map(({ name, appIds }) => ({
     name,
+    status: 'completed',
     conclusion: 'success',
     head_sha: HEAD_SHA,
-    app: { slug: 'github-actions', name: 'GitHub Actions' },
+    app: {
+      id: appIds[0],
+      slug: name.startsWith('agentic/') ? 'autoloop' : 'github-actions',
+      name: name.startsWith('agentic/') ? 'Autoloop' : 'GitHub Actions',
+    },
   }));
 }
 
-function makeInput({ files = [ALLOWED_PATH], fileEntries, ...overrides } = {}) {
+function makeInput({
+  files = [ALLOWED_PATH],
+  fileEntries,
+  labels = [],
+  headRefName = `feat/gh-${LOOP_ISSUE}-safe-change`,
+  body = `Closes #${LOOP_ISSUE}`,
+  ...overrides
+} = {}) {
   const entries = fileEntries ?? files.map((filename) => ({ filename, previous_filename: null }));
   return {
     prNumber: 138,
+    coreComplete: true,
     state: 'OPEN',
     isDraft: false,
     baseRefName: BASE_BRANCH,
+    baseRefOid: BASE_SHA,
+    headRefName,
+    body,
     headRefOid: HEAD_SHA,
     headRepository: { owner: REPOSITORY.owner, name: REPOSITORY.name },
-    labels: [],
+    labels: [...new Set(labels)],
     changedFiles: entries.length,
     additions: 10,
     deletions: 5,
@@ -874,10 +1988,115 @@ function makeInput({ files = [ALLOWED_PATH], fileEntries, ...overrides } = {}) {
     filePaginationComplete: true,
     reviewThreads: [],
     threadPaginationComplete: true,
-    statuses: REQUIRED_VERDICTS.map((context) => ({ context, state: 'success', sha: HEAD_SHA })),
+    statuses: [],
     checkRuns: makeCheckRuns(),
     rollupComplete: true,
     killSwitch: { known: true, active: false },
+    linkedIssue: {
+      complete: true,
+      number: LOOP_ISSUE,
+      state: 'OPEN',
+      labels: ['loop-ready', 'loop-delivered'],
+      bodyHash: ISSUE_BODY_HASH,
+      createdAt: '2026-07-24T00:00:00Z',
+      lastEditedAt: '2026-07-24T00:01:00Z',
+      blocked: false,
+      dependenciesClear: true,
+      dependenciesComplete: true,
+      dependencies: [],
+      loopReady: {
+        complete: true,
+        eventId: 7001,
+        actor: TRUSTED_HUMAN_LOGINS[0],
+        labeledAt: '2026-07-24T00:02:00Z',
+        roleName: 'maintain',
+      },
+    },
+    ownership: {
+      complete: true,
+      issueBodyHash: ISSUE_BODY_HASH,
+      claimCommitAncestor: true,
+      claimCommit: {
+        complete: true,
+        issue: LOOP_ISSUE,
+        headOid: HEAD_SHA,
+        baseOid: BASE_SHA,
+        oid: CLAIM_SHA,
+        commits: [
+          {
+            oid: CLAIM_SHA,
+            message: `chore: claim #${LOOP_ISSUE}`,
+            parentOids: [BASE_SHA],
+          },
+          {
+            oid: HEAD_SHA,
+            message: 'feat: implement safe change',
+            parentOids: [CLAIM_SHA],
+          },
+        ],
+      },
+      frozenPlanPresent: true,
+      frozenPlanHash: FROZEN_PLAN_HASH,
+      frozenPlanCommentId: 'IC_kwDOAutoloop7',
+      frozenPlanAuthor: LOOP_LOGIN,
+      frozenPlanCommentVerified: true,
+    },
+    lifecycle: {
+      complete: true,
+      delivered: true,
+      headOid: HEAD_SHA,
+      premergeRecord: true,
+      premergeRecordId: `pmr_${'9'.repeat(64)}`,
+      premergeRecordHash: '8'.repeat(64),
+      premergeRecordAuthor: LOOP_LOGIN,
+      premergeRecordCommentId: 'IC_premerge',
+      premergeRecordIssue: LOOP_ISSUE,
+      premergeRecordPullRequest: 138,
+    },
+    gateEvidenceVerified: true,
+    authorization: {
+      complete: true,
+      pullRequest: 138,
+      actor: TRUSTED_HUMAN_LOGINS[0],
+      headOid: HEAD_SHA,
+      label: labels.find((label) => SAFE_LABELS.includes(label)) ?? SAFE_LABELS[0],
+      labelEventId: 12001,
+      labeledAt: '2026-07-24T00:03:00Z',
+      eventVerified: true,
+      afterCurrentHead: true,
+      roleName: 'maintain',
+      check: {
+        name: 'agentic/human-authorization',
+        headOid: HEAD_SHA,
+        status: 'COMPLETED',
+        conclusion: 'SUCCESS',
+        app: { id: TRUSTED_AUTHORIZATION_APP_IDS[0] },
+      },
+    },
+    executorIdentity: {
+      complete: true,
+      login: LOOP_LOGIN,
+      id: 9001,
+    },
+    serverPolicy: {
+      complete: true,
+      source: 'live',
+      strategy: 'direct-strict',
+      strict: true,
+      enforceAdmins: true,
+      actorCanBypass: false,
+      requiredConversationResolution: true,
+      requiredApprovingReviewCount: REQUIRED_APPROVING_REVIEW_COUNT,
+      requireCodeOwnerReviews: REQUIRE_CODE_OWNER_REVIEWS,
+      dismissStaleReviews: true,
+      requireLastPushApproval: true,
+      forcePushesAllowed: false,
+      deletionsAllowed: false,
+      requiredChecks: requiredCheckContracts(),
+      queueRequired: false,
+      rulesetsComplete: true,
+      bypassActorsVisible: true,
+    },
     fetchReasons: [],
     ...overrides,
   };
@@ -885,6 +2104,12 @@ function makeInput({ files = [ALLOWED_PATH], fileEntries, ...overrides } = {}) {
 
 function protectedFixture(name, path) {
   return { name, input: makeInput({ files: [path], labels: ['risk:pure-deletion'] }), expectExit: 1, expectCalls: 0 };
+}
+
+function invalidClaimFixture(name, mutate) {
+  const input = makeInput();
+  input.ownership.claimCommit = mutate(input.ownership.claimCommit);
+  return { name, input, expectExit: 1, expectCalls: 0 };
 }
 
 // Declarative, network-free fixtures for the policy and orchestration.
@@ -922,10 +2147,122 @@ export const FIXTURES = [
   { name: 'hard-block label do-not-merge', input: makeInput({ labels: ['do-not-merge'] }), expectExit: 1, expectCalls: 0 },
   { name: 'hard-block label loop-blocked', input: makeInput({ labels: ['loop-blocked'] }), expectExit: 1, expectCalls: 0 },
   { name: 'hard-block label needs-human', input: makeInput({ labels: ['needs-human'] }), expectExit: 1, expectCalls: 0 },
-  { name: 'missing gate verdict on Path A', input: makeInput({ labels: ['risk:pure-deletion'], statuses: [{ context: 'agentic/review', state: 'success', sha: HEAD_SHA }] }), expectExit: 1, expectCalls: 0 },
-  { name: 'failing review on Path A', input: makeInput({ labels: ['risk:pure-deletion'], statuses: [{ context: 'agentic/gate', state: 'success', sha: HEAD_SHA }, { context: 'agentic/review', state: 'failure', sha: HEAD_SHA }] }), expectExit: 1, expectCalls: 0 },
-  { name: 'missing verdict on Path B', input: makeInput({ statuses: [{ context: 'agentic/gate', state: 'success', sha: HEAD_SHA }] }), expectExit: 1, expectCalls: 0 },
-  { name: 'non-success agentic status', input: makeInput({ statuses: [...makeInput().statuses, { context: 'agentic/extra', state: 'failure', sha: HEAD_SHA }] }), expectExit: 1, expectCalls: 0 },
+  {
+    name: 'missing gate verdict on Path A',
+    input: makeInput({
+      labels: ['risk:pure-deletion'],
+      checkRuns: makeCheckRuns().filter((check) => check.name !== 'agentic/gate'),
+    }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'successful gate CheckRun without typed gate evidence blocks',
+    input: makeInput({ gateEvidenceVerified: false }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'failing review on Path A',
+    input: makeInput({
+      labels: ['risk:pure-deletion'],
+      checkRuns: makeCheckRuns().map((check) =>
+        check.name === 'agentic/review' ? { ...check, conclusion: 'failure' } : check),
+    }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'missing verdict on Path B',
+    input: makeInput({
+      checkRuns: makeCheckRuns().filter((check) => check.name !== 'agentic/review'),
+    }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'non-success agentic CheckRun',
+    input: makeInput({
+      checkRuns: [
+        ...makeCheckRuns(),
+        {
+          name: 'agentic/extra',
+          status: 'completed',
+          conclusion: 'failure',
+          head_sha: HEAD_SHA,
+          app: { id: TRUSTED_AUTOMATION_APP_IDS[0], slug: 'autoloop' },
+        },
+      ],
+    }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'branch and body claim mismatch blocks',
+    input: makeInput({ headRefName: 'feat/gh-7-safe-change', body: 'Closes #8' }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  invalidClaimFixture('claim commit later in the PR blocks', (claimCommit) => ({
+    ...claimCommit,
+    commits: [...claimCommit.commits].reverse(),
+  })),
+  invalidClaimFixture('claim commit with a non-canonical message blocks', (claimCommit) => ({
+    ...claimCommit,
+    commits: claimCommit.commits.map((commit, index) =>
+      index === 0 ? { ...commit, message: 'chore: claim issue 7' } : commit),
+  })),
+  invalidClaimFixture('claim commit parent not equal to base blocks', (claimCommit) => ({
+    ...claimCommit,
+    commits: claimCommit.commits.map((commit, index) =>
+      index === 0 ? { ...commit, parentOids: ['f'.repeat(40)] } : commit),
+  })),
+  {
+    name: 'missing linked issue and ownership evidence blocks',
+    input: makeInput({ linkedIssue: null, ownership: null }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'untrusted producer cannot spoof an agentic verdict',
+    input: makeInput({
+      checkRuns: makeCheckRuns().map((check) =>
+        check.name === 'agentic/gate' ? { ...check, app: { id: 999, slug: 'untrusted' } } : check),
+    }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'plain commit status cannot spoof an agentic verdict',
+    input: makeInput({
+      statuses: [{
+        context: 'agentic/gate',
+        state: 'success',
+        sha: HEAD_SHA,
+        creator: { login: LOOP_LOGIN },
+      }],
+    }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'missing non-bypassable server-policy evidence blocks',
+    input: makeInput({ serverPolicy: null }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'Path A authorization on an old head blocks',
+    input: makeInput({
+      labels: ['risk:pure-deletion'],
+      authorization: {
+        ...makeInput().authorization,
+        headOid: 'f'.repeat(40),
+      },
+    }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
   { name: 'draft PR', input: makeInput({ isDraft: true }), expectExit: 1, expectCalls: 0 },
   { name: 'wrong base branch', input: makeInput({ baseRefName: 'some-feature-branch' }), expectExit: 1, expectCalls: 0 },
   { name: 'fork head', input: makeInput({ headRepository: { owner: 'someone-else', name: REPOSITORY.name } }), expectExit: 1, expectCalls: 0 },
@@ -940,7 +2277,14 @@ export const FIXTURES = [
   // CI-evidence fixtures only exist when the config declares required checks.
   ...(REQUIRED_CI_CHECKS.length
     ? [
-        { name: 'missing CI check', input: makeInput({ checkRuns: makeCheckRuns().slice(1) }), expectExit: 1, expectCalls: 0 },
+        {
+          name: 'missing CI check',
+          input: makeInput({
+            checkRuns: makeCheckRuns().filter((check) => check.name !== REQUIRED_CI_CHECKS[0]),
+          }),
+          expectExit: 1,
+          expectCalls: 0,
+        },
         {
           name: 'user-posted (non-CheckRun) CI context',
           input: makeInput({ statuses: [...makeInput().statuses, { context: REQUIRED_CI_CHECKS[0], state: 'success', sha: HEAD_SHA }] }),
@@ -949,7 +2293,12 @@ export const FIXTURES = [
         },
         {
           name: 'duplicate CI context',
-          input: makeInput({ checkRuns: [makeCheckRuns()[0], makeCheckRuns()[0], ...makeCheckRuns().slice(1)] }),
+          input: makeInput({
+            checkRuns: [
+              ...makeCheckRuns(),
+              makeCheckRuns().find((check) => check.name === REQUIRED_CI_CHECKS[0]),
+            ],
+          }),
           expectExit: 1,
           expectCalls: 0,
         },
@@ -993,7 +2342,10 @@ export const FIXTURES = [
   protectedFixture('protected secret path segment', 'lib/utils/secret-store.ts'),
   protectedFixture('protected token path segment', 'lib/utils/api-token.ts'),
   protectedFixture('protected credential path segment', 'lib/services/credentialVault.ts'),
+  protectedFixture('protected credential storage', 'config/credentials.yml'),
+  protectedFixture('protected private key material', 'certs/private-key.pem'),
   protectedFixture('protected nested .env file', 'apps/web/.env.local'),
+  protectedFixture('protected CI requirements policy', '.autoloop/ci-policy.json'),
   protectedFixture("the tool's own path with everything green", 'tools/agentic/auto-merge.mjs'),
   protectedFixture('protected .github/**', '.github/workflows/ci.yml'),
   protectedFixture('protected .claude/**', '.claude/settings.json'),
@@ -1029,7 +2381,10 @@ export const FIXTURES = [
   protectedFixture('protected nested CLAUDE.md', 'packages/web/CLAUDE.md'),
   protectedFixture('protected nested AGENTS.override.md', 'a/b/AGENTS.override.md'),
   protectedFixture('protected docker-compose.yml', 'docker-compose.yml'),
+  protectedFixture('protected docker-compose.yaml', 'docker-compose.yaml'),
+  protectedFixture('protected nested docker-compose', 'deploy/docker-compose.prod.yml'),
   protectedFixture('protected Dockerfile*', 'Dockerfile.prod'),
+  protectedFixture('protected nested Dockerfile*', 'containers/Dockerfile.prod'),
   protectedFixture('protected nested package.json', 'packages/server/package.json'),
   protectedFixture('protected nested lockfile', 'packages/server/package-lock.json'),
   protectedFixture('protected nested *.lock file', 'packages/server/cache.lock'),
@@ -1059,14 +2414,18 @@ export const FIXTURES = [
     expectCalls: ALLOW_ALL ? 1 : 0,
   },
   {
-    name: `401 changed lines (size cap applies only to classified mode: ${AUTOMERGE_MODE})`,
-    input: makeInput({ additions: 201, deletions: 200 }),
+    name: `${REVERSIBLE_MAX_LINES + 1} changed lines (size cap applies only to classified mode: ${AUTOMERGE_MODE})`,
+    input: makeInput({ additions: Math.ceil((REVERSIBLE_MAX_LINES + 1) / 2), deletions: Math.floor((REVERSIBLE_MAX_LINES + 1) / 2) }),
     expectExit: ALLOW_ALL ? 0 : 1,
     expectCalls: ALLOW_ALL ? 1 : 0,
   },
   {
-    name: 'boundary exactly 20 files and exactly 400 lines → allow',
-    input: makeInput({ files: Array.from({ length: 20 }, (_, index) => allowedPathN(100 + index)), additions: 200, deletions: 200 }),
+    name: `boundary exactly 20 files and exactly ${REVERSIBLE_MAX_LINES} lines → allow`,
+    input: makeInput({
+      files: Array.from({ length: 20 }, (_, index) => allowedPathN(100 + index)),
+      additions: Math.ceil(REVERSIBLE_MAX_LINES / 2),
+      deletions: Math.floor(REVERSIBLE_MAX_LINES / 2),
+    }),
     expectExit: 0,
     expectCalls: 1,
     expectArgs: { sha: HEAD_SHA, squash: true },
@@ -1077,6 +2436,31 @@ export const FIXTURES = [
     mergeBehavior: 'cas409',
     expectExit: 1,
     expectCalls: 1,
+    expectConfirmCalls: 0,
+  },
+  {
+    name: 'executor identity precondition failure never enters ambiguous confirmation',
+    input: makeInput(),
+    mergeBehavior: 'identity',
+    expectExit: 1,
+    expectCalls: 1,
+    expectConfirmCalls: 0,
+  },
+  {
+    name: 'merge-queue strategy fails closed before submission',
+    input: makeInput(),
+    strategy: 'merge-queue',
+    expectExit: 1,
+    expectCalls: 0,
+    expectConfirmCalls: 0,
+  },
+  {
+    name: 'merge-queue strategy also fails closed in dry-run',
+    input: makeInput(),
+    strategy: 'merge-queue',
+    dryRun: true,
+    expectExit: 1,
+    expectCalls: 0,
     expectConfirmCalls: 0,
   },
   {
@@ -1118,13 +2502,784 @@ function statusStampCases() {
     mismatchThrew = true;
   }
   cases.push({ name: 'combined-status page for a different sha fails the fetch', ok: mismatchThrew });
+  const base = makeInput();
+  const planBody = 'frozen reviewed plan';
+  const ownership = {
+    kind: 'ownership',
+    v: 1,
+    headOid: HEAD_SHA,
+    issue: LOOP_ISSUE,
+    issueBodyHash: ISSUE_BODY_HASH,
+    claimCommitOid: CLAIM_SHA,
+    frozenPlanHash: sha256(planBody),
+    frozenPlanCommentId: 'IC_kwDOAutoloop7',
+    frozenPlanAuthor: LOOP_LOGIN,
+  };
+  const gate = {
+    kind: 'gate',
+    v: 1,
+    headOid: HEAD_SHA,
+    commandHash: '6'.repeat(64),
+    configHash: '7'.repeat(64),
+    repositoryFingerprint: '8'.repeat(64),
+  };
+  const reviewSummaryValue =
+    `Authenticated review convergence: REVIEW_CLEAN; round 2; receipt ${'2'.repeat(64)}.`;
+  const gateSummaryValue = serializeAttestation(gate);
+  const lifecycleMarker = {
+    v: 1,
+    issue: LOOP_ISSUE,
+    issueBodyHash: ISSUE_BODY_HASH,
+    planHash: ownership.frozenPlanHash,
+    branch: base.headRefName,
+    plannedBaseOid: BASE_SHA,
+    selector: 'native',
+    runIntentHash: '1'.repeat(64),
+    intentSource: 'invocation',
+    mergePolicy: 'ratified',
+    phase: 'ready-head',
+    claimCommit: CLAIM_SHA,
+    pr: 138,
+    headOid: HEAD_SHA,
+  };
+  const lifecycleBody = serializeLifecycleMarker(lifecycleMarker);
+  const ciPolicySource = canonicalCiPolicy(REQUIRED_CI_CHECKS);
+  const ciPolicy = {
+    complete: true,
+    source: ciPolicySource,
+    sourceHash: sha256(ciPolicySource),
+    requiredChecks: [...REQUIRED_CI_CHECKS],
+  };
+  const componentCheckRuns = makeCheckRuns().map((check, index) => ({
+    ...check,
+    id: 100 + index,
+    output: {
+      summary:
+        check.name === 'agentic/review'
+          ? reviewSummaryValue
+          : check.name === 'agentic/gate'
+            ? gateSummaryValue
+            : 'verified',
+    },
+  }));
+  const reviewCheck = componentCheckRuns.find((check) => check.name === 'agentic/review');
+  const gateCheck = componentCheckRuns.find((check) => check.name === 'agentic/gate');
+  const deliveryEvidence = {
+    schemaVersion: 1,
+    source: 'github-rest',
+    repository: 'autoloop/fixture',
+    pullRequest: 138,
+    remoteHead: HEAD_SHA,
+    baseRefName: 'main',
+    requiredChecks: [],
+    checks: componentCheckRuns.map((checkRun) => ({
+      id: checkRun.id,
+      name: checkRun.name,
+      headOid: checkRun.head_sha,
+      status: checkRun.status.toUpperCase(),
+      conclusion: checkRun.conclusion.toUpperCase(),
+      appId: checkRun.app.id,
+    })),
+  };
+  const deliveryEvidenceFingerprint = sha256(stableJson(deliveryEvidence));
+  const delivery = {
+    state: 'delivered',
+    code: 'NO_REQUIRED_CI',
+    canMarkDelivered: true,
+    headOid: HEAD_SHA,
+    requirementsPolicy: {
+      sourceFingerprint: ciPolicy.sourceHash,
+    },
+    liveEvidence: {
+      ...deliveryEvidence,
+      provenance: {
+        schemaVersion: 1,
+        source: 'github-rest',
+        repository: deliveryEvidence.repository,
+        pullRequest: deliveryEvidence.pullRequest,
+        evidenceFingerprint: deliveryEvidenceFingerprint,
+      },
+    },
+  };
+  const premerge = createPremergeRecord({
+    issue: LOOP_ISSUE,
+    pullRequest: 138,
+    headOid: HEAD_SHA,
+    run: {
+      intentHash: lifecycleMarker.runIntentHash,
+      receiptFingerprint: '2'.repeat(64),
+    },
+    plan: {
+      commentId: ownership.frozenPlanCommentId,
+      contentHash: ownership.frozenPlanHash,
+    },
+    review: {
+      checkRunId: reviewCheck.id,
+      summaryHash: sha256(reviewSummaryValue),
+    },
+    gate: {
+      checkRunId: gateCheck.id,
+      summaryHash: sha256(gateSummaryValue),
+    },
+    ci: {
+      policyHash: ciPolicy.sourceHash,
+      evidenceHash: deliveryEvidenceFingerprint,
+    },
+    lifecycle: {
+      commentId: 'IC_lifecycle',
+      identityHash: lifecycleIdentityHash(lifecycleMarker),
+    },
+  });
+  const policy = {
+    kind: 'policy',
+    v: 1,
+    headOid: HEAD_SHA,
+    issue: LOOP_ISSUE,
+    pullRequest: 138,
+    delivered: true,
+    premergeRecordId: premerge.recordId,
+    premergeRecordHash: premergeRecordHash(premerge),
+    premergeRecordAuthor: LOOP_LOGIN,
+  };
+  const authorization = {
+    kind: 'human-authorization',
+    v: 1,
+    headOid: HEAD_SHA,
+    pullRequest: 138,
+    actor: TRUSTED_HUMAN_LOGINS[0],
+    label: SAFE_LABELS[0],
+    labelEventId: 12001,
+    labeledAt: '2026-07-24T00:03:00Z',
+  };
+  const commitMetadata = [
+    {
+      oid: CLAIM_SHA,
+      message: `chore: claim #${LOOP_ISSUE}`,
+      parentOids: [BASE_SHA],
+    },
+    {
+      oid: HEAD_SHA,
+      message: 'feat: implement safe change',
+      parentOids: [CLAIM_SHA],
+    },
+  ];
+  const evidence = deriveAttestedEvidence({
+    ...base,
+    checkRuns: [
+      ...componentCheckRuns.map((check) => {
+        if (check.name === 'agentic/ownership') {
+          return { ...check, output: { summary: serializeAttestation(ownership) } };
+        }
+        if (check.name === 'agentic/policy') {
+          return { ...check, output: { summary: serializeAttestation(policy) } };
+        }
+        if (check.name === 'agentic/gate') {
+          return { ...check, output: { summary: serializeAttestation(gate) } };
+        }
+        return check;
+      }),
+      {
+        name: 'agentic/human-authorization',
+        status: 'completed',
+        conclusion: 'success',
+        head_sha: HEAD_SHA,
+        app: { id: TRUSTED_AUTHORIZATION_APP_IDS[0], slug: 'autoloop-auth' },
+        output: { summary: serializeAttestation(authorization) },
+      },
+    ],
+  }, commitMetadata);
+  const policyLiveInput = {
+    issue: { number: LOOP_ISSUE, labels: [] },
+    comments: {
+      complete: true,
+      items: [
+        {
+          id: ownership.frozenPlanCommentId,
+          author: { login: LOOP_LOGIN },
+          body: planBody,
+        },
+        {
+          id: premerge.lifecycle.commentId,
+          author: { login: LOOP_LOGIN },
+          body: lifecycleBody,
+          neverEdited: true,
+        },
+        {
+          id: 'IC_premerge',
+          author: { login: LOOP_LOGIN },
+          body: serializePremergeRecord(premerge),
+          neverEdited: true,
+        },
+      ],
+    },
+    policyAttestation: evidence.policyAttestation,
+    policyLiveComplete: true,
+    pullRequest: {
+      number: 138,
+      headOid: HEAD_SHA,
+      headRefName: base.headRefName,
+      body: base.body,
+      merged: false,
+      mergeOid: null,
+    },
+    checkRuns: { complete: true, items: componentCheckRuns },
+    ciPolicy,
+    delivery,
+    loopLogin: LOOP_LOGIN,
+  };
+  const hydratedLifecycle = deriveLiveIssueEvidence(policyLiveInput).lifecycle;
+  const nonexistentComponentLifecycle = deriveLiveIssueEvidence({
+    ...policyLiveInput,
+    checkRuns: {
+      complete: true,
+      items: componentCheckRuns.filter((checkRun) => checkRun.id !== reviewCheck.id),
+    },
+  }).lifecycle;
+  cases.push({
+    name: 'trusted exact-head attestations require live premerge hydration',
+    ok:
+      evidence.ownership?.claimCommitAncestor === true
+      && evidence.ownership?.claimCommit?.commits?.[0]?.message
+        === `chore: claim #${LOOP_ISSUE}`
+      && evidence.ownership?.claimCommit?.baseOid === BASE_SHA
+      && evidence.ownership?.claimCommit?.headOid === HEAD_SHA
+      && evidence.ownership?.frozenPlanCommentId === ownership.frozenPlanCommentId
+      && evidence.lifecycle === null
+      && evidence.policyAttestation?.premergeRecordId === premerge.recordId
+      && hydratedLifecycle?.premergeRecord === true
+      && evidence.gateEvidenceVerified === true
+      && evidence.authorization?.pullRequest === 138
+      && evidence.authorization?.actor === TRUSTED_HUMAN_LOGINS[0]
+      && evidence.serverPolicy === null,
+  });
+  cases.push({
+    name: 'live hydration rejects canonical records with nonexistent component IDs',
+    ok:
+      nonexistentComponentLifecycle?.complete === true
+      && nonexistentComponentLifecycle.premergeRecord === false,
+  });
+  const legacyPolicy = deriveAttestedEvidence({
+    ...base,
+    checkRuns: [{
+      name: 'agentic/policy',
+      status: 'completed',
+      conclusion: 'success',
+      head_sha: HEAD_SHA,
+      output: {
+        summary: `<!-- autoloop-attestation-v1
+{"delivered":true,"headOid":"${HEAD_SHA}","issue":${LOOP_ISSUE},"kind":"policy","premergeRecord":"does-not-exist","v":1}
+-->`,
+      },
+    }],
+  }, commitMetadata);
+  cases.push({
+    name: 'caller record strings never hydrate lifecycle truth',
+    ok: legacyPolicy.policyAttestation === null && legacyPolicy.lifecycle === null,
+  });
+  const staleEvidence = deriveAttestedEvidence({
+    ...base,
+    checkRuns: [{
+      name: 'agentic/ownership',
+      status: 'completed',
+      conclusion: 'success',
+      head_sha: HEAD_SHA,
+      output: { summary: serializeAttestation({ ...ownership, headOid: 'e'.repeat(40) }) },
+    }],
+  }, commitMetadata);
+  cases.push({
+    name: 'stale attestation cannot hydrate ownership',
+    ok: staleEvidence.ownership === null,
+  });
+  const staleGateEvidence = deriveAttestedEvidence({
+    ...base,
+    checkRuns: [{
+      name: 'agentic/gate',
+      status: 'completed',
+      conclusion: 'success',
+      head_sha: HEAD_SHA,
+      output: {
+        summary: serializeAttestation({ ...gate, headOid: 'f'.repeat(40) }),
+      },
+    }],
+  }, commitMetadata);
+  cases.push({
+    name: 'stale typed gate evidence cannot authorize merge',
+    ok: staleGateEvidence.gateEvidenceVerified === false,
+  });
   return cases;
+}
+
+function prCommitMetadataCases() {
+  const first = {
+    sha: CLAIM_SHA,
+    commit: { message: `chore: claim #${LOOP_ISSUE}` },
+    parents: [{ sha: BASE_SHA }],
+  };
+  const last = {
+    sha: HEAD_SHA,
+    commit: { message: 'feat: implement safe change' },
+    parents: [{ sha: CLAIM_SHA }],
+  };
+  const normalized = collectPrCommitMetadata([[first], [last]]);
+  let malformedRejected = false;
+  try {
+    collectPrCommitMetadata([[{ ...first, parents: [] }]]);
+  } catch {
+    malformedRejected = true;
+  }
+  let duplicateRejected = false;
+  try {
+    collectPrCommitMetadata([[first, first]]);
+  } catch {
+    duplicateRejected = true;
+  }
+  let endpointLimitRejected = false;
+  try {
+    collectPrCommitMetadata([Array.from({ length: 250 }, (_, index) => ({
+      sha: index.toString(16).padStart(40, '0'),
+      commit: { message: `commit ${index}` },
+      parents: [{ sha: BASE_SHA }],
+    }))]);
+  } catch {
+    endpointLimitRejected = true;
+  }
+  return [
+    {
+      name: 'PR commit metadata preserves API order and parents',
+      ok:
+        normalized[0]?.oid === CLAIM_SHA
+        && normalized[0]?.parentOids?.[0] === BASE_SHA
+        && normalized.at(-1)?.oid === HEAD_SHA,
+    },
+    {
+      name: 'PR commit metadata rejects missing parents',
+      ok: malformedRejected,
+    },
+    {
+      name: 'PR commit metadata rejects duplicate OIDs',
+      ok: duplicateRejected,
+    },
+    {
+      name: 'PR commit metadata rejects the potentially truncated endpoint limit',
+      ok: endpointLimitRejected,
+    },
+  ];
+}
+
+function restPaginationCases() {
+  const cases = [];
+  const responses = new Map([
+    ['page-1', {
+      data: [{ id: 1 }],
+      link: '<https://api.github.com/page-2>; rel="next"',
+    }],
+    ['https://api.github.com/page-2', {
+      data: [{ id: 2 }],
+      link: null,
+    }],
+  ]);
+  const pages = ghPaginated('page-1', (endpoint) => responses.get(endpoint));
+  cases.push({
+    name: 'REST pagination follows Link next even after a short page',
+    ok: pages.length === 2
+      && pages[0][0].id === 1
+      && pages[1][0].id === 2,
+  });
+  let repeatedRejected = false;
+  try {
+    ghPaginated('page-1', () => ({
+      data: [],
+      link: '<https://api.github.com/page-1>; rel="next"',
+    }));
+  } catch {
+    repeatedRejected = true;
+  }
+  cases.push({
+    name: 'REST pagination rejects a repeated Link next target',
+    ok: repeatedRejected,
+  });
+  const included = parseIncludedResponse(
+    'HTTP/2.0 200 OK\r\nLink: <https://api.github.com/page-2>; rel="next"\r\n\r\n[]',
+  );
+  cases.push({
+    name: 'included REST headers and JSON body parse independently',
+    ok: Array.isArray(included.data)
+      && included.link?.includes('rel="next"'),
+  });
+  return cases;
+}
+
+function liveEvidenceCases() {
+  const ownership = {
+    complete: true,
+    issueBodyHash: ISSUE_BODY_HASH,
+    claimCommitAncestor: true,
+    frozenPlanPresent: true,
+    frozenPlanHash: FROZEN_PLAN_HASH,
+    frozenPlanCommentId: 'IC_kwDOAutoloop7',
+    frozenPlanAuthor: LOOP_LOGIN,
+  };
+  const issueInput = {
+    issue: {
+      complete: true,
+      number: LOOP_ISSUE,
+      state: 'OPEN',
+      body: `Work\n\n## Blocked by\n- #6`,
+      labels: ['loop-ready', 'loop-delivered'],
+      labelsComplete: true,
+      createdAt: '2026-07-24T00:00:00Z',
+      lastEditedAt: '2026-07-24T00:01:00Z',
+    },
+    timeline: {
+      complete: true,
+      items: [{
+        id: 7001,
+        event: 'labeled',
+        label: { name: 'loop-ready' },
+        actor: { login: 'maintainer' },
+        created_at: '2026-07-24T00:02:00Z',
+      }],
+    },
+    comments: {
+      complete: true,
+      items: [{
+        id: ownership.frozenPlanCommentId,
+        author: { login: LOOP_LOGIN },
+        body: 'frozen plan',
+      }],
+    },
+    dependencies: {
+      complete: true,
+      items: [{ number: 6, state: 'CLOSED' }],
+    },
+    loopReadyPermission: {
+      complete: true,
+      login: 'maintainer',
+      roleName: 'maintain',
+    },
+    ownership: {
+      ...ownership,
+      frozenPlanHash: sha256('frozen plan'),
+    },
+    loopLogin: LOOP_LOGIN,
+  };
+  const issueEvidence = deriveLiveIssueEvidence(issueInput);
+  const hardLabelEvidence = deriveLiveIssueEvidence({
+    ...issueInput,
+    issue: {
+      ...issueInput.issue,
+      labels: [...issueInput.issue.labels, 'loop-blocked'],
+    },
+  });
+  const reopenedDependency = deriveLiveIssueEvidence({
+    ...issueInput,
+    dependencies: {
+      complete: true,
+      items: [{ number: 6, state: 'OPEN' }],
+    },
+  });
+  const deletedPlan = deriveLiveIssueEvidence({
+    ...issueInput,
+    comments: { complete: true, items: [] },
+  });
+  const editedPlan = deriveLiveIssueEvidence({
+    ...issueInput,
+    comments: {
+      complete: true,
+      items: [{
+        ...issueInput.comments.items[0],
+        body: 'edited frozen plan',
+      }],
+    },
+  });
+  const emptyPlan = deriveLiveIssueEvidence({
+    ...issueInput,
+    comments: {
+      complete: true,
+      items: [{
+        ...issueInput.comments.items[0],
+        body: '',
+      }],
+    },
+    ownership: {
+      ...issueInput.ownership,
+      frozenPlanHash: sha256(''),
+    },
+  });
+  const incompleteTimeline = deriveLiveIssueEvidence({
+    ...issueInput,
+    timeline: { complete: false, items: issueInput.timeline.items },
+  });
+
+  const authorization = {
+    complete: true,
+    pullRequest: 138,
+    actor: 'maintainer',
+    headOid: HEAD_SHA,
+    label: SAFE_LABELS[0],
+    labelEventId: 12001,
+    labeledAt: '2026-07-24T00:03:00Z',
+    check: {
+      name: 'agentic/human-authorization',
+      headOid: HEAD_SHA,
+      status: 'COMPLETED',
+      conclusion: 'SUCCESS',
+      app: { id: TRUSTED_AUTHORIZATION_APP_IDS[0] },
+    },
+  };
+  const authorizationInput = {
+    authorization,
+    prNumber: 138,
+    headOid: HEAD_SHA,
+    labels: [SAFE_LABELS[0]],
+    timeline: {
+      complete: true,
+      items: [
+        {
+          event: 'committed',
+          sha: HEAD_SHA,
+        },
+        {
+          id: 12001,
+          event: 'labeled',
+          label: { name: SAFE_LABELS[0] },
+          actor: { login: 'maintainer' },
+          created_at: '2026-07-24T00:03:00Z',
+        },
+      ],
+    },
+    permission: {
+      complete: true,
+      login: 'maintainer',
+      roleName: 'maintain',
+    },
+  };
+  const authorizationEvidence = deriveLiveAuthorizationEvidence(authorizationInput);
+  const authorizationBeforeHead = deriveLiveAuthorizationEvidence({
+    ...authorizationInput,
+    timeline: {
+      complete: true,
+      items: [...authorizationInput.timeline.items].reverse(),
+    },
+  });
+  const authorizationBeforeForcePushBack = deriveLiveAuthorizationEvidence({
+    ...authorizationInput,
+    timeline: {
+      complete: true,
+      items: [
+        { event: 'committed', sha: HEAD_SHA },
+        { event: 'committed', sha: 'd'.repeat(40) },
+        authorizationInput.timeline.items.at(-1),
+        {
+          event: 'head_ref_force_pushed',
+          commit_id: HEAD_SHA,
+          created_at: '2026-07-24T00:04:00Z',
+        },
+      ],
+    },
+  });
+  const relabeledByLoop = deriveLiveAuthorizationEvidence({
+    ...authorizationInput,
+    timeline: {
+      complete: true,
+      items: [
+        ...authorizationInput.timeline.items,
+        {
+          id: 12002,
+          event: 'unlabeled',
+          label: { name: SAFE_LABELS[0] },
+          actor: { login: 'maintainer' },
+          created_at: '2026-07-24T00:04:00Z',
+        },
+        {
+          id: 12003,
+          event: 'labeled',
+          label: { name: SAFE_LABELS[0] },
+          actor: { login: LOOP_LOGIN },
+          created_at: '2026-07-24T00:05:00Z',
+        },
+      ],
+    },
+  });
+
+  const branchProtection = {
+    required_status_checks: {
+      strict: true,
+      contexts: requiredCheckContracts().map(({ name }) => name),
+      checks: requiredCheckContracts().map(({ name, appIds }) => ({
+        context: name,
+        app_id: appIds[0],
+      })),
+    },
+    enforce_admins: { enabled: true },
+    required_pull_request_reviews: {
+      dismiss_stale_reviews: true,
+      require_code_owner_reviews: false,
+      required_approving_review_count: 1,
+      require_last_push_approval: true,
+      bypass_pull_request_allowances: { users: [], teams: [], apps: [] },
+    },
+    required_conversation_resolution: { enabled: true },
+    allow_force_pushes: { enabled: false },
+    allow_deletions: { enabled: false },
+  };
+  const policyInput = {
+    branchProtection: { complete: true, value: branchProtection },
+    branchRules: { complete: true, items: [] },
+    rulesets: { complete: true, items: [] },
+  };
+  const livePolicy = deriveLiveServerPolicy(policyInput);
+  const unpinnedPolicy = deriveLiveServerPolicy({
+    ...policyInput,
+    branchProtection: {
+      complete: true,
+      value: {
+        ...branchProtection,
+        required_status_checks: {
+          ...branchProtection.required_status_checks,
+          checks: branchProtection.required_status_checks.checks.map((check, index) =>
+            index === 0 ? { ...check, app_id: null } : check),
+        },
+      },
+    },
+  });
+  const mismatchedCheckContexts = deriveLiveServerPolicy({
+    ...policyInput,
+    branchProtection: {
+      complete: true,
+      value: {
+        ...branchProtection,
+        required_status_checks: {
+          ...branchProtection.required_status_checks,
+          checks: branchProtection.required_status_checks.checks.map((check, index) =>
+            index === 0
+              ? { ...check, context: branchProtection.required_status_checks.checks[1].context }
+              : check),
+        },
+      },
+    },
+  });
+  const bypassRule = {
+    type: 'pull_request',
+    ruleset_id: 99,
+    parameters: {
+      dismiss_stale_reviews_on_push: true,
+      require_code_owner_review: false,
+      require_last_push_approval: true,
+      required_approving_review_count: 1,
+      required_review_thread_resolution: true,
+    },
+  };
+  const bypassPolicy = deriveLiveServerPolicy({
+    ...policyInput,
+    branchRules: { complete: true, items: [bypassRule] },
+    rulesets: {
+      complete: true,
+      items: [{
+        id: 99,
+        enforcement: 'active',
+        bypass_actors: [{ actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' }],
+      }],
+    },
+  });
+  const hiddenBypassPolicy = deriveLiveServerPolicy({
+    ...policyInput,
+    branchRules: { complete: true, items: [bypassRule] },
+    rulesets: {
+      complete: true,
+      items: [{ id: 99, enforcement: 'active' }],
+    },
+  });
+
+  return [
+    {
+      name: 'live issue provenance, dependencies, and frozen plan hydrate completely',
+      ok:
+        issueEvidence.linkedIssue.complete === true
+        && issueEvidence.linkedIssue.dependenciesClear === true
+        && issueEvidence.ownership.frozenPlanCommentVerified === true,
+    },
+    {
+      name: 'current linked-issue hard label overrides stale policy claims',
+      ok: hardLabelEvidence.linkedIssue.blocked === true,
+    },
+    {
+      name: 'reopened dependency is not cleared by an exact-head attestation',
+      ok: reopenedDependency.linkedIssue.dependenciesClear === false,
+    },
+    {
+      name: 'deleted frozen-plan comment invalidates ownership',
+      ok: deletedPlan.ownership.frozenPlanCommentVerified === false,
+    },
+    {
+      name: 'edited frozen-plan comment invalidates ownership',
+      ok: editedPlan.ownership.frozenPlanCommentVerified === false,
+    },
+    {
+      name: 'empty frozen-plan comment cannot satisfy ownership',
+      ok: emptyPlan.ownership.frozenPlanCommentVerified === false,
+    },
+    {
+      name: 'incomplete issue timeline cannot prove eligibility',
+      ok: incompleteTimeline.linkedIssue.complete === false,
+    },
+    {
+      name: 'exact current Path A label event hydrates authorization',
+      ok:
+        authorizationEvidence.eventVerified === true
+        && authorizationEvidence.afterCurrentHead === true,
+    },
+    {
+      name: 'Path A label event older than the current head cannot hydrate authorization',
+      ok:
+        authorizationBeforeHead.eventVerified === true
+        && authorizationBeforeHead.afterCurrentHead === false,
+    },
+    {
+      name: 'Path A label before a force-push back to a historical head cannot hydrate authorization',
+      ok:
+        authorizationBeforeForcePushBack.eventVerified === true
+        && authorizationBeforeForcePushBack.afterCurrentHead === false,
+    },
+    {
+      name: 'label removal and loop re-add cannot reuse human authorization',
+      ok: relabeledByLoop.eventVerified === false,
+    },
+    {
+      name: 'API-shaped live branch protection derives strict pinned policy',
+      ok:
+        livePolicy.complete === true
+        && livePolicy.strict === true
+        && livePolicy.requiredChecks.length === requiredCheckContracts().length,
+    },
+    {
+      name: 'un-pinned live required check makes server policy incomplete',
+      ok: unpinnedPolicy.complete === false,
+    },
+    {
+      name: 'mismatched live required-check contexts make server policy incomplete',
+      ok: mismatchedCheckContexts.complete === false,
+    },
+    {
+      name: 'applicable ruleset bypass allowance is detected',
+      ok: bypassPolicy.actorCanBypass === true,
+    },
+    {
+      name: 'hidden applicable ruleset bypass actors make policy incomplete',
+      ok: hiddenBypassPolicy.complete === false,
+    },
+  ];
 }
 
 function selfTest() {
   let passed = 0;
   let failed = 0;
-  for (const check of statusStampCases()) {
+  for (const check of [
+    ...statusStampCases(),
+    ...prCommitMetadataCases(),
+    ...restPaginationCases(),
+    ...liveEvidenceCases(),
+  ]) {
     if (check.ok) passed += 1;
     else failed += 1;
     console.log(`${check.ok ? 'PASS' : 'FAIL'} ${check.name}`);
@@ -1137,6 +3292,11 @@ function selfTest() {
       mergeExecutor: (args) => {
         calls.push({ ...args });
         if (fixture.mergeBehavior === 'cas409') throw Object.assign(new Error('head changed before merge'), { status: 409 });
+        if (fixture.mergeBehavior === 'identity') {
+          throw Object.assign(new Error('executor identity mismatch'), {
+            code: 'EXECUTOR_IDENTITY_MISMATCH',
+          });
+        }
         if (fixture.mergeBehavior === 'timeout') throw Object.assign(new Error('request timed out'), { code: 'ETIMEDOUT' });
         return { merged: true };
       },
@@ -1145,6 +3305,7 @@ function selfTest() {
         return fixture.confirmMerged ?? { merged: false, headSha: null };
       },
       sleep: () => {},
+      strategy: fixture.strategy,
     });
     const expectedCalls = fixture.expectCalls ?? 0;
     const argsOkay = fixture.expectArgs ? JSON.stringify(calls[0]) === JSON.stringify(fixture.expectArgs) : true;
@@ -1190,7 +3351,9 @@ function main() {
     for (const reason of result.reasons) console.log(`  - ${reason}`);
     process.exit(1);
   }
-  if (!dryRun) console.log(`MERGED #${number} (squash, sha=${inputs.headRefOid})`);
+  if (!dryRun) {
+    console.log(`MERGED #${number} (squash, sha=${inputs.headRefOid})`);
+  }
   process.exit(0);
 }
 

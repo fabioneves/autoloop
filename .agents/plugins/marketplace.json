@@ -6,6 +6,7 @@
   "plugins": [
     {
       "name": "autoloop",
+      "description": "Native-first standing dev loop for Claude Code, Codex CLI, and opencode: issues in, gated and independently reviewed PRs out; a human merges by default.",
       "source": {
         "source": "local",
         "path": "./"

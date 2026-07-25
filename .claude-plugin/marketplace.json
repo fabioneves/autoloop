@@ -8,7 +8,7 @@
     {
       "name": "autoloop",
       "source": "./",
-      "description": "Dual-host standing dev loop for Claude Code and Codex CLI: issues in, gated + independently reviewed PRs out. Writer ≠ reviewer; a human merges."
+      "description": "Native-first standing dev loop for Claude Code, Codex CLI, and opencode: issues in, gated + independently reviewed PRs out. Code writer ≠ code reviewer; a human merges by default."
     },
     {
       "name": "agent-skills",
