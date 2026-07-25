@@ -196,10 +196,37 @@ function validateGate(value, errors) {
   }
 }
 
-function validateMerge(value, errors) {
-  if (!validateObjectShape(value, 'merge', ['policy'], [], errors)) return;
+function validateMerge(value, expectedVersion, errors) {
+  // Schema 0.24.0 predates the acknowledgement, so migration must be able to read
+  // a legacy non-manual policy without demanding a field that could not exist.
+  const legacy = expectedVersion === LEGACY_CONFIG_VERSION;
+  if (!validateObjectShape(
+    value,
+    'merge',
+    ['policy'],
+    legacy ? [] : ['unverifiedInvocationAcknowledged'],
+    errors,
+  )) return;
   if (hasOwn(value, 'policy') && !['manual', 'ratified', 'auto'].includes(value.policy)) {
     errors.push('merge.policy: must be "manual", "ratified", or "auto"');
+  }
+  // No supported transport can prove who requested a run, so a non-manual policy
+  // is a deliberate, recorded acceptance of that risk rather than a default. The
+  // acknowledgement is meaningless under manual, and a dead option is a defect.
+  if (legacy) return;
+  // Whether a non-manual policy *requires* the acknowledgement is Runtime's
+  // decision, so the failure names the real remedy instead of surfacing as a
+  // migration error. The schema only rejects a meaningless value here.
+  const acknowledged = value.unverifiedInvocationAcknowledged;
+  const nonManual = value.policy === 'ratified' || value.policy === 'auto';
+  if (hasOwn(value, 'unverifiedInvocationAcknowledged') && acknowledged !== true) {
+    errors.push(
+      'merge.unverifiedInvocationAcknowledged: must be true when present',
+    );
+  } else if (!nonManual && acknowledged === true) {
+    errors.push(
+      'merge.unverifiedInvocationAcknowledged: only valid with a non-manual merge.policy',
+    );
   }
 }
 
@@ -333,7 +360,9 @@ function validateProjectValues(cfg, expectedVersion, errors) {
   if (hasOwn(cfg, 'version')) validateVersion(cfg.version, expectedVersion, errors);
   if (hasOwn(cfg, 'baseBranch')) validateBaseBranch(cfg.baseBranch, errors);
   if (hasOwn(cfg, 'gate')) validateGate(cfg.gate, errors);
-  if (hasOwn(cfg, 'merge')) validateMerge(cfg.merge, errors);
+  if (hasOwn(cfg, 'merge')) {
+    validateMerge(cfg.merge, expectedVersion, errors);
+  }
   if (hasOwn(cfg, 'tracker')) {
     if (expectedVersion === LEGACY_CONFIG_VERSION) {
       validateLegacyTracker(cfg.tracker, errors);
@@ -612,7 +641,11 @@ export function migrateConfig024To025(cfg, migrationFacts) {
   ];
   if (cfg.merge.policy !== 'manual') {
     warnings.push(
-      `merge.policy: legacy "${cfg.merge.policy}" reset to "manual"; re-enable only after live non-manual policy verification`,
+      `merge.policy: "${cfg.merge.policy}" reset to "manual" because migration `
+      + 'cannot grant an unattended merge you did not re-confirm. '
+      + `"${cfg.merge.policy}" is still a valid value: restore it together with `
+      + 'merge.unverifiedInvocationAcknowledged: true, which records that no '
+      + 'supported invocation transport can prove a human requested the run',
     );
   }
   const adapter = effectiveLegacyAdapter(cfg.runtime.supportedHosts, cfg.engine.profile);
@@ -846,6 +879,9 @@ function selfTest() {
       `merge policy ${policy} is valid`,
       changed(base, (cfg) => {
         cfg.merge.policy = policy;
+        if (policy !== 'manual') {
+          cfg.merge.unverifiedInvocationAcknowledged = true;
+        }
       }),
     );
   }
@@ -1398,11 +1434,42 @@ function selfTest() {
       `migration contains legacy ${policy} merge policy`,
       contained.ok
         && contained.config.merge.policy === 'manual'
-        && contained.warnings.includes(
-          `merge.policy: legacy "${policy}" reset to "manual"; re-enable only after live non-manual policy verification`,
-        ),
+        && contained.warnings.some((warning) =>
+          warning.startsWith(`merge.policy: "${policy}" reset to "manual"`)
+          && warning.includes('merge.unverifiedInvocationAcknowledged: true')),
     );
   }
+
+  for (const policy of ['ratified', 'auto']) {
+    const unacknowledged = { ...projectFixture(), merge: { policy } };
+    const acknowledged = {
+      ...projectFixture(),
+      merge: { policy, unverifiedInvocationAcknowledged: true },
+    };
+    expect(
+      `${policy} accepts both the bare and acknowledged shapes`,
+      validateConfig(unacknowledged).length === 0
+        && validateConfig(acknowledged).length === 0,
+    );
+  }
+  expect(
+    'the acknowledgement is rejected as a dead option under manual policy',
+    validateConfig({
+      ...projectFixture(),
+      merge: { policy: 'manual', unverifiedInvocationAcknowledged: true },
+    }).includes(
+      'merge.unverifiedInvocationAcknowledged: only valid with a non-manual merge.policy',
+    ),
+  );
+  expect(
+    'a false acknowledgement never enables a non-manual policy',
+    validateConfig({
+      ...projectFixture(),
+      merge: { policy: 'auto', unverifiedInvocationAcknowledged: false },
+    }).includes(
+      'merge.unverifiedInvocationAcknowledged: must be true when present',
+    ),
+  );
 
   const legacyNoneTracker = migrateConfig024To025(legacyFixture(['claude'], 'claude'));
   expect(

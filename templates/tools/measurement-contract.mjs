@@ -6020,11 +6020,15 @@ function readOwnedArtifact(path, maximum, label) {
       || info.nlink !== 1
       || info.size < 1
       || info.size > maximum
-      || ![0o600, 0o640, 0o644].includes(mode)
+      // Reject only what lets another account rewrite the policy. A fixed
+      // 600/640/644 allowlist made verification depend on the checkout umask:
+      // git does not track the group-write bit, so the same commit passed under
+      // umask 022 and failed under 002.
+      || (mode & 0o002) !== 0
       || (typeof process.getuid === 'function' && info.uid !== process.getuid())
     ) {
       throw new Error(
-        `expected an owned regular bounded mode-600/640/644 ${label} file`,
+        `expected an owned regular bounded non-world-writable ${label} file`,
       );
     }
     return readFileSync(descriptor, 'utf8');

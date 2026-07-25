@@ -26,7 +26,7 @@ Skills and the vendored `tools/agentic/*` scripts read this block. Edit it direc
 {{CONFIG_JSON}}
 ```
 
-- `version` — config schema version; v0.40.0 requires `0.25.0`. Setup migrates older blocks through
+- `version` — config schema version; v0.40.1 requires `0.25.0`. Setup migrates older blocks through
   a visible diff. A missing, older, or unknown version is invalid at runtime.
 - `baseBranch` — the configured short branch name used by every base-aware claim, lane, guard,
   delivery, and merge check.
@@ -34,9 +34,15 @@ Skills and the vendored `tools/agentic/*` scripts read this block. Edit it direc
   default null) — a faster scoped variant for inner-loop iteration only; the last gate before a
   PR goes ready is always the full `gate.command`. `gate.setupCommand` (optional)
   installs gate deps on first run.
-- `merge.policy` — v0.40 Runtime accepts only `manual` because same-UID prompt transport is
-  `best-effort-unverified`; a human merges. `ratified` and `auto` remain reserved policy-engine
-  values and fail run open with `UNVERIFIABLE_INVOCATION_PROVENANCE`.
+- `merge.policy` — `manual`, `ratified`, or `auto`. Defaults to `manual`, where a human merges.
+  No supported prompt transport can prove a human requested a run, so `intentProvenance` is always
+  `best-effort-unverified`. A non-manual policy therefore also requires
+  `merge.unverifiedInvocationAcknowledged: true`, which records that the repository accepts an
+  unauthenticated trigger; without it, run open fails with `UNVERIFIABLE_INVOCATION_PROVENANCE`.
+  Findings 10 and 11 — a distinct loop identity and independently attributable verdict producers —
+  remain open, so a non-manual policy relies on the configured base protection for its safety.
+- `merge.unverifiedInvocationAcknowledged` — optional, and only valid alongside a non-manual
+  policy. It must be `true` when present.
 - `tracker` — a discriminated object: `{ "provider": "none" }`, or
   `{ "provider": "jira", "epicKey": "TEAM-123", "cloudId": "<Atlassian UUID>" }`.
 - `review.checklistPath` — the review criteria file both reviewers grade against.

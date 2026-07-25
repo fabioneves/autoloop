@@ -10,7 +10,7 @@
 <strong>Labelled GitHub issues in. Gated, independently reviewed PRs out.</strong>
 
 <p>
-  <img alt="release v0.40.0" src="https://img.shields.io/badge/release-v0.40.0-8b5cf6?style=flat-square">
+  <img alt="release v0.40.1" src="https://img.shields.io/badge/release-v0.40.1-8b5cf6?style=flat-square">
   <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
   <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square">
   <img alt="human controlled merge" src="https://img.shields.io/badge/authority-human_merge-f59e0b?style=flat-square">
@@ -82,7 +82,7 @@ Pitcrew revises, re-reviews, and re-gates the same branch before returning it to
 | **Proof** | Reviewed plan, reviewed final diff, one full objective gate, CI when present, and pushed head all tied to the delivered SHA. |
 | **Output** | A ready PR with `Closes #N`, findings and dispositions, gate evidence, and per-step timings. |
 | **Return path** | Pitcrew handles review feedback, failed CI, and base conflicts on the existing PR. |
-| **Authority** | v0.40 runs only with `merge.policy: manual`; a human merges. Prompt hooks grant no lifecycle, merge, or release authority. |
+| **Authority** | `merge.policy: manual` by default; a human merges. A non-manual policy requires an explicit `merge.unverifiedInvocationAcknowledged: true`, because prompt hooks cannot prove a human requested the run. |
 | **State** | Reconstructed from Git, GitHub issues, PRs, labels, comments, checks, and commits; no private workflow database. |
 
 ## 🛡️ The four guardrails
@@ -98,8 +98,9 @@ The entire system hangs from two invariants:
    later fix rounds receive independent fresh-context review. Plans receive one independent
    adversarial review; the orchestrator records and dispositions its findings before freezing the
    plan instead of starting a second plan-review round.
-2. **L2 — a human merges.** The loop opens and services PRs; v0.40 never merges directly and
-   rejects `ratified` or `auto` policy at run open.
+2. **L2 — a human merges by default.** The loop opens and services PRs. `ratified` and `auto` are
+   rejected at run open unless the repository sets `merge.unverifiedInvocationAcknowledged: true`,
+   recording that it accepts a trigger no supported transport can authenticate.
 
 Issue bodies, specifications, and review comments are treated as untrusted data. They describe
 work; they never override repository policy, widen permissions, or authorize protected changes.
@@ -362,7 +363,7 @@ Historical records and capability results have zero route-selection authority. O
 engine's installed authenticated capability supplies standing cost authority; fallback requires
 its own independently authenticated capability.
 
-v0.40.0 supports exactly five active-host/captured-preference pairs:
+v0.40.1 supports exactly five active-host/captured-preference pairs:
 
 | Active host | Captured engine preference | Route | Live verification |
 |---|---|---|---|
@@ -593,7 +594,7 @@ the exact checked-out commit reachable from `origin/main`. Configure the
 `github.token`, but honestly fails when that token cannot read the required live controls.
 
 Configured repositories record their scaffold contract version in the JSON block inside
-`docs/agentic/STATE.md`. v0.40.0 uses schema `0.25.0`. Breaking config-shape changes bump the minor
+`docs/agentic/STATE.md`. v0.40.1 uses schema `0.25.0`. Breaking config-shape changes bump the minor
 version while the project is `0.x`; re-running setup audits and migrates the repository-owned layer
 through a visible diff and, when policy is involved, a human-reviewed and human-merged policy PR.
 

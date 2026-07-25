@@ -1470,10 +1470,18 @@ function openPolicy(input) {
   }
   const config = validateConfigInput(input.config);
   if (!config.ok) return config;
-  if (config.value.merge.policy !== 'manual') {
+  // Invocation provenance stays best-effort-unverified on every supported
+  // transport. A non-manual policy therefore runs only where the repository has
+  // recorded that it accepts an unauthenticated trigger; absent that, fail closed
+  // here, before capability probing, scratch creation, or any mutation.
+  if (
+    config.value.merge.policy !== 'manual'
+    && config.value.merge.unverifiedInvocationAcknowledged !== true
+  ) {
     return failure(
       'UNVERIFIABLE_INVOCATION_PROVENANCE',
-      'runtime cannot verify invocation provenance under a non-manual merge policy',
+      'runtime cannot verify invocation provenance under a non-manual merge '
+      + 'policy; set merge.unverifiedInvocationAcknowledged to accept that risk',
     );
   }
   const host = validateHostEvidence(input.hostEvidence);
@@ -4406,10 +4414,19 @@ function selfTest() {
       'succeeded,transient-failure,environment-failure,invalid-result'
     && EFFECTS.join(',') === 'none,complete,partial,unknown'
     && INTENT_PROVENANCE === 'best-effort-unverified');
-  check('non-manual merge policy cannot claim invocation provenance', () =>
+  check('an unacknowledged non-manual merge policy fails closed at open', () =>
     expectError(openRun('claude', 'native', {
       config: { merge: { policy: 'auto' } },
     }), 'UNVERIFIABLE_INVOCATION_PROVENANCE'));
+  check('an acknowledged non-manual merge policy opens with unverified provenance', () => {
+    const opened = openRun('claude', 'native', {
+      config: {
+        merge: { policy: 'auto', unverifiedInvocationAcknowledged: true },
+      },
+    });
+    return opened.ok === true
+      && opened.value.intentProvenance === INTENT_PROVENANCE;
+  });
   check('open requires explicit best-effort-unverified provenance', () =>
     expectError(RuntimeContract.open({
       invocation: fixtureInvocation('dev', 'native'),
