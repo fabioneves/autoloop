@@ -45,7 +45,6 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - name: Smoke-test process authority isolation
-        if: runner.os == 'Linux'
         run: node templates/tools/route-adapter-contract.mjs --self-test-authority-isolation
       - name: Check measurement budget policy (pending is not a pass)
         run: >-

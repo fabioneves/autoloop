@@ -3813,7 +3813,72 @@ function secureBrokerStateDirectory() {
 }
 
 function supportsProcessAuthorityIsolation(platform = process.platform) {
-  return platform === 'linux';
+  if (platform === 'linux') return true;
+  // macOS has no PID namespace, so its boundary is a narrower, separately named
+  // set of properties: host-file confinement, Git-metadata write denial, and
+  // cross-process signal denial. Availability is never assumed from the platform
+  // — probeProcessAuthorityIsolation must prove those properties on this host
+  // before any darwin route is offered.
+  return platform === 'darwin' && existsSync('/usr/bin/sandbox-exec');
+}
+
+function sbplPath(value) {
+  return JSON.stringify(value);
+}
+
+// Deny-by-default. The v11 review rejected an allow-by-default profile because
+// hiding the broker path is not the same as proving confinement, so every
+// permission here is additive and the denials that follow the allows win.
+function darwinSandboxProfile({
+  checkout,
+  gitDirectory,
+  scratchDirectory,
+  executable,
+  readablePaths,
+  writableCheckout,
+  writableGitMetadata,
+  unshareNetwork,
+}) {
+  const reads = [
+    '/usr',
+    '/System',
+    '/Library',
+    '/bin',
+    '/sbin',
+    '/private/etc',
+    '/private/var/db/timezone',
+    checkout,
+    executable,
+    ...readablePaths,
+  ];
+  const writes = [
+    ...(writableCheckout ? [checkout] : []),
+    ...(scratchDirectory === null ? [] : [scratchDirectory]),
+  ];
+  return [
+    '(version 1)',
+    '(deny default)',
+    // The properties this boundary claims.
+    '(deny process-info*)',
+    '(deny mach-priv-task-port)',
+    '(allow signal (target self))',
+    '(allow process-fork)',
+    `(allow process-exec (literal ${sbplPath(executable)}) (subpath "/usr") (subpath "/bin"))`,
+    '(allow sysctl-read)',
+    '(allow mach-lookup)',
+    '(allow file-read-metadata)',
+    `(allow file-read* ${reads.map((path) => `(subpath ${sbplPath(path)})`).join(' ')})`,
+    '(allow file-read* (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))',
+    '(allow file-write-data (literal "/dev/null"))',
+    ...(writes.length > 0
+      ? [`(allow file-write* ${writes.map((path) => `(subpath ${sbplPath(path)})`).join(' ')})`]
+      : []),
+    // Last match wins, so this revokes Git metadata writes granted above.
+    ...(writableGitMetadata
+      ? []
+      : [`(deny file-write* (subpath ${sbplPath(gitDirectory)}))`]),
+    unshareNetwork ? '(deny network*)' : '(allow network*)',
+  ].join('\n');
 }
 
 function executablePath(command) {
@@ -3882,11 +3947,13 @@ function systemRuntimeMountArguments() {
   ]);
 }
 
-function toolchainMountArguments() {
+function toolchainPaths() {
   const home = realpathSync(homedir());
-  return readOnlyMountArguments([
-    join(home, '.bun', 'bin'),
-  ]);
+  return [join(home, '.bun', 'bin')];
+}
+
+function toolchainMountArguments() {
+  return readOnlyMountArguments(toolchainPaths());
 }
 
 function gitMetadataMountArguments(cwd, writable) {
@@ -4035,6 +4102,46 @@ function processAuthoritySandbox(
       ],
     };
   }
+  if (platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
+    const checkout = realpathSync(cwd);
+    const executable = executablePath(command);
+    if (executable === null) return null;
+    let gitDirectory;
+    try {
+      gitDirectory = realpathSync(resolve(
+        checkout,
+        gitOutput(checkout, ['rev-parse', '--git-dir']),
+      ));
+    } catch {
+      return null;
+    }
+    const readablePaths = [
+      ...engineAuthPaths(command),
+      ...toolchainPaths(),
+    ].filter((path) => existsSync(path)).map((path) => realpathSync(path));
+    const scratch = scratchDirectory === null
+      ? null
+      : realpathSync(scratchDirectory);
+    return {
+      command: '/usr/bin/sandbox-exec',
+      argv: [
+        '-p',
+        darwinSandboxProfile({
+          checkout,
+          gitDirectory,
+          scratchDirectory: scratch,
+          executable,
+          readablePaths,
+          writableCheckout,
+          writableGitMetadata,
+          unshareNetwork,
+        }),
+        '--',
+        executable,
+        ...argv,
+      ],
+    };
+  }
   return null;
 }
 
@@ -4047,6 +4154,8 @@ export function probeProcessAuthorityIsolation(cwd = process.cwd(), diagnose = n
     [10, 'the child read a host-private broker marker'],
     [11, 'the child shared the host PID namespace'],
     [12, 'the child shared the host IPC namespace'],
+    [13, 'the child could signal a host process'],
+    [14, 'the child wrote Git metadata'],
   ]);
   let markerPath = null;
   try {
@@ -4075,13 +4184,28 @@ export function probeProcessAuthorityIsolation(cwd = process.cwd(), diagnose = n
       ? readlinkSync('/proc/self/ns/ipc')
       : '';
     const script = [
-      "import { existsSync, readlinkSync } from 'node:fs';",
+      "import { existsSync, readlinkSync, writeFileSync } from 'node:fs';",
       'if (existsSync(process.argv[1])) process.exit(10);',
       'if (process.platform === "linux") {',
       '  const pid = readlinkSync("/proc/self/ns/pid");',
       '  const ipc = readlinkSync("/proc/self/ns/ipc");',
       '  if (pid === process.argv[2]) process.exit(11);',
       '  if (ipc === process.argv[3]) process.exit(12);',
+      '}',
+      // macOS has no PID namespace, so the child proves the narrower properties
+      // the darwin profile actually claims: it cannot signal the host broker,
+      // and it cannot write Git metadata.
+      'if (process.platform === "darwin") {',
+      '  try {',
+      '    process.kill(Number(process.argv[4]), 0);',
+      '    process.exit(13);',
+      '  } catch (error) {',
+      '    if (error.code !== "EPERM") process.exit(13);',
+      '  }',
+      '  try {',
+      '    writeFileSync(process.argv[5], "breach\\n");',
+      '    process.exit(14);',
+      '  } catch {}',
       '}',
     ].join('\n');
     const sandbox = processAuthoritySandbox(
@@ -4093,6 +4217,8 @@ export function probeProcessAuthorityIsolation(cwd = process.cwd(), diagnose = n
         markerPath,
         hostPidNamespace,
         hostIpcNamespace,
+        String(process.pid),
+        join(realpathSync(cwd), '.git', 'autoloop-probe-breach'),
       ],
       cwd,
     );
@@ -5525,9 +5651,33 @@ function selfTest() {
       ),
   ]);
   checks.push([
-    'macOS cannot advertise process authority isolation',
-    !supportsProcessAuthorityIsolation('darwin')
-      && processAuthoritySandbox(process.execPath, [], process.cwd(), 'darwin') === null,
+    'macOS advertises isolation only where sandbox-exec exists, and never by platform alone',
+    (() => {
+      const available = supportsProcessAuthorityIsolation('darwin');
+      if (!existsSync('/usr/bin/sandbox-exec')) {
+        return available === false
+          && processAuthoritySandbox(
+            process.execPath,
+            [],
+            process.cwd(),
+            'darwin',
+          ) === null;
+      }
+      const sandbox = processAuthoritySandbox(
+        process.execPath,
+        [],
+        process.cwd(),
+        'darwin',
+        { writableCheckout: true, writableGitMetadata: false },
+      );
+      const profile = sandbox?.argv?.[1] ?? '';
+      return available === true
+        && sandbox?.command === '/usr/bin/sandbox-exec'
+        && profile.startsWith('(version 1)\n(deny default)')
+        && profile.includes('(deny process-info*)')
+        && profile.includes('(allow signal (target self))')
+        && /\(deny file-write\* \(subpath "[^"]*\.git"\)\)/u.test(profile);
+    })(),
   ]);
   checks.push([
     'process sandbox exposes only a writable checkout and explicit scratch',
