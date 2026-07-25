@@ -5,6 +5,19 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.40.4] - 2026-07-26
+
+### Changed
+
+- Setup shows the merge policy in every interview and offers to change it. The 0.40.3 question
+  fired only for a repository on or migrating from a non-manual policy, so a repository whose
+  earlier migration had already reset `auto` to `manual` was never asked — the trigger state had
+  been erased by the very reset the question existed to surface.
+- Migration and reconfigure collapse the interview to one summary table and a single accept-all
+  confirmation, expanding into individual questions only where an item carries a real decision.
+  Fewer questions, never fewer disclosures: everything still appears in the summary and the
+  visible diff.
+
 ## [0.40.3] - 2026-07-25
 
 ### Fixed
@@ -170,7 +183,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.3...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.4...HEAD
+[0.40.4]: https://github.com/fabioneves/autoloop/compare/v0.40.3...v0.40.4
 [0.40.3]: https://github.com/fabioneves/autoloop/compare/v0.40.2...v0.40.3
 [0.40.2]: https://github.com/fabioneves/autoloop/compare/v0.40.1...v0.40.2
 [0.40.1]: https://github.com/fabioneves/autoloop/compare/v0.40.0...v0.40.1

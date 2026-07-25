@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.40.3 · starting
+∞ setup · v0.40.4 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -191,6 +191,12 @@ Show the old config, migrated config, warnings, and artifact diff before writing
 Use structured questions when the host provides them; otherwise ask one concise question at a
 time. Global defaults may pre-fill answers but never skip confirmation.
 
+Scale the interview to the mode. A fresh install walks every item. Migration and reconfigure
+collapse to one summary table — every current value beside its default or migrated value — and a
+single accept-all confirmation, expanding an item into its own question only where it carries a
+real decision: drift, a cap the human may want to change, or the merge policy. Fewer questions,
+never fewer disclosures: everything still appears in the summary and the visible diff.
+
 Ask only:
 
 1. Mission and non-negotiable invariants.
@@ -211,8 +217,11 @@ Ask only:
 9. Universal host prompt hooks are mandatory best-effort transport for every enabled Claude,
    Codex, or OpenCode runtime entrypoint. They are not attributable intent.
 10. Optional agent-skills dependency.
-11. Merge policy. Default `manual`. When the repository is on, or is migrating from, `ratified` or
-    `auto`, ask explicitly whether to restore it rather than resetting silently. Explain in one
+11. Merge policy. Default `manual`. Show the current policy in every interview and offer to change
+    it — migration history is not a reliable trigger, because an earlier migration may already have
+    reset a non-manual policy before this question existed. When the repository is on, or is
+    migrating from, `ratified` or `auto`, ask explicitly whether to restore it rather than
+    resetting silently. Explain in one
     sentence what the human is accepting: no supported invocation transport can prove a human
     requested a run, so an unauthenticated trigger can merge. Restoring it writes both
     `merge.policy` and `merge.unverifiedInvocationAcknowledged: true`; Runtime refuses the policy
