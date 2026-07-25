@@ -612,6 +612,105 @@ function effectiveLegacyAdapter(hosts, profile) {
   return { engine: 'opencode', route: 'claude.opencode-exec' };
 }
 
+const PRE_LEGACY_CONFIG_VERSION = '0.23.0';
+
+// 0.23.0 predates three additive fields and the third engine block. Every
+// difference is deterministic, so this hop needs no supplemental facts; the
+// tracker stays a string until the 0.24.0 -> 0.25.0 hop reshapes it.
+export function migrateConfig023To024(cfg) {
+  if (!isRecord(cfg) || cfg.version !== PRE_LEGACY_CONFIG_VERSION) {
+    return {
+      ok: false,
+      code: 'INVALID_LEGACY_CONFIG',
+      errors: [`version: must equal "${PRE_LEGACY_CONFIG_VERSION}"`],
+      warnings: [],
+    };
+  }
+  const config = structuredClone(cfg);
+  const warnings = [];
+  config.version = LEGACY_CONFIG_VERSION;
+  if (isRecord(config.gate) && !hasOwn(config.gate, 'quickCommand')) {
+    config.gate.quickCommand = null;
+    warnings.push('gate.quickCommand: added as null');
+  }
+  if (isRecord(config.caps) && !hasOwn(config.caps, 'codeReviewRoundsPerUnit')) {
+    config.caps.codeReviewRoundsPerUnit = 5;
+    warnings.push('caps.codeReviewRoundsPerUnit: defaulted to 5');
+  }
+  if (isRecord(config.engine) && !isRecord(config.engine.opencode)) {
+    config.engine.opencode = { implementerModel: null, reviewerModel: null };
+    warnings.push('engine.opencode: added with null tuning');
+  }
+  const errors = validateLegacyConfig(config);
+  if (errors.length > 0) {
+    return { ok: false, code: 'INVALID_LEGACY_CONFIG', errors, warnings: [] };
+  }
+  return { ok: true, config, warnings };
+}
+
+// Ordered so a caller asks to be brought current and never names a version
+// pair. A new schema appends one step here instead of adding a function whose
+// name every caller and skill must learn.
+const MIGRATION_STEPS = Object.freeze([
+  Object.freeze({
+    from: PRE_LEGACY_CONFIG_VERSION,
+    apply: (cfg) => migrateConfig023To024(cfg),
+  }),
+  Object.freeze({
+    from: LEGACY_CONFIG_VERSION,
+    apply: (cfg, facts) => migrateConfig024To025(cfg, facts),
+  }),
+]);
+
+export const MIGRATABLE_CONFIG_VERSIONS = Object.freeze(
+  MIGRATION_STEPS.map((step) => step.from),
+);
+
+export function migrateProjectConfig(cfg, migrationFacts) {
+  if (!isRecord(cfg) || typeof cfg.version !== 'string') {
+    return {
+      ok: false,
+      code: 'INVALID_LEGACY_CONFIG',
+      errors: ['version: must be a string'],
+      warnings: [],
+    };
+  }
+  if (cfg.version === CONFIG_VERSION) {
+    return { ok: true, config: structuredClone(cfg), warnings: [], migrated: false };
+  }
+  let current = cfg;
+  const warnings = [];
+  let migrated = false;
+  for (let guard = 0; guard < MIGRATION_STEPS.length + 1; guard += 1) {
+    if (current.version === CONFIG_VERSION) {
+      return { ok: true, config: current, warnings, migrated };
+    }
+    const step = MIGRATION_STEPS.find((candidate) => candidate.from === current.version);
+    if (step === undefined) {
+      return {
+        ok: false,
+        code: 'UNSUPPORTED_CONFIG_VERSION',
+        errors: [
+          `version: "${current.version}" has no migration path; `
+          + `migratable versions are ${MIGRATABLE_CONFIG_VERSIONS.join(', ')}`,
+        ],
+        warnings,
+      };
+    }
+    const result = step.apply(current, migrationFacts);
+    if (!result.ok) return { ...result, warnings: [...warnings, ...result.warnings] };
+    warnings.push(...result.warnings);
+    current = result.config;
+    migrated = true;
+  }
+  return {
+    ok: false,
+    code: 'UNSUPPORTED_CONFIG_VERSION',
+    errors: ['version: migration chain did not converge'],
+    warnings,
+  };
+}
+
 export function migrateConfig024To025(cfg, migrationFacts) {
   const errors = validateLegacyConfig(cfg);
   if (errors.length > 0) {
@@ -1471,6 +1570,60 @@ function selfTest() {
     ),
   );
 
+  const preLegacyFixture = () => {
+    const cfg = legacyFixture(['claude', 'codex'], 'codex');
+    cfg.version = PRE_LEGACY_CONFIG_VERSION;
+    delete cfg.gate.quickCommand;
+    delete cfg.caps.codeReviewRoundsPerUnit;
+    delete cfg.engine.opencode;
+    return cfg;
+  };
+  const chained = migrateProjectConfig(preLegacyFixture());
+  expect(
+    'the chain carries 0.23.0 to the current schema without naming a version pair',
+    chained.ok
+      && chained.migrated === true
+      && chained.config.version === CONFIG_VERSION
+      && validateConfig(chained.config).length === 0
+      && chained.warnings.includes('gate.quickCommand: added as null')
+      && chained.warnings.includes('caps.codeReviewRoundsPerUnit: defaulted to 5')
+      && chained.warnings.includes(
+        'runtime.supportedHosts: retired routing authority removed',
+      ),
+  );
+  const preLegacyJira = preLegacyFixture();
+  preLegacyJira.tracker = 'jira';
+  expect(
+    'a 0.23.0 Jira tracker still reaches the supplemental-facts gate',
+    migrateProjectConfig(preLegacyJira).code === 'MIGRATION_INPUT_REQUIRED'
+      && migrateProjectConfig(preLegacyJira, {
+        tracker: {
+          epicKey: 'AUTO-9',
+          cloudId: '123e4567-e89b-12d3-a456-426614174000',
+        },
+      }).ok === true,
+  );
+  const alreadyCurrent = migrateProjectConfig(projectFixture());
+  expect(
+    'a current configuration is returned unchanged and unmigrated',
+    alreadyCurrent.ok
+      && alreadyCurrent.migrated === false
+      && alreadyCurrent.warnings.length === 0,
+  );
+  const unknownVersion = migrateProjectConfig({
+    ...projectFixture(),
+    version: '0.19.0',
+  });
+  expect(
+    'an unknown schema is a typed unsupported version, never a silent pass',
+    !unknownVersion.ok
+      && unknownVersion.code === 'UNSUPPORTED_CONFIG_VERSION'
+      && unknownVersion.errors.some((error) => error.includes('0.23.0, 0.24.0')),
+  );
+  expect(
+    'the 0.23.0 step refuses a configuration of another version',
+    migrateConfig023To024(projectFixture()).code === 'INVALID_LEGACY_CONFIG',
+  );
   const legacyNoneTracker = migrateConfig024To025(legacyFixture(['claude'], 'claude'));
   expect(
     'migration converts legacy none tracker',
