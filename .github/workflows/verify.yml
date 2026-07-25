@@ -44,6 +44,24 @@ jobs:
           then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+      - name: Diagnose the macOS sandbox profile
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          node -e '
+            const { spawnSync } = require("node:child_process");
+            const run = (label, profile, argv) => {
+              const r = spawnSync("/usr/bin/sandbox-exec",
+                ["-p", profile, "--", ...argv], { encoding: "utf8" });
+              console.log(label, "status=", r.status, "signal=", r.signal,
+                "stderr=", (r.stderr || "").trim().slice(0, 300));
+            };
+            run("allow-all/true", "(version 1)(allow default)", ["/usr/bin/true"]);
+            run("allow-all/node", "(version 1)(allow default)",
+              [process.execPath, "-e", "console.log(1)"]);
+            run("deny-default/true", "(version 1)(deny default)", ["/usr/bin/true"]);
+          '
+          log show --last 3m --predicate 'senderImagePath contains "Sandbox"' --style compact 2>/dev/null | tail -30 || true
       - name: Smoke-test process authority isolation
         run: node templates/tools/route-adapter-contract.mjs --self-test-authority-isolation
       - name: Check measurement budget policy (pending is not a pass)
