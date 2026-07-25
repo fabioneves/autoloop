@@ -420,10 +420,9 @@ unless the live immutable-release setting reports `enabled=true`. Add
 `--require-owner-enforcement` to the immutable-release command when organization-owner enforcement
 is required; then `enforced_by_owner=true` is mandatory too.
 
-Both checks require authenticated live GitHub API evidence: Administration repository read and
-enough ruleset access to disclose bypass actors. In CI, grant the job `administration: read` and the
-workflow token qualifies. Elsewhere, authenticate `gh` or set `AUTOLOOP_RELEASE_POLICY_TOKEN` to a
-credential holding that access. Missing, insufficient, or redacted authentication is a
+Both checks require authenticated live GitHub API evidence. Set
+`AUTOLOOP_RELEASE_POLICY_TOKEN` to a credential with Administration repository read and enough
+ruleset access to disclose bypass actors. Missing, insufficient, or redacted authentication is a
 doctor `FAIL`, never a `NOTE`. Setup may present the exact required controls but never mutates
 repository or release protection without the user's explicit authorization.
 
