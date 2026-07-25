@@ -588,9 +588,12 @@ API evidence fails verification. When organization policy must enforce immutabil
 `--require-owner-enforcement` to the immutable-release check.
 
 Tag CI repeats both live checks and additionally proves that `v<VERSION>` is an annotated tag on
-the exact checked-out commit reachable from `origin/main`. Configure the
-`AUTOLOOP_RELEASE_POLICY_TOKEN` Actions secret for that job; the workflow falls back to
-`github.token`, but honestly fails when that token cannot read the required live controls.
+the exact checked-out commit reachable from `origin/main`. The workflow grants that job
+`administration: read`, so `github.token` can read the required live controls without further
+configuration. Set the `AUTOLOOP_RELEASE_POLICY_TOKEN` Actions secret only where that permission is
+unavailable — an organization that restricts workflow token permissions, or an owner-enforcement
+check the default token cannot see. Either way the checks fail honestly rather than assuming the
+controls are present.
 
 Configured repositories record their scaffold contract version in the JSON block inside
 `docs/agentic/STATE.md`. v0.40.0 uses schema `0.25.0`. Breaking config-shape changes bump the minor

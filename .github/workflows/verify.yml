@@ -10,6 +10,10 @@ on:
 
 permissions:
   contents: read
+  # Reading rulesets, their bypass actors, and the immutable-release setting are
+  # Administration reads. Without this the tag-time release checks fail on the
+  # default token and would need a personal access token instead.
+  administration: read
 
 jobs:
   contracts:
