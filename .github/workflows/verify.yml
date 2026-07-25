@@ -48,20 +48,13 @@ jobs:
         if: runner.os == 'macOS'
         continue-on-error: true
         run: |
-          node -e '
-            const { spawnSync } = require("node:child_process");
-            const run = (label, profile, argv) => {
-              const r = spawnSync("/usr/bin/sandbox-exec",
-                ["-p", profile, "--", ...argv], { encoding: "utf8" });
-              console.log(label, "status=", r.status, "signal=", r.signal,
-                "stderr=", (r.stderr || "").trim().slice(0, 300));
-            };
-            run("allow-all/true", "(version 1)(allow default)", ["/usr/bin/true"]);
-            run("allow-all/node", "(version 1)(allow default)",
-              [process.execPath, "-e", "console.log(1)"]);
-            run("deny-default/true", "(version 1)(deny default)", ["/usr/bin/true"]);
+          node --input-type=module -e '
+            import { probeProcessAuthorityIsolation } from "./templates/tools/route-adapter-contract.mjs";
+            const reasons = [];
+            const ok = probeProcessAuthorityIsolation(process.cwd(), (r) => reasons.push(r));
+            console.log("probe ok=", ok, "reasons=", JSON.stringify(reasons));
           '
-          log show --last 3m --predicate 'senderImagePath contains "Sandbox"' --style compact 2>/dev/null | tail -30 || true
+          log show --last 2m --predicate 'eventMessage contains "deny"' --style compact 2>/dev/null | rg -i "sandbox" | tail -25 || true
       - name: Smoke-test process authority isolation
         run: node templates/tools/route-adapter-contract.mjs --self-test-authority-isolation
       - name: Check measurement budget policy (pending is not a pass)
