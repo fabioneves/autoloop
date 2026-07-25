@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.40.2 · starting
+∞ setup · v0.40.3 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -170,8 +170,9 @@ From `0.23.0` it first adds the fields that version predates — `gate.quickComm
 
 - Remove `runtime.supportedHosts` and `engine.profile`.
 - Remove `caps.runWallClockHours`; v0.40 queue runs have no fixed whole-run clock ceiling.
-- Reset every legacy `ratified` or `auto` merge policy to `manual`. v0.40 does not re-enable a
-  non-manual policy because its prompt transport is not authenticated provenance.
+- Reset a `ratified` or `auto` merge policy to `manual` first, because migration must not carry an
+  unattended merge nobody re-confirmed. Then ask (see the merge-policy question below): the value is
+  not retired, and the human may restore it.
 - Never convert the legacy profile into current invocation intent.
 - Preserve valid, effective, non-null tuning only through the adapter-scoped map implemented by
   the contract.
@@ -199,14 +200,24 @@ Ask only:
    empty API response.
 4. Tracker: none or Jira; Jira requires epic key and cloud ID.
 5. Review checklist path/content.
-6. Numeric caps.
+6. Numeric caps. Show every cap with its current value and the scaffold default side by side, and
+   offer to change any of them; accepting all is one keystroke. Call out `sliceMaxLines` and
+   `codeReviewRoundsPerUnit` explicitly — they set slice size and review convergence, so they shape
+   cost and cycle time more than the rest. A migrated repository keeps its own values, which is why
+   they must be shown: a preserved value the human never saw is indistinguishable from a silent one.
 7. Optional tuning for the three adapter-option entries. State clearly that tuning cannot change
    the bare native route.
 8. Extra human-authorization/protected paths.
 9. Universal host prompt hooks are mandatory best-effort transport for every enabled Claude,
    Codex, or OpenCode runtime entrypoint. They are not attributable intent.
 10. Optional agent-skills dependency.
-11. Merge policy. v0.40 requires `manual`; do not offer `ratified` or `auto` as an enabled choice.
+11. Merge policy. Default `manual`. When the repository is on, or is migrating from, `ratified` or
+    `auto`, ask explicitly whether to restore it rather than resetting silently. Explain in one
+    sentence what the human is accepting: no supported invocation transport can prove a human
+    requested a run, so an unauthenticated trigger can merge. Restoring it writes both
+    `merge.policy` and `merge.unverifiedInvocationAcknowledged: true`; Runtime refuses the policy
+    without that field. State that findings 10 and 11 are open, so the configured base protection is
+    what stands behind a non-manual policy.
 
 Never infer that an empty required-check list means CI is safe. Merge, merge queue, tag
 publication, and release publication require an independent maintainer action outside the run.
@@ -302,7 +313,11 @@ Always reconcile the route-enabling host artifacts:
 
 - `.codex/agents/autoloop-reviewer.toml` from `codex-reviewer-agent.template.toml`
 - `.opencode/agent/autoloop-reviewer.md` from `opencode-reviewer-agent.template.md`
-- `opencode.json`, merged per key from `opencode-config.template.json`
+- `.opencode/opencode.json`, merged per key from `opencode-config.template.json`. opencode reads
+  project configuration from either the repository root or `.opencode/`; Autoloop keeps it in
+  `.opencode/` so the scaffold adds nothing loose to the project root. When a legacy root
+  `opencode.json` exists, merge it into `.opencode/opencode.json` and delete the root copy in the
+  same visible diff.
 
 Always reconcile `.claude/settings.json` from
 `settings-hooks.template.json`, `.codex/hooks.json` from `codex-hooks.template.json` unless the

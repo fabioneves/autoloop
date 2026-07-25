@@ -25,10 +25,20 @@
 // Usage:  (hook) reads the PreToolUse payload on stdin
 //         node tools/agentic/command-guard.mjs --self-test
 
-import { readFileSync, realpathSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
+  MIGRATABLE_CONFIG_VERSIONS,
   extractConfig,
   validateConfig,
 } from './config-contract.mjs';
@@ -1434,10 +1444,100 @@ function currentBranch() {
   }
 }
 
+// The guard is defense-in-depth for commands a run issues; repository rules are
+// the enforcement boundary. Applying it to every Bash call in the project turns
+// ordinary development into a fight with a policy that was never aimed at it, so
+// it enforces only while a run is actually open.
+//
+// An open run is evidenced by a live broker lease bound to a process in this
+// hook's own ancestry. `finish` revokes the lease, so the evidence disappears
+// with the run. Anything unreadable or ambiguous means "no run": a guard that
+// cannot establish an open run must not block a human.
+function brokerLeaseDirectory() {
+  const parent = ['darwin', 'linux'].includes(process.platform)
+    ? realpathSync('/tmp')
+    : realpathSync(tmpdir());
+  return join(
+    parent,
+    `autoloop-broker-${typeof process.getuid === 'function' ? process.getuid() : 'user'}`,
+  );
+}
+
+function ancestorPids(limit = 64) {
+  const pids = new Set();
+  let pid = process.ppid;
+  for (let depth = 0; depth < limit && pid > 1; depth += 1) {
+    pids.add(pid);
+    let parent;
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+    } catch {
+      return pids;
+    }
+    if (!Number.isSafeInteger(parent) || parent <= 0) return pids;
+    pid = parent;
+  }
+  return pids;
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+export function loopRunIsOpen() {
+  let entries;
+  try {
+    entries = readdirSync(brokerLeaseDirectory());
+  } catch {
+    return false;
+  }
+  const ancestors = ancestorPids();
+  for (const entry of entries) {
+    if (!entry.startsWith('host-') || !entry.endsWith('.lease')) continue;
+    let lease;
+    try {
+      lease = JSON.parse(
+        readFileSync(join(brokerLeaseDirectory(), entry), 'utf8'),
+      );
+    } catch {
+      continue;
+    }
+    if (
+      Number.isSafeInteger(lease?.pid)
+      && Number.isSafeInteger(lease?.hostPid)
+      && ancestors.has(lease.hostPid)
+      && processAlive(lease.pid)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function loadConfiguredBase(statePath) {
   const config = extractConfig(readFileSync(statePath, 'utf8'));
   const errors = validateConfig(config);
   if (errors.length > 0) {
+    // A configuration awaiting migration is not a hostile one. Refusing here
+    // blocks every command in the repository, including the ones Setup needs to
+    // perform the migration, so report the remedy and let the command through.
+    // No loop can run under an unmigrated schema — Runtime rejects it at open —
+    // so nothing the guard exists to protect is reachable in this state.
+    if (MIGRATABLE_CONFIG_VERSIONS.includes(config?.version)) {
+      throw Object.assign(
+        new Error(
+          `repository configuration is schema ${config.version}; `
+          + 'run autoloop:setup to migrate. The command guard is inactive until then',
+        ),
+        { migrationPending: true },
+      );
+    }
     throw new Error(`invalid ProjectConfig: ${errors.join('; ')}`);
   }
   return config.baseBranch;
@@ -1743,6 +1843,46 @@ function selfTest() {
       ok = false;
     }
   }
+  // The scoping decides whether `evaluate` is consulted at all, so prove both
+  // that a fabricated lease cannot activate the guard and that its evidence is
+  // exactly a live broker bound to this process's own ancestry.
+  {
+    const directory = brokerLeaseDirectory();
+    let created = null;
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const foreign = join(directory, 'host-selftest-foreign.lease');
+      writeFileSync(foreign, JSON.stringify({
+        pid: process.pid,
+        hostPid: 999_999_999,
+      }));
+      created = foreign;
+      if (loopRunIsOpen() !== false) {
+        console.error('FAIL [a lease outside this ancestry does not open a run]');
+        ok = false;
+      }
+      writeFileSync(foreign, JSON.stringify({
+        pid: 999_999_999,
+        hostPid: process.ppid,
+      }));
+      if (loopRunIsOpen() !== false) {
+        console.error('FAIL [a lease whose broker is dead does not open a run]');
+        ok = false;
+      }
+      writeFileSync(foreign, JSON.stringify({
+        pid: process.pid,
+        hostPid: process.ppid,
+      }));
+      if (process.platform === 'linux' && loopRunIsOpen() !== true) {
+        console.error('FAIL [a live lease in this ancestry opens a run]');
+        ok = false;
+      }
+    } catch {
+      // An unwritable broker directory is not a guard defect.
+    } finally {
+      if (created !== null) rmSync(created, { force: true });
+    }
+  }
   console.log(ok ? `self-test OK (${cases.length} cases)` : 'self-test FAILED');
   return ok;
 }
@@ -1768,10 +1908,18 @@ function main() {
     process.exit(2);
   }
 
+  // Ordered before configuration loading: with no run open there is nothing to
+  // guard, so a configuration problem must not block a human's command either.
+  if (!loopRunIsOpen()) process.exit(0);
+
   let baseBranch;
   try {
     baseBranch = loadConfiguredBase(parsed.statePath);
   } catch (error) {
+    if (error.migrationPending === true) {
+      console.error(`command-guard: ${error.message}`);
+      process.exit(0);
+    }
     console.error(`command-guard: cannot resolve configured base: ${error.message}`);
     process.exit(2);
   }

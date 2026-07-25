@@ -49,7 +49,7 @@ const INSTALLED_FORWARD_ARTIFACTS = Object.freeze([
   '.codex/agents/autoloop-reviewer.toml',
   '.opencode/agent/autoloop-reviewer.md',
   '.opencode/plugins/autoloop.js',
-  'opencode.json',
+  '.opencode/opencode.json',
   'tools/agentic/session-preflight.sh',
   ...RUNTIME_ROUTING_CONSUMERS.map((name) => `tools/agentic/${name}`),
 ]);
