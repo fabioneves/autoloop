@@ -4038,9 +4038,26 @@ function processAuthoritySandbox(
   return null;
 }
 
-export function probeProcessAuthorityIsolation(cwd = process.cwd()) {
+// `diagnose` receives one stable reason string when the probe fails. Capability
+// probing ignores it; the CLI self-test prints it, because an isolation gate that
+// fails without a reason cannot be operated.
+export function probeProcessAuthorityIsolation(cwd = process.cwd(), diagnose = null) {
+  const report = typeof diagnose === 'function' ? diagnose : () => {};
+  const violations = new Map([
+    [10, 'the child read a host-private broker marker'],
+    [11, 'the child shared the host PID namespace'],
+    [12, 'the child shared the host IPC namespace'],
+  ]);
   let markerPath = null;
   try {
+    if (!supportsProcessAuthorityIsolation(process.platform)) {
+      report(`platform ${process.platform} has no verified process-authority sandbox`);
+      return false;
+    }
+    if (!existsSync('/usr/bin/bwrap')) {
+      report('/usr/bin/bwrap is absent');
+      return false;
+    }
     secureBrokerStateDirectory();
     markerPath = join(
       BROKER_STATE_DIRECTORY,
@@ -4079,7 +4096,10 @@ export function probeProcessAuthorityIsolation(cwd = process.cwd()) {
       ],
       cwd,
     );
-    if (sandbox === null) return false;
+    if (sandbox === null) {
+      report('the sandbox command could not be constructed for this host layout');
+      return false;
+    }
     const result = spawnSync(sandbox.command, sandbox.argv, {
       cwd,
       encoding: 'utf8',
@@ -4088,8 +4108,21 @@ export function probeProcessAuthorityIsolation(cwd = process.cwd()) {
       env: processChildEnvironment({}, process.execPath, cwd),
       windowsHide: true,
     });
-    return result.status === 0 && !result.error;
-  } catch {
+    if (result.error) {
+      report(`the sandbox command failed to start: ${result.error.message}`);
+      return false;
+    }
+    if (result.status !== 0) {
+      report(
+        violations.get(result.status)
+        ?? `the sandbox command exited ${result.status}: `
+          + `${String(result.stderr ?? '').trim() || 'no stderr'}`,
+      );
+      return false;
+    }
+    return true;
+  } catch (error) {
+    report(`the probe raised ${error.message}`);
     return false;
   } finally {
     if (markerPath !== null) rmSync(markerPath, { force: true });
@@ -7318,7 +7351,18 @@ if (isMain) {
     process.argv.length === 3
     && process.argv[2] === '--self-test-authority-isolation'
   ) {
-    process.exit(probeProcessAuthorityIsolation(process.cwd()) ? 0 : 1);
+    const reasons = [];
+    const isolated = probeProcessAuthorityIsolation(
+      process.cwd(),
+      (reason) => reasons.push(reason),
+    );
+    if (!isolated) {
+      process.stderr.write(
+        'process authority isolation is unavailable: '
+        + `${reasons.join('; ') || 'no reason reported'}\n`,
+      );
+    }
+    process.exit(isolated ? 0 : 1);
   }
   const [mode, path, ...rest] = process.argv.slice(2);
   const operations = {
