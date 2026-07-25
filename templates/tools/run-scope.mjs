@@ -4568,7 +4568,7 @@ async function liveBrokerContinuationSelfTest() {
   }
   const result = spawnSync(
     BROKER_EXECUTABLE,
-    [BROKER_ENTRYPOINT, '--continuation-broker-self-test-driver'],
+    [BROKER_ENTRYPOINT, '--continuation-broker-self-test-host'],
     {
       argv0: 'codex',
       encoding: 'utf8',
@@ -5102,6 +5102,30 @@ async function main() {
       && await liveBrokerContinuationScenario(false);
     process.stdout.write(`${JSON.stringify({ ok })}\n`);
     process.exit(ok ? 0 : 1);
+  }
+  // Host binding is read from a process's ancestors, never from itself, so a
+  // host named through argv0 is only visible to its descendants. This stands in
+  // as that ancestor and relays the driver's verdict unchanged.
+  if (
+    args.length === 1
+    && args[0] === '--continuation-broker-self-test-host'
+  ) {
+    const driven = spawnSync(
+      BROKER_EXECUTABLE,
+      [BROKER_ENTRYPOINT, '--continuation-broker-self-test-driver'],
+      {
+        encoding: 'utf8',
+        timeout: 60000,
+        maxBuffer: MAX_INPUT_BYTES,
+        env: process.env,
+        windowsHide: true,
+      },
+    );
+    if (process.env.AUTOLOOP_SELF_TEST_DEBUG === '1' && driven.status !== 0) {
+      process.stderr.write(String(driven.stderr ?? driven.error?.message ?? ''));
+    }
+    process.stdout.write(driven.stdout ?? `${JSON.stringify({ ok: false })}\n`);
+    process.exit(driven.status === 0 ? 0 : 1);
   }
   if (
     args.length === 3

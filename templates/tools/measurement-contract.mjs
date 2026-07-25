@@ -7713,6 +7713,13 @@ async function concurrentPublishAndRead(recordValue, directory, expectedRecords)
   };
 }
 
+// macOS resolves TMPDIR through symlinks (/var -> /private/var) and the store
+// legitimately refuses a path that is not its own realpath, so fixtures anchor
+// to the resolved root instead of weakening that check.
+function selfTestTemporaryRoot() {
+  return realpathSync(tmpdir());
+}
+
 async function selfTest() {
   const valid = fixtureRecord();
   const missingIntentProvenance = structuredClone(valid);
@@ -8020,7 +8027,7 @@ async function selfTest() {
   );
   const retryRuntime = fixtureRetryReceiptForMeasurement();
   const retryCaptureStore = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-measurement-retry-${randomUUID()}`,
   );
   const retryRunId = randomUUID();
@@ -8653,7 +8660,7 @@ async function selfTest() {
       controlRecords: [],
     },
   };
-  const eventStore = join(tmpdir(), `autoloop-measurement-events-${randomUUID()}`);
+  const eventStore = join(selfTestTemporaryRoot(), `autoloop-measurement-events-${randomUUID()}`);
   const retainedRunId = 'e23e4567-e89b-42d3-a456-426614174000';
   const retainedEventInputs = [
     rawEvents[0],
@@ -8721,7 +8728,7 @@ async function selfTest() {
     );
   }
   const operationStore = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-measurement-operation-${randomUUID()}`,
   );
   const operationRunId = 'a23e4567-e89b-42d3-a456-426614174000';
@@ -8911,7 +8918,7 @@ async function selfTest() {
     );
   }
   const portableBundleFile = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-measurement-evidence-${randomUUID()}.json`,
   );
   writeFileSync(portableBundleFile, exportedEvidenceBundle.source, { mode: 0o600 });
@@ -8941,14 +8948,14 @@ async function selfTest() {
     { input: JSON.stringify(valid), encoding: 'utf8' },
   );
   const pendingPolicyFile = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-measurement-policy-${randomUUID()}.json`,
   );
   writeFileSync(pendingPolicyFile, canonicalPendingPolicy, { mode: 0o600 });
   const pendingPolicyFileCheck = checkBudgetPolicyAt(pendingPolicyFile);
   const missingPolicyFileCheck = checkBudgetPolicyAt(`${pendingPolicyFile}.missing`);
   const activePolicyFile = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-active-measurement-policy-${randomUUID()}.json`,
   );
   writeFileSync(
@@ -8958,9 +8965,9 @@ async function selfTest() {
   );
   const missingPortableEvidenceCheck = checkBudgetPolicyAt(
     activePolicyFile,
-    tmpdir(),
+    selfTestTemporaryRoot(),
   );
-  const tempDirectory = join(tmpdir(), `autoloop-measurement-${randomUUID()}`);
+  const tempDirectory = join(selfTestTemporaryRoot(), `autoloop-measurement-${randomUUID()}`);
   const persisted = persistMeasurement(valid, tempDirectory);
   const duplicate = persistMeasurement(valid, tempDirectory);
   writeFileSync(join(tempDirectory, `.tmp-${randomUUID()}`), '{"partial":', { mode: 0o600 });
@@ -9219,29 +9226,29 @@ async function selfTest() {
     inconsistentEvidence.subject,
     inconsistentEvidence.control,
   ]);
-  const externalDirectory = join(tmpdir(), `autoloop-measurement-external-${randomUUID()}`);
+  const externalDirectory = join(selfTestTemporaryRoot(), `autoloop-measurement-external-${randomUUID()}`);
   mkdirSync(externalDirectory, { mode: 0o700 });
   const externalPath = join(externalDirectory, `${valid.recordId}.json`);
   writeFileSync(externalPath, `${JSON.stringify(valid)}\n`, { mode: 0o600 });
-  const symlinkStore = join(tmpdir(), `autoloop-measurement-symlink-${randomUUID()}`);
+  const symlinkStore = join(selfTestTemporaryRoot(), `autoloop-measurement-symlink-${randomUUID()}`);
   persistMeasurement({ ...valid, recordId: '823e4567-e89b-42d3-a456-426614174000' }, symlinkStore);
   symlinkSync(externalPath, join(symlinkStore, `${valid.recordId}.json`));
   const symlinkRead = readMeasurements(symlinkStore);
-  const oversizedStore = join(tmpdir(), `autoloop-measurement-oversized-${randomUUID()}`);
+  const oversizedStore = join(selfTestTemporaryRoot(), `autoloop-measurement-oversized-${randomUUID()}`);
   persistMeasurement({ ...valid, recordId: '923e4567-e89b-42d3-a456-426614174000' }, oversizedStore);
   const oversizedId = 'a23e4567-e89b-42d3-a456-426614174000';
   writeFileSync(join(oversizedStore, `${oversizedId}.json`), 'x'.repeat(MAX_RECORD_BYTES + 1), {
     mode: 0o600,
   });
   const oversizedRead = readMeasurements(oversizedStore);
-  const widenedStore = join(tmpdir(), `autoloop-measurement-mode-${randomUUID()}`);
+  const widenedStore = join(selfTestTemporaryRoot(), `autoloop-measurement-mode-${randomUUID()}`);
   const widenedPersist = persistMeasurement(valid, widenedStore);
   const widenedDescriptor = openSync(widenedPersist.path, constants.O_RDONLY);
   fchmodSync(widenedDescriptor, 0o644);
   closeSync(widenedDescriptor);
   const widenedRead = readMeasurements(widenedStore);
   const widenedDirectoryStore = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-measurement-directory-mode-${randomUUID()}`,
   );
   persistMeasurement(valid, widenedDirectoryStore);
@@ -9253,7 +9260,7 @@ async function selfTest() {
   closeSync(directoryDescriptor);
   const widenedDirectoryRead = readMeasurements(widenedDirectoryStore);
   const missingAuthorityStore = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-measurement-missing-authority-${randomUUID()}`,
   );
   const missingAuthorityInitial = persistMeasurement(valid, missingAuthorityStore);
@@ -9263,11 +9270,11 @@ async function selfTest() {
     ...valid,
     recordId: 'ab3e4567-e89b-42d3-a456-426614174000',
   }, missingAuthorityStore);
-  const emptyStore = join(tmpdir(), `autoloop-measurement-empty-${randomUUID()}`);
+  const emptyStore = join(selfTestTemporaryRoot(), `autoloop-measurement-empty-${randomUUID()}`);
   mkdirSync(emptyStore, { mode: 0o700 });
   const emptyStoreRead = readMeasurements(emptyStore);
   const emptyStoreWrite = persistMeasurement(valid, emptyStore);
-  const publicationStore = join(tmpdir(), `autoloop-measurement-publication-${randomUUID()}`);
+  const publicationStore = join(selfTestTemporaryRoot(), `autoloop-measurement-publication-${randomUUID()}`);
   const publicationPersist = persistMeasurement(valid, publicationStore);
   linkSync(
     publicationPersist.path,
@@ -9275,7 +9282,7 @@ async function selfTest() {
   );
   const recoveredPublication = readMeasurements(publicationStore);
   const invalidAvoidedStore = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-measurement-invalid-avoided-${randomUUID()}`,
   );
   const invalidAvoided = structuredClone(valid);
@@ -9314,12 +9321,12 @@ async function selfTest() {
     ...valid,
     revision: 'f'.repeat(40),
     recordId: 'ae3e4567-e89b-42d3-a456-426614174000',
-  }, join(tmpdir(), `autoloop-measurement-spoof-${randomUUID()}`));
+  }, join(selfTestTemporaryRoot(), `autoloop-measurement-spoof-${randomUUID()}`));
   const legacyImport = persistMeasurement({
     ...valid,
     checkpoint: 'legacy-workflow',
     recordId: 'af3e4567-e89b-42d3-a456-426614174000',
-  }, join(tmpdir(), `autoloop-measurement-legacy-${randomUUID()}`));
+  }, join(selfTestTemporaryRoot(), `autoloop-measurement-legacy-${randomUUID()}`));
   const futureRecord = structuredClone(valid);
   futureRecord.capturedAt = '2999-01-01T00:00:00.000Z';
   const semanticClones = Array.from({ length: 100 }, (_, index) => ({
@@ -9400,7 +9407,7 @@ async function selfTest() {
     MAX_STORE_RECORDS,
   );
   const publishReadStore = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-measurement-publish-read-${randomUUID()}`,
   );
   persistMeasurement(valid, publishReadStore);
@@ -9563,7 +9570,7 @@ async function selfTest() {
   );
   const symbolicFixtureClean = readStoreLockOid() === null;
   const hostileGitStore = join(
-    tmpdir(),
+    selfTestTemporaryRoot(),
     `autoloop-measurement-hostile-git-${randomUUID()}`,
   );
   const hostileGitKeys = [
@@ -9600,10 +9607,10 @@ async function selfTest() {
     }
   }
   const hostileGitRead = readMeasurements(hostileGitStore);
-  const concurrentStore = join(tmpdir(), `autoloop-measurement-race-${randomUUID()}`);
+  const concurrentStore = join(selfTestTemporaryRoot(), `autoloop-measurement-race-${randomUUID()}`);
   const concurrentStatuses = await concurrentPersist(valid, concurrentStore);
   const concurrentRead = readMeasurements(concurrentStore);
-  const invalidWriteDirectory = join(tmpdir(), `autoloop-measurement-invalid-${randomUUID()}`);
+  const invalidWriteDirectory = join(selfTestTemporaryRoot(), `autoloop-measurement-invalid-${randomUUID()}`);
   const invalidWrite = persistMeasurement({ ...valid, workload: '' }, invalidWriteDirectory);
   let invalidFinalExists = false;
   try {

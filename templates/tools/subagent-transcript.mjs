@@ -18,7 +18,7 @@
 // pure-function fixtures.
 
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -167,7 +167,9 @@ function selfTest() {
     ok = false;
     console.log('self-test case failed: Claude Explore metadata normalization');
   }
-  const cliRoot = mkdtempSync(join(tmpdir(), 'autoloop-subagent-cli-'));
+  // Git reports realpaths, so a macOS TMPDIR reached through /var -> /private/var
+  // would make the fixture root and the CLI's resolved root disagree.
+  const cliRoot = mkdtempSync(join(realpathSync(tmpdir()), 'autoloop-subagent-cli-'));
   const cliToolDirectory = join(cliRoot, 'tools', 'agentic');
   mkdirSync(cliToolDirectory, { recursive: true });
   const cliEntrypoint = join(cliToolDirectory, 'subagent-transcript.mjs');

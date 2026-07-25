@@ -7,6 +7,7 @@ import {
 import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -3998,7 +3999,10 @@ function fixtureGit(cwd, args) {
 }
 
 function fixtureLiveReviewWork() {
-  const root = mkdtempSync(join(tmpdir(), 'autoloop-runtime-review-'));
+  // Git answers in realpaths, which a macOS TMPDIR symlink would not match.
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), 'autoloop-runtime-review-')),
+  );
   const initialized = spawnSync('git', [
     'init',
     '-q',
@@ -4383,7 +4387,9 @@ function selfTest() {
     && typeof initializeRouteState === 'function'
     && typeof validateRuntimeRun === 'function');
   check('public run validation accepts only an exact issued run', () => {
-    const issued = openRun();
+    // Name the host: an omitted one falls through to live detection, which
+    // passes only when the suite happens to run inside a recognized host.
+    const issued = openRun('claude');
     return issued.ok
       && validateRuntimeRun(issued.value)
       && !validateRuntimeRun({

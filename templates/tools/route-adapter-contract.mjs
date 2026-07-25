@@ -5330,8 +5330,12 @@ function linkedWorktreeGitEntrySelfTest() {
 }
 
 function gitProbeHardeningSelfTest() {
-  const root = mkdtempSync(join(tmpdir(), 'autoloop-git-probe-'));
-  const effects = mkdtempSync(join(tmpdir(), 'autoloop-git-effects-'));
+  // Git reports realpaths, so a macOS TMPDIR reached through a symlink would
+  // make the fixture root and Git's own answers disagree.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'autoloop-git-probe-')));
+  const effects = realpathSync(
+    mkdtempSync(join(tmpdir(), 'autoloop-git-effects-')),
+  );
   const fsmonitorMarker = join(effects, 'fsmonitor');
   const hookMarker = join(effects, 'post-commit');
   try {
@@ -5552,6 +5556,9 @@ function selfTest() {
     'OpenCode engine keeps provider networking while model-owned Git metadata is overlaid read-only',
     (() => {
       if (!existsSync('/usr/bin/bwrap')) return true;
+      // The sandbox is built around the resolved engine, so this case needs the
+      // engine installed. A host without it cannot exercise the contract.
+      if (executablePath('opencode') === null) return true;
       const checkout = process.cwd();
       const gitDir = realpathSync(resolve(
         checkout,
