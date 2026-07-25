@@ -27,6 +27,7 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import {
   basename,
+  dirname,
   isAbsolute,
   join,
   relative,
@@ -3839,6 +3840,9 @@ function darwinSandboxProfile({
   writableGitMetadata,
   unshareNetwork,
 }) {
+  // An interpreter needs its whole installation, not just the binary: dyld
+  // resolves libraries and resources relative to the install root.
+  const executableRoot = dirname(dirname(executable));
   const reads = [
     '/usr',
     '/System',
@@ -3846,9 +3850,10 @@ function darwinSandboxProfile({
     '/bin',
     '/sbin',
     '/private/etc',
+    '/private/var/db/dyld',
     '/private/var/db/timezone',
+    executableRoot,
     checkout,
-    executable,
     ...readablePaths,
   ];
   const writes = [
@@ -3863,7 +3868,7 @@ function darwinSandboxProfile({
     '(deny mach-priv-task-port)',
     '(allow signal (target self))',
     '(allow process-fork)',
-    `(allow process-exec (literal ${sbplPath(executable)}) (subpath "/usr") (subpath "/bin"))`,
+    `(allow process-exec (subpath ${sbplPath(executableRoot)}) (subpath "/usr") (subpath "/bin"))`,
     '(allow sysctl-read)',
     '(allow mach-lookup)',
     '(allow file-read-metadata)',
