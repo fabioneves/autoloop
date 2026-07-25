@@ -553,6 +553,10 @@ branch with the repository's required CI checks.
   fresh process behind the same broker-owned mount/credential boundary. A missing executable,
   authentication, role posture, or isolation fact fails capability preflight and does not activate
   fallback.
+- `bwrap` needs unprivileged user namespaces. Ubuntu 24.04 and later restrict them through AppArmor,
+  so an otherwise correct host reports `bwrap: setting up uid map: Permission denied` and no live
+  route. Load the distribution's `bwrap` AppArmor profile, or set
+  `kernel.apparmor_restrict_unprivileged_userns=0`, then rerun doctor.
 - An objective, one-shot gate command: test, build, lint, or a repository-specific composition.
   Prefer a sandboxed command with no live credentials, network, or production writes.
 - Optional `gate.quickCommand` for cheap inner-loop feedback. It never replaces the final full
