@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.40.1 · starting
+∞ setup · v0.40.2 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -19,7 +19,7 @@ If a tool call already happened, print the banner with the next output. Print it
 Setup is idempotent and has four modes:
 
 - Fresh install: `docs/agentic/STATE.md` is absent.
-- Migration: STATE contains schema `0.24.0`.
+- Migration: STATE contains a migratable schema older than `0.25.0` (`0.23.0` or `0.24.0`).
 - Reconfigure: STATE contains schema `0.25.0`.
 - Doctor: the invocation contains `doctor`; read-only and never writes.
 
@@ -155,9 +155,18 @@ paths/model identifiers, commands with control characters, or out-of-range caps 
 checks that each configured command's executable is discoverable and that the checklist exists at
 the audited base ref.
 
-## Schema `0.24.0` migration
+## Schema migration
 
-Use `migrateConfig024To025()` from `config-contract.mjs`; do not hand-transform JSON.
+Use `migrateProjectConfig()` from `config-contract.mjs`; do not hand-transform JSON and do not call
+a single version step directly. It reads the configuration's own version and applies the ordered
+chain until the current schema, so a caller never names a version pair. `MIGRATABLE_CONFIG_VERSIONS`
+lists what it accepts; anything else is a typed `UNSUPPORTED_CONFIG_VERSION` rather than a silent
+pass.
+
+From `0.23.0` it first adds the fields that version predates — `gate.quickCommand`,
+`caps.codeReviewRoundsPerUnit`, and the `engine.opencode` block — then continues through the
+`0.24.0` step below. A Jira tracker still requires supplemental facts, and the typed
+`MIGRATION_INPUT_REQUIRED` result names exactly which.
 
 - Remove `runtime.supportedHosts` and `engine.profile`.
 - Remove `caps.runWallClockHours`; v0.40 queue runs have no fixed whole-run clock ceiling.

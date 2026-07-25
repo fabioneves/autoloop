@@ -5,6 +5,23 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.40.2] - 2026-07-25
+
+### Added
+
+- `migrateProjectConfig()` migrates a repository configuration from its own version to the current
+  schema through an ordered chain, so callers never name a version pair. `MIGRATABLE_CONFIG_VERSIONS`
+  declares what it accepts and anything else is a typed `UNSUPPORTED_CONFIG_VERSION`.
+- A `0.23.0` migration step. That version predates `gate.quickCommand`,
+  `caps.codeReviewRoundsPerUnit`, and the `engine.opencode` block; all three are added
+  deterministically, then the existing `0.24.0` step completes the migration.
+
+### Fixed
+
+- A repository on schema `0.23.0` could not upgrade at all. Migration existed only as a single
+  hardcoded `0.24.0` to `0.25.0` hop, named for that pair in the function and in Setup's prose, so
+  any other version had nowhere to go and Runtime refused the repository outright.
+
 ## [0.40.1] - 2026-07-25
 
 ### Added
@@ -123,6 +140,7 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.1...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.2...HEAD
+[0.40.2]: https://github.com/fabioneves/autoloop/compare/v0.40.1...v0.40.2
 [0.40.1]: https://github.com/fabioneves/autoloop/compare/v0.40.0...v0.40.1
 [0.40.0]: https://github.com/fabioneves/autoloop/compare/v0.39.9...v0.40.0
