@@ -5,7 +5,7 @@ describe a terminal completed, blocked, or failed unit across stages, review rou
 it does not flatten that unit into one misleading route. The measurement tool never posts records
 to GitHub or sends them to another service.
 
-The pipeline is implemented in v0.40.2. This repository does not yet contain real legacy,
+The pipeline is implemented in v0.40.3. This repository does not yet contain real legacy,
 safe-system, or post-optimization samples, and it has no evidence-derived performance budget.
 Capture those records before making performance claims. Never synthesize a missing historical
 baseline or relabel a current run as `legacy-workflow`.

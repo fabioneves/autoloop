@@ -5329,6 +5329,15 @@ function linkedWorktreeGitEntrySelfTest() {
   }
 }
 
+// These cases prove a *shipped template* satisfies the adapter contract, which
+// only exists in the plugin tree. Vendored to tools/agentic/, `../` lands in
+// tools/ where no template lives, so the case is not applicable rather than
+// broken. Returning null lets each caller skip instead of throwing ENOENT.
+function reviewerTemplatePath(name) {
+  const candidate = fileURLToPath(new URL(`../${name}`, import.meta.url));
+  return existsSync(candidate) ? candidate : null;
+}
+
 function gitProbeHardeningSelfTest() {
   // The broker commit this asserts runs inside the authority sandbox, which
   // v0.40 verifies on Linux only. A host without that boundary cannot exercise
@@ -5487,15 +5496,12 @@ function selfTest() {
     'static reviewer artifacts reject symlinks before reading',
     (() => {
       const root = mkdtempSync(join(tmpdir(), 'autoloop-artifact-'));
+      const codexTemplate = reviewerTemplatePath('codex-reviewer-agent.template.toml');
+      if (codexTemplate === null) return true;
       try {
         const directory = join(root, '.codex', 'agents');
         mkdirSync(directory, { recursive: true });
-        symlinkSync(
-          fileURLToPath(
-            new URL('../codex-reviewer-agent.template.toml', import.meta.url),
-          ),
-          join(directory, 'autoloop-reviewer.toml'),
-        );
+        symlinkSync(codexTemplate, join(directory, 'autoloop-reviewer.toml'));
         return staticReviewerArtifact(root, 'codex') === false;
       } finally {
         rmSync(root, { recursive: true, force: true });
@@ -6904,6 +6910,15 @@ function selfTest() {
     'matching host ancestry, help text, auth text, and static artifacts are not effective capabilities',
     firstHost.ok
       && (() => {
+        const codexReviewerTemplate = reviewerTemplatePath(
+          'codex-reviewer-agent.template.toml',
+        );
+        const opencodeReviewerTemplate = reviewerTemplatePath(
+          'opencode-reviewer-agent.template.md',
+        );
+        if (codexReviewerTemplate === null || opencodeReviewerTemplate === null) {
+          return true;
+        }
         const root = mkdtempSync(join(tmpdir(), 'autoloop-capability-'));
         const previousPath = process.env.PATH;
         try {
@@ -6937,19 +6952,11 @@ function selfTest() {
           chmodSync(opencode, 0o700);
           writeFileSync(
             join(codexArtifact, 'autoloop-reviewer.toml'),
-            readFileSync(
-              fileURLToPath(
-                new URL('../codex-reviewer-agent.template.toml', import.meta.url),
-              ),
-            ),
+            readFileSync(codexReviewerTemplate),
           );
           writeFileSync(
             join(opencodeArtifact, 'autoloop-reviewer.md'),
-            readFileSync(
-              fileURLToPath(
-                new URL('../opencode-reviewer-agent.template.md', import.meta.url),
-              ),
-            ),
+            readFileSync(opencodeReviewerTemplate),
           );
           process.env.PATH = `${bin}:${previousPath}`;
           const facts = Object.fromEntries(
