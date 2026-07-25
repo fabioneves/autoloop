@@ -5,6 +5,25 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.40.1] - 2026-07-25
+
+### Added
+
+- An explicit `merge.unverifiedInvocationAcknowledged` opt-in. `ratified` and `auto` are no longer
+  refused outright: a repository that sets it to `true` records that it accepts a trigger no
+  supported transport can authenticate, and Runtime then opens the run. Without it, run open still
+  fails closed with `UNVERIFIABLE_INVOCATION_PROVENANCE`. Findings 10 and 11 remain open, so a
+  non-manual policy relies on configured base protection for its safety.
+
+### Fixed
+
+- Contract verification no longer depends on the checkout umask. The budget-policy reader accepted
+  only modes 600/640/644, so the same commit passed under umask 022 and failed under 002 — Git does
+  not track the group-write bit. It now rejects what actually matters: a world-writable policy file.
+- The 0.24.0 migration no longer describes a reset merge policy as "legacy", which read as though
+  `ratified` and `auto` had been retired. They are current values, and the warning now names the
+  acknowledgement that restores them.
+
 ## [0.40.0] - 2026-07-25
 
 ### Added
@@ -104,5 +123,6 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.0...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.1...HEAD
+[0.40.1]: https://github.com/fabioneves/autoloop/compare/v0.40.0...v0.40.1
 [0.40.0]: https://github.com/fabioneves/autoloop/compare/v0.39.9...v0.40.0
