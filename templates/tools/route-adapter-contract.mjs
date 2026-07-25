@@ -4163,8 +4163,11 @@ export function probeProcessAuthorityIsolation(cwd = process.cwd(), diagnose = n
       report(`platform ${process.platform} has no verified process-authority sandbox`);
       return false;
     }
-    if (!existsSync('/usr/bin/bwrap')) {
-      report('/usr/bin/bwrap is absent');
+    const required = process.platform === 'darwin'
+      ? '/usr/bin/sandbox-exec'
+      : '/usr/bin/bwrap';
+    if (!existsSync(required)) {
+      report(`${required} is absent`);
       return false;
     }
     secureBrokerStateDirectory();
