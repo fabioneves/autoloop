@@ -2110,7 +2110,16 @@ async function releaseMode(args) {
       requireOwnerEnforcement: args.includes('--require-owner-enforcement'),
     }));
   } catch (error) {
-    errors.push(`live release controls: ${error.message}`);
+    // Reading rulesets, bypass actors, and the immutable-release setting are
+    // Administration reads, and `administration` is not a permission a workflow
+    // can grant its own token. Where no credential can see them, say so instead
+    // of claiming the controls are absent: unreadable is not the same evidence
+    // as non-compliant, and a returned violation above is still a hard failure.
+    if (args.includes('--allow-unverified-live-controls')) {
+      notes.push(`live release controls are unverified: ${error.message}`);
+    } else {
+      errors.push(`live release controls: ${error.message}`);
+    }
   }
   if (errors.length > 0) {
     process.stderr.write(

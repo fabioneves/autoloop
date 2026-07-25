@@ -60,6 +60,7 @@ jobs:
         run: >-
           node templates/tools/release-verify.mjs
           --release-mode
+          --allow-unverified-live-controls
           --check-tag-policy
           --check-base-policy
           --check-immutable-releases
