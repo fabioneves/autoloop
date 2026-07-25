@@ -1,6 +1,6 @@
 # Autoloop — consolidated review and remediation plan
 
-- **This document:** v10, 2026-07-24
+- **This document:** v13, 2026-07-25
 - **Reviewed tree:** v0.39.9 at `9dbc5b6`
 - **Toolchain checked:** Codex CLI 0.145.0
 - **Review date:** 2026-07-23; efficiency, architecture, and v9/v10 corrections 2026-07-24
@@ -14,6 +14,30 @@
   `005e1d4996eb1a69151f5610beecbe90fc7b496215917b7c93680e47a730ff3f`
 - **v10 terminology input:** verified consolidated review v9, SHA-256
   `4c4c1852774c2c6b086e696afdfe2eefdaef6c6be8a142a072a3427d00e80549`
+- **v11 implementation security correction:** a fresh authority-isolation review found that the
+  proposed allow-by-default macOS `sandbox-exec` profile hid the broker path but did not prove
+  process observation and IPC isolation. v0.40 therefore reports process routes unavailable on
+  macOS instead of advertising an unproved boundary.
+- **v12 implementation security correction:** no supported non-Linux host exposes a non-forgeable
+  private channel that proves native child identity, effective tools, and write-denial effects to
+  the Runtime broker. v0.40 therefore makes live execution Linux-only. Every non-Linux route probe
+  fails with `UNVERIFIABLE_NATIVE_PROVENANCE` before challenge or scratch creation; macOS CI is
+  portable static verification only. Two-phase native probing remains synthetic test scaffolding,
+  not an operational route.
+- **v13 implementation security correction:** supported same-UID prompt hooks cannot authenticate
+  who requested a run. Their immutable `intentProvenance` is therefore
+  `best-effort-unverified`, never private, user-attributable, or merge authority. v0.40 opens such
+  runs only under `merge.policy: manual`; continuation cannot upgrade provenance; lifecycle work
+  still requires independently fetched pre-existing `loop-ready` or loop-owned-PR authority; the
+  guard forbids the loop from applying `loop-ready`, merging, or publishing tags/releases.
+  The selected engine's installed authenticated capability is standing cost authorization for
+  that engine only; fallback requires its own independently authenticated capability. A prompt
+  selector is only an unverified routing preference. All five steady-state routes are
+  broker-launched processes inside the Linux boundary: native describes a host/engine relationship,
+  not an in-session child topology. Every typed writer receives writable checkout files and
+  read-only Git metadata; after one valid complete result, the offline broker makes and verifies
+  the sole direct-child commit. The OpenCode model further receives only checkout-file tools. No
+  route receives Git, GitHub, or SSH remote credentials or host IPC sockets.
 - **Target release:** Autoloop v0.40.0; repository configuration schema v0.25.0
 - **Amendment provenance:** the efficiency workstream was added after the six-round consolidation;
   the follow-up verification corrected both findings and efficiency claims. The native-first,
@@ -31,13 +55,15 @@ contract drift identified by the review itself.
 The findings remain verified observations about v0.39.9. The architecture section is a prospective
 decision for v0.40.0, not a claim that the six-round review proved persisted host/profile
 configuration inherently wrong. The review proved inconsistency; the v0.40.0 decision chooses
-invocation-scoped routing as the remedy.
+invocation-scoped routing as the remedy. The v11–v13 corrections narrow platform capability
+without changing the closed route catalog: all five routes are live-verifiable on Linux, while
+non-Linux live execution fails closed.
 
 ## Decision
 
-Autoloop has a strong supervised-workflow design: exact-head evidence, fresh reviewer threads,
-bounded convergence, explicit trust rules, and useful recovery after a draft PR exists. It is not
-ready for unattended merging.
+Autoloop has a strong supervised-workflow design: exact-head evidence, fresh broker-launched
+reviewer processes, bounded convergence, explicit trust rules, and useful recovery after a draft
+PR exists. It is not ready for unattended merging.
 
 Use `merge.policy: manual` today, with:
 
@@ -50,14 +76,20 @@ Manual mode prevents findings 9–12 from automatically landing code. It does no
 1–8. In particular, finding 4 can bypass the human-merge boundary when effective no-bypass base
 protection is absent.
 
-There are two deployment bars:
+v13 makes that recommendation executable rather than advisory: every supported v0.40 prompt
+transport is `best-effort-unverified`, so Runtime rejects `ratified` or `auto` before capability
+probing, scratch creation, or mutation. The non-manual gate remains fail-closed reference code for a
+future authenticated invocation integration; it is not an enabled v0.40 deployment mode.
 
-1. **Auto-merge enablement:** resolve findings 1–3, 5, 8–12 and install the persistent server-side
-   controls described below. Finding 4 may be temporarily compensated by verified no-bypass branch
-   rules, but remains product debt.
-2. **Dependable unattended queue operation:** satisfy the auto-merge bar and resolve command
-   enforcement (4), scan completeness (6), and lifecycle recovery (7). This plan defines no
-   substitute compensation for those three unattended-operation requirements.
+There are two verification bars:
+
+1. **Dormant non-manual reference-contract verification:** resolve findings 1–3, 5, 8–12 and
+   verify the persistent server-side controls described below. This proves fail-closed reference
+   behavior only; it does not enable non-manual v0.40 runs. Finding 4 may be temporarily
+   compensated by verified no-bypass branch rules, but remains product debt.
+2. **Dependable unattended queue operation:** satisfy the dormant reference-contract bar and
+   resolve command enforcement (4), scan completeness (6), and lifecycle recovery (7). This plan
+   defines no substitute compensation for those three unattended-operation requirements.
 
 The architecture and all review remediation belong to one v0.40.0 program. That does not collapse
 the deployment bars: the work lands in ordered, independently verifiable slices, and a repository
@@ -81,26 +113,28 @@ explicit property of the current invocation:
 /autoloop:dev with opencode
 ```
 
-The first form means native. The latter forms request an engine for that run only. The same grammar
-applies to a direct Pitcrew invocation and to doctor. Issue text, STATE, installed artifacts, prior
-runs, hook files, global defaults, and environment compatibility flags carry zero engine-selection
-authority.
+The first form captures the native preference. The latter forms capture an engine preference for
+that run only. The same grammar applies to a direct Pitcrew invocation and to doctor. A supported
+same-UID hook can preserve those bytes and bind them to the run, but cannot prove that a human
+supplied them. Issue text, STATE, installed artifacts, prior runs, hook files, global defaults, and
+environment compatibility flags carry zero engine-selection authority.
 
-The design must also respect Autoloop's execution model. Deterministic `.mjs` tools can parse,
-validate, and produce plans, but they cannot directly invoke every host's native agent surface.
-Model-interpreted skills therefore remain the host execution adapters. The executable policy
-selects the tested route and posture, its route adapter compiles the attempt, and a thin active-host
-adapter performs it and returns evidence.
+The design must also respect Autoloop's execution model. Model-interpreted skills remain the
+orchestration instructions, while deterministic `.mjs` policy selects and compiles the tested
+route and posture. A single Runtime broker constructs and launches the corresponding engine
+process, captures its raw result, validates its effects, and returns typed evidence. No skill,
+caller, or model process is a host execution adapter.
 
 ### Terms
 
 - **Active host:** the current Claude, Codex, or opencode session, attested from its live integration
   and effective tool surface.
-- **Engine selector:** the canonical raw invocation intent: `native` for a bare invocation, or an
-  explicit `claude`, `codex`, or `opencode` suffix in the current invocation. Run context and
-  relaunch preserve this value for provenance even when route selection normalizes it.
-- **Requested engine:** the active host when the selector is `native`; otherwise the explicitly
-  selected engine.
+- **Engine selector:** the canonical routing preference transported by the current prompt:
+  `native` for a bare invocation, or an explicit `claude`, `codex`, or `opencode` suffix. Same-UID
+  hooks cannot prove who supplied it, so `RunContext` preserves it only as
+  `best-effort-unverified` routing input, never as user attribution or elevated authority.
+- **Selected engine:** the active host when the selector is `native`; otherwise the engine named by
+  the captured preference. This is a routing decision, not proof of a user request.
 - **Route:** the tested execution path selected for one stage. A native route means that the active
   host and effective engine are the same; it does not require an in-session process.
 - **Capability:** preflight evidence that a route and its isolation contract can run.
@@ -114,7 +148,7 @@ interface is small and all values crossing it are serializable:
 ```ts
 interface RuntimeContract {
   open(input: {
-    invocation: string;
+    intentRecord: CapturedIntentRecord;
     hostEvidence: HostEvidence;
     config: ProjectConfig;
     continuation?: RelaunchEnvelope;
@@ -122,6 +156,7 @@ interface RuntimeContract {
 
   plan(input: {
     run: RunContext;
+    config: ProjectConfig;
     work: WorkContext;
     laneProof: LaneProof;
     capabilities: CapabilitySnapshot;
@@ -142,8 +177,10 @@ interface RuntimeContract {
 }
 ```
 
-`open()` parses and freezes run intent. `plan()` selects exactly one deterministic dispatch plan or
-returns one typed error. `observe()` owns retry, outage, recovery-probe, and fallback transitions.
+`open()` parses and freezes run intent. `plan()` first requires the validated configuration
+fingerprint to equal `run.configFingerprint`, then derives only the selected role and actual
+route's adapter tuning and returns exactly one deterministic dispatch plan or one typed error.
+`observe()` owns retry, outage, recovery-probe, and fallback transitions.
 `finish()` retains the existing stop and bounded relaunch guarantees. A thin compatibility wrapper
 may preserve the current `run-scope.mjs` command surface during migration, but it contains no
 independent policy.
@@ -162,7 +199,7 @@ lane classification, GitHub lifecycle, review judgment, gate execution, recovery
 authorization.
 
 The closed catalog binds each supported route to a route adapter. The route adapter owns the
-security and artifact contract; the active-host adapter remains thin:
+security and artifact contract; the Runtime broker owns the only execution seam:
 
 ```ts
 interface RouteAdapter {
@@ -173,30 +210,55 @@ interface RouteAdapter {
   classify(raw: RawAttemptResult): DispatchAttemptOutcome;
 }
 
-interface HostAdapter {
+interface ExecutionBroker {
   attestHost(): HostEvidence;
-  probe(requirements: readonly CapabilityRequirement[]): CapabilitySnapshot;
+  probe(route: RouteId, requirements: readonly CapabilityRequirement[]): CapabilitySnapshot;
   execute(attempt: DispatchAttemptPlan): RawAttemptResult;
 }
 ```
 
 Route adapters own required repository artifacts, static validation, doctor requirements, minimum
 versions, exact launch flags and prompt transport, collection/schema validation, effective
-isolation evidence, and single-attempt classification. Host adapters attest the host and perform
-the route adapter's compiled probe/attempt through the real host tool surface. Neither adapter
-chooses a route or improvises a retry/fallback.
+isolation evidence, and single-attempt classification. The broker attests the host and performs
+the route adapter's compiled probe/attempt through the closed process boundary. Neither the route
+adapter nor the child chooses a route or improvises a retry/fallback.
+
+Execution authorization is process-bound. One broker keeps signing keys only in memory and exposes
+the closed typed operation sequence, never a generic signing endpoint. Inputs must be artifacts
+previously issued by that broker; attempt authorization is exact and one-use, so a worker may
+submit its own terminal evidence but cannot re-attest, open/plan a run, compile another role,
+authorize a future reviewer, or cross sessions. Registry claims are atomic and bound to a live
+broker PID/start identity and owned socket. After a durable prompt intent, one exact prepared
+continuation target may receive a broker-issued target attestation while the durable state is
+opened or prompted. Exact target Runtime open and the prompted transition may occur in either
+order; the source run/session and registry are revoked only after both. A target stop before that
+join is retained without tearing down the source and completes teardown when the prompted
+transition arrives. The same broker/socket/PID and target authority otherwise survive the
+transfer. The target's terminal stop destroys remaining clients, removes the final
+registry/socket state, and zeroes keys.
+
+Every process adapter requires `host.process-authority-isolation`. Doctor executes the same smoke
+used at launch: Linux requires usable `/usr/bin/bwrap`, a hidden broker directory, a fresh PID
+namespace, a private home and IPC namespace, and closed selective mounts. v0.40 has no verified
+process-authority sandbox on macOS and reports those selected process routes unavailable; a later
+macOS implementation requires a separately reviewed closed-world process-observation and IPC
+boundary. Executable presence alone is not evidence. The same process-boundary requirement applies
+to native and cross-engine adapters. v0.40 rejects every non-Linux live route probe before issuing
+an attempt challenge or creating scratch state. macOS CI proves portable static contracts, not
+live route availability.
 
 `RuntimeContract.observe()` reduces single-attempt outcomes, selects any retry or fallback, and
-assembles the final dispatch receipt with attempt count, requested and actual routes, adapter,
-model identity when observable, isolation/effect evidence, outage transition, fallback, and
-degradation. An adapter cannot self-authorize a second attempt.
+assembles the final dispatch receipt with attempt count, captured selector and provenance, selected
+and actual routes, adapter, model identity when observable, isolation/effect evidence, outage
+transition, fallback, and degradation. It never describes the selector as an authenticated user
+request. An adapter cannot self-authorize a second attempt.
 
 ### Closed route catalog
 
 v0.40.0 supports exactly the routes that have an explicit adapter, isolation contract, doctor
 contract, and fixtures:
 
-| Active host | Requested engine | Route |
+| Active host | Captured engine preference | Route |
 |---|---|---|
 | Claude | Claude | Native Claude |
 | Codex | Codex | Native Codex |
@@ -205,7 +267,7 @@ contract, and fixtures:
 | Claude | opencode | Claude → fresh `opencode run` |
 
 Claude→opencode is retained because it is an existing v0.39.9 route; v0.40.0 changes its selection
-from a persisted profile to explicit invocation intent rather than removing the capability.
+from a persisted profile to a captured invocation preference rather than removing the capability.
 
 The other four host/engine pairs return `UNSUPPORTED_ROUTE`. Recognizing an engine name does not
 authorize an untested pairing. Naming the active engine explicitly normalizes the selected route to
@@ -213,44 +275,59 @@ native without rewriting the raw selector stored in `RunContext`. New routes are
 their adapter, security contract, doctor checks, and fixtures; capabilities do not dynamically
 compose arbitrary pairings.
 
-Native describes the host/engine relationship, not process topology:
+Native describes the host/engine relationship, not process topology. Every steady-state route is
+process-backed and broker-launched:
 
-- Native Claude uses fresh Agent-tool threads.
-- Native Codex implementation uses a fresh writable worker. Review primarily uses a fresh external
-  `codex exec --sandbox read-only`; an in-session reviewer is a disclosed degraded fallback only.
-- Native opencode uses fresh task agents and the deny-stripped typed reviewer for review.
-- Claude→Codex uses fresh `codex exec` processes with role-appropriate sandboxing.
-- Claude→opencode uses fresh `opencode run` processes and the typed reviewer for review.
+- Native Claude uses fresh non-persistent Claude print processes with a broker-owned structured
+  output schema and role-specific tool posture.
+- Native Codex uses fresh `codex exec` processes with workspace-write implementation and read-only
+  review postures.
+- Native opencode uses fresh `opencode run --pure` processes and the deny-stripped typed reviewer.
+- Claude→Codex and Claude→opencode use the same engine-specific process contracts.
 
-For native Codex only, this explicitly supersedes the 2026-07-21 maintainer decision to use
-host-session reviewers for docs/small lanes (`skills/dev/SKILL.md:410–430`). The route remains
-native, but reviewer isolation now determines process topology: a healthy reviewer uses fresh
-external `codex exec --sandbox read-only`. Claude and opencode retain their safe host-native lane
-adapters. This is a deliberate safety-over-cost change, not an accidental reinterpretation of the
-standing decision.
+The Linux broker constructs the command, environment, sandbox, result channel, and classification.
+The child cannot choose a transcript path or submit an already-classified attempt. Its mount
+namespace exposes only the route's required engine/toolchain/runtime paths, provider authentication
+material, checkout, and broker-designated scratch; home, `/run`, `/tmp`, `/var/tmp`, and `/dev` are
+private, and host IPC sockets and unrelated host files are absent. Writer checkout files remain
+writable while Git metadata is read-only on every Claude, Codex, and OpenCode route.
+After one valid complete typed result, an offline broker subprocess stages, creates the sole
+direct-child commit, and verifies the exact checkout. The OpenCode writer further has a closed
+model-callable allowlist of checkout-scoped read/edit/glob/grep/list. Sealed Git configuration
+disables credential helpers and remote
+authentication; terminal credential prompts, GitHub CLI credentials, SSH keys/agents, and ambient
+auth variables are absent. Reviewers receive a read-only checkout. The trusted OpenCode engine may
+retain provider authentication and network transport for inference, but provider output and every
+model-callable tool remain untrusted and cannot expose that transport. Remote repository authority
+is never delegated to a model process.
+
+This supersedes both the 2026-07-21 native-Codex host-session-reviewer decision and v12's retained
+Claude/opencode host-native optimization. The safety boundary is uniform across engines even when
+that costs an extra process dispatch.
 
 ### Stage, lane, and convergence policy
 
-“Requested” below means the invocation-selected route; “native” means the safe active-host route.
+“Selected” below means the route derived from the captured invocation preference; “native” means
+the safe active-host/engine route.
 Lane inputs are mechanical proofs issued by the configured-base-aware classifier, not prose
 assertions.
 
 | Stage | Docs lane | Small lane | Full lane |
 |---|---|---|---|
-| Plan review | Native | Native | Requested |
-| Implementation | Native | Requested | Requested |
-| Code review round 1 | Native | Native after final-diff proof | Requested |
+| Plan review | Native | Native | Selected |
+| Implementation | Native | Selected | Selected |
+| Code review round 1 | Native | Native after final-diff proof | Selected |
 | Code review round 2+ | Native | Native | Native |
 | Bounded doubt/judgment review | Native | Native | Native |
 
 Pitcrew uses the same resolver. In v0.40.0 its revision work is unconditionally full lane;
-therefore revision implementation and its first independent full review use the requested route,
+therefore revision implementation and its first independent full review use the selected route,
 while later convergence uses native. Adding narrower Pitcrew lanes is a separate policy decision,
 not an inference from Dev's table. A final Dev diff that loses docs/small eligibility is promoted
 to the full route. Uncertain Dev lane evidence fails closed to full.
 
 A rare bounded doubt/judgment review always uses the safe native reviewer adapter, regardless of
-the requested cross-host engine, because it reviews an in-flight decision and has no later
+the selected cross-host engine, because it reviews an in-flight decision and has no later
 independent review. It is one fresh read-only dispatch with the native adapter's isolation and
 fallback contract. It is not an outage recovery probe; if no safe native review route exists, stop.
 
@@ -275,22 +352,23 @@ Probe only the selected route and its reachable fallback, cache the result for t
 capability fingerprint, and invalidate it when relevant evidence changes.
 
 - Missing executable, authentication, minimum version, required artifact, or effective isolation is
-  a capability failure. An explicit selector is never silently ignored.
+  a capability failure. An explicit selector is never silently ignored. Authentication of an
+  installed selected engine is standing cost authorization for that engine only.
 - A route that passed preflight but later dies may enter the bounded outage state after the
   documented retry.
 - Outage fallback uses a safe native route only when its isolation contract is satisfied. Every
-  substitution is disclosed and never rewrites run intent.
+  substitution is disclosed and never rewrites run intent. A fallback engine must independently
+  pass its authenticated capability probe; failure of the selected engine never grants standing
+  cost authority for a different engine.
 - Sandbox initialization failure is an environment/config failure, not an engine outage.
-- Typed-child, `agent_type`, and `fork_turns` checks apply only when the degraded native-Codex
-  in-session fallback is reachable or selected. A healthy external-exec route cannot fail because
-  an unused fallback feature is unavailable.
 - A writer with uncertain or partial effects is reconciled through lifecycle recovery, never
   duplicated by a blind retry.
 - No review is skipped. If neither the selected route nor an accepted safe fallback is available,
   stop with a typed error.
 
 Capability and outage state are run-local evidence. They are not standing configuration and do not
-change the requested engine. Dispatch receipts are audit evidence, not future routing authority.
+change the captured preference or selected engine. Dispatch receipts are audit evidence, not
+future routing authority.
 
 ### Configuration, Setup, and doctor
 
@@ -302,7 +380,10 @@ numeric caps—and removes routing authority:
 - delete `engine.profile`;
 - preserve valid non-null role tuning only through the explicit adapter-scoped field map below;
   options tune a selected route and never select one;
-- reject requested engine, resolved route, capability, and outage fields in standing configuration.
+- reject captured/selected engine, resolved route, capability, and outage fields in standing
+  configuration;
+- require `merge.policy: manual`; `ratified` and `auto` remain dormant reference-policy values and
+  fail at `RuntimeContract.open()` before capability probing, scratch creation, or mutation.
 
 Migration maps only role tuning that was effective under the valid 0.24.0 profile/host shape:
 
@@ -370,19 +451,19 @@ The prompt remains one exact canonical template. The envelope accepts only fixed
 numbers, never arbitrary instructions. `selector` stores the canonical raw selector from
 `RunContext`: a bare invocation remains `native`, while an explicit same-host selector remains
 explicit even though its route is native. A same-run relaunch preserves selector and scope,
-re-attests the active host, rejects a host mismatch, and re-probes capabilities. A new human
-invocation creates new intent. Old v1 markers are rejected or cleared rather than interpreted
-through a retired profile. Recovery of an existing claim uses the new invocation's intent; a
-historical route is evidence, not an obligation.
+re-attests the active host, rejects a host mismatch, and re-probes capabilities. A newly captured
+invocation creates new `best-effort-unverified` intent. Old v1 markers are rejected or cleared
+rather than interpreted through a retired profile. Recovery of an existing claim uses the newly
+captured invocation's intent; a historical route is evidence, not an obligation.
 
 ### Alternatives considered
 
 1. **Keep `supportedHosts` and `engine.profile`.** Rejected because repository configuration would
    continue to carry session intent, host switching would still require reconciliation, and
    Setup/doctor/runtime could continue to disagree.
-2. **Build one effectful controller that performs every dispatch.** Rejected because native host
-   agent surfaces are not all callable from one Node process. The deterministic module produces a
-   plan; host skills remain thin execution adapters.
+2. **Let skills or host-agent surfaces execute plans directly.** Rejected because that creates a
+   second execution seam. Skills orchestrate only; the Runtime broker launches every compiled
+   route process.
 3. **Dynamically compose arbitrary host, engine, and transport adapters.** Deferred. It offers
    future extensibility but adds registry and ambiguity machinery and can imply support for
    untested pairings. v0.40.0 uses a closed, tested catalog.
@@ -444,6 +525,11 @@ finding 12 and must not be described as universally fail-closed.
 `push → verify remote head → wait/classify CI → mark delivered`
 
 Represent pending checks as an explicit `awaiting-ci` state.
+
+The v0.40 delivery contract obtains the complete required-check policy from canonical
+`.autoloop/ci-policy.json` at the exact remote-head Git object and matching checkout. It derives
+the set and fingerprints itself, rejects missing/stale/malformed/wrong-head/symlinked sources and
+caller-set mismatch, and treats the policy path as human-authorized and merge-protected.
 
 ### 2. A verified late Critical/Major can escape convergence
 
@@ -540,16 +626,16 @@ provide immutable run intent plus stage, a mechanically issued lane proof, round
 identity, and observed capability/outage facts. The module returns one tested dispatch plan or one
 typed error; no caller retains an independent host/profile table.
 
-Preserve the reviewed isolation contracts: external read-only Codex review, the typed deny-stripped
-opencode reviewer, and fresh Claude Agent-tool review. Native Codex review remains external
-`codex exec --sandbox read-only` when healthy, including docs/small lanes; native does not imply a
-writable in-session reviewer. Typed-child checks (`agent_type`, parent overrides, effective child
-surface, and `fork_turns`) apply only to the degraded native-Codex fallback that needs them.
+Preserve the reviewed role isolation while moving every healthy route behind the uniform
+process/broker boundary: read-only review checkouts, deny-stripped opencode reviewer tools,
+structured Claude/Codex verdicts, fresh context, and no writer/reviewer identity collision.
+Host-session children and caller-submitted native classifications are not steady-state or degraded
+fallback routes in v0.40.
 
-Routes not selected by the current invocation receive static artifact validation and, at most, a
-note that effective capability remains unverified. If prompt-level writable review remains an
-accepted availability tradeoff, call it degraded and apply the integrity checks; do not
-simultaneously claim that every accepted native review is OS-sandboxed.
+Routes not selected by the captured routing preference receive static artifact validation and, at
+most, a note that effective capability remains unverified. Fallback requires independently proved
+standing capability for the fallback engine; failure of one authenticated engine cannot authorize
+spend on another.
 
 ### 6. Scan incompleteness permits unsupported absence conclusions
 
@@ -598,10 +684,10 @@ OID, claim commit, head OID, and phase. Restart must independently reconcile:
 
 Use a recoverable two-phase terminal record: persist the complete pre-merge evidence first, then
 merge, then idempotently append the outcome. A later run must backfill a missing terminal outcome.
-Record requested and actual routes as audit evidence, never as recovery authority. A same-chain
-relaunch preserves its selector through the v2 envelope; a new human invocation and orphan recovery
-use the new invocation's intent. Neither may infer a route from the retired profile or an old run
-record.
+Record selected and actual routes as audit evidence, never as recovery authority. A same-chain
+relaunch preserves its selector through the v2 envelope; a newly captured invocation and orphan
+recovery use that invocation's `best-effort-unverified` intent. Neither may infer a route from the
+retired profile or an old run record.
 
 ### 8. Configured-base and protected-path classification are inconsistent
 
@@ -784,7 +870,7 @@ The reviewed tree contains large model-facing contracts:
 
 The initial review estimated that a Dev invocation can begin with roughly 30,000 tokens of protocol
 before issue and code context. Treat that as a hypothesis, not a budget: source bytes are not
-additive, and the active host, requested engine, route, and lane determine what is actually
+additive, and the active host, selected engine, route, and lane determine what is actually
 injected. Instrument the real payload.
 
 The measurement deliverable is a versioned capture pipeline, not a larger claim for `stats.mjs`.
@@ -794,10 +880,12 @@ needed to recompute aggregates after correcting an estimator. Record instrumenta
 unavailable host/provider fields instead of inferring them.
 
 Every record must identify the repository revision, workload, active host, engine selector,
-requested engine, requested and actual route, intent source, adapter, degradation, stage, round,
+selected engine, selected and actual route, intent source and provenance, adapter, degradation, stage, round,
 lane, merge policy, base-freshness strategy, configuration/capability fingerprint, outage
 transition, and measurement-pipeline version. Legacy v0.39 records retain the retired profile only
-as `legacyProfile`. Capture comparable samples for each route in the v0.40.0 closed catalog and each
+as `legacyProfile`. Serialized schemas may retain compatibility keys named `requestedEngine` and
+`requestedRoute`; presentation labels them captured/selected and never implies user attribution.
+Capture comparable samples for each route in the v0.40.0 closed catalog and each
 representative full, small, and docs lane that can actually run in the test environment:
 
 - time to first eligible issue selection;
@@ -811,7 +899,7 @@ representative full, small, and docs lane that can actually run in the test envi
 
 `stats.mjs` is only the coarse label-gap timing slice. It cannot currently separate active work from
 engine/CI/human waits, calculate p95, capture tokens/calls/mutations/dispatches, stratify by
-active-host/requested-engine/actual-route/lane, or measure time to first selection. Fix its
+active-host/selected-engine/actual-route/lane, or measure time to first selection. Fix its
 even-count median; compute p95 in it or the composite pipeline; do not use it as the sole baseline
 authority. Until finding 3 repairs its claim parser, supply an explicitly validated issue cohort
 rather than relying on default discovery, which is capped at 100 without completeness proof.
@@ -845,15 +933,13 @@ Treat these as performance invariants while implementing the findings:
   Pitcrew should consume one typed, generation-tagged repository snapshot rather than rebuild state
   through serial model-mediated calls. The generation tag is a freshness boundary, not a claim that
   the GitHub facts were fetched atomically.
-- **Depth-one overlap.** While one unit waits on an engine or isolated host thread, stage at most
+- **Depth-one overlap.** While one unit waits on an engine process, stage at most
   one next unit through read-only premise, plan, and plan review. Checkout, claim, implementation,
   gate, and terminal mutations remain single-flight.
 - **Mechanically selected docs and small lanes.** Preserve the stage/lane table's docs/small
   policy, final-diff reclassification, escalation checks, reviewer independence, and full final
-  gate. Their savings are host-dependent: Claude and opencode retain safe cheaper host-native
-  reviews, while native Codex deliberately replaces the former host-session reviewer optimization
-  with external read-only `codex exec`. Do not claim zero engine dispatches for native-Codex
-  docs/small review; measure that safety-over-cost change separately.
+  gate. Every engine now pays for a fresh process dispatch; measure that uniform safety boundary
+  instead of claiming a zero-dispatch host-session optimization.
 - **One deep review per artifact.** Keep one plan-review dispatch and full-diff code-review round 1;
   use fresh fix-delta reviews for convergence and the human-block path for a verified late
   Critical/Major.
@@ -902,7 +988,7 @@ Treat these as performance invariants while implementing the findings:
 ### Performance acceptance
 
 For every optimization, record the bottleneck, comparable before/after samples, the affected active
-host/requested engine/actual route/lane, and the regression guard. A change is a performance
+host/selected engine/actual route/lane, and the regression guard. A change is a performance
 improvement only when the target metric improves without increasing false absence conclusions,
 stale authorization, unreviewed scope, failed recovery, or gate escapes.
 
@@ -910,7 +996,8 @@ After the safe-system baseline, set explicit budgets for prompt tokens, time to 
 per-unit API requests/subprocesses/mutations, and p50/p95 unit time. Keep budgets mode-aware: a
 cross-host route and a native route do not have the same cost profile. Make the benchmark workload
 repeatable across the closed route catalog, with unavailable live-host coverage reported
-explicitly. Performance work does not delay containment or lower the auto-merge bar.
+explicitly. Performance work does not delay containment or lower the dormant non-manual
+reference-contract bar.
 
 ## Remediation order
 
@@ -984,7 +1071,8 @@ merge-queue server strategy (findings 9–12).
 Route verified out-of-delta Critical/Major findings to the existing human-block state without
 changing delta convergence (finding 2).
 
-Auto-merge may be reconsidered only after Steps 0–5 are installed and verified.
+Steps 0–5 verify dormant reference contracts only. v0.40 remains manual-only; enabling non-manual
+merge requires a separately authenticated invocation transport in a future release.
 
 ### Step 6 — harden command enforcement
 
@@ -1026,17 +1114,26 @@ mutations, and unused overlap. Add regression measurement for each accepted opti
 ## Acceptance criteria for implementation
 
 The bars below are cumulative. Passing the architecture bar proves migration and routing
-correctness; it does not close unrelated findings. Automated merge remains disabled until the
-architecture and auto-merge bars pass. Dependable unattended operation requires the first three
-bars; full plan completion requires all four.
+correctness; it does not close unrelated findings. v0.40 remains manual-only even when its dormant
+non-manual reference contracts pass their verification bar. Enabling an authenticated future
+non-manual transport is a separate release decision. Dependable unattended operation requires the
+first three bars; full plan completion requires all four.
 
 ### v0.40.0 architecture and migration
 
 - Release manifests, cached-skill banners, and documentation identify Autoloop v0.40.0; migrated
   repository STATE uses configuration schema v0.25.0.
-- Bare Dev, Pitcrew, and doctor invocations select the safe native route on Claude, Codex, and
-  opencode. Explicit Claude→Codex and Claude→opencode invocations select their cross-host routes.
-  The other four host/engine pairs fail before mutation with `UNSUPPORTED_ROUTE`.
+- On Linux, bare Dev, Pitcrew, and doctor invocations select the safe native route on Claude,
+  Codex, and opencode. Captured Claude→Codex and Claude→opencode selectors select their cross-host
+  routes. All five routes use fresh broker-launched processes; no steady-state host-session child
+  path exists. The other four host/engine pairs fail before mutation with `UNSUPPORTED_ROUTE`.
+  On non-Linux hosts every live route probe fails before attempt challenge or scratch creation
+  with `UNVERIFIABLE_ISOLATION`; macOS CI is static portability verification.
+- Every prompt-hook record and accepted run carries immutable
+  `intentProvenance: "best-effort-unverified"`. Continuations preserve it exactly and cannot
+  upgrade it. `ratified` and `auto` fail at run open with
+  `UNVERIFIABLE_INVOCATION_PROVENANCE` before capability probing, scratch creation, or mutation.
+  Forged current-format same-UID records cannot gain lifecycle, merge, tag, or release authority.
 - Schema 0.25.0 validates every standing runtime-required value and rejects persisted
   `runtime.supportedHosts`, `engine.profile`, requested engine, resolved route, capability, or
   outage authority. Retained adapter options cannot select a route.
@@ -1048,7 +1145,7 @@ bars; full plan completion requires all four.
 - One Setup migration reconciles the safe repository artifacts for all three hosts. Switching the
   active native host afterward requires no repository reconfiguration.
 - Setup, doctor, Dev, and Pitcrew use the same `ProjectContract`, `RuntimeContract`, route catalog,
-  and route/host adapter contracts. No consumer retains an independent host/profile matrix or
+  route-adapter contracts, and execution broker. No consumer retains an independent host/profile matrix or
   grep-shaped route decision.
 - Exhaustive fixtures cover all active-host × selector × Dev/Pitcrew flow × stage × lane × round ×
   capability/outage inputs, including bounded doubt/judgment review. Each returns one deterministic
@@ -1059,26 +1156,40 @@ bars; full plan completion requires all four.
   auto-merge criterion.
 - Pitcrew fixtures prove unconditional full-lane revision implementation and first review, native
   convergence, shared `RunContext` when called from Dev, and fresh intent when invoked standalone.
-- Native Codex review remains fresh external OS-enforced read-only review when healthy in full,
-  docs, small, and convergence routes. Fixtures and operational prose explicitly mark the prior
-  native-Codex host-session docs/small decision as superseded. Unused degraded-spawn capabilities
-  are not evaluated.
-- The shipped Codex and opencode reviewer artifacts pass their shared adapter doctor contracts.
+- Native Claude, Codex, and opencode attempts remain fresh OS-confined processes. Every reviewer
+  posture has a read-only checkout. Every writer has checkout-file write authority and read-only
+  Git metadata; the offline broker creates the sole direct-child commit only after a successful
+  complete typed result. The OpenCode model further has only checkout-file tools. No route can
+  authenticate Git/GitHub/SSH remote operations. Fixtures prove private home and IPC paths, no
+  unrelated-host sentinel reads, no host sockets, sealed Git configuration, closed-world OpenCode
+  model tools, broker-owned offline commit, and equivalent effective Claude Bash/network denial. The prior
+  native-Codex host-session and native-child/degraded-spawn decisions are superseded.
+- The shipped Claude, Codex, and opencode process artifacts pass their shared adapter doctor
+  contracts.
   Static validation of an inactive route is not reported as effective runtime success.
 - Relaunch v2 round-trips the canonical raw selector, scope, generation, origin host, and
   run-intent hash. Fixtures prove that bare `native` stays `native`, an explicit same-host selector
   stays explicit while resolving to a native route, and corruption, conflicting intent, stale
   generation, and host mismatch are rejected. The envelope never carries arbitrary prompt text or
   standing outage authority.
-- Every dispatch receipt and run record distinguishes active host, selector, requested engine,
-  requested route, actual route, adapter, observable model identity, effective isolation,
-  capability/outage transition, fallback, and degradation.
+- Every dispatch receipt and run record distinguishes active host, captured selector,
+  `intentProvenance`, selected engine/route, actual route, adapter, observable model identity,
+  effective isolation, capability/outage transition, fallback, and degradation. Serialized
+  compatibility fields may retain `requestedEngine` and `requestedRoute`, but user-facing text
+  never claims the selector was authenticated or requested by a user.
+- The selected engine's authenticated installed capability is standing cost authorization only for
+  that engine. A fallback requires its own independently authenticated capability; one engine's
+  failure never authorizes spending through another.
+- The command guard and process boundary prevent the loop from adding, creating, or renaming
+  `loop-ready`, merging, pushing release tags, or creating/editing/deleting/uploading releases.
+  Dev may act only on an independently fetched pre-existing `loop-ready` issue, and Pitcrew only on
+  an independently fetched loop-owned PR with fresh evidence.
 - Static contract lint rejects stale profile-based routing prose in forward operational artifacts
   while exempting historical review evidence, migration diagnostics, and `legacyProfile`
   telemetry. Live smoke coverage is reported for each available route; an unavailable host or
   route is typed `unavailable`, never inferred green.
 
-### Auto-merge enablement
+### Dormant non-manual reference-contract verification
 
 - The complete v0.40.0 architecture and migration bar above passes.
 - **Finding 1:** Dev and Pitcrew use the same tested transition, and delivered is impossible until
@@ -1108,7 +1219,7 @@ bars; full plan completion requires all four.
 
 ### Dependable unattended queue operation
 
-- The complete auto-merge bar above passes.
+- The complete dormant non-manual reference-contract bar above passes.
 - **Finding 4:** structured command/order and destination-ref fixtures pass against the configured
   base, including every reproduced bypass, while server protection remains non-bypassable.
 - **Finding 6:** the startup snapshot is complete, internally paginated with bounded concurrency,
@@ -1123,7 +1234,8 @@ bars; full plan completion requires all four.
 
 - A versioned pipeline retains recomputable raw records and reports time, tokens, calls, mutations,
   dispatches, review yield, gate outcomes, and recovery outcomes by repository revision, workload,
-  active host, selector, requested engine, requested and actual route, adapter, stage, round, lane,
+  active host, selector, intent provenance, selected engine, selected and actual route, adapter,
+  stage, round, lane,
   merge policy, base-freshness strategy, capability/outage transition, and
   capability/configuration fingerprint. Legacy records preserve the retired field only as
   `legacyProfile`. A provider field that cannot be observed is a typed `unavailable` value with a

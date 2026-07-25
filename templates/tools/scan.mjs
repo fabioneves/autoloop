@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 
 import { execFile, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { CLAIM_CONTRACT_FIXTURES, parseLoopClaim } from './claim-contract.mjs';
+import {
+  lifecycleCommentNeverEdited,
+  parseLifecycleComment,
+  resolveLifecycleCommentChain,
+  serializeLifecycleSuccessor,
+} from './lifecycle-contract.mjs';
 import {
   SNAPSHOT_SECTIONS,
   blockedByIssueNumbers,
@@ -14,6 +21,7 @@ import {
   createSnapshot,
   incompleteSection,
   issueSnapshotItem,
+  lifecycleMarkerSnapshotItem,
   mapBounded,
   verifySnapshot,
 } from './snapshot-contract.mjs';
@@ -22,6 +30,7 @@ const MAX_PAGES = 100;
 const MAX_ITEMS = 10000;
 const MAX_CONCURRENCY = 4;
 const ROLE_PERMISSIONS = new Set(['admin', 'none', 'read', 'write']);
+const TRUSTED_LIFECYCLE_ROLES = new Set(['admin', 'maintain']);
 const limitCommand = createLimiter(MAX_CONCURRENCY);
 
 const ISSUES_QUERY = `
@@ -42,6 +51,32 @@ query($id:ID!,$cursor:String){
   node(id:$id){
     ... on Issue{
       labels(first:100,after:$cursor){nodes{name} pageInfo{hasNextPage endCursor}}
+    }
+  }
+}`;
+
+const DEPENDENCY_ISSUE_QUERY = `
+query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){
+    issue(number:$number){
+      __typename
+      number
+      state
+    }
+  }
+}`;
+
+const ISSUE_COMMENTS_QUERY = `
+query($owner:String!,$name:String!,$number:Int!,$cursor:String){
+  repository(owner:$owner,name:$name){
+    issue(number:$number){
+      comments(first:100,after:$cursor){
+        nodes{
+          id author{login} authorAssociation body createdAt lastEditedAt updatedAt url
+          viewerDidAuthor
+        }
+        pageInfo{hasNextPage endCursor}
+      }
     }
   }
 }`;
@@ -267,15 +302,29 @@ function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-export function classifyPrs(prs) {
+function pullRequestRepository(pr) {
+  return typeof pr?.headRepository === 'string'
+    ? pr.headRepository
+    : pr?.headRepository?.nameWithOwner ?? null;
+}
+
+function loopOwnership(pr, repositoryNameWithOwner) {
+  const claim = parseLoopClaim({ branch: pr?.headRefName, body: pr?.body });
+  const sameRepository = typeof repositoryNameWithOwner === 'string'
+    && repositoryNameWithOwner.length > 0
+    && pullRequestRepository(pr) === repositoryNameWithOwner;
+  return { claim, loopOwned: claim.valid && sameRepository };
+}
+
+export function classifyPrs(prs, repositoryNameWithOwner) {
   const loopOwned = [];
   const human = [];
   for (const entry of Array.isArray(prs) ? prs : []) {
     const pr = entry && typeof entry === 'object' && !Array.isArray(entry)
       ? entry
       : {};
-    const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
-    if (claim.valid) {
+    const { claim, loopOwned: owned } = loopOwnership(pr, repositoryNameWithOwner);
+    if (owned) {
       loopOwned.push({ ...pr, issue: claim.issue, orphanCandidate: !!pr.isDraft });
     } else {
       human.push({ number: pr.number, headRefName: pr.headRefName });
@@ -284,9 +333,13 @@ export function classifyPrs(prs) {
   return { loopOwned, human };
 }
 
-export function normalizePullRequest(pr = {}, statusContexts = undefined) {
+export function normalizePullRequest(
+  pr = {},
+  statusContexts = undefined,
+  repositoryNameWithOwner = null,
+) {
   const value = pr && typeof pr === 'object' && !Array.isArray(pr) ? pr : {};
-  const claim = parseLoopClaim({ branch: value.headRefName, body: value.body });
+  const { claim, loopOwned } = loopOwnership(value, repositoryNameWithOwner);
   const commit = value.commits?.nodes?.at(-1)?.commit;
   const contexts = Array.isArray(statusContexts)
     ? statusContexts
@@ -305,7 +358,7 @@ export function normalizePullRequest(pr = {}, statusContexts = undefined) {
     mergedAt: value.mergedAt ?? null,
     updatedAt: value.updatedAt ?? null,
     author: value.author?.login ?? null,
-    headRepository: value.headRepository?.nameWithOwner ?? null,
+    headRepository: pullRequestRepository(value),
     statusCheckState: commit?.statusCheckRollup?.state ?? null,
     statusCheckRollup: contexts
       .map((context) => context.__typename === 'CheckRun'
@@ -327,9 +380,9 @@ export function normalizePullRequest(pr = {}, statusContexts = undefined) {
         `${left.kind}\0${left.name ?? ''}`,
         `${right.kind}\0${right.name ?? ''}`,
       )),
-    issue: claim.valid ? claim.issue : null,
-    orphanCandidate: claim.valid && pr.isDraft === true,
-    ownership: claim.valid ? 'loop' : 'human',
+    issue: loopOwned ? claim.issue : null,
+    orphanCandidate: loopOwned && pr.isDraft === true,
+    ownership: loopOwned ? 'loop' : 'human',
   };
 }
 
@@ -399,7 +452,7 @@ async function fetchPullRequests(repo, states) {
   }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
   if (!states.includes('OPEN')) {
     const items = section.items
-      .map((pr) => normalizePullRequest(pr, []))
+      .map((pr) => normalizePullRequest(pr, [], repo.nameWithOwner))
       .sort((left, right) => left.number - right.number);
     return section.complete
       ? completeSection(items)
@@ -411,7 +464,7 @@ async function fetchPullRequests(repo, states) {
   }));
   const items = checks
     .map(({ pr, section: checkSection }) =>
-      normalizePullRequest(pr, checkSection.items))
+      normalizePullRequest(pr, checkSection.items, repo.nameWithOwner))
     .sort((left, right) => left.number - right.number);
   const dependencies = [section, ...checks.map(({ section: value }) => value)];
   return dependencies.every((value) => value.complete)
@@ -461,6 +514,231 @@ async function fetchIssueLabels(issue) {
     });
     return connectionPage(data.node?.labels, `issue #${issue.number} labels`);
   }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
+}
+
+export function normalizeDependencyIssueSection(issueNumber, issue) {
+  if (
+    !Number.isSafeInteger(issueNumber)
+    || issueNumber < 1
+    || issue?.__typename !== 'Issue'
+    || issue.number !== issueNumber
+    || !['CLOSED', 'OPEN'].includes(issue.state)
+  ) {
+    return incompleteSection(
+      'DEPENDENCY_ISSUE_INVALID',
+      `dependency #${issueNumber} is missing, unavailable, or is not an issue`,
+    );
+  }
+  return completeSection([{
+    number: issue.number,
+    state: issue.state,
+  }]);
+}
+
+async function fetchDependencyIssue(repo, issueNumber) {
+  try {
+    const data = await ghGraphql(DEPENDENCY_ISSUE_QUERY, {
+      owner: repo.owner,
+      name: repo.name,
+      number: issueNumber,
+    });
+    return normalizeDependencyIssueSection(
+      issueNumber,
+      data.repository?.issue,
+    );
+  } catch (error) {
+    return incompleteSection(
+      'DEPENDENCY_ISSUE_FETCH_FAILED',
+      `dependency #${issueNumber}: ${commandError(error)}`,
+    );
+  }
+}
+
+async function fetchIssueComments(repo, issueNumber) {
+  return collectPaginated(async (cursor) => {
+    const data = await ghGraphql(ISSUE_COMMENTS_QUERY, {
+      owner: repo.owner,
+      name: repo.name,
+      number: issueNumber,
+      cursor,
+    });
+    return connectionPage(
+      data.repository?.issue?.comments,
+      `issue #${issueNumber} comments`,
+    );
+  }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
+}
+
+function lifecycleMarkerCandidate(comment) {
+  return typeof comment?.body === 'string'
+    && comment.body.includes('<!-- autoloop-lifecycle-v');
+}
+
+function lifecycleChainInput(comment) {
+  return {
+    id: comment.id,
+    body: comment.body,
+    neverEdited: lifecycleCommentNeverEdited(comment),
+  };
+}
+
+export function normalizeLifecycleMarkerComment(
+  comment,
+  issueNumber,
+  chain = {},
+) {
+  return lifecycleMarkerSnapshotItem(comment, issueNumber, chain);
+}
+
+export function normalizeLifecycleMarkerSection(
+  issueNumber,
+  section,
+  trustedAuthors = new Set(),
+) {
+  const candidates = Array.isArray(section?.items)
+    ? section.items.filter((comment) =>
+      lifecycleMarkerCandidate(comment)
+      && trustedAuthors.has(comment.author?.login))
+    : [];
+  const parsed = candidates.map((comment) => ({
+    comment,
+    result: parseLifecycleComment(comment.body),
+  }));
+  const valid = parsed.filter(({ result }) =>
+    result.ok === true && result.marker.issue === issueNumber);
+  const malformed = parsed.length - valid.length;
+  if (malformed > 0) {
+    return incompleteSection(
+      'LIFECYCLE_MARKER_INVALID',
+      `issue #${issueNumber} has ${malformed} malformed or mismatched lifecycle marker comment(s)`,
+    );
+  }
+  let chain = null;
+  try {
+    chain = resolveLifecycleCommentChain(
+      valid.map(({ comment }) => lifecycleChainInput(comment)),
+    );
+    if (chain !== null) {
+      const rootAuthor = valid.find(
+        ({ comment }) => comment.id === chain.root.id,
+      )?.comment.author?.login;
+      if (
+        typeof rootAuthor !== 'string'
+        || valid.some(({ comment, result }) =>
+          (
+            result.successor === null
+            || result.successor.rootCommentId === chain.root.id
+          )
+          && comment.author?.login !== rootAuthor)
+      ) {
+        throw new Error('lifecycle chain author changed');
+      }
+      chain = resolveLifecycleCommentChain(
+        valid
+          .filter(({ comment }) => comment.author?.login === rootAuthor)
+          .map(({ comment }) => lifecycleChainInput(comment)),
+      );
+    }
+  } catch (error) {
+    const ambiguous = /ambiguous|fork/u.test(String(error?.message ?? error));
+    return incompleteSection(
+      ambiguous ? 'LIFECYCLE_MARKER_AMBIGUOUS' : 'LIFECYCLE_MARKER_INVALID',
+      `issue #${issueNumber} lifecycle chain is invalid: ${String(error?.message ?? error)}`,
+    );
+  }
+  const root = chain === null
+    ? null
+    : valid.find(({ comment }) => comment.id === chain.root.id)?.comment;
+  const tip = chain === null
+    ? null
+    : valid.find(({ comment }) => comment.id === chain.tip.id)?.comment;
+  const items = root && tip
+    ? [normalizeLifecycleMarkerComment(tip, issueNumber, {
+        root,
+        sequence: chain.sequence,
+      })]
+    : [];
+  if (section?.complete !== true) {
+    return incompleteSection(
+      section?.error?.code ?? 'ISSUE_COMMENTS_INCOMPLETE',
+      section?.error?.message ?? `issue #${issueNumber} comments are incomplete`,
+      items,
+    );
+  }
+  return completeSection(items);
+}
+
+function lifecycleIssueNumbers(openPrs, openIssues, mergedPrs) {
+  return [...new Set([
+    ...openIssues.items.map((issue) => issue.number),
+    ...openPrs.items.map((pr) => pr.issue).filter(Number.isSafeInteger),
+    ...mergedPrs.items.map((pr) => pr.issue).filter(Number.isSafeInteger),
+  ])].sort((left, right) => left - right);
+}
+
+function lifecycleTrustedAuthors(roleSections, viewerAuthoredLogins) {
+  return new Set(
+    roleSections
+      .flatMap((section) => section.items)
+      .filter((role) =>
+        TRUSTED_LIFECYCLE_ROLES.has(role.roleName)
+        || (role.roleName === 'write' && viewerAuthoredLogins.has(role.login)))
+      .map((role) => role.login),
+  );
+}
+
+async function fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo) {
+  const issueNumbers = lifecycleIssueNumbers(openPrs, openIssues, mergedPrs);
+  const commentsByIssue = await mapBounded(
+    issueNumbers,
+    MAX_CONCURRENCY,
+    async (issueNumber) => ({
+      issueNumber,
+      section: await fetchIssueComments(repo, issueNumber),
+    }),
+  );
+  const authors = [...new Set(
+    commentsByIssue
+      .flatMap(({ section }) => section.items)
+      .filter(lifecycleMarkerCandidate)
+      .map((comment) => comment.author?.login)
+      .filter((login) => typeof login === 'string' && login.length > 0),
+  )].sort();
+  const roleSections = await mapBounded(
+    authors,
+    MAX_CONCURRENCY,
+    (login) => fetchRole(repo, login),
+  );
+  const viewerAuthoredLogins = new Set(
+    commentsByIssue
+      .flatMap(({ section }) => section.items)
+      .filter((comment) => lifecycleMarkerCandidate(comment) && comment.viewerDidAuthor === true)
+      .map((comment) => comment.author?.login)
+      .filter((login) => typeof login === 'string' && login.length > 0),
+  );
+  const trustedAuthors = lifecycleTrustedAuthors(roleSections, viewerAuthoredLogins);
+  const perIssue = commentsByIssue.map(({ issueNumber, section }) =>
+    normalizeLifecycleMarkerSection(issueNumber, section, trustedAuthors));
+  const dependencies = [
+    openPrs,
+    openIssues,
+    mergedPrs,
+    ...roleSections,
+    ...perIssue,
+  ];
+  const items = perIssue
+    .flatMap((section) => section.items)
+    .sort((left, right) => compareText(
+      `${left.issueNumber}\0${left.createdAt ?? ''}\0${left.id ?? ''}`,
+      `${right.issueNumber}\0${right.createdAt ?? ''}\0${right.id ?? ''}`,
+    ));
+  return dependencies.every((section) => section.complete)
+    ? completeSection(items)
+    : incompleteSection(
+      'LIFECYCLE_MARKERS_INCOMPLETE',
+      sectionError(dependencies, 'lifecycle marker evidence is incomplete'),
+      items,
+    );
 }
 
 async function fetchOpenIssues(repo) {
@@ -516,7 +794,39 @@ async function fetchIssueTimeline(repo, issue) {
 
 async function fetchQueue(openIssues, repo) {
   const candidates = openIssues.items.filter((issue) => issueHasLabel(issue, 'loop-ready'));
+  const referenceNumbers = [...new Set(
+    candidates.flatMap((issue) => blockedByIssueNumbers(issue.body)),
+  )];
+  const referenceLimit = referenceNumbers.length <= MAX_ITEMS
+    ? completeSection([])
+    : incompleteSection(
+      'DEPENDENCY_REFERENCE_LIMIT',
+      `queue references exceed the ${MAX_ITEMS}-issue evidence bound`,
+    );
+  const dependencySections = referenceLimit.complete
+    ? await mapBounded(
+      referenceNumbers,
+      MAX_CONCURRENCY,
+      (issueNumber) => fetchDependencyIssue(repo, issueNumber),
+    )
+    : [];
+  const dependenciesByNumber = new Map(
+    referenceNumbers.map((number, index) => [
+      number,
+      dependencySections[index]
+        ?? incompleteSection(
+          'DEPENDENCY_REFERENCE_LIMIT',
+          `dependency #${number} was not fetched because the queue reference bound was exceeded`,
+        ),
+    ]),
+  );
   const timelines = await mapBounded(candidates, MAX_CONCURRENCY, async (issue) => {
+    const blockedBy = blockedByIssueNumbers(issue.body);
+    const dependencies = blockedBy
+      .map((number) => dependenciesByNumber.get(number)?.items[0])
+      .filter(Boolean);
+    const issueDependencySections = blockedBy
+      .map((number) => dependenciesByNumber.get(number));
     const section = await fetchIssueTimeline(repo, issue);
     const provenance = labelProvenance(section.items);
     const provenanceComplete =
@@ -526,19 +836,32 @@ async function fetchQueue(openIssues, repo) {
       && provenance.labeledAt.length > 0;
     const item = {
       ...issue,
-      blockedBy: blockedByIssueNumbers(issue.body),
+      blockedBy,
+      dependencies,
       provenance,
     };
+    const complete = section.complete
+      && provenanceComplete
+      && referenceLimit.complete
+      && issueDependencySections.every((dependency) => dependency?.complete === true);
     return {
       item,
-      section: section.complete && provenanceComplete
-        ? section
+      section: complete
+        ? completeSection([])
         : incompleteSection(
-          section.complete ? 'LABEL_PROVENANCE_MISSING' : section.error.code,
-          section.complete
-            ? `issue #${issue.number} has no visible loop-ready label event`
-            : section.error.message,
-          section.items,
+          !section.complete
+            ? section.error.code
+            : !provenanceComplete
+              ? 'LABEL_PROVENANCE_MISSING'
+              : 'DEPENDENCY_EVIDENCE_INCOMPLETE',
+          !section.complete
+            ? section.error.message
+            : !provenanceComplete
+              ? `issue #${issue.number} has no visible loop-ready label event`
+              : sectionError(
+                [referenceLimit, ...issueDependencySections],
+                `issue #${issue.number} dependency evidence is incomplete`,
+              ),
         ),
       labelEvidence: provenanceComplete
         ? {
@@ -556,7 +879,12 @@ async function fetchQueue(openIssues, repo) {
   });
   const items = timelines.map(({ item }) => item)
     .sort((left, right) => left.number - right.number);
-  const dependent = [openIssues, ...timelines.map(({ section }) => section)];
+  const dependent = [
+    openIssues,
+    referenceLimit,
+    ...dependencySections,
+    ...timelines.map(({ section }) => section),
+  ];
   return {
     section: dependent.every((section) => section.complete)
       ? completeSection(items)
@@ -759,6 +1087,26 @@ function roleFailureSection(error) {
   return incompleteSection('AUTHOR_ROLE_FETCH_FAILED', commandError(error));
 }
 
+function normalizeRoleResponse(data, login) {
+  if (
+    !data
+    || typeof login !== 'string'
+    || login.length === 0
+    || !ROLE_PERMISSIONS.has(data.permission)
+    || typeof data.role_name !== 'string'
+    || data.user?.login !== login
+    || !Number.isSafeInteger(data.user?.id)
+    || data.user.id <= 0
+  ) {
+    return null;
+  }
+  return {
+    login,
+    roleName: data.role_name ?? null,
+    permission: data.permission,
+  };
+}
+
 async function fetchRole(repo, login) {
   try {
     const data = await ghJson([
@@ -767,17 +1115,11 @@ async function fetchRole(repo, login) {
       'GET',
       `repos/${repo.owner}/${repo.name}/collaborators/${encodeURIComponent(login)}/permission`,
     ]);
-    if (
-      !ROLE_PERMISSIONS.has(data.permission)
-      || !(data.role_name === null || typeof data.role_name === 'string')
-    ) {
+    const role = normalizeRoleResponse(data, login);
+    if (!role) {
       throw new Error(`author permission response for ${login} is incomplete`);
     }
-    return completeSection([{
-      login,
-      roleName: data.role_name ?? null,
-      permission: data.permission ?? null,
-    }]);
+    return completeSection([role]);
   } catch (error) {
     return roleFailureSection(error);
   }
@@ -875,7 +1217,10 @@ export async function repositorySnapshot({ now = () => new Date().toISOString() 
     fetchOpenIssues(repo),
     fetchPullRequests(repo, ['MERGED']),
   ]);
-  const queue = await fetchQueue(openIssues, repo);
+  const [queue, lifecycleMarkers] = await Promise.all([
+    fetchQueue(openIssues, repo),
+    fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo),
+  ]);
   const blockedIssues = derivedIssueSection(openIssues, 'loop-blocked');
   const [unresolvedReviewThreads, reviewEvidence] = await Promise.all([
     fetchUnresolvedThreads(openPrs, repo),
@@ -894,6 +1239,7 @@ export async function repositorySnapshot({ now = () => new Date().toISOString() 
       repo: repoSection,
       tree,
       openPrs,
+      lifecycleMarkers,
       queue: queue.section,
       blockedIssues,
       openIssues,
@@ -930,12 +1276,20 @@ function focusAuthorVerification(section, number, issueNumber) {
 }
 
 function focusPr(snapshot, number) {
-  const issueNumber = snapshot.sections.openPrs.items
+  const issueNumber = [
+    ...snapshot.sections.openPrs.items,
+    ...snapshot.sections.mergedPrs.items,
+  ]
     .find((pr) => pr.number === number && pr.ownership === 'loop')
     ?.issue;
   const sections = {
     ...snapshot.sections,
     openPrs: focusSection(snapshot.sections.openPrs, (pr) => pr.number === number),
+    mergedPrs: focusSection(snapshot.sections.mergedPrs, (pr) => pr.number === number),
+    lifecycleMarkers: focusSection(
+      snapshot.sections.lifecycleMarkers,
+      (marker) => marker.issueNumber === issueNumber,
+    ),
     unresolvedReviewThreads: focusSection(
       snapshot.sections.unresolvedReviewThreads,
       (thread) => thread.prNumber === number,
@@ -955,8 +1309,16 @@ async function selfTest() {
     headRefName: fixture.branch,
     body: fixture.body,
     isDraft: index === 0,
+    headRepository: 'owner/repo',
   }));
-  const { loopOwned, human } = classifyPrs(prs);
+  prs.push({
+    number: prs.length + 1,
+    headRefName: 'feat/gh-77-fork',
+    body: 'Closes #77',
+    isDraft: true,
+    headRepository: 'fork/repo',
+  });
+  const { loopOwned, human } = classifyPrs(prs, 'owner/repo');
   const provenance = labelProvenance([
     { event: 'labeled', label: { name: 'loop-ready' }, actor: { login: 'a' }, created_at: 't1' },
     { event: 'labeled', label: { name: 'loop-blocked' }, actor: { login: 'x' }, created_at: 't2' },
@@ -975,12 +1337,34 @@ async function selfTest() {
     labels: ['loop-ready'],
   });
   const issueAfter = issueSnapshotItem({ ...issueBefore, body: 'after' });
+  const closedDependency = normalizeDependencyIssueSection(12, {
+    __typename: 'Issue',
+    number: 12,
+    state: 'CLOSED',
+  });
+  const missingDependency = normalizeDependencyIssueSection(12, null);
+  const nonIssueDependency = normalizeDependencyIssueSection(12, {
+    __typename: 'PullRequest',
+    number: 12,
+    state: 'CLOSED',
+  });
+  const mismatchedDependency = normalizeDependencyIssueSection(12, {
+    __typename: 'Issue',
+    number: 13,
+    state: 'CLOSED',
+  });
+  const unknownStateDependency = normalizeDependencyIssueSection(12, {
+    __typename: 'Issue',
+    number: 12,
+    state: 'UNKNOWN',
+  });
   const normalizedPr = normalizePullRequest({
     number: 3,
     title: 'loop',
     headRefName: 'feat/gh-8-loop',
     body: 'Closes #8',
     isDraft: true,
+    headRepository: { nameWithOwner: 'owner/repo' },
     commits: {
       nodes: [{
         commit: {
@@ -994,7 +1378,15 @@ async function selfTest() {
         },
       }],
     },
-  });
+  }, undefined, 'owner/repo');
+  const normalizedFork = normalizePullRequest({
+    number: 4,
+    title: 'fork',
+    headRefName: 'feat/gh-9-fork',
+    body: 'Closes #9',
+    isDraft: true,
+    headRepository: { nameWithOwner: 'fork/repo' },
+  }, [], 'owner/repo');
   const normalizedReview = normalizeComment({
     id: 'review-1',
     author: { login: 'reviewer' },
@@ -1032,6 +1424,12 @@ async function selfTest() {
   const focusedSections = Object.fromEntries(
     SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
   );
+  focusedSections.repo = completeSection([{
+    owner: 'owner',
+    name: 'repo',
+    nameWithOwner: 'owner/repo',
+    defaultBranch: 'main',
+  }]);
   focusedSections.authorVerification = completeSection([{
     login: 'reviewer',
     roleName: 'write',
@@ -1112,12 +1510,225 @@ async function selfTest() {
     actor: { login: 'labeler' },
     createdAt: '2026-01-01T00:00:00Z',
   }]);
+  const lifecycleBody = '<!-- autoloop-lifecycle-v1\n{"branch":"feat/gh-7-contract","intentSource":"invocation","issue":7,"issueBodyHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mergePolicy":"manual","phase":"intent-recorded","planHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","plannedBaseOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runIntentHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","selector":"native","v":1}\n-->';
+  const lifecycleComment = {
+    id: 'IC_lifecycle',
+    author: { login: 'autoloop' },
+    authorAssociation: 'MEMBER',
+    viewerDidAuthor: true,
+    body: lifecycleBody,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    url: 'https://example.test/issues/7#issuecomment-1',
+  };
+  const lifecycleSuccessorLink = {
+    v: 1,
+    rootCommentId: lifecycleComment.id,
+    previousCommentId: lifecycleComment.id,
+    previousBodyHash: createHash('sha256')
+      .update(lifecycleBody)
+      .digest('hex'),
+    sequence: 1,
+  };
+  const lifecycleSuccessor = {
+    ...lifecycleComment,
+    id: 'IC_lifecycle_successor',
+    body: serializeLifecycleSuccessor({
+      ...parseLifecycleComment(lifecycleBody).marker,
+      phase: 'local-claim',
+      claimCommit: 'a'.repeat(40),
+    }, lifecycleSuccessorLink),
+    createdAt: '2026-01-01T00:00:01Z',
+    updatedAt: '2026-01-01T00:00:01Z',
+    url: 'https://example.test/issues/7#issuecomment-2',
+  };
+  const lifecycleChain = normalizeLifecycleMarkerSection(
+    7,
+    completeSection([lifecycleComment, lifecycleSuccessor]),
+    new Set(['autoloop']),
+  );
+  const duplicateLifecycleSuccessor = normalizeLifecycleMarkerSection(
+    7,
+    completeSection([
+      lifecycleComment,
+      lifecycleSuccessor,
+      { ...lifecycleSuccessor, id: 'IC_lifecycle_successor_duplicate' },
+    ]),
+    new Set(['autoloop']),
+  );
+  const forkedLifecycle = normalizeLifecycleMarkerSection(
+    7,
+    completeSection([
+      lifecycleComment,
+      lifecycleSuccessor,
+      {
+        ...lifecycleSuccessor,
+        id: 'IC_lifecycle_fork',
+        body: serializeLifecycleSuccessor({
+          ...parseLifecycleComment(lifecycleBody).marker,
+          phase: 'remote-claim',
+          claimCommit: 'a'.repeat(40),
+        }, lifecycleSuccessorLink),
+      },
+    ]),
+    new Set(['autoloop']),
+  );
+  const disconnectedLifecycle = normalizeLifecycleMarkerSection(
+    7,
+    completeSection([
+      lifecycleComment,
+      {
+        ...lifecycleSuccessor,
+        body: serializeLifecycleSuccessor(
+          parseLifecycleComment(lifecycleSuccessor.body).marker,
+          {
+            ...lifecycleSuccessorLink,
+            previousBodyHash: 'f'.repeat(64),
+          },
+        ),
+      },
+    ]),
+    new Set(['autoloop']),
+  );
+  const editedLifecycleRoot = normalizeLifecycleMarkerSection(
+    7,
+    completeSection([{
+      ...lifecycleComment,
+      lastEditedAt: '2026-01-01T00:00:05Z',
+    }]),
+    new Set(['autoloop']),
+  );
+  const editedLifecycleRootWithSuccessor = normalizeLifecycleMarkerSection(
+    7,
+    completeSection([
+      { ...lifecycleComment, lastEditedAt: '2026-01-01T00:00:05Z' },
+      { ...lifecycleSuccessor, lastEditedAt: null },
+    ]),
+    new Set(['autoloop']),
+  );
+  const editedLifecycleSuccessor = normalizeLifecycleMarkerSection(
+    7,
+    completeSection([
+      { ...lifecycleComment, lastEditedAt: null },
+      { ...lifecycleSuccessor, lastEditedAt: '2026-01-01T00:00:05Z' },
+    ]),
+    new Set(['autoloop']),
+  );
+  const normalizedLifecycle = typeof normalizeLifecycleMarkerComment === 'function'
+    ? normalizeLifecycleMarkerComment(lifecycleComment, 7)
+    : null;
+  const trustedLifecycleAuthors = new Set(['autoloop']);
+  const malformedLifecycle = typeof normalizeLifecycleMarkerSection === 'function'
+    ? normalizeLifecycleMarkerSection(7, completeSection([{
+      ...lifecycleComment,
+      body: '<!-- autoloop-lifecycle-v1\nnot-json\n-->',
+    }]), trustedLifecycleAuthors)
+    : null;
+  const duplicateLifecycle = typeof normalizeLifecycleMarkerSection === 'function'
+    ? normalizeLifecycleMarkerSection(7, completeSection([
+      lifecycleComment,
+      { ...lifecycleComment, id: 'IC_lifecycle_2' },
+    ]), trustedLifecycleAuthors)
+    : null;
+  const untrustedLifecycleLookalike = normalizeLifecycleMarkerSection(
+    7,
+    completeSection([
+      lifecycleComment,
+      {
+        ...lifecycleComment,
+        id: 'IC_untrusted',
+        author: { login: 'outsider' },
+        authorAssociation: 'NONE',
+        body: '<!-- autoloop-lifecycle-v1\nnot-json\n-->',
+      },
+    ]),
+    trustedLifecycleAuthors,
+  );
+  const untrustedLifecycleClaim = normalizeLifecycleMarkerSection(
+    7,
+    completeSection([{
+      ...lifecycleComment,
+      id: 'IC_untrusted_valid',
+      author: { login: 'outsider' },
+      authorAssociation: 'NONE',
+    }]),
+    trustedLifecycleAuthors,
+  );
+  const trustedLifecycleRoles = lifecycleTrustedAuthors([
+    completeSection([
+      { login: 'owner', roleName: 'admin', permission: 'admin' },
+      { login: 'maintainer', roleName: 'maintain', permission: 'write' },
+      { login: 'writer', roleName: 'write', permission: 'write' },
+      { login: 'reader', roleName: 'read', permission: 'read' },
+    ]),
+  ], new Set());
+  const currentWriterLifecycleRoles = lifecycleTrustedAuthors([
+    completeSection([
+      { login: 'writer', roleName: 'write', permission: 'write' },
+    ]),
+  ], new Set(['writer']));
+  const boundRoleResponse = typeof normalizeRoleResponse === 'function'
+    ? normalizeRoleResponse({
+      permission: 'write',
+      role_name: 'maintain',
+      user: { id: 17, login: 'maintainer' },
+    }, 'maintainer')
+    : null;
+  const mismatchedRoleResponse = typeof normalizeRoleResponse === 'function'
+    ? normalizeRoleResponse({
+      permission: 'admin',
+      role_name: 'admin',
+      user: { id: 18, login: 'attacker' },
+    }, 'owner')
+    : null;
+  const incompleteRoleResponse = typeof normalizeRoleResponse === 'function'
+    ? normalizeRoleResponse({
+      permission: 'write',
+      role_name: null,
+      user: { id: 19, login: 'writer' },
+    }, 'writer')
+    : null;
+  const lifecycleIssues = lifecycleIssueNumbers(
+    completeSection([{ issue: 7 }, { issue: null }]),
+    completeSection([{ number: 8 }]),
+    completeSection([{ issue: 9 }, { issue: null }]),
+  );
+  const mergedFocusSections = Object.fromEntries(
+    SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+  );
+  mergedFocusSections.repo = completeSection([{
+    owner: 'owner',
+    name: 'repo',
+    nameWithOwner: 'owner/repo',
+    defaultBranch: 'main',
+  }]);
+  mergedFocusSections.mergedPrs = completeSection([
+    {
+      ...focusedSections.openPrs.items[0],
+      number: 4,
+      mergedAt: '2026-01-01T00:00:03Z',
+    },
+    {
+      ...focusedSections.openPrs.items[0],
+      number: 5,
+      body: 'Closes #8',
+      headRefName: 'feat/gh-8-loop-pr',
+      issue: 8,
+      mergedAt: '2026-01-01T00:00:04Z',
+    },
+  ]);
+  mergedFocusSections.lifecycleMarkers = completeSection([normalizedLifecycle]);
+  const focusedMerged = focusPr(createSnapshot({
+    scannedAt: '2026-01-01T00:00:00.000Z',
+    sections: mergedFocusSections,
+  }), 4);
   const checks = [
     [
       'canonical ownership parser',
       loopOwned.map((pr) => pr.issue).join(',') === expectedIssues.join(',')
         && loopOwned[0].orphanCandidate === true
-        && human.length === CLAIM_CONTRACT_FIXTURES.filter((fixture) => !fixture.valid).length,
+        && human.length === CLAIM_CONTRACT_FIXTURES.filter((fixture) => !fixture.valid).length + 1
+        && human.at(-1).number === prs.length,
     ],
     [
       'last label provenance',
@@ -1130,12 +1741,36 @@ async function selfTest() {
       blocked.join(',') === '12,34'
         && blockedByIssueNumbers('no section #5').length === 0,
     ],
+    [
+      'dependency facts require an exact Issue identity and state',
+      typeof normalizeDependencyIssueSection === 'function'
+        && DEPENDENCY_ISSUE_QUERY.includes('__typename')
+        && DEPENDENCY_ISSUE_QUERY.includes('state')
+        && closedDependency.complete === true
+        && closedDependency.items[0]?.number === 12
+        && closedDependency.items[0]?.state === 'CLOSED'
+        && [
+          missingDependency,
+          nonIssueDependency,
+          mismatchedDependency,
+          unknownStateDependency,
+        ]
+          .every((section) =>
+            section.complete === false
+            && section.error?.code === 'DEPENDENCY_ISSUE_INVALID'),
+    ],
     ['durable body hash changes on edits', issueBefore.bodySha256 !== issueAfter.bodySha256],
     [
       'normalized loop PR carries claim',
       normalizedPr.issue === 8
         && normalizedPr.orphanCandidate === true
         && normalizedPr.statusCheckRollup.length === 1,
+    ],
+    [
+      'normalized fork PR remains human-owned',
+      normalizedFork.ownership === 'human'
+        && normalizedFork.issue === null
+        && normalizedFork.orphanCandidate === false,
     ],
     [
       'actionability fields survive normalization',
@@ -1164,6 +1799,108 @@ async function selfTest() {
       'GraphQL label provenance is recognized',
       graphQlProvenance?.labeledBy === 'labeler'
         && graphQlProvenance?.labeledAt === '2026-01-01T00:00:00Z',
+    ],
+    [
+      'pre-PR issue lifecycle markers normalize with issue identity',
+      normalizedLifecycle?.issueNumber === 7
+        && normalizedLifecycle?.id === 'IC_lifecycle'
+        && normalizedLifecycle?.body === lifecycleBody,
+    ],
+    [
+      'malformed lifecycle marker candidates keep discovery incomplete',
+      malformedLifecycle?.complete === false
+        && malformedLifecycle?.error?.code === 'LIFECYCLE_MARKER_INVALID',
+    ],
+    [
+      'identical duplicate lifecycle roots collapse deterministically',
+      duplicateLifecycle?.complete === true
+        && duplicateLifecycle.items.length === 1
+        && duplicateLifecycle.items[0].id === 'IC_lifecycle',
+    ],
+    [
+      'append-only lifecycle chain snapshots the logical tip and root',
+      lifecycleChain.complete === true
+        && lifecycleChain.items.length === 1
+        && lifecycleChain.items[0].id === lifecycleComment.id
+        && lifecycleChain.items[0].tipId === lifecycleSuccessor.id
+        && lifecycleChain.items[0].sequence === 1
+        && lifecycleChain.items[0].body === lifecycleSuccessor.body,
+    ],
+    [
+      'identical lifecycle successor retries collapse deterministically',
+      duplicateLifecycleSuccessor.complete === true
+        && duplicateLifecycleSuccessor.items.length === 1
+        && duplicateLifecycleSuccessor.items[0].sequence === 1,
+    ],
+    [
+      'divergent lifecycle successor forks keep discovery incomplete',
+      forkedLifecycle.complete === false
+        && forkedLifecycle.error?.code === 'LIFECYCLE_MARKER_AMBIGUOUS',
+    ],
+    [
+      'disconnected lifecycle successors keep discovery incomplete',
+      disconnectedLifecycle.complete === false
+        && disconnectedLifecycle.error?.code === 'LIFECYCLE_MARKER_INVALID',
+    ],
+    [
+      'an unanchored edited lifecycle root keeps discovery incomplete',
+      editedLifecycleRoot.complete === false
+        && editedLifecycleRoot.error?.code === 'LIFECYCLE_MARKER_INVALID',
+    ],
+    [
+      'a hash-anchored edited lifecycle root still resolves its tip',
+      editedLifecycleRootWithSuccessor.complete === true
+        && editedLifecycleRootWithSuccessor.items.length === 1
+        && editedLifecycleRootWithSuccessor.items[0].tipId === lifecycleSuccessor.id,
+    ],
+    [
+      'an edited lifecycle successor keeps discovery incomplete',
+      editedLifecycleSuccessor.complete === false
+        && editedLifecycleSuccessor.error?.code === 'LIFECYCLE_MARKER_INVALID',
+    ],
+    [
+      'untrusted lifecycle lookalikes cannot wedge trusted recovery',
+      untrustedLifecycleLookalike.complete === true
+        && untrustedLifecycleLookalike.items.length === 1
+        && untrustedLifecycleLookalike.items[0].author === 'autoloop',
+    ],
+    [
+      'untrusted lifecycle claims have no durable authority',
+      untrustedLifecycleClaim.complete === true
+        && untrustedLifecycleClaim.items.length === 0,
+    ],
+    [
+      'maintainer lifecycle authority excludes unrelated writers',
+      [...trustedLifecycleRoles].sort().join(',') === 'maintainer,owner',
+    ],
+    [
+      'the authenticated current writer can retain its own lifecycle authority',
+      [...currentWriterLifecycleRoles].join(',') === 'writer',
+    ],
+    [
+      'lifecycle comment discovery records current-viewer authorship',
+      ISSUE_COMMENTS_QUERY.includes('viewerDidAuthor'),
+    ],
+    [
+      'role responses bind permission evidence to the requested identity',
+      boundRoleResponse?.login === 'maintainer'
+        && boundRoleResponse?.roleName === 'maintain'
+        && mismatchedRoleResponse === null
+        && incompleteRoleResponse === null,
+    ],
+    [
+      'merged loop PR issues remain discoverable after their issues close',
+      lifecycleIssues.join(',') === '7,8,9',
+    ],
+    [
+      'focused merged PR retains its lifecycle marker',
+      focusedMerged.sections.lifecycleMarkers.items.length === 1
+        && focusedMerged.sections.lifecycleMarkers.items[0].issueNumber === 7,
+    ],
+    [
+      'focused merged PR excludes unrelated merged PRs',
+      focusedMerged.sections.mergedPrs.items.length === 1
+        && focusedMerged.sections.mergedPrs.items[0].number === 4,
     ],
     [
       'focused author evidence excludes other PRs',

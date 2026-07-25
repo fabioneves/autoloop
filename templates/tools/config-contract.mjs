@@ -16,12 +16,15 @@ const PROJECT_KEYS = [
   'caps',
 ];
 const CAP_RANGES = {
-  runWallClockHours: { min: 0.25, max: 168, integer: false },
   gateRetriesPerUnit: { min: 0, max: 20, integer: true },
   reviseRoundsPerPr: { min: 0, max: 20, integer: true },
   codeReviewRoundsPerUnit: { min: 1, max: 20, integer: true },
   sliceMaxLines: { min: 1, max: 10000, integer: true },
   sliceMaxFiles: { min: 1, max: 1000, integer: true },
+};
+const LEGACY_CAP_RANGES = {
+  runWallClockHours: { min: 0.25, max: 168, integer: false },
+  ...CAP_RANGES,
 };
 const ADAPTER_OPTION_KEYS = {
   'claude.native': ['implementerModel', 'reviewerModel'],
@@ -38,6 +41,39 @@ const MODEL_PATTERNS = {
   'claude.native': /^[A-Za-z0-9][A-Za-z0-9._:@+-]*$/u,
   'claude.codex-exec': /^[A-Za-z0-9][A-Za-z0-9._:@+-]*$/u,
   'claude.opencode-exec': /^[A-Za-z0-9][A-Za-z0-9._:@+-]*\/[A-Za-z0-9][A-Za-z0-9._:@+-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:@+-]*)*$/u,
+};
+const ADAPTER_ROLE_OPTIONS = {
+  'claude.native': {
+    writer: { model: 'implementerModel' },
+    reviewer: { model: 'reviewerModel' },
+    probe: {},
+  },
+  'codex.native': {
+    writer: {},
+    reviewer: {},
+    probe: {},
+  },
+  'opencode.native': {
+    writer: {},
+    reviewer: {},
+    probe: {},
+  },
+  'claude.codex-exec': {
+    writer: {
+      model: 'implementerModel',
+      effort: 'implementerEffort',
+    },
+    reviewer: {
+      model: 'reviewerModel',
+      effort: 'reviewerEffort',
+    },
+    probe: {},
+  },
+  'claude.opencode-exec': {
+    writer: { model: 'implementerModel' },
+    reviewer: { model: 'reviewerModel' },
+    probe: {},
+  },
 };
 const LEGACY_MODEL_ROUTES = {
   claude: 'claude.native',
@@ -221,11 +257,11 @@ function validateReview(value, errors) {
   }
 }
 
-function validateCapValues(value, keys, errors) {
+function validateCapValues(value, ranges, keys, errors) {
   for (const key of keys) {
     if (!hasOwn(value, key)) continue;
     const candidate = value[key];
-    const { min, max, integer } = CAP_RANGES[key];
+    const { min, max, integer } = ranges[key];
     if (
       typeof candidate !== 'number'
       || !Number.isFinite(candidate)
@@ -242,14 +278,21 @@ function validateCapValues(value, keys, errors) {
 function validateCaps(value, errors) {
   const keys = Object.keys(CAP_RANGES);
   if (!validateObjectShape(value, 'caps', keys, [], errors)) return;
-  validateCapValues(value, keys, errors);
+  validateCapValues(value, CAP_RANGES, keys, errors);
 }
 
 function validateLegacyCaps(value, errors) {
   const optional = ['codeReviewRoundsPerUnit'];
-  const required = Object.keys(CAP_RANGES).filter((key) => !optional.includes(key));
+  const required = Object.keys(LEGACY_CAP_RANGES).filter(
+    (key) => !optional.includes(key),
+  );
   if (!validateObjectShape(value, 'caps', required, optional, errors)) return;
-  validateCapValues(value, [...required, ...optional], errors);
+  validateCapValues(
+    value,
+    LEGACY_CAP_RANGES,
+    [...required, ...optional],
+    errors,
+  );
 }
 
 function validModel(value, route) {
@@ -317,6 +360,41 @@ export function validateConfig(cfg) {
 }
 
 export const validateProjectConfig = validateConfig;
+
+export function validateAdapterTuning(route, role, tuning) {
+  const mapping = ADAPTER_ROLE_OPTIONS[route]?.[role];
+  if (
+    !mapping
+    || !isRecord(tuning)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(tuning))
+    || Object.getOwnPropertySymbols(tuning).length !== 0
+  ) {
+    return false;
+  }
+  const allowed = Object.keys(mapping);
+  if (Object.keys(tuning).some((key) => !allowed.includes(key))) return false;
+  if (hasOwn(tuning, 'model') && !validModel(tuning.model, route)) return false;
+  if (hasOwn(tuning, 'effort') && !EFFORTS.has(tuning.effort)) return false;
+  return true;
+}
+
+export function resolveAdapterTuning(config, route, role) {
+  let snapshot;
+  try {
+    snapshot = structuredClone(config);
+  } catch {
+    return null;
+  }
+  if (validateConfig(snapshot).length !== 0) return null;
+  const mapping = ADAPTER_ROLE_OPTIONS[route]?.[role];
+  if (!mapping) return null;
+  const options = snapshot.adapterOptions?.[route] ?? {};
+  const tuning = {};
+  for (const [target, source] of Object.entries(mapping)) {
+    if (hasOwn(options, source)) tuning[target] = options[source];
+  }
+  return Object.freeze(tuning);
+}
 
 export function extractConfig(markdown) {
   const pattern = /```json[ \t]+autoloop-config[ \t]*\r?\n([\s\S]*?)\r?\n```/gu;
@@ -484,14 +562,14 @@ function copyProjectConfig(cfg, tracker) {
   const caps = {};
   for (const key of Object.keys(CAP_RANGES)) {
     caps[key] = key === 'codeReviewRoundsPerUnit'
-      ? (cfg.caps[key] ?? 3)
+      ? (cfg.caps[key] ?? 5)
       : cfg.caps[key];
   }
   return {
     version: CONFIG_VERSION,
     baseBranch: cfg.baseBranch,
     gate,
-    merge: { policy: cfg.merge.policy },
+    merge: { policy: 'manual' },
     tracker,
     review: { checklistPath: cfg.review.checklistPath },
     caps,
@@ -530,7 +608,13 @@ export function migrateConfig024To025(cfg, migrationFacts) {
   const warnings = [
     'runtime.supportedHosts: retired routing authority removed',
     'engine.profile: retired routing authority removed',
+    'caps.runWallClockHours: retired fixed run cap removed',
   ];
+  if (cfg.merge.policy !== 'manual') {
+    warnings.push(
+      `merge.policy: legacy "${cfg.merge.policy}" reset to "manual"; re-enable only after live non-manual policy verification`,
+    );
+  }
   const adapter = effectiveLegacyAdapter(cfg.runtime.supportedHosts, cfg.engine.profile);
   const retained = {};
 
@@ -574,11 +658,10 @@ function projectFixture() {
     tracker: { provider: 'none' },
     review: { checklistPath: 'docs/agentic/checklist.md' },
     caps: {
-      runWallClockHours: 4,
       gateRetriesPerUnit: 2,
       reviseRoundsPerPr: 3,
-      codeReviewRoundsPerUnit: 3,
-      sliceMaxLines: 500,
+      codeReviewRoundsPerUnit: 5,
+      sliceMaxLines: 700,
       sliceMaxFiles: 10,
     },
   };
@@ -587,6 +670,7 @@ function projectFixture() {
 function legacyFixture(hosts, profile) {
   const cfg = projectFixture();
   cfg.version = LEGACY_CONFIG_VERSION;
+  cfg.caps.runWallClockHours = 4;
   cfg.tracker = 'none';
   cfg.runtime = { supportedHosts: hosts };
   cfg.engine = {
@@ -644,7 +728,6 @@ function selfTest() {
   expectValid(
     'bounded zero retry caps are valid',
     changed(base, (cfg) => {
-      cfg.caps.runWallClockHours = 0.5;
       cfg.caps.gateRetriesPerUnit = 0;
       cfg.caps.reviseRoundsPerPr = 0;
     }),
@@ -669,6 +752,87 @@ function selfTest() {
         },
       };
     }),
+  );
+  const resolvedTuning = changed(base, (cfg) => {
+    cfg.adapterOptions = {
+      'claude.native': {
+        implementerModel: 'sonnet',
+        reviewerModel: 'opus',
+      },
+      'claude.codex-exec': {
+        implementerModel: 'gpt-5.6-writer',
+        reviewerModel: 'gpt-5.6-reviewer',
+        implementerEffort: 'medium',
+        reviewerEffort: 'ultra',
+      },
+    };
+  });
+  expect(
+    'adapter tuning resolves only the selected role fields',
+    JSON.stringify(
+      resolveAdapterTuning(
+        resolvedTuning,
+        'claude.codex-exec',
+        'writer',
+      ),
+    ) === JSON.stringify({
+      model: 'gpt-5.6-writer',
+      effort: 'medium',
+    })
+      && JSON.stringify(
+        resolveAdapterTuning(
+          resolvedTuning,
+          'claude.codex-exec',
+          'reviewer',
+        ),
+      ) === JSON.stringify({
+        model: 'gpt-5.6-reviewer',
+        effort: 'ultra',
+      }),
+  );
+  expect(
+    'probe and native session routes resolve no tuning',
+    Object.keys(
+      resolveAdapterTuning(
+        resolvedTuning,
+        'claude.codex-exec',
+        'probe',
+      ),
+    ).length === 0
+      && Object.keys(
+        resolveAdapterTuning(resolvedTuning, 'codex.native', 'writer'),
+      ).length === 0
+      && Object.keys(
+        resolveAdapterTuning(resolvedTuning, 'opencode.native', 'reviewer'),
+      ).length === 0,
+  );
+  expect(
+    'resolved tuning validator rejects caller option injection',
+    validateAdapterTuning(
+      'claude.codex-exec',
+      'writer',
+      { model: 'gpt-5.6-writer', effort: 'high' },
+    )
+      && !validateAdapterTuning(
+        'claude.codex-exec',
+        'writer',
+        { model: '--sandbox', effort: 'high' },
+      )
+      && !validateAdapterTuning(
+        'claude.opencode-exec',
+        'reviewer',
+        { model: 'provider/reviewer', effort: 'high' },
+      )
+      && !validateAdapterTuning(
+        'claude.native',
+        'probe',
+        { model: 'opus' },
+      )
+      && !validateAdapterTuning(
+        'claude.native',
+        'writer',
+        Object.create({ model: 'sonnet' }),
+      ),
   );
   expectValid('active host is not a ProjectContract input', base, { activeHost: 'unknown' });
   expectValid(
@@ -951,7 +1115,6 @@ function selfTest() {
     );
   }
   const invalidCaps = {
-    runWallClockHours: [0, 169, Number.POSITIVE_INFINITY],
     gateRetriesPerUnit: [-1, 21, 1.5],
     reviseRoundsPerPr: [-1, 21, 1.5],
     codeReviewRoundsPerUnit: [0, 21, 1.5],
@@ -969,6 +1132,13 @@ function selfTest() {
       );
     }
   }
+  expectInvalid(
+    'retired wall-clock cap is rejected',
+    changed(base, (cfg) => {
+      cfg.caps.runWallClockHours = 4;
+    }),
+    'caps.runWallClockHours',
+  );
   expectInvalid(
     'unknown cap',
     changed(base, (cfg) => {
@@ -1209,8 +1379,30 @@ function selfTest() {
   const defaultedReviewCap = migrateConfig024To025(legacyWithoutReviewCap);
   expect(
     'migration materializes the legacy code-review default',
-    defaultedReviewCap.ok && defaultedReviewCap.config.caps.codeReviewRoundsPerUnit === 3,
+    defaultedReviewCap.ok && defaultedReviewCap.config.caps.codeReviewRoundsPerUnit === 5,
   );
+  expect(
+    'migration removes the retired fixed run cap',
+    defaultedReviewCap.ok
+      && !hasOwn(defaultedReviewCap.config.caps, 'runWallClockHours')
+      && defaultedReviewCap.warnings.includes(
+        'caps.runWallClockHours: retired fixed run cap removed',
+      ),
+  );
+
+  for (const policy of ['ratified', 'auto']) {
+    const legacyNonManual = legacyFixture(['claude'], 'claude');
+    legacyNonManual.merge.policy = policy;
+    const contained = migrateConfig024To025(legacyNonManual);
+    expect(
+      `migration contains legacy ${policy} merge policy`,
+      contained.ok
+        && contained.config.merge.policy === 'manual'
+        && contained.warnings.includes(
+          `merge.policy: legacy "${policy}" reset to "manual"; re-enable only after live non-manual policy verification`,
+        ),
+    );
+  }
 
   const legacyNoneTracker = migrateConfig024To025(legacyFixture(['claude'], 'claude'));
   expect(

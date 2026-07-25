@@ -1,28 +1,24 @@
 #!/usr/bin/env node
 // ============================================================================
-// GENERIC RATIFIED AUTO-MERGE GATE — engine is generic; the REPO CONFIG block
-// below is filled by autoloop:setup from your repo's facts.
+// DORMANT NON-MANUAL MERGE REFERENCE — v0.40 Setup never installs or invokes
+// this file, and Runtime rejects every non-manual run before probing or mutation.
+// The generic REPO CONFIG block below exists only for fail-closed contract tests.
 //
 // The policy ENGINE (independently fetched, SHA-bound evidence; AND-gate;
-// kill-switch; CAS merge + confirmation) is battle-tested production code.
+// kill-switch; CAS merge + confirmation) remains reference code.
 // The self-test fixtures DERIVE from the config block, so `--self-test` stays
 // meaningful for any filled config — run it after every config change.
 //
-// RATIFICATION: this file only carries policy authority once a HUMAN has merged
-// the PR that vendors it into the repo (normally the autoloop:setup scaffold
-// PR — which may set `merge.policy: "ratified"` in the same PR, since nothing
-// takes effect until that human merge). When merge policy is `ratified`, the
-// scaffold MUST land via a PR — a direct commit would skip the ratifying merge.
-// The tool's own tools/** path stays protected so it can never authorize
-// changes to itself.
+// This file carries no v0.40 policy authority. A future release may reuse the
+// independently fetched, SHA-bound AND-gate only after adding authenticated
+// invocation provenance and a separately reviewed enablement path. Human-merging
+// this reference file or changing ProjectConfig cannot enable it in v0.40.
 // ============================================================================
-// Ratified auto-merge gate for the dev loop.
+// Dormant ratified auto-merge reference for a future dev loop.
 //
-// This is a ratified-policy model: the human merge of the PR that introduced this
-// tool grants the policy authority, not the loop that runs it. The policy is a pure
-// AND-gate over independently fetched, SHA-bound GitHub evidence. The tool can only
-// satisfy that policy or refuse; its own tools/** path is protected and can never be
-// authorized by this file.
+// The policy is a pure AND-gate over independently fetched, SHA-bound GitHub
+// evidence. Its own tools/** path is protected and can never be authorized by this
+// file. These properties are verified as dormant reference behavior only.
 //
 // Usage:
 //   node tools/agentic/auto-merge.mjs <prNumber> [--dry-run]
@@ -37,15 +33,31 @@ import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+  createPremergeRecord,
+  premergeRecordHash,
   parseAttestation,
   serializeAttestation,
+  serializePremergeRecord,
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
+import {
+  canonicalCiPolicy,
+  finalizeHead,
+} from './delivery-contract.mjs';
+import {
+  lifecycleCommentNeverEdited,
+  lifecycleIdentityHash,
+  serializeLifecycleMarker,
+} from './lifecycle-contract.mjs';
 import { matchMergeProtected } from './lane-contract.mjs';
 import {
   REQUIRED_ATTESTATIONS,
   authorizeMerge,
 } from './merge-authorization-contract.mjs';
+import {
+  authorizePolicyPublication,
+  fetchPublicationCiPolicy,
+} from './publish-verdict.mjs';
 
 // ── REPO CONFIG — filled by autoloop:setup; the vendored copy in your repo is the policy ──
 export const REPOSITORY = { owner: 'your-org', name: 'your-repo' }; // setup: from `gh repo view`
@@ -235,6 +247,9 @@ const ISSUE_QUERY = `
             id
             author{login}
             body
+            createdAt
+            updatedAt
+            lastEditedAt
           }
           pageInfo{hasNextPage endCursor}
         }
@@ -265,6 +280,9 @@ const ISSUE_COMMENTS_QUERY = `
             id
             author{login}
             body
+            createdAt
+            updatedAt
+            lastEditedAt
           }
           pageInfo{hasNextPage endCursor}
         }
@@ -587,6 +605,13 @@ function sha256(value) {
   return createHash('sha256').update(String(value)).digest('hex');
 }
 
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+}
+
 function blockedBy(body) {
   const section = /##\s*Blocked by([\s\S]*?)(\n##\s|$)/i.exec(body ?? '');
   if (!section) return [];
@@ -608,6 +633,7 @@ export function deriveLiveIssueEvidence(input) {
   const dependencies = input?.dependencies;
   const permission = input?.loopReadyPermission;
   const ownership = input?.ownership;
+  const policyAttestation = input?.policyAttestation;
   const labels = Array.isArray(issue?.labels) ? issue.labels : [];
   const expectedDependencies = blockedBy(issue?.body);
   const dependencyItems = Array.isArray(dependencies?.items)
@@ -649,6 +675,26 @@ export function deriveLiveIssueEvidence(input) {
     && typeof planComment?.body === 'string'
     && planComment.body.length > 0
     && sha256(planComment.body) === ownership.frozenPlanHash;
+  const policyVerification = policyAttestation
+    ? authorizePolicyPublication(policyAttestation, {
+      complete: input?.policyLiveComplete === true,
+      loopAuthor: input?.loopLogin,
+      issue: { number: issue?.number },
+      pullRequest: input?.pullRequest,
+      comments,
+      checkRuns: input?.checkRuns,
+      ciPolicy: input?.ciPolicy,
+      delivery: input?.delivery,
+    })
+    : null;
+  const premergeObservation = policyVerification?.observation ?? null;
+  const premergeVerified = (
+    policyVerification?.authorized === true
+    && premergeObservation?.verified === true
+    && premergeObservation.pullRequest === policyAttestation?.pullRequest
+    && policyAttestation?.premergeRecordAuthor === input?.loopLogin
+    && issue?.number === policyAttestation?.issue
+  );
   const hardLabels = new Set([
     'human:authorize',
     'human:legal',
@@ -697,6 +743,25 @@ export function deriveLiveIssueEvidence(input) {
         ...ownership,
         frozenPlanPresent: planComment !== null,
         frozenPlanCommentVerified,
+      }
+      : null,
+    lifecycle: policyAttestation
+      ? {
+        complete:
+          comments?.complete === true
+          && input?.checkRuns?.complete === true
+          && input?.ciPolicy?.complete === true
+          && premergeObservation?.complete === true,
+        delivered: policyAttestation.delivered,
+        headOid: policyAttestation.headOid,
+        premergeRecord: premergeVerified,
+        premergeRecordId: premergeVerified ? premergeObservation.id : null,
+        premergeRecordHash: premergeVerified ? premergeObservation.bodyHash : null,
+        premergeRecordAuthor: premergeVerified ? premergeObservation.author : null,
+        premergeRecordCommentId: premergeVerified ? premergeObservation.commentId : null,
+        premergeRecordIssue: premergeVerified ? premergeObservation.issue : null,
+        premergeRecordPullRequest:
+          premergeVerified ? premergeObservation.pullRequest : null,
       }
       : null,
   };
@@ -996,6 +1061,7 @@ function fetchIssueRecord(number) {
         id: comment?.id,
         author: { login: comment?.author?.login ?? null },
         body: comment?.body,
+        neverEdited: lifecycleCommentNeverEdited(comment),
       })),
     },
   };
@@ -1029,7 +1095,7 @@ function fetchDependencies(body) {
   return { complete: true, items };
 }
 
-function fetchLinkedIssueEvidence(number, ownership) {
+function fetchLinkedIssueEvidence(number, ownership, policyAttestation, policyLive) {
   const record = fetchIssueRecord(number);
   const timeline = fetchTimeline(number);
   const readyEvent = latestLabelEvent(timeline.items, 'loop-ready');
@@ -1042,6 +1108,8 @@ function fetchLinkedIssueEvidence(number, ownership) {
     dependencies: fetchDependencies(record.issue.body),
     loopReadyPermission,
     ownership,
+    policyAttestation,
+    ...policyLive,
     loopLogin: LOOP_LOGIN,
   });
 }
@@ -1158,6 +1226,8 @@ export function deriveAttestedEvidence(inputs, commitMetadata = null) {
   const result = {
     ownership: null,
     lifecycle: null,
+    policyAttestation: null,
+    ciPolicy: null,
     authorization: null,
     gateEvidenceVerified: false,
     executorIdentity: null,
@@ -1225,13 +1295,12 @@ export function deriveAttestedEvidence(inputs, commitMetadata = null) {
       frozenPlanCommentVerified: false,
     };
   }
-  if (policy && policy.value.issue === issue) {
-    result.lifecycle = {
-      complete: true,
-      delivered: policy.value.delivered,
-      headOid: policy.value.headOid,
-      premergeRecord: policy.value.premergeRecord.length > 0,
-    };
+  if (
+    policy
+    && policy.value.issue === issue
+    && policy.value.pullRequest === inputs?.prNumber
+  ) {
+    result.policyAttestation = policy.value;
   }
   if (authorization && authorization.value.pullRequest === inputs?.prNumber) {
     result.authorization = {
@@ -1313,6 +1382,7 @@ function emptyInputs() {
     lifecycle: null,
     authorization: null,
     gateEvidenceVerified: false,
+    policyAttestation: null,
     serverPolicy: null,
     fetchReasons: [],
   };
@@ -1360,10 +1430,66 @@ function fetchInputs(number) {
   Object.assign(inputs, deriveAttestedEvidence(inputs, commitMetadata));
 
   if (claim.valid) {
+    let delivery = null;
+    if (inputs.headRefOid) {
+      try {
+        inputs.ciPolicy = fetchPublicationCiPolicy({
+          host: 'github.com',
+          owner: REPOSITORY.owner,
+          repo: REPOSITORY.name,
+        }, inputs.headRefOid);
+      } catch (error) {
+        inputs.fetchReasons.push(`committed CI policy fetch failed: ${errorMessage(error)}`);
+      }
+      try {
+        delivery = finalizeHead({
+          schemaVersion: 1,
+          repository: `${REPOSITORY.owner}/${REPOSITORY.name}`,
+          pullRequest: inputs.prNumber,
+          committedHead: inputs.headRefOid,
+          reviewedHead: inputs.headRefOid,
+          gatedHead: inputs.headRefOid,
+        });
+        if (delivery.canMarkDelivered !== true) {
+          inputs.fetchReasons.push(
+            `live delivery evidence failed: ${delivery.code ?? 'DELIVERY_UNVERIFIED'}`,
+          );
+        }
+      } catch (error) {
+        inputs.fetchReasons.push(
+          `live delivery evidence failed closed: ${errorMessage(error)}`,
+        );
+      }
+    }
     try {
-      const issueEvidence = fetchLinkedIssueEvidence(claim.issue, inputs.ownership);
+      const issueEvidence = fetchLinkedIssueEvidence(
+        claim.issue,
+        inputs.ownership,
+        inputs.policyAttestation,
+        {
+          policyLiveComplete:
+            inputs.coreComplete === true
+            && inputs.rollupComplete === true
+            && inputs.ciPolicy?.complete === true,
+          pullRequest: {
+            number: inputs.prNumber,
+            headOid: inputs.headRefOid,
+            headRefName: inputs.headRefName,
+            body: inputs.body,
+            merged: upper(inputs.state) === 'MERGED',
+            mergeOid: null,
+          },
+          checkRuns: {
+            complete: inputs.rollupComplete === true,
+            items: inputs.checkRuns,
+          },
+          ciPolicy: inputs.ciPolicy,
+          delivery,
+        },
+      );
       inputs.linkedIssue = issueEvidence.linkedIssue;
       inputs.ownership = issueEvidence.ownership;
+      inputs.lifecycle = issueEvidence.lifecycle;
     } catch (error) {
       inputs.fetchReasons.push(`linked-issue eligibility fetch failed: ${errorMessage(error)}`);
     }
@@ -1920,6 +2046,12 @@ function makeInput({
       delivered: true,
       headOid: HEAD_SHA,
       premergeRecord: true,
+      premergeRecordId: `pmr_${'9'.repeat(64)}`,
+      premergeRecordHash: '8'.repeat(64),
+      premergeRecordAuthor: LOOP_LOGIN,
+      premergeRecordCommentId: 'IC_premerge',
+      premergeRecordIssue: LOOP_ISSUE,
+      premergeRecordPullRequest: 138,
     },
     gateEvidenceVerified: true,
     authorization: {
@@ -2213,6 +2345,7 @@ export const FIXTURES = [
   protectedFixture('protected credential storage', 'config/credentials.yml'),
   protectedFixture('protected private key material', 'certs/private-key.pem'),
   protectedFixture('protected nested .env file', 'apps/web/.env.local'),
+  protectedFixture('protected CI requirements policy', '.autoloop/ci-policy.json'),
   protectedFixture("the tool's own path with everything green", 'tools/agentic/auto-merge.mjs'),
   protectedFixture('protected .github/**', '.github/workflows/ci.yml'),
   protectedFixture('protected .claude/**', '.claude/settings.json'),
@@ -2370,6 +2503,7 @@ function statusStampCases() {
   }
   cases.push({ name: 'combined-status page for a different sha fails the fetch', ok: mismatchThrew });
   const base = makeInput();
+  const planBody = 'frozen reviewed plan';
   const ownership = {
     kind: 'ownership',
     v: 1,
@@ -2377,17 +2511,9 @@ function statusStampCases() {
     issue: LOOP_ISSUE,
     issueBodyHash: ISSUE_BODY_HASH,
     claimCommitOid: CLAIM_SHA,
-    frozenPlanHash: FROZEN_PLAN_HASH,
+    frozenPlanHash: sha256(planBody),
     frozenPlanCommentId: 'IC_kwDOAutoloop7',
     frozenPlanAuthor: LOOP_LOGIN,
-  };
-  const policy = {
-    kind: 'policy',
-    v: 1,
-    headOid: HEAD_SHA,
-    issue: LOOP_ISSUE,
-    delivered: true,
-    premergeRecord: 'record-1',
   };
   const gate = {
     kind: 'gate',
@@ -2396,6 +2522,124 @@ function statusStampCases() {
     commandHash: '6'.repeat(64),
     configHash: '7'.repeat(64),
     repositoryFingerprint: '8'.repeat(64),
+  };
+  const reviewSummaryValue =
+    `Authenticated review convergence: REVIEW_CLEAN; round 2; receipt ${'2'.repeat(64)}.`;
+  const gateSummaryValue = serializeAttestation(gate);
+  const lifecycleMarker = {
+    v: 1,
+    issue: LOOP_ISSUE,
+    issueBodyHash: ISSUE_BODY_HASH,
+    planHash: ownership.frozenPlanHash,
+    branch: base.headRefName,
+    plannedBaseOid: BASE_SHA,
+    selector: 'native',
+    runIntentHash: '1'.repeat(64),
+    intentSource: 'invocation',
+    mergePolicy: 'ratified',
+    phase: 'ready-head',
+    claimCommit: CLAIM_SHA,
+    pr: 138,
+    headOid: HEAD_SHA,
+  };
+  const lifecycleBody = serializeLifecycleMarker(lifecycleMarker);
+  const ciPolicySource = canonicalCiPolicy(REQUIRED_CI_CHECKS);
+  const ciPolicy = {
+    complete: true,
+    source: ciPolicySource,
+    sourceHash: sha256(ciPolicySource),
+    requiredChecks: [...REQUIRED_CI_CHECKS],
+  };
+  const componentCheckRuns = makeCheckRuns().map((check, index) => ({
+    ...check,
+    id: 100 + index,
+    output: {
+      summary:
+        check.name === 'agentic/review'
+          ? reviewSummaryValue
+          : check.name === 'agentic/gate'
+            ? gateSummaryValue
+            : 'verified',
+    },
+  }));
+  const reviewCheck = componentCheckRuns.find((check) => check.name === 'agentic/review');
+  const gateCheck = componentCheckRuns.find((check) => check.name === 'agentic/gate');
+  const deliveryEvidence = {
+    schemaVersion: 1,
+    source: 'github-rest',
+    repository: 'autoloop/fixture',
+    pullRequest: 138,
+    remoteHead: HEAD_SHA,
+    baseRefName: 'main',
+    requiredChecks: [],
+    checks: componentCheckRuns.map((checkRun) => ({
+      id: checkRun.id,
+      name: checkRun.name,
+      headOid: checkRun.head_sha,
+      status: checkRun.status.toUpperCase(),
+      conclusion: checkRun.conclusion.toUpperCase(),
+      appId: checkRun.app.id,
+    })),
+  };
+  const deliveryEvidenceFingerprint = sha256(stableJson(deliveryEvidence));
+  const delivery = {
+    state: 'delivered',
+    code: 'NO_REQUIRED_CI',
+    canMarkDelivered: true,
+    headOid: HEAD_SHA,
+    requirementsPolicy: {
+      sourceFingerprint: ciPolicy.sourceHash,
+    },
+    liveEvidence: {
+      ...deliveryEvidence,
+      provenance: {
+        schemaVersion: 1,
+        source: 'github-rest',
+        repository: deliveryEvidence.repository,
+        pullRequest: deliveryEvidence.pullRequest,
+        evidenceFingerprint: deliveryEvidenceFingerprint,
+      },
+    },
+  };
+  const premerge = createPremergeRecord({
+    issue: LOOP_ISSUE,
+    pullRequest: 138,
+    headOid: HEAD_SHA,
+    run: {
+      intentHash: lifecycleMarker.runIntentHash,
+      receiptFingerprint: '2'.repeat(64),
+    },
+    plan: {
+      commentId: ownership.frozenPlanCommentId,
+      contentHash: ownership.frozenPlanHash,
+    },
+    review: {
+      checkRunId: reviewCheck.id,
+      summaryHash: sha256(reviewSummaryValue),
+    },
+    gate: {
+      checkRunId: gateCheck.id,
+      summaryHash: sha256(gateSummaryValue),
+    },
+    ci: {
+      policyHash: ciPolicy.sourceHash,
+      evidenceHash: deliveryEvidenceFingerprint,
+    },
+    lifecycle: {
+      commentId: 'IC_lifecycle',
+      identityHash: lifecycleIdentityHash(lifecycleMarker),
+    },
+  });
+  const policy = {
+    kind: 'policy',
+    v: 1,
+    headOid: HEAD_SHA,
+    issue: LOOP_ISSUE,
+    pullRequest: 138,
+    delivered: true,
+    premergeRecordId: premerge.recordId,
+    premergeRecordHash: premergeRecordHash(premerge),
+    premergeRecordAuthor: LOOP_LOGIN,
   };
   const authorization = {
     kind: 'human-authorization',
@@ -2422,7 +2666,7 @@ function statusStampCases() {
   const evidence = deriveAttestedEvidence({
     ...base,
     checkRuns: [
-      ...makeCheckRuns().map((check) => {
+      ...componentCheckRuns.map((check) => {
         if (check.name === 'agentic/ownership') {
           return { ...check, output: { summary: serializeAttestation(ownership) } };
         }
@@ -2444,8 +2688,55 @@ function statusStampCases() {
       },
     ],
   }, commitMetadata);
+  const policyLiveInput = {
+    issue: { number: LOOP_ISSUE, labels: [] },
+    comments: {
+      complete: true,
+      items: [
+        {
+          id: ownership.frozenPlanCommentId,
+          author: { login: LOOP_LOGIN },
+          body: planBody,
+        },
+        {
+          id: premerge.lifecycle.commentId,
+          author: { login: LOOP_LOGIN },
+          body: lifecycleBody,
+          neverEdited: true,
+        },
+        {
+          id: 'IC_premerge',
+          author: { login: LOOP_LOGIN },
+          body: serializePremergeRecord(premerge),
+          neverEdited: true,
+        },
+      ],
+    },
+    policyAttestation: evidence.policyAttestation,
+    policyLiveComplete: true,
+    pullRequest: {
+      number: 138,
+      headOid: HEAD_SHA,
+      headRefName: base.headRefName,
+      body: base.body,
+      merged: false,
+      mergeOid: null,
+    },
+    checkRuns: { complete: true, items: componentCheckRuns },
+    ciPolicy,
+    delivery,
+    loopLogin: LOOP_LOGIN,
+  };
+  const hydratedLifecycle = deriveLiveIssueEvidence(policyLiveInput).lifecycle;
+  const nonexistentComponentLifecycle = deriveLiveIssueEvidence({
+    ...policyLiveInput,
+    checkRuns: {
+      complete: true,
+      items: componentCheckRuns.filter((checkRun) => checkRun.id !== reviewCheck.id),
+    },
+  }).lifecycle;
   cases.push({
-    name: 'trusted exact-head attestations hydrate merge evidence',
+    name: 'trusted exact-head attestations require live premerge hydration',
     ok:
       evidence.ownership?.claimCommitAncestor === true
       && evidence.ownership?.claimCommit?.commits?.[0]?.message
@@ -2453,11 +2744,37 @@ function statusStampCases() {
       && evidence.ownership?.claimCommit?.baseOid === BASE_SHA
       && evidence.ownership?.claimCommit?.headOid === HEAD_SHA
       && evidence.ownership?.frozenPlanCommentId === ownership.frozenPlanCommentId
-      && evidence.lifecycle?.premergeRecord === true
+      && evidence.lifecycle === null
+      && evidence.policyAttestation?.premergeRecordId === premerge.recordId
+      && hydratedLifecycle?.premergeRecord === true
       && evidence.gateEvidenceVerified === true
       && evidence.authorization?.pullRequest === 138
       && evidence.authorization?.actor === TRUSTED_HUMAN_LOGINS[0]
       && evidence.serverPolicy === null,
+  });
+  cases.push({
+    name: 'live hydration rejects canonical records with nonexistent component IDs',
+    ok:
+      nonexistentComponentLifecycle?.complete === true
+      && nonexistentComponentLifecycle.premergeRecord === false,
+  });
+  const legacyPolicy = deriveAttestedEvidence({
+    ...base,
+    checkRuns: [{
+      name: 'agentic/policy',
+      status: 'completed',
+      conclusion: 'success',
+      head_sha: HEAD_SHA,
+      output: {
+        summary: `<!-- autoloop-attestation-v1
+{"delivered":true,"headOid":"${HEAD_SHA}","issue":${LOOP_ISSUE},"kind":"policy","premergeRecord":"does-not-exist","v":1}
+-->`,
+      },
+    }],
+  }, commitMetadata);
+  cases.push({
+    name: 'caller record strings never hydrate lifecycle truth',
+    ok: legacyPolicy.policyAttestation === null && legacyPolicy.lifecycle === null,
   });
   const staleEvidence = deriveAttestedEvidence({
     ...base,

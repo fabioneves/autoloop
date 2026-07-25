@@ -2,6 +2,7 @@
 
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { validPremergeRecordId } from './attestation-contract.mjs';
 
 export const REQUIRED_ATTESTATIONS = [
   'agentic/gate',
@@ -392,7 +393,18 @@ export function authorizeMerge(input) {
   if (pr.lifecycle?.complete !== true) reasons.push('lifecycle evidence is incomplete');
   if (pr.lifecycle?.delivered !== true) reasons.push('lifecycle is not delivered');
   if (pr.lifecycle?.headOid !== pr.headRefOid) reasons.push('lifecycle evidence is not bound to the current head');
-  if (pr.lifecycle?.premergeRecord !== true) reasons.push('pre-merge audit record is missing');
+  if (
+    pr.lifecycle?.premergeRecord !== true
+    || !validPremergeRecordId(pr.lifecycle?.premergeRecordId)
+    || !HASH_RE.test(pr.lifecycle?.premergeRecordHash ?? '')
+    || pr.lifecycle?.premergeRecordAuthor !== config.loopLogin
+    || typeof pr.lifecycle?.premergeRecordCommentId !== 'string'
+    || pr.lifecycle.premergeRecordCommentId.length === 0
+    || pr.lifecycle?.premergeRecordIssue !== pr.claim?.issue
+    || pr.lifecycle?.premergeRecordPullRequest !== pr.number
+  ) {
+    reasons.push('pre-merge audit record identity, author, or content is unverified');
+  }
   if (pr.gateEvidenceVerified !== true) {
     reasons.push('typed exact-head gate evidence is missing or invalid');
   }
@@ -516,6 +528,12 @@ function fixture(overrides = {}) {
         delivered: true,
         headOid: HEAD,
         premergeRecord: true,
+        premergeRecordId: `pmr_${'d'.repeat(64)}`,
+        premergeRecordHash: 'e'.repeat(64),
+        premergeRecordAuthor: 'autoloop[bot]',
+        premergeRecordCommentId: 'IC_premerge',
+        premergeRecordIssue: 7,
+        premergeRecordPullRequest: 12,
       },
       gateEvidenceVerified: true,
       path: 'A',
@@ -635,6 +653,35 @@ function selfTest() {
     ['missing frozen plan blocks', fixture({ pr: { ...base.pr, ownership: { ...base.pr.ownership, frozenPlanPresent: false } } }), false],
     ['unverified frozen-plan comment blocks', fixture({ pr: { ...base.pr, ownership: { ...base.pr.ownership, frozenPlanCommentVerified: false } } }), false],
     ['undelivered lifecycle blocks', fixture({ pr: { ...base.pr, lifecycle: { ...base.pr.lifecycle, delivered: false } } }), false],
+    ['caller premerge record string never authorizes', fixture({
+      pr: {
+        ...base.pr,
+        lifecycle: {
+          ...base.pr.lifecycle,
+          premergeRecord: 'does-not-exist',
+        },
+      },
+    }), false],
+    ['bare premerge boolean without hydrated identity blocks', fixture({
+      pr: {
+        ...base.pr,
+        lifecycle: {
+          complete: true,
+          delivered: true,
+          headOid: HEAD,
+          premergeRecord: true,
+        },
+      },
+    }), false],
+    ['premerge record from a non-loop author blocks', fixture({
+      pr: {
+        ...base.pr,
+        lifecycle: {
+          ...base.pr.lifecycle,
+          premergeRecordAuthor: 'maintainer',
+        },
+      },
+    }), false],
     ['blocked issue blocks', fixture({ pr: { ...base.pr, linkedIssue: { ...base.pr.linkedIssue, blocked: true } } }), false],
     ['current linked-issue hard label blocks stale clear booleans', fixture({
       pr: {

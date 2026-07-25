@@ -2,19 +2,11 @@
 
 import {
   createHash,
-  createHmac,
   randomBytes,
-  timingSafeEqual,
 } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  closeSync,
-  constants,
-  fstatSync,
-  lstatSync,
   mkdtempSync,
-  openSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -25,9 +17,14 @@ import {
   classifyLaneProof,
   verifyLaneProof,
 } from './lane-contract.mjs';
-import { validateProjectConfig } from './config-contract.mjs';
+import {
+  resolveAdapterTuning,
+  validateAdapterTuning,
+  validateProjectConfig,
+} from './config-contract.mjs';
 import {
   artifactSourceFingerprint,
+  authorizeRuntimeValue,
   classifyRouteAttempt,
   compileRouteAttempt,
   HOST_ADAPTER_AUTHORITY,
@@ -44,10 +41,20 @@ import {
   validateSealedArtifactSource,
   validateUnsealedArtifactSource,
   validateRouteAttemptOutcome,
+  validateRuntimeAuthorization,
 } from './route-adapter-contract.mjs';
+import {
+  SNAPSHOT_SECTIONS,
+  completeSection,
+  createQueueEvidence,
+  createSnapshot,
+  issueSnapshotItem,
+  verifyQueueEvidence,
+} from './snapshot-contract.mjs';
 
 export const RUNTIME_CONTRACT_VERSION = 1;
 export const CONFIG_VERSION = '0.25.0';
+export const INTENT_PROVENANCE = 'best-effort-unverified';
 export const MAX_RELAUNCH_GENERATIONS = 25;
 export const RELAUNCH_PROMPT =
   "Load the autoloop dev skill and drain the queue; auto-continue across sessions; stop per STATE's stop condition.";
@@ -88,7 +95,6 @@ export const OUTAGE_TRANSITIONS = Object.freeze([
 ]);
 export const DEGRADATIONS = Object.freeze([
   'native-fallback',
-  'degraded-native-codex-review',
 ]);
 export const STOP_REASONS = Object.freeze([
   'queue-exhausted',
@@ -102,6 +108,7 @@ export const ERROR_CODES = Object.freeze([
   'UNKNOWN_ACTIVE_HOST',
   'AMBIGUOUS_ACTIVE_HOST',
   'CONFIG_MIGRATION_REQUIRED',
+  'UNVERIFIABLE_INVOCATION_PROVENANCE',
   'UNSUPPORTED_ROUTE',
   'MISSING_CAPABILITY',
   'UNVERIFIABLE_ISOLATION',
@@ -118,52 +125,54 @@ export const ERROR_CODES = Object.freeze([
 ]);
 
 export const CAPABILITY_REQUIREMENTS = Object.freeze([
-  'claude.agent.available',
-  'claude.agent.fresh-context',
-  'claude.agent.writer',
-  'claude.agent.reviewer-read-only',
-  'codex.worker.available',
-  'codex.worker.fresh-context',
-  'codex.worker.writer',
+  'host.process-authority-isolation',
+  'host.writer-broker-commit',
+  'claude.print.available',
+  'claude.authenticated',
+  'claude.version.2.1.205',
+  'claude.print.workspace-write',
+  'claude.print.read-only',
+  'claude.structured-output',
+  'claude.bash.sandbox',
+  'claude.bash.network-denied',
+  'claude.subprocess.credentials-scrubbed',
   'codex.exec.available',
   'codex.authenticated',
   'codex.version.0.145.0',
   'codex.exec.workspace-write',
   'codex.exec.read-only',
   'codex.exec.network-denied',
+  'codex.exec.auth-denied',
   'codex.verdict-schema',
-  'codex.spawn.available',
-  'codex.spawn.agent-type',
-  'codex.spawn.fork-turns-none',
-  'codex.spawn.effective-read-only',
-  'codex.spawn.integrity',
   'artifact.codex-reviewer',
-  'opencode.task.available',
-  'opencode.task.fresh-context',
-  'opencode.task.writer',
   'opencode.run.available',
   'opencode.authenticated',
   'opencode.version.1.18.3',
   'opencode.run.writer',
   'opencode.reviewer.typed',
   'opencode.reviewer.denied-tools',
+  'opencode.external-directory-denied',
+  'opencode.remote-tools-denied',
   'opencode.verdict-schema',
   'artifact.opencode-reviewer',
 ]);
 export const ISOLATION_REQUIREMENTS = Object.freeze([
-  'claude.agent.fresh-context',
-  'claude.agent.reviewer-read-only',
-  'codex.worker.fresh-context',
+  'host.process-authority-isolation',
+  'host.writer-broker-commit',
+  'claude.print.workspace-write',
+  'claude.print.read-only',
+  'claude.bash.sandbox',
+  'claude.bash.network-denied',
+  'claude.subprocess.credentials-scrubbed',
   'codex.exec.workspace-write',
   'codex.exec.read-only',
   'codex.exec.network-denied',
-  'codex.spawn.fork-turns-none',
-  'codex.spawn.effective-read-only',
-  'codex.spawn.integrity',
-  'opencode.task.fresh-context',
+  'codex.exec.auth-denied',
   'opencode.run.writer',
   'opencode.reviewer.typed',
   'opencode.reviewer.denied-tools',
+  'opencode.external-directory-denied',
+  'opencode.remote-tools-denied',
 ]);
 
 const CODEX_ARTIFACT = Object.freeze({
@@ -177,11 +186,114 @@ const OPENCODE_ARTIFACT = Object.freeze({
   roles: Object.freeze(['reviewer', 'doctor']),
 });
 
-const posture = (execution, requirements, mode, degraded) => ({
+const CLAUDE_WRITER_REQUIREMENTS = Object.freeze([
+  'host.process-authority-isolation',
+  'host.writer-broker-commit',
+  'claude.print.available',
+  'claude.authenticated',
+  'claude.version.2.1.205',
+  'claude.print.workspace-write',
+  'claude.bash.sandbox',
+  'claude.bash.network-denied',
+  'claude.subprocess.credentials-scrubbed',
+]);
+const CLAUDE_REVIEWER_REQUIREMENTS = Object.freeze([
+  'host.process-authority-isolation',
+  'claude.print.available',
+  'claude.authenticated',
+  'claude.version.2.1.205',
+  'claude.print.read-only',
+  'claude.structured-output',
+  'claude.subprocess.credentials-scrubbed',
+]);
+const CLAUDE_DOCTOR_REQUIREMENTS = Object.freeze([
+  'host.process-authority-isolation',
+  'host.writer-broker-commit',
+  'claude.print.available',
+  'claude.authenticated',
+  'claude.version.2.1.205',
+  'claude.print.workspace-write',
+  'claude.print.read-only',
+  'claude.structured-output',
+  'claude.bash.sandbox',
+  'claude.bash.network-denied',
+  'claude.subprocess.credentials-scrubbed',
+]);
+const CODEX_WRITER_REQUIREMENTS = Object.freeze([
+  'host.process-authority-isolation',
+  'host.writer-broker-commit',
+  'codex.exec.available',
+  'codex.authenticated',
+  'codex.version.0.145.0',
+  'codex.exec.workspace-write',
+  'codex.exec.network-denied',
+  'codex.exec.auth-denied',
+]);
+const CODEX_REVIEWER_REQUIREMENTS = Object.freeze([
+  'host.process-authority-isolation',
+  'codex.exec.available',
+  'codex.authenticated',
+  'codex.version.0.145.0',
+  'codex.exec.read-only',
+  'codex.exec.network-denied',
+  'codex.exec.auth-denied',
+  'codex.verdict-schema',
+  'artifact.codex-reviewer',
+]);
+const CODEX_DOCTOR_REQUIREMENTS = Object.freeze([
+  'host.process-authority-isolation',
+  'host.writer-broker-commit',
+  'codex.exec.available',
+  'codex.authenticated',
+  'codex.version.0.145.0',
+  'codex.exec.workspace-write',
+  'codex.exec.read-only',
+  'codex.exec.network-denied',
+  'codex.exec.auth-denied',
+  'codex.verdict-schema',
+  'artifact.codex-reviewer',
+]);
+const OPENCODE_WRITER_REQUIREMENTS = Object.freeze([
+  'host.process-authority-isolation',
+  'host.writer-broker-commit',
+  'opencode.run.available',
+  'opencode.authenticated',
+  'opencode.version.1.18.3',
+  'opencode.run.writer',
+  'opencode.external-directory-denied',
+  'opencode.remote-tools-denied',
+]);
+const OPENCODE_REVIEWER_REQUIREMENTS = Object.freeze([
+  'host.process-authority-isolation',
+  'opencode.run.available',
+  'opencode.authenticated',
+  'opencode.version.1.18.3',
+  'opencode.reviewer.typed',
+  'opencode.reviewer.denied-tools',
+  'opencode.external-directory-denied',
+  'opencode.remote-tools-denied',
+  'opencode.verdict-schema',
+  'artifact.opencode-reviewer',
+]);
+const OPENCODE_DOCTOR_REQUIREMENTS = Object.freeze([
+  'host.process-authority-isolation',
+  'host.writer-broker-commit',
+  'opencode.run.available',
+  'opencode.authenticated',
+  'opencode.version.1.18.3',
+  'opencode.run.writer',
+  'opencode.reviewer.typed',
+  'opencode.reviewer.denied-tools',
+  'opencode.external-directory-denied',
+  'opencode.remote-tools-denied',
+  'opencode.verdict-schema',
+  'artifact.opencode-reviewer',
+]);
+
+const posture = (execution, requirements, mode) => ({
   execution,
   requirements,
   isolation: { mode },
-  ...(degraded ? { degraded } : {}),
 });
 
 export const ROUTE_CATALOG = deepFreeze({
@@ -193,44 +305,26 @@ export const ROUTE_CATALOG = deepFreeze({
     adapterOptionsKey: 'claude.native',
     requiredArtifacts: [],
     doctor: {
-      executable: null,
-      minimumVersion: null,
+      executable: 'claude',
+      minimumVersion: '2.1.205',
       staticChecks: [],
-      liveChecks: [
-        'claude.agent.available',
-        'claude.agent.fresh-context',
-        'claude.agent.writer',
-        'claude.agent.reviewer-read-only',
-      ],
+      liveChecks: CLAUDE_DOCTOR_REQUIREMENTS,
       inactiveStatus: 'unverified',
     },
     postures: {
       writer: posture(
-        'claude.fresh-agent-writer',
-        [
-          'claude.agent.available',
-          'claude.agent.fresh-context',
-          'claude.agent.writer',
-        ],
-        'fresh-writable-agent',
+        'claude.print-workspace-write',
+        CLAUDE_WRITER_REQUIREMENTS,
+        'fresh-workspace-write-process',
       ),
       reviewer: posture(
-        'claude.fresh-agent-reviewer',
-        [
-          'claude.agent.available',
-          'claude.agent.fresh-context',
-          'claude.agent.reviewer-read-only',
-        ],
-        'fresh-read-only-agent',
+        'claude.print-typed-reviewer',
+        CLAUDE_REVIEWER_REQUIREMENTS,
+        'os-read-only',
       ),
       probe: posture(
-        'claude.live-doctor',
-        [
-          'claude.agent.available',
-          'claude.agent.fresh-context',
-          'claude.agent.writer',
-          'claude.agent.reviewer-read-only',
-        ],
+        'claude.print-live-doctor',
+        CLAUDE_DOCTOR_REQUIREMENTS,
         'live-route-probe',
       ),
     },
@@ -246,84 +340,24 @@ export const ROUTE_CATALOG = deepFreeze({
       executable: 'codex',
       minimumVersion: '0.145.0',
       staticChecks: ['artifact.codex-reviewer'],
-      liveChecks: [
-        'codex.worker.available',
-        'codex.worker.fresh-context',
-        'codex.worker.writer',
-        'codex.exec.available',
-        'codex.authenticated',
-        'codex.version.0.145.0',
-        'codex.exec.read-only',
-        'codex.exec.network-denied',
-        'codex.verdict-schema',
-      ],
+      liveChecks: CODEX_DOCTOR_REQUIREMENTS,
       inactiveStatus: 'unverified',
     },
     postures: {
       writer: posture(
-        'codex.fresh-writable-worker',
-        [
-          'codex.worker.available',
-          'codex.worker.fresh-context',
-          'codex.worker.writer',
-        ],
-        'fresh-writable-worker',
+        'codex.exec-workspace-write',
+        CODEX_WRITER_REQUIREMENTS,
+        'fresh-workspace-write-process',
       ),
       reviewer: posture(
         'codex.exec-read-only',
-        [
-          'codex.exec.available',
-          'codex.authenticated',
-          'codex.version.0.145.0',
-          'codex.exec.read-only',
-          'codex.exec.network-denied',
-          'codex.verdict-schema',
-          'artifact.codex-reviewer',
-        ],
+        CODEX_REVIEWER_REQUIREMENTS,
         'os-read-only',
-        posture(
-          'codex.in-session-reviewer',
-          [
-            'codex.spawn.available',
-            'codex.spawn.agent-type',
-            'codex.spawn.fork-turns-none',
-            'codex.spawn.effective-read-only',
-            'codex.spawn.integrity',
-            'artifact.codex-reviewer',
-          ],
-          'integrity-checked-read-only',
-        ),
       ),
       probe: posture(
-        'codex.live-doctor',
-        [
-          'codex.worker.available',
-          'codex.worker.fresh-context',
-          'codex.worker.writer',
-          'codex.exec.available',
-          'codex.authenticated',
-          'codex.version.0.145.0',
-          'codex.exec.read-only',
-          'codex.exec.network-denied',
-          'codex.verdict-schema',
-          'artifact.codex-reviewer',
-        ],
+        'codex.exec-live-doctor',
+        CODEX_DOCTOR_REQUIREMENTS,
         'live-route-probe',
-        posture(
-          'codex.degraded-live-doctor',
-          [
-            'codex.worker.available',
-            'codex.worker.fresh-context',
-            'codex.worker.writer',
-            'codex.spawn.available',
-            'codex.spawn.agent-type',
-            'codex.spawn.fork-turns-none',
-            'codex.spawn.effective-read-only',
-            'codex.spawn.integrity',
-            'artifact.codex-reviewer',
-          ],
-          'degraded-live-route-probe',
-        ),
       ),
     },
   },
@@ -338,52 +372,23 @@ export const ROUTE_CATALOG = deepFreeze({
       executable: 'opencode',
       minimumVersion: '1.18.3',
       staticChecks: ['artifact.opencode-reviewer'],
-      liveChecks: [
-        'opencode.task.available',
-        'opencode.task.fresh-context',
-        'opencode.task.writer',
-        'opencode.version.1.18.3',
-        'opencode.reviewer.typed',
-        'opencode.reviewer.denied-tools',
-        'opencode.verdict-schema',
-      ],
+      liveChecks: OPENCODE_DOCTOR_REQUIREMENTS,
       inactiveStatus: 'unverified',
     },
     postures: {
       writer: posture(
-        'opencode.fresh-task-writer',
-        [
-          'opencode.task.available',
-          'opencode.task.fresh-context',
-          'opencode.task.writer',
-        ],
-        'fresh-writable-task',
+        'opencode.run-writer',
+        OPENCODE_WRITER_REQUIREMENTS,
+        'fresh-writable-process',
       ),
       reviewer: posture(
-        'opencode.typed-reviewer',
-        [
-          'opencode.task.available',
-          'opencode.task.fresh-context',
-          'opencode.version.1.18.3',
-          'opencode.reviewer.typed',
-          'opencode.reviewer.denied-tools',
-          'opencode.verdict-schema',
-          'artifact.opencode-reviewer',
-        ],
+        'opencode.run-typed-reviewer',
+        OPENCODE_REVIEWER_REQUIREMENTS,
         'typed-deny-read-only',
       ),
       probe: posture(
-        'opencode.live-doctor',
-        [
-          'opencode.task.available',
-          'opencode.task.fresh-context',
-          'opencode.task.writer',
-          'opencode.version.1.18.3',
-          'opencode.reviewer.typed',
-          'opencode.reviewer.denied-tools',
-          'opencode.verdict-schema',
-          'artifact.opencode-reviewer',
-        ],
+        'opencode.run-live-doctor',
+        OPENCODE_DOCTOR_REQUIREMENTS,
         'live-route-probe',
       ),
     },
@@ -399,53 +404,23 @@ export const ROUTE_CATALOG = deepFreeze({
       executable: 'codex',
       minimumVersion: '0.145.0',
       staticChecks: ['artifact.codex-reviewer'],
-      liveChecks: [
-        'codex.exec.available',
-        'codex.authenticated',
-        'codex.version.0.145.0',
-        'codex.exec.workspace-write',
-        'codex.exec.read-only',
-        'codex.exec.network-denied',
-        'codex.verdict-schema',
-      ],
+      liveChecks: CODEX_DOCTOR_REQUIREMENTS,
       inactiveStatus: 'unverified',
     },
     postures: {
       writer: posture(
         'codex.exec-workspace-write',
-        [
-          'codex.exec.available',
-          'codex.authenticated',
-          'codex.version.0.145.0',
-          'codex.exec.workspace-write',
-        ],
+        CODEX_WRITER_REQUIREMENTS,
         'fresh-workspace-write-process',
       ),
       reviewer: posture(
         'codex.exec-read-only',
-        [
-          'codex.exec.available',
-          'codex.authenticated',
-          'codex.version.0.145.0',
-          'codex.exec.read-only',
-          'codex.exec.network-denied',
-          'codex.verdict-schema',
-          'artifact.codex-reviewer',
-        ],
+        CODEX_REVIEWER_REQUIREMENTS,
         'os-read-only',
       ),
       probe: posture(
         'codex.exec-live-doctor',
-        [
-          'codex.exec.available',
-          'codex.authenticated',
-          'codex.version.0.145.0',
-          'codex.exec.workspace-write',
-          'codex.exec.read-only',
-          'codex.exec.network-denied',
-          'codex.verdict-schema',
-          'artifact.codex-reviewer',
-        ],
+        CODEX_DOCTOR_REQUIREMENTS,
         'live-route-probe',
       ),
     },
@@ -461,53 +436,23 @@ export const ROUTE_CATALOG = deepFreeze({
       executable: 'opencode',
       minimumVersion: '1.18.3',
       staticChecks: ['artifact.opencode-reviewer'],
-      liveChecks: [
-        'opencode.run.available',
-        'opencode.authenticated',
-        'opencode.version.1.18.3',
-        'opencode.run.writer',
-        'opencode.reviewer.typed',
-        'opencode.reviewer.denied-tools',
-        'opencode.verdict-schema',
-      ],
+      liveChecks: OPENCODE_DOCTOR_REQUIREMENTS,
       inactiveStatus: 'unverified',
     },
     postures: {
       writer: posture(
         'opencode.run-writer',
-        [
-          'opencode.run.available',
-          'opencode.authenticated',
-          'opencode.version.1.18.3',
-          'opencode.run.writer',
-        ],
+        OPENCODE_WRITER_REQUIREMENTS,
         'fresh-writable-process',
       ),
       reviewer: posture(
         'opencode.run-typed-reviewer',
-        [
-          'opencode.run.available',
-          'opencode.authenticated',
-          'opencode.version.1.18.3',
-          'opencode.reviewer.typed',
-          'opencode.reviewer.denied-tools',
-          'opencode.verdict-schema',
-          'artifact.opencode-reviewer',
-        ],
+        OPENCODE_REVIEWER_REQUIREMENTS,
         'typed-deny-read-only',
       ),
       probe: posture(
         'opencode.run-live-doctor',
-        [
-          'opencode.run.available',
-          'opencode.authenticated',
-          'opencode.version.1.18.3',
-          'opencode.run.writer',
-          'opencode.reviewer.typed',
-          'opencode.reviewer.denied-tools',
-          'opencode.verdict-schema',
-          'artifact.opencode-reviewer',
-        ],
+        OPENCODE_DOCTOR_REQUIREMENTS,
         'live-route-probe',
       ),
     },
@@ -516,6 +461,7 @@ export const ROUTE_CATALOG = deepFreeze({
 
 const OPEN_KEYS = [
   'invocation',
+  'intentProvenance',
   'hostEvidence',
   'config',
   'continuation',
@@ -597,6 +543,7 @@ const RUN_KEYS = [
   'sessionFingerprint',
   'invocationNonce',
   'selector',
+  'intentProvenance',
   'requestedEngine',
   'requestedRoute',
   'scope',
@@ -688,6 +635,7 @@ const RUNTIME_RECEIPT_KEYS = [
   'invocationFlow',
   'activeHost',
   'selector',
+  'intentProvenance',
   'requestedEngine',
   'requestedRoute',
   'actualRoute',
@@ -709,6 +657,7 @@ const RUNTIME_RECEIPT_KEYS = [
   'artifactSource',
   'artifactAuthorFingerprint',
   'actorIdentityFingerprint',
+  'effectiveLane',
   'laneProofFingerprint',
   'capabilityFingerprint',
   'attemptCount',
@@ -723,10 +672,10 @@ const RUNTIME_RECEIPT_KEYS = [
 ];
 const PROGRESS_KEYS = [
   'reason',
-  'eligibleRemaining',
   'unitsCompleted',
-  'queueComplete',
+  'queueEvidence',
 ];
+const QUEUE_EVIDENCE_INPUT_KEYS = ['evidence', 'snapshot'];
 const CHECKOUT_KEYS = [
   'repositoryFingerprint',
   'branch',
@@ -752,12 +701,6 @@ const FORBIDDEN_CONFIG_KEYS = [
 const HEX_64 = /^[a-f0-9]{64}$/;
 const HEX_40 = /^[a-f0-9]{40}$/;
 const SAFE_IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
-const AUTHORIZATION_DIRECTORY =
-  join(
-    process.env.XDG_RUNTIME_DIR || tmpdir(),
-    `autoloop-authority-${typeof process.getuid === 'function' ? process.getuid() : 'user'}`,
-  );
-const AUTHORIZATION_DOMAIN = 'autoloop-host-adapter-authority-v1';
 
 function deepFreeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
@@ -831,46 +774,8 @@ function hashValue(value) {
     .digest('hex');
 }
 
-function authorityKey(sessionFingerprint) {
-  if (!HEX_64.test(sessionFingerprint)) {
-    throw new Error('session fingerprint is invalid');
-  }
-  const directoryStats = lstatSync(AUTHORIZATION_DIRECTORY);
-  if (
-    !directoryStats.isDirectory()
-    || directoryStats.isSymbolicLink()
-    || typeof process.getuid === 'function'
-      && directoryStats.uid !== process.getuid()
-  ) {
-    throw new Error('host authority path is invalid');
-  }
-  const descriptor = openSync(
-    join(AUTHORIZATION_DIRECTORY, `${sessionFingerprint}.key`),
-    constants.O_RDONLY | constants.O_NOFOLLOW,
-  );
-  try {
-    const stats = fstatSync(descriptor);
-    if (
-      !stats.isFile()
-      || typeof process.getuid === 'function' && stats.uid !== process.getuid()
-      || (stats.mode & 0o077) !== 0
-    ) {
-      throw new Error('host authority key permissions are invalid');
-    }
-    const value = readFileSync(descriptor, 'utf8');
-    if (!HEX_64.test(value)) throw new Error('host authority key is invalid');
-    return value;
-  } finally {
-    closeSync(descriptor);
-  }
-}
-
 function authorizeValue(value, sessionFingerprint) {
-  return createHmac('sha256', authorityKey(sessionFingerprint))
-    .update(AUTHORIZATION_DOMAIN)
-    .update('\0')
-    .update(JSON.stringify(canonicalize(value)))
-    .digest('hex');
+  return authorizeRuntimeValue(value, sessionFingerprint);
 }
 
 function authorizedFingerprinted(value, sessionFingerprint) {
@@ -883,16 +788,11 @@ function authorizedFingerprinted(value, sessionFingerprint) {
 }
 
 function validAuthorization(value, sessionFingerprint, authorization) {
-  if (!HEX_64.test(authorization)) return false;
-  try {
-    const expected = authorizeValue(value, sessionFingerprint);
-    return timingSafeEqual(
-      Buffer.from(expected, 'hex'),
-      Buffer.from(authorization, 'hex'),
-    );
-  } catch {
-    return false;
-  }
+  return validateRuntimeAuthorization(
+    value,
+    sessionFingerprint,
+    authorization,
+  );
 }
 
 function success(value) {
@@ -995,6 +895,30 @@ function parseScope(invocation) {
   );
 }
 
+function invocationFlows(invocation) {
+  const flows = [];
+  if (
+    /[$/]autoloop:dev\b/i.test(invocation)
+    || /^\s*dev(?:\s|$)/i.test(invocation)
+  ) {
+    flows.push('dev');
+  }
+  if (
+    /[$/]autoloop:pitcrew\b/i.test(invocation)
+    || /^\s*pitcrew(?:\s|$)/i.test(invocation)
+  ) {
+    flows.push('pitcrew');
+  }
+  if (
+    /[$/]autoloop:doctor\b/i.test(invocation)
+    || /[$/]autoloop:setup\b[\s\S]*\bdoctor\b/i.test(invocation)
+    || /^\s*doctor(?:\s|$)/i.test(invocation)
+  ) {
+    flows.push('doctor');
+  }
+  return flows;
+}
+
 function parseInvocation(invocation) {
   if (typeof invocation !== 'string' || invocation.length < 1 || invocation.length > 4096) {
     return invalidIntent('invocation must be a non-empty bounded string');
@@ -1010,7 +934,9 @@ function parseInvocation(invocation) {
       .test(invocation)
     || /(?:^|\s)--engine\s*(?:=\s*)?(?=$|[;,.!?])/i.test(invocation)
     || /\bengine\s*(?:=|:)\s*(?=$|[;,.!?])/i.test(invocation)
-    || /\/autoloop:(?:dev|pitcrew|doctor)\b\s+with\s*(?:(?:=|:)\s*)?(?=$|[;,.!?])/i
+    || /(?:[$/]autoloop:(?:dev|pitcrew|doctor)\b|^\s*(?:dev|pitcrew|doctor)\b)\s+with\s*(?:(?:=|:)\s*)?(?=$|[;,.!?])/i
+      .test(invocation)
+    || /[$/]autoloop:setup\b[^\r\n]*?\bdoctor\b\s+with\s*(?:(?:=|:)\s*)?(?=$|[;,.!?])/i
       .test(invocation)
     || /\bwith(?:=|:)(?:claude|codex|opencode)\b/i.test(invocation)
   ) {
@@ -1025,15 +951,7 @@ function parseInvocation(invocation) {
   if (invocation === RELAUNCH_PROMPT) {
     invocationFlow = 'dev';
   } else {
-    const flows = [];
-    if (/\/autoloop:dev\b/i.test(invocation)) flows.push('dev');
-    if (/\/autoloop:pitcrew\b/i.test(invocation)) flows.push('pitcrew');
-    if (
-      /\/autoloop:doctor\b/i.test(invocation)
-      || /\/autoloop:setup\b[\s\S]*\bdoctor\b/i.test(invocation)
-    ) {
-      flows.push('doctor');
-    }
+    const flows = invocationFlows(invocation);
     if (flows.length > 1) {
       return failure(
         'CONFLICTING_INTENT',
@@ -1045,8 +963,17 @@ function parseInvocation(invocation) {
     }
     [invocationFlow] = flows;
   }
+  const trailingSelector = invocation.match(
+    /\bwith\s+([^\s;,.!?]+)\s*[.!?]?\s*$/i,
+  );
+  if (
+    trailingSelector
+    && !HOSTS.includes(trailingSelector[1].toLowerCase())
+  ) {
+    return invalidIntent('invocation carries an unknown engine selector');
+  }
   const directSelector = invocation.match(
-    /\/autoloop:(?:dev|pitcrew|doctor)\b\s+with(?:\s+|=|:)([^\s;,.!?]+)/i,
+    /(?:[$/]autoloop:(?:dev|pitcrew|doctor)\b|[$/]autoloop:setup\b[^\r\n]*?\bdoctor\b|^\s*(?:dev|pitcrew|doctor)\b)\s+with(?:\s+|=|:)([^\s;,.!?]+)/i,
   );
   if (
     directSelector
@@ -1093,13 +1020,20 @@ function routeFor(activeHost, requestedEngine) {
   return null;
 }
 
-function intentHash(originHost, selector, scope, invocationFlow) {
+function intentHash(
+  originHost,
+  selector,
+  scope,
+  invocationFlow,
+  intentProvenance,
+) {
   return hashValue({
     version: RUNTIME_CONTRACT_VERSION,
     configVersion: CONFIG_VERSION,
     invocationFlow,
     originHost,
     selector,
+    intentProvenance,
     scope,
   });
 }
@@ -1111,6 +1045,7 @@ function runInstanceFingerprint({
   hostEvidenceFingerprint,
   sessionFingerprint,
   invocationNonce,
+  intentProvenance,
   configuredBaseBranch,
   configFingerprint,
   generation,
@@ -1124,6 +1059,7 @@ function runInstanceFingerprint({
     hostEvidenceFingerprint,
     sessionFingerprint,
     invocationNonce,
+    intentProvenance,
     configuredBaseBranch,
     configFingerprint,
     generation,
@@ -1176,17 +1112,23 @@ function validateHostEvidence(evidence) {
 }
 
 function validateConfigInput(config) {
+  let snapshot;
+  try {
+    snapshot = structuredClone(config);
+  } catch {
+    return migrateConfigFailure();
+  }
   if (
-    !isPlainObject(config)
-    || !isJsonSerializable(config)
-    || validateProjectConfig(config).length !== 0
+    !isPlainObject(snapshot)
+    || !isJsonSerializable(snapshot)
+    || validateProjectConfig(snapshot).length !== 0
   ) {
     return migrateConfigFailure();
   }
-  if (FORBIDDEN_CONFIG_KEYS.some((key) => Object.hasOwn(config, key))) {
+  if (FORBIDDEN_CONFIG_KEYS.some((key) => Object.hasOwn(snapshot, key))) {
     return migrateConfigFailure();
   }
-  return success(true);
+  return success(snapshot);
 }
 
 function validateEnvelope(envelope, activeHost, parsed) {
@@ -1228,6 +1170,7 @@ function validateEnvelope(envelope, activeHost, parsed) {
     envelope.selector,
     envelope.scope,
     'dev',
+    INTENT_PROVENANCE,
   )
     !== envelope.runIntentHash) {
     return failure('INVALID_RELAUNCH', 'relaunch run-intent hash is stale or corrupt');
@@ -1518,8 +1461,20 @@ function openPolicy(input) {
   if (!hasOnlyKeys(input, OPEN_KEYS)) {
     return invalidIntent('open input has an invalid shape');
   }
+  if (input.intentProvenance !== INTENT_PROVENANCE) {
+    return failure(
+      'UNVERIFIABLE_INVOCATION_PROVENANCE',
+      'runtime requires explicit best-effort-unverified invocation provenance',
+    );
+  }
   const config = validateConfigInput(input.config);
   if (!config.ok) return config;
+  if (config.value.merge.policy !== 'manual') {
+    return failure(
+      'UNVERIFIABLE_INVOCATION_PROVENANCE',
+      'runtime cannot verify invocation provenance under a non-manual merge policy',
+    );
+  }
   const host = validateHostEvidence(input.hostEvidence);
   if (!host.ok) return host;
   const parsed = parseInvocation(input.invocation);
@@ -1550,7 +1505,7 @@ function openPolicy(input) {
       input,
       host.value,
       parsed.value,
-      input.config,
+      config.value,
     );
     if (!envelope.ok) return envelope;
     if (input.invocation !== RELAUNCH_PROMPT) {
@@ -1563,7 +1518,13 @@ function openPolicy(input) {
     invocationFlow = 'dev';
     runIntentHash = envelope.value.runIntentHash;
   } else {
-    runIntentHash = intentHash(originHost, selector, scope, invocationFlow);
+    runIntentHash = intentHash(
+      originHost,
+      selector,
+      scope,
+      invocationFlow,
+      INTENT_PROVENANCE,
+    );
   }
   const requestedEngine = selector === 'native' ? host.value.activeHost : selector;
   const requestedRoute = routeFor(host.value.activeHost, requestedEngine);
@@ -1588,13 +1549,14 @@ function openPolicy(input) {
     sessionFingerprint: host.value.sessionFingerprint,
     invocationNonce: randomBytes(32).toString('hex'),
     selector,
+    intentProvenance: INTENT_PROVENANCE,
     requestedEngine,
     requestedRoute,
     scope,
     generation,
     runIntentHash,
-    configuredBaseBranch: input.config.baseBranch,
-    configFingerprint: hashValue(input.config),
+    configuredBaseBranch: config.value.baseBranch,
+    configFingerprint: hashValue(config.value),
   };
   const unsignedRun = {
     ...run,
@@ -1624,6 +1586,7 @@ function validateRun(run) {
     || !HEX_64.test(run.sessionFingerprint)
     || !HEX_64.test(run.invocationNonce)
     || !SELECTORS.includes(run.selector)
+    || run.intentProvenance !== INTENT_PROVENANCE
     || !HOSTS.includes(run.requestedEngine)
     || !Object.hasOwn(ROUTE_CATALOG, run.requestedRoute)
     || !validateScope(run.scope)
@@ -1654,8 +1617,17 @@ function validateRun(run) {
       run.selector,
       run.scope,
       run.invocationFlow,
+      run.intentProvenance,
     )
     && run.instanceFingerprint === runInstanceFingerprint(run);
+}
+
+export function validateRuntimeRun(run) {
+  try {
+    return validateRun(run);
+  } catch {
+    return false;
+  }
 }
 
 function validExecutionCheckout(checkout) {
@@ -1953,22 +1925,12 @@ function missingRequirements(candidate, facts) {
   return candidate.requirements.filter((requirement) => facts[requirement] !== true);
 }
 
-function candidateFor(routeId, role, facts, allowDegraded = true) {
+function candidateFor(routeId, role, facts) {
   const primary = ROUTE_CATALOG[routeId]?.postures?.[role];
   if (!primary) return { candidate: null, missing: [], degraded: false };
   const primaryMissing = missingRequirements(primary, facts);
   if (primaryMissing.length === 0) {
     return { candidate: primary, missing: [], degraded: false };
-  }
-  if (allowDegraded && primary.degraded) {
-    const degradedMissing = missingRequirements(primary.degraded, facts);
-    if (degradedMissing.length === 0) {
-      return {
-        candidate: primary.degraded,
-        missing: [],
-        degraded: true,
-      };
-    }
   }
   return { candidate: null, missing: primaryMissing, degraded: false };
 }
@@ -2317,53 +2279,21 @@ function validReviewVerdict(value) {
 
 function validExecutionEvidence(value, execution) {
   if (!isPlainObject(value)) return false;
-  const processExecutions = [
-    'codex.exec-workspace-write',
-    'codex.exec-read-only',
-    'codex.exec-live-doctor',
-    'opencode.run-writer',
-    'opencode.run-typed-reviewer',
-    'opencode.run-live-doctor',
-  ];
-  const probeExecutions = [
-    'claude.live-doctor',
-    'codex.live-doctor',
-    'codex.degraded-live-doctor',
-    'opencode.live-doctor',
-  ];
-  const expectedKind = processExecutions.includes(execution)
-    ? 'process'
-    : probeExecutions.includes(execution)
-      ? 'host-surface'
-      : 'host-child';
-  if (value.kind !== expectedKind) return false;
-  if (expectedKind !== 'host-child') {
-    return hasExactKeys(value, [
-      'kind',
-      'instanceId',
-      'integration',
-      'transcriptFingerprint',
-    ])
-      && SAFE_IDENTITY.test(value.instanceId)
-      && SAFE_IDENTITY.test(value.integration)
-      && HEX_64.test(value.transcriptFingerprint);
-  }
-  return hasExactKeys(value, [
+  const processExecutions = Object.values(ROUTE_CATALOG).flatMap(
+    ({ postures }) => Object.values(postures).map(
+      ({ execution: candidate }) => candidate,
+    ),
+  );
+  return processExecutions.includes(execution)
+    && hasExactKeys(value, [
     'kind',
     'instanceId',
     'integration',
-    'metadataFile',
-    'metadataFingerprint',
-    'transcriptFile',
     'transcriptFingerprint',
   ])
+    && value.kind === 'process'
     && SAFE_IDENTITY.test(value.instanceId)
     && SAFE_IDENTITY.test(value.integration)
-    && /^[A-Za-z0-9._-]{1,255}-payload\.json$/.test(value.metadataFile)
-    && HEX_64.test(value.metadataFingerprint)
-    && /^[A-Za-z0-9._-]{1,255}-transcript\.jsonl$/.test(
-      value.transcriptFile,
-    )
     && HEX_64.test(value.transcriptFingerprint);
 }
 
@@ -2416,19 +2346,11 @@ function validAttemptRecord(record, index, planValue, run) {
     && (record.verdict === null || validReviewVerdict(record.verdict));
 }
 
-function safeFallbackRoute(planValue, run, fallbackRoute, execution = null) {
+function safeFallbackRoute(planValue, run, fallbackRoute) {
   const native = `${run.activeHost}.native`;
-  if (fallbackRoute !== native) return false;
-  if (run.requestedRoute !== native) {
-    return planValue.actualRoute === run.requestedRoute;
-  }
-  return native === 'codex.native'
-    && planValue.actualRoute === native
-    && planValue.execution === 'codex.exec-read-only'
-    && (
-      execution === null
-      || execution === 'codex.in-session-reviewer'
-    );
+  return run.requestedRoute !== native
+    && planValue.actualRoute === run.requestedRoute
+    && fallbackRoute === native;
 }
 
 function validFallback(fallback, planValue, run) {
@@ -2452,6 +2374,7 @@ function validFallback(fallback, planValue, run) {
     'route',
     'adapter',
     'execution',
+    'adapterTuning',
     'requirements',
     'isolation',
     'degradation',
@@ -2467,10 +2390,14 @@ function validFallback(fallback, planValue, run) {
     planValue,
     run,
     fallback.route,
-    fallback.execution,
   )
     && fallback.adapter === fallback.route
     && postureValue !== null
+    && validateAdapterTuning(
+      fallback.route,
+      planValue.role,
+      fallback.adapterTuning,
+    )
     && equalArrays(fallback.requirements, postureValue.requirements)
     && validPlanIsolation(fallback.isolation, postureValue)
     && Array.isArray(fallback.degradation)
@@ -2481,30 +2408,7 @@ function validFallback(fallback, planValue, run) {
     );
 }
 
-function fallbackCandidate(run, role, selected, facts) {
-  if (
-    selected.route === 'codex.native'
-    && role === 'reviewer'
-    && selected.candidate.execution === 'codex.exec-read-only'
-  ) {
-    const degraded = ROUTE_CATALOG['codex.native'].postures.reviewer.degraded;
-    const missing = missingRequirements(degraded, facts);
-    return missing.length === 0
-      ? {
-        available: true,
-        route: 'codex.native',
-        adapter: 'codex.native',
-        execution: degraded.execution,
-        requirements: [...degraded.requirements],
-        isolation: { ...degraded.isolation },
-        degradation: ['degraded-native-codex-review'],
-      }
-      : {
-        available: false,
-        route: 'codex.native',
-        missing: [...missing].sort(),
-      };
-  }
+function fallbackCandidate(run, role, selected, facts, config) {
   const native = `${run.activeHost}.native`;
   if (selected.route === run.requestedRoute && run.requestedRoute !== native) {
     const fallback = candidateFor(native, role, facts);
@@ -2514,6 +2418,7 @@ function fallbackCandidate(run, role, selected, facts) {
         route: native,
         adapter: native,
         execution: fallback.candidate.execution,
+        adapterTuning: resolveAdapterTuning(config, native, role),
         requirements: [...fallback.candidate.requirements],
         isolation: { ...fallback.candidate.isolation },
         degradation: ['native-fallback'],
@@ -2530,13 +2435,21 @@ function fallbackCandidate(run, role, selected, facts) {
 function planPolicy(input) {
   if (!hasExactKeys(
     input,
-    ['run', 'work', 'capabilities', 'routeState'],
+    ['run', 'config', 'work', 'capabilities', 'routeState'],
     ['laneProof'],
   )) {
     return invalidIntent('plan input has an invalid shape');
   }
   if (!validateRun(input.run)) {
     return failure('EXPIRED_PLAN', 'run context is invalid or stale');
+  }
+  const config = validateConfigInput(input.config);
+  if (!config.ok) return config;
+  if (hashValue(config.value) !== input.run.configFingerprint) {
+    return failure(
+      'EXPIRED_PLAN',
+      'plan configuration does not match the opened run',
+    );
   }
   const work = validateWork(input.work);
   if (!work.ok) return work;
@@ -2614,14 +2527,6 @@ function planPolicy(input) {
     }
     return capabilityFailure(selected.missing);
   }
-  if (selected.degraded) {
-    fallbackUsed = true;
-    if (recoveryProbe) {
-      recoveryProbe = false;
-      outageTransition = 'continued';
-    }
-    initialDegradation.push('degraded-native-codex-review');
-  }
   const fallback = fallbackUsed
     ? null
     : fallbackCandidate(
@@ -2632,6 +2537,7 @@ function planPolicy(input) {
         candidate: selected.candidate,
       },
       capability.value.facts,
+      config.value,
     );
   const maxAttempts =
     input.work.stage === 'judgment-review'
@@ -2679,6 +2585,11 @@ function planPolicy(input) {
     actualRoute,
     adapter: actualRoute,
     execution: selected.candidate.execution,
+    adapterTuning: resolveAdapterTuning(
+      config.value,
+      actualRoute,
+      role,
+    ),
     flow: input.work.flow,
     stage: input.work.stage,
     round: input.work.round,
@@ -2793,6 +2704,11 @@ function validatePlan(planValue, run, routeState) {
     || !Object.hasOwn(ROUTE_CATALOG, planValue.actualRoute)
     || ROUTE_CATALOG[planValue.actualRoute].activeHost !== run.activeHost
     || planValue.adapter !== planValue.actualRoute
+    || !validateAdapterTuning(
+      planValue.actualRoute,
+      planValue.role,
+      planValue.adapterTuning,
+    )
     || !FLOWS.includes(planValue.flow)
     || !STAGES.includes(planValue.stage)
     || !LANES.includes(planValue.effectiveLane)
@@ -2944,20 +2860,20 @@ function validatePlan(planValue, run, routeState) {
         || planValue.requestedRoute === native
       )
     )
-    || (
-      planValue.degradation.includes('degraded-native-codex-review')
-      && (
-        !planValue.fallbackUsed
-        || planValue.actualRoute !== 'codex.native'
-        || planValue.execution !== 'codex.in-session-reviewer'
-      )
-    )
     || !validFallback(planValue.fallback, planValue, run)
     || (planValue.fallbackUsed && planValue.fallback !== null)
   ) {
     return false;
   }
   return true;
+}
+
+export function validateRuntimePlan(planValue, run) {
+  try {
+    return validatePlan(planValue, run, planValue?.routeState);
+  } catch {
+    return false;
+  }
 }
 
 function validateOutcome(outcome, planValue) {
@@ -3053,6 +2969,7 @@ function buildReceipt(run, planValue, outcome, routeState) {
     invocationFlow: run.invocationFlow,
     activeHost: run.activeHost,
     selector: run.selector,
+    intentProvenance: run.intentProvenance,
     requestedEngine: run.requestedEngine,
     requestedRoute: run.requestedRoute,
     actualRoute: planValue.actualRoute,
@@ -3074,6 +2991,7 @@ function buildReceipt(run, planValue, outcome, routeState) {
     artifactSource: structuredClone(planValue.artifactSource),
     artifactAuthorFingerprint: planValue.artifactAuthorFingerprint,
     actorIdentityFingerprint: planValue.actorIdentityFingerprint,
+    effectiveLane: planValue.effectiveLane,
     laneProofFingerprint: planValue.laneProofFingerprint,
     capabilityFingerprint: planValue.capabilityFingerprint,
     attemptCount: attempts.length,
@@ -3186,6 +3104,7 @@ function validateRuntimeReceiptPolicy(receipt) {
     || !FLOWS.includes(receipt.invocationFlow)
     || !HOSTS.includes(receipt.activeHost)
     || !SELECTORS.includes(receipt.selector)
+    || receipt.intentProvenance !== INTENT_PROVENANCE
     || !HOSTS.includes(receipt.requestedEngine)
     || !Object.hasOwn(ROUTE_CATALOG, receipt.requestedRoute)
     || !Object.hasOwn(ROUTE_CATALOG, receipt.actualRoute)
@@ -3228,6 +3147,7 @@ function validateRuntimeReceiptPolicy(receipt) {
     })
     || !HEX_64.test(receipt.artifactAuthorFingerprint)
     || !HEX_64.test(receipt.actorIdentityFingerprint)
+    || !LANES.includes(receipt.effectiveLane)
     || !HEX_64.test(receipt.laneProofFingerprint)
     || !HEX_64.test(receipt.capabilityFingerprint)
     || !Number.isSafeInteger(receipt.attemptCount)
@@ -3341,6 +3261,7 @@ function fallbackPlan(planValue, history, routeState) {
     actualRoute: fallback.route,
     adapter: fallback.adapter,
     execution: fallback.execution,
+    adapterTuning: { ...fallback.adapterTuning },
     requirements: [...fallback.requirements],
     evaluatedCapabilities: [...fallback.requirements],
     isolation: { ...fallback.isolation },
@@ -3551,27 +3472,48 @@ function finishPolicy(input) {
   }
   const {
     reason,
-    eligibleRemaining,
     unitsCompleted,
-    queueComplete,
+    queueEvidence,
   } = input.progress;
   if (
     !STOP_REASONS.includes(reason)
-    || !Number.isSafeInteger(eligibleRemaining)
-    || eligibleRemaining < 0
     || !Number.isSafeInteger(unitsCompleted)
     || unitsCompleted < 0
-    || typeof queueComplete !== 'boolean'
+    || !(queueEvidence === null || isPlainObject(queueEvidence))
   ) {
     return failure('INVALID_STOP', 'progress facts contain an invalid stop value');
   }
-  if (reason === 'queue-exhausted') {
-    if (queueComplete !== true) {
+  const queuePurpose = reason === 'queue-exhausted'
+    ? 'queueExhaustion'
+    : reason === 'context-budget'
+      && input.run.scope.scope === 'queue'
+      && input.run.scope.autoContinue === true
+      ? 'relaunch'
+      : null;
+  if (queuePurpose !== null) {
+    if (
+      !hasExactKeys(queueEvidence, QUEUE_EVIDENCE_INPUT_KEYS)
+      || queueEvidence.evidence?.purpose !== queuePurpose
+      || !verifyQueueEvidence(
+        queueEvidence.evidence,
+        queueEvidence.snapshot,
+        input.run,
+      )
+    ) {
       return failure(
         'INCOMPLETE_PROGRESS',
-        'queue exhaustion requires complete absence evidence',
+        'queue-sensitive finish requires complete current run-bound queue evidence',
       );
     }
+  } else if (queueEvidence !== null) {
+    return failure(
+      'INVALID_STOP',
+      'queue evidence is valid only for queue exhaustion or opted-in relaunch',
+    );
+  }
+  const eligibleRemaining =
+    queuePurpose === null ? null : queueEvidence.evidence.eligibleIssueNumbers.length;
+  if (reason === 'queue-exhausted') {
     if (eligibleRemaining !== 0) {
       return failure(
         'INVALID_STOP',
@@ -3596,7 +3538,7 @@ function finishPolicy(input) {
     && input.run.scope.autoContinue === true
     && unitsCompleted >= 1
     && eligibleRemaining >= 1
-    && queueComplete === true;
+    && queuePurpose === 'relaunch';
   if (
     shouldRelaunch
     && input.run.generation < MAX_RELAUNCH_GENERATIONS
@@ -3739,54 +3681,8 @@ const ROUTES = [
   'claude.codex-exec',
   'claude.opencode-exec',
 ];
-const REQUIREMENTS = [
-  'claude.agent.available',
-  'claude.agent.fresh-context',
-  'claude.agent.writer',
-  'claude.agent.reviewer-read-only',
-  'codex.worker.available',
-  'codex.worker.fresh-context',
-  'codex.worker.writer',
-  'codex.exec.available',
-  'codex.authenticated',
-  'codex.version.0.145.0',
-  'codex.exec.workspace-write',
-  'codex.exec.read-only',
-  'codex.exec.network-denied',
-  'codex.verdict-schema',
-  'codex.spawn.available',
-  'codex.spawn.agent-type',
-  'codex.spawn.fork-turns-none',
-  'codex.spawn.effective-read-only',
-  'codex.spawn.integrity',
-  'artifact.codex-reviewer',
-  'opencode.task.available',
-  'opencode.task.fresh-context',
-  'opencode.task.writer',
-  'opencode.run.available',
-  'opencode.authenticated',
-  'opencode.version.1.18.3',
-  'opencode.run.writer',
-  'opencode.reviewer.typed',
-  'opencode.reviewer.denied-tools',
-  'opencode.verdict-schema',
-  'artifact.opencode-reviewer',
-];
-const ISOLATION = [
-  'claude.agent.fresh-context',
-  'claude.agent.reviewer-read-only',
-  'codex.worker.fresh-context',
-  'codex.exec.workspace-write',
-  'codex.exec.read-only',
-  'codex.exec.network-denied',
-  'codex.spawn.fork-turns-none',
-  'codex.spawn.effective-read-only',
-  'codex.spawn.integrity',
-  'opencode.task.fresh-context',
-  'opencode.run.writer',
-  'opencode.reviewer.typed',
-  'opencode.reviewer.denied-tools',
-];
+const REQUIREMENTS = [...CAPABILITY_REQUIREMENTS];
+const ISOLATION = [...ISOLATION_REQUIREMENTS];
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -3854,6 +3750,72 @@ function fixtureCheckout(extra = {}) {
     headOid: HEAD_OID,
     clean: true,
     ...extra,
+  };
+}
+
+export function fixtureQueueEvidence(run, eligibleRemaining, purpose) {
+  const sections = Object.fromEntries(
+    SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+  );
+  const issues = Array.from({ length: eligibleRemaining }, (_, index) =>
+    issueSnapshotItem({
+      number: index + 1,
+      title: `queue item ${index + 1}`,
+      body: 'body',
+      updatedAt: '2026-01-01T00:00:00Z',
+      lastEditedAt: null,
+      labels: ['loop-ready'],
+    }));
+  sections.repo = completeSection([{
+    owner: 'autoloop',
+    name: 'runtime-fixture',
+    nameWithOwner: 'autoloop/runtime-fixture',
+    defaultBranch: run.configuredBaseBranch,
+  }]);
+  sections.tree = completeSection([{
+    dirtyEntries: [],
+    dirtyPaths: 0,
+    branch: run.configuredBaseBranch,
+    headOid: HEAD_OID,
+  }]);
+  sections.openIssues = completeSection(issues);
+  sections.queue = completeSection(issues.map((issue) => ({
+    ...issue,
+    blockedBy: [],
+    dependencies: [],
+    provenance: {
+      labeledBy: 'maintainer',
+      labeledAt: '2026-01-01T00:00:01Z',
+    },
+  })));
+  sections.authorVerification = completeSection(eligibleRemaining === 0 ? [] : [{
+    login: 'maintainer',
+    roleName: 'maintain',
+    permission: 'write',
+    evidence: issues.map((issue) => ({
+      kind: 'queue-label',
+      issueNumber: issue.number,
+      author: 'maintainer',
+      authorAssociation: null,
+      body: '',
+      createdAt: '2026-01-01T00:00:01Z',
+      updatedAt: null,
+      url: null,
+    })),
+  }]);
+  const snapshot = createSnapshot({
+    scannedAt: '2026-01-01T00:00:02.000Z',
+    sections,
+  });
+  return {
+    snapshot,
+    evidence: createQueueEvidence({
+      snapshot,
+      purpose,
+      runInstanceFingerprint: run.instanceFingerprint,
+      configFingerprint: run.configFingerprint,
+      configuredBaseBranch: run.configuredBaseBranch,
+    }),
   };
 }
 
@@ -4242,29 +4204,10 @@ function fixtureExecutionEvidence(attempt) {
   const instanceId =
     `fixture-${attempt.attempt}-${attempt.role}-${attempt.execution}`
       .replace(/[^A-Za-z0-9._:-]/g, '-');
-  if (attempt.launch.transport === 'process') {
-    return {
-      kind: 'process',
-      instanceId,
-      integration: attempt.producer,
-      transcriptFingerprint: HEX.evidence,
-    };
-  }
-  if (attempt.role === 'probe') {
-    return {
-      kind: 'host-surface',
-      instanceId,
-      integration: attempt.producer,
-      transcriptFingerprint: HEX.evidence,
-    };
-  }
   return {
-    kind: 'host-child',
+    kind: 'process',
     instanceId,
     integration: attempt.producer,
-    metadataFile: `${instanceId}-payload.json`,
-    metadataFingerprint: HEX.evidence,
-    transcriptFile: `${instanceId}-transcript.jsonl`,
     transcriptFingerprint: HEX.evidence,
   };
 }
@@ -4308,7 +4251,72 @@ function fixtureOutcome(planValue, {
   return outcome.value;
 }
 
+export function fixtureRetryReceiptForMeasurement() {
+  const config = fixtureConfig();
+  const opened = open({
+    invocation: fixtureInvocation('dev', 'codex'),
+    intentProvenance: INTENT_PROVENANCE,
+    hostEvidence: fixtureHostEvidence('claude'),
+    config,
+  });
+  if (!opened.ok) throw new Error('measurement retry fixture did not open');
+  const run = opened.value;
+  const work = fixtureWork({ stage: 'implementation' });
+  const capabilities = fixtureCapabilities(
+    run,
+    'available',
+    {},
+    work.checkout,
+  );
+  const routeState = fixtureRouteState(run, capabilities);
+  const initialPlan = plan({
+    run,
+    config,
+    work,
+    laneProof: fixtureLaneProof('full'),
+    capabilities,
+    routeState,
+  });
+  if (!initialPlan.ok) {
+    throw new Error('measurement retry fixture did not plan');
+  }
+  const first = observe({
+    run,
+    routeState,
+    plan: initialPlan.value,
+    outcome: fixtureOutcome(initialPlan.value, {
+      status: 'transient-failure',
+      modelIdentity: undefined,
+    }),
+  });
+  if (!first.ok || first.value.kind !== 'retry') {
+    throw new Error('measurement retry fixture did not retry');
+  }
+  const completed = observe({
+    run,
+    routeState: first.value.routeState,
+    plan: first.value.nextPlan,
+    outcome: fixtureOutcome(first.value.nextPlan),
+  });
+  if (!completed.ok || completed.value.kind !== 'complete') {
+    throw new Error('measurement retry fixture did not complete');
+  }
+  return {
+    run,
+    capabilities,
+    initialRouteState: routeState,
+    initialPlan: initialPlan.value,
+    terminalPlan: first.value.nextPlan,
+    receipt: completed.value.receipt,
+  };
+}
+
 function selfTest() {
+  const openFixture = (input) => RuntimeContract.open({
+    ...input,
+    intentProvenance: INTENT_PROVENANCE,
+  });
+  const open = openFixture;
   let passed = 0;
   let failed = 0;
   const failures = [];
@@ -4331,18 +4339,58 @@ function selfTest() {
     && ERROR_CODES.includes(result.error.code)
     && JSON.stringify(result).length < 2048;
   const openRun = (host, selector = 'native', options = {}) =>
-    open({
+    openFixture({
       invocation: fixtureInvocation(options.flow ?? 'dev', selector, options.suffix ?? ''),
       hostEvidence: fixtureHostEvidence(host),
       config: fixtureConfig(options.config ?? {}),
       ...(options.continuationBundle ?? {}),
     });
+  const planWithConfig = (input) =>
+    plan({ config: fixtureConfig(), ...input });
+  const tunedPlan = ({
+    host = 'claude',
+    selector = 'native',
+    config = fixtureConfig(),
+    stage = 'implementation',
+    routeStatus = 'healthy',
+  } = {}) => {
+    const flow = stage === 'doctor' ? 'doctor' : 'dev';
+    const opened = openFixture({
+      invocation: fixtureInvocation(flow, selector),
+      hostEvidence: fixtureHostEvidence(host),
+      config,
+    });
+    if (!opened.ok) return opened;
+    const capabilities = fixtureCapabilities(opened.value);
+    return planWithConfig({
+      run: opened.value,
+      config,
+      work: fixtureWork({ flow, stage }),
+      laneProof: fixtureLaneProof('full'),
+      capabilities,
+      routeState: fixtureRouteState(
+        opened.value,
+        capabilities,
+        routeStatus,
+      ),
+    });
+  };
 
   check('public interface is exactly open, plan, observe, finish', () =>
     Object.keys(RuntimeContract).join(',') === 'open,plan,observe,finish'
     && Object.values(RuntimeContract).every((value) => typeof value === 'function')
     && typeof transitionContinuationLease === 'function'
-    && typeof initializeRouteState === 'function');
+    && typeof initializeRouteState === 'function'
+    && typeof validateRuntimeRun === 'function');
+  check('public run validation accepts only an exact issued run', () => {
+    const issued = openRun();
+    return issued.ok
+      && validateRuntimeRun(issued.value)
+      && !validateRuntimeRun({
+        ...issued.value,
+        invocationFlow: 'doctor',
+      });
+  });
   check('stable enum exports are exact', () =>
     HOSTS.join(',') === 'claude,codex,opencode'
     && SELECTORS.join(',') === 'native,claude,codex,opencode'
@@ -4350,7 +4398,25 @@ function selfTest() {
     && LANES.join(',') === 'docs,small,full'
     && ATTEMPT_STATUSES.join(',') ===
       'succeeded,transient-failure,environment-failure,invalid-result'
-    && EFFECTS.join(',') === 'none,complete,partial,unknown');
+    && EFFECTS.join(',') === 'none,complete,partial,unknown'
+    && INTENT_PROVENANCE === 'best-effort-unverified');
+  check('non-manual merge policy cannot claim invocation provenance', () =>
+    expectError(openRun('claude', 'native', {
+      config: { merge: { policy: 'auto' } },
+    }), 'UNVERIFIABLE_INVOCATION_PROVENANCE'));
+  check('open requires explicit best-effort-unverified provenance', () =>
+    expectError(RuntimeContract.open({
+      invocation: fixtureInvocation('dev', 'native'),
+      hostEvidence: fixtureHostEvidence('claude'),
+      config: fixtureConfig(),
+    }), 'UNVERIFIABLE_INVOCATION_PROVENANCE'));
+  check('open rejects upgraded invocation provenance', () =>
+    expectError(RuntimeContract.open({
+      invocation: fixtureInvocation('dev', 'native'),
+      intentProvenance: 'verified',
+      hostEvidence: fixtureHostEvidence('claude'),
+      config: fixtureConfig(),
+    }), 'UNVERIFIABLE_INVOCATION_PROVENANCE'));
   check('route catalog is closed and serializable', () =>
     Object.keys(ROUTE_CATALOG).join(',') === ROUTES.join(',')
     && JSON.parse(JSON.stringify(ROUTE_CATALOG)) !== null
@@ -4382,6 +4448,7 @@ function selfTest() {
           && run.originHost === host
           && run.invocationFlow === 'dev'
           && run.selector === selector
+          && run.intentProvenance === INTENT_PROVENANCE
           && run.requestedEngine === (selector === 'native' ? host : selector)
           && run.requestedRoute === expected
           && run.scope.scope === 'queue'
@@ -4408,6 +4475,287 @@ function selfTest() {
       && result.value.requestedRoute === 'codex.native'
       && !JSON.stringify(result.value).includes('misleading');
   });
+  check('open keeps selected tuning out of the run context', () => {
+    const result = openRun('claude', 'codex', {
+      config: {
+        adapterOptions: {
+          'claude.codex-exec': {
+            implementerModel: 'gpt-5.6-writer',
+            reviewerModel: 'gpt-5.6-reviewer',
+          },
+        },
+      },
+    });
+    return result.ok
+      && result.value.requestedRoute === 'claude.codex-exec'
+      && !JSON.stringify(result.value).includes('gpt-5.6-writer')
+      && !JSON.stringify(result.value).includes('gpt-5.6-reviewer');
+  });
+  check('Claude native model pins resolve only for the selected role', () => {
+    const config = fixtureConfig({
+      adapterOptions: {
+        'claude.native': {
+          implementerModel: 'sonnet-writer',
+          reviewerModel: 'opus-reviewer',
+        },
+      },
+    });
+    const writer = tunedPlan({ config });
+    const reviewer = tunedPlan({ config, stage: 'plan-review' });
+    if (!writer.ok || !reviewer.ok) return false;
+    const writerAttempt = compileRouteAttempt(writer.value);
+    const reviewerAttempt = compileRouteAttempt(reviewer.value);
+    return writer.value.adapterTuning.model === 'sonnet-writer'
+      && reviewer.value.adapterTuning.model === 'opus-reviewer'
+      && !JSON.stringify(writer.value.adapterTuning).includes('opus-reviewer')
+      && !JSON.stringify(reviewer.value.adapterTuning).includes('sonnet-writer')
+      && writerAttempt.ok
+      && reviewerAttempt.ok
+      && writerAttempt.value.launch.argv.includes('sonnet-writer')
+      && reviewerAttempt.value.launch.argv.includes('opus-reviewer');
+  });
+  check('Claude to Codex model and effort pins compile as argv values', () => {
+    const config = fixtureConfig({
+      adapterOptions: {
+        'claude.codex-exec': {
+          implementerModel: 'gpt-5.6-writer',
+          reviewerModel: 'gpt-5.6-reviewer',
+          implementerEffort: 'medium',
+          reviewerEffort: 'ultra',
+        },
+      },
+    });
+    const writer = tunedPlan({ selector: 'codex', config });
+    const reviewer = tunedPlan({
+      selector: 'codex',
+      config,
+      stage: 'plan-review',
+    });
+    if (!writer.ok || !reviewer.ok) return false;
+    const writerAttempt = compileRouteAttempt(writer.value);
+    const reviewerAttempt = compileRouteAttempt(reviewer.value);
+    if (!writerAttempt.ok || !reviewerAttempt.ok) return false;
+    const writerArgv = writerAttempt.value.launch.argv;
+    const reviewerArgv = reviewerAttempt.value.launch.argv;
+    return writer.value.adapterTuning.model === 'gpt-5.6-writer'
+      && writer.value.adapterTuning.effort === 'medium'
+      && reviewer.value.adapterTuning.model === 'gpt-5.6-reviewer'
+      && reviewer.value.adapterTuning.effort === 'ultra'
+      && writerArgv[writerArgv.indexOf('--model') + 1] === 'gpt-5.6-writer'
+      && reviewerArgv[reviewerArgv.indexOf('--model') + 1] === 'gpt-5.6-reviewer'
+      && writerArgv.includes('model_reasoning_effort="medium"')
+      && reviewerArgv.includes('model_reasoning_effort="ultra"')
+      && !JSON.stringify(writerArgv).includes('gpt-5.6-reviewer')
+      && !JSON.stringify(reviewerArgv).includes('gpt-5.6-writer');
+  });
+  check('Claude to opencode model pins compile as argv values', () => {
+    const config = fixtureConfig({
+      adapterOptions: {
+        'claude.opencode-exec': {
+          implementerModel: 'openai/gpt-5.6-writer',
+          reviewerModel: 'anthropic/claude-reviewer',
+        },
+      },
+    });
+    const writer = tunedPlan({ selector: 'opencode', config });
+    const reviewer = tunedPlan({
+      selector: 'opencode',
+      config,
+      stage: 'plan-review',
+    });
+    if (!writer.ok || !reviewer.ok) return false;
+    const writerAttempt = compileRouteAttempt(writer.value);
+    const reviewerAttempt = compileRouteAttempt(reviewer.value);
+    if (!writerAttempt.ok || !reviewerAttempt.ok) return false;
+    const writerArgv = writerAttempt.value.launch.argv;
+    const reviewerArgv = reviewerAttempt.value.launch.argv;
+    return writerArgv[writerArgv.indexOf('--model') + 1]
+        === 'openai/gpt-5.6-writer'
+      && reviewerArgv[reviewerArgv.indexOf('--model') + 1]
+        === 'anthropic/claude-reviewer'
+      && !writerArgv.includes('--variant')
+      && !reviewerArgv.includes('--variant');
+  });
+  check('doctor probes never receive writer or reviewer tuning', () => {
+    const config = fixtureConfig({
+      adapterOptions: {
+        'claude.codex-exec': {
+          implementerModel: 'gpt-5.6-writer',
+          reviewerModel: 'gpt-5.6-reviewer',
+          implementerEffort: 'medium',
+          reviewerEffort: 'ultra',
+        },
+      },
+    });
+    const probe = tunedPlan({
+      selector: 'codex',
+      config,
+      stage: 'doctor',
+    });
+    if (!probe.ok) return false;
+    const attempt = compileRouteAttempt(probe.value);
+    return attempt.ok
+      && Object.keys(probe.value.adapterTuning).length === 0
+      && JSON.stringify(attempt.value.launch.argv) ===
+        JSON.stringify(['--version']);
+  });
+  check('outage fallback applies the actual native route tuning', () => {
+    const config = fixtureConfig({
+      adapterOptions: {
+        'claude.native': { implementerModel: 'sonnet-fallback' },
+        'claude.codex-exec': {
+          implementerModel: 'gpt-5.6-primary',
+          implementerEffort: 'high',
+        },
+      },
+    });
+    const fallback = tunedPlan({
+      selector: 'codex',
+      config,
+      routeStatus: 'outage',
+    });
+    if (!fallback.ok) return false;
+    const attempt = compileRouteAttempt(fallback.value);
+    return fallback.value.requestedRoute === 'claude.codex-exec'
+      && fallback.value.actualRoute === 'claude.native'
+      && fallback.value.adapterTuning.model === 'sonnet-fallback'
+      && !JSON.stringify(fallback.value.adapterTuning).includes(
+        'gpt-5.6-primary',
+      )
+      && attempt.ok
+      && attempt.value.launch.argv.includes('sonnet-fallback');
+  });
+  check('native Codex and opencode inherit active session tuning', () => {
+    const codex = tunedPlan({ host: 'codex' });
+    const opencode = tunedPlan({ host: 'opencode' });
+    if (!codex.ok || !opencode.ok) return false;
+    const codexAttempt = compileRouteAttempt(codex.value);
+    const opencodeAttempt = compileRouteAttempt(opencode.value);
+    return Object.keys(codex.value.adapterTuning).length === 0
+      && Object.keys(opencode.value.adapterTuning).length === 0
+      && codexAttempt.ok
+      && opencodeAttempt.ok
+      && !Object.hasOwn(codexAttempt.value.launch, 'model')
+      && !Object.hasOwn(opencodeAttempt.value.launch, 'model');
+  });
+  check('plan requires the exact configuration that opened the run', () => {
+    const config = fixtureConfig({
+      adapterOptions: {
+        'claude.codex-exec': { reviewerModel: 'gpt-5.6-reviewer' },
+      },
+    });
+    const opened = open({
+      invocation: '/autoloop:dev with codex',
+      hostEvidence: fixtureHostEvidence('claude'),
+      config,
+    });
+    if (!opened.ok) return false;
+    const capabilities = fixtureCapabilities(opened.value);
+    const input = {
+      run: opened.value,
+      work: fixtureWork({ stage: 'plan-review' }),
+      laneProof: fixtureLaneProof('full'),
+      capabilities,
+      routeState: fixtureRouteState(opened.value, capabilities),
+    };
+    return expectError(plan(input), 'INVALID_INTENT')
+      && expectError(plan({
+        ...input,
+        config: fixtureConfig(),
+      }), 'EXPIRED_PLAN')
+      && expectError(plan({
+        ...input,
+        config,
+        adapterTuning: { model: 'caller-injected' },
+      }), 'INVALID_INTENT');
+  });
+  check('mutable config accessors cannot escape the run fingerprint', () => {
+    let reads = 0;
+    const options = {};
+    Object.defineProperty(options, 'reviewerModel', {
+      enumerable: true,
+      get() {
+        reads += 1;
+        return reads === 1 ? 'gpt-5.6-original' : 'gpt-5.6-swapped';
+      },
+    });
+    const config = fixtureConfig({
+      adapterOptions: { 'claude.codex-exec': options },
+    });
+    const opened = open({
+      invocation: '/autoloop:dev with codex',
+      hostEvidence: fixtureHostEvidence('claude'),
+      config,
+    });
+    if (!opened.ok) return false;
+    const capabilities = fixtureCapabilities(opened.value);
+    return reads === 1
+      && expectError(plan({
+        run: opened.value,
+        config,
+        work: fixtureWork({ stage: 'plan-review' }),
+        laneProof: fixtureLaneProof('full'),
+        capabilities,
+        routeState: fixtureRouteState(opened.value, capabilities),
+      }), 'EXPIRED_PLAN')
+      && reads === 2;
+  });
+  check('runtime-authorized failure fallback retunes to the actual route', () => {
+    const config = fixtureConfig({
+      adapterOptions: {
+        'claude.native': { reviewerModel: 'opus-fallback' },
+        'claude.codex-exec': {
+          reviewerModel: 'gpt-5.6-primary',
+          reviewerEffort: 'high',
+        },
+      },
+    });
+    const opened = open({
+      invocation: '/autoloop:dev with codex',
+      hostEvidence: fixtureHostEvidence('claude'),
+      config,
+    });
+    if (!opened.ok) return false;
+    const capabilities = fixtureCapabilities(opened.value);
+    const routeState = fixtureRouteState(opened.value, capabilities);
+    const primary = plan({
+      run: opened.value,
+      config,
+      work: fixtureWork({ stage: 'plan-review' }),
+      laneProof: fixtureLaneProof('full'),
+      capabilities,
+      routeState,
+    });
+    if (!primary.ok) return false;
+    const first = observe({
+      run: opened.value,
+      routeState,
+      plan: primary.value,
+      outcome: fixtureOutcome(primary.value, {
+        status: 'transient-failure',
+        modelIdentity: undefined,
+      }),
+    });
+    if (!first.ok || first.value.kind !== 'retry') return false;
+    const second = observe({
+      run: opened.value,
+      routeState: first.value.routeState,
+      plan: first.value.nextPlan,
+      outcome: fixtureOutcome(first.value.nextPlan, {
+        status: 'transient-failure',
+        modelIdentity: undefined,
+      }),
+    });
+    if (!second.ok || second.value.kind !== 'fallback') return false;
+    const attempt = compileRouteAttempt(second.value.nextPlan);
+    return second.value.nextPlan.actualRoute === 'claude.native'
+      && second.value.nextPlan.adapterTuning.model === 'opus-fallback'
+      && !JSON.stringify(second.value.nextPlan.adapterTuning).includes(
+        'gpt-5.6-primary',
+      )
+      && attempt.ok
+      && attempt.value.launch.argv.includes('opus-fallback');
+  });
   check('runtime authority in config is rejected', () =>
     expectError(openRun('claude', 'native', {
       config: { runtime: { supportedHosts: ['codex'] } },
@@ -4433,15 +4781,15 @@ function selfTest() {
       forged.selector,
       forged.scope,
       forged.invocationFlow,
+      forged.intentProvenance,
     );
     forged.instanceFingerprint = runInstanceFingerprint(forged);
     return expectError(finish({
       run: forged,
       progress: {
         reason: 'context-budget',
-        eligibleRemaining: 1,
         unitsCompleted: 1,
-        queueComplete: true,
+        queueEvidence: null,
         checkout: fixtureCheckout(),
       },
     }), 'INVALID_INTENT')
@@ -4511,6 +4859,37 @@ function selfTest() {
       hostEvidence: fixtureHostEvidence('claude'),
       config: fixtureConfig(),
     }), 'INVALID_INTENT'));
+  check('Setup doctor cannot silently ignore an unknown selector', () =>
+    expectError(open({
+      invocation: '/autoloop:setup doctor with desktop',
+      hostEvidence: fixtureHostEvidence('claude'),
+      config: fixtureConfig(),
+    }), 'INVALID_INTENT'));
+  check('plain opencode doctor cannot silently ignore an unknown selector', () =>
+    expectError(open({
+      invocation: 'doctor with desktop',
+      hostEvidence: fixtureHostEvidence('opencode'),
+      config: fixtureConfig(),
+    }), 'INVALID_INTENT'));
+  for (const invocation of [
+    '/autoloop:dev take one issue and stop with desktop',
+    '$autoloop:pitcrew revise one PR with desktop',
+    'doctor inspect the configured route with desktop',
+    '/autoloop:setup doctor inspect the configured route with desktop',
+  ]) {
+    check(`unknown trailing selector after scope prose is rejected: ${invocation}`, () =>
+      expectError(open({
+        invocation,
+        hostEvidence: fixtureHostEvidence('claude'),
+        config: fixtureConfig(),
+      }), 'INVALID_INTENT'));
+  }
+  check('Setup doctor rejects an incomplete selector', () =>
+    expectError(open({
+      invocation: '/autoloop:setup doctor with',
+      hostEvidence: fixtureHostEvidence('claude'),
+      config: fixtureConfig(),
+    }), 'INVALID_INTENT'));
   for (const invocation of [
     '/autoloop:dev using codex',
     '/autoloop:dev; use codex',
@@ -4556,7 +4935,6 @@ function selfTest() {
     '/autoloop:dev use the ratified plan',
     '/autoloop:dev using the existing spec',
     '/autoloop:dev choose issue #7',
-    '/autoloop:dev implement with tests',
     '/autoloop:dev use plan',
     '/autoloop:dev update the data model',
     '/autoloop:dev fix the simulation engine',
@@ -4624,6 +5002,43 @@ function selfTest() {
       && dev.value.runIntentHash !== pitcrew.value.runIntentHash
       && dev.value.runIntentHash !== doctor.value.runIntentHash;
   });
+  check('Codex dollar and opencode skill surfaces preserve native intent', () => {
+    const codex = open({
+      invocation: '$autoloop:dev',
+      hostEvidence: fixtureHostEvidence('codex'),
+      config: fixtureConfig(),
+    });
+    const opencode = open({
+      invocation: 'dev',
+      hostEvidence: fixtureHostEvidence('opencode'),
+      config: fixtureConfig(),
+    });
+    const doctor = open({
+      invocation: 'doctor with opencode',
+      hostEvidence: fixtureHostEvidence('opencode'),
+      config: fixtureConfig(),
+    });
+    return codex.ok
+      && codex.value.selector === 'native'
+      && codex.value.requestedRoute === 'codex.native'
+      && opencode.ok
+      && opencode.value.selector === 'native'
+      && opencode.value.requestedRoute === 'opencode.native'
+      && doctor.ok
+      && doctor.value.selector === 'opencode'
+      && doctor.value.requestedRoute === 'opencode.native';
+  });
+  check('opencode cron prompt begins with the explicit Dev surface', () => {
+    const opened = open({
+      invocation: 'dev run one cycle; stop condition: queue empty',
+      hostEvidence: fixtureHostEvidence('opencode'),
+      config: fixtureConfig(),
+    });
+    return opened.ok
+      && opened.value.invocationFlow === 'dev'
+      && opened.value.selector === 'native'
+      && opened.value.requestedRoute === 'opencode.native';
+  });
 
   for (const host of HOSTS) {
     for (const selector of SELECTORS) {
@@ -4642,9 +5057,12 @@ function selfTest() {
         run: original.value,
         progress: {
           reason: 'context-budget',
-          eligibleRemaining: 2,
           unitsCompleted: 1,
-          queueComplete: true,
+          queueEvidence: fixtureQueueEvidence(
+            original.value,
+            2,
+            'relaunch',
+          ),
           checkout: fixtureCheckout(),
         },
       });
@@ -4669,6 +5087,7 @@ function selfTest() {
       check(`relaunch round trip ${host} × ${selector}`, () =>
         reopened.ok
         && reopened.value.selector === selector
+        && reopened.value.intentProvenance === INTENT_PROVENANCE
         && reopened.value.requestedRoute === original.value.requestedRoute
         && reopened.value.scope.autoContinue === true
         && reopened.value.generation === 1
@@ -4681,7 +5100,7 @@ function selfTest() {
             original.value,
             capabilities,
           );
-          const dispatch = plan({
+          const dispatch = planWithConfig({
             run: original.value,
             work: fixtureWork({ stage: 'code-review' }),
             laneProof: fixtureLaneProof('full', 'final'),
@@ -4710,9 +5129,12 @@ function selfTest() {
       run: relaunchSource.value,
       progress: {
         reason: 'context-budget',
-        eligibleRemaining: 1,
         unitsCompleted: 1,
-        queueComplete: true,
+        queueEvidence: fixtureQueueEvidence(
+          relaunchSource.value,
+          1,
+          'relaunch',
+        ),
         checkout: fixtureCheckout(),
       },
     })
@@ -4873,7 +5295,13 @@ function selfTest() {
         continuation: {
           ...envelope,
           scope,
-          runIntentHash: intentHash('claude', envelope.selector, scope, 'dev'),
+          runIntentHash: intentHash(
+            'claude',
+            envelope.selector,
+            scope,
+            'dev',
+            INTENT_PROVENANCE,
+          ),
         },
       }), 'INVALID_RELAUNCH');
     });
@@ -4939,7 +5367,7 @@ function selfTest() {
                 const work = fixtureWork({ flow, stage, round });
                 const capabilities = fixtureCapabilities(run, capabilityMode);
                 const routeState = fixtureRouteState(run, capabilities, routeStatus);
-                const result = plan({ run, work, laneProof, capabilities, routeState });
+                const result = planWithConfig({ run, work, laneProof, capabilities, routeState });
                 const validRound = stageAcceptsRound(flow, stage, round);
                 const effectiveLane = expectedEffectiveLane(flow, stage, round, lane, mode);
                 const nominal = expectedNominalRoute(run, flow, stage, round, effectiveLane);
@@ -4980,7 +5408,7 @@ function selfTest() {
                   if (!actual) return expectError(result, 'UNSAFE_FALLBACK');
                   if (!result.ok) return false;
                   const value = result.value;
-                  const repeat = plan({ run, work, laneProof, capabilities, routeState });
+                  const repeat = planWithConfig({ run, work, laneProof, capabilities, routeState });
                   return repeat.ok
                     && JSON.stringify(repeat.value) === JSON.stringify(value)
                     && value.requestedRoute === run.requestedRoute
@@ -5023,12 +5451,13 @@ function selfTest() {
         hostEvidenceFingerprint: run.hostEvidenceFingerprint,
         sessionFingerprint: run.sessionFingerprint,
         invocationNonce: run.invocationNonce,
+        intentProvenance: run.intentProvenance,
         configuredBaseBranch: run.configuredBaseBranch,
         configFingerprint: run.configFingerprint,
         generation: run.generation,
       }));
     check('caller-authored outage state cannot select recovery or fallback', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'code-review' }),
         laneProof: fixtureLaneProof('full', 'final'),
@@ -5045,9 +5474,9 @@ function selfTest() {
     check('capability fingerprint churn cannot silently clear an outage', () => {
       const outage = fixtureRouteState(run, capabilities, 'outage');
       const changed = fixtureCapabilities(run, 'available', {
-        'opencode.task.available': false,
+        'opencode.run.available': false,
       });
-      return expectError(plan({
+      return expectError(planWithConfig({
         run,
         work: fixtureWork({ stage: 'code-review' }),
         laneProof: fixtureLaneProof('full', 'final'),
@@ -5058,7 +5487,7 @@ function selfTest() {
     check('capability refresh preserves outage and retry history', () => {
       const outage = fixtureRouteState(run, capabilities, 'outage');
       const changed = fixtureCapabilities(run, 'available', {
-        'opencode.task.available': false,
+        'opencode.run.available': false,
       });
       const refreshed = refreshRouteState({
         run,
@@ -5067,7 +5496,7 @@ function selfTest() {
         capabilities: changed,
       });
       const replanned = refreshed.ok
-        ? plan({
+        ? planWithConfig({
           run,
           work: fixtureWork({ stage: 'code-review' }),
           laneProof: fixtureLaneProof('full', 'final'),
@@ -5091,7 +5520,7 @@ function selfTest() {
     check('initial healthy route state needs no caller-computed capability hash', () => {
       const initialized = initializeRouteState({ run, capabilities });
       if (!initialized.ok) return false;
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'implementation' }),
         laneProof: fixtureLaneProof('full'),
@@ -5106,7 +5535,7 @@ function selfTest() {
           run.instanceFingerprint;
     });
     check('small round-one review requires final proof', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'code-review', round: 1 }),
         laneProof: fixtureLaneProof('small', 'planned'),
@@ -5119,7 +5548,7 @@ function selfTest() {
         && result.value.laneProof.status === 'promoted';
     });
     check('implementation cannot narrow from a final proof', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'implementation' }),
         laneProof: fixtureLaneProof('docs', 'final'),
@@ -5133,7 +5562,7 @@ function selfTest() {
         );
     });
     check('plan review cannot narrow from a final proof', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'plan-review' }),
         laneProof: fixtureLaneProof('docs', 'final'),
@@ -5147,7 +5576,7 @@ function selfTest() {
         );
     });
     check('full code review proof still must be final', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'code-review' }),
         laneProof: fixtureLaneProof('full', 'planned'),
@@ -5161,7 +5590,7 @@ function selfTest() {
         );
     });
     check('judgment review requires a final head-bound proof', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({
           stage: 'judgment-review',
@@ -5177,7 +5606,7 @@ function selfTest() {
         && result.value.artifactSubject.headOid === HEAD_OID;
     });
     check('planned judgment proof is rejected as a mode mismatch', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({
           stage: 'judgment-review',
@@ -5195,7 +5624,7 @@ function selfTest() {
     check('code review requires an explicit reviewed head', () => {
       const work = fixtureWork({ stage: 'code-review' });
       const { headOid, ...artifact } = work.artifact;
-      return expectError(plan({
+      return expectError(planWithConfig({
         run,
         work: { ...work, artifact },
         laneProof: fixtureLaneProof('full', 'final'),
@@ -5204,7 +5633,7 @@ function selfTest() {
       }), 'INVALID_INTENT');
     });
     check('missing lane proof fails closed to full', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'implementation' }),
         laneProof: undefined,
@@ -5216,7 +5645,7 @@ function selfTest() {
         && result.value.laneProof.status === 'unverifiable';
     });
     check('omitted lane proof also fails closed to full', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'implementation' }),
         capabilities,
@@ -5227,7 +5656,7 @@ function selfTest() {
         && result.value.laneProof.status === 'unverifiable';
     });
     check('stale lane proof fails closed to full', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'implementation' }),
         laneProof: fixtureLaneProof('docs', 'planned', OTHER_OID),
@@ -5239,7 +5668,7 @@ function selfTest() {
         && result.value.laneProof.reasonCodes.includes('STALE_LANE_PROOF');
     });
     check('planned proof is bound to the exact artifact identity', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({
           stage: 'implementation',
@@ -5264,7 +5693,7 @@ function selfTest() {
         {},
         work.checkout,
       );
-      const result = plan({
+      const result = planWithConfig({
         run,
         work,
         laneProof: fixtureLaneProof('docs', 'final'),
@@ -5277,7 +5706,7 @@ function selfTest() {
     });
     check('tampered lane proof cannot retain its old fingerprint authority', () => {
       const proof = fixtureLaneProof('full');
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'implementation' }),
         laneProof: { ...proof, lane: 'docs' },
@@ -5289,7 +5718,7 @@ function selfTest() {
         && result.value.laneProof.status === 'unverifiable';
     });
     check('lane proof exposes replay validation without cryptographic authority', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'implementation' }),
         laneProof: fixtureLaneProof('full', 'planned'),
@@ -5300,7 +5729,7 @@ function selfTest() {
         && result.value.laneProof.authority === 'structural-replay-only';
     });
     check('caller-authored lane is rejected', () =>
-      expectError(plan({
+      expectError(planWithConfig({
         run,
         work: { ...fixtureWork(), lane: 'docs' },
         laneProof: fixtureLaneProof('full'),
@@ -5308,7 +5737,7 @@ function selfTest() {
         routeState: healthy,
       }), 'INVALID_INTENT'));
     check('pitcrew revision lane is unconditionally full', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ flow: 'pitcrew', stage: 'implementation' }),
         laneProof: fixtureLaneProof('docs'),
@@ -5320,7 +5749,7 @@ function selfTest() {
         && result.value.actualRoute === 'claude.codex-exec';
     });
     check('Dev may share its run with Pitcrew but standalone Pitcrew cannot become Dev', () => {
-      const shared = plan({
+      const shared = planWithConfig({
         run,
         work: fixtureWork({ flow: 'pitcrew', stage: 'implementation' }),
         laneProof: fixtureLaneProof('full'),
@@ -5330,7 +5759,7 @@ function selfTest() {
       const standalone = openRun('claude', 'codex', { flow: 'pitcrew' });
       if (!standalone.ok) return false;
       return shared.ok
-        && expectError(plan({
+        && expectError(planWithConfig({
           run: standalone.value,
           work: fixtureWork({ flow: 'dev', stage: 'implementation' }),
           laneProof: fixtureLaneProof('full'),
@@ -5339,14 +5768,14 @@ function selfTest() {
         }), 'INVALID_INTENT');
     });
     check('plan review can dispatch only once', () =>
-      expectError(plan({
+      expectError(planWithConfig({
         run,
         work: fixtureWork({ stage: 'plan-review', round: 2 }),
         laneProof: fixtureLaneProof('full'),
         capabilities,
         routeState: healthy,
       }), 'INVALID_INTENT')
-      && expectError(plan({
+      && expectError(planWithConfig({
         run,
         work: fixtureWork({
           stage: 'plan-review',
@@ -5358,7 +5787,7 @@ function selfTest() {
         routeState: healthy,
       }), 'INVALID_INTENT'));
     check('round one reviews the full artifact', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'code-review', round: 1 }),
         laneProof: fixtureLaneProof('full', 'final'),
@@ -5368,7 +5797,7 @@ function selfTest() {
       return result.ok && result.value.reviewScope === 'full-artifact';
     });
     check('round two reviews delta and rebuttals natively', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'code-review', round: 2 }),
         laneProof: fixtureLaneProof('full', 'final'),
@@ -5385,7 +5814,7 @@ function selfTest() {
         claim: 'The behavior is required by the sealed contract.',
         evidence: 'Inspect the exact patch and bounded evidence.',
       }];
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({
           stage: 'code-review',
@@ -5424,7 +5853,7 @@ function selfTest() {
         && source.openRebuttals[0].findingId === 'F-2';
     });
     check('judgment review is bounded native and not a recovery probe', () => {
-      const result = plan({
+      const result = planWithConfig({
         run,
         work: fixtureWork({ stage: 'judgment-review' }),
         laneProof: fixtureLaneProof('full'),
@@ -5438,7 +5867,7 @@ function selfTest() {
         && result.value.recoveryProbe === false;
     });
     check('author reviewer collision is typed', () =>
-      expectError(plan({
+      expectError(planWithConfig({
         run,
         work: fixtureWork({
           stage: 'code-review',
@@ -5449,7 +5878,7 @@ function selfTest() {
         routeState: healthy,
       }), 'AUTHOR_REVIEWER_COLLISION'));
     check('writers are serialized', () =>
-      expectError(plan({
+      expectError(planWithConfig({
         run,
         work: fixtureWork({
           stage: 'implementation',
@@ -5464,7 +5893,7 @@ function selfTest() {
         routeState: healthy,
       }), 'UNSAFE_CONCURRENCY'));
     check('overlap is at most depth one and read only', () =>
-      expectError(plan({
+      expectError(planWithConfig({
         run,
         work: fixtureWork({
           stage: 'plan-review',
@@ -5478,7 +5907,7 @@ function selfTest() {
         capabilities,
         routeState: healthy,
       }), 'UNSAFE_CONCURRENCY')
-      && expectError(plan({
+      && expectError(planWithConfig({
         run,
         work: fixtureWork({
           stage: 'plan-review',
@@ -5502,7 +5931,7 @@ function selfTest() {
           {},
           fixture.work.checkout,
         );
-        const livePlan = plan({
+        const livePlan = planWithConfig({
           run,
           work: fixture.work,
           laneProof: fixtureLaneProof('full', 'final'),
@@ -5526,7 +5955,7 @@ function selfTest() {
     });
 
     const primaryWork = fixtureWork({ stage: 'code-review' });
-    const primaryPlan = plan({
+    const primaryPlan = planWithConfig({
       run,
       work: primaryWork,
       laneProof: fixtureLaneProof('full', 'final'),
@@ -5560,7 +5989,7 @@ function selfTest() {
             content,
           },
         };
-        return expectError(plan({
+        return expectError(planWithConfig({
           run,
           work: fixtureWork({
             stage: 'code-review',
@@ -5615,6 +6044,7 @@ function selfTest() {
           && result.value.receipt.attemptCount === 1
           && result.value.receipt.activeHost === 'claude'
           && result.value.receipt.selector === 'codex'
+          && result.value.receipt.intentProvenance === INTENT_PROVENANCE
           && result.value.receipt.requestedEngine === 'codex'
           && result.value.receipt.requestedRoute === 'claude.codex-exec'
           && result.value.receipt.actualRoute === 'claude.codex-exec'
@@ -5639,6 +6069,24 @@ function selfTest() {
           })())
           && result.value.receipt.fallback.used === false
           && result.value.receipt.degradation.length === 0;
+      });
+      check('receipt provenance cannot be publicly upgraded', () => {
+        const completed = observe({
+          run,
+          routeState: primaryPlan.value.routeState,
+          plan: primaryPlan.value,
+          outcome: fixtureOutcome(primaryPlan.value),
+        });
+        if (!completed.ok || completed.value.kind !== 'complete') return false;
+        const forged = {
+          ...completed.value.receipt,
+          intentProvenance: 'verified',
+        };
+        delete forged.fingerprint;
+        return !validateRuntimeReceipt({
+          ...forged,
+          fingerprint: hashValue(forged),
+        });
       });
       check('caller cannot forge an authenticated Runtime receipt', () => {
         const completed = observe({
@@ -5893,7 +6341,7 @@ function selfTest() {
       });
     }
 
-    const writerPlan = plan({
+    const writerPlan = planWithConfig({
       run,
       work: fixtureWork({ stage: 'implementation' }),
       laneProof: fixtureLaneProof('full'),
@@ -5934,7 +6382,7 @@ function selfTest() {
         }), 'PARTIAL_WRITER_RESULT'));
     }
 
-    const outageReview = plan({
+    const outageReview = planWithConfig({
       run,
       work: fixtureWork({ stage: 'code-review' }),
       laneProof: fixtureLaneProof('full', 'final'),
@@ -5979,34 +6427,24 @@ function selfTest() {
       'codex.exec.read-only': false,
       'codex.exec.network-denied': false,
     };
-    check('native Codex review selects attested degraded fallback only when primary is unavailable', () => {
+    check('missing native Codex external review is a capability failure', () => {
       const capabilities = fixtureCapabilities(
         nativeCodex.value,
         'available',
         degradedFacts,
       );
-      const result = plan({
+      const result = planWithConfig({
         run: nativeCodex.value,
         work: fixtureWork({ stage: 'code-review' }),
         laneProof: fixtureLaneProof('full', 'final'),
         capabilities,
         routeState: fixtureRouteState(nativeCodex.value, capabilities),
       });
-      return result.ok
-        && result.value.actualRoute === 'codex.native'
-        && result.value.execution === 'codex.in-session-reviewer'
-        && result.value.fallbackUsed === true
-        && result.value.degradation.includes('degraded-native-codex-review');
+      return expectError(result, 'MISSING_CAPABILITY');
     });
-    check('healthy native Codex external review ignores unused degraded-spawn failures', () => {
-      const capabilities = fixtureCapabilities(nativeCodex.value, 'available', {
-        'codex.spawn.available': false,
-        'codex.spawn.agent-type': false,
-        'codex.spawn.fork-turns-none': false,
-        'codex.spawn.effective-read-only': false,
-        'codex.spawn.integrity': false,
-      });
-      const result = plan({
+    check('healthy native Codex review has no host-native degradation path', () => {
+      const capabilities = fixtureCapabilities(nativeCodex.value);
+      const result = planWithConfig({
         run: nativeCodex.value,
         work: fixtureWork({ stage: 'code-review' }),
         laneProof: fixtureLaneProof('full', 'final'),
@@ -6015,7 +6453,41 @@ function selfTest() {
       });
       return result.ok
         && result.value.execution === 'codex.exec-read-only'
+        && result.value.fallback === null
         && result.value.degradation.length === 0;
+    });
+    check('native Codex failure cannot spend on a retired in-session engine', () => {
+      const capabilities = fixtureCapabilities(nativeCodex.value);
+      const primary = planWithConfig({
+        run: nativeCodex.value,
+        work: fixtureWork({ stage: 'code-review' }),
+        laneProof: fixtureLaneProof('full', 'final'),
+        capabilities,
+        routeState: fixtureRouteState(nativeCodex.value, capabilities),
+      });
+      if (!primary.ok || primary.value.execution !== 'codex.exec-read-only') {
+        return false;
+      }
+      const first = observe({
+        run: nativeCodex.value,
+        routeState: primary.value.routeState,
+        plan: primary.value,
+        outcome: fixtureOutcome(primary.value, {
+          status: 'transient-failure',
+          modelIdentity: undefined,
+        }),
+      });
+      if (!first.ok || first.value.kind !== 'retry') return false;
+      const second = observe({
+        run: nativeCodex.value,
+        routeState: first.value.routeState,
+        plan: first.value.nextPlan,
+        outcome: fixtureOutcome(first.value.nextPlan, {
+          status: 'transient-failure',
+          modelIdentity: undefined,
+        }),
+      });
+      return expectError(second, 'UNSAFE_FALLBACK');
     });
   }
 
@@ -6025,14 +6497,23 @@ function selfTest() {
     config: fixtureConfig(),
   });
   if (finishRun.ok) {
+    check('caller-declared queue counters cannot finish a run', () =>
+      expectError(finish({
+        run: finishRun.value,
+        progress: {
+          reason: 'queue-exhausted',
+          unitsCompleted: 2,
+          eligibleRemaining: 0,
+          queueComplete: true,
+        },
+      }), 'INVALID_STOP'));
     check('queue exhaustion requires complete absence evidence', () =>
       expectError(finish({
         run: finishRun.value,
         progress: {
           reason: 'queue-exhausted',
-          eligibleRemaining: 0,
           unitsCompleted: 2,
-          queueComplete: false,
+          queueEvidence: null,
         },
       }), 'INCOMPLETE_PROGRESS'));
     check('queue exhaustion rejects eligible work', () =>
@@ -6040,9 +6521,12 @@ function selfTest() {
         run: finishRun.value,
         progress: {
           reason: 'queue-exhausted',
-          eligibleRemaining: 1,
           unitsCompleted: 2,
-          queueComplete: true,
+          queueEvidence: fixtureQueueEvidence(
+            finishRun.value,
+            1,
+            'queueExhaustion',
+          ),
         },
       }), 'INVALID_STOP'));
     check('complete empty queue stops', () => {
@@ -6050,9 +6534,12 @@ function selfTest() {
         run: finishRun.value,
         progress: {
           reason: 'queue-exhausted',
-          eligibleRemaining: 0,
           unitsCompleted: 2,
-          queueComplete: true,
+          queueEvidence: fixtureQueueEvidence(
+            finishRun.value,
+            0,
+            'queueExhaustion',
+          ),
         },
       });
       return result.ok
@@ -6064,9 +6551,8 @@ function selfTest() {
         run: finishRun.value,
         progress: {
           reason: 'wall-clock-cap',
-          eligibleRemaining: 1,
           unitsCompleted: 1,
-          queueComplete: true,
+          queueEvidence: null,
         },
       }), 'INVALID_STOP'));
     check('no progress means no relaunch', () => {
@@ -6074,9 +6560,12 @@ function selfTest() {
         run: finishRun.value,
         progress: {
           reason: 'context-budget',
-          eligibleRemaining: 1,
           unitsCompleted: 0,
-          queueComplete: true,
+          queueEvidence: fixtureQueueEvidence(
+            finishRun.value,
+            1,
+            'relaunch',
+          ),
         },
       });
       return result.ok && result.value.action === 'stop';
@@ -6105,9 +6594,8 @@ function selfTest() {
         run: capped,
         progress: {
           reason: 'context-budget',
-          eligibleRemaining: 1,
           unitsCompleted: 1,
-          queueComplete: true,
+          queueEvidence: fixtureQueueEvidence(capped, 1, 'relaunch'),
         },
       });
       return result.ok
@@ -6127,9 +6615,8 @@ function selfTest() {
         run: boundedRun.value,
         progress: {
           reason: 'invocation-bound-reached',
-          eligibleRemaining: 1,
           unitsCompleted: 1,
-          queueComplete: true,
+          queueEvidence: null,
         },
       }), 'INVALID_STOP'));
     check('bounded stop succeeds at the bound', () => {
@@ -6137,9 +6624,8 @@ function selfTest() {
         run: boundedRun.value,
         progress: {
           reason: 'invocation-bound-reached',
-          eligibleRemaining: 1,
           unitsCompleted: 2,
-          queueComplete: true,
+          queueEvidence: null,
         },
       });
       return result.ok

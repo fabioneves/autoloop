@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - v*
   pull_request:
 
 permissions:
@@ -24,9 +26,52 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
+      - name: Install Linux authority sandbox
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Smoke-test process authority isolation
+        if: runner.os == 'Linux'
+        run: node templates/tools/route-adapter-contract.mjs --self-test-authority-isolation
+      - name: Check measurement budget policy (pending is not a pass)
+        run: >-
+          node templates/tools/measurement-contract.mjs
+          --check-budget-policy templates/measurement-budget-policy.template.json
       - name: Verify release and contracts
         run: node templates/tools/verify.mjs --plugin-root .
+      - name: Verify release tag and live controls
+        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          AUTOLOOP_RELEASE_POLICY_TOKEN: ${{ secrets.AUTOLOOP_RELEASE_POLICY_TOKEN || github.token }}
+        run: >-
+          node templates/tools/release-verify.mjs
+          --release-mode
+          --check-tag-policy
+          --check-base-policy
+          --check-immutable-releases
+          --check-root .
+          --repository "$GITHUB_REPOSITORY"
+          --tag "$GITHUB_REF_NAME"
+          --main-ref refs/remotes/origin/main
+          --base-branch main
+          --required-check "Contracts (macos-latest, Node 24)@15368"
+          --required-check "Contracts (ubuntu-latest, Node 22)@15368"
+      - name: Check committed whitespace
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if test -n "$BASE_SHA" &&
+             test "$BASE_SHA" != "0000000000000000000000000000000000000000" &&
+             git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null
+          then
+            git diff --check "$BASE_SHA" HEAD
+          else
+            git diff-tree --root --no-commit-id --check HEAD
+          fi

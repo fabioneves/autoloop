@@ -46,17 +46,313 @@
 import { spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import {
+  chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
+  openSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
 
+const SMOKE_PROTOCOL = "authenticated-continuation-crash-v1"
+const SMOKE_BOUNDARIES = new Set([
+  "request-issued",
+  "session-created",
+  "context-injected",
+])
+const SMOKE_TOKEN_PATTERN = /^[a-f0-9]{64}$/
+const SMOKE_FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/
+const SMOKE_SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/
+const TRANSCRIPT_IDENTITY_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/
+const MAX_PLUGIN_INPUT_BYTES = 1024 * 1024
+const SMOKE_MARKER_KEYS = [
+  "boundary",
+  "continuationSessionId",
+  "createdAt",
+  "handlerSessionId",
+  "kind",
+  "leaseFingerprint",
+  "operatorTokenFingerprint",
+  "processId",
+  "version",
+]
+const SMOKE_DIRECTIVE = [
+  "## autoloop authenticated continuation smoke",
+  "",
+  "Run the requested queue invocation through the normal authenticated path.",
+  "After exactly one unit reaches its normal delivered terminal state, if fresh",
+  "queue evidence proves another eligible unit remains, finish with reason",
+  "`context-budget`, the real delivered-unit count, and the real checkout.",
+  "Pipe the complete finish result unchanged to `continuation-store.mjs --issue`.",
+  "Do not create, edit, copy, restore, or reseal relaunch or continuation files.",
+  "Stop the initiating turn after the issue command returns.",
+].join("\n")
+const SMOKE_CRASH_CODE = "AUTOLOOP_SMOKE_HANDLER_CRASH"
+const REVIEWER_TOOLS = ["glob", "grep", "list", "read"]
+const REVIEWER_FRONTMATTER = [
+  "---",
+  "description: Read-only independent reviewer for Autoloop plan and code review rounds.",
+  "mode: all",
+  "permission:",
+  '  "*": deny',
+  "  read: allow",
+  "  glob: allow",
+  "  grep: allow",
+  "  list: allow",
+  "---",
+].join("\n")
+
+const isSmokeFingerprint = (value) =>
+  typeof value === "string" && SMOKE_FINGERPRINT_PATTERN.test(value)
+
+const isSmokeSession = (value) =>
+  typeof value === "string" && SMOKE_SESSION_PATTERN.test(value)
+
+function boundedRegularText(path) {
+  const descriptor = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  )
+  try {
+    const stats = fstatSync(descriptor)
+    if (!stats.isFile() || stats.size > MAX_PLUGIN_INPUT_BYTES) {
+      throw new Error("plugin input is not a bounded regular file")
+    }
+    return readFileSync(descriptor, "utf8")
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
+const isCanonicalTimestamp = (value) => {
+  if (typeof value !== "string") return false
+  try {
+    return new Date(value).toISOString() === value
+  } catch {
+    return false
+  }
+}
+
+function smokeCrashConfig(env) {
+  const protocol = env.AUTOLOOP_SMOKE_CONTINUATION_PROTOCOL
+  const token = env.AUTOLOOP_SMOKE_OPERATOR_TOKEN
+  if (protocol === undefined && token === undefined) {
+    return { configured: false, status: "inert" }
+  }
+  if (
+    protocol !== SMOKE_PROTOCOL
+    || typeof token !== "string"
+    || !SMOKE_TOKEN_PATTERN.test(token)
+    || new Set(token).size < 8
+  ) {
+    return {
+      configured: true,
+      status: "unavailable",
+      reason:
+        "smoke continuation protocol requires its exact version and a varied 256-bit lowercase-hex operator token",
+    }
+  }
+  return {
+    configured: true,
+    status: "available",
+    tokenFingerprint: createHash("sha256").update(token).digest("hex"),
+  }
+}
+
+function validSmokeMarker(marker, binding) {
+  if (
+    marker === null
+    || typeof marker !== "object"
+    || Array.isArray(marker)
+    || Object.keys(marker).sort().join("\0") !== SMOKE_MARKER_KEYS.join("\0")
+  ) {
+    return false
+  }
+  return marker.kind === "autoloop-opencode-smoke-crash"
+    && marker.version === 1
+    && SMOKE_BOUNDARIES.has(marker.boundary)
+    && isSmokeFingerprint(marker.leaseFingerprint)
+    && (
+      marker.continuationSessionId === null
+      || isSmokeSession(marker.continuationSessionId)
+    )
+    && isSmokeSession(marker.handlerSessionId)
+    && Number.isSafeInteger(marker.processId)
+    && marker.processId > 0
+    && isSmokeFingerprint(marker.operatorTokenFingerprint)
+    && isCanonicalTimestamp(marker.createdAt)
+    && (
+      marker.boundary === "request-issued"
+        ? marker.continuationSessionId === null
+        : isSmokeSession(marker.continuationSessionId)
+    )
+    && marker.boundary === binding.boundary
+    && marker.leaseFingerprint === binding.leaseFingerprint
+    && marker.continuationSessionId === binding.continuationSessionId
+    && marker.processId === binding.processId
+    && marker.operatorTokenFingerprint === binding.operatorTokenFingerprint
+}
+
+function armSmokeCrash(
+  config,
+  boundary,
+  {
+    markerDirectory,
+    leaseFingerprint,
+    continuationSessionId,
+    handlerSessionId,
+    processId = process.pid,
+    createdAt = new Date().toISOString(),
+  },
+) {
+  if (config?.status !== "available") {
+    return { status: "inert" }
+  }
+  if (
+    !isSmokeFingerprint(config.tokenFingerprint)
+    || typeof markerDirectory !== "string"
+    || markerDirectory.length === 0
+    || !isAbsolute(markerDirectory)
+    || !SMOKE_BOUNDARIES.has(boundary)
+    || !isSmokeFingerprint(leaseFingerprint)
+    || (
+      boundary === "request-issued"
+        ? continuationSessionId !== null
+        : !isSmokeSession(continuationSessionId)
+    )
+    || !isSmokeSession(handlerSessionId)
+    || !Number.isSafeInteger(processId)
+    || processId <= 0
+    || !isCanonicalTimestamp(createdAt)
+  ) {
+    throw new Error("smoke crash attribution is invalid")
+  }
+
+  const directory = join(markerDirectory, "smoke-crashes")
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const directoryStat = lstatSync(directory)
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+    throw new Error("smoke crash marker path must be a real directory")
+  }
+  chmodSync(directory, 0o700)
+
+  const path = join(directory, `${leaseFingerprint}-${boundary}.json`)
+  const binding = {
+    boundary,
+    leaseFingerprint,
+    continuationSessionId,
+    processId,
+    operatorTokenFingerprint: config.tokenFingerprint,
+  }
+  const readExisting = () => {
+    const markerStat = lstatSync(path)
+    if (!markerStat.isFile() || markerStat.isSymbolicLink()) {
+      throw new Error("smoke crash marker conflicts with this operator or continuation")
+    }
+    let marker
+    try {
+      marker = JSON.parse(boundedRegularText(path))
+    } catch {
+      throw new Error("smoke crash marker conflicts with this operator or continuation")
+    }
+    if (!validSmokeMarker(marker, binding)) {
+      throw new Error("smoke crash marker conflicts with this operator or continuation")
+    }
+    return { status: "consumed", path }
+  }
+  if (existsSync(path)) return readExisting()
+
+  const marker = {
+    kind: "autoloop-opencode-smoke-crash",
+    version: 1,
+    boundary,
+    leaseFingerprint,
+    continuationSessionId,
+    handlerSessionId,
+    processId,
+    operatorTokenFingerprint: config.tokenFingerprint,
+    createdAt,
+  }
+  try {
+    writeFileSync(path, `${JSON.stringify(marker)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    })
+  } catch (error) {
+    if (error?.code === "EEXIST") return readExisting()
+    throw error
+  }
+  return { status: "armed", path }
+}
+
+function consistentChildAgent(messages) {
+  if (!Array.isArray(messages)) return null
+  const agents = messages
+    .filter((message) => message?.info?.role === "user")
+    .map((message) => message.info.agent)
+  const agent = agents[0]
+  if (
+    typeof agent !== "string"
+    || !TRANSCRIPT_IDENTITY_PATTERN.test(agent)
+    || agents.some((candidate) => candidate !== agent)
+  ) {
+    return null
+  }
+  return agent
+}
+
+function consistentModelIdentity(messages) {
+  if (!Array.isArray(messages)) return null
+  const models = messages
+    .filter((message) => message?.info?.role === "assistant")
+    .map((message) => ({
+      providerID: message.info.providerID,
+      modelID: message.info.modelID,
+    }))
+  const model = models[0]
+  if (
+    model === undefined
+    || typeof model.providerID !== "string"
+    || typeof model.modelID !== "string"
+    || models.some((candidate) =>
+      candidate.providerID !== model.providerID
+      || candidate.modelID !== model.modelID)
+  ) {
+    return null
+  }
+  const identity = `${model.providerID}/${model.modelID}`
+  return TRANSCRIPT_IDENTITY_PATTERN.test(identity) ? identity : null
+}
+
+function trustedReviewerMetadata(root, agent) {
+  if (agent !== "autoloop-reviewer") return null
+  const path = join(root, ".opencode", "agent", "autoloop-reviewer.md")
+  try {
+    const content = boundedRegularText(path)
+    if (!content.startsWith(`${REVIEWER_FRONTMATTER}\n`)) return null
+    return { tools: [...REVIEWER_TOOLS] }
+  } catch {
+    return null
+  }
+}
+
+const configuredSmokeCrash = smokeCrashConfig(process.env)
+delete process.env.AUTOLOOP_SMOKE_CONTINUATION_PROTOCOL
+delete process.env.AUTOLOOP_SMOKE_OPERATOR_TOKEN
+
 export const Autoloop = async ({ client, directory, worktree }) => {
   const root = worktree || directory
   const tool = (name) => join(root, "tools/agentic", name)
   const isEngineChild = process.env.AUTOLOOP_ENGINE_CHILD === "1"
+  const smokeCrash = configuredSmokeCrash
   const relaunchOwnerNonce = randomUUID()
   const textFingerprint = (value) =>
     createHash("sha256").update(value).digest("hex")
@@ -103,9 +399,14 @@ export const Autoloop = async ({ client, directory, worktree }) => {
   // tool.execute.after receives only {title, output, metadata} — the command must be
   // correlated from the before hook by callID.
   const pendingCommands = new Map()
+  const pendingIntentCommands = new Set()
   const rememberCommand = (callID, command) => {
     if (pendingCommands.size > 100) pendingCommands.clear() // dropped afters must not leak
     if (callID) pendingCommands.set(callID, command)
+  }
+  const rememberIntentCommand = (sessionID) => {
+    if (pendingIntentCommands.size > 100) pendingIntentCommands.clear()
+    pendingIntentCommands.add(sessionID)
   }
 
   // Context injection (noReply: the message is context for the next turn, not a new turn).
@@ -124,6 +425,93 @@ export const Autoloop = async ({ client, directory, worktree }) => {
 
   const log = (level, message) =>
     client.app.log({ body: { service: "autoloop", level, message } }).catch(() => {})
+
+  let smokeProtocolStatus = smokeCrash.status
+  let smokeStatusLogged = false
+  const smokeStatusMessage = (status, details = {}) => JSON.stringify({
+    kind: "autoloop-opencode-continuation-smoke",
+    version: 1,
+    status,
+    processId: process.pid,
+    ...details,
+  })
+  const smokeUnavailable = async (reason) => {
+    smokeProtocolStatus = "unavailable"
+    if (smokeStatusLogged) return
+    smokeStatusLogged = true
+    await log("warn", smokeStatusMessage("unavailable", { reason }))
+  }
+  const armSmokeProtocol = async (sessionID) => {
+    if (smokeProtocolStatus === "inert" || smokeProtocolStatus === "armed") {
+      return
+    }
+    if (smokeProtocolStatus === "unavailable") {
+      await smokeUnavailable(smokeCrash.reason)
+      return
+    }
+    const markerDirectory = autoloopGitDir()
+    if (!markerDirectory) {
+      await smokeUnavailable("git-state-path-unavailable")
+      return
+    }
+    if (existsSync(join(markerDirectory, "relaunch-request"))) {
+      await smokeUnavailable("preexisting-relaunch-request")
+      return
+    }
+    if (!await inject(sessionID, SMOKE_DIRECTIVE)) {
+      await smokeUnavailable("directive-injection-failed")
+      return
+    }
+    smokeProtocolStatus = "armed"
+    smokeStatusLogged = true
+    await log("warn", smokeStatusMessage("armed", {
+      sessionId: sessionID,
+      operatorTokenFingerprint: smokeCrash.tokenFingerprint,
+    }))
+  }
+  const crashForSmoke = async (boundary, facts) => {
+    if (smokeProtocolStatus !== "armed") return
+    const result = armSmokeCrash(smokeCrash, boundary, facts)
+    if (result.status !== "armed") return
+    await log(
+      "warn",
+      smokeStatusMessage("handler-crashed", {
+        boundary,
+        leaseFingerprint: facts.leaseFingerprint,
+        handlerSessionId: facts.handlerSessionId,
+        continuationSessionId: facts.continuationSessionId,
+        marker: result.path,
+      }),
+    )
+    const error = new Error(
+      `autoloop smoke simulated continuation handler crash at ${boundary}`,
+    )
+    error.code = SMOKE_CRASH_CODE
+    throw error
+  }
+  const pendingLeaseFingerprint = (markerDirectory) => {
+    const path = join(markerDirectory, "relaunch-request")
+    try {
+      const stats = lstatSync(path)
+      if (!stats.isFile() || stats.isSymbolicLink()) return null
+      const pointer = JSON.parse(boundedRegularText(path))
+      if (
+        pointer === null
+        || typeof pointer !== "object"
+        || Array.isArray(pointer)
+        || Object.keys(pointer).sort().join("\0")
+          !== ["leaseFingerprint", "pointerNonce", "version"].join("\0")
+        || pointer.version !== 1
+        || !isSmokeFingerprint(pointer.leaseFingerprint)
+        || !isSmokeSession(pointer.pointerNonce)
+      ) {
+        return null
+      }
+      return pointer.leaseFingerprint
+    } catch {
+      return null
+    }
+  }
 
   // Clean tree = no uncommitted changes. The dev skill parks on the base branch with a clean tree;
   // a fresh session must never be spawned onto an in-progress unit.
@@ -189,8 +577,8 @@ export const Autoloop = async ({ client, directory, worktree }) => {
   }
 
   // The vendored store keeps an append-only issued → claimed → session-created → opened →
-  // prompted CAS. One-shot effect intents precede provider mutations; recovery reconciles the
-  // lease-named session and exact messages without repeating an unresolved mutation.
+  // prompted CAS. One-shot effect intents precede provider mutations; prompt preparation lets the
+  // exact target open while promptAsync is in flight, and recovery reconciles exact messages.
   let relaunchInFlight = false
 
   const maybeRelaunchOwned = async (ownerSessionID) => {
@@ -203,6 +591,15 @@ export const Autoloop = async ({ client, directory, worktree }) => {
     const store = tool("continuation-store.mjs")
     if (!existsSync(store)) {
       return log("warn", "relaunch-request refused — continuation store missing")
+    }
+    const pendingLease = pendingLeaseFingerprint(markerDir)
+    if (pendingLease) {
+      await crashForSmoke("request-issued", {
+        markerDirectory: markerDir,
+        leaseFingerprint: pendingLease,
+        continuationSessionId: null,
+        handlerSessionId: ownerSessionID,
+      })
     }
     let claim
     try {
@@ -301,11 +698,18 @@ export const Autoloop = async ({ client, directory, worktree }) => {
           expectedStatus: "claimed",
           nextStatus: "session-created",
           activeHost: "opencode",
-          integration: "opencode-plugin",
+          integration: "opencode.user-prompt-hook",
           sessionId: newID,
         })
         claim = { ...claim, ...created }
       }
+
+      await crashForSmoke("session-created", {
+        markerDirectory: markerDir,
+        leaseFingerprint,
+        continuationSessionId: newID,
+        handlerSessionId: ownerSessionID,
+      })
 
       const opened = storeResult(store, ["--transition"], {
         leaseFingerprint,
@@ -317,10 +721,7 @@ export const Autoloop = async ({ client, directory, worktree }) => {
       const continuationContext = {
         continuation: opened.continuation,
         hostAttestationRequest: {
-          integration: opened.session?.integration,
           sessionId: opened.session?.sessionId,
-          observedSurface: { tool: "task" },
-          expectedHost: "opencode",
         },
       }
       const context =
@@ -350,11 +751,24 @@ export const Autoloop = async ({ client, directory, worktree }) => {
         }
       }
 
+      await crashForSmoke("context-injected", {
+        markerDirectory: markerDir,
+        leaseFingerprint,
+        continuationSessionId: newID,
+        handlerSessionId: ownerSessionID,
+      })
+
       const prompt = opened.request?.prompt
       if (typeof prompt !== "string") {
         throw new Error("opened continuation has no canonical prompt")
       }
       const promptIntent = issueEffect("prompt", "opened", prompt)
+      storeResult(store, ["--prepare-prompt"], {
+        leaseFingerprint,
+        claimFingerprint,
+        ownerFingerprint,
+        continuation: opened.continuation,
+      })
       const hasPrompt = await boundedProviderCall(
         messageContains(newID, prompt),
       )
@@ -386,6 +800,7 @@ export const Autoloop = async ({ client, directory, worktree }) => {
       })
       return log("info", `relaunched drain as ${newID}`)
     } catch (e) {
+      if (e?.code === SMOKE_CRASH_CODE) throw e
       return log(
         "warn",
         `relaunch paused at a durable recovery point: ${e.message}`,
@@ -404,12 +819,86 @@ export const Autoloop = async ({ client, directory, worktree }) => {
   }
 
   return {
+    "command.execute.before": async (input) => {
+      if (isEngineChild) return
+      const capture = tool("intent-contract.mjs")
+      if (!existsSync(capture)) {
+        throw new Error(
+          `autoloop: intent capture ${capture} not found — refusing unattested commands until setup is rerun`,
+        )
+      }
+      const result = runNode(capture, {
+        hook_event_name: "opencode.command",
+        session_id: input.sessionID,
+        cwd: root,
+        command: input.command,
+        arguments: input.arguments,
+      }, ["--capture-hook-json"])
+      if (result.error || result.status !== 0) {
+        throw new Error(
+          result.stderr
+          || result.error?.message
+          || "autoloop host command intent capture failed",
+        )
+      }
+      let outcome
+      try {
+        outcome = JSON.parse(result.stdout)
+      } catch {
+        throw new Error("autoloop host command intent capture returned invalid evidence")
+      }
+      if (
+        outcome?.captured === true
+        || outcome?.reason === "already-sealed"
+        || outcome?.reason === "non-runtime-autoloop-command"
+      ) {
+        rememberIntentCommand(input.sessionID)
+      }
+    },
+
+    "chat.message": async (input, output) => {
+      if (isEngineChild) return
+      const sessionID = input.sessionID
+      const messageID = output.message?.id ?? output.message?.messageID
+      const prompt = (output.parts ?? [])
+        .filter((part) => part?.type === "text" && typeof part.text === "string")
+        .map((part) => part.text)
+        .join("\n")
+      if (!prompt) return
+      if (!sessionID || !messageID) {
+        throw new Error(
+          "autoloop: opencode prompt attribution is unavailable — refusing an unattested prompt",
+        )
+      }
+      if (pendingIntentCommands.delete(sessionID)) return
+      const capture = tool("intent-contract.mjs")
+      if (!existsSync(capture)) {
+        throw new Error(
+          `autoloop: intent capture ${capture} not found — refusing unattested prompts until setup is rerun`,
+        )
+      }
+      const result = runNode(capture, {
+        hook_event_name: "opencode.user-prompt",
+        session_id: sessionID,
+        turn_id: messageID,
+        cwd: root,
+        prompt,
+      }, ["--capture-hook"])
+      if (result.error || result.status !== 0) {
+        throw new Error(
+          result.stderr
+          || result.error?.message
+          || "autoloop host intent capture failed",
+        )
+      }
+    },
+
     "tool.execute.before": async (input, output) => {
       if (input.tool !== "bash") return
       const guard = tool("command-guard.mjs")
       if (!existsSync(guard)) {
         throw new Error(
-          `autoloop: command guard ${guard} not found — refusing commands until opencode runs from the repo root (re-run autoloop setup?)`,
+          `autoloop: command guard ${guard} not found — failing closed; refusing commands until opencode runs from the repo root (re-run autoloop setup?)`,
         )
       }
       const res = runNode(
@@ -449,6 +938,7 @@ export const Autoloop = async ({ client, directory, worktree }) => {
         const info = event.properties?.info ?? event.properties ?? {}
         const sessionID = info.id ?? event.properties?.sessionID
         if (!sessionID || info.parentID) return // children skip the orchestrator preflight
+        await armSmokeProtocol(sessionID)
         const preflight = tool("session-preflight.sh")
         if (!existsSync(preflight)) {
           await inject(sessionID, `autoloop: ${preflight} not found — this repo is not set up (autoloop setup) or opencode was launched outside the repo root`)
@@ -478,12 +968,17 @@ export const Autoloop = async ({ client, directory, worktree }) => {
           if (!existsSync(capture)) return
           const got = await client.session.messages({ path: { id: sessionID } })
           const messages = got?.data ?? got ?? []
+          const agent = consistentChildAgent(messages)
+          const modelIdentity = consistentModelIdentity(messages)
+          const metadata = trustedReviewerMetadata(root, agent)
           runNode(capture, {
             hook_event_name: "opencode.child.idle",
             sessionID,
             parentID: session.parentID,
-            agent: session.agent ?? null,
+            agent,
             title: session.title ?? null,
+            ...(modelIdentity ? { modelIdentity } : {}),
+            ...(metadata ? { metadata } : {}),
             messages,
           })
         } catch {

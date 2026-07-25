@@ -33,11 +33,15 @@ route:
 /autoloop:setup doctor with opencode
 ```
 
-A bare invocation means the active native route. A suffix is run-local intent. STATE, environment
+Codex uses `$autoloop:setup doctor`; opencode invokes the `setup` skill with `doctor`. Both accept
+the same trailing selector grammar.
+
+A bare invocation means the active native route. A suffix is a run-local captured preference.
+Same-UID prompt hooks cannot prove who supplied it. STATE, environment
 variables, installed artifacts, old run records, and global defaults have zero routing authority.
 Only these five routes exist:
 
-| Active host | Requested engine | Route |
+| Active host | Captured engine preference | Route |
 |---|---|---|
 | Claude | Claude | `claude.native` |
 | Codex | Codex | `codex.native` |
@@ -52,21 +56,15 @@ Every other host/engine pair fails before mutation with `UNSUPPORTED_ROUTE`.
 1. Resolve this skill's real path and its sibling `templates/` directory. Do not depend on
    `CLAUDE_PLUGIN_ROOT`, `PLUGIN_ROOT`, or another compatibility variable.
 2. Print the banner.
-3. Determine the active host only from the live integration and effective tool surface. Produce
-   exact host evidence for `RuntimeContract.open()`:
-
-   ```json
-   {
-     "kind": "autoloop-host-evidence",
-     "version": 1,
-     "source": "live-integration",
-     "observedHosts": ["claude"],
-     "fingerprint": "<sha256 of the observed adapter/tool-surface facts>"
-   }
-   ```
-
-   Exactly one of `claude`, `codex`, or `opencode` must be observed. Ambiguous or synthetic
-   evidence is a failure.
+3. In doctor mode, require the Claude/Codex `UserPromptSubmit` or opencode
+   `opencode.user-prompt` hook to have passed the command-shaped event to
+   `intent-contract.mjs --capture-hook` before this skill began. Call the sibling
+   `run-scope.mjs --attest-host-json` with exactly `{sessionId}`. Its broker consumes the one-use
+   process/repository/session-bound transport and reads validated STATE itself. Runtime records
+   immutable `intentProvenance: "best-effort-unverified"`; the hook is not user attribution.
+   Never construct host evidence or pass prompt/config prose. Exactly one of `claude`, `codex`, or
+   `opencode` must be observed. Ambiguous, missing, or replayed transport is a failure. Write modes
+   do not attest or open a run.
 4. Check version currency before deriving drift. In a versioned plugin cache, list sibling
    directory names and pipe them through:
 
@@ -80,9 +78,41 @@ Every other host/engine pair fails before mutation with `UNSUPPORTED_ROUTE`.
 5. Fetch the configured base and audit `origin/<base>`, not the parked checkout. Until STATE is
    parsed, use the repository default only to find an existing STATE; then switch the audit ref to
    `cfg.baseBranch`. A unit branch's older files are a NOTE, never drift evidence.
-6. Parse the invocation with `RuntimeContract.open()`. Doctor uses flow `doctor`. Do not maintain a
-   prose route table or substitute another engine on failure.
+6. In doctor mode only, call `run-scope.mjs --open-json` with exactly `{hostEvidence}`. The broker,
+   not Setup, supplies Runtime with the consumed captured routing preference and ProjectConfig it
+   read and validated from STATE. `/autoloop:setup doctor`, `$autoloop:setup doctor`, and
+   opencode's plain `doctor` normalize to flow `doctor` without changing the selector.
+   `merge.policy` other than `manual` fails before probing. Caller `invocation` or `config` fields
+   are invalid. Fresh install, migration, and reconfigure do not
+   open run intent or select a route: the scaffold is universal. Reject an engine suffix on those
+   write modes and use a later explicit doctor invocation for live route verification. Do not
+   maintain a prose route table or substitute another engine on failure.
 7. Run the one-call audit below. Follow up only on failed or incomplete sections.
+
+Before or during scaffold reconciliation, every Runtime/adapter call uses the loaded skill's
+sibling `<templates>/tools/run-scope.mjs`; after reconciliation, verify the installed
+`tools/agentic/run-scope.mjs` produces the same results. Use structured JSON operation flags:
+host attestation uses exact `{sessionId}` with `--attest-host-json`, opening uses exact
+`{hostEvidence}` with `--open-json`, and Linux-only live capability probing uses exact
+`{hostEvidence,run,routes:[selectedRoute, optionalNativeFallback],cwd:absoluteRepositoryRoot}` with
+`--probe-json`. On non-Linux hosts every route probe fails with
+`UNVERIFIABLE_ISOLATION` before issuing an attempt challenge or creating probe scratch state.
+Doctor plans use `--plan-json` then `--compile-json` and
+broker-only `--execute-json` for every route. Setup never fabricates contract output in prose or
+trusts an older installed contract to validate its own migration.
+
+Runtime signing authority lives only in the process-bound broker's memory. The broker exposes
+typed, sequence-gated operations rather than a generic signer. A new invocation attestation
+consumes the one-use prompt record; one exact opencode continuation target instead reuses the
+unchanged broker and receives target evidence only from its prompt-prepared, session-bound durable
+ledger. Exact target Runtime open and the prompted transition join in either order before the
+completed transfer revokes source authority; an early target stop defers teardown until that join.
+The target's terminal stop
+removes the final registry/socket and zeroes keys. Every adapter and capability probe requires the same executed
+`host.process-authority-isolation` smoke: Linux needs usable `/usr/bin/bwrap`, private PID/mount/
+runtime/temp/device/home views, closed ambient reads, no remote Git/GitHub/SSH credentials or host
+IPC, and role-specific checkout/scratch access. v0.40 reports all live adapters unavailable on
+macOS. A present executable without the complete verified boundary is a capability failure.
 
 ## Project configuration
 
@@ -101,11 +131,10 @@ Schema `0.25.0` stores repository policy, never session intent:
   "tracker": { "provider": "none" },
   "review": { "checklistPath": "docs/agentic/checklist.md" },
   "caps": {
-    "runWallClockHours": 4,
     "gateRetriesPerUnit": 2,
     "reviseRoundsPerPr": 3,
-    "codeReviewRoundsPerUnit": 3,
-    "sliceMaxLines": 500,
+    "codeReviewRoundsPerUnit": 5,
+    "sliceMaxLines": 700,
     "sliceMaxFiles": 10
   }
 }
@@ -131,6 +160,9 @@ the audited base ref.
 Use `migrateConfig024To025()` from `config-contract.mjs`; do not hand-transform JSON.
 
 - Remove `runtime.supportedHosts` and `engine.profile`.
+- Remove `caps.runWallClockHours`; v0.40 queue runs have no fixed whole-run clock ceiling.
+- Reset every legacy `ratified` or `auto` merge policy to `manual`. v0.40 does not re-enable a
+  non-manual policy because its prompt transport is not authenticated provenance.
 - Never convert the legacy profile into current invocation intent.
 - Preserve valid, effective, non-null tuning only through the adapter-scoped map implemented by
   the contract.
@@ -153,32 +185,22 @@ Ask only:
 
 1. Mission and non-negotiable invariants.
 2. Configured base branch.
-3. Gate, optional quick gate, and optional setup command.
+3. Gate, optional quick gate, optional setup command, and the complete required CI CheckRun-name
+   set. An empty set must be an explicit repository-policy choice, never an inference from an
+   empty API response.
 4. Tracker: none or Jira; Jira requires epic key and cloud ID.
 5. Review checklist path/content.
 6. Numeric caps.
 7. Optional tuning for the three adapter-option entries. State clearly that tuning cannot change
    the bare native route.
 8. Extra human-authorization/protected paths.
-9. Hooks: universal host hooks are recommended.
+9. Universal host prompt hooks are mandatory best-effort transport for every enabled Claude,
+   Codex, or OpenCode runtime entrypoint. They are not attributable intent.
 10. Optional agent-skills dependency.
-11. Merge policy. Default and recommendation are `manual`.
+11. Merge policy. v0.40 requires `manual`; do not offer `ratified` or `auto` as an enabled choice.
 
-Non-manual merge is unavailable until all of the following are explicitly configured and doctor
-passes them:
-
-- a dedicated least-privilege loop identity distinct from maintainer identities;
-- trusted GitHub App IDs for gate/review/ownership/policy CheckRuns;
-- a separately trusted producer for head-bound human authorization;
-- complete required CI CheckRun names and App IDs;
-- required approving review, stale-review dismissal, latest-push approval, resolved
-  conversations, no force pushes/deletions, administrator enforcement, and no loop-actor bypass;
-- either strict up-to-date direct merge, or a supported merge queue with `merge_group` CI and
-  asynchronous recovery.
-
-If any fact is missing, keep `merge.policy: manual`. Never infer that an empty required-check list
-means CI is safe. The current public user-owned Autoloop repository uses direct strict protection;
-merge queue support must be capability-detected per target repository.
+Never infer that an empty required-check list means CI is safe. Merge, merge queue, tag
+publication, and release publication require an independent maintainer action outside the run.
 
 Global defaults contain only non-project preferences:
 
@@ -187,11 +209,10 @@ Global defaults contain only non-project preferences:
   "merge": { "policy": "manual" },
   "tracker": { "provider": "none" },
   "caps": {
-    "runWallClockHours": 4,
     "gateRetriesPerUnit": 2,
     "reviseRoundsPerPr": 3,
-    "codeReviewRoundsPerUnit": 3,
-    "sliceMaxLines": 500,
+    "codeReviewRoundsPerUnit": 5,
+    "sliceMaxLines": 700,
     "sliceMaxFiles": 10
   },
   "hooks": true,
@@ -208,48 +229,84 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 
 | Repository path | Template | Contract |
 |---|---|---|
+| `.autoloop/ci-policy.json` | `ci-policy.template.json` | Canonical schema-v1 complete required-CheckRun policy |
+| `.autoloop/measurement-budget-policy.json` | `measurement-budget-policy.template.json` | Canonical version-1 retained-evidence budget gate |
 | `tools/agentic/adapter-contract.mjs` | `tools/adapter-contract.mjs` | Static reviewer artifact validation |
-| `tools/agentic/attestation-contract.mjs` | `tools/attestation-contract.mjs` | Exact-head ownership/policy/authorization records |
+| `tools/agentic/attestation-contract.mjs` | `tools/attestation-contract.mjs` | Exact-head gate/ownership/policy/authorization records |
 | `tools/agentic/claim-contract.mjs` | `tools/claim-contract.mjs` | Canonical branch/body ownership parser |
 | `tools/agentic/command-guard.mjs` | `tools/command-guard.mjs` | Structured command/ref guard |
 | `tools/agentic/config-contract.mjs` | `tools/config-contract.mjs` | ProjectConfig and migration |
+| `tools/agentic/continuation-store.mjs` | `tools/continuation-store.mjs` | Append-only, session-bound opencode relaunch state |
 | `tools/agentic/contract-lint.mjs` | `tools/contract-lint.mjs` | Forward-artifact contract drift |
 | `tools/agentic/delivery-contract.mjs` | `tools/delivery-contract.mjs` | Exact-head CI/delivery transition |
 | `tools/agentic/escalate-paths.mjs` | `tools/escalate-paths.mjs` | Configured-base lane-proof CLI |
+| `tools/agentic/intent-contract.mjs` | `tools/intent-contract.mjs` | Best-effort, one-use process-bound prompt transport |
 | `tools/agentic/label-swap-reminder.mjs` | same name | Label transition reminder |
 | `tools/agentic/lane-contract.mjs` | `tools/lane-contract.mjs` | Lane proof and shared path policy |
 | `tools/agentic/lifecycle-contract.mjs` | `tools/lifecycle-contract.mjs` | Durable mutation recovery |
+| `tools/agentic/lifecycle-driver.mjs` | `tools/lifecycle-driver.mjs` | Stable-read lifecycle effect executor and revision epochs |
 | `tools/agentic/loop-scope.mjs` | `tools/loop-scope.mjs` | Loop PR scope |
 | `tools/agentic/measurement-contract.mjs` | `tools/measurement-contract.mjs` | Versioned efficiency records |
+| `tools/agentic/publish-verdict.mjs` | `tools/publish-verdict.mjs` | Universal exact-head terminal finalizer and CheckRun publisher |
 | `tools/agentic/release-verify.mjs` | `tools/release-verify.mjs` | Portable release/version helpers |
 | `tools/agentic/review-contract.mjs` | `tools/review-contract.mjs` | Convergence/human-block transition |
+| `tools/agentic/route-adapter-contract.mjs` | `tools/route-adapter-contract.mjs` | Typed route attempt compilation |
 | `tools/agentic/run-scope.mjs` | `tools/run-scope.mjs` | Runtime open/finish compatibility wrapper |
 | `tools/agentic/runtime-contract.mjs` | `tools/runtime-contract.mjs` | Route/stage/capability/relaunch policy |
 | `tools/agentic/scan.mjs` | `tools/scan.mjs` | Complete typed startup snapshot |
 | `tools/agentic/snapshot-contract.mjs` | `tools/snapshot-contract.mjs` | Snapshot completeness and invalidation |
 | `tools/agentic/session-preflight.sh` | same name | Session injection |
 | `tools/agentic/stats.mjs` | `tools/stats.mjs` | Presentation statistics only |
-| `tools/agentic/subagent-transcript.mjs` | same name | Attributable transcript capture |
+| `tools/agentic/subagent-transcript.mjs` | same name | Non-routing host-subagent transcript telemetry |
 | `tools/agentic/verify.mjs` | `tools/verify.mjs` | Canonical installed-contract verification |
 | `tools/agentic/writeback-check.mjs` | same name | Canonical writeback checks |
 
-`publish-verdict.mjs`, `merge-authorization-contract.mjs`, and a filled
-`auto-merge.reference.mjs` are required only for a non-manual installation. Never invoke the
-reference file. Build `tools/agentic/auto-merge.mjs` by preserving its repository-owned config
-zone and reconciling the template-owned engine zone. Fill repository/base, required CI checks and
-App IDs, loop login, trusted humans, automation/authorization App IDs, reversible/protected paths,
-mode, and base-freshness strategy. Its self-test must pass. Any policy-content change ships through
-a human-reviewed PR so the human merge re-ratifies it.
+`publish-verdict.mjs` is universal, including manual mode: it owns the sole exact-head terminal
+transition from draft/premerge evidence to ready and delivered. Raw `gh pr ready` and raw
+`loop-delivered` label mutations are forbidden. The non-manual merge authorization/reference tools
+remain shipped, fail-closed test artifacts but v0.40 Setup never materializes or invokes
+`tools/agentic/auto-merge.mjs`. The universal finalizer runs or binds manual gate/review evidence,
+creates the head-bound premerge record, performs the ready/label effects, and reads every
+postcondition back.
 
-Always reconcile these host artifacts:
+Write `.autoloop/ci-policy.json` as the exact canonical JSON serialization produced by
+`canonicalCiPolicy()` with the explicitly confirmed complete CheckRun-name set. It is universal,
+including manual installations. Doctor rejects a missing, noncanonical, or symlinked policy.
+The shared lane policy treats this file as both human-authorized and merge-protected, so no loop PR
+can weaken the CI set it is about to use for delivery.
 
-- `.claude/settings.json` from `settings-hooks.template.json`
-- `.codex/hooks.json` from `codex-hooks.template.json`, unless the same project-layer hooks already
-  live in `.codex/config.toml`; never duplicate both representations
+For a fresh install, copy `measurement-budget-policy.template.json` byte-for-byte to
+`.autoloop/measurement-budget-policy.json`. Its `pending-evidence` state is intentional:
+verification reports `passed: false` and never invents a baseline, sample, limit, or successful
+budget gate. Preserve an existing valid active policy during reconfiguration. Activate or change
+entries only in a human-reviewed change after genuine authenticated raw-event safe-system and
+post-optimization cohorts exist. Before activation, export exactly the policy record IDs with
+`measurement-contract.mjs --export-evidence-bundle`, commit the canonical output as
+`.autoloop/measurement-evidence-v1.json`, and bind its exact SHA-256 in the active policy. This is
+the portable fresh-clone CI evidence path; never copy the private local store authority key. The
+shared lane policy treats both files as human-authorized and merge-protected. The policy must
+remain the exact canonical serialization accepted by
+`measurement-contract.mjs --check-budget-policy`; missing, malformed, symlinked, digest-mismatched,
+provisional, or regressed active policy evidence fails closed.
+
+Always reconcile the route-enabling host artifacts:
+
 - `.codex/agents/autoloop-reviewer.toml` from `codex-reviewer-agent.template.toml`
 - `.opencode/agent/autoloop-reviewer.md` from `opencode-reviewer-agent.template.md`
-- `.opencode/plugins/autoloop.js` from `opencode-plugin.template.js`
 - `opencode.json`, merged per key from `opencode-config.template.json`
+
+Always reconcile `.claude/settings.json` from
+`settings-hooks.template.json`, `.codex/hooks.json` from `codex-hooks.template.json` unless the
+same project-layer hooks live in `.codex/config.toml`, and `.opencode/plugins/autoloop.js` from
+`opencode-plugin.template.js`. Never duplicate Codex hook representations. Doctor fails if any
+enabled host entrypoint is absent, inactive, or cannot retain one-use best-effort transport. It validates
+every installed hook/plugin artifact; disabling one disables that host's Autoloop runtime and is
+a doctor failure when the host remains configured.
+Codex skips every new or hash-changed non-managed hook until a human trusts that exact definition.
+After reconciling Codex hooks, instruct the user to open `/hooks`, review the source and hash, and
+trust it; Setup never bypasses or manufactures that trust. A static verifier PASS proves shape and
+tool targets only. Doctor reports effective activation/trust as a separate PASS; missing inventory
+or an untrusted definition is a FAIL and is never called active.
 
 Preserve maintainer edits, show diffs, and ask before replacing edited vendored artifacts. New
 Codex agents and opencode agents/plugins require a fresh host session.
@@ -264,11 +321,12 @@ The Codex reviewer contract is:
 
 Validate it through `adapter-contract.mjs`; Setup and doctor must not reproduce it with grep.
 Healthy native-Codex review uses fresh external `codex exec --sandbox read-only`, including
-docs/small lanes. In-session `agent_type`/`fork_turns` checks apply only if the degraded fallback
-is selected or reachable. They cannot fail a healthy external-exec route.
+docs/small lanes. No in-session `agent_type`/`fork_turns` fallback is part of v0.40; doctor neither
+probes nor requires it.
 
-The opencode reviewer must pass the shared deny-stripped adapter contract. Static validity of an
-inactive artifact is a PASS for the artifact and a NOTE for effective runtime capability.
+The opencode reviewer must pass the shared closed-world adapter contract: wildcard deny first,
+followed only by in-worktree read/glob/grep/list allows. Static validity of an inactive artifact is
+a PASS for the artifact and a NOTE for effective runtime capability.
 
 ## One-call audit
 
@@ -295,7 +353,8 @@ check. STATE Lessons over 3000 bytes and ARCH over 8000 bytes are compaction NOT
 ## Selected-route doctor
 
 Doctor is read-only. Report `PASS`, `FAIL`, or `NOTE`, name the audited ref, active host, canonical
-raw selector, requested engine, route, adapter, and capability fingerprint.
+captured selector, selected engine, route, adapter, `intentProvenance`, and capability fingerprint.
+Never say the selector was requested by a verified user.
 
 Always check:
 
@@ -304,44 +363,79 @@ Always check:
 - every universal tool/artifact present, importable, syntactically valid, and self-tested;
 - shared STATE/path-policy fixtures, including `.opencode/**` and `.githooks/**`;
 - hooks parse and refer only to present vendored tools;
+- Codex hook shape/tool references separately from effective enablement and hash trust (unproven
+  activation is a NOTE, not a PASS);
 - open duplicate migration PRs;
 - no stale profile-based routing prose in forward operational artifacts;
 - static Codex and opencode reviewer contracts.
 
-Then probe only the selected route and reachable fallback according to
-`RuntimeContract.plan()`:
+Then, on Linux, pass exact broker-issued `{hostEvidence,run}`, the selected route followed by its
+independently authenticated/capable same-host native fallback, if any, and the absolute audited
+repository root to
+`--probe-json`. The broker binds authority internally and
+the route adapter executes every capability smoke; presence checks, caller observations, and
+static guesses cannot produce an available fact. Non-Linux doctor route probes fail closed with
+`UNVERIFIABLE_ISOLATION`; macOS CI verifies portable static contracts only. Plan the
+doctor stage from the returned Linux snapshot, then compile and execute it through the broker-only
+process route-adapter sequence.
+Doctor receives no writer/reviewer adapter tuning and never constructs a
+capability success, status, effect, isolation result, or attempt outcome:
 
-- Native Claude: fresh Agent-tool writer/reviewer surfaces and read-only reviewer posture.
-- Native Codex: worker surface plus authenticated Codex `0.145.0+`; external
-  `codex exec --sandbox read-only` reviewer and effective isolation. Probe typed in-session
-  fallback fields only if that degraded fallback is selected/reachable.
-- Native opencode: opencode `1.18.3+`, fresh task writer, typed reviewer with
-  edit/bash/task/webfetch/websearch absent.
+- Native Claude: authenticated Claude print mode, structured output, effective inline
+  writer/reviewer sandbox policy, subprocess credential scrub and network denial, read-only
+  writer Git metadata with broker-owned commit, plus read-only reviewer checkout.
+- Native Codex: authenticated Codex `0.145.0+`, exact workspace-write/read-only process postures,
+  structured verdict, read-only writer Git metadata with broker-owned commit, and effective
+  process/read/network isolation.
+- Native opencode: authenticated opencode `1.18.3+`, fresh `run --pure` sealed writer with exactly
+  read/edit/glob/grep/list and read-only Git metadata, typed reviewer with exactly
+  read/glob/grep/list, one terminal result, broker-owned networkless local commit after a valid
+  complete writer result, private IPC, and forbidden continuation/session/share flags. The trusted
+  engine retains provider transport for inference; no model-callable shell/network/custom/MCP
+  surface exists.
 - Claude→Codex: authenticated Codex `0.145.0+`, exact workspace-write/read-only launch flags,
-  structured verdict, and network/isolation evidence.
-- Claude→opencode: authenticated opencode `1.18.3+`, exact fresh `opencode run` transport, typed
-  reviewer, and forbidden continuation/session/share flags.
+  structured verdict, read-only writer Git metadata with broker-owned commit,
+  process-authority sandbox, and network/isolation evidence.
+- Claude→opencode: authenticated opencode `1.18.3+`, the same exact fresh sealed OpenCode
+  writer/reviewer and broker-commit postures, process-authority sandbox, and forbidden
+  continuation/session/share flags.
 
 Unavailable inactive routes are NOTEs. A selected missing executable/authentication/version,
 artifact, or isolation property is a typed capability FAIL. Never silently fall back during
 doctor.
 
-For non-manual policy, also fail unless the dedicated identity, trusted producer IDs, CheckRun
-contracts, complete ownership/lifecycle attestations, branch/ruleset controls, strict direct or
-queue strategy, and no-bypass result are all proven. A live `--dry-run` must refuse a deliberately
-incomplete fixture. Do not invoke a real merge.
+Any non-manual policy is a typed `UNVERIFIABLE_INVOCATION_PROVENANCE` failure before the route
+probe. Do not invoke a merge, merge queue, tag publication, or release publication.
+
+For every GitHub repository that can publish a release, doctor also runs:
+
+```bash
+node tools/agentic/release-verify.mjs --check-tag-policy --check-root .
+node tools/agentic/release-verify.mjs --check-immutable-releases --check-root .
+```
+
+It binds the repository to the exact checkout origin and fails unless a live active `refs/tags/v*`
+ruleset has no exclusions or bypass actors and forbids deletion and non-fast-forward updates, and
+unless the live immutable-release setting reports `enabled=true`. Add
+`--require-owner-enforcement` to the immutable-release command when organization-owner enforcement
+is required; then `enforced_by_owner=true` is mandatory too.
+
+Both checks require authenticated live GitHub API evidence. Set
+`AUTOLOOP_RELEASE_POLICY_TOKEN` to a credential with Administration repository read and enough
+ruleset access to disclose bypass actors. Missing, insufficient, or redacted authentication is a
+doctor `FAIL`, never a `NOTE`. Setup may present the exact required controls but never mutates
+repository or release protection without the user's explicit authorization.
 
 ## Write and delivery
 
 Fresh install starts from templates. Reconfigure/migration preserves repo-owned mission,
-invariants, tracker identifiers, checklist additions, lessons, auto-merge config zone, and any
-explicit extra protected paths.
+invariants, tracker identifiers, checklist additions, lessons, dormant policy-reference config,
+and any explicit extra protected paths.
 
-Create labels idempotently. All installations use lifecycle and step labels; non-manual
-installations additionally use the ratified-risk and kill-switch labels.
+Create lifecycle and step labels idempotently. Do not create non-manual policy labels.
 
-Never mutate default/release branch protection, GitHub Apps, credentials, or non-manual policy
-without explicit user authorization. Present the exact desired settings and verify after changes.
+Never mutate default/release branch protection, GitHub Apps, or credentials without explicit user
+authorization. Present the exact desired settings and verify after changes.
 
 Run:
 
@@ -354,9 +448,8 @@ Run:
 7. release verification;
 8. static stale-route lint.
 
-Show the complete diff. A fresh install or migration is delivered through a PR by default. A
-non-manual configuration always requires a human-reviewed PR. Never auto-merge Setup's own policy
-change.
+Show the complete diff. A fresh install or migration is delivered through a PR by default. Never
+auto-merge Setup's own change.
 
 End with:
 
@@ -372,7 +465,7 @@ Doctor ends with:
 
 ## Hard rules
 
-- Never persist host, selector, requested engine, resolved route, capabilities, outages, or
+- Never persist host, selector, selected engine, resolved route, capabilities, outages, or
   fallback state in ProjectConfig.
 - Never infer active host from config, environment variables, files, or history.
 - Never interpret legacy profile as current run intent.
@@ -380,4 +473,4 @@ Doctor ends with:
 - Never report an inactive route as effectively verified.
 - Never let a missing optional fallback capability fail a healthy selected route.
 - Never use incomplete evidence to prove absence.
-- Never enable or invoke non-manual merge before every architecture and authorization bar passes.
+- Never enable or invoke non-manual merge in v0.40.

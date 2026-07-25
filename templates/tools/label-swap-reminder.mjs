@@ -89,7 +89,7 @@ export function reminderFor(command, opts = {}) {
     : `① step line \`▶ ${n} · step ${s}/11 — ${step} (<actor>)\`; ② TaskUpdate rename \`${n} · ${s}/11 ${step} — <composed title>\` + activeForm (Claude Code task mirror; refresh with \` · <unit elapsed>\` at each ~3-min heartbeat while this step waits)`;
   const [nextLabel, nextWhen] = NEXT[key];
   const archNudge = key === '06-simplify' && opts.archMap
-    ? ` Structure changed this unit (component/dir/CI path filter/integration point)? Update docs/agentic/ARCH.md (+ its Last-verified line) on the unit branch now — it must ride this unit's review and gate.`
+    ? ` Structure changed this unit (component/dir/CI path filter/integration point)? Update the curated facts in docs/agentic/ARCH.md on the unit branch now — it must ride this unit's review and gate. Never add freshness metadata or a shared timestamp.`
     : '';
   return `autoloop: \`${label}\` swap ran for ${n}. Riders due in the SAME message as the swap `
     + `(missing one? emit it in your NEXT message — late beats never): ${entry}.${EXTRAS[key] ?? ''}${archNudge} `
@@ -125,6 +125,13 @@ function selfTest() {
   const withMap = reminderFor('gh issue edit 5 --add-label loop:06-simplify', { archMap: true });
   const withoutMap = reminderFor('gh issue edit 5 --add-label loop:06-simplify', {});
   if (!/ARCH\.md/.test(withMap)) { fail++; console.error('FAIL: archMap:true missing ARCH.md nudge'); }
+  if (
+    !/Never add freshness metadata/.test(withMap)
+    || withMap.includes(`Last${'-'}verified`)
+  ) {
+    fail++;
+    console.error('FAIL: ARCH nudge contradicts the no-freshness-metadata contract');
+  }
   if (/ARCH\.md/.test(withoutMap)) { fail++; console.error('FAIL: archMap:false leaked ARCH.md nudge'); }
   console.log(fail === 0 ? `self-test OK (${cases.length} cases)` : `self-test: ${fail} FAILED`);
   process.exit(fail === 0 ? 0 : 1);

@@ -22,8 +22,10 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
+  INTENT_PROVENANCE,
   RELAUNCH_PROMPT,
   finish,
+  fixtureQueueEvidence,
   open,
   transitionContinuationLease,
 } from './runtime-contract.mjs';
@@ -98,6 +100,20 @@ const LOCK_KEYS = [
 ];
 const LOCK_REF = 'refs/autoloop/continuation-operation-lock';
 const ZERO_OID = '0'.repeat(40);
+const RUN_SCOPE_ENTRYPOINT = realpathSync(
+  fileURLToPath(new URL('./run-scope.mjs', import.meta.url)),
+);
+const RUN_SCOPE_EXECUTABLE = realpathSync(process.execPath);
+const CONTINUATION_SELF_TEST_MODE = (() => {
+  try {
+    return process.argv.length === 3
+      && process.argv[2] === '--self-test'
+      && realpathSync(process.argv[1]) ===
+        realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
 
 function isPlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -135,6 +151,69 @@ function textFingerprint(value) {
 
 function fingerprinted(value) {
   return { ...value, fingerprint: hashValue(value) };
+}
+
+function runScopeBrokerOperation(flag, input, invoke = spawnSync) {
+  const result = invoke(
+    RUN_SCOPE_EXECUTABLE,
+    [RUN_SCOPE_ENTRYPOINT, flag, '-'],
+    {
+      input: `${JSON.stringify(input)}\n`,
+      encoding: 'utf8',
+      timeout: 30000,
+      maxBuffer: MAX_INPUT_BYTES,
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([key]) =>
+          key !== 'NODE_OPTIONS'
+          && !key.startsWith('AUTOLOOP_AUTHORITY_')),
+      ),
+      windowsHide: true,
+    },
+  );
+  if (result.error) throw result.error;
+  const output = String(result.stdout ?? '');
+  if (
+    Buffer.byteLength(output) > MAX_INPUT_BYTES
+    || output.trimEnd().split('\n').length !== 1
+  ) {
+    throw new Error('authority broker returned an invalid response');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error('authority broker returned invalid JSON');
+  }
+  if (
+    !parsed
+    || typeof parsed !== 'object'
+    || Array.isArray(parsed)
+    || typeof parsed.ok !== 'boolean'
+  ) {
+    throw new Error('authority broker returned an invalid result');
+  }
+  return parsed;
+}
+
+function productionContinuationTransition(
+  input,
+  invoke = runScopeBrokerOperation,
+) {
+  return invoke('--transition-continuation-json', input);
+}
+
+function productionContinuationHistory(
+  input,
+  invoke = runScopeBrokerOperation,
+) {
+  return invoke('--validate-continuation-history-json', input);
+}
+
+function productionContinuationPromptPreparation(
+  input,
+  invoke = runScopeBrokerOperation,
+) {
+  return invoke('--prepare-continuation-prompt-json', input);
 }
 
 function boundedJson(path) {
@@ -427,11 +506,24 @@ export function validateRelaunchRequest(value) {
       error: 'request is not an exact RuntimeContract relaunch result',
     };
   }
-  const issued = transitionContinuationLease({
-    lease: value.lease,
-    state: value.continuationState,
-    nextStatus: 'issued',
-  });
+  let issued;
+  try {
+    issued = CONTINUATION_SELF_TEST_MODE
+      ? transitionContinuationLease({
+        lease: value.lease,
+        state: value.continuationState,
+        nextStatus: 'issued',
+      })
+      : productionContinuationHistory({
+        lease: value.lease,
+        states: [value.continuationState],
+      });
+  } catch (error) {
+    return {
+      ok: false,
+      error: `continuation authority is unavailable: ${error.message}`,
+    };
+  }
   if (!issued.ok) {
     return {
       ok: false,
@@ -466,10 +558,10 @@ function currentState(directory, request) {
     .sort((left, right) => Number(left.match[1]) - Number(right.match[1]));
   if (files.length === 0) throw new Error('continuation has no durable state');
   let previous = request.continuationState;
+  const states = files.map(({ name }) => boundedJson(join(directory, name)));
   if (
     files[0].name !== 'state-000-issued.json'
-    || hashValue(boundedJson(join(directory, files[0].name)))
-      !== hashValue(previous)
+    || hashValue(states[0]) !== hashValue(previous)
   ) {
     throw new Error('issued continuation state is corrupt');
   }
@@ -478,21 +570,38 @@ function currentState(directory, request) {
     if (Number(match[1]) !== index) {
       throw new Error('continuation state history has a revision gap');
     }
-    const state = boundedJson(join(directory, name));
-    const advanced = transitionContinuationLease({
+    const state = states[index];
+    if (state.status !== match[2]) {
+      throw new Error('continuation state history is corrupt');
+    }
+    if (CONTINUATION_SELF_TEST_MODE) {
+      const advanced = transitionContinuationLease({
+        lease: request.lease,
+        state: previous,
+        nextStatus: match[2],
+        claimFingerprint: state.claimFingerprint,
+        sessionFingerprint: state.sessionFingerprint,
+      });
+      if (
+        !advanced.ok
+        || advanced.value.state.fingerprint !== state.fingerprint
+      ) {
+        throw new Error('continuation state history is corrupt');
+      }
+    }
+    previous = state;
+  }
+  if (!CONTINUATION_SELF_TEST_MODE) {
+    const validated = productionContinuationHistory({
       lease: request.lease,
-      state: previous,
-      nextStatus: match[2],
-      claimFingerprint: state.claimFingerprint,
-      sessionFingerprint: state.sessionFingerprint,
+      states,
     });
     if (
-      !advanced.ok
-      || advanced.value.state.fingerprint !== state.fingerprint
+      !validated.ok
+      || validated.value.stateFingerprint !== previous.fingerprint
     ) {
       throw new Error('continuation state history is corrupt');
     }
-    previous = state;
   }
   return previous;
 }
@@ -780,11 +889,14 @@ function checkoutMatches(checkout, lease) {
 }
 
 function persistTransition(directory, request, state, input) {
-  const advanced = transitionContinuationLease({
+  const transition = {
     lease: request.lease,
     state,
     ...input,
-  });
+  };
+  const advanced = CONTINUATION_SELF_TEST_MODE
+    ? transitionContinuationLease(transition)
+    : productionContinuationTransition(transition);
   if (!advanced.ok) {
     return {
       ok: false,
@@ -1218,6 +1330,149 @@ function continuationBundle(request, state, authorization) {
   };
 }
 
+function selfTestContinuationPromptPreparation(input) {
+  const opened = transitionContinuationLease({
+    lease: input.lease,
+    state: input.state,
+    nextStatus: 'opened',
+  });
+  if (
+    !opened.ok
+    || hashValue(opened.value.authorization) !== hashValue(input.authorization)
+  ) {
+    return { ok: false, error: { message: 'authorization is invalid' } };
+  }
+  return {
+    ok: true,
+    value: {
+      leaseFingerprint: input.lease.fingerprint,
+      stateFingerprint: input.state.fingerprint,
+      effectFingerprint: input.effect.fingerprint,
+      targetSessionFingerprint: input.session.sessionFingerprint,
+      prepared: true,
+    },
+  };
+}
+
+export function prepareRelaunchPromptAt(
+  markerDirectory,
+  input,
+  checkout,
+) {
+  if (
+    !exactKeys(input, [
+      'leaseFingerprint',
+      'claimFingerprint',
+      'ownerFingerprint',
+      'continuation',
+    ])
+    || !HASH_RE.test(input.leaseFingerprint)
+    || !HASH_RE.test(input.claimFingerprint)
+    || !HASH_RE.test(input.ownerFingerprint)
+    || !exactKeys(input.continuation, [
+      'continuation',
+      'continuationLease',
+      'continuationState',
+      'continuationAuthorization',
+    ])
+  ) {
+    return { ok: false, error: 'prompt preparation input has an invalid shape' };
+  }
+  try {
+    const directory = leaseDirectory(
+      markerDirectory,
+      input.leaseFingerprint,
+    );
+    return withLeaseLock(directory, () => {
+      const loaded = readRequest(markerDirectory, input.leaseFingerprint);
+      const owner = currentOwner(directory, loaded.request);
+      if (
+        owner?.fingerprint !== input.ownerFingerprint
+        || owner.claimFingerprint !== input.claimFingerprint
+      ) {
+        return {
+          ok: false,
+          error: 'prompt preparation does not hold the active continuation owner',
+        };
+      }
+      if (!checkoutMatches(checkout, loaded.request.lease)) {
+        return {
+          ok: false,
+          error: 'checkout changed before prompt preparation',
+        };
+      }
+      if (
+        loaded.state.status !== 'opened'
+        || loaded.state.claimFingerprint !== input.claimFingerprint
+      ) {
+        return {
+          ok: false,
+          error: 'prompt preparation requires the exact opened continuation',
+        };
+      }
+      const effect = readEffect(directory, loaded.request, 'prompt');
+      const session = readSession(directory);
+      const continuation = input.continuation;
+      if (
+        effect.claimFingerprint !== input.claimFingerprint
+        || hashValue(continuation.continuation)
+          !== hashValue(loaded.request.envelope)
+        || hashValue(continuation.continuationLease)
+          !== hashValue(loaded.request.lease)
+        || hashValue(continuation.continuationState)
+          !== hashValue(loaded.state)
+        || continuation.continuationState.sessionFingerprint
+          !== session.sessionFingerprint
+      ) {
+        return {
+          ok: false,
+          error: 'prompt preparation does not match durable continuation history',
+        };
+      }
+      const operation = {
+        lease: continuation.continuationLease,
+        state: continuation.continuationState,
+        authorization: continuation.continuationAuthorization,
+        effect,
+        session,
+      };
+      const prepared = CONTINUATION_SELF_TEST_MODE
+        ? selfTestContinuationPromptPreparation(operation)
+        : productionContinuationPromptPreparation(operation);
+      if (
+        !prepared.ok
+        || prepared.value?.leaseFingerprint
+          !== loaded.request.lease.fingerprint
+        || prepared.value?.stateFingerprint !== loaded.state.fingerprint
+        || prepared.value?.effectFingerprint !== effect.fingerprint
+        || prepared.value?.targetSessionFingerprint
+          !== session.sessionFingerprint
+        || prepared.value?.prepared !== true
+      ) {
+        return {
+          ok: false,
+          error: prepared.ok
+            ? 'prompt preparation returned mismatched authority'
+            : `prompt preparation failed: ${prepared.error.message}`,
+        };
+      }
+      return {
+        ok: true,
+        value: {
+          ...prepared.value,
+          effect,
+          session,
+        },
+      };
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: `prompt preparation failed: ${error.message}`,
+    };
+  }
+}
+
 export function transitionRelaunchRequestAt(
   markerDirectory,
   input,
@@ -1485,6 +1740,7 @@ function fixtureRequest() {
   if (!evidence.ok) throw new Error('fixture host did not attest');
   const opened = open({
     invocation: '/autoloop:dev; auto-continue',
+    intentProvenance: INTENT_PROVENANCE,
     hostEvidence: evidence.value,
     config: fixtureConfig(),
   });
@@ -1493,9 +1749,12 @@ function fixtureRequest() {
     run: opened.value,
     progress: {
       reason: 'context-budget',
-      eligibleRemaining: 1,
       unitsCompleted: 1,
-      queueComplete: true,
+      queueEvidence: fixtureQueueEvidence(
+        opened.value,
+        1,
+        'relaunch',
+      ),
       checkout: fixtureCheckout(),
     },
   });
@@ -1569,7 +1828,7 @@ function selfTest() {
     expectedStatus: 'claimed',
     nextStatus: 'session-created',
     activeHost: 'opencode',
-    integration: 'opencode-plugin',
+    integration: 'opencode.user-prompt-hook',
     sessionId: 'session-1',
   }, {
     ...fixtureCheckout(),
@@ -1582,7 +1841,7 @@ function selfTest() {
     expectedStatus: 'claimed',
     nextStatus: 'session-created',
     activeHost: 'opencode',
-    integration: 'opencode-plugin',
+    integration: 'opencode.user-prompt-hook',
     sessionId: 'session-1',
   }, fixtureCheckout());
   const repeatedCreate = transitionRelaunchRequestAt(directory, {
@@ -1592,7 +1851,7 @@ function selfTest() {
     expectedStatus: 'claimed',
     nextStatus: 'session-created',
     activeHost: 'opencode',
-    integration: 'opencode-plugin',
+    integration: 'opencode.user-prompt-hook',
     sessionId: 'session-1',
   }, fixtureCheckout());
   const conflictingSession = transitionRelaunchRequestAt(directory, {
@@ -1602,7 +1861,7 @@ function selfTest() {
     expectedStatus: 'session-created',
     nextStatus: 'session-created',
     activeHost: 'opencode',
-    integration: 'opencode-plugin',
+    integration: 'opencode.user-prompt-hook',
     sessionId: 'session-2',
   }, fixtureCheckout());
   const opened = transitionRelaunchRequestAt(directory, {
@@ -1620,13 +1879,13 @@ function selfTest() {
     nextStatus: 'opened',
   }, fixtureCheckout());
   const targetHost = issueHostEvidence({
-    integration: 'opencode-plugin',
+    integration: 'opencode.user-prompt-hook',
     sessionId: 'session-1',
     observedSurface: { tool: 'task' },
     expectedHost: 'opencode',
   });
   const otherHost = issueHostEvidence({
-    integration: 'opencode-plugin',
+    integration: 'opencode.user-prompt-hook',
     sessionId: 'session-2',
     observedSurface: { tool: 'task' },
     expectedHost: 'opencode',
@@ -1634,6 +1893,7 @@ function selfTest() {
   const runtimeOpened = targetHost.ok && opened.ok
     ? open({
       invocation: RELAUNCH_PROMPT,
+      intentProvenance: INTENT_PROVENANCE,
       hostEvidence: targetHost.value,
       config: fixtureConfig(),
       ...opened.value.continuation,
@@ -1642,6 +1902,7 @@ function selfTest() {
   const crossSessionOpen = otherHost.ok && opened.ok
     ? open({
       invocation: RELAUNCH_PROMPT,
+      intentProvenance: INTENT_PROVENANCE,
       hostEvidence: otherHost.value,
       config: fixtureConfig(),
       ...opened.value.continuation,
@@ -1655,6 +1916,17 @@ function selfTest() {
     effect: 'context-inject',
     subjectFingerprint: textFingerprint('fixture continuation context'),
   }, fixtureCheckout());
+  const promptPreparationInput = {
+    leaseFingerprint: request.lease.fingerprint,
+    claimFingerprint,
+    ownerFingerprint,
+    continuation: opened.value?.continuation,
+  };
+  const prematurePromptPreparation = prepareRelaunchPromptAt(
+    directory,
+    promptPreparationInput,
+    fixtureCheckout(),
+  );
   const promptEffect = issueRelaunchEffectAt(directory, {
     leaseFingerprint: request.lease.fingerprint,
     claimFingerprint,
@@ -1662,6 +1934,26 @@ function selfTest() {
     expectedStatus: 'opened',
     effect: 'prompt',
     subjectFingerprint: textFingerprint(request.prompt),
+  }, fixtureCheckout());
+  const preparedPrompt = prepareRelaunchPromptAt(
+    directory,
+    promptPreparationInput,
+    fixtureCheckout(),
+  );
+  const recoveredPromptPreparation = prepareRelaunchPromptAt(
+    directory,
+    promptPreparationInput,
+    fixtureCheckout(),
+  );
+  const forgedPromptPreparation = prepareRelaunchPromptAt(directory, {
+    ...promptPreparationInput,
+    continuation: {
+      ...promptPreparationInput.continuation,
+      continuationAuthorization: {
+        ...promptPreparationInput.continuation.continuationAuthorization,
+        authorization: 'f'.repeat(64),
+      },
+    },
   }, fixtureCheckout());
   const prompted = transitionRelaunchRequestAt(directory, {
     leaseFingerprint: request.lease.fingerprint,
@@ -1770,7 +2062,7 @@ function selfTest() {
       expectedStatus: 'claimed',
       nextStatus: 'session-created',
       activeHost: 'opencode',
-      integration: 'opencode-plugin',
+      integration: 'opencode.user-prompt-hook',
       sessionId: 'stale-owner-session',
     }, fixtureCheckout())
     : { ok: false };
@@ -1782,7 +2074,7 @@ function selfTest() {
       expectedStatus: 'claimed',
       nextStatus: 'session-created',
       activeHost: 'opencode',
-      integration: 'opencode-plugin',
+      integration: 'opencode.user-prompt-hook',
       sessionId: 'takeover-session',
     }, fixtureCheckout())
     : { ok: false };
@@ -1971,8 +2263,42 @@ function selfTest() {
     symbolicTarget,
     contenderBOid,
   ]);
+  const productionRoutes = [];
+  const productionTransition = productionContinuationTransition(
+    { lease: request.lease, state: request.continuationState },
+    (flag, input) => {
+      productionRoutes.push([flag, input]);
+      return { ok: true };
+    },
+  );
+  const productionHistory = productionContinuationHistory(
+    { lease: request.lease, states: [request.continuationState] },
+    (flag, input) => {
+      productionRoutes.push([flag, input]);
+      return { ok: true };
+    },
+  );
+  const productionPromptPreparation =
+    productionContinuationPromptPreparation(
+      { lease: request.lease, state: request.continuationState },
+      (flag, input) => {
+        productionRoutes.push([flag, input]);
+        return { ok: true };
+      },
+    );
   const cases = [
     ['runtime request validates', validateRelaunchRequest(request).ok],
+    [
+      'production continuation validation and CAS route through run-scope',
+      productionTransition.ok
+        && productionHistory.ok
+        && productionPromptPreparation.ok
+        && productionRoutes.map(([flag]) => flag).join(',') === [
+          '--transition-continuation-json',
+          '--validate-continuation-history-json',
+          '--prepare-continuation-prompt-json',
+        ].join(','),
+    ],
     ['issue is durable and idempotent', issued.ok && duplicate.ok],
     ['checkout mismatch does not claim', !wrongCheckout.ok],
     [
@@ -1999,7 +2325,9 @@ function selfTest() {
       created.ok
         && repeatedCreate.ok
         && created.value.state.fingerprint ===
-          repeatedCreate.value.state.fingerprint,
+          repeatedCreate.value.state.fingerprint
+        && created.value.session.integration
+          === 'opencode.user-prompt-hook',
     ],
     ['session binding cannot be replaced', !conflictingSession.ok],
     [
@@ -2013,6 +2341,13 @@ function selfTest() {
     [
       'authorization opens only in the lease-bound provider session',
       runtimeOpened.ok && !crossSessionOpen.ok,
+    ],
+    [
+      'prompt readiness requires its durable intent and exact opened authority',
+      !prematurePromptPreparation.ok
+        && preparedPrompt.ok
+        && recoveredPromptPreparation.ok
+        && !forgedPromptPreparation.ok,
     ],
     [
       'prompted is terminal and clears the active pointer',
@@ -2155,13 +2490,14 @@ function main() {
       '--claim',
       '--renew',
       '--issue-effect',
+      '--prepare-prompt',
       '--transition',
     ].includes(mode)
     || rest.length > 0
   ) {
     console.error(
       'continuation-store: expected --checkout, --issue, --claim, ' +
-      '--renew, --issue-effect, --transition, or --self-test',
+      '--renew, --issue-effect, --prepare-prompt, --transition, or --self-test',
     );
     process.exit(2);
   }
@@ -2188,6 +2524,12 @@ function main() {
         );
       } else if (mode === '--issue-effect') {
         result = issueRelaunchEffectAt(
+          markerDirectory,
+          readStdin(),
+          snapshotCheckoutAt(process.cwd()),
+        );
+      } else if (mode === '--prepare-prompt') {
+        result = prepareRelaunchPromptAt(
           markerDirectory,
           readStdin(),
           snapshotCheckoutAt(process.cwd()),

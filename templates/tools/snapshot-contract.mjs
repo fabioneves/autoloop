@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseLoopClaim } from './claim-contract.mjs';
+import { parseLifecycleComment } from './lifecycle-contract.mjs';
 
-export const SNAPSHOT_VERSION = 1;
+export const SNAPSHOT_VERSION = 2;
+export const QUEUE_EVIDENCE_VERSION = 1;
 export const SNAPSHOT_SECTIONS = Object.freeze([
   'repo',
   'tree',
   'openPrs',
+  'lifecycleMarkers',
   'queue',
   'blockedIssues',
   'openIssues',
@@ -31,11 +35,14 @@ export const SNAPSHOT_ABSENCE_REQUIREMENTS = Object.freeze({
     'mergedPrs',
     'openIssues',
     'openPrs',
+    'lifecycleMarkers',
     'queue',
   ]),
-  blockerResolution: Object.freeze(['openIssues']),
   actionability: Object.freeze([
     'authorVerification',
+    'blockedIssues',
+    'lifecycleMarkers',
+    'openIssues',
     'openPrs',
     'unresolvedReviewThreads',
   ]),
@@ -45,6 +52,7 @@ export const SNAPSHOT_ABSENCE_REQUIREMENTS = Object.freeze({
     'mergedPrs',
     'openIssues',
     'openPrs',
+    'lifecycleMarkers',
     'queue',
   ]),
   relaunch: Object.freeze([
@@ -53,6 +61,7 @@ export const SNAPSHOT_ABSENCE_REQUIREMENTS = Object.freeze({
     'mergedPrs',
     'openIssues',
     'openPrs',
+    'lifecycleMarkers',
     'queue',
   ]),
   stop: Object.freeze([
@@ -61,6 +70,7 @@ export const SNAPSHOT_ABSENCE_REQUIREMENTS = Object.freeze({
     'mergedPrs',
     'openIssues',
     'openPrs',
+    'lifecycleMarkers',
     'queue',
   ]),
 });
@@ -76,6 +86,21 @@ const SNAPSHOT_KEYS = [
 ];
 const SECTION_KEYS = ['complete', 'error', 'items'];
 const INVALIDATION_KEYS = ['reasonCodes', 'sections'];
+const QUEUE_EVIDENCE_KEYS = [
+  'configuredBaseBranch',
+  'configFingerprint',
+  'eligibleIssueNumbers',
+  'fingerprint',
+  'kind',
+  'purpose',
+  'repositoryFingerprint',
+  'repositoryNameWithOwner',
+  'requiredSections',
+  'runInstanceFingerprint',
+  'snapshotFingerprint',
+  'snapshotGeneration',
+  'version',
+];
 const ISSUE_ITEM_KEYS = [
   'number',
   'title',
@@ -116,8 +141,10 @@ const PULL_REQUEST_ITEM_KEYS = [
 const QUEUE_ITEM_KEYS = [
   ...ISSUE_ITEM_KEYS,
   'blockedBy',
+  'dependencies',
   'provenance',
 ];
+const DEPENDENCY_ITEM_KEYS = ['number', 'state'];
 const COMMENT_EVIDENCE_KEYS = [
   'kind',
   'id',
@@ -133,6 +160,18 @@ const COMMENT_EVIDENCE_KEYS = [
 const LABEL_EVIDENCE_KEYS = [
   'kind',
   'issueNumber',
+  'author',
+  'authorAssociation',
+  'body',
+  'createdAt',
+  'updatedAt',
+  'url',
+];
+const LIFECYCLE_MARKER_ITEM_KEYS = [
+  'issueNumber',
+  'id',
+  'tipId',
+  'sequence',
   'author',
   'authorAssociation',
   'body',
@@ -176,6 +215,7 @@ const MERGE_STATE_STATUSES = new Set([
   'UNSTABLE',
 ]);
 const STATUS_STATES = new Set(['ERROR', 'EXPECTED', 'FAILURE', 'PENDING', 'SUCCESS']);
+const ISSUE_STATES = new Set(['CLOSED', 'OPEN']);
 const CHECK_STATUS_STATES = new Set([
   'COMPLETED',
   'IN_PROGRESS',
@@ -197,10 +237,17 @@ const CHECK_CONCLUSION_STATES = new Set([
 ]);
 const INVALIDATED_SECTIONS = {
   GIT_MUTATION: ['tree'],
-  ISSUE_MUTATION: ['authorVerification', 'blockedIssues', 'openIssues', 'queue'],
+  ISSUE_MUTATION: [
+    'authorVerification',
+    'blockedIssues',
+    'lifecycleMarkers',
+    'openIssues',
+    'queue',
+  ],
   PR_MUTATION: [
     'authorVerification',
     'blockedIssues',
+    'lifecycleMarkers',
     'mergedPrs',
     'openIssues',
     'openPrs',
@@ -400,12 +447,14 @@ function validCheckContext(item) {
   return STATUS_STATES.has(item.status) && item.conclusion === null;
 }
 
-function validPullRequestItem(item) {
+function validPullRequestItem(item, _complete, repositoryNameWithOwner) {
   const loopOwned = item?.ownership === 'loop';
   const claim = parseLoopClaim({
     branch: item?.headRefName,
     body: item?.body,
   });
+  const sameRepository = nonEmptyString(repositoryNameWithOwner)
+    && item?.headRepository === repositoryNameWithOwner;
   return hasExactKeys(item, PULL_REQUEST_ITEM_KEYS)
     && positiveInteger(item.number)
     && typeof item.title === 'string'
@@ -428,7 +477,7 @@ function validPullRequestItem(item) {
     && typeof item.orphanCandidate === 'boolean'
     && ['human', 'loop'].includes(item.ownership)
     && loopOwned === positiveInteger(item.issue)
-    && loopOwned === claim.valid
+    && loopOwned === (claim.valid && sameRepository)
     && (!loopOwned || claim.issue === item.issue)
     && item.orphanCandidate === (loopOwned && item.isDraft);
 }
@@ -440,6 +489,10 @@ function validProvenance(value) {
 }
 
 function validQueueItem(item, complete) {
+  const expectedDependencies = blockedByIssueNumbers(item?.body);
+  const dependencyNumbers = Array.isArray(item?.dependencies)
+    ? item.dependencies.map((dependency) => dependency?.number)
+    : [];
   return hasExactKeys(item, QUEUE_ITEM_KEYS)
     && ISSUE_ITEM_KEYS.every((key) => key in item)
     && validIssueItem(Object.fromEntries(
@@ -447,7 +500,18 @@ function validQueueItem(item, complete) {
     ))
     && isDenseJsonArray(item.blockedBy)
     && item.blockedBy.every(positiveInteger)
-    && stableJson(item.blockedBy) === stableJson(blockedByIssueNumbers(item.body))
+    && stableJson(item.blockedBy) === stableJson(expectedDependencies)
+    && isDenseJsonArray(item.dependencies)
+    && item.dependencies.every((dependency) =>
+      hasExactKeys(dependency, DEPENDENCY_ITEM_KEYS)
+      && positiveInteger(dependency.number)
+      && ISSUE_STATES.has(dependency.state)
+      && expectedDependencies.includes(dependency.number))
+    && new Set(dependencyNumbers).size === dependencyNumbers.length
+    && (
+      !complete
+      || stableJson(dependencyNumbers) === stableJson(expectedDependencies)
+    )
     && (
       validProvenance(item.provenance)
       || (!complete && item.provenance === null)
@@ -519,6 +583,35 @@ function validAuthorVerificationItem(item, complete) {
       validEvidenceItem(evidence, true) && evidence.author === item.login);
 }
 
+function validLifecycleMarkerItem(item) {
+  if (
+    !hasExactKeys(item, LIFECYCLE_MARKER_ITEM_KEYS)
+    || !positiveInteger(item.issueNumber)
+    || !nonEmptyString(item.id)
+    || !nonEmptyString(item.author)
+    || !nullableString(item.authorAssociation)
+    || typeof item.body !== 'string'
+    || !validDateTime(item.createdAt)
+    || !validDateTime(item.updatedAt)
+    || !nullableString(item.url)
+  ) {
+    return false;
+  }
+  const parsed = parseLifecycleComment(item.body);
+  return parsed.ok === true
+    && parsed.marker.issue === item.issueNumber
+    && nonEmptyString(item.tipId)
+    && Number.isSafeInteger(item.sequence)
+    && item.sequence >= 0
+    && (
+      item.sequence === 0
+        ? parsed.successor === null && item.tipId === item.id
+        : parsed.successor !== null
+          && parsed.successor.rootCommentId === item.id
+          && parsed.successor.sequence === item.sequence
+    );
+}
+
 const SECTION_ITEM_VALIDATORS = Object.freeze({
   repo: (item) => hasExactKeys(
     item,
@@ -538,6 +631,7 @@ const SECTION_ITEM_VALIDATORS = Object.freeze({
     && nonEmptyString(item.branch)
     && validObjectId(item.headOid),
   openPrs: validPullRequestItem,
+  lifecycleMarkers: validLifecycleMarkerItem,
   queue: validQueueItem,
   blockedIssues: validIssueItem,
   openIssues: validIssueItem,
@@ -546,7 +640,7 @@ const SECTION_ITEM_VALIDATORS = Object.freeze({
   authorVerification: validAuthorVerificationItem,
 });
 
-function validSnapshotSection(name, section) {
+function validSnapshotSection(name, section, repositoryNameWithOwner = null) {
   if (!validSection(section)) return false;
   if (
     section.complete
@@ -555,8 +649,22 @@ function validSnapshotSection(name, section) {
   ) {
     return false;
   }
+  if (
+    ['openPrs', 'mergedPrs'].includes(name)
+    && section.items.length > 0
+    && !nonEmptyString(repositoryNameWithOwner)
+  ) {
+    return false;
+  }
   return section.items.every((item) =>
-    SECTION_ITEM_VALIDATORS[name](item, section.complete));
+    SECTION_ITEM_VALIDATORS[name](item, section.complete, repositoryNameWithOwner));
+}
+
+function snapshotRepositoryName(sections) {
+  const repo = sections?.repo;
+  return validSnapshotSection('repo', repo) && repo.complete
+    ? repo.items[0].nameWithOwner
+    : null;
 }
 
 export function completeSection(items = []) {
@@ -736,6 +844,29 @@ export function issueSnapshotItem(issue = {}) {
   };
 }
 
+export function lifecycleMarkerSnapshotItem(
+  comment = {},
+  issueNumber = null,
+  chain = {},
+) {
+  const root = chain.root ?? comment;
+  const sequence = Number.isSafeInteger(chain.sequence)
+    ? chain.sequence
+    : 0;
+  return {
+    issueNumber: Number.isSafeInteger(issueNumber) && issueNumber > 0 ? issueNumber : null,
+    id: typeof root.id === 'string' ? root.id : null,
+    tipId: typeof comment.id === 'string' ? comment.id : null,
+    sequence,
+    author: comment.author?.login ?? null,
+    authorAssociation: comment.authorAssociation ?? null,
+    body: typeof comment.body === 'string' ? comment.body : '',
+    createdAt: root.createdAt ?? null,
+    updatedAt: comment.updatedAt ?? comment.lastEditedAt ?? null,
+    url: root.url ?? null,
+  };
+}
+
 function snapshotFingerprint(snapshot) {
   const { fingerprint: ignoredFingerprint, ...content } = snapshot;
   return sha256(content);
@@ -759,10 +890,15 @@ function sortedUniqueStrings(values) {
 export function createSnapshot({ scannedAt, sections } = {}) {
   const timestampValid = validTimestamp(scannedAt);
   const normalizedScannedAt = timestampValid ? scannedAt : new Date(0).toISOString();
+  const repositoryNameWithOwner = snapshotRepositoryName(sections);
   const normalizedSections = Object.fromEntries(
     SNAPSHOT_SECTIONS.map((name) => [
       name,
-      timestampValid && validSnapshotSection(name, sections?.[name])
+      timestampValid && validSnapshotSection(
+        name,
+        sections?.[name],
+        repositoryNameWithOwner,
+      )
         ? sections[name]
         : incompleteSection(
           timestampValid ? 'SNAPSHOT_SECTION_INVALID' : 'SNAPSHOT_TIMESTAMP_INVALID',
@@ -787,6 +923,7 @@ export function createSnapshot({ scannedAt, sections } = {}) {
 
 export function verifySnapshot(snapshot) {
   try {
+    const repositoryNameWithOwner = snapshotRepositoryName(snapshot?.sections);
     if (
       !hasExactKeys(snapshot, SNAPSHOT_KEYS)
       || snapshot.kind !== 'autoloop-repository-snapshot'
@@ -796,7 +933,7 @@ export function verifySnapshot(snapshot) {
       || !/^[0-9a-f]{64}$/.test(snapshot.fingerprint)
       || !hasExactKeys(snapshot.sections, SNAPSHOT_SECTIONS)
       || !SNAPSHOT_SECTIONS.every((name) =>
-        validSnapshotSection(name, snapshot.sections[name]))
+        validSnapshotSection(name, snapshot.sections[name], repositoryNameWithOwner))
       || snapshot.generation !== snapshotGeneration(snapshot.scannedAt, snapshot.sections)
       || !hasExactKeys(snapshot.invalidation, INVALIDATION_KEYS)
       || !isDenseJsonArray(snapshot.invalidation.reasonCodes)
@@ -925,6 +1062,202 @@ export function repositoryAbsenceDecision(snapshot, purpose, matches) {
   return absenceDecision(snapshot, sections, matches);
 }
 
+function eligibleQueueIssueNumbers(snapshot) {
+  const blocked = new Set(snapshot.sections.blockedIssues.items.map((issue) => issue.number));
+  const owned = new Set([
+    ...snapshot.sections.openPrs.items,
+    ...snapshot.sections.mergedPrs.items,
+  ]
+    .filter((pr) => pr.ownership === 'loop' && positiveInteger(pr.issue))
+    .map((pr) => pr.issue));
+  const recovering = new Set(
+    snapshot.sections.lifecycleMarkers.items.map((marker) => marker.issueNumber),
+  );
+  return snapshot.sections.queue.items
+    .filter((issue) => {
+      const labeledBy = issue.provenance?.labeledBy;
+      const labeledAt = issue.provenance?.labeledAt;
+      const trusted = snapshot.sections.authorVerification.items.some((author) =>
+        author.login === labeledBy
+        && ['admin', 'write'].includes(author.permission)
+        && author.evidence.some((evidence) =>
+          evidence.kind === 'queue-label'
+          && evidence.issueNumber === issue.number
+          && evidence.author === labeledBy
+          && evidence.createdAt === labeledAt));
+      const bodyUnchanged = issue.lastEditedAt === null
+        || Date.parse(issue.lastEditedAt) <= Date.parse(labeledAt);
+      return trusted
+        && bodyUnchanged
+        && !blocked.has(issue.number)
+        && !issue.labels.includes('loop-blocked')
+        && !owned.has(issue.number)
+        && !recovering.has(issue.number)
+        && issue.dependencies.every((dependency) => dependency.state === 'CLOSED');
+    })
+    .map((issue) => issue.number)
+    .sort((left, right) => left - right);
+}
+
+function queueEvidenceFingerprint(evidence) {
+  const { fingerprint: ignoredFingerprint, ...content } = evidence;
+  return sha256(content);
+}
+
+export function createQueueEvidence({
+  snapshot,
+  purpose,
+  runInstanceFingerprint,
+  configFingerprint,
+  configuredBaseBranch,
+} = {}) {
+  const purposeSections = SNAPSHOT_ABSENCE_REQUIREMENTS[purpose];
+  const requiredSections = purposeSections
+    ? sortedUniqueStrings(['repo', 'tree', ...purposeSections])
+    : null;
+  if (
+    !verifySnapshot(snapshot)
+    || !['queueExhaustion', 'relaunch'].includes(purpose)
+    || requiredSections === null
+    || !/^[0-9a-f]{64}$/u.test(runInstanceFingerprint ?? '')
+    || !/^[0-9a-f]{64}$/u.test(configFingerprint ?? '')
+    || !nonEmptyString(configuredBaseBranch)
+    || snapshot.invalidation.reasonCodes.length !== 0
+    || requiredSections.some((name) => snapshot.sections[name].complete !== true)
+  ) {
+    throw new TypeError('queue evidence requires one complete current repository snapshot');
+  }
+  const repository = snapshot.sections.repo.items[0];
+  const tree = snapshot.sections.tree.items[0];
+  if (
+    repository.defaultBranch !== configuredBaseBranch
+    || tree.branch !== configuredBaseBranch
+    || tree.dirtyPaths !== 0
+  ) {
+    throw new TypeError('queue evidence requires a clean configured-base snapshot');
+  }
+  const evidence = {
+    kind: 'autoloop-queue-evidence',
+    version: QUEUE_EVIDENCE_VERSION,
+    purpose,
+    runInstanceFingerprint,
+    configFingerprint,
+    configuredBaseBranch,
+    repositoryNameWithOwner: repository.nameWithOwner,
+    repositoryFingerprint: sha256({
+      defaultBranch: repository.defaultBranch,
+      nameWithOwner: repository.nameWithOwner,
+    }),
+    snapshotGeneration: snapshot.generation,
+    snapshotFingerprint: snapshot.fingerprint,
+    requiredSections,
+    eligibleIssueNumbers: eligibleQueueIssueNumbers(snapshot),
+    fingerprint: '',
+  };
+  evidence.fingerprint = queueEvidenceFingerprint(evidence);
+  return deepFreeze(evidence);
+}
+
+export function verifyQueueEvidence(evidence, snapshot, run) {
+  try {
+    if (
+      !hasExactKeys(evidence, QUEUE_EVIDENCE_KEYS)
+      || !['queueExhaustion', 'relaunch'].includes(evidence.purpose)
+      || evidence.kind !== 'autoloop-queue-evidence'
+      || evidence.version !== QUEUE_EVIDENCE_VERSION
+      || !/^[0-9a-f]{64}$/u.test(evidence.fingerprint)
+      || !isDenseJsonArray(evidence.requiredSections)
+      || !isDenseJsonArray(evidence.eligibleIssueNumbers)
+      || evidence.eligibleIssueNumbers.some((number) => !positiveInteger(number))
+      || new Set(evidence.eligibleIssueNumbers).size !== evidence.eligibleIssueNumbers.length
+    ) {
+      return false;
+    }
+    const expected = createQueueEvidence({
+      snapshot,
+      purpose: evidence.purpose,
+      runInstanceFingerprint: run?.instanceFingerprint,
+      configFingerprint: run?.configFingerprint,
+      configuredBaseBranch: run?.configuredBaseBranch,
+    });
+    return stableJson(expected) === stableJson(evidence)
+      && queueEvidenceFingerprint(evidence) === evidence.fingerprint;
+  } catch {
+    return false;
+  }
+}
+
+export function blockerResolutionDecision(snapshot, issueNumber) {
+  const result = (ok, reasonCodes, openDependencies = []) => ({
+    ok,
+    reasonCodes,
+    openDependencies,
+  });
+  if (!verifySnapshot(snapshot) || !positiveInteger(issueNumber)) {
+    return result(false, ['SNAPSHOT_BLOCKER_INPUT_INVALID']);
+  }
+  if (snapshot.sections.queue.complete !== true) {
+    return result(false, ['SNAPSHOT_SECTION_INCOMPLETE']);
+  }
+  const candidates = snapshot.sections.queue.items
+    .filter((item) => item.number === issueNumber);
+  if (candidates.length !== 1) {
+    return result(false, [
+      candidates.length === 0
+        ? 'SNAPSHOT_QUEUE_ITEM_MISSING'
+        : 'SNAPSHOT_QUEUE_ITEM_AMBIGUOUS',
+    ]);
+  }
+  const openDependencies = candidates[0].dependencies
+    .filter((dependency) => dependency.state !== 'CLOSED')
+    .map((dependency) => dependency.number);
+  return openDependencies.length === 0
+    ? result(true, [])
+    : result(false, ['SNAPSHOT_DEPENDENCY_OPEN'], openDependencies);
+}
+
+function parseArgs(args) {
+  if (args.length === 1 && args[0] === '--self-test') {
+    return { mode: 'self-test', error: null };
+  }
+  if (
+    args.length === 2
+    && args[0] === '--invalidate'
+    && SNAPSHOT_INVALIDATION_REASONS.includes(args[1])
+  ) {
+    return { mode: 'invalidate', reasonCode: args[1], error: null };
+  }
+  if (
+    args.length === 5
+    && args[0] === '--queue-evidence'
+    && ['queueExhaustion', 'relaunch'].includes(args[1])
+  ) {
+    return {
+      mode: 'queue-evidence',
+      purpose: args[1],
+      runInstanceFingerprint: args[2],
+      configFingerprint: args[3],
+      configuredBaseBranch: args[4],
+      error: null,
+    };
+  }
+  return {
+    mode: null,
+    error:
+      'expected --self-test, --invalidate '
+      + `<${SNAPSHOT_INVALIDATION_REASONS.join('|')}>, or `
+      + '--queue-evidence <queueExhaustion|relaunch> <run hash> <config hash> <base>',
+  };
+}
+
+function readSnapshotInput() {
+  const source = readFileSync(0, 'utf8');
+  if (Buffer.byteLength(source) > 64 * 1024 * 1024) {
+    throw new Error('snapshot input exceeds 64 MiB');
+  }
+  return JSON.parse(source);
+}
+
 async function selfTest() {
   const checks = [];
   const check = async (name, test) => {
@@ -962,6 +1295,82 @@ async function selfTest() {
     ownership: 'loop',
     ...overrides,
   });
+  const lifecycleMarkerItem = (overrides = {}) => ({
+    issueNumber: 7,
+    id: 'IC_lifecycle',
+    tipId: 'IC_lifecycle',
+    sequence: 0,
+    author: 'autoloop',
+    authorAssociation: 'MEMBER',
+    body: '<!-- autoloop-lifecycle-v1\n{"branch":"feat/gh-7-contract","intentSource":"invocation","issue":7,"issueBodyHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mergePolicy":"manual","phase":"intent-recorded","planHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","plannedBaseOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runIntentHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","selector":"native","v":1}\n-->',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    url: 'https://example.test/issues/7#issuecomment-1',
+    ...overrides,
+  });
+  const queueSnapshot = ({ blocked = false, incomplete = null } = {}) => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    const issue = issueSnapshotItem({
+      number: 7,
+      title: 'queued',
+      body: 'body',
+      updatedAt: '2026-01-01T00:00:00Z',
+      lastEditedAt: null,
+      labels: ['loop-ready', ...(blocked ? ['loop-blocked'] : [])],
+    });
+    sections.repo = completeSection([{
+      owner: 'owner',
+      name: 'repo',
+      nameWithOwner: 'owner/repo',
+      defaultBranch: 'main',
+    }]);
+    sections.tree = completeSection([{
+      dirtyEntries: [],
+      dirtyPaths: 0,
+      branch: 'main',
+      headOid: 'a'.repeat(40),
+    }]);
+    sections.queue = completeSection([{
+      ...issue,
+      blockedBy: [],
+      dependencies: [],
+      provenance: {
+        labeledBy: 'maintainer',
+        labeledAt: '2026-01-01T00:00:01Z',
+      },
+    }]);
+    sections.openIssues = completeSection([issue]);
+    sections.blockedIssues = completeSection(blocked ? [issue] : []);
+    sections.authorVerification = completeSection([{
+      login: 'maintainer',
+      roleName: 'maintain',
+      permission: 'write',
+      evidence: [{
+        kind: 'queue-label',
+        issueNumber: 7,
+        author: 'maintainer',
+        authorAssociation: null,
+        body: '',
+        createdAt: '2026-01-01T00:00:01Z',
+        updatedAt: null,
+        url: null,
+      }],
+    }]);
+    if (incomplete !== null) {
+      sections[incomplete] = incompleteSection('PAGE_FETCH_FAILED', 'offline');
+    }
+    return createSnapshot({
+      scannedAt: '2026-01-01T00:00:02.000Z',
+      sections,
+    });
+  };
+  const queueRun = {
+    instanceFingerprint: 'b'.repeat(64),
+    configFingerprint: 'c'.repeat(64),
+    configuredBaseBranch: 'main',
+  };
 
   await check('pagination reaches the terminal page', async () => {
     const pages = new Map([
@@ -1055,6 +1464,69 @@ async function selfTest() {
       && /^[0-9a-f]{64}$/.test(snapshot.fingerprint)
       && verifySnapshot(snapshot);
   });
+  await check('queue evidence derives eligible IDs and binds the run and repository', () => {
+    const snapshot = queueSnapshot();
+    const evidence = createQueueEvidence({
+      snapshot,
+      purpose: 'relaunch',
+      runInstanceFingerprint: queueRun.instanceFingerprint,
+      configFingerprint: queueRun.configFingerprint,
+      configuredBaseBranch: queueRun.configuredBaseBranch,
+    });
+    return stableJson(evidence.eligibleIssueNumbers) === stableJson([7])
+      && evidence.repositoryNameWithOwner === 'owner/repo'
+      && verifyQueueEvidence(evidence, snapshot, queueRun)
+      && !verifyQueueEvidence(evidence, snapshot, {
+        ...queueRun,
+        instanceFingerprint: 'd'.repeat(64),
+      });
+  });
+  await check('queue evidence excludes blocked work without calling it absent', () => {
+    const snapshot = queueSnapshot({ blocked: true });
+    const evidence = createQueueEvidence({
+      snapshot,
+      purpose: 'queueExhaustion',
+      runInstanceFingerprint: queueRun.instanceFingerprint,
+      configFingerprint: queueRun.configFingerprint,
+      configuredBaseBranch: queueRun.configuredBaseBranch,
+    });
+    return evidence.eligibleIssueNumbers.length === 0
+      && snapshot.sections.queue.items.length === 1
+      && verifyQueueEvidence(evidence, snapshot, queueRun);
+  });
+  await check('queue evidence rejects incomplete or invalidated snapshots', () => {
+    const incomplete = queueSnapshot({ incomplete: 'openIssues' });
+    const invalidated = invalidateSnapshot(queueSnapshot(), 'WAIT_BOUNDARY');
+    for (const snapshot of [incomplete, invalidated]) {
+      try {
+        createQueueEvidence({
+          snapshot,
+          purpose: 'queueExhaustion',
+          runInstanceFingerprint: queueRun.instanceFingerprint,
+          configFingerprint: queueRun.configFingerprint,
+          configuredBaseBranch: queueRun.configuredBaseBranch,
+        });
+        return false;
+      } catch {
+        continue;
+      }
+    }
+    return true;
+  });
+  await check('queue evidence rejects tampered derived IDs', () => {
+    const snapshot = queueSnapshot();
+    const evidence = createQueueEvidence({
+      snapshot,
+      purpose: 'relaunch',
+      runInstanceFingerprint: queueRun.instanceFingerprint,
+      configFingerprint: queueRun.configFingerprint,
+      configuredBaseBranch: queueRun.configuredBaseBranch,
+    });
+    return !verifyQueueEvidence({
+      ...evidence,
+      eligibleIssueNumbers: [],
+    }, snapshot, queueRun);
+  });
   await check('mutation invalidates only affected sections with a reason', () => {
     const sections = Object.fromEntries(
       SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
@@ -1078,11 +1550,40 @@ async function selfTest() {
     const invalidated = invalidateSnapshot(snapshot, 'ISSUE_MUTATION');
     return invalidated.sections.queue.complete === false
       && invalidated.sections.openIssues.complete === false
+      && invalidated.sections.lifecycleMarkers.complete === false
       && invalidated.sections.tree.complete === true
       && invalidated.invalidation.reasonCodes.includes('ISSUE_MUTATION')
       && invalidated.generation === snapshot.generation
       && invalidated.fingerprint !== snapshot.fingerprint
       && verifySnapshot(invalidated);
+  });
+  await check('typed invalidation CLI accepts only closed reason codes', () => {
+    const accepted = parseArgs(['--invalidate', 'PR_MUTATION']);
+    const rejected = parseArgs(['--invalidate', 'SOMETHING_CHANGED']);
+    return accepted.mode === 'invalidate'
+      && accepted.reasonCode === 'PR_MUTATION'
+      && accepted.error === null
+      && rejected.mode === null
+      && rejected.error !== null;
+  });
+  await check('queue-evidence CLI requires closed purpose and explicit bindings', () => {
+    const accepted = parseArgs([
+      '--queue-evidence',
+      'relaunch',
+      'a'.repeat(64),
+      'b'.repeat(64),
+      'main',
+    ]);
+    const rejected = parseArgs([
+      '--queue-evidence',
+      'something',
+      'a'.repeat(64),
+      'b'.repeat(64),
+      'main',
+    ]);
+    return accepted.mode === 'queue-evidence'
+      && accepted.purpose === 'relaunch'
+      && rejected.error !== null;
   });
   await check('incomplete section rejects an absence conclusion', () => {
     const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
@@ -1115,6 +1616,18 @@ async function selfTest() {
       && snapshot.sections.openIssues.error?.code === 'SNAPSHOT_SECTION_INVALID'
       && absence.ok === false
       && absence.incompleteSections.includes('openIssues');
+  });
+  await check('anonymous lifecycle markers cannot become authoritative', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.lifecycleMarkers = completeSection([lifecycleMarkerItem({ author: null })]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:00.000Z',
+      sections,
+    });
+    return snapshot.sections.lifecycleMarkers.complete === false
+      && snapshot.sections.lifecycleMarkers.error?.code === 'SNAPSHOT_SECTION_INVALID';
   });
   await check('typed hashes reject string-coercible objects', () => {
     const sections = Object.fromEntries(
@@ -1185,6 +1698,12 @@ async function selfTest() {
     const validSections = Object.fromEntries(
       SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
     );
+    validSections.repo = completeSection([{
+      owner: 'owner',
+      name: 'repo',
+      nameWithOwner: 'owner/repo',
+      defaultBranch: 'main',
+    }]);
     validSections.openPrs = completeSection([pullRequestItem()]);
     const valid = createSnapshot({
       scannedAt: '2026-01-01T00:00:00.000Z',
@@ -1309,6 +1828,7 @@ async function selfTest() {
     sections.queue = completeSection([{
       ...issue,
       blockedBy: [],
+      dependencies: [],
       provenance: {
         labeledBy: 'maintainer',
         labeledAt: '2026-01-01T00:00:01Z',
@@ -1320,6 +1840,98 @@ async function selfTest() {
     });
     return snapshot.sections.queue.complete === false
       && stableJson(blockedByIssueNumbers(issue.body)) === stableJson([12]);
+  });
+  await check('blocker resolution requires exact typed dependency evidence', () => {
+    const issue = issueSnapshotItem({
+      number: 7,
+      title: 'dependency',
+      body: '## Blocked by\n- #12\n- #34',
+      updatedAt: '2026-01-01T00:00:00Z',
+      lastEditedAt: null,
+      labels: ['loop-ready'],
+    });
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.queue = completeSection([{
+      ...issue,
+      blockedBy: [12, 34],
+      dependencies: [
+        { number: 12, state: 'CLOSED' },
+        { number: 34, state: 'CLOSED' },
+      ],
+      provenance: {
+        labeledBy: 'maintainer',
+        labeledAt: '2026-01-01T00:00:01Z',
+      },
+    }]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:02.000Z',
+      sections,
+    });
+    const resolution = blockerResolutionDecision(snapshot, 7);
+    return resolution.ok === true
+      && !Object.hasOwn(SNAPSHOT_ABSENCE_REQUIREMENTS, 'blockerResolution');
+  });
+  await check('missing dependency evidence cannot mean closed', () => {
+    const issue = issueSnapshotItem({
+      number: 7,
+      title: 'dependency',
+      body: '## Blocked by\n- #12',
+      updatedAt: '2026-01-01T00:00:00Z',
+      lastEditedAt: null,
+      labels: ['loop-ready'],
+    });
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.openIssues = completeSection([]);
+    sections.queue = completeSection([{
+      ...issue,
+      blockedBy: [12],
+      dependencies: [],
+      provenance: {
+        labeledBy: 'maintainer',
+        labeledAt: '2026-01-01T00:00:01Z',
+      },
+    }]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:02.000Z',
+      sections,
+    });
+    return snapshot.sections.queue.complete === false
+      && blockerResolutionDecision(snapshot, 7).ok === false;
+  });
+  await check('an observed open dependency blocks resolution', () => {
+    const issue = issueSnapshotItem({
+      number: 7,
+      title: 'dependency',
+      body: '## Blocked by\n- #12',
+      updatedAt: '2026-01-01T00:00:00Z',
+      lastEditedAt: null,
+      labels: ['loop-ready'],
+    });
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.openIssues = completeSection([]);
+    sections.queue = completeSection([{
+      ...issue,
+      blockedBy: [12],
+      dependencies: [{ number: 12, state: 'OPEN' }],
+      provenance: {
+        labeledBy: 'maintainer',
+        labeledAt: '2026-01-01T00:00:01Z',
+      },
+    }]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:02.000Z',
+      sections,
+    });
+    const resolution = blockerResolutionDecision(snapshot, 7);
+    return resolution.ok === false
+      && resolution.reasonCodes.includes('SNAPSHOT_DEPENDENCY_OPEN')
+      && stableJson(resolution.openDependencies) === stableJson([12]);
   });
   await check('loop ownership is recomputed from the canonical claim', () => {
     const sections = Object.fromEntries(
@@ -1351,6 +1963,49 @@ async function selfTest() {
       sections,
     });
     return snapshot.sections.openPrs.complete === false;
+  });
+  await check('fork PRs cannot carry loop ownership', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.repo = completeSection([{
+      owner: 'owner',
+      name: 'repo',
+      nameWithOwner: 'owner/repo',
+      defaultBranch: 'main',
+    }]);
+    sections.openPrs = completeSection([pullRequestItem({
+      headRepository: 'fork/repo',
+    })]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:01.000Z',
+      sections,
+    });
+    return snapshot.sections.openPrs.complete === false
+      && snapshot.sections.openPrs.error?.code === 'SNAPSHOT_SECTION_INVALID';
+  });
+  await check('fork PRs remain valid human-owned snapshot entries', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.repo = completeSection([{
+      owner: 'owner',
+      name: 'repo',
+      nameWithOwner: 'owner/repo',
+      defaultBranch: 'main',
+    }]);
+    sections.openPrs = completeSection([pullRequestItem({
+      headRepository: 'fork/repo',
+      issue: null,
+      orphanCandidate: false,
+      ownership: 'human',
+    })]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:01.000Z',
+      sections,
+    });
+    return snapshot.sections.openPrs.complete === true
+      && verifySnapshot(snapshot);
   });
   await check('malformed snapshot envelopes fail closed without throwing', () => {
     const malformed = {
@@ -1396,6 +2051,7 @@ async function selfTest() {
         labels: ['loop-ready'],
       }),
       blockedBy: [],
+      dependencies: [],
       provenance: {
         labeledBy: 'maintainer',
         labeledAt: '2026-01-01T00:00:00Z',
@@ -1407,6 +2063,25 @@ async function selfTest() {
     });
     const result = absenceDecision(snapshot, ['queue'], (item) => item.number === 9);
     return !result.ok && result.reasonCodes.includes('SNAPSHOT_ITEM_PRESENT');
+  });
+  await check('pre-PR lifecycle marker is discoverable before queue selection', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.lifecycleMarkers = completeSection([lifecycleMarkerItem()]);
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:01.000Z',
+      sections,
+    });
+    const selection = repositoryAbsenceDecision(
+      snapshot,
+      'selection',
+      (_item, name) => name === 'lifecycleMarkers',
+    );
+    return snapshot.sections.lifecycleMarkers?.complete === true
+      && snapshot.sections.openPrs.items.length === 0
+      && selection.ok === false
+      && selection.reasonCodes.includes('SNAPSHOT_ITEM_PRESENT');
   });
   await check('closed absence purposes require their complete sections', () => {
     return Object.entries(SNAPSHOT_ABSENCE_REQUIREMENTS).every(([purpose, required]) => {
@@ -1421,6 +2096,25 @@ async function selfTest() {
       return repositoryAbsenceDecision(snapshot, purpose, () => false).ok === false;
     });
   });
+  await check('actionability requires complete issue and blocking-label evidence', () => {
+    const sections = Object.fromEntries(
+      SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
+    );
+    sections.blockedIssues = incompleteSection('PAGE_FETCH_FAILED', 'offline');
+    sections.openIssues = incompleteSection('PAGE_FETCH_FAILED', 'offline');
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:00.000Z',
+      sections,
+    });
+    const actionability = repositoryAbsenceDecision(
+      snapshot,
+      'actionability',
+      () => false,
+    );
+    return actionability.ok === false
+      && stableJson(actionability.incompleteSections)
+        === stableJson(['blockedIssues', 'openIssues']);
+  });
 
   const failures = checks.filter(([, passed]) => !passed);
   for (const [name] of failures) console.error(`FAIL: ${name}`);
@@ -1432,7 +2126,36 @@ async function selfTest() {
   return failures.length === 0;
 }
 
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.error) {
+    console.error(`snapshot-contract: ${parsed.error}`);
+    return 2;
+  }
+  if (parsed.mode === 'self-test') return await selfTest() ? 0 : 1;
+  try {
+    const snapshot = readSnapshotInput();
+    const result = parsed.mode === 'invalidate'
+      ? invalidateSnapshot(snapshot, parsed.reasonCode)
+      : {
+        snapshot,
+        evidence: createQueueEvidence({
+          snapshot,
+          purpose: parsed.purpose,
+          runInstanceFingerprint: parsed.runInstanceFingerprint,
+          configFingerprint: parsed.configFingerprint,
+          configuredBaseBranch: parsed.configuredBaseBranch,
+        }),
+      };
+    process.stdout.write(`${JSON.stringify(result, null, 1)}\n`);
+    return 0;
+  } catch (error) {
+    console.error(`snapshot-contract: ${error.message}`);
+    return 1;
+  }
+}
+
 const isMain = process.argv[1]
   ? pathToFileURL(process.argv[1]).href === import.meta.url
   : false;
-if (isMain) process.exit(await selfTest() ? 0 : 1);
+if (isMain) process.exit(await main());

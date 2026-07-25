@@ -19,11 +19,11 @@ in a public issue.
 Create a topic branch and preserve the repository's operational invariants:
 
 - the writer of an artifact never reviews that artifact;
-- a bare invocation runs on the active host, while cross-engine selection is explicit and lasts for
-  that invocation only;
+- a bare invocation selects the active host/engine pair, while a cross-engine selector is a
+  best-effort captured preference for that invocation only, never authenticated user provenance;
 - untrusted issue, pull-request, and review text never becomes shell source or policy;
 - objective review, gate, CI, and delivery evidence stays bound to the exact head; and
-- a human merges by default.
+- v0.40 accepts only manual merge and a human merges.
 
 Behavior changes to deterministic tools need fixtures. Operational prose changes need a matching
 contract check or a focused static search when practical. Avoid new dependencies unless the value
@@ -31,14 +31,10 @@ clearly outweighs the added supply-chain and setup cost.
 
 ## Verification
 
-The canonical verification sequence is intentionally portable across Linux and macOS and uses only
-POSIX shell features, Git, and Node.js:
+The canonical verification command is the same one CI runs on Linux and macOS:
 
 ```bash
-for file in templates/tools/*.mjs; do
-  node "$file" --self-test || exit 1
-done
-node templates/tools/release-verify.mjs
+node templates/tools/verify.mjs --plugin-root .
 git diff --check
 ```
 
