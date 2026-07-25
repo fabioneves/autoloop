@@ -26,7 +26,7 @@ Skills and the vendored `tools/agentic/*` scripts read this block. Edit it direc
 {{CONFIG_JSON}}
 ```
 
-- `version` — config schema version; v0.40.2 requires `0.25.0`. Setup migrates older blocks through
+- `version` — config schema version; v0.40.3 requires `0.25.0`. Setup migrates older blocks through
   a visible diff. A missing, older, or unknown version is invalid at runtime.
 - `baseBranch` — the configured short branch name used by every base-aware claim, lane, guard,
   delivery, and merge check.

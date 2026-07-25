@@ -5,6 +5,36 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.40.3] - 2026-07-25
+
+### Fixed
+
+- Vendored contract self-tests resolved reviewer templates relative to their own file, which only
+  lands in the plugin tree. Once vendored to `tools/agentic/`, `verify.mjs --install-root` failed
+  with `ENOENT` unless the templates were also copied loose into `tools/`. The check now applies to
+  a shipped template where one exists and is skipped as not applicable where none does, so an
+  installed repository needs no stray files.
+- The command guard blocked every command in a repository whose configuration still awaited
+  migration, including the commands Setup needed to perform it. A migratable schema now reports the
+  remedy and yields.
+- The command guard applied to every Bash call in a project, so ordinary development fought a policy
+  aimed at loop-issued commands. It now enforces only while a run is open, evidenced by a live
+  broker lease bound to the caller's own ancestry. Anything unreadable or ambiguous means no run.
+
+### Changed
+
+- `opencode.json` moves to `.opencode/opencode.json`, alongside the other opencode artifacts.
+  opencode reads project configuration from either location, verified against 1.18.4, so the
+  scaffold no longer adds a loose file to the project root. Setup merges a legacy root copy into
+  `.opencode/` and removes it.
+- Setup asks about the merge policy instead of silently resetting it. A repository on or migrating
+  from `ratified` or `auto` is offered the restore, told in one sentence what an unauthenticated
+  trigger means, and has both `merge.policy` and `merge.unverifiedInvocationAcknowledged` written
+  together.
+- Setup shows every numeric cap with its current value beside the scaffold default and offers to
+  change any, calling out `sliceMaxLines` and `codeReviewRoundsPerUnit`. A migrated repository keeps
+  its own values, so showing them is what makes a preserved value distinguishable from a silent one.
+
 ## [0.40.2] - 2026-07-25
 
 ### Added
@@ -140,7 +170,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.2...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.3...HEAD
+[0.40.3]: https://github.com/fabioneves/autoloop/compare/v0.40.2...v0.40.3
 [0.40.2]: https://github.com/fabioneves/autoloop/compare/v0.40.1...v0.40.2
 [0.40.1]: https://github.com/fabioneves/autoloop/compare/v0.40.0...v0.40.1
 [0.40.0]: https://github.com/fabioneves/autoloop/compare/v0.39.9...v0.40.0

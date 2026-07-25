@@ -10,7 +10,7 @@
 <strong>Labelled GitHub issues in. Gated, independently reviewed PRs out.</strong>
 
 <p>
-  <img alt="release v0.40.2" src="https://img.shields.io/badge/release-v0.40.2-8b5cf6?style=flat-square">
+  <img alt="release v0.40.3" src="https://img.shields.io/badge/release-v0.40.3-8b5cf6?style=flat-square">
   <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
   <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square">
   <img alt="human controlled merge" src="https://img.shields.io/badge/authority-human_merge-f59e0b?style=flat-square">
@@ -334,7 +334,7 @@ tools/agentic/
   autoloop.js               optional opencode plugin wiring the same vendored guards
 .opencode/agent/
   autoloop-reviewer.md      closed-world reviewer; only in-worktree read/glob/grep/list survive
-opencode.json               instructions entry auto-priming STATE.md (merged, never clobbered)
+.opencode/opencode.json     instructions entry auto-priming STATE.md (merged, never clobbered)
 ```
 
 The command guard hardens literal model-issued shell operations; it is not an arbitrary-program
@@ -363,7 +363,7 @@ Historical records and capability results have zero route-selection authority. O
 engine's installed authenticated capability supplies standing cost authority; fallback requires
 its own independently authenticated capability.
 
-v0.40.2 supports exactly five active-host/captured-preference pairs:
+v0.40.3 supports exactly five active-host/captured-preference pairs:
 
 | Active host | Captured engine preference | Route | Live verification |
 |---|---|---|---|
@@ -594,7 +594,7 @@ the exact checked-out commit reachable from `origin/main`. Configure the
 `github.token`, but honestly fails when that token cannot read the required live controls.
 
 Configured repositories record their scaffold contract version in the JSON block inside
-`docs/agentic/STATE.md`. v0.40.2 uses schema `0.25.0`. Breaking config-shape changes bump the minor
+`docs/agentic/STATE.md`. v0.40.3 uses schema `0.25.0`. Breaking config-shape changes bump the minor
 version while the project is `0.x`; re-running setup audits and migrates the repository-owned layer
 through a visible diff and, when policy is involved, a human-reviewed and human-merged policy PR.
 

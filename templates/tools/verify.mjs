@@ -821,7 +821,7 @@ function installChecks(root) {
     '.codex/agents/autoloop-reviewer.toml',
     '.opencode/agent/autoloop-reviewer.md',
     'docs/agentic/LOOP.md',
-    'opencode.json',
+    '.opencode/opencode.json',
   ]) {
     checks.push({
       name: `required artifact ${relativePath}`,
@@ -876,7 +876,7 @@ function installChecks(root) {
     ),
   });
   for (const relativePath of [
-    'opencode.json',
+    '.opencode/opencode.json',
   ]) {
     try {
       readFileSync(resolve(root, relativePath));
