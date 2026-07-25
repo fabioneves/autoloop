@@ -52,9 +52,10 @@ jobs:
             import { probeProcessAuthorityIsolation } from "./templates/tools/route-adapter-contract.mjs";
             const reasons = [];
             const ok = probeProcessAuthorityIsolation(process.cwd(), (r) => reasons.push(r));
-            console.log("probe ok=", ok, "reasons=", JSON.stringify(reasons));
-          '
-          log show --last 2m --predicate 'eventMessage contains "deny"' --style compact 2>/dev/null | rg -i "sandbox" | tail -25 || true
+            console.log("PROBE ok=", ok, "reasons=", JSON.stringify(reasons));
+          ' || true
+          echo "----- sandbox denials -----"
+          log show --last 2m --predicate 'senderImagePath contains "Sandbox"' --style compact 2>/dev/null | rg -i "deny" | tail -20 || true
       - name: Smoke-test process authority isolation
         run: node templates/tools/route-adapter-contract.mjs --self-test-authority-isolation
       - name: Check measurement budget policy (pending is not a pass)
