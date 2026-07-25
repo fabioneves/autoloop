@@ -87,7 +87,10 @@ function run(executable, args, cwd) {
   const result = spawnSync(executable, args, {
     cwd,
     encoding: 'utf8',
-    timeout: 120000,
+    // Contract self-tests spawn Git and Node repeatedly, and a macOS runner is
+    // slow enough at process creation to exceed a two-minute ceiling that Linux
+    // clears in seconds. The bound still catches a genuine hang.
+    timeout: 600000,
     maxBuffer: MAX_OUTPUT_BYTES,
   });
   return {

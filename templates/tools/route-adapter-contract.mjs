@@ -5330,6 +5330,10 @@ function linkedWorktreeGitEntrySelfTest() {
 }
 
 function gitProbeHardeningSelfTest() {
+  // The broker commit this asserts runs inside the authority sandbox, which
+  // v0.40 verifies on Linux only. A host without that boundary cannot exercise
+  // the contract, so it is unavailable rather than failed.
+  if (!supportsProcessAuthorityIsolation(process.platform)) return true;
   // Git reports realpaths, so a macOS TMPDIR reached through a symlink would
   // make the fixture root and Git's own answers disagree.
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'autoloop-git-probe-')));
