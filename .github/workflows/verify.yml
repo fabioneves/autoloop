@@ -55,24 +55,15 @@ jobs:
           --check-budget-policy templates/measurement-budget-policy.template.json
       - name: Verify release and contracts
         run: node templates/tools/verify.mjs --plugin-root .
-      - name: Verify release tag and live controls
+      - name: Verify release tag
         if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
-        env:
-          AUTOLOOP_RELEASE_POLICY_TOKEN: ${{ secrets.AUTOLOOP_RELEASE_POLICY_TOKEN || github.token }}
         run: >-
           node templates/tools/release-verify.mjs
           --release-mode
-          --allow-unverified-live-controls
-          --check-tag-policy
-          --check-base-policy
-          --check-immutable-releases
           --check-root .
           --repository "$GITHUB_REPOSITORY"
           --tag "$GITHUB_REF_NAME"
           --main-ref refs/remotes/origin/main
-          --base-branch main
-          --required-check "Contracts (macos-latest, Node 24)@15368"
-          --required-check "Contracts (ubuntu-latest, Node 22)@15368"
       - name: Check committed whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}

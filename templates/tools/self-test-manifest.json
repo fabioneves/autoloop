@@ -22,7 +22,7 @@
     "merge-authorization-contract.mjs": "d162977e509012240b319b36b069a0e564cbef3ed76e5584899bac083e4f8615",
     "prime.mjs": "9af86052822178cadb716c99557e53281099c01c8dc5183a84203e41eba62140",
     "publish-verdict.mjs": "59c63e124644459bbd48ac2ae7071bfb5b83d9c83736ddc686ff453729356c53",
-    "release-verify.mjs": "d2ce467c06f5e22c6860fd121e2ddbc5abdc55c22f237a48763c163e7b8f937e",
+    "release-verify.mjs": "12f03891d668fa093699c21055ca6d483b883fab44753161ffdc1cb650aedf7d",
     "review-contract.mjs": "5631663a153275a8b8e67d07383d4bc98c1a0b7eb2f2425f4ff49785cbc13468",
     "route-adapter-contract.mjs": "f2bcb32a8911f58a60c63908c97e8668f711072c34f6182470e93099e1cf0d0d",
     "run-scope.mjs": "928940963a602e652e184b8645aac925c595ef606928da4ce9f5ec1e165891b9",

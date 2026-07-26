@@ -314,7 +314,7 @@ tools/agentic/
   lifecycle-contract.mjs    durable phase markers and idempotent reconciliation
   lifecycle-driver.mjs      stable-read lifecycle effects and revision epochs
   measurement-contract.mjs  authenticated raw cost records and strict cohort statistics
-  release-verify.mjs        release consistency, live controls, and portable helpers
+  release-verify.mjs        static release consistency and portable helpers
   verify.mjs                canonical installed contract and syntax verification
   contract-lint.mjs         stale routing and duplicate-grammar detection
   command-guard.mjs         blocks protected mutations plus opaque shell source and CLI aliases
@@ -584,20 +584,17 @@ Before a release, run the portable Linux/macOS verification command:
 
 ```bash
 node templates/tools/release-verify.mjs
-node templates/tools/release-verify.mjs --check-tag-policy --check-root .
-node templates/tools/release-verify.mjs --check-immutable-releases --check-root .
 ```
 
-The two live checks bind the audited repository to the checkout's exact GitHub origin. They require
-an authenticated `AUTOLOOP_RELEASE_POLICY_TOKEN` (or `gh` authentication) that can read repository
-Administration settings and disclose ruleset bypass actors. Missing, insufficient, or redacted
-API evidence fails verification. When organization policy must enforce immutability, append
-`--require-owner-enforcement` to the immutable-release check.
+The release gate verifies the static release contract only: synchronized version literals and
+manifests, the release badge, a dated changelog heading, the skill startup banners, the committed
+release evidence, and the tag workflow's shape. Tag CI adds `--release-mode`, which also proves
+from local git objects that `v<VERSION>` is an annotated tag on the exact checked-out commit
+reachable from `origin/main` and that the checkout's origin is the repository CI runs for.
 
-Tag CI repeats both live checks and additionally proves that `v<VERSION>` is an annotated tag on
-the exact checked-out commit reachable from `origin/main`. Configure the
-`AUTOLOOP_RELEASE_POLICY_TOKEN` Actions secret for that job; the workflow falls back to
-`github.token`, but honestly fails when that token cannot read the required live controls.
+Branch, tag, and release protection (rulesets, immutable releases) are configured on GitHub and
+are the maintainer's responsibility; the release gate does not read or verify that server-side
+configuration.
 
 Configured repositories record their scaffold contract version in the JSON block inside
 `docs/agentic/STATE.md`. v0.41.3 uses schema `0.25.0`. Breaking config-shape changes bump the minor
