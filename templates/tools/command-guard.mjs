@@ -416,6 +416,11 @@ function inlineInterpreterSource(cmd) {
     '--eval',
     '--print',
   ]);
+  // Flags that make an interpreter print and exit without reading any source.
+  // Long forms only, and deliberately: `-v` is the version flag for node, ruby,
+  // php and perl but means "verbose" for python, where a script is still read
+  // from stdin. The long spelling is unambiguous for every interpreter below.
+  const terminalFlags = new Set(['--version', '--help']);
   const interpreters = new Set([
     'bash',
     'bun',
@@ -472,6 +477,13 @@ function inlineInterpreterSource(cmd) {
           || /^-[A-Za-z]*[ceEpr][A-Za-z]*$/u.test(argument),
       )) {
         return true;
+      }
+      // A probe that only prints a version or a usage banner executes nothing,
+      // so it is not the no-script-argument stdin shape the return below cat-
+      // ches. Checked after the source-flag test, so `node --version -e '...'`
+      // still blocks on the `-e`.
+      if (argumentsAfterExecutable.every((argument) => terminalFlags.has(argument))) {
+        return false;
       }
       return !argumentsAfterExecutable.some((argument) => !argument.startsWith('-'));
     });
@@ -1664,6 +1676,20 @@ function selfTest() {
     ["python3 -c 'import os; os.system(\"g\"+\"h pr m\"+\"erge 42\")'", 'feat/gh-1-x', true],
     ["node -e 'require(\"child_process\").execFileSync(\"g\"+\"h\",[\"pr\",\"m\"+\"erge\",\"42\"])'", 'feat/gh-1-x', true],
     ["perl -e 'system(\"g\".\"h\", \"pr\", \"m\".\"erge\", 42)'", 'feat/gh-1-x', true],
+    // A version or help probe runs no source at all. The rule below treats an
+    // interpreter with no script argument as reading from stdin, which is right
+    // for a bare `node` and wrong for `node --version` — and the setup audit
+    // battery is exactly `gh auth status && node --version && codex --version`.
+    ['node --version', 'feat/gh-1-x', false],
+    ['python3 --version', 'feat/gh-1-x', false],
+    ['deno --help', 'feat/gh-1-x', false],
+    ['echo probe && gh auth status && node --version', 'feat/gh-1-x', false],
+    // Short forms stay opaque on purpose: `-v` is the version flag for node and
+    // ruby but means "verbose" for python, where it still reads a script from
+    // stdin. The long form is unambiguous everywhere and costs nothing to write.
+    ['node -v', 'feat/gh-1-x', true],
+    ['node', 'feat/gh-1-x', true],
+    ["node --version -e 'require(\"child_process\").execFileSync(\"g\"+\"h\")'", 'feat/gh-1-x', true],
     ["printf '\\\\147\\\\150\\\\040\\\\160\\\\162\\\\040\\\\155\\\\145\\\\162\\\\147\\\\145\\\\040\\\\064\\\\062\\\\012' | sh", 'feat/gh-1-x', true],
     ["printf '\\\\147\\\\151\\\\164\\\\040\\\\160\\\\165\\\\163\\\\150\\\\040\\\\157\\\\162\\\\151\\\\147\\\\151\\\\156\\\\040\\\\110\\\\105\\\\101\\\\104\\\\072\\\\164\\\\162\\\\165\\\\156\\\\153\\\\012' | bash", 'feat/gh-1-x', true],
     ["printf 'import os\\\\nos.system(chr(103)+chr(104)+\" pr \"+\"merge 42\")\\\\n' | python3", 'feat/gh-1-x', true],

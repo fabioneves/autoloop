@@ -3,6 +3,21 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.42.3] - 2026-07-26
+
+### Fixed
+
+- **The command guard allows an interpreter version probe.** `inlineInterpreterSource` treats an
+  interpreter with no script argument as reading source from stdin, which is right for a bare
+  `node` and wrong for `node --version`: every argument starts with `-`, so the probe looked like
+  the stdin shape. It refused `node --version`, `python3 --version`, `deno --help`, and therefore
+  the whole setup audit battery, whose first line is
+  `gh auth status && node --version && codex --version`. `--version` and `--help` now read as what
+  they are — the interpreter prints and exits without executing anything. Long forms only, because
+  `-v` is the version flag for node, ruby, php and perl but means "verbose" for python, where a
+  script is still read from stdin. The test runs after the source-flag check, so
+  `node --version -e '...'` still blocks on the `-e`, and a bare `node` still blocks.
+
 ## [0.42.2] - 2026-07-26
 
 ### Fixed
