@@ -115,7 +115,11 @@ function writeEngineShim(scratch, argvLog) {
     'cat > /dev/null',
     'case "$*" in',
     `  *--json-schema*) printf '%s\\n' ${JSON.stringify(verdict)} ;;`,
-    `  *) printf '%s\\n' ${JSON.stringify(text)} ;;`,
+    // The writer branch. A real writer leaves the checkout moved, and dispatch
+    // now refuses an implement that does not, so the fixture writes a file
+    // rather than only claiming to have done the work.
+    `  *) printf 'fixture slice\\n' > fixture-slice.txt`,
+    `     printf '%s\\n' ${JSON.stringify(text)} ;;`,
     'esac',
     '',
   ].join('\n'));

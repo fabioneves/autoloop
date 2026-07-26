@@ -758,7 +758,27 @@ function replaceLabels(state, labels) {
   }
 }
 
-function ensureLocalClaimGit(root, request) {
+// `sanitizedEnvironment` sets GIT_CONFIG_GLOBAL=/dev/null and strips every GIT_*
+// variable, so neither `~/.gitconfig` nor GIT_AUTHOR_* can reach the claim
+// commit. A checkout without repo-local `user.*` therefore has no identity to
+// commit under at all. The loop supplies its own rather than reading any config
+// back: the GitHub login the driver already authenticated as is the honest
+// author of a machine-made commit, and binding it here matches the
+// executor-identity equality the merge gate enforces later.
+export function claimCommitIdentity(viewer) {
+  // A GitHub login, and nothing that could smuggle a second `-c` argument or a
+  // newline into the commit header. An absent viewer is a caller bug, not a
+  // reason to author as `undefined`.
+  if (typeof viewer !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(viewer)) {
+    throw new Error('claim commit requires the authenticated GitHub login');
+  }
+  return {
+    name: viewer,
+    email: `${viewer}@users.noreply.github.com`,
+  };
+}
+
+function ensureLocalClaimGit(root, request, viewer) {
   const status = command(
     'git',
     ['status', '--porcelain=v1', '--untracked-files=all'],
@@ -801,6 +821,7 @@ function ensureLocalClaimGit(root, request) {
       { cwd: root },
     );
   }
+  const identity = claimCommitIdentity(viewer);
   command(
     'git',
     [
@@ -808,6 +829,10 @@ function ensureLocalClaimGit(root, request) {
       'core.hooksPath=/dev/null',
       '-c',
       'commit.gpgsign=false',
+      '-c',
+      `user.name=${identity.name}`,
+      '-c',
+      `user.email=${identity.email}`,
       'commit',
       '--allow-empty',
       '--no-verify',
@@ -830,7 +855,7 @@ function productionAdapters(root) {
       if (!labels.includes('loop-started')) labels.push('loop-started');
       labels.push('loop:04-claim');
       replaceLabels(state, [...new Set(labels)]);
-      ensureLocalClaimGit(root, request);
+      ensureLocalClaimGit(root, request, state.viewer);
     },
     ensureRemoteClaim: (state, request) => {
       const current = repositoryTarget(root);
@@ -1533,7 +1558,7 @@ function selfTest() {
       partialRequest.intent.branch,
       partialRequest.intent.issue,
     );
-    ensureLocalClaimGit(claimRoot, partialRequest);
+    ensureLocalClaimGit(claimRoot, partialRequest, 'loop-login');
     const recoveredClaim = findClaimCommit(
       claimRoot,
       partialRequest.intent.branch,
@@ -1548,6 +1573,65 @@ function selfTest() {
       && recoveredClaim.headOid === recoveredClaim.claimCommit;
   } finally {
     rmSync(claimRoot, { recursive: true, force: true });
+  }
+  // A real checkout carries no repo-local `user.*`; the operator's identity lives
+  // in `~/.gitconfig`, which `sanitizedEnvironment` deliberately hides behind
+  // GIT_CONFIG_GLOBAL=/dev/null. The claim commit must therefore carry its own
+  // identity or it cannot be authored at all — a live 0.42.1 run died here with
+  // "Author identity unknown". The fixture above writes `user.*` into the repo,
+  // which is precisely why the gap survived every prior self-test run.
+  const bareRoot = mkdtempSync(join(tmpdir(), 'autoloop-lifecycle-bare-'));
+  let claimAuthorsItself = false;
+  try {
+    command('git', ['init', '-q', '-b', 'main', bareRoot]);
+    command(
+      'git',
+      [
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'user.name=Base',
+        '-c',
+        'user.email=base@example.invalid',
+        'commit',
+        '--allow-empty',
+        '--no-verify',
+        '-m',
+        'base',
+      ],
+      { cwd: bareRoot },
+    );
+    const bareBaseOid = command(
+      'git',
+      ['rev-parse', '--verify', 'main^{commit}'],
+      { cwd: bareRoot },
+    ).toLowerCase();
+    const bareRequest = fakeReconcileRequest();
+    bareRequest.intent.planHash = sha256(bareRequest.plan.body);
+    bareRequest.intent.branch = 'feat/gh-7-bare';
+    bareRequest.intent.plannedBaseOid = bareBaseOid;
+    ensureLocalClaimGit(bareRoot, bareRequest, 'loop-login');
+    const bareClaim = findClaimCommit(
+      bareRoot,
+      bareRequest.intent.branch,
+      bareRequest.intent.issue,
+    );
+    const author = command(
+      'git',
+      ['log', '-1', '--format=%an <%ae>'],
+      { cwd: bareRoot },
+    );
+    const identity = claimCommitIdentity('loop-login');
+    claimAuthorsItself =
+      bareClaim.complete
+      && bareClaim.exists
+      && author === `${identity.name} <${identity.email}>`;
+  } catch {
+    claimAuthorsItself = false;
+  } finally {
+    rmSync(bareRoot, { recursive: true, force: true });
   }
   const checks = [
     [
@@ -1609,6 +1693,24 @@ function selfTest() {
     [
       'partial local claim resumes after a switch-before-commit crash',
       partialClaimRecovery,
+    ],
+    [
+      'the claim commit authors itself when the checkout configures no identity',
+      claimAuthorsItself,
+    ],
+    [
+      'claim identity refuses anything that is not a GitHub login',
+      ['', null, undefined, 'a b', 'x\n-c core.hooksPath=evil', '-flag', 'a'.repeat(40)]
+        .every((bad) => {
+          try {
+            claimCommitIdentity(bad);
+            return false;
+          } catch {
+            return true;
+          }
+        })
+      && claimCommitIdentity('loop-login').email
+        === 'loop-login@users.noreply.github.com',
     ],
   ];
   const failures = checks.filter(([, ok]) => !ok);

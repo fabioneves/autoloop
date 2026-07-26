@@ -42,10 +42,12 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // minutes, and a run that needs more than half an hour has a different problem.
 const DISPATCH_TIMEOUT_MS = 30 * 60 * 1000;
 
-// Claude Code refuses to run these without an explicit grant once the
-// permission mode is forced to `default`, which CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
-// does. Read-only tools (Glob/Grep/Read) need no entry, so the deny list below
-// stays the only statement this contract makes about reads.
+// The mutating tools, granted explicitly in the settings allow list rather than
+// left to the permission mode alone. The grant is derived from the posture's own
+// `--tools` ceiling, so a posture grants exactly what it declares and the
+// reviewer grants nothing at all. Read-only tools (Glob/Grep/Read) need no
+// entry, so the deny list below stays the only statement this contract makes
+// about reads.
 const TOOLS_REQUIRING_GRANT = Object.freeze(['Bash', 'Edit', 'Write']);
 
 // The two postures, carried over unchanged from the route adapter they used to
@@ -218,12 +220,32 @@ export function dispatchArgv(role, tools) {
   ];
 }
 
+// The child inherits this process's environment and nothing is added to it.
+// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 used to be set here to satisfy the broker
+// capability `claude.subprocess.credentials-scrubbed`; v0.42.0 deleted the
+// broker, and with it both that predicate and the cleanup that swept the stub
+// files scrub mode creates. Setting it now buys nothing and costs three things
+// the self-test pins: the child ignores `--permission-mode`, the checkout gains
+// seventeen zero-byte stubs nobody removes, and every Bash call dies at sandbox
+// start on `/home/.mcp.json`.
 function dispatchEnvironment() {
-  return { ...process.env, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' };
+  return { ...process.env };
 }
 
 function failure(step, code, message, detail = {}) {
   return { ok: false, step, error: { code, message, ...detail } };
+}
+
+// What the writer is supposed to have moved: the committed history plus the
+// working tree. `null` means there is nothing to compare — the cwd is not a Git
+// work tree, or carries no commit yet — and this tool does not invent a
+// requirement it cannot observe.
+function checkoutFingerprint(cwd) {
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' });
+  if (head.status !== 0) return null;
+  const tree = spawnSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8' });
+  if (tree.status !== 0) return null;
+  return `${head.stdout.trim()}\n${tree.stdout}`;
 }
 
 // Claude's stream-json output ends with exactly one `result` event. More than
@@ -262,6 +284,8 @@ export function runDispatch({
   startedAtMs = PROCESS_START_MS,
 }) {
   const argv = dispatchArgv(role, tools);
+  const checkoutBefore =
+    ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const started = Date.now();
   const startupMs = started - startedAtMs;
   const result = spawnSync(engine, argv, {
@@ -327,6 +351,14 @@ export function runDispatch({
       'ENGINE_RESULT_EMPTY',
       `${role}: the engine returned an empty result`,
       { ms, startupMs, stderr },
+    );
+  }
+  if (checkoutBefore !== null && checkoutFingerprint(cwd) === checkoutBefore) {
+    return failure(
+      'result',
+      'WRITER_MADE_NO_CHANGE',
+      `${role}: the engine answered but the checkout is unchanged`,
+      { ms, startupMs, stderr, text },
     );
   }
   return { ok: true, role, tools, startupMs, ms, text };
@@ -428,7 +460,7 @@ const PASSING_VERDICT = {
 };
 
 function shimBody(script) {
-  return `#!/bin/sh\nprintf '%s' "$*" > "$AUTOLOOP_SHIM_ARGV"\ncat > "$AUTOLOOP_SHIM_STDIN"\n${script}\n`;
+  return `#!/bin/sh\nprintf '%s' "$*" > "$AUTOLOOP_SHIM_ARGV"\nenv > "$AUTOLOOP_SHIM_ENV"\ncat > "$AUTOLOOP_SHIM_STDIN"\n${script}\n`;
 }
 
 function selfTest() {
@@ -535,8 +567,10 @@ function selfTest() {
   try {
     const argvPath = join(scratch, 'argv.txt');
     const stdinPath = join(scratch, 'stdin.txt');
+    const envPath = join(scratch, 'env.txt');
     process.env.AUTOLOOP_SHIM_ARGV = argvPath;
     process.env.AUTOLOOP_SHIM_STDIN = stdinPath;
+    process.env.AUTOLOOP_SHIM_ENV = envPath;
 
     const shimDirectory = join(scratch, 'bin');
     const engine = join(shimDirectory, 'claude');
@@ -567,6 +601,20 @@ function selfTest() {
       'a live reviewer spawn never receives a write tool',
       !/--tools \S*(?:Write|Edit|Bash)/.test(launchedArgv),
     );
+    // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 made the child ignore
+    // `--permission-mode` (claude 2.1.220 prints "Permission mode forced to
+    // default"), pre-create seventeen zero-byte stub files in the checkout, and
+    // — measured on 0.42.1 — fail every Bash call at sandbox start with
+    // "bwrap: Can't create file at /home/.mcp.json: Permission denied", which
+    // blocked a live run at 05/11 IMPLEMENT. It was set to satisfy the broker's
+    // `claude.subprocess.credentials-scrubbed` capability and the broker cleaned
+    // the stubs it caused; v0.42.0 deleted both. Nothing is left but the costs.
+    check(
+      'the dispatch environment never forces the child out of its posture',
+      !readFileSync(envPath, 'utf8')
+        .split('\n')
+        .some((line) => line.startsWith('CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=')),
+    );
     check(
       'every result reports the wrapper overhead separately from the engine time',
       Number.isInteger(reviewed.startupMs)
@@ -590,6 +638,60 @@ function selfTest() {
       && implemented.text === 'implemented the slice'
       && readFileSync(argvPath, 'utf8').includes('--permission-mode acceptEdits'),
     );
+
+    // `ok` for a review role means a schema-valid verdict. For the writer it
+    // meant only that the engine answered, so an implement whose sandbox never
+    // started returned `ok: true` carrying its own error as prose — which is how
+    // a live 0.42.1 run reported a no-op implement as a success. The checkout is
+    // the evidence the envelope lacks.
+    const repoScratch = mkdtempSync(join(tmpdir(), 'autoloop-dispatch-repo-'));
+    spawnSync('git', ['init', '-q', '-b', 'main', repoScratch]);
+    spawnSync(
+      'git',
+      [
+        '-c',
+        'user.name=Base',
+        '-c',
+        'user.email=base@example.invalid',
+        'commit',
+        '--allow-empty',
+        '-q',
+        '-m',
+        'base',
+      ],
+      { cwd: repoScratch },
+    );
+    writeEngineShim(shimDirectory, shimBody(
+      resultEvent({ result: 'claimed to implement the slice' }),
+    ));
+    const idleWriter = runDispatch({
+      role: 'implement',
+      prompt: 'implement the plan',
+      tools: writerTools,
+      cwd: repoScratch,
+      engine,
+    });
+    check(
+      'an implement that leaves the checkout untouched is a typed failure',
+      idleWriter.ok === false
+      && idleWriter.step === 'result'
+      && idleWriter.error.code === 'WRITER_MADE_NO_CHANGE',
+    );
+    writeEngineShim(shimDirectory, shimBody(
+      `printf 'work\\n' > implemented.txt\n${resultEvent({ result: 'implemented the slice' })}`,
+    ));
+    const busyWriter = runDispatch({
+      role: 'implement',
+      prompt: 'implement the plan',
+      tools: writerTools,
+      cwd: repoScratch,
+      engine,
+    });
+    check(
+      'an implement that moves the checkout still succeeds',
+      busyWriter.ok === true && busyWriter.text === 'implemented the slice',
+    );
+    rmSync(repoScratch, { recursive: true, force: true });
 
     writeEngineShim(shimDirectory, shimBody(
       resultEvent({ structured_output: { verdict: 'maybe' } }),

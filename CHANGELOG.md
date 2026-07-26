@@ -3,24 +3,33 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
-## [Unreleased]
+## [0.42.2] - 2026-07-26
 
-### Added
+### Fixed
 
-- `scaffold.mjs --merge-state` and `--merge-loop`: a mechanical splice of template-owned prose with
-  repository-owned content, returning a typed per-section report (`from-template`, `preserved`,
-  `new`, `needs-human-review`) plus the merged document. The template declares its own
-  repository-owned regions with `{{PLACEHOLDER}}` markers, and each marker's shape decides how that
-  region merges — fenced block (the `autoloop-config` block), list extension point (extra
-  escalate paths), whole-section repository prose (Mission and its invariants), or a scalar value
-  (LOOP's project name, checklist path, and gate command). Lessons is declared repository memory,
-  and a template that renames it fails closed. Nothing is dropped: an installed section with no
-  template counterpart is preserved in place and reported, and any structural ambiguity that could
-  lose repository bytes returns the report with exit 3 and no document at all. `--write` is
-  required to touch disk. A measured 11.2-minute migration spent 203s reading the templates in
-  fragments and 148s hand-splicing STATE prose; against that repository's real pre-migration
-  documents the merge reproduces the hand-merged LOOP byte-for-byte and leaves three flagged
-  decisions in STATE.
+- **The claim commit carries its own identity.** `sanitizedEnvironment` sets
+  `GIT_CONFIG_GLOBAL=/dev/null` and strips every `GIT_*` variable, so neither `~/.gitconfig` nor
+  `GIT_AUTHOR_*` could reach the claim commit and a checkout without repo-local `user.*` — which is
+  what a real checkout looks like — had no identity to commit under at all. A live run died with
+  "Author identity unknown" at the claim step. The driver now supplies the GitHub login it already
+  authenticated as, which also binds the commit to the identity the merge gate checks later. The
+  path was unreachable before 0.42.1: the driver refused every non-manual policy earlier, so
+  fixing that is what exposed this.
+- **Dispatch no longer forces the engine's env scrub.** `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` was
+  set on every child to satisfy the broker capability `claude.subprocess.credentials-scrubbed`,
+  and the broker also swept the stub files scrub mode creates. v0.42.0 deleted the broker, the
+  predicate, and the sweeper; only the costs remained. Measured: the child ignored
+  `--permission-mode` so the declared postures were never applied, the checkout gained seventeen
+  zero-byte stubs nobody removed, and every Bash call died at sandbox start on `/home/.mcp.json`,
+  which blocked a live run at the implement step. Roles again run under the posture they declare.
+- **An implement dispatch proves it moved the checkout.** `ok` from a review role means a
+  schema-valid verdict; from the writer it meant only that the engine answered, so an implement
+  whose sandbox never started returned `ok: true` carrying its own error as the text payload.
+  Writer dispatches now fingerprint HEAD and porcelain status around the spawn and fail typed with
+  `WRITER_MADE_NO_CHANGE`, preserving the engine's text as the diagnostic. A cwd that is not a Git
+  work tree, or carries no commit yet, asserts nothing.
+
+## [0.42.1] - 2026-07-26
 
 ### Changed
 
@@ -40,8 +49,6 @@ Notable changes to Autoloop are recorded here. The format follows
   credential. Branch, tag, and release protection stay configured on GitHub as the
   maintainer's responsibility; `--release-mode` still verifies the static release contract
   and proves the annotated-tag binding from local git objects.
-
-## [0.42.1] - 2026-07-26
 
 ### Fixed
 
