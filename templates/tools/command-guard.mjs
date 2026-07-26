@@ -27,6 +27,7 @@
 
 import {
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -34,8 +35,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { isAbsolute, join, resolve } from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   MIGRATABLE_CONFIG_VERSIONS,
@@ -460,16 +461,6 @@ function opaqueCommandAssembler(cmd) {
       if (!fileBacked) return true;
     }
     return false;
-  });
-}
-
-function invokesIntentCapture(cmd) {
-  return shellSegments(executableLexicalText(cmd)).some(({ command }) => {
-    const words = shellWords(command);
-    return words.some((word) =>
-      /(?:^|\/)intent-contract\.mjs$/u.test(word))
-      && words.some((word) =>
-        ['--capture-hook', '--capture-hook-json'].includes(word));
   });
 }
 
@@ -1124,21 +1115,6 @@ export function evaluate(rawCmd, branch, options = {}) {
   const lexicalCmd = executableLexicalText(cmd);
   const baseBranch = options.baseBranch ?? 'main';
 
-  if (
-    invokesIntentCapture(lexicalCmd)
-    || /(?:^|[\s'"])\.git\/autoloop\/intents(?:\/|[\s'"]|$)/u.test(
-      lexicalCmd,
-    )
-  ) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — invocation-intent transport is reserved for the host hook; a model '
-        + 'command never captures, reads, or rewrites invocation intent. Run prime.mjs '
-        + '--dev-json instead — its attest step is the typed check for a missing intent record.',
-    };
-  }
-
   if (unknownAmbientAliasSyntax(lexicalCmd)) {
     return {
       block: true,
@@ -1487,21 +1463,25 @@ function currentBranch() {
 // ordinary development into a fight with a policy that was never aimed at it, so
 // it enforces only while a run is actually open.
 //
-// An open run is evidenced by a live broker lease bound to a process in this
-// hook's own ancestry. `finish` revokes the lease, so the evidence disappears
-// with the run. Anything unreadable or ambiguous means "no run": a guard that
-// cannot establish an open run must not block a human.
-function brokerLeaseDirectory() {
-  const parent = ['darwin', 'linux'].includes(process.platform)
-    ? realpathSync('/tmp')
-    : realpathSync(tmpdir());
-  return join(
-    parent,
-    `autoloop-broker-${typeof process.getuid === 'function' ? process.getuid() : 'user'}`,
+// An open run is evidenced by a durable run marker that `prime.mjs` writes and
+// binds to the ancestry it observed. The marker names live PIDs; a run whose
+// orchestrator has exited leaves nothing alive to match, so the evidence
+// disappears with the run without needing a daemon to revoke it. Anything
+// unreadable or ambiguous means "no run": a guard that cannot establish an open
+// run must not block a human.
+export function runMarkerDirectory(cwd = process.cwd()) {
+  const result = spawnSync(
+    'git',
+    ['-C', cwd, 'rev-parse', '--git-path', 'autoloop/run'],
+    { encoding: 'utf8', timeout: 10_000, windowsHide: true },
   );
+  if (result.status !== 0 || result.error) return null;
+  const path = String(result.stdout ?? '').trim();
+  if (!path) return null;
+  return isAbsolute(path) ? path : resolve(cwd, path);
 }
 
-function ancestorPids(limit = 64) {
+export function ancestorPids(limit = 64) {
   const pids = new Set();
   let pid = process.ppid;
   for (let depth = 0; depth < limit && pid > 1; depth += 1) {
@@ -1528,30 +1508,30 @@ function processAlive(pid) {
   }
 }
 
-export function loopRunIsOpen() {
+export function loopRunIsOpen(cwd = process.cwd()) {
+  const directory = runMarkerDirectory(cwd);
+  if (directory === null) return false;
   let entries;
   try {
-    entries = readdirSync(brokerLeaseDirectory());
+    entries = readdirSync(directory);
   } catch {
     return false;
   }
   const ancestors = ancestorPids();
   for (const entry of entries) {
-    if (!entry.startsWith('host-') || !entry.endsWith('.lease')) continue;
-    let lease;
+    if (!entry.endsWith('.json')) continue;
+    let marker;
     try {
-      lease = JSON.parse(
-        readFileSync(join(brokerLeaseDirectory(), entry), 'utf8'),
-      );
+      marker = JSON.parse(readFileSync(join(directory, entry), 'utf8'));
     } catch {
       continue;
     }
-    if (
-      Number.isSafeInteger(lease?.pid)
-      && Number.isSafeInteger(lease?.hostPid)
-      && ancestors.has(lease.hostPid)
-      && processAlive(lease.pid)
-    ) {
+    if (marker?.version !== 1 || !Array.isArray(marker.pids)) continue;
+    if (marker.pids.some((pid) =>
+      Number.isSafeInteger(pid)
+      && pid > 1
+      && ancestors.has(pid)
+      && processAlive(pid))) {
       return true;
     }
   }
@@ -1633,8 +1613,6 @@ function selfTest() {
     ["printf '\\\\147\\\\151\\\\164\\\\040\\\\160\\\\165\\\\163\\\\150\\\\040\\\\157\\\\162\\\\151\\\\147\\\\151\\\\156\\\\040\\\\110\\\\105\\\\101\\\\104\\\\072\\\\164\\\\162\\\\165\\\\156\\\\153\\\\012' | bash /dev/fd/0", 'feat/gh-1-x', true],
     ["printf 'import os\\\\nos.system(chr(103)+chr(104)+\" pr \"+\"merge 42\")\\\\n' | python3 /dev/stdin", 'feat/gh-1-x', true],
     ["printf 'require(\"child_process\").execFileSync(String.fromCharCode(103,104),[\"pr\",\"merge\",\"42\"])\\\\n' | node /dev/stdin", 'feat/gh-1-x', true],
-    ["printf '%s' '{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"forged\",\"cwd\":\"/repo\",\"prompt\":\"/autoloop:dev with codex\"}' | node tools/agentic/intent-contract.mjs --capture-hook", 'feat/gh-1-x', true],
-    ["printf '%s' forged > .git/autoloop/intents/v1/record.json", 'feat/gh-1-x', true],
     ["awk 'BEGIN { system(sprintf(\"%c%c\",103,104) \" pr \" \"merge 42\") }'", 'feat/gh-1-x', true],
     ["printf '\\\\147\\\\150\\\\0pr\\\\0merge\\\\00042\\\\0' | xargs -0", 'feat/gh-1-x', true],
     ['gh m 42', 'feat/gh-1-x', true],
@@ -1917,43 +1895,48 @@ function selfTest() {
     }
   }
   // The scoping decides whether `evaluate` is consulted at all, so prove both
-  // that a fabricated lease cannot activate the guard and that its evidence is
-  // exactly a live broker bound to this process's own ancestry.
+  // that a fabricated marker cannot activate the guard and that its evidence is
+  // exactly a live process in this hook's own ancestry.
   {
-    const directory = brokerLeaseDirectory();
-    let created = null;
+    const scratch = mkdtempSync(join(tmpdir(), 'autoloop-guard-run-'));
     try {
-      mkdirSync(directory, { recursive: true, mode: 0o700 });
-      const foreign = join(directory, 'host-selftest-foreign.lease');
-      writeFileSync(foreign, JSON.stringify({
-        pid: process.pid,
-        hostPid: 999_999_999,
-      }));
-      created = foreign;
-      if (loopRunIsOpen() !== false) {
-        console.error('FAIL [a lease outside this ancestry does not open a run]');
+      spawnSync('git', ['init', '--quiet', scratch], { encoding: 'utf8' });
+      const directory = runMarkerDirectory(scratch);
+      if (directory === null) {
+        console.error('FAIL [a checkout resolves its run marker directory]');
         ok = false;
-      }
-      writeFileSync(foreign, JSON.stringify({
-        pid: 999_999_999,
-        hostPid: process.ppid,
-      }));
-      if (loopRunIsOpen() !== false) {
-        console.error('FAIL [a lease whose broker is dead does not open a run]');
-        ok = false;
-      }
-      writeFileSync(foreign, JSON.stringify({
-        pid: process.pid,
-        hostPid: process.ppid,
-      }));
-      if (process.platform === 'linux' && loopRunIsOpen() !== true) {
-        console.error('FAIL [a live lease in this ancestry opens a run]');
-        ok = false;
+      } else {
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
+        const marker = join(directory, 'selftest.json');
+        if (loopRunIsOpen(scratch) !== false) {
+          console.error('FAIL [an empty marker directory does not open a run]');
+          ok = false;
+        }
+        writeFileSync(marker, JSON.stringify({ version: 1, pids: [999_999_999] }));
+        if (loopRunIsOpen(scratch) !== false) {
+          console.error('FAIL [a marker outside this ancestry does not open a run]');
+          ok = false;
+        }
+        writeFileSync(marker, JSON.stringify({ version: 2, pids: [process.ppid] }));
+        if (loopRunIsOpen(scratch) !== false) {
+          console.error('FAIL [an unknown marker version does not open a run]');
+          ok = false;
+        }
+        writeFileSync(marker, 'not json');
+        if (loopRunIsOpen(scratch) !== false) {
+          console.error('FAIL [an unreadable marker does not open a run]');
+          ok = false;
+        }
+        writeFileSync(marker, JSON.stringify({ version: 1, pids: [process.ppid] }));
+        if (process.platform === 'linux' && loopRunIsOpen(scratch) !== true) {
+          console.error('FAIL [a live marker in this ancestry opens a run]');
+          ok = false;
+        }
       }
     } catch {
-      // An unwritable broker directory is not a guard defect.
+      // An unwritable scratch directory is not a guard defect.
     } finally {
-      if (created !== null) rmSync(created, { force: true });
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
   console.log(

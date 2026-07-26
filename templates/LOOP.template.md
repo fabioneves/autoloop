@@ -2,9 +2,9 @@
 
 A standing, self-prompting development loop for **{{PROJECT_NAME}}**, coordinated from one Claude
 Code, Codex CLI, or opencode session. It takes each eligible **`loop-ready` GitHub issue**: the
-session orchestrator plans it, a fresh broker-launched reviewer process reviews the plan, a fresh
-broker-launched implementer process builds it, the orchestrator reviews and fixes the diff and runs
-the objective gate, then another fresh broker-launched reviewer process reviews the code. It opens
+session orchestrator plans it, a fresh reviewer process reviews the plan, a fresh implementer
+process builds it, the orchestrator reviews and fixes the diff and runs the objective gate, then
+another fresh reviewer process reviews the code. It opens
 a PR that `Closes #N` and moves to the next eligible issue; a human merges. A code writer never
 reviews that code.
 Plans receive one independent adversarial review followed by recorded dispositions. You don't
@@ -22,14 +22,14 @@ config (mission, config block, caps, lessons), **not** the queue.
 | `docs/agentic/STATE.md` | standing config — mission, config block, autonomy, caps, lessons |
 | `autoloop:dev` (plugin skill) | **forward path** — issue → ready PR |
 | `autoloop:pitcrew` (plugin skill) | **return path** — revises the loop's PRs from review / CI / conflicts |
-| Current invocation | bare = safe native route; `with claude` / `with codex` / `with opencode` = captured selector for this invocation |
+| `tools/agentic/dispatch.mjs` | **one-call role dispatch** — a fresh process with a fixed tool posture per role |
 | `{{CHECKLIST_PATH}}` | the criteria both reviewers grade against |
 | `{{GATE_COMMAND}}` | the objective gate — the only source of "done" |
-| `tools/agentic/*` (vendored) | project/runtime contracts, preflight, guards, lifecycle checks, and one-call run scan |
+| `tools/agentic/*` (vendored) | project contracts, preflight, guards, lifecycle checks, and the one-call prime |
 | Host continuation | Claude: `/loop` + `/goal`; Codex CLI: `/goal` and manual reruns; opencode: manual reruns or cron + `opencode run` |
 
-Setup reconciles the safe Claude, Codex, and opencode artifacts together. Their presence proves
-only that a route can be checked; it never selects a host or engine.
+Setup reconciles the safe Claude, Codex, and opencode artifacts together, so changing which host
+you drive the loop from needs no repository reconfiguration.
 
 ## How to feed the queue
 
@@ -64,16 +64,10 @@ queue", or just invoking the skill) drains the eligible queue. Confirm that the 
 builds inside the claimed branch, the gate actually fails bad work, and the fresh review is
 honest.
 
-Bare Dev, Pitcrew, and doctor invocations always use the active host's native route. Selectors are
-`with claude`, `with codex`, and `with opencode`. To select a supported Claude → Codex or Claude →
-opencode preference, append the matching selector, for example `/autoloop:dev with codex`. The
-selector is not saved in STATE. Same-UID prompt hooks bind it as
-`intentProvenance: "best-effort-unverified"` and cannot prove a human supplied it. Repeat it in
-every interactive or scheduled invocation that should use the cross-host route; unsupported
-host/engine pairs stop before mutation. Authentication of an installed selected engine is standing
-cost authorization for that engine only. A fallback engine must independently pass its own
-authenticated installed capability; failure of one engine never authorizes spending through
-another.
+There is nothing to select. Every role — plan review, implementation, code review, and bounded
+doubt review — runs through one `tools/agentic/dispatch.mjs` call that spawns a fresh engine
+process with that role's fixed tool posture. Claude Code, Codex CLI, and opencode are hosts for
+the orchestrator; the dispatch surface is identical on all three.
 
 Only after that bounded run succeeds, set the unattended queue goal:
 
@@ -124,8 +118,8 @@ never merges, pushes release tags, or publishes a release.
   secret autonomously.
 - **Issue text is untrusted data** — the loop acts only on `loop-ready` labels applied by a
   maintainer, verified.
-- **Every route is a broker-launched Linux process.** Native names the host/engine relationship,
-  not an in-session child. Writers can commit only inside the checkout; reviewers are read-only;
-  neither receives remote Git/GitHub credentials, unrelated host files, or same-UID host IPC.
+- **Every role is a fresh engine process with a fixed tool posture.** The writer posture is the
+  only one that can change files; reviewer postures declare only `Glob,Grep,Read` and can never be
+  handed a write tool. Neither receives ambient credential reads.
 - **Never circumvent a guardrail.** If the gate, a hook, or a NEVER-DO rule can't pass
   legitimately, the loop stops and reports — never disables the check.

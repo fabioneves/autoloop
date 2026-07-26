@@ -1,0 +1,744 @@
+#!/usr/bin/env node
+
+// One role dispatch, one call, one typed result.
+//
+// The invariant that matters is process identity: a writer and a reviewer are
+// never the same process, and a reviewer is never handed a tool that can write.
+// That is enforced here by construction — the role picks a frozen tool ceiling
+// and permission mode, and there is no path that widens either.
+//
+// Everything the old dispatch path carried around this — a signing daemon, host
+// evidence, live posture smokes, a closed route catalog, plans, receipts, and
+// one-use cryptographic envelopes — existed to make a dispatch attributable
+// across machines for unattended merging. This tool is for a supervised
+// operator on their own machine, so it spawns the engine directly.
+//
+// Usage:
+//   node tools/agentic/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
+//     --prompt-file <path> [--tools <csv>] [--output-file <path>] [--json]
+//   node tools/agentic/dispatch.mjs --self-test
+//
+// Exit 0 on a typed success, 1 on a typed failure, 2 on a usage error.
+
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+// A dispatch is a model round trip on a real task, not a mechanical step. The
+// bound exists to stop a wedged child from hanging a loop forever, so it is
+// deliberately generous: the longest observed healthy implement dispatch is
+// minutes, and a run that needs more than half an hour has a different problem.
+const DISPATCH_TIMEOUT_MS = 30 * 60 * 1000;
+
+// Claude Code refuses to run these without an explicit grant once the
+// permission mode is forced to `default`, which CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
+// does. Read-only tools (Glob/Grep/Read) need no entry, so the deny list below
+// stays the only statement this contract makes about reads.
+const TOOLS_REQUIRING_GRANT = Object.freeze(['Bash', 'Edit', 'Write']);
+
+// The two postures, carried over unchanged from the route adapter they used to
+// live in. `writer` is the only posture that can mutate the checkout; `reviewer`
+// cannot name a write tool at all, which is the invariant the self-test pins.
+export const POSTURES = Object.freeze({
+  writer: Object.freeze({
+    tools: Object.freeze(['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write']),
+    permissionMode: 'acceptEdits',
+  }),
+  reviewer: Object.freeze({
+    tools: Object.freeze(['Glob', 'Grep', 'Read']),
+    permissionMode: 'plan',
+  }),
+});
+
+export const ROLES = Object.freeze({
+  'plan-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
+  implement: Object.freeze({ posture: 'writer', result: 'text' }),
+  'code-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
+  'doubt-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
+});
+
+export const ROLE_NAMES = Object.freeze(Object.keys(ROLES));
+
+// The structured verdict schema, carried over from the deleted route adapter.
+// Every review role returns exactly this shape or fails typed.
+export const REVIEW_VERDICT_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    verdict: { type: 'string', enum: ['pass', 'fail'] },
+    findings: {
+      type: 'array',
+      maxItems: 100,
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 128 },
+          severity: {
+            type: 'string',
+            enum: ['Critical', 'Major', 'Minor', 'Suggestion'],
+          },
+          summary: { type: 'string', minLength: 1, maxLength: 4096 },
+          evidence: { type: 'string', maxLength: 16384 },
+        },
+        required: ['id', 'severity', 'summary', 'evidence'],
+        additionalProperties: false,
+      },
+    },
+    rebuts: {
+      type: 'array',
+      maxItems: 100,
+      items: {
+        type: 'object',
+        properties: {
+          findingId: { type: 'string', minLength: 1, maxLength: 128 },
+          status: { type: 'string', enum: ['accepted', 'rejected'] },
+          evidence: { type: 'string', minLength: 1, maxLength: 16384 },
+        },
+        required: ['findingId', 'status', 'evidence'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['verdict', 'findings', 'rebuts'],
+  additionalProperties: false,
+});
+
+const FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value, keys) {
+  return isPlainObject(value)
+    && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
+}
+
+// The same validator the review contract applies to a recorded round, so a
+// verdict that would be rejected downstream is rejected here instead of being
+// carried forward as if it were evidence.
+export function validReviewVerdict(value) {
+  return hasExactKeys(value, ['verdict', 'findings', 'rebuts'])
+    && ['pass', 'fail'].includes(value.verdict)
+    && Array.isArray(value.findings)
+    && value.findings.length <= 100
+    && new Set(value.findings.map(({ id }) => id)).size === value.findings.length
+    && value.findings.every((finding) =>
+      hasExactKeys(finding, ['id', 'severity', 'summary', 'evidence'])
+      && FINDING_ID_RE.test(finding.id)
+      && ['Critical', 'Major', 'Minor', 'Suggestion'].includes(finding.severity)
+      && typeof finding.summary === 'string'
+      && finding.summary.length >= 1
+      && finding.summary.length <= 4096
+      && typeof finding.evidence === 'string'
+      && finding.evidence.length <= 16384)
+    && Array.isArray(value.rebuts)
+    && value.rebuts.length <= 100
+    && new Set(value.rebuts.map(({ findingId }) => findingId)).size
+      === value.rebuts.length
+    && value.rebuts.every((rebut) =>
+      hasExactKeys(rebut, ['findingId', 'status', 'evidence'])
+      && FINDING_ID_RE.test(rebut.findingId)
+      && ['accepted', 'rejected'].includes(rebut.status)
+      && typeof rebut.evidence === 'string'
+      && rebut.evidence.length >= 1
+      && rebut.evidence.length <= 16384)
+    && (
+      value.verdict === 'pass'
+        ? !value.findings.some(({ severity }) =>
+          ['Critical', 'Major'].includes(severity))
+        : value.findings.some(({ severity }) =>
+          ['Critical', 'Major'].includes(severity))
+    );
+}
+
+function processSettings(tools) {
+  return {
+    permissions: {
+      allow: tools.filter((tool) => TOOLS_REQUIRING_GRANT.includes(tool)),
+      deny: [
+        'Read(~/.config/gh/**)',
+        'Read(~/.git-credentials)',
+        'Read(~/.gitconfig)',
+        'Read(~/.netrc)',
+        'Read(~/.ssh/**)',
+      ],
+    },
+  };
+}
+
+// The role's tool ceiling. `requested` may narrow it and can never widen it: a
+// tool outside the posture is a usage error, not a silently dropped entry.
+export function resolveTools(role, requested = null) {
+  const posture = POSTURES[ROLES[role].posture];
+  if (requested === null) return [...posture.tools];
+  const wanted = requested
+    .split(',')
+    .map((tool) => tool.trim())
+    .filter((tool) => tool.length > 0);
+  if (wanted.length === 0) return null;
+  if (new Set(wanted).size !== wanted.length) return null;
+  if (wanted.some((tool) => !posture.tools.includes(tool))) return null;
+  return posture.tools.filter((tool) => wanted.includes(tool));
+}
+
+// Pure: the exact argv a dispatch launches, so the self-test can pin the
+// posture without spawning anything.
+export function dispatchArgv(role, tools) {
+  const { posture, result } = ROLES[role];
+  return [
+    '--print',
+    '--safe-mode',
+    '--no-session-persistence',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    ...(result === 'review-verdict'
+      ? ['--json-schema', JSON.stringify(REVIEW_VERDICT_SCHEMA)]
+      : []),
+    '--strict-mcp-config',
+    '--disable-slash-commands',
+    '--settings',
+    JSON.stringify(processSettings(tools)),
+    '--permission-mode',
+    POSTURES[posture].permissionMode,
+    '--tools',
+    tools.join(','),
+  ];
+}
+
+function dispatchEnvironment() {
+  return { ...process.env, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' };
+}
+
+function failure(step, code, message, detail = {}) {
+  return { ok: false, step, error: { code, message, ...detail } };
+}
+
+// Claude's stream-json output ends with exactly one `result` event. More than
+// one, none, or a non-success subtype means the child did not produce a result
+// this tool can stand behind.
+export function parseResultEvent(stdout) {
+  if (typeof stdout !== 'string') return null;
+  let resultEvent = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    if (event?.type !== 'result') continue;
+    if (resultEvent !== null) return null;
+    resultEvent = event;
+  }
+  return resultEvent;
+}
+
+// Wall clock at module load. `startupMs` on every result is the distance from
+// here to the engine spawn — this tool's own overhead, with model time
+// excluded — so a regression in the wrapper is visible without a profiler.
+const PROCESS_START_MS = Date.now();
+
+export function runDispatch({
+  role,
+  prompt,
+  tools,
+  cwd = process.cwd(),
+  timeoutMs = DISPATCH_TIMEOUT_MS,
+  engine = 'claude',
+  startedAtMs = PROCESS_START_MS,
+}) {
+  const argv = dispatchArgv(role, tools);
+  const started = Date.now();
+  const startupMs = started - startedAtMs;
+  const result = spawnSync(engine, argv, {
+    cwd,
+    encoding: 'utf8',
+    env: dispatchEnvironment(),
+    input: prompt,
+    maxBuffer: MAX_OUTPUT_BYTES,
+    timeout: timeoutMs,
+    windowsHide: true,
+  });
+  const ms = Date.now() - started;
+  const stderr = String(result.stderr ?? '');
+  if (result.error?.code === 'ETIMEDOUT' || result.signal === 'SIGTERM') {
+    return failure(
+      'dispatch',
+      'DISPATCH_TIMEOUT',
+      `${role}: the engine did not finish within ${timeoutMs}ms`,
+      { ms, startupMs, stderr },
+    );
+  }
+  if (result.error) {
+    return failure(
+      'spawn',
+      'ENGINE_SPAWN_FAILED',
+      `${role}: ${result.error.message}`,
+      { ms, startupMs, stderr },
+    );
+  }
+  if (result.status !== 0) {
+    return failure(
+      'dispatch',
+      'ENGINE_EXIT_NONZERO',
+      `${role}: engine exited ${result.status}`,
+      { ms, startupMs, exitCode: result.status, stderr },
+    );
+  }
+  const resultEvent = parseResultEvent(result.stdout ?? '');
+  if (resultEvent === null || resultEvent.subtype !== 'success') {
+    return failure(
+      'result',
+      'ENGINE_RESULT_MISSING',
+      `${role}: the engine produced no single successful result event`,
+      { ms, startupMs, stderr },
+    );
+  }
+  if (ROLES[role].result === 'review-verdict') {
+    const verdict = resultEvent.structured_output;
+    if (!validReviewVerdict(verdict)) {
+      return failure(
+        'result',
+        'INVALID_REVIEW_VERDICT',
+        `${role}: structured output is not a valid review verdict`,
+        { ms, startupMs, stderr },
+      );
+    }
+    return { ok: true, role, tools, startupMs, ms, verdict };
+  }
+  const text = typeof resultEvent.result === 'string' ? resultEvent.result : '';
+  if (text.length === 0) {
+    return failure(
+      'result',
+      'ENGINE_RESULT_EMPTY',
+      `${role}: the engine returned an empty result`,
+      { ms, startupMs, stderr },
+    );
+  }
+  return { ok: true, role, tools, startupMs, ms, text };
+}
+
+export function parseArgs(args) {
+  const parsed = {
+    mode: 'dispatch',
+    role: null,
+    promptFile: null,
+    tools: null,
+    outputFile: null,
+    json: false,
+    error: null,
+  };
+  if (args.length === 1 && args[0] === '--self-test') {
+    return { ...parsed, mode: 'self-test' };
+  }
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index];
+    if (flag === '--json') {
+      parsed.json = true;
+      continue;
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith('--')) {
+      return { ...parsed, error: `${flag}: expected a value` };
+    }
+    index += 1;
+    if (flag === '--role') parsed.role = value;
+    else if (flag === '--prompt-file') parsed.promptFile = value;
+    else if (flag === '--tools') parsed.tools = value;
+    else if (flag === '--output-file') parsed.outputFile = value;
+    else return { ...parsed, error: `unknown flag ${flag}` };
+  }
+  if (parsed.role === null || !ROLE_NAMES.includes(parsed.role)) {
+    return {
+      ...parsed,
+      error: `--role: expected one of ${ROLE_NAMES.join(', ')}`,
+    };
+  }
+  if (parsed.promptFile === null) {
+    return { ...parsed, error: '--prompt-file: required' };
+  }
+  return parsed;
+}
+
+function readPrompt(path) {
+  const bytes = readFileSync(path === '-' ? 0 : path);
+  if (bytes.length === 0) throw new Error('prompt is empty');
+  if (bytes.length > MAX_PROMPT_BYTES) {
+    throw new Error(`prompt exceeds ${MAX_PROMPT_BYTES} bytes`);
+  }
+  return bytes.toString('utf8');
+}
+
+function report(result) {
+  if (result.ok !== true) {
+    return [
+      `dispatch ${result.step} FAILED  ${result.error.code}`,
+      result.error.message,
+      ...(result.error.stderr ? [`stderr: ${result.error.stderr.trim()}`] : []),
+    ].join('\n');
+  }
+  const lines = [
+    `dispatch ${result.role} ok  ${result.tools.join(',')}  `
+    + `${result.ms}ms (${result.startupMs}ms wrapper overhead)`,
+  ];
+  if (result.verdict) {
+    const gating = result.verdict.findings.filter(({ severity }) =>
+      ['Critical', 'Major'].includes(severity));
+    lines.push(
+      `verdict ${result.verdict.verdict}  findings ${result.verdict.findings.length}`
+      + ` (${gating.length} gating)  rebuts ${result.verdict.rebuts.length}`,
+    );
+    for (const finding of result.verdict.findings) {
+      lines.push(`  ${finding.severity.padEnd(10)} ${finding.id}  ${finding.summary}`);
+    }
+  } else {
+    lines.push(result.text.length > 2000 ? `${result.text.slice(0, 2000)}…` : result.text);
+  }
+  return lines.join('\n');
+}
+
+// A fake engine on PATH: every posture assertion below runs against a real
+// spawn, so the argv this tool builds is the argv the self-test inspects.
+function writeEngineShim(directory, body) {
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, 'claude');
+  writeFileSync(path, body);
+  chmodSync(path, 0o755);
+  return directory;
+}
+
+const PASSING_VERDICT = {
+  verdict: 'pass',
+  findings: [],
+  rebuts: [],
+};
+
+function shimBody(script) {
+  return `#!/bin/sh\nprintf '%s' "$*" > "$AUTOLOOP_SHIM_ARGV"\ncat > "$AUTOLOOP_SHIM_STDIN"\n${script}\n`;
+}
+
+function selfTest() {
+  const failures = [];
+  const cases = [];
+  const check = (name, passed) => {
+    cases.push(name);
+    if (!passed) failures.push(name);
+  };
+
+  check(
+    'every role maps to exactly one posture',
+    ROLE_NAMES.length === 4
+    && ROLE_NAMES.every((role) => POSTURES[ROLES[role].posture] !== undefined)
+    && ROLES.implement.posture === 'writer'
+    && ['plan-review', 'code-review', 'doubt-review']
+      .every((role) => ROLES[role].posture === 'reviewer'),
+  );
+
+  const writerTools = resolveTools('implement');
+  const reviewerTools = resolveTools('code-review');
+  check(
+    'the writer posture carries the writing tool set',
+    writerTools.join(',') === 'Bash,Edit,Glob,Grep,Read,Write',
+  );
+  check(
+    'no reviewer role can ever name a write tool',
+    ['plan-review', 'code-review', 'doubt-review'].every((role) => {
+      const tools = resolveTools(role);
+      return tools.join(',') === 'Glob,Grep,Read'
+        && !tools.some((tool) => TOOLS_REQUIRING_GRANT.includes(tool));
+    }),
+  );
+  check(
+    '--tools may narrow a posture and can never widen it',
+    resolveTools('code-review', 'Read,Grep').join(',') === 'Grep,Read'
+    && resolveTools('code-review', 'Read,Write') === null
+    && resolveTools('code-review', 'Bash') === null
+    && resolveTools('implement', 'Read,Read') === null
+    && resolveTools('implement', '') === null
+    && resolveTools('implement', 'Edit,Read').join(',') === 'Edit,Read',
+  );
+
+  const writerArgv = dispatchArgv('implement', writerTools);
+  const reviewerArgv = dispatchArgv('code-review', reviewerTools);
+  const argvValue = (argv, flag) => argv[argv.indexOf(flag) + 1];
+  check(
+    'the writer argv accepts edits and grants only its declared write tools',
+    argvValue(writerArgv, '--permission-mode') === 'acceptEdits'
+    && argvValue(writerArgv, '--tools') === 'Bash,Edit,Glob,Grep,Read,Write'
+    && JSON.parse(argvValue(writerArgv, '--settings')).permissions.allow.join(',')
+      === 'Bash,Edit,Write'
+    && !writerArgv.includes('--json-schema'),
+  );
+  check(
+    'the reviewer argv plans, declares read-only tools, and grants none',
+    argvValue(reviewerArgv, '--permission-mode') === 'plan'
+    && argvValue(reviewerArgv, '--tools') === 'Glob,Grep,Read'
+    && JSON.parse(argvValue(reviewerArgv, '--settings')).permissions.allow.length === 0
+    && JSON.parse(argvValue(reviewerArgv, '--json-schema')).required.join(',')
+      === 'verdict,findings,rebuts',
+  );
+  check(
+    'every posture denies ambient credential reads and persists no session',
+    [writerArgv, reviewerArgv].every((argv) =>
+      argv.includes('--no-session-persistence')
+      && argv.includes('--safe-mode')
+      && argv.includes('--strict-mcp-config')
+      && argv.includes('--disable-slash-commands')
+      && JSON.parse(argvValue(argv, '--settings')).permissions.deny
+        .includes('Read(~/.ssh/**)')),
+  );
+
+  check(
+    'a review verdict must be internally consistent to parse',
+    validReviewVerdict(PASSING_VERDICT)
+    && !validReviewVerdict({
+      ...PASSING_VERDICT,
+      findings: [{
+        id: 'f1', severity: 'Major', summary: 's', evidence: 'e',
+      }],
+    })
+    && validReviewVerdict({
+      verdict: 'fail',
+      findings: [{ id: 'f1', severity: 'Major', summary: 's', evidence: 'e' }],
+      rebuts: [],
+    })
+    && !validReviewVerdict({ verdict: 'pass', findings: [] })
+    && !validReviewVerdict(null),
+  );
+
+  check(
+    'argument parsing rejects unknown roles, flags, and missing values',
+    parseArgs(['--role', 'implement', '--prompt-file', '/p']).error === null
+    && parseArgs(['--role', 'refactor', '--prompt-file', '/p']).error !== null
+    && parseArgs(['--role', 'implement']).error !== null
+    && parseArgs(['--role', 'implement', '--prompt-file', '/p', '--wat', 'x'])
+      .error !== null
+    && parseArgs(['--role', 'implement', '--prompt-file']).error !== null
+    && parseArgs(['--role', 'implement', '--prompt-file', '/p', '--json']).json === true,
+  );
+
+  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-dispatch-'));
+  try {
+    const argvPath = join(scratch, 'argv.txt');
+    const stdinPath = join(scratch, 'stdin.txt');
+    process.env.AUTOLOOP_SHIM_ARGV = argvPath;
+    process.env.AUTOLOOP_SHIM_STDIN = stdinPath;
+
+    const shimDirectory = join(scratch, 'bin');
+    const engine = join(shimDirectory, 'claude');
+    const resultEvent = (extra) =>
+      `printf '%s\\n' '${JSON.stringify({ type: 'result', subtype: 'success', ...extra })}'`;
+
+    writeEngineShim(shimDirectory, shimBody(
+      resultEvent({ structured_output: PASSING_VERDICT }),
+    ));
+    const reviewed = runDispatch({
+      role: 'code-review',
+      prompt: 'review the delta',
+      tools: reviewerTools,
+      cwd: scratch,
+      engine,
+    });
+    const launchedArgv = readFileSync(argvPath, 'utf8');
+    check(
+      'a review dispatch parses the structured verdict and forwards the prompt on stdin',
+      reviewed.ok === true
+      && reviewed.role === 'code-review'
+      && reviewed.verdict.verdict === 'pass'
+      && readFileSync(stdinPath, 'utf8') === 'review the delta'
+      && launchedArgv.includes('--permission-mode plan')
+      && launchedArgv.includes('--tools Glob,Grep,Read'),
+    );
+    check(
+      'a live reviewer spawn never receives a write tool',
+      !/--tools \S*(?:Write|Edit|Bash)/.test(launchedArgv),
+    );
+    check(
+      'every result reports the wrapper overhead separately from the engine time',
+      Number.isInteger(reviewed.startupMs)
+      && reviewed.startupMs >= 0
+      && Number.isInteger(reviewed.ms),
+    );
+
+    writeEngineShim(shimDirectory, shimBody(
+      resultEvent({ result: 'implemented the slice' }),
+    ));
+    const implemented = runDispatch({
+      role: 'implement',
+      prompt: 'implement the plan',
+      tools: writerTools,
+      cwd: scratch,
+      engine,
+    });
+    check(
+      'an implement dispatch returns the terminal text and the writing tool set',
+      implemented.ok === true
+      && implemented.text === 'implemented the slice'
+      && readFileSync(argvPath, 'utf8').includes('--permission-mode acceptEdits'),
+    );
+
+    writeEngineShim(shimDirectory, shimBody(
+      resultEvent({ structured_output: { verdict: 'maybe' } }),
+    ));
+    const malformed = runDispatch({
+      role: 'code-review',
+      prompt: 'review',
+      tools: reviewerTools,
+      cwd: scratch,
+      engine,
+    });
+    check(
+      'a malformed structured verdict is a typed failure, never a pass',
+      malformed.ok === false
+      && malformed.step === 'result'
+      && malformed.error.code === 'INVALID_REVIEW_VERDICT',
+    );
+
+    writeEngineShim(shimDirectory, shimBody("printf 'no result event\\n'"));
+    const resultless = runDispatch({
+      role: 'implement',
+      prompt: 'implement',
+      tools: writerTools,
+      cwd: scratch,
+      engine,
+    });
+    check(
+      'a missing result event is a typed failure',
+      resultless.ok === false
+      && resultless.error.code === 'ENGINE_RESULT_MISSING',
+    );
+
+    writeEngineShim(shimDirectory, shimBody(
+      "printf 'engine blew up\\n' >&2\nexit 3",
+    ));
+    const exited = runDispatch({
+      role: 'implement',
+      prompt: 'implement',
+      tools: writerTools,
+      cwd: scratch,
+      engine,
+    });
+    check(
+      'a non-zero exit is typed and preserves the child stderr',
+      exited.ok === false
+      && exited.step === 'dispatch'
+      && exited.error.code === 'ENGINE_EXIT_NONZERO'
+      && exited.error.exitCode === 3
+      && exited.error.stderr.includes('engine blew up'),
+    );
+
+    writeEngineShim(shimDirectory, shimBody('sleep 30'));
+    const timedOut = runDispatch({
+      role: 'implement',
+      prompt: 'implement',
+      tools: writerTools,
+      cwd: scratch,
+      engine,
+      timeoutMs: 250,
+    });
+    check(
+      'exceeding the budget is a typed timeout, never a silent success',
+      timedOut.ok === false
+      && timedOut.step === 'dispatch'
+      && timedOut.error.code === 'DISPATCH_TIMEOUT',
+    );
+
+    writeEngineShim(shimDirectory, shimBody('exit 0'));
+    const missingEngine = runDispatch({
+      role: 'implement',
+      prompt: 'implement',
+      tools: writerTools,
+      cwd: scratch,
+      engine: join(shimDirectory, 'not-installed'),
+    });
+    check(
+      'an absent engine is a typed spawn failure',
+      missingEngine.ok === false
+      && missingEngine.step === 'spawn'
+      && missingEngine.error.code === 'ENGINE_SPAWN_FAILED',
+    );
+
+    check(
+      'a failing dispatch reports its typed error without a verdict',
+      report(exited).includes('ENGINE_EXIT_NONZERO')
+      && report(reviewed).includes('verdict pass'),
+    );
+  } finally {
+    delete process.env.AUTOLOOP_SHIM_ARGV;
+    delete process.env.AUTOLOOP_SHIM_STDIN;
+    rmSync(scratch, { recursive: true, force: true });
+  }
+
+  for (const name of failures) console.error(`FAIL ${name}`);
+  console.log(
+    failures.length === 0
+      ? `self-test OK (${cases.length} cases)`
+      : `self-test FAILED (${failures.length}/${cases.length})`,
+  );
+  return failures.length === 0;
+}
+
+function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.error) {
+    console.error(`dispatch: ${parsed.error}`);
+    console.error(
+      'usage: dispatch.mjs --role <'
+      + `${ROLE_NAMES.join('|')}> --prompt-file <path|-> `
+      + '[--tools <csv>] [--output-file <path>] [--json]',
+    );
+    process.exit(2);
+  }
+  if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+
+  const tools = resolveTools(parsed.role, parsed.tools);
+  if (tools === null) {
+    console.error(
+      `dispatch: --tools must be a distinct non-empty subset of the ${parsed.role} `
+      + `posture (${POSTURES[ROLES[parsed.role].posture].tools.join(',')})`,
+    );
+    process.exit(2);
+  }
+  let prompt;
+  try {
+    prompt = readPrompt(parsed.promptFile);
+  } catch (error) {
+    console.error(`dispatch: unable to read the prompt: ${error.message}`);
+    process.exit(2);
+  }
+
+  const result = runDispatch({ role: parsed.role, prompt, tools });
+  const serialized = `${JSON.stringify(result, null, 1)}\n`;
+  if (parsed.outputFile !== null) {
+    const path = resolve(parsed.outputFile);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, serialized);
+  }
+  process.stdout.write(parsed.json ? serialized : `${report(result)}\n`);
+  process.exit(result.ok === true ? 0 : 1);
+}
+
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url))
+      === realpathSync(process.argv[1]);
+  } catch {
+    return false;
+  }
+})();
+if (isMain) main();

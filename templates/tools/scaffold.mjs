@@ -271,24 +271,6 @@ export function reconcile(root, templates, { audit = false } = {}) {
     'templates/opencode-config.template.json',
   );
 
-  const budgetPolicy = resolve(root, '.autoloop', 'measurement-budget-policy.json');
-  if (existsSync(budgetPolicy)) {
-    results.push({
-      path: '.autoloop/measurement-budget-policy.json',
-      action: 'kept',
-    });
-  } else {
-    writeArtifact(
-      root,
-      '.autoloop/measurement-budget-policy.json',
-      readFileSync(join(templates, 'measurement-budget-policy.template.json')),
-      results,
-      undefined,
-      audit,
-      'templates/measurement-budget-policy.template.json',
-    );
-  }
-
   const loop = resolve(root, 'docs', 'agentic', 'LOOP.md');
   const loopTemplate = readFileSync(join(templates, 'LOOP.template.md'));
   if (!existsSync(loop)) {
@@ -334,10 +316,6 @@ function fixtureTemplates() {
   writeFileSync(join(templates, TEMPLATE_MARKER), '# state template\n');
   writeFileSync(join(templates, 'LOOP.template.md'), '# loop template\n');
   writeFileSync(
-    join(templates, 'measurement-budget-policy.template.json'),
-    '{ "status": "pending-evidence" }\n',
-  );
-  writeFileSync(
     join(templates, 'opencode-config.template.json'),
     stableJson({ instructions: ['docs/agentic/STATE.md'], permission: { read: 'allow' } }),
   );
@@ -372,7 +350,7 @@ function fixtureState(policy) {
     '',
     '```json autoloop-config',
     JSON.stringify({
-      version: '0.25.0',
+      version: '0.26.0',
       baseBranch: 'main',
       gate: { command: 'npm test', quickCommand: null, setupCommand: null },
       merge,
@@ -544,7 +522,7 @@ function selfTest() {
 
     writeFileSync(
       join(root, 'docs', 'agentic', 'STATE.md'),
-      fixtureState('manual').replace('"0.25.0"', '"0.24.0"'),
+      fixtureState('manual').replace('"0.26.0"', '"0.24.0"'),
     );
     const legacy = reconcile(root, templates);
     expect(

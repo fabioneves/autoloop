@@ -33,7 +33,7 @@ if ! command -v node >/dev/null 2>&1; then
 else
   config_contract="$REPO_DIR/tools/agentic/config-contract.mjs"
   release_contract="$REPO_DIR/tools/agentic/release-verify.mjs"
-  runtime_contract="$REPO_DIR/tools/agentic/runtime-contract.mjs"
+  dispatch_tool="$REPO_DIR/tools/agentic/dispatch.mjs"
   if [ -f "$config_contract" ]; then
     node "$config_contract" "$REPO_DIR/docs/agentic/STATE.md" 2>&1 || true
   else
@@ -49,10 +49,10 @@ else
   else
     echo 'FAIL  tools/agentic/release-verify.mjs missing — re-run autoloop:setup before the loop runs'
   fi
-  if [ -f "$runtime_contract" ]; then
-    echo 'PASS  RuntimeContract present — the skill must attest the live host and selected route'
+  if [ -f "$dispatch_tool" ]; then
+    echo 'PASS  dispatch tool present — role dispatch is available'
   else
-    echo 'FAIL  tools/agentic/runtime-contract.mjs missing — route selection cannot run'
+    echo 'FAIL  tools/agentic/dispatch.mjs missing — no role can be dispatched'
   fi
 fi
 
@@ -64,9 +64,7 @@ else
   echo "NOTE  checkout has $dirty uncommitted path(s) — fine interactively; the loop requires a clean tree UNLESS this is a provably loop-owned in-flight unit (dirty on a gh-<N> branch with its open draft PR + claim-commit HEAD + in-boundary paths → adoption checkpoints and resumes). Otherwise it is a human's WIP: never stash/discard — stop and report."
 fi
 
-# 3. Routing is deliberately not inferred here. A hook script cannot prove which live host
-# integration invoked it. Dev/Setup/Pitcrew attest that fact from their effective tool surface,
-# then RuntimeContract selects only the requested route and reachable safe fallback.
-echo 'INFO  route not inferred by preflight — active host evidence is invocation-scoped'
+# 3. Every role dispatch spawns a fresh engine process; there is nothing here to select.
+echo 'INFO  role dispatch is one call — tools/agentic/dispatch.mjs --role <role>'
 
 exit 0

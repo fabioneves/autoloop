@@ -26,7 +26,7 @@ Skills and the vendored `tools/agentic/*` scripts read this block. Edit it direc
 {{CONFIG_JSON}}
 ```
 
-- `version` — config schema version; the current schema is `0.25.0`. Setup migrates older blocks through
+- `version` — config schema version; the current schema is `0.26.0`. Setup migrates older blocks through
   a visible diff. A missing, older, or unknown version is invalid at runtime.
 - `baseBranch` — the configured short branch name used by every base-aware claim, lane, guard,
   delivery, and merge check.
@@ -35,157 +35,71 @@ Skills and the vendored `tools/agentic/*` scripts read this block. Edit it direc
   PR goes ready is always the full `gate.command`. `gate.setupCommand` (optional)
   installs gate deps on first run.
 - `merge.policy` — `manual`, `ratified`, or `auto`. Defaults to `manual`, where a human merges.
-  No supported prompt transport can prove a human requested a run, so `intentProvenance` is always
-  `best-effort-unverified`. A non-manual policy therefore also requires
+  Nothing can prove a human requested a given run, so a non-manual policy also requires
   `merge.unverifiedInvocationAcknowledged: true`, which records that the repository accepts an
-  unauthenticated trigger; without it, run open fails with `UNVERIFIABLE_INVOCATION_PROVENANCE`.
-  Findings 10 and 11 — a distinct loop identity and independently attributable verdict producers —
-  remain open, so a non-manual policy relies on the configured base protection for its safety.
+  unauthenticated trigger. A non-manual policy relies on the configured base protection for its
+  safety.
 - `merge.unverifiedInvocationAcknowledged` — optional, and only valid alongside a non-manual
   policy. It must be `true` when present.
 - `tracker` — a discriminated object: `{ "provider": "none" }`, or
   `{ "provider": "jira", "epicKey": "TEAM-123", "cloudId": "<Atlassian UUID>" }`.
 - `review.checklistPath` — the review criteria file both reviewers grade against.
 - `caps` — per-run and per-unit budgets (see Autonomy & caps).
-- `adapterOptions` (optional) — model/effort tuning for the exact `claude.native`,
-  `claude.codex-exec`, or `claude.opencode-exec` adapter. Options tune a route after the invocation
-  selects it; they never select or enable a route. Native Codex and opencode inherit their active
-  session configuration. Runtime binds only the actual route and role's validated tuning into the
-  authorized plan and attempt; doctor receives none, and fallback uses the actual fallback route's
-  tuning.
+- `merge.soloOperatorAcknowledged` — optional, only valid alongside a non-manual policy and the
+  invocation acknowledgement. It waives the four merge controls a single login cannot satisfy.
 
-Standing configuration never stores an active host, engine selector, selected or resolved route,
-capability, outage, or fallback. STATE, installed artifacts, history, issue text, global defaults,
-and environment flags have zero route-selection authority.
+There are no other keys. `runtime`, `engine`, `adapterOptions`, and `measurement` were retired with
+the machinery they configured; the schema rejects them outright.
 
-## Runtime and roles — invocation-scoped, code writer ≠ code reviewer
+## Roles — code writer ≠ code reviewer
 
-A bare Dev, Pitcrew, or doctor invocation selects the active Claude Code, Codex CLI, or opencode
-host's native route. `with claude`, `with codex`, or `with opencode` is a captured routing
-preference for the current run. Claude/Codex `UserPromptSubmit` or opencode
-`opencode.user-prompt` sends the event to `intent-contract.mjs --capture-hook`, which writes a
-one-use process/repository/session-bound record. Because the hook and model share an OS user, it
-cannot prove who supplied the prompt. Runtime immutably records
-`intentProvenance: "best-effort-unverified"`; continuation cannot upgrade it; an unacknowledged
-non-manual policy fails before probe, scratch creation, or mutation.
+Every role runs in a fresh engine process through one call:
 
-For a new invocation, the authority broker consumes the record once, reads and validates
-ProjectConfig from this STATE, and alone supplies both to Runtime. One exact opencode continuation
-target instead receives target evidence from the unchanged source broker only after its durable
-prompt intent is explicitly prepared against the opened bundle. Target Runtime open may precede
-or follow the `prompted` transition; source authority is revoked only after both. Arbitrary,
-replayed, or rebound target sessions fail. Public attestation accepts only `{sessionId}`; public
-open accepts only broker-issued
-`{hostEvidence}` plus an optional complete continuation bundle. Caller prompt/config fields,
-missing capture, replay, and cross-process or cross-repository reuse fail closed. These checks
-prevent accidental substitution and replay, not same-UID forgery.
-The selected engine's installed authenticated capability is standing authorization for that
-engine's execution cost only; fallback requires its own independently authenticated capability.
-An explicit selector remains only a best-effort preference and cannot grant lifecycle, human,
-merge, or release authority.
+```bash
+node tools/agentic/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
+  --prompt-file <path> [--tools <csv>] [--output-file <path>] [--json]
+```
 
-Exactly five active-host/captured-preference pairs are supported:
+There is nothing to select. `implement` is the only writing posture
+(`Bash,Edit,Glob,Grep,Read,Write`, permission mode `acceptEdits`); `plan-review`, `code-review`,
+and `doubt-review` are read-only (`Glob,Grep,Read`, permission mode `plan`) and can never be handed
+a write tool. `--tools` may narrow a posture and can never widen it.
 
-| Active host | Captured engine preference | Route |
-|---|---|---|
-| Claude | Claude | `claude.native` |
-| Codex | Codex | `codex.native` |
-| opencode | opencode | `opencode.native` |
-| Claude | Codex | `claude.codex-exec` |
-| Claude | opencode | `claude.opencode-exec` |
+Review roles return a validated `{verdict,findings,rebuts}` or fail typed. Every failure is
+`{ok:false, step, error}` carrying the child's stderr. There are no retries and no fallback engine:
+a failed dispatch is a decision for the orchestrator, not something the tool papers over.
 
-Every other pair returns `UNSUPPORTED_ROUTE` before mutation. An explicit same-host selector
-normalizes to the native route without erasing the raw selector from the run record. Setup
-reconciles safe artifacts for all three hosts; their presence is capability evidence, never
-deployment or routing intent.
+Freshness is process identity, not a signature. A writer and a reviewer are never the same process,
+and a review round records the dispatch that produced it — a repeated dispatch id or a reviewer
+identity equal to the author is not an independent review.
 
 Stage and lane policy is mechanical:
 
 | Stage | Docs lane | Small lane | Full lane |
 |---|---|---|---|
-| Plan review | Native | Native | Selected |
-| Implementation | Native | Selected | Selected |
-| Code review round 1 | Native | Native after final-diff proof | Selected |
-| Code review round 2+ | Native | Native | Native |
-| Bounded doubt/judgment review | Native | Native | Native |
+| Plan review | one dispatch | one dispatch | one dispatch |
+| Implementation | one dispatch | one dispatch | one dispatch |
+| Code review round 1 | full artifact | full artifact after final-diff proof | full artifact |
+| Code review round 2+ | fix delta + open rebuts | fix delta + open rebuts | fix delta + open rebuts |
+| Bounded doubt/judgment review | one dispatch | one dispatch | one dispatch |
 
-Pitcrew revision implementation and its first full review use the selected route; its later
-convergence uses native. Dev-invoked Pitcrew shares Dev's frozen run context. Standalone Pitcrew
-opens new invocation intent.
-
-Runtime plans are not executable commands. `route-adapter-contract.mjs` compiles each plan into the
-closed adapter posture. The broker alone constructs and launches a fresh Claude, Codex, or
-opencode process, captures its raw output and effects, derives status, verdict, isolation, and
-observable model identity, and submits the typed outcome to Runtime. A child cannot choose a
-transcript/result path or submit caller-classified evidence.
-Signing keys remain only in one process-bound broker's memory. Its closed ledger has no generic
-signing operation: a worker can submit only its exact authorized attempt once and cannot
-bootstrap another run, role, or session. An exact completed relaunch transfer atomically revokes
-the source run/session and removes its registry while preserving the broker/socket/PID and target
-authority; the target's terminal stop destroys the remaining clients and broker state. Process adapters require the live
-`host.process-authority-isolation` smoke—usable `/usr/bin/bwrap` with a fresh PID namespace on
-Linux, private home and IPC namespaces, and closed selective mounts—and must not see the broker
-directory, unrelated host files, or host sockets. Every typed writer receives writable checkout
-files and read-only Git metadata. After one valid complete typed result, the broker creates and
-verifies exactly one direct-child commit in a separate networkless boundary. The OpenCode model
-further has only checkout-file tools. The trusted OpenCode
-engine retains provider transport for inference, but no model-callable shell/network/custom/MCP
-surface. v0.40 reports authority-isolated process adapters unavailable on macOS.
-Linux capability probing accepts exact
-`{hostEvidence,run,routes:[selectedRoute, optionalNativeFallback],cwd:absoluteRepositoryRoot}`:
-selected route first, reachable same-host native fallback second. v0.40 live execution is
-Linux-only. On non-Linux hosts every route probe fails with
-`UNVERIFIABLE_ISOLATION` before issuing an attempt challenge or creating scratch state. macOS CI
-verifies portable static contracts; it does not advertise a live route. Only executed Linux
-route-smoke results can establish availability.
-Executable presence, caller observations, prose, cached guesses, or static artifacts alone never
-can.
-The selected engine must independently prove installed authentication; this is standing cost
-authorization for that engine only. A fallback engine must pass its own authenticated capability
-probe. Failure of one engine never authorizes spending through another.
-Route state is initialized once and every transition is durably compare-and-swapped; a capability
-change expires the plan instead of clearing outage history. Relaunches use the v2 envelope and a
-session-bound continuation lease. opencode persists the append-only
-issued→claimed→session-created→opened→prompted chain through `continuation-store.mjs`; recovery
-resumes from the last durable transition without treating the opened bundle as a bearer token.
-After the durable prompt intent, `--prepare-prompt` binds that exact intent, opened authorization,
-and target session before provider dispatch. Open and prompted join order-independently; an early
-target terminal cannot tear down the source before the join.
-The lease binds the full ProjectConfig fingerprint and configured base; either changing requires a
-new invocation rather than carrying stale policy across sessions.
+Plan review is dispatched exactly once. Pitcrew revision implementation and its first full review
+are always full lane. Dev-invoked Pitcrew shares Dev's prime; standalone Pitcrew primes for itself.
 
 - **the orchestrator = this session** — the orchestrator ROLE, played by whatever model the session runs.
   Writes the plan, reviews **and fixes** the implementer's diff, runs the gate, drives the PR. Name the
   session's model in the run record so the trail says who reviewed.
-- **the implementer = the implementer** — writes code and returns one complete typed result;
-  never reviews. Every route is a fresh broker-launched process: Claude print mode with a sealed
-  sandbox policy and structured result, `codex exec --sandbox workspace-write`, or
-  `opencode run --pure --format json`. All models edit checkout files but receive read-only Git
-  metadata; the broker creates the sole direct-child commit after accepting a complete typed
-  result. Writers are serialized.
-- **the reviewer = the reviewer** — reviews the plan, then (a fresh process) the code; never
-  writes. Claude uses print mode with a sealed read-only tool/sandbox policy and structured
-  verdict. Codex uses `codex exec --sandbox read-only` with web/apps/approval escalation disabled
-  and an output schema. opencode uses
-  `opencode run --pure --agent autoloop-reviewer --format json`; the typed reviewer allows exactly
-  in-worktree read/glob/grep/list, and the terminal event stream must contain one valid verdict.
-  Resume/continue/session/fork/share and caller-chosen transcript/result paths are forbidden.
-- **the process boundary = the boundary** — Linux `/usr/bin/bwrap` supplies fresh PID, mount,
-  IPC, `/run`, `/tmp`, `/var/tmp`, `/dev`, and private-home views. Read access is closed to the
-  engine runtime/auth material, role-appropriate checkout, required toolchain, and broker scratch.
-  Every writer receives writable checkout files and read-only Git metadata, then delegates the
-  networkless direct-child commit to the broker. Reviewers receive a read-only checkout. GitHub
-  CLI config, SSH material and agents, Git credential
-  stores/helpers, ambient remote-auth variables, broker sockets, rootless container sockets,
-  D-Bus, editor Git sockets, other repositories, shell history, and other host IPC/data are absent.
-  OpenCode provider transport belongs only to the trusted engine, not its model tool surface. The
-  broker compiles the launch/environment, captures stdout/effects, and classifies the receipt.
-- Cross-model diversity is deliberate: a reviewer on a different model/engine than the writer
-  catches shared blind spots, but it never overrides the safe route contract.
-- **No extra Copilot or third-party reviewer service.** The broker-launched reviewer process plus
-  the orchestrator provide the required reviews, per artifact: the orchestrator plans → a fresh
-  reviewer process reviews the plan; the implementer writes code → the orchestrator reviews and
-  fixes → another fresh broker-launched reviewer process reviews the code.
+- **the implementer = the `implement` dispatch** — writes code, never reviews. It is a fresh
+  process with the writing posture and no session persistence; the orchestrator commits its work.
+  Writers are serialized.
+- **the reviewer = the review dispatches** — reviews the plan, then (a separate fresh process) the
+  code; never writes. Its posture declares only `Glob,Grep,Read`, and the settings it launches with
+  deny ambient credential reads (`~/.ssh`, `~/.netrc`, `~/.git-credentials`, `~/.gitconfig`, and
+  the `gh` config directory).
+- **No extra Copilot or third-party reviewer service.** The dispatched reviewer plus the
+  orchestrator provide the required reviews, per artifact: the orchestrator plans → a fresh
+  reviewer reviews the plan; the implementer writes code → the orchestrator reviews and fixes →
+  another fresh reviewer reviews the code.
 
 ## Autonomy & caps (do not exceed without a human)
 
@@ -217,7 +131,7 @@ new invocation rather than carrying stale policy across sessions.
   stop the unit.
 - **Serialize the worked unit.** One CLAIMED unit at a time in the main checkout — finish its PR
   before claiming the next. Read-only staging of the next unit (premise-check / plan /
-  plan review against `origin/<base>`, depth 1) during route-dispatch waits is allowed
+  plan review against `origin/<base>`, depth 1) during dispatch waits is allowed
   (autoloop:dev → Efficiency); never two implementers, never a second claim.
 
 ### Escalate-list (build allowed; never *merge* autonomously)
@@ -304,21 +218,18 @@ built into the unit). **A rebut is a proposal, not closure**: each re-review is 
 thread that receives the prior findings + dispositions and explicitly **accepts or rejects each
 rebut** — rejection may rest on the finding's original evidence; the writer's say-so never closes a
 blocker. Accepted rebut = closed (doesn't re-block without new evidence); rejected = still blocking
-  (fix or park). Give every Critical/Major a stable finding ID. Accepted-rebut evidence is the full
-  host-authenticated Runtime receipt whose typed verdict accepts that ID. The convergence contract
-  receives the ordered receipt history and exact current run/plan/artifact/HEAD bindings. Each
-  later receipt seals the complete preceding gating ledger, typed dispositions, prior reviewed
-  head as delta base, and open rebuts; resolved entries remain in the ledger as `state: closed`,
-  while a caller-authored status or bare fingerprint has no authority. Cap at the
-  configured review limit (new-install default 5); capped with an unresolved Major →
-  `loop-blocked`, the human arbitrates. Round 1 follows the stage/lane table and reviews the full
-  artifact. **Rounds 2+ use the safe native route and converge on rebut adjudication and
-  Critical/Major findings inside the fix delta since the previous round.** A verified
-  out-of-delta Critical/Major does not restart full-artifact review; it enters `loop-blocked` for
-  human arbitration and cannot publish a clean review result. Healthy native Codex convergence
-  review remains a fresh external
-  `codex exec --sandbox read-only`, not a host-session shortcut. A finding never authorizes
-  weakening an invariant or touching the escalate-list.
+  (fix or park). Give every Critical/Major a stable finding ID. A rebut closes only when a fresh
+  reviewer dispatch's typed verdict accepts that exact ID. The convergence contract receives the
+  ordered round history plus the exact current plan/artifact/HEAD bindings. Each later round
+  carries the complete preceding gating ledger, its typed dispositions, the prior reviewed head as
+  its delta base, and the open rebuts; resolved entries remain in the ledger as `state: closed`,
+  and a caller-authored status has no authority. Cap at the configured review limit (new-install
+  default 5); capped with an unresolved Major → `loop-blocked`, the human arbitrates. Round 1
+  reviews the full artifact. **Rounds 2+ converge on rebut adjudication and Critical/Major
+  findings inside the fix delta since the previous round.** A verified out-of-delta
+  Critical/Major does not restart full-artifact review; it enters `loop-blocked` for human
+  arbitration and cannot publish a clean review result. A finding never authorizes weakening an
+  invariant or touching the escalate-list.
 
 **Plans are the deliberate exception — the plan reviewer is dispatched ONCE per unit, never
 re-dispatched for a plan revision.** On `REVISE` the
@@ -342,11 +253,12 @@ establishes infeasibility or a hard-defer defers immediately instead.
   green on that head**, with the complete pre-merge record durably bound; only the human merge
   remains. The sole effectful path is
   `publish-verdict.mjs terminal-finalize --request-file ... --review-evidence-file ...`. Its closed
-  request binds issue, PR, exact head, Runtime intent/review receipt, frozen plan, and the
-  lifecycle comment ID. It rejects a caller-authored lifecycle hash, independently binds the exact
+  request binds issue, PR, exact head, run identity and the clean review evidence fingerprint,
+  frozen plan, and the lifecycle comment ID. It rejects a caller-authored lifecycle hash, independently binds the exact
   finalized live head into a headless draft marker, and derives the lifecycle identity only after
-  compare-and-swap/readback. The dormant non-manual reference contract additionally requires exact ownership
-  evidence and the configured publisher App ID; v0.40 manual mode forbids those inputs. Raw
+  compare-and-swap/readback. Under an acknowledged non-manual policy the reference contract additionally
+  requires exact ownership evidence and the configured publisher App ID; manual mode forbids those
+  inputs. Raw
   PR-ready and `loop-delivered` mutations,
   caller `remoteHead`, `ci`, CheckRuns, required contexts, producer IDs, and delivery booleans are
   forbidden. The finalizer executes the full gate, publishes/reuses exact-head CheckRuns, and uses
@@ -403,53 +315,6 @@ establishes infeasibility or a hard-defer defers immediately instead.
 the defer flow.** The guardrail verifies *who applied* `loop-ready`; cycling it would launder the
 trust chain through the loop's own login.
 
-Workflow measurements are local evidence, never routing or lifecycle authority. Dev and Pitcrew
-bind `run-start` from exact `{run,measurement}` immediately after Runtime opens and before startup
-operations. Capability and route-state fields are forbidden at that boundary. They start the
-selection stage immediately, execute authentication, Git synchronization, setup, scan, lifecycle
-recovery, probing, route-state initialization, and selection through the measured operation
-wrapper, then bind `unit-context` from the first exact broker-issued plan; callers never declare
-lane proof, capability, or outage facts. They retain write-once authenticated raw events at each
-stage/wait boundary and use measured Runtime observation for every dispatch receipt. The wrapper
-applies command policy, journals remote mutation intent before execution, and appends a matching
-commit marker only after authenticated capture. Any unresolved intent terminally blocks all later
-remote mutations in that run; there is no caller-trusted reconciliation shortcut. The tool binds live
-HEAD, tool time, event order, and the declared or producer-owned payload under the local store HMAC.
-Finalization replays the raw set and derives reconciled aggregates plus separate
-stage/round/route/adapter segments; direct caller-composed aggregate recording is refused. Later
-reads reauthenticate and rederive the record. This proves local retention, not that an external
-provider, command, or receipt declaration was independently true. Every run also binds
-`comparisonContextFingerprint`, the SHA-256 of the exact retained bytes of its immutable,
-versioned benchmark manifest, plus `checkpointEndpointFingerprint` from the retained
-checkpoint-specific endpoint manifest. A Git-ref CAS lock serializes publication/recovery.
-Duplicate run/unit or terminal-evidence identities and invalid evidence fail closed within a cohort
-and across independent baseline/current cohorts. Provider and avoided-cost facts that cannot be
-verified use typed unavailable reasons. When segment telemetry is incomplete, an independently
-observed unit aggregate requires `provider-unit-total` provenance whose closed raw evidence binds
-the exact run, unit, metric, single observed provider, and claimed value; fully observed segments
-still require an exact sum.
-Legacy-to-safe comparison holds workload, mode, comparison context, and unique stage-independent
-role/route/adapter/degradation/provider/model/engine identities fixed, and refuses unavailable
-provider/model/engine identity or non-completed units. Each checkpoint retains one exact revision,
-configuration, and endpoint; capability/outage evidence may vary without splitting it but every
-report preserves exact value/count distributions. Stage/round topology may vary across
-checkpoints. Budget commands consume only replay-verified event-derived record IDs. The canonical
-`.autoloop/measurement-budget-policy.json` binds exact baseline/current IDs per workload and
-execution mode. An active policy also binds the exact SHA-256 of the committed canonical
-`.autoloop/measurement-evidence-v1.json` raw-event bundle, so clean-clone CI replays evidence
-without the private local Git store. `pending-evidence` is valid but always `passed: false` and is
-never reported as a budget pass; an active policy fails closed on missing, malformed,
-digest-mismatched, provisional, cohort-mismatched, or regressed evidence. Source/current require
-completed units, observable runtime identity, one
-revision/endpoint per side, and the same configuration. A p95 needs 20 observed values for that
-metric; a budget remains provisional until its named safe-system source and current cohort both
-meet the declared stable floor of at least 100. Missing historical records are never fabricated,
-and event finalization cannot import legacy records.
-v0.40 has no producer-backed terminal, gate, lifecycle, or provider-accounting seam. Those
-references remain typed unavailable; the raw Runtime/command stream is retained, aggregate
-finalization is refused, and the budget policy stays `pending-evidence` until genuine producers
-and cohorts exist.
-
 **Step labels are breadcrumbs, never decision inputs.** `loop-started` and the `loop:*` labels are
 the loop's own progress trail — truth stays git/GitHub (open PRs, merged PRs, gate verdicts), and
 no check may key off a step label. A stale step label from a crashed run is reconciled at the next
@@ -475,24 +340,16 @@ Do not activate this queue-wide goal for the supervised first run: run one issue
 explicitly bounded invocation ("take ONE issue and stop") with no active goal, validate it, and
 only then use this condition for queue-draining work. That bound lives in the invocation you
 type, never in this file — nothing in STATE sets or implies a run scope. Queue draining is the
-default whenever the current invocation states no bound; the loop resolves the run scope at
-Prime from that invocation alone (`tools/agentic/run-scope.mjs`) and must not park with
-eligible work remaining without a reason `validateStop` accepts.
+default whenever the current invocation states no bound, and the run must not park with eligible
+work remaining without a stated reason.
 
-Every queue-sensitive finish invalidates stale sections, runs a fresh full snapshot, requires its
-queue/lifecycle/dependency sections to be complete, and derives evidence only from that exact
-verified snapshot. Pipe it to
-`node tools/agentic/snapshot-contract.mjs --queue-evidence <queueExhaustion|relaunch>
-<run.instanceFingerprint> <run.configFingerprint> <run.configuredBaseBranch>` and pass its exact
-`{snapshot,evidence}` stdout as `progress.queueEvidence` to `run-scope.mjs --finish-json`. Use
-`queueExhaustion` for queue exhaustion and `relaunch` for an opted-in queue context-budget
-handoff. Caller-declared `eligibleRemaining`, `queueComplete`, eligible IDs, or absence claims
-have no authority and must never be supplied.
+Every queue-sensitive finish invalidates stale sections, runs a fresh full snapshot, and requires
+its queue/lifecycle/dependency sections to be complete. Absence is proved only from that exact
+verified snapshot; a caller-declared "nothing remaining" has no authority.
 
 > Every open `loop-ready` issue is either claimed by an open/merged PR (with a green gate), labelled
 > `loop-blocked` with a reason, or dependency-blocked (has an open `## Blocked by`). The final code
-> verdict comes from a **fresh broker-launched reviewer process** — never from a process that
-> wrote the code.
+> verdict comes from a **fresh reviewer dispatch** — never from a process that wrote the code.
 
 ## Security — issue-injection guardrail
 

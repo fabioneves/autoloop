@@ -66,7 +66,7 @@ import {
   serializeLifecycleSuccessor,
 } from './lifecycle-contract.mjs';
 import { authorizeReviewPublication } from './review-contract.mjs';
-import { snapshotExecutionRepository } from './route-adapter-contract.mjs';
+import { snapshotExecutionRepository } from './checkout-contract.mjs';
 
 const CONTEXTS = new Set([
   'gate',
@@ -193,7 +193,7 @@ function reviewSummary(
   return (
     `Authenticated review convergence: ${authorization.code}; `
     + `round ${evidence.round}; receipt `
-    + `${authorization.runtimeReceiptFingerprint}.`
+    + `${authorization.reviewEvidenceFingerprint}.`
   );
 }
 
@@ -3315,7 +3315,7 @@ function selfTest() {
       return {
         authorized: true,
         code: 'REVIEW_CLEAN',
-        runtimeReceiptFingerprint: 'c'.repeat(64),
+        reviewEvidenceFingerprint: 'c'.repeat(64),
       };
     },
   );
@@ -3336,7 +3336,7 @@ function selfTest() {
       () => ({
         authorized: false,
         code: 'INVALID_REVIEW_EVIDENCE',
-        runtimeReceiptFingerprint: null,
+        reviewEvidenceFingerprint: null,
       }),
     );
     console.error('FAIL review publisher rejects denied authorization');
@@ -3377,7 +3377,7 @@ function selfTest() {
     passed += 1;
   }
   const gateConfig = {
-    version: '0.25.0',
+    version: '0.26.0',
     baseBranch: 'main',
     gate: { command: 'npm test', quickCommand: null, setupCommand: null },
     merge: { policy: 'manual' },
