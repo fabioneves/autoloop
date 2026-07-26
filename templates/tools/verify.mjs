@@ -57,6 +57,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'lifecycle-driver.mjs',
   'loop-scope.mjs',
   'measurement-contract.mjs',
+  'prime.mjs',
   'publish-verdict.mjs',
   'release-verify.mjs',
   'review-contract.mjs',

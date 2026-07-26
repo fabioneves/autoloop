@@ -335,6 +335,20 @@ function requireReleaseReference(text, path, description, literal, errors) {
   }
 }
 
+// prime.mjs declares the checkpoint-endpoint manifest's autoloopVersion; a
+// stale literal there silently fragments measurement cohorts, so releases must
+// keep it synchronized like every other version literal.
+function requirePrimeVersion(text, version, errors) {
+  const matches = typeof text === 'string'
+    ? [...text.matchAll(/^const AUTOLOOP_VERSION = '([^']+)';$/gmu)]
+    : [];
+  if (matches.length !== 1 || matches[0][1] !== version) {
+    errors.push(
+      `templates/tools/prime.mjs: expected exactly one AUTOLOOP_VERSION literal equal to ${version}`,
+    );
+  }
+}
+
 function exactKeys(value, keys) {
   return value
     && typeof value === 'object'
@@ -665,6 +679,7 @@ export function verifyRelease(files, options = {}) {
   }
 
   const configVersion = readConfigVersion(files.configContract, errors);
+  requirePrimeVersion(files.primeTool, version, errors);
   requireReleaseReference(
     files.README,
     'README.md',
@@ -790,6 +805,7 @@ function fixtureFiles(version = '0.40.0') {
     devSkill: `∞ dev · v${version} · starting\n`,
     pitcrewSkill: `∞ pitcrew · v${version} · starting\n`,
     configContract: "export const CONFIG_VERSION = '0.25.0';\n",
+    primeTool: `const AUTOLOOP_VERSION = '${version}';\n`,
     measurementDoc: `The pipeline is implemented in v${version}.\n`,
     opencodeSmoke:
       `- v${version} live smoke evidence: date=2026-07-25; `
@@ -1013,6 +1029,16 @@ async function selfTest() {
         'docs/measurement.md: expected exactly one v0.40.1 release reference',
         'docs/opencode-smoke.md: expected exactly one complete v0.40.1 live smoke evidence record',
         'README.md: expected exactly one v0.40.1/schema 0.25.0 reference',
+      ],
+    },
+    {
+      name: 'rejects a stale prime version literal',
+      files: {
+        ...fixtureFiles(),
+        primeTool: "const AUTOLOOP_VERSION = '0.39.9';\n",
+      },
+      expected: [
+        'templates/tools/prime.mjs: expected exactly one AUTOLOOP_VERSION literal equal to 0.40.0',
       ],
     },
     {
@@ -1709,6 +1735,7 @@ function loadRepository(root) {
     devSkill: readText(root, 'skills/dev/SKILL.md'),
     pitcrewSkill: readText(root, 'skills/pitcrew/SKILL.md'),
     configContract: readText(root, 'templates/tools/config-contract.mjs'),
+    primeTool: readText(root, 'templates/tools/prime.mjs'),
     measurementDoc: readText(root, 'docs/measurement.md'),
     opencodeSmoke: readText(root, 'docs/opencode-smoke.md'),
     stateTemplate: readText(root, 'templates/STATE.template.md'),

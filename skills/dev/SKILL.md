@@ -26,47 +26,37 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    `docs/agentic/STATE.md` in full. If absent, stop and run Setup.
 2. Extract and validate ProjectConfig with `config-contract.mjs`. Schema `0.24.0` is a typed
    migration failure with the exact Setup remedy. ProjectConfig contains no routing authority.
-   Retain the exact versioned benchmark and checkpoint-endpoint manifest bytes for this invocation,
-   hash them, and generate the measurement run UUID before Runtime opens.
 3. For a new invocation, require the host prompt hook to have captured the command-shaped prompt
    before this skill began: Claude/Codex `UserPromptSubmit` and opencode
-   `opencode.user-prompt` pipe their native event to `intent-contract.mjs --capture-hook`. Verify
-   that transport record exists as the FIRST prime action — before dirty-tree attribution,
-   configuration repair, or any other work. A prose-shaped invocation captures nothing by design;
-   attestation will fail, so stop within seconds and instruct the human to reinvoke as
-   `/autoloop:dev …` instead of discovering the missing record after doing real work (a live run
-   spent five minutes on remediation, then had to throw the session away). Call
-   `run-scope.mjs --attest-host-json` with exactly `{sessionId}`. The broker consumes that one-use
-   process/repository/session-bound transport record and reads and validates STATE itself. For the
-   exact opencode v2 continuation target from step 5, the unchanged source broker instead derives
-   one target attestation from its prompt-prepared, session-bound continuation ledger; it never
-   consumes the canonical relaunch prompt as new invocation intent or starts a second broker. The
-   hook shares an OS user with the model and cannot authenticate who supplied the prompt; Runtime
-   therefore records immutable `intentProvenance: "best-effort-unverified"`. Missing, replayed,
-   conflicting, cross-process, or cross-repository transport stops, but these checks are not user
-   attribution. Never pass prompt text or ProjectConfig as caller attestation.
-4. Call `run-scope.mjs --open-json` with exactly `{hostEvidence}` plus either all four typed
-   continuation fields or none. The broker alone hydrates the captured routing preference and
-   validated ProjectConfig into Runtime. Bare invocation stores selector `native`; only an
-   explicit final `with claude|codex|opencode` suffix stores that selector. It remains
-   best-effort-unverified and never grants lifecycle, human, merge, or release authority.
-   `merge.policy` other than `manual` returns `UNVERIFIABLE_INVOCATION_PROVENANCE` before probe,
-   scratch creation, or mutation unless the configuration records
-   `merge.unverifiedInvocationAcknowledged: true`. Caller `invocation` or `config` fields are invalid, and
-   unsupported pairs stop before mutation.
-5. For a v2 continuation, require the durable `opened` state, its
-   `continuationAuthorization`, and host evidence bound to the same integration/session ID. Pass
-   the exact bundle to Runtime. Reject v1/free-text markers, replay, corruption, host/session
-   mismatch, selector conflict, stale generation, or a changed ProjectConfig/configured base.
-6. Immediately bind measurement through `run-scope.mjs --bind-measurement-json` with exact
-   `{run,measurement}`. The version-1 declaration contains the run UUID, workload/checkpoint and
-   retained-manifest fingerprints, intent source/provenance, merge policy, and base-freshness
-   strategy; it contains no capability, route state, unit, lane, outage, repository, host, nonce,
-   or authority fields. The broker validates the exact run it issued and persists `run-start`.
-   Immediately retain the `selection` stage start. This must complete before authentication,
-   Git synchronization, setup, scan, lifecycle recovery, route probing, or another selection
-   operation. Stop if either boundary is not retained.
-7. Verify GitHub authentication and repository access. Attribute a dirty tree before switching:
+   `opencode.user-prompt` pipe their native event to `intent-contract.mjs --capture-hook`. That
+   transport record is the FIRST prime dependency — before dirty-tree attribution, configuration
+   repair, or any other work. A prose-shaped invocation captures nothing by design; attestation
+   will fail, so stop within seconds and instruct the human to reinvoke as `/autoloop:dev …`
+   instead of discovering the missing record after doing real work (a live run spent five minutes
+   on remediation, then had to throw the session away). Then run the one-call prime:
+
+   ```bash
+   printf '{"sessionId":"<native-session-id>"}' | node tools/agentic/prime.mjs --dev-json -
+   ```
+
+   One call performs, in order, exactly the per-op sequence documented under "Manual per-op
+   prime" below: `--attest-host-json` with exactly `{sessionId}` (attestation fails first and
+   fast when the transport record is missing), `--open-json` with exactly `{hostEvidence}`,
+   mechanical derivation of the version-1 measurement declaration (run UUID, retained
+   workload/checkpoint-endpoint manifest bytes and their SHA-256 fingerprints, intent
+   source/provenance, merge policy, base-freshness strategy — no capability, route state, unit,
+   lane, outage, repository, host, nonce, or authority fields), `--bind-measurement-json` with
+   exact `{run,measurement}` (the broker validates the exact run it issued and persists
+   `run-start`), the public `selection-1` stage-start capture, and one measured startup
+   `scan.mjs` operation through `measurement-contract.mjs --run-operation`. It stops fail-closed
+   at the first typed error with that error on stdout, and on success prints one bundle:
+   `{ok,run,boundaries:{runStart,stageStart},scan:{operationId,eventPath},snapshot}`. Retain the
+   exact bundle. The boundaries it retained are the measurement `run-start`, the open
+   `selection-1` stage start, and the authenticated startup-scan operation event; every later
+   startup operation still runs measured inside that open stage. prime.mjs opens new invocations
+   only — for the exact opencode v2 continuation target, and to diagnose a failed prime step, use
+   the manual per-op path below with the same safety rules.
+4. Verify GitHub authentication and repository access. Attribute a dirty tree before switching:
    only a lifecycle-bound, same-issue orphan with every dirty path in the plan boundary and no
    human-authorization path may resume. Otherwise treat it as human work and stop. Never stash,
    discard, or relocate unknown work. Uncommitted scaffold or migration artifacts
@@ -77,20 +67,21 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    the run with the typed guardrail-failure stop, and let the next invocation start clean after
    the human merges — never continue into selection holding a config fingerprint the base no
    longer matches.
-8. On a clean tree, fetch and switch to `cfg.baseBranch`, pull fast-forward, then re-read STATE
+5. On a clean tree, fetch and switch to `cfg.baseBranch`, pull fast-forward, then re-read STATE
    because the session injection may have come from a parked unit branch.
-9. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
-10. Run one versioned startup snapshot through `scan.mjs`, retain its exact output, and share that
-   retained snapshot with Pitcrew. Every section is `{items,complete,error}`. Use targeted
-   fallbacks only for incomplete sections. After any Git or GitHub mutation or any wait boundary,
-   pipe the retained snapshot through
+6. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
+7. The prime bundle's `snapshot` is the one versioned startup snapshot; retain its exact bytes
+   and share that retained snapshot with Pitcrew. Every section is `{items,complete,error}`. Use
+   targeted fallbacks only for incomplete sections. After any Git or GitHub mutation (including
+   the base switch above) or any wait boundary, pipe the retained snapshot through
    `node tools/agentic/snapshot-contract.mjs --invalidate <REASON>` and replace it with the exact
    stdout before making another snapshot-derived decision. Use `GIT_MUTATION`, `ISSUE_MUTATION`,
    `PR_MUTATION`, `REVIEW_MUTATION`, or `WAIT_BOUNDARY`; use `UNKNOWN_MUTATION` when uncertain.
-   Mutations may be batched only while no decision intervenes. Then rerun the full `scan.mjs` and
-   replace the invalidated snapshot before actionability, absence, selection, or stop decisions.
-   Never read items from an invalidated section as authority.
-11. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
+   Mutations may be batched only while no decision intervenes. Then rerun the full `scan.mjs` —
+   as a measured operation inside the open selection stage — and replace the invalidated snapshot
+   before actionability, absence, selection, or stop decisions. Never read items from an
+   invalidated section as authority.
+8. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
     durable issue-comment marker before selecting work, including an intent that crashed before a
     draft PR existed. A marker has authority only when its author currently has admin/maintain, or
     when it is the authenticated current runner's own marker and that runner still has write.
@@ -103,7 +94,7 @@ Run Pitcrew first in the same `RunContext`, then take new work.
     A proven human merge missing its terminal outcome is backfilled through this same driver before
     its marker reaches `terminal-record`. Git/GitHub facts are lifecycle authority; recorded
     routes are audit evidence only.
-12. Live execution in v0.40 is Linux-only. Probe with `run-scope.mjs --probe-json` input exactly
+9. Live execution in v0.40 is Linux-only. Probe with `run-scope.mjs --probe-json` input exactly
     `{hostEvidence,run,routes:[selectedRoute, optionalNativeFallback],cwd:absoluteRepositoryRoot}`.
     Put the selected route first and include the same-host native route second only when that
     engine independently passes its own authenticated installed capability. Authentication is the
@@ -114,11 +105,53 @@ Run Pitcrew first in the same `RunContext`, then take new work.
     executable presence, caller observations, prose, and static guesses cannot make a capability
     available. Cache the returned capability snapshot under its fingerprint. Missing
     executable/auth/version/artifact/isolation is a capability error, not an outage.
-13. Immediately call `run-scope.mjs --initialize-route-state-json` with exact
+10. Immediately call `run-scope.mjs --initialize-route-state-json` with exact
     `{run,capabilities}` and retain the broker-issued route state. This must precede the first
     plan. Initialize exactly once for this run/capability fingerprint; an
     existing durable state is reused and later capability changes use refresh, never
     reinitialization.
+
+### Manual per-op prime
+
+The fallback path for the exact opencode v2 continuation target and for diagnosing a failed
+prime.mjs step. It is the same op sequence with the same safety rules; retain the exact versioned
+workload and checkpoint-endpoint manifest bytes for this invocation, hash them, and generate the
+measurement run UUID before Runtime opens.
+
+1. Call `run-scope.mjs --attest-host-json` with exactly `{sessionId}`. The broker consumes that
+   one-use process/repository/session-bound transport record and reads and validates STATE
+   itself. For the exact opencode v2 continuation target from step 3, the unchanged source broker
+   instead derives one target attestation from its prompt-prepared, session-bound continuation
+   ledger; it never consumes the canonical relaunch prompt as new invocation intent or starts a
+   second broker. The hook shares an OS user with the model and cannot authenticate who supplied
+   the prompt; Runtime therefore records immutable
+   `intentProvenance: "best-effort-unverified"`. Missing, replayed, conflicting, cross-process,
+   or cross-repository transport stops, but these checks are not user attribution. Never pass
+   prompt text or ProjectConfig as caller attestation.
+2. Call `run-scope.mjs --open-json` with exactly `{hostEvidence}` plus either all four typed
+   continuation fields or none. The broker alone hydrates the captured routing preference and
+   validated ProjectConfig into Runtime. Bare invocation stores selector `native`; only an
+   explicit final `with claude|codex|opencode` suffix stores that selector. It remains
+   best-effort-unverified and never grants lifecycle, human, merge, or release authority.
+   `merge.policy` other than `manual` returns `UNVERIFIABLE_INVOCATION_PROVENANCE` before probe,
+   scratch creation, or mutation unless the configuration records
+   `merge.unverifiedInvocationAcknowledged: true`. Caller `invocation` or `config` fields are invalid, and
+   unsupported pairs stop before mutation.
+3. For a v2 continuation, require the durable `opened` state, its
+   `continuationAuthorization`, and host evidence bound to the same integration/session ID. Pass
+   the exact bundle to Runtime. Reject v1/free-text markers, replay, corruption, host/session
+   mismatch, selector conflict, stale generation, or a changed ProjectConfig/configured base.
+4. Immediately bind measurement through `run-scope.mjs --bind-measurement-json` with exact
+   `{run,measurement}`. The version-1 declaration contains the run UUID, workload/checkpoint and
+   retained-manifest fingerprints, intent source/provenance, merge policy, and base-freshness
+   strategy; it contains no capability, route state, unit, lane, outage, repository, host, nonce,
+   or authority fields. The broker validates the exact run it issued and persists `run-start`.
+   Immediately retain the `selection` stage start. This must complete before authentication,
+   Git synchronization, setup, scan, lifecycle recovery, route probing, or another selection
+   operation. Stop if either boundary is not retained.
+5. Run one versioned startup snapshot through `scan.mjs` as a measured operation
+   (`measurement-contract.mjs --run-operation`) inside the open selection stage, then continue
+   at step 4 of Prime.
 
 ## Runtime execution seam
 
@@ -129,7 +162,9 @@ corresponding structured JSON flag: `--attest-host-json`, `--probe-json`,
 `--bind-measurement-json`, `--bind-measurement-unit-json`,
 `--observe-measured-json`, or `--finish-json`. Use stdin or a bounded JSON file. Plain
 `--observe-json` is doctor-only for terminal receipts; Dev always uses the measured form. Do not
-inline-import contracts or translate their outputs in prose.
+inline-import contracts or translate their outputs in prose. `prime.mjs` composes exactly these
+CLI seams for the prime sequence — it holds no authority of its own and every envelope it submits
+is validated by the same broker as a hand-written one.
 
 The first attestation starts one process-bound authority broker. Signing keys exist only in that
 broker's memory; no key or generic signing endpoint is exposed. Its closed ledger accepts only
