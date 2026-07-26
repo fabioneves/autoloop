@@ -305,7 +305,7 @@ function validCumulativeLedger(previous, current) {
   return true;
 }
 
-function roundHistory(rounds, round, scope, expected, projectConfig) {
+function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) {
   if (
     !Array.isArray(rounds)
     || rounds.length !== round
@@ -341,15 +341,31 @@ function roundHistory(rounds, round, scope, expected, projectConfig) {
   }
   if (first.configFingerprint !== hashValue(projectConfig)) return null;
   if (rounds[0].deltaBaseOid !== first.configuredBaseOid) return null;
+  // A single undifferentiated null here cost a live run a bisect: the caller's
+  // one INVALID_REVIEW_EVIDENCE code cannot say which chain rule broke, and
+  // `artifactVersion` in particular is refused for a reason stated nowhere the
+  // orchestrator reads. Each rule now names itself.
   for (let index = 1; index < rounds.length; index += 1) {
     const previous = rounds[index - 1];
     const current = rounds[index];
-    if (
-      current.deltaBaseOid !== previous.headOid
-      || !validCumulativeLedger(previous, current)
-      || current.artifactVersion <= previous.artifactVersion
-      || current.artifactFingerprint === previous.artifactFingerprint
-    ) {
+    if (current.deltaBaseOid !== previous.headOid) {
+      gaps.push(`round ${index + 1}: deltaBaseOid must equal the previous round's headOid`);
+      return null;
+    }
+    if (!validCumulativeLedger(previous, current)) {
+      gaps.push(`round ${index + 1}: the cumulative finding ledger is not carried forward`);
+      return null;
+    }
+    if (current.artifactVersion <= previous.artifactVersion) {
+      gaps.push(
+        `round ${index + 1}: artifactVersion must strictly increase per round `
+        + `(got ${current.artifactVersion} after ${previous.artifactVersion}) — it versions the `
+        + 'reviewed artifact, not the plan',
+      );
+      return null;
+    }
+    if (current.artifactFingerprint === previous.artifactFingerprint) {
+      gaps.push(`round ${index + 1}: artifactFingerprint is unchanged — nothing was re-reviewed`);
       return null;
     }
   }
@@ -412,14 +428,20 @@ export function reviewTransition(input) {
     return decision('error', 'INVALID_REVIEW_INPUT');
   }
 
+  const evidenceGaps = [];
   const history = roundHistory(
     input.reviewRounds,
     input.round,
     input.scope,
     input.expected,
     input.projectConfig,
+    evidenceGaps,
   );
-  if (!history) return decision('error', 'INVALID_REVIEW_EVIDENCE');
+  if (!history) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', evidenceGaps.length > 0
+      ? { evidenceGap: evidenceGaps[0] }
+      : {});
+  }
   if (!authenticatedFindings(history.rounds)) {
     return decision('error', 'INVALID_REVIEW_EVIDENCE');
   }

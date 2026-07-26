@@ -327,6 +327,11 @@ Each entry in `reviewRounds` is the record of one dispatched round:
  checkout,priorFindings,openRebuttals,verdict}
 ```
 
+- `artifactVersion` versions the **reviewed artifact**, not the plan, and must **strictly increase
+  every round**: round 1 is 1, round 2 is 2, and so on. Stamping each round with the plan's own
+  version is the natural mistake — the field sits beside `planFingerprint` — and it is refused
+  without naming itself, which has cost a live run a bisect. `artifactFingerprint` must also
+  differ from the previous round's: a round that reviewed byte-identical work is not a round.
 - `dispatchId` is unique per round — a repeated id is a replayed reviewer, not a fresh one.
 - `authorIdentity` and `reviewerIdentity` must differ. That is the writer ≠ reviewer invariant.
 - `scope` is `full-artifact` for round 1 and `fix-delta-and-open-rebuttals` afterwards.
