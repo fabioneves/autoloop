@@ -20,7 +20,7 @@
     "loop-smoke.mjs": "4092753b880a861cc9943d60bfcd55628f25dd0c09c22f21de81b4d70ecdafba",
     "measurement-contract.mjs": "51d3f0ec696c32cb3bc8d105c0697321aa95bfa8e1ee1c9f388335ecaba88a5a",
     "merge-authorization-contract.mjs": "d162977e509012240b319b36b069a0e564cbef3ed76e5584899bac083e4f8615",
-    "prime.mjs": "8007f54b2e483ecf2e23f332de442fdbc5064966e0881b64a8e59b051aa4dbc4",
+    "prime.mjs": "dde353e7ca9fe7b0e15e59e440b3633325cc1f0d6ebe605336467227c03627e7",
     "publish-verdict.mjs": "59c63e124644459bbd48ac2ae7071bfb5b83d9c83736ddc686ff453729356c53",
     "release-verify.mjs": "12f03891d668fa093699c21055ca6d483b883fab44753161ffdc1cb650aedf7d",
     "review-contract.mjs": "5631663a153275a8b8e67d07383d4bc98c1a0b7eb2f2425f4ff49785cbc13468",
