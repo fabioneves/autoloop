@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.42.3 · starting
+🟦 ∞ dev · v0.43.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -128,6 +128,45 @@ named skills.
 
 A writer that reports partial or unknown effects enters lifecycle reconciliation. Never blind-retry
 it. A review dispatch that mutated the repository is invalid.
+
+## Efficiency — overlap and liveness
+
+A dispatch is a model round trip measured in minutes. One live run spent 23 minutes on the
+implementer and 9 on plan review with five eligible issues sitting in the queue and the
+orchestrator idle throughout. Serializing the *worked* unit is required; idling the session while
+it waits is not.
+
+**Overlap (depth one).** Any background dispatch is the trigger — not a named list of steps,
+which goes stale the moment a role is added. While a dispatch is in flight, stage the NEXT
+eligible issue through its read-only steps 1–3: premise-check and plan against `origin/<base>`,
+then its plan-review dispatch. Read the committed tree (`git show`, `git grep`) and never the
+working tree, which the in-flight unit's writer owns.
+
+One idiom on every host:
+
+```bash
+node tools/agentic/dispatch.mjs --role implement --prompt-file <p> \
+  --output-file <result.json> --json      # run in background; collect when it exits
+```
+
+`--output-file` exists so a result can be collected later. Hard limits: at most ONE unit staged
+ahead; never two writers; never claim the staged unit (step 4) until the worked unit reaches a
+terminal state — delivered, blocked, or deferred. Every marker and step label names its own issue.
+At collection, finish the worked unit through step 11, then claim the staged one with its
+already-reviewed plan.
+
+**Liveness — never end the turn mid-unit.** A turn that has ended emits no heartbeat and no task
+update, so an idle turn and a working session are indistinguishable; a live run ended its turn at
+step 8 of 11 with four commits sitting unpushed and nothing objected. The unit runs to a terminal
+state in-turn. While a dispatch is in flight and no staging work remains, hold the wait in-turn
+with bounded polls and emit the heartbeat pair — chat line plus task elapsed refresh — after each.
+The Stop hook now refuses a turn that abandons pushed-behind work, but the hook is the backstop,
+not the plan.
+
+**Accounting.** The run record's `overlap:` line comes from `overlap-report.mjs`, which derives
+concurrency from the dispatch log's own timestamps. `concurrent 0s` beside `eligible 5` is a run
+that serialized work it could have overlapped, and it is visible without anyone choosing to
+mention it.
 
 ## Lane and convergence policy
 
@@ -327,6 +366,11 @@ Each entry in `reviewRounds` is the record of one dispatched round:
  checkout,priorFindings,openRebuttals,verdict}
 ```
 
+- `artifactVersion` versions the **reviewed artifact**, not the plan, and must **strictly increase
+  every round**: round 1 is 1, round 2 is 2, and so on. Stamping each round with the plan's own
+  version is the natural mistake — the field sits beside `planFingerprint` — and it is refused
+  without naming itself, which has cost a live run a bisect. `artifactFingerprint` must also
+  differ from the previous round's: a round that reviewed byte-identical work is not a round.
 - `dispatchId` is unique per round — a repeated id is a replayed reviewer, not a fresh one.
 - `authorIdentity` and `reviewerIdentity` must differ. That is the writer ≠ reviewer invariant.
 - `scope` is `full-artifact` for round 1 and `fix-delta-and-open-rebuttals` afterwards.
@@ -450,7 +494,10 @@ Post one issue run record via body file containing:
 - gate command/result and exact OID;
 - delivery/CI/merge or queue outcome;
 - lifecycle/premerge record identifiers;
-- recovery outcomes.
+- recovery outcomes;
+- the `overlap:` line, verbatim from `node tools/agentic/overlap-report.mjs --eligible <e>`. It is
+  computed from the dispatch log, never composed by hand — a hand-written one is what let overlap
+  disappear for three releases unnoticed.
 
 Post one end-of-run digest and scoreboard, not one per tool phase. `stats.mjs` presents cross-unit
 step timings from the label timeline; it is presentation only.
@@ -476,38 +523,63 @@ branch. If dirty, do not switch; report it.
 
 ## Chat markers
 
-One visual language end to end: the `∞` motif from the start banner, a step ribbon, and
-rounded frames. Values in every marker are safe composed text, never raw issue/review bytes.
+One visual language end to end: the `∞` motif from the start banner, a state badge, a step
+ribbon, and rounded frames. Values in every marker are safe composed text, never raw
+issue/review bytes.
+
+Every banner opens with one state badge, so a scrollback can be scanned for outcomes without
+reading any words:
+
+| badge | state |
+|---|---|
+| 🟦 | in progress |
+| 🟩 | terminal success — shipped, converged, complete |
+| 🟥 | blocked — a guardrail refused or the unit failed |
+| 🟨 | needs a human — an open Major, a human-block path, a decision |
 
 After prime succeeds, open the run frame:
 
 ```text
-∞ run ─ queue <e> eligible · <policy>
+🟦 ∞ run ─ queue <e> eligible · <policy>
 ```
 
 Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
-eleven cells:
+eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
+that decides nothing is due still happened, and a missing ribbon reads as a skipped step.
 
 ```text
-∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor>
+🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor>
+🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 SIMPLIFY ─ #<N> · no change required · orchestrator
 ```
+
+Code review converges over rounds, so it also prints a round ribbon against the configured
+cap — same grammar, cells counting rounds — which makes an approaching cap visible before it
+blocks:
+
+```text
+🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW ─ #<N> · fix-delta · 0 Critical · 2 Major open
+🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW ─ #<N> · fix-delta · clean · converged
+```
+
+Plan review is one dispatch and has no round ribbon.
 
 End a unit with one closing rail:
 
 ```text
-╰─ ✔ #<N> SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> ─╯
+🟩 ╰─ ✔ #<N> SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> ─╯
 ```
 
 or:
 
 ```text
-╰─ ✖ #<N> BLOCKED ─ <safe composed reason> ─╯
+🟥 ╰─ ✖ #<N> BLOCKED ─ <safe composed reason> ─╯
 ```
 
-Close the run with:
+Close the run with the badge matching its outcome — 🟩 when something shipped and nothing
+blocked, 🟥 when anything blocked:
 
 ```text
-∞ run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
+🟩 ∞ run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
 ```
 
 Never paste raw issue/review text into chat banners.

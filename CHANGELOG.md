@@ -3,6 +3,63 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.43.0] - 2026-07-26
+
+### Added
+
+- **Depth-one overlap is back, and this time it is measured.** v0.39 staged the next eligible unit
+  while a dispatch was in flight; v0.40.0 rewrote the skill around the broker and dropped the
+  section. Nothing failed when it went, so it stayed gone for three minor versions — a live 0.42.3
+  run idled 32 minutes across two dispatches with five eligible issues queued. Restored with the
+  trigger generalized to any background dispatch rather than an enumerated step list, and with one
+  host-neutral idiom (the dispatch call backgrounded, collected from `--output-file`) replacing the
+  branching across Claude, native Codex and opencode. Limits unchanged: one staged ahead, never two
+  writers, never claim the staged unit until the worked one is terminal, read the committed tree
+  and never the writer's working tree.
+- **`overlap-report.mjs`** — the run record's `overlap:` line, computed instead of narrated. Sum of
+  dispatch durations minus their union is exactly the wall-clock two or more were in flight, so
+  `concurrent 0s` beside `eligible 5` is a run that serialized work it could have overlapped.
+  v0.39 had the same line but hand-written, which is precisely why its disappearance went unseen.
+  Run scope comes from the run-marker mtime `prime.mjs` already writes.
+- **Every dispatch records its own window** to `autoloop/dispatch-log.jsonl` in the common Git
+  directory — common so units in separate worktrees stay comparable, inside `.git` so it can never
+  be committed. Typed failures are logged beside successes, so idle time cannot be understated by
+  counting only what worked.
+- **A state badge on every banner** — 🟦 in progress, 🟩 terminal success, 🟥 blocked, 🟨 needs a
+  human — plus a round ribbon for code-review convergence against its cap. The `▰▱` ribbon is
+  unchanged and the badge is a prefix, so the release-pinned startup literal still matches.
+- **Preflight names vendored-tool drift.** `tools/agentic/*` is a copy taken when setup last ran, so
+  a released fix reaches a checkout only when setup runs again — and a 0.42.1 command-guard refused
+  the audit battery of the 0.42.3 setup that would have replaced it. Two causes, the second
+  previously invisible: setup has not run, or the checkout is a unit branch that forked before the
+  reconcile landed on its base.
+
+### Fixed
+
+- **Ending a turn mid-unit is a write-back gap.** A live run stopped at step 8 of 11 —
+  `stop_reason=end_turn`, not a crash — leaving four commits only in the local checkout. Every
+  guard had a reason to stay quiet: clean tree, draft-PR case deliberately a reminder, and step
+  labels never advanced past claim so the unit did not look mid-flight. Unpushed work under an open
+  loop PR is now a hard gap, checked with `git rev-list --count` against the tracking ref — no
+  GraphQL, which is why the draft check was softened in the first place.
+- **A skipped step-label swap can no longer pass unseen.** The same run swapped `loop:04-claim` and
+  never swapped again, running implement, simplify, diff review and two code-review rounds while
+  the issue still advertised claim — and the stale label then hid the abandoned turn. The reminder
+  now also fires on the plan-review, implementer and code-review dispatches, which are the moments
+  those swaps come due; and an open loop PR with commits pushed beyond its claim whose issue still
+  advertises claim is a hard gap at Stop.
+- **The review chain names the rule it refused on.** `artifactVersion` must strictly increase per
+  round, enforced in `roundHistory` and stated in no prose. The field appeared in the skill only as
+  a bare name beside `planFingerprint`, so stamping every round with the plan's version is the
+  natural mistake; a live run made it, got one undifferentiated `INVALID_REVIEW_EVIDENCE`, and had
+  to bisect. The rule is now documented, and each chain check names itself via `evidenceGap`.
+- **Every step prints its ribbon, including no-ops.** A run printed 05/11 then 07/11: step 6 ran,
+  decided no simplification was needed, and printed nothing. A missing ribbon reads as a skipped
+  step.
+- **Liveness is a stated rule.** A turn that has ended emits no heartbeat, so an idle turn and a
+  working session are indistinguishable. The unit runs to a terminal state in-turn; the Stop hook
+  is the backstop, not the plan.
+
 ## [0.42.3] - 2026-07-26
 
 ### Fixed
