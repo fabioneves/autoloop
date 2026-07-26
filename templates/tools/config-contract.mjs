@@ -246,6 +246,20 @@ function validateMerge(value, expectedVersion, errors) {
   }
 }
 
+// Measurement capture is opt-in until the pipeline's producers can finalize a
+// record: with capture off, prime runs attest -> open -> scan, commands run
+// unmeasured, and a close is just the finish decision. 'events' restores the
+// full event ceremony per repository; flipping the key back is the whole
+// migration. The pipeline delivers no enforcement while pending-evidence, so
+// its per-run protocol cost is pure tax in the interim (live runs measured
+// 3-6 minutes of it).
+function validateMeasurementCapture(value, errors) {
+  if (!validateObjectShape(value, 'measurement', ['capture'], [], errors)) return;
+  if (!['off', 'events'].includes(value.capture)) {
+    errors.push('measurement.capture: must be "off" or "events"');
+  }
+}
+
 function validateTracker(value, errors) {
   if (!isRecord(value)) {
     errors.push('tracker: must be a JSON object');
@@ -378,6 +392,7 @@ function validateProjectValues(cfg, expectedVersion, errors) {
   if (hasOwn(cfg, 'gate')) validateGate(cfg.gate, errors);
   if (hasOwn(cfg, 'merge')) {
     validateMerge(cfg.merge, expectedVersion, errors);
+    if (hasOwn(cfg, 'measurement')) validateMeasurementCapture(cfg.measurement, errors);
   }
   if (hasOwn(cfg, 'tracker')) {
     if (expectedVersion === LEGACY_CONFIG_VERSION) {
@@ -398,7 +413,7 @@ function validateProjectValues(cfg, expectedVersion, errors) {
 
 export function validateConfig(cfg) {
   const errors = [];
-  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['adapterOptions'], errors)) return errors;
+  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['adapterOptions', 'measurement'], errors)) return errors;
   validateProjectValues(cfg, CONFIG_VERSION, errors);
   if (hasOwn(cfg, 'adapterOptions')) validateAdapterOptions(cfg.adapterOptions, errors);
   return errors;
@@ -1633,6 +1648,15 @@ function selfTest() {
       'merge.soloOperatorAcknowledged: must be true when present',
     ),
   );
+  expect(
+    'measurement capture accepts off and events and rejects anything else',
+    validateConfig({ ...projectFixture(), measurement: { capture: 'off' } }).length === 0
+      && validateConfig({ ...projectFixture(), measurement: { capture: 'events' } }).length === 0
+      && validateConfig({ ...projectFixture(), measurement: { capture: 'all' } })
+        .includes('measurement.capture: must be "off" or "events"')
+      && validateConfig({ ...projectFixture(), measurement: {} }).length > 0,
+  );
+
   {
     const legacySolo = legacyFixture(['claude'], 'claude');
     legacySolo.merge.policy = 'auto';
