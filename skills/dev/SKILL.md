@@ -248,8 +248,14 @@ For every dispatch, call the broker's `--plan-json` with the frozen run, the exa
 configuration that opened it, work context, verified lane proof, capability snapshot, and route
 state. Pass the plan through
 `compileRouteAttempt()`. Every route executes through broker-only `--execute-json`, which returns an
-already-classified `{outcome,output}`; pass only `outcome` to `observe()`. The adapter derives
+already-classified `{outcome,output,placeholderCleanup}`; pass only `outcome` to `observe()`. The
+adapter derives
 status, effect, verdict, isolation, and model identity from broker-captured process evidence.
+`placeholderCleanup` names the zero-byte sensitive-path stubs the engine's own inner sandbox left in
+the checkout and the broker removed before measuring any effect: a bounded `{removed,paths}` record
+for the run, never a silent deletion. Only paths absent before the dispatch, untracked, regular,
+zero-byte, and not symlinks are removed; a non-empty writer output or any tracked file is never a
+candidate.
 Never hand-author a receipt, successful outcome, or route-state transition. Only Runtime may
 authorize a retry, recovery probe, or safe native fallback whose engine has independently proved
 standing capability.
