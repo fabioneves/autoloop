@@ -129,6 +129,45 @@ named skills.
 A writer that reports partial or unknown effects enters lifecycle reconciliation. Never blind-retry
 it. A review dispatch that mutated the repository is invalid.
 
+## Efficiency — overlap and liveness
+
+A dispatch is a model round trip measured in minutes. One live run spent 23 minutes on the
+implementer and 9 on plan review with five eligible issues sitting in the queue and the
+orchestrator idle throughout. Serializing the *worked* unit is required; idling the session while
+it waits is not.
+
+**Overlap (depth one).** Any background dispatch is the trigger — not a named list of steps,
+which goes stale the moment a role is added. While a dispatch is in flight, stage the NEXT
+eligible issue through its read-only steps 1–3: premise-check and plan against `origin/<base>`,
+then its plan-review dispatch. Read the committed tree (`git show`, `git grep`) and never the
+working tree, which the in-flight unit's writer owns.
+
+One idiom on every host:
+
+```bash
+node tools/agentic/dispatch.mjs --role implement --prompt-file <p> \
+  --output-file <result.json> --json      # run in background; collect when it exits
+```
+
+`--output-file` exists so a result can be collected later. Hard limits: at most ONE unit staged
+ahead; never two writers; never claim the staged unit (step 4) until the worked unit reaches a
+terminal state — delivered, blocked, or deferred. Every marker and step label names its own issue.
+At collection, finish the worked unit through step 11, then claim the staged one with its
+already-reviewed plan.
+
+**Liveness — never end the turn mid-unit.** A turn that has ended emits no heartbeat and no task
+update, so an idle turn and a working session are indistinguishable; a live run ended its turn at
+step 8 of 11 with four commits sitting unpushed and nothing objected. The unit runs to a terminal
+state in-turn. While a dispatch is in flight and no staging work remains, hold the wait in-turn
+with bounded polls and emit the heartbeat pair — chat line plus task elapsed refresh — after each.
+The Stop hook now refuses a turn that abandons pushed-behind work, but the hook is the backstop,
+not the plan.
+
+**Accounting.** The run record's `overlap:` line comes from `overlap-report.mjs`, which derives
+concurrency from the dispatch log's own timestamps. `concurrent 0s` beside `eligible 5` is a run
+that serialized work it could have overlapped, and it is visible without anyone choosing to
+mention it.
+
 ## Lane and convergence policy
 
 `escalate-paths.mjs` issues configured-base-bound proofs:
@@ -455,7 +494,10 @@ Post one issue run record via body file containing:
 - gate command/result and exact OID;
 - delivery/CI/merge or queue outcome;
 - lifecycle/premerge record identifiers;
-- recovery outcomes.
+- recovery outcomes;
+- the `overlap:` line, verbatim from `node tools/agentic/overlap-report.mjs --eligible <e>`. It is
+  computed from the dispatch log, never composed by hand — a hand-written one is what let overlap
+  disappear for three releases unnoticed.
 
 Post one end-of-run digest and scoreboard, not one per tool phase. `stats.mjs` presents cross-unit
 step timings from the label timeline; it is presentation only.
