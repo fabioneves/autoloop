@@ -5471,7 +5471,10 @@ function selfTest() {
                   if (!actual) return expectError(result, 'UNSAFE_FALLBACK');
                   if (!result.ok) return false;
                   const value = result.value;
-                  const repeat = planWithConfig({ run, work, laneProof, capabilities, routeState });
+                  const repeat = matrixPhase(
+                    'plan-repeat',
+                    () => planWithConfig({ run, work, laneProof, capabilities, routeState }),
+                  );
                   return repeat.ok
                     && JSON.stringify(repeat.value) === JSON.stringify(value)
                     && value.requestedRoute === run.requestedRoute
