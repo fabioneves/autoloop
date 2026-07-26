@@ -52,7 +52,7 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    at the first typed error with that error on stdout. On success it persists the full bundle and
    the raw snapshot under `.git/autoloop/prime/<runId>.{bundle,snapshot}.json` and prints only the
    decision-sized summary:
-   `{ok,run,hostEvidence,boundaries,scan,bundlePath,snapshotPath,snapshotBytes,sections}` — per-section
+   `{ok,run,measurementRunId,hostEvidence,boundaries,scan,bundlePath,snapshotPath,snapshotBytes,sections}` — per-section
    `{complete,items,error}` counts, never item bodies, because a full snapshot exceeds what a tool
    result can carry. Retain the printed summary and the two paths; read section details from
    `snapshotPath` with targeted queries, never by dumping the file into context. The boundaries it retained are the measurement `run-start`, the open
@@ -85,7 +85,7 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    `PR_MUTATION`, `REVIEW_MUTATION`, or `WAIT_BOUNDARY`; use `UNKNOWN_MUTATION` when uncertain.
    Mutations may be batched only while no decision intervenes. Then rerun the full `scan.mjs` as
    a one-shot measured operation inside the open selection stage —
-   `node tools/agentic/measurement-contract.mjs --measured <operationId> -- node tools/agentic/scan.mjs`
+   `node tools/agentic/measurement-contract.mjs --measured <operationId> --run <measurementRunId> -- node tools/agentic/scan.mjs`
    — and replace the invalidated snapshot before actionability, absence, selection, or stop
    decisions. Never read items from an invalidated section as authority.
 8. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
@@ -159,7 +159,7 @@ measurement run UUID before Runtime opens.
    Git synchronization, setup, scan, lifecycle recovery, route probing, or another selection
    operation. Stop if either boundary is not retained.
 5. Run one versioned startup snapshot through `scan.mjs` as a one-shot measured operation
-   (`measurement-contract.mjs --measured <operationId> -- node tools/agentic/scan.mjs`) inside
+   (`measurement-contract.mjs --measured <operationId> --run <measurementRunId> -- node tools/agentic/scan.mjs`) inside
    the open selection stage, then continue at step 4 of Prime.
 
 ## Runtime execution seam
@@ -244,7 +244,7 @@ Run each GitHub API read, subprocess, or remote mutation as a one-shot measured 
 
 ```bash
 node tools/agentic/measurement-contract.mjs --measured <operationId> \
-  [--action "<text>"] -- <executable> <argument>...
+  --run <measurementRunId> [--action "<text>"] -- <executable> <argument>...
 ```
 
 Everything after the lone `--` is the exact argv, never a shell string. The tool derives the run
