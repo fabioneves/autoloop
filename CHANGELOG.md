@@ -5,6 +5,37 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.41.3] - 2026-07-26
+
+### Fixed
+
+- **The route probe works from the detached broker** — the last gate between prime and unit
+  work. `issueCapabilitySnapshot` executes inside the authority broker, which re-parents to
+  init, so the live-host ancestry walk found nothing and every live probe failed with
+  `INVALID_CAPABILITY_ATTESTATION`; self-tests skip that branch by design and no earlier live
+  run had reached the probe. The broker retains its host binding once at startup (a real walk,
+  while its spawner's ancestry still proves the session; fail-closed, no fallbacks) and
+  broker-side callers compare against it. Proven red first.
+- Measured operations and the conclude call bind to an explicit run id from the prime summary:
+  interrupted sessions leave run-start-without-run-finish ledgers, so bare exactly-one
+  derivation was permanently ambiguous on any repository with history.
+
+### Changed
+
+- **Measurement capture is opt-in** (`measurement.capture`: default `off`, `events` restores
+  full capture per repository). The pipeline enforces nothing until its producers land, while
+  live runs paid 3–6 minutes of ceremony per run: with capture off, prime is attest → open →
+  one plain scan, no ledger opens, commands run unmeasured, and a blocked close is only the
+  finish decision.
+
+### Added
+
+- **`loop-smoke.mjs` — the no-model end-to-end release gate**: fixture repository → synthetic
+  hook capture → real detached broker → full events-mode prime → route probe → guardrail
+  close, asserting typed results, byte-complete artifacts, broker teardown, and a 60-second
+  budget (measured 716ms). It runs in every verify battery, reproduces this release's probe
+  bug red against the prior tree, and would have caught every live failure of the past day.
+
 ## [0.41.2] - 2026-07-26
 
 ### Fixed
@@ -318,7 +349,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.2...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.3...HEAD
+[0.41.3]: https://github.com/fabioneves/autoloop/compare/v0.41.2...v0.41.3
 [0.41.2]: https://github.com/fabioneves/autoloop/compare/v0.41.1...v0.41.2
 [0.41.1]: https://github.com/fabioneves/autoloop/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/fabioneves/autoloop/compare/v0.40.5...v0.41.0
