@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.42.3 · starting
+🟦 ∞ pitcrew · v0.42.3 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -252,10 +252,10 @@ When taking a PR, print a composed banner beside the `loop:revising` mutation:
 ╰──────────────────────────────────────────────────╯
 ```
 
-Print one ribbon line per step — `▰` done-or-current, `▱` remaining, always eight cells:
+Print one badged ribbon line per step (🟦 in progress · 🟩 complete · 🟥 blocked · 🟨 needs a human) — `▰` done-or-current, `▱` remaining, always eight cells:
 
 ```text
-∞ ▰▰▰▱▱▱▱▱ 03/8 REVISE ─ PR #<P> · <actor>
+🟦 ∞ ▰▰▰▱▱▱▱▱ 03/8 REVISE ─ PR #<P> · <actor>
 ```
 
 End with one closing rail:

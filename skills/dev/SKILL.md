@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.42.3 · starting
+🟦 ∞ dev · v0.42.3 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -481,38 +481,63 @@ branch. If dirty, do not switch; report it.
 
 ## Chat markers
 
-One visual language end to end: the `∞` motif from the start banner, a step ribbon, and
-rounded frames. Values in every marker are safe composed text, never raw issue/review bytes.
+One visual language end to end: the `∞` motif from the start banner, a state badge, a step
+ribbon, and rounded frames. Values in every marker are safe composed text, never raw
+issue/review bytes.
+
+Every banner opens with one state badge, so a scrollback can be scanned for outcomes without
+reading any words:
+
+| badge | state |
+|---|---|
+| 🟦 | in progress |
+| 🟩 | terminal success — shipped, converged, complete |
+| 🟥 | blocked — a guardrail refused or the unit failed |
+| 🟨 | needs a human — an open Major, a human-block path, a decision |
 
 After prime succeeds, open the run frame:
 
 ```text
-∞ run ─ queue <e> eligible · <policy>
+🟦 ∞ run ─ queue <e> eligible · <policy>
 ```
 
 Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
-eleven cells:
+eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
+that decides nothing is due still happened, and a missing ribbon reads as a skipped step.
 
 ```text
-∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor>
+🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor>
+🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 SIMPLIFY ─ #<N> · no change required · orchestrator
 ```
+
+Code review converges over rounds, so it also prints a round ribbon against the configured
+cap — same grammar, cells counting rounds — which makes an approaching cap visible before it
+blocks:
+
+```text
+🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW ─ #<N> · fix-delta · 0 Critical · 2 Major open
+🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW ─ #<N> · fix-delta · clean · converged
+```
+
+Plan review is one dispatch and has no round ribbon.
 
 End a unit with one closing rail:
 
 ```text
-╰─ ✔ #<N> SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> ─╯
+🟩 ╰─ ✔ #<N> SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> ─╯
 ```
 
 or:
 
 ```text
-╰─ ✖ #<N> BLOCKED ─ <safe composed reason> ─╯
+🟥 ╰─ ✖ #<N> BLOCKED ─ <safe composed reason> ─╯
 ```
 
-Close the run with:
+Close the run with the badge matching its outcome — 🟩 when something shipped and nothing
+blocked, 🟥 when anything blocked:
 
 ```text
-∞ run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
+🟩 ∞ run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
 ```
 
 Never paste raw issue/review text into chat banners.
