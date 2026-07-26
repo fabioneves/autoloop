@@ -45,10 +45,38 @@ const NEXT = {
   '09-gate': ['loop-delivered (or loop-blocked)', 'the unit reaches its terminal state'],
 };
 
+// A dispatch IS the step it serves, which makes it an anchor a skipped swap
+// cannot hide behind. Firing only on swaps left this hook blind to the failure
+// that actually happens: a live 0.42.3 run swapped 04-claim and then never
+// swapped again, running implement, simplify, diff review and two code-review
+// rounds while the issue still read `loop:04-claim`. `NEXT` already declares
+// these three dispatches as the moments 03, 05 and 08 come due. Steps 06 and 07
+// have no dispatch of their own and stay anchored to the preceding swap's
+// pointer — re-arming the chain at 05 is what gets them back.
+const DISPATCH_STEP = {
+  'plan-review': '03-plan-review',
+  implement: '05-implement',
+  'code-review': '08-code-review',
+};
+
 // Returns null when the command is not a loop-label swap on an issue.
 // opts.archMap: docs/agentic/ARCH.md exists → step 6 also reminds the map update.
 export function reminderFor(command, opts = {}) {
   if (typeof command !== 'string') return null;
+
+  const dispatched = command.match(/dispatch\.mjs\b[^\n]*?--role[= ]+["']?([a-z-]+)/);
+  if (dispatched) {
+    const key = DISPATCH_STEP[dispatched[1]];
+    if (!key) return null;
+    const s = Number(key.slice(0, 2));
+    return `autoloop: the ${dispatched[1]} dispatch just went out — \`loop:${key}\` must ALREADY `
+      + `be the current step label on this unit's issue. If it is not, swap it NOW (late beats `
+      + `never) and emit its riders: ① step line \`▶ #<N> · step ${s}/11 — ${STEPS[key]} `
+      + `(<actor>)\`; ② TaskUpdate rename + activeForm. A step that dispatches without swapping `
+      + `strands the label timeline — the issue keeps advertising an earlier step, which is how a `
+      + `crashed or abandoned run gets mis-reconciled by the next one.`;
+  }
+
   if (!/gh\s+issue\s+edit\b/.test(command)) return null;
   const add = command.match(/--add-label[= ]+["']?([^"'\s]+)/);
   if (!add) return null;
@@ -110,6 +138,17 @@ function selfTest() {
     ['gh issue edit 5 --remove-label loop:06-simplify --add-label loop:07-diff-review', /naming in the plan is not loading/],
     ['gh issue edit 7 --remove-label loop:09-gate,loop-started --add-label loop-delivered', /PushNotification `✔ #7/],
     ['gh issue edit 4 --add-label loop-blocked --remove-label loop-ready', /PushNotification `✖ #4/],
+    // The swap chain died at 04 in a live 0.42.3 run: steps 05 through 11 never
+    // swapped, so the issue still read `loop:04-claim` after implement, simplify,
+    // diff review and two code-review rounds. This hook could not object — it
+    // only fires ON a swap, so a swap that never happens is invisible to it. The
+    // dispatch IS the step, and `NEXT` already says 05 is due "when the
+    // implementer dispatch goes out", so anchor on the dispatch itself.
+    ['node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json', /loop:05-implement/],
+    ['node tools/agentic/dispatch.mjs --role code-review --prompt-file /tmp/p.md --json', /loop:08-code-review/],
+    ['node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/p.md --json', /loop:03-plan-review/],
+    ['node tools/agentic/dispatch.mjs --role doubt-review --prompt-file /tmp/p.md', null],
+    ['node tools/agentic/lifecycle-driver.mjs --reconcile-json', null],
     ['gh label create loop:02-plan --force', null],
     ['gh issue edit 4 --add-label needs-dependency', null],
     ['gh pr edit 4 --add-label loop:02-plan', null],
