@@ -522,24 +522,10 @@ A non-manual policy lacking `merge.unverifiedInvocationAcknowledged: true` is a 
 `UNVERIFIABLE_INVOCATION_PROVENANCE` failure before the route probe. Doctor never invokes a merge,
 merge queue, tag publication, or release publication under any policy.
 
-For every GitHub repository that can publish a release, doctor also runs:
-
-```bash
-node tools/agentic/release-verify.mjs --check-tag-policy --check-root .
-node tools/agentic/release-verify.mjs --check-immutable-releases --check-root .
-```
-
-It binds the repository to the exact checkout origin and fails unless a live active `refs/tags/v*`
-ruleset has no exclusions or bypass actors and forbids deletion and non-fast-forward updates, and
-unless the live immutable-release setting reports `enabled=true`. Add
-`--require-owner-enforcement` to the immutable-release command when organization-owner enforcement
-is required; then `enforced_by_owner=true` is mandatory too.
-
-Both checks require authenticated live GitHub API evidence. Set
-`AUTOLOOP_RELEASE_POLICY_TOKEN` to a credential with Administration repository read and enough
-ruleset access to disclose bypass actors. Missing, insufficient, or redacted authentication is a
-doctor `FAIL`, never a `NOTE`. Setup may present the exact required controls but never mutates
-repository or release protection without the user's explicit authorization.
+Repository, branch, tag, and release protection are configured on GitHub and remain the human's
+responsibility; doctor does not read or verify that server-side configuration. Setup may present
+the exact desired controls but never mutates repository or release protection without the user's
+explicit authorization.
 
 ## Write and delivery
 

@@ -5,6 +5,16 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+### Removed
+
+- Tag-time live-control verification. The release gate no longer reads GitHub rulesets or the
+  immutable-release setting: `release-verify.mjs` drops the `--check-tag-policy`,
+  `--check-base-policy`, and `--check-immutable-releases` modes, the
+  `--allow-unverified-live-controls` escape, and the `AUTOLOOP_RELEASE_POLICY_TOKEN`
+  credential. Branch, tag, and release protection stay configured on GitHub as the
+  maintainer's responsibility; `--release-mode` still verifies the static release contract
+  and proves the annotated-tag binding from local git objects.
+
 ## [0.41.3] - 2026-07-26
 
 ### Fixed

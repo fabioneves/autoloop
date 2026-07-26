@@ -21,9 +21,6 @@ import { fileURLToPath } from 'node:url';
 const STABLE_SEMVER = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const OID = /^[0-9a-f]{40,64}$/u;
-const RELEASE_TAG_INCLUDE = 'refs/tags/v*';
-const GITHUB_API_VERSION = '2026-03-10';
-const MAX_RULESETS = 1000;
 const MAX_SMOKE_MANIFEST_BYTES = 256 * 1024;
 const MAX_SMOKE_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_SMOKE_TOTAL_BYTES = 32 * 1024 * 1024;
@@ -55,19 +52,6 @@ const SMOKE_EVIDENCE_ROLES = Object.freeze([
   'check-10-crash-session-created',
   'check-10-crash-context-injected',
 ]);
-const RELEASE_BASE_POLICY = Object.freeze({
-  branch: 'main',
-  requiredChecks: Object.freeze([
-    Object.freeze({
-      context: 'Contracts (macos-latest, Node 24)',
-      integrationId: 15368,
-    }),
-    Object.freeze({
-      context: 'Contracts (ubuntu-latest, Node 22)',
-      integrationId: 15368,
-    }),
-  ]),
-});
 const SKILL_BANNERS = [
   ['setup', 'setupSkill', 'skills/setup/SKILL.md'],
   ['dev', 'devSkill', 'skills/dev/SKILL.md'],
@@ -149,164 +133,6 @@ export function verifyReleaseTagBinding(binding) {
   }
   if (binding?.mainContainsTag !== true) {
     errors.push('release tag binding: tagged commit is not reachable from main');
-  }
-  return errors;
-}
-
-export function verifyReleaseTagRulesets(rulesets) {
-  if (!Array.isArray(rulesets)) {
-    return ['repository tag policy: ruleset evidence is unavailable'];
-  }
-  const protectedByNoBypassRuleset = rulesets.some((ruleset) => {
-    const refName = ruleset?.conditions?.ref_name;
-    const ruleTypes = new Set(
-      Array.isArray(ruleset?.rules)
-        ? ruleset.rules.map((rule) => rule?.type)
-        : [],
-    );
-    return ruleset?.target === 'tag'
-      && ruleset?.enforcement === 'active'
-      && Array.isArray(ruleset?.bypass_actors)
-      && ruleset.bypass_actors.length === 0
-      && Array.isArray(refName?.include)
-      && refName.include.includes(RELEASE_TAG_INCLUDE)
-      && Array.isArray(refName?.exclude)
-      && refName.exclude.length === 0
-      && ruleTypes.has('deletion')
-      && ruleTypes.has('non_fast_forward');
-  });
-  return protectedByNoBypassRuleset
-    ? []
-    : [
-      'repository tag policy: expected an active v* tag ruleset with no bypass actors and deletion/non_fast_forward rules',
-    ];
-}
-
-function completeRulesetEvidence(rulesets) {
-  return Array.isArray(rulesets)
-    && rulesets.length <= MAX_RULESETS
-    && rulesets.every((ruleset) =>
-      ruleset
-      && typeof ruleset === 'object'
-      && !Array.isArray(ruleset)
-      && Number.isSafeInteger(ruleset.id)
-      && ruleset.id > 0
-      && typeof ruleset.name === 'string'
-      && ruleset.name.length >= 1
-      && ['branch', 'tag', 'push'].includes(ruleset.target)
-      && ['active', 'disabled', 'evaluate'].includes(ruleset.enforcement)
-      && Array.isArray(ruleset.bypass_actors)
-      && ruleset.conditions
-      && typeof ruleset.conditions === 'object'
-      && !Array.isArray(ruleset.conditions)
-      && Array.isArray(ruleset.conditions.ref_name?.include)
-      && Array.isArray(ruleset.conditions.ref_name?.exclude)
-      && Array.isArray(ruleset.rules));
-}
-
-export function verifyConfiguredBaseRulesets(
-  rulesets,
-  policy = RELEASE_BASE_POLICY,
-) {
-  if (
-    !completeRulesetEvidence(rulesets)
-    || typeof policy?.branch !== 'string'
-    || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u.test(policy.branch)
-    || !Array.isArray(policy.requiredChecks)
-    || policy.requiredChecks.length < 1
-    || policy.requiredChecks.some((check) =>
-      !exactKeys(check, ['context', 'integrationId'])
-      || typeof check.context !== 'string'
-      || check.context.length < 1
-      || check.context.length > 255
-      || !Number.isSafeInteger(check.integrationId)
-      || check.integrationId < 1)
-    || new Set(policy.requiredChecks.map((check) => check.context)).size
-      !== policy.requiredChecks.length
-  ) {
-    return ['repository base policy: ruleset evidence or expected policy is unavailable or malformed'];
-  }
-  const expectedRef = `refs/heads/${policy.branch}`;
-  const expectedChecks = [...policy.requiredChecks]
-    .sort((left, right) => left.context.localeCompare(right.context));
-  const protectedByNoBypassRuleset = rulesets.some((ruleset) => {
-    if (
-      ruleset.target !== 'branch'
-      || ruleset.enforcement !== 'active'
-      || ruleset.bypass_actors.length !== 0
-      || ruleset.conditions.ref_name.include.length !== 1
-      || ruleset.conditions.ref_name.include[0] !== expectedRef
-      || ruleset.conditions.ref_name.exclude.length !== 0
-    ) {
-      return false;
-    }
-    const byType = new Map();
-    for (const rule of ruleset.rules) {
-      if (
-        !rule
-        || typeof rule !== 'object'
-        || Array.isArray(rule)
-        || typeof rule.type !== 'string'
-        || byType.has(rule.type)
-      ) {
-        return false;
-      }
-      byType.set(rule.type, rule);
-    }
-    const status = byType.get('required_status_checks')?.parameters;
-    const pullRequest = byType.get('pull_request')?.parameters;
-    const requiredChecks = Array.isArray(status?.required_status_checks)
-      ? status.required_status_checks
-        .map((check) => ({
-          context: check?.context,
-          integrationId: check?.integration_id,
-        }))
-        .sort((left, right) =>
-          String(left.context).localeCompare(String(right.context)))
-      : null;
-    return byType.has('deletion')
-      && byType.has('non_fast_forward')
-      && status?.strict_required_status_checks_policy === true
-      && Array.isArray(requiredChecks)
-      && JSON.stringify(requiredChecks) === JSON.stringify(expectedChecks)
-      && Array.isArray(pullRequest?.allowed_merge_methods)
-      && pullRequest.allowed_merge_methods.length === 1
-      && pullRequest.allowed_merge_methods[0] === 'squash'
-      && typeof pullRequest.dismiss_stale_reviews_on_push === 'boolean'
-      && typeof pullRequest.require_code_owner_review === 'boolean'
-      && typeof pullRequest.require_last_push_approval === 'boolean'
-      && Number.isSafeInteger(
-        pullRequest.required_approving_review_count,
-      )
-      && pullRequest.required_approving_review_count >= 0
-      && pullRequest.required_review_thread_resolution === true;
-  });
-  return protectedByNoBypassRuleset
-    ? []
-    : [
-      `repository base policy: expected active no-bypass ${expectedRef} rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection`,
-    ];
-}
-
-export function verifyImmutableReleases(settings, options = {}) {
-  if (
-    settings === null
-    || typeof settings !== 'object'
-    || Array.isArray(settings)
-    || typeof settings.enabled !== 'boolean'
-    || typeof settings.enforced_by_owner !== 'boolean'
-  ) {
-    return ['immutable releases: live repository settings are unavailable or malformed'];
-  }
-  const errors = [];
-  if (settings.enabled !== true) {
-    errors.push('immutable releases: repository setting must report enabled=true');
-  }
-  if (
-    options.requireOwnerEnforcement === true
-    && settings.enforced_by_owner !== true
-  ) {
-    errors.push('immutable releases: organization owner enforcement is required');
   }
   return errors;
 }
@@ -595,28 +421,14 @@ function readJsonDocument(text, path, errors) {
 function requireReleaseWorkflow(text, errors) {
   const requirements = [
     ['--release-mode', '--release-mode release gate'],
-    ['--check-tag-policy', '--check-tag-policy release gate'],
-    ['--check-base-policy', '--check-base-policy release gate'],
-    [
-      '--check-immutable-releases',
-      '--check-immutable-releases release gate',
-    ],
     [
       '--repository "$GITHUB_REPOSITORY"',
       'checkout-bound repository argument',
     ],
-    ['--base-branch main', 'configured base branch argument'],
+    ['--tag "$GITHUB_REF_NAME"', 'tag-bound release argument'],
     [
-      '--required-check "Contracts (macos-latest, Node 24)@15368"',
-      'macOS trusted status check argument',
-    ],
-    [
-      '--required-check "Contracts (ubuntu-latest, Node 22)@15368"',
-      'Linux trusted status check argument',
-    ],
-    [
-      'AUTOLOOP_RELEASE_POLICY_TOKEN: ${{ secrets.AUTOLOOP_RELEASE_POLICY_TOKEN || github.token }}',
-      'release policy token with github.token fallback',
+      '--main-ref refs/remotes/origin/main',
+      'origin/main ancestry argument',
     ],
   ];
   for (const [literal, description] of requirements) {
@@ -814,15 +626,10 @@ function fixtureFiles(version = '0.40.0') {
     evidenceArtifacts: evidence.evidenceArtifacts,
     stateTemplate: 'the current schema is `0.25.0`.\n',
     verifyWorkflow: [
-      'AUTOLOOP_RELEASE_POLICY_TOKEN: ${{ secrets.AUTOLOOP_RELEASE_POLICY_TOKEN || github.token }}',
       '--release-mode',
-      '--check-tag-policy',
-      '--check-base-policy',
-      '--check-immutable-releases',
       '--repository "$GITHUB_REPOSITORY"',
-      '--base-branch main',
-      '--required-check "Contracts (macos-latest, Node 24)@15368"',
-      '--required-check "Contracts (ubuntu-latest, Node 22)@15368"',
+      '--tag "$GITHUB_REF_NAME"',
+      '--main-ref refs/remotes/origin/main',
       '',
     ].join('\n'),
     portabilitySurfaces: {
@@ -850,71 +657,6 @@ function mutatedFixtureManifest(mutate) {
     `sha256=${fingerprintBytes(bytes)}`,
   );
   return files;
-}
-
-function fixtureTagRuleset(overrides = {}) {
-  return {
-    id: 40,
-    name: 'release tags',
-    target: 'tag',
-    enforcement: 'active',
-    bypass_actors: [],
-    conditions: {
-      ref_name: {
-        include: [RELEASE_TAG_INCLUDE],
-        exclude: [],
-      },
-    },
-    rules: [
-      { type: 'deletion' },
-      { type: 'non_fast_forward' },
-    ],
-    ...overrides,
-  };
-}
-
-function fixtureBaseRuleset(overrides = {}) {
-  return {
-    id: 41,
-    name: 'configured base',
-    target: 'branch',
-    enforcement: 'active',
-    bypass_actors: [],
-    conditions: {
-      ref_name: {
-        include: ['refs/heads/main'],
-        exclude: [],
-      },
-    },
-    rules: [
-      { type: 'deletion' },
-      { type: 'non_fast_forward' },
-      {
-        type: 'pull_request',
-        parameters: {
-          allowed_merge_methods: ['squash'],
-          dismiss_stale_reviews_on_push: false,
-          require_code_owner_review: false,
-          require_last_push_approval: false,
-          required_approving_review_count: 0,
-          required_review_thread_resolution: true,
-        },
-      },
-      {
-        type: 'required_status_checks',
-        parameters: {
-          strict_required_status_checks_policy: true,
-          required_status_checks: RELEASE_BASE_POLICY.requiredChecks.map(
-            (check) => ({
-              context: check.context,
-              integration_id: check.integrationId,
-            }),
-          ),
-        },
-      },
-    ],
-    ...overrides,
-  };
 }
 
 function realEvidenceReaderSelfTest() {
@@ -1189,23 +931,18 @@ async function selfTest() {
       ],
     },
     {
-      name: 'requires tag CI to invoke all live release controls',
+      name: 'requires tag CI to run the bound release gate',
       files: {
         ...fixtureFiles(),
         verifyWorkflow: [
-          'AUTOLOOP_RELEASE_POLICY_TOKEN: ${{ secrets.AUTOLOOP_RELEASE_POLICY_TOKEN || github.token }}',
           '--release-mode',
-          '--check-base-policy',
           '--repository "$GITHUB_REPOSITORY"',
-          '--base-branch main',
-          '--required-check "Contracts (macos-latest, Node 24)@15368"',
-          '--required-check "Contracts (ubuntu-latest, Node 22)@15368"',
           '',
         ].join('\n'),
       },
       expected: [
-        '.github/workflows/verify.yml: expected exactly one --check-tag-policy release gate',
-        '.github/workflows/verify.yml: expected exactly one --check-immutable-releases release gate',
+        '.github/workflows/verify.yml: expected exactly one tag-bound release argument',
+        '.github/workflows/verify.yml: expected exactly one origin/main ancestry argument',
       ],
     },
   ];
@@ -1312,321 +1049,6 @@ async function selfTest() {
       ],
     },
     {
-      name: 'accepts an active no-bypass release-tag ruleset',
-      actual: () => verifyReleaseTagRulesets([fixtureTagRuleset()]),
-      expected: [],
-    },
-    {
-      name: 'rejects bypassable release-tag controls',
-      actual: () => verifyReleaseTagRulesets([
-        fixtureTagRuleset({
-          bypass_actors: [{ actor_type: 'RepositoryRole', actor_id: 5 }],
-        }),
-      ]),
-      expected: [
-        'repository tag policy: expected an active v* tag ruleset with no bypass actors and deletion/non_fast_forward rules',
-      ],
-    },
-    {
-      name: 'rejects redacted bypass evidence',
-      actual: () => verifyReleaseTagRulesets([
-        fixtureTagRuleset({ bypass_actors: null }),
-      ]),
-      expected: [
-        'repository tag policy: expected an active v* tag ruleset with no bypass actors and deletion/non_fast_forward rules',
-      ],
-    },
-    {
-      name: 'rejects incomplete release-tag rules',
-      actual: () => verifyReleaseTagRulesets([
-        fixtureTagRuleset({
-          rules: [{ type: 'deletion' }],
-        }),
-      ]),
-      expected: [
-        'repository tag policy: expected an active v* tag ruleset with no bypass actors and deletion/non_fast_forward rules',
-      ],
-    },
-    {
-      name: 'accepts an active no-bypass configured-base ruleset',
-      actual: () => verifyConfiguredBaseRulesets([fixtureBaseRuleset()]),
-      expected: [],
-    },
-    {
-      name: 'rejects bypassable configured-base controls',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          bypass_actors: [{ actor_type: 'RepositoryRole', actor_id: 5 }],
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects redacted configured-base ruleset evidence',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({ bypass_actors: null }),
-      ]),
-      expected: [
-        'repository base policy: ruleset evidence or expected policy is unavailable or malformed',
-      ],
-    },
-    {
-      name: 'rejects configured-base controls without pull requests',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          rules: fixtureBaseRuleset().rules.filter(
-            (rule) => rule.type !== 'pull_request',
-          ),
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects configured-base controls without history protection',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          rules: fixtureBaseRuleset().rules.filter(
-            (rule) => rule.type !== 'non_fast_forward',
-          ),
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects inactive configured-base controls',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({ enforcement: 'evaluate' }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects configured-base merge-method weakening',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          rules: fixtureBaseRuleset().rules.map((rule) =>
-            rule.type === 'pull_request'
-              ? {
-                ...rule,
-                parameters: {
-                  ...rule.parameters,
-                  allowed_merge_methods: ['merge', 'squash'],
-                },
-              }
-              : rule),
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects unresolved configured-base conversations',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          rules: fixtureBaseRuleset().rules.map((rule) =>
-            rule.type === 'pull_request'
-              ? {
-                ...rule,
-                parameters: {
-                  ...rule.parameters,
-                  required_review_thread_resolution: false,
-                },
-              }
-              : rule),
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects non-strict configured-base status checks',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          rules: fixtureBaseRuleset().rules.map((rule) =>
-            rule.type === 'required_status_checks'
-              ? {
-                ...rule,
-                parameters: {
-                  ...rule.parameters,
-                  strict_required_status_checks_policy: false,
-                },
-              }
-              : rule),
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects untrusted configured-base check producers',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          rules: fixtureBaseRuleset().rules.map((rule) =>
-            rule.type === 'required_status_checks'
-              ? {
-                ...rule,
-                parameters: {
-                  ...rule.parameters,
-                  required_status_checks:
-                    rule.parameters.required_status_checks.map(
-                      (check, index) => index === 0
-                        ? { ...check, integration_id: 1 }
-                        : check,
-                    ),
-                },
-              }
-              : rule),
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects incomplete configured-base check names',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          rules: fixtureBaseRuleset().rules.map((rule) =>
-            rule.type === 'required_status_checks'
-              ? {
-                ...rule,
-                parameters: {
-                  ...rule.parameters,
-                  required_status_checks:
-                    rule.parameters.required_status_checks.slice(1),
-                },
-              }
-              : rule),
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects configured-base rules for another branch',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          conditions: {
-            ref_name: {
-              include: ['refs/heads/release'],
-              exclude: [],
-            },
-          },
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'rejects incomplete configured-base review evidence',
-      actual: () => verifyConfiguredBaseRulesets([
-        fixtureBaseRuleset({
-          rules: fixtureBaseRuleset().rules.map((rule) => {
-            if (rule.type !== 'pull_request') return rule;
-            const parameters = { ...rule.parameters };
-            delete parameters.require_last_push_approval;
-            return { ...rule, parameters };
-          }),
-        }),
-      ]),
-      expected: [
-        'repository base policy: expected active no-bypass refs/heads/main rules requiring pull requests, resolved conversations, strict trusted checks, deletion, and non-fast-forward protection',
-      ],
-    },
-    {
-      name: 'accepts enabled repository immutable releases',
-      actual: () => verifyImmutableReleases({
-        enabled: true,
-        enforced_by_owner: false,
-      }),
-      expected: [],
-    },
-    {
-      name: 'rejects disabled repository immutable releases',
-      actual: () => verifyImmutableReleases({
-        enabled: false,
-        enforced_by_owner: false,
-      }),
-      expected: [
-        'immutable releases: repository setting must report enabled=true',
-      ],
-    },
-    {
-      name: 'rejects incomplete immutable release evidence',
-      actual: () => verifyImmutableReleases({ enabled: true }),
-      expected: [
-        'immutable releases: live repository settings are unavailable or malformed',
-      ],
-    },
-    {
-      name: 'requires owner enforcement when organization policy is expected',
-      actual: () => verifyImmutableReleases(
-        { enabled: true, enforced_by_owner: false },
-        { requireOwnerEnforcement: true },
-      ),
-      expected: [
-        'immutable releases: organization owner enforcement is required',
-      ],
-    },
-    {
-      name: 'accepts immutable releases enforced by the owner',
-      actual: () => verifyImmutableReleases(
-        { enabled: true, enforced_by_owner: true },
-        { requireOwnerEnforcement: true },
-      ),
-      expected: [],
-    },
-    {
-      name: 'immutable release reads require explicit live API authentication',
-      actual: async () => {
-        try {
-          await readImmutableReleases('owner/repository', undefined, async () => {
-            throw new Error('request must not run');
-          });
-          return 'accepted';
-        } catch (error) {
-          return error.message;
-        }
-      },
-      expected:
-        'immutable releases: authenticated GitHub API token is required '
-        + '(Administration repository read)',
-    },
-    {
-      name: 'composite live release controls exercise base, tag, and immutable policy',
-      actual: async () => {
-        const calls = [];
-        const errors = await verifyLiveReleaseControls({
-          repository: 'owner/repository',
-          token: 'test-token',
-          requireOwnerEnforcement: true,
-        }, {
-          readRulesets: async () => {
-            calls.push('tag');
-            return [fixtureTagRuleset(), fixtureBaseRuleset()];
-          },
-          readImmutable: async () => {
-            calls.push('immutable');
-            return { enabled: true, enforced_by_owner: true };
-          },
-        });
-        return { calls: calls.sort(), errors };
-      },
-      expected: { calls: ['immutable', 'tag'], errors: [] },
-    },
-    {
       name: 'lists only ordered durable continuation states',
       actual: () => sortContinuationStateNames([
         'state-004-prompted.json',
@@ -1661,35 +1083,6 @@ async function selfTest() {
         nonexistentRejected: true,
         symlinkRejected: true,
       },
-    },
-    {
-      name: 'release base policy arguments cannot weaken committed checks',
-      actual: () => {
-        const exact = releaseBasePolicyArgs([
-          '--base-branch',
-          'main',
-          '--required-check',
-          'Contracts (macos-latest, Node 24)@15368',
-          '--required-check',
-          'Contracts (ubuntu-latest, Node 22)@15368',
-        ]);
-        let weakened = false;
-        try {
-          releaseBasePolicyArgs([
-            '--base-branch',
-            'main',
-            '--required-check',
-            'Contracts (ubuntu-latest, Node 22)@15368',
-          ]);
-        } catch {
-          weakened = true;
-        }
-        return {
-          exact: exact === RELEASE_BASE_POLICY,
-          weakened,
-        };
-      },
-      expected: { exact: true, weakened: true },
     },
   ];
   for (const fixture of helperCases) {
@@ -1757,44 +1150,6 @@ function optionValue(args, name) {
     throw new Error(`${name} requires a value`);
   }
   return value;
-}
-
-function optionValues(args, name) {
-  const values = [];
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== name) continue;
-    const value = args[index + 1];
-    if (value === undefined || value.startsWith('--')) {
-      throw new Error(`${name} requires a value`);
-    }
-    values.push(value);
-  }
-  return values;
-}
-
-function releaseBasePolicyArgs(args) {
-  const branch = optionValue(args, '--base-branch');
-  const requiredChecks = optionValues(args, '--required-check')
-    .map((value) => {
-      const separator = value.lastIndexOf('@');
-      const context = value.slice(0, separator);
-      const rawIntegrationId = value.slice(separator + 1);
-      const integrationId = /^[1-9][0-9]*$/u.test(rawIntegrationId)
-        ? Number(rawIntegrationId)
-        : null;
-      return { context, integrationId };
-    })
-    .sort((left, right) => left.context.localeCompare(right.context));
-  if (
-    branch !== RELEASE_BASE_POLICY.branch
-    || JSON.stringify(requiredChecks)
-      !== JSON.stringify(RELEASE_BASE_POLICY.requiredChecks)
-  ) {
-    throw new Error(
-      'release arguments must exactly match the committed configured-base policy',
-    );
-  }
-  return RELEASE_BASE_POLICY;
 }
 
 function repositoryRoot(args) {
@@ -1976,132 +1331,13 @@ function readReleaseTagBinding(root, version, tagName, mainRef) {
   };
 }
 
-async function githubJson(path, token) {
-  const response = await fetch(`https://api.github.com${path}`, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      'User-Agent': 'autoloop-release-verifier',
-      'X-GitHub-Api-Version': GITHUB_API_VERSION,
-    },
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!response.ok) {
-    throw new Error(`GitHub API ${response.status} for ${path}`);
-  }
-  return response.json();
-}
-
-async function readRepositoryRulesets(repository, token) {
-  if (!REPOSITORY.test(repository)) {
-    throw new Error('--repository must be owner/name');
-  }
-  const summaries = [];
-  const ids = new Set();
-  for (let page = 1; page <= 11; page += 1) {
-    const values = await githubJson(
-      `/repos/${repository}/rulesets?includes_parents=true&per_page=100&page=${page}`,
-      token,
-    );
-    if (!Array.isArray(values)) {
-      throw new Error('GitHub ruleset list is not an array');
-    }
-    if (summaries.length + values.length > MAX_RULESETS) {
-      throw new Error(`GitHub ruleset list exceeds ${MAX_RULESETS} entries`);
-    }
-    for (const value of values) {
-      if (!Number.isSafeInteger(value?.id) || ids.has(value.id)) {
-        throw new Error('GitHub ruleset list has a missing or duplicate id');
-      }
-      ids.add(value.id);
-      summaries.push(value);
-    }
-    if (values.length < 100) break;
-  }
-  const details = [];
-  for (let index = 0; index < summaries.length; index += 10) {
-    const batch = summaries.slice(index, index + 10);
-    const values = await Promise.all(
-      batch.map((summary) =>
-        githubJson(
-          `/repos/${repository}/rulesets/${summary.id}?includes_parents=true`,
-          token,
-        )),
-    );
-    if (values.some((value, offset) => value?.id !== batch[offset].id)) {
-      throw new Error('GitHub ruleset detail identity changed');
-    }
-    details.push(...values);
-  }
-  return details;
-}
-
-export async function readImmutableReleases(
-  repository,
-  token,
-  request = githubJson,
-) {
-  if (!REPOSITORY.test(repository)) {
-    throw new Error('--repository must be owner/name');
-  }
-  if (typeof token !== 'string' || token.length === 0) {
-    throw new Error(
-      'immutable releases: authenticated GitHub API token is required '
-      + '(Administration repository read)',
-    );
-  }
-  return request(`/repos/${repository}/immutable-releases`, token);
-}
-
-export async function verifyLiveReleaseControls(input, adapters = {}) {
-  const readRulesets = adapters.readRulesets ?? readRepositoryRulesets;
-  const readImmutable = adapters.readImmutable ?? readImmutableReleases;
-  const [rulesets, immutable] = await Promise.all([
-    readRulesets(input.repository, input.token),
-    readImmutable(input.repository, input.token),
-  ]);
-  return [
-    ...verifyReleaseTagRulesets(rulesets),
-    ...verifyConfiguredBaseRulesets(
-      rulesets,
-      input.basePolicy ?? RELEASE_BASE_POLICY,
-    ),
-    ...verifyImmutableReleases(immutable, {
-      requireOwnerEnforcement: input.requireOwnerEnforcement === true,
-    }),
-  ];
-}
-
-function githubToken() {
-  const configured =
-    process.env.AUTOLOOP_RELEASE_POLICY_TOKEN
-    || process.env.GH_TOKEN
-    || process.env.GITHUB_TOKEN;
-  if (configured) return configured;
-  try {
-    return execFileSync('gh', ['auth', 'token'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 10000,
-    }).trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function requiredGithubToken() {
-  const token = githubToken();
-  if (!token) {
-    throw new Error(
-      'authenticated GitHub API token is unavailable; set '
-      + 'AUTOLOOP_RELEASE_POLICY_TOKEN with Administration repository read '
-      + 'and ruleset bypass visibility',
-    );
-  }
-  return token;
-}
-
-async function releaseMode(args) {
+// Release mode verifies the static release contract only: synchronized
+// version literals and manifests, the workflow shape, the annotated-tag
+// binding proved from local git objects, and the checkout's origin identity.
+// Branch, tag, and release protection live in the repository's GitHub
+// configuration and are the maintainer's responsibility; this gate makes no
+// live API reads and no claims about server-side enforcement.
+function releaseMode(args) {
   const root = repositoryRoot(args);
   const files = loadRepository(root);
   const notes = [];
@@ -2112,12 +1348,6 @@ async function releaseMode(args) {
   const version = files.VERSION?.trim() ?? '';
   const tagName = optionValue(args, '--tag');
   const mainRef = optionValue(args, '--main-ref');
-  let basePolicy;
-  try {
-    basePolicy = releaseBasePolicyArgs(args);
-  } catch (error) {
-    errors.push(`release base policy: ${error.message}`);
-  }
   if (!tagName) errors.push('release mode: --tag is required');
   if (!mainRef) errors.push('release mode: --main-ref is required');
   if (tagName && mainRef) {
@@ -2132,23 +1362,8 @@ async function releaseMode(args) {
   let repository;
   try {
     repository = boundRepository(root, optionValue(args, '--repository'));
-    errors.push(...await verifyLiveReleaseControls({
-      repository,
-      token: requiredGithubToken(),
-      basePolicy: basePolicy ?? RELEASE_BASE_POLICY,
-      requireOwnerEnforcement: args.includes('--require-owner-enforcement'),
-    }));
   } catch (error) {
-    // Reading rulesets, bypass actors, and the immutable-release setting are
-    // Administration reads, and `administration` is not a permission a workflow
-    // can grant its own token. Where no credential can see them, say so instead
-    // of claiming the controls are absent: unreadable is not the same evidence
-    // as non-compliant, and a returned violation above is still a hard failure.
-    if (args.includes('--allow-unverified-live-controls')) {
-      notes.push(`live release controls are unverified: ${error.message}`);
-    } else {
-      errors.push(`live release controls: ${error.message}`);
-    }
+    errors.push(`release repository binding: ${error.message}`);
   }
   if (errors.length > 0) {
     process.stderr.write(
@@ -2159,96 +1374,7 @@ async function releaseMode(args) {
   for (const text of notes) process.stdout.write(`note: ${text}\n`);
   process.stdout.write(
     `release verification passed (v${version}; annotated tag on main; `
-    + `${repository}; non-bypassable configured base and tags; `
-    + 'immutable releases)\n',
-  );
-  return 0;
-}
-
-async function basePolicyMode(args) {
-  const root = repositoryRoot(args);
-  let repository;
-  try {
-    const basePolicy = releaseBasePolicyArgs(args);
-    repository = boundRepository(root, optionValue(args, '--repository'));
-    const rulesets = await readRepositoryRulesets(
-      repository,
-      requiredGithubToken(),
-    );
-    const errors = verifyConfiguredBaseRulesets(rulesets, basePolicy);
-    if (errors.length > 0) {
-      process.stderr.write(
-        `base policy verification failed:\n`
-        + `${errors.map((error) => `- ${error}`).join('\n')}\n`,
-      );
-      return 1;
-    }
-  } catch (error) {
-    process.stderr.write(`base policy verification failed: ${error.message}\n`);
-    return 1;
-  }
-  process.stdout.write(
-    `base policy verification passed (${repository}; `
-    + `${RELEASE_BASE_POLICY.branch}; non-bypassable trusted checks)\n`,
-  );
-  return 0;
-}
-
-async function tagPolicyMode(args) {
-  const root = repositoryRoot(args);
-  const expectedRepository = optionValue(args, '--repository');
-  let repository;
-  try {
-    repository = boundRepository(root, expectedRepository);
-    const rulesets = await readRepositoryRulesets(
-      repository,
-      requiredGithubToken(),
-    );
-    const errors = verifyReleaseTagRulesets(rulesets);
-    if (errors.length > 0) {
-      process.stderr.write(
-        `tag policy verification failed:\n${errors.map((error) => `- ${error}`).join('\n')}\n`,
-      );
-      return 1;
-    }
-  } catch (error) {
-    process.stderr.write(`tag policy verification failed: ${error.message}\n`);
-    return 1;
-  }
-  process.stdout.write(
-    `tag policy verification passed (${repository}; non-bypassable v* controls)\n`,
-  );
-  return 0;
-}
-
-async function immutableReleasesMode(args) {
-  const root = repositoryRoot(args);
-  let repository;
-  try {
-    repository = boundRepository(root, optionValue(args, '--repository'));
-    const settings = await readImmutableReleases(
-      repository,
-      requiredGithubToken(),
-    );
-    const errors = verifyImmutableReleases(settings, {
-      requireOwnerEnforcement: args.includes('--require-owner-enforcement'),
-    });
-    if (errors.length > 0) {
-      process.stderr.write(
-        `immutable release verification failed:\n`
-        + `${errors.map((error) => `- ${error}`).join('\n')}\n`,
-      );
-      return 1;
-    }
-  } catch (error) {
-    process.stderr.write(
-      `immutable release verification failed: ${error.message}\n`,
-    );
-    return 1;
-  }
-  process.stdout.write(
-    `immutable release verification passed (${repository}; enabled`
-    + `${args.includes('--require-owner-enforcement') ? '; owner-enforced' : ''})\n`,
+    + `${repository})\n`,
   );
   return 0;
 }
@@ -2287,11 +1413,6 @@ async function main(args) {
     }
   }
   if (args.includes('--release-mode')) return releaseMode(args);
-  if (args.includes('--check-base-policy')) return basePolicyMode(args);
-  if (args.includes('--check-tag-policy')) return tagPolicyMode(args);
-  if (args.includes('--check-immutable-releases')) {
-    return immutableReleasesMode(args);
-  }
   const root = repositoryRoot(args);
   const files = loadRepository(root);
   const notes = [];
