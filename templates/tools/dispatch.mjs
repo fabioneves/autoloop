@@ -22,7 +22,9 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -31,7 +33,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
@@ -236,6 +238,35 @@ function failure(step, code, message, detail = {}) {
   return { ok: false, step, error: { code, message, ...detail } };
 }
 
+// The dispatch log lives in the COMMON Git directory, so every linked worktree
+// writes to one file: overlap runs units from separate worktrees and their
+// windows have to be comparable. Inside `.git` it can never be committed or
+// dirty a tree — the same reasoning `subagent-transcript.mjs` uses.
+export function resolveDispatchLogPath(cwd, readCommonDir = (directory) => spawnSync(
+  'git',
+  ['rev-parse', '--git-common-dir'],
+  { cwd: directory, encoding: 'utf8', timeout: 15000 },
+).stdout) {
+  const raw = String(readCommonDir(cwd) ?? '').trim();
+  if (!raw) return null;
+  const common = isAbsolute(raw) ? resolve(raw) : resolve(cwd, raw);
+  return join(common, 'autoloop', 'dispatch-log.jsonl');
+}
+
+// One line per dispatch, so a run's idle wall-clock is a measurement rather than
+// a claim. Fail-open in every direction: accounting must never cost a dispatch.
+function recordDispatchWindow(cwd, entry) {
+  try {
+    const path = resolveDispatchLogPath(cwd);
+    if (path === null) return;
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${JSON.stringify(entry)}\n`);
+  } catch {
+    // A repo-less cwd, a read-only .git, a race on mkdir — none of it is worth
+    // failing a model round trip over.
+  }
+}
+
 // What the writer is supposed to have moved: the committed history plus the
 // working tree. `null` means there is nothing to compare — the cwd is not a Git
 // work tree, or carries no commit yet — and this tool does not invent a
@@ -274,7 +305,22 @@ export function parseResultEvent(stdout) {
 // excluded — so a regression in the wrapper is visible without a profiler.
 const PROCESS_START_MS = Date.now();
 
-export function runDispatch({
+// Every dispatch — typed success or typed failure alike — contributes its window
+// to the log, so idle wall-clock cannot be understated by a run that only counts
+// the dispatches that worked.
+export function runDispatch(options) {
+  const windowStartedAtMs = Date.now();
+  const result = executeDispatch(options);
+  recordDispatchWindow(options.cwd ?? process.cwd(), {
+    role: options.role,
+    startedAtMs: windowStartedAtMs,
+    ms: Date.now() - windowStartedAtMs,
+    ok: result.ok === true,
+  });
+  return result;
+}
+
+function executeDispatch({
   role,
   prompt,
   tools,
@@ -690,6 +736,27 @@ function selfTest() {
     check(
       'an implement that moves the checkout still succeeds',
       busyWriter.ok === true && busyWriter.text === 'implemented the slice',
+    );
+    // Overlap accounting is only trustworthy if it is measured rather than
+    // narrated: the 0.39 `overlap:` line was self-reported, and the behaviour it
+    // described died in v0.40.0 without anyone noticing for three minor
+    // versions. Every dispatch records its own window here instead.
+    const logPath = join(repoScratch, '.git', 'autoloop', 'dispatch-log.jsonl');
+    const logged = existsSync(logPath)
+      ? readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      : [];
+    check(
+      'every dispatch records its own window in the dispatch log',
+      logged.length === 2
+      && logged.every((entry) =>
+        entry.role === 'implement'
+        && Number.isSafeInteger(entry.startedAtMs)
+        && entry.startedAtMs > 0
+        && Number.isSafeInteger(entry.ms)
+        && entry.ms >= 0
+        && typeof entry.ok === 'boolean')
+      && logged[0].ok === false
+      && logged[1].ok === true,
     );
     rmSync(repoScratch, { recursive: true, force: true });
 
