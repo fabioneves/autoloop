@@ -5,6 +5,41 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-07-26
+
+### Added
+
+- Solo-operator merge mode for single-identity repositories, where the loop necessarily runs
+  under the only maintainer's login. `merge.soloOperatorAcknowledged: true` — valid only alongside
+  a non-manual policy AND `merge.unverifiedInvocationAcknowledged: true` — waives the four gate
+  controls one login cannot satisfy: identity separation, App attestation, live server-policy
+  verification, and the approving-review requirement (GitHub forbids self-approval). Everything
+  else keeps full strength: exact-head CAS merge with SHA-bound confirmation, required CI green on
+  the exact head from `.autoloop/ci-policy.json`, claim/ownership/frozen-plan binding, hard-block
+  labels, protected path families, the kill switch, executor-identity matching, and Path-A label
+  event verification with head binding. A solo config whose trusted list is not exactly the loop
+  login is invalid, and migration never emits the flag. Non-solo behavior is byte-identical.
+- Setup fills the vendored merge executor's REPO CONFIG block in the same visible diff that
+  vendors it (repository, loop login, required checks from the committed CI policy, and the
+  solo-operator transcription), then runs the vendored file's config-derived `--self-test` as
+  evidence — a placeholder block refuses every invocation, so an unfilled vendor was an
+  incomplete setup.
+- `scaffold.mjs` preserves a Setup-filled `auto-merge.mjs` as `kept-modified` instead of
+  clobbering it back to placeholders on reconciliation, matching the existing
+  `escalate-paths.mjs` policy-preservation rule.
+
+### Fixed
+
+- The merge reference header no longer claims "Setup never installs or invokes this file" —
+  false since the 0.40.1 acknowledgement contract — and now states the enablement conditional; a
+  self-test case guards the header because contract lint deliberately skips `auto-merge.*`.
+- `UNCONDITIONAL_NON_MANUAL_REFUSAL` lint now crosses single line wraps and recognizes
+  unconditional `UNVERIFIABLE_INVOCATION_PROVENANCE` rejection claims that name the policy in a
+  different table cell; the six stale prose sites it then surfaced in README and the STATE
+  template (including two the drift audit had not listed) now state the acknowledgement
+  conditional.
+- `scaffold.mjs` self-test reported a hardcoded case count; it now counts.
+
 ## [0.40.5] - 2026-07-26
 
 ### Added
@@ -216,7 +251,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.5...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.0...HEAD
+[0.41.0]: https://github.com/fabioneves/autoloop/compare/v0.40.5...v0.41.0
 [0.40.5]: https://github.com/fabioneves/autoloop/compare/v0.40.4...v0.40.5
 [0.40.4]: https://github.com/fabioneves/autoloop/compare/v0.40.3...v0.40.4
 [0.40.3]: https://github.com/fabioneves/autoloop/compare/v0.40.2...v0.40.3

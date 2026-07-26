@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.40.5 · starting
+∞ setup · v0.41.0 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -228,6 +228,16 @@ Ask only:
     `merge.policy` and `merge.unverifiedInvocationAcknowledged: true`; Runtime refuses the policy
     without that field. State that findings 10 and 11 are open, so the configured base protection is
     what stands behind a non-manual policy.
+    For a single-identity repository — the loop necessarily runs under the only maintainer's own
+    login — additionally offer solo-operator mode, and only after the non-manual acknowledgement
+    is accepted. Explain in one sentence what it waives and why: identity separation, App
+    attestation, live server-policy verification, and the approving-review requirement are
+    unsatisfiable with one login (GitHub forbids self-approval, and the gate would otherwise
+    demand a second trusted human), while exact-head CAS merge, CI on the exact head, ownership
+    binding, protected paths, and the kill switch keep full strength. Accepting writes
+    `merge.soloOperatorAcknowledged: true` alongside the invocation acknowledgement; the schema
+    rejects the flag without it. Never offer solo mode when more than one trusted human exists —
+    the gate hard-fails a solo config whose trusted list is not exactly the loop login.
 
 Never infer that an empty required-check list means CI is safe. Merge, merge queue, tag
 publication, and release publication require an independent maintainer action outside the run.
@@ -299,6 +309,18 @@ removed when the policy returns to `manual`. Setup itself never invokes
 `tools/agentic/auto-merge.mjs`. The universal finalizer runs or binds manual gate/review evidence,
 creates the head-bound premerge record, performs the ready/label effects, and reads every
 postcondition back.
+
+After vendoring for an acknowledged non-manual policy, Setup fills the vendored file's REPO CONFIG
+block in the same visible diff — a placeholder block refuses every invocation, so an unfilled
+vendor is an incomplete setup, not a safe default. Fill `REPOSITORY` from `gh repo view`,
+`LOOP_LOGIN` from `gh api user`, and `REQUIRED_CI_CHECKS` to exactly the confirmed
+`.autoloop/ci-policy.json` set. Under `merge.soloOperatorAcknowledged: true` additionally set
+`SOLO_OPERATOR = true`, `TRUSTED_HUMAN_LOGINS = [LOOP_LOGIN]`, both App-ID lists empty, and
+`REQUIRED_APPROVING_REVIEW_COUNT = 0`; without the solo acknowledgement, ask the human for the
+trusted logins and App IDs instead — never invent them. Then run the vendored file's
+`--self-test` (its fixtures derive from the block) and show the result as evidence. Reconciliation
+never overwrites a filled block: `scaffold.mjs` reports the modified file as `kept-modified` for
+visible-diff reconciliation.
 
 Write `.autoloop/ci-policy.json` as the exact canonical JSON serialization produced by
 `canonicalCiPolicy()` with the explicitly confirmed complete CheckRun-name set. It is universal,

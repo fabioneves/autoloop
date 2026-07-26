@@ -204,7 +204,7 @@ function validateMerge(value, expectedVersion, errors) {
     value,
     'merge',
     ['policy'],
-    legacy ? [] : ['unverifiedInvocationAcknowledged'],
+    legacy ? [] : ['unverifiedInvocationAcknowledged', 'soloOperatorAcknowledged'],
     errors,
   )) return;
   if (hasOwn(value, 'policy') && !['manual', 'ratified', 'auto'].includes(value.policy)) {
@@ -226,6 +226,22 @@ function validateMerge(value, expectedVersion, errors) {
   } else if (!nonManual && acknowledged === true) {
     errors.push(
       'merge.unverifiedInvocationAcknowledged: only valid with a non-manual merge.policy',
+    );
+  }
+  // Solo-operator relaxations are a second, separate risk acceptance layered on the
+  // invocation acknowledgement: they additionally waive identity separation, so a
+  // solo flag without the invocation acknowledgement is an incoherent record.
+  if (!hasOwn(value, 'soloOperatorAcknowledged')) return;
+  const solo = value.soloOperatorAcknowledged;
+  if (solo !== true) {
+    errors.push('merge.soloOperatorAcknowledged: must be true when present');
+  } else if (!nonManual) {
+    errors.push(
+      'merge.soloOperatorAcknowledged: only valid with a non-manual merge.policy',
+    );
+  } else if (acknowledged !== true) {
+    errors.push(
+      'merge.soloOperatorAcknowledged: requires merge.unverifiedInvocationAcknowledged: true',
     );
   }
 }
@@ -1569,6 +1585,64 @@ function selfTest() {
       'merge.unverifiedInvocationAcknowledged: must be true when present',
     ),
   );
+
+  for (const policy of ['ratified', 'auto']) {
+    expect(
+      `${policy} accepts the doubly acknowledged solo-operator shape`,
+      validateConfig({
+        ...projectFixture(),
+        merge: {
+          policy,
+          unverifiedInvocationAcknowledged: true,
+          soloOperatorAcknowledged: true,
+        },
+      }).length === 0,
+    );
+  }
+  expect(
+    'solo acknowledgement without the invocation acknowledgement is rejected',
+    validateConfig({
+      ...projectFixture(),
+      merge: { policy: 'auto', soloOperatorAcknowledged: true },
+    }).includes(
+      'merge.soloOperatorAcknowledged: requires merge.unverifiedInvocationAcknowledged: true',
+    ),
+  );
+  expect(
+    'solo acknowledgement is rejected as a dead option under manual policy',
+    validateConfig({
+      ...projectFixture(),
+      merge: {
+        policy: 'manual',
+        soloOperatorAcknowledged: true,
+      },
+    }).includes(
+      'merge.soloOperatorAcknowledged: only valid with a non-manual merge.policy',
+    ),
+  );
+  expect(
+    'a false solo acknowledgement never enables solo relaxations',
+    validateConfig({
+      ...projectFixture(),
+      merge: {
+        policy: 'auto',
+        unverifiedInvocationAcknowledged: true,
+        soloOperatorAcknowledged: false,
+      },
+    }).includes(
+      'merge.soloOperatorAcknowledged: must be true when present',
+    ),
+  );
+  {
+    const legacySolo = legacyFixture(['claude'], 'claude');
+    legacySolo.merge.policy = 'auto';
+    const migratedSolo = migrateConfig024To025(legacySolo);
+    expect(
+      'migration never emits a solo-operator acknowledgement',
+      migratedSolo.ok
+        && !hasOwn(migratedSolo.config.merge, 'soloOperatorAcknowledged'),
+    );
+  }
 
   const preLegacyFixture = () => {
     const cfg = legacyFixture(['claude', 'codex'], 'codex');

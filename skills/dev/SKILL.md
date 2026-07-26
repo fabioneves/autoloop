@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.40.5 · starting
+∞ dev · v0.41.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -532,10 +532,11 @@ delivery booleans are forbidden.
 Under `merge.policy: manual`, stop after the returned exact terminal result and leave the ready PR
 for a human. Under an acknowledged non-manual policy, invoke the vendored
 `tools/agentic/auto-merge.mjs` once for the delivered PR and treat its typed verdict as final for
-this run. The executor independently refetches every ownership, eligibility, evidence, and
-server-protection predicate and refuses with a typed reason when any is missing; route a refusal
-to the human-block path — never retry it blindly, weaken a predicate, or merge through any other
-surface. No run submits a merge queue entry, publishes a tag, or creates a release. Later recovery
+this run. The executor independently refetches every ownership, eligibility, and evidence
+predicate — plus live server protection, except under the solo-operator acknowledgement, which
+waives the four controls a single login cannot satisfy — and refuses with a typed reason when any
+is missing; route a refusal to the human-block path — never retry it blindly, weaken a predicate,
+or merge through any other surface. No run submits a merge queue entry, publishes a tag, or creates a release. Later recovery
 may observe a completed merge and reconcile the existing loop-owned lifecycle record, but prompt
 transport itself grants no authority for that mutation.
 

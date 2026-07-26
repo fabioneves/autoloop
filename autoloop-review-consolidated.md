@@ -1,6 +1,23 @@
 # Autoloop — consolidated review and remediation plan
 
-- **This document:** v13, 2026-07-25
+- **This document:** v14, 2026-07-26
+- **v14 amendment (supersedes the unconditional manual-only wording below):** the maintainer
+  decision of 2026-07-26 ratifies two deviations that shipped in 0.40.1–0.41.0. First, `ratified`
+  and `auto` no longer fail unconditionally at run open: a committed
+  `merge.unverifiedInvocationAcknowledged: true` opens the run as a recorded acceptance that no
+  supported transport authenticates the trigger; unacknowledged non-manual runs still fail with
+  `UNVERIFIABLE_INVOCATION_PROVENANCE` before probing, scratch creation, or mutation. Second,
+  v0.41.0 adds an acknowledged solo-operator mode
+  (`merge.soloOperatorAcknowledged: true`, valid only atop the first acknowledgement) for
+  single-identity repositories where findings 10–12's identity-separation, App-attestation,
+  server-policy, and approving-review requirements are unsatisfiable rather than unconfigured:
+  those four families are waived there, with exact-head CAS merge, exact-head CI from
+  `.autoloop/ci-policy.json`, ownership binding, protected paths, kill switch, and executor
+  identity kept, and `trustedHumanLogins` required to equal `[loopLogin]`. Multi-identity
+  installations keep the full findings 9–12 contract unchanged; the unattended-operation bars
+  below continue to describe that contract. Statements below that describe the non-manual gate
+  as unconditionally dormant are historical.
+- **Prior version:** v13, 2026-07-25
 - **Reviewed tree:** v0.39.9 at `9dbc5b6`
 - **Toolchain checked:** Codex CLI 0.145.0
 - **Review date:** 2026-07-23; efficiency, architecture, and v9/v10 corrections 2026-07-24
