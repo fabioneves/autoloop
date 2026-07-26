@@ -349,6 +349,45 @@ function hasActiveShellExpansion(cmd) {
   return false;
 }
 
+// A live run wrote `S=/tmp/x; sha256sum $S/plan.md` and was refused as opaque,
+// every session, because the guard cannot judge what it cannot read. Refusing
+// is not the only way to become able to read it: when a variable is assigned a
+// literal in the same command, the guard substitutes it and judges the REAL
+// command. That is strictly stronger than refusal — `verb=merge; gh pr $verb 42`
+// now blocks on the merge rule itself rather than on shape. Anything not
+// statically resolvable (command substitution, environment, values carrying
+// whitespace or metacharacters) stays opaque and stays blocked.
+const RESOLVABLE_VALUE = /^[A-Za-z0-9_./:@%+,=-]+$/u;
+
+function literalAssignments(cmd) {
+  const values = new Map();
+  const pattern = /(?:^|[;&|]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)=("[^"$`\\\n]*"|'[^'\n]*'|[^\s;&|()<>"'`$\\]*)/gu;
+  for (const match of String(cmd).matchAll(pattern)) {
+    const [, name, raw] = match;
+    const value = /^["']/u.test(raw) ? raw.slice(1, -1) : raw;
+    if (!RESOLVABLE_VALUE.test(value)) {
+      values.set(name, null);
+      continue;
+    }
+    values.set(name, values.has(name) ? null : value);
+  }
+  return values;
+}
+
+function resolveShellExpansions(cmd) {
+  const values = literalAssignments(cmd);
+  if (values.size === 0) return null;
+  let resolved = String(cmd);
+  for (const [name, value] of values) {
+    if (value === null) continue;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    resolved = resolved
+      .replace(new RegExp(`\\$\\{${escaped}\\}`, 'gu'), value)
+      .replace(new RegExp(`\\$${escaped}(?![A-Za-z0-9_])`, 'gu'), value);
+  }
+  return hasActiveShellExpansion(resolved) ? null : resolved;
+}
+
 function opaqueMutationSyntax(cmd) {
   return hasActiveShellExpansion(cmd);
 }
@@ -1103,6 +1142,13 @@ export function evaluate(rawCmd, branch, options = {}) {
     };
   }
   if (opaqueMutationSyntax(rawCmd)) {
+    // Resolve literal assignments once and judge the substituted command. The
+    // recursion cannot loop: the resolved text carries no expansion left to
+    // resolve (resolveShellExpansions returns null otherwise).
+    const resolved = options.expansionResolved ? null : resolveShellExpansions(rawCmd);
+    if (resolved !== null) {
+      return evaluate(resolved, branch, { ...options, expansionResolved: true });
+    }
     return {
       block: true,
       reason:
@@ -1591,6 +1637,19 @@ function selfTest() {
   const cases = [
     // [cmd, branch, expectBlock, baseBranch]
     ['gh pr merge 42', 'feat/gh-1-x', true],
+    // A literal path variable is resolvable, so the guard substitutes and judges
+    // the real command instead of refusing the shape (the friction every live
+    // run hit). Anything it cannot resolve stays blocked as opaque.
+    ['S=/tmp/scratch; sha256sum $S/plan.md', 'feat/gh-1-x', false],
+    ['S=/tmp/scratch; sha256sum ${S}/plan.md', 'feat/gh-1-x', false],
+    ['D=docs; rg -n autoloop $D/agentic/STATE.md', 'feat/gh-1-x', false],
+    // Substitution makes evasion detectable rather than merely refused: this
+    // now blocks on the merge rule itself.
+    ['verb=merge; gh pr $verb 42', 'feat/gh-1-x', true],
+    ['V=$(printf merge); gh pr $V 42', 'feat/gh-1-x', true],
+    ['S="/tmp/a b"; ls $S', 'feat/gh-1-x', true],
+    ['ls $UNSET_PATH/x', 'feat/gh-1-x', true],
+    ['B=main; git push origin --delete $B', 'feat/gh-1-x', true, 'main'],
     ['gh --repo o/r pr merge 42 --squash', 'feat/gh-1-x', true],
     ['gh pr merge --auto 42', 'feat/gh-1-x', true],
     // The word "merge" inside an option argument is not a merge invocation: a PR
