@@ -707,11 +707,14 @@ export function verifyRelease(files, options = {}) {
       `v${version} uses schema \`${configVersion}\`.`,
       errors,
     );
+    // Schema-only on purpose: STATE prose is vendored into every configured
+    // repository, and a plugin-version literal there turns each patch release
+    // into per-repository prose drift.
     requireReleaseReference(
       files.stateTemplate,
       'templates/STATE.template.md',
-      `v${version}/schema ${configVersion} reference`,
-      `v${version} requires \`${configVersion}\`.`,
+      `schema ${configVersion} reference`,
+      `the current schema is \`${configVersion}\`.`,
       errors,
     );
   }
@@ -793,7 +796,7 @@ function fixtureFiles(version = '0.40.0') {
       + `opencode=1.18.4; checks=1-10; sha256=${evidence.sha256}; `
       + `location=${evidence.location}\n`,
     evidenceArtifacts: evidence.evidenceArtifacts,
-    stateTemplate: `v${version} requires \`0.25.0\`.\n`,
+    stateTemplate: 'the current schema is `0.25.0`.\n',
     verifyWorkflow: [
       'AUTOLOOP_RELEASE_POLICY_TOKEN: ${{ secrets.AUTOLOOP_RELEASE_POLICY_TOKEN || github.token }}',
       '--release-mode',
@@ -1003,14 +1006,13 @@ async function selfTest() {
           `- v0.40.0 live smoke evidence: date=2026-07-25; `
           + `opencode=1.18.4; checks=1-10; sha256=${'a'.repeat(64)}; `
           + 'location=evidence/opencode-v0.40.0.tar\n',
-        stateTemplate: 'v0.40.0 requires `0.25.0`.\n',
+        stateTemplate: 'the current schema is `0.25.0`.\n',
       },
       expected: [
         'README.md: expected exactly one v0.40.1 route-matrix release reference',
         'docs/measurement.md: expected exactly one v0.40.1 release reference',
         'docs/opencode-smoke.md: expected exactly one complete v0.40.1 live smoke evidence record',
         'README.md: expected exactly one v0.40.1/schema 0.25.0 reference',
-        'templates/STATE.template.md: expected exactly one v0.40.1/schema 0.25.0 reference',
       ],
     },
     {
@@ -1021,7 +1023,7 @@ async function selfTest() {
       },
       expected: [
         'README.md: expected exactly one v0.40.0/schema 0.26.0 reference',
-        'templates/STATE.template.md: expected exactly one v0.40.0/schema 0.26.0 reference',
+        'templates/STATE.template.md: expected exactly one schema 0.26.0 reference',
       ],
     },
     {

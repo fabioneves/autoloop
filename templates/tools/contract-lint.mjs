@@ -56,6 +56,20 @@ const INSTALLED_FORWARD_ARTIFACTS = Object.freeze([
 
 const STALE_ROUTE_PATTERNS = Object.freeze([
   {
+    code: 'UNCONDITIONAL_NON_MANUAL_REFUSAL',
+    pattern:
+      /\b(?:non-?manual|other than `?manual`?)\b[^.\n]{0,120}\b(?:fail(?:s|ure)?|reject\w*|refus\w*|forbid\w*)|\b(?:reject\w*|refus\w*|forbid\w*|never\s+enable\w*)\b[^.\n]{0,120}\bnon-?manual\b/giu,
+    message:
+      'a non-manual merge policy fails only without '
+      + 'merge.unverifiedInvocationAcknowledged; state the conditional',
+    exemptMatch: ({ source, index }) => {
+      if (typeof source !== 'string') return false;
+      const window = source.slice(Math.max(0, index - 400), index + 400);
+      return window.includes('unverifiedInvocationAcknowledged')
+        || /\bunacknowledged\b/iu.test(window);
+    },
+  },
+  {
     code: 'PERSISTED_HOST_AUTHORITY',
     pattern: /\bcfg\.runtime\.supportedHosts\b/gu,
     message: 'runtime.supportedHosts cannot select or authorize a route',
@@ -125,7 +139,7 @@ export function lintRoutingText(text, path = '<text>') {
       const start = source.lastIndexOf('\n', match.index - 1) + 1;
       const end = source.indexOf('\n', match.index);
       const line = source.slice(start, end === -1 ? source.length : end);
-      if (rule.exemptMatch?.({ path, line })) continue;
+      if (rule.exemptMatch?.({ path, line, source, index: match.index })) continue;
       findings.push({
         path,
         line: lineNumber(source, match.index),

@@ -24,7 +24,7 @@ import { extractConfig, validateConfig } from './config-contract.mjs';
 import { parseCiPolicy } from './delivery-contract.mjs';
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
-const UNIVERSAL_TOOL_FILES = Object.freeze([
+export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'adapter-contract.mjs',
   'attestation-contract.mjs',
   'claim-contract.mjs',
@@ -47,6 +47,7 @@ const UNIVERSAL_TOOL_FILES = Object.freeze([
   'route-adapter-contract.mjs',
   'run-scope.mjs',
   'runtime-contract.mjs',
+  'scaffold.mjs',
   'scan.mjs',
   'snapshot-contract.mjs',
   'stats.mjs',
@@ -59,7 +60,7 @@ const PLUGIN_TOOL_FILES = Object.freeze([
   'auto-merge.reference.mjs',
   'merge-authorization-contract.mjs',
 ]);
-const NON_MANUAL_TOOL_FILES = Object.freeze([
+export const NON_MANUAL_TOOL_FILES = Object.freeze([
   'auto-merge.mjs',
   'merge-authorization-contract.mjs',
 ]);
