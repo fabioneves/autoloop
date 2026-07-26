@@ -41,6 +41,37 @@ Notable changes to Autoloop are recorded here. The format follows
   maintainer's responsibility; `--release-mode` still verifies the static release contract
   and proves the annotated-tag binding from local git objects.
 
+## [0.42.1] - 2026-07-26
+
+### Fixed
+
+- **The lifecycle driver accepts every merge policy its contract validates.** A live run planned
+  and independently reviewed an issue, then hard-stopped at the claim step because the driver
+  required `intent.mergePolicy === 'manual'` on top of the contract's own validation. The
+  lifecycle contract accepts `manual`, `ratified`, and `auto` and branches where it matters; the
+  extra clause was a leftover from when non-manual was dormant reference code, and it refused
+  the claim for every acknowledged non-manual repository — exactly the configuration solo mode
+  exists to serve.
+- **The command guard resolves literal expansions instead of refusing them.** Every live session
+  wrote something like `S=/tmp/x; sha256sum $S/plan.md` and was refused as opaque, then retried
+  with a literal path. When a variable is assigned a literal in the same command, the guard now
+  substitutes it and judges the real command — strictly stronger than refusal, because
+  `verb=merge; gh pr $verb 42` now blocks on the merge rule itself. Command substitution,
+  environment variables, and values carrying whitespace or metacharacters stay opaque and stay
+  blocked.
+
+### Added
+
+- **`scaffold.mjs --merge-state` / `--merge-loop`** — mechanical STATE and LOOP reconciliation.
+  A v0.42.0 migration spent 203 seconds reading templates in fragments and 148 seconds splicing
+  prose by hand, over half the run. Ownership is derived from the template's own
+  `{{PLACEHOLDER}}` markers rather than declared: a marker's shape determines whether the
+  repository owns a fence body, list additions, a whole section, or a scalar. Only Lessons is
+  declared, keyed by heading, so a rename fails closed rather than replacing durable memory.
+  Structural ambiguity produces a typed report and a non-zero exit, never a lossy merge.
+  Verified against a real installed STATE: the three differences from the hand-merged result
+  were exactly the decisions it flagged, and LOOP came out byte-identical with no decisions.
+
 ## [0.42.0] - 2026-07-26
 
 ### Removed
@@ -474,7 +505,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.42.0...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.42.1...HEAD
+[0.42.1]: https://github.com/fabioneves/autoloop/compare/v0.42.0...v0.42.1
 [0.42.0]: https://github.com/fabioneves/autoloop/compare/v0.41.4...v0.42.0
 [0.41.4]: https://github.com/fabioneves/autoloop/compare/v0.41.3...v0.41.4
 [0.41.3]: https://github.com/fabioneves/autoloop/compare/v0.41.2...v0.41.3
