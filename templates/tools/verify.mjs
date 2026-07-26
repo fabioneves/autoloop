@@ -18,12 +18,28 @@ import {
   join,
   resolve,
 } from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { extractConfig, validateConfig } from './config-contract.mjs';
 import { parseCiPolicy } from './delivery-contract.mjs';
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
+const SELF_TEST_MANIFEST_NAME = 'self-test-manifest.json';
+const SELF_TEST_PATTERN = /(?:async\s+)?function\s+selfTest\s*\(/;
+// Mirrors scaffold's TOOL_SOURCE_NAMES: the reference-named merge executor
+// installs under the name the runtime dispatches, so its manifest entry is
+// keyed by the installed name while hashing the reference template's bytes.
+// (The installed copy is Setup-filled, so it normally differs and self-tests
+// live — the mapping only keeps the manifest keyed by installed names.)
+const TOOL_INSTALL_NAMES = Object.freeze({
+  'auto-merge.reference.mjs': 'auto-merge.mjs',
+});
+// Self-tests whose evidence is bound to the surrounding root rather than the
+// tool's own bytes: adapter-contract validates THIS root's reviewer artifacts
+// (verify hands it --install-root), so byte-identity with the template proves
+// nothing about the install and it always self-tests live.
+const ROOT_BOUND_SELF_TESTS = Object.freeze(['adapter-contract.mjs']);
 export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'adapter-contract.mjs',
   'attestation-contract.mjs',
@@ -664,6 +680,91 @@ function checkConfiguredChecklist(root) {
   }
 }
 
+// The release-proven manifest hashes exactly the template tools this file
+// would spawn a self-test for, keyed by their installed names. Deterministic:
+// it reads bytes, never runs anything.
+function selfTestManifestTools(toolsDir) {
+  const ownName = basename(fileURLToPath(import.meta.url));
+  const tools = {};
+  for (const name of readdirSync(toolsDir).filter((entry) => entry.endsWith('.mjs')).sort()) {
+    if (name === ownName || ROOT_BOUND_SELF_TESTS.includes(name)) continue;
+    const source = readFileSync(join(toolsDir, name));
+    if (!SELF_TEST_PATTERN.test(source.toString('utf8'))) continue;
+    tools[TOOL_INSTALL_NAMES[name] ?? name] = createHash('sha256').update(source).digest('hex');
+  }
+  return Object.fromEntries(
+    Object.entries(tools).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function renderSelfTestManifest(toolsDir) {
+  return `${JSON.stringify({
+    version: 1,
+    node: nodeMajor(),
+    tools: selfTestManifestTools(toolsDir),
+  }, null, 2)}\n`;
+}
+
+// Plugin-root freshness: a stale committed manifest must not ship. The node
+// field is NOT compared against the running process here — CI regenerates on
+// more than one Node line, so freshness binds the hashed template bytes; the
+// recorded major only gates the install-side fast path.
+function checkSelfTestManifest(toolsDir) {
+  let committed;
+  try {
+    committed = JSON.parse(readFileSync(resolve(toolsDir, SELF_TEST_MANIFEST_NAME), 'utf8'));
+  } catch (error) {
+    return { ok: false, detail: `self-test manifest is unreadable: ${error.message}` };
+  }
+  const errors = [];
+  if (committed?.version !== 1) errors.push('version: expected 1');
+  if (!/^\d+$/u.test(String(committed?.node ?? ''))) {
+    errors.push('node: expected a numeric major version');
+  }
+  const expected = selfTestManifestTools(toolsDir);
+  const actual = plainObject(committed?.tools) ? committed.tools : {};
+  for (const [name, hash] of Object.entries(expected)) {
+    if (actual[name] !== hash) errors.push(`${name}: manifest hash is stale`);
+  }
+  for (const name of Object.keys(actual)) {
+    if (expected[name] === undefined) {
+      errors.push(`${name}: manifest entry has no template tool`);
+    }
+  }
+  return errors.length === 0
+    ? { ok: true, detail: '' }
+    : {
+      ok: false,
+      detail: 'regenerate with '
+        + '`node templates/tools/verify.mjs --emit-self-test-manifest '
+        + `> templates/tools/${SELF_TEST_MANIFEST_NAME}\`: ${errors.join('; ')}`,
+    };
+}
+
+// Install-side manifest load. Fail-open by design: a missing, unreadable, or
+// malformed manifest only disables the fast path, so every self-test spawns
+// exactly as it always has. The recorded Node major must match the running
+// process — release CI only proved the manifest for the majors it ran.
+function loadSelfTestManifest(toolsDir) {
+  try {
+    const manifest = JSON.parse(readFileSync(resolve(toolsDir, SELF_TEST_MANIFEST_NAME), 'utf8'));
+    if (
+      manifest?.version !== 1
+      || !plainObject(manifest.tools)
+      || String(manifest.node) !== nodeMajor()
+    ) {
+      return null;
+    }
+    const tools = {};
+    for (const [name, hash] of Object.entries(manifest.tools)) {
+      if (typeof hash === 'string' && /^[0-9a-f]{64}$/u.test(hash)) tools[name] = hash;
+    }
+    return tools;
+  } catch {
+    return null;
+  }
+}
+
 function pluginChecks(root) {
   const toolsDir = resolve(root, 'templates', 'tools');
   const checks = toolChecks(root, toolsDir, PLUGIN_TOOL_FILES, 'template');
@@ -740,6 +841,10 @@ function pluginChecks(root) {
     ),
   });
   checks.push({
+    name: 'release-proven self-test manifest',
+    execute: () => checkSelfTestManifest(toolsDir),
+  });
+  checks.push({
     name: 'release contract',
     execute: () => checkReleaseContract(root),
   });
@@ -754,7 +859,7 @@ function pluginChecks(root) {
   return checks;
 }
 
-function toolChecks(root, toolsDir, requiredFiles, artifactMode) {
+function toolChecks(root, toolsDir, requiredFiles, artifactMode, { full = false } = {}) {
   const checks = [];
   for (const name of requiredFiles) {
     checks.push({
@@ -762,6 +867,17 @@ function toolChecks(root, toolsDir, requiredFiles, artifactMode) {
       execute: () => checkExists(resolve(toolsDir, name)),
     });
   }
+  // Release CI already self-tested every template tool on the release commit,
+  // so an installed copy whose bytes match the shipped manifest re-proves
+  // nothing by spawning again: it passes as release-proven. Anything else —
+  // differing bytes (the Setup-filled auto-merge.mjs, a repo-owned
+  // escalate-paths.mjs), a missing manifest entry, another Node major, or
+  // --full — runs the live self-test exactly as before. Syntax and every
+  // non-self-test check are never skipped.
+  const manifest = artifactMode === 'install' && !full
+    ? loadSelfTestManifest(toolsDir)
+    : null;
+  const ownName = basename(fileURLToPath(import.meta.url));
   const toolNames = existsSync(toolsDir) ? readdirSync(toolsDir)
     .filter((name) => name.endsWith('.mjs'))
     .sort() : [];
@@ -771,26 +887,40 @@ function toolChecks(root, toolsDir, requiredFiles, artifactMode) {
       name: `syntax ${name}`,
       execute: () => run(process.execPath, ['--check', path], root),
     });
-    if (
-      name !== basename(fileURLToPath(import.meta.url))
-      && /(?:async\s+)?function\s+selfTest\s*\(/.test(readFileSync(path, 'utf8'))
-    ) {
-      checks.push({
-        name: `self-test ${name}`,
-        execute: () => run(
-          process.execPath,
-          name === 'adapter-contract.mjs'
-            ? [
-              path,
-              '--self-test',
-              artifactMode === 'template' ? '--template-root' : '--install-root',
-              root,
-            ]
-            : [path, '--self-test'],
-          root,
-        ),
-      });
+    if (name === ownName) continue;
+    const source = readFileSync(path);
+    if (!SELF_TEST_PATTERN.test(source.toString('utf8'))) continue;
+    let proven = false;
+    if (manifest !== null && !ROOT_BOUND_SELF_TESTS.includes(name)) {
+      try {
+        proven = manifest[name] !== undefined
+          && createHash('sha256').update(source).digest('hex') === manifest[name];
+      } catch {
+        proven = false; // fail-open: any doubt runs the real self-test
+      }
     }
+    if (proven) {
+      checks.push({
+        name: `self-test ${name} (release-proven)`,
+        execute: () => ({ ok: true, detail: '' }),
+      });
+      continue;
+    }
+    checks.push({
+      name: `self-test ${name}`,
+      execute: () => run(
+        process.execPath,
+        name === 'adapter-contract.mjs'
+          ? [
+            path,
+            '--self-test',
+            artifactMode === 'template' ? '--template-root' : '--install-root',
+            root,
+          ]
+          : [path, '--self-test'],
+        root,
+      ),
+    });
   }
   return checks;
 }
@@ -804,7 +934,7 @@ function installedToolFiles(config) {
   ];
 }
 
-function installChecks(root) {
+function installChecks(root, { full = false } = {}) {
   const toolsDir = resolve(root, 'tools', 'agentic');
   let config = null;
   try {
@@ -815,7 +945,7 @@ function installChecks(root) {
     config = null;
   }
   const requiredFiles = installedToolFiles(config);
-  const checks = toolChecks(root, toolsDir, requiredFiles, 'install');
+  const checks = toolChecks(root, toolsDir, requiredFiles, 'install', { full });
   for (const relativePath of [
     '.autoloop/ci-policy.json',
     '.autoloop/measurement-budget-policy.json',
@@ -891,6 +1021,10 @@ function installChecks(root) {
   }
   checks.push(...installedEntrypointChecks(root, toolsDir));
   return checks;
+}
+
+function nodeMajor() {
+  return String(process.versions.node).split('.')[0];
 }
 
 function selfTest() {
@@ -1145,6 +1279,73 @@ function selfTest() {
   } finally {
     rmSync(entrypointRoot, { recursive: true, force: true });
   }
+  const fastPathRoot = mkdtempSync(join(tmpdir(), 'autoloop-fastpath-'));
+  let provenSkips;
+  let provenSyntaxKept;
+  let fullFlagSpawns;
+  let mismatchedNodeSpawns;
+  let modifiedToolSpawns;
+  let missingManifestSpawns;
+  let freshManifestPasses;
+  let staleManifestFails;
+  let referenceNameMapped;
+  try {
+    const fixtureToolsDir = join(fastPathRoot, 'tools', 'agentic');
+    mkdirSync(fixtureToolsDir, { recursive: true });
+    // The fixture tool FAILS its live self-test on purpose: a passing check
+    // is proof the fast path skipped the spawn, and a failing check is proof
+    // the self-test really executed.
+    const fixtureTool = [
+      'function selfTest() { return false; }',
+      "if (process.argv.includes('--self-test')) process.exit(1);",
+      '',
+    ].join('\n');
+    const fixtureToolPath = join(fixtureToolsDir, 'fixture-tool.mjs');
+    writeFileSync(fixtureToolPath, fixtureTool);
+    const fixtureDigest = createHash('sha256').update(fixtureTool).digest('hex');
+    const manifestPath = join(fixtureToolsDir, SELF_TEST_MANIFEST_NAME);
+    const writeManifest = (node, hash) => writeFileSync(manifestPath, `${JSON.stringify({
+      version: 1,
+      node,
+      tools: { 'fixture-tool.mjs': hash },
+    }, null, 2)}\n`);
+    const fixtureSelfTestCheck = (options) =>
+      toolChecks(fastPathRoot, fixtureToolsDir, [], 'install', options)
+        .find((check) => check.name.startsWith('self-test fixture-tool.mjs'));
+    writeManifest(nodeMajor(), fixtureDigest);
+    const proven = fixtureSelfTestCheck();
+    provenSkips = proven.name === 'self-test fixture-tool.mjs (release-proven)'
+      && proven.execute().ok;
+    provenSyntaxKept = toolChecks(fastPathRoot, fixtureToolsDir, [], 'install')
+      .some((check) => check.name === 'syntax fixture-tool.mjs');
+    const fullFlag = fixtureSelfTestCheck({ full: true });
+    fullFlagSpawns = fullFlag.name === 'self-test fixture-tool.mjs'
+      && !fullFlag.execute().ok;
+    writeManifest(String(Number(nodeMajor()) + 1), fixtureDigest);
+    const mismatchedNode = fixtureSelfTestCheck();
+    mismatchedNodeSpawns = mismatchedNode.name === 'self-test fixture-tool.mjs'
+      && !mismatchedNode.execute().ok;
+    writeManifest(nodeMajor(), fixtureDigest);
+    writeFileSync(fixtureToolPath, `${fixtureTool}// drifted\n`);
+    const modifiedTool = fixtureSelfTestCheck();
+    modifiedToolSpawns = modifiedTool.name === 'self-test fixture-tool.mjs'
+      && !modifiedTool.execute().ok;
+    writeFileSync(fixtureToolPath, fixtureTool);
+    rmSync(manifestPath);
+    const unproven = fixtureSelfTestCheck();
+    missingManifestSpawns = unproven.name === 'self-test fixture-tool.mjs'
+      && !unproven.execute().ok;
+    writeFileSync(manifestPath, renderSelfTestManifest(fixtureToolsDir));
+    freshManifestPasses = checkSelfTestManifest(fixtureToolsDir).ok;
+    writeManifest(nodeMajor(), fixtureDigest.split('').reverse().join(''));
+    staleManifestFails = !checkSelfTestManifest(fixtureToolsDir).ok;
+    writeFileSync(join(fixtureToolsDir, 'auto-merge.reference.mjs'), fixtureTool);
+    const manifestTools = selfTestManifestTools(fixtureToolsDir);
+    referenceNameMapped = manifestTools['auto-merge.mjs'] === fixtureDigest
+      && manifestTools['auto-merge.reference.mjs'] === undefined;
+  } finally {
+    rmSync(fastPathRoot, { recursive: true, force: true });
+  }
   const cases = [
     ['structured command success', success.ok && success.detail.length > 0],
     ['structured command failure', !failure.ok && failure.detail.length > 0],
@@ -1179,6 +1380,15 @@ function selfTest() {
     ['disabled Claude prompt entrypoint fails closed', disabledClaudeEntrypoint],
     ['missing Codex prompt entrypoint fails closed', missingCodexEntrypoint],
     ['missing opencode prompt entrypoint fails closed', missingOpencodeEntrypoint],
+    ['release-proven identical tool skips its spawn', provenSkips],
+    ['release-proven fast path keeps the syntax check', provenSyntaxKept],
+    ['--full forces a release-proven tool to self-test live', fullFlagSpawns],
+    ['a foreign node major disables the fast path', mismatchedNodeSpawns],
+    ['a modified installed tool still self-tests live', modifiedToolSpawns],
+    ['a missing manifest disables the fast path', missingManifestSpawns],
+    ['a fresh committed manifest passes the plugin check', freshManifestPasses],
+    ['a stale committed manifest fails the plugin check', staleManifestFails],
+    ['the merge executor manifest entry uses the installed name', referenceNameMapped],
   ];
   const failures = cases.filter(([, passed]) => !passed);
   for (const [name] of failures) console.error(`FAIL ${name}`);
@@ -1192,18 +1402,26 @@ function selfTest() {
 
 function parseArgs(args) {
   if (args.length === 1 && args[0] === '--self-test') {
-    return { mode: 'self-test', root: null, error: null };
+    return { mode: 'self-test', root: null, full: false, error: null };
+  }
+  if (args.length === 1 && args[0] === '--emit-self-test-manifest') {
+    return { mode: 'emit-manifest', root: null, full: false, error: null };
   }
   if (args.length === 2 && args[0] === '--plugin-root' && args[1]) {
-    return { mode: 'plugin', root: args[1], error: null };
+    return { mode: 'plugin', root: args[1], full: false, error: null };
   }
-  if (args.length === 2 && args[0] === '--install-root' && args[1]) {
-    return { mode: 'install', root: args[1], error: null };
+  const full = args.includes('--full');
+  const rest = full ? args.filter((arg) => arg !== '--full') : args;
+  if (rest.length === 2 && rest[0] === '--install-root' && rest[1]) {
+    return { mode: 'install', root: rest[1], full, error: null };
   }
   return {
     mode: null,
     root: null,
-    error: 'expected --plugin-root <path>, --install-root <path>, or --self-test',
+    full: false,
+    error: 'expected --plugin-root <path>, --install-root <path> [--full], '
+      + '--emit-self-test-manifest, or --self-test; --full disables the '
+      + 'release-proven fast path so every installed self-test spawns',
   };
 }
 
@@ -1214,9 +1432,17 @@ function main() {
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+  if (parsed.mode === 'emit-manifest') {
+    process.stdout.write(
+      renderSelfTestManifest(resolve(fileURLToPath(new URL('.', import.meta.url)))),
+    );
+    return;
+  }
 
   const root = resolve(parsed.root);
-  const checks = parsed.mode === 'plugin' ? pluginChecks(root) : installChecks(root);
+  const checks = parsed.mode === 'plugin'
+    ? pluginChecks(root)
+    : installChecks(root, { full: parsed.full });
   const failures = [];
   for (const check of checks) {
     const startedAt = process.hrtime.bigint();

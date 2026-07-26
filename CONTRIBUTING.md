@@ -38,6 +38,14 @@ node templates/tools/verify.mjs --plugin-root .
 git diff --check
 ```
 
+A change to any tool under `templates/tools/` must regenerate the committed release-proven
+manifest, which installed verify runs use to skip re-proving byte-identical tools; the
+plugin-root verify above fails while the committed manifest is stale:
+
+```bash
+node templates/tools/verify.mjs --emit-self-test-manifest > templates/tools/self-test-manifest.json
+```
+
 Run any additional live smoke protocol affected by the change. For opencode adapter changes, use
 [docs/opencode-smoke.md](docs/opencode-smoke.md) in a scratch repository.
 
