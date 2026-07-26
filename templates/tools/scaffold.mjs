@@ -32,11 +32,15 @@ const TEMPLATE_MARKER = 'STATE.template.md';
 const TOOL_SOURCE_NAMES = Object.freeze({
   'auto-merge.mjs': 'auto-merge.reference.mjs',
 });
-// escalate-paths.mjs may carry repository-owned protected-path entries (the
-// review's extra escalate globs live in the tool today). A blind byte refresh
-// would silently delete policy, so a modified copy is reported for prose-level
-// reconciliation instead of overwritten.
-const PRESERVE_IF_MODIFIED = Object.freeze(new Set(['escalate-paths.mjs']));
+// Some vendored tools carry repository-owned policy that a blind byte refresh
+// would silently delete, so a modified copy is reported for prose-level
+// reconciliation instead of overwritten: escalate-paths.mjs holds the review's
+// extra escalate globs, and auto-merge.mjs holds the Setup-filled REPO CONFIG
+// block (repository, logins, required checks, solo-operator transcription).
+const PRESERVE_IF_MODIFIED = Object.freeze(new Map([
+  ['escalate-paths.mjs', 'repository-owned escalate entries'],
+  ['auto-merge.mjs', 'the Setup-filled merge REPO CONFIG block'],
+]));
 const HOST_ARTIFACTS = Object.freeze([
   ['codex-reviewer-agent.template.toml', '.codex/agents/autoloop-reviewer.toml'],
   ['opencode-reviewer-agent.template.md', '.opencode/agent/autoloop-reviewer.md'],
@@ -176,7 +180,7 @@ export function reconcile(root, templates) {
       results.push({ path: `tools/agentic/${name}`, action: 'kept-modified' });
       warnings.push(
         `tools/agentic/${name} differs from the template and may carry `
-        + 'repository-owned escalate entries; reconcile it in the visible diff '
+        + `${PRESERVE_IF_MODIFIED.get(name)}; reconcile it in the visible diff `
         + 'instead of overwriting',
       );
       continue;
@@ -351,7 +355,9 @@ function fixtureState(policy) {
 
 function selfTest() {
   let ok = true;
+  let cases = 0;
   const expect = (name, pass) => {
+    cases += 1;
     if (!pass) {
       console.error(`FAIL ${name}`);
       ok = false;
@@ -451,6 +457,20 @@ function selfTest() {
         && nonManualActions.get('tools/agentic/merge-authorization-contract.mjs') === 'created',
     );
 
+    const vendoredMerge = join(root, 'tools', 'agentic', 'auto-merge.mjs');
+    writeFileSync(
+      vendoredMerge,
+      `${readFileSync(vendoredMerge, 'utf8')}\n// repo-filled REPO CONFIG\n`,
+    );
+    const filledAgain = reconcile(root, templates);
+    expect(
+      'a Setup-filled merge executor survives reconciliation for visible-diff review',
+      filledAgain.results.some((entry) =>
+        entry.path === 'tools/agentic/auto-merge.mjs' && entry.action === 'kept-modified')
+        && readFileSync(vendoredMerge, 'utf8').includes('repo-filled REPO CONFIG')
+        && filledAgain.warnings.some((warning) => warning.includes('auto-merge.mjs')),
+    );
+
     writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'), fixtureState('manual'));
     const backToManual = reconcile(root, templates);
     expect(
@@ -481,7 +501,7 @@ function selfTest() {
     rmSync(templates, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
-  console.log(ok ? 'self-test OK (10 cases)' : 'self-test FAILED');
+  console.log(ok ? `self-test OK (${cases} cases)` : 'self-test FAILED');
   return ok;
 }
 

@@ -2565,12 +2565,16 @@ function measuredOperationKind(executable, args) {
       ]),
     );
     const subcommand = index < 0 ? null : args[index];
+    // Local working-tree subcommands are ordinary subprocess operations; only
+    // `push` and unknown shapes stay conservatively remote (`init` is left
+    // unknown on purpose — the loop never initializes repositories).
     const known = new Set([
       'add', 'apply', 'branch', 'cat-file', 'checkout', 'cherry-pick',
-      'commit', 'config', 'diff', 'diff-tree', 'fetch', 'for-each-ref',
-      'log', 'ls-files', 'ls-remote', 'ls-tree', 'merge', 'merge-base',
-      'merge-tree', 'pull', 'rebase', 'remote', 'restore', 'rev-parse',
-      'show', 'status', 'switch', 'tag', 'update-ref', 'worktree',
+      'clean', 'commit', 'config', 'diff', 'diff-tree', 'fetch',
+      'for-each-ref', 'log', 'ls-files', 'ls-remote', 'ls-tree', 'merge',
+      'merge-base', 'merge-tree', 'mv', 'pull', 'rebase', 'remote', 'reset',
+      'restore', 'rev-parse', 'revert', 'rm', 'show', 'stash', 'status',
+      'switch', 'tag', 'update-ref', 'worktree',
     ]);
     if (subcommand === 'push') return 'remote-mutation';
     return subcommand !== null && known.has(subcommand)
@@ -8902,6 +8906,14 @@ async function selfTest() {
     'create',
     'fixture.txt',
   ]);
+  const localGitClassifications = [
+    ['reset', '--hard', 'origin/main'],
+    ['revert', '--no-edit', 'HEAD'],
+    ['stash', 'push'],
+    ['clean', '-fd'],
+    ['rm', '--cached', 'fixture.txt'],
+    ['mv', 'fixture.txt', 'renamed.txt'],
+  ].map((args) => measuredOperationKind('git', ['-C', GIT_CONTEXT, ...args]));
   const compactMutationClassifications = [
     ['api', '-XPOST', 'repos/example/project/issues'],
     ['api', '-XPATCH', 'repos/example/project/issues/1'],
@@ -9874,6 +9886,8 @@ async function selfTest() {
       !forbiddenMeasuredMerge.ok],
     ['global Git push syntax is conservatively a remote mutation',
       globalGitPushClassification === 'remote-mutation'],
+    ['local Git subcommands classify as subprocess operations',
+      localGitClassifications.every((kind) => kind === 'subprocess')],
     ['unknown GitHub CLI shapes are conservatively remote mutations',
       unknownGhClassification === 'remote-mutation'],
     ['compact and abbreviated GitHub API mutation flags require journaling',

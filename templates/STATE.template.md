@@ -66,8 +66,8 @@ preference for the current run. Claude/Codex `UserPromptSubmit` or opencode
 `opencode.user-prompt` sends the event to `intent-contract.mjs --capture-hook`, which writes a
 one-use process/repository/session-bound record. Because the hook and model share an OS user, it
 cannot prove who supplied the prompt. Runtime immutably records
-`intentProvenance: "best-effort-unverified"`; continuation cannot upgrade it; non-manual policy
-fails before probe, scratch creation, or mutation.
+`intentProvenance: "best-effort-unverified"`; continuation cannot upgrade it; an unacknowledged
+non-manual policy fails before probe, scratch creation, or mutation.
 
 For a new invocation, the authority broker consumes the record once, reads and validates
 ProjectConfig from this STATE, and alone supplies both to Runtime. One exact opencode continuation
@@ -190,10 +190,12 @@ new invocation rather than carrying stale policy across sessions.
 ## Autonomy & caps (do not exceed without a human)
 
 - **Level: L2.** The loop builds on a working branch, runs the gate, opens a PR that `Closes #N`,
-  drives it to green + reviewed, and makes the PR ready. **A human merges.** v0.40 refuses
-  non-manual run open because prompt provenance is unverified. Direct merge, tag/release
-  publication, and applying/creating/renaming `loop-ready` are forbidden. Branch protection on the
-  base branch is the **human's control**: the loop never edits it.
+  drives it to green + reviewed, and makes the PR ready. **A human merges** unless the config
+  records an acknowledged non-manual policy (`merge.unverifiedInvocationAcknowledged: true`), in
+  which case only the vendored gate may merge, on full green exact-head evidence; an
+  unacknowledged non-manual run still fails at run open. Direct merge outside that gate,
+  tag/release publication, and applying/creating/renaming `loop-ready` are forbidden. Branch
+  protection on the base branch is the **human's control**: the loop never edits it.
 - The shell command guard is defense in depth for literal model-issued commands, not a sandbox for
   arbitrary executables or reviewed program files. No-bypass server rules remain the protected
   branch boundary even when local command inspection cannot prove program behavior.

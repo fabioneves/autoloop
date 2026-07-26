@@ -1,20 +1,28 @@
 #!/usr/bin/env node
 // ============================================================================
-// DORMANT NON-MANUAL MERGE REFERENCE — v0.40 Setup never installs or invokes
-// this file, and Runtime rejects every non-manual run before probing or mutation.
-// The generic REPO CONFIG block below exists only for fail-closed contract tests.
+// NON-MANUAL MERGE REFERENCE — dormant by default, enabled only by recorded
+// consent. Setup vendors this file as tools/agentic/auto-merge.mjs solely for a
+// repository whose committed config carries merge.policy: ratified|auto WITH
+// merge.unverifiedInvocationAcknowledged: true; Runtime opens such runs on that
+// recorded acceptance and still rejects every unacknowledged non-manual run
+// before probing or mutation. With the placeholder REPO CONFIG block below,
+// every invocation refuses fail-closed; only autoloop:setup fills it.
 //
 // The policy ENGINE (independently fetched, SHA-bound evidence; AND-gate;
-// kill-switch; CAS merge + confirmation) remains reference code.
+// kill-switch; CAS merge + confirmation) is identical in every mode.
 // The self-test fixtures DERIVE from the config block, so `--self-test` stays
 // meaningful for any filled config — run it after every config change.
 //
-// This file carries no v0.40 policy authority. A future release may reuse the
-// independently fetched, SHA-bound AND-gate only after adding authenticated
-// invocation provenance and a separately reviewed enablement path. Human-merging
-// this reference file or changing ProjectConfig cannot enable it in v0.40.
+// SOLO_OPERATOR transcribes the additional merge.soloOperatorAcknowledged: true
+// consent for a single-identity repository: identity separation, App
+// attestation, live server policy, and approving review are waived there
+// because one login cannot satisfy them; exact-head CAS merge, CI on the exact
+// head, ownership binding, protected paths, and the kill switch keep full
+// strength. No acknowledgement grants the loop tag, release, or base-branch
+// authority, and provenance remains best-effort-unverified in every mode.
 // ============================================================================
-// Dormant ratified auto-merge reference for a future dev loop.
+// Ratified/auto merge engine for the dev loop; reference-dormant until the
+// acknowledgements above are committed.
 //
 // The policy is a pure AND-gate over independently fetched, SHA-bound GitHub
 // evidence. Its own tools/** path is protected and can never be authorized by this
@@ -30,7 +38,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   createPremergeRecord,
@@ -87,6 +95,13 @@ export const EXTRA_PROTECTED_PATHS = [];
 export const AUTOMERGE_MODE = 'classified';
 export const LOOP_LOGIN = 'autoloop[bot]';
 export const TRUSTED_HUMAN_LOGINS = ['maintainer'];
+// Solo-operator installations have exactly one human, who necessarily shares the
+// loop's login. Setup writes true ONLY from a config carrying BOTH acknowledgements
+// (merge.unverifiedInvocationAcknowledged AND merge.soloOperatorAcknowledged) and
+// then fills TRUSTED_HUMAN_LOGINS = [LOOP_LOGIN]. When true, the gate waives
+// identity separation, App attestation, live server policy, and approving review —
+// the four families a single login cannot satisfy — and keeps everything else.
+export const SOLO_OPERATOR = false;
 export const TRUSTED_AUTOMATION_APP_IDS = [1];
 export const TRUSTED_AUTHORIZATION_APP_IDS = [2];
 export const REQUIRED_CI_CHECK_APPS = {};
@@ -1583,6 +1598,7 @@ function mergeAuthorizationInput(pr, path) {
       baseFreshnessStrategy: BASE_FRESHNESS_STRATEGY,
       loopLogin: LOOP_LOGIN,
       trustedHumanLogins: TRUSTED_HUMAN_LOGINS,
+      soloOperator: SOLO_OPERATOR,
       automationAppIds: TRUSTED_AUTOMATION_APP_IDS,
       authorizationAppIds: TRUSTED_AUTHORIZATION_APP_IDS,
       requiredApprovingReviewCount: REQUIRED_APPROVING_REVIEW_COUNT,
@@ -1980,7 +1996,9 @@ function makeInput({
     changedFiles: entries.length,
     additions: 10,
     deletions: 5,
-    reviewDecision: 'APPROVED',
+    // A solo repository can never reach APPROVED (GitHub forbids self-approval),
+    // so the fixture derives the reachable review shape from the config block.
+    reviewDecision: SOLO_OPERATOR ? null : 'APPROVED',
     reviewRequests: [],
     reviewRequestsComplete: true,
     mergeStateStatus: 'CLEAN',
@@ -2065,7 +2083,9 @@ function makeInput({
       eventVerified: true,
       afterCurrentHead: true,
       roleName: 'maintain',
-      check: {
+      // Without a GitHub App nobody can publish the authorization CheckRun; the
+      // solo gate waives it, so the solo fixture must not fabricate one.
+      check: SOLO_OPERATOR ? undefined : {
         name: 'agentic/human-authorization',
         headOid: HEAD_SHA,
         status: 'COMPLETED',
@@ -2078,7 +2098,9 @@ function makeInput({
       login: LOOP_LOGIN,
       id: 9001,
     },
-    serverPolicy: {
+    // A plan without branch protection has no live server policy; the solo gate
+    // skips its validation, so the solo fixture carries none.
+    serverPolicy: SOLO_OPERATOR ? undefined : {
       complete: true,
       source: 'live',
       strategy: 'direct-strict',
@@ -2223,15 +2245,29 @@ export const FIXTURES = [
     expectExit: 1,
     expectCalls: 0,
   },
-  {
-    name: 'untrusted producer cannot spoof an agentic verdict',
-    input: makeInput({
-      checkRuns: makeCheckRuns().map((check) =>
-        check.name === 'agentic/gate' ? { ...check, app: { id: 999, slug: 'untrusted' } } : check),
-    }),
-    expectExit: 1,
-    expectCalls: 0,
-  },
+  // Producer pinning derives from the config block: a solo fill has no App to pin
+  // to, so the same substituted producer is accepted there by design — on the
+  // exact head and successful, which stays required in every mode.
+  SOLO_OPERATOR
+    ? {
+      name: 'solo mode accepts an unpinned exact-head verdict producer',
+      input: makeInput({
+        checkRuns: makeCheckRuns().map((check) =>
+          check.name === 'agentic/gate' ? { ...check, app: { id: 999, slug: 'untrusted' } } : check),
+      }),
+      dryRun: true,
+      expectExit: 0,
+      expectCalls: 0,
+    }
+    : {
+      name: 'untrusted producer cannot spoof an agentic verdict',
+      input: makeInput({
+        checkRuns: makeCheckRuns().map((check) =>
+          check.name === 'agentic/gate' ? { ...check, app: { id: 999, slug: 'untrusted' } } : check),
+      }),
+      expectExit: 1,
+      expectCalls: 0,
+    },
   {
     name: 'plain commit status cannot spoof an agentic verdict',
     input: makeInput({
@@ -2245,12 +2281,23 @@ export const FIXTURES = [
     expectExit: 1,
     expectCalls: 0,
   },
-  {
-    name: 'missing non-bypassable server-policy evidence blocks',
-    input: makeInput({ serverPolicy: null }),
-    expectExit: 1,
-    expectCalls: 0,
-  },
+  // Server policy also derives from the config block: solo repositories have no
+  // branch protection to read, so absent evidence is the solo happy path — this
+  // doubles as the solo dry-run would-merge fixture.
+  SOLO_OPERATOR
+    ? {
+      name: 'solo dry-run would-merge without server-policy evidence',
+      input: makeInput({ serverPolicy: null }),
+      dryRun: true,
+      expectExit: 0,
+      expectCalls: 0,
+    }
+    : {
+      name: 'missing non-bypassable server-policy evidence blocks',
+      input: makeInput({ serverPolicy: null }),
+      expectExit: 1,
+      expectCalls: 0,
+    },
   {
     name: 'Path A authorization on an old head blocks',
     input: makeInput({
@@ -3245,13 +3292,15 @@ function liveEvidenceCases() {
       name: 'label removal and loop re-add cannot reuse human authorization',
       ok: relabeledByLoop.eventVerified === false,
     },
-    {
+    // The live-policy derivation is consulted only in non-solo mode, and its
+    // pinned-policy expectation needs the App pins a solo fill cannot have.
+    ...(SOLO_OPERATOR ? [] : [{
       name: 'API-shaped live branch protection derives strict pinned policy',
       ok:
         livePolicy.complete === true
         && livePolicy.strict === true
         && livePolicy.requiredChecks.length === requiredCheckContracts().length,
-    },
+    }]),
     {
       name: 'un-pinned live required check makes server policy incomplete',
       ok: unpinnedPolicy.complete === false,
@@ -3271,6 +3320,41 @@ function liveEvidenceCases() {
   ];
 }
 
+// The solo relaxations live in merge-authorization-contract.mjs and are fully
+// fixture-proven there; the engine's whole solo responsibility is transcribing
+// the vendored SOLO_OPERATOR constant into the gate config, and deriving its
+// own fixtures so `--self-test` stays meaningful for a filled solo config.
+function soloTranscriptionCases() {
+  const input = makeInput();
+  const { config } = mergeAuthorizationInput(input, ALLOW_ALL ? 'all-green' : 'A');
+  // Contract lint deliberately skips auto-merge.* (fixture prose would trip its
+  // patterns), so the file polices its own header: the enablement claim must
+  // state the acknowledgement conditional, never an unconditional refusal.
+  const header = readFileSync(fileURLToPath(import.meta.url), 'utf8').slice(0, 2200);
+  return [
+    {
+      name: 'header states the acknowledged enablement conditional',
+      ok: !/never installs or invokes/u.test(header)
+        && header.includes('merge.unverifiedInvocationAcknowledged')
+        && header.includes('merge.soloOperatorAcknowledged'),
+    },
+    {
+      name: 'gate config transcribes SOLO_OPERATOR from the repo block',
+      ok: config.soloOperator === SOLO_OPERATOR,
+    },
+    {
+      name: 'fixture evidence derives from the solo shape of the config block',
+      ok: SOLO_OPERATOR
+        ? input.serverPolicy === undefined
+          && input.reviewDecision === null
+          && input.authorization.check === undefined
+        : input.serverPolicy?.complete === true
+          && input.reviewDecision === 'APPROVED'
+          && input.authorization.check?.name === 'agentic/human-authorization',
+    },
+  ];
+}
+
 function selfTest() {
   let passed = 0;
   let failed = 0;
@@ -3279,6 +3363,7 @@ function selfTest() {
     ...prCommitMetadataCases(),
     ...restPaginationCases(),
     ...liveEvidenceCases(),
+    ...soloTranscriptionCases(),
   ]) {
     if (check.ok) passed += 1;
     else failed += 1;

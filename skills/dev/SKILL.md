@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.40.5 · starting
+∞ dev · v0.41.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -30,7 +30,12 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    hash them, and generate the measurement run UUID before Runtime opens.
 3. For a new invocation, require the host prompt hook to have captured the command-shaped prompt
    before this skill began: Claude/Codex `UserPromptSubmit` and opencode
-   `opencode.user-prompt` pipe their native event to `intent-contract.mjs --capture-hook`. Call
+   `opencode.user-prompt` pipe their native event to `intent-contract.mjs --capture-hook`. Verify
+   that transport record exists as the FIRST prime action — before dirty-tree attribution,
+   configuration repair, or any other work. A prose-shaped invocation captures nothing by design;
+   attestation will fail, so stop within seconds and instruct the human to reinvoke as
+   `/autoloop:dev …` instead of discovering the missing record after doing real work (a live run
+   spent five minutes on remediation, then had to throw the session away). Call
    `run-scope.mjs --attest-host-json` with exactly `{sessionId}`. The broker consumes that one-use
    process/repository/session-bound transport record and reads and validates STATE itself. For the
    exact opencode v2 continuation target from step 5, the unchanged source broker instead derives
@@ -64,7 +69,14 @@ Run Pitcrew first in the same `RunContext`, then take new work.
 7. Verify GitHub authentication and repository access. Attribute a dirty tree before switching:
    only a lifecycle-bound, same-issue orphan with every dirty path in the plan boundary and no
    human-authorization path may resume. Otherwise treat it as human work and stop. Never stash,
-   discard, or relocate unknown work.
+   discard, or relocate unknown work. Uncommitted scaffold or migration artifacts
+   (`tools/agentic/**`, host artifacts, a STATE config edit) are Setup's unfinished work — human
+   work: stop with the Setup remedy, and never commit them to the base or package them into a PR
+   inside a Dev run. If the human explicitly directs landing them anyway, deliver that migration
+   PR, then treat the unmerged PR as a base prerequisite: retain a `human` wait boundary, finish
+   the run with the typed guardrail-failure stop, and let the next invocation start clean after
+   the human merges — never continue into selection holding a config fingerprint the base no
+   longer matches.
 8. On a clean tree, fetch and switch to `cfg.baseBranch`, pull fast-forward, then re-read STATE
    because the session injection may have come from a parked unit branch.
 9. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
@@ -532,10 +544,11 @@ delivery booleans are forbidden.
 Under `merge.policy: manual`, stop after the returned exact terminal result and leave the ready PR
 for a human. Under an acknowledged non-manual policy, invoke the vendored
 `tools/agentic/auto-merge.mjs` once for the delivered PR and treat its typed verdict as final for
-this run. The executor independently refetches every ownership, eligibility, evidence, and
-server-protection predicate and refuses with a typed reason when any is missing; route a refusal
-to the human-block path — never retry it blindly, weaken a predicate, or merge through any other
-surface. No run submits a merge queue entry, publishes a tag, or creates a release. Later recovery
+this run. The executor independently refetches every ownership, eligibility, and evidence
+predicate — plus live server protection, except under the solo-operator acknowledgement, which
+waives the four controls a single login cannot satisfy — and refuses with a typed reason when any
+is missing; route a refusal to the human-block path — never retry it blindly, weaken a predicate,
+or merge through any other surface. No run submits a merge queue entry, publishes a tag, or creates a release. Later recovery
 may observe a completed merge and reconcile the existing loop-owned lifecycle record, but prompt
 transport itself grants no authority for that mutation.
 
@@ -618,6 +631,15 @@ Invalidate relevant snapshot sections, re-derive state, and take the next unit u
 - context budget;
 - explicit invocation bound reached;
 - guardrail failure.
+
+Never end a turn waiting on a human with the run left open and no retained boundary. The broker
+is process-bound and the intent record one-use: when the session ends, an open run without a
+`run-finish` becomes an unrecoverable orphan with a dangling measurement ledger. Before any
+human handoff (an unmergeable prerequisite PR, a blocked authorization, anything phrased "tell
+me when…"), retain the `human` `wait-start`, and if the handoff ends the run's useful work,
+retain `wait-end` and `stage-end` and call `--finish-json` with the guardrail-failure stop so
+the ledger closes. "I'll continue when you're done" is only valid within the same living
+session, and the handoff message must say so.
 
 For every queue-sensitive finish, invalidate stale sections, run a fresh full `scan.mjs`, and
 require every queue/lifecycle/dependency section to be complete. Pipe that exact verified snapshot
