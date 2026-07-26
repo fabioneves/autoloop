@@ -524,5 +524,11 @@ Doctor ends with:
 - Never report an inactive route as effectively verified.
 - Never let a missing optional fallback capability fail a healthy selected route.
 - Never use incomplete evidence to prove absence.
+- Never run the repository gate, test suite, or CI to prove a scaffold or prose edit; static
+  validation and `verify.mjs --install-root` are Setup's entire evidence surface. A failing gate or
+  red CI on the configured base is a NOTE for the human, never Setup's work — Setup never modifies
+  repository source.
+- When STATE drift is only a version or schema literal, apply it as one direct edit; never write
+  block-surgery scripts against STATE.
 - Enable a non-manual policy only through the explicit interview answer that writes
   `merge.unverifiedInvocationAcknowledged: true` beside it. Setup never merges.

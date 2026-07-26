@@ -21,6 +21,14 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- Installed STATE prose no longer carries the plugin version. The vendored template embedded it, so
+  every patch release dirtied every configured repository's STATE by one literal and forced a
+  prose reconciliation per repository per release — the direct cause of a thirteen-minute setup run
+  whose entire payload was a version string. STATE references the configuration schema only.
+- Setup's evidence surface is now explicitly bounded: static validation and
+  `verify.mjs --install-root`, never the repository gate, test suite, or CI. A live session had
+  begun repairing a pre-existing failure on the configured base to "prove" a prose edit; a failing
+  base is a NOTE for the human, and Setup never modifies repository source.
 - Seven skill-prose sites still asserted that v0.40 forbids a non-manual merge policy, contradicting
   the 0.40.1 contract; a Setup session resolving the contradiction refused to offer the policy the
   interview was told to offer. All prose now states the conditional.
