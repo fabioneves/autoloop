@@ -164,6 +164,10 @@ export function reconcile(root, templates, { audit = false } = {}) {
   const tools = [
     ...UNIVERSAL_TOOL_FILES,
     'session-preflight.sh',
+    // The release-proven self-test manifest rides beside the vendored tools so
+    // the installed verify.mjs can pass byte-identical tools without spawning
+    // their already-proven self-tests.
+    'self-test-manifest.json',
     ...(nonManual ? NON_MANUAL_TOOL_FILES : []),
   ];
   for (const name of tools) {
@@ -327,6 +331,7 @@ function fixtureTemplates() {
     ...UNIVERSAL_TOOL_FILES.map((name) => TOOL_SOURCE_NAMES[name] ?? name),
     ...NON_MANUAL_TOOL_FILES.map((name) => TOOL_SOURCE_NAMES[name] ?? name),
     'session-preflight.sh',
+    'self-test-manifest.json',
   ]);
   for (const name of names) {
     writeFileSync(join(templates, 'tools', name), `// fixture ${name}\n`);
@@ -408,6 +413,10 @@ function selfTest() {
       'a manual repository vendors the universal set without the merge executor',
       actions.get('tools/agentic/verify.mjs') === 'created'
         && actions.get('tools/agentic/auto-merge.mjs') === undefined,
+    );
+    expect(
+      'the release-proven self-test manifest is vendored beside the tools',
+      actions.get('tools/agentic/self-test-manifest.json') === 'created',
     );
     expect(
       'a legacy root opencode.json folds into .opencode with repository values winning',

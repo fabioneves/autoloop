@@ -425,8 +425,14 @@ wc -c docs/agentic/STATE.md docs/agentic/ARCH.md 2>/dev/null
 A scan or audit section that fails is incomplete, not an empty success. Follow it with one targeted
 check. STATE Lessons over 3000 bytes and ARCH over 8000 bytes are compaction NOTEs, not failures.
 
-Cost discipline — a full verify runs every vendored self-test and costs minutes of wall clock:
+Cost discipline — the verify battery is seconds, not minutes, but only when used as designed:
 
+- Install-root verify applies the release-proven fast path automatically: a vendored tool whose
+  bytes match the shipped `self-test-manifest.json` prints `PASS self-test <name>
+  (release-proven)` without spawning, and only modified tools (the Setup-filled
+  `auto-merge.mjs`, a repo-owned `escalate-paths.mjs`) self-test live, so the battery normally
+  costs ~10-20 seconds. When a byte-identical tool is itself under suspicion, rerun with
+  `--full` to spawn every self-test — expect minutes of wall clock in that mode.
 - Capture its output ONCE (the `tee` above) and derive every later view from the capture. Never
   run the same verify twice to get a different `grep`/`tail` of identical output.
 - `scaffold.mjs --audit` returns the complete would-be reconciliation as the same typed report
