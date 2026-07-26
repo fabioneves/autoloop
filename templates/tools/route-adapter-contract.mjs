@@ -2519,9 +2519,13 @@ export function issueCapabilitySnapshot(input) {
       || fixtureMode && liveMode
       || !validateHostEvidence(input.hostEvidence)
       || !HEX_64.test(input.invocationNonce)
+      // Mode check first: detectActiveHost walks the ancestor chain through
+      // /proc (Linux) or ps spawns (macOS, ~44ms), and evaluating it before the
+      // self-test short-circuit charged every fixture snapshot for it — 101 of
+      // the macOS suite's 106 seconds. Production semantics are unchanged.
       || (
-        detectActiveHost() !== input.hostEvidence.observedHosts[0]
-        && !CONTRACT_SELF_TEST_MODE
+        !CONTRACT_SELF_TEST_MODE
+        && detectActiveHost() !== input.hostEvidence.observedHosts[0]
       )
       || liveMode
         && (
