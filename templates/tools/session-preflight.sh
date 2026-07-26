@@ -64,7 +64,29 @@ else
   echo "NOTE  checkout has $dirty uncommitted path(s) — fine interactively; the loop requires a clean tree UNLESS this is a provably loop-owned in-flight unit (dirty on a gh-<N> branch with its open draft PR + claim-commit HEAD + in-boundary paths → adoption checkpoints and resumes). Otherwise it is a human's WIP: never stash/discard — stop and report."
 fi
 
-# 3. Every role dispatch spawns a fresh engine process; there is nothing here to select.
+# 3. Vendored-tool drift. tools/agentic/* is a COPY taken the last time setup ran,
+# so a released fix reaches this repo only when setup runs again — and if the fix
+# is in a tool setup itself depends on, it can strand: a 0.42.1 command-guard
+# refused the audit battery of the 0.42.3 setup that would have replaced it.
+# Silent on any host without the Claude plugin cache; version comparison goes
+# through the release helper because `sort -V` is absent on stock macOS.
+vendored_prime="$REPO_DIR/tools/agentic/prime.mjs"
+plugin_cache="$HOME/.claude/plugins/cache/autoloop/autoloop"
+release_helper="$REPO_DIR/tools/agentic/release-verify.mjs"
+if [ -f "$vendored_prime" ] && [ -d "$plugin_cache" ] && [ -f "$release_helper" ]; then
+  vendored_version=$(sed -n "s/^const AUTOLOOP_VERSION = '\(.*\)';$/\1/p" "$vendored_prime" | head -1)
+  newest_installed=$(ls -1 "$plugin_cache" 2>/dev/null \
+    | run_timed 10 node "$release_helper" --sort-versions 2>/dev/null | tail -1)
+  if [ -n "$vendored_version" ] && [ -n "$newest_installed" ]; then
+    if [ "$vendored_version" = "$newest_installed" ]; then
+      echo "PASS  vendored tools match the installed plugin (v$vendored_version)"
+    else
+      echo "NOTE  vendored tools on this checkout are v$vendored_version but v$newest_installed is installed — either setup has not run since the release, or this is a unit branch that forked before the reconcile landed on the base. A tool-level fix in v$newest_installed is NOT in effect here."
+    fi
+  fi
+fi
+
+# 4. Every role dispatch spawns a fresh engine process; there is nothing here to select.
 echo 'INFO  role dispatch is one call — tools/agentic/dispatch.mjs --role <role>'
 
 exit 0
