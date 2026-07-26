@@ -575,7 +575,10 @@ function sanitizedGitEnvironment() {
   };
 }
 
-function gitOutput(cwd, args) {
+// Raw variant: NUL-delimited Git output must not be trimmed, because trimming
+// would corrupt a first or last path whose name begins or ends with
+// whitespace. Every human-readable caller goes through `gitOutput` below.
+function gitProcessOutput(cwd, args) {
   const result = spawnSync('git', [
     '--no-replace-objects',
     '--no-optional-locks',
@@ -595,7 +598,11 @@ function gitOutput(cwd, args) {
   if (result.status !== 0 || result.error) {
     throw new Error('Git checkout probe failed');
   }
-  return String(result.stdout ?? '').trim();
+  return String(result.stdout ?? '');
+}
+
+function gitOutput(cwd, args) {
+  return gitProcessOutput(cwd, args).trim();
 }
 
 function parseGitHubRemote(value) {
@@ -750,6 +757,103 @@ function checkoutChanged(before, after) {
       before.headOid !== after.headOid
       || before.clean !== after.clean
     );
+}
+
+// Claude Code's own inner sandbox ("scrub mode", which this adapter switches on
+// with CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 to satisfy the route requirement
+// `claude.subprocess.credentials-scrubbed`) pre-creates zero-byte stub files in
+// the working directory for every sensitive path it wants to deny but that does
+// not exist yet, so its bind-mount deny rules have something to mount over. It
+// normally hides them by appending them to `.git/info/exclude` under a
+// `# claude-code scrub-mode stubs` header; this adapter mounts Git metadata
+// read-only, so that append fails and the stubs surface as untracked litter.
+//
+// Measured against claude 2.1.220: one dispatch into a clean checkout left
+// exactly 17 zero-byte files - `bunfig.toml`, `package.json`, `.npmrc`,
+// `.yarnrc`, `.yarnrc.yml`, `.gitmodules`, `package-lock.json`, `yarn.lock`,
+// `pnpm-lock.yaml`, and the eight `.env*` variants.
+//
+// Engine-side prevention is unavailable: the stub loop is unconditional inside
+// scrub mode, no settings key gates it, and the only knob is the whole feature
+// (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0`, which "loses subprocess isolation" per
+// the CLI's own error text) - the isolation this route exists to prove. So the
+// broker cleans up after the dispatch instead.
+//
+// The litter is a functional blocker, not cosmetics: an unattributable dirty
+// tree stops the next run, the broker commit's `git add --all` would otherwise
+// carry the stubs into the writer's commit, and a zero-byte `package.json` or
+// `yarn.lock` breaks a repository's own gate command.
+const MAX_REPORTED_PLACEHOLDER_PATHS = 20;
+
+// Untracked, non-ignored working-tree files - the exact set the contract's own
+// `checkout.clean` probe and the dirty-tree attribution rule react to. Ignored
+// paths stay out on purpose: enumerating them is unbounded in a real repository
+// (a `node_modules` tree alone overruns the output cap) and an ignored stub is
+// invisible to both consumers of this set.
+function untrackedCheckoutPaths(cwd) {
+  return new Set(
+    gitProcessOutput(cwd, [
+      'ls-files',
+      '--others',
+      '--exclude-standard',
+      '-z',
+    ]).split('\0').filter((path) => path.length > 0),
+  );
+}
+
+// O_NOFOLLOW makes the measurement itself refuse symlinks, so a symlink can
+// never be measured through to its target and then unlinked as if it were the
+// zero-byte file the target might be. A directory opens but fstats as one.
+function emptyRegularFileNoFollow(path) {
+  let descriptor = null;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stats = fstatSync(descriptor);
+    return stats.isFile() && stats.size === 0;
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
+  }
+}
+
+// Removes only paths that were absent before the dispatch, are untracked now,
+// are regular files, are zero bytes, and are not symlinks. A writer's real
+// output has content and survives; anything Git tracks is never a candidate,
+// including a tracked file the engine truncated to zero bytes - that is a real
+// writer effect for the existing effect verification to judge, not litter.
+function removeEngineCheckoutPlaceholders(cwd, before) {
+  if (!(before instanceof Set)) return { removed: 0, paths: [] };
+  let after;
+  try {
+    after = untrackedCheckoutPaths(cwd);
+  } catch {
+    return { removed: 0, paths: [] };
+  }
+  const removed = [];
+  for (const path of [...after].sort()) {
+    if (before.has(path)) continue;
+    const absolute = resolve(cwd, path);
+    const scoped = relative(cwd, absolute);
+    if (
+      scoped === ''
+      || scoped === '..'
+      || scoped.startsWith(`..${sep}`)
+      || isAbsolute(scoped)
+      || scoped.split(sep)[0] === '.git'
+      || !emptyRegularFileNoFollow(absolute)
+    ) {
+      continue;
+    }
+    try {
+      rmSync(absolute, { force: true });
+      removed.push(scoped);
+    } catch {}
+  }
+  return {
+    removed: removed.length,
+    paths: removed.slice(0, MAX_REPORTED_PLACEHOLDER_PATHS),
+  };
 }
 
 function exactDirectChildCommit(cwd, before, after) {
@@ -2195,6 +2299,12 @@ function executeCapabilityPosture(
     const startingHead = posture === 'writer'
       ? gitOutput(scratch, ['rev-parse', 'HEAD'])
       : null;
+    let placeholderBaseline = null;
+    try {
+      placeholderBaseline = untrackedCheckoutPaths(scratch);
+    } catch {
+      placeholderBaseline = null;
+    }
     const result = spawnSync(sandbox.command, sandbox.argv, {
       input: capabilityPrompt(route, posture, challenge),
       cwd: scratch,
@@ -2208,6 +2318,14 @@ function executeCapabilityPosture(
       ),
       windowsHide: true,
     });
+    // The capability writer posture is a real engine dispatch into a real
+    // checkout whose commit stages `--all`, so it litters and mis-commits
+    // exactly like a route attempt does. Clean up before anything is measured
+    // and before any early return, including the budget timeout.
+    const placeholderCleanup = removeEngineCheckoutPlaceholders(
+      scratch,
+      placeholderBaseline,
+    );
     if (result.error?.code === 'ETIMEDOUT') {
       return {
         status: 'unavailable',
@@ -2215,6 +2333,7 @@ function executeCapabilityPosture(
           route,
           posture,
           reason: `capability smoke exceeded its budget (${budgetMs} ms)`,
+          placeholderCleanup,
         }),
       };
     }
@@ -2266,6 +2385,7 @@ function executeCapabilityPosture(
         verdict,
         effectObserved,
         commitObserved,
+        placeholderCleanup,
       }),
     };
   } finally {
@@ -4563,6 +4683,14 @@ export function executeRouteAttempt(input) {
       );
     }
     const argv = authoritySandbox.argv;
+    let placeholderBaseline = null;
+    try {
+      placeholderBaseline = untrackedCheckoutPaths(
+        input.attempt.checkout.root,
+      );
+    } catch {
+      placeholderBaseline = null;
+    }
     const result = spawnSync(authoritySandbox.command, argv, {
       input: launch.promptTransport === 'stdin' ? input.attempt.prompt : undefined,
       encoding: 'utf8',
@@ -4576,6 +4704,14 @@ export function executeRouteAttempt(input) {
       timeout: 30 * 60 * 1000,
       windowsHide: true,
     });
+    // Before any checkout effect is measured and before the broker commit
+    // stages `--all`: the engine's own scrub-mode stubs must not become the
+    // writer's diff, the run's dirty tree, or the next run's unattributable
+    // human work.
+    const placeholderCleanup = removeEngineCheckoutPlaceholders(
+      input.attempt.checkout.root,
+      placeholderBaseline,
+    );
     const launched = processLaunched(result);
     const exitedSuccessfully =
       launched && result.status === 0 && !result.error;
@@ -4709,6 +4845,7 @@ export function executeRouteAttempt(input) {
           stderr: result.stderr ?? result.error?.message ?? '',
           capturedReviewOutput,
           writerResult: writerResult ?? null,
+          placeholderCleanup,
           brokerCommitObserved,
           writerCommitLineageObserved,
           beforeCheckout: input.attempt.checkout,
@@ -4753,6 +4890,9 @@ export function executeRouteAttempt(input) {
         stdout: result.stdout ?? '',
         stderr: result.stderr ?? result.error?.message ?? '',
       },
+      // Bounded and never silent: the run record names what the broker
+      // removed from the checkout after the dispatch.
+      placeholderCleanup,
     });
   } catch {
     return failure(
@@ -5190,6 +5330,207 @@ function fakeCapabilitySmokeSelfTest(route, {
         root,
         budgetMs,
       ).status);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// The scrub-mode stub names the engine actually creates, plus the shapes the
+// cleanup must never touch. Shared by the platform-independent fixture below
+// and by the sandboxed fake-engine dispatch that follows it.
+const PLACEHOLDER_STUB_NAMES = Object.freeze([
+  '.env',
+  '.gitmodules',
+  'package.json',
+  'yarn.lock',
+]);
+
+function placeholderFixtureRepository() {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), 'autoloop-placeholder-')),
+  );
+  const initialized = spawnSync('git', ['init', '--quiet'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 15000,
+    maxBuffer: MAX_IO_BYTES,
+    env: sanitizedGitEnvironment(),
+  });
+  if (initialized.status !== 0 || initialized.error) {
+    rmSync(root, { recursive: true, force: true });
+    throw new Error('placeholder fixture repository did not initialize');
+  }
+  writeFileSync(join(root, 'tracked-content.txt'), 'keep me\n');
+  writeFileSync(join(root, 'reviewer.marker'), 'placeholder baseline\n');
+  fixtureGit(root, ['add', '--', 'tracked-content.txt', 'reviewer.marker']);
+  fixtureGit(root, [
+    '-c',
+    'user.name=Autoloop Fixture',
+    '-c',
+    'user.email=autoloop@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'base',
+  ]);
+  // Untracked and already zero bytes before any dispatch: the cleanup must
+  // leave it exactly where it found it.
+  writeFileSync(join(root, 'pre-existing-empty.txt'), '');
+  return root;
+}
+
+function placeholderCleanupSelfTest() {
+  const root = placeholderFixtureRepository();
+  try {
+    const before = untrackedCheckoutPaths(root);
+    for (const name of PLACEHOLDER_STUB_NAMES) {
+      writeFileSync(join(root, name), '');
+    }
+    writeFileSync(join(root, 'writer-output.txt'), 'real writer output\n');
+    // A tracked file the engine truncated to zero bytes is a real writer
+    // effect, not litter: the existing effect verification judges it.
+    writeFileSync(join(root, 'tracked-content.txt'), '');
+    symlinkSync('writer-output.txt', join(root, 'output-link'));
+    symlinkSync('pre-existing-empty.txt', join(root, 'empty-link'));
+    const cleanup = removeEngineCheckoutPlaceholders(root, before);
+    const survives = (name) => {
+      try {
+        return lstatSync(join(root, name)) !== undefined;
+      } catch {
+        return false;
+      }
+    };
+    return cleanup.removed === PLACEHOLDER_STUB_NAMES.length
+      && cleanup.paths.join(',') === [...PLACEHOLDER_STUB_NAMES].sort().join(',')
+      && PLACEHOLDER_STUB_NAMES.every((name) => !survives(name))
+      && survives('pre-existing-empty.txt')
+      && lstatSync(join(root, 'pre-existing-empty.txt')).size === 0
+      && survives('writer-output.txt')
+      && lstatSync(join(root, 'writer-output.txt')).size > 0
+      && survives('tracked-content.txt')
+      && lstatSync(join(root, 'tracked-content.txt')).size === 0
+      && lstatSync(join(root, 'output-link')).isSymbolicLink()
+      && lstatSync(join(root, 'empty-link')).isSymbolicLink()
+      && untrackedCheckoutPaths(root).has('pre-existing-empty.txt');
+  } catch {
+    return false;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function placeholderCleanupBoundsSelfTest() {
+  const root = placeholderFixtureRepository();
+  try {
+    const before = untrackedCheckoutPaths(root);
+    const names = Array.from(
+      { length: MAX_REPORTED_PLACEHOLDER_PATHS + 5 },
+      (unused, index) => `stub-${String(index).padStart(3, '0')}.tmp`,
+    );
+    for (const name of names) writeFileSync(join(root, name), '');
+    const cleanup = removeEngineCheckoutPlaceholders(root, before);
+    return cleanup.removed === names.length
+      && cleanup.paths.length === MAX_REPORTED_PLACEHOLDER_PATHS
+      && names.every((name) => !existsSync(join(root, name)))
+      // A null baseline (the pre-dispatch probe failed) removes nothing.
+      && removeEngineCheckoutPlaceholders(root, null).removed === 0;
+  } catch {
+    return false;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// Proves the cleanup inside a real sandboxed dispatch rather than against the
+// helper alone: a fake engine litters the writable checkout exactly the way
+// scrub mode does, and the posture must still verify, keep every real effect,
+// and commit none of the litter.
+function placeholderCleanupDispatchSelfTest() {
+  if (
+    process.platform !== 'linux'
+    || !existsSync('/usr/bin/bwrap')
+  ) {
+    return null;
+  }
+  const root = placeholderFixtureRepository();
+  const previousPath = process.env.PATH;
+  try {
+    const challenge = randomBytes(32).toString('hex');
+    writeFileSync(
+      join(root, 'reviewer.marker'),
+      `sealed:${challenge}`,
+    );
+    fixtureGit(root, ['add', '--', 'reviewer.marker']);
+    fixtureGit(root, [
+      '-c',
+      'user.name=Autoloop Fixture',
+      '-c',
+      'user.email=autoloop@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'sealed',
+    ]);
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const command = join(bin, 'claude');
+    writeFileSync(command, [
+      '#!/usr/bin/env node',
+      "const { symlinkSync, writeFileSync } = require('node:fs');",
+      "const prompt = require('node:fs').readFileSync(0, 'utf8');",
+      'const challenge = prompt.match(/[a-f0-9]{64}/)?.[0];',
+      "writeFileSync('writer.marker', challenge);",
+      `for (const name of ${JSON.stringify(PLACEHOLDER_STUB_NAMES)}) {`,
+      "  writeFileSync(name, '');",
+      '}',
+      "writeFileSync('writer-output.txt', 'real writer output\\n');",
+      "writeFileSync('tracked-content.txt', '');",
+      "symlinkSync('writer-output.txt', 'output-link');",
+      'process.stdout.write(JSON.stringify({',
+      "  type: 'result',",
+      "  subtype: 'success',",
+      '  structured_output: {',
+      "    kind: 'autoloop-route-capability-verdict',",
+      '    version: 1,',
+      '    challenge,',
+      "    route: 'claude.native',",
+      "    posture: 'writer',",
+      "    result: 'marker-created',",
+      '  },',
+      '}));',
+    ].join('\n'));
+    chmodSync(command, 0o700);
+    // `bin/` must not be a working-tree surprise the cleanup or the commit has
+    // to reason about; it is tooling, not repository content.
+    writeFileSync(join(root, '.git', 'info', 'exclude'), '/bin/\n');
+    process.env.PATH = `${bin}:${previousPath}`;
+    const posture = executeCapabilityPosture(
+      'claude.native',
+      'writer',
+      challenge,
+      root,
+    );
+    process.env.PATH = previousPath;
+    const committed = fixtureGit(root, [
+      'ls-tree',
+      '--name-only',
+      '-r',
+      'HEAD',
+    ]).split('\n').filter(Boolean);
+    return posture.status === 'verified'
+      && PLACEHOLDER_STUB_NAMES.every((name) =>
+        !existsSync(join(root, name)) && !committed.includes(name))
+      && committed.includes('writer.marker')
+      && committed.includes('writer-output.txt')
+      && committed.includes('output-link')
+      && lstatSync(join(root, 'output-link')).isSymbolicLink()
+      && lstatSync(join(root, 'writer-output.txt')).size > 0
+      && lstatSync(join(root, 'pre-existing-empty.txt')).size === 0
+      && lstatSync(join(root, 'tracked-content.txt')).size === 0
+      && committed.includes('tracked-content.txt');
+  } catch {
+    return false;
   } finally {
     process.env.PATH = previousPath;
     rmSync(root, { recursive: true, force: true });
@@ -5653,6 +5994,18 @@ function selfTest() {
   checks.push([
     'the capability smoke budget is a bounded constant',
     CAPABILITY_SMOKE_BUDGET_MS === 120_000,
+  ]);
+  checks.push([
+    'engine placeholders are removed and real writer effects are not',
+    placeholderCleanupSelfTest() === true,
+  ]);
+  checks.push([
+    'placeholder cleanup reports a bounded path list and needs a baseline',
+    placeholderCleanupBoundsSelfTest() === true,
+  ]);
+  checks.push([
+    'a littering dispatch verifies, keeps its effects, and commits no litter',
+    placeholderCleanupDispatchSelfTest() !== false,
   ]);
   checks.push([
     'static reviewer artifacts reject symlinks before reading',
