@@ -49,9 +49,13 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    exact `{run,measurement}` (the broker validates the exact run it issued and persists
    `run-start`), the public `selection-1` stage-start capture, and one measured startup
    `scan.mjs` operation through `measurement-contract.mjs --run-operation`. It stops fail-closed
-   at the first typed error with that error on stdout, and on success prints one bundle:
-   `{ok,run,boundaries:{runStart,stageStart},scan:{operationId,eventPath},snapshot}`. Retain the
-   exact bundle. The boundaries it retained are the measurement `run-start`, the open
+   at the first typed error with that error on stdout. On success it persists the full bundle and
+   the raw snapshot under `.git/autoloop/prime/<runId>.{bundle,snapshot}.json` and prints only the
+   decision-sized summary:
+   `{ok,run,boundaries,scan,bundlePath,snapshotPath,snapshotBytes,sections}` — per-section
+   `{complete,items,error}` counts, never item bodies, because a full snapshot exceeds what a tool
+   result can carry. Retain the printed summary and the two paths; read section details from
+   `snapshotPath` with targeted queries, never by dumping the file into context. The boundaries it retained are the measurement `run-start`, the open
    `selection-1` stage start, and the authenticated startup-scan operation event; every later
    startup operation still runs measured inside that open stage. prime.mjs opens new invocations
    only — for the exact opencode v2 continuation target, and to diagnose a failed prime step, use
@@ -70,12 +74,13 @@ Run Pitcrew first in the same `RunContext`, then take new work.
 5. On a clean tree, fetch and switch to `cfg.baseBranch`, pull fast-forward, then re-read STATE
    because the session injection may have come from a parked unit branch.
 6. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
-7. The prime bundle's `snapshot` is the one versioned startup snapshot; retain its exact bytes
-   and share that retained snapshot with Pitcrew. Every section is `{items,complete,error}`. Use
+7. The file at the prime summary's `snapshotPath` is the one versioned startup snapshot; retain
+   that exact file and share it with Pitcrew. Every section is `{items,complete,error}`. Use
    targeted fallbacks only for incomplete sections. After any Git or GitHub mutation (including
-   the base switch above) or any wait boundary, pipe the retained snapshot through
-   `node tools/agentic/snapshot-contract.mjs --invalidate <REASON>` and replace it with the exact
-   stdout before making another snapshot-derived decision. Use `GIT_MUTATION`, `ISSUE_MUTATION`,
+   the base switch above) or any wait boundary, pipe the retained snapshot file through
+   `node tools/agentic/snapshot-contract.mjs --invalidate <REASON> < <snapshotPath>`, write the
+   exact stdout back to a retained file, and use that file for every later snapshot-derived
+   decision. Use `GIT_MUTATION`, `ISSUE_MUTATION`,
    `PR_MUTATION`, `REVIEW_MUTATION`, or `WAIT_BOUNDARY`; use `UNKNOWN_MUTATION` when uncertain.
    Mutations may be batched only while no decision intervenes. Then rerun the full `scan.mjs` —
    as a measured operation inside the open selection stage — and replace the invalidated snapshot

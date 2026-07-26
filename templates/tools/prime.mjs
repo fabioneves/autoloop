@@ -29,6 +29,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -37,7 +38,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractConfig, validateProjectConfig } from './config-contract.mjs';
 import { writeStdoutSync } from './snapshot-contract.mjs';
@@ -736,6 +737,51 @@ async function selfTest() {
     rmSync(fixtureRepo, { recursive: true, force: true });
   }
 
+  {
+    const bigSection = (n) => ({
+      complete: true,
+      items: Array.from({ length: n }, (unused, index) => ({
+        number: index + 1,
+        body: 'x'.repeat(2000),
+      })),
+      error: null,
+    });
+    const fullResult = {
+      ok: true,
+      run: { runId: 'fixture-run' },
+      boundaries: { runStart: { payload: { runId: 'fixture-run' } }, stageStart: {} },
+      scan: { operationId: 'op', eventPath: '/tmp/e.json' },
+      snapshot: {
+        kind: 'autoloop-repository-snapshot',
+        sections: {
+          queue: bigSection(60),
+          openIssues: { complete: false, items: [], error: 'SCAN_FAILED' },
+        },
+      },
+    };
+    const scratch = mkdtempSync(join(tmpdir(), 'autoloop-prime-bundle-'));
+    try {
+      spawnSync('git', ['init', '-q', scratch], { encoding: 'utf8' });
+      const compact = persistPrimeBundle(fullResult, scratch);
+      const printedBytes = Buffer.byteLength(JSON.stringify(compact, null, 1), 'utf8');
+      const persisted = JSON.parse(readFileSync(compact.bundlePath, 'utf8'));
+      const rawSnapshot = JSON.parse(readFileSync(compact.snapshotPath, 'utf8'));
+      check(
+        'success stdout is decision-sized while the durable bundle keeps every byte',
+        compact.snapshot === undefined
+          && compact.sections.queue.complete === true
+          && compact.sections.queue.items === 60
+          && compact.sections.openIssues.error === 'SCAN_FAILED'
+          && printedBytes < 8192
+          && persisted.snapshot.sections.queue.items.length === 60
+          && rawSnapshot.sections.queue.items.length === 60
+          && compact.bundlePath.includes('.git/autoloop/prime/fixture-run'),
+      );
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
   for (const name of failures) console.error(`FAIL ${name}`);
   console.log(
     failures.length === 0
@@ -743,6 +789,42 @@ async function selfTest() {
       : `self-test FAILED (${failures.length}/${cases.length})`,
   );
   return failures.length === 0;
+}
+
+// The full bundle inlines a ~300KB snapshot; a model-facing tool result is
+// truncated far below that, which silently re-created the manual-scan
+// archaeology prime exists to remove. The durable artifacts live under
+// .git/autoloop/prime/ and stdout carries only decision-sized facts plus the
+// paths; snapshot consumers already read from files.
+export function sectionSummary(snapshot) {
+  return Object.fromEntries(
+    Object.entries(snapshot?.sections ?? {}).map(([name, section]) => [name, {
+      complete: section?.complete === true,
+      items: Array.isArray(section?.items) ? section.items.length : 0,
+      ...(section?.error ? { error: section.error } : {}),
+    }]),
+  );
+}
+
+export function persistPrimeBundle(result, cwd = process.cwd()) {
+  const directory = resolve(cwd, '.git', 'autoloop', 'prime');
+  mkdirSync(directory, { recursive: true });
+  const runId = result?.boundaries?.runStart?.payload?.runId
+    ?? result?.run?.runId
+    ?? 'run';
+  const bundlePath = resolve(directory, `${runId}.bundle.json`);
+  const snapshotPath = resolve(directory, `${runId}.snapshot.json`);
+  const snapshotBytes = `${JSON.stringify(result.snapshot, null, 1)}\n`;
+  writeFileSync(bundlePath, `${JSON.stringify(result, null, 1)}\n`);
+  writeFileSync(snapshotPath, snapshotBytes);
+  const { snapshot, ...compact } = result;
+  return {
+    ...compact,
+    bundlePath,
+    snapshotPath,
+    snapshotBytes: Buffer.byteLength(snapshotBytes, 'utf8'),
+    sections: sectionSummary(snapshot),
+  };
 }
 
 function parseArgs(args) {
@@ -774,7 +856,8 @@ async function main() {
     process.exit(2);
   }
   const result = primeDev(input);
-  writeStdoutSync(`${JSON.stringify(result, null, 1)}\n`);
+  const printed = result.ok === true ? persistPrimeBundle(result) : result;
+  writeStdoutSync(`${JSON.stringify(printed, null, 1)}\n`);
   process.exit(result.ok === true ? 0 : 1);
 }
 
