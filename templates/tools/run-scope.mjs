@@ -1322,8 +1322,10 @@ export function parseArgs(args) {
     mode: null,
     path: null,
     error:
-      `expected ${Object.keys(OPERATION_FLAGS).join(', ')} <path|->, ` +
-      'or --self-test',
+      'expected exactly one of '
+      + `${Object.keys(OPERATION_FLAGS).map((flag) => `${flag} <path|->`).join(', ')}, `
+      + 'or --self-test; every operation flag takes a JSON input path '
+      + "('-' reads stdin)",
   };
 }
 
