@@ -24,6 +24,7 @@ import {
   lifecycleMarkerSnapshotItem,
   mapBounded,
   verifySnapshot,
+  writeStdoutSync,
 } from './snapshot-contract.mjs';
 
 const MAX_PAGES = 100;
@@ -1951,10 +1952,10 @@ async function main() {
   try {
     const snapshot = await repositorySnapshot();
     if (prIndex !== -1) {
-      console.log(JSON.stringify(focusPr(snapshot, prNumber), null, 1));
+      writeStdoutSync(`${JSON.stringify(focusPr(snapshot, prNumber), null, 1)}\n`);
       return 0;
     }
-    console.log(JSON.stringify(snapshot, null, 1));
+    writeStdoutSync(`${JSON.stringify(snapshot, null, 1)}\n`);
     return 0;
   } catch (error) {
     const sections = Object.fromEntries(
@@ -1963,10 +1964,10 @@ async function main() {
         incompleteSection('SCAN_FAILED', commandError(error)),
       ]),
     );
-    console.log(JSON.stringify(createSnapshot({
+    writeStdoutSync(`${JSON.stringify(createSnapshot({
       scannedAt: new Date().toISOString(),
       sections,
-    }), null, 1));
+    }), null, 1)}\n`);
     return 0;
   }
 }
