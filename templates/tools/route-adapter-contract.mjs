@@ -1074,8 +1074,38 @@ export function detectHostProcessBinding() {
   });
 }
 
+// The authority broker is spawned detached and re-parents to init the moment
+// its spawner exits, so a live ancestry walk from inside a serving broker
+// finds no host (live failure: every --probe-json returned
+// INVALID_CAPABILITY_ATTESTATION because the detached broker's
+// detectActiveHost() was null). The broker therefore captures its host
+// binding exactly once at startup — while its ancestry still proves the
+// session — and every later broker-side host comparison uses that retained
+// binding. Retention is a real walk at call time (never a caller-supplied
+// binding), it is single-shot, and it is refused outside authority-broker
+// mode, so non-broker processes keep the live walk and fail closed exactly as
+// before when no host is detectable.
+let RETAINED_HOST_BINDING = null;
+
+export function retainBrokerHostBinding() {
+  if (!AUTHORITY_BROKER_MODE) {
+    throw new Error('host binding retention is authority-broker-only');
+  }
+  if (RETAINED_HOST_BINDING !== null) {
+    throw new Error('broker host process binding is already retained');
+  }
+  const binding = detectHostProcessBinding();
+  if (binding === null) {
+    throw new Error('broker host process binding is unavailable');
+  }
+  RETAINED_HOST_BINDING = binding;
+  return RETAINED_HOST_BINDING;
+}
+
 function detectActiveHost() {
-  return detectHostProcessBinding()?.host ?? null;
+  return AUTHORITY_BROKER_MODE
+    ? RETAINED_HOST_BINDING?.host ?? null
+    : detectHostProcessBinding()?.host ?? null;
 }
 
 function selfTestHost(expectedHost) {
@@ -7191,6 +7221,65 @@ function selfTest() {
             }),
             encoding: 'utf8',
             timeout: 15000,
+          },
+        );
+        return child.status === 1
+          && child.stdout.includes('INVALID_CAPABILITY_ATTESTATION');
+      })(),
+  ]);
+  checks.push([
+    'live probes outside a proven single-host session fail closed',
+    firstHost.ok
+      && (() => {
+        // Non-broker processes keep the live ancestry walk (only the
+        // authority broker holds a startup-retained binding). Two nested
+        // relays with different host names make the ancestry ambiguous under
+        // live hosts and hostless CI alike, so the walk proves no single
+        // host and the live-shaped probe must fail closed — there is no
+        // retained binding and no environment fallback outside the broker.
+        const probeInput = JSON.stringify({
+          hostEvidence: firstHost.value,
+          invocationNonce: HEX.run,
+          routes: ['claude.native'],
+          cwd: process.cwd(),
+        });
+        const innerScript = [
+          "import { spawnSync } from 'node:child_process';",
+          'const result = spawnSync(process.execPath, [',
+          '  process.argv[1], "--probe-json", "-",',
+          '], {',
+          '  input: process.env.AUTOLOOP_TEST_PROBE_INPUT,',
+          '  encoding: "utf8", timeout: 30000, windowsHide: true,',
+          '});',
+          'process.stdout.write(String(result.stdout ?? ""));',
+          'process.exit(result.status ?? 1);',
+        ].join('\n');
+        const outerScript = [
+          "import { spawnSync } from 'node:child_process';",
+          'const result = spawnSync(process.execPath, [',
+          '  "--input-type=module", "--eval", process.env.AUTOLOOP_TEST_INNER,',
+          '  process.argv[1],',
+          '], { argv0: "codex", encoding: "utf8", timeout: 45000, windowsHide: true });',
+          'process.stdout.write(String(result.stdout ?? ""));',
+          'process.exit(result.status ?? 1);',
+        ].join('\n');
+        const child = spawnSync(
+          process.execPath,
+          [
+            '--input-type=module',
+            '--eval',
+            outerScript,
+            fileURLToPath(import.meta.url),
+          ],
+          {
+            argv0: 'claude',
+            encoding: 'utf8',
+            timeout: 60000,
+            env: {
+              ...process.env,
+              AUTOLOOP_TEST_INNER: innerScript,
+              AUTOLOOP_TEST_PROBE_INPUT: probeInput,
+            },
           },
         );
         return child.status === 1

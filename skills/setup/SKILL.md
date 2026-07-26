@@ -561,7 +561,10 @@ Run:
 5. Runtime route fixtures;
 6. claim/lane/path cross-consumer fixtures;
 7. release verification;
-8. static stale-route lint.
+8. static stale-route lint;
+9. the end-to-end loop smoke (`node tools/agentic/loop-smoke.mjs --self-test`) —
+   no model, no network: capture-hook → prime → detached-broker probe →
+   guardrail finish against a scratch fixture repository.
 
 Show the complete diff. A fresh install or migration is delivered through a PR by default. Never
 auto-merge Setup's own change.
