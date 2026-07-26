@@ -3362,9 +3362,22 @@ function measuredOperationSummary(executable, args) {
     .slice(0, 200);
 }
 
-function deriveMeasuredOperationInput(operationId, action, command, directory) {
-  const open = deriveOpenMeasurementRun(directory);
-  if (!open.ok) return open;
+function deriveMeasuredOperationInput(operationId, action, command, directory, runId = null) {
+  // An orphaned ledger (run-start without run-finish, left by an interrupted
+  // session) makes bare exactly-one derivation permanently ambiguous, so the
+  // caller may bind the run explicitly — prime's summary carries the id.
+  let open;
+  if (runId !== null) {
+    if (!UUID_RE.test(runId)) {
+      return { ok: false, errors: ['--run: expected the measurement run UUID'] };
+    }
+    const active = currentMeasurementStage(directory, runId);
+    if (!active.ok) return { ok: false, errors: active.errors };
+    open = { ok: true, runId, stage: active.stage };
+  } else {
+    open = deriveOpenMeasurementRun(directory);
+    if (!open.ok) return open;
+  }
   const [executable, ...args] = command;
   let cwd;
   try {
@@ -9113,6 +9126,29 @@ async function selfTest() {
     (input) => persistMeasurementEvent(input, derivationStore, 'run-boundary-declared'),
   );
   const ambiguousOpenRun = deriveOpenMeasurementRun(derivationStore);
+  // Explicit binding cuts through orphan-ledger ambiguity — the live failure
+  // mode: three interrupted runs plus the current one all counted as open.
+  const boundThroughAmbiguity = deriveMeasuredOperationInput(
+    'one-shot-bound',
+    null,
+    ['git', 'status', '--porcelain=v1'],
+    derivationStore,
+    derivationRunId,
+  );
+  const boundToSecondOpenRun = deriveMeasuredOperationInput(
+    'one-shot-bound-second',
+    null,
+    ['git', 'status'],
+    derivationStore,
+    secondOpenRunId,
+  );
+  const boundToInvalidRun = deriveMeasuredOperationInput(
+    'one-shot-bound-bad',
+    null,
+    ['git', 'status'],
+    derivationStore,
+    'not-a-uuid',
+  );
   const idleStageStore = join(
     selfTestTemporaryRoot(),
     `autoloop-measurement-idle-stage-${randomUUID()}`,
@@ -9122,6 +9158,13 @@ async function selfTest() {
     (input) => persistMeasurementEvent(input, idleStageStore, 'run-boundary-declared'),
   );
   const idleStageDerivation = deriveOpenMeasurementRun(idleStageStore);
+  const boundToStagelessRun = deriveMeasuredOperationInput(
+    'one-shot-bound-idle',
+    null,
+    ['git', 'status'],
+    idleStageStore,
+    idleStageRunId,
+  );
   const emptyStoreDerivation = deriveOpenMeasurementRun(join(
     selfTestTemporaryRoot(),
     `autoloop-measurement-absent-${randomUUID()}`,
@@ -10157,6 +10200,18 @@ async function selfTest() {
       && ambiguousOpenRun.candidates?.length === 2
       && ambiguousOpenRun.errors[0].includes(derivationRunId)
       && ambiguousOpenRun.errors[0].includes(secondOpenRunId)],
+    ['explicit --run binding cuts through open-run ambiguity',
+      boundThroughAmbiguity.ok
+      && boundThroughAmbiguity.value.runId === derivationRunId
+      && boundThroughAmbiguity.value.stageId === boundThroughAmbiguity.value.stageId],
+    ['explicit --run binding selects either open candidate deterministically',
+      boundToSecondOpenRun.ok
+      && boundToSecondOpenRun.value.runId === secondOpenRunId],
+    ['explicit --run binding still requires an active stage on that run',
+      !boundToStagelessRun.ok],
+    ['explicit --run binding rejects a malformed run id',
+      !boundToInvalidRun.ok
+      && boundToInvalidRun.errors[0].includes('--run')],
     ['an open run without an active stage is a typed derivation error',
       idleStageWrites.every((result) => result.ok)
       && !idleStageDerivation.ok
@@ -10405,7 +10460,8 @@ async function selfTest() {
 }
 
 const MEASURED_USAGE =
-  'expected --measured <operationId> [--action <text>] -- <executable> <argument>...';
+  'expected --measured <operationId> [--action <text>] [--run <measurement run UUID>] '
+  + '-- <executable> <argument>...';
 
 function parseMeasuredArgs(args) {
   const operationId = args[1];
@@ -10414,15 +10470,18 @@ function parseMeasuredArgs(args) {
   }
   let index = 2;
   let action = null;
-  if (args[index] === '--action') {
-    action = args[index + 1];
-    if (action === undefined) return { mode: null, error: MEASURED_USAGE };
+  let runId = null;
+  while (args[index] === '--action' || args[index] === '--run') {
+    const value = args[index + 1];
+    if (value === undefined) return { mode: null, error: MEASURED_USAGE };
+    if (args[index] === '--action') action = value;
+    else runId = value;
     index += 2;
   }
   if (args[index] !== '--') return { mode: null, error: MEASURED_USAGE };
   const command = args.slice(index + 1);
   if (command.length === 0) return { mode: null, error: MEASURED_USAGE };
-  return { mode: 'measured', operationId, action, command };
+  return { mode: 'measured', operationId, action, runId, command };
 }
 
 function parseArgs(args) {
@@ -10587,6 +10646,7 @@ async function main() {
       parsed.action,
       parsed.command,
       directory,
+      parsed.runId,
     );
     if (!derived.ok) writeResult(derived, false);
     writeResult(runMeasuredOperation(derived.value, directory));

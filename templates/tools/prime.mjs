@@ -88,7 +88,7 @@ const CONCLUDE_KEYS = Object.freeze([
   'stageId',
   'blockedReason',
 ]);
-const CONCLUDE_OPTIONAL_KEYS = Object.freeze(['waitCategory']);
+const CONCLUDE_OPTIONAL_KEYS = Object.freeze(['measurementRunId', 'waitCategory']);
 const CONCLUDE_WAIT_CATEGORIES = Object.freeze(['engine', 'ci', 'human']);
 const CONCLUDE_WAIT_ID = 'guardrail-handoff-1';
 // Mirrors measurement-contract's segment telemetry keys; the self-test
@@ -404,11 +404,12 @@ export function primeDev(rawInput, cwd = process.cwd()) {
         message: `origin remote "${origin.value}" has no owner/name form`,
       });
     }
+    const measurementRunId = randomUUID();
     const { declaration } = deriveMeasurementDeclaration({
       config,
       run,
       repository,
-      runId: randomUUID(),
+      runId: measurementRunId,
     });
 
     // 4. Bind: the broker validates the exact run it issued and persists the
@@ -494,6 +495,10 @@ export function primeDev(rawInput, cwd = process.cwd()) {
     return {
       ok: true,
       run,
+      // Every one-shot measured operation and the conclude call bind to this id
+      // explicitly, so orphaned ledgers from interrupted runs cannot make the
+      // open-run derivation ambiguous (live failure: four candidates).
+      measurementRunId,
       // The route probe and every later broker operation take the SAME host
       // evidence the manual path would have kept from its own attest call; the
       // intent record is one-use, so dropping this here would strand the run
@@ -702,14 +707,24 @@ export async function concludeDev(rawInput, cwd = process.cwd()) {
     'autoloop/measurements/v1',
   ]);
   if (storePath.ok !== true) return storePath;
-  // The measurement runId is never a caller field: it is derived from the
-  // retained store exactly like the one-shot measured operation derives it —
-  // one run with a retained run-start and no run-finish, whose active stage
-  // must be the stage the caller is closing.
-  const { deriveOpenMeasurementRun } = await import('./measurement-contract.mjs');
+  // An optional caller-supplied measurementRunId (from the prime summary) binds
+  // the close explicitly, because orphaned ledgers from interrupted runs make
+  // the bare one-open-run derivation ambiguous (live failure: four candidates).
+  // Bare derivation stays for the single-open case; either way the id must name
+  // a run with a retained run-start, no run-finish, and the caller's stage.
+  const { deriveOpenMeasurementRun, currentMeasurementStage } =
+    await import('./measurement-contract.mjs');
   let open;
   try {
-    open = deriveOpenMeasurementRun(resolve(root, storePath.value));
+    const store = resolve(root, storePath.value);
+    if (typeof rawInput?.measurementRunId === 'string') {
+      const active = currentMeasurementStage(store, rawInput.measurementRunId);
+      open = active.ok === true
+        ? { ok: true, runId: rawInput.measurementRunId, stage: active.stage }
+        : { ok: false, errors: active.errors };
+    } else {
+      open = deriveOpenMeasurementRun(store);
+    }
   } catch (error) {
     return failure('derive-run', {
       code: 'OPEN_RUN_UNDERIVABLE',
@@ -1178,6 +1193,7 @@ async function selfTest() {
     const fullResult = {
       ok: true,
       run: { runId: 'fixture-run' },
+      measurementRunId: 'e23e4567-e89b-42d3-a456-426614174000',
       hostEvidence: { fingerprint: 'f'.repeat(64), observedHosts: ['claude'] },
       boundaries: { runStart: { payload: { runId: 'fixture-run' } }, stageStart: {} },
       scan: { operationId: 'op', eventPath: '/tmp/e.json' },
@@ -1206,7 +1222,10 @@ async function selfTest() {
           && printedBytes < 8192
           && persisted.snapshot.sections.queue.items.length === 60
           && rawSnapshot.sections.queue.items.length === 60
-          && compact.bundlePath.includes('.git/autoloop/prime/fixture-run'),
+          && compact.measurementRunId === 'e23e4567-e89b-42d3-a456-426614174000'
+          && compact.bundlePath.includes(
+            '.git/autoloop/prime/e23e4567-e89b-42d3-a456-426614174000',
+          ),
       );
     } finally {
       rmSync(scratch, { recursive: true, force: true });
@@ -1240,7 +1259,8 @@ export function sectionSummary(snapshot) {
 export function persistPrimeBundle(result, cwd = process.cwd()) {
   const directory = resolve(cwd, '.git', 'autoloop', 'prime');
   mkdirSync(directory, { recursive: true });
-  const runId = result?.boundaries?.runStart?.payload?.runId
+  const runId = result?.measurementRunId
+    ?? result?.boundaries?.runStart?.payload?.runId
     ?? result?.run?.runId
     ?? 'run';
   const bundlePath = resolve(directory, `${runId}.bundle.json`);
