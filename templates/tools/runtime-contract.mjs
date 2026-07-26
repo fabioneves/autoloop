@@ -4361,6 +4361,21 @@ function selfTest() {
     checkFamilies.set(family, entry);
   };
   const suiteStartedAt = process.hrtime.bigint();
+  // Phase attribution inside the fixture matrix: the macOS histogram showed the
+  // matrix itself absorbing 73s with no single check slow, so the summary also
+  // splits the per-iteration call sites when the suite is slow.
+  const matrixPhases = new Map();
+  const matrixPhase = (phase, thunk) => {
+    const startedAt = process.hrtime.bigint();
+    try {
+      return thunk();
+    } finally {
+      const entry = matrixPhases.get(phase) ?? { count: 0, ms: 0 };
+      entry.count += 1;
+      entry.ms += Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+      matrixPhases.set(phase, entry);
+    }
+  };
   const expectError = (result, code) =>
     result?.ok === false
     && result.error?.code === code
@@ -5402,11 +5417,20 @@ function selfTest() {
                 const mode = ['code-review', 'judgment-review'].includes(stage)
                   ? 'final'
                   : 'planned';
-                const laneProof = fixtureLaneProof(lane, mode);
-                const work = fixtureWork({ flow, stage, round });
-                const capabilities = fixtureCapabilities(run, capabilityMode);
-                const routeState = fixtureRouteState(run, capabilities, routeStatus);
-                const result = planWithConfig({ run, work, laneProof, capabilities, routeState });
+                const laneProof = matrixPhase('laneProof', () => fixtureLaneProof(lane, mode));
+                const work = matrixPhase('work', () => fixtureWork({ flow, stage, round }));
+                const capabilities = matrixPhase(
+                  'capabilities',
+                  () => fixtureCapabilities(run, capabilityMode),
+                );
+                const routeState = matrixPhase(
+                  'routeState',
+                  () => fixtureRouteState(run, capabilities, routeStatus),
+                );
+                const result = matrixPhase(
+                  'plan',
+                  () => planWithConfig({ run, work, laneProof, capabilities, routeState }),
+                );
                 const validRound = stageAcceptsRound(flow, stage, round);
                 const effectiveLane = expectedEffectiveLane(flow, stage, round, lane, mode);
                 const nominal = expectedNominalRoute(run, flow, stage, round, effectiveLane);
@@ -6723,6 +6747,10 @@ function selfTest() {
       .slice(0, 8)
       .map(([family, { count, ms }]) => `${(ms / 1000).toFixed(1)}s/${count}x ${family}`);
     console.log(`slow checks: ${families.join('; ')}`);
+    const phases = [...matrixPhases.entries()]
+      .sort(([, left], [, right]) => right.ms - left.ms)
+      .map(([phase, { count, ms }]) => `${(ms / 1000).toFixed(1)}s/${count}x ${phase}`);
+    if (phases.length > 0) console.log(`matrix phases: ${phases.join('; ')}`);
   }
   console.log(
     failed === 0
