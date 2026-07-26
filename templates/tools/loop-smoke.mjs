@@ -40,8 +40,21 @@
 // fixture-host technique run-scope's own detached-broker self-tests use — so
 // every step child observes exactly one host ancestor.
 //
+// `--real-engine-smoke` is the OTHER mode, and the opposite trade: it runs the
+// same four steps WITHOUT the engine shims, so the route capability probe
+// dispatches real writer and reviewer postures against a real authenticated
+// engine, and then asserts every `claude.native` capability came back available.
+// It is the pre-release gate for `posture: isolated` — the only mode that proves
+// an engine can actually be dispatched inside the authority sandbox, which no
+// shimmed run can show.
+//
+// It is deliberately NOT part of `--self-test` and NOT part of CI: it costs real
+// model spend (roughly $0.25 per run), needs an authenticated engine CLI, and
+// needs a working `/usr/bin/bwrap`. Run it by hand before a release.
+//
 // Usage:
 //   node tools/agentic/loop-smoke.mjs --self-test
+//   node tools/agentic/loop-smoke.mjs --real-engine-smoke   # manual, costs money
 
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -65,6 +78,13 @@ import { UNIVERSAL_TOOL_FILES } from './verify.mjs';
 const TOOL_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const SMOKE_BUDGET_MS = 60_000;
 const STEP_TIMEOUT_MS = 55_000;
+// Real engine dispatches are model round trips, not mechanics. The route probe
+// runs a writer and a reviewer posture back to back, each capped at 20 minutes
+// inside route-adapter-contract; observed end to end on a warm box is well under
+// two minutes, and this budget leaves room for a slow model without hanging a
+// release check indefinitely.
+const REAL_ENGINE_BUDGET_MS = 15 * 60_000;
+const REAL_ENGINE_STEP_TIMEOUT_MS = 14 * 60_000;
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const FIXTURE_ORIGIN_URL = 'https://github.com/autoloop-smoke/fixture.git';
 const FIXTURE_PROMPT = '/autoloop:dev';
@@ -131,6 +151,8 @@ function writeEngineShims(scratch) {
   return shimDirectory;
 }
 
+// `shimDirectory` is null in real-engine mode, which leaves PATH alone so the
+// probe resolves the host's actual engine CLI.
 function smokeEnvironment(ghConfigDir, shimDirectory) {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) =>
@@ -169,14 +191,18 @@ function runGit(root, args) {
   return String(result.stdout ?? '').trim();
 }
 
-function runToolJson(name, args, { root, environment, input }) {
+function runToolJson(
+  name,
+  args,
+  { root, environment, input, stepTimeoutMs = STEP_TIMEOUT_MS },
+) {
   const result = spawnSync(process.execPath, args, {
     cwd: root,
     encoding: 'utf8',
     env: environment,
     input,
     maxBuffer: MAX_CHILD_OUTPUT_BYTES,
-    timeout: STEP_TIMEOUT_MS,
+    timeout: stepTimeoutMs,
     windowsHide: true,
   });
   if (result.error) {
@@ -277,7 +303,13 @@ async function buildFixtureRepository(scratch) {
 // The four mechanical steps of a live /autoloop:dev session, each a separate
 // child process against the fixture repository. Runs either directly under a
 // live host ancestry or inside the `--smoke-host` fixture host.
-export function runSmokeSteps({ root, host, sessionId, environment }) {
+export function runSmokeSteps({
+  root,
+  host,
+  sessionId,
+  environment,
+  stepTimeoutMs = STEP_TIMEOUT_MS,
+}) {
   const steps = [];
   const timed = (name, execute) => {
     const startedAt = Date.now();
@@ -301,7 +333,7 @@ export function runSmokeSteps({ root, host, sessionId, environment }) {
     const result = runToolJson(
       'intent-contract.mjs --capture-hook-json',
       [tool('intent-contract.mjs'), '--capture-hook-json'],
-      { root, environment, input: `${JSON.stringify(event)}\n` },
+      { root, environment, stepTimeoutMs, input: `${JSON.stringify(event)}\n` },
     );
     if (!result.ok) return result;
     if (result.status !== 0 || result.value.captured !== true) {
@@ -319,7 +351,7 @@ export function runSmokeSteps({ root, host, sessionId, environment }) {
     const result = runToolJson(
       'prime.mjs --dev-json',
       [tool('prime.mjs'), '--dev-json', '-'],
-      { root, environment, input: JSON.stringify({ sessionId }) },
+      { root, environment, stepTimeoutMs, input: JSON.stringify({ sessionId }) },
     );
     if (!result.ok) return result;
     const value = result.value;
@@ -375,6 +407,7 @@ export function runSmokeSteps({ root, host, sessionId, environment }) {
       {
         root,
         environment,
+        stepTimeoutMs,
         input: JSON.stringify({
           hostEvidence: summary.hostEvidence,
           run: summary.run,
@@ -415,6 +448,7 @@ export function runSmokeSteps({ root, host, sessionId, environment }) {
       {
         root,
         environment,
+        stepTimeoutMs,
         input: JSON.stringify({
           run: summary.run,
           progress: {
@@ -444,7 +478,7 @@ export function runSmokeSteps({ root, host, sessionId, environment }) {
   return outcome;
 }
 
-function runFixtureHostSteps(context, scratch) {
+function runFixtureHostSteps(context, scratch, budgetMs = SMOKE_BUDGET_MS) {
   const contextPath = join(scratch, 'smoke-host-context.json');
   writeFileSync(contextPath, JSON.stringify(context));
   const result = spawnSync(
@@ -456,7 +490,7 @@ function runFixtureHostSteps(context, scratch) {
       encoding: 'utf8',
       env: context.environment,
       maxBuffer: MAX_CHILD_OUTPUT_BYTES,
-      timeout: SMOKE_BUDGET_MS,
+      timeout: budgetMs,
       windowsHide: true,
     },
   );
@@ -553,8 +587,12 @@ function terminateLeakedBroker(sessionFingerprint) {
   } catch {}
 }
 
-async function selfTest() {
+async function selfTest({ realEngine = false } = {}) {
   const startedAt = Date.now();
+  const budgetMs = realEngine ? REAL_ENGINE_BUDGET_MS : SMOKE_BUDGET_MS;
+  const stepTimeoutMs = realEngine
+    ? REAL_ENGINE_STEP_TIMEOUT_MS
+    : STEP_TIMEOUT_MS;
   const phases = [];
   const timedPhase = async (name, execute) => {
     const phaseStart = Date.now();
@@ -578,9 +616,27 @@ async function selfTest() {
     return true;
   }
   const host = liveBinding?.host ?? 'claude';
-  const mode = liveBinding === null
+  const hostMode = liveBinding === null
     ? 'fixture-host (argv0 claude)'
     : `live-host (${host})`;
+  const mode = realEngine
+    ? `real-engine · ${hostMode}`
+    : hostMode;
+  // The real-engine gate exists to prove a real dispatch inside the authority
+  // sandbox. Preconditions it cannot substitute for are a hard failure, not a
+  // skip: a silent pass here would be exactly the false negative this mode was
+  // added to eliminate.
+  if (realEngine) {
+    const missing = [
+      !existsSync('/usr/bin/bwrap') && '/usr/bin/bwrap is absent',
+      process.platform !== 'linux'
+        && `platform ${process.platform} has no process-authority sandbox`,
+    ].filter(Boolean);
+    if (missing.length > 0) {
+      console.error(`real-engine smoke cannot run: ${missing.join('; ')}`);
+      return false;
+    }
+  }
   const sessionId = `loop-smoke-${randomUUID()}`;
   const scratch = mkdtempSync(join(tmpdir(), 'autoloop-loop-smoke-'));
   const sessionFingerprints = new Set([
@@ -590,7 +646,12 @@ async function selfTest() {
   try {
     const ghConfigDir = join(scratch, 'gh-config');
     mkdirSync(ghConfigDir, { recursive: true });
-    const environment = smokeEnvironment(ghConfigDir, writeEngineShims(scratch));
+    // Real-engine mode is defined by the ABSENCE of the shims: the probe has to
+    // resolve and dispatch the host's actual engine CLI.
+    const environment = smokeEnvironment(
+      ghConfigDir,
+      realEngine ? null : writeEngineShims(scratch),
+    );
 
     let fixture = null;
     const setup = await timedPhase('fixture-setup', async () => {
@@ -608,9 +669,10 @@ async function selfTest() {
         host,
         sessionId,
         environment,
+        stepTimeoutMs,
       };
       const outcome = liveBinding === null
-        ? runFixtureHostSteps(context, scratch)
+        ? runFixtureHostSteps(context, scratch, budgetMs)
         : runSmokeSteps(context);
       for (const step of outcome.steps) {
         phases.push({
@@ -623,6 +685,31 @@ async function selfTest() {
       if (typeof outcome.sessionFingerprint === 'string') {
         sessionFingerprints.add(outcome.sessionFingerprint);
       }
+      // The assertion the shimmed smoke structurally cannot make: a shimmed
+      // probe reports typed-unavailable facts and passes. Here every capability
+      // the route declares must be observed available, or the isolated posture
+      // cannot dispatch this engine.
+      if (realEngine) {
+        await timedPhase('real-engine-capabilities', async () => {
+          const facts = outcome.probe?.facts ?? null;
+          if (facts === null || Object.keys(facts).length === 0) {
+            return { ok: false, detail: 'probe returned no capability facts' };
+          }
+          const unavailable = Object.entries(facts)
+            .filter(([, available]) => available !== true)
+            .map(([requirement]) => requirement);
+          return unavailable.length === 0
+            ? {
+              ok: true,
+              detail: `${Object.keys(facts).length}/${Object.keys(facts).length} `
+                + `available for ${host}.native`,
+            }
+            : {
+              ok: false,
+              detail: `unavailable for ${host}.native: ${unavailable.join(', ')}`,
+            };
+        });
+      }
     }
 
     await timedPhase('teardown', async () => {
@@ -633,7 +720,7 @@ async function selfTest() {
     });
 
     const totalMs = Date.now() - startedAt;
-    const withinBudget = totalMs < SMOKE_BUDGET_MS;
+    const withinBudget = totalMs < budgetMs;
     allOk = phases.every((phase) => phase.ok) && withinBudget;
 
     console.log(`loop smoke · ${mode}`);
@@ -647,7 +734,7 @@ async function selfTest() {
     }
     console.log(
       `${'total'.padEnd(18)}${String(totalMs).padStart(6)}  `
-      + `${withinBudget ? 'ok' : 'FAIL'}  budget ${SMOKE_BUDGET_MS}ms`,
+      + `${withinBudget ? 'ok' : 'FAIL'}  budget ${budgetMs}ms`,
     );
     return allOk;
   } finally {
@@ -671,6 +758,19 @@ if (isMainModule()) {
     console.log(passed ? 'self-test OK (loop smoke)' : 'self-test FAILED');
     process.exit(passed ? 0 : 1);
   } else if (
+    process.argv.length === 3
+    && process.argv[2] === '--real-engine-smoke'
+  ) {
+    // Manual pre-release gate for `posture: isolated`. Never wired into
+    // `--self-test`, `verify.mjs`, or CI: it spends real model budget.
+    const passed = await selfTest({ realEngine: true });
+    console.log(
+      passed
+        ? 'real-engine smoke OK (isolated posture dispatches a live engine)'
+        : 'real-engine smoke FAILED',
+    );
+    process.exit(passed ? 0 : 1);
+  } else if (
     process.argv.length === 4
     && process.argv[2] === '--smoke-host'
   ) {
@@ -679,7 +779,7 @@ if (isMainModule()) {
     const context = JSON.parse(readFileSync(process.argv[3], 'utf8'));
     process.stdout.write(`${JSON.stringify(runSmokeSteps(context))}\n`);
   } else {
-    console.error('loop-smoke: expected --self-test');
+    console.error('loop-smoke: expected --self-test or --real-engine-smoke');
     process.exit(2);
   }
 }

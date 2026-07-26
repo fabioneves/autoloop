@@ -18,6 +18,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   realpathSync,
   rmSync,
@@ -1285,35 +1286,59 @@ function codexReviewerArgs(adapterTuning = {}) {
   return codexStructuredArgs('read-only', adapterTuning);
 }
 
-const CLAUDE_PROCESS_SETTINGS = deepFreeze({
-  permissions: {
-    allow: ['Bash'],
-    deny: [
-      'Read(~/.config/gh/**)',
-      'Read(~/.git-credentials)',
-      'Read(~/.gitconfig)',
-      'Read(~/.netrc)',
-      'Read(~/.ssh/**)',
-    ],
-  },
-  sandbox: {
-    enabled: true,
-    failIfUnavailable: true,
-    autoAllowBashIfSandboxed: true,
-    allowUnsandboxedCommands: false,
-    excludedCommands: [],
-    filesystem: {
-      denyRead: ['~/'],
-      allowRead: ['.'],
+// Claude Code refuses to run these without an explicit grant once the permission
+// mode is forced to `default` (see `claudeProcessSettings`). Read-only tools
+// (Glob/Grep/Read) need no entry and are deliberately left out, so the deny list
+// below stays the only statement this contract makes about reads.
+const CLAUDE_TOOLS_REQUIRING_GRANT = deepFreeze(['Bash', 'Edit', 'Write']);
+
+// `tools` is the posture's own `--tools` ceiling, so the allow list can never
+// name a tool the posture did not already declare.
+//
+// Observed 2026-07-26 on claude 2.1.220: with CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
+// the CLI prints "Permission mode forced to default - CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
+// is set (allowed_non_write_users hardening)" and ignores `--permission-mode
+// acceptEdits`. The writer posture's Write tool then came back "Claude requested
+// permissions to write to <path>, but you haven't granted it yet", the marker was
+// never created, and the route capability smoke reported `route-smoke-failed`.
+// Measured: neither `--allowedTools` nor a wider settings allow list restores the
+// mode - only CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0 does, and dropping that hardening
+// is a worse trade than granting the posture's declared tools explicitly. Under
+// the forced `default` mode an explicit allow list is honoured, so the writer's
+// Write now succeeds with the scrub still on.
+function claudeProcessSettings(tools) {
+  return {
+    permissions: {
+      allow: tools
+        .split(',')
+        .filter((tool) => CLAUDE_TOOLS_REQUIRING_GRANT.includes(tool)),
+      deny: [
+        'Read(~/.config/gh/**)',
+        'Read(~/.git-credentials)',
+        'Read(~/.gitconfig)',
+        'Read(~/.netrc)',
+        'Read(~/.ssh/**)',
+      ],
     },
-    network: {
-      allowedDomains: [],
-      deniedDomains: ['*'],
-      allowAllUnixSockets: false,
-      allowLocalBinding: false,
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      excludedCommands: [],
+      filesystem: {
+        denyRead: ['~/'],
+        allowRead: ['.'],
+      },
+      network: {
+        allowedDomains: [],
+        deniedDomains: ['*'],
+        allowAllUnixSockets: false,
+        allowLocalBinding: false,
+      },
     },
-  },
-});
+  };
+}
 
 const OPENCODE_FILE_PERMISSIONS = deepFreeze({
   '*': 'deny',
@@ -1387,7 +1412,7 @@ function claudeStructuredArgs(permissionMode, tools, adapterTuning = {}) {
     '--strict-mcp-config',
     '--disable-slash-commands',
     '--settings',
-    JSON.stringify(CLAUDE_PROCESS_SETTINGS),
+    JSON.stringify(claudeProcessSettings(tools)),
     '--permission-mode',
     permissionMode,
     '--tools',
@@ -3959,6 +3984,31 @@ function toolchainMountArguments() {
   ]);
 }
 
+// A read-only Git directory is mounted as a tmpfs with every real entry re-bound
+// read-only underneath, instead of as one read-only bind of the directory.
+//
+// Observed 2026-07-26 on claude 2.1.220: under a plain read-only bind, every Bash
+// tool call in the writer posture failed at sandbox start with
+//   bwrap: Can't create file at <checkout>/.git/modules: Read-only file system
+// and, for a worktree checkout, with
+//   bwrap: Can't create file at <common-dir>/config.lock: Read-only file system
+// Claude Code runs its own nested bwrap sandbox and has to create those mount
+// points to neutralise the paths; a read-only Git directory denies the creation
+// and `failIfUnavailable: true` turns that into a hard failure of every Bash call.
+//
+// The overlay keeps every path that actually exists unwritable - verified under
+// it that writing `.git/config`, `git add` (object insert) and `git commit` all
+// still fail with "Read-only file system" and the host Git directory is unchanged
+// afterwards - while letting the nested sandbox create entries that live on the
+// tmpfs, die with the namespace, and never reach the host repository. Commit
+// authority therefore still rests solely with the outer broker.
+function readOnlyGitDirectoryArguments(path) {
+  const overlay = readOnlyMountArguments(
+    readdirSync(path).map((entry) => join(path, entry)),
+  );
+  return overlay === null ? null : ['--tmpfs', path, ...overlay];
+}
+
 function gitMetadataMountArguments(cwd, writable) {
   const argumentsList = [];
   const mounted = new Set();
@@ -3972,13 +4022,22 @@ function gitMetadataMountArguments(cwd, writable) {
       return null;
     }
     if (!writable) {
-      argumentsList.push('--ro-bind', gitEntry, gitEntry);
+      // A file `.git` (worktree or submodule pointer) has no entries to overlay,
+      // so it keeps the plain read-only bind; the Git directory it points at is
+      // mounted below and gets the overlay there.
+      const entryMount = stats.isDirectory()
+        ? readOnlyGitDirectoryArguments(gitEntry)
+        : ['--ro-bind', gitEntry, gitEntry];
+      if (entryMount === null) return null;
+      argumentsList.push(...entryMount);
       mounted.add(realpathSync(gitEntry));
     }
   } catch {
     return null;
   }
-  for (const flag of ['--git-dir', '--git-common-dir']) {
+  // The common dir is mounted before the per-worktree Git dir it contains: a
+  // tmpfs laid over an ancestor after the fact would shadow the descendant mount.
+  for (const flag of ['--git-common-dir', '--git-dir']) {
     try {
       const raw = gitOutput(cwd, ['rev-parse', flag]);
       const path = realpathSync(
@@ -3994,7 +4053,11 @@ function gitMetadataMountArguments(cwd, writable) {
       ) {
         continue;
       }
-      argumentsList.push(writable ? '--bind' : '--ro-bind', path, path);
+      const mount = writable
+        ? ['--bind', path, path]
+        : readOnlyGitDirectoryArguments(path);
+      if (mount === null) return null;
+      argumentsList.push(...mount);
       mounted.add(path);
     } catch {
       return null;
@@ -5193,7 +5256,13 @@ function processSandboxBoundarySelfTest() {
       `if (readlinkSync('/proc/self/ns/ipc') === ${JSON.stringify(hostIpcNamespace)}) process.exit(14);`,
       "writeFileSync('tracked.txt', 'writer\\n');",
       'let metadataDenied = false;',
-      "try { writeFileSync('.git/autoloop-model-probe', 'tampered\\n'); } catch { metadataDenied = true; }",
+      // Tampering is proven against an existing metadata path. The read-only Git
+      // overlay leaves the Git directory itself a tmpfs so the engine's own
+      // nested sandbox can create the mount points it needs, so a brand-new
+      // entry there is writable by design - and provably ephemeral: the probe
+      // file written below must not exist on the host once the namespace dies.
+      "try { writeFileSync('.git/config', 'tampered\\n'); } catch { metadataDenied = true; }",
+      "try { writeFileSync('.git/autoloop-model-probe', 'ephemeral\\n'); } catch {}",
       "const added = spawnSync('git', ['add', '--', 'tracked.txt']);",
       'if (!metadataDenied || added.status === 0) process.exit(12);',
     ].join('\n');
@@ -5225,7 +5294,10 @@ function processSandboxBoundarySelfTest() {
       "import { spawnSync } from 'node:child_process';",
       "writeFileSync('tracked.txt', 'opencode writer\\n');",
       'let metadataDenied = false;',
-      "try { writeFileSync('.git/autoloop-model-probe', 'tampered\\n'); } catch { metadataDenied = true; }",
+      // Same overlay semantics as the typed writer above: deny on an existing
+      // metadata path, and prove the ephemeral entry never reaches the host.
+      "try { writeFileSync('.git/config', 'tampered\\n'); } catch { metadataDenied = true; }",
+      "try { writeFileSync('.git/autoloop-model-probe', 'ephemeral\\n'); } catch {}",
       "const added = spawnSync('git', ['add', '--', 'tracked.txt']);",
       'if (!metadataDenied || added.status === 0) process.exit(30);',
     ].join('\n');
@@ -5675,10 +5747,23 @@ function selfTest() {
         },
       );
       const serialized = JSON.stringify(sandbox?.argv);
+      // The Git directory is overlaid as a tmpfs with each real entry re-bound
+      // read-only underneath (see `readOnlyGitDirectoryArguments`), so the shape
+      // to assert is the overlay plus a read-only bind of every existing entry -
+      // and never a writable bind of the directory itself.
       return sandbox?.command === '/usr/bin/bwrap'
         && !sandbox.argv.includes('--unshare-net')
         && serialized.includes(
-          JSON.stringify(['--ro-bind', gitDir, gitDir]).slice(1, -1),
+          JSON.stringify(['--tmpfs', gitDir]).slice(1, -1),
+        )
+        && readdirSync(gitDir).every((entry) =>
+          serialized.includes(JSON.stringify([
+            '--ro-bind',
+            join(gitDir, entry),
+            join(gitDir, entry),
+          ]).slice(1, -1)))
+        && !serialized.includes(
+          JSON.stringify(['--bind', gitDir, gitDir]).slice(1, -1),
         );
     })(),
   ]);
@@ -5743,6 +5828,85 @@ function selfTest() {
   checks.push([
     'trusted broker commits writer results outside the model boundary',
     processBoundary === null || processBoundary.brokerCommitted,
+  ]);
+  checks.push([
+    'claude postures grant exactly the mutating tools they declare',
+    (() => {
+      const settingsFor = (execution) => {
+        const argv = launchFor(execution).argv;
+        return JSON.parse(argv[argv.indexOf('--settings') + 1]);
+      };
+      const writer = settingsFor('claude.print-workspace-write');
+      const reviewer = settingsFor('claude.print-typed-reviewer');
+      // The writer needs an explicit grant because CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
+      // forces the permission mode to `default` and `--permission-mode acceptEdits`
+      // is ignored. The reviewer declares no mutating tool, so it grants nothing.
+      return writer.permissions.allow.join(',') === 'Bash,Edit,Write'
+        && reviewer.permissions.allow.length === 0
+        && [writer, reviewer].every((settings) =>
+          settings.permissions.allow.every((tool) =>
+            CLAUDE_TOOLS_REQUIRING_GRANT.includes(tool))
+          && !settings.permissions.allow.includes('Read')
+          && settings.sandbox.enabled === true
+          && settings.sandbox.failIfUnavailable === true);
+    })(),
+  ]);
+  checks.push([
+    'read-only Git overlay denies existing metadata yet admits nested mount points',
+    (() => {
+      if (process.platform !== 'linux' || !existsSync('/usr/bin/bwrap')) return true;
+      const root = mkdtempSync(join(tmpdir(), 'autoloop-git-overlay-'));
+      try {
+        const initialized = spawnSync('git', ['init', '--quiet'], {
+          cwd: root,
+          encoding: 'utf8',
+          timeout: 15000,
+          maxBuffer: MAX_IO_BYTES,
+          env: sanitizedGitEnvironment(),
+        });
+        if (initialized.status !== 0 || initialized.error) return true;
+        writeFileSync(join(root, 'tracked.txt'), 'base\n');
+        fixtureGit(root, ['add', '--', 'tracked.txt']);
+        fixtureGit(root, [
+          '-c', 'user.name=Autoloop Fixture',
+          '-c', 'user.email=autoloop@example.invalid',
+          'commit', '--quiet', '-m', 'base',
+        ]);
+        const configBefore = readFileSync(join(root, '.git', 'config'), 'utf8');
+        // `.git/modules` is the exact path Claude Code's nested bwrap sandbox
+        // failed to create under a plain read-only bind of `.git`, which broke
+        // every Bash tool call in the writer posture.
+        const script = [
+          "import { writeFileSync, mkdirSync } from 'node:fs';",
+          'let nested = false;',
+          "try { mkdirSync('.git/modules'); nested = true; } catch {}",
+          'let denied = false;',
+          "try { writeFileSync('.git/config', 'tampered\\n'); } catch { denied = true; }",
+          'if (!nested || !denied) process.exit(40);',
+        ].join('\n');
+        const sandbox = processAuthoritySandbox(
+          process.execPath,
+          ['--input-type=module', '--eval', script],
+          root,
+          'linux',
+          { writableCheckout: true, writableGitMetadata: false },
+        );
+        if (sandbox === null) return true;
+        const result = spawnSync(sandbox.command, sandbox.argv, {
+          cwd: root,
+          encoding: 'utf8',
+          timeout: 15000,
+          maxBuffer: MAX_IO_BYTES,
+          env: processChildEnvironment({}, process.execPath, root),
+        });
+        return result.status === 0
+          && !result.error
+          && !existsSync(join(root, '.git', 'modules'))
+          && readFileSync(join(root, '.git', 'config'), 'utf8') === configBefore;
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    })(),
   ]);
   checks.push([
     'broker commit is gated on a successful complete typed writer result',
