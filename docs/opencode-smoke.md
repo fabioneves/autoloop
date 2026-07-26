@@ -291,7 +291,7 @@ operator token. Stop and wait for the server only after those evidence copies ar
 kill "$SERVER_PID"
 wait "$SERVER_PID" || true
 node tools/agentic/release-verify.mjs \
-  --fingerprint-stdin <evidence/opencode-v0.41.0/manifest.json
+  --fingerprint-stdin <evidence/opencode-v0.41.1/manifest.json
 ```
 
 The plugin reports a typed
@@ -305,7 +305,7 @@ scripted as above; 7 via the `session.prompt` spike recorded in the v0.35 planni
 predates the v0.40.0 invocation contract, and the rerun it requires was deliberately skipped, so the
 OpenCode routes ship without live verification:
 
-- v0.41.0 live smoke evidence: untested
+- v0.41.1 live smoke evidence: untested
 
 `untested` is a declaration, not evidence. It means no check in this document was executed against
 the v0.40.0 contract: the two OpenCode routes in the closed catalog — native opencode and
@@ -317,7 +317,7 @@ To retire the declaration, run all ten checks and replace the line with exactly 
 containing the real UTC date, installed opencode version, SHA-256 of the sanitized manifest's exact
 bytes, and its committed repository-relative location:
 
-`- v0.41.0 live smoke evidence: date=YYYY-MM-DD; opencode=X.Y.Z; checks=1-10; sha256=<64 lowercase hex>; location=evidence/opencode-v0.41.0/manifest.json`
+`- v0.41.1 live smoke evidence: date=YYYY-MM-DD; opencode=X.Y.Z; checks=1-10; sha256=<64 lowercase hex>; location=evidence/opencode-v0.41.1/manifest.json`
 
 The location is a committed repository-relative JSON manifest, not a URL or archive. It and every
 inventory member must be a bounded regular non-symlink file committed unchanged at `HEAD`.

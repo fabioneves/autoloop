@@ -5,6 +5,50 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-07-26
+
+### Fixed
+
+- **The loop can start again.** `scan.mjs` printed its ~313KB snapshot and exited via
+  `process.exit(await main())`, which discards async-buffered stdout — and stdout is async
+  whenever it is a pipe, which the required measured-operation wrapper always is. Every v0.41.0
+  Dev run therefore blocked at prime step 10 on a snapshot truncated to one pipe buffer.
+  `scan.mjs`, `snapshot-contract.mjs`, and `measurement-contract.mjs` now write primary output
+  synchronously (EAGAIN-retrying `writeSync`); an end-to-end self-test pipes 400KB through a
+  real child that exits immediately.
+- The macOS CI contract job ran 2–3.5 minutes against Ubuntu's ~1: `detectActiveHost()` walks
+  the ancestor process chain (`ps` spawns on macOS at ~44ms a call) and was evaluated before
+  the self-test-mode short-circuit, charging all 2,304 matrix fixtures — 101 of the suite's
+  106 seconds. The mode check now evaluates first; macOS runs at parity (1m04s).
+- The permanent slow-suite diagnostics that found it: verify prints per-check durations and
+  surfaces each self-test's family histogram and matrix-phase attribution, so the next platform
+  stall names its own culprit in the CI log.
+
+### Changed — startup cost
+
+- **One-call prime.** `prime.mjs --dev-json {sessionId}` composes attest → open → mechanical
+  measurement-declaration derivation → bind → selection stage-start → the measured startup scan
+  into one deterministic invocation returning one typed bundle. It holds no broker authority —
+  it issues the same public CLI commands the model previously assembled by hand across ~30
+  round trips and ~4–5 minutes; non-scan prime is now ~2 seconds and a live prime is
+  scan-dominated. The manual per-op path remains documented for continuations and diagnosis.
+- **Release-proven verify.** Install-root verification skips re-spawning a tool's self-test
+  when its bytes match the committed release manifest (template sha256 + node major, freshness-
+  checked in plugin CI, vendored by scaffold): measured 23.3s → 0.7s. Any byte difference,
+  missing entry, node-major mismatch, or unreadable manifest fails open to the real spawn;
+  `--full` restores the entire battery; plugin templates always self-test fully.
+- Setup's audit uses `scaffold.mjs --audit` — the identical typed reconciliation report with
+  zero writes — replacing per-artifact manual diffing, and captures verify output once.
+
+### Added
+
+- One visual language across the cycle: run frame, per-step progress ribbons (eleven cells in
+  Dev, eight in Pitcrew, five setup phases), rounded unit banners, and closing rails for
+  shipped/blocked/complete. The tool surface is now two-tier: ~8 entry points a session
+  invokes; every other vendored file is a library those entry points own.
+- `adapter-contract --template-root` accepts the plugin root or the templates directory itself;
+  `run-scope` usage names the `<path|->` argument on every operation flag.
+
 ## [0.41.0] - 2026-07-26
 
 ### Added
@@ -251,7 +295,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.0...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.1...HEAD
+[0.41.1]: https://github.com/fabioneves/autoloop/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/fabioneves/autoloop/compare/v0.40.5...v0.41.0
 [0.40.5]: https://github.com/fabioneves/autoloop/compare/v0.40.4...v0.40.5
 [0.40.4]: https://github.com/fabioneves/autoloop/compare/v0.40.3...v0.40.4
