@@ -26,7 +26,7 @@
     "route-adapter-contract.mjs": "78d6675d93b0ddc88362b9256a864919705eab627b498022b75c42bbaa0fb437",
     "run-scope.mjs": "654b363bf98de8423bcc0b351ac2c5ce9609a29efab2c254e59f18f8086f94ab",
     "runtime-contract.mjs": "ffe6baa952744ac723c72641468715f0ae1117db875bfe7f4abf2674002f50ea",
-    "scaffold.mjs": "b8645da7504006dd28cf399e54031481bf3f2f6b0684f98b01ec3a50abf9cac6",
+    "scaffold.mjs": "6e40548712f77f80a18f0cb929b230454dfa5d1927986dd6b20c6c9e021b473a",
     "scan.mjs": "74c6fafd732cddb351e1fd9255e6f3240ce18ca797ba1964a0fc4bec03793add",
     "snapshot-contract.mjs": "c4fbc82d8380a59407db62aeb82c90e47c383be25ad5e454f8fc2ba4e5aaa91f",
     "stats.mjs": "86a8f95bad038bb191654aa1f215867992141d27657df2200659e91513889dc3",
