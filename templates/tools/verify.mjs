@@ -1232,9 +1232,10 @@ function main() {
           : `PASS ${check.name}${timing}`,
       );
       // A passing child's stdout is otherwise discarded, which swallowed the
-      // self-tests' slow-check attribution — surface exactly that line.
-      const slow = result.detail?.match(/^slow checks: .+$/mu);
-      if (slow) console.log(`  ${slow[0]}`);
+      // self-tests' diagnostic attribution — surface every such line.
+      for (const line of result.detail?.match(/^(?:slow checks|matrix phases): .+$/gmu) ?? []) {
+        console.log(`  ${line}`);
+      }
     } else {
       console.error(`FAIL ${check.name}${timing}`);
       if (result.detail) console.error(result.detail);
