@@ -42,10 +42,12 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // minutes, and a run that needs more than half an hour has a different problem.
 const DISPATCH_TIMEOUT_MS = 30 * 60 * 1000;
 
-// Claude Code refuses to run these without an explicit grant once the
-// permission mode is forced to `default`, which CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
-// does. Read-only tools (Glob/Grep/Read) need no entry, so the deny list below
-// stays the only statement this contract makes about reads.
+// The mutating tools, granted explicitly in the settings allow list rather than
+// left to the permission mode alone. The grant is derived from the posture's own
+// `--tools` ceiling, so a posture grants exactly what it declares and the
+// reviewer grants nothing at all. Read-only tools (Glob/Grep/Read) need no
+// entry, so the deny list below stays the only statement this contract makes
+// about reads.
 const TOOLS_REQUIRING_GRANT = Object.freeze(['Bash', 'Edit', 'Write']);
 
 // The two postures, carried over unchanged from the route adapter they used to
@@ -218,8 +220,16 @@ export function dispatchArgv(role, tools) {
   ];
 }
 
+// The child inherits this process's environment and nothing is added to it.
+// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 used to be set here to satisfy the broker
+// capability `claude.subprocess.credentials-scrubbed`; v0.42.0 deleted the
+// broker, and with it both that predicate and the cleanup that swept the stub
+// files scrub mode creates. Setting it now buys nothing and costs three things
+// the self-test pins: the child ignores `--permission-mode`, the checkout gains
+// seventeen zero-byte stubs nobody removes, and every Bash call dies at sandbox
+// start on `/home/.mcp.json`.
 function dispatchEnvironment() {
-  return { ...process.env, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' };
+  return { ...process.env };
 }
 
 function failure(step, code, message, detail = {}) {
@@ -428,7 +438,7 @@ const PASSING_VERDICT = {
 };
 
 function shimBody(script) {
-  return `#!/bin/sh\nprintf '%s' "$*" > "$AUTOLOOP_SHIM_ARGV"\ncat > "$AUTOLOOP_SHIM_STDIN"\n${script}\n`;
+  return `#!/bin/sh\nprintf '%s' "$*" > "$AUTOLOOP_SHIM_ARGV"\nenv > "$AUTOLOOP_SHIM_ENV"\ncat > "$AUTOLOOP_SHIM_STDIN"\n${script}\n`;
 }
 
 function selfTest() {
@@ -535,8 +545,10 @@ function selfTest() {
   try {
     const argvPath = join(scratch, 'argv.txt');
     const stdinPath = join(scratch, 'stdin.txt');
+    const envPath = join(scratch, 'env.txt');
     process.env.AUTOLOOP_SHIM_ARGV = argvPath;
     process.env.AUTOLOOP_SHIM_STDIN = stdinPath;
+    process.env.AUTOLOOP_SHIM_ENV = envPath;
 
     const shimDirectory = join(scratch, 'bin');
     const engine = join(shimDirectory, 'claude');
@@ -566,6 +578,20 @@ function selfTest() {
     check(
       'a live reviewer spawn never receives a write tool',
       !/--tools \S*(?:Write|Edit|Bash)/.test(launchedArgv),
+    );
+    // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 made the child ignore
+    // `--permission-mode` (claude 2.1.220 prints "Permission mode forced to
+    // default"), pre-create seventeen zero-byte stub files in the checkout, and
+    // — measured on 0.42.1 — fail every Bash call at sandbox start with
+    // "bwrap: Can't create file at /home/.mcp.json: Permission denied", which
+    // blocked a live run at 05/11 IMPLEMENT. It was set to satisfy the broker's
+    // `claude.subprocess.credentials-scrubbed` capability and the broker cleaned
+    // the stubs it caused; v0.42.0 deleted both. Nothing is left but the costs.
+    check(
+      'the dispatch environment never forces the child out of its posture',
+      !readFileSync(envPath, 'utf8')
+        .split('\n')
+        .some((line) => line.startsWith('CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=')),
     );
     check(
       'every result reports the wrapper overhead separately from the engine time',

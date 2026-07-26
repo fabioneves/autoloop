@@ -10,7 +10,7 @@
     "config-contract.mjs": "fdcbf5397770a052b5ded3e68028b047e31ea113c22a1726502328230bc4be05",
     "contract-lint.mjs": "91e33170fcc2050e5f2dd2787acb9a110923660616cfe6ff2ac8fa31374231dc",
     "delivery-contract.mjs": "0dce50718147486b45b618921efd70139ec803752d07737f046211eb4c23fcfd",
-    "dispatch.mjs": "ff264ca99c9ec480efb3af73b5ad2016471f47267c88712c23deb5061dc25c44",
+    "dispatch.mjs": "949ad666f8c7dcb9d9c285900178824efe888b761c180b94385a9dce8094928a",
     "escalate-paths.mjs": "f172fde38c418dc48d6ed7cccdf2a84343e609007dbdb3c62e0ea9c7c959f84b",
     "label-swap-reminder.mjs": "6ce726aa50e31ed008b7a89eec71bf30f27c85910aaa3123dbb0afad6a56411d",
     "lane-contract.mjs": "0fc8d64eb5cf69a767dad18ce418b717cad1cd6a72edfd70ff168674e6b218d0",
