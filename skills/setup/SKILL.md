@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.40.4 · starting
+∞ setup · v0.40.5 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -82,7 +82,8 @@ Every other host/engine pair fails before mutation with `UNSUPPORTED_ROUTE`.
    not Setup, supplies Runtime with the consumed captured routing preference and ProjectConfig it
    read and validated from STATE. `/autoloop:setup doctor`, `$autoloop:setup doctor`, and
    opencode's plain `doctor` normalize to flow `doctor` without changing the selector.
-   `merge.policy` other than `manual` fails before probing. Caller `invocation` or `config` fields
+   `merge.policy` other than `manual` fails before probing unless the configuration records
+   `merge.unverifiedInvocationAcknowledged: true`. Caller `invocation` or `config` fields
    are invalid. Fresh install, migration, and reconfigure do not
    open run intent or select a route: the scaffold is universal. Reject an engine suffix on those
    write modes and use a later explicit doctor invocation for live route verification. Do not
@@ -292,8 +293,9 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 
 `publish-verdict.mjs` is universal, including manual mode: it owns the sole exact-head terminal
 transition from draft/premerge evidence to ready and delivered. Raw `gh pr ready` and raw
-`loop-delivered` label mutations are forbidden. The non-manual merge authorization/reference tools
-remain shipped, fail-closed test artifacts but v0.40 Setup never materializes or invokes
+`loop-delivered` label mutations are forbidden. The non-manual merge authorization tools are vendored exactly when ProjectConfig records an
+acknowledged non-manual policy — `scaffold.mjs` derives the tool set from the configuration — and
+removed when the policy returns to `manual`. Setup itself never invokes
 `tools/agentic/auto-merge.mjs`. The universal finalizer runs or binds manual gate/review evidence,
 creates the head-bound premerge record, performs the ready/label effects, and reads every
 postcondition back.
@@ -340,6 +342,21 @@ After reconciling Codex hooks, instruct the user to open `/hooks`, review the so
 trust it; Setup never bypasses or manufactures that trust. A static verifier PASS proves shape and
 tool targets only. Doctor reports effective activation/trust as a separate PASS; missing inventory
 or an untrusted definition is a FAIL and is never called active.
+
+Perform the mechanical reconciliation with one call, never file-by-file model work:
+
+```bash
+node <templates>/tools/scaffold.mjs --reconcile <repository root>
+```
+
+It vendors the policy-derived tool set (adding the non-manual merge tools only under an
+acknowledged non-manual ProjectConfig and removing them on return to `manual`), refreshes host
+artifacts, merges hooks and `.opencode/opencode.json` without clobbering repository-owned entries,
+folds a legacy root `opencode.json` into `.opencode/`, and returns a typed report. Present that
+report; hand-copy nothing it covers. What it deliberately leaves to the model and human: STATE and
+LOOP prose reconciliation, `ci-policy.json` authorship, the checklist, anything it reports
+`kept-modified` (a policy-bearing tool such as `escalate-paths.mjs` whose repository copy differs),
+and the visible diff and commit.
 
 Preserve maintainer edits, show diffs, and ask before replacing edited vendored artifacts. New
 Codex agents and opencode agents/plugins require a fresh host session.
@@ -437,8 +454,9 @@ Unavailable inactive routes are NOTEs. A selected missing executable/authenticat
 artifact, or isolation property is a typed capability FAIL. Never silently fall back during
 doctor.
 
-Any non-manual policy is a typed `UNVERIFIABLE_INVOCATION_PROVENANCE` failure before the route
-probe. Do not invoke a merge, merge queue, tag publication, or release publication.
+A non-manual policy lacking `merge.unverifiedInvocationAcknowledged: true` is a typed
+`UNVERIFIABLE_INVOCATION_PROVENANCE` failure before the route probe. Doctor never invokes a merge,
+merge queue, tag publication, or release publication under any policy.
 
 For every GitHub repository that can publish a release, doctor also runs:
 
@@ -506,4 +524,5 @@ Doctor ends with:
 - Never report an inactive route as effectively verified.
 - Never let a missing optional fallback capability fail a healthy selected route.
 - Never use incomplete evidence to prove absence.
-- Never enable or invoke non-manual merge in v0.40.
+- Enable a non-manual policy only through the explicit interview answer that writes
+  `merge.unverifiedInvocationAcknowledged: true` beside it. Setup never merges.

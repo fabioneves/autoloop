@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.40.4 · starting
+∞ dev · v0.40.5 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -46,7 +46,8 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    explicit final `with claude|codex|opencode` suffix stores that selector. It remains
    best-effort-unverified and never grants lifecycle, human, merge, or release authority.
    `merge.policy` other than `manual` returns `UNVERIFIABLE_INVOCATION_PROVENANCE` before probe,
-   scratch creation, or mutation. Caller `invocation` or `config` fields are invalid, and
+   scratch creation, or mutation unless the configuration records
+   `merge.unverifiedInvocationAcknowledged: true`. Caller `invocation` or `config` fields are invalid, and
    unsupported pairs stop before mutation.
 5. For a v2 continuation, require the durable `opened` state, its
    `continuationAuthorization`, and host evidence bound to the same integration/session ID. Pass
@@ -528,10 +529,15 @@ incomplete evidence fails before the terminal mutation and may be retried only a
 read. Raw `gh pr ready`, raw `loop-delivered` label edits, split `premerge-create`, and caller
 delivery booleans are forbidden.
 
-Stop after the returned exact terminal result and leave the ready PR for a human. Never invoke
-`auto-merge.mjs`, submit a merge queue entry, publish a tag, or create a release from a v0.40 run.
-Later recovery may observe a human-performed merge and reconcile the existing loop-owned lifecycle
-record, but prompt transport itself grants no authority for that mutation.
+Under `merge.policy: manual`, stop after the returned exact terminal result and leave the ready PR
+for a human. Under an acknowledged non-manual policy, invoke the vendored
+`tools/agentic/auto-merge.mjs` once for the delivered PR and treat its typed verdict as final for
+this run. The executor independently refetches every ownership, eligibility, evidence, and
+server-protection predicate and refuses with a typed reason when any is missing; route a refusal
+to the human-block path — never retry it blindly, weaken a predicate, or merge through any other
+surface. No run submits a merge queue entry, publishes a tag, or creates a release. Later recovery
+may observe a completed merge and reconcile the existing loop-owned lifecycle record, but prompt
+transport itself grants no authority for that mutation.
 
 ### 11. Record and continue
 

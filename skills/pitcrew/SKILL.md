@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.40.4 · starting
+∞ pitcrew · v0.40.5 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -34,8 +34,8 @@ independently reviewed, gated exact head. Run it before selecting new Dev work.
    bundle to `--open-json`. The broker consumes the one-use best-effort transport only for a new
    invocation and always reads validated ProjectConfig from STATE; caller prompt/config fields are
    invalid. Runtime records immutable `intentProvenance: "best-effort-unverified"` because
-   same-UID hooks cannot prove who supplied the prompt. It rejects non-manual policy before probe
-   or mutation. Bare means native; an explicit final `with claude|codex|opencode` suffix is only a
+   same-UID hooks cannot prove who supplied the prompt. It rejects a non-manual policy lacking
+   `merge.unverifiedInvocationAcknowledged: true` before probe or mutation. Bare means native; an explicit final `with claude|codex|opencode` suffix is only a
    captured routing preference. Immediately after a standalone open, call
    `--bind-measurement-json` with exact `{run,measurement}` and retain the `selection` stage start
    before authentication, Git/GitHub access, scan, lifecycle recovery, probing, or selection. The

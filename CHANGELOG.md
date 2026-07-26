@@ -5,6 +5,31 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.40.5] - 2026-07-26
+
+### Added
+
+- `scaffold.mjs` performs the complete mechanical scaffold reconciliation in one call: it vendors
+  the policy-derived tool set, refreshes host artifacts, merges hooks and `.opencode/opencode.json`
+  without clobbering repository-owned entries, folds a legacy root `opencode.json` into
+  `.opencode/`, and returns a typed report. Setup drops from dozens of model round trips to a
+  handful. A policy-bearing tool whose repository copy differs (`escalate-paths.mjs` carrying extra
+  escalate globs) is reported `kept-modified`, never overwritten.
+- A contract-lint rule, `UNCONDITIONAL_NON_MANUAL_REFUSAL`: forward operational artifacts may no
+  longer claim a non-manual merge policy fails outright without stating the acknowledgement
+  conditional.
+
+### Fixed
+
+- Seven skill-prose sites still asserted that v0.40 forbids a non-manual merge policy, contradicting
+  the 0.40.1 contract; a Setup session resolving the contradiction refused to offer the policy the
+  interview was told to offer. All prose now states the conditional.
+- Dev had no non-manual invocation path at all: its terminal step said "never invoke
+  auto-merge.mjs" unconditionally. Under an acknowledged non-manual policy the run now invokes the
+  vendored executor once for the delivered PR and treats its typed verdict as final; the executor
+  independently refetches every ownership, eligibility, evidence, and server-protection predicate
+  and refuses with a typed reason when any is missing, and a refusal routes to the human-block path.
+
 ## [0.40.4] - 2026-07-26
 
 ### Changed
@@ -183,7 +208,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.4...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.40.5...HEAD
+[0.40.5]: https://github.com/fabioneves/autoloop/compare/v0.40.4...v0.40.5
 [0.40.4]: https://github.com/fabioneves/autoloop/compare/v0.40.3...v0.40.4
 [0.40.3]: https://github.com/fabioneves/autoloop/compare/v0.40.2...v0.40.3
 [0.40.2]: https://github.com/fabioneves/autoloop/compare/v0.40.1...v0.40.2
