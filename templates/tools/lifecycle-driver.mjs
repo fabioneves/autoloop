@@ -664,8 +664,12 @@ function validateReconcileRequest(request) {
       'schemaVersion',
     ])
     && request.schemaVersion === 1
+    // The policy set is the lifecycle contract's to define (it validates
+    // 'manual', 'ratified', and 'auto' at lifecycle-contract.mjs:81, and
+    // branches on the distinction where it matters). This extra 'manual'-only
+    // clause was a leftover from when non-manual was dormant reference code,
+    // and it refused the claim step for every acknowledged non-manual repo.
     && validateIntent(request.intent)
-    && request.intent.mergePolicy === 'manual'
     && BRANCH_RE.test(request.baseBranch ?? '')
     && (
       request.lifecycleCommentId === null
@@ -1585,6 +1589,18 @@ function selfTest() {
     [
       'driver requests reject caller-authored repository and evidence fields',
       !validateReconcileRequest({ ...request, repository: 'attacker/repo' }),
+    ],
+    [
+      'driver accepts every merge policy the lifecycle contract validates',
+      ['manual', 'ratified', 'auto'].every((mergePolicy) =>
+        validateReconcileRequest({
+          ...request,
+          intent: { ...request.intent, mergePolicy },
+        }))
+      && !validateReconcileRequest({
+        ...request,
+        intent: { ...request.intent, mergePolicy: 'whenever' },
+      }),
     ],
     [
       'repository identity ignores ambient Git and GitHub target overrides',
