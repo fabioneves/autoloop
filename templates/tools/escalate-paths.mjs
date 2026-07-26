@@ -308,6 +308,32 @@ function selfTest() {
     ['normalized traversal is incomplete', traversalProof.decisionEvidence.sourceComplete === false],
     ['normalized traversal is not reported as a path', proofPaths(traversalProof).length === 0],
   ];
+  const usageText = usage();
+  const plannedGaps = incompleteInputGuidance('planned', [
+    'PLAN_SUBJECT_UNAVAILABLE',
+    'SMALL_PERSISTED_DATA_UNVERIFIED',
+  ]);
+  const finalGaps = incompleteInputGuidance('final', [
+    'BASE_OID_UNAVAILABLE',
+    'FINAL_DIFF_INCOMPLETE',
+  ]);
+  diffChecks.push(
+    ['usage names every mode and required flag',
+      usageText.includes('--planned-path')
+      && usageText.includes('--artifact-version')
+      && usageText.includes('--artifact-fingerprint')
+      && usageText.includes('--base-oid')
+      && usageText.includes('--working-tree')
+      && !usageText.includes('LANE_PROOF')],
+    ['planned reason codes become actionable guidance',
+      plannedGaps.includes('--artifact-version')
+      && plannedGaps.includes('--artifact-fingerprint')
+      && plannedGaps.includes('--estimated-lines')],
+    ['final reason codes become actionable guidance',
+      finalGaps.includes('--base-oid')],
+    ['unknown reason codes never fabricate guidance',
+      incompleteInputGuidance('planned', ['SOMETHING_ELSE']) === null],
+  );
   for (const [name, passed] of diffChecks) {
     if (!passed) {
       console.error(`FAIL: ${name}`);
@@ -316,6 +342,51 @@ function selfTest() {
   }
   console.log(ok ? `self-test OK (${cases.length + diffChecks.length} checks)` : 'self-test FAILED');
   return ok;
+}
+
+function usage() {
+  return [
+    'usage: escalate-paths.mjs <mode> [--json]',
+    '',
+    'planned mode (pre-implementation lane selection):',
+    '  --base <ref> --base-oid <sha> --artifact-version <n> --artifact-fingerprint <sha256>',
+    '  --estimated-lines <n> --planned-path <path> [--planned-path <path>...]',
+    '  (or --planned-paths <a,b,c> / --planned-json <file>)',
+    '',
+    'final mode (post-implementation reclassification):',
+    '  --base <ref> --base-oid <sha> [--head <sha>]',
+    '',
+    'working-tree mode (escalate-path check only, no lane proof):',
+    '  --working-tree',
+    '',
+    'other: --self-test | --help',
+    '',
+    'Exit 0 clean, 1 escalate paths matched, 2 evidence incomplete (the lane',
+    'fails closed to full and the reason codes name the missing input).',
+  ].join('\n');
+}
+
+// Incomplete evidence already fails closed to the full lane, but the reason
+// codes lived only inside the emitted proof, so a caller saw a bare exit 2 and
+// had to read this file's source to learn which flag was missing (observed in
+// a live run).
+const REASON_GUIDANCE = Object.freeze({
+  PLAN_SUBJECT_UNAVAILABLE: ['--artifact-version', '--artifact-fingerprint'],
+  SMALL_PERSISTED_DATA_UNVERIFIED: ['--estimated-lines'],
+  BASE_OID_UNAVAILABLE: ['--base-oid'],
+  BASE_REF_UNAVAILABLE: ['--base'],
+  FINAL_DIFF_INCOMPLETE: ['--base-oid'],
+});
+
+function incompleteInputGuidance(mode, reasonCodes) {
+  const flags = [];
+  for (const code of reasonCodes ?? []) {
+    for (const flag of REASON_GUIDANCE[code] ?? []) {
+      if (!flags.includes(flag)) flags.push(flag);
+    }
+  }
+  if (flags.length === 0) return null;
+  return `${mode} evidence is incomplete; supply ${flags.join(' ')}`;
 }
 
 function outputResult(files, laneProof, args, sourceComplete, error = null) {
@@ -329,13 +400,26 @@ function outputResult(files, laneProof, args, sourceComplete, error = null) {
     else if (hits.length) console.log('→ apply `human:authorize` and record the matched path');
     else console.log('no escalate paths touched');
   }
-  if (!sourceComplete) return 2;
+  if (!sourceComplete) {
+    const guidance = incompleteInputGuidance(
+      laneProof.mode,
+      laneProof.reasonCodes,
+    );
+    if (guidance) console.error(`escalate-paths: ${guidance}`);
+    return 2;
+  }
   return hits.length ? 1 : 0;
 }
 
 function main() {
   const args = process.argv.slice(2);
   if (args.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
+  // Before any mode resolution: --help must never emit a lane proof for a
+  // fabricated state (it did, then errored that --base was missing).
+  if (args.includes('--help') || args.includes('-h') || args.length === 0) {
+    console.log(usage());
+    process.exit(args.length === 0 ? 2 : 0);
+  }
   if (args.includes('--working-tree')) {
     try {
       const tracked = gitText(['diff', '--name-only', '-z', 'HEAD']).split('\0').filter(Boolean);
