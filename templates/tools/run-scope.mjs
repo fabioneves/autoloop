@@ -59,6 +59,7 @@ import {
   executeRouteAttempt,
   issueCapabilitySnapshot,
   issueHostEvidence,
+  retainBrokerHostBinding,
   validateCapabilitySnapshot,
   validateRuntimeAuthorization,
 } from './route-adapter-contract.mjs';
@@ -2683,10 +2684,11 @@ async function authorityBrokerMain(socketPath, stateDirectory) {
   }
   ensureBrokerDirectory();
   purgeLegacyAuthorityKeys();
-  const hostBinding = detectHostProcessBinding();
-  if (hostBinding === null) {
-    throw new Error('broker host process binding is unavailable');
-  }
+  // Captured once, while the spawner's live ancestry still proves the host
+  // session; the contract module retains the same binding for every later
+  // broker-side host comparison (the detached broker re-parents to init, so a
+  // fresh walk would find no host — the live probe failure this fixes).
+  const hostBinding = retainBrokerHostBinding();
   const repositoryRoot = brokerCheckoutRoot();
   const sessions = new Set();
   const ledger = createBrokerLedger();
@@ -4713,6 +4715,228 @@ async function detachedBrokerHostDeathSelfTest() {
   }
 }
 
+// Regression: the detached broker re-parents away from its spawner the moment
+// the attesting CLI child exits, so a fresh host-ancestry walk from inside the
+// broker no longer proves the session (live failure: every --probe-json
+// returned INVALID_CAPABILITY_ATTESTATION). This scenario crosses exactly that
+// seam: attestation runs through a short-lived CLI child (the broker's
+// spawner, guaranteed exited when spawnSync returns), then the probe must
+// still return a typed capability snapshot from the broker's startup-retained
+// host binding. Engine CLIs are PATH-shimmed to fail their version preflight
+// so the probe stays a fast typed-unavailable result instead of dispatching a
+// real engine process.
+async function detachedBrokerProbeScenario() {
+  const hostBinding = detectHostProcessBinding();
+  if (hostBinding === null) return false;
+  const debug = (label, value) => {
+    if (process.env.AUTOLOOP_SELF_TEST_DEBUG === '1') {
+      console.error(`detached broker probe ${label}: ${JSON.stringify(value)}`);
+    }
+  };
+  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-detached-probe-'));
+  let registry = null;
+  try {
+    for (const engine of ['claude', 'codex', 'opencode']) {
+      const shimPath = join(scratch, engine);
+      writeFileSync(shimPath, '#!/bin/sh\nexit 127\n');
+      chmodSync(shimPath, 0o755);
+    }
+    const sessionId =
+      `run-scope-detached-probe-${randomBytes(8).toString('hex')}`;
+    captureHostIntent({
+      hook_event_name: hostBinding.host === 'opencode'
+        ? 'opencode.user-prompt'
+        : 'UserPromptSubmit',
+      session_id: sessionId,
+      turn_id: `turn-${randomBytes(8).toString('hex')}`,
+      cwd: process.cwd(),
+      prompt: '/autoloop:dev',
+    }, {
+      binding: hostBinding,
+      cwd: process.cwd(),
+    });
+    const attestChild = spawnSync(
+      BROKER_EXECUTABLE,
+      [BROKER_ENTRYPOINT, '--attest-host-json', '-'],
+      {
+        input: `${JSON.stringify({ sessionId })}\n`,
+        encoding: 'utf8',
+        timeout: 60000,
+        maxBuffer: MAX_INPUT_BYTES,
+        env: {
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(([key]) =>
+              key !== 'NODE_OPTIONS'
+              && !key.startsWith('AUTOLOOP_AUTHORITY_')),
+          ),
+          PATH: [scratch, process.env.PATH ?? ''].filter(Boolean).join(':'),
+        },
+        windowsHide: true,
+      },
+    );
+    let attested = null;
+    try {
+      attested = JSON.parse(attestChild.stdout);
+    } catch {}
+    if (attestChild.status !== 0 || attested?.ok !== true) {
+      debug('attest', { status: attestChild.status, attested });
+      return false;
+    }
+    const sessionFingerprint = attested.value.sessionFingerprint;
+    registry = readBrokerRegistry(sessionFingerprint);
+    const opened = await requestSessionBroker(
+      sessionFingerprint,
+      'open',
+      { hostEvidence: attested.value },
+    );
+    if (!opened.ok) {
+      debug('open', opened);
+      return false;
+    }
+    const probed = await requestSessionBroker(
+      sessionFingerprint,
+      'probe',
+      {
+        hostEvidence: attested.value,
+        run: opened.value,
+        routes: [opened.value.requestedRoute],
+        cwd: brokerCheckoutRoot(),
+      },
+    );
+    if (
+      probed.ok !== true
+      || probed.value?.kind !== 'autoloop-capability-snapshot'
+      || typeof probed.value.facts !== 'object'
+      || probed.value.facts === null
+    ) {
+      debug('probe', probed);
+      return false;
+    }
+    const finished = await requestSessionBroker(
+      sessionFingerprint,
+      'finish',
+      {
+        run: opened.value,
+        progress: {
+          reason: 'guardrail-failure',
+          unitsCompleted: 0,
+          queueEvidence: null,
+        },
+      },
+    );
+    if (finished.ok !== true || finished.value.action !== 'stop') {
+      debug('finish', finished);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    debug('error', error.message);
+    return false;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+    if (registry && brokerCommandMatches(registry)) {
+      try {
+        process.kill(registry.pid, 'SIGTERM');
+      } catch {}
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+  }
+}
+
+async function detachedBrokerProbeSelfTest() {
+  if (detectHostProcessBinding() !== null) {
+    return await detachedBrokerProbeScenario();
+  }
+  const result = spawnSync(
+    BROKER_EXECUTABLE,
+    [BROKER_ENTRYPOINT, '--detached-probe-self-test-host'],
+    {
+      argv0: 'codex',
+      encoding: 'utf8',
+      timeout: 120000,
+      maxBuffer: MAX_INPUT_BYTES,
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([key]) =>
+          key !== 'NODE_OPTIONS'
+          && !key.startsWith('AUTOLOOP_AUTHORITY_')),
+      ),
+      windowsHide: true,
+    },
+  );
+  if (result.error || result.status !== 0) {
+    if (process.env.AUTOLOOP_SELF_TEST_DEBUG === '1') {
+      console.error(String(result.stderr ?? result.error?.message ?? ''));
+    }
+    return false;
+  }
+  try {
+    return JSON.parse(result.stdout).ok === true;
+  } catch {
+    return false;
+  }
+}
+
+// The retained binding must exist or the broker must never serve: a broker
+// whose startup ancestry cannot prove exactly one live host refuses to start,
+// so no probe can ever be answered without a retained binding and there is no
+// environment fallback. Two nested relays with different host names make the
+// ancestry ambiguous deterministically, under live hosts and hostless CI
+// alike.
+function ambiguousAncestryBrokerSelfTest() {
+  const socketPath = brokerSocketPath(
+    `${randomBytes(16).toString('hex')}.sock`,
+  );
+  const innerScript = [
+    "import { spawnSync } from 'node:child_process';",
+    'const result = spawnSync(process.execPath, [',
+    '  process.argv[1], "--authority-broker", process.argv[2], process.argv[3],',
+    '], { encoding: "utf8", timeout: 30000, windowsHide: true });',
+    'process.stdout.write(String(result.stdout ?? ""));',
+    'process.stderr.write(String(result.stderr ?? ""));',
+    'process.exit(result.status ?? 1);',
+  ].join('\n');
+  const outerScript = [
+    "import { spawnSync } from 'node:child_process';",
+    'const result = spawnSync(process.execPath, [',
+    '  "--input-type=module", "--eval", process.env.AUTOLOOP_TEST_INNER,',
+    '  process.argv[1], process.argv[2], process.argv[3],',
+    '], { argv0: "codex", encoding: "utf8", timeout: 45000, windowsHide: true });',
+    'process.stdout.write(String(result.stdout ?? ""));',
+    'process.stderr.write(String(result.stderr ?? ""));',
+    'process.exit(result.status ?? 1);',
+  ].join('\n');
+  const result = spawnSync(
+    BROKER_EXECUTABLE,
+    [
+      '--input-type=module',
+      '--eval',
+      outerScript,
+      BROKER_ENTRYPOINT,
+      socketPath,
+      BROKER_DIRECTORY,
+    ],
+    {
+      argv0: 'claude',
+      encoding: 'utf8',
+      timeout: 60000,
+      maxBuffer: MAX_INPUT_BYTES,
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([key]) =>
+            key !== 'NODE_OPTIONS'
+            && !key.startsWith('AUTOLOOP_AUTHORITY_')),
+        ),
+        AUTOLOOP_TEST_INNER: innerScript,
+      },
+      windowsHide: true,
+    },
+  );
+  return result.status !== 0
+    && !existsSync(socketPath)
+    && String(result.stdout ?? '')
+      .includes('broker host process binding is unavailable');
+}
+
 function forgedSameUidIntentSelfTest() {
   const root = mkdtempSync(join(tmpdir(), 'autoloop-forged-intent-'));
   const binding = {
@@ -4887,6 +5111,8 @@ async function selfTest() {
     await liveBrokerContinuationSelfTest();
   const detachedBrokerHostDeath =
     await detachedBrokerHostDeathSelfTest();
+  const detachedBrokerProbe = await detachedBrokerProbeSelfTest();
+  const ambiguousAncestryBroker = ambiguousAncestryBrokerSelfTest();
   const forgedSameUidIntent = forgedSameUidIntentSelfTest();
   const portableSocket =
     Buffer.byteLength(brokerSocketPath(
@@ -5076,6 +5302,14 @@ async function selfTest() {
       detachedBrokerHostDeath,
     ],
     [
+      'a detached broker probes from its retained host binding',
+      detachedBrokerProbe,
+    ],
+    [
+      'a broker without one provable live host refuses to start',
+      ambiguousAncestryBroker,
+    ],
+    [
       'a forged same-UID hook record cannot upgrade provenance or merge policy',
       forgedSameUidIntent,
     ],
@@ -5104,6 +5338,35 @@ async function main() {
       && await liveBrokerContinuationScenario(false);
     process.stdout.write(`${JSON.stringify({ ok })}\n`);
     process.exit(ok ? 0 : 1);
+  }
+  if (
+    args.length === 1
+    && args[0] === '--detached-probe-self-test-driver'
+  ) {
+    const ok = await detachedBrokerProbeScenario();
+    process.stdout.write(`${JSON.stringify({ ok })}\n`);
+    process.exit(ok ? 0 : 1);
+  }
+  if (
+    args.length === 1
+    && args[0] === '--detached-probe-self-test-host'
+  ) {
+    const driven = spawnSync(
+      BROKER_EXECUTABLE,
+      [BROKER_ENTRYPOINT, '--detached-probe-self-test-driver'],
+      {
+        encoding: 'utf8',
+        timeout: 120000,
+        maxBuffer: MAX_INPUT_BYTES,
+        env: process.env,
+        windowsHide: true,
+      },
+    );
+    if (process.env.AUTOLOOP_SELF_TEST_DEBUG === '1' && driven.status !== 0) {
+      process.stderr.write(String(driven.stderr ?? driven.error?.message ?? ''));
+    }
+    process.stdout.write(driven.stdout ?? `${JSON.stringify({ ok: false })}\n`);
+    process.exit(driven.status === 0 ? 0 : 1);
   }
   // Host binding is read from a process's ancestors, never from itself, so a
   // host named through argv0 is only visible to its descendants. This stands in
