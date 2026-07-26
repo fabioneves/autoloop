@@ -21,9 +21,25 @@
 // broker internals. Continuations are not supported here — a continuation field
 // in the input is a typed error directing the caller to the manual per-op path.
 //
+// --conclude-json is the matching one-call close for a guardrail-blocked run.
+// A live Dev run spent minutes hand-assembling the same fixed sequence every
+// time a human handoff ended the run's useful work: optional human
+// wait-start/wait-end, the orchestrator-owned stage-end with typed-unavailable
+// telemetry, the blocked run-finish with typed-unavailable evidence, then the
+// guardrail-failure finish. Every one of those envelopes is mechanically
+// derivable from the retained store plus the caller's blocked reason, so this
+// mode composes them and drives the same public CLI seams in order
+// (measurement-contract.mjs --capture-event, run-scope.mjs --finish-json),
+// stopping fail-closed at the first typed error. v1 closes exactly the
+// guardrail-failure stop; every other stop reason keeps the manual path.
+//
 // Usage:
 //   node tools/agentic/prime.mjs --dev-json <path|->   # {"sessionId":"..."} or
 //                                                      # {"sessionId":"...","scanArgs":[...]}
+//   node tools/agentic/prime.mjs --conclude-json <path|->
+//     # {"run":{...},"hostEvidence":{...},"reason":"guardrail-failure",
+//     #  "stageId":"...","blockedReason":{"code":"...","reason":"..."},
+//     #  "waitCategory":"human"?}
 //   node tools/agentic/prime.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
@@ -64,6 +80,33 @@ const CONTINUATION_KEYS = Object.freeze([
   'continuationState',
   'continuationAuthorization',
 ]);
+const CONCLUDE_REASON = 'guardrail-failure';
+const CONCLUDE_KEYS = Object.freeze([
+  'run',
+  'hostEvidence',
+  'reason',
+  'stageId',
+  'blockedReason',
+]);
+const CONCLUDE_OPTIONAL_KEYS = Object.freeze(['waitCategory']);
+const CONCLUDE_WAIT_CATEGORIES = Object.freeze(['engine', 'ci', 'human']);
+const CONCLUDE_WAIT_ID = 'guardrail-handoff-1';
+// Mirrors measurement-contract's segment telemetry keys; the self-test
+// validates every composed event through that contract's own validators, so
+// drift fails there instead of at capture time.
+const CONCLUDE_TELEMETRY_KEYS = Object.freeze([
+  'provider',
+  'model',
+  'engine',
+  'promptTokens',
+  'cachedInputTokens',
+  'outputTokens',
+  'reasoningTokens',
+  'contextBytes',
+  'costUsd',
+]);
+const STAGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_/-]{0,79}$/;
+const HEX_64_PATTERN = /^[0-9a-f]{64}$/;
 const TOOL_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const RUN_SCOPE = join(TOOL_DIRECTORY, 'run-scope.mjs');
 const MEASUREMENT_CONTRACT = join(TOOL_DIRECTORY, 'measurement-contract.mjs');
@@ -471,6 +514,277 @@ export function primeDev(rawInput, cwd = process.cwd()) {
   }
 }
 
+function boundedPrintable(value, maximum) {
+  return typeof value === 'string'
+    && value.length >= 1
+    && value.length <= maximum
+    && !/[\x00-\x1f\x7f]/.test(value);
+}
+
+function invalidConclude(message) {
+  return failure('input', { code: 'INVALID_CONCLUDE_INPUT', message });
+}
+
+export function validateConcludeInput(value) {
+  if (!plainObject(value)) {
+    return invalidConclude(
+      'expected a JSON object with {run,hostEvidence,reason,stageId,blockedReason} '
+      + 'and optional {waitCategory}',
+    );
+  }
+  const missing = CONCLUDE_KEYS.find((key) => !Object.hasOwn(value, key));
+  if (missing !== undefined) {
+    return invalidConclude(`missing input field "${missing}"`);
+  }
+  const unknown = Object.keys(value).find(
+    (key) => !CONCLUDE_KEYS.includes(key) && !CONCLUDE_OPTIONAL_KEYS.includes(key),
+  );
+  if (unknown !== undefined) {
+    return invalidConclude(`unknown input field "${unknown}"`);
+  }
+  if (value.reason !== CONCLUDE_REASON) {
+    return failure('input', {
+      code: 'CONCLUDE_REASON_UNSUPPORTED',
+      message:
+        `conclude closes exactly the "${CONCLUDE_REASON}" stop; every other stop `
+        + 'keeps the manual event path (measurement-contract.mjs --capture-event '
+        + 'boundaries plus run-scope.mjs --finish-json)',
+    });
+  }
+  if (
+    !plainObject(value.run)
+    || typeof value.run.activeHost !== 'string'
+    || !HEX_64_PATTERN.test(value.run.hostEvidenceFingerprint ?? '')
+  ) {
+    return invalidConclude('run: expected the exact broker-issued run artifact');
+  }
+  if (
+    !plainObject(value.hostEvidence)
+    || value.hostEvidence.fingerprint !== value.run.hostEvidenceFingerprint
+  ) {
+    return invalidConclude(
+      'hostEvidence: fingerprint must match run.hostEvidenceFingerprint',
+    );
+  }
+  if (
+    Object.hasOwn(value.hostEvidence, 'sessionFingerprint')
+    && value.hostEvidence.sessionFingerprint !== value.run.sessionFingerprint
+  ) {
+    return invalidConclude(
+      'hostEvidence: sessionFingerprint must match run.sessionFingerprint',
+    );
+  }
+  if (!STAGE_ID_PATTERN.test(value.stageId ?? '')) {
+    return invalidConclude('stageId: invalid identifier');
+  }
+  if (
+    !plainObject(value.blockedReason)
+    || Object.keys(value.blockedReason).sort().join(',') !== 'code,reason'
+    || !boundedPrintable(value.blockedReason.code, 80)
+    || !boundedPrintable(value.blockedReason.reason, 500)
+  ) {
+    return invalidConclude(
+      'blockedReason: expected {code,reason} with a bounded printable code '
+      + '(80) and reason (500)',
+    );
+  }
+  if (
+    Object.hasOwn(value, 'waitCategory')
+    && !CONCLUDE_WAIT_CATEGORIES.includes(value.waitCategory)
+  ) {
+    return invalidConclude(
+      `waitCategory: expected one of ${CONCLUDE_WAIT_CATEGORIES.join(', ')}`,
+    );
+  }
+  return {
+    ok: true,
+    run: value.run,
+    hostEvidence: value.hostEvidence,
+    stageId: value.stageId,
+    blockedReason: value.blockedReason,
+    waitCategory: value.waitCategory ?? null,
+  };
+}
+
+// The composed inputs mirror the retained golden shapes from live blocked
+// runs: empty-envelope human wait boundaries, an orchestrator-owned stage end
+// whose degradation carries the caller's blocked reason with every telemetry
+// field typed-unavailable, and a blocked run finish whose terminal, gate, and
+// lifecycle evidence references are typed-unavailable until real producers
+// exist. Every input goes through the public capture CLI, so the strict event
+// validators apply unchanged.
+export function composeConcludeEvents({
+  runId,
+  stageId,
+  stage,
+  route,
+  blockedReason,
+  waitCategory,
+}) {
+  const unavailable = (reason) => ({ status: 'unavailable', reason });
+  const telemetryReason =
+    'orchestrator-owned stage end; provider producer capture is unavailable';
+  const events = [];
+  if (waitCategory !== null && waitCategory !== undefined) {
+    for (const kind of ['wait-start', 'wait-end']) {
+      events.push({
+        name: kind,
+        input: {
+          version: 1,
+          runId,
+          kind,
+          payload: { stageId, waitId: CONCLUDE_WAIT_ID, category: waitCategory },
+          envelopes: {},
+        },
+      });
+    }
+  }
+  events.push({
+    name: 'stage-end',
+    input: {
+      version: 1,
+      runId,
+      kind: 'stage-end',
+      payload: {
+        stageId,
+        actualRoute: route,
+        adapter: route,
+        degradation: { code: blockedReason.code, reason: blockedReason.reason },
+        telemetry: Object.fromEntries(
+          CONCLUDE_TELEMETRY_KEYS.map((key) => [key, unavailable(telemetryReason)]),
+        ),
+      },
+      envelopes: {
+        providerEvidence: unavailable(
+          'orchestrator-owned stage end; no provider accounting producer is installed',
+        ),
+      },
+    },
+  });
+  events.push({
+    name: 'run-finish',
+    input: {
+      version: 1,
+      runId,
+      kind: 'run-finish',
+      payload: {
+        terminal: { status: 'blocked', stage, reason: blockedReason.reason },
+        gate: { result: 'not-run', localGreenCiRed: false },
+        recovery: { resumeKind: 'fresh', recoveryKind: 'blocked' },
+      },
+      envelopes: {
+        terminalEvidence: unavailable(
+          'no producer-backed terminal seam is installed; the run stopped '
+          + 'blocked before any terminal mutation',
+        ),
+        gateEvidence: unavailable(
+          `the gate never ran; the run stopped blocked during ${stage}`,
+        ),
+        lifecycleEvidence: unavailable(
+          'no lifecycle marker outcome was produced; the run stopped blocked '
+          + 'before delivery',
+        ),
+      },
+    },
+  });
+  return events;
+}
+
+export async function concludeDev(rawInput, cwd = process.cwd()) {
+  const input = validateConcludeInput(rawInput);
+  if (input.ok !== true) return input;
+  const rootResult = gitValue('repository', cwd, ['rev-parse', '--show-toplevel']);
+  if (rootResult.ok !== true) return rootResult;
+  const root = realpathSync(rootResult.value);
+  const storePath = gitValue('derive-run', root, [
+    'rev-parse',
+    '--git-path',
+    'autoloop/measurements/v1',
+  ]);
+  if (storePath.ok !== true) return storePath;
+  // The measurement runId is never a caller field: it is derived from the
+  // retained store exactly like the one-shot measured operation derives it —
+  // one run with a retained run-start and no run-finish, whose active stage
+  // must be the stage the caller is closing.
+  const { deriveOpenMeasurementRun } = await import('./measurement-contract.mjs');
+  let open;
+  try {
+    open = deriveOpenMeasurementRun(resolve(root, storePath.value));
+  } catch (error) {
+    return failure('derive-run', {
+      code: 'OPEN_RUN_UNDERIVABLE',
+      message: error.message,
+    });
+  }
+  if (open.ok !== true) {
+    return failure('derive-run', {
+      code: 'OPEN_RUN_UNDERIVABLE',
+      message: open.errors.join('; '),
+      ...(open.candidates === undefined ? {} : { candidates: open.candidates }),
+    });
+  }
+  if (open.stage.id !== input.stageId) {
+    return failure('derive-run', {
+      code: 'STAGE_MISMATCH',
+      message: `stageId "${input.stageId}" does not match the retained active `
+        + `stage "${open.stage.id}"`,
+    });
+  }
+  const composed = composeConcludeEvents({
+    runId: open.runId,
+    stageId: input.stageId,
+    stage: open.stage.stage,
+    route: `${input.run.activeHost}.native`,
+    blockedReason: input.blockedReason,
+    waitCategory: input.waitCategory,
+  });
+  const temporary = mkdtempSync(join(tmpdir(), 'autoloop-prime-'));
+  try {
+    const writeOpInput = (name, value) => {
+      const path = join(temporary, name);
+      writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+      return path;
+    };
+    const events = [];
+    for (const { name, input: eventInput } of composed) {
+      writeOpInput(`event-${name}.json`, eventInput);
+      const captured = runToolJson(
+        name,
+        `measurement-contract.mjs --capture-event (${name})`,
+        [MEASUREMENT_CONTRACT, '--capture-event'],
+        {
+          cwd: root,
+          input: JSON.stringify(eventInput),
+          timeout: BROKER_STEP_TIMEOUT_MS,
+        },
+      );
+      if (captured.ok !== true) return captured;
+      events.push(captured.value.path);
+    }
+    const finish = runToolJson(
+      'finish',
+      'run-scope.mjs --finish-json',
+      [
+        RUN_SCOPE,
+        '--finish-json',
+        writeOpInput('finish.json', {
+          run: input.run,
+          progress: {
+            reason: CONCLUDE_REASON,
+            unitsCompleted: 0,
+            queueEvidence: null,
+          },
+        }),
+      ],
+      { cwd: root, timeout: BROKER_STEP_TIMEOUT_MS },
+    );
+    if (finish.ok !== true) return finish;
+    return { ok: true, finish: finish.value.value, events };
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
 function readJsonInput(path) {
   const bytes = readFileSync(path === '-' ? 0 : path);
   if (bytes.length > MAX_INPUT_BYTES) throw new Error('input exceeds 1 MiB');
@@ -587,7 +901,8 @@ async function selfTest() {
   // one combined run check; a deliberately unauthorized fixture run therefore
   // reduces its verdict to exactly that run error when — and only when — the
   // derived declaration passes every declaration check.
-  const { bindRuntimeMeasurement } = await import('./measurement-contract.mjs');
+  const { bindRuntimeMeasurement, buildTypedMeasurementEvent } =
+    await import('./measurement-contract.mjs');
   const accepted = bindRuntimeMeasurement(
     { run: fixtureRun, measurement: derived.declaration },
     TOOL_DIRECTORY,
@@ -668,6 +983,90 @@ async function selfTest() {
     && repositorySlug('not-a-remote') === null,
   );
 
+  const concludeFixtureInput = {
+    run: fixtureRun,
+    hostEvidence: {
+      fingerprint: fixtureRun.hostEvidenceFingerprint,
+      sessionFingerprint: fixtureRun.sessionFingerprint,
+    },
+    reason: CONCLUDE_REASON,
+    stageId: 'selection-1',
+    blockedReason: {
+      code: 'FIXTURE_GUARDRAIL',
+      reason: 'fixture human handoff ends the run',
+    },
+    waitCategory: 'human',
+  };
+  check(
+    'a non-guardrail conclude reason is a typed error naming the manual path',
+    (() => {
+      const refused = validateConcludeInput({
+        ...concludeFixtureInput,
+        reason: 'queue-exhausted',
+      });
+      return refused.ok === false
+        && refused.step === 'input'
+        && refused.error.code === 'CONCLUDE_REASON_UNSUPPORTED'
+        && refused.error.message.includes('manual event path');
+    })(),
+  );
+  check(
+    'missing, unknown, and malformed conclude inputs are typed errors',
+    validateConcludeInput(null).ok === false
+    && validateConcludeInput({}).ok === false
+    && validateConcludeInput({ ...concludeFixtureInput, extra: 1 }).ok === false
+    && validateConcludeInput({
+      ...concludeFixtureInput,
+      hostEvidence: { fingerprint: 'f'.repeat(64) },
+    }).ok === false
+    && validateConcludeInput({ ...concludeFixtureInput, stageId: '!' }).ok === false
+    && validateConcludeInput({
+      ...concludeFixtureInput,
+      blockedReason: { code: 'x'.repeat(81), reason: 'r' },
+    }).ok === false
+    && validateConcludeInput({
+      ...concludeFixtureInput,
+      waitCategory: 'weekend',
+    }).ok === false
+    && (() => {
+      const parsed = validateConcludeInput(concludeFixtureInput);
+      const withoutWait = { ...concludeFixtureInput };
+      delete withoutWait.waitCategory;
+      return parsed.ok === true
+        && parsed.waitCategory === 'human'
+        && validateConcludeInput(withoutWait).waitCategory === null;
+    })(),
+  );
+  {
+    const composed = composeConcludeEvents({
+      runId: randomUUID(),
+      stageId: 'selection-1',
+      stage: 'selection',
+      route: 'claude.native',
+      blockedReason: concludeFixtureInput.blockedReason,
+      waitCategory: 'human',
+    });
+    const validated = composed.map(({ input }) => buildTypedMeasurementEvent(input));
+    const withoutWait = composeConcludeEvents({
+      runId: randomUUID(),
+      stageId: 'selection-1',
+      stage: 'selection',
+      route: 'claude.native',
+      blockedReason: concludeFixtureInput.blockedReason,
+      waitCategory: null,
+    });
+    check(
+      'composed conclude events pass the measurement contract validators',
+      composed.map(({ name }) => name).join(',')
+        === 'wait-start,wait-end,stage-end,run-finish'
+      && validated.every((result) => result.ok === true)
+      && withoutWait.map(({ name }) => name).join(',') === 'stage-end,run-finish'
+      && composed[2].input.payload.degradation.code === 'FIXTURE_GUARDRAIL'
+      && composed[3].input.payload.terminal.status === 'blocked'
+      && composed[3].input.payload.terminal.stage === 'selection',
+    );
+  }
+
   const section = { items: [], complete: true, error: null };
   const sections = Object.fromEntries(
     Array.from({ length: SNAPSHOT_SECTION_COUNT }, (_, index) => [
@@ -737,6 +1136,31 @@ async function selfTest() {
     check(
       'the temporary input directory is removed',
       JSON.stringify(temporaryEntries()) === JSON.stringify(before),
+    );
+    const concluded = spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), '--conclude-json', '-'],
+      {
+        cwd: fixtureRepo,
+        encoding: 'utf8',
+        input: JSON.stringify(concludeFixtureInput),
+        maxBuffer: MAX_CHILD_OUTPUT_BYTES,
+        timeout: 120_000,
+        windowsHide: true,
+      },
+    );
+    let concludedTyped = null;
+    try {
+      concludedTyped = JSON.parse(concluded.stdout);
+    } catch {}
+    check(
+      'a repository without an open measurement run fails conclude closed at derive-run',
+      concluded.status === 1
+      && concludedTyped?.ok === false
+      && concludedTyped.step === 'derive-run'
+      && concludedTyped.error.code === 'OPEN_RUN_UNDERIVABLE'
+      && Array.isArray(concludedTyped.error.candidates)
+      && concludedTyped.error.candidates.length === 0,
     );
   } finally {
     rmSync(fixtureRepo, { recursive: true, force: true });
@@ -841,10 +1265,14 @@ function parseArgs(args) {
   if (args.length === 2 && args[0] === '--dev-json' && args[1]) {
     return { mode: 'dev', path: args[1], error: null };
   }
+  if (args.length === 2 && args[0] === '--conclude-json' && args[1]) {
+    return { mode: 'conclude', path: args[1], error: null };
+  }
   return {
     mode: null,
     path: null,
-    error: "expected --dev-json <path|-> ('-' reads stdin) or --self-test",
+    error: "expected --dev-json <path|->, --conclude-json <path|-> "
+      + "('-' reads stdin), or --self-test",
   };
 }
 
@@ -861,6 +1289,11 @@ async function main() {
   } catch (error) {
     console.error(`prime: unable to read JSON input: ${error.message}`);
     process.exit(2);
+  }
+  if (parsed.mode === 'conclude') {
+    const concluded = await concludeDev(input);
+    writeStdoutSync(`${JSON.stringify(concluded, null, 1)}\n`);
+    process.exit(concluded.ok === true ? 0 : 1);
   }
   const result = primeDev(input);
   const printed = result.ok === true ? persistPrimeBundle(result) : result;

@@ -2555,23 +2555,35 @@ function structuredCommandIndex(args, optionsWithValues) {
   return -1;
 }
 
+const GIT_STRUCTURED_OPTIONS_WITH_VALUES = new Set([
+  '-C',
+  '-c',
+  '--config-env',
+  '--exec-path',
+  '--git-dir',
+  '--namespace',
+  '--super-prefix',
+  '--work-tree',
+]);
+const GH_STRUCTURED_OPTIONS_WITH_VALUES = new Set(['-R', '--hostname', '--repo']);
+
+function structuredSubcommand(executable, args) {
+  const command = basename(executable);
+  const optionsWithValues = command === 'git'
+    ? GIT_STRUCTURED_OPTIONS_WITH_VALUES
+    : command === 'gh'
+      ? GH_STRUCTURED_OPTIONS_WITH_VALUES
+      : null;
+  const index = optionsWithValues === null
+    ? args.findIndex((argument) => !argument.startsWith('-'))
+    : structuredCommandIndex(args, optionsWithValues);
+  return index < 0 ? null : args[index];
+}
+
 function measuredOperationKind(executable, args) {
   const command = basename(executable);
   if (command === 'git') {
-    const index = structuredCommandIndex(
-      args,
-      new Set([
-        '-C',
-        '-c',
-        '--config-env',
-        '--exec-path',
-        '--git-dir',
-        '--namespace',
-        '--super-prefix',
-        '--work-tree',
-      ]),
-    );
-    const subcommand = index < 0 ? null : args[index];
+    const subcommand = structuredSubcommand(executable, args);
     // Local working-tree subcommands are ordinary subprocess operations; only
     // `push` and unknown shapes stay conservatively remote (`init` is left
     // unknown on purpose — the loop never initializes repositories).
@@ -2591,7 +2603,7 @@ function measuredOperationKind(executable, args) {
   if (command !== 'gh') return 'subprocess';
   const commandIndex = structuredCommandIndex(
     args,
-    new Set(['-R', '--hostname', '--repo']),
+    GH_STRUCTURED_OPTIONS_WITH_VALUES,
   );
   if (commandIndex < 0) return 'remote-mutation';
   const primary = args[commandIndex];
@@ -3281,6 +3293,98 @@ function runMeasuredOperation(input, directory, execute = spawnSync) {
       stdout: String(result.stdout ?? ''),
       stderr: String(result.stderr ?? ''),
       retrySafe: input.kind !== 'remote-mutation',
+    },
+  };
+}
+
+// A live run spent minutes per measured command hand-writing the full JSON
+// envelope for --run-operation even though every field except the operation
+// identity is mechanically derivable from the retained store. The one-shot
+// derivation below assembles exactly that envelope — the run with a retained
+// run-start and no run-finish, the replayed active stage, the classifier's
+// operation kind, and a bounded default action — and hands it unmodified to
+// runMeasuredOperation, so every journal, duplicate, stage, and policy check
+// still applies.
+export function deriveOpenMeasurementRun(directory) {
+  const target = resolve(directory);
+  let names;
+  try {
+    names = readdirSync(join(target, 'events')).sort();
+  } catch (error) {
+    if (error?.code === 'ENOENT') names = [];
+    else {
+      return {
+        ok: false,
+        errors: [`measurement event store read failed: ${error.message}`],
+      };
+    }
+  }
+  const invalid = names.find((name) => !UUID_RE.test(name));
+  if (invalid !== undefined) {
+    return {
+      ok: false,
+      errors: [`${invalid}: unexpected measurement event store entry`],
+    };
+  }
+  const candidates = [];
+  for (const runId of names) {
+    const retained = readMeasurementEvents(target, runId);
+    if (!retained.ok) {
+      return { ok: false, errors: [`${runId}: ${retained.errors.join('; ')}`] };
+    }
+    if (
+      retained.events.length === 0
+      || retained.events[0].kind !== 'run-start'
+      || retained.events.at(-1).kind === 'run-finish'
+    ) continue;
+    candidates.push(runId);
+  }
+  if (candidates.length !== 1) {
+    return {
+      ok: false,
+      candidates,
+      errors: [candidates.length === 0
+        ? 'no measurement run with a retained run-start and no run-finish '
+          + 'exists in this store'
+        : 'expected exactly one open measurement run, found '
+          + `${candidates.length}: ${candidates.join(', ')}`],
+    };
+  }
+  const active = currentMeasurementStage(target, candidates[0]);
+  if (!active.ok) return { ok: false, candidates, errors: active.errors };
+  return { ok: true, runId: candidates[0], stage: active.stage };
+}
+
+function measuredOperationSummary(executable, args) {
+  const command = basename(executable);
+  const subcommand = structuredSubcommand(executable, args);
+  return (subcommand === null ? command : `${command} ${subcommand}`)
+    .slice(0, 200);
+}
+
+function deriveMeasuredOperationInput(operationId, action, command, directory) {
+  const open = deriveOpenMeasurementRun(directory);
+  if (!open.ok) return open;
+  const [executable, ...args] = command;
+  let cwd;
+  try {
+    cwd = realpathSync(gitExec(['rev-parse', '--show-toplevel']).trim());
+  } catch (error) {
+    return {
+      ok: false,
+      errors: [`cannot resolve the repository root: ${error.message}`],
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      version: 1,
+      runId: open.runId,
+      stageId: open.stage.id,
+      operationId,
+      kind: measuredOperationKind(executable, args),
+      action: action ?? measuredOperationSummary(executable, args),
+      command: { executable, args, cwd },
     },
   };
 }
@@ -8760,15 +8864,17 @@ async function selfTest() {
     `autoloop-measurement-operation-${randomUUID()}`,
   );
   const operationRunId = 'a23e4567-e89b-42d3-a456-426614174000';
-  const operationSeedInputs = retainedEventInputs.slice(0, 2).map((input) => {
-    const rebound = { ...structuredClone(input), runId: operationRunId };
-    const runtimeBinding = rebound.payload.runtimeBinding;
-    if (runtimeBinding?.status === 'observed') {
-      runtimeBinding.envelope.runId = operationRunId;
-      runtimeBinding.fingerprint = fingerprint(runtimeBinding.envelope);
-    }
-    return rebound;
-  });
+  const seedRunEventInputs = (runId, count) =>
+    retainedEventInputs.slice(0, count).map((input) => {
+      const rebound = { ...structuredClone(input), runId };
+      for (const value of Object.values(rebound.payload)) {
+        if (value?.status !== 'observed' || !plainObject(value.envelope)) continue;
+        value.envelope.runId = runId;
+        value.fingerprint = fingerprint(value.envelope);
+      }
+      return rebound;
+    });
+  const operationSeedInputs = seedRunEventInputs(operationRunId, 2);
   const operationSeedWrites = operationSeedInputs.map((input) =>
     persistMeasurementEvent(input, operationStore, 'run-boundary-declared'));
   const measuredOperationInput = {
@@ -8942,6 +9048,92 @@ async function selfTest() {
     ['api', 'repos/example/project/issues', '-Fkey=@fixture.json'],
     ['api', 'repos/example/project/issues', '--meth=GET'],
   ].map((args) => measuredOperationKind('gh', args));
+  const derivationStore = join(
+    selfTestTemporaryRoot(),
+    `autoloop-measurement-derivation-${randomUUID()}`,
+  );
+  const derivationRunId = 'b23e4567-e89b-42d3-a456-426614174000';
+  const derivationSeedWrites = seedRunEventInputs(derivationRunId, 2).map(
+    (input) => persistMeasurementEvent(input, derivationStore, 'run-boundary-declared'),
+  );
+  const derivedOpenRun = deriveOpenMeasurementRun(derivationStore);
+  const derivedOneShot = deriveMeasuredOperationInput(
+    'one-shot-node-version',
+    null,
+    [process.execPath, '--version'],
+    derivationStore,
+  );
+  const explicitOneShot = {
+    version: 1,
+    runId: derivationRunId,
+    stageId: 'premise',
+    operationId: 'one-shot-node-version',
+    kind: 'subprocess',
+    action: basename(process.execPath),
+    command: {
+      executable: process.execPath,
+      args: ['--version'],
+      cwd: realpathSync(gitExec(['rev-parse', '--show-toplevel']).trim()),
+    },
+  };
+  const oneShotOperation = derivedOneShot.ok
+    ? runMeasuredOperation(derivedOneShot.value, derivationStore)
+    : derivedOneShot;
+  const oneShotRead = readMeasurementEvents(derivationStore, derivationRunId);
+  const oneShotRetained = oneShotRead.events.find(
+    (eventValue) => eventValue.kind === 'operation',
+  );
+  let duplicateOneShotExecuted = false;
+  const duplicateOneShotDerived = deriveMeasuredOperationInput(
+    'one-shot-node-version',
+    null,
+    [process.execPath, '--version'],
+    derivationStore,
+  );
+  const duplicateOneShot = duplicateOneShotDerived.ok
+    ? runMeasuredOperation(duplicateOneShotDerived.value, derivationStore, () => {
+      duplicateOneShotExecuted = true;
+      return {};
+    })
+    : duplicateOneShotDerived;
+  const derivedGitKind = deriveMeasuredOperationInput(
+    'one-shot-git-fetch',
+    null,
+    ['git', 'fetch', '--prune', 'origin'],
+    derivationStore,
+  );
+  const derivedGhKind = deriveMeasuredOperationInput(
+    'one-shot-gh-issue-list',
+    'list open issues',
+    ['gh', 'api', 'repos/example/project/issues'],
+    derivationStore,
+  );
+  const secondOpenRunId = 'c23e4567-e89b-42d3-a456-426614174000';
+  const secondOpenRunWrites = seedRunEventInputs(secondOpenRunId, 2).map(
+    (input) => persistMeasurementEvent(input, derivationStore, 'run-boundary-declared'),
+  );
+  const ambiguousOpenRun = deriveOpenMeasurementRun(derivationStore);
+  const idleStageStore = join(
+    selfTestTemporaryRoot(),
+    `autoloop-measurement-idle-stage-${randomUUID()}`,
+  );
+  const idleStageRunId = 'd23e4567-e89b-42d3-a456-426614174000';
+  const idleStageWrites = seedRunEventInputs(idleStageRunId, 3).map(
+    (input) => persistMeasurementEvent(input, idleStageStore, 'run-boundary-declared'),
+  );
+  const idleStageDerivation = deriveOpenMeasurementRun(idleStageStore);
+  const emptyStoreDerivation = deriveOpenMeasurementRun(join(
+    selfTestTemporaryRoot(),
+    `autoloop-measurement-absent-${randomUUID()}`,
+  ));
+  const measuredParses = [
+    parseArgs(['--measured', 'op-1', '--', 'git', 'fetch']),
+    parseArgs(['--measured', 'op-1', '--action', 'fetch base', '--', 'git', 'fetch']),
+    parseArgs(['--measured', 'op-1', 'git', 'fetch']),
+    parseArgs(['--measured', 'op-1', '--action', 'fetch base', 'git', 'fetch']),
+    parseArgs(['--measured', 'op-1', '--']),
+    parseArgs(['--measured']),
+  ];
   const retainedDerivedRead = readMeasurements(eventStore);
   const retainedEventsRead = readMeasurementEvents(eventStore, retainedRunId);
   const exportedEvidenceBundle = exportMeasurementEvidenceBundle(
@@ -9929,6 +10121,59 @@ async function selfTest() {
       && !freshMutationExecuted],
     ['command wrapper refuses a retained identity before duplicate execution',
       !duplicateMeasuredOperation.ok && !duplicateOperationExecuted],
+    ['one-shot derivation assembles the explicit envelope byte-for-byte',
+      derivationSeedWrites.every((result) => result.ok)
+      && derivedOpenRun.ok
+      && derivedOpenRun.runId === derivationRunId
+      && derivedOpenRun.stage.id === 'premise'
+      && derivedOneShot.ok
+      && JSON.stringify(derivedOneShot.value) === JSON.stringify(explicitOneShot)
+      && oneShotOperation.ok
+      && oneShotRead.ok
+      && oneShotRetained !== undefined
+      && oneShotRetained.payload.stageId === explicitOneShot.stageId
+      && oneShotRetained.payload.operationId === explicitOneShot.operationId
+      && oneShotRetained.payload.kind === explicitOneShot.kind
+      && oneShotRetained.payload.action === explicitOneShot.action],
+    ['one-shot derivation still refuses a retained duplicate identity',
+      !duplicateOneShot.ok
+      && !duplicateOneShotExecuted
+      && duplicateOneShot.errors?.some((error) =>
+        error.includes('already retained'))],
+    ['one-shot kind derivation matches the classifier for git and gh',
+      derivedGitKind.ok
+      && derivedGitKind.value.kind
+        === measuredOperationKind('git', ['fetch', '--prune', 'origin'])
+      && derivedGitKind.value.kind === 'subprocess'
+      && derivedGitKind.value.action === 'git fetch'
+      && derivedGhKind.ok
+      && derivedGhKind.value.kind
+        === measuredOperationKind('gh', ['api', 'repos/example/project/issues'])
+      && derivedGhKind.value.kind === 'github-api'
+      && derivedGhKind.value.action === 'list open issues'],
+    ['two open runs are a typed ambiguity naming both candidates',
+      secondOpenRunWrites.every((result) => result.ok)
+      && !ambiguousOpenRun.ok
+      && ambiguousOpenRun.candidates?.length === 2
+      && ambiguousOpenRun.errors[0].includes(derivationRunId)
+      && ambiguousOpenRun.errors[0].includes(secondOpenRunId)],
+    ['an open run without an active stage is a typed derivation error',
+      idleStageWrites.every((result) => result.ok)
+      && !idleStageDerivation.ok
+      && idleStageDerivation.errors[0]
+        === 'measurement run has no active stage'
+      && !emptyStoreDerivation.ok
+      && emptyStoreDerivation.candidates?.length === 0],
+    ['the measured grammar requires -- and names its full usage on misuse',
+      measuredParses[0].mode === 'measured'
+      && measuredParses[0].operationId === 'op-1'
+      && measuredParses[0].action === null
+      && JSON.stringify(measuredParses[0].command)
+        === JSON.stringify(['git', 'fetch'])
+      && measuredParses[1].mode === 'measured'
+      && measuredParses[1].action === 'fetch base'
+      && measuredParses.slice(2).every((parsedValue) =>
+        parsedValue.mode === null && parsedValue.error === MEASURED_USAGE)],
     ['raw operation replay cannot inflate a derived aggregate',
       !replayedOperationDerivation.ok],
     ['raw stage events cannot be reordered before aggregate derivation',
@@ -10159,6 +10404,27 @@ async function selfTest() {
   return passed === cases.length;
 }
 
+const MEASURED_USAGE =
+  'expected --measured <operationId> [--action <text>] -- <executable> <argument>...';
+
+function parseMeasuredArgs(args) {
+  const operationId = args[1];
+  if (operationId === undefined || operationId.startsWith('-')) {
+    return { mode: null, error: MEASURED_USAGE };
+  }
+  let index = 2;
+  let action = null;
+  if (args[index] === '--action') {
+    action = args[index + 1];
+    if (action === undefined) return { mode: null, error: MEASURED_USAGE };
+    index += 2;
+  }
+  if (args[index] !== '--') return { mode: null, error: MEASURED_USAGE };
+  const command = args.slice(index + 1);
+  if (command.length === 0) return { mode: null, error: MEASURED_USAGE };
+  return { mode: 'measured', operationId, action, command };
+}
+
 function parseArgs(args) {
   if (args.length === 1 && args[0] === '--self-test') return { mode: 'self-test' };
   if (args.length === 0) return { mode: 'summarize' };
@@ -10169,6 +10435,7 @@ function parseArgs(args) {
   if (args.length === 1 && args[0] === '--run-operation') {
     return { mode: 'run-operation' };
   }
+  if (args[0] === '--measured') return parseMeasuredArgs(args);
   if (args.length === 1 && args[0] === '--finalize-events') {
     return { mode: 'finalize-events' };
   }
@@ -10196,7 +10463,9 @@ function parseArgs(args) {
   return {
     mode: null,
     error:
-      'expected --capture-event, --run-operation, --finalize-events, '
+      'expected --capture-event, --run-operation, '
+      + '--measured <operationId> [--action <text>] -- <executable> <argument>..., '
+      + '--finalize-events, '
       + '--check-budget-policy <path>, '
       + '--export-evidence-bundle, '
       + '--summarize-store, --compare <checkpoint>, --budget-source, --validate-budget, '
@@ -10304,6 +10573,23 @@ async function main() {
         'caller-composed aggregate records are refused; capture authenticated raw events and finalize them',
       ],
     }, false);
+  }
+  if (parsed.mode === 'measured') {
+    let directory;
+    try {
+      directory = measurementDirectory();
+    } catch (error) {
+      console.error(`measurement-contract: cannot resolve Git measurement storage: ${error.message}`);
+      process.exit(1);
+    }
+    const derived = deriveMeasuredOperationInput(
+      parsed.operationId,
+      parsed.action,
+      parsed.command,
+      directory,
+    );
+    if (!derived.ok) writeResult(derived, false);
+    writeResult(runMeasuredOperation(derived.value, directory));
   }
   const input = readJsonInput();
   if (!input.ok) {

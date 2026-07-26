@@ -67,8 +67,9 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    (`tools/agentic/**`, host artifacts, a STATE config edit) are Setup's unfinished work — human
    work: stop with the Setup remedy, and never commit them to the base or package them into a PR
    inside a Dev run. If the human explicitly directs landing them anyway, deliver that migration
-   PR, then treat the unmerged PR as a base prerequisite: retain a `human` wait boundary, finish
-   the run with the typed guardrail-failure stop, and let the next invocation start clean after
+   PR, then treat the unmerged PR as a base prerequisite: close the run with one
+   `prime.mjs --conclude-json` call (`waitCategory: "human"` retains the wait boundary alongside
+   the typed guardrail-failure stop), and let the next invocation start clean after
    the human merges — never continue into selection holding a config fingerprint the base no
    longer matches.
 5. On a clean tree, fetch and switch to `cfg.baseBranch`, pull fast-forward, then re-read STATE
@@ -82,10 +83,11 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    exact stdout back to a retained file, and use that file for every later snapshot-derived
    decision. Use `GIT_MUTATION`, `ISSUE_MUTATION`,
    `PR_MUTATION`, `REVIEW_MUTATION`, or `WAIT_BOUNDARY`; use `UNKNOWN_MUTATION` when uncertain.
-   Mutations may be batched only while no decision intervenes. Then rerun the full `scan.mjs` —
-   as a measured operation inside the open selection stage — and replace the invalidated snapshot
-   before actionability, absence, selection, or stop decisions. Never read items from an
-   invalidated section as authority.
+   Mutations may be batched only while no decision intervenes. Then rerun the full `scan.mjs` as
+   a one-shot measured operation inside the open selection stage —
+   `node tools/agentic/measurement-contract.mjs --measured <operationId> -- node tools/agentic/scan.mjs`
+   — and replace the invalidated snapshot before actionability, absence, selection, or stop
+   decisions. Never read items from an invalidated section as authority.
 8. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
     durable issue-comment marker before selecting work, including an intent that crashed before a
     draft PR existed. A marker has authority only when its author currently has admin/maintain, or
@@ -156,9 +158,9 @@ measurement run UUID before Runtime opens.
    Immediately retain the `selection` stage start. This must complete before authentication,
    Git synchronization, setup, scan, lifecycle recovery, route probing, or another selection
    operation. Stop if either boundary is not retained.
-5. Run one versioned startup snapshot through `scan.mjs` as a measured operation
-   (`measurement-contract.mjs --run-operation`) inside the open selection stage, then continue
-   at step 4 of Prime.
+5. Run one versioned startup snapshot through `scan.mjs` as a one-shot measured operation
+   (`measurement-contract.mjs --measured <operationId> -- node tools/agentic/scan.mjs`) inside
+   the open selection stage, then continue at step 4 of Prime.
 
 ## Runtime execution seam
 
@@ -226,7 +228,8 @@ outage by reinitializing state.
 
 Pair the operational path with authenticated measurement capture. From the early `selection`
 stage start through its end, execute every startup GitHub read, subprocess, and remote mutation
-through `measurement-contract.mjs --run-operation`; this includes auth/access checks, Git
+through the one-shot `measurement-contract.mjs --measured` grammar below; this includes
+auth/access checks, Git
 synchronization, setup, scan, lifecycle recovery, probing, route-state initialization, and the
 selection decision. Retain public `stage-start`, `stage-end`, `wait-start`, and `wait-end`
 boundaries: stage/wait starts and wait ends use empty envelopes; an orchestrator-owned stage end
@@ -237,8 +240,20 @@ the initial lane/proof plus exact capability and initial route-state fingerprint
 lane/capability/outage fields, and persists `unit-context` before any dispatch. Later final-diff
 promotion remains visible in each Runtime receipt's own effective lane and lane-proof fingerprint.
 
-Run each GitHub API read, subprocess, or remote mutation through
-`measurement-contract.mjs --run-operation`; never submit an observed command envelope through the
+Run each GitHub API read, subprocess, or remote mutation as a one-shot measured operation:
+
+```bash
+node tools/agentic/measurement-contract.mjs --measured <operationId> \
+  [--action "<text>"] -- <executable> <argument>...
+```
+
+Everything after the lone `--` is the exact argv, never a shell string. The tool derives the run
+(exactly one retained `run-start` without a `run-finish`; zero or several is a typed error naming
+the candidates), the replayed active stage, the operation kind from the same classifier the
+validator enforces, and a bounded `<executable> <subcommand>` action (`--action` overrides), then
+hands the assembled envelope to the same wrapper `--run-operation` runs — no journal, duplicate,
+stage, or policy check is relaxed. Keep the JSON-envelope `--run-operation` path as the fallback
+for exotic inputs. Never submit an observed command envelope through the
 public capture endpoint. The wrapper applies configured-base/forbidden-operation policy and
 durably journals remote-mutation intent before execution, then appends its commit marker only
 after authenticated operation capture. An unresolved intent terminally blocks every later remote
@@ -676,12 +691,24 @@ Invalidate relevant snapshot sections, re-derive state, and take the next unit u
 
 Never end a turn waiting on a human with the run left open and no retained boundary. The broker
 is process-bound and the intent record one-use: when the session ends, an open run without a
-`run-finish` becomes an unrecoverable orphan with a dangling measurement ledger. Before any
-human handoff (an unmergeable prerequisite PR, a blocked authorization, anything phrased "tell
-me when…"), retain the `human` `wait-start`, and if the handoff ends the run's useful work,
-retain `wait-end` and `stage-end` and call `--finish-json` with the guardrail-failure stop so
-the ledger closes. "I'll continue when you're done" is only valid within the same living
-session, and the handoff message must say so.
+`run-finish` becomes an unrecoverable orphan with a dangling measurement ledger. Before a
+same-session pause, retain the `human` `wait-start` (and `wait-end` on resume). When a human
+handoff (an unmergeable prerequisite PR, a blocked authorization, anything phrased "tell
+me when…") ends the run's useful work, close everything with ONE call:
+
+```bash
+node tools/agentic/prime.mjs --conclude-json <path|->
+```
+
+The input is `{run,hostEvidence,reason:"guardrail-failure",stageId,blockedReason:{code,reason},
+waitCategory?}`; `run` and `hostEvidence` come from the prime summary, and `waitCategory:
+"human"` adds the wait boundaries. It derives the open measurement run from the retained store,
+captures the `human` `wait-start`/`wait-end`, the typed-unavailable `stage-end`, and the blocked
+`run-finish` through the public capture CLI, then calls `--finish-json` with the
+guardrail-failure stop so the ledger closes — stopping fail-closed at the first typed error. The
+manual event path (`--capture-event` boundaries plus `--finish-json`) stays as the diagnostic
+fallback for a failed conclude step. "I'll continue when you're done" is only valid within the
+same living session, and the handoff message must say so.
 
 For every queue-sensitive finish, invalidate stale sections, run a fresh full `scan.mjs`, and
 require every queue/lifecycle/dependency section to be complete. Pipe that exact verified snapshot
