@@ -552,6 +552,23 @@ Run:
    no model, no network: capture-hook → prime → detached-broker probe →
    guardrail finish against a scratch fixture repository.
 
+Manual pre-release gate for `posture: isolated` — NOT part of the battery above, NOT part of
+`--self-test`, and NOT in CI:
+
+```bash
+node tools/agentic/loop-smoke.mjs --real-engine-smoke
+```
+
+It runs the same four steps with the engine shims removed, so the route capability probe dispatches
+real writer and reviewer postures inside the authority sandbox, and it fails unless every
+`claude.native` capability comes back available. This is the only check that proves an engine can
+actually be dispatched under `posture: isolated`: the shimmed smoke reports typed-unavailable
+capabilities and passes, so it cannot distinguish a working isolated posture from a broken one.
+
+Requires Linux with a working `/usr/bin/bwrap` and an authenticated engine CLI, and it spends real
+model budget (roughly $0.25 per run). Run it by hand before cutting a release; a missing
+precondition is reported as a failure rather than a skip.
+
 Show the complete diff. A fresh install or migration is delivered through a PR by default. Never
 auto-merge Setup's own change.
 
