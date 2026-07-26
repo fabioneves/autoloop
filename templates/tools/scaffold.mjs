@@ -4,8 +4,10 @@
 // tool and host artifact through model-mediated compare/copy calls — dozens of
 // slow round trips wrapping microsecond file operations. This tool performs the
 // complete mechanical reconciliation in one invocation and returns a typed
-// report. Judgment stays with the model: STATE/LOOP prose merging, the
-// interview, ci-policy authorship, the visible diff, and the commit.
+// report. A second entry point merges the STATE and LOOP documents against
+// their templates on the same principle. Judgment stays with the model: the
+// interview, ci-policy authorship, whatever the merge report flags for human
+// review, the visible diff, and the commit.
 
 import {
   chmodSync,
@@ -20,7 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { extractConfig, validateConfig } from './config-contract.mjs';
+import { CONFIG_VERSION, extractConfig, validateConfig } from './config-contract.mjs';
 import {
   NON_MANUAL_TOOL_FILES,
   UNIVERSAL_TOOL_FILES,
@@ -50,6 +52,39 @@ const HOOK_MERGES = Object.freeze([
   ['settings-hooks.template.json', '.claude/settings.json'],
   ['codex-hooks.template.json', '.codex/hooks.json'],
 ]);
+// `repoAppendedHeadings` names the repository memory a template cannot mark
+// with a placeholder, because the template ships seed content the repository
+// then appends to. It is keyed by the template's own heading: a template that
+// renames one stops matching, and the merge fails closed instead of replacing
+// durable repository memory. LOOP declares none — it is entirely
+// template-owned prose plus the scalar values below.
+const MERGE_DOCUMENTS = Object.freeze({
+  state: Object.freeze({
+    label: 'STATE',
+    template: 'STATE.template.md',
+    install: 'docs/agentic/STATE.md',
+    repoAppendedHeadings: Object.freeze([
+      '## lessons learned (durable rules; write here, not in chat)',
+    ]),
+  }),
+  loop: Object.freeze({
+    label: 'LOOP',
+    template: 'LOOP.template.md',
+    install: 'docs/agentic/LOOP.md',
+    repoAppendedHeadings: Object.freeze([]),
+  }),
+});
+// Scalar holes the machine-readable config owns. The installed prose only
+// renders these values and goes stale the moment the config changes, so the
+// config wins over the installed line.
+const CONFIG_VALUE_SOURCES = Object.freeze({
+  CHECKLIST_PATH: (config) => config?.review?.checklistPath,
+  GATE_COMMAND: (config) => config?.gate?.command,
+});
+const PLACEHOLDER_PATTERN = /\{\{([A-Z0-9_]+)\}\}/gu;
+const HAS_PLACEHOLDER = /\{\{[A-Z0-9_]+\}\}/u;
+const SOLE_PLACEHOLDER = /^\s*\{\{([A-Z0-9_]+)\}\}\s*$/u;
+const LIST_MARKER = /^\s{0,3}[-*+]\s/u;
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -287,7 +322,10 @@ export function reconcile(root, templates, { audit = false } = {}) {
     results.push({ path: 'docs/agentic/LOOP.md', action: 'identical' });
   } else {
     results.push({ path: 'docs/agentic/LOOP.md', action: 'kept' });
-    warnings.push('docs/agentic/LOOP.md differs from the template; reconcile its prose in the visible diff');
+    warnings.push(
+      'docs/agentic/LOOP.md differs from the template; merge it with '
+      + '`scaffold.mjs --merge-loop <root>` and review that typed report',
+    );
   }
 
   if (!existsSync(resolve(root, '.autoloop', 'ci-policy.json'))) {
@@ -308,6 +346,536 @@ export function reconcile(root, templates, { audit = false } = {}) {
     results: results.sort((left, right) => left.path.localeCompare(right.path)),
     warnings,
   };
+}
+
+// ---------------------------------------------------------------------------
+// STATE / LOOP document merge
+//
+// A template rewrite deletes and renames prose wholesale while every install
+// carries repository-owned content that must survive. Reading the template in
+// fragments and hand-splicing the prose cost over half of a measured
+// 11.2-minute migration, so the splice is mechanical here and the model only
+// adjudicates what the report flags.
+//
+// The template declares its own repository-owned regions with {{PLACEHOLDER}}
+// markers, and each marker's shape says how that region merges:
+//   * sole content of a fenced block (the ```json autoloop-config``` block) —
+//     the fence content comes from the install, the surrounding prose from the
+//     template;
+//   * alone on the line after a list (the extra escalate paths) — the
+//     repository's own entries are spliced back after the template's;
+//   * alone on its line anywhere else (Mission's guidance, spec docs, and
+//     invariants) — the whole section is repository prose, preserved verbatim
+//     under the template's heading;
+//   * inside a line of prose (LOOP's project name, checklist path, and gate
+//     command) — a scalar value, taken from the machine-readable config where
+//     the config owns it and otherwise recovered by aligning that exact
+//     template line against the installed document.
+// Everything else is template-owned and arrives verbatim. Nothing is dropped:
+// an installed section with no template counterpart is preserved in place and
+// reported `needs-human-review`, and any structural ambiguity that could lose
+// repository bytes yields the report and no merged document at all.
+// ---------------------------------------------------------------------------
+
+function headingKey(level, title) {
+  return `${'#'.repeat(level)} ${title.toLowerCase().replace(/\s+/gu, ' ').trim()}`;
+}
+
+function fenceDelimiter(line) {
+  const match = /^\s{0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+  return match === null ? null : { marker: match[1], info: match[2].trim() };
+}
+
+function closesFence(fence, open) {
+  return fence.marker[0] === open.marker[0]
+    && fence.marker.length >= open.marker.length
+    && fence.info === '';
+}
+
+function trimTrailingBlanks(lines) {
+  let end = lines.length;
+  while (end > 0 && lines[end - 1].trim() === '') end -= 1;
+  return lines.slice(0, end);
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+// Flat parse: the title and the prose before the first sub-heading are the
+// preamble, and every heading below the title starts a section. A heading
+// inside a fenced block is content — STATE's injection-guardrail snippet
+// contains one.
+function parseSections(text) {
+  const lines = String(text).replace(/\r\n/gu, '\n').split('\n');
+  const preamble = [];
+  const sections = [];
+  let open = null;
+  let current = null;
+  for (const line of lines) {
+    const fence = fenceDelimiter(line);
+    if (fence !== null) {
+      if (open === null) open = fence;
+      else if (closesFence(fence, open)) open = null;
+    } else if (open === null) {
+      const heading = /^(#{2,6})\s+(\S.*?)\s*$/u.exec(line);
+      if (heading !== null) {
+        current = {
+          level: heading[1].length,
+          title: heading[2],
+          key: headingKey(heading[1].length, heading[2]),
+          body: [],
+        };
+        sections.push(current);
+        continue;
+      }
+    }
+    (current === null ? preamble : current.body).push(line);
+  }
+  for (const section of sections) section.body = trimTrailingBlanks(section.body);
+  return {
+    preamble: trimTrailingBlanks(preamble),
+    sections,
+    unterminatedFence: open !== null,
+  };
+}
+
+function renderDocument(preamble, blocks) {
+  const parts = preamble.length > 0 ? [preamble.join('\n')] : [];
+  for (const block of blocks) {
+    parts.push([`${'#'.repeat(block.level)} ${block.title}`, ...block.body].join('\n'));
+  }
+  return `${parts.join('\n\n')}\n`;
+}
+
+// The contiguous non-blank run ending just above `index` is a list when any of
+// its lines opens a list item; that makes the placeholder a list extension
+// point rather than a whole-section repository hole.
+function listRunAbove(lines, index) {
+  let start = index;
+  while (start > 0 && lines[start - 1].trim() !== '') start -= 1;
+  if (start === index) return null;
+  return lines.slice(start, index).some((line) => LIST_MARKER.test(line)) ? start : null;
+}
+
+function classifyHoles(body) {
+  const holes = [];
+  let open = null;
+  let fenceStart = -1;
+  for (let index = 0; index < body.length; index += 1) {
+    const line = body[index];
+    const fence = fenceDelimiter(line);
+    if (fence !== null) {
+      if (open === null) {
+        open = fence;
+        fenceStart = index;
+      } else if (closesFence(fence, open)) {
+        const inner = body.slice(fenceStart + 1, index);
+        const sole = inner.length === 1 ? SOLE_PLACEHOLDER.exec(inner[0]) : null;
+        if (sole !== null) {
+          holes.push({
+            kind: 'fence', name: sole[1], info: open.info, start: fenceStart, end: index,
+          });
+        }
+        open = null;
+      }
+      continue;
+    }
+    if (open !== null) continue;
+    const sole = SOLE_PLACEHOLDER.exec(line);
+    if (sole !== null) {
+      const listStart = listRunAbove(body, index);
+      holes.push(listStart === null
+        ? { kind: 'block', name: sole[1], index }
+        : { kind: 'list', name: sole[1], index, listStart });
+      continue;
+    }
+    for (const match of line.matchAll(PLACEHOLDER_PATTERN)) {
+      holes.push({ kind: 'inline', name: match[1], index });
+    }
+  }
+  return holes;
+}
+
+function listItemLabel(line) {
+  const text = line.replace(LIST_MARKER, '').trim();
+  const bold = /^\*\*(.+?)\*\*/u.exec(text);
+  return (bold === null ? text : bold[1]).toLowerCase().replace(/\s+/gu, ' ').trim();
+}
+
+function parseListItems(lines) {
+  const items = [];
+  for (const line of lines) {
+    if (LIST_MARKER.test(line)) items.push([line]);
+    else if (items.length > 0) items[items.length - 1].push(line);
+  }
+  return items.map((lines_) => ({ lines: lines_, label: listItemLabel(lines_[0]) }));
+}
+
+function listRuns(lines) {
+  const runs = [];
+  let start = -1;
+  for (let index = 0; index <= lines.length; index += 1) {
+    const blank = index === lines.length || lines[index].trim() === '';
+    if (!blank) {
+      if (start < 0) start = index;
+      continue;
+    }
+    if (start >= 0) {
+      const run = lines.slice(start, index);
+      if (run.some((line) => LIST_MARKER.test(line))) runs.push(run);
+      start = -1;
+    }
+  }
+  return runs;
+}
+
+function fenceBlocks(text) {
+  const lines = String(text).replace(/\r\n/gu, '\n').split('\n');
+  const blocks = [];
+  let open = null;
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const fence = fenceDelimiter(lines[index]);
+    if (fence === null) continue;
+    if (open === null) {
+      open = fence;
+      start = index;
+    } else if (closesFence(fence, open)) {
+      blocks.push({ info: open.info, content: lines.slice(start + 1, index) });
+      open = null;
+    }
+  }
+  return blocks;
+}
+
+// A template line carrying inline placeholders becomes a pattern; the installed
+// document must answer it with exactly one distinct value tuple, or the value
+// is unresolved and the merge fails closed rather than guessing.
+function alignLine(line, installLines) {
+  const names = [...line.matchAll(PLACEHOLDER_PATTERN)].map((match) => match[1]);
+  if (names.length === 0) return null;
+  const literals = line.split(/\{\{[A-Z0-9_]+\}\}/gu).map(escapeRegExp);
+  const pattern = new RegExp(`^${literals.join('(.+?)')}$`, 'u');
+  const tuples = new Map();
+  for (const candidate of installLines) {
+    const match = pattern.exec(candidate);
+    if (match === null) continue;
+    tuples.set(JSON.stringify(match.slice(1)), match.slice(1));
+  }
+  if (tuples.size !== 1) return null;
+  const values = [...tuples.values()][0];
+  return Object.fromEntries(names.map((name, index) => [name, values[index]]));
+}
+
+export function mergeDocument(templateText, installText, options = {}) {
+  const {
+    config = null,
+    repoAppendedHeadings = [],
+    label = 'document',
+  } = options;
+  const ambiguities = [];
+  const warnings = [];
+  const template = parseSections(templateText);
+  const install = parseSections(installText);
+  if (template.unterminatedFence) ambiguities.push('the template has an unterminated fenced block');
+  if (install.unterminatedFence) {
+    ambiguities.push('the installed document has an unterminated fenced block');
+  }
+  for (const [parsed, which] of [[template, 'the template'], [install, 'the installed document']]) {
+    const seen = new Set();
+    for (const section of parsed.sections) {
+      if (seen.has(section.key)) {
+        ambiguities.push(
+          `${which} repeats the heading "${section.title}"; repeated headings cannot be matched`,
+        );
+      }
+      seen.add(section.key);
+    }
+  }
+  const appended = new Set(repoAppendedHeadings);
+  const templateKeys = new Set(template.sections.map((section) => section.key));
+  for (const key of appended) {
+    if (!templateKeys.has(key)) {
+      ambiguities.push(
+        `the template no longer contains the repository-appended section "${key}"; `
+        + 'classify it by hand before merging, or its repository content is replaced',
+      );
+    }
+  }
+  const installByKey = new Map(install.sections.map((section) => [section.key, section]));
+  const installFences = fenceBlocks(installText);
+  const preservedTexts = [];
+  const filledFenceInfos = [];
+  // A hole whose fill already failed keeps its marker in the assembled text;
+  // the failure is reported once, not again as an unresolved value.
+  const unfilledHoles = new Set();
+
+  const sections = [];
+  const merges = new Map();
+  for (const templateSection of template.sections) {
+    const heading = `${'#'.repeat(templateSection.level)} ${templateSection.title}`;
+    const installed = installByKey.get(templateSection.key) ?? null;
+    const holes = classifyHoles(templateSection.body);
+    if (appended.has(templateSection.key) || holes.some((hole) => hole.kind === 'block')) {
+      const preserve = installed !== null;
+      if (preserve) preservedTexts.push(installed.body.join('\n'));
+      merges.set(templateSection.key, {
+        level: templateSection.level,
+        title: templateSection.title,
+        body: preserve ? installed.body : templateSection.body,
+      });
+      sections.push({
+        heading,
+        ownership: 'repository',
+        action: preserve ? 'preserved' : 'new',
+      });
+      continue;
+    }
+    const body = [...templateSection.body];
+    const preserved = [];
+    for (const hole of [...holes].reverse()) {
+      if (hole.kind === 'fence') {
+        const matches = installFences.filter((block) => block.info === hole.info);
+        if (matches.length !== 1) {
+          ambiguities.push(
+            `the installed document holds ${matches.length} \`${hole.info}\` blocks; `
+            + 'exactly one is required to fill the template block',
+          );
+          unfilledHoles.add(hole.name);
+          continue;
+        }
+        const content = matches[0].content;
+        body.splice(hole.start + 1, hole.end - hole.start - 1, ...content);
+        preservedTexts.push(content.join('\n'));
+        filledFenceInfos.push(hole.info);
+        let version = null;
+        try {
+          version = JSON.parse(content.join('\n'))?.version ?? null;
+        } catch {
+          version = null;
+        }
+        if (hole.info === 'json autoloop-config') {
+          if (version === null) {
+            warnings.push(
+              'the preserved autoloop-config block is not valid JSON with a version; '
+              + 'validate it with config-contract.mjs before committing',
+            );
+          } else if (version !== CONFIG_VERSION) {
+            warnings.push(
+              `the preserved autoloop-config records version ${version} and the current `
+              + `schema is ${CONFIG_VERSION}; land the migrated configuration in this same commit`,
+            );
+          }
+        }
+        const stamp = version === null ? '' : ` (version ${version})`;
+        preserved.push(`the \`${hole.info}\` block${stamp}`);
+        continue;
+      }
+      if (hole.kind !== 'list') continue;
+      const templateItems = parseListItems(body.slice(hole.listStart, hole.index));
+      const labels = new Set(templateItems.map((item) => item.label));
+      const candidates = installed === null
+        ? []
+        : listRuns(installed.body)
+          .map((run) => parseListItems(run))
+          .map((items) => ({
+            items,
+            overlap: items.filter((item) => labels.has(item.label)).length,
+          }))
+          .sort((left, right) => right.overlap - left.overlap);
+      if (candidates.length > 0 && candidates[0].overlap === 0) {
+        ambiguities.push(
+          `no list under "${templateSection.title}" aligns with the template's list, so `
+          + 'repository entries there cannot be told apart from template entries',
+        );
+        unfilledHoles.add(hole.name);
+        continue;
+      }
+      const extras = candidates.length === 0
+        ? []
+        : candidates[0].items.filter((item) => !labels.has(item.label));
+      body.splice(hole.index, 1, ...extras.flatMap((item) => item.lines));
+      for (const item of extras) preservedTexts.push(item.lines.join('\n'));
+      if (extras.length > 0) {
+        preserved.push(
+          `${extras.length} repository list ${extras.length === 1 ? 'entry' : 'entries'} `
+          + `(${extras.map((item) => item.label).join(', ')})`,
+        );
+      }
+    }
+    merges.set(templateSection.key, {
+      level: templateSection.level,
+      title: templateSection.title,
+      body,
+    });
+    const entry = {
+      heading,
+      ownership: 'template',
+      action: installed === null ? 'new' : 'from-template',
+    };
+    if (preserved.length > 0) entry.preserved = preserved;
+    sections.push(entry);
+  }
+
+  // An installed section with no template counterpart keeps its position: it is
+  // emitted after the merged form of the nearest preceding matched section.
+  const anchored = new Map();
+  let anchor = '';
+  for (const section of install.sections) {
+    if (templateKeys.has(section.key)) {
+      anchor = section.key;
+      continue;
+    }
+    if (!anchored.has(anchor)) anchored.set(anchor, []);
+    anchored.get(anchor).push(section);
+    preservedTexts.push(section.body.join('\n'));
+    sections.push({
+      heading: `${'#'.repeat(section.level)} ${section.title}`,
+      ownership: 'unclassified',
+      action: 'needs-human-review',
+      reason: 'the template has no counterpart section; keep, fold, or delete it by hand',
+    });
+  }
+  const orphanBlocks = (key) => (anchored.get(key) ?? []).map((section) => ({
+    level: section.level,
+    title: section.title,
+    body: section.body,
+  }));
+  const blocks = [...orphanBlocks('')];
+  for (const templateSection of template.sections) {
+    blocks.push(merges.get(templateSection.key));
+    blocks.push(...orphanBlocks(templateSection.key));
+  }
+
+  let text = renderDocument(template.preamble, blocks);
+  const installLines = String(installText).replace(/\r\n/gu, '\n').split('\n');
+  const values = {};
+  for (const [name, read] of Object.entries(CONFIG_VALUE_SOURCES)) {
+    const value = read(config);
+    if (typeof value === 'string' && value.length > 0 && text.includes(`{{${name}}}`)) {
+      values[name] = { value, source: 'autoloop-config' };
+      text = text.split(`{{${name}}}`).join(value);
+    }
+  }
+  for (const line of text.split('\n')) {
+    if (!HAS_PLACEHOLDER.test(line)) continue;
+    const resolved = alignLine(line, installLines);
+    if (resolved === null) continue;
+    for (const [name, value] of Object.entries(resolved)) {
+      const bound = values[name];
+      if (bound === undefined) {
+        values[name] = { value, source: 'installed line' };
+      } else if (bound.source === 'installed line' && bound.value !== value) {
+        ambiguities.push(
+          `{{${name}}} aligns to both "${bound.value}" and "${value}" in the installed `
+          + 'document; the value is not recoverable',
+        );
+      }
+    }
+  }
+  for (const [name, entry] of Object.entries(values)) {
+    text = text.split(`{{${name}}}`).join(entry.value);
+  }
+  for (const line of text.split('\n')) {
+    for (const match of line.matchAll(PLACEHOLDER_PATTERN)) {
+      if (unfilledHoles.has(match[1])) continue;
+      ambiguities.push(
+        `{{${match[1]}}} has no value: no installed line matches the template line `
+        + `"${line.trim()}"`,
+      );
+    }
+  }
+  const mergedFences = fenceBlocks(text);
+  for (const info of new Set(filledFenceInfos)) {
+    const count = mergedFences.filter((block) => block.info === info).length;
+    if (count !== 1) {
+      ambiguities.push(
+        `the merged document would hold ${count} \`${info}\` blocks; a duplicate arrives with a `
+        + 'section that has no template counterpart — resolve that section first',
+      );
+    }
+  }
+  for (const preserved of preservedTexts) {
+    if (preserved.length > 0 && !text.includes(preserved)) {
+      ambiguities.push(
+        'a preserved repository region did not survive assembly verbatim: '
+        + `"${preserved.split('\n')[0].trim()}"`,
+      );
+    }
+  }
+  const counts = {
+    fromTemplate: sections.filter((entry) => entry.action === 'from-template').length,
+    preserved: sections.filter((entry) => entry.action === 'preserved').length,
+    new: sections.filter((entry) => entry.action === 'new').length,
+    needsHumanReview: sections.filter((entry) => entry.action === 'needs-human-review').length,
+  };
+  if (counts.needsHumanReview > 0 && counts.new > 0) {
+    warnings.push(
+      `${counts.needsHumanReview} installed section(s) have no template counterpart while `
+      + `${counts.new} template section(s) are new; a renamed section appears as both`,
+    );
+  }
+  return {
+    report: {
+      version: 1,
+      document: label,
+      ok: ambiguities.length === 0,
+      wrote: false,
+      changed: null,
+      counts,
+      values,
+      sections,
+      warnings,
+      ambiguities,
+    },
+    merged: ambiguities.length === 0 ? text : null,
+  };
+}
+
+function readInstalledConfig(root) {
+  try {
+    return extractConfig(readFileSync(resolve(root, 'docs', 'agentic', 'STATE.md'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+export function mergeDocumentFiles(root, templates, kind, { write = false } = {}) {
+  const spec = MERGE_DOCUMENTS[kind];
+  if (spec === undefined) throw new Error(`unknown document ${kind}`);
+  if (!existsSync(join(templates, TEMPLATE_MARKER))) {
+    throw new Error(
+      `templates directory ${templates} does not contain ${TEMPLATE_MARKER}; `
+      + 'pass --templates <plugin templates dir>',
+    );
+  }
+  const installPath = resolve(root, spec.install);
+  if (!existsSync(installPath)) {
+    throw new Error(
+      `${spec.install} does not exist; a fresh install is scaffolded by --reconcile, not merged`,
+    );
+  }
+  const installText = readFileSync(installPath, 'utf8');
+  const { report, merged } = mergeDocument(
+    readFileSync(join(templates, spec.template), 'utf8'),
+    installText,
+    {
+      config: readInstalledConfig(root),
+      label: spec.label,
+      repoAppendedHeadings: spec.repoAppendedHeadings,
+    },
+  );
+  report.template = `templates/${spec.template}`;
+  report.install = spec.install;
+  if (merged !== null) {
+    report.changed = merged !== installText;
+    if (write) {
+      if (report.changed) writeFileSync(installPath, merged);
+      report.wrote = true;
+    }
+  }
+  return { report, merged };
 }
 
 function fixtureTemplates() {
@@ -367,6 +935,302 @@ function fixtureState(policy) {
     '```',
     '',
   ].join('\n');
+}
+
+const FIXTURE_CONFIG = Object.freeze({
+  version: '0.25.0',
+  baseBranch: 'main',
+  gate: { command: 'npm test', quickCommand: null, setupCommand: null },
+  merge: { policy: 'manual' },
+  tracker: { provider: 'none' },
+  review: { checklistPath: 'docs/agentic/checklist.md' },
+});
+
+function fixtureStateTemplate() {
+  return [
+    '# STATE — fixture',
+    '',
+    '> Standing prose the template owns.',
+    '',
+    '## Mission (the VISION)',
+    '',
+    'Develop and maintain **{{PROJECT_NAME}}** to spec.',
+    '',
+    '{{REPO_GUIDANCE}}',
+    '',
+    'The load-bearing invariants:',
+    '',
+    '{{INVARIANTS}}',
+    '',
+    '## Config (the machine-readable surface)',
+    '',
+    'Config prose rewritten in this template version.',
+    '',
+    '```json autoloop-config',
+    '{{CONFIG_JSON}}',
+    '```',
+    '',
+    '## Roles — writer ≠ reviewer',
+    '',
+    'Renamed from "Runtime and roles" in this template version.',
+    '',
+    '### Escalate-list',
+    '',
+    '- **secrets / env**: `.env*`.',
+    '- **deploy / ops**: `Dockerfile*`,',
+    '  `.github/workflows/*`.',
+    '{{ESCALATE_PATHS}}',
+    '',
+    '## Digest',
+    '',
+    'New in this template version.',
+    '',
+    '## Lessons learned (durable rules; write here, not in chat)',
+    '',
+    '- **Seed lesson.** Shipped by the template.',
+    '',
+  ].join('\n');
+}
+
+function fixtureStateInstall(extraFence = false) {
+  return [
+    '# STATE — fixture',
+    '',
+    '> Older standing prose the template rewrote.',
+    '',
+    '## Mission (the VISION)',
+    '',
+    'Develop and maintain **Fixture Project** to spec.',
+    '',
+    '- `AGENTS.md` — repository guidance.',
+    '',
+    'The load-bearing invariants:',
+    '',
+    '- Determinism is byte-exact.',
+    '- No ambient randomness.',
+    '',
+    '## Config (the machine-readable surface)',
+    '',
+    'Older config prose that the new template deleted.',
+    '',
+    '```json autoloop-config',
+    JSON.stringify(FIXTURE_CONFIG, null, 2),
+    '```',
+    '',
+    '## Runtime and roles — invocation-scoped',
+    '',
+    'Template prose the new version deleted under a renamed heading.',
+    ...(extraFence
+      ? ['', '```json autoloop-config', '{ "version": "0.24.0" }', '```']
+      : []),
+    '',
+    '### Escalate-list',
+    '',
+    '- **secrets / env**: `.env*`.',
+    '- **deploy / ops**: `Dockerfile*`,',
+    '  `.github/workflows/*`.',
+    '- **authoritative specification**: `spec/**`.',
+    '',
+    '## Queue & progress',
+    '',
+    'A repository section the new template has no counterpart for.',
+    '',
+    '## Lessons learned (durable rules; write here, not in chat)',
+    '',
+    '- **Seed lesson.** Shipped by the template.',
+    '- **Repository lesson.** Written by this repository.',
+    '',
+  ].join('\n');
+}
+
+function fixtureLoopTemplate() {
+  return [
+    '# The autoloop — fixture runbook',
+    '',
+    'A standing loop for **{{PROJECT_NAME}}**, driven from one session.',
+    '',
+    '## The pieces',
+    '',
+    '| Asset | Role |',
+    '|---|---|',
+    '| `{{CHECKLIST_PATH}}` | the criteria both reviewers grade against |',
+    '| `{{GATE_COMMAND}}` | the objective gate — the only source of "done" |',
+    '',
+    '## Autonomy & safety',
+    '',
+    '- Non-zero `{{GATE_COMMAND}}` = not done. Rewritten in this template version.',
+    '',
+  ].join('\n');
+}
+
+function fixtureLoopInstall(alignable = true) {
+  return [
+    '# The autoloop — fixture runbook',
+    '',
+    alignable
+      ? 'A standing loop for **Fixture Project**, driven from one session.'
+      : 'An older sentence that shares no literal text with the new template line.',
+    '',
+    '## The pieces',
+    '',
+    '| Asset | Role |',
+    '|---|---|',
+    '| `docs/agentic/old-checklist.md` | the criteria both reviewers grade against |',
+    '| `make check` | the objective gate — the only source of "done" |',
+    '',
+    '## Local operator notes',
+    '',
+    'A section this repository added to its own runbook.',
+    '',
+    '## Autonomy & safety',
+    '',
+    '- Non-zero `make check` = not done. Older wording.',
+    '',
+  ].join('\n');
+}
+
+function mergeSelfTest(expect) {
+  const templates = mkdtempSync(join(tmpdir(), 'autoloop-merge-templates-'));
+  const root = mkdtempSync(join(tmpdir(), 'autoloop-merge-root-'));
+  try {
+    writeFileSync(join(templates, TEMPLATE_MARKER), fixtureStateTemplate());
+    writeFileSync(join(templates, 'LOOP.template.md'), fixtureLoopTemplate());
+    const statePath = join(root, 'docs', 'agentic', 'STATE.md');
+    const loopPath = join(root, 'docs', 'agentic', 'LOOP.md');
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(statePath, fixtureStateInstall());
+    writeFileSync(loopPath, fixtureLoopInstall());
+
+    const dry = mergeDocumentFiles(root, templates, 'state');
+    const actions = new Map(dry.report.sections.map((entry) => [entry.heading, entry.action]));
+    expect(
+      'every repository-owned byte survives the merge',
+      [
+        'Fixture Project',
+        '- `AGENTS.md` — repository guidance.',
+        '- Determinism is byte-exact.',
+        '- No ambient randomness.',
+        '"version": "0.25.0"',
+        '- **authoritative specification**: `spec/**`.',
+        '- **Repository lesson.** Written by this repository.',
+        'A repository section the new template has no counterpart for.',
+        'Template prose the new version deleted under a renamed heading.',
+      ].every((fragment) => dry.merged.includes(fragment)),
+    );
+    expect(
+      'template-owned prose is replaced wholesale, preamble included',
+      dry.merged.includes('Standing prose the template owns.')
+        && dry.merged.includes('Config prose rewritten in this template version.')
+        && !dry.merged.includes('Older standing prose the template rewrote.')
+        && !dry.merged.includes('Older config prose that the new template deleted.'),
+    );
+    expect(
+      'a section the template added arrives as new',
+      actions.get('## Digest') === 'new'
+        && dry.merged.includes('New in this template version.')
+        && actions.get('## Roles — writer ≠ reviewer') === 'new',
+    );
+    expect(
+      'an installed section with no template counterpart is reported, never dropped',
+      dry.report.counts.needsHumanReview === 2
+        && actions.get('## Runtime and roles — invocation-scoped') === 'needs-human-review'
+        && actions.get('## Queue & progress') === 'needs-human-review'
+        && dry.report.warnings.some((warning) => warning.includes('renamed section')),
+    );
+    const preservedIn = (heading) =>
+      dry.report.sections.find((entry) => entry.heading === heading)?.preserved?.[0];
+    expect(
+      'repository holes are filled surgically inside template-owned sections',
+      preservedIn('## Config (the machine-readable surface)')
+        === 'the `json autoloop-config` block (version 0.25.0)'
+        && preservedIn('### Escalate-list')?.startsWith('1 repository list entry')
+        && dry.merged.split('- **deploy / ops**').length === 2,
+    );
+    expect(
+      'a preserved configuration older than the current schema is called out',
+      dry.report.warnings.some((warning) =>
+        warning.includes('version 0.25.0') && warning.includes(CONFIG_VERSION)),
+    );
+    expect(
+      'the dry run writes nothing',
+      dry.report.wrote === false
+        && dry.report.changed === true
+        && readFileSync(statePath, 'utf8') === fixtureStateInstall(),
+    );
+
+    const written = mergeDocumentFiles(root, templates, 'state', { write: true });
+    const again = mergeDocumentFiles(root, templates, 'state');
+    expect(
+      '--write applies the identical document and merging again is a no-op',
+      written.report.wrote === true
+        && readFileSync(statePath, 'utf8') === dry.merged
+        && again.report.changed === false
+        && again.report.ok === true,
+    );
+
+    writeFileSync(statePath, fixtureStateInstall(true));
+    const ambiguous = mergeDocumentFiles(root, templates, 'state');
+    expect(
+      'two config blocks fail closed with a report and no merged document',
+      ambiguous.merged === null
+        && ambiguous.report.ok === false
+        && ambiguous.report.ambiguities.some((entry) =>
+          entry.includes('2 `json autoloop-config` blocks')),
+    );
+
+    const renamedLessons = mergeDocument(
+      fixtureStateTemplate().replace(
+        '## Lessons learned (durable rules; write here, not in chat)',
+        '## Durable rules',
+      ),
+      fixtureStateInstall(),
+      { repoAppendedHeadings: MERGE_DOCUMENTS.state.repoAppendedHeadings },
+    );
+    expect(
+      'a template that renames repository memory fails closed instead of replacing it',
+      renamedLessons.merged === null
+        && renamedLessons.report.ambiguities.some((entry) =>
+          entry.includes('repository-appended section')),
+    );
+
+    writeFileSync(statePath, fixtureStateInstall());
+    const loop = mergeDocumentFiles(root, templates, 'loop');
+    expect(
+      'LOOP carries no repository sections: scalar values come from the config first',
+      loop.report.values.GATE_COMMAND?.value === 'npm test'
+        && loop.report.values.GATE_COMMAND?.source === 'autoloop-config'
+        && loop.report.values.CHECKLIST_PATH?.value === 'docs/agentic/checklist.md'
+        && loop.report.values.PROJECT_NAME?.value === 'Fixture Project'
+        && loop.report.values.PROJECT_NAME?.source === 'installed line'
+        && loop.merged.includes('| `npm test` | the objective gate')
+        && loop.merged.includes('Rewritten in this template version.')
+        && !loop.merged.includes('make check'),
+    );
+    expect(
+      'a repository-added runbook section is preserved for human review',
+      loop.report.counts.needsHumanReview === 1
+        && loop.merged.includes('A section this repository added to its own runbook.'),
+    );
+
+    writeFileSync(loopPath, fixtureLoopInstall(false));
+    const unresolved = mergeDocumentFiles(root, templates, 'loop');
+    expect(
+      'a value no installed line can answer fails closed instead of guessing',
+      unresolved.merged === null
+        && unresolved.report.ambiguities.some((entry) => entry.includes('{{PROJECT_NAME}}')),
+    );
+
+    let refused = false;
+    try {
+      mergeDocumentFiles(mkdtempSync(join(tmpdir(), 'autoloop-merge-empty-')), templates, 'state');
+    } catch (error) {
+      refused = error.message.includes('--reconcile');
+    }
+    expect('merging an absent document is refused, never scaffolded', refused);
+  } finally {
+    rmSync(templates, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function selfTest() {
@@ -538,6 +1402,7 @@ function selfTest() {
       refused = true;
     }
     expect('a directory without the template marker is refused', refused);
+    mergeSelfTest(expect);
   } finally {
     rmSync(templates, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
@@ -551,9 +1416,64 @@ function defaultTemplates() {
   return existsSync(join(candidate, TEMPLATE_MARKER)) ? candidate : null;
 }
 
+const USAGE = 'usage: scaffold.mjs --reconcile <repository root> [--templates <dir>]\n'
+  + '       scaffold.mjs --audit <repository root> [--templates <dir>]\n'
+  + '       scaffold.mjs --merge-state <repository root> [--templates <dir>] [--write] [--json]\n'
+  + '       scaffold.mjs --merge-loop <repository root> [--templates <dir>] [--write] [--json]\n'
+  + '       scaffold.mjs --self-test\n'
+  + '--audit returns the identical typed report without writing anything.\n'
+  + '--merge-* writes nothing without --write: the merged document goes to stdout and the\n'
+  + 'typed report to stderr (with --json, one object on stdout carrying both). Exit 3 means\n'
+  + 'a structural ambiguity that could lose repository content: report only, no document.';
+
+function resolveTemplates(args) {
+  const at = args.indexOf('--templates');
+  return { at, value: at >= 0 ? args[at + 1] : defaultTemplates() };
+}
+
+function mergeMain(args, kind, flagAt) {
+  const root = args[flagAt + 1];
+  const templates = resolveTemplates(args);
+  const write = args.includes('--write');
+  const json = args.includes('--json');
+  const expected = 2 + (templates.at >= 0 ? 2 : 0) + (write ? 1 : 0) + (json ? 1 : 0);
+  if (typeof root !== 'string' || root.startsWith('--') || args.length !== expected) {
+    console.error(USAGE);
+    return 2;
+  }
+  if (templates.value === null) {
+    console.error(
+      'scaffold: cannot locate the plugin templates directory from this vendored '
+      + 'copy; pass --templates <plugin templates dir>',
+    );
+    return 2;
+  }
+  let result;
+  try {
+    result = mergeDocumentFiles(resolve(root), resolve(templates.value), kind, { write });
+  } catch (error) {
+    console.error(`scaffold: ${error.message}`);
+    return 1;
+  }
+  const { report, merged } = result;
+  if (json) {
+    console.log(JSON.stringify({ ...report, merged }, null, 2));
+  } else if (write || merged === null) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.error(JSON.stringify(report, null, 2));
+    process.stdout.write(merged);
+  }
+  return report.ok ? 0 : 3;
+}
+
 function main(args) {
   if (args.length === 1 && args[0] === '--self-test') {
     return selfTest() ? 0 : 1;
+  }
+  for (const [flag, kind] of [['--merge-state', 'state'], ['--merge-loop', 'loop']]) {
+    const at = args.indexOf(flag);
+    if (at >= 0) return mergeMain(args, kind, at);
   }
   const auditAt = args.indexOf('--audit');
   const reconcileAt = auditAt >= 0 ? auditAt : args.indexOf('--reconcile');
@@ -565,11 +1485,7 @@ function main(args) {
     : defaultTemplates();
   const expected = 2 + (templatesAt >= 0 ? 2 : 0);
   if (reconcileAt < 0 || typeof root !== 'string' || args.length !== expected) {
-    console.error(
-      'usage: scaffold.mjs --reconcile <repository root> [--templates <dir>] '
-      + '| --audit <repository root> [--templates <dir>] | --self-test\n'
-      + '--audit returns the identical typed report without writing anything.',
-    );
+    console.error(USAGE);
     return 2;
   }
   if (templates === null) {

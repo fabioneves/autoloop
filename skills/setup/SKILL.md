@@ -68,10 +68,13 @@ Codex uses `$autoloop:setup doctor`; opencode invokes the `setup` skill with `do
    `cfg.baseBranch`. A unit branch's older files are a NOTE, never drift evidence.
 5. Run the one-call audit below. Follow up only on failed or incomplete sections.
 
-Before scaffold reconciliation, use the loaded skill's sibling `<templates>/tools/`; after
-reconciliation, verify the installed `tools/agentic/` copies produce the same results. Setup never
-fabricates contract output in prose or trusts an older installed contract to validate its own
-migration.
+Every contract call names the copy it runs. Before the scaffold reconciliation lands, run contracts
+from the loaded skill's sibling `<templates>/tools/`: the repository's `tools/agentic/` copies are
+still the pre-migration ones, so they can only validate the pre-migration artifacts they shipped
+with. After reconciliation, verify the installed `tools/agentic/` copies produce the same results.
+The one-call audit below is the deliberate exception — it reads the installed copies because the
+installed copies are what it audits. Setup never fabricates contract output in prose or trusts an
+older installed contract to validate its own migration.
 
 ## Project configuration
 
@@ -109,7 +112,8 @@ the audited base ref.
 
 ## Schema migration
 
-Use `migrateProjectConfig()` from `config-contract.mjs`; do not hand-transform JSON and do not call
+Use `migrateProjectConfig()` from `<templates>/tools/config-contract.mjs`; do not hand-transform
+JSON and do not call
 a single version step directly. It reads the configuration's own version and applies the ordered
 chain until the current schema, so a caller never names a version pair. `MIGRATABLE_CONFIG_VERSIONS`
 lists what it accepts; anything else is a typed `UNSUPPORTED_CONFIG_VERSION` rather than a silent
@@ -133,7 +137,12 @@ From `0.23.0` it first adds the fields that version predates — `gate.quickComm
   names each removed key in its warnings and carries every remaining value across unchanged,
   including `merge.policy` and both acknowledgements.
 - Reconcile every template-derived operational section and universal host artifact in the same
-  migration. A version-only migration is forbidden.
+  migration (`--reconcile` plus the STATE/LOOP merge under Write and delivery). A version-only
+  migration is forbidden.
+- Validate the migrated configuration with `<templates>/tools/config-contract.mjs`, never
+  `tools/agentic/config-contract.mjs`, because the validator that accepts the new schema only
+  arrives with the reconcile — the installed one rejects the migrated block on its version
+  literal.
 
 Show the old config, migrated config, warnings, and artifact diff before writing.
 
@@ -265,7 +274,8 @@ never overwrites a filled block: `scaffold.mjs` reports the modified file as `ke
 visible-diff reconciliation.
 
 Write `.autoloop/ci-policy.json` as the exact canonical JSON serialization produced by
-`canonicalCiPolicy()` with the explicitly confirmed complete CheckRun-name set. It is universal,
+`canonicalCiPolicy()` from `<templates>/tools/delivery-contract.mjs` (the installed copy once the
+reconcile has landed) with the explicitly confirmed complete CheckRun-name set. It is universal,
 including manual installations. Doctor rejects a missing, noncanonical, or symlinked policy.
 The shared lane policy treats this file as both human-authorized and merge-protected, so no loop PR
 can weaken the CI set it is about to use for delivery.
@@ -303,10 +313,11 @@ It vendors the policy-derived tool set (adding the non-manual merge tools only u
 acknowledged non-manual ProjectConfig and removing them on return to `manual`), refreshes host
 artifacts, merges hooks and `.opencode/opencode.json` without clobbering repository-owned entries,
 folds a legacy root `opencode.json` into `.opencode/`, and returns a typed report. Present that
-report; hand-copy nothing it covers. What it deliberately leaves to the model and human: STATE and
-LOOP prose reconciliation, `ci-policy.json` authorship, the checklist, anything it reports
-`kept-modified` (a policy-bearing tool such as `escalate-paths.mjs` whose repository copy differs),
-and the visible diff and commit.
+report; hand-copy nothing it covers. What it deliberately leaves to the model and human:
+`ci-policy.json` authorship, the checklist, anything it reports `kept-modified` (a policy-bearing
+tool such as `escalate-paths.mjs` whose repository copy differs), and the visible diff and commit.
+STATE and LOOP prose is the merge under Write and delivery — one call per document, never hand
+work.
 
 Preserve maintainer edits, show diffs, and ask before replacing edited vendored artifacts. New
 Codex agents and opencode agents/plugins require a fresh host session.
@@ -319,7 +330,8 @@ The Codex reviewer contract is:
 - no model/provider/effort override
 - no legacy `sandbox_mode`
 
-Validate it through `adapter-contract.mjs`; Setup and doctor must not reproduce it with grep.
+Validate it through `<templates>/tools/adapter-contract.mjs` before the reconcile lands and through
+the installed copy after; Setup and doctor must not reproduce it with grep.
 These artifacts define the read-only reviewer posture each host offers its own subagents; role
 dispatch itself does not use them.
 
@@ -351,6 +363,11 @@ wc -c docs/agentic/STATE.md docs/agentic/ARCH.md 2>/dev/null
 A scan or audit section that fails is incomplete, not an empty success. Follow it with one targeted
 check. STATE Lessons over 3000 bytes and ARCH over 8000 bytes are compaction NOTEs, not failures.
 
+The `config` and `contracts` sections above deliberately run the repository's installed copies:
+they report the pre-migration install as it stands, which is the thing being audited. A legacy
+schema failing there is the migration signal, not an error to chase. Every validation *after* a
+write runs from `<templates>/tools/` until the reconcile has landed.
+
 Cost discipline — the verify battery is seconds, not minutes, but only when used as designed:
 
 - Install-root verify applies the release-proven fast path automatically: a vendored tool whose
@@ -369,6 +386,8 @@ Cost discipline — the verify battery is seconds, not minutes, but only when us
   `templates/tools/auto-merge.reference.mjs`; there is no `auto-merge.mjs` template). Manual per-artifact diffing is the anti-pattern that made a live
   setup run take twenty minutes; diff by hand only the artifacts the audit reports as
   `kept`/`kept-modified` (repo-owned prose and policy), never the mechanical set.
+  `docs/agentic/LOOP.md` reported `kept` is not one of them: it is merged by
+  `scaffold.mjs --merge-loop`, whose report is the review surface.
 - The whole verify battery runs at most TWICE per session: once in this audit, once as the
   delivery evidence after writes. A reconcile that reports only `identical`/`kept` actions
   needs no second verify at all — cite the audit capture.
@@ -407,9 +426,44 @@ explicit authorization.
 
 ## Write and delivery
 
-Fresh install starts from templates. Reconfigure/migration preserves repo-owned mission,
-invariants, tracker identifiers, checklist additions, lessons, dormant policy-reference config,
-and any explicit extra protected paths.
+Fresh install starts from the templates: `--reconcile` writes `LOOP.md`, and Setup fills the STATE
+template's placeholders from the interview answers.
+
+Reconfigure and migration **merge** instead — one call per document. Never read the template in
+fragments and splice its prose by hand; that cost over half of a measured 11.2-minute migration and
+it silently loses repository content:
+
+```bash
+node <templates>/tools/scaffold.mjs --merge-state <repository root> > /tmp/autoloop-state-merged.md
+node <templates>/tools/scaffold.mjs --merge-loop <repository root> > /tmp/autoloop-loop-merged.md
+```
+
+Both write nothing: the merged document goes to the redirect, the typed report to stderr. The
+report names, per section, what came verbatim from the template, what was preserved from the
+repository (Mission and its invariants, the `autoloop-config` block, extra escalate-path entries,
+Lessons), which template sections are `new`, and which installed sections are
+`needs-human-review`. Read that report — not the template.
+
+1. Resolve only what the report flags. `needs-human-review` is an installed section the template
+   has no counterpart for: it is preserved in place, never dropped, and you decide to keep, fold,
+   or delete it. A section renamed upstream appears as one `needs-human-review` entry beside one
+   `new` entry — that pair is the rename.
+2. Act on every `warnings` entry. A preserved `autoloop-config` older than the current schema means
+   the migrated block still has to land in this same commit.
+3. Re-run the identical command with `--write` to apply it, then show the diff.
+
+Exit 3 is a structural ambiguity that could lose repository bytes — a repeated heading, more than
+one `autoloop-config` block, a scalar value no installed line answers, a template that renamed a
+repository-owned section. There is no merged document in that case: fix exactly what the
+`ambiguities` list names and re-run. Never route around it by splicing prose.
+
+`--merge-loop` normally needs no decisions at all: LOOP carries no repository-authored sections,
+only the project name, checklist path, and gate command, and the last two are read from the config
+so a stale rendering is corrected rather than carried forward. A section a repository added to its
+own LOOP is preserved and reported like any other.
+
+The merge covers only these two documents. The review checklist, `.autoloop/ci-policy.json`, and
+`ARCH.md` are separate repository-owned files it never reads or writes.
 
 Create lifecycle and step labels idempotently. Do not create non-manual policy labels.
 
@@ -473,6 +527,7 @@ Doctor ends with:
   red CI on the configured base is a NOTE for the human, never Setup's work — Setup never modifies
   repository source.
 - When STATE drift is only a version or schema literal, apply it as one direct edit; never write
-  block-surgery scripts against STATE.
+  block-surgery scripts against STATE. Anything broader is `scaffold.mjs --merge-state`, never a
+  hand-assembled splice of template and repository prose.
 - Enable a non-manual policy only through the explicit interview answer that writes
   `merge.unverifiedInvocationAcknowledged: true` beside it. Setup never merges.
