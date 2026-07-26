@@ -448,7 +448,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.4...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.42.0...HEAD
+[0.42.0]: https://github.com/fabioneves/autoloop/compare/v0.41.4...v0.42.0
 [0.41.4]: https://github.com/fabioneves/autoloop/compare/v0.41.3...v0.41.4
 [0.41.3]: https://github.com/fabioneves/autoloop/compare/v0.41.2...v0.41.3
 [0.41.2]: https://github.com/fabioneves/autoloop/compare/v0.41.1...v0.41.2
