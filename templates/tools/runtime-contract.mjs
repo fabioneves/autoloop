@@ -4332,6 +4332,11 @@ function selfTest() {
   let passed = 0;
   let failed = 0;
   const failures = [];
+  // Wall time between consecutive checks attributes each check's setup cost;
+  // the slowest land in the summary so a slow platform names the culprit in CI
+  // instead of the suite stalling opaquely (macOS runners: 110s, Linux: 4s).
+  let lastCheckAt = process.hrtime.bigint();
+  const slowChecks = [];
   const check = (name, predicate) => {
     try {
       if (predicate()) {
@@ -4343,6 +4348,12 @@ function selfTest() {
     } catch (error) {
       failed += 1;
       if (failures.length < 30) failures.push(`${name}: ${error.message}`);
+    }
+    const now = process.hrtime.bigint();
+    const elapsedMs = Number((now - lastCheckAt) / 1_000_000n);
+    lastCheckAt = now;
+    if (elapsedMs >= 1000 && slowChecks.length < 12) {
+      slowChecks.push(`${(elapsedMs / 1000).toFixed(1)}s ${name}`);
     }
   };
   const expectError = (result, code) =>
@@ -6700,6 +6711,7 @@ function selfTest() {
   if (failures.length) {
     for (const failure of failures) console.error(`FAIL ${failure}`);
   }
+  if (slowChecks.length > 0) console.log(`slow checks: ${slowChecks.join('; ')}`);
   console.log(
     failed === 0
       ? `self-test OK (${total} checks)`

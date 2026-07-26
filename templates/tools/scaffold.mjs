@@ -59,17 +59,19 @@ function stableJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-function writeArtifact(root, relativePath, bytes, results, mode) {
+function writeArtifact(root, relativePath, bytes, results, mode, audit = false) {
   const target = resolve(root, relativePath);
-  mkdirSync(dirname(target), { recursive: true });
   let action = 'created';
   if (existsSync(target)) {
     action = Buffer.compare(readFileSync(target), Buffer.from(bytes)) === 0
       ? 'identical'
       : 'refreshed';
   }
-  if (action !== 'identical') writeFileSync(target, bytes);
-  if (mode !== undefined) chmodSync(target, mode);
+  if (!audit) {
+    mkdirSync(dirname(target), { recursive: true });
+    if (action !== 'identical') writeFileSync(target, bytes);
+    if (mode !== undefined) chmodSync(target, mode);
+  }
   results.push({ path: relativePath, action });
 }
 
@@ -147,7 +149,7 @@ function readProjectConfig(root, warnings) {
   }
 }
 
-export function reconcile(root, templates) {
+export function reconcile(root, templates, { audit = false } = {}) {
   if (!existsSync(join(templates, TEMPLATE_MARKER))) {
     throw new Error(
       `templates directory ${templates} does not contain ${TEMPLATE_MARKER}; `
@@ -191,13 +193,14 @@ export function reconcile(root, templates) {
       bytes,
       results,
       name.endsWith('.sh') ? 0o755 : undefined,
+      audit,
     );
   }
   if (!nonManual) {
     for (const name of NON_MANUAL_TOOL_FILES) {
       const stale = resolve(root, 'tools', 'agentic', name);
       if (existsSync(stale)) {
-        unlinkSync(stale);
+        if (!audit) unlinkSync(stale);
         results.push({ path: `tools/agentic/${name}`, action: 'removed' });
       }
     }
@@ -209,6 +212,8 @@ export function reconcile(root, templates) {
       relativePath,
       readFileSync(join(templates, templateName)),
       results,
+      undefined,
+      audit,
     );
   }
 
@@ -218,9 +223,9 @@ export function reconcile(root, templates) {
     const existing = existsSync(target) ? readJson(target) : null;
     const { merged, changed } = mergeHookDocuments(existing, template);
     if (existing === null) {
-      writeArtifact(root, relativePath, stableJson(merged), results);
+      writeArtifact(root, relativePath, stableJson(merged), results, undefined, audit);
     } else if (changed) {
-      writeFileSync(target, stableJson(merged));
+      if (!audit) writeFileSync(target, stableJson(merged));
       results.push({ path: relativePath, action: 'merged' });
     } else {
       results.push({ path: relativePath, action: 'identical' });
@@ -235,7 +240,7 @@ export function reconcile(root, templates) {
   let existingConfig = existsSync(contained) ? readJson(contained) : null;
   if (existsSync(legacyPath)) {
     existingConfig = mergeOpencodeConfig(readJson(legacyPath), existingConfig ?? {});
-    unlinkSync(legacyPath);
+    if (!audit) unlinkSync(legacyPath);
     results.push({ path: 'opencode.json', action: 'removed' });
   }
   writeArtifact(
@@ -243,6 +248,8 @@ export function reconcile(root, templates) {
     '.opencode/opencode.json',
     stableJson(mergeOpencodeConfig(existingConfig, template)),
     results,
+    undefined,
+    audit,
   );
 
   const budgetPolicy = resolve(root, '.autoloop', 'measurement-budget-policy.json');
@@ -257,13 +264,15 @@ export function reconcile(root, templates) {
       '.autoloop/measurement-budget-policy.json',
       readFileSync(join(templates, 'measurement-budget-policy.template.json')),
       results,
+      undefined,
+      audit,
     );
   }
 
   const loop = resolve(root, 'docs', 'agentic', 'LOOP.md');
   const loopTemplate = readFileSync(join(templates, 'LOOP.template.md'));
   if (!existsSync(loop)) {
-    writeArtifact(root, 'docs/agentic/LOOP.md', loopTemplate, results);
+    writeArtifact(root, 'docs/agentic/LOOP.md', loopTemplate, results, undefined, audit);
   } else if (Buffer.compare(readFileSync(loop), loopTemplate) === 0) {
     results.push({ path: 'docs/agentic/LOOP.md', action: 'identical' });
   } else {
@@ -380,6 +389,18 @@ function selfTest() {
       },
       permissions: { allow: ['Bash(ls:*)'] },
     }));
+
+    const audited = reconcile(root, templates, { audit: true });
+    const auditedActions = new Map(
+      audited.results.map((entry) => [entry.path, entry.action]),
+    );
+    expect(
+      'audit mode reports the full would-be reconciliation without writing',
+      auditedActions.get('tools/agentic/verify.mjs') === 'created'
+        && !existsSync(join(root, 'tools'))
+        && existsSync(join(root, 'opencode.json'))
+        && auditedActions.get('opencode.json') === 'removed',
+    );
 
     const first = reconcile(root, templates);
     const actions = new Map(first.results.map((entry) => [entry.path, entry.action]));
@@ -514,7 +535,9 @@ function main(args) {
   if (args.length === 1 && args[0] === '--self-test') {
     return selfTest() ? 0 : 1;
   }
-  const reconcileAt = args.indexOf('--reconcile');
+  const auditAt = args.indexOf('--audit');
+  const reconcileAt = auditAt >= 0 ? auditAt : args.indexOf('--reconcile');
+  const audit = auditAt >= 0;
   const templatesAt = args.indexOf('--templates');
   const root = reconcileAt >= 0 ? args[reconcileAt + 1] : undefined;
   const templates = templatesAt >= 0
@@ -523,7 +546,9 @@ function main(args) {
   const expected = 2 + (templatesAt >= 0 ? 2 : 0);
   if (reconcileAt < 0 || typeof root !== 'string' || args.length !== expected) {
     console.error(
-      'usage: scaffold.mjs --reconcile <repository root> [--templates <dir>] | --self-test',
+      'usage: scaffold.mjs --reconcile <repository root> [--templates <dir>] '
+      + '| --audit <repository root> [--templates <dir>] | --self-test\n'
+      + '--audit returns the identical typed report without writing anything.',
     );
     return 2;
   }
@@ -536,7 +561,7 @@ function main(args) {
   }
   let report;
   try {
-    report = reconcile(resolve(root), resolve(templates));
+    report = reconcile(resolve(root), resolve(templates), { audit });
   } catch (error) {
     console.error(`scaffold: ${error.message}`);
     return 1;
