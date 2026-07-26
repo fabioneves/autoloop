@@ -1231,6 +1231,10 @@ function main() {
           ? `NOTE ${check.name}: ${result.detail}`
           : `PASS ${check.name}${timing}`,
       );
+      // A passing child's stdout is otherwise discarded, which swallowed the
+      // self-tests' slow-check attribution — surface exactly that line.
+      const slow = result.detail?.match(/^slow checks: .+$/mu);
+      if (slow) console.log(`  ${slow[0]}`);
     } else {
       console.error(`FAIL ${check.name}${timing}`);
       if (result.detail) console.error(result.detail);
