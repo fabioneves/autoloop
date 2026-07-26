@@ -236,6 +236,18 @@ function failure(step, code, message, detail = {}) {
   return { ok: false, step, error: { code, message, ...detail } };
 }
 
+// What the writer is supposed to have moved: the committed history plus the
+// working tree. `null` means there is nothing to compare — the cwd is not a Git
+// work tree, or carries no commit yet — and this tool does not invent a
+// requirement it cannot observe.
+function checkoutFingerprint(cwd) {
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' });
+  if (head.status !== 0) return null;
+  const tree = spawnSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8' });
+  if (tree.status !== 0) return null;
+  return `${head.stdout.trim()}\n${tree.stdout}`;
+}
+
 // Claude's stream-json output ends with exactly one `result` event. More than
 // one, none, or a non-success subtype means the child did not produce a result
 // this tool can stand behind.
@@ -272,6 +284,8 @@ export function runDispatch({
   startedAtMs = PROCESS_START_MS,
 }) {
   const argv = dispatchArgv(role, tools);
+  const mutatesCheckout = ROLES[role].posture === 'writer';
+  const checkoutBefore = mutatesCheckout ? checkoutFingerprint(cwd) : null;
   const started = Date.now();
   const startupMs = started - startedAtMs;
   const result = spawnSync(engine, argv, {
@@ -337,6 +351,14 @@ export function runDispatch({
       'ENGINE_RESULT_EMPTY',
       `${role}: the engine returned an empty result`,
       { ms, startupMs, stderr },
+    );
+  }
+  if (checkoutBefore !== null && checkoutFingerprint(cwd) === checkoutBefore) {
+    return failure(
+      'result',
+      'WRITER_MADE_NO_CHANGE',
+      `${role}: the engine answered but the checkout is unchanged`,
+      { ms, startupMs, stderr, text },
     );
   }
   return { ok: true, role, tools, startupMs, ms, text };
@@ -616,6 +638,60 @@ function selfTest() {
       && implemented.text === 'implemented the slice'
       && readFileSync(argvPath, 'utf8').includes('--permission-mode acceptEdits'),
     );
+
+    // `ok` for a review role means a schema-valid verdict. For the writer it
+    // meant only that the engine answered, so an implement whose sandbox never
+    // started returned `ok: true` carrying its own error as prose — which is how
+    // a live 0.42.1 run reported a no-op implement as a success. The checkout is
+    // the evidence the envelope lacks.
+    const repoScratch = mkdtempSync(join(tmpdir(), 'autoloop-dispatch-repo-'));
+    spawnSync('git', ['init', '-q', '-b', 'main', repoScratch]);
+    spawnSync(
+      'git',
+      [
+        '-c',
+        'user.name=Base',
+        '-c',
+        'user.email=base@example.invalid',
+        'commit',
+        '--allow-empty',
+        '-q',
+        '-m',
+        'base',
+      ],
+      { cwd: repoScratch },
+    );
+    writeEngineShim(shimDirectory, shimBody(
+      resultEvent({ result: 'claimed to implement the slice' }),
+    ));
+    const idleWriter = runDispatch({
+      role: 'implement',
+      prompt: 'implement the plan',
+      tools: writerTools,
+      cwd: repoScratch,
+      engine,
+    });
+    check(
+      'an implement that leaves the checkout untouched is a typed failure',
+      idleWriter.ok === false
+      && idleWriter.step === 'result'
+      && idleWriter.error.code === 'WRITER_MADE_NO_CHANGE',
+    );
+    writeEngineShim(shimDirectory, shimBody(
+      `printf 'work\\n' > implemented.txt\n${resultEvent({ result: 'implemented the slice' })}`,
+    ));
+    const busyWriter = runDispatch({
+      role: 'implement',
+      prompt: 'implement the plan',
+      tools: writerTools,
+      cwd: repoScratch,
+      engine,
+    });
+    check(
+      'an implement that moves the checkout still succeeds',
+      busyWriter.ok === true && busyWriter.text === 'implemented the slice',
+    );
+    rmSync(repoScratch, { recursive: true, force: true });
 
     writeEngineShim(shimDirectory, shimBody(
       resultEvent({ structured_output: { verdict: 'maybe' } }),
