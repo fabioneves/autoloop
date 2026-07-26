@@ -1,9 +1,11 @@
 name: Verify
 
+# No push trigger for main: the no-bypass ruleset means every main commit
+# arrives through a pull request whose required checks ran on the identical
+# tree, so a branch-push run would verify the same tree a second time. Tags
+# still run everything plus the release gate.
 on:
   push:
-    branches:
-      - main
     tags:
       - v*
   pull_request:
