@@ -4332,11 +4332,13 @@ function selfTest() {
   let passed = 0;
   let failed = 0;
   const failures = [];
-  // Wall time between consecutive checks attributes each check's setup cost;
-  // the slowest land in the summary so a slow platform names the culprit in CI
-  // instead of the suite stalling opaquely (macOS runners: 110s, Linux: 4s).
+  // Wall time between consecutive checks attributes each check's setup cost,
+  // aggregated by name family: a slow platform pays sub-second penalties
+  // thousands of times (macOS runners: 80-140s total, no single check over a
+  // second), so per-check thresholds see nothing while a family histogram
+  // names the culprit in CI.
   let lastCheckAt = process.hrtime.bigint();
-  const slowChecks = [];
+  const checkFamilies = new Map();
   const check = (name, predicate) => {
     try {
       if (predicate()) {
@@ -4352,10 +4354,13 @@ function selfTest() {
     const now = process.hrtime.bigint();
     const elapsedMs = Number((now - lastCheckAt) / 1_000_000n);
     lastCheckAt = now;
-    if (elapsedMs >= 1000 && slowChecks.length < 12) {
-      slowChecks.push(`${(elapsedMs / 1000).toFixed(1)}s ${name}`);
-    }
+    const family = name.split(' ').slice(0, 3).join(' ');
+    const entry = checkFamilies.get(family) ?? { count: 0, ms: 0 };
+    entry.count += 1;
+    entry.ms += elapsedMs;
+    checkFamilies.set(family, entry);
   };
+  const suiteStartedAt = process.hrtime.bigint();
   const expectError = (result, code) =>
     result?.ok === false
     && result.error?.code === code
@@ -6711,7 +6716,14 @@ function selfTest() {
   if (failures.length) {
     for (const failure of failures) console.error(`FAIL ${failure}`);
   }
-  if (slowChecks.length > 0) console.log(`slow checks: ${slowChecks.join('; ')}`);
+  const suiteMs = Number((process.hrtime.bigint() - suiteStartedAt) / 1_000_000n);
+  if (suiteMs >= 10_000) {
+    const families = [...checkFamilies.entries()]
+      .sort(([, left], [, right]) => right.ms - left.ms)
+      .slice(0, 8)
+      .map(([family, { count, ms }]) => `${(ms / 1000).toFixed(1)}s/${count}x ${family}`);
+    console.log(`slow checks: ${families.join('; ')}`);
+  }
   console.log(
     failed === 0
       ? `self-test OK (${total} checks)`
