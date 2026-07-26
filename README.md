@@ -10,7 +10,7 @@
 <strong>Labelled GitHub issues in. Gated, independently reviewed PRs out.</strong>
 
 <p>
-  <img alt="release v0.40.5" src="https://img.shields.io/badge/release-v0.40.5-8b5cf6?style=flat-square">
+  <img alt="release v0.41.0" src="https://img.shields.io/badge/release-v0.41.0-8b5cf6?style=flat-square">
   <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
   <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square">
   <img alt="human controlled merge" src="https://img.shields.io/badge/authority-human_merge-f59e0b?style=flat-square">
@@ -363,7 +363,7 @@ Historical records and capability results have zero route-selection authority. O
 engine's installed authenticated capability supplies standing cost authority; fallback requires
 its own independently authenticated capability.
 
-v0.40.5 supports exactly five active-host/captured-preference pairs:
+v0.41.0 supports exactly five active-host/captured-preference pairs:
 
 | Active host | Captured engine preference | Route | Live verification |
 |---|---|---|---|
@@ -505,14 +505,18 @@ Every degraded review is disclosed. “No review” is never the fallback.
 
 | Policy | Behavior |
 |---|---|
-| **`manual`** | The only v0.40 runtime policy. The loop marks the PR ready; a human merges. |
-| **`ratified`** | Reserved policy-engine configuration. v0.40 runtime open rejects it with `UNVERIFIABLE_INVOCATION_PROVENANCE`. |
-| **`auto`** | Reserved policy-engine configuration. v0.40 runtime open rejects it with `UNVERIFIABLE_INVOCATION_PROVENANCE`. |
+| **`manual`** | The default policy. The loop marks the PR ready; a human merges. |
+| **`ratified`** | Run open rejects it with `UNVERIFIABLE_INVOCATION_PROVENANCE` unless the config records `merge.unverifiedInvocationAcknowledged: true`; the vendored gate then merges only the classified reversible paths. |
+| **`auto`** | Same acknowledgement contract as `ratified`; the vendored gate may merge any loop PR whose full evidence is green, protected paths always excluded. |
 
 Same-UID hooks provide useful transport and replay resistance but cannot authenticate a human
-invocation. v0.40 therefore refuses to use them for automatic merge. The retained non-manual policy
-engine remains fail-closed test/reference code for a future integration with authenticated
-invocation provenance.
+invocation. A non-manual policy therefore opens only on the recorded
+`merge.unverifiedInvocationAcknowledged: true` acceptance; an unacknowledged non-manual run still
+fails at run open. A single-identity repository may additionally record
+`merge.soloOperatorAcknowledged: true`, which waives the four gate controls one login cannot
+satisfy — identity separation, App attestation, live server policy, and approving review — while
+exact-head CAS merge, CI on the exact head, ownership binding, protected paths, and the kill
+switch keep full strength.
 
 The command guard blocks direct merge, `loop-ready` creation/application, and tag/release
 publication. Dev can act only on a pre-existing `loop-ready` event whose labeler role and
@@ -538,9 +542,11 @@ loop-owned PR with fresh review, CI, and base evidence. Doctor is read-only.
   `.opencode/**`, `.githooks/**`, and `.autoloop/ci-policy.json`.
 - **The exact SHA matters.** Review, gate, CI, pushed head, and the dormant non-manual reference
   verdicts agree on the same commit.
-- **Branch protection remains yours.** Autoloop never edits repository protection. Under
-  the dormant non-manual reference policy, the gate reads it and every applicable ruleset live and
-  refuses when complete non-bypassable enforcement cannot be proved.
+- **Branch protection remains yours.** Autoloop never edits repository protection. Under an
+  acknowledged non-manual policy the gate reads it and every applicable ruleset live and refuses
+  when complete non-bypassable enforcement cannot be proved; a solo-operator repository, whose
+  plan cannot have protection, records `merge.soloOperatorAcknowledged: true` instead and keeps
+  every remaining control.
 
 For unattended scheduling, use a dedicated least-privilege machine identity and protect the base
 branch with the repository's required CI checks.
@@ -594,7 +600,7 @@ the exact checked-out commit reachable from `origin/main`. Configure the
 `github.token`, but honestly fails when that token cannot read the required live controls.
 
 Configured repositories record their scaffold contract version in the JSON block inside
-`docs/agentic/STATE.md`. v0.40.5 uses schema `0.25.0`. Breaking config-shape changes bump the minor
+`docs/agentic/STATE.md`. v0.41.0 uses schema `0.25.0`. Breaking config-shape changes bump the minor
 version while the project is `0.x`; re-running setup audits and migrates the repository-owned layer
 through a visible diff and, when policy is involved, a human-reviewed and human-merged policy PR.
 

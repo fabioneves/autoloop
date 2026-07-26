@@ -57,8 +57,11 @@ const INSTALLED_FORWARD_ARTIFACTS = Object.freeze([
 const STALE_ROUTE_PATTERNS = Object.freeze([
   {
     code: 'UNCONDITIONAL_NON_MANUAL_REFUSAL',
+    // The refusal window crosses a single line wrap (but never a blank line), and
+    // an unconditional rejection claim is also recognized by the provenance error
+    // code alone, because table rows name the policy in a different cell.
     pattern:
-      /\b(?:non-?manual|other than `?manual`?)\b[^.\n]{0,120}\b(?:fail(?:s|ure)?|reject\w*|refus\w*|forbid\w*)|\b(?:reject\w*|refus\w*|forbid\w*|never\s+enable\w*)\b[^.\n]{0,120}\bnon-?manual\b/giu,
+      /\b(?:non-?manual|other than `?manual`?)\b(?:[^.\n]|\n(?!\s*\n)){0,160}\b(?:fail(?:s|ure)?|reject\w*|refus\w*|forbid\w*)|\b(?:reject\w*|refus\w*|forbid\w*|never\s+enable\w*)\b(?:[^.\n]|\n(?!\s*\n)){0,160}\bnon-?manual\b|\b(?:reject\w*|refus\w*)\b(?:[^.\n]|\n(?!\s*\n)){0,80}\bUNVERIFIABLE_INVOCATION_PROVENANCE\b/giu,
     message:
       'a non-manual merge policy fails only without '
       + 'merge.unverifiedInvocationAcknowledged; state the conditional',
@@ -66,7 +69,8 @@ const STALE_ROUTE_PATTERNS = Object.freeze([
       if (typeof source !== 'string') return false;
       const window = source.slice(Math.max(0, index - 400), index + 400);
       return window.includes('unverifiedInvocationAcknowledged')
-        || /\bunacknowledged\b/iu.test(window);
+        || /\bunacknowledged\b/iu.test(window)
+        || /\backnowledged\s+non-?manual\b/iu.test(window);
     },
   },
   {
@@ -295,6 +299,18 @@ function selfTest() {
     'claim-contract.mjs': 'export const CLOSES_RE = /x/;',
     'scan.mjs': 'const CLOSES_RE = /y/;',
   });
+  const wrappedRefusal = lintRoutingText(
+    '**A human merges.** v0.40 refuses\n  non-manual run open because prompt provenance is unverified.',
+  );
+  const unconditionalProvenanceClaim = lintRoutingText(
+    '| **`auto`** | Reserved. v0.40 runtime open rejects it with `UNVERIFIABLE_INVOCATION_PROVENANCE`. |',
+  );
+  const conditionalRefusal = lintRoutingText(
+    'Runtime refuses\n  non-manual run open without `merge.unverifiedInvocationAcknowledged: true`.',
+  );
+  const conditionalProvenanceClaim = lintRoutingText(
+    'Run open rejects an unacknowledged non-manual policy with `UNVERIFIABLE_INVOCATION_PROVENANCE`.',
+  );
   const smokeExemption = lintRoutingText(
     '`opencode run --auto $M --format json "smoke"`',
     'docs/opencode-smoke.md',
@@ -305,6 +321,30 @@ function selfTest() {
   );
   const cases = [
     ['migration prose is allowed', clean.length === 0],
+    [
+      'a line-wrapped unconditional refusal is still rejected',
+      wrappedRefusal.length === 1
+        && wrappedRefusal[0].code === 'UNCONDITIONAL_NON_MANUAL_REFUSAL',
+    ],
+    [
+      'an unconditional provenance-rejection claim is rejected without the policy noun',
+      unconditionalProvenanceClaim.length === 1
+        && unconditionalProvenanceClaim[0].code === 'UNCONDITIONAL_NON_MANUAL_REFUSAL',
+    ],
+    [
+      'conditional refusal prose stays allowed across a line wrap',
+      conditionalRefusal.length === 0,
+    ],
+    [
+      'a provenance-rejection claim scoped to unacknowledged policies stays allowed',
+      conditionalProvenanceClaim.length === 0,
+    ],
+    [
+      'prose scoped to an acknowledged non-manual policy stays allowed',
+      lintRoutingText(
+        'Under an acknowledged non-manual policy the gate reads live protection and refuses unproved enforcement.',
+      ).length === 0,
+    ],
     [
       'operational host/profile prose is rejected',
       stale.length === 8

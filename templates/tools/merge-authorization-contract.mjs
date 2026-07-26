@@ -26,20 +26,23 @@ const HARD_LABELS = new Set([
 ]);
 const TRUSTED_ROLES = new Set(['admin', 'maintain', 'write']);
 
-function validAppIds(appIds) {
+function validAppIdList(appIds) {
   return (
     Array.isArray(appIds)
-    && appIds.length > 0
     && new Set(appIds).size === appIds.length
     && appIds.every((id) => Number.isSafeInteger(id) && id > 0)
   );
+}
+
+function validAppIds(appIds) {
+  return validAppIdList(appIds) && appIds.length > 0;
 }
 
 function validTimestamp(value) {
   return typeof value === 'string' && Number.isFinite(Date.parse(value));
 }
 
-function requiredCheckMap(checks, reasons, path) {
+function requiredCheckMap(checks, reasons, path, allowUnpinned = false) {
   const map = new Map();
   if (!Array.isArray(checks)) {
     reasons.push(`${path} is missing or invalid`);
@@ -50,7 +53,7 @@ function requiredCheckMap(checks, reasons, path) {
       typeof check?.name !== 'string'
       || check.name.length === 0
       || !Array.isArray(check.appIds)
-      || check.appIds.length === 0
+      || (!allowUnpinned && check.appIds.length === 0)
       || check.appIds.some((id) => !Number.isInteger(id) || id < 1)
     ) {
       reasons.push(`${path} contains an invalid check contract`);
@@ -136,7 +139,11 @@ function validateChecks(pr, configuredChecks, reasons) {
     if (String(check.conclusion ?? '').toUpperCase() !== 'SUCCESS') {
       reasons.push(`required CheckRun ${name} is not successful`);
     }
-    if (!appIds.has(check.app?.id)) reasons.push(`required CheckRun ${name} has an unapproved producer`);
+    // An empty pin set exists only under solo mode, where requiredCheckMap accepted
+    // the unpinned contract: name + exact head + success is the whole producer claim.
+    if (appIds.size > 0 && !appIds.has(check.app?.id)) {
+      reasons.push(`required CheckRun ${name} has an unapproved producer`);
+    }
   }
   for (const check of pr.checks) {
     if (check?.headOid !== pr.headRefOid) continue;
@@ -156,7 +163,7 @@ function validateChecks(pr, configuredChecks, reasons) {
   }
 }
 
-function validateLinkedIssue(config, pr, reasons) {
+function validateLinkedIssue(config, pr, reasons, solo = false) {
   const issue = pr.linkedIssue;
   if (issue?.complete !== true) reasons.push('linked issue evidence is incomplete');
   if (issue?.state !== 'OPEN') reasons.push('linked issue is not open');
@@ -179,7 +186,9 @@ function validateLinkedIssue(config, pr, reasons) {
     || loopReady.eventId < 1
     || typeof loopReady.actor !== 'string'
     || loopReady.actor.length === 0
-    || loopReady.actor === config.loopLogin
+    // Solo mode has one login for human and loop, so actor-vs-loop separation is
+    // unprovable; the event, role, and freshness requirements all remain.
+    || (!solo && loopReady.actor === config.loopLogin)
     || !TRUSTED_ROLES.has(loopReady.roleName)
     || !validTimestamp(loopReady.labeledAt)
     || !validTimestamp(editedAt)
@@ -272,7 +281,7 @@ function validateOwnership(config, pr, reasons) {
   }
 }
 
-function validateAuthorization(config, pr, reasons) {
+function validateAuthorization(config, pr, reasons, solo = false) {
   if (pr.path !== 'A') return;
   const authorization = pr.authorization;
   if (authorization?.complete !== true) {
@@ -282,7 +291,7 @@ function validateAuthorization(config, pr, reasons) {
   if (
     !Array.isArray(config.trustedHumanLogins)
     || !config.trustedHumanLogins.includes(authorization.actor)
-    || authorization.actor === config.loopLogin
+    || (!solo && authorization.actor === config.loopLogin)
   ) {
     reasons.push('Path A authorization is not attributable to a trusted human');
   }
@@ -305,6 +314,10 @@ function validateAuthorization(config, pr, reasons) {
       'Path A authorization label event, current-head ordering, or current actor permission is unverified',
     );
   }
+  // Without a GitHub App there is no one to publish the dedicated authorization
+  // CheckRun; solo mode keeps the label-event, head-binding, and ordering proofs
+  // above as the whole Path-A evidence.
+  if (solo) return;
   const attestationIds = new Set(config.authorizationAppIds ?? []);
   const check = authorization.check;
   if (
@@ -323,6 +336,22 @@ export function authorizeMerge(input) {
   const config = input?.config;
   const pr = input?.pr;
   if (!config || !pr) return { allow: false, reasons: ['merge authorization input is incomplete'] };
+  const solo = config.soloOperator === true;
+  // Solo mode is single-identity by definition: the one human IS the loop login.
+  // Naming anyone else means identity separation was available after all, so the
+  // relaxation would be unjustified — fail closed on that misconfiguration.
+  const identityValid = Array.isArray(config.trustedHumanLogins)
+    && config.trustedHumanLogins.length > 0
+    && config.trustedHumanLogins.every((login) => typeof login === 'string' && login.length > 0)
+    && (solo
+      ? config.trustedHumanLogins.length === 1
+        && config.trustedHumanLogins[0] === config.loopLogin
+      : !config.trustedHumanLogins.includes(config.loopLogin));
+  const appIdsValid = solo
+    ? validAppIdList(config.automationAppIds) && validAppIdList(config.authorizationAppIds)
+    : validAppIds(config.automationAppIds) && validAppIds(config.authorizationAppIds);
+  const reviewCountValid = Number.isInteger(config.requiredApprovingReviewCount)
+    && config.requiredApprovingReviewCount >= (solo ? 0 : 1);
   if (
     typeof config.repository?.owner !== 'string'
     || typeof config.repository?.name !== 'string'
@@ -331,14 +360,10 @@ export function authorizeMerge(input) {
     || config.baseFreshnessStrategy !== 'direct-strict'
     || typeof config.loopLogin !== 'string'
     || config.loopLogin.length === 0
-    || !Array.isArray(config.trustedHumanLogins)
-    || config.trustedHumanLogins.length === 0
-    || config.trustedHumanLogins.some((login) => typeof login !== 'string' || login.length === 0)
-    || config.trustedHumanLogins.includes(config.loopLogin)
-    || !validAppIds(config.automationAppIds)
-    || !validAppIds(config.authorizationAppIds)
-    || !Number.isInteger(config.requiredApprovingReviewCount)
-    || config.requiredApprovingReviewCount < 1
+    || (config.soloOperator !== undefined && typeof config.soloOperator !== 'boolean')
+    || !identityValid
+    || !appIdsValid
+    || !reviewCountValid
     || typeof config.requireCodeOwnerReviews !== 'boolean'
   ) {
     reasons.push('merge authorization config is invalid');
@@ -348,7 +373,7 @@ export function authorizeMerge(input) {
   if ([...automationAppIds].some((id) => authorizationAppIds.has(id))) {
     reasons.push('automation and human-authorization App IDs overlap');
   }
-  const configuredChecks = requiredCheckMap(config.requiredChecks, reasons, 'config.requiredChecks');
+  const configuredChecks = requiredCheckMap(config.requiredChecks, reasons, 'config.requiredChecks', solo);
   for (const name of REQUIRED_ATTESTATIONS) {
     const appIds = configuredChecks.get(name);
     if (!appIds) reasons.push(`config is missing required attestation ${name}`);
@@ -375,7 +400,15 @@ export function authorizeMerge(input) {
       if (HARD_LABELS.has(label)) reasons.push(`hard-block label present: ${label}`);
     }
   }
-  if (pr.reviewDecision !== 'APPROVED') reasons.push('current review decision is not approved');
+  // GitHub forbids approving one's own PR, so a solo repository can never reach
+  // APPROVED; an explicit request for changes still blocks in every mode.
+  if (solo) {
+    if (pr.reviewDecision === 'CHANGES_REQUESTED') {
+      reasons.push('current review decision requests changes');
+    }
+  } else if (pr.reviewDecision !== 'APPROVED') {
+    reasons.push('current review decision is not approved');
+  }
   if (!Array.isArray(pr.reviewRequests)) reasons.push('review-request evidence is missing');
   else if (pr.reviewRequests.length > 0) reasons.push('review requests remain pending');
 
@@ -387,7 +420,7 @@ export function authorizeMerge(input) {
   ) {
     reasons.push('loop ownership claim is invalid or mismatched');
   }
-  validateLinkedIssue(config, pr, reasons);
+  validateLinkedIssue(config, pr, reasons, solo);
   validateOwnership(config, pr, reasons);
 
   if (pr.lifecycle?.complete !== true) reasons.push('lifecycle evidence is incomplete');
@@ -416,7 +449,7 @@ export function authorizeMerge(input) {
   if (config.mergePolicy === 'ratified' && !new Set(['A', 'B']).has(pr.path)) {
     reasons.push('ratified policy does not authorize the all-green path');
   }
-  validateAuthorization(config, pr, reasons);
+  validateAuthorization(config, pr, reasons, solo);
   validateChecks(pr, configuredChecks, reasons);
   if (
     input.executorIdentity?.complete !== true
@@ -426,7 +459,10 @@ export function authorizeMerge(input) {
   ) {
     reasons.push('merge executor identity is incomplete or does not match the dedicated loop login');
   }
-  validateServerPolicy(config, input.serverPolicy, configuredChecks, pr.checks, reasons);
+  // A plan without branch protection has no live server policy to verify; solo
+  // mode substitutes exact-head CAS semantics plus the CLEAN merge-state gate in
+  // the executor, both of which remain unconditional.
+  if (!solo) validateServerPolicy(config, input.serverPolicy, configuredChecks, pr.checks, reasons);
   return { allow: reasons.length === 0, reasons };
 }
 
@@ -589,8 +625,62 @@ function fixture(overrides = {}) {
   };
 }
 
+// A solo-operator installation has exactly one human, who necessarily shares the
+// loop's login. Identity separation, App attestation, live server policy, and
+// approving review are unsatisfiable there, not merely unconfigured; every other
+// control keeps its full strength. The fixture models that shape generically.
+function soloFixture(overrides = {}) {
+  const base = fixture();
+  const config = {
+    ...base.config,
+    soloOperator: true,
+    mergePolicy: 'auto',
+    loopLogin: 'solo-dev',
+    trustedHumanLogins: ['solo-dev'],
+    automationAppIds: [],
+    authorizationAppIds: [],
+    requiredApprovingReviewCount: 0,
+    requiredChecks: base.config.requiredChecks.map(({ name }) => ({ name, appIds: [] })),
+  };
+  const pr = {
+    ...base.pr,
+    labels: [],
+    reviewDecision: null,
+    path: 'all-green',
+    authorization: undefined,
+    linkedIssue: {
+      ...base.pr.linkedIssue,
+      loopReady: { ...base.pr.linkedIssue.loopReady, actor: 'solo-dev' },
+    },
+    ownership: { ...base.pr.ownership, frozenPlanAuthor: 'solo-dev' },
+    lifecycle: { ...base.pr.lifecycle, premergeRecordAuthor: 'solo-dev' },
+    checks: base.pr.checks.map((check) => ({ ...check, app: { id: 15368 } })),
+  };
+  const merged = {
+    config,
+    pr,
+    executorIdentity: { complete: true, login: 'solo-dev', id: 9001 },
+    serverPolicy: undefined,
+    ...overrides,
+  };
+  return merged;
+}
+
 function selfTest() {
   const base = fixture();
+  const solo = soloFixture();
+  const soloPathA = soloFixture();
+  soloPathA.config = { ...soloPathA.config, mergePolicy: 'ratified' };
+  soloPathA.pr = {
+    ...soloPathA.pr,
+    labels: ['risk:pure-deletion'],
+    path: 'A',
+    authorization: {
+      ...base.pr.authorization,
+      actor: 'solo-dev',
+      check: undefined,
+    },
+  };
   const cases = [
     ['complete strict evidence authorizes', base, true],
     ['delivered state is sourced from the linked issue and lifecycle', fixture({
@@ -825,6 +915,73 @@ function selfTest() {
     ],
     ['active kill switch blocks', fixture({ pr: { ...base.pr, killSwitch: { complete: true, active: true } } }), false],
     ['incomplete evidence blocks', fixture({ pr: { ...base.pr, checksComplete: false } }), false],
+
+    ['solo operator with single identity and green exact-head evidence authorizes', solo, true],
+    ['solo Path-A self-authorization without an App CheckRun authorizes', soloPathA, true],
+    ['solo flag absent keeps identity separation required', soloFixture({
+      config: (() => { const { soloOperator, ...rest } = soloFixture().config; return rest; })(),
+    }), false],
+    ['solo with a second trusted human is invalid', soloFixture({
+      config: { ...solo.config, trustedHumanLogins: ['solo-dev', 'friend'] },
+    }), false],
+    ['solo trusted list naming someone other than the loop is invalid', soloFixture({
+      config: { ...solo.config, trustedHumanLogins: ['friend'] },
+    }), false],
+    ['solo pending required check blocks', soloFixture({
+      pr: {
+        ...solo.pr,
+        checks: solo.pr.checks.map((check) =>
+          check.name === 'ci' ? { ...check, status: 'IN_PROGRESS', conclusion: null } : check),
+      },
+    }), false],
+    ['solo failing required check blocks', soloFixture({
+      pr: {
+        ...solo.pr,
+        checks: solo.pr.checks.map((check) =>
+          check.name === 'ci' ? { ...check, conclusion: 'FAILURE' } : check),
+      },
+    }), false],
+    ['solo hard-block label blocks', soloFixture({
+      pr: { ...solo.pr, labels: ['do-not-merge'] },
+    }), false],
+    ['solo active kill switch blocks', soloFixture({
+      pr: { ...solo.pr, killSwitch: { complete: true, active: true } },
+    }), false],
+    ['solo claim mismatch blocks', soloFixture({
+      pr: { ...solo.pr, claim: { ok: false, code: 'ISSUE_MISMATCH' } },
+    }), false],
+    ['solo changes-requested review still blocks', soloFixture({
+      pr: { ...solo.pr, reviewDecision: 'CHANGES_REQUESTED' },
+    }), false],
+    ['solo pending review request still blocks', soloFixture({
+      pr: { ...solo.pr, reviewRequests: ['solo-dev'] },
+    }), false],
+    ['solo unresolved conversations still block', soloFixture({
+      pr: { ...solo.pr, conversationsResolved: false },
+    }), false],
+    ['solo executor other than the loop login blocks', soloFixture({
+      executorIdentity: { complete: true, login: 'someone-else', id: 9002 },
+    }), false],
+    ['solo stale loop-ready label event still blocks', soloFixture({
+      pr: {
+        ...solo.pr,
+        linkedIssue: {
+          ...solo.pr.linkedIssue,
+          loopReady: { ...solo.pr.linkedIssue.loopReady, labeledAt: '2026-07-24T00:00:30Z' },
+        },
+      },
+    }), false],
+    ['solo Path-A authorization not bound to the current head still blocks', (() => {
+      const input = soloFixture();
+      input.config = { ...input.config, mergePolicy: 'ratified' };
+      input.pr = {
+        ...input.pr,
+        labels: ['risk:pure-deletion'],
+        path: 'A',
+        authorization: { ...soloPathA.pr.authorization, headOid: BASE, afterCurrentHead: false },
+      };
+      return input;
+    })(), false],
   ];
   let passed = 0;
   for (const [name, input, expected] of cases) {
