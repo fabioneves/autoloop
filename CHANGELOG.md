@@ -5,6 +5,32 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `scaffold.mjs --merge-state` and `--merge-loop`: a mechanical splice of template-owned prose with
+  repository-owned content, returning a typed per-section report (`from-template`, `preserved`,
+  `new`, `needs-human-review`) plus the merged document. The template declares its own
+  repository-owned regions with `{{PLACEHOLDER}}` markers, and each marker's shape decides how that
+  region merges — fenced block (the `autoloop-config` block), list extension point (extra
+  escalate paths), whole-section repository prose (Mission and its invariants), or a scalar value
+  (LOOP's project name, checklist path, and gate command). Lessons is declared repository memory,
+  and a template that renames it fails closed. Nothing is dropped: an installed section with no
+  template counterpart is preserved in place and reported, and any structural ambiguity that could
+  lose repository bytes returns the report with exit 3 and no document at all. `--write` is
+  required to touch disk. A measured 11.2-minute migration spent 203s reading the templates in
+  fragments and 148s hand-splicing STATE prose; against that repository's real pre-migration
+  documents the merge reproduces the hand-merged LOOP byte-for-byte and leaves three flagged
+  decisions in STATE.
+
+### Changed
+
+- Setup's WRITE phase reconciles STATE and LOOP through that merge and its report instead of
+  reading the templates and splicing prose by hand.
+- Setup names the copy of every contract it runs. During a migration the configuration is migrated
+  and validated with `<templates>/tools/config-contract.mjs`, never the repository's vendored copy,
+  which is still the pre-migration validator until the reconcile lands and rejects the migrated
+  block on its version literal.
+
 ### Removed
 
 - Tag-time live-control verification. The release gate no longer reads GitHub rulesets or the
