@@ -68,7 +68,10 @@ independently reviewed, gated exact head. Run it before selecting new Dev work.
    Failure of one engine never authorizes spending on another.
    On non-Linux hosts every route probe fails with `UNVERIFIABLE_ISOLATION` before issuing an
    attempt challenge or creating probe scratch state. Only executed Linux smoke facts count—never
-   caller observations, executable presence, prose, or static guesses.
+   caller observations, executable presence, prose, or static guesses. Each route's capability
+   smoke performs one real sandboxed engine dispatch per posture, each hard-bounded by a
+   120-second budget that degrades to typed `unavailable` when exceeded — a multi-minute probe
+   is normal operation, never a stall to investigate.
 8. Standalone Pitcrew must call `--initialize-route-state-json` with exact
    `{run,capabilities}` immediately after probing and retain the broker-issued state. Embedded
    Pitcrew reuses Dev's exact current route state for the same run and capability fingerprint.
@@ -82,6 +85,18 @@ independently reviewed, gated exact head. Run it before selecting new Dev work.
    `--bind-measurement-unit-json`; the broker derives initial lane proof plus exact capability and
    initial route-state fingerprints. Use `--observe-measured-json` for every Runtime observation.
    Never hand-author observed envelopes or Runtime dispatch, lane, capability, or outage facts.
+
+No improvised inspection: `.git/autoloop/**` stores (intents, prime bundles, measurements) are
+broker-owned records, and the command guard blocks inline interpreters (`node -e`, `python -c`,
+interpreter heredocs) by policy — a guard block is the policy working, never an error to engineer
+around. Read retained snapshots only through the typed accessors —
+`node tools/agentic/snapshot-contract.mjs --summary <snapshotPath>` for bounded per-section
+`{complete,items,error}` counts and `--section <name> <snapshotPath>` for one section's exact
+JSON (unknown names fail closed listing the valid catalog) — through
+`measurement-contract.mjs --measured` for anything that must run as an operation, or with plain
+`jq` (single-quoted filter) on the exact files the prime summary names, which the guard
+sanctions. Never pre-inspect the intent store: prime/attest is the transport check, and a
+missing intent record surfaces there as a typed failure within seconds.
 
 Invoke Runtime and adapter operations only through `node tools/agentic/run-scope.mjs` and its
 structured JSON flags. Reuse Dev's returned objects verbatim when embedded; standalone Pitcrew

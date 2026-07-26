@@ -1091,32 +1091,33 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: a shell or language interpreter reading a heredoc is opaque to command '
-        + 'policy. Use a visible canonical command or a reviewed file.',
+        'autoloop guard — a shell or language interpreter reading a heredoc is opaque to '
+        + 'command policy. Write the script to a file and run it, or use the typed tool commands.',
     };
   }
   if (inlineInterpreterSource(rawCmd)) {
     return {
       block: true,
       reason:
-        'Blocked: inline shell or language-interpreter source is opaque to command policy. '
-        + 'Use a visible canonical command or a reviewed file.',
+        'autoloop guard — inline shell or language-interpreter source is opaque to command '
+        + 'policy. Write the script to a file and run it, or use the typed tool commands.',
     };
   }
   if (opaqueCommandAssembler(rawCmd)) {
     return {
       block: true,
       reason:
-        'Blocked: inline command assembly is opaque to command policy. '
-        + 'Use literal canonical commands or a reviewed program file.',
+        'autoloop guard — inline command assembly is opaque to command policy. '
+        + 'Use literal canonical commands, a reviewed program file, or the typed tool commands.',
     };
   }
   if (opaqueMutationSyntax(rawCmd)) {
     return {
       block: true,
       reason:
-        'Blocked: active shell expansion is opaque to command policy and can hide a mutation. '
-        + 'Use literal canonical commands; split discovery and mutation into separate tool calls.',
+        'autoloop guard — active shell expansion is opaque to command policy and can hide a '
+        + 'mutation. Use literal canonical commands; split discovery and mutation into '
+        + 'separate tool calls.',
     };
   }
   const cmd = stripHeredocs(rawCmd);
@@ -1132,8 +1133,9 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: invocation-intent transport is reserved for the host hook. '
-        + 'A model command cannot capture or rewrite invocation intent.',
+        'autoloop guard — invocation-intent transport is reserved for the host hook; a model '
+        + 'command never captures, reads, or rewrites invocation intent. Run prime.mjs '
+        + '--dev-json instead — its attest step is the typed check for a missing intent record.',
     };
   }
 
@@ -1141,8 +1143,8 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: an unknown Git or GitHub CLI command may resolve through an ambient alias. '
-        + 'Use a canonical built-in subcommand.',
+        'autoloop guard — an unknown Git or GitHub CLI command may resolve through an ambient '
+        + 'alias. Use a canonical built-in subcommand.',
     };
   }
 
@@ -1150,8 +1152,9 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: grouped or substituted Git commit/push syntax can hide branch and destination '
-        + 'state. Run the canonical Git command without shell grouping or substitution.',
+        'autoloop guard — grouped or substituted Git commit/push syntax can hide branch and '
+        + 'destination state. Run the canonical Git command without shell grouping or '
+        + 'substitution.',
     };
   }
 
@@ -1189,9 +1192,9 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: `gh pr merge` — L2: the loop/agent never merges directly ' +
-        '(docs/agentic/STATE.md → Autonomy). A human merges, or the repo-ratified ' +
-        'tools/agentic/auto-merge.mjs performs the sole sanctioned policy-gated exception.',
+        'autoloop guard — `gh pr merge` is outside loop authority: the loop/agent never '
+        + 'merges directly (docs/agentic/STATE.md → Autonomy). Leave the merge to a human, or '
+        + 'to the repo-ratified tools/agentic/auto-merge.mjs policy gate.',
     };
   }
 
@@ -1201,7 +1204,7 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: raw pull-request readiness mutation. '
+        'autoloop guard — raw pull-request readiness mutation is outside loop authority. '
         + 'Use the exact-head Autoloop terminal finalizer.',
     };
   }
@@ -1212,9 +1215,9 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: raw protected lifecycle-label mutation. '
-        + '`loop-ready` requires an independent maintainer action; '
-        + '`loop-delivered` requires the exact-head Autoloop terminal finalizer.',
+        'autoloop guard — raw protected lifecycle-label mutation is outside loop authority. '
+        + 'Ask a maintainer to apply `loop-ready`; deliver `loop-delivered` through the '
+        + 'exact-head Autoloop terminal finalizer.',
     };
   }
   if (segments.some(({ command }) =>
@@ -1226,8 +1229,9 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: release or tag publication requires an independent maintainer release action; '
-        + 'best-effort Autoloop invocation intent grants no release authority.',
+        'autoloop guard — release and tag publication require an independent maintainer '
+        + 'action; best-effort Autoloop invocation intent grants no release authority. '
+        + 'Report release readiness and leave publication to the maintainer.',
     };
   }
   let states = [{ branch: branch ?? null, succeeded: null }];
@@ -1247,8 +1251,8 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: command-scoped Git aliases or config includes can hide a protected mutation. '
-          + 'Run the canonical Git subcommand without an alias override.',
+          'autoloop guard — command-scoped Git aliases or config includes can hide a protected '
+          + 'mutation. Run the canonical Git subcommand without an alias override.',
       };
     }
     if (
@@ -1258,8 +1262,8 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: command-scoped Git configuration can hide push destinations or force '
-          + 'semantics. Run canonical `git push` without configuration overrides.',
+          'autoloop guard — command-scoped Git configuration can hide push destinations or '
+          + 'force semantics. Run canonical `git push` without configuration overrides.',
       };
     }
     if (
@@ -1272,17 +1276,18 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          `Blocked: \`git commit\` may target configured base "${baseBranch}" — the base takes PRs `
-          + 'only and the current branch must be proven. Create a working branch first: '
-          + '<type>/gh-<N>-<slug> (autoloop:dev step 4).',
+          `autoloop guard — \`git commit\` may target configured base "${baseBranch}"; the `
+          + 'base takes PRs only and the current branch must be proven. Create a working '
+          + 'branch first: <type>/gh-<N>-<slug> (autoloop:dev step 4).',
       };
     }
     if (pushTargetsBase(words, possibleBranches, baseBranch)) {
       return {
         block: true,
         reason:
-          `Blocked: \`git push\` targets or can resolve to configured base "${baseBranch}" — `
-          + 'use an explicit non-base refspec; the base takes PRs only.',
+          `autoloop guard — \`git push\` targets or can resolve to configured base `
+          + `"${baseBranch}"; the base takes PRs only. Push an explicit non-base refspec `
+          + 'instead.',
       };
     }
     const target = switchTarget(words, baseBranch);
@@ -1313,8 +1318,8 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: commit message carries a Co-Authored-By trailer — this repo forbids ' +
-        'co-author trailers on commits (autoloop hard rules). Re-run without it.',
+        'autoloop guard — this repo forbids Co-Authored-By trailers on commits (autoloop '
+        + 'hard rules). Re-run the same commit without the trailer.',
     };
   }
 
@@ -1336,8 +1341,9 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: force push (`--force`/-f or a `+<refspec>` force-update) — destructive. Use ' +
-          '--force-with-lease (and only on loop branches after a rebase, autoloop:pitcrew step 7).',
+          'autoloop guard — force pushes (`--force`/-f or a `+<refspec>` force-update) are '
+          + 'destructive and outside policy. Use --force-with-lease, and only on loop '
+          + 'branches after a rebase (autoloop:pitcrew step 7).',
       };
     }
   }
@@ -1347,9 +1353,9 @@ export function evaluate(rawCmd, branch, options = {}) {
     return {
       block: true,
       reason:
-        'Blocked: inline --body/-b on a gh command — untrusted text never rides in shell ' +
-        'source (STATE → Lessons). Write the body to a scratch file with the host\'s safe file-editing surface ' +
-        'and pass --body-file.',
+        'autoloop guard — untrusted text never rides inline in shell source (STATE → '
+        + 'Lessons), so --body/-b on gh commands is out of policy. Write the body to a '
+        + 'scratch file with the host\'s safe file-editing surface and pass --body-file.',
     };
   }
 
@@ -1362,16 +1368,17 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: GraphQL query input from a file or stdin is opaque to the merge guard. '
-          + 'Pass a visible read-only query inline.',
+          'autoloop guard — GraphQL query input from a file or stdin is opaque to the merge '
+          + 'guard. Pass a visible read-only query inline.',
       };
     }
     if (/\/(pulls\/[^\s/]+\/merge|merges)\b/.test(lexicalCmd)) {
       return {
         block: true,
         reason:
-          'Blocked: `gh api` merge endpoint — L2: the loop/agent never merges directly, via any ' +
-          'raw surface (docs/agentic/STATE.md → Autonomy). Use human merge or the repo-ratified policy gate.',
+          'autoloop guard — the `gh api` merge endpoint is outside loop authority: the '
+          + 'loop/agent never merges directly, via any raw surface (docs/agentic/STATE.md → '
+          + 'Autonomy). Leave the merge to a human or the repo-ratified policy gate.',
       };
     }
     if (
@@ -1381,8 +1388,9 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: GraphQL merge mutation — L2: the loop/agent never merges directly, via any ' +
-          'raw surface (docs/agentic/STATE.md → Autonomy). Use human merge or the repo-ratified policy gate.',
+          'autoloop guard — GraphQL merge mutations are outside loop authority: the '
+          + 'loop/agent never merges directly, via any raw surface (docs/agentic/STATE.md → '
+          + 'Autonomy). Leave the merge to a human or the repo-ratified policy gate.',
       };
     }
     if (
@@ -1393,7 +1401,7 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: raw terminal GraphQL mutation. '
+          'autoloop guard — raw terminal GraphQL mutation is outside loop authority. '
           + 'Use the exact-head Autoloop terminal finalizer.',
       };
     }
@@ -1404,8 +1412,8 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: raw issue or label mutation could bypass terminal delivery policy. '
-        + 'Use a canonical gh issue command or the Autoloop terminal finalizer.',
+          'autoloop guard — raw issue or label mutation could bypass terminal delivery '
+          + 'policy. Use a canonical gh issue command or the Autoloop terminal finalizer.',
       };
     }
     if (segments.some(({ command }) => {
@@ -1425,7 +1433,8 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: raw release/tag API mutation requires an independent maintainer release action.',
+          'autoloop guard — raw release/tag API mutation requires an independent maintainer '
+          + 'release action. Report release readiness and leave publication to the maintainer.',
       };
     }
     if (
@@ -1440,9 +1449,9 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: mutating `gh api` call on branch or ruleset protection — the protection ' +
-          'baseline is the human\'s control; the loop only reads it ' +
-          '(docs/agentic/STATE.md → Autonomy). Report the mismatch instead.',
+          'autoloop guard — the branch/ruleset protection baseline is the human\'s control; '
+          + 'the loop only reads it (docs/agentic/STATE.md → Autonomy). Report the mismatch '
+          + 'instead of mutating protection.',
       };
     }
     if (
@@ -1452,8 +1461,8 @@ export function evaluate(rawCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          'Blocked: GraphQL branch/ruleset protection mutation — the protection baseline is '
-          + 'the human\'s control; the loop only reads it.',
+          'autoloop guard — the branch/ruleset protection baseline is the human\'s control; '
+          + 'the loop only reads it. Report the mismatch instead of mutating protection.',
       };
     }
   }
@@ -1849,6 +1858,36 @@ function selfTest() {
       ok = false;
     }
   }
+  // Every refusal must read as policy: a consistent guard identity prefix and a
+  // closing sentence naming the sanctioned alternative, never an error dump.
+  let messageChecks = 0;
+  {
+    messageChecks += 1;
+    const offPolicy = cases
+      .filter(([, , expect]) => expect)
+      .map(([cmd, branch, , baseBranch]) => [
+        cmd,
+        evaluate(cmd, branch, { baseBranch }).reason ?? '',
+      ])
+      .filter(([, reason]) =>
+        !reason.startsWith('autoloop guard — ') || !reason.trimEnd().endsWith('.'));
+    for (const [cmd] of offPolicy) {
+      console.error(`FAIL [block reason is not policy-shaped]: ${cmd.split('\n')[0]}`);
+      ok = false;
+    }
+    messageChecks += 1;
+    const inlineReason = evaluate(
+      "node -e 'console.log(1)'",
+      'feat/gh-1-x',
+    ).reason;
+    const expectedInlineReason =
+      'autoloop guard — inline shell or language-interpreter source is opaque to command '
+      + 'policy. Write the script to a file and run it, or use the typed tool commands.';
+    if (inlineReason !== expectedInlineReason) {
+      console.error('FAIL [inline-interpreter block is the exact policy message]');
+      ok = false;
+    }
+  }
   const argCases = [
     ['default config path', [], 'docs/agentic/STATE.md'],
     ['explicit config path', ['--config', '/repo/STATE.md'], '/repo/STATE.md'],
@@ -1917,14 +1956,21 @@ function selfTest() {
       if (created !== null) rmSync(created, { force: true });
     }
   }
-  console.log(ok ? `self-test OK (${cases.length} cases)` : 'self-test FAILED');
+  console.log(
+    ok
+      ? `self-test OK (${cases.length + messageChecks} cases)`
+      : 'self-test FAILED',
+  );
   return ok;
 }
 
 function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
-    console.error(`command-guard: ${parsed.error}`);
+    console.error(
+      `autoloop guard — invalid guard invocation (${parsed.error}), so no command can be `
+      + 'proven safe. Re-run autoloop:setup to repair the hook wiring.',
+    );
     process.exit(2);
   }
   if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
@@ -1933,12 +1979,20 @@ function main() {
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
   } catch (error) {
-    console.error(`command-guard: invalid hook payload; refusing command: ${error.message}`);
+    console.error(
+      `autoloop guard — the hook payload was unreadable (${error.message}), so the command `
+      + 'cannot be proven safe. Re-run the command; if this repeats, re-run autoloop:setup '
+      + 'to repair the hook wiring.',
+    );
     process.exit(2);
   }
   const cmd = payload?.tool_input?.command;
   if (typeof cmd !== 'string') {
-    console.error('command-guard: hook payload omitted the Bash command; refusing command');
+    console.error(
+      'autoloop guard — the hook payload omitted the Bash command, so it cannot be proven '
+      + 'safe. Re-run the command; if this repeats, re-run autoloop:setup to repair the '
+      + 'hook wiring.',
+    );
     process.exit(2);
   }
 
@@ -1954,7 +2008,11 @@ function main() {
       console.error(`command-guard: ${error.message}`);
       process.exit(0);
     }
-    console.error(`command-guard: cannot resolve configured base: ${error.message}`);
+    console.error(
+      `autoloop guard — the configured base branch cannot be resolved (${error.message}), `
+      + 'so branch-sensitive rules cannot be proven. Run autoloop:setup to repair '
+      + 'docs/agentic/STATE.md.',
+    );
     process.exit(2);
   }
   const verdict = evaluate(cmd, currentBranch(), { baseBranch });

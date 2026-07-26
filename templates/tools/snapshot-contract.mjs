@@ -3,7 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseLoopClaim } from './claim-contract.mjs';
 import { parseLifecycleComment } from './lifecycle-contract.mjs';
 
@@ -1246,6 +1246,21 @@ function parseArgs(args) {
   ) {
     return { mode: 'invalidate', reasonCode: args[1], error: null };
   }
+  if (args.length === 2 && args[0] === '--summary' && args[1]) {
+    return { mode: 'summary', path: args[1], error: null };
+  }
+  if (args.length === 3 && args[0] === '--section') {
+    if (!SNAPSHOT_SECTIONS.includes(args[1])) {
+      return {
+        mode: null,
+        error: `unknown section "${String(args[1]).slice(0, 80)}"; `
+          + `valid sections: ${SNAPSHOT_SECTIONS.join(', ')}`,
+      };
+    }
+    if (args[2]) {
+      return { mode: 'section', section: args[1], path: args[2], error: null };
+    }
+  }
   if (
     args.length === 5
     && args[0] === '--queue-evidence'
@@ -1264,17 +1279,88 @@ function parseArgs(args) {
     mode: null,
     error:
       'expected --self-test, --invalidate '
-      + `<${SNAPSHOT_INVALIDATION_REASONS.join('|')}>, or `
+      + `<${SNAPSHOT_INVALIDATION_REASONS.join('|')}>, `
+      + '--summary <path|->, --section <name> <path|->, or '
       + '--queue-evidence <queueExhaustion|relaunch> <run hash> <config hash> <base>',
   };
 }
 
-function readSnapshotInput() {
-  const source = readFileSync(0, 'utf8');
+function readSnapshotInput(path = '-') {
+  const source = readFileSync(path === '-' ? 0 : path, 'utf8');
   if (Buffer.byteLength(source) > 64 * 1024 * 1024) {
     throw new Error('snapshot input exceeds 64 MiB');
   }
   return JSON.parse(source);
+}
+
+// Typed read accessors: a live run peeked into snapshot files with ad-hoc
+// inline-interpreter JSON parsing, which the command guard blocks by policy.
+// These two modes are the sanctioned replacements — a bounded per-section
+// summary and one section's exact JSON — closed over SNAPSHOT_SECTIONS so an
+// unknown name fails with the valid catalog instead of an empty result.
+export function summarizeSnapshot(snapshot) {
+  if (
+    !isRecord(snapshot)
+    || snapshot.kind !== 'autoloop-repository-snapshot'
+    || !isRecord(snapshot.sections)
+  ) {
+    return {
+      ok: false,
+      error: 'expected an autoloop-repository-snapshot object with sections',
+    };
+  }
+  return {
+    ok: true,
+    summary: {
+      kind: 'autoloop-snapshot-summary',
+      scannedAt: validTimestamp(snapshot.scannedAt) ? snapshot.scannedAt : null,
+      sections: Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => {
+        const section = snapshot.sections[name];
+        if (!isRecord(section)) {
+          return [name, {
+            complete: false,
+            items: 0,
+            error: errorRecord(
+              'SNAPSHOT_SECTION_MISSING',
+              `${name} section is missing`,
+            ),
+          }];
+        }
+        return [name, {
+          complete: section.complete === true,
+          items: Array.isArray(section.items) ? section.items.length : 0,
+          error: section.error === null || section.error === undefined
+            ? null
+            : validError(section.error)
+              ? section.error
+              : errorRecord('SNAPSHOT_ERROR', 'section error is malformed'),
+        }];
+      })),
+    },
+  };
+}
+
+export function extractSnapshotSection(snapshot, name) {
+  if (!SNAPSHOT_SECTIONS.includes(name)) {
+    return {
+      ok: false,
+      error: `unknown section "${String(name).slice(0, 80)}"; `
+        + `valid sections: ${SNAPSHOT_SECTIONS.join(', ')}`,
+    };
+  }
+  if (
+    !isRecord(snapshot)
+    || snapshot.kind !== 'autoloop-repository-snapshot'
+    || !isRecord(snapshot.sections)
+    || !isRecord(snapshot.sections[name])
+  ) {
+    return {
+      ok: false,
+      error: `snapshot input carries no readable "${name}" section; `
+        + 'expected an autoloop-repository-snapshot object',
+    };
+  }
+  return { ok: true, section: snapshot.sections[name] };
 }
 
 async function selfTest() {
@@ -2131,6 +2217,62 @@ async function selfTest() {
       return repositoryAbsenceDecision(snapshot, purpose, () => false).ok === false;
     });
   });
+  await check('summary reports bounded per-section counts, never item bodies', () => {
+    const complete = summarizeSnapshot(queueSnapshot());
+    const incomplete = summarizeSnapshot(queueSnapshot({ incomplete: 'openIssues' }));
+    const refused = summarizeSnapshot({ sections: {} });
+    return complete.ok === true
+      && complete.summary.kind === 'autoloop-snapshot-summary'
+      && complete.summary.scannedAt === '2026-01-01T00:00:02.000Z'
+      && stableJson(Object.keys(complete.summary.sections).sort())
+        === stableJson([...SNAPSHOT_SECTIONS].sort())
+      && complete.summary.sections.queue.complete === true
+      && complete.summary.sections.queue.items === 1
+      && complete.summary.sections.queue.error === null
+      && !JSON.stringify(complete.summary).includes('"body"')
+      && incomplete.ok === true
+      && incomplete.summary.sections.openIssues.complete === false
+      && incomplete.summary.sections.openIssues.error.code === 'PAGE_FETCH_FAILED'
+      && refused.ok === false;
+  });
+  await check('section accessor returns one section exactly as persisted', () => {
+    const snapshot = queueSnapshot();
+    const extracted = extractSnapshotSection(snapshot, 'queue');
+    const missing = extractSnapshotSection({ kind: 'other' }, 'queue');
+    return extracted.ok === true
+      && stableJson(extracted.section) === stableJson(snapshot.sections.queue)
+      && missing.ok === false;
+  });
+  await check('unknown section names fail closed listing the valid catalog', () => {
+    const refused = extractSnapshotSection(queueSnapshot(), 'bogus');
+    const cliRefused = parseArgs(['--section', 'bogus', '-']);
+    const cliSummary = parseArgs(['--summary', '-']);
+    const cliSection = parseArgs(['--section', 'queue', '-']);
+    return refused.ok === false
+      && SNAPSHOT_SECTIONS.every((name) => refused.error.includes(name))
+      && cliRefused.mode === null
+      && SNAPSHOT_SECTIONS.every((name) => cliRefused.error.includes(name))
+      && cliSummary.mode === 'summary'
+      && cliSection.mode === 'section'
+      && cliSection.section === 'queue';
+  });
+  await check('summary CLI prints the bounded summary for stdin snapshots', () => {
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), '--summary', '-'],
+      {
+        encoding: 'utf8',
+        input: JSON.stringify(queueSnapshot()),
+        maxBuffer: 4 * 1024 * 1024,
+        timeout: 30000,
+      },
+    );
+    if (result.status !== 0) return false;
+    const summary = JSON.parse(result.stdout);
+    return summary.kind === 'autoloop-snapshot-summary'
+      && summary.sections.repo.items === 1
+      && summary.sections.queue.complete === true;
+  });
   await check('actionability requires complete issue and blocking-label evidence', () => {
     const sections = Object.fromEntries(
       SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
@@ -2168,6 +2310,27 @@ async function main() {
     return 2;
   }
   if (parsed.mode === 'self-test') return await selfTest() ? 0 : 1;
+  if (parsed.mode === 'summary' || parsed.mode === 'section') {
+    try {
+      const snapshot = readSnapshotInput(parsed.path);
+      const result = parsed.mode === 'summary'
+        ? summarizeSnapshot(snapshot)
+        : extractSnapshotSection(snapshot, parsed.section);
+      if (result.ok !== true) {
+        console.error(`snapshot-contract: ${result.error}`);
+        return 1;
+      }
+      writeStdoutSync(`${JSON.stringify(
+        parsed.mode === 'summary' ? result.summary : result.section,
+        null,
+        1,
+      )}\n`);
+      return 0;
+    } catch (error) {
+      console.error(`snapshot-contract: ${error.message}`);
+      return 1;
+    }
+  }
   try {
     const snapshot = readSnapshotInput();
     const result = parsed.mode === 'invalidate'

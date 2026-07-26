@@ -1252,10 +1252,13 @@ async function selfTest() {
     });
     const fullResult = {
       ok: true,
-      run: { runId: 'fixture-run' },
+      run: { instanceFingerprint: '9'.repeat(64) },
       measurementRunId: 'e23e4567-e89b-42d3-a456-426614174000',
       hostEvidence: { fingerprint: 'f'.repeat(64), observedHosts: ['claude'] },
-      boundaries: { runStart: { payload: { runId: 'fixture-run' } }, stageStart: {} },
+      boundaries: {
+        runStart: { payload: { runId: 'e23e4567-e89b-42d3-a456-426614174000' } },
+        stageStart: {},
+      },
       scan: { operationId: 'op', eventPath: '/tmp/e.json' },
       snapshot: {
         kind: 'autoloop-repository-snapshot',
@@ -1286,6 +1289,27 @@ async function selfTest() {
           && compact.bundlePath.includes(
             '.git/autoloop/prime/e23e4567-e89b-42d3-a456-426614174000',
           ),
+      );
+      // Capture-off runs have no measurement id and no boundaries; the bundle
+      // must still get a stable unique name from the broker run artifact's
+      // instanceFingerprint, with the 'run' literal only as the final fallback.
+      const captureOff = persistPrimeBundle({
+        ...fullResult,
+        measurementRunId: null,
+        boundaries: null,
+        scan: { operationId: null, eventPath: null },
+      }, scratch);
+      const anonymous = persistPrimeBundle({
+        ...fullResult,
+        run: {},
+        measurementRunId: null,
+        boundaries: null,
+      }, scratch);
+      check(
+        'capture-off bundles are named by the broker run instance fingerprint',
+        captureOff.bundlePath.endsWith(`/${'9'.repeat(64)}.bundle.json`)
+          && captureOff.snapshotPath.endsWith(`/${'9'.repeat(64)}.snapshot.json`)
+          && anonymous.bundlePath.endsWith('/run.bundle.json'),
       );
     } finally {
       rmSync(scratch, { recursive: true, force: true });
@@ -1319,9 +1343,18 @@ export function sectionSummary(snapshot) {
 export function persistPrimeBundle(result, cwd = process.cwd()) {
   const directory = resolve(cwd, '.git', 'autoloop', 'prime');
   mkdirSync(directory, { recursive: true });
-  const runId = result?.measurementRunId
-    ?? result?.boundaries?.runStart?.payload?.runId
-    ?? result?.run?.runId
+  // With capture on, the measurement run UUID names the bundle. With capture
+  // off there is no measurement id, and the broker-issued run artifact carries
+  // no `runId` field — its stable unique identifier is `instanceFingerprint`
+  // (run-scope.mjs open result), which a live capture-off run proved when the
+  // old `run.runId` lookup missed and every bundle collapsed onto the literal
+  // 'run' name. The literal survives only as the final fail-safe.
+  const runId = [
+    result?.measurementRunId,
+    result?.boundaries?.runStart?.payload?.runId,
+    result?.run?.instanceFingerprint,
+  ].find((value) =>
+    typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value))
     ?? 'run';
   const bundlePath = resolve(directory, `${runId}.bundle.json`);
   const snapshotPath = resolve(directory, `${runId}.snapshot.json`);
