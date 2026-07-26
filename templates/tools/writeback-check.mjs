@@ -8,6 +8,13 @@
 // next Stop passes; `stop_hook_active` prevents any loop):
 //   - an open PR on a loop branch (<type>/gh-<N>-…) whose body lacks "Closes #N"
 //   - an open issue labelled loop-blocked with zero comments (no reason recorded)
+//   - an open loop PR carrying commits that exist only in the local checkout: the
+//     unit was abandoned mid-flight. A live 0.42.3 run ended its turn at step 8
+//     of 11 with four such commits and every guard stayed quiet — clean tree,
+//     draft PR (a reminder, below), and step labels never advanced past claim so
+//     the unit did not look mid-flight. This one is a pure `git rev-list --count`
+//     against the tracking ref, so it costs none of the GraphQL that made the
+//     draft check too expensive to harden.
 //
 // Reminders (JSON systemMessage on stdout, exit 0 — never block):
 //   - a claimed loop PR still in draft (may be mid-unit OR a forgotten autoloop:dev step 10;
@@ -64,6 +71,51 @@ export function checkPrs(prs) {
     }
   }
   return { hard, reminders };
+}
+
+/** Pure: open loop PRs carrying commits that exist only in the local checkout.
+ *
+ *  A live 0.42.3 run ended its turn at step 8 of 11 with four commits stranded
+ *  locally, and all three guards had a reason to stay quiet: the tree was clean,
+ *  the draft-PR case is deliberately a reminder rather than a gap, and the step
+ *  labels had never advanced past claim so the unit did not look mid-flight.
+ *
+ *  Unpushed work under an open loop PR is the fact none of that ambiguity
+ *  touches. It is also purely local — `git rev-list --count` against the remote
+ *  tracking ref — so it costs no GraphQL, which is the reason the draft check
+ *  was softened in the first place. `unpushedFor` returns null when the
+ *  comparison is unanswerable (branch absent locally, no remote ref yet); that
+ *  is skipped rather than guessed at. */
+export function checkUnpushedLoopWork(prs, unpushedFor) {
+  const hard = [];
+  for (const pr of prs ?? []) {
+    if (!LOOP_BRANCH_RE.test(pr.headRefName ?? '')) continue;
+    const ahead = unpushedFor(pr.headRefName);
+    if (!Number.isSafeInteger(ahead) || ahead <= 0) continue;
+    hard.push(
+      `PR #${pr.number} (${pr.headRefName}) has ${ahead} commit(s) only in the local checkout `
+      + '— the unit is unfinished and its work is stranded; push and carry the unit to a '
+      + 'terminal state (delivered / blocked) instead of ending the turn',
+    );
+  }
+  return hard;
+}
+
+/** Local-only: commits on the branch that the remote tracking ref does not have. */
+function unpushedCommitCount(branch) {
+  try {
+    const range = `refs/remotes/origin/${branch}..refs/heads/${branch}`;
+    const out = execSync(`git rev-list --count ${JSON.stringify(range)}`, {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 15000,
+    });
+    const count = Number(String(out).trim());
+    return Number.isSafeInteger(count) ? count : null;
+  } catch {
+    return null; // unknown branch, no remote ref, or no git — never guess
+  }
 }
 
 /** Pure: merged loop PRs whose linked issue is still open. On a PR that does not target the
@@ -156,6 +208,17 @@ function selfTest() {
     { number: 6, headRefName: 'fix/gh-6-mismatch', body: 'Closes #7', isDraft: false },
   ];
   const { hard, reminders } = checkPrs(prs);
+  // A live 0.42.3 run ended its turn at step 8 of 11 with four commits sitting
+  // only in the local checkout. Nothing objected: the tree was clean, the PR was
+  // draft (a reminder, not a gap), and the step labels had never advanced past
+  // claim so the unit did not even look mid-flight. Unpushed work under an open
+  // loop PR is the one fact that was unambiguous, and it is purely local.
+  const unpushed = checkUnpushedLoopWork(prs, (branch) => ({
+    'feat/gh-1-x': 0,
+    'fix/gh-3-z': 4,
+    'hardening/human-branch': 9,
+    'fix/gh-5-colon': null,
+  })[branch] ?? 0);
   const mergedGap = checkMergedClosedGap(
     [
       { number: 20, headRefName: 'feat/gh-7-a', body: 'Closes #7' },
@@ -190,6 +253,10 @@ function selfTest() {
     mergedGap.length === 2 && mergedGap[0].includes('#7') && mergedGap[0].includes('PR #20') &&
     mergedGap[1].includes('PR #23') && mergedGap[1].includes('ISSUE_MISMATCH') &&
     blocked.length === 2 && blocked[0].includes('#9') && blocked[1].includes('#12') &&
+    // Only the loop-branch PR with local-only commits: a pushed loop branch is
+    // silent, a non-loop branch is never this hook's business, and an
+    // unanswerable ref comparison is skipped rather than guessed at.
+    unpushed.length === 1 && unpushed[0].includes('#3') && unpushed[0].includes('4') &&
     stranded.length === 1 && stranded[0].includes('#7') && stranded[0].includes('loop:04-claim') &&
     stranded[0].includes('--remove-label loop:07-diff-review') &&
     reminderWire.exitCode === 0 && reminderWire.stderr === '' &&
@@ -222,6 +289,7 @@ function main() {
   const openIssues = ghJson('issue list --state open --json number,labels --limit 100');
 
   const { hard, reminders } = checkPrs(prs);
+  hard.push(...checkUnpushedLoopWork(prs, unpushedCommitCount));
   if (merged !== null && openIssues !== null) {
     reminders.push(...checkMergedClosedGap(merged, openIssues.map((issue) => issue.number)));
   }
