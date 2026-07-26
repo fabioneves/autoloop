@@ -288,28 +288,28 @@ terminal labels, add `loop-blocked` plus the appropriate reason gate, and stop t
 When taking a PR, print a composed banner beside the `loop:revising` mutation:
 
 ```text
-╔══════════════════════════════════════════════════╗
-║  ▶ PR #<P> (issue #<N>) — <safe title>           ║
-║    <threads / CI / conflict>                     ║
-╚══════════════════════════════════════════════════╝
+╭──────────────────────────────────────────────────╮
+│ ∞ PR #<P> (issue #<N>) — <safe title>            │
+│   <threads / CI / conflict>                      │
+╰──────────────────────────────────────────────────╯
 ```
 
-Print one step line:
+Print one ribbon line per step — `▰` done-or-current, `▱` remaining, always eight cells:
 
 ```text
-▶ PR #<P> · step <s>/8 — <STEP> (<actor>)
+∞ ▰▰▰▱▱▱▱▱ 03/8 REVISE ─ PR #<P> · <actor>
 ```
 
-End with either:
+End with one closing rail:
 
 ```text
-✔ PR #<P> REVISED — round <N> · <delivered|awaiting-ci> · gated <short OID>
+╰─ ✔ PR #<P> REVISED ─ round <N> · <delivered|awaiting-ci> · gated <short OID> ─╯
 ```
 
 or:
 
 ```text
-✖ PR #<P> BLOCKED — <safe composed reason>
+╰─ ✖ PR #<P> BLOCKED ─ <safe composed reason> ─╯
 ```
 
 Fold Pitcrew outcomes into Dev's one end-of-run digest and scoreboard when the contexts are

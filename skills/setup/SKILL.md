@@ -16,6 +16,19 @@ Your first output, before a tool call or question, is exactly:
 
 If a tool call already happened, print the banner with the next output. Print it once.
 
+Mark each phase with a five-cell ribbon in the same `∞` visual language — `▰` for
+done-or-current, `▱` for remaining — as the phase begins:
+
+```text
+∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base
+∞ ▰▰▱▱▱ 2/5 AUDIT ─ one-call battery
+∞ ▰▰▰▱▱ 3/5 INTERVIEW ─ decisions only
+∞ ▰▰▰▰▱ 4/5 WRITE ─ reconcile · visible diff
+∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery
+```
+
+Doctor mode replaces the ribbon with its own single line: `∞ doctor ─ <audited ref> · <route>`.
+
 Setup is idempotent and has four modes:
 
 - Fresh install: `docs/agentic/STATE.md` is absent.
@@ -555,7 +568,7 @@ stopping; interrupted means reverted, not parked.
 End with:
 
 ```text
-∞ setup · complete
+╰─ ∞ setup · complete ─ <mode> · <changed>/<total> artifacts · verify <state> ─╯
 ```
 
 Doctor ends with:
