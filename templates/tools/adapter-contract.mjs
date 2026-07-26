@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -170,10 +170,18 @@ export function validateReviewerArtifact(route, source) {
 }
 
 function selfTest(mode, root) {
+  // --template-root takes the PLUGIN root (the directory containing templates/).
+  // Being handed the templates directory itself was a live Setup stumble, and
+  // the shape is unambiguous, so accept both rather than failing opaquely.
+  const templatesDir = mode === 'template'
+    && !existsSync(resolve(root, 'templates', 'codex-reviewer-agent.template.toml'))
+    && existsSync(resolve(root, 'codex-reviewer-agent.template.toml'))
+    ? root
+    : resolve(root, 'templates');
   const paths = mode === 'template'
     ? {
-      codex: resolve(root, 'templates', 'codex-reviewer-agent.template.toml'),
-      opencode: resolve(root, 'templates', 'opencode-reviewer-agent.template.md'),
+      codex: resolve(templatesDir, 'codex-reviewer-agent.template.toml'),
+      opencode: resolve(templatesDir, 'opencode-reviewer-agent.template.md'),
     }
     : {
       codex: resolve(root, '.codex', 'agents', 'autoloop-reviewer.toml'),

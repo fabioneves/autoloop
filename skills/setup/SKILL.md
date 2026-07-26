@@ -414,13 +414,29 @@ opencode --version 2>/dev/null || echo opencode:absent
 echo "=== config ==="
 node tools/agentic/config-contract.mjs docs/agentic/STATE.md 2>&1
 echo "=== contracts ==="
-node tools/agentic/verify.mjs --install-root .
+node tools/agentic/verify.mjs --install-root . 2>&1 | tee /tmp/autoloop-verify-audit.txt | grep -vE '^PASS '
+tail -2 /tmp/autoloop-verify-audit.txt
+echo "=== artifact drift ==="
+node <templates>/tools/scaffold.mjs --audit .
 echo "=== sizes ==="
 wc -c docs/agentic/STATE.md docs/agentic/ARCH.md 2>/dev/null
 ```
 
 A scan or audit section that fails is incomplete, not an empty success. Follow it with one targeted
 check. STATE Lessons over 3000 bytes and ARCH over 8000 bytes are compaction NOTEs, not failures.
+
+Cost discipline — a full verify runs every vendored self-test and costs minutes of wall clock:
+
+- Capture its output ONCE (the `tee` above) and derive every later view from the capture. Never
+  run the same verify twice to get a different `grep`/`tail` of identical output.
+- `scaffold.mjs --audit` returns the complete would-be reconciliation as the same typed report
+  with zero writes — it replaces every file-by-file `diff`/`cmp` of vendored tools and host
+  artifacts during the audit. Manual per-artifact diffing is the anti-pattern that made a live
+  setup run take twenty minutes; diff by hand only the artifacts the audit reports as
+  `kept`/`kept-modified` (repo-owned prose and policy), never the mechanical set.
+- The whole verify battery runs at most TWICE per session: once in this audit, once as the
+  delivery evidence after writes. A reconcile that reports only `identical`/`kept` actions
+  needs no second verify at all — cite the audit capture.
 
 ## Selected-route doctor
 
