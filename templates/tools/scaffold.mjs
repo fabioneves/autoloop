@@ -59,7 +59,7 @@ function stableJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-function writeArtifact(root, relativePath, bytes, results, mode, audit = false) {
+function writeArtifact(root, relativePath, bytes, results, mode, audit = false, source) {
   const target = resolve(root, relativePath);
   let action = 'created';
   if (existsSync(target)) {
@@ -72,7 +72,7 @@ function writeArtifact(root, relativePath, bytes, results, mode, audit = false) 
     if (action !== 'identical') writeFileSync(target, bytes);
     if (mode !== undefined) chmodSync(target, mode);
   }
-  results.push({ path: relativePath, action });
+  results.push(source ? { path: relativePath, action, source } : { path: relativePath, action });
 }
 
 function hookCommands(entry) {
@@ -183,7 +183,11 @@ export function reconcile(root, templates, { audit = false } = {}) {
       && existsSync(target)
       && Buffer.compare(readFileSync(target), bytes) !== 0
     ) {
-      results.push({ path: `tools/agentic/${name}`, action: 'kept-modified' });
+      results.push({
+        path: `tools/agentic/${name}`,
+        action: 'kept-modified',
+        source: `templates/tools/${TOOL_SOURCE_NAMES[name] ?? name}`,
+      });
       warnings.push(
         `tools/agentic/${name} differs from the template and may carry `
         + `${PRESERVE_IF_MODIFIED.get(name)}; reconcile it in the visible diff `
@@ -198,6 +202,7 @@ export function reconcile(root, templates, { audit = false } = {}) {
       results,
       name.endsWith('.sh') ? 0o755 : undefined,
       audit,
+      `templates/tools/${TOOL_SOURCE_NAMES[name] ?? name}`,
     );
   }
   if (!nonManual) {
@@ -218,6 +223,7 @@ export function reconcile(root, templates, { audit = false } = {}) {
       results,
       undefined,
       audit,
+      `templates/${templateName}`,
     );
   }
 
@@ -227,7 +233,15 @@ export function reconcile(root, templates, { audit = false } = {}) {
     const existing = existsSync(target) ? readJson(target) : null;
     const { merged, changed } = mergeHookDocuments(existing, template);
     if (existing === null) {
-      writeArtifact(root, relativePath, stableJson(merged), results, undefined, audit);
+      writeArtifact(
+        root,
+        relativePath,
+        stableJson(merged),
+        results,
+        undefined,
+        audit,
+        `templates/${templateName}`,
+      );
     } else if (changed) {
       if (!audit) writeFileSync(target, stableJson(merged));
       results.push({ path: relativePath, action: 'merged' });
@@ -254,6 +268,7 @@ export function reconcile(root, templates, { audit = false } = {}) {
     results,
     undefined,
     audit,
+    'templates/opencode-config.template.json',
   );
 
   const budgetPolicy = resolve(root, '.autoloop', 'measurement-budget-policy.json');
@@ -270,13 +285,22 @@ export function reconcile(root, templates, { audit = false } = {}) {
       results,
       undefined,
       audit,
+      'templates/measurement-budget-policy.template.json',
     );
   }
 
   const loop = resolve(root, 'docs', 'agentic', 'LOOP.md');
   const loopTemplate = readFileSync(join(templates, 'LOOP.template.md'));
   if (!existsSync(loop)) {
-    writeArtifact(root, 'docs/agentic/LOOP.md', loopTemplate, results, undefined, audit);
+    writeArtifact(
+      root,
+      'docs/agentic/LOOP.md',
+      loopTemplate,
+      results,
+      undefined,
+      audit,
+      'templates/LOOP.template.md',
+    );
   } else if (Buffer.compare(readFileSync(loop), loopTemplate) === 0) {
     results.push({ path: 'docs/agentic/LOOP.md', action: 'identical' });
   } else {
@@ -485,6 +509,15 @@ function selfTest() {
       nonManual.nonManualTooling === true
         && nonManualActions.get('tools/agentic/auto-merge.mjs') === 'created'
         && nonManualActions.get('tools/agentic/merge-authorization-contract.mjs') === 'created',
+    );
+    expect(
+      'every template-backed entry names its template source, through the rename',
+      nonManual.results.find((entry) => entry.path === 'tools/agentic/auto-merge.mjs')
+        ?.source === 'templates/tools/auto-merge.reference.mjs'
+        && nonManual.results.find((entry) => entry.path === 'tools/agentic/verify.mjs')
+          ?.source === 'templates/tools/verify.mjs'
+        && nonManual.results.find((entry) => entry.path === '.codex/agents/autoloop-reviewer.toml')
+          ?.source === 'templates/codex-reviewer-agent.template.toml',
     );
 
     const vendoredMerge = join(root, 'tools', 'agentic', 'auto-merge.mjs');
