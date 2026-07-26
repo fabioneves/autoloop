@@ -36,7 +36,7 @@ import {
   createPremergeRecordComment,
   policyAttestationForRecord,
 } from './publish-verdict.mjs';
-import { snapshotExecutionRepository } from './route-adapter-contract.mjs';
+import { snapshotExecutionRepository } from './checkout-contract.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/u;
 const HASH_RE = /^[0-9a-f]{64}$/u;

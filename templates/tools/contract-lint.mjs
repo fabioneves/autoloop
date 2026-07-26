@@ -12,10 +12,48 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const RUNTIME_ROUTING_CONSUMERS = Object.freeze([
-  'runtime-contract.mjs',
+// The tools a stale routing instruction would most plausibly land in.
+const DISPATCH_CONSUMERS = Object.freeze([
+  'dispatch.mjs',
+  'prime.mjs',
+  'review-contract.mjs',
+]);
+// Deleted with the broker. Naming one of these in an instruction is a dangling
+// reference by construction: the file does not exist in any install.
+const RETIRED_TOOLS = Object.freeze([
   'run-scope.mjs',
+  'runtime-contract.mjs',
   'route-adapter-contract.mjs',
+  'measurement-contract.mjs',
+  'intent-contract.mjs',
+  'continuation-store.mjs',
+]);
+// Structured CLI seams that only the broker, the measurement ledger, or the
+// route catalog ever answered.
+const RETIRED_FLAGS = Object.freeze([
+  'attest-host-json',
+  'open-json',
+  'probe-json',
+  'plan-json',
+  'compile-json',
+  'execute-json',
+  'observe-json',
+  'observe-measured-json',
+  'bind-measurement-json',
+  'bind-measurement-unit-json',
+  'initialize-route-state-json',
+  'refresh-route-state-json',
+  'finish-json',
+  'dev-json',
+  'conclude-json',
+  'capture-event',
+  'capture-hook',
+  'capture-hook-json',
+  'run-operation',
+  'measured',
+  'check-budget-policy',
+  'finalize-events',
+  'export-evidence-bundle',
 ]);
 const FORWARD_ARTIFACTS = Object.freeze([
   'README.md',
@@ -36,8 +74,7 @@ const FORWARD_ARTIFACTS = Object.freeze([
   'templates/opencode-reviewer-agent.template.md',
   'templates/tools/label-swap-reminder.mjs',
   'templates/tools/session-preflight.sh',
-  ...RUNTIME_ROUTING_CONSUMERS.map((name) => `templates/tools/${name}`),
-  'docs/measurement.md',
+  ...DISPATCH_CONSUMERS.map((name) => `templates/tools/${name}`),
   'docs/opencode-smoke.md',
 ]);
 const INSTALLED_FORWARD_ARTIFACTS = Object.freeze([
@@ -51,7 +88,7 @@ const INSTALLED_FORWARD_ARTIFACTS = Object.freeze([
   '.opencode/plugins/autoloop.js',
   '.opencode/opencode.json',
   'tools/agentic/session-preflight.sh',
-  ...RUNTIME_ROUTING_CONSUMERS.map((name) => `tools/agentic/${name}`),
+  ...DISPATCH_CONSUMERS.map((name) => `tools/agentic/${name}`),
 ]);
 
 const STALE_ROUTE_PATTERNS = Object.freeze([
@@ -108,7 +145,28 @@ const STALE_ROUTE_PATTERNS = Object.freeze([
   {
     code: 'LEGACY_ADAPTER_OPTION_PATH',
     pattern: /\bengine\.(?:claude|codex|opencode)\.[A-Za-z][A-Za-z0-9]*\b/gu,
-    message: 'host tuning belongs under adapterOptions, not the retired engine table',
+    message: 'the retired engine tuning table has no replacement key',
+  },
+  {
+    code: 'RETIRED_MACHINERY_TOOL',
+    pattern: new RegExp(
+      `\\btools/agentic/(?:${RETIRED_TOOLS.map((name) =>
+        name.replace('.', '\\.')).join('|')})`,
+      'gu',
+    ),
+    message: 'the broker, route, and measurement tools are deleted; '
+      + 'dispatch.mjs and prime.mjs are the entry points',
+  },
+  {
+    code: 'RETIRED_MACHINERY_SEAM',
+    pattern: new RegExp(`--(?:${RETIRED_FLAGS.join('|')})\\b`, 'gu'),
+    message: 'the broker and measurement CLI seams are deleted',
+  },
+  {
+    code: 'RETIRED_RUNTIME_CONTRACT',
+    pattern: /\bRuntimeContract\b|\bauthority broker\b|\bcapability (?:probe|snapshot)\b|\bmeasurement ledger\b|\bmeasurement-budget-policy\b/giu,
+    message: 'the RuntimeContract, its broker, capability probing, and the '
+      + 'measurement ledger no longer exist',
   },
   {
     code: 'CAPABILITY_FAILURE_AS_OUTAGE',
@@ -256,22 +314,22 @@ function installedRoutingRegression() {
       'tools/agentic/loop-scope.mjs',
       'tools/agentic/stats.mjs',
       'tools/agentic/writeback-check.mjs',
-      'tools/agentic/runtime-contract.mjs',
-      'tools/agentic/run-scope.mjs',
-      'tools/agentic/route-adapter-contract.mjs',
+      'tools/agentic/dispatch.mjs',
+      'tools/agentic/prime.mjs',
+      'tools/agentic/review-contract.mjs',
     ];
     for (const relativePath of files) {
       const path = resolve(root, relativePath);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(
         path,
-        relativePath.endsWith('runtime-contract.mjs')
+        relativePath.endsWith('dispatch.mjs')
           ? 'const route = cfg.runtime.supportedHosts;'
           : '',
       );
     }
     return lintInstallRoot(root).some((finding) =>
-      finding.path === 'tools/agentic/runtime-contract.mjs'
+      finding.path === 'tools/agentic/dispatch.mjs'
       && finding.code === 'PERSISTED_HOST_AUTHORITY');
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -280,7 +338,7 @@ function installedRoutingRegression() {
 
 function selfTest() {
   const clean = lintRoutingText(
-    'Migration removes runtime.supportedHosts and engine.profile; RuntimeContract owns routing.',
+    'Migration removes runtime.supportedHosts and engine.profile.',
   );
   const stale = lintRoutingText(
     [
@@ -375,8 +433,28 @@ function selfTest() {
         && overbroadSmokeExemption.length === 1,
     ],
     [
-      'installed runtime consumers are linted',
+      'installed dispatch consumers are linted',
       installedRoutingRegression(),
+    ],
+    [
+      'a deleted tool named in an instruction is a dangling reference',
+      lintRoutingText('Run node tools/agentic/run-scope.mjs --probe-json.')
+        .map(({ code }) => code).sort().join(',')
+        === 'RETIRED_MACHINERY_SEAM,RETIRED_MACHINERY_TOOL',
+    ],
+    [
+      'retired broker and measurement vocabulary is rejected',
+      lintRoutingText('Ask the RuntimeContract for a capability snapshot.')
+        .filter(({ code }) => code === 'RETIRED_RUNTIME_CONTRACT').length === 2
+        && lintRoutingText('The authority broker signs the measurement ledger.')
+          .filter(({ code }) => code === 'RETIRED_RUNTIME_CONTRACT').length === 2,
+    ],
+    [
+      'the surviving dispatch surface passes the lint',
+      lintRoutingText(
+        'Run node tools/agentic/dispatch.mjs --role code-review '
+        + '--prompt-file /tmp/p.md --json, then node tools/agentic/prime.mjs.',
+      ).length === 0,
     ],
   ];
   const failures = cases.filter(([, passed]) => !passed);

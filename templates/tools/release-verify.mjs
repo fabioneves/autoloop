@@ -25,33 +25,13 @@ const MAX_SMOKE_MANIFEST_BYTES = 256 * 1024;
 const MAX_SMOKE_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_SMOKE_TOTAL_BYTES = 32 * 1024 * 1024;
 const SMOKE_EVIDENCE_KIND = 'autoloop-opencode-live-smoke-evidence';
-const SMOKE_EVIDENCE_ROLES = Object.freeze([
-  ...Array.from(
-    { length: 9 },
-    (_, index) => `check-${String(index + 1).padStart(2, '0')}-stream`,
+const SMOKE_EVIDENCE_CHECK_COUNT = 7;
+const SMOKE_EVIDENCE_ROLES = Object.freeze(
+  Array.from(
+    { length: SMOKE_EVIDENCE_CHECK_COUNT },
+    (unused, index) => `check-${String(index + 1).padStart(2, '0')}-stream`,
   ),
-  'check-10-origin-stream',
-  'check-10-driver-request-issued-stream',
-  'check-10-driver-session-created-stream',
-  'check-10-driver-context-injected-stream',
-  'check-10-server-log',
-  'check-10-message-response',
-  'check-10-request',
-  'check-10-state-issued',
-  'check-10-state-claimed',
-  'check-10-state-session-created',
-  'check-10-state-opened',
-  'check-10-state-prompted',
-  'check-10-effect-session-create',
-  'check-10-effect-context-inject',
-  'check-10-effect-prompt',
-  'check-10-owner-claim',
-  'check-10-owner-session-recovery',
-  'check-10-owner-context-recovery',
-  'check-10-crash-request-issued',
-  'check-10-crash-session-created',
-  'check-10-crash-context-injected',
-]);
+);
 const SKILL_BANNERS = [
   ['setup', 'setupSkill', 'skills/setup/SKILL.md'],
   ['dev', 'devSkill', 'skills/dev/SKILL.md'],
@@ -73,16 +53,6 @@ export function compareStableVersions(left, right) {
 
 export function fingerprintBytes(value) {
   return createHash('sha256').update(value).digest('hex');
-}
-
-export function sortContinuationStateNames(names) {
-  return names
-    .filter((name) => /^state-[0-9]{3}-(?:issued|claimed|session-created|opened|prompted)\.json$/u.test(name))
-    .sort();
-}
-
-export function listContinuationStates(directory) {
-  return sortContinuationStateNames(readdirSync(directory));
 }
 
 export function sortStableVersions(text) {
@@ -244,12 +214,15 @@ function validateSmokeEvidenceManifest(
     || manifest.opencode !== record.opencode
     || manifest.sanitized !== true
     || !Array.isArray(manifest.checks)
-    || manifest.checks.length !== 10
+    || manifest.checks.length !== SMOKE_EVIDENCE_CHECK_COUNT
     || manifest.checks.some((check, index) => check !== index + 1)
     || !Array.isArray(manifest.files)
     || manifest.files.length !== SMOKE_EVIDENCE_ROLES.length
   ) {
-    evidenceFailure(errors, 'manifest identity or checks 1-10 are incomplete');
+    evidenceFailure(
+      errors,
+      `manifest identity or checks 1-${SMOKE_EVIDENCE_CHECK_COUNT} are incomplete`,
+    );
     return;
   }
   const roles = new Set();
@@ -323,12 +296,12 @@ function requireOpenCodeSmokeEvidence(
     ? [...text.matchAll(new RegExp(
       `^- v${version.replaceAll('.', '\\.')} live smoke evidence: `
       + 'date=([0-9]{4}-[0-9]{2}-[0-9]{2}); '
-      + 'opencode=([^;]+); checks=1-10; '
+      + 'opencode=([^;]+); checks=1-7; '
       + 'sha256=([0-9a-f]{64}); location=([^\\s]+)$',
       'gmu',
     ))]
     : [];
-  // An untested declaration states that the ten live checks were deliberately
+  // An untested declaration states that the live checks were deliberately
   // skipped for this release. It carries the release instead of blocking it, but
   // it is always reported as a note and never as a passed live route.
   const untested = typeof text === 'string'
@@ -495,15 +468,8 @@ export function verifyRelease(files, options = {}) {
   requireReleaseReference(
     files.README,
     'README.md',
-    `v${version} route-matrix release reference`,
-    `v${version} supports exactly five active-host/captured-preference pairs:`,
-    errors,
-  );
-  requireReleaseReference(
-    files.measurementDoc,
-    'docs/measurement.md',
-    `v${version} release reference`,
-    `The pipeline is implemented in v${version}.`,
+    `v${version} dispatch-surface release reference`,
+    `v${version} dispatches every role through one call:`,
     errors,
   );
   const readArtifact = options.readEvidenceArtifact
@@ -586,7 +552,10 @@ function fixtureSmokeEvidence(version) {
     release: version,
     date: '2026-07-25',
     opencode: '1.18.4',
-    checks: Array.from({ length: 10 }, (_, index) => index + 1),
+    checks: Array.from(
+      { length: SMOKE_EVIDENCE_CHECK_COUNT },
+      (unused, index) => index + 1,
+    ),
     sanitized: true,
     files,
   }, null, 2)}\n`);
@@ -604,7 +573,7 @@ function fixtureFiles(version = '0.40.0') {
     VERSION: `${version}\n`,
     README: [
       `<img alt="release v${version}" src="https://img.shields.io/badge/release-v${version}-8b5cf6?style=flat-square">`,
-      `v${version} supports exactly five active-host/captured-preference pairs:`,
+      `v${version} dispatches every role through one call:`,
       `v${version} uses schema \`0.25.0\`.`,
       '',
     ].join('\n'),
@@ -618,10 +587,9 @@ function fixtureFiles(version = '0.40.0') {
     pitcrewSkill: `∞ pitcrew · v${version} · starting\n`,
     configContract: "export const CONFIG_VERSION = '0.25.0';\n",
     primeTool: `const AUTOLOOP_VERSION = '${version}';\n`,
-    measurementDoc: `The pipeline is implemented in v${version}.\n`,
     opencodeSmoke:
       `- v${version} live smoke evidence: date=2026-07-25; `
-      + `opencode=1.18.4; checks=1-10; sha256=${evidence.sha256}; `
+      + `opencode=1.18.4; checks=1-7; sha256=${evidence.sha256}; `
       + `location=${evidence.location}\n`,
     evidenceArtifacts: evidence.evidenceArtifacts,
     stateTemplate: 'the current schema is `0.25.0`.\n',
@@ -755,20 +723,18 @@ async function selfTest() {
         ...fixtureFiles('0.40.1'),
         README: [
           '<img alt="release v0.40.1" src="https://img.shields.io/badge/release-v0.40.1-8b5cf6?style=flat-square">',
-          'v0.40.0 supports exactly five active-host/captured-preference pairs:',
+          'v0.40.0 dispatches every role through one call:',
           'v0.40.0 uses schema `0.25.0`.',
           '',
         ].join('\n'),
-        measurementDoc: 'The pipeline is implemented in v0.40.0.\n',
         opencodeSmoke:
           `- v0.40.0 live smoke evidence: date=2026-07-25; `
-          + `opencode=1.18.4; checks=1-10; sha256=${'a'.repeat(64)}; `
+          + `opencode=1.18.4; checks=1-7; sha256=${'a'.repeat(64)}; `
           + 'location=evidence/opencode-v0.40.0.tar\n',
         stateTemplate: 'the current schema is `0.25.0`.\n',
       },
       expected: [
-        'README.md: expected exactly one v0.40.1 route-matrix release reference',
-        'docs/measurement.md: expected exactly one v0.40.1 release reference',
+        'README.md: expected exactly one v0.40.1 dispatch-surface release reference',
         'docs/opencode-smoke.md: expected exactly one complete v0.40.1 live smoke evidence record',
         'README.md: expected exactly one v0.40.1/schema 0.25.0 reference',
       ],
@@ -826,7 +792,7 @@ async function selfTest() {
         ...fixtureFiles(),
         opencodeSmoke:
           '- v0.40.0 live smoke evidence: date=2026-07-25; '
-          + 'opencode=1.18.4; checks=1-10; sha256=pending; location=pending\n',
+          + 'opencode=1.18.4; checks=1-7; sha256=pending; location=pending\n',
       },
       expected: [
         'docs/opencode-smoke.md: expected exactly one complete v0.40.0 live smoke evidence record',
@@ -904,7 +870,7 @@ async function selfTest() {
         manifest.files.pop();
       }),
       expected: [
-        'docs/opencode-smoke.md: live smoke evidence artifact manifest identity or checks 1-10 are incomplete',
+        'docs/opencode-smoke.md: live smoke evidence artifact manifest identity or checks 1-7 are incomplete',
       ],
     },
     {
@@ -1049,20 +1015,6 @@ async function selfTest() {
       ],
     },
     {
-      name: 'lists only ordered durable continuation states',
-      actual: () => sortContinuationStateNames([
-        'state-004-prompted.json',
-        'request.json',
-        'state-000-issued.json',
-        'state-003-opened.json',
-      ]),
-      expected: [
-        'state-000-issued.json',
-        'state-003-opened.json',
-        'state-004-prompted.json',
-      ],
-    },
-    {
       name: 'parses only exact GitHub origin repositories',
       actual: () => [
         repositorySlugFromRemote('git@github.com:owner/repository.git'),
@@ -1129,7 +1081,6 @@ function loadRepository(root) {
     pitcrewSkill: readText(root, 'skills/pitcrew/SKILL.md'),
     configContract: readText(root, 'templates/tools/config-contract.mjs'),
     primeTool: readText(root, 'templates/tools/prime.mjs'),
-    measurementDoc: readText(root, 'docs/measurement.md'),
     opencodeSmoke: readText(root, 'docs/opencode-smoke.md'),
     stateTemplate: readText(root, 'templates/STATE.template.md'),
     verifyWorkflow: readText(root, '.github/workflows/verify.yml'),
@@ -1383,15 +1334,6 @@ async function main(args) {
   if (args.includes('--self-test')) return selfTest();
   if (args[0] === '--fingerprint-stdin') {
     process.stdout.write(`${fingerprintBytes(readFileSync(0))}\n`);
-    return 0;
-  }
-  if (args[0] === '--list-continuation-states') {
-    const directory = args[1];
-    if (!directory || args.length !== 2) {
-      process.stderr.write('--list-continuation-states requires one directory\n');
-      return 2;
-    }
-    process.stdout.write(`${listContinuationStates(directory).join('\n')}\n`);
     return 0;
   }
   if (args[0] === '--sort-versions') {

@@ -1,38 +1,31 @@
 #!/usr/bin/env node
 
-import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import {
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+// Code-review convergence: the authority for clean / continue / block / cap.
+//
+// Every decision this file made under the broker survives unchanged — round 1
+// covers the complete artifact, rounds 2+ cover only the fix delta plus open
+// rebuts, a verified Critical/Major outside a later delta enters the human-block
+// path, an unresolved Major at the cap blocks, and a rebut closes only when a
+// fresh reviewer accepts that exact finding ID.
+//
+// What changed is the shape of the evidence. It used to be a chain of
+// broker-signed runtime receipts whose authenticity came from an in-process
+// signing key; the orchestrator could not construct one from a shell, which is
+// how the loop stopped converging. It is now the record of the dispatches that
+// actually happened: one entry per round, each naming its own dispatch, its
+// writer and reviewer identities, the delta it reviewed, and the typed verdict
+// `dispatch.mjs` parsed. Freshness is proved structurally — distinct dispatch
+// ids per round, and a reviewer identity that is never the author's.
+//
+// Usage:
+//   node tools/agentic/review-contract.mjs < review-input.json
+//   node tools/agentic/review-contract.mjs --self-test
+
+import { createHash } from 'node:crypto';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { classifyLaneProof } from './lane-contract.mjs';
 import { validateProjectConfig } from './config-contract.mjs';
-import {
-  CAPABILITY_REQUIREMENTS,
-  INTENT_PROVENANCE,
-  initializeRouteState,
-  observe,
-  open,
-  plan,
-  refreshRouteState,
-  validateRuntimeReceipt,
-} from './runtime-contract.mjs';
-import {
-  artifactSourceFingerprint,
-  classifyRouteAttempt,
-  compileRouteAttempt,
-  issueCapabilitySnapshot,
-  issueHostAttemptReceipt,
-  issueHostEvidence,
-  snapshotExecutionCheckout,
-} from './route-adapter-contract.mjs';
+import { validReviewVerdict } from './dispatch.mjs';
 
 const GATING_SEVERITIES = new Set(['Critical', 'Major']);
 const REVIEW_SCOPES = new Map([
@@ -42,7 +35,47 @@ const REVIEW_SCOPES = new Map([
 const HASH_RE = /^[0-9a-f]{64}$/;
 const OID_RE = /^[0-9a-f]{40}$/;
 const FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
+const DISPOSITIONS = new Set(['fix', 'rebut']);
+const LEDGER_STATES = new Set(['open', 'closed']);
+
+const ROUND_KEYS = [
+  'round',
+  'scope',
+  'dispatchId',
+  'authorIdentity',
+  'reviewerIdentity',
+  'planFingerprint',
+  'repositoryFingerprint',
+  'configFingerprint',
+  'configuredBaseOid',
+  'deltaBaseOid',
+  'headOid',
+  'artifactVersion',
+  'artifactFingerprint',
+  'checkout',
+  'priorFindings',
+  'openRebuttals',
+  'verdict',
+];
+const CHECKOUT_KEYS = [
+  'root',
+  'repositoryFingerprint',
+  'branch',
+  'headOid',
+  'clean',
+];
+const LEDGER_KEYS = [
+  'findingId',
+  'severity',
+  'summary',
+  'evidence',
+  'disposition',
+  'state',
+  'rationale',
+];
+const REBUTTAL_KEYS = ['findingId', 'claim', 'evidence'];
 
 function isPlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -65,7 +98,7 @@ function canonicalize(value) {
   return value;
 }
 
-function hashValue(value) {
+export function hashValue(value) {
   return createHash('sha256')
     .update(JSON.stringify(canonicalize(value)))
     .digest('hex');
@@ -86,9 +119,14 @@ function decision(state, code, detail = {}) {
   };
 }
 
+function boundedText(value, minimum, maximum) {
+  return typeof value === 'string'
+    && value.length >= minimum
+    && value.length <= maximum;
+}
+
 function validExpected(expected) {
   return hasExactKeys(expected, [
-    'runInstanceFingerprint',
     'planFingerprint',
     'repositoryFingerprint',
     'configuredBaseOid',
@@ -96,7 +134,6 @@ function validExpected(expected) {
     'artifactFingerprint',
     'headOid',
   ])
-    && HASH_RE.test(expected.runInstanceFingerprint)
     && HASH_RE.test(expected.planFingerprint)
     && HASH_RE.test(expected.repositoryFingerprint)
     && OID_RE.test(expected.configuredBaseOid)
@@ -118,6 +155,75 @@ function validAnnotations(annotations) {
       && typeof annotation.inScope === 'boolean');
 }
 
+function validCheckout(checkout) {
+  return hasExactKeys(checkout, CHECKOUT_KEYS)
+    && boundedText(checkout.root, 2, 4096)
+    && HASH_RE.test(checkout.repositoryFingerprint)
+    && boundedText(checkout.branch, 1, 255)
+    && OID_RE.test(checkout.headOid)
+    && typeof checkout.clean === 'boolean';
+}
+
+function validLedgerEntry(entry) {
+  return hasExactKeys(entry, LEDGER_KEYS)
+    && FINDING_ID_RE.test(entry.findingId)
+    && GATING_SEVERITIES.has(entry.severity)
+    && boundedText(entry.summary, 1, 4096)
+    && boundedText(entry.evidence, 0, 16384)
+    && DISPOSITIONS.has(entry.disposition)
+    && LEDGER_STATES.has(entry.state)
+    && boundedText(entry.rationale, 1, 4096);
+}
+
+function validRebuttal(rebuttal) {
+  return hasExactKeys(rebuttal, REBUTTAL_KEYS)
+    && FINDING_ID_RE.test(rebuttal.findingId)
+    && boundedText(rebuttal.claim, 1, 4096)
+    && boundedText(rebuttal.evidence, 1, 16384);
+}
+
+// One recorded round. `dispatchId` is the identity of the reviewer process that
+// produced the verdict — distinct per round is what "fresh reviewer" means once
+// there is no broker to seal an execution instance.
+export function validReviewRound(record) {
+  return hasExactKeys(record, ROUND_KEYS)
+    && Number.isSafeInteger(record.round)
+    && record.round >= 1
+    && record.round <= 100
+    && [...REVIEW_SCOPES.values()].includes(record.scope)
+    && boundedText(record.dispatchId, 1, 128)
+    && IDENTITY_RE.test(record.dispatchId)
+    && IDENTITY_RE.test(record.authorIdentity ?? '')
+    && IDENTITY_RE.test(record.reviewerIdentity ?? '')
+    // Writer and reviewer identities never collide. Under the broker this was
+    // a sealed actor fingerprint; here it is the plain statement, and it is
+    // still the invariant that makes an independent review independent.
+    && record.authorIdentity !== record.reviewerIdentity
+    && HASH_RE.test(record.planFingerprint)
+    && HASH_RE.test(record.repositoryFingerprint)
+    && HASH_RE.test(record.configFingerprint)
+    && OID_RE.test(record.configuredBaseOid)
+    && OID_RE.test(record.deltaBaseOid)
+    && OID_RE.test(record.headOid)
+    && Number.isSafeInteger(record.artifactVersion)
+    && record.artifactVersion >= 1
+    && HASH_RE.test(record.artifactFingerprint)
+    && validCheckout(record.checkout)
+    && record.checkout.repositoryFingerprint === record.repositoryFingerprint
+    && record.checkout.headOid === record.headOid
+    && Array.isArray(record.priorFindings)
+    && record.priorFindings.length <= 100
+    && new Set(record.priorFindings.map(({ findingId }) => findingId)).size
+      === record.priorFindings.length
+    && record.priorFindings.every(validLedgerEntry)
+    && Array.isArray(record.openRebuttals)
+    && record.openRebuttals.length <= 100
+    && new Set(record.openRebuttals.map(({ findingId }) => findingId)).size
+      === record.openRebuttals.length
+    && record.openRebuttals.every(validRebuttal)
+    && validReviewVerdict(record.verdict);
+}
+
 function gatingFindings(verdict) {
   return verdict.findings.filter(({ severity }) =>
     GATING_SEVERITIES.has(severity));
@@ -130,22 +236,19 @@ function findingCoreMatches(ledgerFinding, finding) {
     && ledgerFinding.evidence === finding.evidence;
 }
 
-function verdictMatchesOpenRebuts(receipt) {
-  const verdict = receipt.reviewVerdicts[0].verdict;
-  const openIds = receipt.artifactSource.openRebuttals.map(
-    ({ findingId }) => findingId,
-  );
-  const rebutIds = verdict.rebuts.map(({ findingId }) => findingId);
-  const gatingIds = new Set(gatingFindings(verdict).map(({ id }) => id));
+function verdictMatchesOpenRebuts(record) {
+  const openIds = record.openRebuttals.map(({ findingId }) => findingId);
+  const rebutIds = record.verdict.rebuts.map(({ findingId }) => findingId);
+  const gatingIds = new Set(gatingFindings(record.verdict).map(({ id }) => id));
   return sameSet(openIds, rebutIds)
-    && verdict.rebuts.every(({ findingId, status }) =>
+    && record.verdict.rebuts.every(({ findingId, status }) =>
       status === 'accepted'
         ? !gatingIds.has(findingId)
         : gatingIds.has(findingId));
 }
 
 function validCumulativeLedger(previous, current) {
-  const previousVerdict = previous.reviewVerdicts[0].verdict;
+  const previousVerdict = previous.verdict;
   const previousGating = new Map(
     gatingFindings(previousVerdict).map((finding) => [finding.id, finding]),
   );
@@ -153,14 +256,10 @@ function validCumulativeLedger(previous, current) {
     previousVerdict.rebuts.map((rebut) => [rebut.findingId, rebut]),
   );
   const priorLedger = new Map(
-    previous.artifactSource.priorFindings.map(
-      (finding) => [finding.findingId, finding],
-    ),
+    previous.priorFindings.map((finding) => [finding.findingId, finding]),
   );
   const currentLedger = new Map(
-    current.artifactSource.priorFindings.map(
-      (finding) => [finding.findingId, finding],
-    ),
+    current.priorFindings.map((finding) => [finding.findingId, finding]),
   );
   const expectedIds = new Set([
     ...priorLedger.keys(),
@@ -182,10 +281,7 @@ function validCumulativeLedger(previous, current) {
       ) {
         return false;
       }
-      if (
-        previousFinding
-        && !findingCoreMatches(previousFinding, repeated)
-      ) {
+      if (previousFinding && !findingCoreMatches(previousFinding, repeated)) {
         return false;
       }
       continue;
@@ -209,115 +305,73 @@ function validCumulativeLedger(previous, current) {
   return true;
 }
 
-function receiptHistory(
-  receipts,
-  round,
-  scope,
-  expected,
-  projectConfig,
-) {
+function roundHistory(rounds, round, scope, expected, projectConfig) {
   if (
-    !Array.isArray(receipts)
-    || receipts.length !== round
-    || receipts.some((receipt) => !validateRuntimeReceipt(receipt))
+    !Array.isArray(rounds)
+    || rounds.length !== round
+    || rounds.some((record) => !validReviewRound(record))
   ) {
     return null;
   }
-  const first = receipts[0];
+  const first = rounds[0];
   const stable = [
-    'runIntentHash',
-    'generation',
-    'hostEvidenceFingerprint',
-    'runInstanceFingerprint',
-    'invocationNonce',
+    'planFingerprint',
+    'repositoryFingerprint',
     'configFingerprint',
-    'sessionFingerprint',
-    'invocationFlow',
-    'activeHost',
-    'selector',
-    'requestedEngine',
-    'requestedRoute',
-    'flow',
     'configuredBaseOid',
+    'authorIdentity',
   ];
-  const attempts = receipts.flatMap((receipt) => receipt.attempts);
   if (
-    !['dev', 'pitcrew'].includes(first.flow)
-    || receipts.some((receipt, index) =>
-      receipt.stage !== 'code-review'
-      || receipt.role !== 'reviewer'
-      || receipt.round !== index + 1
-      || receipt.reviewScope !== (
+    rounds.some((record, index) =>
+      record.round !== index + 1
+      || record.scope !== (
         index === 0
           ? REVIEW_SCOPES.get('full')
           : REVIEW_SCOPES.get('delta')
       )
-      || stable.some((key) => receipt[key] !== first[key]))
-    || receipts.some((receipt) =>
-      receipt.checkout.root !== first.checkout.root
-      || receipt.checkout.repositoryFingerprint
-        !== first.checkout.repositoryFingerprint
-      || receipt.checkout.branch !== first.checkout.branch)
-    || new Set(receipts.map(({ fingerprint }) => fingerprint)).size
-      !== receipts.length
-    || new Set(receipts.map(({ planFingerprint }) => planFingerprint)).size
-      !== receipts.length
-    || new Set(attempts.map(({ executionEvidence }) =>
-      executionEvidence.instanceId)).size !== attempts.length
-    || new Set(attempts.map(({ evidenceFingerprint }) =>
-      evidenceFingerprint)).size !== attempts.length
-    || receipts.some((receipt) => !verdictMatchesOpenRebuts(receipt))
+      || stable.some((key) => record[key] !== first[key]))
+    || rounds.some((record) =>
+      record.checkout.root !== first.checkout.root
+      || record.checkout.branch !== first.checkout.branch)
+    // A repeated dispatch id is a replayed reviewer, not a fresh one.
+    || new Set(rounds.map(({ dispatchId }) => dispatchId)).size !== rounds.length
+    || rounds.some((record) => !verdictMatchesOpenRebuts(record))
   ) {
     return null;
   }
-  if (
-    first.configFingerprint !== hashValue(projectConfig)
-    || receipts.some(({ configFingerprint }) =>
-      configFingerprint !== first.configFingerprint)
-  ) {
-    return null;
-  }
-  for (let index = 1; index < receipts.length; index += 1) {
-    const previous = receipts[index - 1];
-    const current = receipts[index];
+  if (first.configFingerprint !== hashValue(projectConfig)) return null;
+  if (rounds[0].deltaBaseOid !== first.configuredBaseOid) return null;
+  for (let index = 1; index < rounds.length; index += 1) {
+    const previous = rounds[index - 1];
+    const current = rounds[index];
     if (
-      current.artifactSource.kind !== 'git-review'
-      || current.artifactSource.deltaBaseOid
-        !== previous.artifactSubject.headOid
+      current.deltaBaseOid !== previous.headOid
       || !validCumulativeLedger(previous, current)
-    ) {
-      return null;
-    }
-    if (
-      current.artifactVersion <= previous.artifactVersion
+      || current.artifactVersion <= previous.artifactVersion
       || current.artifactFingerprint === previous.artifactFingerprint
     ) {
       return null;
     }
   }
-  const current = receipts.at(-1);
+  const current = rounds.at(-1);
   if (
-    current.reviewScope !== REVIEW_SCOPES.get(scope)
-    || current.runInstanceFingerprint !== expected.runInstanceFingerprint
+    current.scope !== REVIEW_SCOPES.get(scope)
     || current.planFingerprint !== expected.planFingerprint
-    || current.checkout.repositoryFingerprint
-      !== expected.repositoryFingerprint
+    || current.repositoryFingerprint !== expected.repositoryFingerprint
     || current.configuredBaseOid !== expected.configuredBaseOid
     || current.artifactVersion !== expected.artifactVersion
     || current.artifactFingerprint !== expected.artifactFingerprint
-    || current.artifactSubject.kind !== 'head'
-    || current.artifactSubject.headOid !== expected.headOid
+    || current.headOid !== expected.headOid
   ) {
     return null;
   }
-  return { current, receipts };
+  return { current, rounds };
 }
 
-function authenticatedFindings(receipts) {
+function authenticatedFindings(rounds) {
   const history = new Map();
-  for (const receipt of receipts) {
-    const verdict = receipt.reviewVerdicts[0].verdict;
-    for (const finding of verdict.findings) {
+  for (const record of rounds) {
+    for (const finding of record.verdict.findings) {
       const previous = history.get(finding.id);
       if (
         previous
@@ -343,7 +397,7 @@ export function reviewTransition(input) {
       'projectConfig',
       'expected',
       'findingAnnotations',
-      'runtimeReceipts',
+      'reviewRounds',
     ])
     || !Number.isSafeInteger(input.round)
     || input.round < 1
@@ -351,34 +405,29 @@ export function reviewTransition(input) {
     || (input.round === 1 && input.scope !== 'full')
     || (input.round > 1 && input.scope !== 'delta')
     || validateProjectConfig(input.projectConfig).length > 0
-    || input.round
-      > input.projectConfig.caps.codeReviewRoundsPerUnit
+    || input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
     || !validExpected(input.expected)
     || !validAnnotations(input.findingAnnotations)
   ) {
     return decision('error', 'INVALID_REVIEW_INPUT');
   }
 
-  const history = receiptHistory(
-    input.runtimeReceipts,
+  const history = roundHistory(
+    input.reviewRounds,
     input.round,
     input.scope,
     input.expected,
     input.projectConfig,
   );
-  if (!history) {
+  if (!history) return decision('error', 'INVALID_REVIEW_EVIDENCE');
+  if (!authenticatedFindings(history.rounds)) {
     return decision('error', 'INVALID_REVIEW_EVIDENCE');
   }
-  const findingsById = authenticatedFindings(history.receipts);
-  if (!findingsById) {
-    return decision('error', 'INVALID_REVIEW_EVIDENCE');
-  }
-  const currentVerdict = history.current.reviewVerdicts[0].verdict;
+
+  const currentVerdict = history.current.verdict;
   const currentIds = currentVerdict.findings.map(({ id }) => id);
   const annotationIds = input.findingAnnotations.map(({ id }) => id);
-  const rebutIds = history.current.artifactSource.openRebuttals.map(
-    ({ findingId }) => findingId,
-  );
+  const rebutIds = history.current.openRebuttals.map(({ findingId }) => findingId);
   const authenticatedRebutIds = currentVerdict.rebuts.map(
     ({ findingId }) => findingId,
   );
@@ -393,8 +442,7 @@ export function reviewTransition(input) {
   const annotations = new Map(
     input.findingAnnotations.map((annotation) => [annotation.id, annotation]),
   );
-  const currentGating = currentVerdict.findings.filter(({ severity }) =>
-    GATING_SEVERITIES.has(severity));
+  const currentGating = gatingFindings(currentVerdict);
   const currentGatingIds = new Set(currentGating.map(({ id }) => id));
   if (
     currentVerdict.rebuts.some(({ findingId, status }) =>
@@ -410,9 +458,7 @@ export function reviewTransition(input) {
   ) {
     return decision('error', 'INVALID_REVIEW_EVIDENCE');
   }
-  if (
-    currentGating.some(({ id }) => annotations.get(id).verified !== true)
-  ) {
+  if (currentGating.some(({ id }) => annotations.get(id).verified !== true)) {
     return decision('verify', 'FINDING_VERIFICATION_REQUIRED');
   }
 
@@ -430,15 +476,12 @@ export function reviewTransition(input) {
   );
   if (currentGating.length === 0 && rejectedRebuts.length === 0) {
     return decision('clean', 'REVIEW_CLEAN', {
-      reviewedHead: history.current.artifactSubject.headOid,
+      reviewedHead: history.current.headOid,
       reviewedCheckout: structuredClone(history.current.checkout),
-      runtimeReceiptFingerprint: history.current.fingerprint,
+      reviewEvidenceFingerprint: hashValue(history.current),
     });
   }
-  if (
-    input.round
-      >= input.projectConfig.caps.codeReviewRoundsPerUnit
-  ) {
+  if (input.round >= input.projectConfig.caps.codeReviewRoundsPerUnit) {
     return decision('human-block', 'REVIEW_CAP_REACHED', {
       unresolvedFindings: currentGating.length,
       rejectedRebuts: rejectedRebuts.length,
@@ -454,13 +497,7 @@ export function authorizeReviewPublication(input, targetHeadOid, liveCheckout) {
   const transition = reviewTransition(input);
   const checkoutMatches =
     isPlainObject(transition.reviewedCheckout)
-    && hasExactKeys(liveCheckout, [
-      'root',
-      'repositoryFingerprint',
-      'branch',
-      'headOid',
-      'clean',
-    ])
+    && hasExactKeys(liveCheckout, CHECKOUT_KEYS)
     && liveCheckout.clean === true
     && hashValue(liveCheckout) === hashValue(transition.reviewedCheckout);
   return {
@@ -475,24 +512,15 @@ export function authorizeReviewPublication(input, targetHeadOid, liveCheckout) {
     reviewedHead: transition.reviewedHead ?? null,
     repositoryFingerprint:
       transition.reviewedCheckout?.repositoryFingerprint ?? null,
-    runtimeReceiptFingerprint:
-      transition.runtimeReceiptFingerprint ?? null,
+    reviewEvidenceFingerprint: transition.reviewEvidenceFingerprint ?? null,
   };
-}
-
-function fixtureHash(value) {
-  return hashValue(value);
 }
 
 function fixtureProjectConfig(codeReviewRoundsPerUnit = 5) {
   return {
-    version: '0.25.0',
+    version: '0.26.0',
     baseBranch: 'main',
-    gate: {
-      command: 'npm test',
-      quickCommand: null,
-      setupCommand: null,
-    },
+    gate: { command: 'npm test', quickCommand: null, setupCommand: null },
     merge: { policy: 'manual' },
     tracker: { provider: 'none' },
     review: { checklistPath: 'docs/agentic/checklist.md' },
@@ -506,164 +534,40 @@ function fixtureProjectConfig(codeReviewRoundsPerUnit = 5) {
   };
 }
 
-const FIXTURE_REPOSITORIES = new Set();
-
-function fixtureGit(root, args) {
-  return execFileSync('git', args, {
-    cwd: root,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 10000,
-  }).trim();
+function oid(seed) {
+  return createHash('sha1').update(String(seed)).digest('hex');
 }
 
-function createFixtureRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'autoloop-review-contract-'));
-  FIXTURE_REPOSITORIES.add(root);
-  fixtureGit(root, ['init', '-b', 'main']);
-  fixtureGit(root, ['config', 'user.name', 'Autoloop Review Contract']);
-  fixtureGit(root, ['config', 'user.email', 'review-contract@example.invalid']);
-  fixtureGit(root, [
-    'remote',
-    'add',
-    'origin',
-    `https://github.com/autoloop-fixtures/review-${randomUUID()}.git`,
-  ]);
-  writeFileSync(join(root, 'reviewed.txt'), 'base\n', 'utf8');
-  fixtureGit(root, ['add', '--', 'reviewed.txt']);
-  fixtureGit(root, ['commit', '-m', 'test: establish review base']);
-  const baseOid = fixtureGit(root, ['rev-parse', 'HEAD']);
-  fixtureGit(root, ['switch', '-c', 'feature/review-contract-fixture']);
-  return { root, baseOid, nextCommit: 1 };
+function hash(seed) {
+  return createHash('sha256').update(String(seed)).digest('hex');
 }
 
-function cloneFixtureRepository(repository) {
-  const parent = mkdtempSync(join(tmpdir(), 'autoloop-review-contract-clone-'));
-  const root = join(parent, 'repository');
-  FIXTURE_REPOSITORIES.add(parent);
-  execFileSync(
-    'git',
-    ['clone', '--no-hardlinks', '--branch', 'feature/review-contract-fixture',
-      repository.root, root],
-    {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 10000,
-    },
-  );
-  fixtureGit(root, ['config', 'user.name', 'Autoloop Review Contract']);
-  fixtureGit(root, ['config', 'user.email', 'review-contract@example.invalid']);
-  fixtureGit(root, [
-    'remote',
-    'set-url',
-    'origin',
-    `https://github.com/autoloop-fixtures/review-${randomUUID()}.git`,
-  ]);
-  return { root, baseOid: repository.baseOid, nextCommit: repository.nextCommit };
-}
-
-function commitFixtureRound(repository, round) {
-  writeFileSync(
-    join(repository.root, 'reviewed.txt'),
-    `round ${round}\n${'review evidence\n'.repeat(round)}`,
-    'utf8',
-  );
-  fixtureGit(repository.root, ['add', '--', 'reviewed.txt']);
-  fixtureGit(
-    repository.root,
-    ['commit', '-m', `test: create review round ${repository.nextCommit}`],
-  );
-  repository.nextCommit += 1;
-  return fixtureGit(repository.root, ['rev-parse', 'HEAD']);
-}
-
-function cleanupFixtureRepositories() {
-  for (const root of FIXTURE_REPOSITORIES) {
-    rmSync(root, { recursive: true, force: true });
-  }
-  FIXTURE_REPOSITORIES.clear();
-}
-
-function fixtureReceiptFactory(projectConfig = fixtureProjectConfig()) {
-  const primaryRepository = createFixtureRepository();
-  const hostEvidence = issueHostEvidence({
-    integration: 'review-contract-self-test',
-    sessionId: 'review-contract-session',
-    observedSurface: { host: 'claude' },
-    expectedHost: 'claude',
-  });
-  if (!hostEvidence.ok) throw new Error('host fixture did not attest');
-  const opened = open({
-    invocation: '/autoloop:dev',
-    intentProvenance: INTENT_PROVENANCE,
-    hostEvidence: hostEvidence.value,
-    config: projectConfig,
-  });
-  if (!opened.ok) throw new Error('run fixture did not open');
-  const run = opened.value;
-  const observations = CAPABILITY_REQUIREMENTS.map((requirement) => ({
-    requirement,
-    available: true,
-    source: 'review-contract-self-test',
-    evidenceFingerprint: fixtureHash({ requirement, available: true }),
-  }));
-  let capabilities = null;
-  let routeState = null;
-  let previousHead = null;
-  let previousVerdict = null;
-  let previousSource = null;
-  return (round, verdict, options = {}) => {
-    const artifactVersion = options.artifactVersion ?? round;
-    const repository = options.switchRepository === true
-      ? cloneFixtureRepository(primaryRepository)
-      : primaryRepository;
-    const headOid = commitFixtureRound(repository, round);
-    const baseOid = repository.baseOid;
-    const checkout = snapshotExecutionCheckout(repository.root);
-    if (checkout === null) throw new Error('checkout fixture did not snapshot');
-    const nextCapabilities = issueCapabilitySnapshot({
-      hostEvidence: hostEvidence.value,
-      invocationNonce: run.invocationNonce,
-      checkout,
-      observations,
-    });
-    if (!nextCapabilities.ok) {
-      throw new Error('capability fixture did not attest');
-    }
-    if (capabilities === null) {
-      const initialized = initializeRouteState({
-        run,
-        capabilities: nextCapabilities.value,
-      });
-      if (!initialized.ok) {
-        throw new Error('route-state fixture did not initialize');
-      }
-      routeState = initialized.value;
-    } else {
-      const refreshed = refreshRouteState({
-        run,
-        routeState,
-        previousCapabilities: capabilities,
-        capabilities: nextCapabilities.value,
-      });
-      if (!refreshed.ok) {
-        throw new Error('route-state fixture did not refresh');
-      }
-      routeState = refreshed.value;
-    }
-    capabilities = nextCapabilities.value;
-    const autoPriorFindings = [];
+// Builds the recorded rounds a real run would produce: the ledger, the open
+// rebuttals, and the delta base are derived from the preceding round exactly as
+// the orchestrator derives them, so a fixture that passes here is a shape the
+// loop can actually produce.
+function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
+  const planFingerprint = hash(`plan-${options.seed ?? 'default'}`);
+  const repositoryFingerprint = hash(`repo-${options.seed ?? 'default'}`);
+  const configuredBaseOid = oid(`base-${options.seed ?? 'default'}`);
+  const configFingerprint = hashValue(projectConfig);
+  let previous = null;
+  let counter = 0;
+  return (round, verdict, overrides = {}) => {
+    counter += 1;
+    const artifactVersion = overrides.artifactVersion ?? round;
+    const headOid = overrides.headOid ?? oid(`head-${options.seed}-${counter}`);
     const ledger = new Map(
-      (previousSource?.priorFindings ?? []).map(
+      (previous?.priorFindings ?? []).map(
         (finding) => [finding.findingId, structuredClone(finding)],
       ),
     );
-    if (previousVerdict !== null) {
+    if (previous !== null) {
       const previousGating = new Map(
-        gatingFindings(previousVerdict).map((finding) => [finding.id, finding]),
+        gatingFindings(previous.verdict).map((finding) => [finding.id, finding]),
       );
       const previousRebuts = new Map(
-        previousVerdict.rebuts.map((rebut) => [rebut.findingId, rebut]),
+        previous.verdict.rebuts.map((rebut) => [rebut.findingId, rebut]),
       );
       for (const finding of ledger.values()) {
         if (finding.state === 'closed' || previousGating.has(finding.findingId)) {
@@ -687,277 +591,143 @@ function fixtureReceiptFactory(projectConfig = fixtureProjectConfig()) {
           disposition: rebutted ? 'rebut' : 'fix',
           state: 'open',
           rationale: rebutted
-            ? 'The author supplied a bounded authenticated rebuttal.'
-            : 'The exact sealed delta contains the bounded fix.',
+            ? 'The author supplied a bounded rebuttal with evidence.'
+            : 'The exact fix delta contains the bounded fix.',
         });
       }
     }
-    autoPriorFindings.push(...ledger.values());
-    const source = {
-      kind: 'git-review',
-      configuredBaseOid: baseOid,
-      finalHeadOid: headOid,
-      deltaBaseOid:
-        options.deltaBaseOid === 'configured-base'
-          ? baseOid
-          : options.deltaBaseOid
-        ?? (round === 1 ? baseOid : previousHead),
-      priorFindings:
-        options.priorFindings
-        ?? autoPriorFindings,
-      openRebuttals: options.openRebuttals ?? verdict.rebuts.map(({ findingId }) => ({
-        findingId,
-        claim: `Re-evaluate ${findingId} against the sealed fix delta.`,
-        evidence: `Authenticated rebut evidence for ${findingId}.`,
-      })),
-    };
-    const artifactFingerprint = artifactSourceFingerprint({
-      stage: 'code-review',
+    const record = {
+      round,
+      scope: round === 1 ? REVIEW_SCOPES.get('full') : REVIEW_SCOPES.get('delta'),
+      dispatchId: overrides.dispatchId ?? `dispatch-${options.seed}-${counter}`,
+      authorIdentity: overrides.authorIdentity ?? 'orchestrator',
+      reviewerIdentity: overrides.reviewerIdentity ?? `reviewer-${counter}`,
+      planFingerprint: overrides.planFingerprint ?? planFingerprint,
+      repositoryFingerprint: overrides.repositoryFingerprint ?? repositoryFingerprint,
+      configFingerprint: overrides.configFingerprint ?? configFingerprint,
+      configuredBaseOid,
+      deltaBaseOid: overrides.deltaBaseOid === 'configured-base'
+        ? configuredBaseOid
+        : overrides.deltaBaseOid
+        ?? (round === 1 ? configuredBaseOid : previous.headOid),
+      headOid,
       artifactVersion,
-      source,
-    });
-    const laneProof = classifyLaneProof({
-      mode: 'final',
-      configuredBase: { ref: 'origin/main', oid: baseOid },
-      subject: { kind: 'head', headOid },
-      final: {
-        complete: true,
-        changedFiles: 1,
-        files: [{
-          status: 'M',
-          path: '.githooks/pre-push',
-          additions: 2,
-          deletions: 1,
-          contentRead: true,
-        }],
-        persistedData: false,
+      artifactFingerprint: overrides.artifactFingerprint
+        ?? hash(`artifact-${options.seed}-${counter}`),
+      checkout: {
+        root: '/fixture/repo',
+        repositoryFingerprint: overrides.repositoryFingerprint ?? repositoryFingerprint,
+        branch: 'loop/issue-1',
+        headOid,
+        clean: true,
       },
-    });
-    if (laneProof.lane !== 'full') throw new Error('lane fixture did not classify');
-    const planned = plan({
-      run,
-      config: projectConfig,
-      capabilities,
-      routeState,
-      laneProof,
-      work: {
-        flow: 'dev',
-        stage: 'code-review',
-        round,
-        planReviewDispatches: 1,
-        configuredBaseOid: baseOid,
-        checkout,
-        artifact: {
-          kind: 'code',
-          version: artifactVersion,
-          fingerprint: artifactFingerprint,
-          authorIdentity: options.authorIdentity ?? `author-${artifactVersion}`,
-          reviewerIdentity: options.reviewerIdentity ?? 'reviewer',
-          headOid,
-          source,
-        },
-        concurrency: {
-          activeWriters: 0,
-          stagedAhead: 0,
-          stagedAheadReadOnly: true,
-        },
-      },
-    });
-    if (!planned.ok) {
-      throw new Error(`review fixture did not plan: ${JSON.stringify(planned)}`);
-    }
-    const attempt = compileRouteAttempt(planned.value);
-    if (!attempt.ok) throw new Error('review fixture did not compile');
-    const evidence = issueHostAttemptReceipt({
-      attempt: attempt.value,
-      raw: {
-        producer: attempt.value.producer,
-        status: 'succeeded',
-        effect: 'none',
-        launchStatus: 'launched',
-        isolation: {
-          mode: planned.value.isolation.mode,
-          verified: true,
-          fingerprint: '6'.repeat(64),
-        },
-        executionEvidence: {
-          kind: 'process',
-          instanceId:
-            options.executionInstanceId ?? `review-child-${round}`,
-          integration: attempt.value.producer,
-          transcriptFingerprint: fixtureHash({
-            round,
-            kind: 'transcript',
-          }),
-        },
-        modelIdentity: 'review/model',
-        verdict,
-      },
-    });
-    if (!evidence.ok) {
-      throw new Error(
-        `review fixture evidence did not issue: ${JSON.stringify(evidence)}`,
-      );
-    }
-    const outcome = classifyRouteAttempt({
-      attempt: attempt.value,
-      evidence: evidence.value,
-    });
-    if (!outcome.ok) throw new Error('review fixture evidence did not classify');
-    const observed = observe({
-      run,
-      routeState,
-      plan: planned.value,
-      outcome: outcome.value,
-    });
-    if (!observed.ok || observed.value.kind !== 'complete') {
-      throw new Error('review fixture did not complete');
-    }
-    routeState = observed.value.routeState;
-    previousHead = headOid;
-    previousVerdict = verdict;
-    previousSource = observed.value.receipt.artifactSource;
-    return observed.value.receipt;
+      priorFindings: overrides.priorFindings ?? [...ledger.values()],
+      openRebuttals: overrides.openRebuttals ?? verdict.rebuts.map(({ findingId }) => ({
+        findingId,
+        claim: `Re-evaluate ${findingId} against the fix delta.`,
+        evidence: `Rebuttal evidence for ${findingId}.`,
+      })),
+      verdict,
+    };
+    previous = record;
+    return record;
   };
 }
 
-function inputFor(
-  receipts,
-  projectConfig = fixtureProjectConfig(),
-  overrides = {},
-) {
-  const current = receipts.at(-1);
-  const verdict = current.reviewVerdicts[0].verdict;
+function inputFor(rounds, projectConfig = fixtureProjectConfig(), overrides = {}) {
+  const current = rounds.at(-1);
   return {
-    round: receipts.length,
-    scope: receipts.length === 1 ? 'full' : 'delta',
+    round: rounds.length,
+    scope: rounds.length === 1 ? 'full' : 'delta',
     projectConfig,
     expected: {
-      runInstanceFingerprint: current.runInstanceFingerprint,
       planFingerprint: current.planFingerprint,
-      repositoryFingerprint: current.checkout.repositoryFingerprint,
+      repositoryFingerprint: current.repositoryFingerprint,
       configuredBaseOid: current.configuredBaseOid,
       artifactVersion: current.artifactVersion,
       artifactFingerprint: current.artifactFingerprint,
-      headOid: current.artifactSubject.headOid,
+      headOid: current.headOid,
     },
-    findingAnnotations: verdict.findings.map(({ id }) => ({
+    findingAnnotations: current.verdict.findings.map(({ id }) => ({
       id,
       verified: true,
       inScope: true,
     })),
-    runtimeReceipts: receipts,
+    reviewRounds: rounds,
     ...overrides,
   };
 }
 
 function selfTest() {
-  const clean = fixtureReceiptFactory()(1, {
-    verdict: 'pass',
-    findings: [],
-    rebuts: [],
-  });
   const finding = {
     id: 'finding-1',
     severity: 'Major',
     summary: 'A gating defect remains',
     evidence: 'src/reviewed.mjs:1',
   };
-  const acceptedFactory = fixtureReceiptFactory();
-  const acceptedFirstFailure = acceptedFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const accepted = acceptedFactory(2, {
-    verdict: 'pass',
-    findings: [],
-    rebuts: [{
-      findingId: finding.id,
-      status: 'accepted',
-      evidence: 'The authenticated fix closes the finding.',
-    }],
-  });
-  const fixedFactory = fixtureReceiptFactory();
-  const fixedFirstFailure = fixedFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const fixed = fixedFactory(2, {
-    verdict: 'pass',
-    findings: [],
-    rebuts: [],
-  });
-  const rejectedFactory = fixtureReceiptFactory();
-  const rejectedFirstFailure = rejectedFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const rejectedFinding = {
-    ...finding,
+  const cumulativeFinding = {
+    id: 'finding-2',
+    severity: 'Major',
+    summary: 'A later delta introduces another gating defect',
+    evidence: 'src/reviewed.mjs:2',
   };
-  const rejected = rejectedFactory(2, {
-    verdict: 'fail',
-    findings: [rejectedFinding],
-    rebuts: [{
-      findingId: finding.id,
-      status: 'rejected',
-      evidence: 'The supplied evidence does not close the finding.',
-    }],
-  });
   const lateFinding = {
     id: 'late-major',
     severity: 'Major',
     summary: 'A late gating defect exists outside the fix delta',
     evidence: 'src/other.mjs:3',
   };
-  const lateFactory = fixtureReceiptFactory();
-  const lateClean = lateFactory(1, {
+  const pass = { verdict: 'pass', findings: [], rebuts: [] };
+  const failWith = (findings, rebuts = []) => ({
+    verdict: 'fail',
+    findings,
+    rebuts,
+  });
+  const accept = (id, evidence) => ({ findingId: id, status: 'accepted', evidence });
+  const reject = (id, evidence) => ({ findingId: id, status: 'rejected', evidence });
+
+  const clean = roundFactory(fixtureProjectConfig(), { seed: 'clean' })(1, pass);
+
+  const acceptedFactory = roundFactory(fixtureProjectConfig(), { seed: 'accepted' });
+  const acceptedFirst = acceptedFactory(1, failWith([finding]));
+  const accepted = acceptedFactory(2, {
     verdict: 'pass',
     findings: [],
-    rebuts: [],
+    rebuts: [accept(finding.id, 'The fix closes the finding.')],
   });
-  const late = lateFactory(2, {
-    verdict: 'fail',
-    findings: [lateFinding],
-    rebuts: [],
-  });
+
+  const fixedFactory = roundFactory(fixtureProjectConfig(), { seed: 'fixed' });
+  const fixedFirst = fixedFactory(1, failWith([finding]));
+  const fixed = fixedFactory(2, pass);
+
+  const rejectedFactory = roundFactory(fixtureProjectConfig(), { seed: 'rejected' });
+  const rejectedFirst = rejectedFactory(1, failWith([finding]));
+  const rejected = rejectedFactory(
+    2,
+    failWith([finding], [reject(finding.id, 'The evidence does not close it.')]),
+  );
+
+  const lateFactory = roundFactory(fixtureProjectConfig(), { seed: 'late' });
+  const lateClean = lateFactory(1, pass);
+  const late = lateFactory(2, failWith([lateFinding]));
+
   const configuredCap = fixtureProjectConfig(1);
-  const cappedFailure = fixtureReceiptFactory(configuredCap)(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const wrongDeltaFactory = fixtureReceiptFactory();
-  const wrongDeltaFirst = wrongDeltaFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
+  const cappedFailure = roundFactory(configuredCap, { seed: 'capped' })(
+    1,
+    failWith([finding]),
+  );
+
+  const wrongDeltaFactory = roundFactory(fixtureProjectConfig(), { seed: 'wrong-delta' });
+  const wrongDeltaFirst = wrongDeltaFactory(1, failWith([finding]));
   const wrongDelta = wrongDeltaFactory(2, {
     verdict: 'pass',
     findings: [],
-    rebuts: [{
-      findingId: finding.id,
-      status: 'accepted',
-      evidence: 'The wrong range cannot authenticate convergence.',
-    }],
-  }, {
-    deltaBaseOid: 'configured-base',
-  });
-  const omittedLedgerFactory = fixtureReceiptFactory();
-  const omittedLedgerFirst = omittedLedgerFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const omittedLedger = omittedLedgerFactory(2, {
-    verdict: 'pass',
-    findings: [],
-    rebuts: [],
-  }, {
+    rebuts: [accept(finding.id, 'The wrong range cannot prove convergence.')],
+  }, { deltaBaseOid: 'configured-base' });
+
+  const omittedLedgerFactory = roundFactory(fixtureProjectConfig(), { seed: 'omitted' });
+  const omittedLedgerFirst = omittedLedgerFactory(1, failWith([finding]));
+  const omittedLedger = omittedLedgerFactory(2, pass, {
     priorFindings: [{
       findingId: 'unrelated-finding',
       severity: 'Major',
@@ -968,78 +738,35 @@ function selfTest() {
       rationale: 'The caller substituted a different finding.',
     }],
   });
-  const reusedInstanceFactory = fixtureReceiptFactory();
-  const reusedInstanceFirst = reusedInstanceFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const reusedInstance = reusedInstanceFactory(2, {
+
+  const reusedFactory = roundFactory(fixtureProjectConfig(), { seed: 'reused' });
+  const reusedFirst = reusedFactory(1, failWith([finding]));
+  const reused = reusedFactory(2, {
     verdict: 'pass',
     findings: [],
-    rebuts: [{
-      findingId: finding.id,
-      status: 'accepted',
-      evidence: 'A repeated host-child instance is not a fresh review.',
-    }],
-  }, {
-    executionInstanceId: 'review-child-1',
-  });
-  const switchedRepositoryFactory = fixtureReceiptFactory();
-  const switchedRepositoryFirst = switchedRepositoryFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const switchedRepository = switchedRepositoryFactory(2, {
+    rebuts: [accept(finding.id, 'A repeated dispatch is not a fresh review.')],
+  }, { dispatchId: 'dispatch-reused-1' });
+
+  const switchedFactory = roundFactory(fixtureProjectConfig(), { seed: 'switched' });
+  const switchedFirst = switchedFactory(1, failWith([finding]));
+  const switched = switchedFactory(2, {
     verdict: 'pass',
     findings: [],
-    rebuts: [{
-      findingId: finding.id,
-      status: 'accepted',
-      evidence: 'A different repository cannot continue this review chain.',
-    }],
-  }, {
-    switchRepository: true,
-  });
-  const cumulativeFinding = {
-    id: 'finding-2',
-    severity: 'Major',
-    summary: 'A later delta introduces another gating defect',
-    evidence: 'src/reviewed.mjs:2',
-  };
-  const cumulativeFactory = fixtureReceiptFactory();
-  const cumulativeFirst = cumulativeFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const cumulativeSecond = cumulativeFactory(2, {
-    verdict: 'fail',
-    findings: [cumulativeFinding],
-    rebuts: [],
-  });
-  const cumulativeThird = cumulativeFactory(3, {
-    verdict: 'pass',
-    findings: [],
-    rebuts: [],
-  });
-  const omittedHistoryFactory = fixtureReceiptFactory();
-  const omittedHistoryFirst = omittedHistoryFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const omittedHistorySecond = omittedHistoryFactory(2, {
-    verdict: 'fail',
-    findings: [cumulativeFinding],
-    rebuts: [],
-  });
-  const omittedHistoryThird = omittedHistoryFactory(3, {
-    verdict: 'pass',
-    findings: [],
-    rebuts: [],
-  }, {
+    rebuts: [accept(finding.id, 'A different repository cannot continue this chain.')],
+  }, { repositoryFingerprint: hash('other-repository') });
+
+  const collidedFactory = roundFactory(fixtureProjectConfig(), { seed: 'collided' });
+  const collided = collidedFactory(1, pass, { reviewerIdentity: 'orchestrator' });
+
+  const cumulativeFactory = roundFactory(fixtureProjectConfig(), { seed: 'cumulative' });
+  const cumulativeFirst = cumulativeFactory(1, failWith([finding]));
+  const cumulativeSecond = cumulativeFactory(2, failWith([cumulativeFinding]));
+  const cumulativeThird = cumulativeFactory(3, pass);
+
+  const omittedHistoryFactory = roundFactory(fixtureProjectConfig(), { seed: 'history' });
+  const omittedHistoryFirst = omittedHistoryFactory(1, failWith([finding]));
+  const omittedHistorySecond = omittedHistoryFactory(2, failWith([cumulativeFinding]));
+  const omittedHistoryThird = omittedHistoryFactory(3, pass, {
     priorFindings: [{
       findingId: cumulativeFinding.id,
       severity: cumulativeFinding.severity,
@@ -1047,25 +774,14 @@ function selfTest() {
       evidence: cumulativeFinding.evidence,
       disposition: 'fix',
       state: 'open',
-      rationale: 'The exact sealed delta contains the bounded fix.',
+      rationale: 'The exact fix delta contains the bounded fix.',
     }],
   });
-  const mutatedHistoryFactory = fixtureReceiptFactory();
-  const mutatedHistoryFirst = mutatedHistoryFactory(1, {
-    verdict: 'fail',
-    findings: [finding],
-    rebuts: [],
-  });
-  const mutatedHistorySecond = mutatedHistoryFactory(2, {
-    verdict: 'fail',
-    findings: [cumulativeFinding],
-    rebuts: [],
-  });
-  const mutatedHistoryThird = mutatedHistoryFactory(3, {
-    verdict: 'pass',
-    findings: [],
-    rebuts: [],
-  }, {
+
+  const mutatedFactory = roundFactory(fixtureProjectConfig(), { seed: 'mutated' });
+  const mutatedFirst = mutatedFactory(1, failWith([finding]));
+  const mutatedSecond = mutatedFactory(2, failWith([cumulativeFinding]));
+  const mutatedThird = mutatedFactory(3, pass, {
     priorFindings: [
       {
         findingId: finding.id,
@@ -1074,7 +790,7 @@ function selfTest() {
         evidence: finding.evidence,
         disposition: 'fix',
         state: 'closed',
-        rationale: 'The exact sealed delta contains the bounded fix.',
+        rationale: 'The exact fix delta contains the bounded fix.',
       },
       {
         findingId: cumulativeFinding.id,
@@ -1083,165 +799,140 @@ function selfTest() {
         evidence: cumulativeFinding.evidence,
         disposition: 'fix',
         state: 'open',
-        rationale: 'The exact sealed delta contains the bounded fix.',
+        rationale: 'The exact fix delta contains the bounded fix.',
       },
     ],
   });
 
   const cases = [
     {
-      name: 'authenticated clean full review publishes success',
+      name: 'clean full review publishes success',
       input: inputFor([clean]),
       expected: ['clean', true],
     },
     {
-      name: 'authenticated Major continues below the cap',
-      input: inputFor([acceptedFirstFailure]),
+      name: 'a Major continues below the cap',
+      input: inputFor([acceptedFirst]),
       expected: ['continue', false],
     },
     {
-      name: 'authenticated accepted rebut permits clean result',
-      input: inputFor([acceptedFirstFailure, accepted]),
+      name: 'an accepted rebut permits a clean result',
+      input: inputFor([acceptedFirst, accepted]),
       expected: ['clean', true],
     },
     {
-      name: 'authenticated reviewed fix permits clean result',
-      input: inputFor([fixedFirstFailure, fixed]),
+      name: 'a reviewed fix permits a clean result',
+      input: inputFor([fixedFirst, fixed]),
       expected: ['clean', true],
     },
     {
-      name: 'authenticated rejected rebut continues',
-      input: inputFor([rejectedFirstFailure, rejected]),
+      name: 'a rejected rebut continues',
+      input: inputFor([rejectedFirst, rejected]),
       expected: ['continue', false],
     },
     {
       name: 'verified out-of-delta Major blocks for a human',
       input: {
         ...inputFor([lateClean, late]),
-        findingAnnotations: [{
-          id: lateFinding.id,
-          verified: true,
-          inScope: false,
-        }],
+        findingAnnotations: [{ id: lateFinding.id, verified: true, inScope: false }],
       },
       expected: ['human-block', false],
     },
     {
-      name: 'unverified gating finding requires verification',
+      name: 'an unverified gating finding requires verification',
       input: {
-        ...inputFor([acceptedFirstFailure]),
-        findingAnnotations: [{
-          id: finding.id,
-          verified: false,
-          inScope: true,
-        }],
+        ...inputFor([acceptedFirst]),
+        findingAnnotations: [{ id: finding.id, verified: false, inScope: true }],
       },
       expected: ['verify', false],
     },
     {
-      name: 'gating finding at cap blocks',
+      name: 'a gating finding at the cap blocks',
       input: inputFor([cappedFailure], configuredCap),
       expected: ['human-block', false],
     },
     {
-      name: 'caller cannot inflate the configured review cap',
+      name: 'the caller cannot inflate the configured review cap',
       input: {
-        ...inputFor([acceptedFirstFailure]),
+        ...inputFor([acceptedFirst]),
         projectConfig: {
           ...fixtureProjectConfig(),
-          caps: {
-            ...fixtureProjectConfig().caps,
-            codeReviewRoundsPerUnit: 20,
-          },
+          caps: { ...fixtureProjectConfig().caps, codeReviewRoundsPerUnit: 20 },
         },
       },
       expected: ['error', false],
     },
     {
-      name: 'caller-authored rebut status has no accepted input field',
+      name: 'there is no caller-authored rebut status input field',
       input: {
-        ...inputFor([rejectedFirstFailure, rejected]),
-        rebutRequests: [{
-          findingId: finding.id,
-          status: 'accepted',
-        }],
+        ...inputFor([rejectedFirst, rejected]),
+        rebutRequests: [{ findingId: finding.id, status: 'accepted' }],
       },
       expected: ['error', false],
     },
     {
-      name: 'authenticated delta must start at the preceding reviewed head',
+      name: 'a later delta must start at the preceding reviewed head',
       input: inputFor([wrongDeltaFirst, wrongDelta]),
       expected: ['error', false],
     },
     {
-      name: 'authenticated later-round ledger cannot omit a prior Major',
+      name: 'a later-round ledger cannot omit a prior Major',
       input: inputFor([omittedLedgerFirst, omittedLedger]),
       expected: ['error', false],
     },
     {
-      name: 'review rounds require distinct authenticated execution instances',
-      input: inputFor([reusedInstanceFirst, reusedInstance]),
+      name: 'review rounds require distinct reviewer dispatches',
+      input: inputFor([reusedFirst, reused]),
       expected: ['error', false],
     },
     {
       name: 'review history cannot switch repositories',
-      input: inputFor([switchedRepositoryFirst, switchedRepository]),
+      input: inputFor([switchedFirst, switched]),
       expected: ['error', false],
     },
     {
-      name: 'three-round review retains closed and open cumulative findings',
-      input: inputFor([
-        cumulativeFirst,
-        cumulativeSecond,
-        cumulativeThird,
-      ]),
+      name: 'a reviewer identity equal to the author is not an independent review',
+      input: inputFor([collided]),
+      expected: ['error', false],
+    },
+    {
+      name: 'three rounds retain closed and open cumulative findings',
+      input: inputFor([cumulativeFirst, cumulativeSecond, cumulativeThird]),
       expected: ['clean', true],
     },
     {
-      name: 'three-round review cannot omit a resolved historical finding',
-      input: inputFor([
-        omittedHistoryFirst,
-        omittedHistorySecond,
-        omittedHistoryThird,
-      ]),
+      name: 'three rounds cannot omit a resolved historical finding',
+      input: inputFor([omittedHistoryFirst, omittedHistorySecond, omittedHistoryThird]),
       expected: ['error', false],
     },
     {
-      name: 'three-round review cannot rewrite historical finding evidence',
-      input: inputFor([
-        mutatedHistoryFirst,
-        mutatedHistorySecond,
-        mutatedHistoryThird,
-      ]),
+      name: 'three rounds cannot rewrite historical finding evidence',
+      input: inputFor([mutatedFirst, mutatedSecond, mutatedThird]),
       expected: ['error', false],
     },
     {
-      name: 'forged verdict fails after recomputing public receipt hash',
+      // Without a broker signature a caller can author a verdict, so the
+      // remaining defence is internal consistency: a "pass" that still carries
+      // a gating finding, or a rebut whose status contradicts the findings, is
+      // refused. Attribution now comes from the dispatch record, not a seal.
+      name: 'a pass verdict that still carries a gating finding is refused',
       input: (() => {
-        const forged = structuredClone(acceptedFirstFailure);
-        forged.reviewVerdicts[0].verdict.findings = [];
-        forged.reviewVerdicts[0].verdict.verdict = 'pass';
-        forged.attempts.at(-1).verdict = forged.reviewVerdicts[0].verdict;
-        const unsigned = { ...forged };
-        delete unsigned.fingerprint;
-        forged.fingerprint = hashValue(unsigned);
+        const forged = structuredClone(acceptedFirst);
+        forged.verdict.verdict = 'pass';
         return inputFor([forged]);
       })(),
       expected: ['error', false],
     },
     {
-      name: 'stale expected head cannot replay an authentic receipt',
+      name: 'a stale expected head cannot replay an authentic round',
       input: {
         ...inputFor([clean]),
-        expected: {
-          ...inputFor([clean]).expected,
-          headOid: 'f'.repeat(40),
-        },
+        expected: { ...inputFor([clean]).expected, headOid: 'f'.repeat(40) },
       },
       expected: ['error', false],
     },
     {
-      name: 'stale expected repository cannot replay an authentic receipt',
+      name: 'a stale expected repository cannot replay an authentic round',
       input: {
         ...inputFor([clean]),
         expected: {
@@ -1252,49 +943,63 @@ function selfTest() {
       expected: ['error', false],
     },
     {
-      name: 'receipt history cannot skip a review round',
+      name: 'round history cannot skip a review round',
       input: {
-        ...inputFor([acceptedFirstFailure, accepted]),
-        runtimeReceipts: [accepted],
+        ...inputFor([acceptedFirst, accepted]),
+        reviewRounds: [accepted],
       },
       expected: ['error', false],
     },
     {
       name: 'round one cannot claim delta scope',
-      input: {
-        ...inputFor([clean]),
-        scope: 'delta',
-      },
+      input: { ...inputFor([clean]), scope: 'delta' },
       expected: ['error', false],
     },
     {
-      name: 'null finding annotation is rejected without throwing',
-      input: {
-        ...inputFor([clean]),
-        findingAnnotations: [null],
-      },
+      name: 'a null finding annotation is rejected without throwing',
+      input: { ...inputFor([clean]), findingAnnotations: [null] },
       expected: ['error', false],
     },
     {
-      name: 'full review cannot classify a finding out of scope',
+      name: 'a full review cannot classify a finding out of scope',
       input: (() => {
-        const failingFull = fixtureReceiptFactory()(1, {
-          verdict: 'fail',
-          findings: [{
+        const failing = roundFactory(fixtureProjectConfig(), { seed: 'full-scope' })(
+          1,
+          failWith([{
             id: 'full-major',
             severity: 'Major',
             summary: 'A full-review finding',
             evidence: 'src/reviewed.mjs:4',
-          }],
-          rebuts: [],
-        });
-        const standalone = inputFor([failingFull]);
+          }]),
+        );
+        const standalone = inputFor([failing]);
         standalone.findingAnnotations[0].inScope = false;
         return standalone;
       })(),
       expected: ['error', false],
     },
+    {
+      name: 'a config whose fingerprint does not bind the rounds is rejected',
+      input: {
+        ...inputFor([clean]),
+        projectConfig: { ...fixtureProjectConfig(), baseBranch: 'trunk' },
+      },
+      expected: ['error', false],
+    },
+    {
+      // A dirty checkout still converges the REVIEW; it is publication that
+      // requires a clean live checkout, which authorizeReviewPublication below
+      // enforces separately.
+      name: 'a dirty reviewed checkout still converges the review itself',
+      input: (() => {
+        const dirty = structuredClone(clean);
+        dirty.checkout.clean = false;
+        return inputFor([dirty]);
+      })(),
+      expected: ['clean', true],
+    },
   ];
+
   let passed = 0;
   for (const fixture of cases) {
     const actual = reviewTransition(fixture.input);
@@ -1310,63 +1015,53 @@ function selfTest() {
     }
     passed += 1;
   }
+
   const cleanInput = inputFor([clean]);
-  const oldHead = clean.artifactSubject.headOid;
-  const cleanCheckout = clean.checkout;
   const publicationCases = [
     {
-      name: 'authenticated clean receipt authorizes only its reviewed head',
-      actual: authorizeReviewPublication(
-        cleanInput,
-        oldHead,
-        cleanCheckout,
-      ).authorized,
+      name: 'a clean round authorizes only its reviewed head',
+      actual: authorizeReviewPublication(cleanInput, clean.headOid, clean.checkout)
+        .authorized,
       expected: true,
     },
     {
-      name: 'authenticated old receipt cannot authorize a different current head',
+      name: 'a clean round cannot authorize a different current head',
+      actual: authorizeReviewPublication(cleanInput, 'f'.repeat(40), clean.checkout)
+        .authorized,
+      expected: false,
+    },
+    {
+      name: 'a clean round cannot publish from a different live checkout',
+      actual: authorizeReviewPublication(cleanInput, clean.headOid, {
+        ...clean.checkout,
+        repositoryFingerprint: 'f'.repeat(64),
+      }).authorized,
+      expected: false,
+    },
+    {
+      name: 'a clean round cannot publish from a dirty live checkout',
+      actual: authorizeReviewPublication(cleanInput, clean.headOid, {
+        ...clean.checkout,
+        clean: false,
+      }).authorized,
+      expected: false,
+    },
+    {
+      name: 'invalid evidence fails publication without throwing',
       actual: authorizeReviewPublication(
-        cleanInput,
-        'f'.repeat(40),
-        cleanCheckout,
+        { ...cleanInput, round: null },
+        clean.headOid,
+        clean.checkout,
       ).authorized,
       expected: false,
     },
     {
-      name: 'authenticated review cannot publish from a different live checkout',
-      actual: authorizeReviewPublication(
-        cleanInput,
-        oldHead,
-        {
-          ...cleanCheckout,
-          repositoryFingerprint: 'f'.repeat(64),
-        },
-      ).authorized,
-      expected: false,
-    },
-    {
-      name: 'authenticated review cannot publish from a dirty live checkout',
-      actual: authorizeReviewPublication(
-        cleanInput,
-        oldHead,
-        {
-          ...cleanCheckout,
-          clean: false,
-        },
-      ).authorized,
-      expected: false,
-    },
-    {
-      name: 'invalid review evidence fails publication without throwing',
-      actual: authorizeReviewPublication(
-        {
-          ...cleanInput,
-          round: null,
-        },
-        oldHead,
-        cleanCheckout,
-      ).authorized,
-      expected: false,
+      name: 'publication reports a stable review evidence fingerprint',
+      actual: HASH_RE.test(
+        authorizeReviewPublication(cleanInput, clean.headOid, clean.checkout)
+          .reviewEvidenceFingerprint ?? '',
+      ),
+      expected: true,
     },
   ];
   for (const fixture of publicationCases) {
@@ -1378,6 +1073,7 @@ function selfTest() {
       );
     }
   }
+
   const total = cases.length + publicationCases.length;
   console.log(
     passed === total
@@ -1388,15 +1084,7 @@ function selfTest() {
 }
 
 function main() {
-  if (process.argv.includes('--self-test')) {
-    let passed;
-    try {
-      passed = selfTest();
-    } finally {
-      cleanupFixtureRepositories();
-    }
-    process.exit(passed ? 0 : 1);
-  }
+  if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
   const raw = readFileSync(0, 'utf8');
   if (Buffer.byteLength(raw) > MAX_INPUT_BYTES) {
     process.stdout.write(

@@ -43,28 +43,24 @@ const ROOT_BOUND_SELF_TESTS = Object.freeze(['adapter-contract.mjs']);
 export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'adapter-contract.mjs',
   'attestation-contract.mjs',
+  'checkout-contract.mjs',
   'claim-contract.mjs',
   'command-guard.mjs',
   'config-contract.mjs',
-  'continuation-store.mjs',
   'contract-lint.mjs',
   'delivery-contract.mjs',
+  'dispatch.mjs',
   'escalate-paths.mjs',
-  'intent-contract.mjs',
   'label-swap-reminder.mjs',
   'lane-contract.mjs',
   'lifecycle-contract.mjs',
   'lifecycle-driver.mjs',
   'loop-scope.mjs',
   'loop-smoke.mjs',
-  'measurement-contract.mjs',
   'prime.mjs',
   'publish-verdict.mjs',
   'release-verify.mjs',
   'review-contract.mjs',
-  'route-adapter-contract.mjs',
-  'run-scope.mjs',
-  'runtime-contract.mjs',
   'scaffold.mjs',
   'scan.mjs',
   'snapshot-contract.mjs',
@@ -84,7 +80,6 @@ export const NON_MANUAL_TOOL_FILES = Object.freeze([
 ]);
 const CLAUDE_HOOK_CONTRACT = Object.freeze({
   'command-guard.mjs': Object.freeze({ event: 'PreToolUse', matcher: 'Bash' }),
-  'intent-contract.mjs': Object.freeze({ event: 'UserPromptSubmit', matcher: null }),
   'label-swap-reminder.mjs': Object.freeze({ event: 'PostToolUse', matcher: 'Bash' }),
   'session-preflight.sh': Object.freeze({ event: 'SessionStart', matcher: null }),
   'subagent-transcript.mjs': Object.freeze({ event: 'SubagentStop', matcher: null }),
@@ -99,7 +94,6 @@ const CODEX_HOOK_CONTRACT = Object.freeze({
 });
 const OPENCODE_PLUGIN_TOOLS = Object.freeze([
   ...Object.keys(CODEX_HOOK_CONTRACT),
-  'continuation-store.mjs',
 ]);
 
 function run(executable, args, cwd) {
@@ -151,46 +145,6 @@ function checkCiPolicy(path) {
   }
 }
 
-function checkMeasurementPolicy(root, toolPath, policyPath) {
-  const result = run(
-    process.execPath,
-    [toolPath, '--check-budget-policy', policyPath],
-    root,
-  );
-  if (!result.ok) return result;
-  let evaluation;
-  try {
-    evaluation = JSON.parse(result.detail);
-  } catch (error) {
-    return {
-      ok: false,
-      detail: `measurement budget policy returned invalid JSON: ${error.message}`,
-    };
-  }
-  if (
-    evaluation.status === 'pending-evidence'
-    && evaluation.ok === true
-    && evaluation.passed === false
-  ) {
-    return {
-      ok: true,
-      note: true,
-      detail: 'pending-evidence — measurement budget gate has not passed',
-    };
-  }
-  if (
-    evaluation.status === 'passed'
-    && evaluation.ok === true
-    && evaluation.passed === true
-  ) {
-    return { ok: true, detail: '' };
-  }
-  return {
-    ok: false,
-    detail: `measurement budget policy returned inconsistent status: ${result.detail}`,
-  };
-}
-
 // The release contract reports pending live evidence as a typed note: it never
 // blocks contract verification and never passes `--release-mode`.
 function checkReleaseContract(root) {
@@ -234,7 +188,6 @@ function validHookArguments(name, args = '') {
     return value.length === 0
       || /^--config\s+(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|\r\n]+)$/u.test(value);
   }
-  if (name === 'intent-contract.mjs') return value === '--capture-hook';
   return value.length === 0;
 }
 
@@ -801,7 +754,6 @@ function pluginChecks(root) {
     '.codex-plugin/plugin.json',
     'templates/opencode-config.template.json',
     'templates/ci-policy.template.json',
-    'templates/measurement-budget-policy.template.json',
   ]) {
     checks.push({
       name: `json ${relativePath}`,
@@ -811,14 +763,6 @@ function pluginChecks(root) {
   checks.push({
     name: 'canonical CI policy template',
     execute: () => checkCiPolicy(resolve(root, 'templates', 'ci-policy.template.json')),
-  });
-  checks.push({
-    name: 'measurement budget policy template',
-    execute: () => checkMeasurementPolicy(
-      root,
-      resolve(toolsDir, 'measurement-contract.mjs'),
-      resolve(root, 'templates', 'measurement-budget-policy.template.json'),
-    ),
   });
   for (const [relativePath, contract] of [
     ['templates/codex-hooks.template.json', CODEX_HOOK_CONTRACT],
@@ -950,7 +894,6 @@ function installChecks(root, { full = false } = {}) {
   const checks = toolChecks(root, toolsDir, requiredFiles, 'install', { full });
   for (const relativePath of [
     '.autoloop/ci-policy.json',
-    '.autoloop/measurement-budget-policy.json',
     '.codex/agents/autoloop-reviewer.toml',
     '.opencode/agent/autoloop-reviewer.md',
     'docs/agentic/LOOP.md',
@@ -964,14 +907,6 @@ function installChecks(root, { full = false } = {}) {
   checks.push({
     name: 'canonical installed CI policy',
     execute: () => checkCiPolicy(resolve(root, '.autoloop', 'ci-policy.json')),
-  });
-  checks.push({
-    name: 'installed measurement budget policy',
-    execute: () => checkMeasurementPolicy(
-      root,
-      resolve(toolsDir, 'measurement-contract.mjs'),
-      resolve(root, '.autoloop', 'measurement-budget-policy.json'),
-    ),
   });
   checks.push({
     name: 'configured review checklist',
@@ -1034,8 +969,7 @@ function selfTest() {
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
   const toolsDir = resolve(fileURLToPath(new URL('.', import.meta.url)));
   const hookInvocation = (name, path) =>
-    `${name.endsWith('.sh') ? 'bash' : 'node'} "${path}/${name}"`
-    + (name === 'intent-contract.mjs' ? ' --capture-hook' : '');
+    `${name.endsWith('.sh') ? 'bash' : 'node'} "${path}/${name}"`;
   const hookDocument = (contract) => {
     const hooks = {};
     for (const [name, binding] of Object.entries(contract)) {

@@ -37,8 +37,6 @@ export const HUMAN_AUTHORIZATION_GLOBS = [
   '**/secrets/**',
   '.github/workflows/**',
   '.autoloop/ci-policy.json',
-  '.autoloop/measurement-budget-policy.json',
-  '.autoloop/measurement-evidence-v1.json',
   ...DEPLOYMENT_GUARDRAIL_GLOBS,
   ...SHARED_GUARDRAIL_ROOTS.map((root) => `${root}/**`),
   'AGENTS.override.md',
@@ -52,16 +50,6 @@ export const HUMAN_AUTHORIZATION_GLOBS = [
 
 export const PATH_POLICY_FIXTURES = [
   { path: '.autoloop/ci-policy.json', humanAuthorization: true, mergeProtected: true },
-  {
-    path: '.autoloop/measurement-budget-policy.json',
-    humanAuthorization: true,
-    mergeProtected: true,
-  },
-  {
-    path: '.autoloop/measurement-evidence-v1.json',
-    humanAuthorization: true,
-    mergeProtected: true,
-  },
   { path: 'tools/agentic/gate.mjs', humanAuthorization: true, mergeProtected: true },
   { path: '.claude/settings.json', humanAuthorization: true, mergeProtected: true },
   { path: '.codex/hooks.json', humanAuthorization: true, mergeProtected: true },
@@ -119,13 +107,6 @@ const MERGE_PROTECTED_PATH_FAMILIES = [
   {
     name: 'CI requirements policy',
     matches: (path) => path === '.autoloop/ci-policy.json',
-  },
-  {
-    name: 'measurement budget trust root',
-    matches: (path) => [
-      '.autoloop/measurement-budget-policy.json',
-      '.autoloop/measurement-evidence-v1.json',
-    ].includes(path),
   },
   { name: 'cryptographic credential paths', matches: (path) => /(^|\/)[^/]*crypt[^/]*(\/|$)/i.test(path) },
   { name: 'secret/credential path segments', matches: (path) => /(^|\/)[^/]*(secret|credential|token)[^/]*(\/|$)/i.test(path) },

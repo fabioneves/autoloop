@@ -3,8 +3,13 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-export const CONFIG_VERSION = '0.25.0';
+export const CONFIG_VERSION = '0.26.0';
 
+// 0.25.0 carried route-scoped adapter tuning and a measurement capture switch.
+// Both named machinery that no longer exists (a closed route catalog; a
+// measurement ledger), so 0.26.0 drops them and the migration below removes the
+// keys rather than leaving dead options in every installed STATE.
+const PRIOR_CONFIG_VERSION = '0.25.0';
 const LEGACY_CONFIG_VERSION = '0.24.0';
 const PROJECT_KEYS = [
   'version',
@@ -41,39 +46,6 @@ const MODEL_PATTERNS = {
   'claude.native': /^[A-Za-z0-9][A-Za-z0-9._:@+-]*$/u,
   'claude.codex-exec': /^[A-Za-z0-9][A-Za-z0-9._:@+-]*$/u,
   'claude.opencode-exec': /^[A-Za-z0-9][A-Za-z0-9._:@+-]*\/[A-Za-z0-9][A-Za-z0-9._:@+-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:@+-]*)*$/u,
-};
-const ADAPTER_ROLE_OPTIONS = {
-  'claude.native': {
-    writer: { model: 'implementerModel' },
-    reviewer: { model: 'reviewerModel' },
-    probe: {},
-  },
-  'codex.native': {
-    writer: {},
-    reviewer: {},
-    probe: {},
-  },
-  'opencode.native': {
-    writer: {},
-    reviewer: {},
-    probe: {},
-  },
-  'claude.codex-exec': {
-    writer: {
-      model: 'implementerModel',
-      effort: 'implementerEffort',
-    },
-    reviewer: {
-      model: 'reviewerModel',
-      effort: 'reviewerEffort',
-    },
-    probe: {},
-  },
-  'claude.opencode-exec': {
-    writer: { model: 'implementerModel' },
-    reviewer: { model: 'reviewerModel' },
-    probe: {},
-  },
 };
 const LEGACY_MODEL_ROUTES = {
   claude: 'claude.native',
@@ -390,10 +362,7 @@ function validateProjectValues(cfg, expectedVersion, errors) {
   if (hasOwn(cfg, 'version')) validateVersion(cfg.version, expectedVersion, errors);
   if (hasOwn(cfg, 'baseBranch')) validateBaseBranch(cfg.baseBranch, errors);
   if (hasOwn(cfg, 'gate')) validateGate(cfg.gate, errors);
-  if (hasOwn(cfg, 'merge')) {
-    validateMerge(cfg.merge, expectedVersion, errors);
-    if (hasOwn(cfg, 'measurement')) validateMeasurementCapture(cfg.measurement, errors);
-  }
+  if (hasOwn(cfg, 'merge')) validateMerge(cfg.merge, expectedVersion, errors);
   if (hasOwn(cfg, 'tracker')) {
     if (expectedVersion === LEGACY_CONFIG_VERSION) {
       validateLegacyTracker(cfg.tracker, errors);
@@ -413,47 +382,26 @@ function validateProjectValues(cfg, expectedVersion, errors) {
 
 export function validateConfig(cfg) {
   const errors = [];
-  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['adapterOptions', 'measurement'], errors)) return errors;
+  if (!validateObjectShape(cfg, '', PROJECT_KEYS, [], errors)) return errors;
   validateProjectValues(cfg, CONFIG_VERSION, errors);
-  if (hasOwn(cfg, 'adapterOptions')) validateAdapterOptions(cfg.adapterOptions, errors);
   return errors;
 }
 
 export const validateProjectConfig = validateConfig;
 
-export function validateAdapterTuning(route, role, tuning) {
-  const mapping = ADAPTER_ROLE_OPTIONS[route]?.[role];
-  if (
-    !mapping
-    || !isRecord(tuning)
-    || ![Object.prototype, null].includes(Object.getPrototypeOf(tuning))
-    || Object.getOwnPropertySymbols(tuning).length !== 0
-  ) {
-    return false;
-  }
-  const allowed = Object.keys(mapping);
-  if (Object.keys(tuning).some((key) => !allowed.includes(key))) return false;
-  if (hasOwn(tuning, 'model') && !validModel(tuning.model, route)) return false;
-  if (hasOwn(tuning, 'effort') && !EFFORTS.has(tuning.effort)) return false;
-  return true;
-}
-
-export function resolveAdapterTuning(config, route, role) {
-  let snapshot;
-  try {
-    snapshot = structuredClone(config);
-  } catch {
-    return null;
-  }
-  if (validateConfig(snapshot).length !== 0) return null;
-  const mapping = ADAPTER_ROLE_OPTIONS[route]?.[role];
-  if (!mapping) return null;
-  const options = snapshot.adapterOptions?.[route] ?? {};
-  const tuning = {};
-  for (const [target, source] of Object.entries(mapping)) {
-    if (hasOwn(options, source)) tuning[target] = options[source];
-  }
-  return Object.freeze(tuning);
+function validatePriorConfig(cfg) {
+  const errors = [];
+  if (!validateObjectShape(
+    cfg,
+    '',
+    PROJECT_KEYS,
+    ['adapterOptions', 'measurement'],
+    errors,
+  )) return errors;
+  validateProjectValues(cfg, PRIOR_CONFIG_VERSION, errors);
+  if (hasOwn(cfg, 'adapterOptions')) validateAdapterOptions(cfg.adapterOptions, errors);
+  if (hasOwn(cfg, 'measurement')) validateMeasurementCapture(cfg.measurement, errors);
+  return errors;
 }
 
 export function extractConfig(markdown) {
@@ -626,7 +574,7 @@ function copyProjectConfig(cfg, tracker) {
       : cfg.caps[key];
   }
   return {
-    version: CONFIG_VERSION,
+    version: PRIOR_CONFIG_VERSION,
     baseBranch: cfg.baseBranch,
     gate,
     merge: { policy: 'manual' },
@@ -690,6 +638,10 @@ const MIGRATION_STEPS = Object.freeze([
   Object.freeze({
     from: LEGACY_CONFIG_VERSION,
     apply: (cfg, facts) => migrateConfig024To025(cfg, facts),
+  }),
+  Object.freeze({
+    from: PRIOR_CONFIG_VERSION,
+    apply: (cfg) => migrateConfig025To026(cfg),
   }),
 ]);
 
@@ -808,6 +760,38 @@ export function migrateConfig024To025(cfg, migrationFacts) {
   return { ok: true, config, warnings };
 }
 
+// 0.25.0 -> 0.26.0 is a pure removal: `adapterOptions` named routes in a closed
+// catalog that no longer exists, and `measurement.capture` switched on a ledger
+// that no longer exists. Nothing is reshaped, so this hop needs no supplemental
+// facts and every remaining value carries across byte for byte.
+export function migrateConfig025To026(cfg) {
+  const errors = validatePriorConfig(cfg);
+  if (errors.length > 0) {
+    return { ok: false, code: 'INVALID_LEGACY_CONFIG', errors, warnings: [] };
+  }
+  const config = structuredClone(cfg);
+  const warnings = [];
+  if (hasOwn(config, 'adapterOptions')) {
+    delete config.adapterOptions;
+    warnings.push('adapterOptions: retired route-scoped tuning removed');
+  }
+  if (hasOwn(config, 'measurement')) {
+    delete config.measurement;
+    warnings.push('measurement.capture: retired measurement ledger removed');
+  }
+  config.version = CONFIG_VERSION;
+  const remaining = validateConfig(config);
+  if (remaining.length > 0) {
+    return {
+      ok: false,
+      code: 'INVALID_LEGACY_CONFIG',
+      errors: remaining,
+      warnings: [],
+    };
+  }
+  return { ok: true, config, warnings };
+}
+
 function projectFixture() {
   return {
     version: CONFIG_VERSION,
@@ -895,115 +879,14 @@ function selfTest() {
       cfg.caps.reviseRoundsPerPr = 0;
     }),
   );
-  expectValid(
-    'all route-scoped adapter tuning is valid',
+  expectInvalid(
+    'retired route-scoped adapter tuning is rejected',
     changed(base, (cfg) => {
-      cfg.adapterOptions = {
-        'claude.native': {
-          implementerModel: 'sonnet',
-          reviewerModel: 'opus',
-        },
-        'claude.codex-exec': {
-          implementerModel: 'gpt-5.6-codex',
-          reviewerModel: 'gpt-5.6-codex',
-          implementerEffort: 'medium',
-          reviewerEffort: 'ultra',
-        },
-        'claude.opencode-exec': {
-          implementerModel: 'provider/writer',
-          reviewerModel: 'provider/reviewer',
-        },
-      };
+      cfg.adapterOptions = { 'claude.native': { reviewerModel: 'opus' } };
     }),
-  );
-  const resolvedTuning = changed(base, (cfg) => {
-    cfg.adapterOptions = {
-      'claude.native': {
-        implementerModel: 'sonnet',
-        reviewerModel: 'opus',
-      },
-      'claude.codex-exec': {
-        implementerModel: 'gpt-5.6-writer',
-        reviewerModel: 'gpt-5.6-reviewer',
-        implementerEffort: 'medium',
-        reviewerEffort: 'ultra',
-      },
-    };
-  });
-  expect(
-    'adapter tuning resolves only the selected role fields',
-    JSON.stringify(
-      resolveAdapterTuning(
-        resolvedTuning,
-        'claude.codex-exec',
-        'writer',
-      ),
-    ) === JSON.stringify({
-      model: 'gpt-5.6-writer',
-      effort: 'medium',
-    })
-      && JSON.stringify(
-        resolveAdapterTuning(
-          resolvedTuning,
-          'claude.codex-exec',
-          'reviewer',
-        ),
-      ) === JSON.stringify({
-        model: 'gpt-5.6-reviewer',
-        effort: 'ultra',
-      }),
-  );
-  expect(
-    'probe and native session routes resolve no tuning',
-    Object.keys(
-      resolveAdapterTuning(
-        resolvedTuning,
-        'claude.codex-exec',
-        'probe',
-      ),
-    ).length === 0
-      && Object.keys(
-        resolveAdapterTuning(resolvedTuning, 'codex.native', 'writer'),
-      ).length === 0
-      && Object.keys(
-        resolveAdapterTuning(resolvedTuning, 'opencode.native', 'reviewer'),
-      ).length === 0,
-  );
-  expect(
-    'resolved tuning validator rejects caller option injection',
-    validateAdapterTuning(
-      'claude.codex-exec',
-      'writer',
-      { model: 'gpt-5.6-writer', effort: 'high' },
-    )
-      && !validateAdapterTuning(
-        'claude.codex-exec',
-        'writer',
-        { model: '--sandbox', effort: 'high' },
-      )
-      && !validateAdapterTuning(
-        'claude.opencode-exec',
-        'reviewer',
-        { model: 'provider/reviewer', effort: 'high' },
-      )
-      && !validateAdapterTuning(
-        'claude.native',
-        'probe',
-        { model: 'opus' },
-      )
-      && !validateAdapterTuning(
-        'claude.native',
-        'writer',
-        Object.create({ model: 'sonnet' }),
-      ),
+    'adapterOptions',
   );
   expectValid('active host is not a ProjectContract input', base, { activeHost: 'unknown' });
-  expectValid(
-    'empty adapter option map is valid',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = {};
-    }),
-  );
   for (const policy of ['manual', 'ratified', 'auto']) {
     expectValid(
       `merge policy ${policy} is valid`,
@@ -1140,6 +1023,8 @@ function selfTest() {
   for (const key of [
     'runtime',
     'engine',
+    'adapterOptions',
+    'measurement',
     'activeHost',
     'requestedEngine',
     'resolvedRoute',
@@ -1313,109 +1198,6 @@ function selfTest() {
     'caps.dispatchRetries',
   );
 
-  expectInvalid(
-    'unknown adapter route',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = { 'codex.native': { reviewerModel: 'gpt-5' } };
-    }),
-    'adapterOptions["codex.native"]',
-  );
-  expectInvalid(
-    'empty adapter route options',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = { 'claude.native': {} };
-    }),
-    'adapterOptions["claude.native"]',
-  );
-  expectInvalid(
-    'adapter route options must be an object',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = { 'claude.native': [] };
-    }),
-    'adapterOptions["claude.native"]',
-  );
-  expectInvalid(
-    'unknown adapter option',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = { 'claude.native': { selector: 'codex' } };
-    }),
-    'adapterOptions["claude.native"].selector',
-  );
-  expectInvalid(
-    'null adapter model',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = { 'claude.native': { reviewerModel: null } };
-    }),
-    'adapterOptions["claude.native"].reviewerModel',
-  );
-  expectInvalid(
-    'model identifier with whitespace',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = { 'claude.native': { reviewerModel: 'secret model' } };
-    }),
-    'adapterOptions["claude.native"].reviewerModel',
-  );
-  expectValid(
-    'route model grammars allow legitimate punctuation',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = {
-        'claude.native': { reviewerModel: 'claude-sonnet-4.5@20260724' },
-        'claude.codex-exec': { reviewerModel: 'gpt-5.6-codex-max' },
-        'claude.opencode-exec': {
-          reviewerModel: 'openrouter/anthropic/claude-sonnet-4.5@20260724',
-        },
-      };
-    }),
-  );
-  expectInvalid(
-    'Claude-native model rejects provider syntax',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = { 'claude.native': { reviewerModel: 'anthropic/claude-sonnet' } };
-    }),
-    'adapterOptions["claude.native"].reviewerModel',
-  );
-  expectInvalid(
-    'Codex model rejects provider syntax',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = { 'claude.codex-exec': { reviewerModel: 'openai/gpt-5' } };
-    }),
-    'adapterOptions["claude.codex-exec"].reviewerModel',
-  );
-  expectInvalid(
-    'opencode model requires provider syntax',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = { 'claude.opencode-exec': { reviewerModel: 'claude-sonnet' } };
-    }),
-    'adapterOptions["claude.opencode-exec"].reviewerModel',
-  );
-  for (const model of [
-    '-gpt-5',
-    'gpt-5;rm',
-    'gpt-5&&rm',
-    'gpt-5|tee',
-    '"gpt-5"',
-    "'gpt-5'",
-    '$(command)',
-    '`command`',
-  ]) {
-    expectInvalid(
-      'model identifier rejects option and shell syntax',
-      changed(base, (cfg) => {
-        cfg.adapterOptions = { 'claude.codex-exec': { reviewerModel: model } };
-      }),
-      'adapterOptions["claude.codex-exec"].reviewerModel',
-    );
-  }
-  expectInvalid(
-    'unknown adapter effort',
-    changed(base, (cfg) => {
-      cfg.adapterOptions = {
-        'claude.codex-exec': { reviewerEffort: 'extreme' },
-      };
-    }),
-    'adapterOptions["claude.codex-exec"].reviewerEffort',
-  );
-
   const migrationCases = [
     {
       name: 'Claude native',
@@ -1510,7 +1292,9 @@ function selfTest() {
     expect(`migration ${fixture.name} is deterministic`, JSON.stringify(result) === JSON.stringify(repeated));
     expect(
       `migration ${fixture.name} produces valid schema 0.25.0`,
-      result.ok && validateConfig(result.config).length === 0,
+      result.ok
+        && result.config.version === PRIOR_CONFIG_VERSION
+        && validatePriorConfig(result.config).length === 0,
     );
     expect(
       `migration ${fixture.name} removes route authority`,
@@ -1649,12 +1433,11 @@ function selfTest() {
     ),
   );
   expect(
-    'measurement capture accepts off and events and rejects anything else',
-    validateConfig({ ...projectFixture(), measurement: { capture: 'off' } }).length === 0
-      && validateConfig({ ...projectFixture(), measurement: { capture: 'events' } }).length === 0
-      && validateConfig({ ...projectFixture(), measurement: { capture: 'all' } })
-        .includes('measurement.capture: must be "off" or "events"')
-      && validateConfig({ ...projectFixture(), measurement: {} }).length > 0,
+    'the retired measurement capture switch is rejected outright',
+    validateConfig({ ...projectFixture(), measurement: { capture: 'off' } })
+      .includes('measurement: unknown key')
+      && validateConfig({ ...projectFixture(), measurement: { capture: 'events' } })
+        .includes('measurement: unknown key'),
   );
 
   {
@@ -1716,7 +1499,9 @@ function selfTest() {
     'an unknown schema is a typed unsupported version, never a silent pass',
     !unknownVersion.ok
       && unknownVersion.code === 'UNSUPPORTED_CONFIG_VERSION'
-      && unknownVersion.errors.some((error) => error.includes('0.23.0, 0.24.0')),
+      && unknownVersion.errors.some(
+        (error) => error.includes('0.23.0, 0.24.0, 0.25.0'),
+      ),
   );
   expect(
     'the 0.23.0 step refuses a configuration of another version',
@@ -1759,7 +1544,7 @@ function selfTest() {
         epicKey: 'AUTO-123',
         cloudId: '123e4567-e89b-12d3-a456-426614174000',
       })
-      && validateConfig(jiraWithFacts.config).length === 0,
+      && validatePriorConfig(jiraWithFacts.config).length === 0,
   );
   expect(
     'Jira migration is pure and deterministic with supplemental facts',
@@ -1932,6 +1717,73 @@ function selfTest() {
     expect(`failed migration ${name} emits no warnings`, result.warnings.length === 0);
   }
 
+  {
+    const prior = {
+      ...projectFixture(),
+      version: PRIOR_CONFIG_VERSION,
+      adapterOptions: { 'claude.native': { reviewerModel: 'opus' } },
+      measurement: { capture: 'events' },
+    };
+    const before = JSON.stringify(prior);
+    const migrated = migrateConfig025To026(prior);
+    expect(
+      'the 0.25.0 hop drops the retired keys and keeps every remaining value',
+      migrated.ok
+        && migrated.config.version === CONFIG_VERSION
+        && !hasOwn(migrated.config, 'adapterOptions')
+        && !hasOwn(migrated.config, 'measurement')
+        && JSON.stringify(migrated.config.gate) === JSON.stringify(prior.gate)
+        && JSON.stringify(migrated.config.caps) === JSON.stringify(prior.caps)
+        && validateConfig(migrated.config).length === 0,
+    );
+    expect(
+      'the 0.25.0 hop names both removals and stays pure and deterministic',
+      migrated.warnings.includes('adapterOptions: retired route-scoped tuning removed')
+        && migrated.warnings.includes(
+          'measurement.capture: retired measurement ledger removed',
+        )
+        && JSON.stringify(prior) === before
+        && JSON.stringify(migrated) === JSON.stringify(migrateConfig025To026(prior)),
+    );
+    const clean = migrateConfig025To026({
+      ...projectFixture(),
+      version: PRIOR_CONFIG_VERSION,
+    });
+    expect(
+      'a 0.25.0 configuration without the retired keys migrates without warnings',
+      clean.ok && clean.warnings.length === 0
+        && validateConfig(clean.config).length === 0,
+    );
+    expect(
+      'the 0.25.0 hop refuses another version and an invalid prior configuration',
+      migrateConfig025To026(projectFixture()).code === 'INVALID_LEGACY_CONFIG'
+        && migrateConfig025To026({
+          ...projectFixture(),
+          version: PRIOR_CONFIG_VERSION,
+          measurement: { capture: 'all' },
+        }).code === 'INVALID_LEGACY_CONFIG',
+    );
+    const soloPreserved = migrateConfig025To026({
+      ...projectFixture(),
+      version: PRIOR_CONFIG_VERSION,
+      merge: {
+        policy: 'auto',
+        unverifiedInvocationAcknowledged: true,
+        soloOperatorAcknowledged: true,
+      },
+      adapterOptions: { 'claude.native': { reviewerModel: 'opus' } },
+    });
+    expect(
+      'the 0.25.0 hop preserves the merge policy and both acknowledgements',
+      soloPreserved.ok
+        && JSON.stringify(soloPreserved.config.merge) === JSON.stringify({
+          policy: 'auto',
+          unverifiedInvocationAcknowledged: true,
+          soloOperatorAcknowledged: true,
+        }),
+    );
+  }
+
   const extracted = extractConfig(
     `before\n\n\`\`\`json autoloop-config\n${JSON.stringify(base)}\n\`\`\`\n`,
   );
@@ -1965,26 +1817,7 @@ function selfTest() {
     ['positional only', ['/tmp/S.md'], { statePath: '/tmp/S.md', selfTest: false }],
     ['default path', [], { statePath: 'docs/agentic/STATE.md', selfTest: false }],
     ['self-test flag', ['--self-test'], { statePath: 'docs/agentic/STATE.md', selfTest: true }],
-    [
-      'deprecated host flag after positional',
-      ['/tmp/S.md', '--host', 'codex'],
-      {
-        statePath: '/tmp/S.md',
-        selfTest: false,
-        deprecatedHost: 'codex',
-      },
-    ],
-    [
-      'deprecated host flag before positional',
-      ['--host', 'claude', '/tmp/S.md'],
-      {
-        statePath: '/tmp/S.md',
-        selfTest: false,
-        deprecatedHost: 'claude',
-      },
-    ],
-    ['deprecated host flag missing value', ['--host'], { error: true }],
-    ['deprecated host flag rejects unknown host', ['--host', 'desktop'], { error: true }],
+    ['retired host flag', ['--host', 'codex'], { error: true }],
     ['unknown flag', ['--frobnicate'], { error: true }],
     ['two positionals', ['a.md', 'b.md'], { error: true }],
     ['self-test with positional', ['--self-test', 'a.md'], { error: true }],
@@ -1995,14 +1828,7 @@ function selfTest() {
       ? got.error !== null
       : got.error === null
         && got.statePath === expected.statePath
-        && got.selfTest === expected.selfTest
-        && (
-          expected.deprecatedHost === undefined
-          || (
-            got.deprecatedHost === expected.deprecatedHost
-            && got.deprecations.some((message) => message.includes('deprecated and ignored'))
-          )
-        );
+        && got.selfTest === expected.selfTest;
     expect(`parseArgs ${name}`, pass);
   }
 
@@ -2014,8 +1840,6 @@ export function parseArgs(args) {
   const parsed = {
     statePath: 'docs/agentic/STATE.md',
     selfTest: false,
-    deprecatedHost: undefined,
-    deprecations: [],
     error: null,
   };
   const positionals = [];
@@ -2027,21 +1851,6 @@ export function parseArgs(args) {
         return parsed;
       }
       parsed.selfTest = true;
-    } else if (arg === '--host') {
-      const host = args[index + 1];
-      if (!HOST_ORDER.includes(host)) {
-        parsed.error = '--host requires claude, codex, or opencode';
-        return parsed;
-      }
-      if (parsed.deprecatedHost !== undefined) {
-        parsed.error = '--host may be supplied only once';
-        return parsed;
-      }
-      parsed.deprecatedHost = host;
-      parsed.deprecations.push(
-        '--host is deprecated and ignored; RuntimeContract resolves the active host',
-      );
-      index += 1;
     } else if (arg.startsWith('-')) {
       parsed.error = 'unknown flag';
       return parsed;
@@ -2068,9 +1877,6 @@ function main() {
       `FAIL  autoloop config: ${parsed.error} — usage: config-contract.mjs [STATE path] | --self-test`,
     );
     process.exit(2);
-  }
-  for (const deprecation of parsed.deprecations) {
-    console.log(`NOTE  autoloop config: ${deprecation}`);
   }
   if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
 

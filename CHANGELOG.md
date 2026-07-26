@@ -15,6 +15,55 @@ Notable changes to Autoloop are recorded here. The format follows
   maintainer's responsibility; `--release-mode` still verifies the static release contract
   and proves the annotated-tag binding from local git objects.
 
+## [0.42.0] - 2026-07-26
+
+### Removed
+
+- The authority broker and everything built on it. `run-scope.mjs`, `runtime-contract.mjs`,
+  `route-adapter-contract.mjs`, `measurement-contract.mjs`, `intent-contract.mjs`, and
+  `continuation-store.mjs` are deleted, together with the closed route catalog, host attestation,
+  capability probing and its bwrap smokes, dispatch plans/receipts, relaunch v2 envelopes, and the
+  measurement ledger (`docs/measurement.md`,
+  `.autoloop/measurement-budget-policy.json`). That machinery existed for unattended merging by
+  unattributable actors across hosts; it made the loop unusable for the supervised solo operator it
+  actually has. A live run spent 5.5 minutes reverse-engineering the broker envelope protocol and
+  still failed closed without reaching implementation.
+- The `UserPromptSubmit` / `opencode.user-prompt` intent-capture hooks and the opencode plugin's
+  continuation/relaunch subsystem.
+- Config keys `runtime`, `engine`, `adapterOptions`, and `measurement`.
+
+### Added
+
+- `dispatch.mjs`: one call runs one role dispatch and returns a typed result.
+  `--role <plan-review|implement|code-review|doubt-review> --prompt-file <path> [--tools <csv>]
+  [--output-file <path>] [--json]`. It spawns `claude -p` directly — a fresh process per dispatch,
+  so writer and reviewer identities never collide. Reviewers get a read-only posture
+  (`Glob,Grep,Read`, permission mode `plan`) that can never be handed a write tool; the writer gets
+  `Bash,Edit,Glob,Grep,Read,Write` with `acceptEdits`. Review roles return the structured verdict
+  schema, parsed and validated, or fail typed. Every failure is `{ok:false, step, error}` with the
+  child's stderr preserved — no retries, no fallback engine — and every result reports the
+  wrapper's own overhead separately from engine time.
+- `checkout-contract.mjs`: the stable checkout and GitHub repository identity probe, extracted from
+  the deleted route adapter, where `publish-verdict.mjs` and `lifecycle-driver.mjs` still need it.
+
+### Changed
+
+- `prime.mjs` is one child process: validate ProjectConfig in-process, report the checkout against
+  the configured base, run one `scan.mjs`, persist the snapshot, print a decision-sized summary.
+  It replaces five broker calls the model had to hand-assemble.
+- `review-contract.mjs` keeps every decision — one plan review, delta-scoped rounds after round 1,
+  the human-block path for verified out-of-delta Critical/Major, the cap — and takes recorded
+  dispatch rounds instead of broker-signed receipts. Freshness is now structural: a unique
+  `dispatchId` per round and a `reviewerIdentity` that is never the author's.
+- `command-guard.mjs` scopes itself to open runs through a durable run marker `prime.mjs` writes
+  and binds to the observed process ancestry, replacing the broker lease. Every guard decision is
+  unchanged.
+- `loop-smoke.mjs` proves the new path end to end against a shimmed engine — prime, three role
+  dispatches, the gate command, the guardrail close — asserts no reviewer dispatch received a write
+  tool, and prints a phase timing table. `--real-engine-smoke` now runs ONE real dispatch.
+- Config schema `0.26.0`, with a `0.25.0` migration that drops the retired keys and carries every
+  remaining value across unchanged, including `merge.policy` and both acknowledgements.
+
 ## [0.41.4] - 2026-07-26
 
 ### Fixed

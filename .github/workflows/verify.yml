@@ -34,25 +34,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
-      - name: Install Linux authority sandbox
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
-          # bwrap needs unprivileged user namespaces, which Ubuntu 24.04 restricts
-          # through AppArmor. An Autoloop host needs the same allowance, so grant it
-          # here rather than weakening what the isolation smoke proves.
-          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1
-          then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-      - name: Smoke-test process authority isolation
-        if: runner.os == 'Linux'
-        run: node templates/tools/route-adapter-contract.mjs --self-test-authority-isolation
-      - name: Check measurement budget policy (pending is not a pass)
-        run: >-
-          node templates/tools/measurement-contract.mjs
-          --check-budget-policy templates/measurement-budget-policy.template.json
       - name: Verify release and contracts
         run: node templates/tools/verify.mjs --plugin-root .
       - name: Verify release tag

@@ -14,10 +14,8 @@ Autoloop opencode reviewer profile — vendored to .opencode/agent/autoloop-revi
 autoloop:setup. The leading wildcard deny is host-enforced and precedes the four explicit
 read-only overrides. It closes newly installed custom and MCP tools as well as today's mutating,
 network, delegation, skill, LSP, and question surfaces. This is typed isolation, not prompt-level.
-Model and provider are intentionally omitted so the reviewer inherits the dispatch surface
-(`opencode run -m <adapterOptions["claude.opencode-exec"].reviewerModel>` on the Claude host when
-that optional tuning exists, the session default natively); setup doctor treats an override here
-as configuration drift.
+Model and provider are intentionally omitted so the reviewer inherits the session default; setup
+doctor treats an override here as configuration drift.
 
 The contract text below mirrors codex-reviewer-agent.template.toml — keep the two in sync;
 changing one without the other is drift the doctor should flag.

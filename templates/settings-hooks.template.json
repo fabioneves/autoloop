@@ -17,17 +17,6 @@
         ]
       }
     ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "s=\"$CLAUDE_PROJECT_DIR/tools/agentic/intent-contract.mjs\"; if [ -f \"$s\" ]; then node \"$s\" --capture-hook; else echo \"autoloop: intent capture $s not found — refusing an unattested prompt until autoloop:setup is re-run\" >&2; exit 2; fi",
-            "timeout": 15
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "Bash",

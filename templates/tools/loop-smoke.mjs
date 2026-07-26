@@ -2,62 +2,43 @@
 
 // No-model end-to-end loop smoke: the release gate that proves the mechanical
 // spine of a live /autoloop:dev session against a scratch fixture repository,
-// with the REAL tool chain and the REAL detached authority broker — and no
-// model, no network, and no gh authentication.
+// with the REAL tool chain — and no model, no network, and no gh
+// authentication.
 //
-// A live Dev session failed every `run-scope.mjs --probe-json` with
-// INVALID_CAPABILITY_ATTESTATION: the detached broker re-parents to init once
-// its spawner exits, so a fresh host-ancestry walk inside the broker finds no
-// host. Self-tests never crossed that seam because CONTRACT_SELF_TEST_MODE
-// skips the live-host comparison and the in-process broker fixtures keep the
-// spawner alive. This smoke crosses exactly that seam: every step is a separate
-// child process, the broker is the real detached one, and the probe runs after
-// the broker's spawner has exited.
+// Sequence (the mechanical path of a live session):
+//   1. `prime.mjs --json` validates ProjectConfig, reports the base, runs one
+//      `scan.mjs`, persists the snapshot, and writes the run marker. The
+//      fixture origin is a fake GitHub slug and the children run with an empty
+//      GH_CONFIG_DIR and no token variables, so every `gh` call fails
+//      immediately without network and scan degrades to a complete snapshot
+//      whose sections are typed-incomplete — which prime accepts (completeness
+//      fallbacks stay with the caller).
+//   2. `dispatch.mjs --role plan-review` against a shimmed engine.
+//   3. `dispatch.mjs --role implement` against the same shim.
+//   4. `dispatch.mjs --role code-review` against the same shim.
+//   5. The configured gate command runs on the fixture.
+//   6. The guardrail close: `command-guard.mjs` blocks a merge while the run
+//      marker is live, then the marker is removed and the guard stands down.
 //
-// Sequence (identical to a live session's mechanical path):
-//   1. `intent-contract.mjs --capture-hook-json` seals a synthetic
-//      UserPromptSubmit `/autoloop:dev` event (the supported hook transport).
-//   2. `prime.mjs --dev-json` attests, opens, binds measurement, and runs the
-//      measured startup scan. The fixture origin is a fake GitHub slug and the
-//      children run with an empty GH_CONFIG_DIR and no token variables, so
-//      every `gh` call fails immediately without network and scan degrades to
-//      a complete snapshot whose sections are typed-incomplete — which prime
-//      accepts (completeness fallbacks stay with the caller).
-//   3. `run-scope.mjs --probe-json` with the prime summary's hostEvidence +
-//      run + the run's requested native route. The result must be a typed
-//      capability snapshot either way: available facts where the box has the
-//      isolation toolchain, typed-unavailable facts where it does not. The
-//      attestation error is the regression this gate exists to catch.
-//   4. `run-scope.mjs --finish-json` guardrail stop, which retires the broker
-//      session and shuts the broker down through its terminal protocol.
+// Every dispatch's launched argv is captured, and the gate asserts that no
+// reviewer dispatch was ever handed a write tool. The phase table prints each
+// phase's wall cost so a regression in the mechanics is visible without a
+// profiler.
 //
-// Host ancestry: the hook capture binds intent to the host process ancestry it
-// observes, and the broker re-verifies that binding when it consumes the
-// record, so capture and prime MUST run under the same host ancestry. Under a
-// live host (claude/codex/opencode ancestor) the steps run as direct children
-// of this process and bind to that live host. Without one (CI), the steps run
-// inside a `--smoke-host` child named `claude` through argv0 — the same
-// fixture-host technique run-scope's own detached-broker self-tests use — so
-// every step child observes exactly one host ancestor.
+// `--real-engine-smoke` is the OTHER mode: it runs ONE real `code-review`
+// dispatch WITHOUT the shim, against the authenticated engine. It is the only
+// check that proves a dispatch reaches a model at all — the shimmed smoke
+// proves the mechanics and cannot tell a working engine from a missing one.
 //
-// `--real-engine-smoke` is the OTHER mode, and the opposite trade: it runs the
-// same four steps WITHOUT the engine shims, so the route capability probe
-// dispatches real writer and reviewer postures against a real authenticated
-// engine, and then asserts every `claude.native` capability came back available.
-// It is the pre-release gate for `posture: isolated` — the only mode that proves
-// an engine can actually be dispatched inside the authority sandbox, which no
-// shimmed run can show.
-//
-// It is deliberately NOT part of `--self-test` and NOT part of CI: it costs real
-// model spend (roughly $0.25 per run), needs an authenticated engine CLI, and
-// needs a working `/usr/bin/bwrap`. Run it by hand before a release.
+// It is deliberately NOT part of `--self-test` and NOT part of CI: it costs
+// real model spend and needs an authenticated engine CLI. Run it by hand
+// before a release.
 //
 // Usage:
 //   node tools/agentic/loop-smoke.mjs --self-test
 //   node tools/agentic/loop-smoke.mjs --real-engine-smoke   # manual, costs money
 
 import { spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
@@ -70,27 +51,21 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detectHostProcessBinding } from './route-adapter-contract.mjs';
 import { UNIVERSAL_TOOL_FILES } from './verify.mjs';
 
 const TOOL_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const SMOKE_BUDGET_MS = 60_000;
 const STEP_TIMEOUT_MS = 55_000;
-// Real engine dispatches are model round trips, not mechanics. The route probe
-// runs a writer and a reviewer posture back to back, each capped at 20 minutes
-// inside route-adapter-contract; observed end to end on a warm box is well under
-// two minutes, and this budget leaves room for a slow model without hanging a
-// release check indefinitely.
-const REAL_ENGINE_BUDGET_MS = 15 * 60_000;
-const REAL_ENGINE_STEP_TIMEOUT_MS = 14 * 60_000;
+// One real dispatch is a model round trip, not a mechanical step.
+const REAL_ENGINE_BUDGET_MS = 10 * 60_000;
+const REAL_ENGINE_STEP_TIMEOUT_MS = 9 * 60_000;
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const FIXTURE_ORIGIN_URL = 'https://github.com/autoloop-smoke/fixture.git';
-const FIXTURE_PROMPT = '/autoloop:dev';
 // Ambient credentials and host-repo Git state must not leak into the fixture:
 // the smoke's contract is deterministic offline behavior.
-const STRIPPED_ENV_PREFIXES = ['GIT_', 'AUTOLOOP_AUTHORITY_'];
+const STRIPPED_ENV_PREFIXES = ['GIT_'];
 const STRIPPED_ENV_KEYS = [
   'NODE_OPTIONS',
   'GH_TOKEN',
@@ -101,13 +76,10 @@ const STRIPPED_ENV_KEYS = [
   'GH_CONFIG_DIR',
 ];
 const FIXTURE_CONFIG = {
-  version: '0.25.0',
+  version: '0.26.0',
   baseBranch: 'main',
   gate: { command: 'true', quickCommand: null, setupCommand: null },
   merge: { policy: 'manual' },
-  // Live installs default to capture off; the smoke opts into 'events' so the
-  // release gate exercises the FULL ledger path (bind, stage, measured scan).
-  measurement: { capture: 'events' },
   tracker: { provider: 'none' },
   review: { checklistPath: 'docs/agentic/checklist.md' },
   caps: {
@@ -118,41 +90,41 @@ const FIXTURE_CONFIG = {
     sliceMaxFiles: 10,
   },
 };
+const PASSING_VERDICT = { verdict: 'pass', findings: [], rebuts: [] };
 
-function brokerDirectory() {
-  const parent = ['darwin', 'linux'].includes(process.platform)
-    ? realpathSync('/tmp')
-    : realpathSync(tmpdir());
-  return join(
-    parent,
-    `autoloop-broker-${typeof process.getuid === 'function'
-      ? process.getuid()
-      : 'user'}`,
-  );
-}
-
-// The live probe executes real engine capability postures (model dispatches
-// with 20-minute caps) whenever the box has a working engine CLI. The smoke's
-// contract is no model and no network, so the fixture presents an engine-less
-// box: PATH-first shims make every engine CLI version preflight fail
-// immediately, and the probe returns its fast typed snapshot with
-// typed-unavailable capabilities — the exact shape an unprovisioned box
-// reports. The regression this gate catches (INVALID_CAPABILITY_ATTESTATION
-// from the detached broker) fires before any capability observation, so the
-// shimmed preflight loses no coverage of it.
-function writeEngineShims(scratch) {
+// One shim stands in for the engine on PATH. It appends its own argv to a log
+// so the gate can assert what each role actually launched, then prints the
+// stream-json `result` event the role expects.
+function writeEngineShim(scratch, argvLog) {
   const shimDirectory = join(scratch, 'engine-shims');
   mkdirSync(shimDirectory, { recursive: true });
-  for (const engine of ['claude', 'codex', 'opencode']) {
-    const shimPath = join(shimDirectory, engine);
-    writeFileSync(shimPath, '#!/bin/sh\nexit 127\n');
-    chmodSync(shimPath, 0o755);
-  }
+  const shimPath = join(shimDirectory, 'claude');
+  const verdict = JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    structured_output: PASSING_VERDICT,
+  });
+  const text = JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    result: 'fixture writer completed the slice',
+  });
+  writeFileSync(shimPath, [
+    '#!/bin/sh',
+    `printf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}`,
+    'cat > /dev/null',
+    'case "$*" in',
+    `  *--json-schema*) printf '%s\\n' ${JSON.stringify(verdict)} ;;`,
+    `  *) printf '%s\\n' ${JSON.stringify(text)} ;;`,
+    'esac',
+    '',
+  ].join('\n'));
+  chmodSync(shimPath, 0o755);
   return shimDirectory;
 }
 
 // `shimDirectory` is null in real-engine mode, which leaves PATH alone so the
-// probe resolves the host's actual engine CLI.
+// dispatch resolves the host's actual engine CLI.
 function smokeEnvironment(ghConfigDir, shimDirectory) {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) =>
@@ -160,19 +132,17 @@ function smokeEnvironment(ghConfigDir, shimDirectory) {
       && !STRIPPED_ENV_KEYS.includes(key)),
   );
   environment.GH_CONFIG_DIR = ghConfigDir;
-  environment.PATH = [shimDirectory, environment.PATH ?? '']
-    .filter(Boolean)
-    .join(':');
+  if (shimDirectory !== null) {
+    environment.PATH = [shimDirectory, environment.PATH ?? '']
+      .filter(Boolean)
+      .join(':');
+  }
   return environment;
 }
 
 function bounded(text, limit = 600) {
   const value = String(text ?? '').trim();
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
-}
-
-function failStep(name, detail) {
-  return { name, ok: false, detail };
 }
 
 function runGit(root, args) {
@@ -191,11 +161,7 @@ function runGit(root, args) {
   return String(result.stdout ?? '').trim();
 }
 
-function runToolJson(
-  name,
-  args,
-  { root, environment, input, stepTimeoutMs = STEP_TIMEOUT_MS },
-) {
+function runTool(name, args, { root, environment, input, stepTimeoutMs }) {
   const result = spawnSync(process.execPath, args, {
     cwd: root,
     encoding: 'utf8',
@@ -208,6 +174,17 @@ function runToolJson(
   if (result.error) {
     return { ok: false, detail: `${name}: ${result.error.message}` };
   }
+  return {
+    ok: true,
+    status: result.status,
+    stdout: String(result.stdout ?? ''),
+    stderr: String(result.stderr ?? ''),
+  };
+}
+
+function runToolJson(name, args, options) {
+  const result = runTool(name, args, options);
+  if (!result.ok) return result;
   let parsed = null;
   try {
     parsed = JSON.parse(result.stdout);
@@ -241,8 +218,7 @@ function writeFixtureState(root) {
 // plugin checkout (templates/tools) this is scaffold's own reconciliation —
 // the exact layout logic Setup uses, auto-merge rename included. From an
 // installed copy (tools/agentic) the sibling tools already carry their
-// installed names, so they are copied directly, plus the repository's
-// installed opencode plugin.
+// installed names, so they are copied directly.
 async function vendorFixtureTools(root) {
   const templatesDirectory = dirname(TOOL_DIRECTORY);
   if (existsSync(join(templatesDirectory, 'STATE.template.md'))) {
@@ -261,17 +237,6 @@ async function vendorFixtureTools(root) {
     if (!existsSync(source)) continue;
     copyFileSync(source, join(toolsTarget, name));
     if (name.endsWith('.sh')) chmodSync(join(toolsTarget, name), 0o755);
-  }
-  const installedPlugin = join(
-    dirname(dirname(TOOL_DIRECTORY)),
-    '.opencode',
-    'plugins',
-    'autoloop.js',
-  );
-  if (existsSync(installedPlugin)) {
-    const pluginTarget = join(root, '.opencode', 'plugins', 'autoloop.js');
-    mkdirSync(dirname(pluginTarget), { recursive: true });
-    copyFileSync(installedPlugin, pluginTarget);
   }
   return 'installed-sibling-copy';
 }
@@ -300,15 +265,14 @@ async function buildFixtureRepository(scratch) {
   return { root: realpathSync(root), vendoring };
 }
 
-// The four mechanical steps of a live /autoloop:dev session, each a separate
-// child process against the fixture repository. Runs either directly under a
-// live host ancestry or inside the `--smoke-host` fixture host.
+// The mechanical steps of a live /autoloop:dev session, each a separate child
+// process against the fixture repository.
 export function runSmokeSteps({
   root,
-  host,
-  sessionId,
   environment,
+  argvLog,
   stepTimeoutMs = STEP_TIMEOUT_MS,
+  roles = ['plan-review', 'implement', 'code-review'],
 }) {
   const steps = [];
   const timed = (name, execute) => {
@@ -318,70 +282,35 @@ export function runSmokeSteps({
     return result.ok;
   };
   const tool = (name) => join(root, 'tools', 'agentic', name);
-  const outcome = { steps, sessionFingerprint: null, probe: null };
+  const outcome = { steps, runMarker: null, dispatches: [] };
 
-  const captured = timed('capture-hook', () => {
-    const event = {
-      hook_event_name: host === 'opencode'
-        ? 'opencode.user-prompt'
-        : 'UserPromptSubmit',
-      session_id: sessionId,
-      turn_id: `turn-${randomUUID()}`,
-      cwd: root,
-      prompt: FIXTURE_PROMPT,
-    };
+  const primed = timed('prime', () => {
     const result = runToolJson(
-      'intent-contract.mjs --capture-hook-json',
-      [tool('intent-contract.mjs'), '--capture-hook-json'],
-      { root, environment, stepTimeoutMs, input: `${JSON.stringify(event)}\n` },
-    );
-    if (!result.ok) return result;
-    if (result.status !== 0 || result.value.captured !== true) {
-      return {
-        ok: false,
-        detail: `hook capture refused: ${bounded(JSON.stringify(result.value))}`,
-      };
-    }
-    return { ok: true, detail: 'intent sealed' };
-  });
-  if (!captured) return outcome;
-
-  let summary = null;
-  const primed = timed('prime-dev', () => {
-    const result = runToolJson(
-      'prime.mjs --dev-json',
-      [tool('prime.mjs'), '--dev-json', '-'],
-      { root, environment, stepTimeoutMs, input: JSON.stringify({ sessionId }) },
+      'prime.mjs --json',
+      [tool('prime.mjs'), '--json'],
+      { root, environment, stepTimeoutMs },
     );
     if (!result.ok) return result;
     const value = result.value;
     if (result.status !== 0 || value.ok !== true) {
-      return {
-        ok: false,
-        detail: `prime failed: ${bounded(JSON.stringify(value))}`,
-      };
+      return { ok: false, detail: `prime failed: ${bounded(JSON.stringify(value))}` };
     }
-    // The CLI prints the decision-sized summary: the full snapshot lives in
-    // the persisted snapshot file and stdout carries the per-section summary
-    // plus the durable paths.
     const sections = Object.values(value.sections ?? {});
-    const eventPath = value.scan?.eventPath;
-    let persistedSnapshotKind = null;
+    let persistedKind = null;
     try {
-      persistedSnapshotKind =
-        JSON.parse(readFileSync(value.snapshotPath, 'utf8')).kind;
+      persistedKind = JSON.parse(readFileSync(value.snapshotPath, 'utf8')).kind;
     } catch {}
     const shapeErrors = [
-      persistedSnapshotKind !== 'autoloop-repository-snapshot'
+      persistedKind !== 'autoloop-repository-snapshot'
         && 'persisted snapshot file is absent or not a repository snapshot',
       sections.length === 0 && 'summary has no snapshot sections',
-      (typeof value.bundlePath !== 'string' || !existsSync(value.bundlePath))
-        && 'persisted prime bundle is absent',
-      (typeof eventPath !== 'string' || !existsSync(eventPath))
-        && 'retained scan event file is absent',
-      value.run?.requestedRoute !== `${host}.native`
-        && `run.requestedRoute is ${bounded(String(value.run?.requestedRoute))}, `
-          + `expected ${host}.native`,
+      value.config?.version !== FIXTURE_CONFIG.version
+        && `config.version is ${bounded(String(value.config?.version))}`,
+      value.base?.onBase !== true && 'base facts do not report the configured base',
+      value.checkout?.clean !== true && 'fixture checkout is not clean',
+      (typeof value.runMarker !== 'string' || !existsSync(value.runMarker))
+        && 'run marker was not written',
+      !Number.isInteger(value.timings?.scanMs) && 'prime reported no scan timing',
     ].filter(Boolean);
     if (shapeErrors.length > 0) {
       return {
@@ -389,202 +318,147 @@ export function runSmokeSteps({
         detail: `prime summary shape is invalid: ${shapeErrors.join('; ')}`,
       };
     }
-    summary = value;
-    outcome.sessionFingerprint = value.run.sessionFingerprint ?? null;
+    outcome.runMarker = value.runMarker;
     const complete = sections.filter((section) => section.complete === true);
     return {
       ok: true,
-      detail: `run open; snapshot sections ${complete.length}/${sections.length} `
-        + 'complete (offline scan degrades typed-incomplete)',
+      detail: `scan ${value.timings.scanMs}ms; sections `
+        + `${complete.length}/${sections.length} complete `
+        + '(offline scan degrades typed-incomplete)',
     };
   });
   if (!primed) return outcome;
 
-  const probed = timed('probe-routes', () => {
-    const result = runToolJson(
-      'run-scope.mjs --probe-json',
-      [tool('run-scope.mjs'), '--probe-json', '-'],
-      {
-        root,
-        environment,
-        stepTimeoutMs,
-        input: JSON.stringify({
-          hostEvidence: summary.hostEvidence,
-          run: summary.run,
-          routes: [summary.run.requestedRoute],
-          cwd: root,
-        }),
-      },
-    );
-    if (!result.ok) return result;
-    const value = result.value;
-    if (
-      result.status !== 0
-      || value.ok !== true
-      || value.value?.kind !== 'autoloop-capability-snapshot'
-      || typeof value.value.facts !== 'object'
-    ) {
+  for (const role of roles) {
+    const promptPath = join(root, `.git/autoloop/${role}-prompt.md`);
+    mkdirSync(dirname(promptPath), { recursive: true });
+    writeFileSync(promptPath, `loop-smoke fixture prompt for ${role}\n`);
+    const dispatched = timed(`dispatch:${role}`, () => {
+      const result = runToolJson(
+        `dispatch.mjs --role ${role}`,
+        [
+          tool('dispatch.mjs'),
+          '--role', role,
+          '--prompt-file', promptPath,
+          '--output-file', join(root, `.git/autoloop/${role}-result.json`),
+          '--json',
+        ],
+        { root, environment, stepTimeoutMs },
+      );
+      if (!result.ok) return result;
+      const value = result.value;
+      if (result.status !== 0 || value.ok !== true) {
+        return {
+          ok: false,
+          detail: `dispatch failed: ${bounded(JSON.stringify(value))}`,
+        };
+      }
+      const expectsVerdict = role !== 'implement';
+      const shapeErrors = [
+        value.role !== role && `result role is ${bounded(String(value.role))}`,
+        expectsVerdict && value.verdict?.verdict !== 'pass'
+          && 'review dispatch returned no parsed verdict',
+        !expectsVerdict && typeof value.text !== 'string'
+          && 'writer dispatch returned no terminal text',
+        !Number.isInteger(value.startupMs) && 'dispatch reported no wrapper overhead',
+      ].filter(Boolean);
+      if (shapeErrors.length > 0) {
+        return { ok: false, detail: shapeErrors.join('; ') };
+      }
+      outcome.dispatches.push({
+        role,
+        tools: value.tools,
+        startupMs: value.startupMs,
+        ms: value.ms,
+      });
+      return {
+        ok: true,
+        detail: `${value.tools.join(',')} · ${value.ms}ms `
+          + `(${value.startupMs}ms wrapper overhead)`,
+      };
+    });
+    if (!dispatched) return outcome;
+  }
+
+  timed('posture-audit', () => {
+    let launched;
+    try {
+      launched = readFileSync(argvLog, 'utf8').trim().split('\n').filter(Boolean);
+    } catch (error) {
+      return { ok: false, detail: `engine argv log unreadable: ${error.message}` };
+    }
+    if (launched.length !== roles.length) {
       return {
         ok: false,
-        detail: `probe did not return a typed capability snapshot: ${
-          bounded(JSON.stringify(value))}`,
+        detail: `expected ${roles.length} engine launches, saw ${launched.length}`,
       };
     }
-    const facts = value.value.facts;
-    const available = Object.values(facts).filter(Boolean).length;
-    outcome.probe = { facts };
+    const reviewerLaunches = launched.filter((line) =>
+      line.includes('--permission-mode plan'));
+    const offending = reviewerLaunches.filter((line) =>
+      /--tools \S*(?:Write|Edit|Bash)/.test(line));
+    if (reviewerLaunches.length !== roles.filter((r) => r !== 'implement').length) {
+      return { ok: false, detail: 'a reviewer role did not launch in plan mode' };
+    }
+    if (offending.length > 0) {
+      return { ok: false, detail: 'a reviewer dispatch received a write tool' };
+    }
     return {
       ok: true,
-      detail: `typed snapshot: ${available}/${Object.keys(facts).length} `
-        + 'capabilities available',
+      detail: `${reviewerLaunches.length} reviewer launch(es), none with a write tool`,
     };
   });
-  if (!probed) return outcome;
 
-  timed('finish-guardrail', () => {
-    const result = runToolJson(
-      'run-scope.mjs --finish-json',
-      [tool('run-scope.mjs'), '--finish-json', '-'],
-      {
-        root,
-        environment,
-        stepTimeoutMs,
-        input: JSON.stringify({
-          run: summary.run,
-          progress: {
-            reason: 'guardrail-failure',
-            unitsCompleted: 0,
-            queueEvidence: null,
-          },
-        }),
-      },
-    );
-    if (!result.ok) return result;
-    if (result.status !== 0 || result.value.ok !== true) {
-      return {
-        ok: false,
-        detail: `finish failed: ${bounded(JSON.stringify(result.value))}`,
-      };
-    }
-    if (result.value.value?.action !== 'stop') {
-      return {
-        ok: false,
-        detail: `guardrail finish returned action ${
-          bounded(String(result.value.value?.action))}, expected stop`,
-      };
-    }
-    return { ok: true, detail: 'run closed; broker session retired' };
-  });
-  return outcome;
-}
-
-function runFixtureHostSteps(context, scratch, budgetMs = SMOKE_BUDGET_MS) {
-  const contextPath = join(scratch, 'smoke-host-context.json');
-  writeFileSync(contextPath, JSON.stringify(context));
-  const result = spawnSync(
-    process.execPath,
-    [fileURLToPath(import.meta.url), '--smoke-host', contextPath],
-    {
-      argv0: 'claude',
-      cwd: context.root,
+  timed('gate', () => {
+    const result = spawnSync('sh', ['-c', FIXTURE_CONFIG.gate.command], {
+      cwd: root,
       encoding: 'utf8',
-      env: context.environment,
-      maxBuffer: MAX_CHILD_OUTPUT_BYTES,
-      timeout: budgetMs,
+      env: environment,
+      timeout: stepTimeoutMs,
       windowsHide: true,
-    },
-  );
-  if (result.error) {
-    return {
-      steps: [failStep('smoke-host', `fixture host: ${result.error.message}`)],
-      sessionFingerprint: null,
-      probe: null,
-    };
-  }
-  try {
-    return JSON.parse(result.stdout);
-  } catch {
-    return {
-      steps: [failStep(
-        'smoke-host',
-        `fixture host exit ${result.status}; stdout ${bounded(result.stdout)}; `
-        + `stderr ${bounded(result.stderr)}`,
-      )],
-      sessionFingerprint: null,
-      probe: null,
-    };
-  }
-}
-
-function expectedSessionFingerprint(host, sessionId) {
-  return createHash('sha256')
-    .update(JSON.stringify({
-      activeHost: host,
-      integration: `${host}.user-prompt-hook`,
-      sessionId,
-    }))
-    .digest('hex');
-}
-
-// One broker per host session is the authority model, so the smoke cannot run
-// inside a session whose broker is already live (a mid-run verify). That is a
-// structural exclusion, not a failure: report it and pass. Hostless CI — the
-// environment this gate exists for — never has a live broker and never skips.
-function liveBrokerOwnsHostSession(binding) {
-  try {
-    const leasePath = join(
-      brokerDirectory(),
-      `host-${binding.fingerprint}.lease`,
-    );
-    if (!existsSync(leasePath)) return false;
-    const lease = JSON.parse(readFileSync(leasePath, 'utf8'));
-    const commandLine = processCommandLine(lease.pid);
-    return commandLine.includes('--authority-broker')
-      && commandLine.some((part) => basename(part) === 'run-scope.mjs');
-  } catch {
-    return false;
-  }
-}
-
-function processCommandLine(pid) {
-  try {
-    if (process.platform === 'linux') {
-      return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
-    }
-    const result = spawnSync('ps', ['-o', 'args=', '-p', String(pid)], {
-      encoding: 'utf8',
-      timeout: 5000,
     });
-    return result.status === 0 ? String(result.stdout).trim().split(/\s+/) : [];
-  } catch {
-    return [];
-  }
-}
+    return result.status === 0
+      ? { ok: true, detail: `configured gate \`${FIXTURE_CONFIG.gate.command}\` green` }
+      : { ok: false, detail: `gate exited ${result.status}` };
+  });
 
-// The finish step's terminal stop is the designed broker teardown. This is the
-// belt-and-suspenders path for failed runs: terminate exactly a process that
-// still holds this smoke session's registry AND presents the authority-broker
-// command line for that registry's socket.
-function terminateLeakedBroker(sessionFingerprint) {
-  const registryPath = join(brokerDirectory(), `${sessionFingerprint}.json`);
-  try {
-    if (!existsSync(registryPath)) return;
-    const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
-    const commandLine = processCommandLine(registry.pid);
-    if (
-      !commandLine.includes('--authority-broker')
-      || !commandLine.includes(registry.socketPath)
-      || !commandLine.some((part) => basename(part) === 'run-scope.mjs')
-    ) {
-      return;
+  timed('guardrail-close', () => {
+    const guard = tool('command-guard.mjs');
+    const guardOptions = {
+      root,
+      environment,
+      stepTimeoutMs,
+      input: JSON.stringify({ tool_input: { command: 'gh pr merge 9 --squash' } }),
+    };
+    const blocked = runTool(
+      'command-guard.mjs (run open)',
+      [guard, '--config', join(root, 'docs', 'agentic', 'STATE.md')],
+      guardOptions,
+    );
+    if (!blocked.ok) return blocked;
+    if (blocked.status !== 2) {
+      return {
+        ok: false,
+        detail: `guard exited ${blocked.status} while the run was open, expected 2`,
+      };
     }
-    process.kill(registry.pid, 'SIGTERM');
-    const gate = new Int32Array(new SharedArrayBuffer(4));
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (!existsSync(registryPath)) return;
-      Atomics.wait(gate, 0, 0, 100);
+    rmSync(outcome.runMarker, { force: true });
+    const standDown = runTool(
+      'command-guard.mjs (run closed)',
+      [guard, '--config', join(root, 'docs', 'agentic', 'STATE.md')],
+      guardOptions,
+    );
+    if (!standDown.ok) return standDown;
+    if (standDown.status !== 0) {
+      return {
+        ok: false,
+        detail: `guard exited ${standDown.status} after the run closed, expected 0`,
+      };
     }
-  } catch {}
+    return { ok: true, detail: 'merge blocked while open; guard stands down when closed' };
+  });
+
+  return outcome;
 }
 
 async function selfTest({ realEngine = false } = {}) {
@@ -606,51 +480,19 @@ async function selfTest({ realEngine = false } = {}) {
     return result;
   };
 
-  const liveBinding = detectHostProcessBinding();
-  if (liveBinding !== null && liveBrokerOwnsHostSession(liveBinding)) {
-    console.log(
-      'loop smoke · skipped: a live authority broker already owns this host '
-      + 'session (one broker per session by design); run the smoke from a '
-      + 'session without an active run',
-    );
-    return true;
-  }
-  const host = liveBinding?.host ?? 'claude';
-  const hostMode = liveBinding === null
-    ? 'fixture-host (argv0 claude)'
-    : `live-host (${host})`;
-  const mode = realEngine
-    ? `real-engine · ${hostMode}`
-    : hostMode;
-  // The real-engine gate exists to prove a real dispatch inside the authority
-  // sandbox. Preconditions it cannot substitute for are a hard failure, not a
-  // skip: a silent pass here would be exactly the false negative this mode was
-  // added to eliminate.
-  if (realEngine) {
-    const missing = [
-      !existsSync('/usr/bin/bwrap') && '/usr/bin/bwrap is absent',
-      process.platform !== 'linux'
-        && `platform ${process.platform} has no process-authority sandbox`,
-    ].filter(Boolean);
-    if (missing.length > 0) {
-      console.error(`real-engine smoke cannot run: ${missing.join('; ')}`);
-      return false;
-    }
-  }
-  const sessionId = `loop-smoke-${randomUUID()}`;
+  const mode = realEngine ? 'real-engine (one live dispatch)' : 'shimmed engine';
   const scratch = mkdtempSync(join(tmpdir(), 'autoloop-loop-smoke-'));
-  const sessionFingerprints = new Set([
-    expectedSessionFingerprint(host, sessionId),
-  ]);
   let allOk = false;
   try {
     const ghConfigDir = join(scratch, 'gh-config');
     mkdirSync(ghConfigDir, { recursive: true });
-    // Real-engine mode is defined by the ABSENCE of the shims: the probe has to
-    // resolve and dispatch the host's actual engine CLI.
+    const argvLog = join(scratch, 'engine-argv.log');
+    writeFileSync(argvLog, '');
+    // Real-engine mode is defined by the ABSENCE of the shim: the dispatch has
+    // to resolve and run the host's actual engine CLI.
     const environment = smokeEnvironment(
       ghConfigDir,
-      realEngine ? null : writeEngineShims(scratch),
+      realEngine ? null : writeEngineShim(scratch, argvLog),
     );
 
     let fixture = null;
@@ -663,17 +505,17 @@ async function selfTest({ realEngine = false } = {}) {
       }
     });
 
+    let outcome = null;
     if (setup.ok) {
-      const context = {
+      outcome = runSmokeSteps({
         root: fixture.root,
-        host,
-        sessionId,
         environment,
+        argvLog,
         stepTimeoutMs,
-      };
-      const outcome = liveBinding === null
-        ? runFixtureHostSteps(context, scratch, budgetMs)
-        : runSmokeSteps(context);
+        // The real-engine mode spends money, so it proves exactly one thing:
+        // that a dispatch reaches a model and returns a parseable verdict.
+        roles: realEngine ? ['code-review'] : undefined,
+      });
       for (const step of outcome.steps) {
         phases.push({
           name: step.name,
@@ -682,60 +524,29 @@ async function selfTest({ realEngine = false } = {}) {
           detail: step.detail ?? '',
         });
       }
-      if (typeof outcome.sessionFingerprint === 'string') {
-        sessionFingerprints.add(outcome.sessionFingerprint);
-      }
-      // The assertion the shimmed smoke structurally cannot make: a shimmed
-      // probe reports typed-unavailable facts and passes. Here every capability
-      // the route declares must be observed available, or the isolated posture
-      // cannot dispatch this engine.
-      if (realEngine) {
-        await timedPhase('real-engine-capabilities', async () => {
-          const facts = outcome.probe?.facts ?? null;
-          if (facts === null || Object.keys(facts).length === 0) {
-            return { ok: false, detail: 'probe returned no capability facts' };
-          }
-          const unavailable = Object.entries(facts)
-            .filter(([, available]) => available !== true)
-            .map(([requirement]) => requirement);
-          return unavailable.length === 0
-            ? {
-              ok: true,
-              detail: `${Object.keys(facts).length}/${Object.keys(facts).length} `
-                + `available for ${host}.native`,
-            }
-            : {
-              ok: false,
-              detail: `unavailable for ${host}.native: ${unavailable.join(', ')}`,
-            };
-        });
-      }
     }
-
-    await timedPhase('teardown', async () => {
-      for (const fingerprint of sessionFingerprints) {
-        terminateLeakedBroker(fingerprint);
-      }
-      return { ok: true, detail: 'broker registry clear' };
-    });
 
     const totalMs = Date.now() - startedAt;
     const withinBudget = totalMs < budgetMs;
     allOk = phases.every((phase) => phase.ok) && withinBudget;
 
     console.log(`loop smoke · ${mode}`);
-    console.log('phase             ms      result');
+    console.log('phase              ms      result');
     for (const phase of phases) {
       const status = phase.ok ? 'ok' : 'FAIL';
       console.log(
-        `${phase.name.padEnd(18)}${String(phase.ms).padStart(6)}  ${status}`
+        `${phase.name.padEnd(19)}${String(phase.ms).padStart(6)}  ${status}`
         + `${phase.detail ? `  ${phase.detail}` : ''}`,
       );
     }
     console.log(
-      `${'total'.padEnd(18)}${String(totalMs).padStart(6)}  `
+      `${'total'.padEnd(19)}${String(totalMs).padStart(6)}  `
       + `${withinBudget ? 'ok' : 'FAIL'}  budget ${budgetMs}ms`,
     );
+    const overhead = (outcome?.dispatches ?? [])
+      .map(({ role, startupMs }) => `${role} ${startupMs}ms`)
+      .join(' · ');
+    if (overhead) console.log(`dispatch wrapper overhead: ${overhead}`);
     return allOk;
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -761,23 +572,15 @@ if (isMainModule()) {
     process.argv.length === 3
     && process.argv[2] === '--real-engine-smoke'
   ) {
-    // Manual pre-release gate for `posture: isolated`. Never wired into
-    // `--self-test`, `verify.mjs`, or CI: it spends real model budget.
+    // Manual pre-release check. Never wired into `--self-test`, `verify.mjs`,
+    // or CI: it spends real model budget.
     const passed = await selfTest({ realEngine: true });
     console.log(
       passed
-        ? 'real-engine smoke OK (isolated posture dispatches a live engine)'
+        ? 'real-engine smoke OK (one live dispatch returned a typed verdict)'
         : 'real-engine smoke FAILED',
     );
     process.exit(passed ? 0 : 1);
-  } else if (
-    process.argv.length === 4
-    && process.argv[2] === '--smoke-host'
-  ) {
-    // Internal fixture-host mode: this process stands in as the single host
-    // ancestor (named through argv0) for the smoke's step children.
-    const context = JSON.parse(readFileSync(process.argv[3], 'utf8'));
-    process.stdout.write(`${JSON.stringify(runSmokeSteps(context))}\n`);
   } else {
     console.error('loop-smoke: expected --self-test or --real-engine-smoke');
     process.exit(2);
