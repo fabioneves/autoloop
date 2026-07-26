@@ -284,8 +284,8 @@ export function runDispatch({
   startedAtMs = PROCESS_START_MS,
 }) {
   const argv = dispatchArgv(role, tools);
-  const mutatesCheckout = ROLES[role].posture === 'writer';
-  const checkoutBefore = mutatesCheckout ? checkoutFingerprint(cwd) : null;
+  const checkoutBefore =
+    ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const started = Date.now();
   const startupMs = started - startedAtMs;
   const result = spawnSync(engine, argv, {
