@@ -63,7 +63,7 @@ import { writeStdoutSync } from './snapshot-contract.mjs';
 // release verifier requires this literal to equal VERSION. The endpoint
 // manifest declares the toolchain version that ran the checkpoint, and the
 // vendored copy of this tool is that toolchain.
-const AUTOLOOP_VERSION = '0.41.3';
+const AUTOLOOP_VERSION = '0.41.4';
 
 const WORKLOAD = 'autoloop-dev-unit';
 const WORKLOAD_UNIT = 'one loop-ready issue from selection to delivered pull request';

@@ -15,6 +15,46 @@ Notable changes to Autoloop are recorded here. The format follows
   maintainer's responsibility; `--release-mode` still verifies the static release contract
   and proves the annotated-tag binding from local git objects.
 
+## [0.41.4] - 2026-07-26
+
+### Fixed
+
+- **The isolated posture can dispatch an engine at all.** Every route capability smoke returned
+  `route-smoke-failed`, so no live run ever got past the probe. Two upstream engine behaviors,
+  both found by reading the engine's own stderr out of the sandbox: Claude Code's env-scrub
+  hardening silently forces `--permission-mode` back to `default` (so the writer's Write was
+  denied and no proof marker appeared), and its inner sandbox needs to create mount points
+  inside `.git`, which read-only Git metadata refused, failing every Bash call. Permissions are
+  now derived from each posture's own tool ceiling — the reviewer grants nothing, a net
+  narrowing — and read-only Git metadata is a tmpfs with real entries re-bound read-only
+  underneath, with the write denials re-verified intact.
+- **The engine's sandbox litter no longer reaches a commit.** Scrub mode creates ~17 zero-byte
+  stubs (`.env*`, `package.json`, `yarn.lock`, …) for sensitive paths that do not exist; it
+  normally hides them by appending to `.git/info/exclude`, which fails precisely because
+  Autoloop mounts Git metadata read-only. Untracked litter would have stopped the next run
+  through the dirty-tree rule and — since the broker commit stages `git add --all` — landed in
+  the pull request. The broker now removes only what appeared during a dispatch: untracked,
+  regular, zero-byte, non-symlink, and reported in the typed result. Every guard is
+  mutation-proven in the self-tests.
+- No error-shaped output on the happy path: typed `snapshot-contract --summary/--section`
+  accessors so nothing is hand-parsed, guard refusals reworded as policy with the sanctioned
+  alternative named, the capability smoke bounded at 120s per dispatch (it was 20 minutes), and
+  bundle files named from the broker run identifier when measurement capture is off.
+
+### Removed
+
+- Tag-time live-control verification and `AUTOLOOP_RELEASE_POLICY_TOKEN`. Repository protection
+  is configured on GitHub and remains the maintainer's responsibility; the release gate verifies
+  the release contract — version literals, annotated-tag binding, changelog, banners, smoke
+  evidence, workflow shape. −937 lines.
+
+### Added
+
+- `loop-smoke.mjs --real-engine-smoke`: the opt-in pre-release gate for `posture: isolated`.
+  It runs the full chain with no engine shims and asserts real capabilities (11/11 on a
+  bwrap-capable, authenticated host, ~40s). It costs real tokens, so it stays manual — the
+  shimmed `loop-smoke` remains in every CI battery.
+
 ## [0.41.3] - 2026-07-26
 
 ### Fixed
@@ -359,7 +399,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.3...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.4...HEAD
+[0.41.4]: https://github.com/fabioneves/autoloop/compare/v0.41.3...v0.41.4
 [0.41.3]: https://github.com/fabioneves/autoloop/compare/v0.41.2...v0.41.3
 [0.41.2]: https://github.com/fabioneves/autoloop/compare/v0.41.1...v0.41.2
 [0.41.1]: https://github.com/fabioneves/autoloop/compare/v0.41.0...v0.41.1
