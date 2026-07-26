@@ -5,6 +5,29 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.41.2] - 2026-07-26
+
+### Fixed
+
+- Prime returns `hostEvidence`: its internal attest consumes the one-use intent record, so the
+  evidence it held was the run's only copy — the first live run blocked at the route probe
+  without it. The summary and persisted bundle now carry it; the skill forbids re-attesting.
+- Prime persists its full bundle and raw snapshot under `.git/autoloop/prime/` and prints a
+  decision-sized summary with per-section counts: the inlined ~300KB snapshot exceeded what a
+  model-facing tool result can carry, silently recreating the manual-scan ceremony.
+
+### Changed — startup cost, round two
+
+- `measurement-contract.mjs --measured <operationId> [--action <text>] -- <command>...` runs a
+  measured operation in one invocation: the open run, active stage, and operation kind are
+  derived from the store (fail-closed on ambiguity), and the assembled input reaches
+  `runMeasuredOperation` unchanged — no per-command envelope files, no validation relaxations.
+- `prime.mjs --conclude-json` closes a guardrail-blocked run in one call: human wait pair,
+  typed-unavailable stage-end, blocked run-finish, and the finish decision, in the exact order
+  live sessions performed by hand across two to three minutes.
+- Scaffold audit/reconcile report entries carry a `source` field naming each artifact's exact
+  template path (renames included), ending spurious hand-diff guesses.
+
 ## [0.41.1] - 2026-07-26
 
 ### Fixed
@@ -295,7 +318,8 @@ Notable changes to Autoloop are recorded here. The format follows
   events, dependencies, frozen plans, executor identity, branch protection, applicable rulesets,
   and bypass actors before any SHA-bound merge authorization.
 
-[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.1...HEAD
+[Unreleased]: https://github.com/fabioneves/autoloop/compare/v0.41.2...HEAD
+[0.41.2]: https://github.com/fabioneves/autoloop/compare/v0.41.1...v0.41.2
 [0.41.1]: https://github.com/fabioneves/autoloop/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/fabioneves/autoloop/compare/v0.40.5...v0.41.0
 [0.40.5]: https://github.com/fabioneves/autoloop/compare/v0.40.4...v0.40.5
