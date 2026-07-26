@@ -54,12 +54,15 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    `run-start`), the public `selection-1` stage-start capture, and one measured startup
    `scan.mjs` operation through `measurement-contract.mjs --run-operation`. It stops fail-closed
    at the first typed error with that error on stdout. On success it persists the full bundle and
-   the raw snapshot under `.git/autoloop/prime/<runId>.{bundle,snapshot}.json` and prints only the
+   the raw snapshot under `.git/autoloop/prime/<id>.{bundle,snapshot}.json` — `<id>` is the
+   measurement run UUID with capture on and the broker run's `instanceFingerprint` with capture
+   off, so both modes get a stable unique name — and prints only the
    decision-sized summary:
    `{ok,run,measurementRunId,hostEvidence,boundaries,scan,bundlePath,snapshotPath,snapshotBytes,sections}` — per-section
    `{complete,items,error}` counts, never item bodies, because a full snapshot exceeds what a tool
    result can carry. Retain the printed summary and the two paths; read section details from
-   `snapshotPath` with targeted queries, never by dumping the file into context. The boundaries it retained are the measurement `run-start`, the open
+   `snapshotPath` only through the typed accessors or `jq` (see "No improvised inspection"
+   below), never by dumping the file into context. The boundaries it retained are the measurement `run-start`, the open
    `selection-1` stage start, and the authenticated startup-scan operation event; every later
    startup operation still runs measured inside that open stage. prime.mjs opens new invocations
    only — for the exact opencode v2 continuation target, and to diagnose a failed prime step, use
@@ -118,11 +121,38 @@ Run Pitcrew first in the same `RunContext`, then take new work.
     executable presence, caller observations, prose, and static guesses cannot make a capability
     available. Cache the returned capability snapshot under its fingerprint. Missing
     executable/auth/version/artifact/isolation is a capability error, not an outage.
+    Expect the probe to take minutes, not seconds: each route's capability smoke performs one
+    real sandboxed engine dispatch per posture (writer, then reviewer — a real model call each),
+    and every dispatch is hard-bounded by a 120-second budget. A dispatch that exceeds the
+    budget degrades to the typed `unavailable` capability instead of hanging, so wait the probe
+    out — a multi-minute probe is normal operation, never a stall to investigate.
 10. Immediately call `run-scope.mjs --initialize-route-state-json` with exact
     `{run,capabilities}` and retain the broker-issued route state. This must precede the first
     plan. Initialize exactly once for this run/capability fingerprint; an
     existing durable state is reused and later capability changes use refresh, never
     reinitialization.
+
+### No improvised inspection
+
+`.git/autoloop/**` stores (intents, prime bundles, measurements) are broker-owned records, not
+model reading material, and the command guard blocks inline interpreters (`node -e`,
+`python -c`, interpreter heredocs) by policy — a guard block there is the policy working, never
+an error to engineer around. The sanctioned reads are typed:
+
+- the prime summary itself — `sections` already carries every per-section
+  `{complete,items,error}` count, and `bundlePath`/`snapshotPath` name the durable files;
+- `node tools/agentic/snapshot-contract.mjs --summary <snapshotPath>` — the bounded per-section
+  summary of any retained snapshot file;
+- `node tools/agentic/snapshot-contract.mjs --section <name> <snapshotPath>` — one section's
+  exact JSON; an unknown name fails closed listing the valid catalog;
+- `measurement-contract.mjs --measured <operationId> --run <measurementRunId> -- <argv>` for
+  anything that must run as an operation (capture on);
+- plain `jq` with a single-quoted filter on the exact files the prime summary names is
+  sanctioned — the guard permits it, and prime naming the files keeps it targeted.
+
+Never pre-inspect the intent store: prime is the transport check. A missing intent record is
+prime's typed attest failure within seconds; peeking at `.git/autoloop/intents/**` first is both
+blocked by the guard and slower than running prime.
 
 ### Manual per-op prime
 

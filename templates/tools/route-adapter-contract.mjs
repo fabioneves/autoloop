@@ -2105,11 +2105,24 @@ function capabilityProcessLaunch(
   };
 }
 
+// Each capability smoke posture is one real sandboxed engine dispatch — the
+// posture contract proves capability by observed effect (typed verdict plus
+// marker/commit evidence), so no lighter static probe can substitute for the
+// dispatch. That makes the smoke a real model call with real latency: a live
+// claude.native probe ran 2.5+ minutes across its two postures. This budget
+// hard-bounds each dispatch; exceeding it is the typed `unavailable` smoke
+// status with the budget surfaced in the evidence reason — never a hang, and
+// never `verified`. Generous by design (a posture dispatch is a trivial task
+// that completes in ~1 minute live); a constant, not an environment override,
+// so the bound cannot be silently widened per host.
+const CAPABILITY_SMOKE_BUDGET_MS = 120_000;
+
 function executeCapabilityPosture(
   route,
   posture,
   challenge,
   scratch,
+  budgetMs = CAPABILITY_SMOKE_BUDGET_MS,
 ) {
   let resultDirectory = null;
   try {
@@ -2161,7 +2174,7 @@ function executeCapabilityPosture(
       input: capabilityPrompt(route, posture, challenge),
       cwd: scratch,
       encoding: 'utf8',
-      timeout: 20 * 60 * 1000,
+      timeout: budgetMs,
       maxBuffer: MAX_IO_BYTES,
       env: processChildEnvironment(
         launch.env,
@@ -2170,6 +2183,16 @@ function executeCapabilityPosture(
       ),
       windowsHide: true,
     });
+    if (result.error?.code === 'ETIMEDOUT') {
+      return {
+        status: 'unavailable',
+        evidenceFingerprint: hashValue({
+          route,
+          posture,
+          reason: `capability smoke exceeded its budget (${budgetMs} ms)`,
+        }),
+      };
+    }
     const launched = processLaunched(result);
     const verdict = launched && result.status === 0 && !result.error
       ? launch.parser(result)
@@ -4984,6 +5007,9 @@ function fixtureReviewRepository({
 function fakeCapabilitySmokeSelfTest(route, {
   writerWrites,
   reviewerMutates,
+  hangSeconds = 0,
+  budgetMs = undefined,
+  postures = ['writer', 'reviewer'],
 }) {
   if (
     process.platform !== 'linux'
@@ -5018,6 +5044,12 @@ function fakeCapabilitySmokeSelfTest(route, {
       "const challenge = prompt.match(/[a-f0-9]{64}/)?.[0];",
       "const posture = prompt.includes('\"posture\":\"writer\"')",
       "  ? 'writer' : 'reviewer';",
+      ...(hangSeconds > 0
+        ? [
+          'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, '
+          + `${hangSeconds * 1000});`,
+        ]
+        : []),
       ...(writerWrites
         ? [
           "if (posture === 'writer') {",
@@ -5087,20 +5119,14 @@ function fakeCapabilitySmokeSelfTest(route, {
         'base',
       ],
     );
-    return [
+    return postures.map((posture) =>
       executeCapabilityPosture(
         route,
-        'writer',
+        posture,
         challenge,
         root,
-      ).status,
-      executeCapabilityPosture(
-        route,
-        'reviewer',
-        challenge,
-        root,
-      ).status,
-    ];
+        budgetMs,
+      ).status);
   } finally {
     process.env.PATH = previousPath;
     rmSync(root, { recursive: true, force: true });
@@ -5538,6 +5564,23 @@ function selfTest() {
       return statuses === null
         || statuses.join(',') === 'failed,verified';
     }),
+  ]);
+  checks.push([
+    'a capability smoke that exceeds its budget is typed unavailable',
+    (() => {
+      const statuses = fakeCapabilitySmokeSelfTest('claude.native', {
+        writerWrites: true,
+        reviewerMutates: false,
+        hangSeconds: 30,
+        budgetMs: 1500,
+        postures: ['writer'],
+      });
+      return statuses === null || statuses.join(',') === 'unavailable';
+    })(),
+  ]);
+  checks.push([
+    'the capability smoke budget is a bounded constant',
+    CAPABILITY_SMOKE_BUDGET_MS === 120_000,
   ]);
   checks.push([
     'static reviewer artifacts reject symlinks before reading',
