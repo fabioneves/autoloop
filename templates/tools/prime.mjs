@@ -451,6 +451,11 @@ export function primeDev(rawInput, cwd = process.cwd()) {
     return {
       ok: true,
       run,
+      // The route probe and every later broker operation take the SAME host
+      // evidence the manual path would have kept from its own attest call; the
+      // intent record is one-use, so dropping this here would strand the run
+      // with no way to probe (live block: "prime.mjs discards hostEvidence").
+      hostEvidence,
       boundaries: {
         runStart: bind.value.value,
         stageStart: stageStartBoundary,
@@ -749,6 +754,7 @@ async function selfTest() {
     const fullResult = {
       ok: true,
       run: { runId: 'fixture-run' },
+      hostEvidence: { fingerprint: 'f'.repeat(64), observedHosts: ['claude'] },
       boundaries: { runStart: { payload: { runId: 'fixture-run' } }, stageStart: {} },
       scan: { operationId: 'op', eventPath: '/tmp/e.json' },
       snapshot: {
@@ -769,6 +775,7 @@ async function selfTest() {
       check(
         'success stdout is decision-sized while the durable bundle keeps every byte',
         compact.snapshot === undefined
+          && compact.hostEvidence.fingerprint === 'f'.repeat(64)
           && compact.sections.queue.complete === true
           && compact.sections.queue.items === 60
           && compact.sections.openIssues.error === 'SCAN_FAILED'

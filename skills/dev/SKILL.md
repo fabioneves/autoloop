@@ -52,7 +52,7 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    at the first typed error with that error on stdout. On success it persists the full bundle and
    the raw snapshot under `.git/autoloop/prime/<runId>.{bundle,snapshot}.json` and prints only the
    decision-sized summary:
-   `{ok,run,boundaries,scan,bundlePath,snapshotPath,snapshotBytes,sections}` — per-section
+   `{ok,run,hostEvidence,boundaries,scan,bundlePath,snapshotPath,snapshotBytes,sections}` — per-section
    `{complete,items,error}` counts, never item bodies, because a full snapshot exceeds what a tool
    result can carry. Retain the printed summary and the two paths; read section details from
    `snapshotPath` with targeted queries, never by dumping the file into context. The boundaries it retained are the measurement `run-start`, the open
@@ -101,6 +101,8 @@ Run Pitcrew first in the same `RunContext`, then take new work.
     routes are audit evidence only.
 9. Live execution in v0.40 is Linux-only. Probe with `run-scope.mjs --probe-json` input exactly
     `{hostEvidence,run,routes:[selectedRoute, optionalNativeFallback],cwd:absoluteRepositoryRoot}`.
+    `hostEvidence` and `run` come from the prime summary — the intent record was consumed by
+    prime's attest, so this is the only copy; never re-attest.
     Put the selected route first and include the same-host native route second only when that
     engine independently passes its own authenticated installed capability. Authentication is the
     operator's standing authorization for that engine's cost; the selector is only a routing
