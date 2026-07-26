@@ -1155,8 +1155,37 @@ export function evaluate(rawCmd, branch, options = {}) {
     };
   }
 
-  // 1. never merge
-  if (/\bgh\b[^\n]*\bpr\b[^\n]*\bmerge\b/.test(lexicalCmd)) {
+  // 1. never merge — structural: `pr` then `merge` must be gh's positional
+  // subcommand words. A free-text scan also matched option arguments, so a PR
+  // *title* containing "merge policy" tripped L2 (live run 3bdd6e5e). Expansion,
+  // substitution, and inline-interpreter evasions are blocked before this rule.
+  const ghPrMergeInvocation = shellSegments(lexicalCmd).some(({ command }) => {
+    const words = shellWords(command);
+    const options = new Set(['-R', '--hostname', '--repo']);
+    const executablePosition = executableIndex(words, 'gh');
+    if (executablePosition === -1) return false;
+    const positionals = [];
+    for (
+      let index = executablePosition + 1;
+      index < words.length && positionals.length < 2;
+      index += 1
+    ) {
+      const word = words[index];
+      if (options.has(word)) {
+        index += 1;
+        continue;
+      }
+      if (
+        [...options].some((option) => word.startsWith(`${option}=`))
+        || word.startsWith('-')
+      ) {
+        continue;
+      }
+      positionals.push(word);
+    }
+    return positionals[0] === 'pr' && positionals[1] === 'merge';
+  });
+  if (ghPrMergeInvocation) {
     return {
       block: true,
       reason:
@@ -1574,6 +1603,11 @@ function selfTest() {
     // [cmd, branch, expectBlock, baseBranch]
     ['gh pr merge 42', 'feat/gh-1-x', true],
     ['gh --repo o/r pr merge 42 --squash', 'feat/gh-1-x', true],
+    ['gh pr merge --auto 42', 'feat/gh-1-x', true],
+    // The word "merge" inside an option argument is not a merge invocation: a PR
+    // about merge policy must be creatable (live false positive, run 3bdd6e5e).
+    ['gh pr create --fill --title "chore: migrate scaffold and enable auto merge policy"', 'chore/autoloop-migrate', false],
+    ['gh pr edit 180 --title "enable auto merge policy"', 'feat/gh-2-y', false],
     ['verb=merge; gh pr $verb 42', 'feat/gh-1-x', true],
     ['gh pr m$(printf erge) 42', 'feat/gh-1-x', true],
     ['a=g; b=h; c=m; d=erge; "$a$b" pr "$c$d" 42', 'feat/gh-1-x', true],

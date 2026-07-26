@@ -524,6 +524,12 @@ Run:
 Show the complete diff. A fresh install or migration is delivered through a PR by default. Never
 auto-merge Setup's own change.
 
+Never end a Setup session with the reconcile uncommitted. An abandoned working-tree migration is
+the worst end state: the next Dev run must treat it as unattributable human work and stop, or —
+worse — gets asked to land it mid-run (a live run wedged exactly this way). Deliver the migration
+branch and PR in the same session, or revert the working tree to the pre-reconcile state before
+stopping; interrupted means reverted, not parked.
+
 End with:
 
 ```text

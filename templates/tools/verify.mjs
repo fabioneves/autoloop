@@ -1081,9 +1081,25 @@ function selfTest() {
       resolve(entrypointRoot, '.codex', 'hooks.json'),
       hookDocument(CODEX_HOOK_CONTRACT),
     );
+    // In the plugin repo the template sits beside tools/; in an install root it
+    // does not exist, but scaffold vendors a byte-identical copy at
+    // .opencode/plugins/autoloop.js — use whichever is present so the vendored
+    // self-test runs everywhere instead of crashing on the plugin-repo path.
+    const opencodePluginSources = [
+      resolve(toolsDir, '..', 'opencode-plugin.template.js'),
+      resolve(toolsDir, '..', '..', '.opencode', 'plugins', 'autoloop.js'),
+    ];
+    const opencodePluginSource = opencodePluginSources.find((path) =>
+      existsSync(path));
+    if (!opencodePluginSource) {
+      throw new Error(
+        'opencode plugin source not found; looked at: '
+        + opencodePluginSources.join(', '),
+      );
+    }
     writeFileSync(
       resolve(entrypointRoot, '.opencode', 'plugins', 'autoloop.js'),
-      readFileSync(resolve(toolsDir, '..', 'opencode-plugin.template.js')),
+      readFileSync(opencodePluginSource),
     );
     completeEntrypoints = installedEntrypointChecks(
       entrypointRoot,
