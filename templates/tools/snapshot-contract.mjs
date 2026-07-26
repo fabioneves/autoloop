@@ -1,10 +1,29 @@
 #!/usr/bin/env node
 
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseLoopClaim } from './claim-contract.mjs';
 import { parseLifecycleComment } from './lifecycle-contract.mjs';
+
+// process.exit() discards async stdout still buffered in Node, and stdout is
+// async whenever it is a pipe — a 313KB snapshot arrived at the measured-scan
+// consumer truncated to one pipe buffer, blocking every Dev run at selection.
+// A synchronous write (retrying EAGAIN on a full non-blocking pipe) hands every
+// byte to the kernel before any exit path can run.
+export function writeStdoutSync(payload) {
+  const bytes = Buffer.from(payload, 'utf8');
+  let offset = 0;
+  while (offset < bytes.length) {
+    try {
+      offset += writeSync(1, bytes, offset, bytes.length - offset);
+    } catch (error) {
+      if (error.code === 'EAGAIN') continue;
+      throw error;
+    }
+  }
+}
 
 export const SNAPSHOT_VERSION = 2;
 export const QUEUE_EVIDENCE_VERSION = 1;
@@ -1267,6 +1286,22 @@ async function selfTest() {
       checks.push([name, false]);
     }
   };
+  await check(
+    'a large payload survives a piped stdout and an immediate exit intact',
+    () => {
+      const source = [
+        `import { writeStdoutSync } from ${JSON.stringify(import.meta.url)};`,
+        "writeStdoutSync('x'.repeat(400000));",
+        'process.exit(0);',
+      ].join('\n');
+      const result = spawnSync(
+        process.execPath,
+        ['--input-type=module', '--eval', source],
+        { encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 30000 },
+      );
+      return result.status === 0 && result.stdout.length === 400000;
+    },
+  );
   const pullRequestItem = (overrides = {}) => ({
     number: 8,
     title: 'loop unit',
@@ -2147,7 +2182,7 @@ async function main() {
           configuredBaseBranch: parsed.configuredBaseBranch,
         }),
       };
-    process.stdout.write(`${JSON.stringify(result, null, 1)}\n`);
+    writeStdoutSync(`${JSON.stringify(result, null, 1)}\n`);
     return 0;
   } catch (error) {
     console.error(`snapshot-contract: ${error.message}`);

@@ -27,6 +27,7 @@ import {
   symlinkSync,
   unlinkSync,
   writeFileSync,
+  writeSync as fsWriteSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
@@ -10251,8 +10252,26 @@ function trustedRecordsById(input, directory, field = 'recordIds') {
   return { ok: true, records: ids.map((recordId) => byId.get(recordId)) };
 }
 
+// process.exit() discards async stdout still buffered in Node, and stdout is a
+// pipe under every measured-operation consumer — a large operation envelope
+// (captured child stdout included) arrived truncated. Write synchronously,
+// retrying EAGAIN on a full non-blocking pipe, so every byte reaches the
+// kernel before the exit.
+function writeStdoutSync(payload) {
+  const bytes = Buffer.from(payload, 'utf8');
+  let offset = 0;
+  while (offset < bytes.length) {
+    try {
+      offset += fsWriteSync(1, bytes, offset, bytes.length - offset);
+    } catch (error) {
+      if (error.code === 'EAGAIN') continue;
+      throw error;
+    }
+  }
+}
+
 function writeResult(result, success = result.ok !== false) {
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  writeStdoutSync(`${JSON.stringify(result, null, 2)}\n`);
   process.exit(success ? 0 : 1);
 }
 
@@ -10340,7 +10359,7 @@ async function main() {
     );
     if (!exported.ok) writeResult(exported, false);
     process.stderr.write(`measurement evidence sha256 ${exported.sha256}\n`);
-    process.stdout.write(exported.source);
+    writeStdoutSync(exported.source);
     process.exit(0);
   }
   if (parsed.mode === 'compare') {
