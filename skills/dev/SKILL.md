@@ -376,10 +376,10 @@ backed disposition and transition to the appropriate human block. Do not silentl
 Print the unit banner beside the first lifecycle/label mutation:
 
 ```text
-╔══════════════════════════════════════════════════╗
-║  ▶ ISSUE #<N> — <safe composed title>            ║
-║    <priority> · <planned lane> · <selected route> ║
-╚══════════════════════════════════════════════════╝
+╭──────────────────────────────────────────────────╮
+│ ∞ #<N> — <safe composed title>                   │
+│   <priority> · <planned lane> · <selected route> │
+╰──────────────────────────────────────────────────╯
 ```
 
 ### 2. Plan
@@ -704,25 +704,49 @@ branch. If dirty, do not switch; report it.
 
 ## Chat markers
 
-Print one step line per step:
+One visual language end to end: the `∞` motif from the start banner, a step ribbon, and
+rounded frames. Values in every marker are safe composed text, never raw issue/review bytes.
+
+After prime succeeds, open the run frame:
 
 ```text
-▶ #<N> · step <s>/11 — <STEP> (<actor>)
+∞ run ─ queue <e> eligible · <policy> · <route>
 ```
 
-End a unit with:
+Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
+eleven cells:
 
 ```text
-✔ #<N> SHIPPED — PR #<P> · <delivered|awaiting-ci|merged> · <short OID>
+∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor>
+```
+
+End a unit with one closing rail:
+
+```text
+╰─ ✔ #<N> SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> ─╯
 ```
 
 or:
 
 ```text
-✖ #<N> BLOCKED — <safe composed reason>
+╰─ ✖ #<N> BLOCKED ─ <safe composed reason> ─╯
+```
+
+Close the run with:
+
+```text
+∞ run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
 ```
 
 Never paste raw issue/review text into chat banners.
+
+## Tool surface
+
+Dev invokes exactly these entry points: `prime.mjs`, `run-scope.mjs`, `scan.mjs`,
+`snapshot-contract.mjs` (invalidate/queue-evidence), `measurement-contract.mjs`
+(events/operations), `publish-verdict.mjs`, `lifecycle-driver.mjs`, `escalate-paths.mjs`, and
+the vendored `auto-merge.mjs` terminal exception. Every other file in `tools/agentic/` is a
+library those entry points own — never invoke a contract module directly.
 
 ## Hard rules
 
