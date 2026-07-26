@@ -602,10 +602,16 @@ function gitSpawn(args, options = {}) {
 
 function plainObject(value) {
   if (!hasPlainObjectPrototype(value)) return false;
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  return Reflect.ownKeys(descriptors).every(
-    (key) => typeof key === 'string' && !descriptors[key].get && !descriptors[key].set,
-  );
+  // Same predicate as materializing every descriptor at once (string keys only,
+  // no accessors), without allocating a full descriptor map per node — this
+  // runs once per data node in both validation and canonicalization and
+  // dominated self-test CPU.
+  if (Object.getOwnPropertySymbols(value).length > 0) return false;
+  for (const name of Object.getOwnPropertyNames(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, name);
+    if (descriptor.get !== undefined || descriptor.set !== undefined) return false;
+  }
+  return true;
 }
 
 function hasPlainObjectPrototype(value) {
@@ -6235,7 +6241,19 @@ function ensureMeasurementDirectory(directory, create = true) {
   return target;
 }
 
+// The self-test exercises the store's write-once and atomicity LOGIC, not the
+// disk's durability guarantees; physical fsync across hundreds of fixture
+// creates dominated CI time (64s on the Ubuntu runner alone). Production paths
+// never flip this — only selfTest() does, in-process.
+let skipFsyncForSelfTest = false;
+
+function durableFsync(descriptor) {
+  if (skipFsyncForSelfTest) return;
+  fsyncSync(descriptor);
+}
+
 function fsyncDirectory(directory) {
+  if (skipFsyncForSelfTest) return;
   const descriptor = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY);
   try {
     fsyncSync(descriptor);
@@ -6515,7 +6533,7 @@ function atomicCreate(path, payload, mode) {
     );
     fchmodSync(descriptor, mode);
     writeFileSync(descriptor, payload, 'utf8');
-    fsyncSync(descriptor);
+    durableFsync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
     linkSync(temporary, path);
@@ -7729,6 +7747,7 @@ function selfTestTemporaryRoot() {
 }
 
 async function selfTest() {
+  skipFsyncForSelfTest = true;
   const valid = fixtureRecord();
   const missingIntentProvenance = structuredClone(valid);
   delete missingIntentProvenance.intentProvenance;

@@ -1219,15 +1219,20 @@ function main() {
   const checks = parsed.mode === 'plugin' ? pluginChecks(root) : installChecks(root);
   const failures = [];
   for (const check of checks) {
+    const startedAt = process.hrtime.bigint();
     const result = check.execute();
+    const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+    // A check's duration prints on its own line, so a slow self-test names
+    // itself instead of the log stalling on the previous check's PASS line.
+    const timing = elapsedMs >= 1000 ? ` (${(elapsedMs / 1000).toFixed(1)}s)` : '';
     if (result.ok) {
       console.log(
         result.note
           ? `NOTE ${check.name}: ${result.detail}`
-          : `PASS ${check.name}`,
+          : `PASS ${check.name}${timing}`,
       );
     } else {
-      console.error(`FAIL ${check.name}`);
+      console.error(`FAIL ${check.name}${timing}`);
       if (result.detail) console.error(result.detail);
       failures.push(check.name);
     }

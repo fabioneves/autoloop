@@ -679,7 +679,20 @@ function probeExecutionRepository(cwd) {
   }
   const requested = realpathSync(resolve(cwd));
   const root = realpathSync(gitOutput(requested, ['rev-parse', '--show-toplevel']));
-  const commonRaw = gitOutput(root, ['rev-parse', '--git-common-dir']);
+  // One spawn for the three root-relative reads: rev-parse emits each answer on
+  // its own line in argument order, and --abbrev-ref modifies only revisions
+  // that FOLLOW it, so the plain HEAD before it stays a full OID. --git-common-dir
+  // must be asked from root (its short form is cwd-relative). Process spawns are
+  // the dominant cost of this double-probed battery on macOS runners.
+  const batched = gitOutput(root, [
+    'rev-parse',
+    '--git-common-dir',
+    'HEAD',
+    '--abbrev-ref',
+    'HEAD',
+  ]).split('\n');
+  if (batched.length !== 3) throw new Error('checkout probe is invalid');
+  const [commonRaw, headOid, branch] = batched.map((line) => line.trim());
   const common = realpathSync(
     isAbsolute(commonRaw) ? commonRaw : resolve(root, commonRaw),
   );
@@ -687,8 +700,8 @@ function probeExecutionRepository(cwd) {
   const checkout = {
     root,
     repositoryFingerprint: hashValue({ root, common, repository }),
-    branch: gitOutput(root, ['rev-parse', '--abbrev-ref', 'HEAD']),
-    headOid: gitOutput(root, ['rev-parse', 'HEAD']),
+    branch,
+    headOid,
     clean: gitOutput(root, [
       'status',
       '--porcelain=v1',
