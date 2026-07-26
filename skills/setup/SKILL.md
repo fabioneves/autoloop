@@ -450,7 +450,10 @@ Cost discipline — the verify battery is seconds, not minutes, but only when us
   run the same verify twice to get a different `grep`/`tail` of identical output.
 - `scaffold.mjs --audit` returns the complete would-be reconciliation as the same typed report
   with zero writes — it replaces every file-by-file `diff`/`cmp` of vendored tools and host
-  artifacts during the audit. Manual per-artifact diffing is the anti-pattern that made a live
+  artifacts during the audit. When you do diff a `kept`/`kept-modified` tool by hand, use the
+  template's SOURCE name: `tools/agentic/auto-merge.mjs` installs from
+  `templates/tools/auto-merge.reference.mjs` — there is no `auto-merge.mjs` template, and
+  diffing against that path prints a spurious "No such file or directory". Manual per-artifact diffing is the anti-pattern that made a live
   setup run take twenty minutes; diff by hand only the artifacts the audit reports as
   `kept`/`kept-modified` (repo-owned prose and policy), never the mechanical set.
 - The whole verify battery runs at most TWICE per session: once in this audit, once as the
