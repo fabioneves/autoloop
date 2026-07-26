@@ -39,7 +39,11 @@ Run Pitcrew first in the same `RunContext`, then take new work.
    printf '{"sessionId":"<native-session-id>"}' | node tools/agentic/prime.mjs --dev-json -
    ```
 
-   One call performs, in order, exactly the per-op sequence documented under "Manual per-op
+   With `measurement.capture` absent or `"off"` (the default), prime is attest → open → one
+   plain startup scan, no measurement ledger exists, every later command runs unmeasured, and a
+   blocked close is only the `--finish-json` decision — skip every measured-operation and
+   capture-event instruction below. With `measurement.capture: "events"`, one call performs, in
+   order, exactly the per-op sequence documented under "Manual per-op
    prime" below: `--attest-host-json` with exactly `{sessionId}` (attestation fails first and
    fast when the transport record is missing), `--open-json` with exactly `{hostEvidence}`,
    mechanical derivation of the version-1 measurement declaration (run UUID, retained

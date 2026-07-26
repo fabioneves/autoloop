@@ -231,7 +231,11 @@ Ask only:
 9. Universal host prompt hooks are mandatory best-effort transport for every enabled Claude,
    Codex, or OpenCode runtime entrypoint. They are not attributable intent.
 10. Optional agent-skills dependency.
-11. Merge policy. Default `manual`. Show the current policy in every interview and offer to change
+11. Measurement capture. Default `off`: runs open no measurement ledger and pay no event
+    ceremony; `events` restores full capture for repositories gathering baselines. State in one
+    sentence that the pipeline enforces nothing until its producers land, so `events` is a
+    data-gathering choice, not a safety one.
+12. Merge policy. Default `manual`. Show the current policy in every interview and offer to change
     it — migration history is not a reliable trigger, because an earlier migration may already have
     reset a non-manual policy before this question existed. When the repository is on, or is
     migrating from, `ratified` or `auto`, ask explicitly whether to restore it rather than

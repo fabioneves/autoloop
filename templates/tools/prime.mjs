@@ -110,6 +110,7 @@ const HEX_64_PATTERN = /^[0-9a-f]{64}$/;
 const TOOL_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const RUN_SCOPE = join(TOOL_DIRECTORY, 'run-scope.mjs');
 const MEASUREMENT_CONTRACT = join(TOOL_DIRECTORY, 'measurement-contract.mjs');
+const SCAN_TOOL = join(TOOL_DIRECTORY, 'scan.mjs');
 // Broker cold start plus attestation stays in seconds; the measured scan is
 // dominated by GitHub reads and inherits measurement-contract's own 30-minute
 // child cap, so the wrapper spawn gets that cap plus slack.
@@ -181,6 +182,10 @@ export function validatePrimeInput(value) {
     });
   }
   return { ok: true, sessionId: value.sessionId, scanArgs };
+}
+
+export function captureEnabled(config) {
+  return config?.measurement?.capture === 'events';
 }
 
 export function repositorySlug(originUrl) {
@@ -403,6 +408,55 @@ export function primeDev(rawInput, cwd = process.cwd()) {
         code: 'REPOSITORY_IDENTITY_UNAVAILABLE',
         message: `origin remote "${origin.value}" has no owner/name form`,
       });
+    }
+    // Capture is opt-in until the pipeline's producers can finalize a record:
+    // with measurement.capture absent or 'off', prime is attest -> open -> a
+    // plain scan, and no ledger is opened at all.
+    const capture = captureEnabled(config);
+    if (!capture) {
+      const plainScan = spawnSync(
+        process.execPath,
+        [SCAN_TOOL, ...input.scanArgs],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          maxBuffer: MAX_CHILD_OUTPUT_BYTES,
+          timeout: SCAN_STEP_TIMEOUT_MS,
+          windowsHide: true,
+        },
+      );
+      if (plainScan.error || plainScan.status !== 0) {
+        return failure('scan', {
+          code: 'SCAN_FAILED',
+          message: plainScan.error?.message
+            ?? `scan.mjs exited ${plainScan.status}: ${String(plainScan.stderr ?? '').slice(0, 400)}`,
+        });
+      }
+      let snapshot;
+      try {
+        snapshot = JSON.parse(plainScan.stdout);
+      } catch (error) {
+        return failure('snapshot', {
+          code: 'SNAPSHOT_PARSE_FAILED',
+          message: `scan stdout is not JSON: ${error.message}`,
+        });
+      }
+      const snapshotErrors = verifySnapshotShape(snapshot);
+      if (snapshotErrors.length > 0) {
+        return failure('snapshot', {
+          code: 'SNAPSHOT_SECTIONS_INVALID',
+          message: snapshotErrors.join('; '),
+        });
+      }
+      return {
+        ok: true,
+        run,
+        measurementRunId: null,
+        hostEvidence,
+        boundaries: null,
+        scan: { operationId: null, eventPath: null },
+        snapshot,
+      };
     }
     const measurementRunId = randomUUID();
     const { declaration } = deriveMeasurementDeclaration({
@@ -858,6 +912,12 @@ async function selfTest() {
     authorization: 'fixture-unauthorized',
   };
   check('fixture config is valid', validateProjectConfig(fixtureConfig).length === 0);
+  check(
+    'measurement capture is off unless the config opts into events',
+    captureEnabled(fixtureConfig) === false
+      && captureEnabled({ ...fixtureConfig, measurement: { capture: 'off' } }) === false
+      && captureEnabled({ ...fixtureConfig, measurement: { capture: 'events' } }) === true,
+  );
 
   const runId = randomUUID();
   const derived = deriveMeasurementDeclaration({
