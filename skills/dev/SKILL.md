@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.45.2 · starting
+∞ dev · v0.45.3 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -128,8 +128,19 @@ writer and reviewers alike to `claude`, and asks nothing of the machine beyond w
 already needs.
 
 **Reviews can run on a second engine, when the invocation asks for it.** `/autoloop:dev with
-codex` sends every review role to `codex` — pass `--engine codex` on those dispatches and append
-` · reviews codex` to the startup banner so the run says which engine judged it. The writer always
+codex` sends every review role to `codex`. Record the choice ONCE, immediately after prime
+succeeds, and the tool routes every reviewer dispatch from the recording — the invocation text is
+forty minutes up-context by the first code review, and a forgotten flag would silently review on
+the writer's model:
+
+```bash
+mkdir -p .git/autoloop && printf 'codex\n' > .git/autoloop/review-engine   # with codex
+printf 'claude\n' > .git/autoloop/review-engine                            # plain run: ALWAYS overwrite
+```
+
+A plain run writes `claude` rather than skipping the write, so a previous session's `codex`
+cannot leak forward. Append ` · reviews codex` to the startup banner so the run says which engine
+judges it, and the `[HOST]` slot on each review ribbon confirms it per dispatch. The writer always
 stays on the host: a second engine buys decorrelated review, not a second writer.
 
 Why it is worth asking for: a fresh process gives identity separation, not cognitive separation.
@@ -164,9 +175,22 @@ reviewer's job is to find the case the author did not consider.
   retries and no fallback engine: a failed dispatch is a decision for the orchestrator.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
+- `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
+  under `autoloop/dispatch-live/` in the common Git directory, announced on stderr). To watch a
+  long review in the host UI, choose the path up front and arm a second background shell —
+  `tail -F <path>` — before dispatching; stop that shell at collection.
 - Every result reports `ms` (the dispatch), `startupMs` (this tool's own overhead before the
   engine starts), and `engine` — the host that actually produced it, stamped from the spawn. Typed
   failures carry it too. Report it on the step's ribbon rather than composing a host name by hand.
+
+**On a resumed unit branch, run tools from the installed plugin, not the checkout.** A unit
+branch carries the `tools/agentic/` copies it forked with — a live resume sat 18 commits behind
+base with a dispatch that predated `--engine`, and the call failed usage-typed. Working the unit
+on its branch is correct; trusting its tools is not. When the preflight NOTEs vendored drift (or a
+vendored tool rejects a documented flag), invoke the same tool from
+`<newest installed plugin>/templates/tools/` instead — same contract, current version. The hooks
+still run the branch's copies; expect their older behavior until the unit lands, and never "fix"
+that by committing tool refreshes into the unit branch — scaffold changes are Setup's, on base.
 
 Write prompts to a file; never inline untrusted issue or review text into a shell command. Give a
 dispatch only what it needs: the frozen plan, the relevant STATE invariants, the evidence, and the
@@ -201,13 +225,22 @@ terminal state — delivered, blocked, or deferred. Every marker and step label 
 At collection, finish the worked unit through step 11, then claim the staged one with its
 already-reviewed plan.
 
-**Liveness — never end the turn mid-unit.** A turn that has ended emits no heartbeat and no task
-update, so an idle turn and a working session are indistinguishable; a live run ended its turn at
-step 8 of 11 with four commits sitting unpushed and nothing objected. The unit runs to a terminal
-state in-turn. While a dispatch is in flight and no staging work remains, hold the wait in-turn
-with bounded polls and emit the heartbeat pair — chat line plus task elapsed refresh — after each.
-The Stop hook now refuses a turn that abandons pushed-behind work, but the hook is the backstop,
-not the plan.
+**Liveness — never go dark; parking is not stopping.** A live run once ended its turn at step 8
+with four commits unpushed and nothing on screen to distinguish that from work — that is the
+failure. Waiting itself has one sanctioned shape per situation:
+
+- **Parked wait (preferred).** Every in-flight dispatch is backgrounded with `--output-file`, a
+  Monitor (or the background task's own completion signal) is armed on each result file, all
+  commits are pushed, and the LAST line before the turn ends is the parked heartbeat naming what
+  it waits for: `♡ parked — #78 codex r1 + #87 plan-review in flight · resumes on result files`.
+  Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
+  the printed line make parked and dead distinguishable at a glance.
+- **In-turn wait (fallback, no monitor available).** One bounded until-loop —
+  `timeout 600 bash -c 'until [ -f <result> ]; do sleep 5; done'` — then the heartbeat pair.
+  Never bare `sleep N;` chains: the host blocks them and tells you so.
+
+The Stop hook still refuses a turn that abandons unpushed work; a parked wait satisfies it by
+construction, because parking requires the push.
 
 **Accounting.** The run record's `overlap:` line comes from `overlap-report.mjs`, which derives
 concurrency from the dispatch log's own timestamps. `concurrent 0s` beside `eligible 5` is a run
@@ -336,6 +369,13 @@ premergeRecordDraft:null}` to a bounded file and pipe it to:
 ```bash
 node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 ```
+
+**Composing the request costs three literal commands, never a read of the driver's source.**
+`node tools/agentic/lifecycle-driver.mjs --example-request` prints a request that passes the
+driver's own validator — it is the self-test fixture, so it cannot drift from what validation
+accepts. Fetch the frozen plan body to a scratchpad file, then assemble with `jq -n --rawfile`
+substituting the real values over the example's placeholders. Run the driver **from the
+repository root**: it probes the checkout from its cwd, and a scratchpad cwd fails the probe.
 
 The driver persists epoch 1 before the first effect, swaps `loop-started`/`loop:04-claim`, creates
 the exact planned-base branch and `chore: claim #N`, publishes the captured branch, posts the exact
@@ -591,7 +631,14 @@ After prime succeeds, open the run frame:
 
 Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
 eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
-that decides nothing is due still happened, and a missing ribbon reads as a skipped step.
+that decides nothing is due still happened, and a missing ribbon reads as a skipped step. A unit
+that runs steps 1–11 prints eleven ribbons; orphan reconciliation before selection prints its own
+`00/11 RECONCILE` ribbon the moment Prime surfaces the orphan, before any fetch or driver call.
+Never withhold a ribbon to reduce output, and never re-print one: a step's ribbon appears
+**exactly once, when the step begins**. A ribbon is an announcement, not a status display —
+"still in flight" is heartbeat news and uses the heartbeat line, never a second copy of the
+ribbon with a different suffix. On resuming from a parked wait, print one `♡ resumed —
+<what fired>` line and continue; the ribbon for a step already announced is never printed again.
 
 ```text
 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor>

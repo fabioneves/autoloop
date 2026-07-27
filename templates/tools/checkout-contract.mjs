@@ -127,7 +127,11 @@ function gitOutput(cwd, args) {
     env: sanitizedGitEnvironment(),
   });
   if (result.status !== 0 || result.error) {
-    throw new Error('Git checkout probe failed');
+    // Name the likely cause: a live session ran the driver from its scratchpad
+    // and spent a diagnosis on this line saying nothing.
+    throw new Error(
+      `Git checkout probe failed (cwd ${process.cwd()} — run from the repository root)`,
+    );
   }
   return String(result.stdout ?? '').trim();
 }

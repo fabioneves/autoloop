@@ -1231,6 +1231,16 @@ function fakeReconcileRequest() {
   };
 }
 
+// The copyable request shape, emitted by `--example-request`. It is the
+// self-test's own fixture with its hash made consistent, so it passes
+// `validateReconcileRequest` by construction and cannot drift from what the
+// validator accepts — unlike prose, and unlike reading this file.
+export function exampleReconcileRequest() {
+  const request = fakeReconcileRequest();
+  request.intent.planHash = sha256(request.plan.body);
+  return request;
+}
+
 function selfTest() {
   const request = fakeReconcileRequest();
   request.intent.planHash = sha256(request.plan.body);
@@ -1699,6 +1709,17 @@ function selfTest() {
       claimAuthorsItself,
     ],
     [
+      'the emitted example request is valid by the same validator that gates callers',
+      // A live session read 1800 lines of this file's source to learn the
+      // request shape, then assembled it wrong twice. The example IS the
+      // self-test fixture, so it cannot drift from what validation accepts.
+      (() => {
+        const example = exampleReconcileRequest();
+        return validateReconcileRequest(example)
+          && JSON.parse(JSON.stringify(example)).schemaVersion === 1;
+      })(),
+    ],
+    [
       'an unrecognised CLI mode is a usage error, never a JSON parse error',
       // Validated before stdin is read: the old order reported "Unexpected end
       // of JSON input" for `--help`, sending a live session after a data
@@ -1754,9 +1775,13 @@ function main() {
   if (args.length === 1 && args[0] === '--self-test') {
     process.exit(selfTest() ? 0 : 1);
   }
+  if (args.length === 1 && args[0] === '--example-request') {
+    process.stdout.write(`${JSON.stringify(exampleReconcileRequest(), null, 2)}\n`);
+    return;
+  }
   if (cliMode(args) === null) {
     throw new Error(
-      `expected one lifecycle driver mode: ${CLI_MODES.join(' | ')} | --self-test`,
+      `expected one lifecycle driver mode: ${CLI_MODES.join(' | ')} | --example-request | --self-test`,
     );
   }
   const input = readCliInput();

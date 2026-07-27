@@ -11,16 +11,14 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.45.2 · starting
+∞ setup · v0.45.3 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
 
-Print **one** badged ribbon per phase, as it begins — never a second copy of the same ribbon
-when it finishes. The next phase's 🟦 line already says the previous one completed, and a 🟩
-re-print doubles every line for no information. 🟩 appears exactly once, on the closing rail;
-🟥 or 🟨 replaces a phase's 🟦 only when that phase blocks or needs a human decision. The ribbon
-is five cells, `▰` done-or-current, `▱` remaining:
+A five-phase run prints **exactly five** 🟦 ribbons — one as each phase begins, every phase,
+including phases that turn out to be trivial. A phase that starts without its ribbon is as wrong
+as a doubled one. The ribbon is five cells, `▰` done-or-current, `▱` remaining:
 
 ```text
 🟦 ∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base
@@ -29,6 +27,11 @@ is five cells, `▰` done-or-current, `▱` remaining:
 🟦 ∞ ▰▰▰▰▱ 4/5 WRITE ─ reconcile · visible diff
 🟦 ∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery
 ```
+
+What is forbidden is the *re-print*: a phase's ribbon appears once, when it begins, never again
+with 🟩 when it finishes — the next phase's 🟦 already says the previous one completed. 🟩 appears
+exactly once per run, on the closing rail, so a green line means the run is over. 🟥 or 🟨
+replaces a phase's 🟦 only when that phase blocks or needs a human decision.
 
 Doctor mode replaces the ribbon with its own single line: `∞ doctor ─ <audited ref>`.
 
@@ -63,8 +66,11 @@ Codex uses `$autoloop:setup doctor`; opencode invokes the `setup` skill with `do
    directory names and pipe them through:
 
    ```bash
-   node <templates>/tools/release-verify.mjs --sort-versions
+   node <templates>/tools/release-verify.mjs --sort-versions | tail -3
    ```
+
+   `tail -3` on purpose: only the newest versions answer the currency question, and a mature
+   cache holds dozens — a live one printed 87 lines to learn one.
 
    In a live tree, compare the loaded banner with `VERSION` and the banner on disk. A newer disk
    version means this session is stale: setup/migration stops; doctor reports FAIL and asks for a
@@ -358,8 +364,30 @@ followed only by in-worktree read/glob/grep/list allows.
 
 ## One-call audit
 
-Run one shell invocation after version and base resolution. Use the audited base materialized in a
-temporary directory for doctor; do not diagnose a parked branch.
+**Trust the preflight before re-deriving it.** The SessionStart hook already ran
+`session-preflight.sh` and its output is in context: gh auth and repo access, node, codex, the
+config contract, the release self-test, dispatch presence, clean-checkout state, checkout-vs-base
+identity, and vendored-vs-installed drift. When that block is present and free of FAIL lines, do
+not spend calls re-proving its facts — a live reconcile acknowledged "preflight already tells me"
+and then re-ran every check anyway. Re-derive a fact only when the preflight is absent (no
+vendored hooks yet), stale (the session predates a plugin change), or FAILing on that fact.
+
+**Reconfigure/reconcile fast path.** With a green preflight, the audit is two sections:
+
+```bash
+echo "=== artifact drift ==="
+node <templates>/tools/scaffold.mjs --audit .
+echo "=== sizes ==="
+wc -c docs/agentic/STATE.md docs/agentic/ARCH.md 2>/dev/null
+```
+
+`verify.mjs --install-root` is deliberately NOT here: the VERIFY phase runs it after the write,
+against the state that ships. Running it in AUDIT too proves the pre-write install twice per
+setup — the pre-write state matters in migration and doctor, and only there.
+
+**Full battery — fresh install, migration, doctor, or a missing/FAILing preflight.** One shell
+invocation; for doctor, use the audited base materialized in a temporary directory rather than
+diagnosing a parked branch.
 
 ```bash
 echo "=== toolchain ==="

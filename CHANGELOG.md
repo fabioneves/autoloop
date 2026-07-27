@@ -3,6 +3,82 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.45.3] - 2026-07-27
+
+### Fixed
+
+- **Every setup phase prints its ribbon again.** The 0.45.1 anti-doubling wording — "never a second
+  copy of the same ribbon" — read, to a cautious session, as a reason to be sparing with ribbons
+  altogether: a live run printed 1/5 RESOLVE and nothing after it. The rule now states the count
+  outright: exactly five 🟦 ribbons per run, one as each phase begins; the forbidden thing is the
+  re-print, and a phase that starts without its ribbon is as wrong as a doubled one.
+
+### Changed
+
+- **`with codex` survives the distance to the first review.** The engine choice was prose at the
+  top of the session; by the first reviewer dispatch it is forty minutes and a hundred thousand
+  tokens up-context, the tool default is the host engine, and a forgotten `--engine` silently
+  reviewed on the writer's own model — with ribbons regressed, nothing would even have said so.
+  The skill now records the choice once after prime (`autoloop/review-engine`, beside the dispatch
+  log) and `dispatch.mjs` routes every reviewer dispatch from the recording; a plain run always
+  overwrites with `claude` so a previous session's choice cannot leak forward. Reviewer roles
+  only — the writer stays on the host in every mode — and an unrecognised recording falls back to
+  the host engine. Proven with a real dispatch: no flag, recorded `codex`, verdict returned with
+  `"engine": "codex"`.
+- **`--engine` reaches the engine.** The flag parsed cleanly since 0.44.0 and was dropped at the
+  CLI seam: `main()` built the dispatch options from role, prompt and tools only, and every
+  self-test called `runDispatch()` directly, so the boundary had no coverage. A review requested
+  with `--engine codex` silently ran claude — labeled `[CODEX]` by a banner that trusted the
+  flag — until the live loop caught it and re-dispatched through the API as a workaround. The
+  seam now passes every parsed option through, and the new self-test drives the actual CLI with a
+  PATH containing only a codex shim, so dropping the engine again cannot pass: the claude fallback
+  would fail to spawn. `--live-file` crosses the same seam and would have shipped dead without it.
+- **Watch a running dispatch live.** Engine stdout streams to a file as it is emitted —
+  auto-named under `autoloop/dispatch-live/` in the common Git directory, or exactly where
+  `--live-file <path>` says. Name the path up front, arm a `tail -F <path>` background shell, and
+  the host's background-task view becomes a live codex window; the path is also announced on
+  stderr at spawn. A 13-minute review used to run as a sealed box.
+- **A ribbon prints exactly once — waiting status is heartbeat news.** A live run re-printed both
+  in-flight ribbons with an "in flight" suffix as its waiting update: the dev rule stated a floor
+  (every step prints one) but no ceiling, and gave waiting no shape of its own. Now: one ribbon
+  per step, at the moment it begins; `♡` heartbeat lines carry in-flight status; resuming from a
+  parked wait prints `♡ resumed — <what fired>` and never re-announces a step.
+- **Parking is not stopping, and the skill now knows the difference.** The liveness rule said
+  "never end the turn mid-unit; hold the wait with bounded polls" — written for a host that
+  allowed sleep-chains. This host blocks them and re-invokes the session when a Monitor fires, so
+  a live run did the right thing (both dispatches backgrounded, monitors armed on the result
+  files, commits pushed, parked heartbeat printed) while the skill's own text said otherwise and
+  the screen read as stopped. The sanctioned shapes are now explicit: parked wait — background +
+  monitor + pushed work + a final `♡ parked` line naming what resumes it — or one bounded
+  until-loop when no monitor exists. The Stop hook's unpushed gap still guards real abandonment,
+  which a parked wait satisfies by construction.
+- **A resumed unit branch runs installed tools, not its fossils.** Resuming a unit checks out its
+  branch — correctly — and the branch carries the `tools/agentic/` copies it forked with. A live
+  resume sat 18 commits behind base with a dispatch predating `--engine`; the reviewer dispatch
+  failed usage-typed, and the session recovered by invoking the plugin-cache copy. That recovery
+  is now the rule: on vendored drift, run the installed plugin's copy of the tool; never commit
+  tool refreshes into a unit branch to compensate.
+- **The dev startup stops reading the driver's source to learn the request shape.**
+  `lifecycle-driver.mjs --example-request` prints a request that passes the driver's own
+  validator — it is the self-test fixture with its hash made consistent, so it cannot drift from
+  what validation accepts. A profiled run spent its longest thinking stretch reading 1800 lines of
+  driver source, then assembled the request wrong twice anyway (a string where `plan` wanted an
+  object, then a scratchpad cwd). The skill now names the three-command recipe, and the checkout
+  probe failure reports its cwd with the remedy instead of the bare "Git checkout probe failed".
+- **Every dev step prints its ribbon, stated as a count.** Same regression class as setup's: after
+  the model switch, ribbon output stopped entirely. The rule now says eleven ribbons for steps
+  1–11 plus `00/11 RECONCILE` the moment an orphan surfaces, and that the anti-noise rule is about
+  re-printing, never about skipping the announcement.
+- **Setup trusts the preflight instead of re-deriving it.** A profiled reconcile said "preflight
+  already tells me" and then re-ran every check: gh auth, node, codex, config contract, and the
+  full install-root verify — the largest single payload of its AUDIT phase. When the SessionStart
+  preflight block is present and free of FAIL lines, its facts stand; with a green preflight,
+  reconfigure/reconcile AUDIT is two sections (`scaffold --audit` and document sizes), and
+  `verify --install-root` runs once per setup, in VERIFY, against the state that ships. The full
+  battery remains for fresh installs, migration, doctor, and a missing or FAILing preflight.
+- Version currency pipes through `--sort-versions | tail -3`: only the newest versions answer the
+  question, and a mature cache holds dozens — a live run printed 87 lines to learn one.
+
 ## [0.45.2] - 2026-07-27
 
 ### Fixed
