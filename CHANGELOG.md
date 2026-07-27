@@ -3,6 +3,20 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.44.4] - 2026-07-27
+
+### Fixed
+
+- **An unrecognised lifecycle-driver mode is a usage error, not a JSON parse error.** `main()`
+  read stdin before validating the mode, so any unknown flag fell through to `JSON.parse` on an
+  empty stdin and reported `Unexpected end of JSON input`. A live session ran
+  `lifecycle-driver.mjs --help` and was told its JSON was corrupt — a data problem that did not
+  exist, for what was only a mistyped flag.
+
+  The mode is now checked first, and an unrecognised one names the valid modes, which makes
+  `--help` self-documenting without adding a flag. A genuinely malformed payload still reports the
+  real parse error, so the two failures stay distinguishable.
+
 ## [0.44.3] - 2026-07-27
 
 ### Fixed

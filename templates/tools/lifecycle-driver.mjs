@@ -1699,6 +1699,17 @@ function selfTest() {
       claimAuthorsItself,
     ],
     [
+      'an unrecognised CLI mode is a usage error, never a JSON parse error',
+      // Validated before stdin is read: the old order reported "Unexpected end
+      // of JSON input" for `--help`, sending a live session after a data
+      // problem that did not exist.
+      cliMode(['--reconcile-json']) === '--reconcile-json'
+      && cliMode(['--begin-revision-json']) === '--begin-revision-json'
+      && cliMode(['--help']) === null
+      && cliMode([]) === null
+      && cliMode(['--reconcile-json', '--extra']) === null,
+    ],
+    [
       'claim identity refuses anything that is not a GitHub login',
       ['', null, undefined, 'a b', 'x\n-c core.hooksPath=evil', '-flag', 'a'.repeat(40)]
         .every((bad) => {
@@ -1723,8 +1734,18 @@ function selfTest() {
   return failures.length === 0;
 }
 
-function readCliInput(args) {
-  if (args.length !== 1) throw new Error('expected one lifecycle driver mode');
+const CLI_MODES = Object.freeze(['--reconcile-json', '--begin-revision-json']);
+
+// The mode is validated BEFORE stdin is read. It used to be validated after, so
+// an unrecognised flag fell through to `JSON.parse` on an empty stdin and
+// reported "Unexpected end of JSON input" — a data error for what is actually a
+// usage error. A live session ran `--help` and was told its JSON was corrupt.
+export function cliMode(args) {
+  if (args.length !== 1) return null;
+  return CLI_MODES.includes(args[0]) ? args[0] : null;
+}
+
+function readCliInput() {
   return JSON.parse(readFileSync(0, 'utf8'));
 }
 
@@ -1733,7 +1754,12 @@ function main() {
   if (args.length === 1 && args[0] === '--self-test') {
     process.exit(selfTest() ? 0 : 1);
   }
-  const input = readCliInput(args);
+  if (cliMode(args) === null) {
+    throw new Error(
+      `expected one lifecycle driver mode: ${CLI_MODES.join(' | ')} | --self-test`,
+    );
+  }
+  const input = readCliInput();
   if (args[0] === '--reconcile-json') {
     process.stdout.write(`${JSON.stringify(driveLifecycle(input))}\n`);
     return;
