@@ -223,6 +223,18 @@
    "branch": "feat/gh-1-x",
    "expect": "allow",
    "why": "0.47.1: model-pinned writer dispatch"
+  },
+  {
+   "cmd": "ls /home/dev/.claude/plugins/cache/autoloop/autoloop/ | node /tmp/templates/tools/release-verify.mjs --sort-versions | tail -3",
+   "branch": "main",
+   "expect": "allow",
+   "why": "the prescribed version-currency shape"
+  },
+  {
+   "cmd": "ls -d /cache/*/ 2>/dev/null | xargs -n1 basename | node /tmp/templates/tools/release-verify.mjs --sort-versions",
+   "branch": "main",
+   "expect": "block",
+   "why": "0.48.0 live: xargs improvised into the version pipe; xargs executes its arguments"
   }
  ]
 }

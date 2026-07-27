@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.48.0 · starting
+∞ dev · v0.48.1 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -761,27 +761,28 @@ cap — same grammar, cells counting rounds — which makes an approaching cap v
 blocks:
 
 ```text
-🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE] ─ #<N> · fix-delta · 0 Critical · 2 Major open
-🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW [CLAUDE] ─ #<N> · fix-delta · clean · converged
+🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · 0 Critical · 2 Major open
+🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · clean · converged
 ```
 
 Plan review is one dispatch and has no round ribbon.
 
-Every dispatched step names the **host** that produced it in a fixed `[HOST]` slot immediately
-after the step name — upper-case and bracketed so it reads as a label rather than one more
-detail, and so an external host is obvious at a glance instead of being buried in the trailing
-fields. The value is the `engine` field on the dispatch result, never composed by hand. A review
-carried out by a different host from the writer is not interchangeable evidence with one carried
-out by the same host, which is the whole reason it belongs on the line:
+Every dispatched step names its **executor** in a fixed slot immediately after the step name —
+upper-case and bracketed so it reads as a label. The slot is `[ENGINE]` when no model is pinned
+and `[ENGINE:MODEL]` when one is (from the `engine` and `model` fields on the dispatch result,
+never composed by hand; drop a trailing `[context]` suffix from the model for display). Who
+judged or wrote is a property of the evidence, and the model is now chooseable per step — so the
+line says it:
 
 ```text
-🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE] ─ #<N> · full · fresh writer
+🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 PLAN [CLAUDE:FABLE] ─ #<N> · full · fresh planner
+🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE:OPUS] ─ #<N> · full · fresh writer
 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN-REVIEW [CODEX] ─ #<N> · full · fresh reviewer
-🟨 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CODEX] ─ #<N> · fix-delta · 1 Major open
+🟨 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ #<N> · fix-delta · 1 Major open · proxy
 ```
 
-Steps the orchestrator runs itself take no `[HOST]` slot — there was no dispatch, and an absent
-slot is the honest statement that nothing external produced the result.
+Steps the orchestrator runs itself take no executor slot — there was no dispatch, and an absent
+slot is the honest statement that the session (its model on the startup banner) did the work.
 
 End a unit with one closing rail:
 
