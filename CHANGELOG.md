@@ -3,6 +3,30 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.45.1] - 2026-07-27
+
+### Fixed
+
+- **A reworded autoloop hook replaces its predecessor instead of stacking beside it.** The hook
+  merge deduped by exact command text, so any change to an autoloop-owned binding — adding
+  `|| exit 2` in 0.45.0 — made the template entry look new, and the merge appended it. Both hosts
+  then carried two `Bash` PreToolUse entries running the same guard, the stale one without the
+  fail-closed suffix, and a live setup had to hand-remove the duplicate in its visible diff. Two
+  entries running the same `tools/agentic/` tool on the same event are versions of one autoloop
+  binding: the merge now replaces the superseded one in place. Maintainer hooks — anything not
+  running the same vendored tool — are untouched, and an identical command still changes nothing.
+- **PR and issue bodies are composed in files, stated in both skills.** The natural idiom —
+  `gh pr create --body "$(cat …)"` — is command substitution and is refused whole, and a live
+  reconcile delivery lost a call to exactly that. `gh` has the sanctioned flag built in: write the
+  body to the scratchpad and pass `--body-file <path>`; commit messages use `git commit -F -` with
+  a quoted heredoc. Verified against the guard: the inline form blocks, the body-file form passes.
+- **Setup prints each phase ribbon once, not twice.** The badge instruction listed 🟩 as "complete"
+  alongside 🟦 "in progress", which read as an invitation to re-print every phase's ribbon with a
+  green badge when it finished — doubling every line of a five-phase run for no information, since
+  the next phase's 🟦 already says the previous one completed. A ribbon is printed once, as the
+  phase begins; 🟩 appears exactly once, on the closing rail; 🟥/🟨 replace a phase's 🟦 only when
+  it blocks or needs a human.
+
 ## [0.45.0] - 2026-07-27
 
 ### Changed

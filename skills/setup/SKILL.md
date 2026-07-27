@@ -11,13 +11,16 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.45.0 · starting
+∞ setup · v0.45.1 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
 
-Mark each phase with a state badge (🟦 in progress · 🟩 complete · 🟥 blocked · 🟨 needs a human) and a five-cell ribbon in the same `∞` visual language — `▰` for
-done-or-current, `▱` for remaining — as the phase begins:
+Print **one** badged ribbon per phase, as it begins — never a second copy of the same ribbon
+when it finishes. The next phase's 🟦 line already says the previous one completed, and a 🟩
+re-print doubles every line for no information. 🟩 appears exactly once, on the closing rail;
+🟥 or 🟨 replaces a phase's 🟦 only when that phase blocks or needs a human decision. The ribbon
+is five cells, `▰` done-or-current, `▱` remaining:
 
 ```text
 🟦 ∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base
@@ -393,6 +396,10 @@ correctly the first time:
   small script to the scratchpad and run the file — never `node -e`;
 - **to measure a section**, use `wc -c`, `grep -c`, or `sed -n` — never an awk program;
 - **to read a section's bytes**, `sed -n '/^## Heading/,$p'` reads what an awk range would;
+- **compose every PR, issue, or comment body in a file.** `gh pr create --body "$(cat …)"` is
+  command substitution and is refused whole; `gh` has the sanctioned flag built in — write the body
+  to the scratchpad and pass `--body-file <path>`. Same for commit messages: `git commit -F -` with
+  a quoted heredoc, or `-F <path>`. Observed live: a reconcile delivery lost a call to exactly this.
 - **never write `$?` at all** — not after `;`, not after `&&`, under any variable name. It cannot be
   resolved without running the command, so it is opaque by construction and takes the whole
   invocation down with it, including the useful part in front of it. It also conveys nothing: the

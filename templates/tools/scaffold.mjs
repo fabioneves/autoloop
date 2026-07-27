@@ -116,10 +116,29 @@ function hookCommands(entry) {
     .filter((command) => typeof command === 'string');
 }
 
+// The vendored tools a hook command executes. Referencing the same
+// `tools/agentic/<name>` is what identifies two differently-worded entries as
+// versions of the same autoloop binding.
+function referencedHookTools(entry) {
+  const names = new Set();
+  for (const command of hookCommands(entry)) {
+    for (const match of command.matchAll(/tools\/agentic\/([A-Za-z0-9._-]+\.(?:mjs|sh))/g)) {
+      names.add(match[1]);
+    }
+  }
+  return names;
+}
+
 // Non-clobbering per-event merge: an event the repository lacks is added whole;
-// within an existing event, a template entry is appended only when none of the
-// repository's entries already carries one of its commands. Repository-owned
-// hooks are never removed or reordered.
+// a template entry whose exact command is already present changes nothing; and
+// maintainer hooks are never removed or reordered.
+//
+// One replacement case, learned live: when an existing entry runs the same
+// vendored tool as the template entry but with different text, it is a
+// SUPERSEDED autoloop binding, not maintainer work — appending beside it runs
+// the guard twice per Bash call, with the stale copy missing whatever the
+// rewording added (observed: the `|| exit 2` fail-closed suffix). Same tool,
+// same event → replace in place.
 export function mergeHookDocuments(existing, template) {
   const merged = structuredClone(existing ?? {});
   if (merged.hooks === undefined) merged.hooks = {};
@@ -130,10 +149,17 @@ export function mergeHookDocuments(existing, template) {
       changed = true;
       continue;
     }
-    const present = new Set(merged.hooks[event].flatMap(hookCommands));
     for (const entry of templateEntries) {
+      const present = new Set(merged.hooks[event].flatMap(hookCommands));
       if (hookCommands(entry).some((command) => present.has(command))) continue;
-      merged.hooks[event].push(structuredClone(entry));
+      const tools = referencedHookTools(entry);
+      const superseded = merged.hooks[event].findIndex((candidate) =>
+        [...referencedHookTools(candidate)].some((name) => tools.has(name)));
+      if (superseded !== -1) {
+        merged.hooks[event][superseded] = structuredClone(entry);
+      } else {
+        merged.hooks[event].push(structuredClone(entry));
+      }
       changed = true;
     }
   }
@@ -1302,6 +1328,56 @@ function selfTest() {
         return settings.permissions.allow[0] === 'Bash(ls:*)'
           && settings.hooks.PostToolUse[0].hooks[0].command === 'repo-owned'
           && settings.hooks.PreToolUse[0].hooks[0].command === 'fixture-guard';
+      })(),
+    );
+    expect(
+      'a superseded autoloop hook is replaced in place, not appended beside',
+      (() => {
+        // Live 0.45.0 reconcile: adding `|| exit 2` to the guard command made
+        // the template entry not-"present", so the merge appended it and both
+        // hosts ran the guard twice per Bash call — the stale copy without the
+        // fail-closed suffix. Same vendored tool on the same event means the
+        // existing entry is a superseded autoloop artifact: replace it.
+        const oldGuard = 'if [ -f "$s" ]; then node "$s" --config "$c"; fi'
+          .replace('"$s"', '"$r/tools/agentic/command-guard.mjs"');
+        const newGuard = oldGuard.replace('--config "$c"', '--config "$c" || exit 2');
+        const { merged, changed } = mergeHookDocuments(
+          {
+            hooks: {
+              PreToolUse: [
+                { matcher: 'Bash', hooks: [{ type: 'command', command: 'maintainer-own' }] },
+                { matcher: 'Bash', hooks: [{ type: 'command', command: oldGuard }] },
+              ],
+            },
+          },
+          { hooks: { PreToolUse: [
+            { matcher: 'Bash', hooks: [{ type: 'command', command: newGuard }] },
+          ] } },
+        );
+        return changed === true
+          && merged.hooks.PreToolUse.length === 2
+          && merged.hooks.PreToolUse[0].hooks[0].command === 'maintainer-own'
+          && merged.hooks.PreToolUse[1].hooks[0].command === newGuard;
+      })(),
+    );
+    expect(
+      'an unchanged autoloop hook and maintainer hooks stay untouched',
+      (() => {
+        const guard = 'node "$r/tools/agentic/command-guard.mjs" --config "$c" || exit 2';
+        const existing = {
+          hooks: { PreToolUse: [
+            { matcher: 'Bash', hooks: [{ type: 'command', command: 'maintainer-own' }] },
+            { matcher: 'Bash', hooks: [{ type: 'command', command: guard }] },
+          ] },
+        };
+        const { merged, changed } = mergeHookDocuments(
+          existing,
+          { hooks: { PreToolUse: [
+            { matcher: 'Bash', hooks: [{ type: 'command', command: guard }] },
+          ] } },
+        );
+        return changed === false
+          && JSON.stringify(merged) === JSON.stringify(existing);
       })(),
     );
     expect(
