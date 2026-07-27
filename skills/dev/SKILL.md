@@ -148,7 +148,7 @@ claude ENGINE — structured verdicts, live streaming, tool ceilings all unchang
 roles run a proxied model. Record it once after prime, engine and model on one line:
 
 ```bash
-printf 'claude gpt-5.6-sol[1m]\n' > .git/autoloop/review-engine
+printf 'claude gpt-5.6-sol\n' > .git/autoloop/review-engine
 ```
 
 Append ` · reviews gpt-5.6-sol (proxy)` to the startup banner, and review ribbons carry the
