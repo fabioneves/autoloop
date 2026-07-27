@@ -277,7 +277,8 @@ failure. Waiting itself has one sanctioned shape per situation:
 - **Parked wait (preferred).** Every in-flight dispatch is backgrounded with `--output-file`, a
   Monitor (or the background task's own completion signal) is armed on each result file, all
   commits are pushed, and the LAST line before the turn ends is the parked heartbeat naming what
-  it waits for: `♡ parked — #78 codex r1 + #87 plan-review in flight · resumes on result files`.
+  it waits for, with the clock:
+  `♡ parked — #78 codex r1 + #87 plan-review in flight · resumes on result files · 15:04`.
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
   the printed line make parked and dead distinguishable at a glance.
 - **In-turn wait (fallback, no monitor available).** One bounded until-loop —
@@ -759,17 +760,27 @@ ribbon with a different suffix. On resuming from a parked wait, print one `♡ r
 <what fired>` line and continue; the ribbon for a step already announced is never printed again.
 
 ```text
-🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor>
-🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 SIMPLIFY ─ #<N> · no change required · orchestrator
+🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor> · 14:07
+🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 SIMPLIFY ─ #<N> · no change required · orchestrator · 14:41
 ```
+
+**Every ribbon's last cell is the wall clock** — `HH:MM`, 24-hour, from `date +%H:%M` in the
+same turn (one cheap read; never guess it from memory). The ribbon carries the START time; the
+step's end and duration belong to the lines that already mark completion, never to a re-printed
+ribbon:
+
+- collecting a dispatched step's typed result, state the duration from the result's own `ms`
+  field — `plan returned · 6m41s`, computed from `ms`, never hand-timed;
+- a `♡ resumed` line carries the clock and what fired: `♡ resumed — codex r1 returned · 14:32`;
+- the closing rail carries the unit's total (from the run record's per-step timings).
 
 Code review converges over rounds, so it also prints a round ribbon against the configured
 cap — same grammar, cells counting rounds — which makes an approaching cap visible before it
 blocks:
 
 ```text
-🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · 0 Critical · 2 Major open
-🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · clean · converged
+🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · 0 Critical · 2 Major open · 15:02
+🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · clean · converged · 15:26
 ```
 
 Plan review is one dispatch and has no round ribbon.
@@ -782,10 +793,10 @@ judged or wrote is a property of the evidence, and the model is now chooseable p
 line says it:
 
 ```text
-🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 PLAN [CLAUDE:FABLE] ─ #<N> · full · fresh planner
-🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE:OPUS] ─ #<N> · full · fresh writer
-🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN-REVIEW [CODEX] ─ #<N> · full · fresh reviewer
-🟨 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ #<N> · fix-delta · 1 Major open · proxy
+🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 PLAN [CLAUDE:FABLE] ─ #<N> · full · fresh planner · 14:03
+🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE:OPUS] ─ #<N> · full · fresh writer · 14:19
+🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN-REVIEW [CODEX] ─ #<N> · full · fresh reviewer · 14:11
+🟨 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ #<N> · fix-delta · 1 Major open · proxy · 15:02
 ```
 
 Steps the orchestrator runs itself take no executor slot — there was no dispatch, and an absent
@@ -794,7 +805,7 @@ slot is the honest statement that the session (its model on the startup banner) 
 End a unit with one closing rail:
 
 ```text
-🟩 ╰─ ✔ #<N> SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> ─╯
+🟩 ╰─ ✔ #<N> SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 16:12 · 2h09m ─╯
 ```
 
 or:
