@@ -94,7 +94,24 @@ if [ -f "$vendored_prime" ] && [ -d "$plugin_cache" ] && [ -f "$release_helper" 
   fi
 fi
 
-# 4. Every role dispatch spawns a fresh engine process; there is nothing here to select.
+# 4. Checkout identity. The hooks load `$CLAUDE_PROJECT_DIR/tools/agentic/*`, which
+# is the WORKING TREE's copy — so the guard, this preflight, and the label hooks
+# are whatever version the current branch happens to carry, no matter what a
+# session audits against. A parked unit branch therefore runs the tools it forked
+# with: observed three times in one day, where a fix that had shipped, installed
+# and reconciled onto the base was still inert because the checkout predated it.
+configured_base=$(sed -n 's/.*"baseBranch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$REPO_DIR/docs/agentic/STATE.md" 2>/dev/null | head -1)
+current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ -n "$configured_base" ] && [ -n "$current_branch" ]; then
+  if [ "$current_branch" = "$configured_base" ]; then
+    echo "PASS  checkout is on the configured base ($configured_base)"
+  else
+    echo "NOTE  checkout is on '$current_branch', not the configured base '$configured_base' — hooks run THIS branch's tools/agentic/ copies, so any tool fix released since it forked is NOT in effect here. Setup and Dev both switch to the base on a clean tree; a dirty tree is human work — stop and report, never stash."
+  fi
+fi
+
+# 5. Every role dispatch spawns a fresh engine process; there is nothing here to select.
 echo 'INFO  role dispatch is one call — tools/agentic/dispatch.mjs --role <role>'
 
 exit 0

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.44.0 · starting · writer claude · reviews codex
+∞ dev · v0.44.1 · starting · writer claude · reviews codex
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,

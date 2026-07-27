@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.44.0 · starting
+∞ setup · v0.44.1 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -66,6 +66,18 @@ Codex uses `$autoloop:setup doctor`; opencode invokes the `setup` skill with `do
 4. Fetch the configured base and audit `origin/<base>`, not the parked checkout. Until STATE is
    parsed, use the repository default only to find an existing STATE; then switch the audit ref to
    `cfg.baseBranch`. A unit branch's older files are a NOTE, never drift evidence.
+
+   **Then obey the configured base with the checkout, not just the audit ref.** On a clean tree,
+   fetch and switch to `cfg.baseBranch` and pull fast-forward before auditing — the same rule Dev
+   applies at Prime. Auditing the right ref is not enough on its own: the hooks load
+   `$CLAUDE_PROJECT_DIR/tools/agentic/*`, so the command guard, this preflight and the label hooks
+   all run the WORKING TREE's copies. A session parked on a unit branch executes the tools that
+   branch forked with, however current the base is — which is how a guard fix that had shipped,
+   installed and reconciled onto the base stayed inert for three separate sessions, each of which
+   then misdiagnosed the block as a new bug.
+
+   A dirty tree or an in-flight loop unit is human work: stop with the remedy and never stash,
+   discard, or relocate it. Finish or park the unit first, then run Setup from the base.
 5. Run the one-call audit below. Follow up only on failed or incomplete sections.
 
 Every contract call names the copy it runs. Before the scaffold reconciliation lands, run contracts
