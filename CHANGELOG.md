@@ -3,6 +3,31 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.46.1] - 2026-07-27
+
+### Fixed
+
+- **The documented free-plan 403 is authoritative absence of branch rules.** A private repository
+  on a free plan returns HTTP 403 ("Upgrade to GitHub Pro or make this repository public") from
+  the rules and classic-protection endpoints — the plan-limitation signal on exactly the
+  configuration solo-operator mode exists for, where the spec already waives protection
+  verification because the plan cannot have any. `delivery-contract` treated only 404 as absence,
+  so every solo unit finished review- and gate-clean and then blocked forever at terminal
+  finalize; a live unit did exactly that with four converged codex rounds and a green gate behind
+  it. The two protection reads now opt in to treating that specific 403 — status and upgrade
+  message both required — as absence; a permissions 403 without the message still aborts, and any
+  other endpoint still aborts on any 403.
+- **`git` as an argument is data, not an invocation.** The ambient-alias rule found `git` anywhere
+  in a segment's words, so a quote-stripped section banner — `echo "=== git diffstat ==="` — read
+  as an unknown subcommand and sank an innocent compound. `git`/`gh` now count only in executable
+  position (start of segment, or behind assignments and transparent wrappers: `command`, `env`,
+  `nohup`, `nice`, `timeout`). A real `git diffstat` still blocks, wrapped or not.
+- **The setup phase ribbons return to the wording that provably announced.** Two rewrites tried to
+  fix the green double-print and each broke announcement itself — one phase of five, then none.
+  The 0.45.0 text demonstrably printed every phase on the current model and returns verbatim,
+  with one added sentence (green only on the closing rail) and 🟩 removed from the per-phase
+  badge legend.
+
 ## [0.46.0] - 2026-07-27
 
 ### Changed
