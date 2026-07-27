@@ -22,7 +22,15 @@ Notable changes to Autoloop are recorded here. The format follows
   fixing, reviewing, long gates); keep in-session what is stateful and small (plans, claims,
   labels, collection, the five-axis judgment), because shipping the orchestrator's state out costs
   more than the turn it saves.
-- **Under `with codex`, Claude's five-axis review moves to the end of the pipeline.** Mid-pipeline
+- **The five-axis pass is replaced by a scope rule: convergence closes full-artifact.** Three
+  designs in one night — in-session, then dispatched, then cut — because the evidence never
+  supported "claude must look last", only "a full-artifact look at the final head catches what
+  delta rounds miss": the one Major that survived three delta-scoped rounds fell to the first
+  whole-artifact re-read. Scope was the active ingredient, not the engine, and the checklist
+  rides in any reviewer's prompt. Under `with codex`, the closing round is codex, full-artifact,
+  checklist-armed — cross-model over what actually ships, at zero Claude tokens, bounded by the
+  existing round cap. Typical unit: r1 full, r2 delta, r3 full-close.
+- **Under `with codex`, Claude's step-7 review becomes a slim handoff check.** Mid-pipeline
   it reviewed the pre-codex artifact, and every fix round landed after it unseen — so the final
   artifact got no Claude-shaped review at all, while the mid-pipeline pass cost a full checklist
   cycle that did not prevent codex finding two Majors an hour later. The one Major the
