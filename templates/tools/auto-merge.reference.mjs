@@ -14,12 +14,14 @@
 // meaningful for any filled config — run it after every config change.
 //
 // SOLO_OPERATOR transcribes the additional merge.soloOperatorAcknowledged: true
-// consent for a single-identity repository: identity separation, App
-// attestation, live server policy, and approving review are waived there
-// because one login cannot satisfy them; exact-head CAS merge, CI on the exact
-// head, ownership binding, protected paths, and the kill switch keep full
-// strength. No acknowledgement grants the loop tag, release, or base-branch
-// authority, and provenance remains best-effort-unverified in every mode.
+// consent for a single-identity repository: the one human IS the loop login,
+// so identity separation and approving review are unsatisfiable there.
+// Solo is the ONLY supported non-manual configuration — the merge gate refuses
+// every non-solo config as retired (docs/specs/simple-delivery.md). Exact-head
+// CAS merge, the triggered-checks floor, the verdict statuses, ownership
+// binding, protected paths, and the kill switch keep full strength. No
+// acknowledgement grants the loop tag, release, or base-branch authority, and
+// provenance remains best-effort-unverified in every mode.
 // ============================================================================
 // Ratified/auto merge engine for the dev loop; reference-dormant until the
 // acknowledgements above are committed.
@@ -43,38 +45,31 @@ import { fileURLToPath } from 'node:url';
 import {
   createPremergeRecord,
   premergeRecordHash,
-  parseAttestation,
-  serializeAttestation,
   serializePremergeRecord,
+  validPremergeRecordId,
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
-import {
-  canonicalCiPolicy,
-  finalizeHead,
-} from './delivery-contract.mjs';
+import { finalizeHead } from './delivery-contract.mjs';
 import {
   lifecycleCommentNeverEdited,
   lifecycleIdentityHash,
+  resolveLifecycleCommentChain,
   serializeLifecycleMarker,
 } from './lifecycle-contract.mjs';
 import { matchMergeProtected } from './lane-contract.mjs';
-import {
-  REQUIRED_ATTESTATIONS,
-  authorizeMerge,
-} from './merge-authorization-contract.mjs';
+import { authorizeMerge } from './merge-authorization-contract.mjs';
 import {
   authorizePolicyPublication,
-  fetchPublicationCiPolicy,
+  buildCommitStatus,
+  fetchPublicationStatuses,
 } from './publish-verdict.mjs';
 
 // ── REPO CONFIG — filled by autoloop:setup; the vendored copy in your repo is the policy ──
 export const REPOSITORY = { owner: 'your-org', name: 'your-repo' }; // setup: from `gh repo view`
 export const BASE_BRANCH = 'main'; // setup: the loop's base branch
-// Required GitHub-Actions check-run names. Setup fills this from the repo's detected
-// CI workflows, confirmed with the user.
-// EMPTY means the repo has no CI: auto-merges then rest on the loop's own SHA-bound
-// verdicts alone — setup must warn loudly and recommend `manual` in that case.
-export const REQUIRED_CI_CHECKS = [];
+// There is no required-check list: the triggered-checks floor (every check run
+// and commit status on the exact head green) plus the two verdict statuses are
+// the whole CI predicate.
 // Path B allowlist (globs): the reversible class that may auto-merge WITHOUT a human
 // risk label. Docs-only is the safe generic default; widen only by explicit user choice.
 // (Protected families below still veto — a reversible glob can never expose a protected path.)
@@ -98,14 +93,13 @@ export const TRUSTED_HUMAN_LOGINS = ['maintainer'];
 // Solo-operator installations have exactly one human, who necessarily shares the
 // loop's login. Setup writes true ONLY from a config carrying BOTH acknowledgements
 // (merge.unverifiedInvocationAcknowledged AND merge.soloOperatorAcknowledged) and
-// then fills TRUSTED_HUMAN_LOGINS = [LOOP_LOGIN]. When true, the gate waives
-// identity separation, App attestation, live server policy, and approving review —
-// the four families a single login cannot satisfy — and keeps everything else.
+// then fills TRUSTED_HUMAN_LOGINS = [LOOP_LOGIN]. Non-solo is retired:
+// authorizeMerge refuses any config without soloOperator=true, naming
+// docs/specs/simple-delivery.md.
 export const SOLO_OPERATOR = false;
-export const TRUSTED_AUTOMATION_APP_IDS = [1];
-export const TRUSTED_AUTHORIZATION_APP_IDS = [2];
-export const REQUIRED_CI_CHECK_APPS = {};
-export const REQUIRED_APPROVING_REVIEW_COUNT = 1;
+// Solo default 0: GitHub forbids approving one's own PR, so a solo repository
+// can never reach APPROVED.
+export const REQUIRED_APPROVING_REVIEW_COUNT = 0;
 export const REQUIRE_CODE_OWNER_REVIEWS = false;
 export const BASE_FRESHNESS_STRATEGY = 'direct-strict';
 // This is separately human-ratified merge authority, not a live read of ProjectConfig. New
@@ -114,6 +108,8 @@ export const BASE_FRESHNESS_STRATEGY = 'direct-strict';
 export const REVERSIBLE_MAX_LINES = 700;
 // ── end repo config — everything below is the generic engine ──
 
+// The two verdict COMMIT STATUSES the finalizer posts (success-only,
+// SHA-bound, description carries the summary-hash prefix).
 export const REQUIRED_VERDICTS = ['agentic/gate', 'agentic/review'];
 export const SAFE_LABELS = ['risk:pure-deletion', 'risk:mechanical-refactor'];
 
@@ -133,6 +129,8 @@ export function globToRe(glob) {
 const REVERSIBLE_RES = REVERSIBLE_PATHS.map(globToRe);
 
 const REPO_SLUG = `${REPOSITORY.owner}/${REPOSITORY.name}`;
+const SHA_RE = /^[0-9a-f]{40}$/i;
+const HASH_RE = /^[0-9a-f]{64}$/;
 const HEAD_SHA = 'a'.repeat(40);
 const BASE_SHA = 'e'.repeat(40);
 const CLAIM_SHA = 'd'.repeat(40);
@@ -145,19 +143,6 @@ const GH_API_HEADERS = [
   '-H',
   'X-GitHub-Api-Version: 2026-03-10',
 ];
-
-function requiredCheckContracts() {
-  return [
-    ...REQUIRED_ATTESTATIONS.map((name) => ({
-      name,
-      appIds: [...TRUSTED_AUTOMATION_APP_IDS],
-    })),
-    ...REQUIRED_CI_CHECKS.map((name) => ({
-      name,
-      appIds: [...(REQUIRED_CI_CHECK_APPS[name] ?? [])],
-    })),
-  ];
-}
 
 const CORE_QUERY = `
   query($owner:String!, $name:String!, $number:Int!) {
@@ -641,14 +626,49 @@ function latestLabelEvent(events, label) {
   ).at(-1) ?? null;
 }
 
+// Discovery of the finalized delivery: the loop-authored lifecycle comment
+// chain must resolve to a tip marker bound to the current head that carries
+// the premerge-record identity. Everything the marker claims (record comment,
+// verdict statuses, plan comment, delivery floor) is verified afterwards by
+// authorizePolicyPublication — this function only locates the claim.
+function finalizedDeliveryMarker(comments, loopLogin, headOid) {
+  if (comments?.complete !== true || !Array.isArray(comments.items)) return null;
+  let chain = null;
+  try {
+    chain = resolveLifecycleCommentChain(
+      comments.items
+        .filter((comment) =>
+          typeof comment?.body === 'string'
+          && comment.body.includes('autoloop-lifecycle-v1')
+          && comment?.author?.login === loopLogin)
+        .map((comment) => ({
+          id: comment.id,
+          body: comment.body,
+          neverEdited: comment.neverEdited === true,
+        })),
+    );
+  } catch {
+    return null;
+  }
+  const marker = chain?.tip?.marker;
+  return (
+    marker
+    && marker.headOid === headOid
+    && validPremergeRecordId(marker.premergeRecord)
+    && HASH_RE.test(marker.premergeRecordHash ?? '')
+    && typeof marker.premergeRecordCommentId === 'string'
+  )
+    ? marker
+    : null;
+}
+
 export function deriveLiveIssueEvidence(input) {
   const issue = input?.issue;
   const timeline = input?.timeline;
   const comments = input?.comments;
   const dependencies = input?.dependencies;
   const permission = input?.loopReadyPermission;
-  const ownership = input?.ownership;
-  const policyAttestation = input?.policyAttestation;
+  const pullRequest = input?.pullRequest;
   const labels = Array.isArray(issue?.labels) ? issue.labels : [];
   const expectedDependencies = blockedBy(issue?.body);
   const dependencyItems = Array.isArray(dependencies?.items)
@@ -676,6 +696,41 @@ export function deriveLiveIssueEvidence(input) {
     && permission?.complete === true
     && permission.login === readyEvent.actor.login
     && typeof permission.roleName === 'string';
+  const marker = finalizedDeliveryMarker(comments, input?.loopLogin, pullRequest?.headOid);
+  const commitMetadata = Array.isArray(input?.commitMetadata)
+    ? input.commitMetadata.map((commit) => ({
+      oid: commit?.oid,
+      message: commit?.message,
+      parentOids: Array.isArray(commit?.parentOids) ? [...commit.parentOids] : commit?.parentOids,
+    }))
+    : null;
+  // The marker's ownership facts (issue-body identity, claim commit, frozen
+  // plan) are sealed into the premerge record via its lifecycle identity hash;
+  // the claim ancestry itself is proven against live PR commit metadata.
+  const ownership = marker === null ? null : {
+    complete:
+      SHA_RE.test(marker.claimCommit ?? '')
+      && HASH_RE.test(marker.issueBodyHash ?? '')
+      && HASH_RE.test(marker.planHash ?? '')
+      && typeof marker.planCommentId === 'string'
+      && marker.planCommentId.length > 0,
+    issue: marker.issue,
+    issueBodyHash: marker.issueBodyHash,
+    claimCommitAncestor:
+      Array.isArray(commitMetadata)
+      && commitMetadata.some((commit) => commit.oid === marker.claimCommit),
+    claimCommit: {
+      complete: Array.isArray(commitMetadata),
+      issue: marker.issue,
+      headOid: marker.headOid,
+      baseOid: pullRequest?.baseOid,
+      oid: marker.claimCommit,
+      commits: commitMetadata,
+    },
+    frozenPlanHash: marker.planHash,
+    frozenPlanCommentId: marker.planCommentId ?? null,
+    frozenPlanAuthor: input?.loopLogin,
+  };
   const commentMatches = Array.isArray(comments?.items)
     ? comments.items.filter((comment) => comment?.id === ownership?.frozenPlanCommentId)
     : [];
@@ -690,15 +745,25 @@ export function deriveLiveIssueEvidence(input) {
     && typeof planComment?.body === 'string'
     && planComment.body.length > 0
     && sha256(planComment.body) === ownership.frozenPlanHash;
+  const policyAttestation = marker === null ? null : {
+    kind: 'policy',
+    v: 1,
+    headOid: marker.headOid,
+    issue: marker.issue,
+    pullRequest: marker.pr,
+    delivered: true,
+    premergeRecordId: marker.premergeRecord,
+    premergeRecordHash: marker.premergeRecordHash,
+    premergeRecordAuthor: input?.loopLogin,
+  };
   const policyVerification = policyAttestation
     ? authorizePolicyPublication(policyAttestation, {
       complete: input?.policyLiveComplete === true,
       loopAuthor: input?.loopLogin,
       issue: { number: issue?.number },
-      pullRequest: input?.pullRequest,
+      pullRequest,
       comments,
-      checkRuns: input?.checkRuns,
-      ciPolicy: input?.ciPolicy,
+      statuses: input?.statuses,
       delivery: input?.delivery,
     })
     : null;
@@ -707,7 +772,6 @@ export function deriveLiveIssueEvidence(input) {
     policyVerification?.authorized === true
     && premergeObservation?.verified === true
     && premergeObservation.pullRequest === policyAttestation?.pullRequest
-    && policyAttestation?.premergeRecordAuthor === input?.loopLogin
     && issue?.number === policyAttestation?.issue
   );
   const hardLabels = new Set([
@@ -764,8 +828,7 @@ export function deriveLiveIssueEvidence(input) {
       ? {
         complete:
           comments?.complete === true
-          && input?.checkRuns?.complete === true
-          && input?.ciPolicy?.complete === true
+          && input?.statuses?.complete === true
           && premergeObservation?.complete === true,
         delivered: policyAttestation.delivered,
         headOid: policyAttestation.headOid,
@@ -779,6 +842,10 @@ export function deriveLiveIssueEvidence(input) {
           premergeVerified ? premergeObservation.pullRequest : null,
       }
       : null,
+    // The verdict statuses matched the record's summary hashes byte-exactly
+    // inside the premerge verification; that IS the typed exact-head gate
+    // evidence in the status era.
+    gateEvidenceVerified: premergeVerified === true,
   };
 }
 
@@ -828,184 +895,6 @@ export function deriveLiveAuthorizationEvidence(input) {
     eventVerified,
     afterCurrentHead,
     roleName: permission?.roleName ?? null,
-  };
-}
-
-function emptyActorAllowances(value) {
-  if (value === undefined || value === null) return true;
-  return (
-    value
-    && typeof value === 'object'
-    && ['users', 'teams', 'apps'].every((key) =>
-      value[key] === undefined || (Array.isArray(value[key]) && value[key].length === 0))
-  );
-}
-
-function addRequiredCheck(checks, context, appId) {
-  if (typeof context !== 'string' || context.length === 0) return false;
-  if (!Number.isSafeInteger(appId) || appId < 1) return false;
-  const appIds = checks.get(context) ?? new Set();
-  appIds.add(appId);
-  checks.set(context, appIds);
-  return true;
-}
-
-export function deriveLiveServerPolicy(input) {
-  const protectionSection = input?.branchProtection;
-  const rulesSection = input?.branchRules;
-  const rulesetsSection = input?.rulesets;
-  const protection = protectionSection?.value;
-  let complete =
-    protectionSection?.complete === true
-    && rulesSection?.complete === true
-    && rulesetsSection?.complete === true
-    && protection
-    && typeof protection === 'object';
-  const statusChecks = protection?.required_status_checks;
-  const reviews = protection?.required_pull_request_reviews;
-  const requiredChecks = new Map();
-  const branchChecks = statusChecks?.checks;
-  const branchContexts = statusChecks?.contexts;
-  const branchCheckContexts = Array.isArray(branchChecks)
-    ? branchChecks.map((check) => check?.context)
-    : [];
-  if (
-    typeof statusChecks?.strict !== 'boolean'
-    || !Array.isArray(branchChecks)
-    || !Array.isArray(branchContexts)
-    || new Set(branchContexts).size !== branchContexts.length
-    || new Set(branchCheckContexts).size !== branchCheckContexts.length
-    || branchChecks.length !== branchContexts.length
-    || branchContexts.some((context) => !branchCheckContexts.includes(context))
-  ) {
-    complete = false;
-  }
-  for (const check of branchChecks ?? []) {
-    if (
-      !branchContexts?.includes(check?.context)
-      || !addRequiredCheck(requiredChecks, check?.context, check?.app_id)
-    ) {
-      complete = false;
-    }
-  }
-
-  let strict = statusChecks?.strict === true;
-  let approvingReviewCount = reviews?.required_approving_review_count;
-  let dismissStaleReviews = reviews?.dismiss_stale_reviews;
-  let requireLastPushApproval = reviews?.require_last_push_approval;
-  let requireCodeOwnerReviews = reviews?.require_code_owner_reviews;
-  let conversationResolution = protection?.required_conversation_resolution?.enabled;
-  let forcePushesAllowed = protection?.allow_force_pushes?.enabled;
-  let deletionsAllowed = protection?.allow_deletions?.enabled;
-  let queueRequired = false;
-  let actorCanBypass =
-    !emptyActorAllowances(reviews?.bypass_pull_request_allowances)
-    || protection?.enforce_admins?.enabled !== true;
-  if (
-    !Number.isInteger(approvingReviewCount)
-    || typeof dismissStaleReviews !== 'boolean'
-    || typeof requireLastPushApproval !== 'boolean'
-    || typeof requireCodeOwnerReviews !== 'boolean'
-    || typeof conversationResolution !== 'boolean'
-    || typeof forcePushesAllowed !== 'boolean'
-    || typeof deletionsAllowed !== 'boolean'
-    || typeof protection?.enforce_admins?.enabled !== 'boolean'
-  ) {
-    complete = false;
-  }
-
-  const rules = Array.isArray(rulesSection?.items) ? rulesSection.items : [];
-  const rulesets = Array.isArray(rulesetsSection?.items) ? rulesetsSection.items : [];
-  const rulesetIds = [...new Set(rules.map((rule) => rule?.ruleset_id))];
-  const detailIds = rulesets.map((ruleset) => ruleset?.id);
-  let bypassActorsVisible =
-    rulesetIds.length === rulesets.length
-    && rulesetIds.every((id) => Number.isSafeInteger(id) && detailIds.includes(id));
-  if (!bypassActorsVisible) complete = false;
-  for (const ruleset of rulesets) {
-    if (
-      !rulesetIds.includes(ruleset?.id)
-      || ruleset?.enforcement !== 'active'
-      || !Array.isArray(ruleset?.bypass_actors)
-    ) {
-      bypassActorsVisible = false;
-      complete = false;
-      continue;
-    }
-    if (ruleset.bypass_actors.length > 0) actorCanBypass = true;
-  }
-
-  for (const rule of rules) {
-    if (typeof rule?.type !== 'string' || !Number.isSafeInteger(rule?.ruleset_id)) {
-      complete = false;
-      continue;
-    }
-    const parameters = rule.parameters ?? {};
-    if (rule.type === 'required_status_checks') {
-      if (
-        typeof parameters.strict_required_status_checks_policy !== 'boolean'
-        || !Array.isArray(parameters.required_status_checks)
-      ) {
-        complete = false;
-        continue;
-      }
-      strict ||= parameters.strict_required_status_checks_policy;
-      for (const check of parameters.required_status_checks) {
-        if (!addRequiredCheck(requiredChecks, check?.context, check?.integration_id)) {
-          complete = false;
-        }
-      }
-    } else if (rule.type === 'pull_request') {
-      if (
-        !Number.isInteger(parameters.required_approving_review_count)
-        || typeof parameters.dismiss_stale_reviews_on_push !== 'boolean'
-        || typeof parameters.require_last_push_approval !== 'boolean'
-        || typeof parameters.require_code_owner_review !== 'boolean'
-        || typeof parameters.required_review_thread_resolution !== 'boolean'
-      ) {
-        complete = false;
-        continue;
-      }
-      approvingReviewCount = Math.max(
-        approvingReviewCount,
-        parameters.required_approving_review_count,
-      );
-      dismissStaleReviews ||= parameters.dismiss_stale_reviews_on_push;
-      requireLastPushApproval ||= parameters.require_last_push_approval;
-      requireCodeOwnerReviews ||= parameters.require_code_owner_review;
-      conversationResolution ||= parameters.required_review_thread_resolution;
-    } else if (rule.type === 'non_fast_forward') {
-      forcePushesAllowed = false;
-    } else if (rule.type === 'deletion') {
-      deletionsAllowed = false;
-    } else if (rule.type === 'merge_queue') {
-      queueRequired = true;
-    }
-  }
-
-  return {
-    complete: complete === true,
-    source: 'live',
-    strategy: 'direct-strict',
-    strict,
-    enforceAdmins: protection?.enforce_admins?.enabled === true,
-    actorCanBypass,
-    requiredConversationResolution: conversationResolution,
-    requiredApprovingReviewCount: approvingReviewCount,
-    requireCodeOwnerReviews,
-    dismissStaleReviews,
-    requireLastPushApproval,
-    forcePushesAllowed,
-    deletionsAllowed,
-    queueRequired,
-    rulesetsComplete:
-      rulesSection?.complete === true
-      && rulesetsSection?.complete === true
-      && rulesetIds.length === rulesets.length,
-    bypassActorsVisible,
-    requiredChecks: [...requiredChecks.entries()]
-      .map(([name, appIds]) => ({ name, appIds: [...appIds].sort((left, right) => left - right) }))
-      .sort((left, right) => left.name.localeCompare(right.name)),
   };
 }
 
@@ -1110,7 +999,7 @@ function fetchDependencies(body) {
   return { complete: true, items };
 }
 
-function fetchLinkedIssueEvidence(number, ownership, policyAttestation, policyLive) {
+function fetchLinkedIssueEvidence(number, policyLive) {
   const record = fetchIssueRecord(number);
   const timeline = fetchTimeline(number);
   const readyEvent = latestLabelEvent(timeline.items, 'loop-ready');
@@ -1122,22 +1011,33 @@ function fetchLinkedIssueEvidence(number, ownership, policyAttestation, policyLi
     timeline,
     dependencies: fetchDependencies(record.issue.body),
     loopReadyPermission,
-    ownership,
-    policyAttestation,
     ...policyLive,
     loopLogin: LOOP_LOGIN,
   });
 }
 
-function fetchLiveAuthorization(number, headOid, labels, authorization) {
-  if (!authorization) return null;
+// Path A evidence is the live label event itself: the seed is the latest
+// labeled event for the PR's safe label, and deriveLiveAuthorizationEvidence
+// proves head ordering and the actor's current permission on top of it.
+function fetchLiveAuthorization(number, headOid, labels) {
+  const label = SAFE_LABELS.find((candidate) => labels.includes(candidate));
+  if (!label) return null;
   const timeline = fetchTimeline(number);
-  const event = latestLabelEvent(timeline.items, authorization.label);
-  const permission = event?.actor?.login
+  const event = latestLabelEvent(timeline.items, label);
+  if (event?.event !== 'labeled') return null;
+  const permission = event.actor?.login
     ? fetchPermission(event.actor.login)
     : { complete: false, login: null, roleName: null };
   return deriveLiveAuthorizationEvidence({
-    authorization,
+    authorization: {
+      complete: true,
+      pullRequest: number,
+      actor: event.actor?.login ?? null,
+      headOid,
+      label,
+      labelEventId: event.id,
+      labeledAt: event.created_at,
+    },
     prNumber: number,
     headOid,
     labels,
@@ -1157,31 +1057,6 @@ function fetchExecutorIdentity() {
     login: data?.login ?? null,
     id: data?.id ?? null,
   };
-}
-
-function fetchLiveServerPolicy() {
-  const branch = encodeURIComponent(BASE_BRANCH);
-  const branchProtection = ghJson(ghApiArgs(
-    `repos/${REPO_SLUG}/branches/${branch}/protection`,
-  ));
-  const rulePages = ghPaginated(
-    `repos/${REPO_SLUG}/rules/branches/${branch}?per_page=100`,
-  );
-  const branchRules = rulePages.flatMap((page) => {
-    if (!Array.isArray(page)) throw new Error('active branch rules page was not an array');
-    return page;
-  });
-  const rulesetIds = [...new Set(branchRules.map((rule) => rule?.ruleset_id))];
-  if (rulesetIds.some((id) => !Number.isSafeInteger(id) || id < 1)) {
-    throw new Error('active branch rule omitted a valid ruleset ID');
-  }
-  const rulesets = rulesetIds.map((id) =>
-    ghJson(ghApiArgs(`repos/${REPO_SLUG}/rulesets/${id}?includes_parents=true`)));
-  return deriveLiveServerPolicy({
-    branchProtection: { complete: true, value: branchProtection },
-    branchRules: { complete: true, items: branchRules },
-    rulesets: { complete: true, items: rulesets },
-  });
 }
 
 export function collectPrCommitMetadata(pages) {
@@ -1223,115 +1098,6 @@ function fetchPrCommitMetadata(number) {
   return collectPrCommitMetadata(
     ghPaginated(`repos/${REPO_SLUG}/pulls/${number}/commits?per_page=100`),
   );
-}
-
-function parsedCheckAttestation(checkRuns, name, kind, headOid) {
-  const candidates = (checkRuns ?? []).filter((checkRun) =>
-    checkRun?.name === name
-    && (checkRun.head_sha ?? checkRun.headSha ?? checkRun.headOid) === headOid
-    && upper(checkRun.status || (checkRun.conclusion ? 'completed' : '')) === 'COMPLETED'
-    && upper(checkRun.conclusion) === 'SUCCESS');
-  if (candidates.length !== 1) return null;
-  const parsed = parseAttestation(candidates[0]?.output?.summary, { kind, headOid });
-  if (!parsed.ok) return null;
-  return { value: parsed.attestation, check: normalizedCheckRun(candidates[0]) };
-}
-
-export function deriveAttestedEvidence(inputs, commitMetadata = null) {
-  const result = {
-    ownership: null,
-    lifecycle: null,
-    policyAttestation: null,
-    ciPolicy: null,
-    authorization: null,
-    gateEvidenceVerified: false,
-    executorIdentity: null,
-    serverPolicy: null,
-    linkedIssue: null,
-  };
-  const headOid = inputs?.headRefOid;
-  if (!/^[0-9a-f]{40}$/i.test(headOid ?? '') || !Array.isArray(inputs?.checkRuns)) return result;
-  const claim = parseLoopClaim({ branch: inputs?.headRefName, body: inputs?.body });
-  const issue = claim.valid ? claim.issue : null;
-
-  const ownership = parsedCheckAttestation(
-    inputs.checkRuns,
-    'agentic/ownership',
-    'ownership',
-    headOid,
-  );
-  const policy = parsedCheckAttestation(
-    inputs.checkRuns,
-    'agentic/policy',
-    'policy',
-    headOid,
-  );
-  const authorization = parsedCheckAttestation(
-    inputs.checkRuns,
-    'agentic/human-authorization',
-    'human-authorization',
-    headOid,
-  );
-  const gate = parsedCheckAttestation(
-    inputs.checkRuns,
-    'agentic/gate',
-    'gate',
-    headOid,
-  );
-  result.gateEvidenceVerified = gate !== null;
-
-  if (ownership && ownership.value.issue === issue) {
-    const commits = Array.isArray(commitMetadata)
-      ? commitMetadata.map((commit) => ({
-        oid: commit?.oid,
-        message: commit?.message,
-        parentOids: Array.isArray(commit?.parentOids) ? [...commit.parentOids] : commit?.parentOids,
-      }))
-      : null;
-    result.ownership = {
-      complete: true,
-      issue: ownership.value.issue,
-      issueBodyHash: ownership.value.issueBodyHash,
-      claimCommitAncestor:
-        Array.isArray(commits)
-        && commits.some((commit) => commit.oid === ownership.value.claimCommitOid),
-      claimCommit: {
-        complete: Array.isArray(commits),
-        issue: ownership.value.issue,
-        headOid: ownership.value.headOid,
-        baseOid: inputs?.baseRefOid,
-        oid: ownership.value.claimCommitOid,
-        commits,
-      },
-      frozenPlanPresent: true,
-      frozenPlanHash: ownership.value.frozenPlanHash,
-      frozenPlanCommentId: ownership.value.frozenPlanCommentId,
-      frozenPlanAuthor: ownership.value.frozenPlanAuthor,
-      frozenPlanCommentVerified: false,
-    };
-  }
-  if (
-    policy
-    && policy.value.issue === issue
-    && policy.value.pullRequest === inputs?.prNumber
-  ) {
-    result.policyAttestation = policy.value;
-  }
-  if (authorization && authorization.value.pullRequest === inputs?.prNumber) {
-    result.authorization = {
-      complete: true,
-      pullRequest: authorization.value.pullRequest,
-      actor: authorization.value.actor,
-      headOid: authorization.value.headOid,
-      label: authorization.value.label,
-      labelEventId: authorization.value.labelEventId,
-      labeledAt: authorization.value.labeledAt,
-      eventVerified: false,
-      roleName: null,
-      check: authorization.check,
-    };
-  }
-  return result;
 }
 
 function fetchKillSwitch() {
@@ -1397,8 +1163,6 @@ function emptyInputs() {
     lifecycle: null,
     authorization: null,
     gateEvidenceVerified: false,
-    policyAttestation: null,
-    serverPolicy: null,
     fetchReasons: [],
   };
 }
@@ -1442,19 +1206,21 @@ function fetchInputs(number) {
   } catch (error) {
     inputs.fetchReasons.push(`PR commit provenance fetch failed: ${errorMessage(error)}`);
   }
-  Object.assign(inputs, deriveAttestedEvidence(inputs, commitMetadata));
 
   if (claim.valid) {
     let delivery = null;
+    let verdictStatuses = null;
     if (inputs.headRefOid) {
+      // Double-read latest-per-context statuses: the shape the premerge-record
+      // verification compares against the record's summary hashes.
       try {
-        inputs.ciPolicy = fetchPublicationCiPolicy({
+        verdictStatuses = fetchPublicationStatuses({
           host: 'github.com',
           owner: REPOSITORY.owner,
           repo: REPOSITORY.name,
         }, inputs.headRefOid);
       } catch (error) {
-        inputs.fetchReasons.push(`committed CI policy fetch failed: ${errorMessage(error)}`);
+        inputs.fetchReasons.push(`verdict status fetch failed: ${errorMessage(error)}`);
       }
       try {
         delivery = finalizeHead({
@@ -1477,34 +1243,28 @@ function fetchInputs(number) {
       }
     }
     try {
-      const issueEvidence = fetchLinkedIssueEvidence(
-        claim.issue,
-        inputs.ownership,
-        inputs.policyAttestation,
-        {
-          policyLiveComplete:
-            inputs.coreComplete === true
-            && inputs.rollupComplete === true
-            && inputs.ciPolicy?.complete === true,
-          pullRequest: {
-            number: inputs.prNumber,
-            headOid: inputs.headRefOid,
-            headRefName: inputs.headRefName,
-            body: inputs.body,
-            merged: upper(inputs.state) === 'MERGED',
-            mergeOid: null,
-          },
-          checkRuns: {
-            complete: inputs.rollupComplete === true,
-            items: inputs.checkRuns,
-          },
-          ciPolicy: inputs.ciPolicy,
-          delivery,
+      const issueEvidence = fetchLinkedIssueEvidence(claim.issue, {
+        policyLiveComplete:
+          inputs.coreComplete === true
+          && inputs.rollupComplete === true
+          && verdictStatuses?.complete === true,
+        pullRequest: {
+          number: inputs.prNumber,
+          headOid: inputs.headRefOid,
+          headRefName: inputs.headRefName,
+          body: inputs.body,
+          merged: upper(inputs.state) === 'MERGED',
+          mergeOid: null,
+          baseOid: inputs.baseRefOid,
         },
-      );
+        commitMetadata,
+        statuses: verdictStatuses,
+        delivery,
+      });
       inputs.linkedIssue = issueEvidence.linkedIssue;
       inputs.ownership = issueEvidence.ownership;
       inputs.lifecycle = issueEvidence.lifecycle;
+      inputs.gateEvidenceVerified = issueEvidence.gateEvidenceVerified === true;
     } catch (error) {
       inputs.fetchReasons.push(`linked-issue eligibility fetch failed: ${errorMessage(error)}`);
     }
@@ -1518,7 +1278,6 @@ function fetchInputs(number) {
         number,
         inputs.headRefOid,
         inputs.labels,
-        inputs.authorization,
       );
     } catch (error) {
       inputs.fetchReasons.push(`human-authorization event fetch failed: ${errorMessage(error)}`);
@@ -1533,12 +1292,6 @@ function fetchInputs(number) {
     inputs.executorIdentity = fetchExecutorIdentity();
   } catch (error) {
     inputs.fetchReasons.push(`merge executor identity fetch failed: ${errorMessage(error)}`);
-  }
-
-  try {
-    inputs.serverPolicy = fetchLiveServerPolicy();
-  } catch (error) {
-    inputs.fetchReasons.push(`live server-policy fetch failed: ${errorMessage(error)}`);
   }
   return inputs;
 }
@@ -1565,12 +1318,6 @@ function changedPaths(pr) {
   return { entries, paths, malformed };
 }
 
-function isActionsCheckRun(checkRun) {
-  const slug = String(checkRun?.app?.slug ?? '').toLowerCase();
-  const name = String(checkRun?.app?.name ?? '').toLowerCase();
-  return slug === 'github-actions' || name === 'github actions';
-}
-
 function pathBAllowed(path) {
   return REVERSIBLE_RES.some((re) => re.test(path));
 }
@@ -1588,23 +1335,29 @@ function normalizedCheckRun(checkRun) {
   };
 }
 
-function mergeAuthorizationInput(pr, path) {
-  const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
+// The vendored REPO CONFIG block transcribed into the gate's config shape.
+// Self-test fixtures override toward the solo shape (the only one the gate
+// accepts); the live path always uses the vendored constants.
+export function engineConfig(overrides = {}) {
   return {
-    config: {
-      repository: REPOSITORY,
-      baseBranch: BASE_BRANCH,
-      mergePolicy: AUTOMERGE_MODE === 'all-green' ? 'auto' : 'ratified',
-      baseFreshnessStrategy: BASE_FRESHNESS_STRATEGY,
-      loopLogin: LOOP_LOGIN,
-      trustedHumanLogins: TRUSTED_HUMAN_LOGINS,
-      soloOperator: SOLO_OPERATOR,
-      automationAppIds: TRUSTED_AUTOMATION_APP_IDS,
-      authorizationAppIds: TRUSTED_AUTHORIZATION_APP_IDS,
-      requiredApprovingReviewCount: REQUIRED_APPROVING_REVIEW_COUNT,
-      requireCodeOwnerReviews: REQUIRE_CODE_OWNER_REVIEWS,
-      requiredChecks: requiredCheckContracts(),
-    },
+    repository: REPOSITORY,
+    baseBranch: BASE_BRANCH,
+    mergePolicy: AUTOMERGE_MODE === 'all-green' ? 'auto' : 'ratified',
+    baseFreshnessStrategy: BASE_FRESHNESS_STRATEGY,
+    loopLogin: LOOP_LOGIN,
+    trustedHumanLogins: TRUSTED_HUMAN_LOGINS,
+    soloOperator: SOLO_OPERATOR,
+    requiredApprovingReviewCount: REQUIRED_APPROVING_REVIEW_COUNT,
+    requireCodeOwnerReviews: REQUIRE_CODE_OWNER_REVIEWS,
+    ...overrides,
+  };
+}
+
+function mergeAuthorizationInput(pr, path, config) {
+  const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
+  const statuses = Array.isArray(pr.statuses) ? pr.statuses : null;
+  return {
+    config,
     pr: {
       number: pr.prNumber,
       complete: pr.coreComplete === true,
@@ -1635,6 +1388,19 @@ function mergeAuthorizationInput(pr, path) {
       authorization: pr.authorization,
       checks: Array.isArray(pr.checkRuns) ? pr.checkRuns.map(normalizedCheckRun) : null,
       checksComplete: pr.rollupComplete === true,
+      // Latest status per context, exact-head only: the combined-status fetch
+      // stamps each item with the page sha, so any stray sha fails closed.
+      statuses: {
+        complete:
+          pr.rollupComplete === true
+          && statuses !== null
+          && statuses.every((status) => status.sha === pr.headRefOid),
+        items: (statuses ?? []).map((status) => ({
+          context: status.context,
+          state: status.state,
+          description: status.description ?? '',
+        })),
+      },
       conversationsResolved:
         pr.threadPaginationComplete === true
         && Array.isArray(pr.reviewThreads)
@@ -1647,7 +1413,6 @@ function mergeAuthorizationInput(pr, path) {
       },
     },
     executorIdentity: pr.executorIdentity,
-    serverPolicy: pr.serverPolicy,
   };
 }
 
@@ -1657,7 +1422,7 @@ function mergeAuthorizationInput(pr, path) {
  *
  * @returns {{allow:boolean, reasons:string[], path:'A'|'B'|'all-green'|'none'}}
  */
-export function decide(pr) {
+export function decide(pr, config = engineConfig()) {
   const reasons = [...(pr.fetchReasons ?? [])];
   const labels = Array.isArray(pr.labels) ? pr.labels : [];
   const { entries, paths, malformed } = changedPaths(pr);
@@ -1719,41 +1484,16 @@ export function decide(pr) {
 
   if (!headRefOid || !/^[0-9a-f]{40}$/i.test(headRefOid)) reasons.push('headRefOid is missing or invalid');
   const statuses = Array.isArray(pr.statuses) ? pr.statuses : [];
-  const headStatuses = statuses.filter((status) => status.sha === headRefOid);
   for (const status of statuses) {
     if (status.sha !== headRefOid) reasons.push(`status context ${status.context ?? 'unknown'} is not on fetched headRefOid`);
   }
-  for (const status of headStatuses) {
-    if (String(status.context ?? '').startsWith('agentic/')) {
-      reasons.push(`agentic evidence must be an attributable CheckRun, not commit status ${status.context}`);
-    }
-  }
 
   const checkRuns = Array.isArray(pr.checkRuns) ? pr.checkRuns : [];
-  const plainStatusNames = new Set(statuses.map((status) => status.context));
-  for (const name of REQUIRED_CI_CHECKS) {
-    if (plainStatusNames.has(name)) reasons.push(`CI context ${name} was user-posted as a plain status, not an Actions CheckRun`);
-    const matches = checkRuns.filter((checkRun) => checkRun.name === name);
-    if (matches.length === 0) {
-      reasons.push(`missing required Actions CheckRun: ${name}`);
-      continue;
-    }
-    if (matches.length > 1) reasons.push(`duplicate CI context: ${name}`);
-    for (const checkRun of matches) {
-      if (!isActionsCheckRun(checkRun)) reasons.push(`CI context ${name} is not from the GitHub Actions app`);
-      const checkHead = checkRun.head_sha ?? checkRun.headSha;
-      if (checkHead !== headRefOid) reasons.push(`CI context ${name} is not on fetched headRefOid`);
-      if (upper(checkRun.conclusion) !== 'SUCCESS') {
-        reasons.push(`CI context ${name} is not SUCCESS (conclusion=${checkRun.conclusion ?? 'unknown'})`);
-      }
-    }
-  }
-
-  // Unconditional triggered-checks floor: whatever CI actually ran on the head must be green —
-  // no pending runs, no failures — regardless of REQUIRED_CI_CHECKS. Path-filtered repos keep
-  // the required list empty (docs-only PRs trigger nothing and pass vacuously); this floor still
-  // protects every PR that DID trigger checks. A concluded run with no `status` field counts as
-  // completed (self-test fixtures and older API shapes omit it).
+  // Triggered-checks floor: whatever actually ran on the head must be green —
+  // no pending runs, no failures, no required-name list. A repo without CI has
+  // nothing on the head and passes vacuously; this floor still protects every
+  // PR that DID trigger checks. A concluded run with no `status` field counts
+  // as completed (self-test fixtures and older API shapes omit it).
   for (const checkRun of checkRuns) {
     const checkHead = checkRun.head_sha ?? checkRun.headSha;
     if (checkHead !== headRefOid) continue; // stale runs on old SHAs never gate the head
@@ -1767,8 +1507,11 @@ export function decide(pr) {
       reasons.push(`triggered CheckRun ${checkRun.name ?? 'unknown'} is not green (conclusion=${checkRun.conclusion})`);
     }
   }
-  for (const status of headStatuses) {
-    if (String(status.context ?? '').startsWith('agentic/')) continue;
+  // The floor covers commit statuses too, verdict contexts included; the
+  // verdict statuses' presence and record binding are enforced by the merge
+  // authorization contract and the premerge verification.
+  for (const status of statuses) {
+    if (status.sha !== headRefOid) continue;
     if (upper(status.state) !== 'SUCCESS') {
       reasons.push(`status context ${status.context ?? 'unknown'} is not SUCCESS (state=${status.state ?? 'unknown'})`);
     }
@@ -1815,7 +1558,7 @@ export function decide(pr) {
     }
   }
 
-  const authorization = authorizeMerge(mergeAuthorizationInput(pr, path));
+  const authorization = authorizeMerge(mergeAuthorizationInput(pr, path, config));
   reasons.push(...authorization.reasons.map((reason) => `merge authorization: ${reason}`));
 
   return { allow: reasons.length === 0, reasons, path };
@@ -1869,15 +1612,16 @@ export function run(inputs, {
   confirmMerged,
   sleep = shortSleep,
   strategy = BASE_FRESHNESS_STRATEGY,
+  config = engineConfig(),
 } = {}) {
-  const decision = decide(inputs);
+  const decision = decide(inputs, config);
   const result = { exitCode: decision.allow ? 0 : 1, decision, reasons: [...decision.reasons] };
   if (!decision.allow) return result;
 
   if (strategy !== BASE_FRESHNESS_STRATEGY || strategy !== 'direct-strict') {
     result.exitCode = 1;
     result.reasons.push(
-      `unsupported submission strategy: ${strategy}; v0.40 enables direct-strict only`,
+      `unsupported submission strategy: ${strategy}; direct-strict is the only supported strategy`,
     );
     return result;
   }
@@ -1945,7 +1689,10 @@ export function run(inputs, {
 }
 
 // ── Self-test fixtures DERIVE from the config block so they stay valid for any
-// filled config. pathFromGlob turns the first glob of a list into a concrete path.
+// filled config, with one forced override: authorizeMerge accepts only the solo
+// shape, so fixture runs use SELF_TEST_CONFIG (solo over the vendored block) and
+// a dedicated fixture pins the non-solo refusal.
+// pathFromGlob turns the first glob of a list into a concrete path.
 function pathFromGlob(glob, leaf) {
   if (!glob.includes('*')) return glob;
   return glob.replace(/\*\*.*$/, leaf).replace(/\*/g, 'x');
@@ -1957,18 +1704,26 @@ const allowedPathN = (index) => pathFromGlob(REVERSIBLE_PATHS[0] ?? 'docs/**', `
 // self-test will fail loudly — pick config that leaves at least one neutral path.)
 const NEUTRAL_PATH = 'zz-selftest/neutral-change.txt';
 const ALLOW_ALL = AUTOMERGE_MODE === 'all-green';
+const SELF_TEST_CONFIG = engineConfig({
+  soloOperator: true,
+  trustedHumanLogins: [LOOP_LOGIN],
+  requiredApprovingReviewCount: 0,
+});
 
 function makeCheckRuns() {
-  return requiredCheckContracts().map(({ name, appIds }) => ({
-    name,
+  return [{
+    name: 'ci-build',
     status: 'completed',
     conclusion: 'success',
     head_sha: HEAD_SHA,
-    app: {
-      id: appIds[0],
-      slug: name.startsWith('agentic/') ? 'autoloop' : 'github-actions',
-      name: name.startsWith('agentic/') ? 'Autoloop' : 'GitHub Actions',
-    },
+    app: { id: 15368, slug: 'github-actions', name: 'GitHub Actions' },
+  }];
+}
+
+function makeVerdictStatuses() {
+  return REQUIRED_VERDICTS.map((context) => ({
+    ...buildCommitStatus(context.slice('agentic/'.length), HEAD_SHA, '0'.repeat(64)),
+    sha: HEAD_SHA,
   }));
 }
 
@@ -1996,9 +1751,8 @@ function makeInput({
     changedFiles: entries.length,
     additions: 10,
     deletions: 5,
-    // A solo repository can never reach APPROVED (GitHub forbids self-approval),
-    // so the fixture derives the reachable review shape from the config block.
-    reviewDecision: SOLO_OPERATOR ? null : 'APPROVED',
+    // A solo repository can never reach APPROVED (GitHub forbids self-approval).
+    reviewDecision: null,
     reviewRequests: [],
     reviewRequestsComplete: true,
     mergeStateStatus: 'CLEAN',
@@ -2006,7 +1760,7 @@ function makeInput({
     filePaginationComplete: true,
     reviewThreads: [],
     threadPaginationComplete: true,
-    statuses: [],
+    statuses: makeVerdictStatuses(),
     checkRuns: makeCheckRuns(),
     rollupComplete: true,
     killSwitch: { known: true, active: false },
@@ -2025,7 +1779,8 @@ function makeInput({
       loopReady: {
         complete: true,
         eventId: 7001,
-        actor: TRUSTED_HUMAN_LOGINS[0],
+        // Solo semantics: the loop-ready actor is the one (loop) login.
+        actor: LOOP_LOGIN,
         labeledAt: '2026-07-24T00:02:00Z',
         roleName: 'maintain',
       },
@@ -2072,10 +1827,12 @@ function makeInput({
       premergeRecordPullRequest: 138,
     },
     gateEvidenceVerified: true,
+    // Solo self-authorization: the actor is the loop login; the label event,
+    // head ordering, and current role are the whole Path-A evidence.
     authorization: {
       complete: true,
       pullRequest: 138,
-      actor: TRUSTED_HUMAN_LOGINS[0],
+      actor: LOOP_LOGIN,
       headOid: HEAD_SHA,
       label: labels.find((label) => SAFE_LABELS.includes(label)) ?? SAFE_LABELS[0],
       labelEventId: 12001,
@@ -2083,41 +1840,11 @@ function makeInput({
       eventVerified: true,
       afterCurrentHead: true,
       roleName: 'maintain',
-      // Without a GitHub App nobody can publish the authorization CheckRun; the
-      // solo gate waives it, so the solo fixture must not fabricate one.
-      check: SOLO_OPERATOR ? undefined : {
-        name: 'agentic/human-authorization',
-        headOid: HEAD_SHA,
-        status: 'COMPLETED',
-        conclusion: 'SUCCESS',
-        app: { id: TRUSTED_AUTHORIZATION_APP_IDS[0] },
-      },
     },
     executorIdentity: {
       complete: true,
       login: LOOP_LOGIN,
       id: 9001,
-    },
-    // A plan without branch protection has no live server policy; the solo gate
-    // skips its validation, so the solo fixture carries none.
-    serverPolicy: SOLO_OPERATOR ? undefined : {
-      complete: true,
-      source: 'live',
-      strategy: 'direct-strict',
-      strict: true,
-      enforceAdmins: true,
-      actorCanBypass: false,
-      requiredConversationResolution: true,
-      requiredApprovingReviewCount: REQUIRED_APPROVING_REVIEW_COUNT,
-      requireCodeOwnerReviews: REQUIRE_CODE_OWNER_REVIEWS,
-      dismissStaleReviews: true,
-      requireLastPushApproval: true,
-      forcePushesAllowed: false,
-      deletionsAllowed: false,
-      requiredChecks: requiredCheckContracts(),
-      queueRequired: false,
-      rulesetsComplete: true,
-      bypassActorsVisible: true,
     },
     fetchReasons: [],
     ...overrides,
@@ -2170,40 +1897,68 @@ export const FIXTURES = [
   { name: 'hard-block label loop-blocked', input: makeInput({ labels: ['loop-blocked'] }), expectExit: 1, expectCalls: 0 },
   { name: 'hard-block label needs-human', input: makeInput({ labels: ['needs-human'] }), expectExit: 1, expectCalls: 0 },
   {
-    name: 'missing gate verdict on Path A',
+    name: 'missing agentic/gate verdict status on Path A',
     input: makeInput({
       labels: ['risk:pure-deletion'],
-      checkRuns: makeCheckRuns().filter((check) => check.name !== 'agentic/gate'),
+      statuses: makeVerdictStatuses().filter((status) => status.context !== 'agentic/gate'),
     }),
     expectExit: 1,
     expectCalls: 0,
   },
   {
-    name: 'successful gate CheckRun without typed gate evidence blocks',
+    name: 'green verdict statuses without typed gate evidence block',
     input: makeInput({ gateEvidenceVerified: false }),
     expectExit: 1,
     expectCalls: 0,
   },
   {
-    name: 'failing review on Path A',
+    name: 'failing agentic/review verdict status on Path A',
     input: makeInput({
       labels: ['risk:pure-deletion'],
-      checkRuns: makeCheckRuns().map((check) =>
-        check.name === 'agentic/review' ? { ...check, conclusion: 'failure' } : check),
+      statuses: makeVerdictStatuses().map((status) =>
+        status.context === 'agentic/review' ? { ...status, state: 'failure' } : status),
     }),
     expectExit: 1,
     expectCalls: 0,
   },
   {
-    name: 'missing verdict on Path B',
+    name: 'missing agentic/review verdict status on Path B',
     input: makeInput({
-      checkRuns: makeCheckRuns().filter((check) => check.name !== 'agentic/review'),
+      statuses: makeVerdictStatuses().filter((status) => status.context !== 'agentic/review'),
     }),
     expectExit: 1,
     expectCalls: 0,
   },
   {
-    name: 'non-success agentic CheckRun',
+    name: 'pending verdict status blocks',
+    input: makeInput({
+      statuses: makeVerdictStatuses().map((status) =>
+        status.context === 'agentic/gate' ? { ...status, state: 'pending' } : status),
+    }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  // No configured agentic CheckRuns exist anymore: an agentic-named CheckRun
+  // on the head is just another triggered check under the floor.
+  {
+    name: 'a green agentic-named CheckRun rides the triggered floor',
+    input: makeInput({
+      checkRuns: [
+        ...makeCheckRuns(),
+        {
+          name: 'agentic/extra',
+          status: 'completed',
+          conclusion: 'success',
+          head_sha: HEAD_SHA,
+          app: { id: 999, slug: 'anything' },
+        },
+      ],
+    }),
+    expectExit: 0,
+    expectCalls: 1,
+  },
+  {
+    name: 'a red agentic-named CheckRun blocks like any triggered check',
     input: makeInput({
       checkRuns: [
         ...makeCheckRuns(),
@@ -2212,7 +1967,7 @@ export const FIXTURES = [
           status: 'completed',
           conclusion: 'failure',
           head_sha: HEAD_SHA,
-          app: { id: TRUSTED_AUTOMATION_APP_IDS[0], slug: 'autoloop' },
+          app: { id: 999, slug: 'anything' },
         },
       ],
     }),
@@ -2245,59 +2000,31 @@ export const FIXTURES = [
     expectExit: 1,
     expectCalls: 0,
   },
-  // Producer pinning derives from the config block: a solo fill has no App to pin
-  // to, so the same substituted producer is accepted there by design — on the
-  // exact head and successful, which stays required in every mode.
-  SOLO_OPERATOR
-    ? {
-      name: 'solo mode accepts an unpinned exact-head verdict producer',
-      input: makeInput({
-        checkRuns: makeCheckRuns().map((check) =>
-          check.name === 'agentic/gate' ? { ...check, app: { id: 999, slug: 'untrusted' } } : check),
-      }),
-      dryRun: true,
-      expectExit: 0,
-      expectCalls: 0,
-    }
-    : {
-      name: 'untrusted producer cannot spoof an agentic verdict',
-      input: makeInput({
-        checkRuns: makeCheckRuns().map((check) =>
-          check.name === 'agentic/gate' ? { ...check, app: { id: 999, slug: 'untrusted' } } : check),
-      }),
-      expectExit: 1,
-      expectCalls: 0,
-    },
   {
-    name: 'plain commit status cannot spoof an agentic verdict',
+    name: 'solo dry-run would-merge posts nothing',
+    input: makeInput(),
+    dryRun: true,
+    expectExit: 0,
+    expectCalls: 0,
+  },
+  // The gate accepts only the solo shape; any other config is a typed refusal
+  // naming docs/specs/simple-delivery.md.
+  {
+    name: 'non-solo config is refused as retired',
+    input: makeInput(),
+    config: engineConfig({ soloOperator: false }),
+    expectExit: 1,
+    expectCalls: 0,
+  },
+  {
+    name: 'a status on a different sha than the fetched head blocks',
     input: makeInput({
-      statuses: [{
-        context: 'agentic/gate',
-        state: 'success',
-        sha: HEAD_SHA,
-        creator: { login: LOOP_LOGIN },
-      }],
+      statuses: makeVerdictStatuses().map((status) =>
+        status.context === 'agentic/gate' ? { ...status, sha: 'f'.repeat(40) } : status),
     }),
     expectExit: 1,
     expectCalls: 0,
   },
-  // Server policy also derives from the config block: solo repositories have no
-  // branch protection to read, so absent evidence is the solo happy path — this
-  // doubles as the solo dry-run would-merge fixture.
-  SOLO_OPERATOR
-    ? {
-      name: 'solo dry-run would-merge without server-policy evidence',
-      input: makeInput({ serverPolicy: null }),
-      dryRun: true,
-      expectExit: 0,
-      expectCalls: 0,
-    }
-    : {
-      name: 'missing non-bypassable server-policy evidence blocks',
-      input: makeInput({ serverPolicy: null }),
-      expectExit: 1,
-      expectCalls: 0,
-    },
   {
     name: 'Path A authorization on an old head blocks',
     input: makeInput({
@@ -2321,37 +2048,7 @@ export const FIXTURES = [
   { name: 'incomplete file pagination (count mismatch)', input: makeInput({ changedFiles: 2 }), expectExit: 1, expectCalls: 0 },
   { name: 'incomplete status/check rollup', input: makeInput({ rollupComplete: false }), expectExit: 1, expectCalls: 0 },
   { name: 'non-CLEAN mergeStateStatus', input: makeInput({ mergeStateStatus: 'DIRTY' }), expectExit: 1, expectCalls: 0 },
-  // CI-evidence fixtures only exist when the config declares required checks.
-  ...(REQUIRED_CI_CHECKS.length
-    ? [
-        {
-          name: 'missing CI check',
-          input: makeInput({
-            checkRuns: makeCheckRuns().filter((check) => check.name !== REQUIRED_CI_CHECKS[0]),
-          }),
-          expectExit: 1,
-          expectCalls: 0,
-        },
-        {
-          name: 'user-posted (non-CheckRun) CI context',
-          input: makeInput({ statuses: [...makeInput().statuses, { context: REQUIRED_CI_CHECKS[0], state: 'success', sha: HEAD_SHA }] }),
-          expectExit: 1,
-          expectCalls: 0,
-        },
-        {
-          name: 'duplicate CI context',
-          input: makeInput({
-            checkRuns: [
-              ...makeCheckRuns(),
-              makeCheckRuns().find((check) => check.name === REQUIRED_CI_CHECKS[0]),
-            ],
-          }),
-          expectExit: 1,
-          expectCalls: 0,
-        },
-      ]
-    : []),
-  // Triggered-checks floor: independent of REQUIRED_CI_CHECKS.
+  // Triggered-checks floor: whatever ran on the head must be green.
   {
     name: 'triggered CheckRun pending blocks',
     input: makeInput({ checkRuns: [...makeCheckRuns(), { name: 'ci-job', status: 'in_progress', head_sha: HEAD_SHA, app: { slug: 'github-actions' } }] }),
@@ -2549,35 +2246,20 @@ function statusStampCases() {
     mismatchThrew = true;
   }
   cases.push({ name: 'combined-status page for a different sha fails the fetch', ok: mismatchThrew });
+  // ── Premerge verification path: a bound lifecycle marker chain, the record
+  // comment, the two verdict statuses, and the delivery floor — hydrated via
+  // deriveLiveIssueEvidence exactly as the live path does.
   const base = makeInput();
   const planBody = 'frozen reviewed plan';
-  const ownership = {
-    kind: 'ownership',
-    v: 1,
-    headOid: HEAD_SHA,
-    issue: LOOP_ISSUE,
-    issueBodyHash: ISSUE_BODY_HASH,
-    claimCommitOid: CLAIM_SHA,
-    frozenPlanHash: sha256(planBody),
-    frozenPlanCommentId: 'IC_kwDOAutoloop7',
-    frozenPlanAuthor: LOOP_LOGIN,
-  };
-  const gate = {
-    kind: 'gate',
-    v: 1,
-    headOid: HEAD_SHA,
-    commandHash: '6'.repeat(64),
-    configHash: '7'.repeat(64),
-    repositoryFingerprint: '8'.repeat(64),
-  };
   const reviewSummaryValue =
     `Authenticated review convergence: REVIEW_CLEAN; round 2; receipt ${'2'.repeat(64)}.`;
-  const gateSummaryValue = serializeAttestation(gate);
-  const lifecycleMarker = {
+  const gateSummaryValue = 'gate verdict summary';
+  const deliveryFingerprint = sha256('delivery evidence fingerprint');
+  const readyMarker = {
     v: 1,
     issue: LOOP_ISSUE,
     issueBodyHash: ISSUE_BODY_HASH,
-    planHash: ownership.frozenPlanHash,
+    planHash: sha256(planBody),
     branch: base.headRefName,
     plannedBaseOid: BASE_SHA,
     selector: 'native',
@@ -2587,179 +2269,76 @@ function statusStampCases() {
     phase: 'ready-head',
     claimCommit: CLAIM_SHA,
     pr: 138,
+    epoch: 1,
+    planCommentId: 'IC_kwDOAutoloop7',
     headOid: HEAD_SHA,
   };
-  const lifecycleBody = serializeLifecycleMarker(lifecycleMarker);
-  const ciPolicySource = canonicalCiPolicy(REQUIRED_CI_CHECKS);
-  const ciPolicy = {
-    complete: true,
-    source: ciPolicySource,
-    sourceHash: sha256(ciPolicySource),
-    requiredChecks: [...REQUIRED_CI_CHECKS],
-  };
-  const componentCheckRuns = makeCheckRuns().map((check, index) => ({
-    ...check,
-    id: 100 + index,
-    output: {
-      summary:
-        check.name === 'agentic/review'
-          ? reviewSummaryValue
-          : check.name === 'agentic/gate'
-            ? gateSummaryValue
-            : 'verified',
-    },
-  }));
-  const reviewCheck = componentCheckRuns.find((check) => check.name === 'agentic/review');
-  const gateCheck = componentCheckRuns.find((check) => check.name === 'agentic/gate');
-  const deliveryEvidence = {
-    schemaVersion: 1,
-    source: 'github-rest',
-    repository: 'autoloop/fixture',
+  const record = createPremergeRecord({
+    issue: LOOP_ISSUE,
     pullRequest: 138,
-    remoteHead: HEAD_SHA,
-    baseRefName: 'main',
-    requiredChecks: [],
-    checks: componentCheckRuns.map((checkRun) => ({
-      id: checkRun.id,
-      name: checkRun.name,
-      headOid: checkRun.head_sha,
-      status: checkRun.status.toUpperCase(),
-      conclusion: checkRun.conclusion.toUpperCase(),
-      appId: checkRun.app.id,
-    })),
+    headOid: HEAD_SHA,
+    run: { intentHash: readyMarker.runIntentHash, receiptFingerprint: '2'.repeat(64) },
+    plan: { commentId: readyMarker.planCommentId, contentHash: readyMarker.planHash },
+    review: { summaryHash: sha256(reviewSummaryValue) },
+    gate: { summaryHash: sha256(gateSummaryValue) },
+    // The finalizer seals the triggered-floor observation fingerprint here.
+    ci: { evidenceHash: deliveryFingerprint },
+    lifecycle: { commentId: 'IC_lifecycle', identityHash: lifecycleIdentityHash(readyMarker) },
+  });
+  const boundMarker = {
+    ...readyMarker,
+    phase: 'premerge-record',
+    premergeRecord: record.recordId,
+    premergeRecordHash: premergeRecordHash(record),
+    premergeRecordCommentId: 'IC_premerge',
   };
-  const deliveryEvidenceFingerprint = sha256(stableJson(deliveryEvidence));
+  const lifecycleBody = serializeLifecycleMarker(boundMarker);
   const delivery = {
     state: 'delivered',
-    code: 'NO_REQUIRED_CI',
+    code: 'CI_GREEN',
     canMarkDelivered: true,
     headOid: HEAD_SHA,
-    requirementsPolicy: {
-      sourceFingerprint: ciPolicy.sourceHash,
-    },
     liveEvidence: {
-      ...deliveryEvidence,
+      schemaVersion: 2,
+      source: 'github-rest',
+      repository: REPO_SLUG,
+      pullRequest: 138,
+      remoteHead: HEAD_SHA,
+      baseRefName: BASE_BRANCH,
+      draft: false,
+      checks: [],
+      statuses: [],
       provenance: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         source: 'github-rest',
-        repository: deliveryEvidence.repository,
-        pullRequest: deliveryEvidence.pullRequest,
-        evidenceFingerprint: deliveryEvidenceFingerprint,
+        repository: REPO_SLUG,
+        pullRequest: 138,
+        evidenceFingerprint: deliveryFingerprint,
       },
     },
   };
-  const premerge = createPremergeRecord({
-    issue: LOOP_ISSUE,
-    pullRequest: 138,
-    headOid: HEAD_SHA,
-    run: {
-      intentHash: lifecycleMarker.runIntentHash,
-      receiptFingerprint: '2'.repeat(64),
-    },
-    plan: {
-      commentId: ownership.frozenPlanCommentId,
-      contentHash: ownership.frozenPlanHash,
-    },
-    review: {
-      checkRunId: reviewCheck.id,
-      summaryHash: sha256(reviewSummaryValue),
-    },
-    gate: {
-      checkRunId: gateCheck.id,
-      summaryHash: sha256(gateSummaryValue),
-    },
-    ci: {
-      policyHash: ciPolicy.sourceHash,
-      evidenceHash: deliveryEvidenceFingerprint,
-    },
-    lifecycle: {
-      commentId: 'IC_lifecycle',
-      identityHash: lifecycleIdentityHash(lifecycleMarker),
-    },
-  });
-  const policy = {
-    kind: 'policy',
-    v: 1,
-    headOid: HEAD_SHA,
-    issue: LOOP_ISSUE,
-    pullRequest: 138,
-    delivered: true,
-    premergeRecordId: premerge.recordId,
-    premergeRecordHash: premergeRecordHash(premerge),
-    premergeRecordAuthor: LOOP_LOGIN,
-  };
-  const authorization = {
-    kind: 'human-authorization',
-    v: 1,
-    headOid: HEAD_SHA,
-    pullRequest: 138,
-    actor: TRUSTED_HUMAN_LOGINS[0],
-    label: SAFE_LABELS[0],
-    labelEventId: 12001,
-    labeledAt: '2026-07-24T00:03:00Z',
+  const publicationStatuses = {
+    complete: true,
+    items: [
+      buildCommitStatus('gate', HEAD_SHA, record.gate.summaryHash),
+      buildCommitStatus('review', HEAD_SHA, record.review.summaryHash),
+    ],
   };
   const commitMetadata = [
-    {
-      oid: CLAIM_SHA,
-      message: `chore: claim #${LOOP_ISSUE}`,
-      parentOids: [BASE_SHA],
-    },
-    {
-      oid: HEAD_SHA,
-      message: 'feat: implement safe change',
-      parentOids: [CLAIM_SHA],
-    },
+    { oid: CLAIM_SHA, message: `chore: claim #${LOOP_ISSUE}`, parentOids: [BASE_SHA] },
+    { oid: HEAD_SHA, message: 'feat: implement safe change', parentOids: [CLAIM_SHA] },
   ];
-  const evidence = deriveAttestedEvidence({
-    ...base,
-    checkRuns: [
-      ...componentCheckRuns.map((check) => {
-        if (check.name === 'agentic/ownership') {
-          return { ...check, output: { summary: serializeAttestation(ownership) } };
-        }
-        if (check.name === 'agentic/policy') {
-          return { ...check, output: { summary: serializeAttestation(policy) } };
-        }
-        if (check.name === 'agentic/gate') {
-          return { ...check, output: { summary: serializeAttestation(gate) } };
-        }
-        return check;
-      }),
-      {
-        name: 'agentic/human-authorization',
-        status: 'completed',
-        conclusion: 'success',
-        head_sha: HEAD_SHA,
-        app: { id: TRUSTED_AUTHORIZATION_APP_IDS[0], slug: 'autoloop-auth' },
-        output: { summary: serializeAttestation(authorization) },
-      },
+  const comments = {
+    complete: true,
+    items: [
+      { id: 'IC_kwDOAutoloop7', author: { login: LOOP_LOGIN }, body: planBody, neverEdited: true },
+      { id: 'IC_lifecycle', author: { login: LOOP_LOGIN }, body: lifecycleBody, neverEdited: true },
+      { id: 'IC_premerge', author: { login: LOOP_LOGIN }, body: serializePremergeRecord(record), neverEdited: true },
     ],
-  }, commitMetadata);
+  };
   const policyLiveInput = {
     issue: { number: LOOP_ISSUE, labels: [] },
-    comments: {
-      complete: true,
-      items: [
-        {
-          id: ownership.frozenPlanCommentId,
-          author: { login: LOOP_LOGIN },
-          body: planBody,
-        },
-        {
-          id: premerge.lifecycle.commentId,
-          author: { login: LOOP_LOGIN },
-          body: lifecycleBody,
-          neverEdited: true,
-        },
-        {
-          id: 'IC_premerge',
-          author: { login: LOOP_LOGIN },
-          body: serializePremergeRecord(premerge),
-          neverEdited: true,
-        },
-      ],
-    },
-    policyAttestation: evidence.policyAttestation,
+    comments,
     policyLiveComplete: true,
     pullRequest: {
       number: 138,
@@ -2768,90 +2347,100 @@ function statusStampCases() {
       body: base.body,
       merged: false,
       mergeOid: null,
+      baseOid: BASE_SHA,
     },
-    checkRuns: { complete: true, items: componentCheckRuns },
-    ciPolicy,
+    commitMetadata,
+    statuses: publicationStatuses,
     delivery,
     loopLogin: LOOP_LOGIN,
   };
-  const hydratedLifecycle = deriveLiveIssueEvidence(policyLiveInput).lifecycle;
-  const nonexistentComponentLifecycle = deriveLiveIssueEvidence({
+  const hydrated = deriveLiveIssueEvidence(policyLiveInput);
+  cases.push({
+    name: 'a bound marker chain hydrates ownership, premerge record, and gate evidence',
+    ok:
+      hydrated.ownership?.claimCommitAncestor === true
+      && hydrated.ownership?.claimCommit?.commits?.[0]?.message === `chore: claim #${LOOP_ISSUE}`
+      && hydrated.ownership?.claimCommit?.baseOid === BASE_SHA
+      && hydrated.ownership?.claimCommit?.headOid === HEAD_SHA
+      && hydrated.ownership?.frozenPlanCommentVerified === true
+      && hydrated.lifecycle?.complete === true
+      && hydrated.lifecycle?.premergeRecord === true
+      && hydrated.lifecycle?.premergeRecordId === record.recordId
+      && hydrated.gateEvidenceVerified === true,
+  });
+  const missingReviewStatus = deriveLiveIssueEvidence({
     ...policyLiveInput,
-    checkRuns: {
+    statuses: {
       complete: true,
-      items: componentCheckRuns.filter((checkRun) => checkRun.id !== reviewCheck.id),
+      items: publicationStatuses.items.filter((status) => status.context !== 'agentic/review'),
     },
-  }).lifecycle;
+  });
   cases.push({
-    name: 'trusted exact-head attestations require live premerge hydration',
+    name: 'a missing verdict status fails premerge verification',
     ok:
-      evidence.ownership?.claimCommitAncestor === true
-      && evidence.ownership?.claimCommit?.commits?.[0]?.message
-        === `chore: claim #${LOOP_ISSUE}`
-      && evidence.ownership?.claimCommit?.baseOid === BASE_SHA
-      && evidence.ownership?.claimCommit?.headOid === HEAD_SHA
-      && evidence.ownership?.frozenPlanCommentId === ownership.frozenPlanCommentId
-      && evidence.lifecycle === null
-      && evidence.policyAttestation?.premergeRecordId === premerge.recordId
-      && hydratedLifecycle?.premergeRecord === true
-      && evidence.gateEvidenceVerified === true
-      && evidence.authorization?.pullRequest === 138
-      && evidence.authorization?.actor === TRUSTED_HUMAN_LOGINS[0]
-      && evidence.serverPolicy === null,
+      missingReviewStatus.lifecycle?.complete === true
+      && missingReviewStatus.lifecycle.premergeRecord === false,
+  });
+  const tamperedGateStatus = deriveLiveIssueEvidence({
+    ...policyLiveInput,
+    statuses: {
+      complete: true,
+      items: [
+        buildCommitStatus('gate', HEAD_SHA, sha256('a different gate summary')),
+        buildCommitStatus('review', HEAD_SHA, record.review.summaryHash),
+      ],
+    },
   });
   cases.push({
-    name: 'live hydration rejects canonical records with nonexistent component IDs',
+    name: 'a verdict status not matching the record summary hash fails closed',
     ok:
-      nonexistentComponentLifecycle?.complete === true
-      && nonexistentComponentLifecycle.premergeRecord === false,
+      tamperedGateStatus.lifecycle?.premergeRecord === false
+      && tamperedGateStatus.gateEvidenceVerified === false,
   });
-  const legacyPolicy = deriveAttestedEvidence({
-    ...base,
-    checkRuns: [{
-      name: 'agentic/policy',
-      status: 'completed',
-      conclusion: 'success',
-      head_sha: HEAD_SHA,
-      output: {
-        summary: `<!-- autoloop-attestation-v1
-{"delivered":true,"headOid":"${HEAD_SHA}","issue":${LOOP_ISSUE},"kind":"policy","premergeRecord":"does-not-exist","v":1}
--->`,
-      },
-    }],
-  }, commitMetadata);
-  cases.push({
-    name: 'caller record strings never hydrate lifecycle truth',
-    ok: legacyPolicy.policyAttestation === null && legacyPolicy.lifecycle === null,
+  const missingRecordComment = deriveLiveIssueEvidence({
+    ...policyLiveInput,
+    comments: {
+      complete: true,
+      items: comments.items.filter((comment) => comment.id !== 'IC_premerge'),
+    },
   });
-  const staleEvidence = deriveAttestedEvidence({
-    ...base,
-    checkRuns: [{
-      name: 'agentic/ownership',
-      status: 'completed',
-      conclusion: 'success',
-      head_sha: HEAD_SHA,
-      output: { summary: serializeAttestation({ ...ownership, headOid: 'e'.repeat(40) }) },
-    }],
-  }, commitMetadata);
   cases.push({
-    name: 'stale attestation cannot hydrate ownership',
-    ok: staleEvidence.ownership === null,
+    name: 'a marker bound to an absent record comment cannot hydrate lifecycle truth',
+    ok:
+      missingRecordComment.lifecycle?.complete === true
+      && missingRecordComment.lifecycle.premergeRecord === false,
   });
-  const staleGateEvidence = deriveAttestedEvidence({
-    ...base,
-    checkRuns: [{
-      name: 'agentic/gate',
-      status: 'completed',
-      conclusion: 'success',
-      head_sha: HEAD_SHA,
-      output: {
-        summary: serializeAttestation({ ...gate, headOid: 'f'.repeat(40) }),
-      },
-    }],
-  }, commitMetadata);
+  const staleMarker = deriveLiveIssueEvidence({
+    ...policyLiveInput,
+    pullRequest: { ...policyLiveInput.pullRequest, headOid: 'f'.repeat(40) },
+  });
   cases.push({
-    name: 'stale typed gate evidence cannot authorize merge',
-    ok: staleGateEvidence.gateEvidenceVerified === false,
+    name: 'a marker for a stale head hydrates neither ownership nor lifecycle',
+    ok: staleMarker.ownership === null && staleMarker.lifecycle === null,
+  });
+  const foreignMarker = deriveLiveIssueEvidence({
+    ...policyLiveInput,
+    comments: {
+      complete: true,
+      items: comments.items.map((comment) =>
+        comment.id === 'IC_lifecycle' ? { ...comment, author: { login: 'someone-else' } } : comment),
+    },
+  });
+  cases.push({
+    name: 'a non-loop-authored marker chain cannot hydrate delivery evidence',
+    ok: foreignMarker.ownership === null && foreignMarker.lifecycle === null,
+  });
+  const editedMarker = deriveLiveIssueEvidence({
+    ...policyLiveInput,
+    comments: {
+      complete: true,
+      items: comments.items.map((comment) =>
+        comment.id === 'IC_lifecycle' ? { ...comment, neverEdited: false } : comment),
+    },
+  });
+  cases.push({
+    name: 'an edited marker root cannot hydrate delivery evidence',
+    ok: editedMarker.ownership === null && editedMarker.lifecycle === null,
   });
   return cases;
 }
@@ -2957,15 +2546,46 @@ function restPaginationCases() {
 }
 
 function liveEvidenceCases() {
-  const ownership = {
-    complete: true,
+  // A finalized (bound) marker is the live source of ownership facts; the
+  // record identity here is a placeholder — these cases exercise linked-issue
+  // and frozen-plan hydration, not premerge verification.
+  const liveMarker = (planHash) => ({
+    v: 1,
+    issue: LOOP_ISSUE,
     issueBodyHash: ISSUE_BODY_HASH,
-    claimCommitAncestor: true,
-    frozenPlanPresent: true,
-    frozenPlanHash: FROZEN_PLAN_HASH,
-    frozenPlanCommentId: 'IC_kwDOAutoloop7',
-    frozenPlanAuthor: LOOP_LOGIN,
-  };
+    planHash,
+    branch: `feat/gh-${LOOP_ISSUE}-safe-change`,
+    plannedBaseOid: BASE_SHA,
+    selector: 'native',
+    runIntentHash: '1'.repeat(64),
+    intentSource: 'invocation',
+    mergePolicy: 'ratified',
+    phase: 'premerge-record',
+    claimCommit: CLAIM_SHA,
+    pr: 138,
+    epoch: 1,
+    planCommentId: 'IC_kwDOAutoloop7',
+    headOid: HEAD_SHA,
+    premergeRecord: `pmr_${'9'.repeat(64)}`,
+    premergeRecordHash: '8'.repeat(64),
+    premergeRecordCommentId: 'IC_premerge',
+  });
+  const liveComments = (planHash, planBody) => ({
+    complete: true,
+    items: [
+      {
+        id: 'IC_kwDOAutoloop7',
+        author: { login: LOOP_LOGIN },
+        body: planBody,
+      },
+      {
+        id: 'IC_live_marker',
+        author: { login: LOOP_LOGIN },
+        body: serializeLifecycleMarker(liveMarker(planHash)),
+        neverEdited: true,
+      },
+    ],
+  });
   const issueInput = {
     issue: {
       complete: true,
@@ -2987,14 +2607,7 @@ function liveEvidenceCases() {
         created_at: '2026-07-24T00:02:00Z',
       }],
     },
-    comments: {
-      complete: true,
-      items: [{
-        id: ownership.frozenPlanCommentId,
-        author: { login: LOOP_LOGIN },
-        body: 'frozen plan',
-      }],
-    },
+    comments: liveComments(sha256('frozen plan'), 'frozen plan'),
     dependencies: {
       complete: true,
       items: [{ number: 6, state: 'CLOSED' }],
@@ -3004,10 +2617,19 @@ function liveEvidenceCases() {
       login: 'maintainer',
       roleName: 'maintain',
     },
-    ownership: {
-      ...ownership,
-      frozenPlanHash: sha256('frozen plan'),
+    pullRequest: {
+      number: 138,
+      headOid: HEAD_SHA,
+      headRefName: `feat/gh-${LOOP_ISSUE}-safe-change`,
+      body: `Closes #${LOOP_ISSUE}`,
+      merged: false,
+      mergeOid: null,
+      baseOid: BASE_SHA,
     },
+    commitMetadata: [
+      { oid: CLAIM_SHA, message: `chore: claim #${LOOP_ISSUE}`, parentOids: [BASE_SHA] },
+      { oid: HEAD_SHA, message: 'feat: implement safe change', parentOids: [CLAIM_SHA] },
+    ],
     loopLogin: LOOP_LOGIN,
   };
   const issueEvidence = deriveLiveIssueEvidence(issueInput);
@@ -3027,31 +2649,22 @@ function liveEvidenceCases() {
   });
   const deletedPlan = deriveLiveIssueEvidence({
     ...issueInput,
-    comments: { complete: true, items: [] },
+    comments: {
+      complete: true,
+      items: issueInput.comments.items.filter((comment) => comment.id !== 'IC_kwDOAutoloop7'),
+    },
   });
   const editedPlan = deriveLiveIssueEvidence({
     ...issueInput,
     comments: {
       complete: true,
-      items: [{
-        ...issueInput.comments.items[0],
-        body: 'edited frozen plan',
-      }],
+      items: issueInput.comments.items.map((comment) =>
+        comment.id === 'IC_kwDOAutoloop7' ? { ...comment, body: 'edited frozen plan' } : comment),
     },
   });
   const emptyPlan = deriveLiveIssueEvidence({
     ...issueInput,
-    comments: {
-      complete: true,
-      items: [{
-        ...issueInput.comments.items[0],
-        body: '',
-      }],
-    },
-    ownership: {
-      ...issueInput.ownership,
-      frozenPlanHash: sha256(''),
-    },
+    comments: liveComments(sha256(''), ''),
   });
   const incompleteTimeline = deriveLiveIssueEvidence({
     ...issueInput,
@@ -3066,13 +2679,6 @@ function liveEvidenceCases() {
     label: SAFE_LABELS[0],
     labelEventId: 12001,
     labeledAt: '2026-07-24T00:03:00Z',
-    check: {
-      name: 'agentic/human-authorization',
-      headOid: HEAD_SHA,
-      status: 'COMPLETED',
-      conclusion: 'SUCCESS',
-      app: { id: TRUSTED_AUTHORIZATION_APP_IDS[0] },
-    },
   };
   const authorizationInput = {
     authorization,
@@ -3149,95 +2755,6 @@ function liveEvidenceCases() {
     },
   });
 
-  const branchProtection = {
-    required_status_checks: {
-      strict: true,
-      contexts: requiredCheckContracts().map(({ name }) => name),
-      checks: requiredCheckContracts().map(({ name, appIds }) => ({
-        context: name,
-        app_id: appIds[0],
-      })),
-    },
-    enforce_admins: { enabled: true },
-    required_pull_request_reviews: {
-      dismiss_stale_reviews: true,
-      require_code_owner_reviews: false,
-      required_approving_review_count: 1,
-      require_last_push_approval: true,
-      bypass_pull_request_allowances: { users: [], teams: [], apps: [] },
-    },
-    required_conversation_resolution: { enabled: true },
-    allow_force_pushes: { enabled: false },
-    allow_deletions: { enabled: false },
-  };
-  const policyInput = {
-    branchProtection: { complete: true, value: branchProtection },
-    branchRules: { complete: true, items: [] },
-    rulesets: { complete: true, items: [] },
-  };
-  const livePolicy = deriveLiveServerPolicy(policyInput);
-  const unpinnedPolicy = deriveLiveServerPolicy({
-    ...policyInput,
-    branchProtection: {
-      complete: true,
-      value: {
-        ...branchProtection,
-        required_status_checks: {
-          ...branchProtection.required_status_checks,
-          checks: branchProtection.required_status_checks.checks.map((check, index) =>
-            index === 0 ? { ...check, app_id: null } : check),
-        },
-      },
-    },
-  });
-  const mismatchedCheckContexts = deriveLiveServerPolicy({
-    ...policyInput,
-    branchProtection: {
-      complete: true,
-      value: {
-        ...branchProtection,
-        required_status_checks: {
-          ...branchProtection.required_status_checks,
-          checks: branchProtection.required_status_checks.checks.map((check, index) =>
-            index === 0
-              ? { ...check, context: branchProtection.required_status_checks.checks[1].context }
-              : check),
-        },
-      },
-    },
-  });
-  const bypassRule = {
-    type: 'pull_request',
-    ruleset_id: 99,
-    parameters: {
-      dismiss_stale_reviews_on_push: true,
-      require_code_owner_review: false,
-      require_last_push_approval: true,
-      required_approving_review_count: 1,
-      required_review_thread_resolution: true,
-    },
-  };
-  const bypassPolicy = deriveLiveServerPolicy({
-    ...policyInput,
-    branchRules: { complete: true, items: [bypassRule] },
-    rulesets: {
-      complete: true,
-      items: [{
-        id: 99,
-        enforcement: 'active',
-        bypass_actors: [{ actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' }],
-      }],
-    },
-  });
-  const hiddenBypassPolicy = deriveLiveServerPolicy({
-    ...policyInput,
-    branchRules: { complete: true, items: [bypassRule] },
-    rulesets: {
-      complete: true,
-      items: [{ id: 99, enforcement: 'active' }],
-    },
-  });
-
   return [
     {
       name: 'live issue provenance, dependencies, and frozen plan hydrate completely',
@@ -3292,45 +2809,22 @@ function liveEvidenceCases() {
       name: 'label removal and loop re-add cannot reuse human authorization',
       ok: relabeledByLoop.eventVerified === false,
     },
-    // The live-policy derivation is consulted only in non-solo mode, and its
-    // pinned-policy expectation needs the App pins a solo fill cannot have.
-    ...(SOLO_OPERATOR ? [] : [{
-      name: 'API-shaped live branch protection derives strict pinned policy',
-      ok:
-        livePolicy.complete === true
-        && livePolicy.strict === true
-        && livePolicy.requiredChecks.length === requiredCheckContracts().length,
-    }]),
-    {
-      name: 'un-pinned live required check makes server policy incomplete',
-      ok: unpinnedPolicy.complete === false,
-    },
-    {
-      name: 'mismatched live required-check contexts make server policy incomplete',
-      ok: mismatchedCheckContexts.complete === false,
-    },
-    {
-      name: 'applicable ruleset bypass allowance is detected',
-      ok: bypassPolicy.actorCanBypass === true,
-    },
-    {
-      name: 'hidden applicable ruleset bypass actors make policy incomplete',
-      ok: hiddenBypassPolicy.complete === false,
-    },
   ];
 }
 
-// The solo relaxations live in merge-authorization-contract.mjs and are fully
+// Solo semantics live in merge-authorization-contract.mjs and are fully
 // fixture-proven there; the engine's whole solo responsibility is transcribing
-// the vendored SOLO_OPERATOR constant into the gate config, and deriving its
-// own fixtures so `--self-test` stays meaningful for a filled solo config.
+// the vendored SOLO_OPERATOR constant into the gate config and refusing the
+// retired non-solo shape.
 function soloTranscriptionCases() {
-  const input = makeInput();
-  const { config } = mergeAuthorizationInput(input, ALLOW_ALL ? 'all-green' : 'A');
   // Contract lint deliberately skips auto-merge.* (fixture prose would trip its
   // patterns), so the file polices its own header: the enablement claim must
   // state the acknowledgement conditional, never an unconditional refusal.
   const header = readFileSync(fileURLToPath(import.meta.url), 'utf8').slice(0, 2200);
+  const nonSolo = authorizeMerge({
+    config: engineConfig({ soloOperator: false }),
+    pr: makeInput(),
+  });
   return [
     {
       name: 'header states the acknowledged enablement conditional',
@@ -3340,17 +2834,12 @@ function soloTranscriptionCases() {
     },
     {
       name: 'gate config transcribes SOLO_OPERATOR from the repo block',
-      ok: config.soloOperator === SOLO_OPERATOR,
+      ok: engineConfig().soloOperator === SOLO_OPERATOR,
     },
     {
-      name: 'fixture evidence derives from the solo shape of the config block',
-      ok: SOLO_OPERATOR
-        ? input.serverPolicy === undefined
-          && input.reviewDecision === null
-          && input.authorization.check === undefined
-        : input.serverPolicy?.complete === true
-          && input.reviewDecision === 'APPROVED'
-          && input.authorization.check?.name === 'agentic/human-authorization',
+      name: 'non-solo authorization is a typed refusal naming the spec',
+      ok: nonSolo.allow === false
+        && nonSolo.reasons.some((reason) => reason.includes('docs/specs/simple-delivery.md')),
     },
   ];
 }
@@ -3374,6 +2863,9 @@ function selfTest() {
     let confirmCalls = 0;
     const result = run(fixture.input, {
       dryRun: fixture.dryRun === true,
+      // authorizeMerge accepts only the solo shape, so fixtures run under the
+      // solo override unless the fixture pins a config of its own.
+      config: fixture.config ?? SELF_TEST_CONFIG,
       mergeExecutor: (args) => {
         calls.push({ ...args });
         if (fixture.mergeBehavior === 'cas409') throw Object.assign(new Error('head changed before merge'), { status: 409 });

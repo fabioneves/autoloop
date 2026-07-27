@@ -1,15 +1,13 @@
 #!/usr/bin/env node
+// Solo-only merge authorization. The one supported configuration is a single
+// PAT-authenticated operator whose login IS the loop login; every non-solo
+// mode is a typed refusal (docs/specs/simple-delivery.md). CI protection is
+// the triggered-checks floor plus the two SHA-bound verdict statuses — there
+// is no required-check list, no App pinning, and no server-policy comparison.
 
-import { readFileSync, realpathSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { validPremergeRecordId } from './attestation-contract.mjs';
-
-export const REQUIRED_ATTESTATIONS = [
-  'agentic/gate',
-  'agentic/review',
-  'agentic/ownership',
-  'agentic/policy',
-];
 
 const SHA_RE = /^[0-9a-f]{40}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/i;
@@ -25,145 +23,64 @@ const HARD_LABELS = new Set([
   'needs-secret',
 ]);
 const TRUSTED_ROLES = new Set(['admin', 'maintain', 'write']);
-
-function validAppIdList(appIds) {
-  return (
-    Array.isArray(appIds)
-    && new Set(appIds).size === appIds.length
-    && appIds.every((id) => Number.isSafeInteger(id) && id > 0)
-  );
-}
-
-function validAppIds(appIds) {
-  return validAppIdList(appIds) && appIds.length > 0;
-}
+const GREEN_CONCLUSIONS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
+// The two verdict statuses the finalizer posts (success-only; absence is the
+// failure signal). Presence + success is this layer's requirement; the
+// byte-exact description-vs-record comparison happens in the premerge-record
+// verification path (authorizePolicyPublication), not here.
+const REQUIRED_VERDICT_STATUSES = ['agentic/gate', 'agentic/review'];
 
 function validTimestamp(value) {
   return typeof value === 'string' && Number.isFinite(Date.parse(value));
 }
 
-function requiredCheckMap(checks, reasons, path, allowUnpinned = false) {
-  const map = new Map();
-  if (!Array.isArray(checks)) {
-    reasons.push(`${path} is missing or invalid`);
-    return map;
-  }
-  for (const check of checks) {
-    if (
-      typeof check?.name !== 'string'
-      || check.name.length === 0
-      || !Array.isArray(check.appIds)
-      || (!allowUnpinned && check.appIds.length === 0)
-      || check.appIds.some((id) => !Number.isInteger(id) || id < 1)
-    ) {
-      reasons.push(`${path} contains an invalid check contract`);
-      continue;
-    }
-    if (map.has(check.name)) reasons.push(`${path} contains duplicate context ${check.name}`);
-    map.set(check.name, new Set(check.appIds));
-  }
-  return map;
-}
-
-function validateServerPolicy(config, serverPolicy, configuredChecks, currentChecks, reasons) {
-  if (serverPolicy?.complete !== true) {
-    reasons.push('server policy evidence is incomplete');
-    return;
-  }
-  if (serverPolicy.source !== 'live') reasons.push('server policy was not derived from live GitHub state');
-  if (serverPolicy.rulesetsComplete !== true) reasons.push('applicable ruleset evidence is incomplete');
-  if (serverPolicy.bypassActorsVisible !== true) reasons.push('ruleset bypass actors are hidden or incomplete');
-  if (config.baseFreshnessStrategy !== 'direct-strict') {
-    reasons.push('merge queue is disabled until merge_group producers and durable recovery exist');
-  }
-  if (serverPolicy.strategy !== config.baseFreshnessStrategy) {
-    reasons.push('server base-freshness strategy does not match policy');
-  }
-  if (serverPolicy.strategy !== 'direct-strict') reasons.push('server policy is not direct-strict');
-  if (serverPolicy.actorCanBypass !== false) reasons.push('merge actor can bypass server policy');
-  if (serverPolicy.enforceAdmins !== true) reasons.push('server policy does not enforce administrators');
-  if (serverPolicy.requiredConversationResolution !== true) {
-    reasons.push('server policy does not require conversation resolution');
-  }
-  if (
-    !Number.isInteger(serverPolicy.requiredApprovingReviewCount)
-    || serverPolicy.requiredApprovingReviewCount < config.requiredApprovingReviewCount
-  ) {
-    reasons.push('server approving-review count is weaker than configured');
-  }
-  if (config.requireCodeOwnerReviews === true && serverPolicy.requireCodeOwnerReviews !== true) {
-    reasons.push('server policy does not require configured code-owner review');
-  }
-  if (serverPolicy.dismissStaleReviews !== true) reasons.push('server policy does not dismiss stale reviews');
-  if (serverPolicy.requireLastPushApproval !== true) {
-    reasons.push('server policy does not require approval after the latest push');
-  }
-  if (serverPolicy.forcePushesAllowed !== false) reasons.push('server policy allows force pushes');
-  if (serverPolicy.deletionsAllowed !== false) reasons.push('server policy allows base deletion');
-  if (serverPolicy.queueRequired !== false) reasons.push('server policy requires unsupported merge-queue execution');
-
-  const enforced = requiredCheckMap(serverPolicy.requiredChecks, reasons, 'serverPolicy.requiredChecks');
-  for (const [name, appIds] of configuredChecks) {
-    const serverAppIds = enforced.get(name);
-    if (!serverAppIds || [...serverAppIds].some((id) => !appIds.has(id))) {
-      reasons.push(`server policy does not pin required check ${name} to an approved producer`);
-      continue;
-    }
-    const matchingChecks = Array.isArray(currentChecks)
-      ? currentChecks.filter((check) => check?.name === name)
-      : [];
-    if (matchingChecks.length === 1 && !serverAppIds.has(matchingChecks[0]?.app?.id)) {
-      reasons.push(`current CheckRun ${name} producer does not match the live server pin`);
-    }
-  }
-
-  if (serverPolicy.strict !== true) reasons.push('direct merge does not require the branch to be up to date');
-}
-
-function validateChecks(pr, configuredChecks, reasons) {
+// The triggered-checks floor plus verdict statuses: every check run AND every
+// commit status on the exact head must be green — an agentic-named CheckRun,
+// if one ever appears, is just another triggered check.
+function validateChecks(pr, reasons) {
   if (pr.checksComplete !== true || !Array.isArray(pr.checks)) {
     reasons.push('check evidence is incomplete');
+  } else {
+    for (const check of pr.checks) {
+      if (check?.headOid !== pr.headRefOid) continue;
+      const status = String(check.status ?? '').toUpperCase();
+      const conclusion = String(check.conclusion ?? '').toUpperCase();
+      if (status !== 'COMPLETED') reasons.push(`triggered CheckRun ${check?.name ?? 'unknown'} is not completed`);
+      else if (!GREEN_CONCLUSIONS.has(conclusion)) {
+        reasons.push(`triggered CheckRun ${check?.name ?? 'unknown'} is not green`);
+      }
+    }
+  }
+  const statuses = pr.statuses;
+  if (statuses?.complete !== true || !Array.isArray(statuses.items)) {
+    reasons.push('commit status evidence is incomplete');
     return;
   }
-  for (const [name, appIds] of configuredChecks) {
-    const matching = pr.checks.filter((check) => check?.name === name);
-    if (matching.length !== 1) {
-      reasons.push(`required CheckRun ${name} count is ${matching.length}, expected 1`);
-      continue;
+  const byContext = new Map();
+  for (const status of statuses.items) {
+    if (
+      typeof status?.context !== 'string'
+      || status.context.length === 0
+      || byContext.has(status.context)
+    ) {
+      reasons.push('commit status evidence is malformed or ambiguous');
+      return;
     }
-    const check = matching[0];
-    if (check.headOid !== pr.headRefOid) reasons.push(`required CheckRun ${name} is not on the current head`);
-    if (String(check.status ?? '').toUpperCase() !== 'COMPLETED') {
-      reasons.push(`required CheckRun ${name} is not completed`);
-    }
-    if (String(check.conclusion ?? '').toUpperCase() !== 'SUCCESS') {
-      reasons.push(`required CheckRun ${name} is not successful`);
-    }
-    // An empty pin set exists only under solo mode, where requiredCheckMap accepted
-    // the unpinned contract: name + exact head + success is the whole producer claim.
-    if (appIds.size > 0 && !appIds.has(check.app?.id)) {
-      reasons.push(`required CheckRun ${name} has an unapproved producer`);
+    byContext.set(status.context, status);
+    // Latest state per context: pending blocks, failure/error blocks.
+    if (String(status.state ?? '').toLowerCase() !== 'success') {
+      reasons.push(`triggered status ${status.context} is not green`);
     }
   }
-  for (const check of pr.checks) {
-    if (check?.headOid !== pr.headRefOid) continue;
-    const status = String(check.status ?? '').toUpperCase();
-    const conclusion = String(check.conclusion ?? '').toUpperCase();
-    if (status !== 'COMPLETED') reasons.push(`triggered CheckRun ${check?.name ?? 'unknown'} is not completed`);
-    else if (!new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']).has(conclusion)) {
-      reasons.push(`triggered CheckRun ${check?.name ?? 'unknown'} is not green`);
-    }
-    if (
-      String(check?.name ?? '').startsWith('agentic/')
-      && check.name !== 'agentic/human-authorization'
-      && !configuredChecks.has(check.name)
-    ) {
-      reasons.push(`unconfigured agentic CheckRun present: ${check.name}`);
+  for (const context of REQUIRED_VERDICT_STATUSES) {
+    const status = byContext.get(context);
+    if (!status || String(status.state ?? '').toLowerCase() !== 'success') {
+      reasons.push(`verdict status ${context} is missing or not success`);
     }
   }
 }
 
-function validateLinkedIssue(config, pr, reasons, solo = false) {
+function validateLinkedIssue(config, pr, reasons) {
   const issue = pr.linkedIssue;
   if (issue?.complete !== true) reasons.push('linked issue evidence is incomplete');
   if (issue?.state !== 'OPEN') reasons.push('linked issue is not open');
@@ -186,9 +103,8 @@ function validateLinkedIssue(config, pr, reasons, solo = false) {
     || loopReady.eventId < 1
     || typeof loopReady.actor !== 'string'
     || loopReady.actor.length === 0
-    // Solo mode has one login for human and loop, so actor-vs-loop separation is
-    // unprovable; the event, role, and freshness requirements all remain.
-    || (!solo && loopReady.actor === config.loopLogin)
+    // Solo mode has one login for human and loop, so the actor may equal the
+    // loop login; the event, role, and freshness requirements all remain.
     || !TRUSTED_ROLES.has(loopReady.roleName)
     || !validTimestamp(loopReady.labeledAt)
     || !validTimestamp(editedAt)
@@ -221,6 +137,8 @@ function validateLinkedIssue(config, pr, reasons, solo = false) {
   }
 }
 
+// Ownership is derived from live git/PR data — claim ancestry, the frozen
+// plan comment, the issue-body identity — not from attestation files.
 function validateOwnership(config, pr, reasons) {
   const ownership = pr.ownership;
   if (ownership?.complete !== true) reasons.push('ownership evidence is incomplete');
@@ -281,7 +199,11 @@ function validateOwnership(config, pr, reasons) {
   }
 }
 
-function validateAuthorization(config, pr, reasons, solo = false) {
+// Path A evidence is the label event itself: verified event, current-head
+// ordering, and current actor permission. There is no App to publish a
+// dedicated authorization CheckRun, so the label-event proofs are the whole
+// Path-A evidence.
+function validateAuthorization(config, pr, reasons) {
   if (pr.path !== 'A') return;
   const authorization = pr.authorization;
   if (authorization?.complete !== true) {
@@ -291,7 +213,6 @@ function validateAuthorization(config, pr, reasons, solo = false) {
   if (
     !Array.isArray(config.trustedHumanLogins)
     || !config.trustedHumanLogins.includes(authorization.actor)
-    || (!solo && authorization.actor === config.loopLogin)
   ) {
     reasons.push('Path A authorization is not attributable to a trusted human');
   }
@@ -314,44 +235,25 @@ function validateAuthorization(config, pr, reasons, solo = false) {
       'Path A authorization label event, current-head ordering, or current actor permission is unverified',
     );
   }
-  // Without a GitHub App there is no one to publish the dedicated authorization
-  // CheckRun; solo mode keeps the label-event, head-binding, and ordering proofs
-  // above as the whole Path-A evidence.
-  if (solo) return;
-  const attestationIds = new Set(config.authorizationAppIds ?? []);
-  const check = authorization.check;
-  if (
-    check?.name !== 'agentic/human-authorization'
-    || check.headOid !== pr.headRefOid
-    || String(check.status ?? '').toUpperCase() !== 'COMPLETED'
-    || String(check.conclusion ?? '').toUpperCase() !== 'SUCCESS'
-    || !attestationIds.has(check.app?.id)
-  ) {
-    reasons.push('Path A authorization CheckRun is missing, stale, unsuccessful, or untrusted');
-  }
 }
 
 export function authorizeMerge(input) {
-  const reasons = [];
   const config = input?.config;
   const pr = input?.pr;
   if (!config || !pr) return { allow: false, reasons: ['merge authorization input is incomplete'] };
-  const solo = config.soloOperator === true;
-  // Solo mode is single-identity by definition: the one human IS the loop login.
-  // Naming anyone else means identity separation was available after all, so the
-  // relaxation would be unjustified — fail closed on that misconfiguration.
+  if (config.soloOperator !== true) {
+    return {
+      allow: false,
+      reasons: ['non-solo merge authorization is retired: docs/specs/simple-delivery.md'],
+    };
+  }
+  const reasons = [];
+  // Solo mode is single-identity by definition: the one human IS the loop
+  // login. Naming anyone else means identity separation was available after
+  // all — fail closed on that misconfiguration.
   const identityValid = Array.isArray(config.trustedHumanLogins)
-    && config.trustedHumanLogins.length > 0
-    && config.trustedHumanLogins.every((login) => typeof login === 'string' && login.length > 0)
-    && (solo
-      ? config.trustedHumanLogins.length === 1
-        && config.trustedHumanLogins[0] === config.loopLogin
-      : !config.trustedHumanLogins.includes(config.loopLogin));
-  const appIdsValid = solo
-    ? validAppIdList(config.automationAppIds) && validAppIdList(config.authorizationAppIds)
-    : validAppIds(config.automationAppIds) && validAppIds(config.authorizationAppIds);
-  const reviewCountValid = Number.isInteger(config.requiredApprovingReviewCount)
-    && config.requiredApprovingReviewCount >= (solo ? 0 : 1);
+    && config.trustedHumanLogins.length === 1
+    && config.trustedHumanLogins[0] === config.loopLogin;
   if (
     typeof config.repository?.owner !== 'string'
     || typeof config.repository?.name !== 'string'
@@ -360,26 +262,12 @@ export function authorizeMerge(input) {
     || config.baseFreshnessStrategy !== 'direct-strict'
     || typeof config.loopLogin !== 'string'
     || config.loopLogin.length === 0
-    || (config.soloOperator !== undefined && typeof config.soloOperator !== 'boolean')
     || !identityValid
-    || !appIdsValid
-    || !reviewCountValid
+    || !Number.isInteger(config.requiredApprovingReviewCount)
+    || config.requiredApprovingReviewCount < 0
     || typeof config.requireCodeOwnerReviews !== 'boolean'
   ) {
     reasons.push('merge authorization config is invalid');
-  }
-  const automationAppIds = new Set(config.automationAppIds ?? []);
-  const authorizationAppIds = new Set(config.authorizationAppIds ?? []);
-  if ([...automationAppIds].some((id) => authorizationAppIds.has(id))) {
-    reasons.push('automation and human-authorization App IDs overlap');
-  }
-  const configuredChecks = requiredCheckMap(config.requiredChecks, reasons, 'config.requiredChecks', solo);
-  for (const name of REQUIRED_ATTESTATIONS) {
-    const appIds = configuredChecks.get(name);
-    if (!appIds) reasons.push(`config is missing required attestation ${name}`);
-    else if ([...appIds].some((id) => !automationAppIds.has(id))) {
-      reasons.push(`required attestation ${name} is not restricted to automation producers`);
-    }
   }
 
   if (pr.complete !== true) reasons.push('PR evidence is incomplete');
@@ -400,14 +288,10 @@ export function authorizeMerge(input) {
       if (HARD_LABELS.has(label)) reasons.push(`hard-block label present: ${label}`);
     }
   }
-  // GitHub forbids approving one's own PR, so a solo repository can never reach
-  // APPROVED; an explicit request for changes still blocks in every mode.
-  if (solo) {
-    if (pr.reviewDecision === 'CHANGES_REQUESTED') {
-      reasons.push('current review decision requests changes');
-    }
-  } else if (pr.reviewDecision !== 'APPROVED') {
-    reasons.push('current review decision is not approved');
+  // GitHub forbids approving one's own PR, so a solo repository can never
+  // reach APPROVED; an explicit request for changes still blocks.
+  if (pr.reviewDecision === 'CHANGES_REQUESTED') {
+    reasons.push('current review decision requests changes');
   }
   if (!Array.isArray(pr.reviewRequests)) reasons.push('review-request evidence is missing');
   else if (pr.reviewRequests.length > 0) reasons.push('review requests remain pending');
@@ -420,7 +304,7 @@ export function authorizeMerge(input) {
   ) {
     reasons.push('loop ownership claim is invalid or mismatched');
   }
-  validateLinkedIssue(config, pr, reasons, solo);
+  validateLinkedIssue(config, pr, reasons);
   validateOwnership(config, pr, reasons);
 
   if (pr.lifecycle?.complete !== true) reasons.push('lifecycle evidence is incomplete');
@@ -449,8 +333,8 @@ export function authorizeMerge(input) {
   if (config.mergePolicy === 'ratified' && !new Set(['A', 'B']).has(pr.path)) {
     reasons.push('ratified policy does not authorize the all-green path');
   }
-  validateAuthorization(config, pr, reasons, solo);
-  validateChecks(pr, configuredChecks, reasons);
+  validateAuthorization(config, pr, reasons);
+  validateChecks(pr, reasons);
   if (
     input.executorIdentity?.complete !== true
     || input.executorIdentity?.login !== config.loopLogin
@@ -459,10 +343,6 @@ export function authorizeMerge(input) {
   ) {
     reasons.push('merge executor identity is incomplete or does not match the dedicated loop login');
   }
-  // A plan without branch protection has no live server policy to verify; solo
-  // mode substitutes exact-head CAS semantics plus the CLEAN merge-state gate in
-  // the executor, both of which remain unconditional.
-  if (!solo) validateServerPolicy(config, input.serverPolicy, configuredChecks, pr.checks, reasons);
   return { allow: reasons.length === 0, reasons };
 }
 
@@ -470,30 +350,37 @@ const HEAD = 'a'.repeat(40);
 const BASE = 'e'.repeat(40);
 const CLAIM = 'd'.repeat(40);
 
+function verdictStatuses() {
+  return [
+    {
+      context: 'agentic/gate',
+      state: 'success',
+      description: `autoloop gate verified · sha256:${'1'.repeat(16)}`,
+    },
+    {
+      context: 'agentic/review',
+      state: 'success',
+      description: `autoloop review verified · sha256:${'2'.repeat(16)}`,
+    },
+  ];
+}
+
+// A solo-operator installation has exactly one human, who necessarily shares
+// the loop's login. Approving review and human/loop actor separation are
+// unsatisfiable there, not merely unconfigured; every other control keeps its
+// full strength.
 function fixture(overrides = {}) {
   const config = {
     repository: { owner: 'owner', name: 'repo' },
     baseBranch: 'main',
-    mergePolicy: 'ratified',
+    mergePolicy: 'auto',
     baseFreshnessStrategy: 'direct-strict',
-    loopLogin: 'autoloop[bot]',
-    trustedHumanLogins: ['maintainer'],
-    automationAppIds: [41],
-    authorizationAppIds: [42],
-    requiredApprovingReviewCount: 1,
+    loopLogin: 'solo-dev',
+    trustedHumanLogins: ['solo-dev'],
+    soloOperator: true,
+    requiredApprovingReviewCount: 0,
     requireCodeOwnerReviews: false,
-    requiredChecks: [
-      ...REQUIRED_ATTESTATIONS.map((name) => ({ name, appIds: [41] })),
-      { name: 'ci', appIds: [7] },
-    ],
   };
-  const checks = config.requiredChecks.map(({ name, appIds }) => ({
-    name,
-    headOid: HEAD,
-    status: 'COMPLETED',
-    conclusion: 'SUCCESS',
-    app: { id: appIds[0] },
-  }));
   return {
     config,
     pr: {
@@ -506,8 +393,8 @@ function fixture(overrides = {}) {
       headRefName: 'feat/gh-7-safe-change',
       headRefOid: HEAD,
       headRepository: { owner: 'owner', name: 'repo' },
-      labels: ['risk:pure-deletion'],
-      reviewDecision: 'APPROVED',
+      labels: [],
+      reviewDecision: null,
       reviewRequests: [],
       claim: { ok: true, issue: 7, branchIssue: 7, bodyIssue: 7 },
       linkedIssue: {
@@ -523,9 +410,9 @@ function fixture(overrides = {}) {
         loopReady: {
           complete: true,
           eventId: 7001,
-          actor: 'maintainer',
+          actor: 'solo-dev',
           labeledAt: '2026-07-24T00:02:00Z',
-          roleName: 'maintain',
+          roleName: 'admin',
         },
         dependenciesComplete: true,
         dependencies: [{ number: 6, state: 'CLOSED' }],
@@ -556,7 +443,7 @@ function fixture(overrides = {}) {
         frozenPlanPresent: true,
         frozenPlanHash: 'c'.repeat(64),
         frozenPlanCommentId: 'IC_kwDOAutoloop7',
-        frozenPlanAuthor: 'autoloop[bot]',
+        frozenPlanAuthor: 'solo-dev',
         frozenPlanCommentVerified: true,
       },
       lifecycle: {
@@ -566,127 +453,92 @@ function fixture(overrides = {}) {
         premergeRecord: true,
         premergeRecordId: `pmr_${'d'.repeat(64)}`,
         premergeRecordHash: 'e'.repeat(64),
-        premergeRecordAuthor: 'autoloop[bot]',
+        premergeRecordAuthor: 'solo-dev',
         premergeRecordCommentId: 'IC_premerge',
         premergeRecordIssue: 7,
         premergeRecordPullRequest: 12,
       },
       gateEvidenceVerified: true,
-      path: 'A',
-      authorization: {
-        complete: true,
-        pullRequest: 12,
-        actor: 'maintainer',
-        headOid: HEAD,
-        label: 'risk:pure-deletion',
-        labelEventId: 12001,
-        labeledAt: '2026-07-24T00:03:00Z',
-        eventVerified: true,
-        afterCurrentHead: true,
-        roleName: 'maintain',
-        check: {
-          name: 'agentic/human-authorization',
-          headOid: HEAD,
-          status: 'COMPLETED',
-          conclusion: 'SUCCESS',
-          app: { id: 42 },
-        },
-      },
-      checks,
+      path: 'all-green',
+      authorization: undefined,
+      checks: [
+        { name: 'ci', headOid: HEAD, status: 'COMPLETED', conclusion: 'SUCCESS' },
+      ],
+      statuses: { complete: true, items: verdictStatuses() },
       checksComplete: true,
       conversationsResolved: true,
       killSwitch: { complete: true, active: false },
     },
     executorIdentity: {
       complete: true,
-      login: 'autoloop[bot]',
+      login: 'solo-dev',
       id: 9001,
-    },
-    serverPolicy: {
-      complete: true,
-      source: 'live',
-      strategy: 'direct-strict',
-      strict: true,
-      enforceAdmins: true,
-      actorCanBypass: false,
-      requiredConversationResolution: true,
-      requiredApprovingReviewCount: 1,
-      requireCodeOwnerReviews: false,
-      dismissStaleReviews: true,
-      requireLastPushApproval: true,
-      forcePushesAllowed: false,
-      deletionsAllowed: false,
-      queueRequired: false,
-      rulesetsComplete: true,
-      bypassActorsVisible: true,
-      requiredChecks: config.requiredChecks,
     },
     ...overrides,
   };
 }
 
-// A solo-operator installation has exactly one human, who necessarily shares the
-// loop's login. Identity separation, App attestation, live server policy, and
-// approving review are unsatisfiable there, not merely unconfigured; every other
-// control keeps its full strength. The fixture models that shape generically.
-function soloFixture(overrides = {}) {
-  const base = fixture();
-  const config = {
-    ...base.config,
-    soloOperator: true,
-    mergePolicy: 'auto',
-    loopLogin: 'solo-dev',
-    trustedHumanLogins: ['solo-dev'],
-    automationAppIds: [],
-    authorizationAppIds: [],
-    requiredApprovingReviewCount: 0,
-    requiredChecks: base.config.requiredChecks.map(({ name }) => ({ name, appIds: [] })),
-  };
-  const pr = {
-    ...base.pr,
-    labels: [],
-    reviewDecision: null,
-    path: 'all-green',
-    authorization: undefined,
-    linkedIssue: {
-      ...base.pr.linkedIssue,
-      loopReady: { ...base.pr.linkedIssue.loopReady, actor: 'solo-dev' },
+function pathAFixture() {
+  const input = fixture();
+  input.config = { ...input.config, mergePolicy: 'ratified' };
+  input.pr = {
+    ...input.pr,
+    labels: ['risk:pure-deletion'],
+    path: 'A',
+    authorization: {
+      complete: true,
+      pullRequest: 12,
+      actor: 'solo-dev',
+      headOid: HEAD,
+      label: 'risk:pure-deletion',
+      labelEventId: 12001,
+      labeledAt: '2026-07-24T00:03:00Z',
+      eventVerified: true,
+      afterCurrentHead: true,
+      roleName: 'admin',
     },
-    ownership: { ...base.pr.ownership, frozenPlanAuthor: 'solo-dev' },
-    lifecycle: { ...base.pr.lifecycle, premergeRecordAuthor: 'solo-dev' },
-    checks: base.pr.checks.map((check) => ({ ...check, app: { id: 15368 } })),
   };
-  const merged = {
-    config,
-    pr,
-    executorIdentity: { complete: true, login: 'solo-dev', id: 9001 },
-    serverPolicy: undefined,
-    ...overrides,
-  };
-  return merged;
+  return input;
 }
 
 function selfTest() {
   const base = fixture();
-  const solo = soloFixture();
-  const soloPathA = soloFixture();
-  soloPathA.config = { ...soloPathA.config, mergePolicy: 'ratified' };
-  soloPathA.pr = {
-    ...soloPathA.pr,
-    labels: ['risk:pure-deletion'],
-    path: 'A',
-    authorization: {
-      ...base.pr.authorization,
-      actor: 'solo-dev',
-      check: undefined,
-    },
-  };
+  const pathA = pathAFixture();
+  const withStatuses = (items) => fixture({
+    pr: { ...base.pr, statuses: { complete: true, items } },
+  });
   const cases = [
-    ['complete strict evidence authorizes', base, true],
-    ['delivered state is sourced from the linked issue and lifecycle', fixture({
-      pr: { ...base.pr, labels: ['risk:pure-deletion'] },
-    }), true],
-    ['branch/body issue mismatch blocks', fixture({ pr: { ...base.pr, claim: { ok: false, code: 'ISSUE_MISMATCH' } } }), false],
+    ['solo all-green evidence authorizes', base, true],
+    ['solo Path-A self-authorization authorizes', pathA, true],
+    [
+      'non-solo config refuses with the spec-naming reason',
+      fixture({ config: { ...base.config, soloOperator: false } }),
+      false,
+      'docs/specs/simple-delivery.md',
+    ],
+    [
+      'absent solo flag refuses with the spec-naming reason',
+      fixture({
+        config: (() => {
+          const { soloOperator, ...rest } = base.config;
+          return rest;
+        })(),
+      }),
+      false,
+      'docs/specs/simple-delivery.md',
+    ],
+    ['solo with a second trusted human is invalid', fixture({
+      config: { ...base.config, trustedHumanLogins: ['solo-dev', 'friend'] },
+    }), false],
+    ['solo trusted list naming someone other than the loop is invalid', fixture({
+      config: { ...base.config, trustedHumanLogins: ['friend'] },
+    }), false],
+    ['negative approving-review count is invalid', fixture({
+      config: { ...base.config, requiredApprovingReviewCount: -1 },
+    }), false],
+    ['branch/body issue mismatch blocks', fixture({
+      pr: { ...base.pr, claim: { ok: false, code: 'ISSUE_MISMATCH' } },
+    }), false],
     ['claim commit later in the PR blocks', fixture({
       pr: {
         ...base.pr,
@@ -740,16 +592,22 @@ function selfTest() {
     ['missing typed gate evidence blocks', fixture({
       pr: { ...base.pr, gateEvidenceVerified: false },
     }), false],
-    ['missing frozen plan blocks', fixture({ pr: { ...base.pr, ownership: { ...base.pr.ownership, frozenPlanPresent: false } } }), false],
-    ['unverified frozen-plan comment blocks', fixture({ pr: { ...base.pr, ownership: { ...base.pr.ownership, frozenPlanCommentVerified: false } } }), false],
-    ['undelivered lifecycle blocks', fixture({ pr: { ...base.pr, lifecycle: { ...base.pr.lifecycle, delivered: false } } }), false],
+    ['missing frozen plan blocks', fixture({
+      pr: { ...base.pr, ownership: { ...base.pr.ownership, frozenPlanPresent: false } },
+    }), false],
+    ['unverified frozen-plan comment blocks', fixture({
+      pr: { ...base.pr, ownership: { ...base.pr.ownership, frozenPlanCommentVerified: false } },
+    }), false],
+    ['frozen plan from a non-loop author blocks', fixture({
+      pr: { ...base.pr, ownership: { ...base.pr.ownership, frozenPlanAuthor: 'friend' } },
+    }), false],
+    ['undelivered lifecycle blocks', fixture({
+      pr: { ...base.pr, lifecycle: { ...base.pr.lifecycle, delivered: false } },
+    }), false],
     ['caller premerge record string never authorizes', fixture({
       pr: {
         ...base.pr,
-        lifecycle: {
-          ...base.pr.lifecycle,
-          premergeRecord: 'does-not-exist',
-        },
+        lifecycle: { ...base.pr.lifecycle, premergeRecord: 'does-not-exist' },
       },
     }), false],
     ['bare premerge boolean without hydrated identity blocks', fixture({
@@ -766,13 +624,12 @@ function selfTest() {
     ['premerge record from a non-loop author blocks', fixture({
       pr: {
         ...base.pr,
-        lifecycle: {
-          ...base.pr.lifecycle,
-          premergeRecordAuthor: 'maintainer',
-        },
+        lifecycle: { ...base.pr.lifecycle, premergeRecordAuthor: 'friend' },
       },
     }), false],
-    ['blocked issue blocks', fixture({ pr: { ...base.pr, linkedIssue: { ...base.pr.linkedIssue, blocked: true } } }), false],
+    ['blocked issue blocks', fixture({
+      pr: { ...base.pr, linkedIssue: { ...base.pr.linkedIssue, blocked: true } },
+    }), false],
     ['current linked-issue hard label blocks stale clear booleans', fixture({
       pr: {
         ...base.pr,
@@ -785,10 +642,7 @@ function selfTest() {
     ['issue edit after loop-ready approval blocks', fixture({
       pr: {
         ...base.pr,
-        linkedIssue: {
-          ...base.pr.linkedIssue,
-          lastEditedAt: '2026-07-24T00:04:00Z',
-        },
+        linkedIssue: { ...base.pr.linkedIssue, lastEditedAt: '2026-07-24T00:04:00Z' },
       },
     }), false],
     ['write-role loop-ready actor remains trusted', fixture({
@@ -809,6 +663,15 @@ function selfTest() {
         },
       },
     }), false],
+    ['stale loop-ready label event blocks', fixture({
+      pr: {
+        ...base.pr,
+        linkedIssue: {
+          ...base.pr.linkedIssue,
+          loopReady: { ...base.pr.linkedIssue.loopReady, labeledAt: '2026-07-24T00:00:30Z' },
+        },
+      },
+    }), false],
     ['reopened dependency blocks stale clear boolean', fixture({
       pr: {
         ...base.pr,
@@ -818,187 +681,137 @@ function selfTest() {
         },
       },
     }), false],
-    ['changes requested blocks', fixture({ pr: { ...base.pr, reviewDecision: 'CHANGES_REQUESTED' } }), false],
-    ['pending reviewer blocks', fixture({ pr: { ...base.pr, reviewRequests: ['maintainer'] } }), false],
-    ['untrusted verdict producer blocks', fixture({ pr: { ...base.pr, checks: base.pr.checks.map((check, index) => index === 0 ? { ...check, app: { id: 99 } } : check) } }), false],
-    ['stale verdict head blocks', fixture({ pr: { ...base.pr, checks: base.pr.checks.map((check, index) => index === 0 ? { ...check, headOid: 'd'.repeat(40) } : check) } }), false],
-    ['pending triggered check blocks', fixture({ pr: { ...base.pr, checks: [...base.pr.checks, { name: 'optional-ci', headOid: HEAD, status: 'IN_PROGRESS', conclusion: null, app: { id: 7 } }] } }), false],
-    ['stale failing check does not gate current head', fixture({ pr: { ...base.pr, checks: [...base.pr.checks, { name: 'old-ci', headOid: 'd'.repeat(40), status: 'COMPLETED', conclusion: 'FAILURE', app: { id: 7 } }] } }), true],
-    ['unconfigured agentic check blocks', fixture({ pr: { ...base.pr, checks: [...base.pr.checks, { name: 'agentic/unknown', headOid: HEAD, status: 'COMPLETED', conclusion: 'SUCCESS', app: { id: 42 } }] } }), false],
-    ['Path A loop-authored approval blocks', fixture({ pr: { ...base.pr, authorization: { ...base.pr.authorization, actor: 'autoloop[bot]' } } }), false],
-    ['Path A authorization accepts a configured human with write role', fixture({
+    ['changes requested blocks', fixture({
+      pr: { ...base.pr, reviewDecision: 'CHANGES_REQUESTED' },
+    }), false],
+    ['pending review request blocks', fixture({
+      pr: { ...base.pr, reviewRequests: ['solo-dev'] },
+    }), false],
+    ['unresolved conversations block', fixture({
+      pr: { ...base.pr, conversationsResolved: false },
+    }), false],
+    ['pending triggered check blocks', fixture({
       pr: {
         ...base.pr,
-        authorization: { ...base.pr.authorization, roleName: 'write' },
-      },
-    }), true],
-    ['Path A authorization on old head blocks', fixture({ pr: { ...base.pr, authorization: { ...base.pr.authorization, headOid: 'd'.repeat(40) } } }), false],
-    ['Path A authorization label older than the current head blocks', fixture({
-      pr: {
-        ...base.pr,
-        authorization: { ...base.pr.authorization, afterCurrentHead: false },
+        checks: [...base.pr.checks, { name: 'optional-ci', headOid: HEAD, status: 'IN_PROGRESS', conclusion: null }],
       },
     }), false],
-    ['Path A authorization from an untrusted app blocks', fixture({ pr: { ...base.pr, authorization: { ...base.pr.authorization, check: { ...base.pr.authorization.check, app: { id: 99 } } } } }), false],
-    ['Path A authorization without a verified current label event blocks', fixture({
-      pr: {
-        ...base.pr,
-        authorization: { ...base.pr.authorization, eventVerified: false },
-      },
-    }), false],
-    ['overlapping automation and authorization producers block', fixture({
-      config: {
-        ...base.config,
-        automationAppIds: [42],
-      },
-    }), false],
-    ['Path B needs no human authorization', fixture({ pr: { ...base.pr, path: 'B', authorization: null } }), true],
-    ['all-green path requires auto policy', fixture({ config: { ...base.config, mergePolicy: 'auto' }, pr: { ...base.pr, path: 'all-green', authorization: null } }), true],
-    ['executor identity mismatch blocks', fixture({
-      executorIdentity: { complete: true, login: 'maintainer', id: 2 },
-    }), false],
-    ['non-strict direct protection blocks', fixture({ serverPolicy: { ...base.serverPolicy, strict: false } }), false],
-    ['server bypass blocks', fixture({ serverPolicy: { ...base.serverPolicy, actorCanBypass: true } }), false],
-    ['caller-authored server-policy source blocks', fixture({
-      serverPolicy: { ...base.serverPolicy, source: 'attestation' },
-    }), false],
-    ['incomplete ruleset enumeration blocks', fixture({
-      serverPolicy: { ...base.serverPolicy, rulesetsComplete: false },
-    }), false],
-    ['hidden ruleset bypass actors block', fixture({
-      serverPolicy: { ...base.serverPolicy, bypassActorsVisible: false },
-    }), false],
-    ['server check with an alternate unapproved producer blocks', fixture({
-      serverPolicy: {
-        ...base.serverPolicy,
-        requiredChecks: base.serverPolicy.requiredChecks.map((check) =>
-          check.name === 'agentic/gate'
-            ? { ...check, appIds: [...check.appIds, 42] }
-            : check),
-      },
-    }), false],
-    ['current check producer must match the live server pin', fixture({
-      config: {
-        ...base.config,
-        automationAppIds: [41, 43],
-        requiredChecks: base.config.requiredChecks.map((check) =>
-          check.name === 'agentic/gate'
-            ? { ...check, appIds: [41, 43] }
-            : check),
-      },
+    ['failing triggered check blocks', fixture({
       pr: {
         ...base.pr,
         checks: base.pr.checks.map((check) =>
-          check.name === 'agentic/gate'
-            ? { ...check, app: { id: 43 } }
-            : check),
-      },
-    }), false],
-    ['review policy weaker than configured intent blocks', fixture({
-      config: { ...base.config, requiredApprovingReviewCount: 2 },
-    }), false],
-    ['missing configured code-owner review blocks', fixture({
-      config: { ...base.config, requireCodeOwnerReviews: true },
-    }), false],
-    [
-      'merge queue is disabled until group producers and durable recovery exist',
-      fixture({
-        config: { ...base.config, baseFreshnessStrategy: 'merge-queue' },
-        serverPolicy: {
-          ...base.serverPolicy,
-          strategy: 'merge-queue',
-          strict: false,
-          queueRequired: true,
-        },
-      }),
-      false,
-    ],
-    ['active kill switch blocks', fixture({ pr: { ...base.pr, killSwitch: { complete: true, active: true } } }), false],
-    ['incomplete evidence blocks', fixture({ pr: { ...base.pr, checksComplete: false } }), false],
-
-    ['solo operator with single identity and green exact-head evidence authorizes', solo, true],
-    ['solo Path-A self-authorization without an App CheckRun authorizes', soloPathA, true],
-    ['solo flag absent keeps identity separation required', soloFixture({
-      config: (() => { const { soloOperator, ...rest } = soloFixture().config; return rest; })(),
-    }), false],
-    ['solo with a second trusted human is invalid', soloFixture({
-      config: { ...solo.config, trustedHumanLogins: ['solo-dev', 'friend'] },
-    }), false],
-    ['solo trusted list naming someone other than the loop is invalid', soloFixture({
-      config: { ...solo.config, trustedHumanLogins: ['friend'] },
-    }), false],
-    ['solo pending required check blocks', soloFixture({
-      pr: {
-        ...solo.pr,
-        checks: solo.pr.checks.map((check) =>
-          check.name === 'ci' ? { ...check, status: 'IN_PROGRESS', conclusion: null } : check),
-      },
-    }), false],
-    ['solo failing required check blocks', soloFixture({
-      pr: {
-        ...solo.pr,
-        checks: solo.pr.checks.map((check) =>
           check.name === 'ci' ? { ...check, conclusion: 'FAILURE' } : check),
       },
     }), false],
-    ['solo hard-block label blocks', soloFixture({
-      pr: { ...solo.pr, labels: ['do-not-merge'] },
-    }), false],
-    ['solo active kill switch blocks', soloFixture({
-      pr: { ...solo.pr, killSwitch: { complete: true, active: true } },
-    }), false],
-    ['solo claim mismatch blocks', soloFixture({
-      pr: { ...solo.pr, claim: { ok: false, code: 'ISSUE_MISMATCH' } },
-    }), false],
-    ['solo changes-requested review still blocks', soloFixture({
-      pr: { ...solo.pr, reviewDecision: 'CHANGES_REQUESTED' },
-    }), false],
-    ['solo pending review request still blocks', soloFixture({
-      pr: { ...solo.pr, reviewRequests: ['solo-dev'] },
-    }), false],
-    ['solo unresolved conversations still block', soloFixture({
-      pr: { ...solo.pr, conversationsResolved: false },
-    }), false],
-    ['solo executor other than the loop login blocks', soloFixture({
-      executorIdentity: { complete: true, login: 'someone-else', id: 9002 },
-    }), false],
-    ['solo stale loop-ready label event still blocks', soloFixture({
+    ['stale failing check does not gate current head', fixture({
       pr: {
-        ...solo.pr,
-        linkedIssue: {
-          ...solo.pr.linkedIssue,
-          loopReady: { ...solo.pr.linkedIssue.loopReady, labeledAt: '2026-07-24T00:00:30Z' },
-        },
+        ...base.pr,
+        checks: [...base.pr.checks, { name: 'old-ci', headOid: 'd'.repeat(40), status: 'COMPLETED', conclusion: 'FAILURE' }],
+      },
+    }), true],
+    ['a green agentic-named CheckRun is just another triggered check', fixture({
+      pr: {
+        ...base.pr,
+        checks: [...base.pr.checks, { name: 'agentic/gate', headOid: HEAD, status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      },
+    }), true],
+    ['a red agentic-named CheckRun blocks like any triggered check', fixture({
+      pr: {
+        ...base.pr,
+        checks: [...base.pr.checks, { name: 'agentic/gate', headOid: HEAD, status: 'COMPLETED', conclusion: 'FAILURE' }],
       },
     }), false],
-    ['solo Path-A authorization not bound to the current head still blocks', (() => {
-      const input = soloFixture();
-      input.config = { ...input.config, mergePolicy: 'ratified' };
+    ['missing agentic/gate verdict status blocks', withStatuses(
+      verdictStatuses().filter((status) => status.context !== 'agentic/gate'),
+    ), false],
+    ['missing agentic/review verdict status blocks', withStatuses(
+      verdictStatuses().filter((status) => status.context !== 'agentic/review'),
+    ), false],
+    ['pending verdict status blocks', withStatuses(
+      verdictStatuses().map((status) =>
+        status.context === 'agentic/gate' ? { ...status, state: 'pending' } : status),
+    ), false],
+    ['failing third-party status blocks', withStatuses([
+      ...verdictStatuses(),
+      { context: 'external/scan', state: 'failure', description: '' },
+    ]), false],
+    ['pending third-party status blocks', withStatuses([
+      ...verdictStatuses(),
+      { context: 'external/scan', state: 'pending', description: '' },
+    ]), false],
+    ['duplicate status contexts block', withStatuses([
+      ...verdictStatuses(),
+      ...verdictStatuses().filter((status) => status.context === 'agentic/gate'),
+    ]), false],
+    ['incomplete status evidence blocks', fixture({
+      pr: { ...base.pr, statuses: { complete: false, items: verdictStatuses() } },
+    }), false],
+    ['missing status evidence blocks', fixture({
+      pr: { ...base.pr, statuses: undefined },
+    }), false],
+    ['hard-block label blocks', fixture({
+      pr: { ...base.pr, labels: ['do-not-merge'] },
+    }), false],
+    ['active kill switch blocks', fixture({
+      pr: { ...base.pr, killSwitch: { complete: true, active: true } },
+    }), false],
+    ['incomplete check evidence blocks', fixture({
+      pr: { ...base.pr, checksComplete: false },
+    }), false],
+    ['ratified policy does not authorize the all-green path', fixture({
+      config: { ...base.config, mergePolicy: 'ratified' },
+    }), false],
+    ['Path B needs no human authorization', (() => {
+      const input = fixture({ config: { ...base.config, mergePolicy: 'ratified' } });
+      input.pr = { ...input.pr, path: 'B', authorization: null };
+      return input;
+    })(), true],
+    ['executor identity mismatch blocks', fixture({
+      executorIdentity: { complete: true, login: 'someone-else', id: 9002 },
+    }), false],
+    ['Path A authorization on old head blocks', (() => {
+      const input = pathAFixture();
       input.pr = {
         ...input.pr,
-        labels: ['risk:pure-deletion'],
-        path: 'A',
-        authorization: { ...soloPathA.pr.authorization, headOid: BASE, afterCurrentHead: false },
+        authorization: { ...input.pr.authorization, headOid: BASE, afterCurrentHead: false },
+      };
+      return input;
+    })(), false],
+    ['Path A authorization label older than the current head blocks', (() => {
+      const input = pathAFixture();
+      input.pr = {
+        ...input.pr,
+        authorization: { ...input.pr.authorization, afterCurrentHead: false },
+      };
+      return input;
+    })(), false],
+    ['Path A authorization without a verified current label event blocks', (() => {
+      const input = pathAFixture();
+      input.pr = {
+        ...input.pr,
+        authorization: { ...input.pr.authorization, eventVerified: false },
+      };
+      return input;
+    })(), false],
+    ['Path A authorization from outside the trusted list blocks', (() => {
+      const input = pathAFixture();
+      input.pr = {
+        ...input.pr,
+        authorization: { ...input.pr.authorization, actor: 'friend' },
       };
       return input;
     })(), false],
   ];
   let passed = 0;
-  for (const [name, input, expected] of cases) {
+  for (const [name, input, expected, reasonSubstring] of cases) {
     const result = authorizeMerge(input);
-    if (result.allow === expected) passed += 1;
+    const reasonOkay = reasonSubstring === undefined
+      || result.reasons.some((reason) => reason.includes(reasonSubstring));
+    if (result.allow === expected && reasonOkay) passed += 1;
     else console.error(`FAIL ${name}: expected allow=${expected}, got ${result.allow} (${result.reasons.join('; ')})`);
   }
   console.log(passed === cases.length ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${cases.length})`);
   return passed === cases.length;
-}
-
-function main() {
-  if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  const input = JSON.parse(readFileSync(0, 'utf8'));
-  const result = authorizeMerge(input);
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-  process.exit(result.allow ? 0 : 1);
 }
 
 const isMain = (() => {
@@ -1009,4 +822,4 @@ const isMain = (() => {
     return false;
   }
 })();
-if (isMain) main();
+if (isMain) process.exit(selfTest() ? 0 : 1);
