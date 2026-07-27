@@ -195,6 +195,22 @@ function deliveryRecordBinding(finalized, request) {
   };
 }
 
+// CI-green alone is not ready-head evidence: on a head where no CI triggered,
+// delivery is trivially green (NO_TRIGGERED_CHECKS), so a bare claim commit
+// would "discover" a ready head it never earned — a live run wedged two units
+// exactly this way (marker bound at the claim commit, every later push an
+// identity mismatch). Ready-head discovery additionally requires both verdict
+// statuses on the exact head: a genuinely crashed post-finalize unit has them
+// (the finalizer posts them before the premerge record), a bare head cannot.
+function verdictStatusesGreen(finalized) {
+  const items = finalized?.liveEvidence?.statuses;
+  if (!Array.isArray(items)) return false;
+  return ['agentic/gate', 'agentic/review'].every((context) =>
+    items.some((status) =>
+      status?.context === context
+      && String(status?.state ?? '').toUpperCase() === 'SUCCESS'));
+}
+
 export function lifecycleIdentityHash(markerValue) {
   const identity = {
     v: markerValue?.v,
@@ -1040,6 +1056,30 @@ export function reconcileLifecycle(input, context = {}) {
     });
   }
 
+  // A ready-head bound to a superseded head is re-convergence work, not a
+  // permanent wedge: the claim-verified remote head moving past the bound head
+  // invalidates the old verdicts, so the marker returns to draft-pr and the
+  // evidence re-accumulates on the new head — rediscovery below demands fresh
+  // verdict statuses, so unbinding never skips review or gate. Revision,
+  // premerge, and merge markers keep their stricter machinery.
+  if (
+    !merged
+    && input.marker.phase === 'ready-head'
+    && SHA_RE.test(input.marker.headOid ?? '')
+    && input.marker.revisionIntent === undefined
+    && input.marker.premergeRecord === undefined
+    && input.marker.mergeOperation === undefined
+    && facts.remoteClaim.exists === true
+    && SHA_RE.test(facts.remoteClaim.headOid ?? '')
+    && facts.remoteClaim.headOid !== input.marker.headOid
+  ) {
+    const { headOid: supersededHeadOid, ...unbound } = input.marker;
+    return transition('act', 'unbind-ready-head', 'READY_HEAD_SUPERSEDED', {
+      supersededHeadOid,
+      marker: { ...unbound, phase: 'draft-pr' },
+    });
+  }
+
   if (!completeExistence(facts.delivery)) return inspect('delivery');
   let restoreDelivery = false;
   let deliveryBinding = null;
@@ -1063,6 +1103,9 @@ export function reconcileLifecycle(input, context = {}) {
           || finalizedDelivery.headOid !== facts.remoteClaim.headOid
         ) {
           return artifactMismatch('delivery');
+        }
+        if (!verdictStatusesGreen(finalizedDelivery)) {
+          return transition('resume', 'resume-unit', 'ACTIVE_DRAFT_RECOVERED');
         }
         return transition('act', 'bind-ready-head', 'READY_HEAD_DISCOVERED', {
           markerPatch: { phase: 'ready-head', headOid: finalizedDelivery.headOid },
@@ -1116,6 +1159,11 @@ export function reconcileLifecycle(input, context = {}) {
         return artifactMismatch('delivery');
       }
       if (!input.marker.headOid) {
+        // A loop-delivered label without both verdict statuses on the head is
+        // an inconsistent world, not a rediscovery.
+        if (!verdictStatusesGreen(finalizedDelivery)) {
+          return artifactMismatch('delivery');
+        }
         return transition('act', 'bind-ready-head', 'READY_HEAD_DISCOVERED', {
           markerPatch: { phase: 'ready-head', headOid: facts.delivery.headOid },
         });
@@ -1327,6 +1375,9 @@ export function reconcileLifecycle(input, context = {}) {
 let SHA = 'a'.repeat(40);
 let OTHER_SHA = 'f'.repeat(40);
 const PENDING_SHA = 'e'.repeat(40);
+// Delivery-green (nothing triggered) but carrying NO verdict statuses — the
+// bare-claim-head shape that must never discover a ready head.
+const UNVERDICTED_SHA = 'd'.repeat(40);
 const HASH = 'b'.repeat(64);
 function testDeliveryEvidenceHash(headOid) {
   return headOid === OTHER_SHA ? '6'.repeat(64) : '5'.repeat(64);
@@ -1372,6 +1423,12 @@ function trustedTestFinalizer(request) {
       repository: request.repository,
       pullRequest: request.pullRequest,
       remoteHead: request.gatedHead,
+      statuses: request.gatedHead === UNVERDICTED_SHA
+        ? []
+        : [
+            { context: 'agentic/gate', state: 'success', description: '' },
+            { context: 'agentic/review', state: 'success', description: '' },
+          ],
       provenance: {
         schemaVersion: 1,
         source: 'github-rest',
@@ -1940,6 +1997,25 @@ function crashRecoveryChecks() {
     checks.push(['draft restart reaches ready head before premerge and delivery', false]);
   }
   try {
+    // The wedge that stranded two live units: a ready-head marker whose bound
+    // head was superseded by a claim-chain push. Recovery must unbind, resume,
+    // and re-earn ready-head on the current head — never block on identity.
+    const superseded = crashWorld('ready-head');
+    superseded.marker.headOid = OTHER_SHA;
+    const recovery = runCrashRecovery(superseded);
+    checks.push([
+      'a superseded ready-head unbinds and re-converges to terminal',
+      recovery.ok
+        && recovery.result.state === 'complete'
+        && recovery.world.attempts['unbind-ready-head'] === 1
+        && Object.keys(recovery.world.attempts).slice(0, 2).join(',')
+          === 'unbind-ready-head,bind-ready-head',
+    ]);
+  } catch (error) {
+    console.error(`FAIL superseded ready-head recovery: ${error.message}`);
+    checks.push(['a superseded ready-head unbinds and re-converges to terminal', false]);
+  }
+  try {
     const manualMerged = crashWorld('ready-head');
     manualMerged.intent.mergePolicy = 'manual';
     manualMerged.marker.mergePolicy = 'manual';
@@ -2228,6 +2304,78 @@ function selfTest() {
         }),
       },
       expected: ['act', 'bind-ready-head'],
+    },
+    {
+      name: 'a green head without verdict statuses resumes, never binds ready-head',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12 }),
+        observed: observed({
+          remoteClaim: {
+            complete: true,
+            exists: true,
+            branch: 'feat/gh-7-contract',
+            headOid: UNVERDICTED_SHA,
+            containsClaimCommit: true,
+          },
+          delivery: {
+            complete: true,
+            exists: false,
+            request: deliveryRequestFor(UNVERDICTED_SHA),
+          },
+        }),
+      },
+      expected: ['resume', 'resume-unit'],
+    },
+    {
+      name: 'a superseded ready-head unbinds to draft-pr instead of wedging',
+      input: {
+        intent: intent(),
+        marker: marker({
+          claimCommit: SHA,
+          pr: 12,
+          headOid: SHA,
+          phase: 'ready-head',
+        }),
+        observed: observed({
+          remoteClaim: {
+            complete: true,
+            exists: true,
+            branch: 'feat/gh-7-contract',
+            headOid: OTHER_SHA,
+            containsClaimCommit: true,
+          },
+          delivery: {
+            complete: true,
+            exists: false,
+            request: deliveryRequestFor(OTHER_SHA),
+          },
+        }),
+      },
+      expected: ['act', 'unbind-ready-head'],
+    },
+    {
+      name: 'a delivered label without verdict statuses is an identity mismatch',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12 }),
+        observed: observed({
+          remoteClaim: {
+            complete: true,
+            exists: true,
+            branch: 'feat/gh-7-contract',
+            headOid: UNVERDICTED_SHA,
+            containsClaimCommit: true,
+          },
+          delivery: {
+            complete: true,
+            exists: true,
+            headOid: UNVERDICTED_SHA,
+            request: deliveryRequestFor(UNVERDICTED_SHA),
+          },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
     },
     {
       name: 'delivered head is bound before terminal record',

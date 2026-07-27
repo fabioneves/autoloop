@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.1] - 2026-07-27
+
+### Fixed
+
+- **Ready-head is earned, never inferred from a quiet head.** A live run wedged two units:
+  `reconcileLifecycle` treated "delivery is green for this head" as ready-head discovery, and on
+  a head where no CI triggered, delivery is trivially green — so a bare claim commit bound
+  `ready-head` at claim, and every later push became a permanent `ARTIFACT_IDENTITY_MISMATCH`.
+  Discovery now additionally requires both verdict statuses (`agentic/gate`, `agentic/review`
+  success) on the exact head: a genuinely crashed post-finalize unit has them, a bare head
+  cannot. A green-but-unverdicted head resumes unit work; a `loop-delivered` label without the
+  statuses fails closed.
+- **A superseded ready-head unbinds instead of wedging.** When the claim-verified remote head
+  moves past a plain forward `ready-head` marker (base sync, new work), the marker now takes a
+  typed `unbind-ready-head` transition back to `draft-pr` and re-earns ready-head on the new
+  head — rediscovery demands fresh verdict statuses, so unbinding never skips review or gate.
+  Revision, premerge, and merge markers keep their stricter machinery. Crash-recovery self-test
+  pins unbind → re-bind → terminal convergence.
+
 ## [0.49.0] - 2026-07-27
 
 ### Changed
