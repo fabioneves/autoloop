@@ -315,10 +315,11 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   rail: subject `∞ #<N> — <issue title>`. This is the standing "the loop is alive" row; complete
   it whatever the unit's outcome (the closing rail says shipped/blocked, the panel just closes).
 - **One task per step**, created in-progress when the step's ribbon prints, completed when the
-  step ends. Subject mirrors the ribbon core with the executor slot:
-  `05 IMPLEMENT [CLAUDE:OPUS] — #149`; `activeForm` says what the spinner should read while it
-  runs (`Implementing #149 on opus`, `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped steps use
-  one task per round (`08 CODE-REVIEW r1 [CLAUDE:GPT-5.6-SOL] — #149`).
+  step ends. The subject starts with the unit prefix — the SAME `∞ #<N> — ` the umbrella row
+  carries, so a unit's rows read as one visual group — then the ribbon core with the executor
+  slot: `∞ #149 — 05 IMPLEMENT [CLAUDE:OPUS]`; `activeForm` says what the spinner should read
+  while it runs (`Implementing #149 on opus`, `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped
+  steps use one task per round (`∞ #149 — 08 CODE-REVIEW r1 [CLAUDE:GPT-5.6-SOL]`).
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
   same turn that states the duration. A staged unit's steps get their own tasks under its own
