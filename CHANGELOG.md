@@ -16,6 +16,13 @@ Notable changes to Autoloop are recorded here. The format follows
   model. The writer never runs a proxied model — cross-MODEL review is the invariant, whichever
   harness carries it — and unlike `with codex`, the reviewer's read-only posture is the tool
   ceiling rather than an OS sandbox, stated in the skill rather than discovered.
+- **Pitcrew never claims a unit whose marker is past review.** Behind-base was an actionability
+  trigger on its own, so a `ready-head` unit — deliverable as-is, since the merge executor binds
+  the exact PR head and GitHub merges a behind-but-CLEAN PR fine — was claimed for revision, hit
+  `beginLifecycleRevision`'s `premerge-record` requirement, and blocked with "no sanctioned loop
+  path". The refusal was right; the claim was the bug. Behind-base is now actionable only when
+  the marker phase can actually enter the revision contract; at `ready-head` and beyond the PR is
+  Dev's to finalize, and Pitcrew says so and moves on.
 - **`--model` pins the engine's model per dispatch.** Claude spells it `--model`, codex `-m`; the
   pin crosses the CLI seam with a regression test that drives the real argv (the `--engine` lesson,
   applied preemptively — the flag would have shipped dead without it), and the chosen model is
