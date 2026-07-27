@@ -3,6 +3,28 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.45.3] - 2026-07-27
+
+### Fixed
+
+- **Every setup phase prints its ribbon again.** The 0.45.1 anti-doubling wording — "never a second
+  copy of the same ribbon" — read, to a cautious session, as a reason to be sparing with ribbons
+  altogether: a live run printed 1/5 RESOLVE and nothing after it. The rule now states the count
+  outright: exactly five 🟦 ribbons per run, one as each phase begins; the forbidden thing is the
+  re-print, and a phase that starts without its ribbon is as wrong as a doubled one.
+
+### Changed
+
+- **Setup trusts the preflight instead of re-deriving it.** A profiled reconcile said "preflight
+  already tells me" and then re-ran every check: gh auth, node, codex, config contract, and the
+  full install-root verify — the largest single payload of its AUDIT phase. When the SessionStart
+  preflight block is present and free of FAIL lines, its facts stand; with a green preflight,
+  reconfigure/reconcile AUDIT is two sections (`scaffold --audit` and document sizes), and
+  `verify --install-root` runs once per setup, in VERIFY, against the state that ships. The full
+  battery remains for fresh installs, migration, doctor, and a missing or FAILing preflight.
+- Version currency pipes through `--sort-versions | tail -3`: only the newest versions answer the
+  question, and a mature cache holds dozens — a live run printed 87 lines to learn one.
+
 ## [0.45.2] - 2026-07-27
 
 ### Fixed
