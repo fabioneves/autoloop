@@ -266,8 +266,11 @@ When taking a PR, print a composed banner beside the `loop:revising` mutation:
 Print one badged ribbon line per step (🟦 in progress · 🟩 complete · 🟥 blocked · 🟨 needs a human) — `▰` done-or-current, `▱` remaining, always eight cells:
 
 ```text
-🟦 ∞ ▰▰▰▱▱▱▱▱ 03/8 REVISE ─ PR #<P> · <actor>
+🟦 ∞ ▰▰▰▱▱▱▱▱ 03/8 REVISE ─ PR #<P> · <actor> · 14:07
 ```
+
+The last cell is the wall clock at step start (`date +%H:%M`, 24-hour), same rule as Dev's
+ribbons; end and duration ride the completion lines, never a re-printed ribbon.
 
 End with one closing rail:
 
