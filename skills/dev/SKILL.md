@@ -339,11 +339,14 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
 - **One task per step**, created in-progress when the step's ribbon prints, completed when the
   step ends. The subject starts with the unit prefix — the SAME `∞ #<N> — ` the umbrella row
   carries, so a unit's rows read as one visual group — then the ribbon core with the executor
-  slot: `∞ #149 — 05 IMPLEMENT [CLAUDE:OPUS]`; `activeForm` says what the spinner should read
-  while it runs (`Implementing #149 on opus`, `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped
-  steps use one task per round, and EVERY dispatched sub-step — fix rounds, doubt reviews, plan
-  revisions — carries the same prefix shape (`∞ #149 — 08 CODE-REVIEW r1 [CLAUDE:GPT-5.6-SOL]`,
-  `∞ #78 — 08 FIX r3 [CLAUDE:OPUS]`); the named examples are not an exhaustive list.
+  slot — MODEL-ONLY in task subjects: `[OPUS]`, not `[CLAUDE:OPUS]` (the panel is narrow; the
+  engine still rides the ribbon and the stamped result, and a dispatch with no pinned model
+  falls back to the engine name, `[CODEX]`). So: `∞ #149 — 05 IMPLEMENT [OPUS]`; `activeForm`
+  says what the spinner should read while it runs (`Implementing #149 on opus`,
+  `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped steps use one task per round, and EVERY
+  dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
+  shape (`∞ #149 — 08 CODE-REVIEW r1 [GPT-5.6-SOL]`, `∞ #78 — 08 FIX r3 [OPUS]`); the named
+  examples are not an exhaustive list.
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
   same turn that states the duration. A staged unit's steps get their own tasks under its own
