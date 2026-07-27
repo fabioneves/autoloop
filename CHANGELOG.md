@@ -3,6 +3,19 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.48.1] - 2026-07-27
+
+### Changed
+
+- **Every dispatched step's ribbon names its executor — engine and model.** The slot is
+  `[ENGINE]` when no model is pinned and `[ENGINE:MODEL]` when one is, read from the dispatch
+  result's own `engine` and `model` stamps rather than composed by hand: `[CLAUDE:OPUS]` writes,
+  `[CLAUDE:FABLE]` plans and fixes, `[CODEX]` reviews, `[CLAUDE:GPT-5.6-SOL]` under the proxy.
+  With models chooseable per step, who judged or wrote belongs on the line that reports it.
+  Orchestrator-run steps keep no slot — the session's model is on the startup banner.
+- Corpus grows to 39: the prescribed version-currency pipe (allow) and the live improvised
+  `xargs -n1 basename` variant (block — xargs executes its arguments).
+
 ## [0.48.0] - 2026-07-27
 
 ### Added
