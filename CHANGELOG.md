@@ -3,6 +3,24 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.44.3] - 2026-07-27
+
+### Fixed
+
+- **The `$?` rule covers the shape rather than one spelling of it.** 0.44.2 told Setup never to
+  append `; echo "exit=$?"` — written against the single instance observed. The next run wrote
+  `git status --short && echo "clean=$?"`: different separator, different variable name, same
+  unresolvable expansion, same refused call. The rule now forbids `$?` outright in any spelling and
+  in both skills; Dev had no rule at all, and the failing command came from a Dev-shaped flow.
+
+  It also states why, which the narrow version did not: `$?` conveys nothing here. The tool result
+  already carries the exit status, and after `&&` the echo runs only when the command already
+  succeeded, so `A && echo "ok=$?"` can print nothing but `0`. Four occurrences in one day across
+  three spellings.
+- Dev also gains the literal-path rule Setup got in 0.44.2 — a shell variable standing in for a
+  path you already know is one more thing the guard must resolve, and buys nothing in a command
+  written once.
+
 ## [0.44.2] - 2026-07-27
 
 ### Fixed

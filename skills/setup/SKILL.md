@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.44.2 · starting
+∞ setup · v0.44.3 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -393,10 +393,12 @@ correctly the first time:
   small script to the scratchpad and run the file — never `node -e`;
 - **to measure a section**, use `wc -c`, `grep -c`, or `sed -n` — never an awk program;
 - **to read a section's bytes**, `sed -n '/^## Heading/,$p'` reads what an awk range would;
-- **never append `; echo "exit=$?"`.** `$?` cannot be resolved without running the command, so it
-  is opaque by construction and takes the whole invocation down with it — including the useful part
-  in front of it. The tool result already carries the exit status, so the suffix costs a refused
-  call and a retry to learn nothing new. Observed three times in one day on the same idiom.
+- **never write `$?` at all** — not after `;`, not after `&&`, under any variable name. It cannot be
+  resolved without running the command, so it is opaque by construction and takes the whole
+  invocation down with it, including the useful part in front of it. It also conveys nothing: the
+  tool result already carries the exit status, and after `&&` the echo runs only when the command
+  already succeeded, so `A && echo "ok=$?"` can print nothing but `0`. Observed four times in one
+  day across three different spellings, each costing a refused call and a retry.
 
 The `config` and `contracts` sections above deliberately run the repository's installed copies:
 they report the pre-migration install as it stands, which is the thing being audited. A legacy
