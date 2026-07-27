@@ -120,6 +120,11 @@ Shapes to keep out of every command, sanctioned read or not:
 - **A shell variable standing in for a path you already know.** Write the literal path. A variable
   is one more thing the guard must resolve before it can judge the command, and it buys nothing in
   a command written once.
+- **Process substitution, `<(…)`.** Command substitution's sibling, refused for the same reason —
+  and it takes the innocent front of the command down with it (a plain `wc -c` was refused because
+  `diff <(cat -A …) <(cat -A …)` rode the same invocation). Byte-compare two files with
+  `cmp -l a b | head` — exact differing offsets, no expansion — or write each transform to a
+  plain file first and diff those.
 
 ## Dispatch
 
@@ -222,6 +227,14 @@ reviewer's job is to find the case the author did not consider.
   - all other claude dispatches → no flag (the saved default)
 
   - step 02 plan (and any plan-revision dispatch) → `--model fable`
+
+  **Model-limit fallback: fable → opus, once per pin.** A dispatch that dies with a usage-limit
+  message ("You've reached your … limit" in its stderr/typed error) is a resource refusal, not a
+  defect: retry that dispatch ONCE with `--model opus` and note the substitution on the step's
+  collection line (`plan returned · opus, fable at limit`). The stamped result already records
+  who actually ran. Never fall back for any other failure class, never fall back reviewers onto
+  the writer's model, and never silently drop the pin — the note is the record. Opus at its
+  limit too parks the run: limits reset; a run killed by improvisation does not.
 
   Premise and disposition are IN-SESSION work and carry no `--model` knob — they run on the
   session's model. The standing choice is **fable**: orchestrate the loop from a fable session.
@@ -326,11 +339,14 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
 - **One task per step**, created in-progress when the step's ribbon prints, completed when the
   step ends. The subject starts with the unit prefix — the SAME `∞ #<N> — ` the umbrella row
   carries, so a unit's rows read as one visual group — then the ribbon core with the executor
-  slot: `∞ #149 — 05 IMPLEMENT [CLAUDE:OPUS]`; `activeForm` says what the spinner should read
-  while it runs (`Implementing #149 on opus`, `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped
-  steps use one task per round, and EVERY dispatched sub-step — fix rounds, doubt reviews, plan
-  revisions — carries the same prefix shape (`∞ #149 — 08 CODE-REVIEW r1 [CLAUDE:GPT-5.6-SOL]`,
-  `∞ #78 — 08 FIX r3 [CLAUDE:OPUS]`); the named examples are not an exhaustive list.
+  slot — MODEL-ONLY in task subjects: `[OPUS]`, not `[CLAUDE:OPUS]` (the panel is narrow; the
+  engine still rides the ribbon and the stamped result, and a dispatch with no pinned model
+  falls back to the engine name, `[CODEX]`). So: `∞ #149 — 05 IMPLEMENT [OPUS]`; `activeForm`
+  says what the spinner should read while it runs (`Implementing #149 on opus`,
+  `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped steps use one task per round, and EVERY
+  dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
+  shape (`∞ #149 — 08 CODE-REVIEW r1 [GPT-5.6-SOL]`, `∞ #78 — 08 FIX r3 [OPUS]`); the named
+  examples are not an exhaustive list.
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
   same turn that states the duration. A staged unit's steps get their own tasks under its own

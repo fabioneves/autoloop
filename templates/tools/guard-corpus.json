@@ -265,6 +265,18 @@
    "branch": "feat/gh-149-x",
    "expect": "allow",
    "why": "0.49.3: the sanctioned typed in-turn wait"
+  },
+  {
+   "cmd": "diff <(cat -A /tmp/s/a.md) <(cat -A /tmp/s/b.md) | head -20",
+   "branch": "feat/gh-135-x",
+   "expect": "block",
+   "why": "0.49.5: process substitution is opaque expansion by design; byte-compare via cmp -l or two plain files"
+  },
+  {
+   "cmd": "cmp -l /tmp/s/plan-135.md /tmp/s/plan-135-frozen.md | head -5",
+   "branch": "feat/gh-135-x",
+   "expect": "allow",
+   "why": "0.49.5: the sanctioned byte-compare \u2014 no expansion, reports exact differing byte offsets"
   }
  ]
 }
