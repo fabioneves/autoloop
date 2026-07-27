@@ -292,9 +292,11 @@ failure. Waiting itself has one sanctioned shape per situation:
   `♡ parked — #78 codex r1 + #87 plan-review in flight · resumes on result files · 15:04`.
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
   the printed line make parked and dead distinguishable at a glance.
-- **In-turn wait (fallback, no monitor available).** One bounded until-loop —
-  `timeout 600 bash -c 'until [ -f <result> ]; do sleep 5; done'` — then the heartbeat pair.
-  Never bare `sleep N;` chains: the host blocks them and tells you so.
+- **In-turn wait (fallback, no monitor available).** One typed bounded wait —
+  `node tools/agentic/dispatch.mjs --wait-file <result.json> --timeout-seconds 600` — then the
+  heartbeat pair. Never `bash -c 'until …'` (inline interpreter source; the guard refuses it —
+  a live run was blocked by exactly that shape) and never bare `sleep N;` chains: the host
+  blocks them and tells you so.
 
 The Stop hook still refuses a turn that abandons unpushed work; a parked wait satisfies it by
 construction, because parking requires the push.

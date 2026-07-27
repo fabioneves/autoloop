@@ -253,6 +253,18 @@
    "branch": "feat/gh-78-x",
    "expect": "allow",
    "why": "0.49.0: the sanctioned status-post shape \u2014 the publisher executes the gate itself and binds the verdict to the exact clean head"
+  },
+  {
+   "cmd": "timeout 600 bash -c 'until [ -f /tmp/s/code-review-1.json ]; do sleep 5; done'",
+   "branch": "feat/gh-149-x",
+   "expect": "block",
+   "why": "0.49.3: inline interpreter source stays blocked even as the skill's old wait idiom; the typed replacement is dispatch.mjs --wait-file"
+  },
+  {
+   "cmd": "node tools/agentic/dispatch.mjs --wait-file /tmp/s/code-review-1.json --timeout-seconds 600",
+   "branch": "feat/gh-149-x",
+   "expect": "allow",
+   "why": "0.49.3: the sanctioned typed in-turn wait"
   }
  ]
 }
