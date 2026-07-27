@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.46.0] - 2026-07-27
+
+### Changed
+
+- **Under `with codex`, Claude's five-axis review moves to the end of the pipeline.** Mid-pipeline
+  it reviewed the pre-codex artifact, and every fix round landed after it unseen — so the final
+  artifact got no Claude-shaped review at all, while the mid-pipeline pass cost a full checklist
+  cycle that did not prevent codex finding two Majors an hour later. The one Major the
+  orchestrator did catch tonight came from a full-artifact look at the delivery head, which is
+  exactly the end position.
+
+  Step 7 in codex mode is now a slim handoff check (build and tests green); after the codex rounds
+  converge and before the gate, the orchestrator runs the full five-axis pass over the complete
+  final diff. A Critical/Major found there is fixed and re-covered by exactly one codex delta
+  round, then the five-axis re-checks that delta only; Minors become run-record notes, never
+  re-entry. The final pass is a gate, not a second convergence loop. Plain runs are unchanged, so
+  every unit is still reviewed by both models — the layering just puts each where it earns most:
+  codex adversarial in the middle, Claude's checklist over what actually ships.
+
 ## [0.45.3] - 2026-07-27
 
 ### Fixed

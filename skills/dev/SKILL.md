@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.45.3 · starting
+∞ dev · v0.46.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -407,10 +407,25 @@ merge-friendly: no shared freshness line, derived count prose, or table re-paddi
 
 ### 7. Orchestrator diff review
 
-Move to `loop:07-diff-review`. Load code-review, security, and domain guidance as applicable.
-Review the simplified diff against `cfg.review.checklistPath`, the frozen plan, invariants,
-boundary, and untrusted-input model. Fix and commit defects. The fresh reviewer in step 8 covers
+Move to `loop:07-diff-review`.
+
+**Plain run:** load code-review, security, and domain guidance as applicable. Review the
+simplified diff against `cfg.review.checklistPath`, the frozen plan, invariants, boundary, and
+untrusted-input model. Fix and commit defects. The fresh reviewer in step 8 covers
 orchestrator-authored fixes.
+
+**`with codex`:** step 7 is a slim handoff check only — build and tests green, nothing else. The
+five-axis pass moves to the END, where it reviews what actually ships: mid-pipeline it reads the
+pre-review artifact, and every fix round lands after it unseen. A live unit proved both halves —
+the mid-pipeline pass did not prevent codex finding two Majors an hour later, and the one Major
+the orchestrator did catch came from a full-artifact look at the delivery head.
+
+After the codex rounds converge clean and before the gate, run the full five-axis review over the
+complete final diff (checklist, frozen plan, invariants, boundary, untrusted-input model). A
+Critical/Major found here is fixed and re-covered by exactly ONE codex delta round — the fix
+invalidates the reviewed head anyway — then the five-axis re-checks that delta only. Minors and
+Suggestions become run-record notes, never re-entry: the final pass is a gate, not a second
+convergence loop.
 
 ### 8. Independent code review
 
