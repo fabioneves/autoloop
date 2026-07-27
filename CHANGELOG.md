@@ -3,6 +3,15 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.48.2] - 2026-07-27
+
+### Fixed
+
+- **Setup says that `--sort-versions` needs no pre-cleaning.** A live run decorated the version
+  pipe with `xargs -n1 basename` against a hazard that does not exist — the sorter silently drops
+  non-version lines — and was correctly refused for the xargs, not the goal. The skill now states
+  the guarantee where the command is prescribed, which removes the reason to improvise.
+
 ## [0.48.1] - 2026-07-27
 
 ### Changed

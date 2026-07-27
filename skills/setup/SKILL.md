@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.48.1 · starting
+∞ setup · v0.48.2 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -67,7 +67,10 @@ Codex uses `$autoloop:setup doctor`; opencode invokes the `setup` skill with `do
    ```
 
    `tail -3` on purpose: only the newest versions answer the currency question, and a mature
-   cache holds dozens — a live one printed 87 lines to learn one.
+   cache holds dozens — a live one printed 87 lines to learn one. Feed it plain `ls` output:
+   `--sort-versions` silently drops non-version lines, so there is nothing to pre-clean — a live
+   run decorated the pipe with `xargs -n1 basename` against a hazard that does not exist and was
+   correctly refused for the xargs, not the goal.
 
    In a live tree, compare the loaded banner with `VERSION` and the banner on disk. A newer disk
    version means this session is stale: setup/migration stops; doctor reports FAIL and asks for a
