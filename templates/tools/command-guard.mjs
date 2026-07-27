@@ -2072,14 +2072,39 @@ function selfTest() {
   return ok;
 }
 
+// A refusal is a policy decision, not a malfunction — and it has to READ that way.
+//
+// Blocking with stderr and exit 2 alone makes the host render every refusal as
+// "PreToolUse:Bash hook error", identical to a crashed hook. A correct decision
+// then looks like a broken tool, which invites working around it instead of
+// reading it. Emitting the structured decision as well makes the host present
+// the reason on its own terms; measured against claude 2.1.220, the error
+// framing disappears and the reason survives verbatim.
+//
+// All three parts are load-bearing. The JSON removes the error framing. `exit 2`
+// keeps the refusal failing CLOSED on any host that does not parse this shape —
+// Codex and opencode run this same guard, and JSON with exit 0 would fail OPEN
+// there, which is a security regression rather than a cosmetic change. stderr
+// keeps the reason visible on exactly those hosts.
+function refuse(reason) {
+  process.stdout.write(`${JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
+    },
+  })}\n`);
+  process.stderr.write(`${reason}\n`);
+  process.exit(2);
+}
+
 function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
-    console.error(
+    refuse(
       `autoloop guard — invalid guard invocation (${parsed.error}), so no command can be `
       + 'proven safe. Re-run autoloop:setup to repair the hook wiring.',
     );
-    process.exit(2);
   }
   if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
 
@@ -2087,21 +2112,19 @@ function main() {
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
   } catch (error) {
-    console.error(
+    refuse(
       `autoloop guard — the hook payload was unreadable (${error.message}), so the command `
       + 'cannot be proven safe. Re-run the command; if this repeats, re-run autoloop:setup '
       + 'to repair the hook wiring.',
     );
-    process.exit(2);
   }
   const cmd = payload?.tool_input?.command;
   if (typeof cmd !== 'string') {
-    console.error(
+    refuse(
       'autoloop guard — the hook payload omitted the Bash command, so it cannot be proven '
       + 'safe. Re-run the command; if this repeats, re-run autoloop:setup to repair the '
       + 'hook wiring.',
     );
-    process.exit(2);
   }
 
   // Ordered before configuration loading: with no run open there is nothing to
@@ -2116,18 +2139,14 @@ function main() {
       console.error(`command-guard: ${error.message}`);
       process.exit(0);
     }
-    console.error(
+    refuse(
       `autoloop guard — the configured base branch cannot be resolved (${error.message}), `
       + 'so branch-sensitive rules cannot be proven. Run autoloop:setup to repair '
       + 'docs/agentic/STATE.md.',
     );
-    process.exit(2);
   }
   const verdict = evaluate(cmd, currentBranch(), { baseBranch });
-  if (verdict.block) {
-    process.stderr.write(verdict.reason + '\n');
-    process.exit(2);
-  }
+  if (verdict.block) refuse(verdict.reason);
   process.exit(0);
 }
 
