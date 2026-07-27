@@ -3,6 +3,26 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.48.3] - 2026-07-27
+
+### Fixed
+
+- **The step-10 finalize example carries its mandatory flags.** Under a non-manual merge policy
+  the terminal finalizer requires `--ownership-attestation-file` and `--expect-app-id` and refuses
+  without them — and the skill's example showed neither, so a live session lost a cycle
+  rediscovering both from the refusal. The example now includes them, names the exact
+  `KEYS.ownership` shape from `attestation-contract.mjs` and where each value comes from (the
+  lifecycle marker and claim, never re-derived), and states the manual-mode inverse: both flags
+  forbidden.
+- **The optimistic full-close is executable, not just prose.** 0.46.0 made "convergence may only
+  close on a full-artifact round" the skill's rule — and the review contract kept refusing it:
+  rounds after the first were delta-only, so round > 1 with full scope returned
+  `INVALID_REVIEW_INPUT`. A live session caught the contradiction mid-unit, correctly ruled that
+  the contract wins, worked within it, and flagged the defect upstream. Round 1 remains full-only;
+  later rounds now accept either scope, with the closing full round pinned by fixture: a clean
+  round-2 full-artifact review publishes success. The delta-blindness human-block path stays
+  delta-scoped, since a full round has no out-of-scope findings by construction.
+
 ## [0.48.2] - 2026-07-27
 
 ### Fixed

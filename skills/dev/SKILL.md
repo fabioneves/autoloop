@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.48.2 · starting
+∞ dev · v0.48.3 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -651,8 +651,20 @@ Then run:
 node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 node tools/agentic/publish-verdict.mjs terminal-finalize \
   --request-file <terminal-request.json> \
-  --review-evidence-file <exact-clean-review-input.json>
+  --review-evidence-file <exact-clean-review-input.json> \
+  --ownership-attestation-file <ownership-attestation.json> \
+  --expect-app-id <ci-app-id>
 ```
+
+Under an **acknowledged non-manual** merge policy (`merge.unverifiedInvocationAcknowledged:
+true`) the last two flags are MANDATORY — the finalizer fails typed without them, and a live
+session lost a cycle rediscovering that from the failure. Compose the
+ownership attestation from facts the run already holds, in exactly the shape
+`attestation-contract.mjs` `KEYS.ownership` defines: `kind: "ownership"`, `v`, `headOid` (the
+gated head), `issue`, `issueBodyHash`, `claimCommitOid`, `frozenPlanHash`, `frozenPlanCommentId`,
+`frozenPlanAuthor` — every value from the lifecycle marker and claim, never re-derived by hand.
+`--expect-app-id` is the CI App's numeric id (GitHub Actions is `15368`). Manual mode is the
+inverse: both flags are forbidden.
 
 The first command must return `READY_HEAD_BOUND` for the exact pushed/gated head. Its live delivery
 read supplies the only head-binding authority. The terminal finalizer independently repeats that

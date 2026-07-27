@@ -324,11 +324,9 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
   if (
     rounds.some((record, index) =>
       record.round !== index + 1
-      || record.scope !== (
-        index === 0
-          ? REVIEW_SCOPES.get('full')
-          : REVIEW_SCOPES.get('delta')
-      )
+      || (index === 0
+        ? record.scope !== REVIEW_SCOPES.get('full')
+        : ![...REVIEW_SCOPES.values()].includes(record.scope))
       || stable.some((key) => record[key] !== first[key]))
     || rounds.some((record) =>
       record.checkout.root !== first.checkout.root
@@ -418,8 +416,11 @@ export function reviewTransition(input) {
     || !Number.isSafeInteger(input.round)
     || input.round < 1
     || !REVIEW_SCOPES.has(input.scope)
+    // Round 1 is always the complete artifact. Later rounds are delta while
+    // fixes churn — and FULL when closing: 0.46.0 made "convergence closes on
+    // a full-artifact round" the rule, and this line kept refusing it, so the
+    // optimistic close was prose a live session could not execute.
     || (input.round === 1 && input.scope !== 'full')
-    || (input.round > 1 && input.scope !== 'delta')
     || validateProjectConfig(input.projectConfig).length > 0
     || input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
     || !validExpected(input.expected)
@@ -620,7 +621,8 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
     }
     const record = {
       round,
-      scope: round === 1 ? REVIEW_SCOPES.get('full') : REVIEW_SCOPES.get('delta'),
+      scope: overrides.scope
+        ?? (round === 1 ? REVIEW_SCOPES.get('full') : REVIEW_SCOPES.get('delta')),
       dispatchId: overrides.dispatchId ?? `dispatch-${options.seed}-${counter}`,
       authorIdentity: overrides.authorIdentity ?? 'orchestrator',
       reviewerIdentity: overrides.reviewerIdentity ?? `reviewer-${counter}`,
@@ -717,6 +719,14 @@ function selfTest() {
     findings: [],
     rebuts: [accept(finding.id, 'The fix closes the finding.')],
   });
+
+  const fullFactory = roundFactory(fixtureProjectConfig(), { seed: 'fullclose' });
+  const fullFirst = fullFactory(1, failWith([finding]));
+  const fullClose = fullFactory(2, {
+    verdict: 'pass',
+    findings: [],
+    rebuts: [accept(finding.id, 'The fix closes the finding.')],
+  }, { scope: 'full-artifact' });
 
   const fixedFactory = roundFactory(fixtureProjectConfig(), { seed: 'fixed' });
   const fixedFirst = fixedFactory(1, failWith([finding]));
@@ -830,6 +840,17 @@ function selfTest() {
     {
       name: 'clean full review publishes success',
       input: inputFor([clean]),
+      expected: ['clean', true],
+    },
+    {
+      // 0.46.0 skill rule, previously unexecutable: convergence closes on a
+      // full-artifact round. Round 2 with full scope was INVALID_REVIEW_INPUT.
+      name: 'a clean full-artifact closing round publishes success',
+      input: inputFor(
+        [fullFirst, fullClose],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
       expected: ['clean', true],
     },
     {
