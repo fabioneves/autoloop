@@ -39,8 +39,16 @@ node "$self_dir/dispatch.mjs" "$@" --live-file "$live" --output-file "$out" --js
   > /dev/null 2>&1 &
 dispatch_pid=$!
 
-# --pid ends the tail when the dispatch exits, so the task closes itself.
-tail --pid "$dispatch_pid" -n +1 -F "$live" 2>/dev/null
+# --pid ends the tail when the dispatch exits, so the task closes itself. The
+# renderer turns raw engine JSONL into pane-readable lines (reasoning ticks,
+# tool calls, output text); it is written never to crash, and a missing copy
+# degrades to the raw stream rather than a dead watcher.
+if [ -f "$self_dir/dispatch-render.mjs" ]; then
+  tail --pid "$dispatch_pid" -n +1 -F "$live" 2>/dev/null \
+    | node "$self_dir/dispatch-render.mjs"
+else
+  tail --pid "$dispatch_pid" -n +1 -F "$live" 2>/dev/null
+fi
 
 wait "$dispatch_pid"
 status=$?
