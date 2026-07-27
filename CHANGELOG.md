@@ -3,6 +3,19 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.48.3] - 2026-07-27
+
+### Fixed
+
+- **The optimistic full-close is executable, not just prose.** 0.46.0 made "convergence may only
+  close on a full-artifact round" the skill's rule — and the review contract kept refusing it:
+  rounds after the first were delta-only, so round > 1 with full scope returned
+  `INVALID_REVIEW_INPUT`. A live session caught the contradiction mid-unit, correctly ruled that
+  the contract wins, worked within it, and flagged the defect upstream. Round 1 remains full-only;
+  later rounds now accept either scope, with the closing full round pinned by fixture: a clean
+  round-2 full-artifact review publishes success. The delta-blindness human-block path stays
+  delta-scoped, since a full round has no out-of-scope findings by construction.
+
 ## [0.48.2] - 2026-07-27
 
 ### Fixed
