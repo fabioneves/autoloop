@@ -202,6 +202,11 @@ reviewer's job is to find the case the author did not consider.
   - step 05 implement → `--model opus`
   - step 08 fix dispatches → `--model fable`
   - all other claude dispatches → no flag (the saved default)
+
+  Premise, planning, and disposition are IN-SESSION work and carry no `--model` knob — they run
+  on the session's model. The standing choice is **fable**: orchestrate the loop from a fable
+  session, and if the session is deliberately something else, know that planning quality rides
+  with it.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 
