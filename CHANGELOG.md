@@ -5,6 +5,17 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [0.44.1] - 2026-07-27
 
+### Changed
+
+- **A second review engine is opt-in, not the default.** v0.44.0 routed every reviewer role to codex
+  automatically, which was wrong: it made an absent codex break a plain run that had asked for
+  nothing unusual, and it put a second vendor in the loop by assumption rather than by choice. Every
+  role now runs on the orchestrating host unless the invocation says otherwise — `/autoloop:dev with
+  codex` sends reviews to codex and appends ` · reviews codex` to the startup banner so a run states
+  which engine judged it. The writer always stays on the host. Everything the codex path gained in
+  0.44.0 is unchanged and still available; only the default moved. Preflight downgrades a missing
+  codex from FAIL to NOTE to match.
+
 ### Fixed
 
 - **Setup obeys the configured base branch with its checkout, not only with its audit ref.** Setup

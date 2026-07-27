@@ -280,11 +280,14 @@ const ENGINES = Object.freeze({
   }),
 });
 
-// Reviews go to codex, writing stays on claude. Structural rather than
-// conventional: with the default in the tool, a review can only end up on the
-// writer's own model by someone explicitly asking for it.
-export function defaultEngineFor(role) {
-  return ROLES[role]?.posture === 'reviewer' ? 'codex' : 'claude';
+// The orchestrating host is the default for every role. Running reviews on a
+// second engine is a real choice with real cost — another CLI to install and
+// authenticate, another vendor in the loop — so it is opt-in at the invocation
+// (`/autoloop:dev with codex`) and passed through as `--engine`, never assumed.
+// v0.44.0 defaulted reviewers to codex and was wrong to: it made an absent codex
+// break a plain run that had asked for nothing unusual.
+export function defaultEngineFor() {
+  return 'claude';
 }
 
 function resolveEngine(binary) {
