@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.44.1 · starting
+∞ setup · v0.44.2 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -374,6 +374,25 @@ wc -c docs/agentic/STATE.md docs/agentic/ARCH.md 2>/dev/null
 
 A scan or audit section that fails is incomplete, not an empty success. Follow it with one targeted
 check. STATE Lessons over 3000 bytes and ARCH over 8000 bytes are compaction NOTEs, not failures.
+
+### No improvised inspection
+
+The battery above is guard-clean as written. Follow-up checks must be too, and the ones reached for
+first usually are not: `node -e '<js>'` to call a contract, and `awk '<program>'` to measure a
+section, are both refused by policy — an inline interpreter and a non-file-backed awk are
+executable source the guard cannot read. Observed on consecutive setup runs, each spending a
+refused call and a retry on the same two shapes.
+
+The block is the policy working, never an error to engineer around. Compose the follow-up
+correctly the first time:
+
+- **substitute the real path** wherever this skill writes `<templates>` — write the literal
+  directory, never a shell variable standing in for it. A variable is one more thing the guard has
+  to resolve, and it buys nothing in a command written once;
+- **to call a contract**, run its CLI directly (`node <templates>/tools/<tool>.mjs …`) or write a
+  small script to the scratchpad and run the file — never `node -e`;
+- **to measure a section**, use `wc -c`, `grep -c`, or `sed -n` — never an awk program;
+- **to read a section's bytes**, `sed -n '/^## Heading/,$p'` reads what an awk range would.
 
 The `config` and `contracts` sections above deliberately run the repository's installed copies:
 they report the pre-migration install as it stands, which is the thing being audited. A legacy

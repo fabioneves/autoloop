@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.44.2] - 2026-07-27
+
+### Fixed
+
+- **Setup stops writing commands its own guard refuses.** The prescribed one-call audit is
+  guard-clean, but the skill then says "follow it with one targeted check" without saying the
+  follow-up must be guard-clean too — and Dev's equivalent "No improvised inspection" section had no
+  counterpart in Setup. So Setup improvised, and reached for exactly the two shapes policy forbids:
+  `node -e '<js>'` to call a contract, and `awk '<program>'` to measure a section. Both are
+  executable source the guard cannot read, so both are refused. Observed on consecutive setup runs,
+  each spending a refused call and a retry on the same two shapes.
+
+  The refusals were correct; the skill asking for them was not. Setup now carries the same guidance
+  Dev has: substitute the literal path wherever the skill writes `<templates>` rather than standing
+  a shell variable in for it, call a contract through its CLI or a scratchpad script file rather
+  than `node -e`, and measure with `wc -c`, `grep -c` or `sed -n` rather than an awk program — a
+  `sed -n '/^## Heading/,$p'` range reads what an awk range would. Each replacement was verified
+  against the guard rather than assumed.
+
 ## [0.44.1] - 2026-07-27
 
 ### Changed
