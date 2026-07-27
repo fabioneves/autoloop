@@ -225,12 +225,12 @@ The label timeline measures each step and the run record posts the durations.
 | `loop:07-diff-review` | Orchestrator | Reviews the simplified diff against the repo checklist, invariants, security, and domain rules; fixes problems. | Clean committed tree and recorded dispositions. |
 | `loop:08-code-review` | Fresh reviewer | Reviews the full diff. Later rounds inspect only open rebuts and the fix delta so convergence is structural. | Independent clean verdict on the final code. |
 | `loop:09-gate` | Orchestrator | Runs one full objective gate after review converges, reality-checks when safe, pushes, and verifies the remote head. | Gated SHA equal to the PR head. |
-| `loop-delivered` | GitHub state | Applied only when committed, reviewed, gated, remote, and CI evidence name the same head, the complete required-check set is either empty by policy or green, and the pre-merge record is durably bound. | Ready PR and end-of-unit run record. |
+| `loop-delivered` | GitHub state | Applied only when committed, reviewed, gated, remote, and CI evidence name the same head, everything that ran on that head is green, and the pre-merge record is durably bound. | Ready PR and end-of-unit run record. |
 
-An empty CheckRun response is never a no-CI policy. Delivery reads canonical
-`.autoloop/ci-policy.json` from both the exact checkout and the remote-head Git tree, derives the
-complete required-check set itself, and rejects any caller list that differs. The policy file is a
-human-authorized, merge-protected path; a loop PR cannot weaken its own delivery requirement.
+Delivery's CI predicate is the triggered-checks floor: every check run and commit status on the
+exact head must be green, read live from GitHub — red blocks, pending blocks, and a repository
+with no CI has nothing to wait for. There is no committed required-check list to keep in sync
+(docs/specs/simple-delivery.md).
 
 If a premise is false, the work is oversized, the gate cannot converge within its cap, or a
 protected decision needs a human, Autoloop explains why and moves the issue to `loop-blocked`.
@@ -289,8 +289,6 @@ The plugin carries the process. The target repository owns its mission, facts, g
 caps, protected paths, and merge policy:
 
 ```text
-.autoloop/
-  ci-policy.json            canonical complete required-CheckRun policy
 docs/agentic/
   STATE.md                  mission, ProjectConfig 0.26, caps, lessons — policy authority
   LOOP.md                   human runbook for feeding, running, and reviewing the loop
@@ -462,17 +460,14 @@ loop-owned PR with fresh review, CI, and base evidence. Doctor is read-only.
   branch-protection changes, inline bodies, and other forbidden commands.
 - **Protected work stops for a human.** Deterministic escalate paths apply `human:authorize`;
   comments and issue text cannot grant themselves authority. Protected families include
-  `.opencode/**`, `.githooks/**`, and `.autoloop/ci-policy.json`.
+  `.opencode/**` and `.githooks/**`.
 - **The exact SHA matters.** Review, gate, CI, pushed head, and the dormant non-manual reference
   verdicts agree on the same commit.
-- **Branch protection remains yours.** Autoloop never edits repository protection. Under an
-  acknowledged non-manual policy the gate reads it and every applicable ruleset live and refuses
-  when complete non-bypassable enforcement cannot be proved; a solo-operator repository, whose
-  plan cannot have protection, records `merge.soloOperatorAcknowledged: true` instead and keeps
-  every remaining control.
-
-For unattended scheduling, use a dedicated least-privilege machine identity and protect the base
-branch with the repository's required CI checks.
+- **Branch protection remains yours.** Autoloop never edits or reads repository protection.
+  Non-manual merge policies are solo-only and require the recorded
+  `merge.soloOperatorAcknowledged: true` + `merge.unverifiedInvocationAcknowledged: true`
+  acknowledgements; every remaining control (exact-head CAS merge, triggered-checks floor,
+  premerge record, protected paths, kill switch) stays active.
 
 ## Requirements
 

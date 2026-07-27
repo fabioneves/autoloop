@@ -247,9 +247,8 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 
 | Repository path | Template | Contract |
 |---|---|---|
-| `.autoloop/ci-policy.json` | `ci-policy.template.json` | Canonical schema-v1 complete required-CheckRun policy |
 | `tools/agentic/adapter-contract.mjs` | `tools/adapter-contract.mjs` | Static reviewer artifact validation |
-| `tools/agentic/attestation-contract.mjs` | `tools/attestation-contract.mjs` | Exact-head gate/ownership/policy/authorization records |
+| `tools/agentic/attestation-contract.mjs` | `tools/attestation-contract.mjs` | Exact-head gate/policy/authorization records |
 | `tools/agentic/checkout-contract.mjs` | `tools/checkout-contract.mjs` | Stable checkout and GitHub repository identity |
 | `tools/agentic/claim-contract.mjs` | `tools/claim-contract.mjs` | Canonical branch/body ownership parser |
 | `tools/agentic/command-guard.mjs` | `tools/command-guard.mjs` | Structured command/ref guard |
@@ -287,22 +286,19 @@ postcondition back.
 
 After vendoring for an acknowledged non-manual policy, Setup fills the vendored file's REPO CONFIG
 block in the same visible diff — a placeholder block refuses every invocation, so an unfilled
-vendor is an incomplete setup, not a safe default. Fill `REPOSITORY` from `gh repo view`,
-`LOOP_LOGIN` from `gh api user`, and `REQUIRED_CI_CHECKS` to exactly the confirmed
-`.autoloop/ci-policy.json` set. Under `merge.soloOperatorAcknowledged: true` additionally set
-`SOLO_OPERATOR = true`, `TRUSTED_HUMAN_LOGINS = [LOOP_LOGIN]`, both App-ID lists empty, and
-`REQUIRED_APPROVING_REVIEW_COUNT = 0`; without the solo acknowledgement, ask the human for the
-trusted logins and App IDs instead — never invent them. Then run the vendored file's
-`--self-test` (its fixtures derive from the block) and show the result as evidence. Reconciliation
-never overwrites a filled block: `scaffold.mjs` reports the modified file as `kept-modified` for
-visible-diff reconciliation.
+vendor is an incomplete setup, not a safe default. Fill `REPOSITORY` from `gh repo view` and
+`LOOP_LOGIN` from `gh api user`. Non-manual is solo-only (docs/specs/simple-delivery.md): the
+config requires `merge.soloOperatorAcknowledged: true` plus
+`merge.unverifiedInvocationAcknowledged: true`, and the vendored block sets `SOLO_OPERATOR = true`,
+`TRUSTED_HUMAN_LOGINS = [LOOP_LOGIN]`, and `REQUIRED_APPROVING_REVIEW_COUNT = 0`. Then run the
+vendored file's `--self-test` (its fixtures derive from the block) and show the result as
+evidence. Reconciliation never overwrites a filled block: `scaffold.mjs` reports the modified file
+as `kept-modified` for visible-diff reconciliation.
 
-Write `.autoloop/ci-policy.json` as the exact canonical JSON serialization produced by
-`canonicalCiPolicy()` from `<templates>/tools/delivery-contract.mjs` (the installed copy once the
-reconcile has landed) with the explicitly confirmed complete CheckRun-name set. It is universal,
-including manual installations. Doctor rejects a missing, noncanonical, or symlinked policy.
-The shared lane policy treats this file as both human-authorized and merge-protected, so no loop PR
-can weaken the CI set it is about to use for delivery.
+There is no committed CI policy: delivery's CI predicate is the triggered-checks floor — every
+check run and commit status on the exact head must be green, read live. If a configured repo still
+carries `.autoloop/ci-policy.json`, reconcile removes it in the visible diff and the report says
+so; doctor treats a lingering copy as a finding.
 
 Always reconcile the host artifacts:
 
@@ -338,7 +334,7 @@ acknowledged non-manual ProjectConfig and removing them on return to `manual`), 
 artifacts, merges hooks and `.opencode/opencode.json` without clobbering repository-owned entries,
 folds a legacy root `opencode.json` into `.opencode/`, and returns a typed report. Present that
 report; hand-copy nothing it covers. What it deliberately leaves to the model and human:
-`ci-policy.json` authorship, the checklist, anything it reports `kept-modified` (a policy-bearing
+the checklist, anything it reports `kept-modified` (a policy-bearing
 tool such as `escalate-paths.mjs` whose repository copy differs), and the visible diff and commit.
 STATE and LOOP prose is the merge under Write and delivery — one call per document, never hand
 work.
@@ -537,7 +533,7 @@ only the project name, checklist path, and gate command, and the last two are re
 so a stale rendering is corrected rather than carried forward. A section a repository added to its
 own LOOP is preserved and reported like any other.
 
-The merge covers only these two documents. The review checklist, `.autoloop/ci-policy.json`, and
+The merge covers only these two documents. The review checklist and
 `ARCH.md` are separate repository-owned files it never reads or writes.
 
 Create lifecycle and step labels idempotently. Do not create non-manual policy labels.

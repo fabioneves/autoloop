@@ -36,7 +36,6 @@ export const HUMAN_AUTHORIZATION_GLOBS = [
   'secrets/**',
   '**/secrets/**',
   '.github/workflows/**',
-  '.autoloop/ci-policy.json',
   ...DEPLOYMENT_GUARDRAIL_GLOBS,
   ...SHARED_GUARDRAIL_ROOTS.map((root) => `${root}/**`),
   'AGENTS.override.md',
@@ -49,7 +48,6 @@ export const HUMAN_AUTHORIZATION_GLOBS = [
 ];
 
 export const PATH_POLICY_FIXTURES = [
-  { path: '.autoloop/ci-policy.json', humanAuthorization: true, mergeProtected: true },
   { path: 'tools/agentic/gate.mjs', humanAuthorization: true, mergeProtected: true },
   { path: '.claude/settings.json', humanAuthorization: true, mergeProtected: true },
   { path: '.codex/hooks.json', humanAuthorization: true, mergeProtected: true },
@@ -104,10 +102,6 @@ export function matchHumanAuthorization(files, globs = HUMAN_AUTHORIZATION_GLOBS
 const DEPLOYMENT_GUARDRAIL_RES = DEPLOYMENT_GUARDRAIL_GLOBS.map(globToRe);
 
 const MERGE_PROTECTED_PATH_FAMILIES = [
-  {
-    name: 'CI requirements policy',
-    matches: (path) => path === '.autoloop/ci-policy.json',
-  },
   { name: 'cryptographic credential paths', matches: (path) => /(^|\/)[^/]*crypt[^/]*(\/|$)/i.test(path) },
   { name: 'secret/credential path segments', matches: (path) => /(^|\/)[^/]*(secret|credential|token)[^/]*(\/|$)/i.test(path) },
   {
