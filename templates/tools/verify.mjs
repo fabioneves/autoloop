@@ -821,6 +821,14 @@ function pluginChecks(root) {
     ),
   });
   checks.push({
+    name: 'guard corpus replay',
+    execute: () => run(
+      process.execPath,
+      [resolve(root, 'templates', 'tools', 'command-guard.mjs'), '--corpus'],
+      root,
+    ),
+  });
+  checks.push({
     name: 'release-proven self-test manifest',
     execute: () => checkSelfTestManifest(toolsDir),
   });
@@ -974,6 +982,14 @@ function installChecks(root, { full = false } = {}) {
     execute: () => run(
       'bash',
       ['-n', resolve(toolsDir, 'dispatch-stream.sh')],
+      root,
+    ),
+  });
+  checks.push({
+    name: 'guard corpus replay',
+    execute: () => run(
+      process.execPath,
+      [resolve(toolsDir, 'command-guard.mjs'), '--corpus'],
       root,
     ),
   });

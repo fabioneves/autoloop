@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.47.0] - 2026-07-27
+
+### Added
+
+- **The guard corpus: real session traffic as a permanent regression gate.** Five of one day's
+  bugs were guard verdicts on commands no unit fixture contained — version probes, multi-line
+  assignments, quoted heredoc bodies, `git` inside prose, inline PR bodies. The corpus carries
+  those command shapes (sanitized, each tagged with the incident that earned its place), the
+  guard replays it in its self-test and via a dedicated `--corpus` mode, and `verify` gates it on
+  both the plugin and every installed repository — a corpus edit is re-proven even when the
+  manifest fast-path skips the unchanged tool. Thirty-six cases at birth; every future false
+  positive becomes an entry.
+- **Setup phase ribbons are mechanically anchored.** Prose alone proved intermittent across three
+  wordings — one ribbon of five, then none, then a scattered subset. Dev's ribbons hold because
+  riders ride label swaps; setup has no labels, so its ribbons now ride the commands each phase
+  inevitably runs: `--sort-versions` anchors RESOLVE, `scaffold --audit` anchors AUDIT and points
+  at INTERVIEW, `--reconcile`/`--merge-*` anchor WRITE, install-root verify anchors VERIFY. The
+  PostToolUse reminder names the ribbon due now and the one after it.
+
 ## [0.46.1] - 2026-07-27
 
 ### Fixed
