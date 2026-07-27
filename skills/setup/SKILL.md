@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-🟦 ∞ setup · v0.43.0 · starting
+🟦 ∞ setup · v0.43.1 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -508,7 +508,7 @@ stopping; interrupted means reverted, not parked.
 End with:
 
 ```text
-╰─ ∞ setup · complete ─ <mode> · <changed>/<total> artifacts · verify <state> ─╯
+🟩 ╰─ ∞ setup · complete ─ <mode> · <changed>/<total> artifacts · verify <state> ─╯
 ```
 
 Doctor ends with:

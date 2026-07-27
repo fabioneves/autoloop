@@ -3,6 +3,24 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.43.1] - 2026-07-27
+
+### Added
+
+- **A dispatched step names the host that produced it.** Which host ran a review is a property of
+  that review: a reviewer sharing the writer's host carries correlated blind spots, an external one
+  does not, and the two are not interchangeable evidence. `dispatch.mjs` reports `engine` on every
+  typed result, on typed failures, and in each dispatch-log entry — stamped once in the wrapper so
+  no return path can omit it, and reduced to the binary's name so a fixture shim and an installed
+  `claude` read alike. Banners carry it in a fixed `[HOST]` slot immediately after the step name,
+  upper-case and bracketed so an external host is obvious rather than buried among trailing fields.
+  Orchestrator-run steps take no slot, which is the honest statement that nothing was dispatched.
+
+### Fixed
+
+- Setup and pitcrew closing rails were left unbadged by the 0.43.0 visual pass. `setup · complete`
+  is the line that reports a run finished, so it now carries the same 🟩 as the dev rails.
+
 ## [0.43.0] - 2026-07-26
 
 ### Added

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-🟦 ∞ dev · v0.43.0 · starting
+🟦 ∞ dev · v0.43.1 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -119,8 +119,9 @@ node tools/agentic/dispatch.mjs --role <plan-review|implement|code-review|doubt-
   retries and no fallback engine: a failed dispatch is a decision for the orchestrator.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
-- Every result reports `ms` (the dispatch) and `startupMs` (this tool's own overhead before the
-  engine starts).
+- Every result reports `ms` (the dispatch), `startupMs` (this tool's own overhead before the
+  engine starts), and `engine` — the host that actually produced it, stamped from the spawn. Typed
+  failures carry it too. Report it on the step's ribbon rather than composing a host name by hand.
 
 Write prompts to a file; never inline untrusted issue or review text into a shell command. Give a
 dispatch only what it needs: the frozen plan, the relevant STATE invariants, the evidence, and the
@@ -557,11 +558,27 @@ cap — same grammar, cells counting rounds — which makes an approaching cap v
 blocks:
 
 ```text
-🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW ─ #<N> · fix-delta · 0 Critical · 2 Major open
-🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW ─ #<N> · fix-delta · clean · converged
+🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE] ─ #<N> · fix-delta · 0 Critical · 2 Major open
+🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW [CLAUDE] ─ #<N> · fix-delta · clean · converged
 ```
 
 Plan review is one dispatch and has no round ribbon.
+
+Every dispatched step names the **host** that produced it in a fixed `[HOST]` slot immediately
+after the step name — upper-case and bracketed so it reads as a label rather than one more
+detail, and so an external host is obvious at a glance instead of being buried in the trailing
+fields. The value is the `engine` field on the dispatch result, never composed by hand. A review
+carried out by a different host from the writer is not interchangeable evidence with one carried
+out by the same host, which is the whole reason it belongs on the line:
+
+```text
+🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE] ─ #<N> · full · fresh writer
+🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN-REVIEW [CODEX] ─ #<N> · full · fresh reviewer
+🟨 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CODEX] ─ #<N> · fix-delta · 1 Major open
+```
+
+Steps the orchestrator runs itself take no `[HOST]` slot — there was no dispatch, and an absent
+slot is the honest statement that nothing external produced the result.
 
 End a unit with one closing rail:
 

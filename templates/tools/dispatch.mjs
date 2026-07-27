@@ -305,19 +305,33 @@ export function parseResultEvent(stdout) {
 // excluded — so a regression in the wrapper is visible without a profiler.
 const PROCESS_START_MS = Date.now();
 
+// The binary that actually produced the result, reduced to its name. Which host
+// reviewed something is a property of the review — a Claude reviewer and an
+// external one are not interchangeable evidence — so it is reported from the
+// spawn rather than asserted by whoever narrates the round.
+function hostName(engine) {
+  const value = String(engine ?? 'claude');
+  return value.slice(value.lastIndexOf('/') + 1);
+}
+
 // Every dispatch — typed success or typed failure alike — contributes its window
 // to the log, so idle wall-clock cannot be understated by a run that only counts
 // the dispatches that worked.
 export function runDispatch(options) {
   const windowStartedAtMs = Date.now();
   const result = executeDispatch(options);
+  const engine = hostName(options.engine);
   recordDispatchWindow(options.cwd ?? process.cwd(), {
     role: options.role,
+    engine,
     startedAtMs: windowStartedAtMs,
     ms: Date.now() - windowStartedAtMs,
     ok: result.ok === true,
   });
-  return result;
+  // Stamped once here so no return path inside the dispatch can omit it.
+  return result.ok
+    ? { ...result, engine }
+    : { ...result, error: { ...result.error, engine } };
 }
 
 function executeDispatch({
@@ -746,6 +760,10 @@ function selfTest() {
       ? readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
       : [];
     check(
+      'a result names the host that produced it',
+      busyWriter.engine === 'claude' && idleWriter.error.engine === 'claude',
+    );
+    check(
       'every dispatch records its own window in the dispatch log',
       logged.length === 2
       && logged.every((entry) =>
@@ -754,6 +772,7 @@ function selfTest() {
         && entry.startedAtMs > 0
         && Number.isSafeInteger(entry.ms)
         && entry.ms >= 0
+        && entry.engine === 'claude'
         && typeof entry.ok === 'boolean')
       && logged[0].ok === false
       && logged[1].ok === true,

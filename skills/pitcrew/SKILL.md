@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-🟦 ∞ pitcrew · v0.43.0 · starting
+🟦 ∞ pitcrew · v0.43.1 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -261,13 +261,13 @@ Print one badged ribbon line per step (🟦 in progress · 🟩 complete · 🟥
 End with one closing rail:
 
 ```text
-╰─ ✔ PR #<P> REVISED ─ round <N> · <delivered|awaiting-ci> · gated <short OID> ─╯
+🟩 ╰─ ✔ PR #<P> REVISED ─ round <N> · <delivered|awaiting-ci> · gated <short OID> ─╯
 ```
 
 or:
 
 ```text
-╰─ ✖ PR #<P> BLOCKED ─ <safe composed reason> ─╯
+🟥 ╰─ ✖ PR #<P> BLOCKED ─ <safe composed reason> ─╯
 ```
 
 Fold Pitcrew outcomes into Dev's one end-of-run digest and scoreboard when the contexts are
