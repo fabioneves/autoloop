@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.3 · starting
+∞ dev · v0.49.4 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -22,8 +22,23 @@ Run Pitcrew first in the same run, then take new work.
 
 ## Prime
 
-One call. It validates ProjectConfig, reports the checkout against the configured base, runs one
-`scan.mjs`, persists the snapshot, and prints a decision-sized summary:
+**Base first, then prime.** The hooks and prime run the WORKING TREE's tool copies, so priming a
+parked unit branch runs whatever tools that branch forked with — the drift trap that has cost
+four separate sessions. Before the prime call:
+
+1. Attribute a dirty tree: only a lifecycle-bound, same-issue orphan with every dirty path in
+   the plan boundary and no human-authorization path may resume on its own branch. Anything else
+   is human work — stop; never stash, discard, or relocate it. Uncommitted scaffold or migration
+   artifacts (`tools/agentic/**`, host artifacts, a STATE config edit) are Setup's unfinished
+   work: stop with the Setup remedy, and never commit them to the base or package them into a PR
+   inside a Dev run.
+2. On a clean tree: fetch, switch to the configured base (`cfg.baseBranch` from the STATE config
+   block; the remote default branch until STATE is readable), and pull fast-forward. A pull that
+   cannot fast-forward is human divergence — stop and report. Then use the base's STATE, not a
+   session injection that may have come from a parked unit branch.
+
+Then one call. It validates ProjectConfig, reports the checkout against the configured base, runs
+one `scan.mjs`, persists the snapshot, and prints a decision-sized summary:
 
 ```bash
 node tools/agentic/prime.mjs --json
@@ -49,19 +64,11 @@ failure.
 
 Then, in order:
 
-1. Use the un-compacted SessionStart STATE injection when present; otherwise read
-   `docs/agentic/STATE.md` in full. If absent, stop and run Setup.
+1. Read `docs/agentic/STATE.md` in full from the base checkout (a SessionStart injection may
+   predate the base switch). If absent, stop and run Setup.
 2. Verify GitHub authentication and repository access.
-3. Attribute a dirty tree before switching: only a lifecycle-bound, same-issue orphan with every
-   dirty path in the plan boundary and no human-authorization path may resume. Otherwise treat it
-   as human work and stop. Never stash, discard, or relocate unknown work. Uncommitted scaffold or
-   migration artifacts (`tools/agentic/**`, host artifacts, a STATE config edit) are Setup's
-   unfinished work — human work: stop with the Setup remedy, and never commit them to the base or
-   package them into a PR inside a Dev run.
-4. On a clean tree, fetch and switch to `cfg.baseBranch`, pull fast-forward, then re-read STATE
-   because the session injection may have come from a parked unit branch.
-5. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
-6. Share the retained snapshot file with Pitcrew. After any Git or GitHub mutation (including the
+3. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
+4. Share the retained snapshot file with Pitcrew. After any Git or GitHub mutation (including the
    base switch above) or any wait boundary, pipe the retained snapshot file through
    `node tools/agentic/snapshot-contract.mjs --invalidate <REASON> < <snapshotPath>`, write the
    exact stdout back to a retained file, and use that file for every later snapshot-derived
@@ -70,7 +77,7 @@ Then, in order:
    decision intervenes. Then rerun `node tools/agentic/prime.mjs --json` (or `scan.mjs` directly)
    and replace the invalidated snapshot before actionability, absence, selection, or stop
    decisions. Never read items from an invalidated section as authority.
-7. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
+5. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
    durable issue-comment marker before selecting work, including an intent that crashed before a
    draft PR existed. A marker has authority only when its author currently has admin/maintain, or
    when it is the authenticated current runner's own marker and that runner still has write.

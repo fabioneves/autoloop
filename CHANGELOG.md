@@ -3,6 +3,17 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.4] - 2026-07-27
+
+### Changed
+
+- **Base first, then prime.** The dev loop's start order inverted: attribute any dirty tree,
+  fetch and switch to the configured base, pull fast-forward (a non-fast-forward pull is human
+  divergence — stop), THEN prime. Prime and the hooks execute the working tree's tool copies, so
+  priming a parked unit branch ran whatever tools that branch forked with — the drift trap that
+  has cost four sessions. STATE is read from the base checkout, never from a session injection
+  that may predate the switch.
+
 ## [0.49.3] - 2026-07-27
 
 ### Fixed
