@@ -3,6 +3,37 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.44.0] - 2026-07-27
+
+### Added
+
+- **Reviews run on codex, not the writer's own model.** A fresh process gives identity separation,
+  not cognitive separation: a reviewer running the writer's model inherits its priors and misses
+  what it missed, which is the one thing an independent review exists to avoid. `plan-review`,
+  `code-review` and `doubt-review` now dispatch to codex; `implement` stays on claude. The split is
+  the tool's default rather than a convention, so a review reaches the writer's model only when
+  asked for explicitly with `--engine`.
+- **A second engine adapter in `dispatch.mjs`**, selected by the binary's own name so a fixture
+  shim on a path and an installed binary resolve alike. Codex runs
+  `exec --json --output-schema <schema> -o <last> --sandbox read-only --ephemeral -C <cwd>` with the
+  prompt on stdin; its verdict is read from the output-last-message file rather than recovered from
+  an event stream, and validated against the same schema as any other. `--sandbox read-only` is
+  OS-enforced, so the reviewer's read-only posture is strictly stronger there than the tool
+  allowlist it has under claude. Codex refuses a writing role rather than approximating one, and an
+  absent codex fails typed — there is still no fallback engine.
+- Preflight reports a missing codex at session start, which is where that belongs rather than at
+  the first review of a finished unit.
+
+### Changed
+
+- The `loop-smoke` posture audit accepts either proof of the same invariant — claude by permission
+  mode and tool ceiling, codex by sandbox — and refuses a write capability in both shapes.
+- Review prompts are framed adversarially by contract: a different model is only worth its cost if
+  it is asked to disagree, so plan and code review challenge the approach, its assumptions and its
+  tradeoffs rather than only hunting defects in the diff.
+- The startup banner drops its state badge — a run that is starting has no outcome to report — and
+  names the engine pairing instead.
+
 ## [0.43.1] - 2026-07-27
 
 ### Added
