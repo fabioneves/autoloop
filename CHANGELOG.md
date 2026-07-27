@@ -7,11 +7,13 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
-- **Every background dispatch is watchable by default.** With the pipeline now dispatch-shaped end
-  to end, the live tail stops being an option: each dispatch names its live file deterministically
-  (`live/<issue>-<role>-r<N>.jsonl`), passes it as `--live-file`, and arms a `tail -F` background
-  shell before dispatching — the host's background-task view shows the engine's events for the
-  whole run. Tails stop at collection; only sub-minute dispatches may skip the watcher.
+- **Every background dispatch is watchable, natively.** `dispatch-stream.sh` (vendored) makes the
+  background task its own watcher: it starts the dispatch, tails the live file to its own stdout —
+  which the host streams into the task view natively — and exits with the dispatch's code. One
+  task per dispatch, no separate tail shell, engine events visible for the whole run, the typed
+  result collected from the output file. Only sub-minute dispatches may skip the wrapper. Proven
+  end to end: a real dispatched review streamed its full event flow through the wrapper's stdout
+  with the typed result intact.
 - **Simplify and fix rounds are dispatches, not orchestrator edits.** The orchestrator's ~86k-token
   context was the one place in the loop still writing code by hand — the most expensive possible
   place to do it, paying full-context turns for every finding fixed. Both now run as background

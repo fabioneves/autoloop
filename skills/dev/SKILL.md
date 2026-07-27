@@ -178,18 +178,20 @@ reviewer's job is to find the case the author did not consider.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 
-**Every background dispatch is watchable, by default.** Name the live file deterministically —
-`<scratchpad>/live/<issue>-<role>-r<N>.jsonl` — pass it as `--live-file`, and arm the watcher
-BEFORE the dispatch as its own background shell:
+**Every background dispatch is watchable, natively.** Background dispatches run through the
+vendored wrapper, which makes the task its own watcher — the host streams a background shell's
+stdout into its task view, and the wrapper tails the live file to exactly there:
 
 ```bash
-tail -F <scratchpad>/live/<issue>-<role>-r<N>.jsonl
+bash tools/agentic/dispatch-stream.sh \
+  <scratchpad>/live/<issue>-<role>-r<N>.jsonl <scratchpad>/<role>-result.json \
+  --role <role> --prompt-file <path> [--engine codex] [--tools <csv>]
 ```
 
-The host's background-task view then shows the engine's events live for the whole run — a
-13-minute codex review is a window, not a sealed box. One tail per in-flight dispatch; stop each
-tail at collection so finished watchers do not accumulate. The only dispatches that may skip the
-watcher are ones expected to finish in under a minute.
+One background task per dispatch, engine events flowing in its own view for the whole run, exit
+code propagated — a 13-minute codex review is a window, not a sealed box. Collect the typed
+result from the output file, never by parsing the stream. Only a dispatch expected to finish in
+under a minute may skip the wrapper and run `dispatch.mjs` directly.
 - Every result reports `ms` (the dispatch), `startupMs` (this tool's own overhead before the
   engine starts), and `engine` — the host that actually produced it, stamped from the spawn. Typed
   failures carry it too. Report it on the step's ribbon rather than composing a host name by hand.
