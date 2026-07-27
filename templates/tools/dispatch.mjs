@@ -340,7 +340,7 @@ export function defaultEngineFor() {
 // and an unrecognised or absent recording falls back to the host engine.
 // The recording is one line: `<engine>` or `<engine> <model>`. The second token
 // serves the proxy mode — reviews on the claude HARNESS but a proxied model
-// (`claude gpt-5.6-sol[1m]`), which keeps structured output and live streaming
+// (`claude gpt-5.6-sol`), which keeps structured output and live streaming
 // while decorrelating the reviewer model from the writer. Reviewer roles only,
 // and an unrecognised engine discards the whole line.
 function recordedReviewChoice(cwd) {
@@ -1233,9 +1233,9 @@ function selfTest() {
     check(
       'a recorded engine may carry a model, routing proxied reviews',
       (() => {
-        writeFileSync(engineFile, 'claude gpt-5.6-sol[1m]\n');
+        writeFileSync(engineFile, 'claude gpt-5.6-sol\n');
         return resolveDefaultEngine('code-review', repoScratch) === 'claude'
-          && resolveDefaultModel('code-review', repoScratch) === 'gpt-5.6-sol[1m]'
+          && resolveDefaultModel('code-review', repoScratch) === 'gpt-5.6-sol'
           && resolveDefaultModel('implement', repoScratch) === null;
       })(),
     );
