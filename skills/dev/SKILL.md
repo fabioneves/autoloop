@@ -427,12 +427,19 @@ pre-review artifact, and every fix round lands after it unseen. A live unit prov
 the mid-pipeline pass did not prevent codex finding two Majors an hour later, and the one Major
 the orchestrator did catch came from a full-artifact look at the delivery head.
 
-After the codex rounds converge clean and before the gate, run the full five-axis review over the
-complete final diff (checklist, frozen plan, invariants, boundary, untrusted-input model). A
-Critical/Major found here is fixed and re-covered by exactly ONE codex delta round — the fix
-invalidates the reviewed head anyway — then the five-axis re-checks that delta only. Minors and
-Suggestions become run-record notes, never re-entry: the final pass is a gate, not a second
-convergence loop.
+After the codex rounds converge clean and before the gate, the five-axis pass runs as ONE
+dispatched claude review — not in the orchestrator's context, where reading the final diff would
+bloat every later turn. The prompt carries the checklist path, the frozen plan, the invariants
+and untrusted-input model, and the codex rounds' finding ledger verbatim; the reviewer reads the
+repository itself and returns the structured verdict. The orchestrator's only in-session work is
+disposition: per finding, fix (dispatched), rebut, or note — judged from the verdict, never by
+re-reading the diff.
+
+A Critical/Major is fixed and re-covered by exactly ONE codex delta round — the fix invalidates
+the reviewed head anyway — then one claude delta re-check. Minors and Suggestions become
+run-record notes, never re-entry: the final pass is a gate, not a second convergence loop. This
+layer is claude-on-claude by design — the cross-model invariant is carried by the codex rounds;
+this one is defense in depth with a different lens, the checklist rather than the adversary.
 
 ### 8. Independent code review
 
@@ -515,9 +522,10 @@ orchestrator overlaps or parks while it runs; a blocking turn spent watching a t
 same waste as one spent watching a dispatch.
 
 The general rule, stated once: **dispatch or background what is bounded and bulky; keep in-session
-what is stateful and small.** Writing, fixing, reviewing, and long gates leave the session; plans,
-claims, labels, verdicts' collection, and the five-axis judgment stay — shipping the
-orchestrator's state out costs more than the turn it saves. The later universal terminal
+what is stateful and small.** Writing, fixing, reviewing, the five-axis pass, and long gates leave
+the session; plans, claims, labels, verdict collection, and finding disposition stay — those
+operate on compact typed results, and shipping the orchestrator's state out costs more than the
+turn it saves. The later universal terminal
 finalizer reruns that configured command on the exact clean remote head and is the only producer of
 the terminal gate CheckRun; never ask it to trust this caller-observed preflight result.
 

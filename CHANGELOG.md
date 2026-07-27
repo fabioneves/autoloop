@@ -33,9 +33,15 @@ Notable changes to Autoloop are recorded here. The format follows
   converge and before the gate, the orchestrator runs the full five-axis pass over the complete
   final diff. A Critical/Major found there is fixed and re-covered by exactly one codex delta
   round, then the five-axis re-checks that delta only; Minors become run-record notes, never
-  re-entry. The final pass is a gate, not a second convergence loop. Plain runs are unchanged, so
-  every unit is still reviewed by both models — the layering just puts each where it earns most:
-  codex adversarial in the middle, Claude's checklist over what actually ships.
+  re-entry. The final pass is a gate, not a second convergence loop.
+
+  The pass itself is a DISPATCHED claude review, not orchestrator work: reading the final diff
+  in-session would bloat every later turn's context, while a fresh reviewer reads the repository
+  with its own tools and returns a compact verdict. The prompt carries the checklist, the frozen
+  plan, and the codex rounds' finding ledger; the orchestrator keeps only disposition — fix,
+  rebut, or note, judged from the verdict. Plain runs are unchanged, so every unit is still
+  reviewed by both models — the layering just puts each where it earns most: codex adversarial in
+  the middle, Claude's checklist over what actually ships.
 
 ## [0.45.3] - 2026-07-27
 
