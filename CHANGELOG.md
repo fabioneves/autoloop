@@ -3,6 +3,20 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.5] - 2026-07-27
+
+### Changed
+
+- **Plan revision is a dispatch, not session work.** After plan-review dispositions (which stay
+  in-session — that is judgment), the revision itself goes out as one `--role plan --model fable`
+  dispatch carrying the plan, the verified findings, and their dispositions, returning the
+  revised artifact typed. The bounded-and-bulky rule that moved planning out of the session
+  moves plan-fixing out too; the one-plan-review rule is untouched — the revision ships
+  reviewed-once with dispositions recorded.
+- **Task-panel prefix rule is explicit for sub-steps.** Fix rounds, doubt reviews, and plan
+  revisions carry the same `∞ #<N> — ` subject prefix; the named examples were never an
+  exhaustive list, and a live session formatted a fix-round row step-first.
+
 ## [0.49.4] - 2026-07-27
 
 ### Changed
