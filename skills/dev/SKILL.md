@@ -656,8 +656,9 @@ node tools/agentic/publish-verdict.mjs terminal-finalize \
   --expect-app-id <ci-app-id>
 ```
 
-Under a **non-manual** merge policy the last two flags are MANDATORY — the finalizer refuses
-without them, and a live session lost a cycle rediscovering that from the refusal. Compose the
+Under an **acknowledged non-manual** merge policy (`merge.unverifiedInvocationAcknowledged:
+true`) the last two flags are MANDATORY — the finalizer fails typed without them, and a live
+session lost a cycle rediscovering that from the failure. Compose the
 ownership attestation from facts the run already holds, in exactly the shape
 `attestation-contract.mjs` `KEYS.ownership` defines: `kind: "ownership"`, `v`, `headOid` (the
 gated head), `issue`, `issueBodyHash`, `claimCommitOid`, `frozenPlanHash`, `frozenPlanCommentId`,
