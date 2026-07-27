@@ -3,6 +3,19 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.47.1] - 2026-07-27
+
+### Added
+
+- **`--model` pins the engine's model per dispatch.** Claude spells it `--model`, codex `-m`; the
+  pin crosses the CLI seam with a regression test that drives the real argv (the `--engine` lesson,
+  applied preemptively — the flag would have shipped dead without it), and the chosen model is
+  stamped into the typed result and the dispatch log so the record says who actually judged or
+  wrote. Proven live: a dispatch pinned to `opus` answered as `claude-opus-5` in its own event
+  stream. Model names are engine vocabulary and the skill says so — claude aliases never ride
+  `--engine codex`. Standing operator defaults recorded in the skill: implement on `opus`, fix
+  dispatches on `fable`, everything else on the saved default.
+
 ## [0.47.0] - 2026-07-27
 
 ### Added

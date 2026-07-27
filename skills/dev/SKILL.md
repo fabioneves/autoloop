@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.47.0 · starting
+∞ dev · v0.47.1 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -175,6 +175,16 @@ reviewer's job is to find the case the author did not consider.
   retries and no fallback engine: a failed dispatch is a decision for the orchestrator.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
+- `--model <name>` pins the engine's model for one dispatch, and is stamped into the typed result
+  and the dispatch log so the record says who actually judged or wrote. **Model names are ENGINE
+  vocabulary**: `opus`, `fable`, `sonnet` are claude-engine aliases and mean nothing to codex,
+  whose models are set in its own config — never pass a claude alias alongside `--engine codex`,
+  and never assume these defaults apply on a non-claude engine.
+
+  Standing defaults for claude-engine dispatches (this repository's operator choice):
+  - step 05 implement → `--model opus`
+  - step 08 fix dispatches → `--model fable`
+  - all other claude dispatches → no flag (the saved default)
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 

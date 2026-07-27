@@ -238,7 +238,10 @@ export function dispatchArgv(role, tools) {
 const ENGINES = Object.freeze({
   claude: Object.freeze({
     supports: (role) => ROLES[role] !== undefined,
-    argv: (role, tools) => dispatchArgv(role, tools),
+    argv: (role, tools, scratch, cwd, model) => [
+      ...dispatchArgv(role, tools),
+      ...(model === null ? [] : ['--model', model]),
+    ],
     // Claude's stream-json ends with exactly one `result` event.
     payload: (role, stdout) => {
       const event = parseResultEvent(stdout);
@@ -252,13 +255,14 @@ const ENGINES = Object.freeze({
     // Reviewer-only, and refused rather than approximated: codex would need a
     // writable sandbox and a commit contract this tool does not model.
     supports: (role) => ROLES[role]?.posture === 'reviewer',
-    argv: (role, tools, scratch, cwd) => {
+    argv: (role, tools, scratch, cwd, model) => {
       writeFileSync(
         join(scratch, 'schema.json'),
         JSON.stringify(REVIEW_VERDICT_SCHEMA),
       );
       return [
         'exec',
+        ...(model === null ? [] : ['-m', model]),
         '--json',
         '--output-schema',
         join(scratch, 'schema.json'),
@@ -419,17 +423,19 @@ export function runDispatch(options) {
   const engineBinary = options.engine ?? resolveDefaultEngine(options.role, cwd);
   const result = executeDispatch({ ...options, engine: engineBinary });
   const engine = hostName(engineBinary);
+  const model = options.model ?? null;
   recordDispatchWindow(options.cwd ?? process.cwd(), {
     role: options.role,
     engine,
+    ...(model === null ? {} : { model }),
     startedAtMs: windowStartedAtMs,
     ms: Date.now() - windowStartedAtMs,
     ok: result.ok === true,
   });
   // Stamped once here so no return path inside the dispatch can omit it.
   return result.ok
-    ? { ...result, engine }
-    : { ...result, error: { ...result.error, engine } };
+    ? { ...result, engine, ...(model === null ? {} : { model }) }
+    : { ...result, error: { ...result.error, engine, ...(model === null ? {} : { model }) } };
 }
 
 function executeDispatch(options) {
@@ -465,6 +471,7 @@ function executeDispatch(options) {
     return runEngine({
       adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
       liveFile: options.liveFile ?? null,
+      model: options.model ?? null,
     });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -504,9 +511,9 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 }
 
 function runEngine({
-  adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch, liveFile,
+  adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch, liveFile, model,
 }) {
-  const argv = adapter.argv(role, tools, scratch, cwd);
+  const argv = adapter.argv(role, tools, scratch, cwd, model ?? null);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
@@ -606,6 +613,7 @@ export function parseArgs(args) {
     mode: 'dispatch',
     role: null,
     engine: null,
+    model: null,
     liveFile: null,
     promptFile: null,
     tools: null,
@@ -628,6 +636,7 @@ export function parseArgs(args) {
     }
     index += 1;
     if (flag === '--engine') parsed.engine = value;
+    else if (flag === '--model') parsed.model = value;
     else if (flag === '--live-file') parsed.liveFile = value;
     else if (flag === '--role') parsed.role = value;
     else if (flag === '--prompt-file') parsed.promptFile = value;
@@ -1030,6 +1039,7 @@ function selfTest() {
           '--role', 'plan-review',
           '--prompt-file', promptPath,
           '--engine', 'codex',
+          '--model', 'gpt-test-model',
           '--live-file', chosen,
           '--json',
         ], {
@@ -1038,10 +1048,39 @@ function selfTest() {
           env: { ...process.env, PATH: `${codexOnly}:${process.env.PATH}` },
         });
         const argvSeen = readFileSync(argvPath, 'utf8');
+        let cliResult;
+        try {
+          cliResult = JSON.parse(run.stdout);
+        } catch {
+          return false; // usage error: empty stdout is a failed check, not a crash
+        }
         return run.status === 0
           && argvSeen.includes('--sandbox read-only')
+          // --model crosses the same seam --engine once fell through:
+          // codex spells it -m.
+          && argvSeen.includes('-m gpt-test-model')
           && existsSync(chosen)
-          && JSON.parse(run.stdout).engine === 'codex';
+          && cliResult.engine === 'codex'
+          && cliResult.model === 'gpt-test-model';
+      })(),
+    );
+    check(
+      'a pinned model reaches the claude argv and the typed result',
+      (() => {
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: PASSING_VERDICT }),
+        ));
+        const pinned = runDispatch({
+          role: 'plan-review',
+          prompt: 'review',
+          tools: reviewerTools,
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+          model: 'opus-test',
+        });
+        return pinned.ok === true
+          && pinned.model === 'opus-test'
+          && readFileSync(argvPath, 'utf8').includes('--model opus-test');
       })(),
     );
     check(
@@ -1254,6 +1293,7 @@ function main() {
     prompt,
     tools,
     ...(parsed.engine === null ? {} : { engine: parsed.engine }),
+    ...(parsed.model === null ? {} : { model: parsed.model }),
     ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
