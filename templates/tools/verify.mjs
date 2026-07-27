@@ -813,6 +813,14 @@ function pluginChecks(root) {
     ),
   });
   checks.push({
+    name: 'shell dispatch-stream',
+    execute: () => run(
+      'bash',
+      ['-n', resolve(root, 'templates', 'tools', 'dispatch-stream.sh')],
+      root,
+    ),
+  });
+  checks.push({
     name: 'release-proven self-test manifest',
     execute: () => checkSelfTestManifest(toolsDir),
   });
@@ -958,6 +966,14 @@ function installChecks(root, { full = false } = {}) {
         '--check-install-root',
         root,
       ],
+      root,
+    ),
+  });
+  checks.push({
+    name: 'shell dispatch-stream',
+    execute: () => run(
+      'bash',
+      ['-n', resolve(toolsDir, 'dispatch-stream.sh')],
       root,
     ),
   });

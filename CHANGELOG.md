@@ -3,6 +3,72 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.46.0] - 2026-07-27
+
+### Changed
+
+- **Every background dispatch is watchable, natively.** `dispatch-stream.sh` (vendored) makes the
+  background task its own watcher: it starts the dispatch, tails the live file to its own stdout —
+  which the host streams into the task view natively — and exits with the dispatch's code. One
+  task per dispatch, no separate tail shell, engine events visible for the whole run, the typed
+  result collected from the output file. Only sub-minute dispatches may skip the wrapper. Proven
+  end to end: a real dispatched review streamed its full event flow through the wrapper's stdout
+  with the typed result intact.
+- **Simplify and fix rounds are dispatches, not orchestrator edits.** The orchestrator's ~86k-token
+  context was the one place in the loop still writing code by hand — the most expensive possible
+  place to do it, paying full-context turns for every finding fixed. Both now run as background
+  `implement` dispatches in the same shape as reviews: bounded prompt, `--output-file`, armed
+  monitor, overlap or park while they run, `WRITER_MADE_NO_CHANGE` refusing a fixer that only
+  claimed to act. Only a trivial edit (~five lines, two files) stays inline. The engine follows
+  the writer — whoever wrote the unit writes its fixes — and the other model keeps reviewing: an
+  engine never reviews its own code.
+- **Long gates background like dispatches, and the offload rule is stated once.** A blocking turn
+  watching a test suite is the same waste as one watching a dispatch: gates over a minute run in
+  the background with a monitor on the log while the orchestrator overlaps or parks. The general
+  principle now sits in the skill — dispatch or background what is bounded and bulky (writing,
+  fixing, reviewing, long gates); keep in-session what is stateful and small (plans, claims,
+  labels, collection, the five-axis judgment), because shipping the orchestrator's state out costs
+  more than the turn it saves.
+- **Four flow cuts, each argued from a live measurement.** SIMPLIFY keeps its timeline slot and
+  loses its dispatch — simplicity is the writer's prompt requirement, residual complexity is a
+  review finding, and the standalone pass re-read a whole unit to change nothing on its first
+  live outing. Convergence closes **optimistically**: after a fix batch the next round is
+  full-artifact and closing (full covers delta by definition), delta scope reserved for
+  mid-storm; the typical unit drops from three codex rounds to two. Plan review is
+  **lane-tiered**: serial for the full lane (a staged plan failing with nine findings is an
+  implement not wasted), concurrent with claim-and-implement for small/docs lanes, aborting on a
+  Critical — the wait moves, the gate does not. And the slim handoff check runs concurrently
+  with the round-1 dispatch, since reviewers hold no Bash and never depended on it. A typical
+  clean unit: ~75–90 minutes before, ~50–60 after, one dispatch and one codex round fewer.
+- **The five-axis pass is replaced by a scope rule: convergence closes full-artifact.** Three
+  designs in one night — in-session, then dispatched, then cut — because the evidence never
+  supported "claude must look last", only "a full-artifact look at the final head catches what
+  delta rounds miss": the one Major that survived three delta-scoped rounds fell to the first
+  whole-artifact re-read. Scope was the active ingredient, not the engine, and the checklist
+  rides in any reviewer's prompt. Under `with codex`, the closing round is codex, full-artifact,
+  checklist-armed — cross-model over what actually ships, at zero Claude tokens, bounded by the
+  existing round cap. Typical unit: r1 full, r2 delta, r3 full-close.
+- **Under `with codex`, Claude's step-7 review becomes a slim handoff check.** Mid-pipeline
+  it reviewed the pre-codex artifact, and every fix round landed after it unseen — so the final
+  artifact got no Claude-shaped review at all, while the mid-pipeline pass cost a full checklist
+  cycle that did not prevent codex finding two Majors an hour later. The one Major the
+  orchestrator did catch tonight came from a full-artifact look at the delivery head, which is
+  exactly the end position.
+
+  Step 7 in codex mode is now a slim handoff check (build and tests green); after the codex rounds
+  converge and before the gate, the orchestrator runs the full five-axis pass over the complete
+  final diff. A Critical/Major found there is fixed and re-covered by exactly one codex delta
+  round, then the five-axis re-checks that delta only; Minors become run-record notes, never
+  re-entry. The final pass is a gate, not a second convergence loop.
+
+  The pass itself is a DISPATCHED claude review, not orchestrator work: reading the final diff
+  in-session would bloat every later turn's context, while a fresh reviewer reads the repository
+  with its own tools and returns a compact verdict. The prompt carries the checklist, the frozen
+  plan, and the codex rounds' finding ledger; the orchestrator keeps only disposition — fix,
+  rebut, or note, judged from the verdict. Plain runs are unchanged, so every unit is still
+  reviewed by both models — the layering just puts each where it earns most: codex adversarial in
+  the middle, Claude's checklist over what actually ships.
+
 ## [0.45.3] - 2026-07-27
 
 ### Fixed

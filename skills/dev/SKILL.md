@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.45.3 · starting
+∞ dev · v0.46.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -176,9 +176,22 @@ reviewer's job is to find the case the author did not consider.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
-  under `autoloop/dispatch-live/` in the common Git directory, announced on stderr). To watch a
-  long review in the host UI, choose the path up front and arm a second background shell —
-  `tail -F <path>` — before dispatching; stop that shell at collection.
+  under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
+
+**Every background dispatch is watchable, natively.** Background dispatches run through the
+vendored wrapper, which makes the task its own watcher — the host streams a background shell's
+stdout into its task view, and the wrapper tails the live file to exactly there:
+
+```bash
+bash tools/agentic/dispatch-stream.sh \
+  <scratchpad>/live/<issue>-<role>-r<N>.jsonl <scratchpad>/<role>-result.json \
+  --role <role> --prompt-file <path> [--engine codex] [--tools <csv>]
+```
+
+One background task per dispatch, engine events flowing in its own view for the whole run, exit
+code propagated — a 13-minute codex review is a window, not a sealed box. Collect the typed
+result from the output file, never by parsing the stream. Only a dispatch expected to finish in
+under a minute may skip the wrapper and run `dispatch.mjs` directly.
 - Every result reports `ms` (the dispatch), `startupMs` (this tool's own overhead before the
   engine starts), and `engine` — the host that actually produced it, stamped from the spawn. Typed
   failures carry it too. Report it on the step's ribbon rather than composing a host name by hand.
@@ -341,6 +354,13 @@ Produce the planned lane proof from complete paths/content evidence. Unknown sco
 
 ### 3. Review the plan once
 
+**Lane-tiered.** For the `full` lane, plan review is serial: no claim until the verdict lands —
+a failed plan caught here is an implement not wasted (a live staged plan failed with nine
+findings). For the **small and docs lanes**, dispatch the plan review and proceed to claim and
+implement **concurrently**: on a Critical plan finding, stop the implement dispatch and drive
+the plan-revision path before continuing; Minors fold into the code-review round-1 prompt as
+context. Concurrency never skips the review — it moves the wait, not the gate.
+
 Move to `loop:03-plan-review`. Dispatch exactly one fresh reviewer:
 
 ```bash
@@ -398,19 +418,49 @@ no PR/merge, and no objective gate. A quick gate may run once after collection.
 
 ### 6. Simplify
 
-Move to `loop:06-simplify`. Load the simplification guidance when available. Make a
-behavior-preserving pass over only this unit: remove needless indirection, duplication,
-scaffolding, comments that narrate code, and speculative abstraction. Commit all changes.
+Move to `loop:06-simplify`, print the ribbon — **and dispatch nothing.** Simplicity is the
+writer's job, stated in the writer's prompt (lean, self-documenting, no needless indirection or
+speculative abstraction), and residual complexity is a review finding like any other: a
+simplification-class finding becomes a normal fix dispatch. A standalone same-engine polish pass
+re-read the whole unit to change nothing on its first live outing — the step keeps its slot in
+the timeline and costs a label swap, not a dispatch. Only a trivial inline edit (~five lines,
+two files) is ever made here.
 
 Update ARCH on the unit branch when structure/integrations changed. Keep curated docs
 merge-friendly: no shared freshness line, derived count prose, or table re-padding.
 
 ### 7. Orchestrator diff review
 
-Move to `loop:07-diff-review`. Load code-review, security, and domain guidance as applicable.
-Review the simplified diff against `cfg.review.checklistPath`, the frozen plan, invariants,
-boundary, and untrusted-input model. Fix and commit defects. The fresh reviewer in step 8 covers
+Move to `loop:07-diff-review`.
+
+**Plain run:** load code-review, security, and domain guidance as applicable. Review the
+simplified diff against `cfg.review.checklistPath`, the frozen plan, invariants, boundary, and
+untrusted-input model. Fix and commit defects. The fresh reviewer in step 8 covers
 orchestrator-authored fixes.
+
+**`with codex`:** step 7 is a slim handoff check only — build and tests green
+(`cfg.gate.quickCommand` when configured), nothing else — and it runs **concurrently with the
+round-1 dispatch**, not before it: reviewers hold no Bash, so the review does not depend on the
+tests having finished. Fire the quick gate in the background, dispatch r1 immediately, and if
+the quick gate fails, discard the r1 verdict, fix, and redo both. The
+five-axis pass moves to the END, where it reviews what actually ships: mid-pipeline it reads the
+pre-review artifact, and every fix round lands after it unseen. A live unit proved both halves —
+the mid-pipeline pass did not prevent codex finding two Majors an hour later, and the one Major
+the orchestrator did catch came from a full-artifact look at the delivery head.
+
+There is no separate five-axis dispatch. Its job is done by a scope rule instead:
+**convergence may only close on a full-artifact round.** And close optimistically: after a fix
+batch, the next round is dispatched **full-artifact and closing** — full scope covers the delta
+by definition, so a pure delta round before a mandatory full-close is a round wasted. Delta
+scope is for mid-storm only, when multiple Criticals make further fix cycles certain. A typical
+unit runs r1 full → fix → r2 full-close; the cap bounds any ping-pong. The closing prompt
+carries the checklist, frozen plan, invariants, and untrusted-input model.
+
+The active ingredient is scope, not engine: a delta-blind Major (a missing presence check
+survived three delta rounds and fell to the first whole-artifact re-read) is caught by
+re-reading everything at the final head, and doing that on codex keeps it cross-model over what
+actually ships — something a claude final pass never was. The orchestrator's only in-session
+work stays disposition: per finding, fix (dispatched), rebut, or note, judged from the verdict.
 
 ### 8. Independent code review
 
@@ -443,6 +493,14 @@ stable finding ID. A rebut closes only when a fresh reviewer accepts that exact 
  findingAnnotations:[{id,verified,inScope}],
  reviewRounds:[...]}
 ```
+
+**Fixing findings between rounds is a dispatch too.** Compose the fix prompt from the verdict's
+findings verbatim (they are structured), the touched files, and the frozen-plan constraints;
+background an `implement` dispatch and collect its commits — the orchestrator coordinates and
+never edits multi-line fixes in its own context. The next review round covers the fix delta, and
+`WRITER_MADE_NO_CHANGE` refuses a fixer that only claimed to act. The engine follows the writer:
+whoever wrote the unit writes its fixes, and the OTHER model keeps reviewing — an engine never
+reviews its own code, which is the entire point of having two.
 
 Each entry in `reviewRounds` is the record of one dispatched round:
 
@@ -479,7 +537,16 @@ publication.
 ### 9. Gate
 
 Move to `loop:09-gate`. Require a clean committed tree. Run one full `cfg.gate.command` as a local
-preflight on the review-converged artifact and record the gated OID. The later universal terminal
+preflight on the review-converged artifact and record the gated OID. **A gate that takes more than
+a minute runs in the background** — `... > <log> 2>&1` with a monitor on the log's tail — and the
+orchestrator overlaps or parks while it runs; a blocking turn spent watching a test suite is the
+same waste as one spent watching a dispatch.
+
+The general rule, stated once: **dispatch or background what is bounded and bulky; keep in-session
+what is stateful and small.** Writing, fixing, reviewing, and long gates leave the session;
+plans, claims, labels, verdict collection, and finding disposition stay — those
+operate on compact typed results, and shipping the orchestrator's state out costs more than the
+turn it saves. The later universal terminal
 finalizer reruns that configured command on the exact clean remote head and is the only producer of
 the terminal gate CheckRun; never ask it to trust this caller-observed preflight result.
 

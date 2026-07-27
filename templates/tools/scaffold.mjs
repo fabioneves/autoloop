@@ -225,6 +225,7 @@ export function reconcile(root, templates, { audit = false } = {}) {
   const tools = [
     ...UNIVERSAL_TOOL_FILES,
     'session-preflight.sh',
+    'dispatch-stream.sh',
     // The release-proven self-test manifest rides beside the vendored tools so
     // the installed verify.mjs can pass byte-identical tools without spawning
     // their already-proven self-tests.
@@ -927,6 +928,7 @@ function fixtureTemplates() {
     ...UNIVERSAL_TOOL_FILES.map((name) => TOOL_SOURCE_NAMES[name] ?? name),
     ...NON_MANUAL_TOOL_FILES.map((name) => TOOL_SOURCE_NAMES[name] ?? name),
     'session-preflight.sh',
+    'dispatch-stream.sh',
     'self-test-manifest.json',
   ]);
   for (const name of names) {
