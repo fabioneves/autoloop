@@ -3,6 +3,36 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.45.0] - 2026-07-27
+
+### Changed
+
+- **A guard refusal reads as a policy decision, not a malfunction.** Blocking with stderr and
+  `exit 2` alone makes the host render every refusal as `PreToolUse:Bash hook error` — identical to
+  a crashed hook. A correct decision then looks like a broken tool, which invites working around it
+  instead of reading it. The guard now also emits the structured
+  `hookSpecificOutput.permissionDecision: "deny"` with its reason, and the error framing disappears
+  while the reason survives verbatim.
+
+  All three channels are load-bearing and were measured, not assumed. The JSON removes the error
+  framing. `exit 2` keeps the refusal failing CLOSED on any host that does not parse that shape —
+  Codex and opencode run this same guard, and JSON with `exit 0` would fail OPEN there, a security
+  regression rather than a cosmetic change. stderr keeps the reason visible on exactly those hosts.
+  Verified against a live host: the command is blocked, the reason is quoted verbatim, and no error
+  prefix appears.
+
+### Fixed
+
+- **A crashed guard now refuses instead of letting the command through.** The hook wrapper handled
+  the guard being *missing* — that branch exits 2 and fails closed — but not the guard *crashing*:
+  node's exit 1 propagated and the host ran the command. A partly vendored, syntax-broken, or
+  dependency-missing guard therefore permitted everything, silently. Found by accident when a test
+  rig copied `command-guard.mjs` without its sibling imports and the guarded command simply ran.
+
+  Both host wrappers now chain `|| exit 2`, so any non-zero exit refuses. The hook contract in
+  `verify.mjs` requires it rather than merely tolerating it, so the fail-open shape cannot return
+  unnoticed.
+
 ## [0.44.4] - 2026-07-27
 
 ### Fixed

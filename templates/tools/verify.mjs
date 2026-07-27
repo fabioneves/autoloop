@@ -192,6 +192,22 @@ function validHookArguments(name, args = '') {
   return value.length === 0;
 }
 
+// `node <tool> || exit 2` — the suffix that turns a CRASHED guard into a refusal.
+// Without it node's exit 1 propagates and the host lets the command through: a
+// partly vendored or syntax-broken guard then permits everything, silently. The
+// missing-file branch already exits 2; this is the branch that did not.
+const FAIL_CLOSED_SUFFIX = /\s*\|\|\s*exit\s+2\s*$/u;
+
+export function stripFailClosed(branch) {
+  return String(branch).replace(FAIL_CLOSED_SUFFIX, '');
+}
+
+// Presence, not position: the strip above is anchored to the end of the guard
+// BRANCH, while a whole hook command continues `; else ...; fi` past it.
+export function failsClosed(command) {
+  return /\|\|\s*exit\s+2/u.test(String(command));
+}
+
 function invokesVendoredTool(command, name) {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const interpreter = name.endsWith('.sh') ? 'bash' : 'node';
@@ -227,7 +243,10 @@ function invokesVendoredTool(command, name) {
       `^${interpreter}\\s+["']?\\$\\{?${escapedVariable}\\}?["']?(?:\\s+([^;&|\\r\\n]+))?\\s*$`,
       'u',
     );
-    const invocationMatch = branches[2].match(invocation);
+    // A `|| exit 2` suffix hardens the binding rather than changing what it
+    // executes, so it is stripped before the shape is matched and required
+    // separately below.
+    const invocationMatch = stripFailClosed(branches[2]).match(invocation);
     if (
       !invocationMatch
       || !validHookArguments(name, invocationMatch[1])
@@ -307,6 +326,12 @@ function validateHookBindings(
       }
       const expected = contract[name];
       if (!expected) continue;
+      if (name === 'command-guard.mjs' && !failsClosed(binding.command)) {
+        errors.push(
+          `${name}: hook command must end the guard branch with \`|| exit 2\` so a crashed `
+          + 'guard refuses instead of letting the command through',
+        );
+      }
       if (!invokesVendoredTool(binding.command, name)) {
         errors.push(`${name}: hook command references the tool without executing it`);
         continue;
