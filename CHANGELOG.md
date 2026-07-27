@@ -3,6 +3,47 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.44.1] - 2026-07-27
+
+### Changed
+
+- **A second review engine is opt-in, not the default.** v0.44.0 routed every reviewer role to codex
+  automatically, which was wrong: it made an absent codex break a plain run that had asked for
+  nothing unusual, and it put a second vendor in the loop by assumption rather than by choice. Every
+  role now runs on the orchestrating host unless the invocation says otherwise — `/autoloop:dev with
+  codex` sends reviews to codex and appends ` · reviews codex` to the startup banner so a run states
+  which engine judged it. The writer always stays on the host. Everything the codex path gained in
+  0.44.0 is unchanged and still available; only the default moved. Preflight downgrades a missing
+  codex from FAIL to NOTE to match.
+
+### Fixed
+
+- **Setup obeys the configured base branch with its checkout, not only with its audit ref.** Setup
+  already audited `origin/<base>` rather than the parked checkout, and treated a unit branch's older
+  files as a NOTE rather than drift. That fixed the comparison axis and left the execution axis
+  untouched: the hooks load `$CLAUDE_PROJECT_DIR/tools/agentic/*`, so the command guard, the
+  preflight and the label hooks all run the WORKING TREE's copies. A session parked on a unit
+  branch therefore executes the tools that branch forked with, however current the base is.
+
+  Observed three times in one day on the same repository. A guard fix shipped in 0.42.3, installed,
+  and reconciled onto `main` stayed inert across three sessions because each ran from a unit branch
+  that predated it — and each session, twice including this one, diagnosed the resulting block as a
+  new bug. Setup now fetches and switches to `cfg.baseBranch` on a clean tree before auditing, the
+  same rule Dev has applied at Prime all along. A dirty tree or an in-flight loop unit stays human
+  work: stop with the remedy, never stash or discard.
+- Preflight names the mismatch mechanically, so a stale checkout is visible at session start rather
+  than inferred from a confusing refusal several steps later.
+- **The command guard resolves a literal assignment on any line, not only the first.** The 0.42.1
+  resolver anchored on `^` with a `/gu` regex and no `m` flag, so `^` matched the very start of the
+  string and nothing else: an assignment was recognised on line 1 and invisible everywhere after it.
+  A live audit battery ran fine as `T=...` on its first line and was refused as opaque the moment a
+  `cd` was added above it — the resolver could no longer see the assignment, so the expansion looked
+  unreadable. A newline separates commands exactly as `;` does, and is now treated that way.
+
+  Strictly stronger, not looser: `cd /repo` then `verb=merge` then `gh pr $verb 42` now blocks on
+  the merge rule itself rather than on shape, and genuinely unresolvable values —
+  `T=$(pwd)` — stay opaque and stay blocked.
+
 ## [0.44.0] - 2026-07-27
 
 ### Added

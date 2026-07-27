@@ -361,7 +361,12 @@ const RESOLVABLE_VALUE = /^[A-Za-z0-9_./:@%+,=-]+$/u;
 
 function literalAssignments(cmd) {
   const values = new Map();
-  const pattern = /(?:^|[;&|]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)=("[^"$`\\\n]*"|'[^'\n]*'|[^\s;&|()<>"'`$\\]*)/gu;
+  // `m` is load-bearing: a newline separates commands exactly as `;` does, and
+  // without it `^` matched only the very start of the string — so an assignment
+  // was recognised on the first line and nowhere else. A live audit battery ran
+  // fine as `T=...` on line 1 and was refused as opaque the moment a `cd` was
+  // added above it.
+  const pattern = /(?:^|[;&|]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)=("[^"$`\\\n]*"|'[^'\n]*'|[^\s;&|()<>"'`$\\]*)/gmu;
   for (const match of String(cmd).matchAll(pattern)) {
     const [, name, raw] = match;
     const value = /^["']/u.test(raw) ? raw.slice(1, -1) : raw;
@@ -1680,6 +1685,13 @@ function selfTest() {
     // interpreter with no script argument as reading from stdin, which is right
     // for a bare `node` and wrong for `node --version` — and the setup audit
     // battery is exactly `gh auth status && node --version && codex --version`.
+    // A newline is a command separator like `;` is. The resolver anchored on
+    // `^` without the `m` flag, so only an assignment on the FIRST line counted:
+    // a live battery worked as `T=...` on line 1 and was refused the moment a
+    // `cd` was added above it, with the expansion reported as opaque.
+    ['T=/tmp/x\nnode $T/a.mjs --audit .', 'feat/gh-1-x', false],
+    ['cd /repo\nT=/tmp/x\nnode $T/a.mjs --audit .', 'feat/gh-1-x', false],
+    ['cd /repo\nverb=merge\ngh pr $verb 42', 'feat/gh-1-x', true],
     ['node --version', 'feat/gh-1-x', false],
     ['python3 --version', 'feat/gh-1-x', false],
     ['deno --help', 'feat/gh-1-x', false],

@@ -54,13 +54,14 @@ else
   else
     echo 'FAIL  tools/agentic/dispatch.mjs missing — no role can be dispatched'
   fi
-  # Reviews run on codex so they do not share the writer's model. There is no
-  # fallback to claude: an absent codex fails every review dispatch typed, which
-  # is far better learned here than at the first review of a finished unit.
+  # A second review engine is opt-in per invocation (`/autoloop:dev with codex`),
+  # so its absence is a NOTE and never a FAIL: a plain run asked for nothing that
+  # needs it. Reported anyway, because "with codex" failing typed at the first
+  # review of a finished unit is a worse place to learn this.
   if command -v codex >/dev/null 2>&1; then
-    echo "PASS  codex present ($(codex --version 2>/dev/null | head -1)) — reviews run off the writer's model"
+    echo "INFO  codex present ($(codex --version 2>/dev/null | head -1)) — \`/autoloop:dev with codex\` can run reviews off the writer's model"
   else
-    echo 'FAIL  codex not installed — every review dispatch will fail typed; install codex or pin `--engine claude` and accept that reviews share the writer model'
+    echo 'NOTE  codex not installed — a plain run is unaffected; `/autoloop:dev with codex` would fail its first review dispatch typed'
   fi
 fi
 
@@ -94,7 +95,24 @@ if [ -f "$vendored_prime" ] && [ -d "$plugin_cache" ] && [ -f "$release_helper" 
   fi
 fi
 
-# 4. Every role dispatch spawns a fresh engine process; there is nothing here to select.
+# 4. Checkout identity. The hooks load `$CLAUDE_PROJECT_DIR/tools/agentic/*`, which
+# is the WORKING TREE's copy — so the guard, this preflight, and the label hooks
+# are whatever version the current branch happens to carry, no matter what a
+# session audits against. A parked unit branch therefore runs the tools it forked
+# with: observed three times in one day, where a fix that had shipped, installed
+# and reconciled onto the base was still inert because the checkout predated it.
+configured_base=$(sed -n 's/.*"baseBranch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$REPO_DIR/docs/agentic/STATE.md" 2>/dev/null | head -1)
+current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ -n "$configured_base" ] && [ -n "$current_branch" ]; then
+  if [ "$current_branch" = "$configured_base" ]; then
+    echo "PASS  checkout is on the configured base ($configured_base)"
+  else
+    echo "NOTE  checkout is on '$current_branch', not the configured base '$configured_base' — hooks run THIS branch's tools/agentic/ copies, so any tool fix released since it forked is NOT in effect here. Setup and Dev both switch to the base on a clean tree; a dirty tree is human work — stop and report, never stash."
+  fi
+fi
+
+# 5. Every role dispatch spawns a fresh engine process; there is nothing here to select.
 echo 'INFO  role dispatch is one call — tools/agentic/dispatch.mjs --role <role>'
 
 exit 0
