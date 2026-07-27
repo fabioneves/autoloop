@@ -393,8 +393,25 @@ function resolveShellExpansions(cmd) {
   return hasActiveShellExpansion(resolved) ? null : resolved;
 }
 
+// A heredoc whose delimiter is quoted (`<<'EOF'`, `<<"EOF"`) has a LITERAL body:
+// the shell performs no expansion and no command substitution inside it. Scanning
+// that body for expansion syntax therefore reads prose as code — a reconcile
+// commit message carrying backticks around `m` and `scaffold.mjs --reconcile` was
+// refused as command substitution, and the loop could not write its own commit.
+//
+// Only the quoted form is stripped. An UNQUOTED `<<EOF` body genuinely does
+// expand, so it stays in the text the expansion check sees; `stripHeredocs`
+// removes both kinds alike and is deliberately not reused here, because doing so
+// would turn `<<EOF` with `$(...)` into a blind spot.
+export function stripQuotedHeredocBodies(cmd) {
+  return String(cmd).replace(
+    /<<[-~]?[ \t]*(['"])([A-Za-z_][A-Za-z0-9_-]*)\1[^\n]*\r?\n[\s\S]*?\r?\n[ \t]*\2(?![A-Za-z0-9_-])/g,
+    (match) => match.slice(0, match.indexOf('\n')),
+  );
+}
+
 function opaqueMutationSyntax(cmd) {
-  return hasActiveShellExpansion(cmd);
+  return hasActiveShellExpansion(stripQuotedHeredocBodies(cmd));
 }
 
 function interpreterHeredoc(cmd) {
@@ -1692,6 +1709,17 @@ function selfTest() {
     ['T=/tmp/x\nnode $T/a.mjs --audit .', 'feat/gh-1-x', false],
     ['cd /repo\nT=/tmp/x\nnode $T/a.mjs --audit .', 'feat/gh-1-x', false],
     ['cd /repo\nverb=merge\ngh pr $verb 42', 'feat/gh-1-x', true],
+    // A QUOTED heredoc body is literal by shell semantics — no expansion, no
+    // command substitution. The expansion check ran on the raw command, so a
+    // commit message containing backticks (`m` flag, `scaffold.mjs --reconcile`)
+    // was read as command substitution and the whole commit refused. Observed
+    // live: the loop could not write its own reconcile commit message.
+    ["git commit -q -F - <<'EOF'\nmsg with `m` backticks\nEOF", 'feat/gh-1-x', false],
+    ["git add -A && git commit -q -F - <<'EOF' && git log --oneline -1\nmsg `x` and $(pwd) literal\nEOF", 'feat/gh-1-x', false],
+    // An UNQUOTED heredoc body really does expand, so it stays opaque. Stripping
+    // both kinds alike before the check would have opened exactly this hole.
+    ['git commit -q -F - <<EOF\nmsg with $(pwd) live\nEOF', 'feat/gh-1-x', true],
+    ['git commit -q -F - <<EOF\nmsg with `pwd` live\nEOF', 'feat/gh-1-x', true],
     ['node --version', 'feat/gh-1-x', false],
     ['python3 --version', 'feat/gh-1-x', false],
     ['deno --help', 'feat/gh-1-x', false],
