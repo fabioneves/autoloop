@@ -354,6 +354,13 @@ Produce the planned lane proof from complete paths/content evidence. Unknown sco
 
 ### 3. Review the plan once
 
+**Lane-tiered.** For the `full` lane, plan review is serial: no claim until the verdict lands —
+a failed plan caught here is an implement not wasted (a live staged plan failed with nine
+findings). For the **small and docs lanes**, dispatch the plan review and proceed to claim and
+implement **concurrently**: on a Critical plan finding, stop the implement dispatch and drive
+the plan-revision path before continuing; Minors fold into the code-review round-1 prompt as
+context. Concurrency never skips the review — it moves the wait, not the gate.
+
 Move to `loop:03-plan-review`. Dispatch exactly one fresh reviewer:
 
 ```bash
@@ -411,16 +418,13 @@ no PR/merge, and no objective gate. A quick gate may run once after collection.
 
 ### 6. Simplify
 
-Move to `loop:06-simplify`. Load the simplification guidance when available. The pass is
-behavior-preserving and covers only this unit: needless indirection, duplication, scaffolding,
-comments that narrate code, speculative abstraction.
-
-**Dispatch it, don't edit it.** The orchestrator's context is the most expensive place in the
-loop to write code — compose a bounded prompt (the unit diff, the guidance distilled, the
-behavior-preserving constraint, conventional commit) and run it as a background `implement`
-dispatch, exactly like a review: `--output-file`, monitor armed, overlap or park while it runs.
-Only a trivial edit — roughly five lines across at most two files — may be made inline. Commit
-all changes.
+Move to `loop:06-simplify`, print the ribbon — **and dispatch nothing.** Simplicity is the
+writer's job, stated in the writer's prompt (lean, self-documenting, no needless indirection or
+speculative abstraction), and residual complexity is a review finding like any other: a
+simplification-class finding becomes a normal fix dispatch. A standalone same-engine polish pass
+re-read the whole unit to change nothing on its first live outing — the step keeps its slot in
+the timeline and costs a label swap, not a dispatch. Only a trivial inline edit (~five lines,
+two files) is ever made here.
 
 Update ARCH on the unit branch when structure/integrations changed. Keep curated docs
 merge-friendly: no shared freshness line, derived count prose, or table re-padding.
@@ -434,17 +438,23 @@ simplified diff against `cfg.review.checklistPath`, the frozen plan, invariants,
 untrusted-input model. Fix and commit defects. The fresh reviewer in step 8 covers
 orchestrator-authored fixes.
 
-**`with codex`:** step 7 is a slim handoff check only — build and tests green, nothing else. The
+**`with codex`:** step 7 is a slim handoff check only — build and tests green
+(`cfg.gate.quickCommand` when configured), nothing else — and it runs **concurrently with the
+round-1 dispatch**, not before it: reviewers hold no Bash, so the review does not depend on the
+tests having finished. Fire the quick gate in the background, dispatch r1 immediately, and if
+the quick gate fails, discard the r1 verdict, fix, and redo both. The
 five-axis pass moves to the END, where it reviews what actually ships: mid-pipeline it reads the
 pre-review artifact, and every fix round lands after it unseen. A live unit proved both halves —
 the mid-pipeline pass did not prevent codex finding two Majors an hour later, and the one Major
 the orchestrator did catch came from a full-artifact look at the delivery head.
 
 There is no separate five-axis dispatch. Its job is done by a scope rule instead:
-**convergence may only close on a full-artifact round.** Delta rounds check fixes as usual, but
-the round that declares the unit clean re-reads the complete final diff — checklist, frozen
-plan, invariants, and untrusted-input model all in its prompt. A typical unit runs r1 full →
-r2 delta → r3 full-close; the cap bounds any ping-pong.
+**convergence may only close on a full-artifact round.** And close optimistically: after a fix
+batch, the next round is dispatched **full-artifact and closing** — full scope covers the delta
+by definition, so a pure delta round before a mandatory full-close is a round wasted. Delta
+scope is for mid-storm only, when multiple Criticals make further fix cycles certain. A typical
+unit runs r1 full → fix → r2 full-close; the cap bounds any ping-pong. The closing prompt
+carries the checklist, frozen plan, invariants, and untrusted-input model.
 
 The active ingredient is scope, not engine: a delta-blind Major (a missing presence check
 survived three delta rounds and fell to the first whole-artifact re-read) is caught by

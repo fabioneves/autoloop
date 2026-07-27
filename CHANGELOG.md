@@ -29,6 +29,17 @@ Notable changes to Autoloop are recorded here. The format follows
   fixing, reviewing, long gates); keep in-session what is stateful and small (plans, claims,
   labels, collection, the five-axis judgment), because shipping the orchestrator's state out costs
   more than the turn it saves.
+- **Four flow cuts, each argued from a live measurement.** SIMPLIFY keeps its timeline slot and
+  loses its dispatch — simplicity is the writer's prompt requirement, residual complexity is a
+  review finding, and the standalone pass re-read a whole unit to change nothing on its first
+  live outing. Convergence closes **optimistically**: after a fix batch the next round is
+  full-artifact and closing (full covers delta by definition), delta scope reserved for
+  mid-storm; the typical unit drops from three codex rounds to two. Plan review is
+  **lane-tiered**: serial for the full lane (a staged plan failing with nine findings is an
+  implement not wasted), concurrent with claim-and-implement for small/docs lanes, aborting on a
+  Critical — the wait moves, the gate does not. And the slim handoff check runs concurrently
+  with the round-1 dispatch, since reviewers hold no Bash and never depended on it. A typical
+  clean unit: ~75–90 minutes before, ~50–60 after, one dispatch and one codex round fewer.
 - **The five-axis pass is replaced by a scope rule: convergence closes full-artifact.** Three
   designs in one night — in-session, then dispatched, then cut — because the evidence never
   supported "claude must look last", only "a full-artifact look at the final head catches what
