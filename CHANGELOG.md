@@ -3,6 +3,16 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.45.2] - 2026-07-27
+
+### Fixed
+
+- **Setup states where `templates/` actually is.** Prime step 1 said "this skill's sibling
+  `templates/` directory", and a live session read "sibling" the natural way — sibling of the
+  skill's own directory — and looked for `skills/setup/templates/`, which does not exist. The
+  directory is a sibling of `skills/` at the plugin root. The step now gives the relationship
+  mechanically (`<skill dir>/../../templates`) instead of a word two directories can both claim.
+
 ## [0.45.1] - 2026-07-27
 
 ### Fixed
