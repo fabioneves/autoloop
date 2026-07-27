@@ -293,6 +293,28 @@ concurrency from the dispatch log's own timestamps. `concurrent 0s` beside `elig
 that serialized work it could have overlapped, and it is visible without anyone choosing to
 mention it.
 
+### The host task panel — activity while parked
+
+On a host that exposes native task tools (Claude Code's TaskCreate/TaskUpdate), mirror the run
+into the task panel so a parked wait never looks like a stop — the panel keeps an in-progress
+spinner on exactly the work that is actually in flight. Hosts without task tools skip this
+silently; it never replaces ribbons, labels, or heartbeat lines.
+
+- **One umbrella task per worked unit**, created at selection, in-progress until the closing
+  rail: subject `∞ #<N> — <issue title>`. This is the standing "the loop is alive" row; complete
+  it whatever the unit's outcome (the closing rail says shipped/blocked, the panel just closes).
+- **One task per step**, created in-progress when the step's ribbon prints, completed when the
+  step ends. Subject mirrors the ribbon core with the executor slot:
+  `05 IMPLEMENT [CLAUDE:OPUS] — #149`; `activeForm` says what the spinner should read while it
+  runs (`Implementing #149 on opus`, `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped steps use
+  one task per round (`08 CODE-REVIEW r1 [CLAUDE:GPT-5.6-SOL] — #149`).
+- **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
+  dispatch's step task is the visible activity; completing them happens at collection, in the
+  same turn that states the duration. A staged unit's steps get their own tasks under its own
+  umbrella, so two units in flight read as two spinners, not one ambiguous row.
+- Never batch-create the whole 11-step list up front: a wall of pending steps is noise and the
+  no-op steps would need deleting. Create each task when its step actually begins.
+
 ## Lane and convergence policy
 
 `escalate-paths.mjs` issues configured-base-bound proofs:
