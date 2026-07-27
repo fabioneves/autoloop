@@ -228,6 +228,14 @@ reviewer's job is to find the case the author did not consider.
 
   - step 02 plan (and any plan-revision dispatch) → `--model fable`
 
+  **Model-limit fallback: fable → opus, once per pin.** A dispatch that dies with a usage-limit
+  message ("You've reached your … limit" in its stderr/typed error) is a resource refusal, not a
+  defect: retry that dispatch ONCE with `--model opus` and note the substitution on the step's
+  collection line (`plan returned · opus, fable at limit`). The stamped result already records
+  who actually ran. Never fall back for any other failure class, never fall back reviewers onto
+  the writer's model, and never silently drop the pin — the note is the record. Opus at its
+  limit too parks the run: limits reset; a run killed by improvisation does not.
+
   Premise and disposition are IN-SESSION work and carry no `--model` knob — they run on the
   session's model. The standing choice is **fable**: orchestrate the loop from a fable session.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
