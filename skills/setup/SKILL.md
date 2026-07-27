@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.45.1 · starting
+∞ setup · v0.45.2 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -53,8 +53,11 @@ Codex uses `$autoloop:setup doctor`; opencode invokes the `setup` skill with `do
 
 ## Prime
 
-1. Resolve this skill's real path and its sibling `templates/` directory. Do not depend on
-   `CLAUDE_PLUGIN_ROOT`, `PLUGIN_ROOT`, or another compatibility variable.
+1. Resolve this skill's real path, then `templates/` at the PLUGIN ROOT — two levels up from the
+   skill directory: `<skill dir>/../../templates`. It is a sibling of `skills/`, not of this
+   skill's own directory; a live session read "sibling" the natural way and looked for
+   `skills/setup/templates/`, which does not exist. Do not depend on `CLAUDE_PLUGIN_ROOT`,
+   `PLUGIN_ROOT`, or another compatibility variable.
 2. Print the banner.
 3. Check version currency before deriving drift. In a versioned plugin cache, list sibling
    directory names and pipe them through:
@@ -84,7 +87,7 @@ Codex uses `$autoloop:setup doctor`; opencode invokes the `setup` skill with `do
 5. Run the one-call audit below. Follow up only on failed or incomplete sections.
 
 Every contract call names the copy it runs. Before the scaffold reconciliation lands, run contracts
-from the loaded skill's sibling `<templates>/tools/`: the repository's `tools/agentic/` copies are
+from the plugin root's `<templates>/tools/`: the repository's `tools/agentic/` copies are
 still the pre-migration ones, so they can only validate the pre-migration artifacts they shipped
 with. After reconciliation, verify the installed `tools/agentic/` copies produce the same results.
 The one-call audit below is the deliberate exception — it reads the installed copies because the
