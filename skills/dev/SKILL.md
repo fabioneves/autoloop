@@ -221,13 +221,22 @@ terminal state — delivered, blocked, or deferred. Every marker and step label 
 At collection, finish the worked unit through step 11, then claim the staged one with its
 already-reviewed plan.
 
-**Liveness — never end the turn mid-unit.** A turn that has ended emits no heartbeat and no task
-update, so an idle turn and a working session are indistinguishable; a live run ended its turn at
-step 8 of 11 with four commits sitting unpushed and nothing objected. The unit runs to a terminal
-state in-turn. While a dispatch is in flight and no staging work remains, hold the wait in-turn
-with bounded polls and emit the heartbeat pair — chat line plus task elapsed refresh — after each.
-The Stop hook now refuses a turn that abandons pushed-behind work, but the hook is the backstop,
-not the plan.
+**Liveness — never go dark; parking is not stopping.** A live run once ended its turn at step 8
+with four commits unpushed and nothing on screen to distinguish that from work — that is the
+failure. Waiting itself has one sanctioned shape per situation:
+
+- **Parked wait (preferred).** Every in-flight dispatch is backgrounded with `--output-file`, a
+  Monitor (or the background task's own completion signal) is armed on each result file, all
+  commits are pushed, and the LAST line before the turn ends is the parked heartbeat naming what
+  it waits for: `♡ parked — #78 codex r1 + #87 plan-review in flight · resumes on result files`.
+  Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
+  the printed line make parked and dead distinguishable at a glance.
+- **In-turn wait (fallback, no monitor available).** One bounded until-loop —
+  `timeout 600 bash -c 'until [ -f <result> ]; do sleep 5; done'` — then the heartbeat pair.
+  Never bare `sleep N;` chains: the host blocks them and tells you so.
+
+The Stop hook still refuses a turn that abandons unpushed work; a parked wait satisfies it by
+construction, because parking requires the push.
 
 **Accounting.** The run record's `overlap:` line comes from `overlap-report.mjs`, which derives
 concurrency from the dispatch log's own timestamps. `concurrent 0s` beside `eligible 5` is a run

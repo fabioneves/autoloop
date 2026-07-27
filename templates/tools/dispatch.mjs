@@ -27,8 +27,12 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  closeSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  unlinkSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -465,23 +469,64 @@ function executeDispatch({
   }
 }
 
+// Engine stdout goes to disk as the engine emits it, so a running dispatch can
+// be watched: `tail -f` the newest file under `autoloop/dispatch-live/` in the
+// common Git directory. A 13-minute codex review used to run as a sealed box —
+// spawnSync buffered the stream in memory and --ephemeral persisted nothing.
+// Fail-open: when the live file cannot be opened, the stream stays in memory
+// and the dispatch proceeds exactly as before.
+const LIVE_KEEP_FILES = 20;
+
+function openLiveEventLog(cwd, role) {
+  try {
+    const logPath = resolveDispatchLogPath(cwd);
+    if (logPath === null) return null;
+    const directory = join(dirname(logPath), 'dispatch-live');
+    mkdirSync(directory, { recursive: true });
+    for (const stale of readdirSync(directory).sort().slice(0, -(LIVE_KEEP_FILES - 1))) {
+      try { unlinkSync(join(directory, stale)); } catch { /* pruning is best-effort */ }
+    }
+    const path = join(directory, `${Date.now()}-${role}.jsonl`);
+    const fd = openSync(path, 'w');
+    // stderr, so a backgrounded caller sees where to tail before results exist.
+    process.stderr.write(`dispatch: live engine events -> ${path}\n`);
+    return { fd, path };
+  } catch {
+    return null;
+  }
+}
+
 function runEngine({
   adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
 }) {
   const argv = adapter.argv(role, tools, scratch, cwd);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
+  const live = openLiveEventLog(cwd, role);
   const started = Date.now();
   const startupMs = started - startedAtMs;
-  const result = spawnSync(engine, argv, {
-    cwd,
-    encoding: 'utf8',
-    env: dispatchEnvironment(),
-    input: prompt,
-    maxBuffer: MAX_OUTPUT_BYTES,
-    timeout: timeoutMs,
-    windowsHide: true,
-  });
+  let result;
+  try {
+    result = spawnSync(engine, argv, {
+      cwd,
+      encoding: 'utf8',
+      env: dispatchEnvironment(),
+      input: prompt,
+      maxBuffer: MAX_OUTPUT_BYTES,
+      timeout: timeoutMs,
+      windowsHide: true,
+      ...(live === null ? {} : { stdio: ['pipe', live.fd, 'pipe'] }),
+    });
+  } finally {
+    if (live !== null) closeSync(live.fd);
+  }
+  if (live !== null && result.stdout == null) {
+    try {
+      result.stdout = readFileSync(live.path, 'utf8');
+    } catch {
+      result.stdout = '';
+    }
+  }
   const ms = Date.now() - started;
   const stderr = String(result.stderr ?? '');
   if (result.error?.code === 'ETIMEDOUT' || result.signal === 'SIGTERM') {
@@ -945,6 +990,20 @@ function selfTest() {
     const engineFile = join(repoScratch, '.git', 'autoloop', 'review-engine');
     mkdirSync(dirname(engineFile), { recursive: true });
     writeFileSync(engineFile, 'codex\n');
+    check(
+      'a dispatch streams its engine events to a live file while running',
+      // A 13-minute codex review ran as a sealed box: spawnSync buffered the
+      // event stream in memory and --ephemeral persisted nothing, so there was
+      // nothing to tail. Events now land on disk as the engine emits them.
+      (() => {
+        const liveDir = join(repoScratch, '.git', 'autoloop', 'dispatch-live');
+        if (!existsSync(liveDir)) return false;
+        const files = readdirSync(liveDir);
+        return files.length > 0
+          && files.every((name) => /-(?:implement|plan-review|code-review|doubt-review)\.jsonl$/.test(name))
+          && readFileSync(join(liveDir, files[0]), 'utf8').includes('"type"');
+      })(),
+    );
     check(
       'a recorded review-engine choice routes reviewer defaults',
       resolveDefaultEngine('plan-review', repoScratch) === 'codex'

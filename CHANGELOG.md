@@ -25,6 +25,15 @@ Notable changes to Autoloop are recorded here. The format follows
   only — the writer stays on the host in every mode — and an unrecognised recording falls back to
   the host engine. Proven with a real dispatch: no flag, recorded `codex`, verdict returned with
   `"engine": "codex"`.
+- **Parking is not stopping, and the skill now knows the difference.** The liveness rule said
+  "never end the turn mid-unit; hold the wait with bounded polls" — written for a host that
+  allowed sleep-chains. This host blocks them and re-invokes the session when a Monitor fires, so
+  a live run did the right thing (both dispatches backgrounded, monitors armed on the result
+  files, commits pushed, parked heartbeat printed) while the skill's own text said otherwise and
+  the screen read as stopped. The sanctioned shapes are now explicit: parked wait — background +
+  monitor + pushed work + a final `♡ parked` line naming what resumes it — or one bounded
+  until-loop when no monitor exists. The Stop hook's unpushed gap still guards real abandonment,
+  which a parked wait satisfies by construction.
 - **A resumed unit branch runs installed tools, not its fossils.** Resuming a unit checks out its
   branch — correctly — and the branch carries the `tools/agentic/` copies it forked with. A live
   resume sat 18 commits behind base with a dispatch predating `--engine`; the reviewer dispatch
