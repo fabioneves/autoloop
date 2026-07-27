@@ -200,7 +200,7 @@ reviewer's job is to find the case the author did not consider.
 
   Standing defaults for claude-engine dispatches (this repository's operator choice):
   - step 05 implement → `--model opus`
-  - step 08 fix dispatches → `--model fable`
+  - step 08 fix dispatches (and any simplify dispatch, should one exist) → `--model opus`
   - all other claude dispatches → no flag (the saved default)
 
   - step 02 plan → `--model fable`
