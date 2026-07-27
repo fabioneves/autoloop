@@ -3,6 +3,18 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.3] - 2026-07-27
+
+### Fixed
+
+- **The reconcile-request refusal names its failing field.** `lifecycle reconcile request is
+  invalid` with no detail cost a lost cycle in two separate live sessions — both times the same
+  silent cause: a locally recomposed `plan.body` whose sha256 no longer matched the frozen
+  `intent.planHash`. `reconcileRequestGaps()` now reports every failing clause, the hash
+  mismatch names both prefixes and states the remedy, and the skill's claim step says it
+  outright: `plan.body` is the frozen plan comment fetched byte-exact from GitHub, never a
+  local recomposition.
+
 ## [0.49.2] - 2026-07-27
 
 ### Fixed

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.2 · starting
+∞ dev · v0.49.3 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -292,9 +292,11 @@ failure. Waiting itself has one sanctioned shape per situation:
   `♡ parked — #78 codex r1 + #87 plan-review in flight · resumes on result files · 15:04`.
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
   the printed line make parked and dead distinguishable at a glance.
-- **In-turn wait (fallback, no monitor available).** One bounded until-loop —
-  `timeout 600 bash -c 'until [ -f <result> ]; do sleep 5; done'` — then the heartbeat pair.
-  Never bare `sleep N;` chains: the host blocks them and tells you so.
+- **In-turn wait (fallback, no monitor available).** One typed bounded wait —
+  `node tools/agentic/dispatch.mjs --wait-file <result.json> --timeout-seconds 600` — then the
+  heartbeat pair. Never `bash -c 'until …'` (inline interpreter source; the guard refuses it —
+  a live run was blocked by exactly that shape) and never bare `sleep N;` chains: the host
+  blocks them and tells you so.
 
 The Stop hook still refuses a turn that abandons unpushed work; a parked wait satisfies it by
 construction, because parking requires the push.
@@ -315,10 +317,11 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   rail: subject `∞ #<N> — <issue title>`. This is the standing "the loop is alive" row; complete
   it whatever the unit's outcome (the closing rail says shipped/blocked, the panel just closes).
 - **One task per step**, created in-progress when the step's ribbon prints, completed when the
-  step ends. Subject mirrors the ribbon core with the executor slot:
-  `05 IMPLEMENT [CLAUDE:OPUS] — #149`; `activeForm` says what the spinner should read while it
-  runs (`Implementing #149 on opus`, `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped steps use
-  one task per round (`08 CODE-REVIEW r1 [CLAUDE:GPT-5.6-SOL] — #149`).
+  step ends. The subject starts with the unit prefix — the SAME `∞ #<N> — ` the umbrella row
+  carries, so a unit's rows read as one visual group — then the ribbon core with the executor
+  slot: `∞ #149 — 05 IMPLEMENT [CLAUDE:OPUS]`; `activeForm` says what the spinner should read
+  while it runs (`Implementing #149 on opus`, `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped
+  steps use one task per round (`∞ #149 — 08 CODE-REVIEW r1 [CLAUDE:GPT-5.6-SOL]`).
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
   same turn that states the duration. A staged unit's steps get their own tasks under its own
@@ -467,6 +470,12 @@ premergeRecordDraft:null}` to a bounded file and pipe it to:
 ```bash
 node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 ```
+
+**`plan.body` is the frozen artifact, byte for byte.** Once the plan comment exists, fetch its
+exact body from GitHub (`gh api` on the captured comment ID, `.body` to a file) and use that —
+never a locally recomposed copy: `sha256(plan.body)` must equal `intent.planHash`, and two live
+sessions each lost a cycle to a recomposition that differed by invisible bytes. The driver's
+refusal names the failing field and both hash prefixes.
 
 **Composing the request costs three literal commands, never a read of the driver's source.**
 `node tools/agentic/lifecycle-driver.mjs --example-request` prints a request that passes the

@@ -653,54 +653,88 @@ function validateIntent(intent) {
   return result.action === 'persist-intent';
 }
 
-function validateReconcileRequest(request) {
-  return (
-    exactKeys(request, [
-      'baseBranch',
-      'intent',
-      'lifecycleCommentId',
-      'plan',
-      'premergeRecordDraft',
-      'schemaVersion',
-    ])
-    && request.schemaVersion === 1
-    // The policy set is the lifecycle contract's to define (it validates
-    // 'manual', 'ratified', and 'auto' at lifecycle-contract.mjs:81, and
-    // branches on the distinction where it matters). This extra 'manual'-only
-    // clause was a leftover from when non-manual was dormant reference code,
-    // and it refused the claim step for every acknowledged non-manual repo.
-    && validateIntent(request.intent)
-    && BRANCH_RE.test(request.baseBranch ?? '')
-    && (
-      request.lifecycleCommentId === null
-      || COMMENT_ID_RE.test(request.lifecycleCommentId ?? '')
-    )
-    && exactKeys(request.plan, ['body', 'prBody', 'title'])
-    && typeof request.plan.body === 'string'
-    && request.plan.body.length > 0
-    && request.plan.body.length <= 65535
-    && sha256(request.plan.body) === request.intent.planHash
-    && typeof request.plan.title === 'string'
-    && /^[\x20-\x7e]{1,256}$/u.test(request.plan.title)
-    && typeof request.plan.prBody === 'string'
-    && request.plan.prBody.length > 0
-    && request.plan.prBody.length <= 65535
-    && parseLoopClaim({
+// Names every failing clause: the terse boolean cost a lost cycle in two
+// separate live sessions, both on the same silent cause (a locally recomposed
+// plan body whose hash no longer matched the frozen intent).
+export function reconcileRequestGaps(request) {
+  const gaps = [];
+  if (!exactKeys(request, [
+    'baseBranch',
+    'intent',
+    'lifecycleCommentId',
+    'plan',
+    'premergeRecordDraft',
+    'schemaVersion',
+  ])) {
+    return ['request keys must be exactly schemaVersion, intent, baseBranch, '
+      + 'lifecycleCommentId, plan, premergeRecordDraft'];
+  }
+  if (request.schemaVersion !== 1) gaps.push('schemaVersion: expected 1');
+  // The policy set is the lifecycle contract's to define (it validates
+  // 'manual', 'ratified', and 'auto' at lifecycle-contract.mjs:81, and
+  // branches on the distinction where it matters). This extra 'manual'-only
+  // clause was a leftover from when non-manual was dormant reference code,
+  // and it refused the claim step for every acknowledged non-manual repo.
+  if (!validateIntent(request.intent)) gaps.push('intent: invalid lifecycle intent');
+  if (!BRANCH_RE.test(request.baseBranch ?? '')) gaps.push('baseBranch: invalid');
+  if (
+    request.lifecycleCommentId !== null
+    && !COMMENT_ID_RE.test(request.lifecycleCommentId ?? '')
+  ) {
+    gaps.push('lifecycleCommentId: expected null or a GitHub comment ID');
+  }
+  if (!exactKeys(request.plan, ['body', 'prBody', 'title'])) {
+    gaps.push('plan: keys must be exactly body, prBody, title');
+    return gaps;
+  }
+  if (
+    typeof request.plan.body !== 'string'
+    || request.plan.body.length === 0
+    || request.plan.body.length > 65535
+  ) {
+    gaps.push('plan.body: expected a non-empty string of at most 65535 bytes');
+  } else if (
+    typeof request.intent?.planHash === 'string'
+    && sha256(request.plan.body) !== request.intent.planHash
+  ) {
+    gaps.push(
+      `plan.body: sha256 ${sha256(request.plan.body).slice(0, 12)}… does not match `
+      + `intent.planHash ${request.intent.planHash.slice(0, 12)}… — the body must be `
+      + 'the FROZEN plan comment fetched byte-exact from GitHub, never recomposed locally',
+    );
+  }
+  if (
+    typeof request.plan.title !== 'string'
+    || !/^[\x20-\x7e]{1,256}$/u.test(request.plan.title)
+  ) {
+    gaps.push('plan.title: expected 1-256 printable ASCII characters');
+  }
+  if (
+    typeof request.plan.prBody !== 'string'
+    || request.plan.prBody.length === 0
+    || request.plan.prBody.length > 65535
+  ) {
+    gaps.push('plan.prBody: expected a non-empty string of at most 65535 bytes');
+  } else if (
+    parseLoopClaim({
       branch: request.intent.branch,
       body: request.plan.prBody,
-    }).issue === request.intent.issue
-    && (
-      request.premergeRecordDraft === null
-      || (() => {
-        try {
-          serializePremergeRecord(request.premergeRecordDraft);
-          return true;
-        } catch {
-          return false;
-        }
-      })()
-    )
-  );
+    }).issue !== request.intent.issue
+  ) {
+    gaps.push('plan.prBody: closing claim does not name intent.issue on intent.branch');
+  }
+  if (request.premergeRecordDraft !== null) {
+    try {
+      serializePremergeRecord(request.premergeRecordDraft);
+    } catch (error) {
+      gaps.push(`premergeRecordDraft: ${error.message}`);
+    }
+  }
+  return gaps;
+}
+
+function validateReconcileRequest(request) {
+  return reconcileRequestGaps(request).length === 0;
 }
 
 function postIssueComment(state, body) {
@@ -999,7 +1033,9 @@ function applyLifecycleAction(adapters, state, request, result) {
 
 export function driveLifecycle(request, context = {}) {
   if (!validateReconcileRequest(request)) {
-    throw new Error('lifecycle reconcile request is invalid');
+    throw new Error(
+      `lifecycle reconcile request is invalid: ${reconcileRequestGaps(request).join('; ')}`,
+    );
   }
   const adapters = context.adapters ?? productionAdapters(
     context.repositoryRoot ?? process.cwd(),

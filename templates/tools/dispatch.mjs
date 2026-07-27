@@ -1439,7 +1439,62 @@ function selfTest() {
   return failures.length === 0;
 }
 
+// The typed in-turn wait: `--wait-file <path> [--timeout-seconds N]` blocks
+// until the file exists or the bound expires (exit 0 / exit 1). It exists so
+// the orchestrator's fallback wait needs no `bash -c 'until …'` — inline
+// interpreter source the guard rightly refuses; a live run was blocked by its
+// own skill's idiom.
+export function parseWaitArgs(args) {
+  if (args[0] !== '--wait-file') return null;
+  const parsed = { path: null, timeoutSeconds: 600, error: null };
+  for (let index = 1; index < args.length; index += 1) {
+    const flag = args[index];
+    const value = args[index + 1];
+    if (index === 1 && flag && !flag.startsWith('-')) {
+      parsed.path = flag;
+      continue;
+    }
+    if (
+      flag === '--timeout-seconds'
+      && /^[1-9][0-9]{0,3}$/u.test(value ?? '')
+    ) {
+      parsed.timeoutSeconds = Number(value);
+      index += 1;
+      continue;
+    }
+    parsed.error = `unknown, duplicate, or incomplete wait option: ${flag ?? 'missing'}`;
+    return parsed;
+  }
+  if (parsed.path === null) parsed.error = '--wait-file requires a path';
+  return parsed;
+}
+
+function runWaitCli(parsed) {
+  const deadline = Date.now() + parsed.timeoutSeconds * 1000;
+  const poll = () => {
+    if (existsSync(parsed.path)) {
+      console.log(`wait: ${parsed.path} exists`);
+      process.exit(0);
+    }
+    if (Date.now() >= deadline) {
+      console.error(`wait: ${parsed.path} absent after ${parsed.timeoutSeconds}s`);
+      process.exit(1);
+    }
+    setTimeout(poll, 2000);
+  };
+  poll();
+}
+
 function main() {
+  const wait = parseWaitArgs(process.argv.slice(2));
+  if (wait) {
+    if (wait.error) {
+      console.error(`dispatch: ${wait.error}`);
+      process.exit(2);
+    }
+    runWaitCli(wait);
+    return;
+  }
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`dispatch: ${parsed.error}`);
