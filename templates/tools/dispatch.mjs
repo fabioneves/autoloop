@@ -290,6 +290,26 @@ export function defaultEngineFor() {
   return 'claude';
 }
 
+// The invocation's engine choice, made durable. `with codex` is prose at the
+// top of a session; by the first reviewer dispatch it is forty minutes and a
+// hundred thousand tokens up-context, the tool default is the host engine, and
+// a forgotten `--engine` silently reviews on the writer's own model — with
+// nothing on the line to say so. The skill records the choice once, in
+// `autoloop/review-engine` beside the dispatch log, and this tool reads it per
+// dispatch. Reviewer roles only: the writer stays on the host in every mode,
+// and an unrecognised or absent recording falls back to the host engine.
+export function resolveDefaultEngine(role, cwd) {
+  if (ROLES[role]?.posture !== 'reviewer') return 'claude';
+  try {
+    const logPath = resolveDispatchLogPath(cwd);
+    if (logPath === null) return 'claude';
+    const recorded = readFileSync(join(dirname(logPath), 'review-engine'), 'utf8').trim();
+    return ENGINES[recorded] !== undefined ? recorded : 'claude';
+  } catch {
+    return 'claude';
+  }
+}
+
 function resolveEngine(binary) {
   return ENGINES[hostName(binary)] ?? null;
 }
@@ -391,8 +411,10 @@ function hostName(engine) {
 // the dispatches that worked.
 export function runDispatch(options) {
   const windowStartedAtMs = Date.now();
-  const result = executeDispatch(options);
-  const engine = hostName(options.engine ?? defaultEngineFor(options.role));
+  const cwd = options.cwd ?? process.cwd();
+  const engineBinary = options.engine ?? resolveDefaultEngine(options.role, cwd);
+  const result = executeDispatch({ ...options, engine: engineBinary });
+  const engine = hostName(engineBinary);
   recordDispatchWindow(options.cwd ?? process.cwd(), {
     role: options.role,
     engine,
@@ -412,7 +434,7 @@ function executeDispatch({
   tools,
   cwd = process.cwd(),
   timeoutMs = DISPATCH_TIMEOUT_MS,
-  engine = defaultEngineFor(role),
+  engine = 'claude',
   startedAtMs = PROCESS_START_MS,
 }) {
   const adapter = resolveEngine(engine);
@@ -915,6 +937,30 @@ function selfTest() {
     check(
       'a result names the host that produced it',
       busyWriter.engine === 'claude' && idleWriter.error.engine === 'claude',
+    );
+    // The invocation's engine choice must survive 40 minutes of context: `with
+    // codex` was prose, the tool default is claude, and a forgotten --engine at
+    // step 8 silently reviewed on the writer's model. The choice is now a file
+    // the skill writes at run start and this tool reads per dispatch.
+    const engineFile = join(repoScratch, '.git', 'autoloop', 'review-engine');
+    mkdirSync(dirname(engineFile), { recursive: true });
+    writeFileSync(engineFile, 'codex\n');
+    check(
+      'a recorded review-engine choice routes reviewer defaults',
+      resolveDefaultEngine('plan-review', repoScratch) === 'codex'
+      && resolveDefaultEngine('code-review', repoScratch) === 'codex'
+      && resolveDefaultEngine('implement', repoScratch) === 'claude',
+    );
+    writeFileSync(engineFile, 'weird-engine\n');
+    check(
+      'an unrecognised recorded choice falls back to the host engine',
+      resolveDefaultEngine('code-review', repoScratch) === 'claude',
+    );
+    rmSync(engineFile);
+    check(
+      'no recorded choice means the host engine for every role',
+      resolveDefaultEngine('code-review', repoScratch) === 'claude'
+      && resolveDefaultEngine('implement', repoScratch) === 'claude',
     );
     check(
       'every dispatch records its own window in the dispatch log',

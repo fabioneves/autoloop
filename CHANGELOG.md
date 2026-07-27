@@ -15,6 +15,16 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
+- **`with codex` survives the distance to the first review.** The engine choice was prose at the
+  top of the session; by the first reviewer dispatch it is forty minutes and a hundred thousand
+  tokens up-context, the tool default is the host engine, and a forgotten `--engine` silently
+  reviewed on the writer's own model — with ribbons regressed, nothing would even have said so.
+  The skill now records the choice once after prime (`autoloop/review-engine`, beside the dispatch
+  log) and `dispatch.mjs` routes every reviewer dispatch from the recording; a plain run always
+  overwrites with `claude` so a previous session's choice cannot leak forward. Reviewer roles
+  only — the writer stays on the host in every mode — and an unrecognised recording falls back to
+  the host engine. Proven with a real dispatch: no flag, recorded `codex`, verdict returned with
+  `"engine": "codex"`.
 - **The dev startup stops reading the driver's source to learn the request shape.**
   `lifecycle-driver.mjs --example-request` prints a request that passes the driver's own
   validator — it is the self-test fixture with its hash made consistent, so it cannot drift from

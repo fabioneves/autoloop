@@ -128,8 +128,19 @@ writer and reviewers alike to `claude`, and asks nothing of the machine beyond w
 already needs.
 
 **Reviews can run on a second engine, when the invocation asks for it.** `/autoloop:dev with
-codex` sends every review role to `codex` — pass `--engine codex` on those dispatches and append
-` · reviews codex` to the startup banner so the run says which engine judged it. The writer always
+codex` sends every review role to `codex`. Record the choice ONCE, immediately after prime
+succeeds, and the tool routes every reviewer dispatch from the recording — the invocation text is
+forty minutes up-context by the first code review, and a forgotten flag would silently review on
+the writer's model:
+
+```bash
+mkdir -p .git/autoloop && printf 'codex\n' > .git/autoloop/review-engine   # with codex
+printf 'claude\n' > .git/autoloop/review-engine                            # plain run: ALWAYS overwrite
+```
+
+A plain run writes `claude` rather than skipping the write, so a previous session's `codex`
+cannot leak forward. Append ` · reviews codex` to the startup banner so the run says which engine
+judges it, and the `[HOST]` slot on each review ribbon confirms it per dispatch. The writer always
 stays on the host: a second engine buys decorrelated review, not a second writer.
 
 Why it is worth asking for: a fresh process gives identity separation, not cognitive separation.
