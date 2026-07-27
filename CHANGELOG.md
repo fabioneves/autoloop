@@ -15,6 +15,17 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
+- **The dev startup stops reading the driver's source to learn the request shape.**
+  `lifecycle-driver.mjs --example-request` prints a request that passes the driver's own
+  validator — it is the self-test fixture with its hash made consistent, so it cannot drift from
+  what validation accepts. A profiled run spent its longest thinking stretch reading 1800 lines of
+  driver source, then assembled the request wrong twice anyway (a string where `plan` wanted an
+  object, then a scratchpad cwd). The skill now names the three-command recipe, and the checkout
+  probe failure reports its cwd with the remedy instead of the bare "Git checkout probe failed".
+- **Every dev step prints its ribbon, stated as a count.** Same regression class as setup's: after
+  the model switch, ribbon output stopped entirely. The rule now says eleven ribbons for steps
+  1–11 plus `00/11 RECONCILE` the moment an orphan surfaces, and that the anti-noise rule is about
+  re-printing, never about skipping the announcement.
 - **Setup trusts the preflight instead of re-deriving it.** A profiled reconcile said "preflight
   already tells me" and then re-ran every check: gh auth, node, codex, config contract, and the
   full install-root verify — the largest single payload of its AUDIT phase. When the SessionStart

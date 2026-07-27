@@ -337,6 +337,13 @@ premergeRecordDraft:null}` to a bounded file and pipe it to:
 node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 ```
 
+**Composing the request costs three literal commands, never a read of the driver's source.**
+`node tools/agentic/lifecycle-driver.mjs --example-request` prints a request that passes the
+driver's own validator — it is the self-test fixture, so it cannot drift from what validation
+accepts. Fetch the frozen plan body to a scratchpad file, then assemble with `jq -n --rawfile`
+substituting the real values over the example's placeholders. Run the driver **from the
+repository root**: it probes the checkout from its cwd, and a scratchpad cwd fails the probe.
+
 The driver persists epoch 1 before the first effect, swaps `loop-started`/`loop:04-claim`, creates
 the exact planned-base branch and `chore: claim #N`, publishes the captured branch, posts the exact
 hash-bound frozen plan, opens one draft whose body passes `parseLoopClaim()`, and binds every
@@ -591,7 +598,11 @@ After prime succeeds, open the run frame:
 
 Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
 eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
-that decides nothing is due still happened, and a missing ribbon reads as a skipped step.
+that decides nothing is due still happened, and a missing ribbon reads as a skipped step. A unit
+that runs steps 1–11 prints eleven ribbons; orphan reconciliation before selection prints its own
+`00/11 RECONCILE` ribbon the moment Prime surfaces the orphan, before any fetch or driver call.
+Never withhold a ribbon to reduce output — the anti-noise rule is about *re-printing* a ribbon
+with 🟩 when its step finishes, never about skipping the announcement.
 
 ```text
 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor>
