@@ -180,7 +180,6 @@ function finalizeDeliveryRequest(request, context) {
 
 function deliveryRecordBinding(finalized, request) {
   const live = finalized?.liveEvidence;
-  const policy = finalized?.requirementsPolicy;
   if (
     finalized?.canMarkDelivered !== true
     || finalized.headOid !== request.gatedHead
@@ -188,12 +187,10 @@ function deliveryRecordBinding(finalized, request) {
     || live?.pullRequest !== request.pullRequest
     || live?.remoteHead !== finalized.headOid
     || !HASH_RE.test(live?.provenance?.evidenceFingerprint ?? '')
-    || !HASH_RE.test(policy?.sourceFingerprint ?? '')
   ) {
     return null;
   }
   return {
-    policyHash: policy.sourceFingerprint,
     evidenceHash: live.provenance.evidenceFingerprint,
   };
 }
@@ -908,7 +905,6 @@ function expectedPremergeRecord(input, ciBinding, requireCiBinding) {
     || requireCiBinding
       && (
         ciBinding === null
-        || record.ci.policyHash !== ciBinding.policyHash
         || record.ci.evidenceHash !== ciBinding.evidenceHash
       )
   ) {
@@ -1332,8 +1328,6 @@ let SHA = 'a'.repeat(40);
 let OTHER_SHA = 'f'.repeat(40);
 const PENDING_SHA = 'e'.repeat(40);
 const HASH = 'b'.repeat(64);
-const TEST_POLICY_HASH = '4'.repeat(64);
-
 function testDeliveryEvidenceHash(headOid) {
   return headOid === OTHER_SHA ? '6'.repeat(64) : '5'.repeat(64);
 }
@@ -1372,9 +1366,6 @@ function trustedTestFinalizer(request) {
     code: 'CI_GREEN',
     canMarkDelivered: true,
     headOid: request.gatedHead,
-    requirementsPolicy: {
-      sourceFingerprint: TEST_POLICY_HASH,
-    },
     liveEvidence: {
       schemaVersion: 1,
       source: 'github-rest',
@@ -1441,15 +1432,12 @@ function testPremergeRecord(markerValue) {
       contentHash: markerValue.planHash,
     },
     review: {
-      checkRunId: 101,
       summaryHash: '2'.repeat(64),
     },
     gate: {
-      checkRunId: 102,
       summaryHash: '3'.repeat(64),
     },
     ci: {
-      policyHash: TEST_POLICY_HASH,
       evidenceHash: testDeliveryEvidenceHash(markerValue.headOid),
     },
     lifecycle: {
@@ -3167,7 +3155,6 @@ function selfTest() {
       const action = reconcileLifecycle(input, testReconcileContext());
       return action.action === 'write-premerge-record'
         && validatePremergeRecord(action.record).length === 0
-        && action.record.ci.policyHash === TEST_POLICY_HASH
         && action.record.ci.evidenceHash === testDeliveryEvidenceHash(SHA)
         && action.body === serializePremergeRecord(action.record)
         && action.bodyHash === premergeRecordHash(action.record);
@@ -3220,7 +3207,6 @@ function selfTest() {
         review: expected.review,
         gate: expected.gate,
         ci: {
-          policyHash: expected.ci.policyHash,
           evidenceHash: '8'.repeat(64),
         },
         lifecycle: expected.lifecycle,

@@ -10,7 +10,7 @@ const RECORD_ID_RE = /^pmr_[0-9a-f]{64}$/;
 const GITHUB_ID_RE = /^[A-Za-z0-9_:-]{1,128}$/;
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9-]{1,100}(?:\[bot\])?$/;
 const LABELS = new Set(['risk:pure-deletion', 'risk:mechanical-refactor']);
-const KINDS = new Set(['gate', 'ownership', 'policy', 'human-authorization']);
+const KINDS = new Set(['gate', 'policy', 'human-authorization']);
 const BASE_KEYS = ['kind', 'v', 'headOid'];
 const KEYS = {
   gate: [
@@ -27,15 +27,6 @@ const KEYS = {
     'premergeRecordId',
     'premergeRecordHash',
     'premergeRecordAuthor',
-  ],
-  ownership: [
-    ...BASE_KEYS,
-    'issue',
-    'issueBodyHash',
-    'claimCommitOid',
-    'frozenPlanHash',
-    'frozenPlanCommentId',
-    'frozenPlanAuthor',
   ],
   'human-authorization': [
     ...BASE_KEYS,
@@ -65,9 +56,9 @@ const PREMERGE_SEED_KEYS = PREMERGE_KEYS.filter((key) =>
 const PREMERGE_PART_KEYS = {
   run: ['intentHash', 'receiptFingerprint'],
   plan: ['commentId', 'contentHash'],
-  review: ['checkRunId', 'summaryHash'],
-  gate: ['checkRunId', 'summaryHash'],
-  ci: ['policyHash', 'evidenceHash'],
+  review: ['summaryHash'],
+  gate: ['summaryHash'],
+  ci: ['evidenceHash'],
   lifecycle: ['commentId', 'identityHash'],
 };
 const TERMINAL_KEYS = [
@@ -115,17 +106,6 @@ export function validateAttestation(value, expected = {}) {
     if (!HASH_RE.test(value.configHash ?? '')) errors.push('configHash must be SHA-256');
     if (!HASH_RE.test(value.repositoryFingerprint ?? '')) {
       errors.push('repositoryFingerprint must be SHA-256');
-    }
-  } else if (value.kind === 'ownership') {
-    if (!Number.isInteger(value.issue) || value.issue < 1) errors.push('issue must be positive');
-    if (!HASH_RE.test(value.issueBodyHash ?? '')) errors.push('issueBodyHash must be SHA-256');
-    if (!SHA_RE.test(value.claimCommitOid ?? '')) errors.push('claimCommitOid must be a commit OID');
-    if (!HASH_RE.test(value.frozenPlanHash ?? '')) errors.push('frozenPlanHash must be SHA-256');
-    if (typeof value.frozenPlanCommentId !== 'string' || value.frozenPlanCommentId.length === 0) {
-      errors.push('frozenPlanCommentId must be non-empty');
-    }
-    if (typeof value.frozenPlanAuthor !== 'string' || value.frozenPlanAuthor.length === 0) {
-      errors.push('frozenPlanAuthor must be non-empty');
     }
   } else if (value.kind === 'policy') {
     if (!Number.isInteger(value.issue) || value.issue < 1) errors.push('issue must be positive');
@@ -195,10 +175,6 @@ function validatePremergeSeed(seed) {
     for (const [key, value] of Object.entries(seed[part])) {
       if (key.endsWith('Hash') || key.endsWith('Fingerprint')) {
         if (!HASH_RE.test(value ?? '')) errors.push(`${part}.${key} must be SHA-256`);
-      } else if (key === 'checkRunId') {
-        if (!Number.isSafeInteger(value) || value < 1) {
-          errors.push(`${part}.${key} must be a positive safe integer`);
-        }
       } else if (!validGitHubId(value)) {
         errors.push(`${part}.${key} must be a strict GitHub identifier`);
       }
@@ -207,10 +183,13 @@ function validatePremergeSeed(seed) {
   return errors;
 }
 
+// v2 dropped review/gate.checkRunId and ci.policyHash: verdicts are SHA-bound
+// commit statuses (no CheckRun identity exists) and there is no committed CI
+// policy — the ci part is the triggered-floor evidence fingerprint alone.
 export function createPremergeRecord(seed) {
   const errors = validatePremergeSeed(seed);
   if (errors.length > 0) throw new Error(`invalid premerge seed: ${errors.join('; ')}`);
-  const identity = { kind: 'premerge-record', v: 1, ...seed };
+  const identity = { kind: 'premerge-record', v: 2, ...seed };
   return {
     ...identity,
     recordId: `pmr_${sha256(stableJson(identity))}`,
@@ -221,7 +200,7 @@ export function validatePremergeRecord(record) {
   const errors = [];
   if (!exactKeys(record, PREMERGE_KEYS)) return ['premerge record keys do not match its schema'];
   if (record.kind !== 'premerge-record') errors.push('premerge record kind is invalid');
-  if (record.v !== 1) errors.push('premerge record version must be 1');
+  if (record.v !== 2) errors.push('premerge record version must be 2');
   const seedErrors = validatePremergeSeed(premergeSeed(record));
   errors.push(...seedErrors);
   if (!validPremergeRecordId(record.recordId)) {
@@ -589,17 +568,6 @@ function selfTest() {
     configHash: 'c'.repeat(64),
     repositoryFingerprint: 'd'.repeat(64),
   };
-  const ownership = {
-    kind: 'ownership',
-    v: 1,
-    headOid: 'a'.repeat(40),
-    issue: 7,
-    issueBodyHash: 'b'.repeat(64),
-    claimCommitOid: 'c'.repeat(40),
-    frozenPlanHash: 'd'.repeat(64),
-    frozenPlanCommentId: 'IC_kwDOAutoloop7',
-    frozenPlanAuthor: 'autoloop[bot]',
-  };
   const authorization = {
     kind: 'human-authorization',
     v: 1,
@@ -624,15 +592,12 @@ function selfTest() {
       contentHash: '3'.repeat(64),
     },
     review: {
-      checkRunId: 101,
       summaryHash: '4'.repeat(64),
     },
     gate: {
-      checkRunId: 102,
       summaryHash: '5'.repeat(64),
     },
     ci: {
-      policyHash: '6'.repeat(64),
       evidenceHash: '7'.repeat(64),
     },
     lifecycle: {
@@ -688,21 +653,28 @@ function selfTest() {
       kind: 'gate',
       headOid: gate.headOid,
     }).ok],
-    ['ownership round trip', parseAttestation(serializeAttestation(ownership), {
-      kind: 'ownership',
-      headOid: ownership.headOid,
-    }).ok],
     ['policy round trip', parseAttestation(serializeAttestation(policy), { kind: 'policy' }).ok],
     ['authorization round trip', parseAttestation(
       serializeAttestation(authorization),
       { kind: 'human-authorization' },
     ).ok],
-    ['unknown key rejected', validateAttestation({ ...ownership, extra: true }).length > 0],
+    ['retired ownership kind rejected', validateAttestation({
+      kind: 'ownership',
+      v: 1,
+      headOid: 'a'.repeat(40),
+      issue: 7,
+      issueBodyHash: 'b'.repeat(64),
+      claimCommitOid: 'c'.repeat(40),
+      frozenPlanHash: 'd'.repeat(64),
+      frozenPlanCommentId: 'IC_kwDOAutoloop7',
+      frozenPlanAuthor: 'autoloop[bot]',
+    }).length > 0],
+    ['unknown key rejected', validateAttestation({ ...gate, extra: true }).length > 0],
     ['head mismatch rejected', !parseAttestation(
-      serializeAttestation(ownership),
+      serializeAttestation(gate),
       { headOid: 'e'.repeat(40) },
     ).ok],
-    ['surrounding prose rejected', !parseAttestation(`note\n${serializeAttestation(ownership)}`).ok],
+    ['surrounding prose rejected', !parseAttestation(`note\n${serializeAttestation(gate)}`).ok],
     ['unsafe authorization label rejected', validateAttestation({
       ...authorization,
       label: 'human:authorize',
@@ -720,10 +692,16 @@ function selfTest() {
       delivered: true,
       premergeRecord: 'does-not-exist',
     }).length > 0],
-    ['ownership without frozen-plan comment identity rejected', validateAttestation({
-      ...ownership,
-      frozenPlanCommentId: '',
-    }).length > 0],
+    ['legacy v1 record shape rejected', (() => {
+      const legacy = {
+        ...premerge,
+        v: 1,
+        review: { checkRunId: 101, summaryHash: '4'.repeat(64) },
+        gate: { checkRunId: 102, summaryHash: '5'.repeat(64) },
+        ci: { policyHash: '6'.repeat(64), evidenceHash: '7'.repeat(64) },
+      };
+      return validatePremergeRecord(legacy).length > 0;
+    })()],
     ['authorization without label event identity rejected', validateAttestation({
       ...authorization,
       labelEventId: null,

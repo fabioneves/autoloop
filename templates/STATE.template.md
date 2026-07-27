@@ -256,29 +256,27 @@ establishes infeasibility or a hard-defer defers immediately instead.
   request binds issue, PR, exact head, run identity and the clean review evidence fingerprint,
   frozen plan, and the lifecycle comment ID. It rejects a caller-authored lifecycle hash, independently binds the exact
   finalized live head into a headless draft marker, and derives the lifecycle identity only after
-  compare-and-swap/readback. Under an acknowledged non-manual policy the reference contract additionally
-  requires exact ownership evidence and the configured publisher App ID; manual mode forbids those
-  inputs. Raw
+  compare-and-swap/readback. Non-manual policies are solo-only: without both recorded
+  acknowledgements (`merge.soloOperatorAcknowledged`, `merge.unverifiedInvocationAcknowledged`)
+  the finalizer refuses typed. Raw
   PR-ready and `loop-delivered` mutations,
-  caller `remoteHead`, `ci`, CheckRuns, required contexts, producer IDs, and delivery booleans are
-  forbidden. The finalizer executes the full gate, publishes/reuses exact-head CheckRuns, and uses
-  the delivery contract to independently double-fetch the live PR, applicable required-check
-  rules, and all
-  paginated current-head CheckRuns. Only its `canMarkDelivered: true` result has delivery
-  authority. An empty fetched check list is not proof that the repository has no required CI. An
-  intentionally empty configured set is accepted only when canonical
-  `.autoloop/ci-policy.json` is an exact regular-file match in the checkout and remote-head Git
-  tree. The delivery contract derives and fingerprints the complete set itself and rejects caller
-  mismatch. Its `requirementsPolicy.sourceFingerprint` becomes the pre-merge
-  `ci.policyHash`, and its full independently fetched
+  caller `remoteHead`, `ci`, verdict statuses, and delivery booleans are
+  forbidden. The finalizer executes the full gate, publishes/reuses exact-head SHA-bound
+  `agentic/gate` and `agentic/review` success commit statuses (descriptions carry the verdict
+  summary SHA-256 prefix), and uses
+  the delivery contract to independently double-fetch the live PR, all paginated current-head
+  check runs, and the latest commit status per context. Only its `canMarkDelivered: true` result
+  has delivery authority. The triggered-checks floor is the CI predicate: every check run and
+  status on the exact head must be green — red blocks, pending blocks, and a head with no CI has
+  nothing to wait for. The delivery contract fingerprints its own fetched evidence; its
   `liveEvidence.provenance.evidenceFingerprint` becomes `ci.evidenceHash`. The finalizer binds the
   lifecycle marker, marks the PR ready, swaps delivered labels, then refetches every postcondition;
   it never accepts caller-authored delivery output.
   That policy path always requires human authorization and is never reversible.
   The durable record is one canonical `autoloop-premerge-record-v1` issue comment with a
   deterministic strict ID and exact body SHA-256. Its closed evidence binds issue, PR, head,
-  run intent and authenticated review receipt, frozen-plan comment, exact review/gate CheckRuns,
-  committed CI policy and complete current-head CI checks, and the lifecycle marker. The
+  run intent and authenticated review receipt, frozen-plan comment, the exact review/gate verdict
+  statuses, the triggered-floor evidence fingerprint, and the lifecycle marker. The
   lifecycle marker binds the record ID, body hash, and comment ID. Authority requires complete
   paginated refetch, the dedicated loop author, every referenced live component, and exactly one
   matching record; a caller boolean/string or `{exists:true}` has none. Missing, duplicate,

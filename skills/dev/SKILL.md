@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.48.3 · starting
+∞ dev · v0.49.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -572,10 +572,10 @@ Each entry in `reviewRounds` is the record of one dispatched round:
 
 Pass only orchestrator verification/scope annotations beside that evidence; caller-authored rebut
 statuses and unsealed disposition strings have no authority. Retain the byte-exact clean input as
-the later review CheckRun evidence. The clean transition's `reviewedHead` and checkout are
+the later review-verdict evidence. The clean transition's `reviewedHead` and checkout are
 artifact-attested, not a claim that the worktree is still live at that head. Re-read HEAD before
 the gate, let the live delivery contract enforce committed = reviewed = gated = the independently
-fetched PR head, and let the review CheckRun publisher require the exact clean live checkout before
+fetched PR head, and let the verdict publisher require the exact clean live checkout before
 publication.
 
 ### 9. Gate
@@ -592,7 +592,7 @@ session; premise, claims, labels, verdict collection, and finding disposition st
 operate on compact typed results, and shipping the orchestrator's state out costs more than the
 turn it saves. The later universal terminal
 finalizer reruns that configured command on the exact clean remote head and is the only producer of
-the terminal gate CheckRun; never ask it to trust this caller-observed preflight result.
+the terminal `agentic/gate` status; never ask it to trust this caller-observed preflight result.
 
 For a non-empty scaffold-only diff under manual policy, the scaffold gate may replace the app gate
 only when every path is inside `tools/agentic/**`, `docs/agentic/**`, `.codex/**`, `.claude/**`,
@@ -651,43 +651,38 @@ Then run:
 node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 node tools/agentic/publish-verdict.mjs terminal-finalize \
   --request-file <terminal-request.json> \
-  --review-evidence-file <exact-clean-review-input.json> \
-  --ownership-attestation-file <ownership-attestation.json> \
-  --expect-app-id <ci-app-id>
+  --review-evidence-file <exact-clean-review-input.json>
 ```
 
-Under an **acknowledged non-manual** merge policy (`merge.unverifiedInvocationAcknowledged:
-true`) the last two flags are MANDATORY — the finalizer fails typed without them, and a live
-session lost a cycle rediscovering that from the failure. Compose the
-ownership attestation from facts the run already holds, in exactly the shape
-`attestation-contract.mjs` `KEYS.ownership` defines: `kind: "ownership"`, `v`, `headOid` (the
-gated head), `issue`, `issueBodyHash`, `claimCommitOid`, `frozenPlanHash`, `frozenPlanCommentId`,
-`frozenPlanAuthor` — every value from the lifecycle marker and claim, never re-derived by hand.
-`--expect-app-id` is the CI App's numeric id (GitHub Actions is `15368`). Manual mode is the
-inverse: both flags are forbidden.
+Those two flags are the WHOLE finalize surface — there is no ownership-attestation file and no
+App id (docs/specs/simple-delivery.md retired both; the premerge record already carries the
+ownership facts). Non-manual merge policies are solo-only: the finalizer refuses typed unless the
+config records both `merge.soloOperatorAcknowledged: true` and
+`merge.unverifiedInvocationAcknowledged: true`.
 
 The first command must return `READY_HEAD_BOUND` for the exact pushed/gated head. Its live delivery
 read supplies the only head-binding authority. The terminal finalizer independently repeats that
 binding/readback after a crash, derives the lifecycle identity internally, and never accepts a
-caller-authored lifecycle hash. Manual mode forbids ownership/publisher evidence.
+caller-authored lifecycle hash.
 
 This is the sole ready/delivered mutation surface. It requires the exact clean live checkout,
-executes the configured full gate, publishes or reuses exact-head review/gate CheckRuns, fetches
-the PR, all current-head checks, committed CI policy, and applicable server rules completely and
-stably, creates or observes one deterministic pre-merge record, binds it into the lifecycle marker,
-marks a draft ready, swaps the issue to `loop-delivered`, and reads every terminal postcondition
-back. Empty policy is accepted only when the committed policy explicitly declares it; optional
-failed/pending checks never masquerade as required checks. Missing, pending, changed, stale,
-wrong-head, wrong-App, duplicate, edited, or incomplete evidence fails before the terminal mutation
-and may be retried only after a fresh live read. Raw `gh pr ready`, raw `loop-delivered` label
-edits, split `premerge-create`, and caller delivery booleans are forbidden.
+executes the configured full gate, publishes or reuses the exact-head `agentic/review` and
+`agentic/gate` success commit statuses (SHA-bound, description carrying the verdict summary's
+sha256 prefix), fetches the PR, all current-head check runs, and the latest status per context
+completely and stably, creates or observes one deterministic pre-merge record, binds it into the
+lifecycle marker, marks a draft ready, swaps the issue to `loop-delivered`, and reads every
+terminal postcondition back. The CI predicate is the triggered-checks floor: everything that ran
+on the exact head must be green — red blocks, pending blocks, and a repo with no CI has nothing to
+wait for. Missing, pending, changed, stale, wrong-head, duplicate, edited, or incomplete evidence
+fails before the terminal mutation and may be retried only after a fresh live read. Raw
+`gh pr ready`, raw `loop-delivered` label edits, split `premerge-create`, and caller delivery
+booleans are forbidden.
 
 Under `merge.policy: manual`, stop after the returned exact terminal result and leave the ready PR
-for a human. Under an acknowledged non-manual policy, invoke the vendored
+for a human. Under an acknowledged solo non-manual policy, invoke the vendored
 `tools/agentic/auto-merge.mjs` once for the delivered PR and treat its typed verdict as final for
 this run. The executor independently refetches every ownership, eligibility, and evidence
-predicate — plus live server protection, except under the solo-operator acknowledgement, which
-waives the four controls a single login cannot satisfy — and refuses with a typed reason when any
+predicate and refuses with a typed reason when any
 is missing; route a refusal to the human-block path — never retry it blindly, weaken a predicate,
 or merge through any other surface. No run submits a merge queue entry, publishes a tag, or creates
 a release.
