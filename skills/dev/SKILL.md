@@ -120,6 +120,11 @@ Shapes to keep out of every command, sanctioned read or not:
 - **A shell variable standing in for a path you already know.** Write the literal path. A variable
   is one more thing the guard must resolve before it can judge the command, and it buys nothing in
   a command written once.
+- **Process substitution, `<(…)`.** Command substitution's sibling, refused for the same reason —
+  and it takes the innocent front of the command down with it (a plain `wc -c` was refused because
+  `diff <(cat -A …) <(cat -A …)` rode the same invocation). Byte-compare two files with
+  `cmp -l a b | head` — exact differing offsets, no expansion — or write each transform to a
+  plain file first and diff those.
 
 ## Dispatch
 
