@@ -6,7 +6,7 @@
 // complete mechanical reconciliation in one invocation and returns a typed
 // report. A second entry point merges the STATE and LOOP documents against
 // their templates on the same principle. Judgment stays with the model: the
-// interview, ci-policy authorship, whatever the merge report flags for human
+// interview, whatever the merge report flags for human
 // review, the visible diff, and the commit.
 
 import {
@@ -356,10 +356,17 @@ export function reconcile(root, templates, { audit = false } = {}) {
     );
   }
 
-  if (!existsSync(resolve(root, '.autoloop', 'ci-policy.json'))) {
+  // The committed CI policy is retired (docs/specs/simple-delivery.md): the
+  // delivery predicate is the triggered-checks floor, so a lingering copy is
+  // dead configuration that reads as authoritative. Reconcile removes it in the
+  // visible diff (audit mode only reports).
+  const ciPolicyPath = resolve(root, '.autoloop', 'ci-policy.json');
+  if (existsSync(ciPolicyPath)) {
+    if (!audit) unlinkSync(ciPolicyPath);
+    results.push({ path: '.autoloop/ci-policy.json', action: 'removed' });
     warnings.push(
-      '.autoloop/ci-policy.json is absent; it is human-owned policy — author it '
-      + 'through the interview, never generate it',
+      '.autoloop/ci-policy.json is retired (docs/specs/simple-delivery.md); '
+      + (audit ? 'reconcile will remove it' : 'removed it — commit the deletion'),
     );
   }
   if (config !== null) {
@@ -1385,8 +1392,29 @@ function selfTest() {
       })(),
     );
     expect(
-      'absent human policy is a warning, never a generated file',
-      first.warnings.some((warning) => warning.includes('.autoloop/ci-policy.json'))
+      'a fresh scaffold never creates the retired CI policy',
+      !first.results.some((entry) => entry.path === '.autoloop/ci-policy.json')
+        && !existsSync(join(root, '.autoloop', 'ci-policy.json')),
+    );
+    mkdirSync(join(root, '.autoloop'), { recursive: true });
+    writeFileSync(
+      join(root, '.autoloop', 'ci-policy.json'),
+      '{"schemaVersion":1,"requiredChecks":[]}\n',
+    );
+    const auditWithPolicy = reconcile(root, templates, { audit: true });
+    expect(
+      'audit reports the retired CI policy without deleting it',
+      auditWithPolicy.results.some((entry) =>
+        entry.path === '.autoloop/ci-policy.json' && entry.action === 'removed')
+        && existsSync(join(root, '.autoloop', 'ci-policy.json')),
+    );
+    const removalRun = reconcile(root, templates);
+    expect(
+      'reconcile removes the retired CI policy and reports it',
+      removalRun.results.some((entry) =>
+        entry.path === '.autoloop/ci-policy.json' && entry.action === 'removed')
+        && removalRun.warnings.some((warning) =>
+          warning.includes('docs/specs/simple-delivery.md'))
         && !existsSync(join(root, '.autoloop', 'ci-policy.json')),
     );
 

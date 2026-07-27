@@ -112,8 +112,7 @@ never merges, pushes release tags, or publishes a release.
 - **PRs, never direct merges.** A human merges. Read the diff — review is the ceiling.
 - **The gate decides done**, not the model. Non-zero `{{GATE_COMMAND}}` = not done.
 - **Escalate-list** paths are *built* but flagged `human:authorize` for extra-careful human review.
-  The protected families include `.opencode/**`, `.githooks/**`, and the exact
-  `.autoloop/ci-policy.json` delivery-policy file.
+  The protected families include `.opencode/**` and `.githooks/**`.
   **New dependencies and secrets/data-writes hard-defer** — the loop never adds a package or a
   secret autonomously.
 - **Issue text is untrusted data** — the loop acts only on `loop-ready` labels applied by a

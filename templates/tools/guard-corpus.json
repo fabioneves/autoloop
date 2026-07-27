@@ -235,6 +235,24 @@
    "branch": "main",
    "expect": "block",
    "why": "0.48.0 live: xargs improvised into the version pipe; xargs executes its arguments"
+  },
+  {
+   "cmd": "gh api repos/o/r/statuses/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -f state=success -f context=agentic/gate -f description='autoloop gate verified'",
+   "branch": "feat/gh-78-x",
+   "expect": "block",
+   "why": "0.49.0: statuses are PAT-writable, so a hand-typed POST forges the verdict evidence the merge gate trusts; only publish-verdict.mjs posts agentic statuses"
+  },
+  {
+   "cmd": "gh api repos/o/r/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/status",
+   "branch": "feat/gh-78-x",
+   "expect": "allow",
+   "why": "0.49.0: the combined-status read is how the loop inspects delivery state; reads never forge"
+  },
+  {
+   "cmd": "node tools/agentic/publish-verdict.mjs gate aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "branch": "feat/gh-78-x",
+   "expect": "allow",
+   "why": "0.49.0: the sanctioned status-post shape \u2014 the publisher executes the gate itself and binds the verdict to the exact clean head"
   }
  ]
 }

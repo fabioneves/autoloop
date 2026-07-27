@@ -268,12 +268,6 @@ async function buildFixtureRepository(scratch) {
   runGit(root, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
   runGit(root, ['remote', 'add', 'origin', FIXTURE_ORIGIN_URL]);
   writeFixtureState(root);
-  const ciPolicyPath = join(root, '.autoloop', 'ci-policy.json');
-  mkdirSync(dirname(ciPolicyPath), { recursive: true });
-  writeFileSync(
-    ciPolicyPath,
-    `${JSON.stringify({ schemaVersion: 1, requiredChecks: [] }, null, 2)}\n`,
-  );
   const vendoring = await vendorFixtureTools(root);
   runGit(root, ['add', '--all']);
   runGit(root, [

@@ -1394,9 +1394,9 @@ function selfTest() {
       commentId: mergedMarkerBase.planCommentId,
       contentHash: mergedMarkerBase.planHash,
     },
-    review: { checkRunId: 101, summaryHash: '9'.repeat(64) },
-    gate: { checkRunId: 102, summaryHash: 'a'.repeat(64) },
-    ci: { policyHash: 'b'.repeat(64), evidenceHash: 'c'.repeat(64) },
+    review: { summaryHash: '9'.repeat(64) },
+    gate: { summaryHash: 'a'.repeat(64) },
+    ci: { evidenceHash: 'c'.repeat(64) },
     lifecycle: {
       commentId: 'IC_lifecycle',
       identityHash: lifecycleIdentityHash(mergedMarkerBase),

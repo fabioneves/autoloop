@@ -22,7 +22,6 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { extractConfig, validateConfig } from './config-contract.mjs';
-import { parseCiPolicy } from './delivery-contract.mjs';
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const SELF_TEST_MANIFEST_NAME = 'self-test-manifest.json';
@@ -126,24 +125,15 @@ function checkJson(path) {
   }
 }
 
-function checkCiPolicy(path) {
-  try {
-    const exactPath = resolve(path);
-    const parentPath = dirname(exactPath);
-    if (
-      lstatSync(exactPath).isSymbolicLink()
-      || lstatSync(parentPath).isSymbolicLink()
-      || realpathSync(exactPath) !== exactPath
-      || realpathSync(parentPath) !== parentPath
-    ) {
-      return { ok: false, detail: `${path}: CI policy path must not use symlinks` };
-    }
-    return parseCiPolicy(readFileSync(path)) === null
-      ? { ok: false, detail: `${path}: CI policy is not canonical schema v1` }
-      : { ok: true, detail: '' };
-  } catch (error) {
-    return { ok: false, detail: error.message };
-  }
+// The committed CI policy is retired (docs/specs/simple-delivery.md); a copy
+// left behind reads as authoritative configuration, so its absence is verified.
+function checkRetiredCiPolicy(root) {
+  return existsSync(resolve(root, '.autoloop', 'ci-policy.json'))
+    ? {
+        ok: false,
+        detail: '.autoloop/ci-policy.json is retired — run scaffold reconcile to remove it',
+      }
+    : { ok: true, detail: '' };
 }
 
 // The release contract reports pending live evidence as a typed note: it never
@@ -779,17 +769,12 @@ function pluginChecks(root) {
     '.claude-plugin/plugin.json',
     '.codex-plugin/plugin.json',
     'templates/opencode-config.template.json',
-    'templates/ci-policy.template.json',
   ]) {
     checks.push({
       name: `json ${relativePath}`,
       execute: () => checkJson(resolve(root, relativePath)),
     });
   }
-  checks.push({
-    name: 'canonical CI policy template',
-    execute: () => checkCiPolicy(resolve(root, 'templates', 'ci-policy.template.json')),
-  });
   for (const [relativePath, contract] of [
     ['templates/codex-hooks.template.json', CODEX_HOOK_CONTRACT],
     ['templates/settings-hooks.template.json', CLAUDE_HOOK_CONTRACT],
@@ -935,7 +920,6 @@ function installChecks(root, { full = false } = {}) {
   const requiredFiles = installedToolFiles(config);
   const checks = toolChecks(root, toolsDir, requiredFiles, 'install', { full });
   for (const relativePath of [
-    '.autoloop/ci-policy.json',
     '.codex/agents/autoloop-reviewer.toml',
     '.opencode/agent/autoloop-reviewer.md',
     'docs/agentic/LOOP.md',
@@ -947,8 +931,8 @@ function installChecks(root, { full = false } = {}) {
     });
   }
   checks.push({
-    name: 'canonical installed CI policy',
-    execute: () => checkCiPolicy(resolve(root, '.autoloop', 'ci-policy.json')),
+    name: 'retired CI policy absent',
+    execute: () => checkRetiredCiPolicy(root),
   });
   checks.push({
     name: 'configured review checklist',

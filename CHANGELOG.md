@@ -3,6 +3,47 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.0] - 2026-07-27
+
+### Changed
+
+- **Simple delivery: verdicts are commit statuses again.** The whole v0.40 finalize/merge
+  evidence layer is gone, per `docs/specs/simple-delivery.md`. `publish-verdict.mjs` posts
+  `agentic/gate` and `agentic/review` as SHA-bound, success-only COMMIT STATUSES whose
+  descriptions carry the verdict summary's sha256 prefix — PAT-writable, where the v0.40
+  CheckRun writes were App-only by GitHub design and 403'd every solo finalize. The premerge
+  record is v2: `review`/`gate` anchor on `{summaryHash}` verified byte-for-byte against the
+  live status description, `ci` on the delivery evidence fingerprint alone.
+- **The CI predicate is the triggered-checks floor.** Every check run and commit status on the
+  exact head must be green — red blocks, pending blocks, a repository with no CI has nothing to
+  wait for. `delivery-contract.mjs` reads only PAT-readable evidence (check runs + combined
+  statuses, double-fetched for stability) and no longer compares against any required-check
+  list, branch-protection rule, or ruleset.
+- **Non-manual merge is solo-only.** `ratified`/`auto` require the recorded
+  `merge.soloOperatorAcknowledged: true` and `merge.unverifiedInvocationAcknowledged: true`;
+  anything else refuses typed at finalize and at merge authorization, naming the spec. The
+  v0.40 multi-actor unattended mode was never usable on a shared login and is retired, not
+  preserved.
+
+### Removed
+
+- **`.autoloop/ci-policy.json` and everything that read it** — the template, `canonicalCiPolicy`,
+  the committed-vs-server comparison (unsatisfiable by construction on a free plan), the
+  rules/branch-protection endpoint reads, and the free-plan-403 handling those reads needed.
+  Scaffold reconcile now REMOVES a lingering copy from configured repos in the visible diff and
+  reports it; `verify --install-root` flags a copy left behind.
+- **CheckRun publication and the App layer** — `ensurePublishedCheckRun`, `--expect-app-id`,
+  producer pinning, server-pinned workflow validation, and the `--ownership-attestation-file`
+  ceremony (the premerge record already carries the ownership facts). The terminal-finalize
+  surface is two flags: `--request-file` and `--review-evidence-file`.
+
+### Added
+
+- **The guard fences hand-posted statuses.** Statuses being PAT-writable is what makes solo
+  delivery possible — and what makes a hand-typed `gh api …/statuses/<sha>` a verdict forgery.
+  Mutating status posts are blocked with a typed reason; combined-status reads pass; corpus
+  entries pin the forgery shape, the read, and the sanctioned publisher invocation.
+
 ## [0.48.3] - 2026-07-27
 
 ### Fixed

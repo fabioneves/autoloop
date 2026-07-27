@@ -1456,6 +1456,21 @@ export function evaluate(rawCmd, branch, options = {}) {
           + 'Autonomy). Leave the merge to a human or the repo-ratified policy gate.',
       };
     }
+    // Verdict statuses are PAT-writable, so a hand-typed POST would forge
+    // delivery evidence the merge gate trusts. Reads (/commits/<sha>/status)
+    // stay allowed; only the mutating status endpoint is fenced.
+    if (
+      /\/statuses\//.test(lexicalCmd)
+      && segments.some(({ command }) => mutatingGhApi(shellWords(command)))
+    ) {
+      return {
+        block: true,
+        reason:
+          'autoloop guard — posting a commit status by hand forges verdict evidence: '
+          + 'agentic statuses come only from tools/agentic/publish-verdict.mjs, which binds '
+          + 'them to the gate/review it actually executed on the exact clean head.',
+      };
+    }
     if (
       /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|enqueuePullRequest)\b/
         .test(lexicalCmd)
@@ -1938,6 +1953,11 @@ function selfTest() {
     ['gh api repos/o/r/pulls/42/mer\\\nge -X PUT', 'feat/gh-2-y', true],
     ["gh api repos/o/r/pulls/42/$'m\\x65rge' -X PUT", 'feat/gh-2-y', true],
     ['gh api repos/o/r/merges -f base=main -f head=feat/gh-2-y', 'feat/gh-2-y', true],
+    // commit statuses: hand-posting forges verdict evidence; reads pass
+    [`gh api repos/o/r/statuses/${'a'.repeat(40)} -f state=success -f context=agentic/gate`, 'feat/gh-2-y', true],
+    [`gh api repos/o/r/statuses/${'a'.repeat(40)} --method POST --input /tmp/s.json`, 'feat/gh-2-y', true],
+    [`gh api repos/o/r/commits/${'a'.repeat(40)}/status`, 'feat/gh-2-y', false],
+    [`gh api repos/o/r/commits/${'a'.repeat(40)}/statuses`, 'feat/gh-2-y', false],
     ["gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"})}'", 'feat/gh-2-y', true],
     ["gh api graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'", 'feat/gh-2-y', true],
     ['gh api graphql --input /tmp/merge.json', 'feat/gh-2-y', true],
