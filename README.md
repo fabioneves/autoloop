@@ -10,7 +10,7 @@
 <strong>Labelled GitHub issues in. Gated, independently reviewed PRs out.</strong>
 
 <p>
-  <img alt="release v0.46.1" src="https://img.shields.io/badge/release-v0.46.1-8b5cf6?style=flat-square">
+  <img alt="release v0.47.0" src="https://img.shields.io/badge/release-v0.47.0-8b5cf6?style=flat-square">
   <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
   <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square">
   <img alt="human controlled merge" src="https://img.shields.io/badge/authority-human_merge-f59e0b?style=flat-square">
@@ -353,7 +353,7 @@ setup only; runtime never reads them. Project facts and secrets do not belong th
 
 Roles stay fixed and there is no routing decision to make.
 
-v0.46.1 dispatches every role through one call:
+v0.47.0 dispatches every role through one call:
 
 ```bash
 node tools/agentic/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
@@ -514,7 +514,7 @@ are the maintainer's responsibility; the release gate does not read or verify th
 configuration.
 
 Configured repositories record their scaffold contract version in the JSON block inside
-`docs/agentic/STATE.md`. v0.46.1 uses schema `0.26.0`. Breaking config-shape changes bump the minor
+`docs/agentic/STATE.md`. v0.47.0 uses schema `0.26.0`. Breaking config-shape changes bump the minor
 version while the project is `0.x`; re-running setup audits and migrates the repository-owned layer
 through a visible diff and, when policy is involved, a human-reviewed and human-merged policy PR.
 

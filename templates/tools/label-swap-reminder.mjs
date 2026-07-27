@@ -59,10 +59,38 @@ const DISPATCH_STEP = {
   'code-review': '08-code-review',
 };
 
+// Setup has no labels, so its phases had no mechanical anchor — and prose alone
+// proved intermittent: live runs printed one ribbon of five, then none, then a
+// scattered subset, across three wordings. Each phase inevitably runs a
+// signature command, so the ribbon rides that command the same way dev's riders
+// ride label swaps. First match wins; the reminder names the ribbon due NOW and
+// the one after it.
+const SETUP_PHASE_ANCHORS = [
+  [/release-verify\.mjs\s+--sort-versions/,
+    'autoloop: RESOLVE is running — its ribbon `🟦 ∞ ▰▱▱▱▱ 1/5 RESOLVE` must already be printed; '
+    + 'print it NOW if missing (late beats never). Next: `🟦 ∞ ▰▰▱▱▱ 2/5 AUDIT` before the audit '
+    + 'battery.'],
+  [/scaffold\.mjs\s+--audit\b/,
+    'autoloop: the AUDIT battery just ran — `🟦 ∞ ▰▰▱▱▱ 2/5 AUDIT` must already be printed; print '
+    + 'it NOW if missing. Next: `🟦 ∞ ▰▰▰▱▱ 3/5 INTERVIEW` BEFORE the first question to the human.'],
+  [/scaffold\.mjs\s+--(?:reconcile|merge-state|merge-loop)\b/,
+    'autoloop: WRITE is running — `🟦 ∞ ▰▰▰▰▱ 4/5 WRITE` must already be printed (and 3/5 '
+    + 'INTERVIEW before it); print any missing ribbon NOW. Next: `🟦 ∞ ▰▰▰▰▰ 5/5 VERIFY` when '
+    + 'evidence collection starts.'],
+  [/verify\.mjs\s+--install-root\b/,
+    'autoloop: install-root verify just ran — in a setup session `🟦 ∞ ▰▰▰▰▰ 5/5 VERIFY` must '
+    + 'already be printed; print it NOW if missing. The closing rail `🟩 ╰─ ∞ setup · complete …` '
+    + 'is the only green line.'],
+];
+
 // Returns null when the command is not a loop-label swap on an issue.
 // opts.archMap: docs/agentic/ARCH.md exists → step 6 also reminds the map update.
 export function reminderFor(command, opts = {}) {
   if (typeof command !== 'string') return null;
+
+  for (const [pattern, message] of SETUP_PHASE_ANCHORS) {
+    if (pattern.test(command)) return message;
+  }
 
   const dispatched = command.match(/dispatch\.mjs\b[^\n]*?--role[= ]+["']?([a-z-]+)/);
   if (dispatched) {
@@ -144,6 +172,11 @@ function selfTest() {
     // only fires ON a swap, so a swap that never happens is invisible to it. The
     // dispatch IS the step, and `NEXT` already says 05 is due "when the
     // implementer dispatch goes out", so anchor on the dispatch itself.
+    ['ls /cache | node /cache/0.47.0/templates/tools/release-verify.mjs --sort-versions | tail -3', /1\/5 RESOLVE/],
+    ['node /cache/templates/tools/scaffold.mjs --audit .', /2\/5 AUDIT/],
+    ['node /cache/templates/tools/scaffold.mjs --reconcile /repo', /4\/5 WRITE/],
+    ['node /cache/templates/tools/scaffold.mjs --merge-state . > /tmp/s.md', /4\/5 WRITE/],
+    ['node tools/agentic/verify.mjs --install-root . 2>&1 | tee /tmp/v.txt', /5\/5 VERIFY/],
     ['node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json', /loop:05-implement/],
     ['node tools/agentic/dispatch.mjs --role code-review --prompt-file /tmp/p.md --json', /loop:08-code-review/],
     ['node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/p.md --json', /loop:03-plan-review/],

@@ -1,0 +1,222 @@
+{
+ "version": 1,
+ "note": "Real command shapes from live sessions, sanitized. Each entry names the incident that earned it a place. expect: allow | block.",
+ "cases": [
+  {
+   "cmd": "node --version",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.42.3: refused as stdin-source; blocked the setup audit battery"
+  },
+  {
+   "cmd": "gh auth status 2>&1 | head -3\nnode --version\ncodex --version 2>/dev/null || echo codex:absent\nopencode --version 2>/dev/null || echo opencode:absent",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "the full toolchain battery, refused whole pre-0.42.3"
+  },
+  {
+   "cmd": "node -v",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "-v means verbose for python; short probes stay opaque"
+  },
+  {
+   "cmd": "node",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "bare interpreter reads stdin"
+  },
+  {
+   "cmd": "node --version -e 'require(\"child_process\")'",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "probe flag must not launder -e"
+  },
+  {
+   "cmd": "T=/tmp/templates\nnode $T/tools/scaffold.mjs --audit .",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.44.1: assignment on line 1 resolved"
+  },
+  {
+   "cmd": "cd /repo\nT=/tmp/templates\nnode $T/tools/scaffold.mjs --audit .",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.44.1: same assignment after a cd was refused \u2014 no m flag"
+  },
+  {
+   "cmd": "cd /repo\nverb=merge\ngh pr $verb 42",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "resolved evasion must block on the merge rule"
+  },
+  {
+   "cmd": "cd /repo\nT=$(pwd)\nnode $T/a.mjs",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "command substitution stays opaque"
+  },
+  {
+   "cmd": "git add -A && git commit -q -F - <<'EOF' && git log --oneline -1\nchore: reconcile scaffold\n\nuses the `m` flag and `scaffold.mjs --reconcile`\nEOF",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.44.2: backticks in a quoted heredoc body read as substitution; the loop could not write its own commit"
+  },
+  {
+   "cmd": "git commit -q -F - <<EOF\nmsg with $(pwd) live\nEOF",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "unquoted heredoc genuinely expands"
+  },
+  {
+   "cmd": "git commit -q -F - <<'EOF'\nx\nEOF\ngh pr merge 42",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "a quoted heredoc must not smuggle a merge after its terminator"
+  },
+  {
+   "cmd": "echo \"=== git diffstat ===\"\ngit status --short\ngit diff --stat | tail -3",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.46.1: section banner read as unknown git subcommand"
+  },
+  {
+   "cmd": "git diffstat",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "a real unknown subcommand may resolve through an alias"
+  },
+  {
+   "cmd": "env git diffstat",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "wrappers do not launder unknown subcommands"
+  },
+  {
+   "cmd": "timeout 30 git fetch origin main",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "transparent wrapper over a known subcommand"
+  },
+  {
+   "cmd": "git status --short; echo \"exit=$?\"",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "unresolvable expansion; observed thrice"
+  },
+  {
+   "cmd": "git status --short && echo \"clean=$?\"",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "the second spelling that beat the first rule"
+  },
+  {
+   "cmd": "node -e \"import('/t/a.mjs').then(m=>m.x())\"",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "inline interpreter source, live setup follow-up"
+  },
+  {
+   "cmd": "jq '.properties.decidedBy' schema.json; python3 -c \"import json; print(1)\"",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "one forbidden segment sinks the compound"
+  },
+  {
+   "cmd": "awk '/^## Lessons/,0' docs/agentic/STATE.md | wc -c",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "non-file-backed awk is executable"
+  },
+  {
+   "cmd": "sed -n '/^## Lessons/,$p' docs/agentic/STATE.md | wc -c",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "the prescribed remedy"
+  },
+  {
+   "cmd": "jq '.cases | length' packages/testdata/vectors.json",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "plain jq read, skill-sanctioned"
+  },
+  {
+   "cmd": "jq -r '.documents.complete | @base64d | fromjson | .result' packages/testdata/vectors.json",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "the pure-jq remedy the live session found"
+  },
+  {
+   "cmd": "jq '.cases += [{name: \"x\"}]' in.json > /tmp/out.json && mv /tmp/out.json in.json && jq '.cases | length' in.json",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "multi-line jq write via visible redirect, live vector authoring"
+  },
+  {
+   "cmd": "node tools/agentic/prime.mjs --json",
+   "branch": "main",
+   "expect": "allow",
+   "why": "the startup call"
+  },
+  {
+   "cmd": "node tools/agentic/dispatch.mjs --role code-review --engine codex --prompt-file /tmp/p.md --output-file /tmp/r.json --json",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "the review dispatch, engine flag included"
+  },
+  {
+   "cmd": "bash tools/agentic/dispatch-stream.sh /tmp/live.jsonl /tmp/r.json --role code-review --prompt-file /tmp/p.md",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "the native watcher wrapper"
+  },
+  {
+   "cmd": "node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/request.json",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "the claim call"
+  },
+  {
+   "cmd": "node tools/agentic/overlap-report.mjs --eligible 5",
+   "branch": "main",
+   "expect": "allow",
+   "why": "the run-record accounting line"
+  },
+  {
+   "cmd": "gh pr create --base main --title \"chore: reconcile\" --body-file /tmp/body.md",
+   "branch": "chore/autoloop-reconcile",
+   "expect": "allow",
+   "why": "the prescribed body-file shape"
+  },
+  {
+   "cmd": "gh pr create --base main --title t --body \"$(cat /tmp/b.md)\"",
+   "branch": "chore/x",
+   "expect": "block",
+   "why": "inline body is substitution; the shape 0.45.1 prescribes against"
+  },
+  {
+   "cmd": "git fetch origin feat/gh-78-x --quiet && git log --oneline origin/main..origin/feat/gh-78-x && git diff --stat origin/main...origin/feat/gh-78-x",
+   "branch": "main",
+   "expect": "allow",
+   "why": "three-dot diff, the remedy for $(git merge-base ...)"
+  },
+  {
+   "cmd": "git diff --stat $(git merge-base origin/main origin/feat/gh-78-x)..origin/feat/gh-78-x",
+   "branch": "main",
+   "expect": "block",
+   "why": "merge-base substitution; three-dot is built in"
+  },
+  {
+   "cmd": "gh pr merge 42 --merge",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "direct merge is outside loop authority"
+  },
+  {
+   "cmd": "g\"\"h p\"\"r m\"\"erge 42",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "quote-splice evasion"
+  }
+ ]
+}

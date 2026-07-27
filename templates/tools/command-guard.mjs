@@ -35,7 +35,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
@@ -1686,7 +1686,36 @@ export function parseArgs(args) {
   };
 }
 
+// Corpus replay: real command shapes from live sessions, each tagged with the
+// incident that earned it a place. Unit fixtures test what we imagined; the
+// corpus tests what sessions actually typed — five of one day's bugs were guard
+// verdicts on commands no fixture contained. Exposed as `--corpus` because the
+// release-proven manifest fast-path may skip an unchanged tool's self-test,
+// and a corpus edit must always be re-proven.
+export function replayCorpus() {
+  const failures = [];
+  let total = 0;
+  try {
+    const corpusPath = join(dirname(fileURLToPath(import.meta.url)), 'guard-corpus.json');
+    const corpus = JSON.parse(readFileSync(corpusPath, 'utf8'));
+    for (const entry of corpus.cases) {
+      const verdict = evaluate(entry.cmd, entry.branch, { baseBranch: 'main' });
+      const got = verdict.block ? 'block' : 'allow';
+      if (got !== entry.expect) {
+        failures.push(
+          `FAIL [corpus: expect ${entry.expect}, got ${got}] (${entry.why}): `
+          + entry.cmd.split('\n')[0]);
+      }
+    }
+    total = corpus.cases.length;
+  } catch (error) {
+    failures.push(`FAIL [corpus unreadable]: ${error.message}`);
+  }
+  return { total, failures };
+}
+
 function selfTest() {
+  let corpusCount = 0;
   const cases = [
     // [cmd, branch, expectBlock, baseBranch]
     ['gh pr merge 42', 'feat/gh-1-x', true],
@@ -2020,6 +2049,13 @@ function selfTest() {
       ok = false;
     }
   }
+  const corpusResult = replayCorpus();
+  corpusCount = corpusResult.total;
+  if (corpusResult.failures.length > 0) {
+    ok = false;
+    for (const line of corpusResult.failures) console.error(line);
+  }
+
   const argCases = [
     ['default config path', [], 'docs/agentic/STATE.md'],
     ['explicit config path', ['--config', '/repo/STATE.md'], '/repo/STATE.md'],
@@ -2095,7 +2131,7 @@ function selfTest() {
   }
   console.log(
     ok
-      ? `self-test OK (${cases.length + messageChecks} cases)`
+      ? `self-test OK (${corpusCount} corpus + ${cases.length + messageChecks} cases)`
       : 'self-test FAILED',
   );
   return ok;
@@ -2128,6 +2164,14 @@ function refuse(reason) {
 }
 
 function main() {
+  if (process.argv.includes('--corpus')) {
+    const { total, failures } = replayCorpus();
+    for (const line of failures) console.error(line);
+    console.log(failures.length === 0
+      ? `corpus OK (${total} cases)`
+      : `corpus FAILED (${failures.length}/${total})`);
+    process.exit(failures.length === 0 ? 0 : 1);
+  }
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     refuse(

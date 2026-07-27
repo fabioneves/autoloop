@@ -230,6 +230,7 @@ export function reconcile(root, templates, { audit = false } = {}) {
     // the installed verify.mjs can pass byte-identical tools without spawning
     // their already-proven self-tests.
     'self-test-manifest.json',
+    'guard-corpus.json',
     ...(nonManual ? NON_MANUAL_TOOL_FILES : []),
   ];
   for (const name of tools) {
@@ -930,6 +931,7 @@ function fixtureTemplates() {
     'session-preflight.sh',
     'dispatch-stream.sh',
     'self-test-manifest.json',
+    'guard-corpus.json',
   ]);
   for (const name of names) {
     writeFileSync(join(templates, 'tools', name), `// fixture ${name}\n`);
