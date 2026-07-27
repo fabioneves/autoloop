@@ -7,6 +7,14 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
+- **Simplify and fix rounds are dispatches, not orchestrator edits.** The orchestrator's ~86k-token
+  context was the one place in the loop still writing code by hand — the most expensive possible
+  place to do it, paying full-context turns for every finding fixed. Both now run as background
+  `implement` dispatches in the same shape as reviews: bounded prompt, `--output-file`, armed
+  monitor, overlap or park while they run, `WRITER_MADE_NO_CHANGE` refusing a fixer that only
+  claimed to act. Only a trivial edit (~five lines, two files) stays inline. The engine follows
+  the writer — whoever wrote the unit writes its fixes — and the other model keeps reviewing: an
+  engine never reviews its own code.
 - **Under `with codex`, Claude's five-axis review moves to the end of the pipeline.** Mid-pipeline
   it reviewed the pre-codex artifact, and every fix round landed after it unseen — so the final
   artifact got no Claude-shaped review at all, while the mid-pipeline pass cost a full checklist

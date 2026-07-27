@@ -398,9 +398,16 @@ no PR/merge, and no objective gate. A quick gate may run once after collection.
 
 ### 6. Simplify
 
-Move to `loop:06-simplify`. Load the simplification guidance when available. Make a
-behavior-preserving pass over only this unit: remove needless indirection, duplication,
-scaffolding, comments that narrate code, and speculative abstraction. Commit all changes.
+Move to `loop:06-simplify`. Load the simplification guidance when available. The pass is
+behavior-preserving and covers only this unit: needless indirection, duplication, scaffolding,
+comments that narrate code, speculative abstraction.
+
+**Dispatch it, don't edit it.** The orchestrator's context is the most expensive place in the
+loop to write code — compose a bounded prompt (the unit diff, the guidance distilled, the
+behavior-preserving constraint, conventional commit) and run it as a background `implement`
+dispatch, exactly like a review: `--output-file`, monitor armed, overlap or park while it runs.
+Only a trivial edit — roughly five lines across at most two files — may be made inline. Commit
+all changes.
 
 Update ARCH on the unit branch when structure/integrations changed. Keep curated docs
 merge-friendly: no shared freshness line, derived count prose, or table re-padding.
@@ -458,6 +465,14 @@ stable finding ID. A rebut closes only when a fresh reviewer accepts that exact 
  findingAnnotations:[{id,verified,inScope}],
  reviewRounds:[...]}
 ```
+
+**Fixing findings between rounds is a dispatch too.** Compose the fix prompt from the verdict's
+findings verbatim (they are structured), the touched files, and the frozen-plan constraints;
+background an `implement` dispatch and collect its commits — the orchestrator coordinates and
+never edits multi-line fixes in its own context. The next review round covers the fix delta, and
+`WRITER_MADE_NO_CHANGE` refuses a fixer that only claimed to act. The engine follows the writer:
+whoever wrote the unit writes its fixes, and the OTHER model keeps reviewing — an engine never
+reviews its own code, which is the entire point of having two.
 
 Each entry in `reviewRounds` is the record of one dispatched round:
 
