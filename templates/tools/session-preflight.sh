@@ -54,6 +54,14 @@ else
   else
     echo 'FAIL  tools/agentic/dispatch.mjs missing — no role can be dispatched'
   fi
+  # Reviews run on codex so they do not share the writer's model. There is no
+  # fallback to claude: an absent codex fails every review dispatch typed, which
+  # is far better learned here than at the first review of a finished unit.
+  if command -v codex >/dev/null 2>&1; then
+    echo "PASS  codex present ($(codex --version 2>/dev/null | head -1)) — reviews run off the writer's model"
+  else
+    echo 'FAIL  codex not installed — every review dispatch will fail typed; install codex or pin `--engine claude` and accept that reviews share the writer model'
+  fi
 fi
 
 # 2. Clean checkout (loop precondition; dirty is fine for interactive work)

@@ -222,6 +222,75 @@ export function dispatchArgv(role, tools) {
   ];
 }
 
+// Two engines, chosen by the binary's own name so a fixture shim on a path and
+// an installed binary resolve the same way.
+//
+// Reviews run on a different engine from the writer on purpose. A reviewer
+// sharing the writer's model shares its priors and its blind spots; a fresh
+// process gives identity separation but not cognitive separation. Codex supplies
+// the second, and `--sandbox read-only` is an OS-enforced boundary rather than a
+// tool allowlist, so the reviewer's read-only posture is stronger there than it
+// is under Claude.
+const ENGINES = Object.freeze({
+  claude: Object.freeze({
+    supports: (role) => ROLES[role] !== undefined,
+    argv: (role, tools) => dispatchArgv(role, tools),
+    // Claude's stream-json ends with exactly one `result` event.
+    payload: (role, stdout) => {
+      const event = parseResultEvent(stdout);
+      if (event === null || event.subtype !== 'success') return null;
+      return ROLES[role].result === 'review-verdict'
+        ? { verdict: event.structured_output }
+        : { text: typeof event.result === 'string' ? event.result : '' };
+    },
+  }),
+  codex: Object.freeze({
+    // Reviewer-only, and refused rather than approximated: codex would need a
+    // writable sandbox and a commit contract this tool does not model.
+    supports: (role) => ROLES[role]?.posture === 'reviewer',
+    argv: (role, tools, scratch, cwd) => {
+      writeFileSync(
+        join(scratch, 'schema.json'),
+        JSON.stringify(REVIEW_VERDICT_SCHEMA),
+      );
+      return [
+        'exec',
+        '--json',
+        '--output-schema',
+        join(scratch, 'schema.json'),
+        '-o',
+        join(scratch, 'last.json'),
+        '--sandbox',
+        'read-only',
+        '--ephemeral',
+        '--skip-git-repo-check',
+        '-C',
+        cwd,
+      ];
+    },
+    // Codex writes its final message to the --output-last-message file, so the
+    // verdict is read from disk instead of recovered from an event stream.
+    payload: (role, stdout, scratch) => {
+      try {
+        return { verdict: JSON.parse(readFileSync(join(scratch, 'last.json'), 'utf8')) };
+      } catch {
+        return null;
+      }
+    },
+  }),
+});
+
+// Reviews go to codex, writing stays on claude. Structural rather than
+// conventional: with the default in the tool, a review can only end up on the
+// writer's own model by someone explicitly asking for it.
+export function defaultEngineFor(role) {
+  return ROLES[role]?.posture === 'reviewer' ? 'codex' : 'claude';
+}
+
+function resolveEngine(binary) {
+  return ENGINES[hostName(binary)] ?? null;
+}
+
 // The child inherits this process's environment and nothing is added to it.
 // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 used to be set here to satisfy the broker
 // capability `claude.subprocess.credentials-scrubbed`; v0.42.0 deleted the
@@ -320,7 +389,7 @@ function hostName(engine) {
 export function runDispatch(options) {
   const windowStartedAtMs = Date.now();
   const result = executeDispatch(options);
-  const engine = hostName(options.engine);
+  const engine = hostName(options.engine ?? defaultEngineFor(options.role));
   recordDispatchWindow(options.cwd ?? process.cwd(), {
     role: options.role,
     engine,
@@ -340,10 +409,41 @@ function executeDispatch({
   tools,
   cwd = process.cwd(),
   timeoutMs = DISPATCH_TIMEOUT_MS,
-  engine = 'claude',
+  engine = defaultEngineFor(role),
   startedAtMs = PROCESS_START_MS,
 }) {
-  const argv = dispatchArgv(role, tools);
+  const adapter = resolveEngine(engine);
+  if (adapter === null) {
+    return failure('spawn', 'ENGINE_UNKNOWN', `${role}: unknown engine ${hostName(engine)}`, {
+      ms: 0,
+      startupMs: 0,
+      stderr: '',
+    });
+  }
+  if (!adapter.supports(role)) {
+    return failure(
+      'spawn',
+      'ENGINE_ROLE_UNSUPPORTED',
+      `${role}: ${hostName(engine)} does not run this role`,
+      { ms: 0, startupMs: 0, stderr: '' },
+    );
+  }
+  // Only the engines that need side files get a scratch directory, and it is
+  // removed on every path out.
+  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-dispatch-io-'));
+  try {
+    return runEngine({
+      adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
+    });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+function runEngine({
+  adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
+}) {
+  const argv = adapter.argv(role, tools, scratch, cwd);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const started = Date.now();
@@ -383,17 +483,17 @@ function executeDispatch({
       { ms, startupMs, exitCode: result.status, stderr },
     );
   }
-  const resultEvent = parseResultEvent(result.stdout ?? '');
-  if (resultEvent === null || resultEvent.subtype !== 'success') {
+  const payload = adapter.payload(role, result.stdout ?? '', scratch);
+  if (payload === null) {
     return failure(
       'result',
       'ENGINE_RESULT_MISSING',
-      `${role}: the engine produced no single successful result event`,
+      `${role}: the engine produced no single successful result`,
       { ms, startupMs, stderr },
     );
   }
   if (ROLES[role].result === 'review-verdict') {
-    const verdict = resultEvent.structured_output;
+    const { verdict } = payload;
     if (!validReviewVerdict(verdict)) {
       return failure(
         'result',
@@ -404,7 +504,7 @@ function executeDispatch({
     }
     return { ok: true, role, tools, startupMs, ms, verdict };
   }
-  const text = typeof resultEvent.result === 'string' ? resultEvent.result : '';
+  const text = typeof payload.text === 'string' ? payload.text : '';
   if (text.length === 0) {
     return failure(
       'result',
@@ -428,6 +528,7 @@ export function parseArgs(args) {
   const parsed = {
     mode: 'dispatch',
     role: null,
+    engine: null,
     promptFile: null,
     tools: null,
     outputFile: null,
@@ -448,7 +549,8 @@ export function parseArgs(args) {
       return { ...parsed, error: `${flag}: expected a value` };
     }
     index += 1;
-    if (flag === '--role') parsed.role = value;
+    if (flag === '--engine') parsed.engine = value;
+    else if (flag === '--role') parsed.role = value;
     else if (flag === '--prompt-file') parsed.promptFile = value;
     else if (flag === '--tools') parsed.tools = value;
     else if (flag === '--output-file') parsed.outputFile = value;
@@ -505,9 +607,9 @@ function report(result) {
 
 // A fake engine on PATH: every posture assertion below runs against a real
 // spawn, so the argv this tool builds is the argv the self-test inspects.
-function writeEngineShim(directory, body) {
+function writeEngineShim(directory, body, name = 'claude') {
   mkdirSync(directory, { recursive: true });
-  const path = join(directory, 'claude');
+  const path = join(directory, name);
   writeFileSync(path, body);
   chmodSync(path, 0o755);
   return directory;
@@ -751,6 +853,54 @@ function selfTest() {
       'an implement that moves the checkout still succeeds',
       busyWriter.ok === true && busyWriter.text === 'implemented the slice',
     );
+    // Codex is the reviewer engine: a reviewer sharing the writer's model shares
+    // its blind spots, so the decorrelation has to be structural. Its result
+    // arrives in the --output-last-message file rather than an event stream,
+    // which is a cleaner contract than parsing stdout for a single event.
+    const codexShimDirectory = join(scratch, 'codexbin');
+    writeEngineShim(codexShimDirectory, [
+      '#!/bin/sh',
+      'printf \'%s\' "$*" > "$AUTOLOOP_SHIM_ARGV"',
+      'env > "$AUTOLOOP_SHIM_ENV"',
+      'cat > "$AUTOLOOP_SHIM_STDIN"',
+      'out=""; prev=""',
+      'for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done',
+      'printf \'%s\' \'{"verdict":"pass","findings":[],"rebuts":[]}\' > "$out"',
+      'printf \'%s\\n\' \'{"type":"turn.completed"}\'',
+      '',
+    ].join('\n'), 'codex');
+    const codexReviewed = runDispatch({
+      role: 'plan-review',
+      prompt: 'review the plan',
+      tools: reviewerTools,
+      cwd: repoScratch,
+      engine: join(codexShimDirectory, 'codex'),
+    });
+    const codexArgvLaunched = readFileSync(argvPath, 'utf8');
+    check(
+      'a codex review returns the verdict from its output-last-message file',
+      codexReviewed.ok === true
+      && codexReviewed.verdict.verdict === 'pass'
+      && codexReviewed.engine === 'codex',
+    );
+    check(
+      'a codex reviewer runs under an OS read-only sandbox, not a tool allowlist',
+      codexArgvLaunched.includes('exec')
+      && codexArgvLaunched.includes('--sandbox read-only')
+      && codexArgvLaunched.includes('--output-schema')
+      && !codexArgvLaunched.includes('--permission-mode'),
+    );
+    check(
+      'codex refuses a writing role rather than pretending to sandbox it',
+      runDispatch({
+        role: 'implement',
+        prompt: 'x',
+        tools: writerTools,
+        cwd: repoScratch,
+        engine: join(codexShimDirectory, 'codex'),
+      }).error?.code === 'ENGINE_ROLE_UNSUPPORTED',
+    );
+
     // Overlap accounting is only trustworthy if it is measured rather than
     // narrated: the 0.39 `overlap:` line was self-reported, and the behaviour it
     // described died in v0.40.0 without anyone noticing for three minor
@@ -765,17 +915,18 @@ function selfTest() {
     );
     check(
       'every dispatch records its own window in the dispatch log',
-      logged.length === 2
+      logged.length === 4
       && logged.every((entry) =>
-        entry.role === 'implement'
-        && Number.isSafeInteger(entry.startedAtMs)
+        Number.isSafeInteger(entry.startedAtMs)
         && entry.startedAtMs > 0
         && Number.isSafeInteger(entry.ms)
         && entry.ms >= 0
-        && entry.engine === 'claude'
         && typeof entry.ok === 'boolean')
-      && logged[0].ok === false
-      && logged[1].ok === true,
+      // Roles, engines and outcomes are all recorded, so overlap accounting can
+      // tell a codex review apart from a claude writer after the fact.
+      && logged.map(({ role, engine, ok }) => `${role}/${engine}/${ok}`).join(' ')
+        === 'implement/claude/false implement/claude/true '
+          + 'plan-review/codex/true implement/codex/false',
     );
     rmSync(repoScratch, { recursive: true, force: true });
 
@@ -851,7 +1002,7 @@ function selfTest() {
       prompt: 'implement',
       tools: writerTools,
       cwd: scratch,
-      engine: join(shimDirectory, 'not-installed'),
+      engine: join(shimDirectory, 'absent', 'claude'),
     });
     check(
       'an absent engine is a typed spawn failure',

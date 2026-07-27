@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-🟦 ∞ dev · v0.43.1 · starting
+∞ dev · v0.43.1 · starting · writer claude · reviews codex
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -104,8 +104,29 @@ Every role runs in a fresh process through one call:
 
 ```bash
 node tools/agentic/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
-  --prompt-file <path> [--tools <csv>] [--output-file <path>] [--json]
+  --prompt-file <path> [--tools <csv>] [--engine <claude|codex>] [--output-file <path>] [--json]
 ```
+
+**Reviews run on a different engine from the writer.** `implement` goes to `claude`; every review
+role goes to `codex`. A fresh process gives identity separation, not cognitive separation — a
+reviewer on the writer's own model inherits its priors and misses what it missed. The split is the
+default in the tool rather than a convention, so a review reaches the writer's model only if
+someone asks for it explicitly with `--engine`.
+
+The codex reviewer runs under `--sandbox read-only`, an OS-enforced boundary rather than a tool
+allowlist, so the read-only posture is strictly stronger there. Its verdict arrives in codex's
+`--output-last-message` file and is validated against the same schema as any other. Codex refuses
+a writing role outright rather than approximating one.
+
+There is no fallback: if `codex` is absent, every review dispatch fails typed. Preflight reports
+its absence at session start so this is known before a unit is built rather than after.
+
+**Frame review prompts adversarially.** A different model is only worth its cost if it is asked to
+disagree. Plan review and code review both challenge the approach — the assumptions it depends on,
+the tradeoffs taken, where the design fails under real conditions — not only whether the diff has
+defects. Load `agent-skills:doubt-driven-development` for the adversarial stance and
+`agent-skills:code-review-and-quality` for the review axes, and say in the prompt that the
+reviewer's job is to find the case the author did not consider.
 
 - `--role` picks the posture. `implement` is the only writing posture
   (`Bash,Edit,Glob,Grep,Read,Write`, permission mode `acceptEdits`). `plan-review`,
