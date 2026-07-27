@@ -71,6 +71,7 @@ export const POSTURES = Object.freeze({
 });
 
 export const ROLES = Object.freeze({
+  plan: Object.freeze({ posture: 'reviewer', result: 'plan' }),
   'plan-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
   implement: Object.freeze({ posture: 'writer', result: 'text' }),
   'code-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
@@ -120,6 +121,37 @@ export const REVIEW_VERDICT_SCHEMA = Object.freeze({
   },
   required: ['verdict', 'findings', 'rebuts'],
   additionalProperties: false,
+});
+
+// The plan a dispatched planner returns, in exactly the shape the lifecycle
+// driver's request wants: `title` printable-ASCII like the driver's own check,
+// `body` the frozen plan the orchestrator hashes, `prBody` carrying the claim.
+export const PLAN_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    title: { type: 'string', minLength: 1, maxLength: 256 },
+    prBody: { type: 'string', minLength: 1, maxLength: 65535 },
+    body: { type: 'string', minLength: 1, maxLength: 65535 },
+  },
+  required: ['title', 'prBody', 'body'],
+  additionalProperties: false,
+});
+
+export function validPlanResult(value) {
+  return hasExactKeys(value, ['title', 'prBody', 'body'])
+    && typeof value.title === 'string'
+    && /^[\x20-\x7e]{1,256}$/.test(value.title)
+    && typeof value.prBody === 'string'
+    && value.prBody.length >= 1
+    && value.prBody.length <= 65535
+    && typeof value.body === 'string'
+    && value.body.length >= 1
+    && value.body.length <= 65535;
+}
+
+const RESULT_SCHEMAS = Object.freeze({
+  'review-verdict': REVIEW_VERDICT_SCHEMA,
+  plan: PLAN_SCHEMA,
 });
 
 const FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -212,8 +244,8 @@ export function dispatchArgv(role, tools) {
     '--output-format',
     'stream-json',
     '--verbose',
-    ...(result === 'review-verdict'
-      ? ['--json-schema', JSON.stringify(REVIEW_VERDICT_SCHEMA)]
+    ...(RESULT_SCHEMAS[result] !== undefined
+      ? ['--json-schema', JSON.stringify(RESULT_SCHEMAS[result])]
       : []),
     '--strict-mcp-config',
     '--disable-slash-commands',
@@ -246,8 +278,8 @@ const ENGINES = Object.freeze({
     payload: (role, stdout) => {
       const event = parseResultEvent(stdout);
       if (event === null || event.subtype !== 'success') return null;
-      return ROLES[role].result === 'review-verdict'
-        ? { verdict: event.structured_output }
+      return RESULT_SCHEMAS[ROLES[role].result] !== undefined
+        ? { structured: event.structured_output }
         : { text: typeof event.result === 'string' ? event.result : '' };
     },
   }),
@@ -258,7 +290,7 @@ const ENGINES = Object.freeze({
     argv: (role, tools, scratch, cwd, model) => {
       writeFileSync(
         join(scratch, 'schema.json'),
-        JSON.stringify(REVIEW_VERDICT_SCHEMA),
+        JSON.stringify(RESULT_SCHEMAS[ROLES[role].result] ?? REVIEW_VERDICT_SCHEMA),
       );
       return [
         'exec',
@@ -280,7 +312,7 @@ const ENGINES = Object.freeze({
     // verdict is read from disk instead of recovered from an event stream.
     payload: (role, stdout, scratch) => {
       try {
-        return { verdict: JSON.parse(readFileSync(join(scratch, 'last.json'), 'utf8')) };
+        return { structured: JSON.parse(readFileSync(join(scratch, 'last.json'), 'utf8')) };
       } catch {
         return null;
       }
@@ -594,7 +626,7 @@ function runEngine({
     );
   }
   if (ROLES[role].result === 'review-verdict') {
-    const { verdict } = payload;
+    const verdict = payload.structured;
     if (!validReviewVerdict(verdict)) {
       return failure(
         'result',
@@ -604,6 +636,18 @@ function runEngine({
       );
     }
     return { ok: true, role, tools, startupMs, ms, verdict };
+  }
+  if (ROLES[role].result === 'plan') {
+    const plan = payload.structured;
+    if (!validPlanResult(plan)) {
+      return failure(
+        'result',
+        'INVALID_PLAN_RESULT',
+        `${role}: structured output is not a valid plan`,
+        { ms, startupMs, stderr },
+      );
+    }
+    return { ok: true, role, tools, startupMs, ms, plan };
   }
   const text = typeof payload.text === 'string' ? payload.text : '';
   if (text.length === 0) {
@@ -740,10 +784,10 @@ function selfTest() {
 
   check(
     'every role maps to exactly one posture',
-    ROLE_NAMES.length === 4
+    ROLE_NAMES.length === 5
     && ROLE_NAMES.every((role) => POSTURES[ROLES[role].posture] !== undefined)
     && ROLES.implement.posture === 'writer'
-    && ['plan-review', 'code-review', 'doubt-review']
+    && ['plan', 'plan-review', 'code-review', 'doubt-review']
       .every((role) => ROLES[role].posture === 'reviewer'),
   );
 
@@ -1082,6 +1126,48 @@ function selfTest() {
       })(),
     );
     check(
+      'a plan dispatch returns the typed plan and is read-only postured',
+      (() => {
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: {
+            title: 'feat: enforce replay cadence',
+            prBody: 'Closes #7',
+            body: '## Plan\n\n1. slice one',
+          } }),
+        ));
+        const planned = runDispatch({
+          role: 'plan',
+          prompt: 'plan issue #7',
+          tools: resolveTools('plan'),
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        const argvSeen = readFileSync(argvPath, 'utf8');
+        return planned.ok === true
+          && planned.plan.title === 'feat: enforce replay cadence'
+          && planned.plan.prBody === 'Closes #7'
+          && argvSeen.includes('--permission-mode plan')
+          && !/--tools \S*(?:Write|Edit|Bash)/.test(argvSeen)
+          && argvSeen.includes('--json-schema');
+      })(),
+    );
+    check(
+      'a malformed plan is a typed failure, not evidence',
+      (() => {
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: { title: '', prBody: '', body: '' } }),
+        ));
+        const bad = runDispatch({
+          role: 'plan',
+          prompt: 'plan issue #7',
+          tools: resolveTools('plan'),
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        return bad.ok === false && bad.error.code === 'INVALID_PLAN_RESULT';
+      })(),
+    );
+    check(
       'a pinned model reaches the claude argv and the typed result',
       (() => {
         writeEngineShim(shimDirectory, shimBody(
@@ -1134,7 +1220,7 @@ function selfTest() {
         if (!existsSync(liveDir)) return false;
         const files = readdirSync(liveDir);
         return files.length > 0
-          && files.every((name) => /-(?:implement|plan-review|code-review|doubt-review)\.jsonl$/.test(name))
+          && files.every((name) => /-(?:plan|implement|plan-review|code-review|doubt-review)\.jsonl$/.test(name))
           && readFileSync(join(liveDir, files[0]), 'utf8').includes('"type"');
       })(),
     );

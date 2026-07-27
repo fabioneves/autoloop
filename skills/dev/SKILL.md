@@ -203,10 +203,10 @@ reviewer's job is to find the case the author did not consider.
   - step 08 fix dispatches → `--model fable`
   - all other claude dispatches → no flag (the saved default)
 
-  Premise, planning, and disposition are IN-SESSION work and carry no `--model` knob — they run
-  on the session's model. The standing choice is **fable**: orchestrate the loop from a fable
-  session, and if the session is deliberately something else, know that planning quality rides
-  with it.
+  - step 02 plan → `--model fable`
+
+  Premise and disposition are IN-SESSION work and carry no `--model` knob — they run on the
+  session's model. The standing choice is **fable**: orchestrate the loop from a fable session.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 
@@ -372,7 +372,19 @@ Print the unit banner beside the first lifecycle/label mutation:
 
 ### 2. Plan
 
-Move to `loop:02-plan`. Write a PR-sized plan with:
+Move to `loop:02-plan`. **The plan is a dispatch** — `--role plan`, read-only postured, returning
+the typed `{title, prBody, body}` the driver's request wants, no markdown parsing:
+
+```bash
+bash tools/agentic/dispatch-stream.sh \
+  <scratchpad>/live/<issue>-plan.jsonl <scratchpad>/plan-result.json \
+  --role plan --prompt-file <path> --model fable
+```
+
+The prompt carries the FULL issue (body, context, acceptance criteria — never an excerpt), the
+lane and caps constraints, and the paths to STATE, the checklist, and the relevant spec — the
+planner reads those itself with its own tools. The orchestrator keeps premise, selection,
+`planHash` computation, intent composition, and claim. The dispatched plan must contain:
 
 - verified premises and evidence;
 - named module/API seam and file boundary;
@@ -575,8 +587,8 @@ orchestrator overlaps or parks while it runs; a blocking turn spent watching a t
 same waste as one spent watching a dispatch.
 
 The general rule, stated once: **dispatch or background what is bounded and bulky; keep in-session
-what is stateful and small.** Writing, fixing, reviewing, and long gates leave the session;
-plans, claims, labels, verdict collection, and finding disposition stay — those
+what is stateful and small.** Writing, fixing, reviewing, PLANNING, and long gates leave the
+session; premise, claims, labels, verdict collection, and finding disposition stay — those
 operate on compact typed results, and shipping the orchestrator's state out costs more than the
 turn it saves. The later universal terminal
 finalizer reruns that configured command on the exact clean remote head and is the only producer of

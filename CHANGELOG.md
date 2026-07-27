@@ -23,6 +23,13 @@ Notable changes to Autoloop are recorded here. The format follows
   path". The refusal was right; the claim was the bug. Behind-base is now actionable only when
   the marker phase can actually enter the revision contract; at `ready-head` and beyond the PR is
   Dev's to finalize, and Pitcrew says so and moves on.
+- **Planning is a dispatch — `--role plan`.** The last big in-session work leaves the orchestrator:
+  a read-only-postured planner reads STATE, the checklist and the spec with its own tools, takes
+  the full issue and constraints in its prompt, and returns the typed `{title, prBody, body}` the
+  driver's request wants — schema-forced on both engines, validated against the driver's own
+  limits, `INVALID_PLAN_RESULT` typed on mismatch. The orchestrator keeps premise, selection,
+  `planHash`, intent composition and claim. With the flag this buys the knob planning never had:
+  standing default `--model fable`, while the session model no longer constrains plan quality.
 - **`--model` pins the engine's model per dispatch.** Claude spells it `--model`, codex `-m`; the
   pin crosses the CLI seam with a regression test that drives the real argv (the `--engine` lesson,
   applied preemptively — the flag would have shipped dead without it), and the chosen model is
