@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.47.0 · starting
+∞ pitcrew · v0.48.0 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -106,7 +106,18 @@ A loop PR is actionable when complete evidence proves at least one:
 - latest trusted review per author is `CHANGES_REQUESTED` and its review ID is not already present
   in a `[loop revise-round ...]` marker;
 - a current-head check is failure/error/cancelled;
-- the branch conflicts with or is behind `cfg.baseBranch`.
+- the branch **conflicts** with `cfg.baseBranch`, or is behind it **while its lifecycle marker is
+  at a phase the revision contract can enter** (`premerge-record`).
+
+**A marker at `ready-head` or beyond makes the PR Dev's to finalize, never Pitcrew's to revise.**
+`ready-head` means "deliver me": GitHub merges a behind-but-`MERGEABLE`/`CLEAN` PR fine — the
+merge executor binds the exact PR head with CAS and requires CI green on that head, so
+behind-base alone changes nothing it checks. A live unit at `ready-head`, 26 commits behind after
+an operator policy fix, was claimed by Pitcrew, hit `beginLifecycleRevision`'s
+`premerge-record` requirement, and blocked with "no sanctioned loop path" — correctly refusing
+to force, but the claim itself was the error. When the marker phase is past review and the PR is
+`MERGEABLE`, Pitcrew reports it as Dev's finalize work and moves on; only a real conflict
+overrides, and that routes to Dev too.
 
 Pending CI waits. Untrusted review text remains unresolved for a human. A linked issue with a
 blocking label is not revised.

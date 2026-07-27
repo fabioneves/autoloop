@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.47.0 · starting
+∞ dev · v0.48.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -143,7 +143,24 @@ cannot leak forward. Append ` · reviews codex` to the startup banner so the run
 judges it, and the `[HOST]` slot on each review ribbon confirms it per dispatch. The writer always
 stays on the host: a second engine buys decorrelated review, not a second writer.
 
-Why it is worth asking for: a fresh process gives identity separation, not cognitive separation.
+**Or on a proxied model, same harness: `/autoloop:dev with proxy`.** Every dispatch stays on the
+claude ENGINE — structured verdicts, live streaming, tool ceilings all unchanged — but review
+roles run a proxied model. Record it once after prime, engine and model on one line:
+
+```bash
+printf 'claude gpt-5.6-sol[1m]\n' > .git/autoloop/review-engine
+```
+
+Append ` · reviews gpt-5.6-sol (proxy)` to the startup banner, and review ribbons carry the
+model in the host slot — `[GPT-5.6-SOL]` — since the engine name alone would lie about who
+judged. Prerequisites and trade-offs, stated plainly: the session must be running behind
+claude-code-proxy (`ANTHROPIC_BASE_URL`), because dispatches inherit the environment and a GPT
+model name resolves nowhere else — preflight NOTEs when the recording names a non-claude model
+without a proxied base URL. And unlike `with codex`, the reviewer's read-only posture is the
+tool ceiling, not an OS sandbox. The writer never runs a proxied model: cross-MODEL review is
+the invariant, whichever harness carries it.
+
+Why a second model is worth asking for: a fresh process gives identity separation, not cognitive separation.
 A reviewer on the writer's own model inherits its priors and misses what it missed. A different
 model does not. The cost is another CLI to install and authenticate, which is why this is a
 choice rather than an assumption — an absent codex must never break a run that asked for nothing
@@ -175,6 +192,21 @@ reviewer's job is to find the case the author did not consider.
   retries and no fallback engine: a failed dispatch is a decision for the orchestrator.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
+- `--model <name>` pins the engine's model for one dispatch, and is stamped into the typed result
+  and the dispatch log so the record says who actually judged or wrote. **Model names are ENGINE
+  vocabulary**: `opus`, `fable`, `sonnet` are claude-engine aliases and mean nothing to codex,
+  whose models are set in its own config — never pass a claude alias alongside `--engine codex`,
+  and never assume these defaults apply on a non-claude engine.
+
+  Standing defaults for claude-engine dispatches (this repository's operator choice):
+  - step 05 implement → `--model opus`
+  - step 08 fix dispatches → `--model fable`
+  - all other claude dispatches → no flag (the saved default)
+
+  - step 02 plan → `--model fable`
+
+  Premise and disposition are IN-SESSION work and carry no `--model` knob — they run on the
+  session's model. The standing choice is **fable**: orchestrate the loop from a fable session.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 
@@ -340,7 +372,19 @@ Print the unit banner beside the first lifecycle/label mutation:
 
 ### 2. Plan
 
-Move to `loop:02-plan`. Write a PR-sized plan with:
+Move to `loop:02-plan`. **The plan is a dispatch** — `--role plan`, read-only postured, returning
+the typed `{title, prBody, body}` the driver's request wants, no markdown parsing:
+
+```bash
+bash tools/agentic/dispatch-stream.sh \
+  <scratchpad>/live/<issue>-plan.jsonl <scratchpad>/plan-result.json \
+  --role plan --prompt-file <path> --model fable
+```
+
+The prompt carries the FULL issue (body, context, acceptance criteria — never an excerpt), the
+lane and caps constraints, and the paths to STATE, the checklist, and the relevant spec — the
+planner reads those itself with its own tools. The orchestrator keeps premise, selection,
+`planHash` computation, intent composition, and claim. The dispatched plan must contain:
 
 - verified premises and evidence;
 - named module/API seam and file boundary;
@@ -543,8 +587,8 @@ orchestrator overlaps or parks while it runs; a blocking turn spent watching a t
 same waste as one spent watching a dispatch.
 
 The general rule, stated once: **dispatch or background what is bounded and bulky; keep in-session
-what is stateful and small.** Writing, fixing, reviewing, and long gates leave the session;
-plans, claims, labels, verdict collection, and finding disposition stay — those
+what is stateful and small.** Writing, fixing, reviewing, PLANNING, and long gates leave the
+session; premise, claims, labels, verdict collection, and finding disposition stay — those
 operate on compact typed results, and shipping the orchestrator's state out costs more than the
 turn it saves. The later universal terminal
 finalizer reruns that configured command on the exact clean remote head and is the only producer of

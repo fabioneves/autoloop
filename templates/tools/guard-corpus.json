@@ -217,6 +217,12 @@
    "branch": "feat/gh-1-x",
    "expect": "block",
    "why": "quote-splice evasion"
+  },
+  {
+   "cmd": "node tools/agentic/dispatch.mjs --role implement --model opus --prompt-file /tmp/p.md --output-file /tmp/r.json --json",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.47.1: model-pinned writer dispatch"
   }
  ]
 }

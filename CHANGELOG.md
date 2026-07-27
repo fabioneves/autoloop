@@ -3,6 +3,42 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.48.0] - 2026-07-27
+
+### Added
+
+- **`/autoloop:dev with proxy` — reviews on a proxied model, same harness.** The recorded review
+  choice now carries an optional model (`claude gpt-5.6-sol[1m]`), so review dispatches keep the
+  claude engine — structured verdicts, live streaming, tool ceilings — while the reviewing MODEL
+  decorrelates from the writer through claude-code-proxy. Review ribbons carry the model in the
+  host slot, since the engine name alone would lie about who judged; preflight NOTEs a proxied
+  recording without `ANTHROPIC_BASE_URL`, where every review would fail typed on an unknown
+  model. The writer never runs a proxied model — cross-MODEL review is the invariant, whichever
+  harness carries it — and unlike `with codex`, the reviewer's read-only posture is the tool
+  ceiling rather than an OS sandbox, stated in the skill rather than discovered.
+- **Pitcrew never claims a unit whose marker is past review.** Behind-base was an actionability
+  trigger on its own, so a `ready-head` unit — deliverable as-is, since the merge executor binds
+  the exact PR head and GitHub merges a behind-but-CLEAN PR fine — was claimed for revision, hit
+  `beginLifecycleRevision`'s `premerge-record` requirement, and blocked with "no sanctioned loop
+  path". The refusal was right; the claim was the bug. Behind-base is now actionable only when
+  the marker phase can actually enter the revision contract; at `ready-head` and beyond the PR is
+  Dev's to finalize, and Pitcrew says so and moves on.
+- **Planning is a dispatch — `--role plan`.** The last big in-session work leaves the orchestrator:
+  a read-only-postured planner reads STATE, the checklist and the spec with its own tools, takes
+  the full issue and constraints in its prompt, and returns the typed `{title, prBody, body}` the
+  driver's request wants — schema-forced on both engines, validated against the driver's own
+  limits, `INVALID_PLAN_RESULT` typed on mismatch. The orchestrator keeps premise, selection,
+  `planHash`, intent composition and claim. With the flag this buys the knob planning never had:
+  standing default `--model fable`, while the session model no longer constrains plan quality.
+- **`--model` pins the engine's model per dispatch.** Claude spells it `--model`, codex `-m`; the
+  pin crosses the CLI seam with a regression test that drives the real argv (the `--engine` lesson,
+  applied preemptively — the flag would have shipped dead without it), and the chosen model is
+  stamped into the typed result and the dispatch log so the record says who actually judged or
+  wrote. Proven live: a dispatch pinned to `opus` answered as `claude-opus-5` in its own event
+  stream. Model names are engine vocabulary and the skill says so — claude aliases never ride
+  `--engine codex`. Standing operator defaults recorded in the skill: implement on `opus`, fix
+  dispatches on `fable`, everything else on the saved default.
+
 ## [0.47.0] - 2026-07-27
 
 ### Added

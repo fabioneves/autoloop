@@ -71,6 +71,7 @@ export const POSTURES = Object.freeze({
 });
 
 export const ROLES = Object.freeze({
+  plan: Object.freeze({ posture: 'reviewer', result: 'plan' }),
   'plan-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
   implement: Object.freeze({ posture: 'writer', result: 'text' }),
   'code-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
@@ -120,6 +121,37 @@ export const REVIEW_VERDICT_SCHEMA = Object.freeze({
   },
   required: ['verdict', 'findings', 'rebuts'],
   additionalProperties: false,
+});
+
+// The plan a dispatched planner returns, in exactly the shape the lifecycle
+// driver's request wants: `title` printable-ASCII like the driver's own check,
+// `body` the frozen plan the orchestrator hashes, `prBody` carrying the claim.
+export const PLAN_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    title: { type: 'string', minLength: 1, maxLength: 256 },
+    prBody: { type: 'string', minLength: 1, maxLength: 65535 },
+    body: { type: 'string', minLength: 1, maxLength: 65535 },
+  },
+  required: ['title', 'prBody', 'body'],
+  additionalProperties: false,
+});
+
+export function validPlanResult(value) {
+  return hasExactKeys(value, ['title', 'prBody', 'body'])
+    && typeof value.title === 'string'
+    && /^[\x20-\x7e]{1,256}$/.test(value.title)
+    && typeof value.prBody === 'string'
+    && value.prBody.length >= 1
+    && value.prBody.length <= 65535
+    && typeof value.body === 'string'
+    && value.body.length >= 1
+    && value.body.length <= 65535;
+}
+
+const RESULT_SCHEMAS = Object.freeze({
+  'review-verdict': REVIEW_VERDICT_SCHEMA,
+  plan: PLAN_SCHEMA,
 });
 
 const FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -212,8 +244,8 @@ export function dispatchArgv(role, tools) {
     '--output-format',
     'stream-json',
     '--verbose',
-    ...(result === 'review-verdict'
-      ? ['--json-schema', JSON.stringify(REVIEW_VERDICT_SCHEMA)]
+    ...(RESULT_SCHEMAS[result] !== undefined
+      ? ['--json-schema', JSON.stringify(RESULT_SCHEMAS[result])]
       : []),
     '--strict-mcp-config',
     '--disable-slash-commands',
@@ -238,13 +270,16 @@ export function dispatchArgv(role, tools) {
 const ENGINES = Object.freeze({
   claude: Object.freeze({
     supports: (role) => ROLES[role] !== undefined,
-    argv: (role, tools) => dispatchArgv(role, tools),
+    argv: (role, tools, scratch, cwd, model) => [
+      ...dispatchArgv(role, tools),
+      ...(model === null ? [] : ['--model', model]),
+    ],
     // Claude's stream-json ends with exactly one `result` event.
     payload: (role, stdout) => {
       const event = parseResultEvent(stdout);
       if (event === null || event.subtype !== 'success') return null;
-      return ROLES[role].result === 'review-verdict'
-        ? { verdict: event.structured_output }
+      return RESULT_SCHEMAS[ROLES[role].result] !== undefined
+        ? { structured: event.structured_output }
         : { text: typeof event.result === 'string' ? event.result : '' };
     },
   }),
@@ -252,13 +287,14 @@ const ENGINES = Object.freeze({
     // Reviewer-only, and refused rather than approximated: codex would need a
     // writable sandbox and a commit contract this tool does not model.
     supports: (role) => ROLES[role]?.posture === 'reviewer',
-    argv: (role, tools, scratch, cwd) => {
+    argv: (role, tools, scratch, cwd, model) => {
       writeFileSync(
         join(scratch, 'schema.json'),
-        JSON.stringify(REVIEW_VERDICT_SCHEMA),
+        JSON.stringify(RESULT_SCHEMAS[ROLES[role].result] ?? REVIEW_VERDICT_SCHEMA),
       );
       return [
         'exec',
+        ...(model === null ? [] : ['-m', model]),
         '--json',
         '--output-schema',
         join(scratch, 'schema.json'),
@@ -276,7 +312,7 @@ const ENGINES = Object.freeze({
     // verdict is read from disk instead of recovered from an event stream.
     payload: (role, stdout, scratch) => {
       try {
-        return { verdict: JSON.parse(readFileSync(join(scratch, 'last.json'), 'utf8')) };
+        return { structured: JSON.parse(readFileSync(join(scratch, 'last.json'), 'utf8')) };
       } catch {
         return null;
       }
@@ -302,16 +338,32 @@ export function defaultEngineFor() {
 // `autoloop/review-engine` beside the dispatch log, and this tool reads it per
 // dispatch. Reviewer roles only: the writer stays on the host in every mode,
 // and an unrecognised or absent recording falls back to the host engine.
-export function resolveDefaultEngine(role, cwd) {
-  if (ROLES[role]?.posture !== 'reviewer') return 'claude';
+// The recording is one line: `<engine>` or `<engine> <model>`. The second token
+// serves the proxy mode — reviews on the claude HARNESS but a proxied model
+// (`claude gpt-5.6-sol[1m]`), which keeps structured output and live streaming
+// while decorrelating the reviewer model from the writer. Reviewer roles only,
+// and an unrecognised engine discards the whole line.
+function recordedReviewChoice(cwd) {
   try {
     const logPath = resolveDispatchLogPath(cwd);
-    if (logPath === null) return 'claude';
+    if (logPath === null) return null;
     const recorded = readFileSync(join(dirname(logPath), 'review-engine'), 'utf8').trim();
-    return ENGINES[recorded] !== undefined ? recorded : 'claude';
+    const [engine, model = null] = recorded.split(/\s+/);
+    if (ENGINES[engine] === undefined) return null;
+    return { engine, model };
   } catch {
-    return 'claude';
+    return null;
   }
+}
+
+export function resolveDefaultEngine(role, cwd) {
+  if (ROLES[role]?.posture !== 'reviewer') return 'claude';
+  return recordedReviewChoice(cwd)?.engine ?? 'claude';
+}
+
+export function resolveDefaultModel(role, cwd) {
+  if (ROLES[role]?.posture !== 'reviewer') return null;
+  return recordedReviewChoice(cwd)?.model ?? null;
 }
 
 function resolveEngine(binary) {
@@ -417,19 +469,22 @@ export function runDispatch(options) {
   const windowStartedAtMs = Date.now();
   const cwd = options.cwd ?? process.cwd();
   const engineBinary = options.engine ?? resolveDefaultEngine(options.role, cwd);
-  const result = executeDispatch({ ...options, engine: engineBinary });
+  const resolvedModel = options.model ?? resolveDefaultModel(options.role, cwd);
+  const result = executeDispatch({ ...options, engine: engineBinary, model: resolvedModel });
   const engine = hostName(engineBinary);
+  const model = resolvedModel;
   recordDispatchWindow(options.cwd ?? process.cwd(), {
     role: options.role,
     engine,
+    ...(model === null ? {} : { model }),
     startedAtMs: windowStartedAtMs,
     ms: Date.now() - windowStartedAtMs,
     ok: result.ok === true,
   });
   // Stamped once here so no return path inside the dispatch can omit it.
   return result.ok
-    ? { ...result, engine }
-    : { ...result, error: { ...result.error, engine } };
+    ? { ...result, engine, ...(model === null ? {} : { model }) }
+    : { ...result, error: { ...result.error, engine, ...(model === null ? {} : { model }) } };
 }
 
 function executeDispatch(options) {
@@ -465,6 +520,7 @@ function executeDispatch(options) {
     return runEngine({
       adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
       liveFile: options.liveFile ?? null,
+      model: options.model ?? null,
     });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -504,9 +560,9 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 }
 
 function runEngine({
-  adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch, liveFile,
+  adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch, liveFile, model,
 }) {
-  const argv = adapter.argv(role, tools, scratch, cwd);
+  const argv = adapter.argv(role, tools, scratch, cwd, model ?? null);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
@@ -570,7 +626,7 @@ function runEngine({
     );
   }
   if (ROLES[role].result === 'review-verdict') {
-    const { verdict } = payload;
+    const verdict = payload.structured;
     if (!validReviewVerdict(verdict)) {
       return failure(
         'result',
@@ -580,6 +636,18 @@ function runEngine({
       );
     }
     return { ok: true, role, tools, startupMs, ms, verdict };
+  }
+  if (ROLES[role].result === 'plan') {
+    const plan = payload.structured;
+    if (!validPlanResult(plan)) {
+      return failure(
+        'result',
+        'INVALID_PLAN_RESULT',
+        `${role}: structured output is not a valid plan`,
+        { ms, startupMs, stderr },
+      );
+    }
+    return { ok: true, role, tools, startupMs, ms, plan };
   }
   const text = typeof payload.text === 'string' ? payload.text : '';
   if (text.length === 0) {
@@ -606,6 +674,7 @@ export function parseArgs(args) {
     mode: 'dispatch',
     role: null,
     engine: null,
+    model: null,
     liveFile: null,
     promptFile: null,
     tools: null,
@@ -628,6 +697,7 @@ export function parseArgs(args) {
     }
     index += 1;
     if (flag === '--engine') parsed.engine = value;
+    else if (flag === '--model') parsed.model = value;
     else if (flag === '--live-file') parsed.liveFile = value;
     else if (flag === '--role') parsed.role = value;
     else if (flag === '--prompt-file') parsed.promptFile = value;
@@ -714,10 +784,10 @@ function selfTest() {
 
   check(
     'every role maps to exactly one posture',
-    ROLE_NAMES.length === 4
+    ROLE_NAMES.length === 5
     && ROLE_NAMES.every((role) => POSTURES[ROLES[role].posture] !== undefined)
     && ROLES.implement.posture === 'writer'
-    && ['plan-review', 'code-review', 'doubt-review']
+    && ['plan', 'plan-review', 'code-review', 'doubt-review']
       .every((role) => ROLES[role].posture === 'reviewer'),
   );
 
@@ -1030,6 +1100,7 @@ function selfTest() {
           '--role', 'plan-review',
           '--prompt-file', promptPath,
           '--engine', 'codex',
+          '--model', 'gpt-test-model',
           '--live-file', chosen,
           '--json',
         ], {
@@ -1038,10 +1109,81 @@ function selfTest() {
           env: { ...process.env, PATH: `${codexOnly}:${process.env.PATH}` },
         });
         const argvSeen = readFileSync(argvPath, 'utf8');
+        let cliResult;
+        try {
+          cliResult = JSON.parse(run.stdout);
+        } catch {
+          return false; // usage error: empty stdout is a failed check, not a crash
+        }
         return run.status === 0
           && argvSeen.includes('--sandbox read-only')
+          // --model crosses the same seam --engine once fell through:
+          // codex spells it -m.
+          && argvSeen.includes('-m gpt-test-model')
           && existsSync(chosen)
-          && JSON.parse(run.stdout).engine === 'codex';
+          && cliResult.engine === 'codex'
+          && cliResult.model === 'gpt-test-model';
+      })(),
+    );
+    check(
+      'a plan dispatch returns the typed plan and is read-only postured',
+      (() => {
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: {
+            title: 'feat: enforce replay cadence',
+            prBody: 'Closes #7',
+            body: '## Plan\n\n1. slice one',
+          } }),
+        ));
+        const planned = runDispatch({
+          role: 'plan',
+          prompt: 'plan issue #7',
+          tools: resolveTools('plan'),
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        const argvSeen = readFileSync(argvPath, 'utf8');
+        return planned.ok === true
+          && planned.plan.title === 'feat: enforce replay cadence'
+          && planned.plan.prBody === 'Closes #7'
+          && argvSeen.includes('--permission-mode plan')
+          && !/--tools \S*(?:Write|Edit|Bash)/.test(argvSeen)
+          && argvSeen.includes('--json-schema');
+      })(),
+    );
+    check(
+      'a malformed plan is a typed failure, not evidence',
+      (() => {
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: { title: '', prBody: '', body: '' } }),
+        ));
+        const bad = runDispatch({
+          role: 'plan',
+          prompt: 'plan issue #7',
+          tools: resolveTools('plan'),
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        return bad.ok === false && bad.error.code === 'INVALID_PLAN_RESULT';
+      })(),
+    );
+    check(
+      'a pinned model reaches the claude argv and the typed result',
+      (() => {
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: PASSING_VERDICT }),
+        ));
+        const pinned = runDispatch({
+          role: 'plan-review',
+          prompt: 'review',
+          tools: reviewerTools,
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+          model: 'opus-test',
+        });
+        return pinned.ok === true
+          && pinned.model === 'opus-test'
+          && readFileSync(argvPath, 'utf8').includes('--model opus-test');
       })(),
     );
     check(
@@ -1078,7 +1220,7 @@ function selfTest() {
         if (!existsSync(liveDir)) return false;
         const files = readdirSync(liveDir);
         return files.length > 0
-          && files.every((name) => /-(?:implement|plan-review|code-review|doubt-review)\.jsonl$/.test(name))
+          && files.every((name) => /-(?:plan|implement|plan-review|code-review|doubt-review)\.jsonl$/.test(name))
           && readFileSync(join(liveDir, files[0]), 'utf8').includes('"type"');
       })(),
     );
@@ -1087,6 +1229,22 @@ function selfTest() {
       resolveDefaultEngine('plan-review', repoScratch) === 'codex'
       && resolveDefaultEngine('code-review', repoScratch) === 'codex'
       && resolveDefaultEngine('implement', repoScratch) === 'claude',
+    );
+    check(
+      'a recorded engine may carry a model, routing proxied reviews',
+      (() => {
+        writeFileSync(engineFile, 'claude gpt-5.6-sol[1m]\n');
+        return resolveDefaultEngine('code-review', repoScratch) === 'claude'
+          && resolveDefaultModel('code-review', repoScratch) === 'gpt-5.6-sol[1m]'
+          && resolveDefaultModel('implement', repoScratch) === null;
+      })(),
+    );
+    check(
+      'a bare recorded engine carries no model',
+      (() => {
+        writeFileSync(engineFile, 'codex\n');
+        return resolveDefaultModel('code-review', repoScratch) === null;
+      })(),
     );
     writeFileSync(engineFile, 'weird-engine\n');
     check(
@@ -1254,6 +1412,7 @@ function main() {
     prompt,
     tools,
     ...(parsed.engine === null ? {} : { engine: parsed.engine }),
+    ...(parsed.model === null ? {} : { model: parsed.model }),
     ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
