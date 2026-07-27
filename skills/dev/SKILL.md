@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.1 · starting
+∞ dev · v0.49.2 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -145,18 +145,29 @@ stays on the host: a second engine buys decorrelated review, not a second writer
 
 **Or on a proxied model, same harness: `/autoloop:dev with proxy`.** Every dispatch stays on the
 claude ENGINE — structured verdicts, live streaming, tool ceilings all unchanged — but review
-roles run a proxied model. Record it once after prime, engine and model on one line:
+roles run a proxied model. Record it once after prime — engine, model, and the proxy URL on one
+line:
 
 ```bash
-printf 'claude gpt-5.6-sol\n' > .git/autoloop/review-engine
+printf 'claude gpt-5.6-sol @http://127.0.0.1:18765\n' > .git/autoloop/review-engine
 ```
+
+The `@<url>` is what makes the mode self-contained: `dispatch.mjs` injects it as
+`ANTHROPIC_BASE_URL` into REVIEWER dispatches itself, so proxy mode works regardless of how this
+session was launched — the session's own environment is not a prerequisite and not evidence.
+Writer roles never read the recording, so a writer can never be proxied.
+
+**The proxy preflight is one probe, and only a probe**: `curl -s --max-time 5 <url>/health` (or
+`<url>/v1/models`) against the recorded URL. Answering = running. If it does not answer, stop
+with `needs-human` naming the URL — NEVER start, install, restart, or background a proxy
+process, and never infer its absence from environment variables, PATH lookups, or the process
+name owning a port (a live run refused a healthy proxy after reading its listener as Docker
+plumbing; another refused it because the session env lacked a variable the dispatch now injects
+itself).
 
 Append ` · reviews gpt-5.6-sol (proxy)` to the startup banner, and review ribbons carry the
 model in the host slot — `[GPT-5.6-SOL]` — since the engine name alone would lie about who
-judged. Prerequisites and trade-offs, stated plainly: the session must be running behind
-claude-code-proxy (`ANTHROPIC_BASE_URL`), because dispatches inherit the environment and a GPT
-model name resolves nowhere else — preflight NOTEs when the recording names a non-claude model
-without a proxied base URL. And unlike `with codex`, the reviewer's read-only posture is the
+judged. Trade-off vs `with codex`, stated plainly: the reviewer's read-only posture is the
 tool ceiling, not an OS sandbox. The writer never runs a proxied model: cross-MODEL review is
 the invariant, whichever harness carries it.
 
@@ -546,7 +557,14 @@ Verify every Critical/Major against code or a cheap reproduction, then dispositi
 - propose an evidence-citing rebut for the next fresh reviewer;
 - block if out-of-boundary human judgment is required.
 
-Pass all prior findings/dispositions forward. After fixes, record the reviewed HEAD and dispatch a
+Pass all prior findings/dispositions forward — and tell every later-round reviewer, in the
+prompt, the ledger's identity rule: **a finding id is immutable evidence — re-opening one keeps
+its ORIGINAL severity, summary, and evidence byte-identical; anything newly discovered is a NEW
+finding with a new id.** A live round re-used a prior id with rewritten text and the contract
+correctly refused to authenticate the whole round history — unfixable after the fact, so the
+rule has to ride in the prompt.
+
+After fixes, record the reviewed HEAD and dispatch a
 fresh later-round reviewer over only the new delta plus open rebuts. Give every Critical/Major a
 stable finding ID. A rebut closes only when a fresh reviewer accepts that exact ID.
 
@@ -603,11 +621,23 @@ publication.
 
 ### 9. Gate
 
+**A gate that is red on the UNTOUCHED base parks the run; it never ends it.** Verify the failure
+reproduces on clean `origin/<base>` (so it is the baseline, not the unit), then check whether an
+open loop PR already fixes it — a live run found its security-audit failure fixed by a queued
+dependency-bump PR and still declared the run complete, which turned a one-merge remedy into a
+dead loop. The correct shape: block the affected units with the reason, post/report the named
+remedy ("merge PR #236 to unblock the gate"), and PARK on the base going green — a monitor on
+`origin/<base>` movement or a bounded re-check — resuming the queue when it does. `run complete`
+is for an empty or exhausted queue, not for a red baseline with a known fix.
+
 Move to `loop:09-gate`. Require a clean committed tree. Run one full `cfg.gate.command` as a local
 preflight on the review-converged artifact and record the gated OID. **A gate that takes more than
 a minute runs in the background** — `... > <log> 2>&1` with a monitor on the log's tail — and the
 orchestrator overlaps or parks while it runs; a blocking turn spent watching a test suite is the
-same waste as one spent watching a dispatch.
+same waste as one spent watching a dispatch. Never chain anything after the gate command in the
+same invocation (`cfg.gate.command; tail <log>` reports the TAIL's exit status as the task's — a
+live run read a red gate as 0 that way); the gate runs alone, and the log plus its own exit code
+are the evidence.
 
 The general rule, stated once: **dispatch or background what is bounded and bulky; keep in-session
 what is stateful and small.** Writing, fixing, reviewing, PLANNING, and long gates leave the

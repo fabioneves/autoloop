@@ -3,6 +3,31 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.2] - 2026-07-27
+
+### Fixed
+
+- **Proxy mode is self-contained: dispatch injects the proxy URL.** The recording gains an
+  `@<url>` token (`claude gpt-5.6-sol @http://127.0.0.1:18765`) and `dispatch.mjs` injects it as
+  `ANTHROPIC_BASE_URL` into REVIEWER dispatches itself — `with proxy` no longer depends on how
+  the host session was launched. A live run refused a healthy proxy because the session env
+  lacked the variable, after misreading the port's listener as Docker plumbing. The preflight is
+  now one probe of the recorded URL (answering = running), and the skill forbids inferring proxy
+  absence from env vars, PATH, or process names — and forbids ever starting one. Writers still
+  never read the recording, so a writer can never be proxied. Malformed `@` tokens fail the whole
+  recording closed.
+- **A red baseline gate parks the run instead of ending it.** A live run proved its gate failure
+  pre-existing on main, found the open PR that fixes it, and still declared `run complete` — a
+  one-merge remedy became a dead loop. The gate step now names the remedy, blocks the affected
+  units, and parks on the base going green; `run complete` is for an exhausted queue only.
+- **Reviewer prompts carry the ledger identity rule.** A live round re-used a finding id with
+  rewritten summary/evidence and the review contract correctly refused to authenticate the round
+  history — unfixable after the fact. Later-round prompts must state: re-opening keeps the
+  original text byte-identical; new evidence is a new finding.
+- **The gate command runs alone.** `cfg.gate.command; tail <log>` reports the tail's exit status
+  as the task's — a live run read a red gate as 0 that way. The log plus the gate's own exit code
+  are the evidence.
+
 ## [0.49.1] - 2026-07-27
 
 ### Fixed

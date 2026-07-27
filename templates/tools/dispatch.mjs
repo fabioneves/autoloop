@@ -348,9 +348,21 @@ function recordedReviewChoice(cwd) {
     const logPath = resolveDispatchLogPath(cwd);
     if (logPath === null) return null;
     const recorded = readFileSync(join(dirname(logPath), 'review-engine'), 'utf8').trim();
-    const [engine, model = null] = recorded.split(/\s+/);
+    const [engine, ...rest] = recorded.split(/\s+/).filter(Boolean);
     if (ENGINES[engine] === undefined) return null;
-    return { engine, model };
+    let model = null;
+    let baseUrl = null;
+    for (const token of rest) {
+      if (token.startsWith('@')) {
+        if (baseUrl !== null || !/^@https?:\/\/\S+$/u.test(token)) return null;
+        baseUrl = token.slice(1);
+      } else if (model === null) {
+        model = token;
+      } else {
+        return null;
+      }
+    }
+    return { engine, model, baseUrl };
   } catch {
     return null;
   }
@@ -366,6 +378,16 @@ export function resolveDefaultModel(role, cwd) {
   return recordedReviewChoice(cwd)?.model ?? null;
 }
 
+// A recorded `@<url>` routes proxied review dispatches to the proxy DIRECTLY:
+// the dispatch injects ANTHROPIC_BASE_URL into the reviewer child, so proxy
+// mode no longer depends on how the host session happened to be launched — a
+// live run refused a healthy proxy because the SESSION lacked the variable.
+// Writer roles never read the recording, so a writer can never be proxied.
+export function resolveDefaultBaseUrl(role, cwd) {
+  if (ROLES[role]?.posture !== 'reviewer') return null;
+  return recordedReviewChoice(cwd)?.baseUrl ?? null;
+}
+
 function resolveEngine(binary) {
   return ENGINES[hostName(binary)] ?? null;
 }
@@ -378,8 +400,11 @@ function resolveEngine(binary) {
 // the self-test pins: the child ignores `--permission-mode`, the checkout gains
 // seventeen zero-byte stubs nobody removes, and every Bash call dies at sandbox
 // start on `/home/.mcp.json`.
-function dispatchEnvironment() {
-  return { ...process.env };
+function dispatchEnvironment(baseUrl = null) {
+  return {
+    ...process.env,
+    ...(baseUrl === null ? {} : { ANTHROPIC_BASE_URL: baseUrl }),
+  };
 }
 
 function failure(step, code, message, detail = {}) {
@@ -573,7 +598,9 @@ function runEngine({
     result = spawnSync(engine, argv, {
       cwd,
       encoding: 'utf8',
-      env: dispatchEnvironment(),
+      env: dispatchEnvironment(
+        adapter === ENGINES.claude ? resolveDefaultBaseUrl(role, cwd) : null,
+      ),
       input: prompt,
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: timeoutMs,
@@ -1244,6 +1271,43 @@ function selfTest() {
       (() => {
         writeFileSync(engineFile, 'codex\n');
         return resolveDefaultModel('code-review', repoScratch) === null;
+      })(),
+    );
+    check(
+      'a recorded proxy URL is injected into reviewer dispatches only',
+      (() => {
+        writeFileSync(engineFile, 'claude gpt-5.6-sol @http://127.0.0.1:18765\n');
+        if (
+          resolveDefaultBaseUrl('code-review', repoScratch) !== 'http://127.0.0.1:18765'
+          || resolveDefaultBaseUrl('implement', repoScratch) !== null
+          || resolveDefaultModel('code-review', repoScratch) !== 'gpt-5.6-sol'
+        ) {
+          return false;
+        }
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: PASSING_VERDICT }),
+        ));
+        const proxied = runDispatch({
+          role: 'code-review',
+          prompt: 'review',
+          tools: reviewerTools,
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        return proxied.ok === true
+          && readFileSync(envPath, 'utf8')
+            .includes('ANTHROPIC_BASE_URL=http://127.0.0.1:18765');
+      })(),
+    );
+    check(
+      'a malformed recorded proxy URL fails closed',
+      (() => {
+        writeFileSync(engineFile, 'claude gpt-5.6-sol @ftp://elsewhere\n');
+        const scheme = resolveDefaultBaseUrl('code-review', repoScratch) === null
+          && resolveDefaultModel('code-review', repoScratch) === null;
+        writeFileSync(engineFile, 'claude gpt-5.6-sol @http://a @http://b\n');
+        const duplicate = resolveDefaultBaseUrl('code-review', repoScratch) === null;
+        return scheme && duplicate;
       })(),
     );
     writeFileSync(engineFile, 'weird-engine\n');
