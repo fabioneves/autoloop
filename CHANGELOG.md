@@ -38,6 +38,11 @@ Notable changes to Autoloop are recorded here. The format follows
   `--live-file <path>` says. Name the path up front, arm a `tail -F <path>` background shell, and
   the host's background-task view becomes a live codex window; the path is also announced on
   stderr at spawn. A 13-minute review used to run as a sealed box.
+- **A ribbon prints exactly once — waiting status is heartbeat news.** A live run re-printed both
+  in-flight ribbons with an "in flight" suffix as its waiting update: the dev rule stated a floor
+  (every step prints one) but no ceiling, and gave waiting no shape of its own. Now: one ribbon
+  per step, at the moment it begins; `♡` heartbeat lines carry in-flight status; resuming from a
+  parked wait prints `♡ resumed — <what fired>` and never re-announces a step.
 - **Parking is not stopping, and the skill now knows the difference.** The liveness rule said
   "never end the turn mid-unit; hold the wait with bounded polls" — written for a host that
   allowed sleep-chains. This host blocks them and re-invokes the session when a Monitor fires, so

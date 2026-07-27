@@ -634,8 +634,11 @@ eleven cells. **Every step prints one, including the ones that turn out to be no
 that decides nothing is due still happened, and a missing ribbon reads as a skipped step. A unit
 that runs steps 1–11 prints eleven ribbons; orphan reconciliation before selection prints its own
 `00/11 RECONCILE` ribbon the moment Prime surfaces the orphan, before any fetch or driver call.
-Never withhold a ribbon to reduce output — the anti-noise rule is about *re-printing* a ribbon
-with 🟩 when its step finishes, never about skipping the announcement.
+Never withhold a ribbon to reduce output, and never re-print one: a step's ribbon appears
+**exactly once, when the step begins**. A ribbon is an announcement, not a status display —
+"still in flight" is heartbeat news and uses the heartbeat line, never a second copy of the
+ribbon with a different suffix. On resuming from a parked wait, print one `♡ resumed —
+<what fired>` line and continue; the ribbon for a step already announced is never printed again.
 
 ```text
 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor>
