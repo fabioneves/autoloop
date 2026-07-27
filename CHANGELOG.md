@@ -15,6 +15,13 @@ Notable changes to Autoloop are recorded here. The format follows
   claimed to act. Only a trivial edit (~five lines, two files) stays inline. The engine follows
   the writer — whoever wrote the unit writes its fixes — and the other model keeps reviewing: an
   engine never reviews its own code.
+- **Long gates background like dispatches, and the offload rule is stated once.** A blocking turn
+  watching a test suite is the same waste as one watching a dispatch: gates over a minute run in
+  the background with a monitor on the log while the orchestrator overlaps or parks. The general
+  principle now sits in the skill — dispatch or background what is bounded and bulky (writing,
+  fixing, reviewing, long gates); keep in-session what is stateful and small (plans, claims,
+  labels, collection, the five-axis judgment), because shipping the orchestrator's state out costs
+  more than the turn it saves.
 - **Under `with codex`, Claude's five-axis review moves to the end of the pipeline.** Mid-pipeline
   it reviewed the pre-codex artifact, and every fix round landed after it unseen — so the final
   artifact got no Claude-shaped review at all, while the mid-pipeline pass cost a full checklist

@@ -509,7 +509,15 @@ publication.
 ### 9. Gate
 
 Move to `loop:09-gate`. Require a clean committed tree. Run one full `cfg.gate.command` as a local
-preflight on the review-converged artifact and record the gated OID. The later universal terminal
+preflight on the review-converged artifact and record the gated OID. **A gate that takes more than
+a minute runs in the background** — `... > <log> 2>&1` with a monitor on the log's tail — and the
+orchestrator overlaps or parks while it runs; a blocking turn spent watching a test suite is the
+same waste as one spent watching a dispatch.
+
+The general rule, stated once: **dispatch or background what is bounded and bulky; keep in-session
+what is stateful and small.** Writing, fixing, reviewing, and long gates leave the session; plans,
+claims, labels, verdicts' collection, and the five-axis judgment stay — shipping the
+orchestrator's state out costs more than the turn it saves. The later universal terminal
 finalizer reruns that configured command on the exact clean remote head and is the only producer of
 the terminal gate CheckRun; never ask it to trust this caller-observed preflight result.
 
