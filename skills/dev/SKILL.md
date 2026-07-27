@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.44.2 · starting
+∞ dev · v0.44.3 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -97,6 +97,18 @@ sanctioned reads are typed:
   exact JSON; an unknown name fails closed listing the valid catalog;
 - plain `jq` with a single-quoted filter on the exact files the prime summary names is
   sanctioned — the guard permits it, and prime naming the file keeps it targeted.
+
+Two shapes to keep out of every command, sanctioned read or not:
+
+- **`$?`, in any spelling.** Not after `;`, not after `&&`, under any variable name. It cannot be
+  resolved without running the command, so it is opaque by construction and takes the whole
+  invocation down with it — including the useful part in front of it. It also says nothing: the
+  tool result already carries the exit status, and after `&&` the echo runs only when the command
+  already succeeded, so `git status --short && echo "clean=$?"` can print nothing but `0`. Observed
+  four times in one day across three spellings, each costing a refused call and a retry.
+- **A shell variable standing in for a path you already know.** Write the literal path. A variable
+  is one more thing the guard must resolve before it can judge the command, and it buys nothing in
+  a command written once.
 
 ## Dispatch
 
