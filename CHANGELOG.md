@@ -7,6 +7,11 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
+- **Every background dispatch is watchable by default.** With the pipeline now dispatch-shaped end
+  to end, the live tail stops being an option: each dispatch names its live file deterministically
+  (`live/<issue>-<role>-r<N>.jsonl`), passes it as `--live-file`, and arms a `tail -F` background
+  shell before dispatching — the host's background-task view shows the engine's events for the
+  whole run. Tails stop at collection; only sub-minute dispatches may skip the watcher.
 - **Simplify and fix rounds are dispatches, not orchestrator edits.** The orchestrator's ~86k-token
   context was the one place in the loop still writing code by hand — the most expensive possible
   place to do it, paying full-context turns for every finding fixed. Both now run as background

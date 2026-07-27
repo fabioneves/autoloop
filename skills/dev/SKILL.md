@@ -176,9 +176,20 @@ reviewer's job is to find the case the author did not consider.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
-  under `autoloop/dispatch-live/` in the common Git directory, announced on stderr). To watch a
-  long review in the host UI, choose the path up front and arm a second background shell —
-  `tail -F <path>` — before dispatching; stop that shell at collection.
+  under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
+
+**Every background dispatch is watchable, by default.** Name the live file deterministically —
+`<scratchpad>/live/<issue>-<role>-r<N>.jsonl` — pass it as `--live-file`, and arm the watcher
+BEFORE the dispatch as its own background shell:
+
+```bash
+tail -F <scratchpad>/live/<issue>-<role>-r<N>.jsonl
+```
+
+The host's background-task view then shows the engine's events live for the whole run — a
+13-minute codex review is a window, not a sealed box. One tail per in-flight dispatch; stop each
+tail at collection so finished watchers do not accumulate. The only dispatches that may skip the
+watcher are ones expected to finish in under a minute.
 - Every result reports `ms` (the dispatch), `startupMs` (this tool's own overhead before the
   engine starts), and `engine` — the host that actually produced it, stamped from the spawn. Typed
   failures carry it too. Report it on the step's ribbon rather than composing a host name by hand.
