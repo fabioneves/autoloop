@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.4 · starting
+∞ dev · v0.49.5 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -221,7 +221,7 @@ reviewer's job is to find the case the author did not consider.
   - step 08 fix dispatches (and any simplify dispatch, should one exist) → `--model opus`
   - all other claude dispatches → no flag (the saved default)
 
-  - step 02 plan → `--model fable`
+  - step 02 plan (and any plan-revision dispatch) → `--model fable`
 
   Premise and disposition are IN-SESSION work and carry no `--model` knob — they run on the
   session's model. The standing choice is **fable**: orchestrate the loop from a fable session.
@@ -328,7 +328,9 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   carries, so a unit's rows read as one visual group — then the ribbon core with the executor
   slot: `∞ #149 — 05 IMPLEMENT [CLAUDE:OPUS]`; `activeForm` says what the spinner should read
   while it runs (`Implementing #149 on opus`, `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped
-  steps use one task per round (`∞ #149 — 08 CODE-REVIEW r1 [CLAUDE:GPT-5.6-SOL]`).
+  steps use one task per round, and EVERY dispatched sub-step — fix rounds, doubt reviews, plan
+  revisions — carries the same prefix shape (`∞ #149 — 08 CODE-REVIEW r1 [CLAUDE:GPT-5.6-SOL]`,
+  `∞ #78 — 08 FIX r3 [CLAUDE:OPUS]`); the named examples are not an exhaustive list.
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
   same turn that states the duration. A staged unit's steps get their own tasks under its own
@@ -456,8 +458,12 @@ node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/autoloop-p
 ```
 
 It checks premises, scope, interface depth, tests, invariants, risk, and issue fitness. Verify each
-Critical/Major claim. The orchestrator records fix/rebut/defer dispositions and revises the plan
-itself. Do not re-dispatch plan review.
+Critical/Major claim; the orchestrator records fix/rebut/defer dispositions in-session — that is
+judgment, and it stays. **The revision itself is a dispatch, not session work**: one
+`--role plan --model fable` dispatch whose prompt carries the current plan, every verified
+finding, and its disposition, returning the revised plan artifact as the typed result — the same
+bounded-and-bulky rule that moved planning out of the session moves plan-fixing out too. Do not
+re-dispatch plan review: the revision ships reviewed-once with dispositions recorded.
 
 ### 4. Persist intent and claim
 
