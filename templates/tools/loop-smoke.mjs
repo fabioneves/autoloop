@@ -124,6 +124,22 @@ function writeEngineShim(scratch, argvLog) {
     '',
   ].join('\n'));
   chmodSync(shimPath, 0o755);
+
+  // Reviews run on codex, so the smoke needs its shape too: the verdict arrives
+  // in the --output-last-message file rather than on stdout. Without this the
+  // smoke would prove only that the writer still works.
+  const codexPath = join(shimDirectory, 'codex');
+  writeFileSync(codexPath, [
+    '#!/bin/sh',
+    `printf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}`,
+    'cat > /dev/null',
+    'out=""; prev=""',
+    'for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done',
+    `printf '%s' ${JSON.stringify(JSON.stringify(PASSING_VERDICT))} > "$out"`,
+    `printf '%s\\n' '{"type":"turn.completed"}'`,
+    '',
+  ].join('\n'));
+  chmodSync(codexPath, 0o755);
   return shimDirectory;
 }
 
@@ -397,19 +413,30 @@ export function runSmokeSteps({
         detail: `expected ${roles.length} engine launches, saw ${launched.length}`,
       };
     }
-    const reviewerLaunches = launched.filter((line) =>
+    // The invariant is that a reviewer can never write. The two engines state it
+    // differently — claude by permission mode and tool ceiling, codex by an
+    // OS-enforced read-only sandbox — so the audit accepts either proof and
+    // still refuses a write capability in both shapes.
+    const claudeReviewers = launched.filter((line) =>
       line.includes('--permission-mode plan'));
-    const offending = reviewerLaunches.filter((line) =>
-      /--tools \S*(?:Write|Edit|Bash)/.test(line));
+    const codexReviewers = launched.filter((line) =>
+      line.includes('--sandbox read-only'));
+    const reviewerLaunches = [...claudeReviewers, ...codexReviewers];
+    const offending = [
+      ...claudeReviewers.filter((line) => /--tools \S*(?:Write|Edit|Bash)/.test(line)),
+      ...codexReviewers.filter((line) =>
+        /--sandbox (?:workspace-write|danger-full-access)|--dangerously/.test(line)),
+    ];
     if (reviewerLaunches.length !== roles.filter((r) => r !== 'implement').length) {
-      return { ok: false, detail: 'a reviewer role did not launch in plan mode' };
+      return { ok: false, detail: 'a reviewer role did not launch read-only' };
     }
     if (offending.length > 0) {
-      return { ok: false, detail: 'a reviewer dispatch received a write tool' };
+      return { ok: false, detail: 'a reviewer dispatch received a write capability' };
     }
     return {
       ok: true,
-      detail: `${reviewerLaunches.length} reviewer launch(es), none with a write tool`,
+      detail: `${claudeReviewers.length} claude + ${codexReviewers.length} codex `
+        + 'reviewer launch(es), none with a write capability',
     };
   });
 
