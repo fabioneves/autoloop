@@ -25,6 +25,12 @@ Notable changes to Autoloop are recorded here. The format follows
   only — the writer stays on the host in every mode — and an unrecognised recording falls back to
   the host engine. Proven with a real dispatch: no flag, recorded `codex`, verdict returned with
   `"engine": "codex"`.
+- **A resumed unit branch runs installed tools, not its fossils.** Resuming a unit checks out its
+  branch — correctly — and the branch carries the `tools/agentic/` copies it forked with. A live
+  resume sat 18 commits behind base with a dispatch predating `--engine`; the reviewer dispatch
+  failed usage-typed, and the session recovered by invoking the plugin-cache copy. That recovery
+  is now the rule: on vendored drift, run the installed plugin's copy of the tool; never commit
+  tool refreshes into a unit branch to compensate.
 - **The dev startup stops reading the driver's source to learn the request shape.**
   `lifecycle-driver.mjs --example-request` prints a request that passes the driver's own
   validator — it is the self-test fixture with its hash made consistent, so it cannot drift from

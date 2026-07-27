@@ -179,6 +179,15 @@ reviewer's job is to find the case the author did not consider.
   engine starts), and `engine` — the host that actually produced it, stamped from the spawn. Typed
   failures carry it too. Report it on the step's ribbon rather than composing a host name by hand.
 
+**On a resumed unit branch, run tools from the installed plugin, not the checkout.** A unit
+branch carries the `tools/agentic/` copies it forked with — a live resume sat 18 commits behind
+base with a dispatch that predated `--engine`, and the call failed usage-typed. Working the unit
+on its branch is correct; trusting its tools is not. When the preflight NOTEs vendored drift (or a
+vendored tool rejects a documented flag), invoke the same tool from
+`<newest installed plugin>/templates/tools/` instead — same contract, current version. The hooks
+still run the branch's copies; expect their older behavior until the unit lands, and never "fix"
+that by committing tool refreshes into the unit branch — scaffold changes are Setup's, on base.
+
 Write prompts to a file; never inline untrusted issue or review text into a shell command. Give a
 dispatch only what it needs: the frozen plan, the relevant STATE invariants, the evidence, and the
 named skills.
