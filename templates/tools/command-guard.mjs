@@ -623,9 +623,28 @@ function executableIndex(words, executable) {
   );
 }
 
+// Wrappers that pass execution through to their argument; anything else in
+// front of `git`/`gh` means the word is an ARGUMENT, not an invocation — a live
+// section banner (`echo "=== git diffstat ==="`) read as an unknown subcommand
+// because the executable was found anywhere in the segment.
+const EXEC_WRAPPERS = new Set(['command', 'env', 'nohup', 'nice', 'timeout']);
+
+function inExecutablePosition(words, position) {
+  for (let index = 0; index < position; index += 1) {
+    const word = words[index];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;      // VAR=value prefix
+    if (EXEC_WRAPPERS.has(word.slice(word.lastIndexOf('/') + 1))) continue;
+    if (/^-/.test(word)) continue;                             // wrapper flags
+    if (/^[0-9]+[smhd]?$/.test(word)) continue;                // timeout duration
+    return false;
+  }
+  return true;
+}
+
 function commandAfterGlobalOptions(words, executable, optionsWithValues) {
   const executablePosition = executableIndex(words, executable);
   if (executablePosition === -1) return null;
+  if (!inExecutablePosition(words, executablePosition)) return null;
   for (let index = executablePosition + 1; index < words.length; index += 1) {
     const word = words[index];
     if (optionsWithValues.has(word)) {
@@ -1720,6 +1739,16 @@ function selfTest() {
     // both kinds alike before the check would have opened exactly this hole.
     ['git commit -q -F - <<EOF\nmsg with $(pwd) live\nEOF', 'feat/gh-1-x', true],
     ['git commit -q -F - <<EOF\nmsg with `pwd` live\nEOF', 'feat/gh-1-x', true],
+    // `git` as an ARGUMENT is data, not an invocation: the alias rule found
+    // `git` anywhere in a segment, so quote-stripped prose — a live run's
+    // `echo "=== git diffstat ==="` section banner — read as an unknown
+    // subcommand and sank an innocent compound. Executable position only.
+    ['echo "=== git diffstat ==="', 'feat/gh-1-x', false],
+    ['echo "gh pr-mangle is not a thing"', 'feat/gh-1-x', false],
+    ['git diffstat', 'feat/gh-1-x', true],
+    ['env git diffstat', 'feat/gh-1-x', true],
+    ['A=1 git status --short', 'feat/gh-1-x', false],
+    ['timeout 30 git fetch origin main', 'feat/gh-1-x', false],
     ['node --version', 'feat/gh-1-x', false],
     ['python3 --version', 'feat/gh-1-x', false],
     ['deno --help', 'feat/gh-1-x', false],

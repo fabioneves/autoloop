@@ -331,6 +331,22 @@ function githubNotFound(error) {
     .some((value) => /\bHTTP(?:\/[0-9.]+)?[ \t]+404\b/iu.test(String(value)));
 }
 
+// The documented free-plan refusal on protection/ruleset endpoints: HTTP 403
+// carrying GitHub's own "Upgrade to GitHub Pro … or make this repository
+// public" message. On such a plan the branch CANNOT have rules — the 403 is the
+// plan-limitation signal, the same authoritative absence the classic 404 case
+// already recognises. A live solo unit finished review- and gate-clean and then
+// blocked here forever. Both conditions are required: a permissions 403 without
+// the upgrade message still aborts the read.
+function githubPlanRestricted(error) {
+  const texts = [error?.stderr, error?.stdout, error?.message]
+    .filter((value) => typeof value === 'string' || Buffer.isBuffer(value))
+    .map((value) => String(value));
+  return texts.some((value) => /\bHTTP(?:\/[0-9.]+)?[ \t]+403\b/iu.test(value))
+    && texts.some((value) =>
+      /upgrade to github (?:pro|team|enterprise)|make this repository public/iu.test(value));
+}
+
 function githubRestJson(
   repository,
   endpoint,
@@ -362,6 +378,7 @@ function githubRestJson(
     );
   } catch (error) {
     if (options.allowNotFound === true && githubNotFound(error)) return null;
+    if (options.allowPlanRestricted === true && githubPlanRestricted(error)) return null;
     evidenceFailure('GITHUB_API_UNAVAILABLE');
   }
   try {
@@ -586,7 +603,13 @@ function fetchRequiredCheckRules(repository, baseRefName, fetchJson) {
   const maximumPages =
     Math.ceil(MAX_BRANCH_RULES / BRANCH_RULE_PAGE_SIZE) + 1;
   for (let page = 1; page <= maximumPages; page += 1) {
-    const values = fetchJson(repository, `${endpoint}&page=${page}`);
+    const values = fetchJson(
+      repository,
+      `${endpoint}&page=${page}`,
+      { allowPlanRestricted: true },
+    );
+    // Plan-restricted absence: the plan cannot have rules, so there are none.
+    if (values === null) return normalizeRequiredCheckRules([]);
     if (
       !Array.isArray(values)
       || values.length > BRANCH_RULE_PAGE_SIZE
@@ -613,7 +636,7 @@ function fetchClassicRequiredChecks(repository, baseRefName, fetchJson) {
   const endpoint =
     `repos/${repository}/branches/${encodeURIComponent(baseRefName)}/protection`;
   return normalizeClassicBranchProtection(
-    fetchJson(repository, endpoint, { allowNotFound: true }),
+    fetchJson(repository, endpoint, { allowNotFound: true, allowPlanRestricted: true }),
   );
 }
 
@@ -2137,7 +2160,54 @@ function selfTest() {
   liveShapedNotFound.status = 1;
   liveShapedNotFound.stdout = '';
   liveShapedNotFound.stderr = 'gh: Branch not protected (HTTP 404)\n';
+  const planRestricted = new Error('GitHub API request failed');
+  planRestricted.status = 1;
+  planRestricted.stdout = '';
+  planRestricted.stderr =
+    'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)\n';
+  const plainForbidden = new Error('GitHub API request failed');
+  plainForbidden.status = 1;
+  plainForbidden.stdout = '';
+  plainForbidden.stderr = 'gh: Resource not accessible by integration (HTTP 403)\n';
   const unitCases = [[
+    'the documented free-plan 403 is authoritative absence where the caller opts in',
+    githubRestJson(
+      'owner/repository',
+      'repos/owner/repository/rules/branches/main',
+      { allowPlanRestricted: true },
+      () => { throw planRestricted; },
+    ) === null,
+  ], [
+    'a permissions 403 without the upgrade message still aborts the read',
+    (() => {
+      try {
+        githubRestJson(
+          'owner/repository',
+          'repos/owner/repository/rules/branches/main',
+          { allowPlanRestricted: true },
+          () => { throw plainForbidden; },
+        );
+        return false;
+      } catch (error) {
+        return error?.code === 'GITHUB_API_UNAVAILABLE';
+      }
+    })(),
+  ], [
+    'a free-plan 403 without the opt-in still aborts',
+    (() => {
+      try {
+        githubRestJson(
+          'owner/repository',
+          'repos/owner/repository/pulls/1',
+          {},
+          () => { throw planRestricted; },
+        );
+        return false;
+      } catch (error) {
+        return error?.code === 'GITHUB_API_UNAVAILABLE';
+      }
+    })(),
+  ], [
     'a live classic-protection 404 is authoritative absence',
     githubRestJson(
       'owner/repository',

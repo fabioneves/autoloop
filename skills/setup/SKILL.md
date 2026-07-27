@@ -11,14 +11,14 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.46.0 · starting
+∞ setup · v0.46.1 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
 
-A five-phase run prints **exactly five** 🟦 ribbons — one as each phase begins, every phase,
-including phases that turn out to be trivial. A phase that starts without its ribbon is as wrong
-as a doubled one. The ribbon is five cells, `▰` done-or-current, `▱` remaining:
+Mark each phase with a state badge (🟦 in progress · 🟥 blocked · 🟨 needs a human) and a
+five-cell ribbon in the same `∞` visual language — `▰` for done-or-current, `▱` for remaining —
+as the phase begins:
 
 ```text
 🟦 ∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base
@@ -28,10 +28,7 @@ as a doubled one. The ribbon is five cells, `▰` done-or-current, `▱` remaini
 🟦 ∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery
 ```
 
-What is forbidden is the *re-print*: a phase's ribbon appears once, when it begins, never again
-with 🟩 when it finishes — the next phase's 🟦 already says the previous one completed. 🟩 appears
-exactly once per run, on the closing rail, so a green line means the run is over. 🟥 or 🟨
-replaces a phase's 🟦 only when that phase blocks or needs a human decision.
+Do not re-print a phase's ribbon when it completes — 🟩 belongs only on the closing rail.
 
 Doctor mode replaces the ribbon with its own single line: `∞ doctor ─ <audited ref>`.
 
