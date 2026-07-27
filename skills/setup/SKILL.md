@@ -392,7 +392,11 @@ correctly the first time:
 - **to call a contract**, run its CLI directly (`node <templates>/tools/<tool>.mjs …`) or write a
   small script to the scratchpad and run the file — never `node -e`;
 - **to measure a section**, use `wc -c`, `grep -c`, or `sed -n` — never an awk program;
-- **to read a section's bytes**, `sed -n '/^## Heading/,$p'` reads what an awk range would.
+- **to read a section's bytes**, `sed -n '/^## Heading/,$p'` reads what an awk range would;
+- **never append `; echo "exit=$?"`.** `$?` cannot be resolved without running the command, so it
+  is opaque by construction and takes the whole invocation down with it — including the useful part
+  in front of it. The tool result already carries the exit status, so the suffix costs a refused
+  call and a retry to learn nothing new. Observed three times in one day on the same idiom.
 
 The `config` and `contracts` sections above deliberately run the repository's installed copies:
 they report the pre-migration install as it stands, which is the thing being audited. A legacy

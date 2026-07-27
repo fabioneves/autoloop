@@ -7,6 +7,18 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **A quoted heredoc body is data, not code.** The expansion check ran on the raw command, so text
+  inside a `<<'EOF'` body was scanned as shell syntax — and a reconcile commit message carrying
+  backticks around `m` and `scaffold.mjs --reconcile` was refused as command substitution. The loop
+  could not write its own commit message. A quoted delimiter means the shell performs no expansion
+  and no substitution in that body, so it is stripped before the check.
+
+  Only the quoted form. An unquoted `<<EOF` body genuinely does expand, and the existing
+  `stripHeredocs` removes both kinds alike — reusing it here would have turned `<<EOF` with
+  `$(...)` into a blind spot, so a narrower `stripQuotedHeredocBodies` was added instead. Pinned in
+  both directions: quoted bodies with backticks and with literal `$(pwd)` pass, unquoted bodies
+  with either still block, a quoted heredoc cannot smuggle a `gh pr merge` after its terminator, and
+  substitution outside a heredoc is unaffected.
 - **Setup stops writing commands its own guard refuses.** The prescribed one-call audit is
   guard-clean, but the skill then says "follow it with one targeted check" without saying the
   follow-up must be guard-clean too — and Dev's equivalent "No improvised inspection" section had no
