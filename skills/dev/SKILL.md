@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.2 · starting
+∞ dev · v0.49.3 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -467,6 +467,12 @@ premergeRecordDraft:null}` to a bounded file and pipe it to:
 ```bash
 node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 ```
+
+**`plan.body` is the frozen artifact, byte for byte.** Once the plan comment exists, fetch its
+exact body from GitHub (`gh api` on the captured comment ID, `.body` to a file) and use that —
+never a locally recomposed copy: `sha256(plan.body)` must equal `intent.planHash`, and two live
+sessions each lost a cycle to a recomposition that differed by invisible bytes. The driver's
+refusal names the failing field and both hash prefixes.
 
 **Composing the request costs three literal commands, never a read of the driver's source.**
 `node tools/agentic/lifecycle-driver.mjs --example-request` prints a request that passes the
