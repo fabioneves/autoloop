@@ -15,6 +15,11 @@ Notable changes to Autoloop are recorded here. The format follows
   entries running the same `tools/agentic/` tool on the same event are versions of one autoloop
   binding: the merge now replaces the superseded one in place. Maintainer hooks — anything not
   running the same vendored tool — are untouched, and an identical command still changes nothing.
+- **PR and issue bodies are composed in files, stated in both skills.** The natural idiom —
+  `gh pr create --body "$(cat …)"` — is command substitution and is refused whole, and a live
+  reconcile delivery lost a call to exactly that. `gh` has the sanctioned flag built in: write the
+  body to the scratchpad and pass `--body-file <path>`; commit messages use `git commit -F -` with
+  a quoted heredoc. Verified against the guard: the inline form blocks, the body-file form passes.
 - **Setup prints each phase ribbon once, not twice.** The badge instruction listed 🟩 as "complete"
   alongside 🟦 "in progress", which read as an invitation to re-print every phase's ribbon with a
   green badge when it finished — doubling every line of a five-phase run for no information, since

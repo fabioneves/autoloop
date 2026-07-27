@@ -396,6 +396,10 @@ correctly the first time:
   small script to the scratchpad and run the file — never `node -e`;
 - **to measure a section**, use `wc -c`, `grep -c`, or `sed -n` — never an awk program;
 - **to read a section's bytes**, `sed -n '/^## Heading/,$p'` reads what an awk range would;
+- **compose every PR, issue, or comment body in a file.** `gh pr create --body "$(cat …)"` is
+  command substitution and is refused whole; `gh` has the sanctioned flag built in — write the body
+  to the scratchpad and pass `--body-file <path>`. Same for commit messages: `git commit -F -` with
+  a quoted heredoc, or `-F <path>`. Observed live: a reconcile delivery lost a call to exactly this.
 - **never write `$?` at all** — not after `;`, not after `&&`, under any variable name. It cannot be
   resolved without running the command, so it is opaque by construction and takes the whole
   invocation down with it, including the useful part in front of it. It also conveys nothing: the

@@ -98,8 +98,12 @@ sanctioned reads are typed:
 - plain `jq` with a single-quoted filter on the exact files the prime summary names is
   sanctioned — the guard permits it, and prime naming the file keeps it targeted.
 
-Two shapes to keep out of every command, sanctioned read or not:
+Shapes to keep out of every command, sanctioned read or not:
 
+- **A body composed inline.** `--body "$(cat …)"` is command substitution and is refused whole.
+  Write the body to a file and pass `--body-file <path>` (`gh pr create`, `gh issue comment`, and
+  the run record all take one); commit messages use `git commit -F -` with a quoted heredoc or
+  `-F <path>`.
 - **`$?`, in any spelling.** Not after `;`, not after `&&`, under any variable name. It cannot be
   resolved without running the command, so it is opaque by construction and takes the whole
   invocation down with it — including the useful part in front of it. It also says nothing: the
