@@ -3,10 +3,19 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
-## [0.47.1] - 2026-07-27
+## [0.48.0] - 2026-07-27
 
 ### Added
 
+- **`/autoloop:dev with proxy` — reviews on a proxied model, same harness.** The recorded review
+  choice now carries an optional model (`claude gpt-5.6-sol[1m]`), so review dispatches keep the
+  claude engine — structured verdicts, live streaming, tool ceilings — while the reviewing MODEL
+  decorrelates from the writer through claude-code-proxy. Review ribbons carry the model in the
+  host slot, since the engine name alone would lie about who judged; preflight NOTEs a proxied
+  recording without `ANTHROPIC_BASE_URL`, where every review would fail typed on an unknown
+  model. The writer never runs a proxied model — cross-MODEL review is the invariant, whichever
+  harness carries it — and unlike `with codex`, the reviewer's read-only posture is the tool
+  ceiling rather than an OS sandbox, stated in the skill rather than discovered.
 - **`--model` pins the engine's model per dispatch.** Claude spells it `--model`, codex `-m`; the
   pin crosses the CLI seam with a regression test that drives the real argv (the `--engine` lesson,
   applied preemptively — the flag would have shipped dead without it), and the chosen model is

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.47.1 · starting
+∞ dev · v0.48.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -143,7 +143,24 @@ cannot leak forward. Append ` · reviews codex` to the startup banner so the run
 judges it, and the `[HOST]` slot on each review ribbon confirms it per dispatch. The writer always
 stays on the host: a second engine buys decorrelated review, not a second writer.
 
-Why it is worth asking for: a fresh process gives identity separation, not cognitive separation.
+**Or on a proxied model, same harness: `/autoloop:dev with proxy`.** Every dispatch stays on the
+claude ENGINE — structured verdicts, live streaming, tool ceilings all unchanged — but review
+roles run a proxied model. Record it once after prime, engine and model on one line:
+
+```bash
+printf 'claude gpt-5.6-sol[1m]\n' > .git/autoloop/review-engine
+```
+
+Append ` · reviews gpt-5.6-sol (proxy)` to the startup banner, and review ribbons carry the
+model in the host slot — `[GPT-5.6-SOL]` — since the engine name alone would lie about who
+judged. Prerequisites and trade-offs, stated plainly: the session must be running behind
+claude-code-proxy (`ANTHROPIC_BASE_URL`), because dispatches inherit the environment and a GPT
+model name resolves nowhere else — preflight NOTEs when the recording names a non-claude model
+without a proxied base URL. And unlike `with codex`, the reviewer's read-only posture is the
+tool ceiling, not an OS sandbox. The writer never runs a proxied model: cross-MODEL review is
+the invariant, whichever harness carries it.
+
+Why a second model is worth asking for: a fresh process gives identity separation, not cognitive separation.
 A reviewer on the writer's own model inherits its priors and misses what it missed. A different
 model does not. The cost is another CLI to install and authenticate, which is why this is a
 choice rather than an assumption — an absent codex must never break a run that asked for nothing

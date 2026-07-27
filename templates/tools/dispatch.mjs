@@ -306,16 +306,32 @@ export function defaultEngineFor() {
 // `autoloop/review-engine` beside the dispatch log, and this tool reads it per
 // dispatch. Reviewer roles only: the writer stays on the host in every mode,
 // and an unrecognised or absent recording falls back to the host engine.
-export function resolveDefaultEngine(role, cwd) {
-  if (ROLES[role]?.posture !== 'reviewer') return 'claude';
+// The recording is one line: `<engine>` or `<engine> <model>`. The second token
+// serves the proxy mode — reviews on the claude HARNESS but a proxied model
+// (`claude gpt-5.6-sol[1m]`), which keeps structured output and live streaming
+// while decorrelating the reviewer model from the writer. Reviewer roles only,
+// and an unrecognised engine discards the whole line.
+function recordedReviewChoice(cwd) {
   try {
     const logPath = resolveDispatchLogPath(cwd);
-    if (logPath === null) return 'claude';
+    if (logPath === null) return null;
     const recorded = readFileSync(join(dirname(logPath), 'review-engine'), 'utf8').trim();
-    return ENGINES[recorded] !== undefined ? recorded : 'claude';
+    const [engine, model = null] = recorded.split(/\s+/);
+    if (ENGINES[engine] === undefined) return null;
+    return { engine, model };
   } catch {
-    return 'claude';
+    return null;
   }
+}
+
+export function resolveDefaultEngine(role, cwd) {
+  if (ROLES[role]?.posture !== 'reviewer') return 'claude';
+  return recordedReviewChoice(cwd)?.engine ?? 'claude';
+}
+
+export function resolveDefaultModel(role, cwd) {
+  if (ROLES[role]?.posture !== 'reviewer') return null;
+  return recordedReviewChoice(cwd)?.model ?? null;
 }
 
 function resolveEngine(binary) {
@@ -421,9 +437,10 @@ export function runDispatch(options) {
   const windowStartedAtMs = Date.now();
   const cwd = options.cwd ?? process.cwd();
   const engineBinary = options.engine ?? resolveDefaultEngine(options.role, cwd);
-  const result = executeDispatch({ ...options, engine: engineBinary });
+  const resolvedModel = options.model ?? resolveDefaultModel(options.role, cwd);
+  const result = executeDispatch({ ...options, engine: engineBinary, model: resolvedModel });
   const engine = hostName(engineBinary);
-  const model = options.model ?? null;
+  const model = resolvedModel;
   recordDispatchWindow(options.cwd ?? process.cwd(), {
     role: options.role,
     engine,
@@ -1126,6 +1143,22 @@ function selfTest() {
       resolveDefaultEngine('plan-review', repoScratch) === 'codex'
       && resolveDefaultEngine('code-review', repoScratch) === 'codex'
       && resolveDefaultEngine('implement', repoScratch) === 'claude',
+    );
+    check(
+      'a recorded engine may carry a model, routing proxied reviews',
+      (() => {
+        writeFileSync(engineFile, 'claude gpt-5.6-sol[1m]\n');
+        return resolveDefaultEngine('code-review', repoScratch) === 'claude'
+          && resolveDefaultModel('code-review', repoScratch) === 'gpt-5.6-sol[1m]'
+          && resolveDefaultModel('implement', repoScratch) === null;
+      })(),
+    );
+    check(
+      'a bare recorded engine carries no model',
+      (() => {
+        writeFileSync(engineFile, 'codex\n');
+        return resolveDefaultModel('code-review', repoScratch) === null;
+      })(),
     );
     writeFileSync(engineFile, 'weird-engine\n');
     check(

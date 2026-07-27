@@ -95,6 +95,23 @@ if [ -f "$vendored_prime" ] && [ -d "$plugin_cache" ] && [ -f "$release_helper" 
   fi
 fi
 
+# 3b. Proxied review recording sanity: `claude <non-claude-model>` only works when
+# the environment routes through claude-code-proxy; otherwise every review
+# dispatch fails typed on an unknown model.
+review_engine_file="$(git rev-parse --git-path autoloop/review-engine 2>/dev/null)"
+if [ -n "$review_engine_file" ] && [ -f "$review_engine_file" ]; then
+  recorded="$(head -1 "$review_engine_file")"
+  case "$recorded" in
+    claude\ *)
+      if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+        echo "NOTE  review-engine records a proxied model ($recorded) but ANTHROPIC_BASE_URL is unset — reviews will fail typed; start the session behind claude-code-proxy or re-record 'claude'"
+      else
+        echo "INFO  proxied reviews recorded: $recorded via $ANTHROPIC_BASE_URL"
+      fi
+      ;;
+  esac
+fi
+
 # 4. Checkout identity. The hooks load `$CLAUDE_PROJECT_DIR/tools/agentic/*`, which
 # is the WORKING TREE's copy — so the guard, this preflight, and the label hooks
 # are whatever version the current branch happens to carry, no matter what a
