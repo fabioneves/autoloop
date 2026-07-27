@@ -1,18 +1,24 @@
 #!/usr/bin/env node
-// SHA-bound CheckRun publisher. Posts verdicts and typed attestations through the
-// caller's GitHub App identity so the merge gate can authenticate head and producer.
+// SHA-bound verdict publisher. Posts the loop's gate/review verdicts as GitHub
+// COMMIT STATUSES so the merge page shows, on the exact head, that this SHA is
+// the one the loop gated and the reviewer reviewed — any later push silently
+// invalidates the verdict, because statuses are SHA-bound. Statuses are
+// PAT-writable; the v0.40 CheckRun publisher required a GitHub App identity
+// that a solo operator cannot have (POST /check-runs is App-only), and with
+// the shared maintainer login this is evidence, not proof either way
+// (docs/specs/simple-delivery.md).
 //
 // Deliberately narrow:
-//   - closed agentic context enum
+//   - closed context enum: agentic/gate, agentic/review
 //   - only `success` can be posted; absence is the failure signal
+//   - the description carries the verdict summary's SHA-256 prefix, so the
+//     premerge record can be verified against the live status byte-for-byte
 //   - gate executes the configured command itself on the exact clean checkout
-//   - ownership, policy, and human authorization require a strict attestation file
 //   - review requires authenticated convergence plus the exact clean live checkout
 //   - details arrive through a file, never shell arguments
 //
-// Usage: node tools/agentic/publish-verdict.mjs <context> <40-hex sha>
-//        [--attestation-file <path> | --review-evidence-file <path>]
-//        [--expect-app-id <positive integer>]
+// Usage: node tools/agentic/publish-verdict.mjs <gate|review> <40-hex sha>
+//        [--review-evidence-file <path>]
 //        node tools/agentic/publish-verdict.mjs premerge-create --record-file <path>
 //        node tools/agentic/publish-verdict.mjs premerge-observe --attestation-file <path>
 //        node tools/agentic/publish-verdict.mjs premerge-append
@@ -20,7 +26,6 @@
 //          --expected-body-hash <64-hex sha256>
 //        node tools/agentic/publish-verdict.mjs terminal-finalize
 //          --request-file <path> --review-evidence-file <path>
-//          [--ownership-attestation-file <path>] [--expect-app-id <positive integer>]
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -51,11 +56,7 @@ import {
   extractConfig,
   validateConfig,
 } from './config-contract.mjs';
-import {
-  canonicalCiPolicy,
-  finalizeHead,
-  parseCiPolicy,
-} from './delivery-contract.mjs';
+import { finalizeHead } from './delivery-contract.mjs';
 import {
   lifecycleCommentNeverEdited,
   lifecycleIdentityHash,
@@ -71,19 +72,6 @@ import { snapshotExecutionRepository } from './checkout-contract.mjs';
 const CONTEXTS = new Set([
   'gate',
   'review',
-  'ownership',
-  'policy',
-  'human-authorization',
-]);
-const MANUAL_TERMINAL_CHECKS = new Set([
-  'agentic/gate',
-  'agentic/review',
-]);
-const NON_MANUAL_TERMINAL_CHECKS = new Set([
-  'agentic/gate',
-  'agentic/ownership',
-  'agentic/policy',
-  'agentic/review',
 ]);
 const TERMINAL_BLOCKING_ISSUE_LABELS = new Set([
   'automerge:halt',
@@ -95,11 +83,10 @@ const TERMINAL_BLOCKING_ISSUE_LABELS = new Set([
   'needs-human',
   'needs-secret',
 ]);
-const ATTESTATION_CONTEXTS = new Set(['ownership', 'policy', 'human-authorization']);
 const SHA_RE = /^[0-9a-f]{40}$/;
 const MAX_REVIEW_EVIDENCE_BYTES = 32 * 1024 * 1024;
 const MAX_AUXILIARY_EVIDENCE_BYTES = 1024 * 1024;
-const MAX_CHECK_RUNS = 10_000;
+const MAX_STATUS_CONTEXTS = 100;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const REPOSITORY_PART_RE =
   /^[a-z0-9](?:[a-z0-9._-]{0,99})$/;
@@ -197,29 +184,24 @@ function reviewSummary(
   );
 }
 
-export function buildCheckRun(ctx, sha, summary, completedAt = new Date().toISOString()) {
-  const text = typeof summary === 'string' && summary.length > 0
-    ? summary.slice(0, 65535)
-    : 'Verified by the Autoloop development workflow.';
-  return {
-    name: `agentic/${ctx}`,
-    head_sha: sha,
-    status: 'completed',
-    conclusion: 'success',
-    started_at: completedAt,
-    completed_at: completedAt,
-    output: {
-      title: `Autoloop ${ctx} passed`,
-      summary: text,
-    },
-  };
+// The description is the status's only payload slot (140 chars); it carries a
+// deterministic SHA-256 prefix of the verdict summary so record verification is
+// a byte-for-byte string compare, not a parse. The record hash still seals the
+// full 64-hex value.
+export function buildStatusDescription(ctx, summaryHash) {
+  if (!CONTEXTS.has(ctx) || !HASH_RE.test(summaryHash ?? '')) {
+    throw new Error('status description requires a closed context and a SHA-256 summary hash');
+  }
+  return `autoloop ${ctx} verified · sha256:${summaryHash.slice(0, 16)}`;
 }
 
-export function hasTrustedProducer(checkRun, trustedAppIds) {
-  return (
-    Array.isArray(trustedAppIds)
-    && trustedAppIds.some((id) => Number.isInteger(id) && id > 0 && id === checkRun?.app?.id)
-  );
+export function buildCommitStatus(ctx, sha, summaryHash) {
+  if (!SHA_RE.test(sha ?? '')) throw new Error('status head OID is invalid');
+  return {
+    state: 'success',
+    context: `agentic/${ctx}`,
+    description: buildStatusDescription(ctx, summaryHash),
+  };
 }
 
 function validRepositoryTarget(repository) {
@@ -234,17 +216,15 @@ function validRepositoryTarget(repository) {
   );
 }
 
-export function buildGitHubApiArgs(repository) {
-  if (
-    !validRepositoryTarget(repository)
-  ) {
+export function buildGitHubApiArgs(repository, sha) {
+  if (!validRepositoryTarget(repository) || !SHA_RE.test(sha ?? '')) {
     throw new Error('publication repository target is invalid');
   }
   return [
     'api',
     '--hostname',
     repository.host,
-    `repos/${repository.owner}/${repository.repo}/check-runs`,
+    `repos/${repository.owner}/${repository.repo}/statuses/${sha}`,
     '--method',
     'POST',
     '-H',
@@ -547,102 +527,61 @@ function githubRestJson(repository, endpoint) {
   return JSON.parse(output);
 }
 
-function fetchPublicationCheckRunSnapshot(repository, headOid, fetchJson) {
-  const endpoint =
-    `repos/${repository.owner}/${repository.repo}/commits/${headOid}`
-    + '/check-runs?filter=all&per_page=100';
-  const first = fetchJson(repository, `${endpoint}&page=1`);
-  if (
-    !first
-    || !Number.isSafeInteger(first.total_count)
-    || first.total_count < 0
-    || first.total_count > MAX_CHECK_RUNS
-    || !Array.isArray(first.check_runs)
-  ) {
-    throw new Error('policy CheckRun pagination is incomplete');
-  }
-  const pages = [first];
-  const pageCount = Math.max(1, Math.ceil(first.total_count / 100));
-  for (let page = 2; page <= pageCount; page += 1) {
-    pages.push(fetchJson(repository, `${endpoint}&page=${page}`));
-  }
-  const items = [];
-  for (const page of pages) {
-    if (
-      !page
-      || page.total_count !== first.total_count
-      || !Array.isArray(page.check_runs)
-    ) {
-      throw new Error('policy CheckRun count changed during pagination');
-    }
-    items.push(...page.check_runs);
-  }
-  if (items.length !== first.total_count) {
-    throw new Error(
-      `policy CheckRun pagination count mismatch (${items.length}/${first.total_count})`,
-    );
-  }
-  const ids = items.map((checkRun) => checkRun?.id);
-  if (
-    ids.some((id) => !Number.isSafeInteger(id) || id < 1)
-    || new Set(ids).size !== ids.length
-    || items.some((checkRun) => checkRun?.head_sha !== headOid)
-  ) {
-    throw new Error(
-      'policy CheckRun pagination returned invalid, duplicate, or wrong-head records',
-    );
-  }
-  return { complete: true, items };
-}
-
-export function fetchPublicationCheckRuns(
-  repository,
-  headOid,
-  fetchJson = githubRestJson,
-) {
-  if (!SHA_RE.test(headOid ?? '')) throw new Error('policy head OID is invalid');
-  const first = fetchPublicationCheckRunSnapshot(repository, headOid, fetchJson);
-  const second = fetchPublicationCheckRunSnapshot(repository, headOid, fetchJson);
-  if (stableJson(first) !== stableJson(second)) {
-    throw new Error('policy CheckRun evidence changed during observation');
-  }
-  return first;
-}
-
-export function fetchPublicationCiPolicy(
-  repository,
-  headOid,
-  fetchJson = githubRestJson,
-) {
-  if (!SHA_RE.test(headOid ?? '')) throw new Error('policy head OID is invalid');
+// The combined-status endpoint returns the LATEST status per context — the
+// verification unit the record needs. A page holding MAX_STATUS_CONTEXTS
+// contexts is treated as possibly truncated and fails closed.
+function fetchPublicationStatusSnapshot(repository, headOid, fetchJson) {
   const value = fetchJson(
     repository,
-    `repos/${repository.owner}/${repository.repo}/contents/.autoloop/ci-policy.json?ref=${headOid}`,
+    `repos/${repository.owner}/${repository.repo}/commits/${headOid}`
+    + `/status?per_page=${MAX_STATUS_CONTEXTS}`,
   );
   if (
-    !value
-    || value.type !== 'file'
-    || value.encoding !== 'base64'
-    || typeof value.content !== 'string'
+    value?.sha !== headOid
+    || !Array.isArray(value?.statuses)
+    || value.statuses.length >= MAX_STATUS_CONTEXTS
   ) {
-    throw new Error('committed CI policy response is invalid');
+    throw new Error('publication status evidence is incomplete');
   }
-  const encoded = value.content.replace(/\r?\n/g, '');
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encoded)) {
-    throw new Error('committed CI policy is not canonical base64');
+  const items = value.statuses.map((status) => {
+    if (
+      typeof status?.context !== 'string'
+      || status.context.length === 0
+      || status.context.length > 255
+      || typeof status?.state !== 'string'
+      || status.state.length === 0
+      || (status.description !== null && typeof status.description !== 'string')
+    ) {
+      throw new Error('publication status evidence is invalid');
+    }
+    return {
+      context: status.context,
+      state: status.state,
+      description: status.description ?? '',
+    };
+  });
+  const contexts = items.map((status) => status.context);
+  if (new Set(contexts).size !== contexts.length) {
+    throw new Error('publication status contexts are ambiguous');
   }
-  const bytes = Buffer.from(encoded, 'base64');
-  if (bytes.length === 0 || bytes.length > 64 * 1024) {
-    throw new Error('committed CI policy is empty or too large');
-  }
-  const policy = parseCiPolicy(bytes);
-  if (policy === null) throw new Error('committed CI policy is malformed');
   return {
     complete: true,
-    source: bytes.toString('utf8'),
-    sourceHash: sha256(bytes),
-    requiredChecks: [...policy.requiredChecks],
+    items: items.sort((left, right) => left.context.localeCompare(right.context)),
   };
+}
+
+export function fetchPublicationStatuses(
+  repository,
+  headOid,
+  fetchJson = githubRestJson,
+) {
+  if (!SHA_RE.test(headOid ?? '')) throw new Error('publication head OID is invalid');
+  const first = fetchPublicationStatusSnapshot(repository, headOid, fetchJson);
+  const second = fetchPublicationStatusSnapshot(repository, headOid, fetchJson);
+  if (stableJson(first) !== stableJson(second)) {
+    throw new Error('publication status evidence changed during observation');
+  }
+  return first;
 }
 
 function stableJson(value) {
@@ -652,27 +591,19 @@ function stableJson(value) {
     `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
 }
 
-function checkRunHead(checkRun) {
-  return checkRun?.head_sha ?? checkRun?.headSha ?? checkRun?.headOid;
-}
-
-function completedSuccess(checkRun) {
+// A verdict status verifies iff the latest status for its context on the exact
+// head is success AND its description is byte-identical to the one this
+// publisher derives from the record's summary hash.
+function exactVerdictStatus(statuses, ctx, summaryHash) {
+  if (statuses?.complete !== true || !Array.isArray(statuses.items)) return null;
+  const context = `agentic/${ctx}`;
+  const matches = statuses.items.filter((status) => status?.context === context);
+  const status = matches.length === 1 ? matches[0] : null;
   return (
-    String(checkRun?.status ?? '').toUpperCase() === 'COMPLETED'
-    && String(checkRun?.conclusion ?? '').toUpperCase() === 'SUCCESS'
-  );
-}
-
-function exactCheckRun(checkRuns, id, name, headOid) {
-  const matches = checkRuns?.items?.filter((checkRun) => checkRun?.id === id) ?? [];
-  const checkRun = matches.length === 1 ? matches[0] : null;
-  return (
-    checkRuns?.complete === true
-    && checkRun?.name === name
-    && checkRunHead(checkRun) === headOid
-    && completedSuccess(checkRun)
+    String(status?.state ?? '').toLowerCase() === 'success'
+    && status.description === buildStatusDescription(ctx, summaryHash)
   )
-    ? checkRun
+    ? status
     : null;
 }
 
@@ -682,54 +613,13 @@ function reviewReceiptFingerprint(summary) {
     .exec(summary)?.[1] ?? null;
 }
 
-export function deriveCiEvidenceFingerprint(ciPolicy, checkRuns, headOid) {
-  if (
-    ciPolicy?.complete !== true
-    || checkRuns?.complete !== true
-    || !Array.isArray(ciPolicy.requiredChecks)
-    || !Array.isArray(checkRuns.items)
-    || !SHA_RE.test(headOid ?? '')
-  ) {
-    return null;
-  }
-  const green = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
-  const normalized = [];
-  for (const name of [...ciPolicy.requiredChecks].sort()) {
-    const matches = checkRuns.items.filter((checkRun) =>
-      checkRun?.name === name && checkRunHead(checkRun) === headOid);
-    if (matches.length !== 1) return null;
-    const checkRun = matches[0];
-    const status = String(checkRun?.status ?? '').toUpperCase();
-    const conclusion = String(checkRun?.conclusion ?? '').toUpperCase();
-    if (
-      !Number.isSafeInteger(checkRun?.id)
-      || checkRun.id < 1
-      || status !== 'COMPLETED'
-      || !green.has(conclusion)
-      || !Number.isSafeInteger(checkRun?.app?.id)
-      || checkRun.app.id < 1
-    ) {
-      return null;
-    }
-    normalized.push({
-      appId: checkRun.app.id,
-      conclusion,
-      id: checkRun.id,
-      name,
-      status,
-    });
-  }
-  return sha256(stableJson(normalized));
-}
-
 export function derivePremergeComponentEvidence(record, live) {
   if (
     !record
     || live?.comments?.complete !== true
     || !Array.isArray(live.comments.items)
-    || live?.checkRuns?.complete !== true
-    || !Array.isArray(live.checkRuns.items)
-    || live?.ciPolicy?.complete !== true
+    || live?.statuses?.complete !== true
+    || !Array.isArray(live.statuses.items)
     || live?.delivery?.canMarkDelivered !== true
   ) {
     return { verified: false, code: 'PREMERGE_COMPONENTS_INCOMPLETE' };
@@ -796,40 +686,27 @@ export function derivePremergeComponentEvidence(record, live) {
   ) {
     return { verified: false, code: 'PREMERGE_COMMENT_COMPONENT_MISMATCH' };
   }
-  const review = exactCheckRun(
-    live.checkRuns,
-    record.review.checkRunId,
-    'agentic/review',
-    record.headOid,
+  // The live statuses carry only the summary-hash prefix (140-char description
+  // ceiling), so the full-summary receipt re-parse of the CheckRun era is not
+  // reproducible here; the record hash seals the full summaryHash and the
+  // finalizer verified the receipt against the summary it hashed.
+  const review = exactVerdictStatus(
+    live.statuses,
+    'review',
+    record.review.summaryHash,
   );
-  const gate = exactCheckRun(
-    live.checkRuns,
-    record.gate.checkRunId,
-    'agentic/gate',
-    record.headOid,
+  const gate = exactVerdictStatus(
+    live.statuses,
+    'gate',
+    record.gate.summaryHash,
   );
-  const reviewSummary = review?.output?.summary;
-  const gateSummaryValue = gate?.output?.summary;
-  if (
-    !review
-    || !gate
-    || sha256(reviewSummary ?? '') !== record.review.summaryHash
-    || reviewReceiptFingerprint(reviewSummary) !== record.run.receiptFingerprint
-    || sha256(gateSummaryValue ?? '') !== record.gate.summaryHash
-    || !parseAttestation(gateSummaryValue, {
-      kind: 'gate',
-      headOid: record.headOid,
-    }).ok
-  ) {
+  if (!review || !gate) {
     return { verified: false, code: 'PREMERGE_CHECK_COMPONENT_MISMATCH' };
   }
   const ciEvidenceHash =
     live.delivery.liveEvidence?.provenance?.evidenceFingerprint ?? null;
   if (
-    live.ciPolicy.sourceHash !== record.ci.policyHash
-    || live.delivery.requirementsPolicy?.sourceFingerprint
-      !== record.ci.policyHash
-    || live.delivery.headOid !== record.headOid
+    live.delivery.headOid !== record.headOid
     || ciEvidenceHash === null
     || ciEvidenceHash !== record.ci.evidenceHash
   ) {
@@ -839,8 +716,6 @@ export function derivePremergeComponentEvidence(record, live) {
     verified: true,
     code: 'PREMERGE_COMPONENTS_VERIFIED',
     lifecycleMarker: parsedLifecycle.marker,
-    reviewCheckRunId: review.id,
-    gateCheckRunId: gate.id,
     ciEvidenceHash,
   };
 }
@@ -861,12 +736,9 @@ export function fetchPolicyPublicationEvidence(
   const fetchGraphql = typeof adapters === 'function'
     ? adapters
     : adapters.graphql ?? githubGraphql;
-  const fetchCheckRuns = typeof adapters === 'object' && adapters.checkRuns
-    ? adapters.checkRuns
-    : fetchPublicationCheckRuns;
-  const fetchCiPolicy = typeof adapters === 'object' && adapters.ciPolicy
-    ? adapters.ciPolicy
-    : fetchPublicationCiPolicy;
+  const fetchStatuses = typeof adapters === 'object' && adapters.statuses
+    ? adapters.statuses
+    : fetchPublicationStatuses;
   const fetchDelivery = typeof adapters === 'object' && adapters.delivery
     ? adapters.delivery
     : (request) => finalizeHead(request, {
@@ -975,8 +847,7 @@ export function fetchPolicyPublicationEvidence(
   return {
     ...live,
     comments: { complete: true, items: comments },
-    checkRuns: fetchCheckRuns(repository, attestation.headOid),
-    ciPolicy: fetchCiPolicy(repository, attestation.headOid),
+    statuses: fetchStatuses(repository, attestation.headOid),
     delivery,
   };
 }
@@ -1341,34 +1212,23 @@ function executeGateSummary(snapshot, config) {
   );
 }
 
-function validPublishedCheckRun(checkRun, payload, expectedAppId) {
+function validPublishedStatus(status, payload) {
   return (
-    Number.isSafeInteger(checkRun?.id)
-    && checkRun.id > 0
-    && checkRun.name === payload.name
-    && checkRun.head_sha === payload.head_sha
-    && checkRun.status === 'completed'
-    && checkRun.conclusion === 'success'
-    && checkRun.output?.title === payload.output.title
-    && checkRun.output?.summary === payload.output.summary
-    && Number.isSafeInteger(checkRun?.app?.id)
-    && checkRun.app.id > 0
-    && (
-      expectedAppId === null
-      || hasTrustedProducer(checkRun, [expectedAppId])
-    )
+    status?.state === payload.state
+    && status?.context === payload.context
+    && status?.description === payload.description
   );
 }
 
-export function postCheckRun(
+export function postCommitStatus(
   repository,
+  headOid,
   payload,
-  expectedAppId = null,
   execute = execFileSync,
 ) {
   const output = execute(
     'gh',
-    buildGitHubApiArgs(repository),
+    buildGitHubApiArgs(repository, headOid),
     {
       input: JSON.stringify(payload),
       encoding: 'utf8',
@@ -1376,59 +1236,55 @@ export function postCheckRun(
       timeout: 15000,
     },
   );
-  const checkRun = JSON.parse(output);
-  if (!validPublishedCheckRun(checkRun, payload, expectedAppId)) {
-    throw new Error('GitHub returned a mismatched CheckRun');
+  const status = JSON.parse(output);
+  if (!validPublishedStatus(status, payload)) {
+    throw new Error('GitHub returned a mismatched commit status');
   }
-  return checkRun;
+  return status;
 }
 
-export function ensurePublishedCheckRun(
+// Idempotent SHA-bound publication: reuse the exact status when it is already
+// the latest for its context, refuse when the latest conflicts (same context,
+// different verdict payload — someone else wrote our reserved context), and
+// verify by readback after posting. The SHA binding is the API path itself.
+export function ensurePublishedStatus(
   context,
   headOid,
-  summary,
+  summaryHash,
   repository,
-  expectedAppId = null,
   overrides = {},
 ) {
-  const payload = buildCheckRun(context, headOid, summary);
-  const fetchChecks = overrides.fetchChecks ?? fetchPublicationCheckRuns;
-  const publish = overrides.publish ?? postCheckRun;
+  const payload = buildCommitStatus(context, headOid, summaryHash);
+  const fetchStatuses = overrides.fetchStatuses ?? fetchPublicationStatuses;
+  const publish = overrides.publish ?? postCommitStatus;
   const select = (snapshot) => {
     if (snapshot?.complete !== true || !Array.isArray(snapshot.items)) {
-      throw new Error(`${payload.name} CheckRun evidence is incomplete`);
+      throw new Error(`${payload.context} status evidence is incomplete`);
     }
     const matches = snapshot.items.filter(
-      (checkRun) =>
-        checkRun?.name === payload.name
-        && checkRunHead(checkRun) === headOid,
+      (status) => status?.context === payload.context,
     );
     if (matches.length === 0) return null;
     if (
-      matches.some((checkRun) =>
-        !validPublishedCheckRun(checkRun, payload, expectedAppId))
-      || new Set(matches.map((checkRun) => checkRun.app.id)).size !== 1
+      matches.length !== 1
+      || !validPublishedStatus(matches[0], payload)
     ) {
-      throw new Error(`${payload.name} exact-head CheckRuns conflict with evidence`);
+      throw new Error(`${payload.context} latest status conflicts with evidence`);
     }
-    return [...matches].sort((left, right) => left.id - right.id)[0];
+    return matches[0];
   };
-  const existing = select(fetchChecks(repository, headOid));
+  const existing = select(fetchStatuses(repository, headOid));
   if (existing) return existing;
-  let posted;
   try {
-    posted = publish(repository, payload, expectedAppId);
+    publish(repository, headOid, payload);
   } catch (error) {
-    const recovered = select(fetchChecks(repository, headOid));
+    const recovered = select(fetchStatuses(repository, headOid));
     if (recovered) return recovered;
     throw error;
   }
-  if (!validPublishedCheckRun(posted, payload, expectedAppId)) {
-    throw new Error(`${payload.name} publication response conflicts with evidence`);
-  }
-  const observed = select(fetchChecks(repository, headOid));
+  const observed = select(fetchStatuses(repository, headOid));
   if (!observed) {
-    throw new Error(`${payload.name} CheckRun postcondition is unverified`);
+    throw new Error(`${payload.context} status postcondition is unverified`);
   }
   return observed;
 }
@@ -1903,60 +1759,6 @@ function terminalStateMatches(state, input) {
   );
 }
 
-function validateModeCheckRequirements(
-  delivery,
-  nonManual,
-  expectedAppId,
-  publishedChecks = null,
-) {
-  const required = delivery?.liveEvidence?.requiredChecks;
-  if (!Array.isArray(required)) {
-    throw new Error('live required-check evidence is unavailable');
-  }
-  const workflow = required.filter((check) =>
-    String(check?.name ?? '').startsWith('agentic/'));
-  const names = workflow.map((check) => check.name);
-  if (
-    new Set(names).size !== names.length
-    || workflow.some((check) =>
-      typeof check?.name !== 'string'
-      || !Number.isSafeInteger(check?.appId)
-      || check.appId < 1)
-  ) {
-    throw new Error('server-pinned workflow CheckRuns are invalid or ambiguous');
-  }
-  const allowed = nonManual
-    ? NON_MANUAL_TERMINAL_CHECKS
-    : MANUAL_TERMINAL_CHECKS;
-  if (
-    names.some((name) => !allowed.has(name))
-    || (
-      nonManual
-      && [...NON_MANUAL_TERMINAL_CHECKS].some((name) => !names.includes(name))
-    )
-  ) {
-    throw new Error('server-pinned workflow CheckRuns do not match terminal mode');
-  }
-  if (
-    expectedAppId !== null
-    && workflow.some((check) => check.appId !== expectedAppId)
-  ) {
-    throw new Error('server-pinned workflow CheckRun producer does not match publisher');
-  }
-  if (publishedChecks !== null) {
-    for (const requirement of workflow) {
-      const context = requirement.name.slice('agentic/'.length);
-      const checkRun = publishedChecks[context];
-      if (
-        !Number.isSafeInteger(checkRun?.app?.id)
-        || checkRun.app.id !== requirement.appId
-      ) {
-        throw new Error(`${requirement.name} does not match its server producer pin`);
-      }
-    }
-  }
-}
-
 function deliveredState(state) {
   return (
     state.draft === false
@@ -2014,17 +1816,22 @@ export function finalizeTerminalDelivery(input, context = {}) {
       },
     },
   };
+  // The only implemented non-manual mode is solo (docs/specs/simple-delivery.md):
+  // one credential writes everything, so App-separated multi-actor evidence is
+  // unprovable by construction. A non-manual config that has not recorded both
+  // solo acknowledgements is a typed refusal, not a degraded run.
   const nonManual = config.merge.policy !== 'manual';
-  if (nonManual && input.expectedAppId === null) {
-    throw new Error('non-manual terminal finalization requires --expect-app-id');
-  }
   if (
-    nonManual !== (input.ownershipAttestation !== null)
+    nonManual
+    && (
+      config.merge.soloOperatorAcknowledged !== true
+      || config.merge.unverifiedInvocationAcknowledged !== true
+    )
   ) {
     throw new Error(
-      nonManual
-        ? 'non-manual terminal finalization requires ownership evidence'
-        : 'manual terminal finalization forbids non-manual ownership evidence',
+      'non-manual terminal finalization is solo-only: record '
+      + 'merge.soloOperatorAcknowledged and merge.unverifiedInvocationAcknowledged '
+      + '(docs/specs/simple-delivery.md) or use merge.policy manual',
     );
   }
   const review = (adapters.review ?? reviewSummary)(
@@ -2042,53 +1849,18 @@ export function finalizeTerminalDelivery(input, context = {}) {
   if (!samePublicationSnapshot(snapshot, afterGate)) {
     throw new Error('checkout or publication repository changed during terminal gate');
   }
-  const ensure = adapters.ensureCheck ?? (
-    (name, headOid, summary) => ensurePublishedCheckRun(
+  const ensure = adapters.ensureStatus ?? (
+    (name, headOid, summaryHash) => ensurePublishedStatus(
       name,
       headOid,
-      summary,
+      summaryHash,
       snapshot.repository,
-      input.expectedAppId,
     )
   );
-  const checks = {
-    review: ensure(
-      'review',
-      input.record.headOid,
-      review,
-      snapshot.repository,
-      input.expectedAppId,
-    ),
-    gate: ensure(
-      'gate',
-      input.record.headOid,
-      gate,
-      snapshot.repository,
-      input.expectedAppId,
-    ),
+  const statuses = {
+    review: ensure('review', input.record.headOid, sha256(review)),
+    gate: ensure('gate', input.record.headOid, sha256(gate)),
   };
-  if (nonManual) {
-    const ownershipErrors = validateAttestation(input.ownershipAttestation, {
-      kind: 'ownership',
-      headOid: input.record.headOid,
-    });
-    if (
-      ownershipErrors.length > 0
-      || input.ownershipAttestation.issue !== input.record.issue
-    ) {
-      throw new Error(
-        `ownership evidence does not match terminal identity`
-        + (ownershipErrors.length > 0 ? `: ${ownershipErrors.join('; ')}` : ''),
-      );
-    }
-    checks.ownership = ensure(
-      'ownership',
-      input.record.headOid,
-      serializeAttestation(input.ownershipAttestation),
-      snapshot.repository,
-      input.expectedAppId,
-    );
-  }
   const deliveryRequest = {
     schemaVersion: 1,
     repository: `${snapshot.repository.owner}/${snapshot.repository.repo}`,
@@ -2106,9 +1878,6 @@ export function finalizeTerminalDelivery(input, context = {}) {
     || delivery.headOid !== input.record.headOid
     || delivery.liveEvidence?.baseRefName !== config.baseBranch
     || !HASH_RE.test(
-      delivery.requirementsPolicy?.sourceFingerprint ?? '',
-    )
-    || !HASH_RE.test(
       delivery.liveEvidence?.provenance?.evidenceFingerprint ?? '',
     )
   ) {
@@ -2116,23 +1885,15 @@ export function finalizeTerminalDelivery(input, context = {}) {
       `exact-head delivery is not green (${delivery?.state ?? 'unknown'}/${delivery?.code ?? 'unknown'})`,
     );
   }
-  validateModeCheckRequirements(
-    delivery,
-    nonManual,
-    input.expectedAppId,
-  );
   const record = createPremergeRecord({
     ...structuredClone(input.record),
     review: {
-      checkRunId: checks.review.id,
       summaryHash: sha256(review),
     },
     gate: {
-      checkRunId: checks.gate.id,
       summaryHash: sha256(gate),
     },
     ci: {
-      policyHash: delivery.requirementsPolicy.sourceFingerprint,
       evidenceHash: delivery.liveEvidence.provenance.evidenceFingerprint,
     },
   });
@@ -2162,21 +1923,6 @@ export function finalizeTerminalDelivery(input, context = {}) {
   if (binding?.verified !== true) {
     throw new Error('lifecycle premerge binding postcondition is unverified');
   }
-  if (nonManual) {
-    checks.policy = ensure(
-      'policy',
-      input.record.headOid,
-      serializeAttestation(premerge.attestation),
-      snapshot.repository,
-      input.expectedAppId,
-    );
-  }
-  validateModeCheckRequirements(
-    delivery,
-    nonManual,
-    input.expectedAppId,
-    checks,
-  );
   const beforeEffects = (adapters.snapshot ?? snapshotExecutionRepository)(
     snapshot.checkout.root,
   );
@@ -2207,18 +1953,11 @@ export function finalizeTerminalDelivery(input, context = {}) {
   if (
     effectDelivery?.canMarkDelivered !== true
     || effectDelivery.headOid !== record.headOid
-    || effectDelivery.requirementsPolicy?.sourceFingerprint !== record.ci.policyHash
     || effectDelivery.liveEvidence?.provenance?.evidenceFingerprint
       !== record.ci.evidenceHash
   ) {
     throw new Error('exact-head delivery evidence changed before terminal effects');
   }
-  validateModeCheckRequirements(
-    effectDelivery,
-    nonManual,
-    input.expectedAppId,
-    checks,
-  );
   state = fetchState(
     snapshot.repository,
     input.record.issue,
@@ -2246,18 +1985,11 @@ export function finalizeTerminalDelivery(input, context = {}) {
   if (
     finalDelivery?.canMarkDelivered !== true
     || finalDelivery.headOid !== record.headOid
-    || finalDelivery.requirementsPolicy?.sourceFingerprint !== record.ci.policyHash
     || finalDelivery.liveEvidence?.provenance?.evidenceFingerprint
       !== record.ci.evidenceHash
   ) {
     throw new Error('terminal delivery evidence changed after finalization');
   }
-  validateModeCheckRequirements(
-    finalDelivery,
-    nonManual,
-    input.expectedAppId,
-    checks,
-  );
   const observe = adapters.observePremerge ?? (
     (attestation) => observePremergeRecord(
       attestation,
@@ -2279,13 +2011,13 @@ export function finalizeTerminalDelivery(input, context = {}) {
     throw new Error('checkout or publication repository changed during terminal effects');
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     mode: config.merge.policy,
     headOid: record.headOid,
     ready: true,
     delivered: true,
-    checks: Object.fromEntries(
-      Object.entries(checks).map(([name, checkRun]) => [name, checkRun.id]),
+    statuses: Object.fromEntries(
+      Object.entries(statuses).map(([name, status]) => [name, status.context]),
     ),
     record,
     premerge: {
@@ -2326,8 +2058,6 @@ export function validateTerminalInput(input) {
     'schemaVersion',
     'record',
     'reviewEvidence',
-    'ownershipAttestation',
-    'expectedAppId',
   ])) {
     return ['terminal input must contain only the closed v1 fields'];
   }
@@ -2380,24 +2110,6 @@ export function validateTerminalInput(input) {
   ) {
     errors.push('reviewEvidence: expected an object');
   }
-  if (
-    input.ownershipAttestation !== null
-    && (
-      typeof input.ownershipAttestation !== 'object'
-      || Array.isArray(input.ownershipAttestation)
-    )
-  ) {
-    errors.push('ownershipAttestation: expected an object or null');
-  }
-  if (
-    input.expectedAppId !== null
-    && (
-      !Number.isSafeInteger(input.expectedAppId)
-      || input.expectedAppId < 1
-    )
-  ) {
-    errors.push('expectedAppId: expected a positive safe integer or null');
-  }
   return errors;
 }
 
@@ -2407,8 +2119,6 @@ export function parseTerminalCommandArgs(args) {
     command: 'terminal-finalize',
     requestFile: null,
     reviewEvidenceFile: null,
-    ownershipAttestationFile: null,
-    expectedAppId: null,
     error: null,
   };
   for (let index = 1; index < args.length; index += 1) {
@@ -2417,7 +2127,6 @@ export function parseTerminalCommandArgs(args) {
     const pathField = new Map([
       ['--request-file', 'requestFile'],
       ['--review-evidence-file', 'reviewEvidenceFile'],
-      ['--ownership-attestation-file', 'ownershipAttestationFile'],
     ]).get(flag);
     if (
       pathField
@@ -2427,19 +2136,6 @@ export function parseTerminalCommandArgs(args) {
       && !value.startsWith('-')
     ) {
       parsed[pathField] = value;
-      index += 1;
-      continue;
-    }
-    if (
-      flag === '--expect-app-id'
-      && parsed.expectedAppId === null
-      && /^[1-9][0-9]*$/u.test(value ?? '')
-    ) {
-      parsed.expectedAppId = Number(value);
-      if (!Number.isSafeInteger(parsed.expectedAppId)) {
-        parsed.error = '--expect-app-id must be a positive safe integer';
-        return parsed;
-      }
       index += 1;
       continue;
     }
@@ -2556,10 +2252,7 @@ export function parseArgs(args) {
   const parsed = {
     ctx,
     sha,
-    summaryFile: null,
-    attestationFile: null,
     reviewEvidenceFile: null,
-    expectedAppId: null,
     selfTest: args.length === 1 && args[0] === '--self-test',
     error: null,
   };
@@ -2572,21 +2265,6 @@ export function parseArgs(args) {
   for (let index = 0; index < rest.length; index += 1) {
     const flag = rest[index];
     const value = rest[index + 1];
-    if (flag === '--summary-file' && parsed.summaryFile === null && value && !value.startsWith('-')) {
-      parsed.summaryFile = value;
-      index += 1;
-      continue;
-    }
-    if (
-      flag === '--attestation-file'
-      && parsed.attestationFile === null
-      && value
-      && !value.startsWith('-')
-    ) {
-      parsed.attestationFile = value;
-      index += 1;
-      continue;
-    }
     if (
       flag === '--review-evidence-file'
       && parsed.reviewEvidenceFile === null
@@ -2597,42 +2275,16 @@ export function parseArgs(args) {
       index += 1;
       continue;
     }
-    if (flag === '--expect-app-id' && parsed.expectedAppId === null && /^\d+$/.test(value ?? '')) {
-      parsed.expectedAppId = Number(value);
-      if (!Number.isSafeInteger(parsed.expectedAppId) || parsed.expectedAppId < 1) {
-        parsed.error = '--expect-app-id must be a positive safe integer';
-        return parsed;
-      }
-      index += 1;
-      continue;
-    }
     parsed.error = `unknown, duplicate, or incomplete option: ${flag ?? 'missing'}`;
     return parsed;
   }
-  if (ATTESTATION_CONTEXTS.has(ctx)) {
-    if (
-      parsed.attestationFile === null
-      || parsed.summaryFile !== null
-      || parsed.reviewEvidenceFile !== null
-    ) {
-      parsed.error =
-        `${ctx} requires --attestation-file and forbids other evidence files`;
-    }
-  } else if (ctx === 'review') {
-    if (
-      parsed.reviewEvidenceFile === null
-      || parsed.summaryFile !== null
-      || parsed.attestationFile !== null
-    ) {
+  if (ctx === 'review') {
+    if (parsed.reviewEvidenceFile === null) {
       parsed.error =
         'review requires --review-evidence-file and forbids other evidence files';
     }
   } else if (ctx === 'gate') {
-    if (
-      parsed.summaryFile !== null
-      || parsed.attestationFile !== null
-      || parsed.reviewEvidenceFile !== null
-    ) {
+    if (parsed.reviewEvidenceFile !== null) {
       parsed.error = 'gate executes cfg.gate.command and forbids caller-authored evidence';
     }
   }
@@ -2643,9 +2295,9 @@ function selfTest() {
   const cases = [
     [['gate', 'a'.repeat(40)], true],
     [['review', 'a'.repeat(40)], true],
-    [['ownership', 'a'.repeat(40)], true],
-    [['policy', 'a'.repeat(40)], true],
-    [['human-authorization', 'a'.repeat(40)], true],
+    [['ownership', 'a'.repeat(40)], false], // retired CheckRun-era context
+    [['policy', 'a'.repeat(40)], false], // retired CheckRun-era context
+    [['human-authorization', 'a'.repeat(40)], false], // retired CheckRun-era context
     [['deploy', 'a'.repeat(40)], false], // context outside the closed enum
     [[undefined, 'a'.repeat(40)], false],
     [['gate', 'a'.repeat(39)], false], // too short
@@ -2662,99 +2314,105 @@ function selfTest() {
       console.error(`FAIL [expect ${expect}]: ctx=${ctx} sha=${String(sha).slice(0, 8)}`);
     }
   }
-  const payload = buildCheckRun('gate', 'a'.repeat(40), 'gate passed', '2026-07-24T00:00:00.000Z');
+  const statusPayload = buildCommitStatus('gate', 'a'.repeat(40), 'f'.repeat(64));
   if (
-    payload.name !== 'agentic/gate'
-    || payload.head_sha !== 'a'.repeat(40)
-    || payload.status !== 'completed'
-    || payload.conclusion !== 'success'
-    || payload.completed_at !== '2026-07-24T00:00:00.000Z'
+    statusPayload.context !== 'agentic/gate'
+    || statusPayload.state !== 'success'
+    || statusPayload.description !== `autoloop gate verified · sha256:${'f'.repeat(16)}`
+    || statusPayload.description.length > 140
   ) {
-    console.error('FAIL verdict publishes as a completed CheckRun');
+    console.error('FAIL verdict publishes as a success commit status');
   } else passed += 1;
-  if (hasTrustedProducer({ app: { id: 42, slug: 'autoloop-verdicts' } }, [42])) {
+  let invalidDescriptionRejected = false;
+  try {
+    buildStatusDescription('deploy', 'f'.repeat(64));
+  } catch {
+    invalidDescriptionRejected = true;
+  }
+  try {
+    invalidDescriptionRejected = invalidDescriptionRejected
+      && (buildStatusDescription('gate', 'not-a-hash') && false);
+  } catch {
+    // second refusal confirmed
+  }
+  if (invalidDescriptionRejected) {
     passed += 1;
   } else {
-    console.error('FAIL configured GitHub App producer is accepted');
+    console.error('FAIL status descriptions require closed context and SHA-256 hash');
   }
-  if (!hasTrustedProducer({ app: { id: 7, slug: 'unknown' } }, [42])) {
-    passed += 1;
-  } else {
-    console.error('FAIL unconfigured producer is rejected');
-  }
-  const paginationHead = 'a'.repeat(40);
-  const paginatedCheckRuns = Array.from({ length: 101 }, (_, index) => ({
-    id: index + 1,
-    name: `check-${index + 1}`,
-    head_sha: paginationHead,
-    status: 'completed',
-    conclusion: 'success',
-    app: { id: 1 },
-    output: { summary: `summary-${index + 1}` },
-  }));
-  let paginationCalls = 0;
-  const paginated = fetchPublicationCheckRuns(
+  const statusHead = 'a'.repeat(40);
+  const statusItems = [
+    { context: 'agentic/gate', state: 'success', description: 'autoloop gate verified · sha256:0000000000000000' },
+    { context: 'ci/test', state: 'success', description: null },
+  ];
+  let statusReads = 0;
+  const stableStatuses = fetchPublicationStatuses(
     { host: 'github.com', owner: 'autoloop', repo: 'fixture' },
-    paginationHead,
-    (_repository, endpoint) => {
-      paginationCalls += 1;
-      const page = Number(new URL(`https://github.invalid/${endpoint}`).searchParams.get('page'));
-      return {
-        total_count: paginatedCheckRuns.length,
-        check_runs: page === 1
-          ? paginatedCheckRuns.slice(0, 100)
-          : paginatedCheckRuns.slice(100),
-      };
+    statusHead,
+    () => {
+      statusReads += 1;
+      return { sha: statusHead, statuses: structuredClone(statusItems) };
     },
   );
   if (
-    paginated.complete
-    && paginated.items.length === paginatedCheckRuns.length
-    && paginationCalls === 4
+    stableStatuses.complete
+    && stableStatuses.items.length === statusItems.length
+    && statusReads === 2
+    && stableStatuses.items.every((status) => typeof status.description === 'string')
   ) {
     passed += 1;
   } else {
-    console.error('FAIL policy CheckRuns use explicit complete stable page reads');
+    console.error('FAIL publication statuses use explicit complete stable reads');
   }
-  let mutationCalls = 0;
-  let changedCheckRunsRejected = false;
+  let statusMutationCalls = 0;
+  let changedStatusesRejected = false;
   try {
-    fetchPublicationCheckRuns(
+    fetchPublicationStatuses(
       { host: 'github.com', owner: 'autoloop', repo: 'fixture' },
-      paginationHead,
+      statusHead,
       () => {
-        mutationCalls += 1;
+        statusMutationCalls += 1;
         return {
-          total_count: 1,
-          check_runs: [{
-            ...paginatedCheckRuns[0],
-            output: {
-              summary: mutationCalls > 1 ? 'changed-summary' : 'summary-1',
-            },
+          sha: statusHead,
+          statuses: [{
+            ...statusItems[0],
+            state: statusMutationCalls > 1 ? 'pending' : 'success',
           }],
         };
       },
     );
   } catch {
-    changedCheckRunsRejected = true;
+    changedStatusesRejected = true;
   }
-  if (changedCheckRunsRejected && mutationCalls === 2) {
+  if (changedStatusesRejected && statusMutationCalls === 2) {
     passed += 1;
   } else {
-    console.error('FAIL changing policy CheckRun evidence is rejected');
+    console.error('FAIL changing publication status evidence is rejected');
+  }
+  let wrongHeadStatusesRejected = false;
+  try {
+    fetchPublicationStatuses(
+      { host: 'github.com', owner: 'autoloop', repo: 'fixture' },
+      statusHead,
+      () => ({ sha: 'b'.repeat(40), statuses: [] }),
+    );
+  } catch {
+    wrongHeadStatusesRejected = true;
+  }
+  if (wrongHeadStatusesRejected) {
+    passed += 1;
+  } else {
+    console.error('FAIL status evidence for the wrong head is rejected');
   }
   const parsed = parseArgs([
     'review',
     'a'.repeat(40),
     '--review-evidence-file',
     '/tmp/review.json',
-    '--expect-app-id',
-    '42',
   ]);
   if (
     !parsed.error
     && parsed.reviewEvidenceFile === '/tmp/review.json'
-    && parsed.expectedAppId === 42
   ) {
     passed += 1;
   } else {
@@ -2763,19 +2421,20 @@ function selfTest() {
   const inline = parseArgs(['gate', 'a'.repeat(40), 'untrusted inline summary']);
   if (inline.error) passed += 1;
   else console.error('FAIL inline summary is rejected');
-  const attestationArgs = parseArgs([
+  if (parseArgs([
+    'review',
+    'a'.repeat(40),
+    '--expect-app-id',
+    '42',
+  ]).error) passed += 1;
+  else console.error('FAIL retired --expect-app-id is rejected');
+  if (parseArgs([
     'ownership',
     'a'.repeat(40),
     '--attestation-file',
     '/tmp/ownership.json',
-  ]);
-  if (!attestationArgs.error && attestationArgs.attestationFile === '/tmp/ownership.json') {
-    passed += 1;
-  } else {
-    console.error('FAIL ownership attestation args parse');
-  }
-  if (parseArgs(['policy', 'a'.repeat(40)]).error) passed += 1;
-  else console.error('FAIL policy requires an attestation file');
+  ]).error) passed += 1;
+  else console.error('FAIL retired attestation contexts are rejected');
   if (parseArgs([
     'gate',
     'a'.repeat(40),
@@ -2799,33 +2458,6 @@ function selfTest() {
     '/tmp/review.txt',
   ]).error) passed += 1;
   else console.error('FAIL review rejects caller-authored summary evidence');
-  const ownership = {
-    kind: 'ownership',
-    v: 1,
-    headOid: 'a'.repeat(40),
-    issue: 7,
-    issueBodyHash: 'b'.repeat(64),
-    claimCommitOid: 'c'.repeat(40),
-    frozenPlanHash: 'd'.repeat(64),
-    frozenPlanCommentId: 'IC_kwDOAutoloop7',
-    frozenPlanAuthor: 'autoloop[bot]',
-  };
-  if (
-    validateAttestation(ownership, {
-      kind: 'ownership',
-      headOid: ownership.headOid,
-    }).length === 0
-    && buildCheckRun(
-      'ownership',
-      ownership.headOid,
-      serializeAttestation(ownership),
-      '2026-07-24T00:00:00.000Z',
-    ).name === 'agentic/ownership'
-  ) {
-    passed += 1;
-  } else {
-    console.error('FAIL ownership attestation builds a CheckRun');
-  }
   const planBody = 'frozen reviewed plan';
   const reviewSummaryValue =
     `Authenticated review convergence: REVIEW_CLEAN; round 2; receipt ${'2'.repeat(64)}.`;
@@ -2855,74 +2487,47 @@ function selfTest() {
     headOid: 'a'.repeat(40),
   };
   const lifecycleBody = serializeLifecycleMarker(lifecycleMarker);
-  const ciPolicySource = canonicalCiPolicy(['ci/test']);
-  const ciPolicy = {
-    complete: true,
-    source: ciPolicySource,
-    sourceHash: sha256(ciPolicySource),
-    requiredChecks: ['ci/test'],
-  };
-  const policyCheckRuns = {
+  const policyStatuses = {
     complete: true,
     items: [
       {
-        id: 101,
-        name: 'agentic/review',
-        head_sha: 'a'.repeat(40),
-        status: 'completed',
-        conclusion: 'success',
-        app: { id: 1 },
-        output: { summary: reviewSummaryValue },
+        context: 'agentic/gate',
+        state: 'success',
+        description: buildStatusDescription('gate', sha256(gateSummaryValue)),
       },
       {
-        id: 102,
-        name: 'agentic/gate',
-        head_sha: 'a'.repeat(40),
-        status: 'completed',
-        conclusion: 'success',
-        app: { id: 1 },
-        output: { summary: gateSummaryValue },
+        context: 'agentic/review',
+        state: 'success',
+        description: buildStatusDescription('review', sha256(reviewSummaryValue)),
       },
-      {
-        id: 103,
-        name: 'ci/test',
-        head_sha: 'a'.repeat(40),
-        status: 'completed',
-        conclusion: 'success',
-        app: { id: 2 },
-        output: { summary: 'CI passed' },
-      },
+      { context: 'ci/test', state: 'success', description: 'CI passed' },
     ],
   };
   const deliveryEvidence = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: 'github-rest',
     repository: 'autoloop/fixture',
     pullRequest: lifecycleMarker.pr,
     remoteHead: lifecycleMarker.headOid,
     baseRefName: 'main',
-    requiredChecks: [{ name: 'ci/test', appId: 2 }],
-    checks: policyCheckRuns.items.map((checkRun) => ({
-      id: checkRun.id,
-      name: checkRun.name,
-      headOid: checkRun.head_sha,
-      status: checkRun.status.toUpperCase(),
-      conclusion: checkRun.conclusion.toUpperCase(),
-      appId: checkRun.app.id,
-    })),
+    checks: [{
+      id: 103,
+      name: 'ci/test',
+      headOid: lifecycleMarker.headOid,
+      status: 'COMPLETED',
+      conclusion: 'SUCCESS',
+    }],
+    statuses: policyStatuses.items,
   };
   const delivery = {
     state: 'delivered',
     code: 'CI_GREEN',
     canMarkDelivered: true,
     headOid: lifecycleMarker.headOid,
-    requirementsPolicy: {
-      sourceFingerprint: ciPolicy.sourceHash,
-    },
     liveEvidence: {
       ...deliveryEvidence,
       provenance: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         source: 'github-rest',
         repository: deliveryEvidence.repository,
         pullRequest: deliveryEvidence.pullRequest,
@@ -2943,15 +2548,12 @@ function selfTest() {
       contentHash: sha256(planBody),
     },
     review: {
-      checkRunId: 101,
       summaryHash: sha256(reviewSummaryValue),
     },
     gate: {
-      checkRunId: 102,
       summaryHash: sha256(gateSummaryValue),
     },
     ci: {
-      policyHash: ciPolicy.sourceHash,
       evidenceHash: delivery.liveEvidence.provenance.evidenceFingerprint,
     },
     lifecycle: {
@@ -3009,8 +2611,7 @@ function selfTest() {
         policyComment,
       ],
     },
-    checkRuns: policyCheckRuns,
-    ciPolicy,
+    statuses: policyStatuses,
     delivery,
   };
   if (authorizePolicyPublication(policy, policyLive).authorized) {
@@ -3075,15 +2676,29 @@ function selfTest() {
   }
   if (!authorizePolicyPublication(policy, {
     ...policyLive,
-    checkRuns: {
+    statuses: {
       complete: true,
-      items: policyLive.checkRuns.items.filter((checkRun) =>
-        checkRun.id !== premerge.review.checkRunId),
+      items: policyLive.statuses.items.filter((status) =>
+        status.context !== 'agentic/review'),
     },
   }).authorized) {
     passed += 1;
   } else {
-    console.error('FAIL canonical wrapper cannot authorize nonexistent component IDs or hashes');
+    console.error('FAIL canonical wrapper cannot authorize an absent verdict status');
+  }
+  if (!authorizePolicyPublication(policy, {
+    ...policyLive,
+    statuses: {
+      complete: true,
+      items: policyLive.statuses.items.map((status) =>
+        (status.context === 'agentic/review'
+          ? { ...status, description: buildStatusDescription('review', 'd'.repeat(64)) }
+          : status)),
+    },
+  }).authorized) {
+    passed += 1;
+  } else {
+    console.error('FAIL a verdict status with a foreign summary hash cannot authorize');
   }
   const parsedCreate = parsePremergeCommandArgs([
     'premerge-create',
@@ -3262,8 +2877,7 @@ function selfTest() {
           },
         };
       },
-      checkRuns: () => policyCheckRuns,
-      ciPolicy: () => ciPolicy,
+      statuses: () => policyStatuses,
       delivery: () => delivery,
     },
   );
@@ -3275,28 +2889,6 @@ function selfTest() {
     passed += 1;
   } else {
     console.error('FAIL policy publication hydrates every linked-issue comment page');
-  }
-  const authorization = {
-    kind: 'human-authorization',
-    v: 1,
-    headOid: 'a'.repeat(40),
-    pullRequest: 12,
-    actor: 'maintainer',
-    label: 'risk:pure-deletion',
-    labelEventId: 123456,
-    labeledAt: '2026-07-24T00:00:00Z',
-  };
-  if (
-    buildCheckRun(
-      'human-authorization',
-      authorization.headOid,
-      serializeAttestation(authorization),
-      '2026-07-24T00:00:00.000Z',
-    ).output.summary.includes('"labelEventId":123456')
-  ) {
-    passed += 1;
-  } else {
-    console.error('FAIL human authorization publishes immutable label-event identity');
   }
   const reviewCheckout = {
     root: '/repo',
@@ -3350,11 +2942,11 @@ function selfTest() {
       host: 'github.example.com',
       owner: 'autoloop',
       repo: 'review-fixture',
-    });
+    }, 'a'.repeat(40));
     if (
       apiArgs[1] === '--hostname'
       && apiArgs[2] === 'github.example.com'
-      && apiArgs[3] === 'repos/autoloop/review-fixture/check-runs'
+      && apiArgs[3] === `repos/autoloop/review-fixture/statuses/${'a'.repeat(40)}`
       && !apiArgs.join(' ').includes('attacker')
       && !apiArgs.join(' ').includes('{owner}')
     ) {
@@ -3371,7 +2963,7 @@ function selfTest() {
       host: 'github.com',
       owner: '../attacker',
       repo: 'review-fixture',
-    });
+    }, 'a'.repeat(40));
     console.error('FAIL publication rejects an invalid repository target');
   } catch {
     passed += 1;
@@ -3435,105 +3027,73 @@ function selfTest() {
   } catch {
     passed += 1;
   }
-  const ensuredChecks = [];
+  const ensuredStatuses = [];
   let ensurePublications = 0;
   const ensureOverrides = {
-    fetchChecks: () => ({
+    fetchStatuses: () => ({
       complete: true,
-      items: structuredClone(ensuredChecks),
+      items: structuredClone(ensuredStatuses),
     }),
-    publish: (_repository, checkPayload) => {
+    publish: (_repository, _headOid, payload) => {
       ensurePublications += 1;
-      const checkRun = {
-        id: 700 + ensurePublications,
-        name: checkPayload.name,
-        head_sha: checkPayload.head_sha,
-        status: checkPayload.status,
-        conclusion: checkPayload.conclusion,
-        app: { id: 42 },
-        output: structuredClone(checkPayload.output),
-      };
-      ensuredChecks.push(checkRun);
-      return structuredClone(checkRun);
+      ensuredStatuses.push(structuredClone(payload));
+      return structuredClone(payload);
     },
   };
-  const ensured = ensurePublishedCheckRun(
+  const reviewHash = sha256(reviewSummaryValue);
+  const ensured = ensurePublishedStatus(
     'review',
     premerge.headOid,
-    reviewSummaryValue,
+    reviewHash,
     operationalRepository,
-    42,
     ensureOverrides,
   );
-  const reused = ensurePublishedCheckRun(
+  const reused = ensurePublishedStatus(
     'review',
     premerge.headOid,
-    reviewSummaryValue,
+    reviewHash,
     operationalRepository,
-    42,
     ensureOverrides,
   );
-  ensuredChecks.push({
-    ...structuredClone(ensured),
-    id: ensured.id + 100,
-  });
-  const duplicateReused = ensurePublishedCheckRun(
-    'review',
-    premerge.headOid,
-    reviewSummaryValue,
-    operationalRepository,
-    42,
-    ensureOverrides,
-  );
-  let conflictingCheckRejected = false;
+  let conflictingStatusRejected = false;
   try {
-    ensurePublishedCheckRun(
+    ensurePublishedStatus(
       'review',
       premerge.headOid,
-      'different summary',
+      'd'.repeat(64),
       operationalRepository,
-      42,
       ensureOverrides,
     );
   } catch {
-    conflictingCheckRejected = true;
+    conflictingStatusRejected = true;
   }
-  const timeoutChecks = [];
-  const recoveredAfterTimeout = ensurePublishedCheckRun(
+  const timeoutStatuses = [];
+  const recoveredAfterTimeout = ensurePublishedStatus(
     'gate',
     premerge.headOid,
-    gateSummaryValue,
+    sha256(gateSummaryValue),
     operationalRepository,
-    42,
     {
-      fetchChecks: () => ({
+      fetchStatuses: () => ({
         complete: true,
-        items: structuredClone(timeoutChecks),
+        items: structuredClone(timeoutStatuses),
       }),
-      publish: (_repository, checkPayload) => {
-        timeoutChecks.push({
-          id: 999,
-          name: checkPayload.name,
-          head_sha: checkPayload.head_sha,
-          status: checkPayload.status,
-          conclusion: checkPayload.conclusion,
-          app: { id: 42 },
-          output: structuredClone(checkPayload.output),
-        });
+      publish: (_repository, _headOid, payload) => {
+        timeoutStatuses.push(structuredClone(payload));
         throw new Error('simulated response loss');
       },
     },
   );
   if (
-    ensured.id === reused.id
-    && duplicateReused.id === ensured.id
+    ensured.context === 'agentic/review'
+    && reused.description === ensured.description
     && ensurePublications === 1
-    && conflictingCheckRejected
-    && recoveredAfterTimeout.id === 999
+    && conflictingStatusRejected
+    && recoveredAfterTimeout.context === 'agentic/gate'
   ) {
     passed += 1;
   } else {
-    console.error('FAIL exact-head CheckRun publication is idempotent and conflict-safe');
+    console.error('FAIL exact-head status publication is idempotent and conflict-safe');
   }
   const stateLabels = Array.from(
     { length: 101 },
@@ -3584,22 +3144,34 @@ function selfTest() {
     '/tmp/terminal.json',
     '--review-evidence-file',
     '/tmp/review.json',
-    '--ownership-attestation-file',
-    '/tmp/ownership.json',
-    '--expect-app-id',
-    '42',
   ]);
   if (
     terminalArgs
     && !terminalArgs.error
     && terminalArgs.requestFile === '/tmp/terminal.json'
     && terminalArgs.reviewEvidenceFile === '/tmp/review.json'
-    && terminalArgs.ownershipAttestationFile === '/tmp/ownership.json'
-    && terminalArgs.expectedAppId === 42
+    && parseTerminalCommandArgs([
+      'terminal-finalize',
+      '--request-file',
+      '/tmp/terminal.json',
+      '--review-evidence-file',
+      '/tmp/review.json',
+      '--ownership-attestation-file',
+      '/tmp/ownership.json',
+    ]).error
+    && parseTerminalCommandArgs([
+      'terminal-finalize',
+      '--request-file',
+      '/tmp/terminal.json',
+      '--review-evidence-file',
+      '/tmp/review.json',
+      '--expect-app-id',
+      '42',
+    ]).error
   ) {
     passed += 1;
   } else {
-    console.error('FAIL closed terminal-finalize CLI parses');
+    console.error('FAIL closed terminal-finalize CLI parses and rejects retired flags');
   }
   const terminalInput = {
     schemaVersion: 1,
@@ -3612,8 +3184,6 @@ function selfTest() {
       lifecycle: { commentId: premerge.lifecycle.commentId },
     },
     reviewEvidence: { round: 2 },
-    ownershipAttestation: null,
-    expectedAppId: null,
   };
   if (
     validateTerminalInput(terminalInput).length === 0
@@ -3745,24 +3315,16 @@ function selfTest() {
   } else {
     console.error('FAIL lifecycle head binding rejects a CAS race');
   }
-  const terminalChecks = new Map([
+  const terminalStatuses = new Map([
     ['review', {
-      id: premerge.review.checkRunId,
-      name: 'agentic/review',
-      head_sha: premerge.headOid,
-      status: 'completed',
-      conclusion: 'success',
-      app: { id: 42 },
-      output: { summary: reviewSummaryValue },
+      state: 'success',
+      context: 'agentic/review',
+      description: buildStatusDescription('review', sha256(reviewSummaryValue)),
     }],
     ['gate', {
-      id: premerge.gate.checkRunId,
-      name: 'agentic/gate',
-      head_sha: premerge.headOid,
-      status: 'completed',
-      conclusion: 'success',
-      app: { id: 42 },
-      output: { summary: gateSummaryValue },
+      state: 'success',
+      context: 'agentic/gate',
+      description: buildStatusDescription('gate', sha256(gateSummaryValue)),
     }],
   ]);
   const terminalSequence = [];
@@ -3781,9 +3343,9 @@ function selfTest() {
     },
     review: () => reviewSummaryValue,
     gate: () => gateSummaryValue,
-    ensureCheck: (context) => {
-      terminalSequence.push(`check:${context}`);
-      return structuredClone(terminalChecks.get(context));
+    ensureStatus: (context) => {
+      terminalSequence.push(`status:${context}`);
+      return structuredClone(terminalStatuses.get(context));
     },
     delivery: () => {
       terminalSequence.push('delivery');
@@ -3835,8 +3397,8 @@ function selfTest() {
     && terminalResult.record.recordId === premerge.recordId
     && terminalSequence.join(',') === [
       'head-bind',
-      'check:review',
-      'check:gate',
+      'status:review',
+      'status:gate',
       'delivery',
       'premerge',
       'bind',
@@ -3953,47 +3515,13 @@ function selfTest() {
   } else {
     console.error('FAIL a hard-blocked linked issue cannot become terminal');
   }
-  const ownershipCheck = {
-    id: 104,
-    name: 'agentic/ownership',
-    head_sha: premerge.headOid,
-    status: 'completed',
-    conclusion: 'success',
-    app: { id: 42 },
-    output: { summary: serializeAttestation(ownership) },
-  };
   const nonManualSequence = [];
-  const nonManualInput = {
-    ...structuredClone(terminalInput),
-    ownershipAttestation: {
-      ...ownership,
-      headOid: premerge.headOid,
-      issue: premerge.issue,
-    },
-    expectedAppId: 42,
-  };
-  const nonManualCheck = (context) => {
-    if (context === 'ownership') return structuredClone(ownershipCheck);
-    if (context === 'policy') {
-      return {
-        id: 105,
-        name: 'agentic/policy',
-        head_sha: premerge.headOid,
-        status: 'completed',
-        conclusion: 'success',
-        app: { id: 42 },
-        output: { summary: 'policy' },
-      };
-    }
-    return structuredClone(terminalChecks.get(context));
-  };
   const nonManualCommonAdapters = {
     ...terminalAdapters,
     config: () => ({
       ...structuredClone(gateConfig),
       merge: { policy: 'ratified' },
     }),
-    ensureCheck: nonManualCheck,
     createPremerge: (record) => ({
       created: false,
       attestation: policyAttestationForRecord(record, 'autoloop[bot]'),
@@ -4014,90 +3542,78 @@ function selfTest() {
       observation: { verified: true },
     }),
   };
-  let missingExpectedAppRejected = false;
+  // Non-manual without both recorded solo acknowledgements is a typed refusal:
+  // the v0.40 multi-actor unattended mode is retired, not degraded into.
+  let unacknowledgedNonManualRejected = false;
   try {
-    finalizeTerminalDelivery(
-      { ...structuredClone(nonManualInput), expectedAppId: null },
-      {
-        repositoryRoot: '/repo',
-        adapters: nonManualCommonAdapters,
-      },
-    );
-  } catch {
-    missingExpectedAppRejected = true;
-  }
-  if (missingExpectedAppRejected) {
-    passed += 1;
-  } else {
-    console.error('FAIL non-manual terminal publication requires a trusted App identity');
-  }
-  let missingModeChecksRejected = false;
-  try {
-    finalizeTerminalDelivery(nonManualInput, {
+    finalizeTerminalDelivery(structuredClone(terminalInput), {
       repositoryRoot: '/repo',
       adapters: nonManualCommonAdapters,
     });
-  } catch {
-    missingModeChecksRejected = true;
+  } catch (error) {
+    unacknowledgedNonManualRejected = error.message.includes('solo-only');
   }
-  if (missingModeChecksRejected) {
+  if (unacknowledgedNonManualRejected) {
     passed += 1;
   } else {
-    console.error('FAIL non-manual delivery requires every server-pinned mode check');
+    console.error('FAIL non-manual finalization without solo acknowledgements refuses typed');
   }
-  const nonManualDelivery = structuredClone(delivery);
-  nonManualDelivery.liveEvidence.requiredChecks = [
-    'gate',
-    'ownership',
-    'policy',
-    'review',
-  ].map((name) => ({ name: `agentic/${name}`, appId: 42 }));
-  const wrongProducerDelivery = structuredClone(nonManualDelivery);
-  wrongProducerDelivery.liveEvidence.requiredChecks =
-    wrongProducerDelivery.liveEvidence.requiredChecks.map(
-      (check) => ({ ...check, appId: 99 }),
-    );
-  let wrongModeProducerRejected = false;
+  let partiallyAcknowledgedRejected = false;
   try {
-    finalizeTerminalDelivery(nonManualInput, {
+    finalizeTerminalDelivery(structuredClone(terminalInput), {
       repositoryRoot: '/repo',
       adapters: {
         ...nonManualCommonAdapters,
-        delivery: () => structuredClone(wrongProducerDelivery),
+        config: () => ({
+          ...structuredClone(gateConfig),
+          merge: {
+            policy: 'ratified',
+            unverifiedInvocationAcknowledged: true,
+          },
+        }),
       },
     });
-  } catch {
-    wrongModeProducerRejected = true;
+  } catch (error) {
+    partiallyAcknowledgedRejected = error.message.includes('solo-only');
   }
-  if (wrongModeProducerRejected) {
+  if (partiallyAcknowledgedRejected) {
     passed += 1;
   } else {
-    console.error('FAIL terminal CheckRuns must match live server producer pins');
+    console.error('FAIL one acknowledgement alone cannot unlock non-manual finalization');
   }
-  const nonManualResult = finalizeTerminalDelivery(nonManualInput, {
+  const soloResult = finalizeTerminalDelivery(structuredClone(terminalInput), {
     repositoryRoot: '/repo',
     adapters: {
       ...nonManualCommonAdapters,
-      ensureCheck: (context, _headOid, _summary) => {
-        nonManualSequence.push(`check:${context}`);
-        return nonManualCheck(context);
+      config: () => ({
+        ...structuredClone(gateConfig),
+        merge: {
+          policy: 'ratified',
+          unverifiedInvocationAcknowledged: true,
+          soloOperatorAcknowledged: true,
+        },
+      }),
+      ensureStatus: (context) => {
+        nonManualSequence.push(`status:${context}`);
+        return structuredClone(terminalStatuses.get(context));
       },
       markReady: () => nonManualSequence.push('ready'),
       markDelivered: () => nonManualSequence.push('delivered'),
-      delivery: () => structuredClone(nonManualDelivery),
     },
   });
   if (
-    nonManualResult.ready === true
-    && nonManualResult.delivered === true
-    && nonManualSequence.join(',') ===
-      'check:review,check:gate,check:ownership,check:policy'
+    soloResult.ready === true
+    && soloResult.delivered === true
+    && soloResult.mode === 'ratified'
+    && soloResult.statuses.review === 'agentic/review'
+    && soloResult.statuses.gate === 'agentic/gate'
+    && nonManualSequence.join(',') === 'status:review,status:gate'
   ) {
     passed += 1;
   } else {
-    console.error('FAIL ready non-manual delivery publishes every mode check idempotently');
+    console.error('FAIL acknowledged solo delivery posts exactly the two verdict statuses');
   }
-  const total = cases.length + 47;
+  const total = cases.length + 45;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }
@@ -4166,20 +3682,10 @@ function runTerminalCli(parsed) {
       MAX_REVIEW_EVIDENCE_BYTES,
     ).toString('utf8'),
   );
-  const ownershipAttestation = parsed.ownershipAttestationFile === null
-    ? null
-    : JSON.parse(
-        readBoundedNoFollow(
-          parsed.ownershipAttestationFile,
-          MAX_AUXILIARY_EVIDENCE_BYTES,
-        ).toString('utf8'),
-      );
   return finalizeTerminalDelivery(
     {
       ...request,
       reviewEvidence,
-      ownershipAttestation,
-      expectedAppId: parsed.expectedAppId,
     },
     { repositoryRoot: process.cwd() },
   );
@@ -4255,31 +3761,6 @@ function main() {
         gateResult,
       );
       publicationSnapshot = currentSnapshot;
-    } else if (parsed.attestationFile !== null) {
-      const attestation = JSON.parse(
-        readBoundedNoFollow(
-          parsed.attestationFile,
-          MAX_AUXILIARY_EVIDENCE_BYTES,
-        ).toString('utf8'),
-      );
-      const errors = validateAttestation(attestation, {
-        kind: parsed.ctx,
-        headOid: parsed.sha,
-      });
-      if (errors.length > 0) throw new Error(errors.join('; '));
-      if (parsed.ctx === 'policy') {
-        const live = fetchPolicyPublicationEvidence(
-          publicationSnapshot.repository,
-          attestation,
-        );
-        const authorization = authorizePolicyPublication(attestation, live);
-        if (!authorization.authorized) {
-          throw new Error(
-            `policy premerge evidence is not live and complete (${authorization.code})`,
-          );
-        }
-      }
-      summary = serializeAttestation(attestation);
     } else if (parsed.reviewEvidenceFile !== null) {
       const bytes = readBoundedNoFollow(
         parsed.reviewEvidenceFile,
@@ -4307,35 +3788,17 @@ function main() {
     console.error(`publish-verdict: evidence file could not be read or validated: ${error.message}`);
     process.exit(1);
   }
-  const payload = buildCheckRun(parsed.ctx, parsed.sha, summary);
   try {
-    const output = execFileSync(
-      'gh',
-      buildGitHubApiArgs(publicationSnapshot.repository),
-      {
-        input: JSON.stringify(payload),
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 15000,
-      },
+    const summaryHash = sha256(summary);
+    const status = ensurePublishedStatus(
+      parsed.ctx,
+      parsed.sha,
+      summaryHash,
+      publicationSnapshot.repository,
     );
-    const checkRun = JSON.parse(output);
-    if (
-      checkRun.name !== payload.name
-      || checkRun.head_sha !== parsed.sha
-      || checkRun.status !== 'completed'
-      || checkRun.conclusion !== 'success'
-    ) {
-      throw new Error('GitHub returned a mismatched CheckRun');
-    }
-    if (
-      parsed.expectedAppId !== null
-      && !hasTrustedProducer(checkRun, [parsed.expectedAppId])
-    ) {
-      throw new Error(`CheckRun producer app ${checkRun.app?.id ?? 'unknown'} is not expected app ${parsed.expectedAppId}`);
-    }
     console.log(
-      `posted ${payload.name}=success on ${parsed.sha.slice(0, 12)} via app ${checkRun.app?.id ?? 'unknown'}`,
+      `posted ${status.context}=success on ${parsed.sha.slice(0, 12)}`
+      + ` · sha256:${summaryHash.slice(0, 16)}`,
     );
   } catch (error) {
     console.error(`publish-verdict: gh api failed: ${error.message}`);
