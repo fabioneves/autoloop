@@ -3,6 +3,17 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.45.1] - 2026-07-27
+
+### Fixed
+
+- **Setup prints each phase ribbon once, not twice.** The badge instruction listed 🟩 as "complete"
+  alongside 🟦 "in progress", which read as an invitation to re-print every phase's ribbon with a
+  green badge when it finished — doubling every line of a five-phase run for no information, since
+  the next phase's 🟦 already says the previous one completed. A ribbon is printed once, as the
+  phase begins; 🟩 appears exactly once, on the closing rail; 🟥/🟨 replace a phase's 🟦 only when
+  it blocks or needs a human.
+
 ## [0.45.0] - 2026-07-27
 
 ### Changed

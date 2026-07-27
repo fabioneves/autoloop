@@ -11,13 +11,16 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.45.0 · starting
+∞ setup · v0.45.1 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
 
-Mark each phase with a state badge (🟦 in progress · 🟩 complete · 🟥 blocked · 🟨 needs a human) and a five-cell ribbon in the same `∞` visual language — `▰` for
-done-or-current, `▱` for remaining — as the phase begins:
+Print **one** badged ribbon per phase, as it begins — never a second copy of the same ribbon
+when it finishes. The next phase's 🟦 line already says the previous one completed, and a 🟩
+re-print doubles every line for no information. 🟩 appears exactly once, on the closing rail;
+🟥 or 🟨 replaces a phase's 🟦 only when that phase blocks or needs a human decision. The ribbon
+is five cells, `▰` done-or-current, `▱` remaining:
 
 ```text
 🟦 ∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base
