@@ -175,6 +175,10 @@ reviewer's job is to find the case the author did not consider.
   retries and no fallback engine: a failed dispatch is a decision for the orchestrator.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
+- `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
+  under `autoloop/dispatch-live/` in the common Git directory, announced on stderr). To watch a
+  long review in the host UI, choose the path up front and arm a second background shell —
+  `tail -F <path>` — before dispatching; stop that shell at collection.
 - Every result reports `ms` (the dispatch), `startupMs` (this tool's own overhead before the
   engine starts), and `engine` — the host that actually produced it, stamped from the spawn. Typed
   failures carry it too. Report it on the step's ribbon rather than composing a host name by hand.

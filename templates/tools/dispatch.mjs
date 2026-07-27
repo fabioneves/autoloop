@@ -432,15 +432,16 @@ export function runDispatch(options) {
     : { ...result, error: { ...result.error, engine } };
 }
 
-function executeDispatch({
-  role,
-  prompt,
-  tools,
-  cwd = process.cwd(),
-  timeoutMs = DISPATCH_TIMEOUT_MS,
-  engine = 'claude',
-  startedAtMs = PROCESS_START_MS,
-}) {
+function executeDispatch(options) {
+  const {
+    role,
+    prompt,
+    tools,
+    cwd = process.cwd(),
+    timeoutMs = DISPATCH_TIMEOUT_MS,
+    engine = 'claude',
+    startedAtMs = PROCESS_START_MS,
+  } = options;
   const adapter = resolveEngine(engine);
   if (adapter === null) {
     return failure('spawn', 'ENGINE_UNKNOWN', `${role}: unknown engine ${hostName(engine)}`, {
@@ -463,6 +464,7 @@ function executeDispatch({
   try {
     return runEngine({
       adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
+      liveFile: options.liveFile ?? null,
     });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -477,16 +479,21 @@ function executeDispatch({
 // and the dispatch proceeds exactly as before.
 const LIVE_KEEP_FILES = 20;
 
-function openLiveEventLog(cwd, role) {
+function openLiveEventLog(cwd, role, chosenPath = null) {
   try {
-    const logPath = resolveDispatchLogPath(cwd);
-    if (logPath === null) return null;
-    const directory = join(dirname(logPath), 'dispatch-live');
-    mkdirSync(directory, { recursive: true });
-    for (const stale of readdirSync(directory).sort().slice(0, -(LIVE_KEEP_FILES - 1))) {
-      try { unlinkSync(join(directory, stale)); } catch { /* pruning is best-effort */ }
+    let path = chosenPath;
+    if (path === null) {
+      const logPath = resolveDispatchLogPath(cwd);
+      if (logPath === null) return null;
+      const directory = join(dirname(logPath), 'dispatch-live');
+      mkdirSync(directory, { recursive: true });
+      for (const stale of readdirSync(directory).sort().slice(0, -(LIVE_KEEP_FILES - 1))) {
+        try { unlinkSync(join(directory, stale)); } catch { /* pruning is best-effort */ }
+      }
+      path = join(directory, `${Date.now()}-${role}.jsonl`);
+    } else {
+      mkdirSync(dirname(path), { recursive: true });
     }
-    const path = join(directory, `${Date.now()}-${role}.jsonl`);
     const fd = openSync(path, 'w');
     // stderr, so a backgrounded caller sees where to tail before results exist.
     process.stderr.write(`dispatch: live engine events -> ${path}\n`);
@@ -497,12 +504,12 @@ function openLiveEventLog(cwd, role) {
 }
 
 function runEngine({
-  adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
+  adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch, liveFile,
 }) {
   const argv = adapter.argv(role, tools, scratch, cwd);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
-  const live = openLiveEventLog(cwd, role);
+  const live = openLiveEventLog(cwd, role, liveFile ?? null);
   const started = Date.now();
   const startupMs = started - startedAtMs;
   let result;
@@ -599,6 +606,7 @@ export function parseArgs(args) {
     mode: 'dispatch',
     role: null,
     engine: null,
+    liveFile: null,
     promptFile: null,
     tools: null,
     outputFile: null,
@@ -620,6 +628,7 @@ export function parseArgs(args) {
     }
     index += 1;
     if (flag === '--engine') parsed.engine = value;
+    else if (flag === '--live-file') parsed.liveFile = value;
     else if (flag === '--role') parsed.role = value;
     else if (flag === '--prompt-file') parsed.promptFile = value;
     else if (flag === '--tools') parsed.tools = value;
@@ -991,6 +1000,75 @@ function selfTest() {
     mkdirSync(dirname(engineFile), { recursive: true });
     writeFileSync(engineFile, 'codex\n');
     check(
+      'the CLI passes --engine and --live-file through to the dispatch',
+      // The flags parsed clean since 0.44.0 and were dropped at this exact
+      // seam: main() built runDispatch options from role/prompt/tools only.
+      // Every self-test called runDispatch directly, so a live loop found it
+      // first — a review requested on codex silently ran claude, labeled
+      // [CODEX] by a banner that trusted the flag. This case goes through the
+      // real argv boundary: a PATH holding ONLY a codex shim, so if the engine
+      // is dropped the claude fallback cannot even spawn.
+      (() => {
+        const cliDir = join(scratch, 'cli-seam');
+        mkdirSync(cliDir, { recursive: true });
+        const codexOnly = join(cliDir, 'bin');
+        writeEngineShim(codexOnly, [
+          '#!/bin/sh',
+          'printf \'%s\' "$*" > "$AUTOLOOP_SHIM_ARGV"',
+          'cat > /dev/null',
+          'out=""; prev=""',
+          'for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done',
+          `printf '%s' '${JSON.stringify(PASSING_VERDICT)}' > "$out"`,
+          'printf \'{"type":"turn.completed"}\\n\'',
+          '',
+        ].join('\n'), 'codex');
+        const promptPath = join(cliDir, 'p.md');
+        writeFileSync(promptPath, 'review');
+        const chosen = join(cliDir, 'cli-live.jsonl');
+        const run = spawnSync(process.execPath, [
+          fileURLToPath(import.meta.url),
+          '--role', 'plan-review',
+          '--prompt-file', promptPath,
+          '--engine', 'codex',
+          '--live-file', chosen,
+          '--json',
+        ], {
+          cwd: repoScratch,
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${codexOnly}:${process.env.PATH}` },
+        });
+        const argvSeen = readFileSync(argvPath, 'utf8');
+        return run.status === 0
+          && argvSeen.includes('--sandbox read-only')
+          && existsSync(chosen)
+          && JSON.parse(run.stdout).engine === 'codex';
+      })(),
+    );
+    check(
+      'a caller-named live file receives the event stream at that exact path',
+      // The auto-named live file cannot be tailed in advance — its name has a
+      // timestamp in it. A caller that wants a watcher (a `tail -F` background
+      // shell in the host UI) names the path first and arms the tail before
+      // the dispatch starts.
+      (() => {
+        const chosen = join(repoScratch, 'chosen-live.jsonl');
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: PASSING_VERDICT }),
+        ));
+        const routed = runDispatch({
+          role: 'plan-review',
+          prompt: 'review',
+          tools: reviewerTools,
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+          liveFile: chosen,
+        });
+        return routed.ok === true
+          && existsSync(chosen)
+          && readFileSync(chosen, 'utf8').includes('"type"');
+      })(),
+    );
+    check(
       'a dispatch streams its engine events to a live file while running',
       // A 13-minute codex review ran as a sealed box: spawnSync buffered the
       // event stream in memory and --ephemeral persisted nothing, so there was
@@ -1168,7 +1246,16 @@ function main() {
     process.exit(2);
   }
 
-  const result = runDispatch({ role: parsed.role, prompt, tools });
+  // Every parsed option crosses this seam. --engine parsed clean for six
+  // releases and was dropped exactly here — a review requested on codex
+  // silently ran claude, and a live loop found it before any test did.
+  const result = runDispatch({
+    role: parsed.role,
+    prompt,
+    tools,
+    ...(parsed.engine === null ? {} : { engine: parsed.engine }),
+    ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
+  });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
   if (parsed.outputFile !== null) {
     const path = resolve(parsed.outputFile);

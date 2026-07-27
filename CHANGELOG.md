@@ -25,6 +25,19 @@ Notable changes to Autoloop are recorded here. The format follows
   only — the writer stays on the host in every mode — and an unrecognised recording falls back to
   the host engine. Proven with a real dispatch: no flag, recorded `codex`, verdict returned with
   `"engine": "codex"`.
+- **`--engine` reaches the engine.** The flag parsed cleanly since 0.44.0 and was dropped at the
+  CLI seam: `main()` built the dispatch options from role, prompt and tools only, and every
+  self-test called `runDispatch()` directly, so the boundary had no coverage. A review requested
+  with `--engine codex` silently ran claude — labeled `[CODEX]` by a banner that trusted the
+  flag — until the live loop caught it and re-dispatched through the API as a workaround. The
+  seam now passes every parsed option through, and the new self-test drives the actual CLI with a
+  PATH containing only a codex shim, so dropping the engine again cannot pass: the claude fallback
+  would fail to spawn. `--live-file` crosses the same seam and would have shipped dead without it.
+- **Watch a running dispatch live.** Engine stdout streams to a file as it is emitted —
+  auto-named under `autoloop/dispatch-live/` in the common Git directory, or exactly where
+  `--live-file <path>` says. Name the path up front, arm a `tail -F <path>` background shell, and
+  the host's background-task view becomes a live codex window; the path is also announced on
+  stderr at spawn. A 13-minute review used to run as a sealed box.
 - **Parking is not stopping, and the skill now knows the difference.** The liveness rule said
   "never end the turn mid-unit; hold the wait with bounded polls" — written for a host that
   allowed sleep-chains. This host blocks them and re-invokes the session when a Monitor fires, so
