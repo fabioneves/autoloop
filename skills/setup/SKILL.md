@@ -508,7 +508,7 @@ stopping; interrupted means reverted, not parked.
 End with:
 
 ```text
-╰─ ∞ setup · complete ─ <mode> · <changed>/<total> artifacts · verify <state> ─╯
+🟩 ╰─ ∞ setup · complete ─ <mode> · <changed>/<total> artifacts · verify <state> ─╯
 ```
 
 Doctor ends with:
