@@ -33,6 +33,58 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'completed-step-rows-shipped-without-their-cost',
+    date: '2026-07-28',
+    symptom: 'Live panels showed bare completed rows (`∞ #123 — 02 PLAN '
+      + '[OPUS]`) with no `[elapsed] [HH:MM]`, losing the per-step cost '
+      + 'profile the panel is the only surviving record of.',
+    cause: 'The rule shipped in v0.49.21 as prose only. Obeying it required '
+      + 'millisecond arithmetic and a clock read in the same turn as '
+      + 'collecting a result, disposing findings and swapping labels.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'step-subject.mjs', anchor: 'export function completedSubject(' }),
+      Object.freeze({
+        file: 'step-subject.mjs',
+        anchor: 'The live defect: a bare completed row, now composed rather than recalled.',
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'plan-followed-the-review-engine-recording',
+    date: '2026-07-28',
+    symptom: 'A run configured to plan on `fable` and review on a proxied '
+      + '`gpt-5.6-sol` planned on the review model instead: the recorded proxy '
+      + 'URL and effort were injected into the plan dispatch, so the `--model '
+      + 'fable` pin was resolved by the review proxy.',
+    cause: 'The review-engine recording was keyed to the reviewer POSTURE, and '
+      + '`plan` shares that posture for its read-only sandbox while being '
+      + 'authored work. Keying on the verdict RESULT separates the two.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'function followsReviewChoice(' }),
+      Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: 'codex refuses to author a plan, which is writing under a reading posture',
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'interpreter-name-in-argument-position',
+    date: '2026-07-28',
+    symptom: '`git log --oneline | grep node` and `git log --grep xargs` were '
+      + 'refused as inline interpreter source and inline command assembly — '
+      + 'plain read-only history queries, denied for naming a tool.',
+    cause: 'Interpreter and assembler detection searched the whole segment, so '
+      + 'a search PATTERN read as an invocation. The git/gh rules already '
+      + 'judged by position; these two did not.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'function invokedAt(' }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: "['git log --oneline | grep node', 'feat/gh-1-x', false]",
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'merge-commit-sha-removed-from-rest',
     date: '2026-07-28',
     symptom: 'Every human-merged unit refused its terminal backfill with '

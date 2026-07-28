@@ -208,7 +208,7 @@ changes nothing it checks.
 Every role runs in a fresh process through one call:
 
 ```bash
-node <plugin-tools>/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
+node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> \
   --prompt-file <path> [--tools <csv>] [--engine <claude|codex>] [--output-file <path>] [--json]
 ```
 
@@ -217,10 +217,12 @@ writer and reviewers alike to `claude`, and asks nothing of the machine beyond w
 already needs.
 
 **Reviews can run on a second engine, when the invocation asks for it.** `/autoloop:dev with
-codex` sends every review role to `codex`. Record the choice ONCE, immediately after prime
-succeeds, and the tool routes every reviewer dispatch from the recording — the invocation text is
-forty minutes up-context by the first code review, and a forgotten flag would silently review on
-the writer's model:
+codex` sends every review role to `codex` — `plan-review`, `code-review`, `doubt-review`, the
+three roles that return a verdict. `plan` and `implement` stay on the host engine and model:
+authoring is the writer's side of the split, whatever posture it runs under. Record the choice
+ONCE, immediately after prime succeeds, and the tool routes every verdict dispatch from the
+recording — the invocation text is forty minutes up-context by the first code review, and a
+forgotten flag would silently review on the writer's model:
 
 ```bash
 mkdir -p .git/autoloop && printf 'codex !xhigh\n' > .git/autoloop/review-engine  # with codex
@@ -243,9 +245,12 @@ printf 'claude gpt-5.6-sol @http://127.0.0.1:18765 !xhigh\n' > .git/autoloop/rev
 
 The `!xhigh` pins reviewer reasoning depth (see `--effort` below); the `@<url>` is what makes the
 mode self-contained: `dispatch.mjs` injects it as
-`ANTHROPIC_BASE_URL` into REVIEWER dispatches itself, so proxy mode works regardless of how this
+`ANTHROPIC_BASE_URL` into VERDICT dispatches itself, so proxy mode works regardless of how this
 session was launched — the session's own environment is not a prerequisite and not evidence.
-Writer roles never read the recording, so a writer can never be proxied.
+Only the roles that return a verdict — `plan-review`, `code-review`, `doubt-review` — read the
+recording. `implement` and `plan` never do, so neither the writer nor the PLANNER can be proxied:
+the plan is authored work that merely happens to run under a reading posture, and a live run
+planned on the review model because the posture, not the result, decided who read the recording.
 
 **The proxy preflight is one probe, and only a probe**: `curl -s --max-time 5 <url>/health` (or
 `<url>/v1/models`) against the recorded URL. Answering = running. **Write the URL as a literal —
@@ -262,8 +267,8 @@ itself).
 Append ` · reviews gpt-5.6-sol (proxy)` to the startup banner, and review ribbons carry the
 model in the host slot — `[GPT-5.6-SOL]` — since the engine name alone would lie about who
 judged. Trade-off vs `with codex`, stated plainly: the reviewer's read-only posture is the
-tool ceiling, not an OS sandbox. The writer never runs a proxied model: cross-MODEL review is
-the invariant, whichever harness carries it.
+tool ceiling, not an OS sandbox. Neither the writer nor the planner runs a proxied model:
+cross-MODEL review is the invariant, whichever harness carries it.
 
 Why a second model is worth asking for: a fresh process gives identity separation, not cognitive separation.
 A reviewer on the writer's own model inherits its priors and misses what it missed. A different
@@ -274,7 +279,9 @@ unusual.
 Under `with codex` the reviewer runs `--sandbox read-only`, an OS-enforced boundary rather than a
 tool allowlist, so the read-only posture is strictly stronger there. Its verdict arrives in codex's
 `--output-last-message` file and is validated against the same schema as any other. Codex refuses
-a writing role outright rather than approximating one, and if `codex` is absent the review
+any authoring role outright rather than approximating one — `implement` because it would need a
+writable sandbox, `plan` because authoring the plan on the review engine inverts the role split
+this loop is built on — and if `codex` is absent the review
 dispatch fails typed rather than falling back to the host — having asked for a second opinion,
 silently getting the first one back is worse than a refusal.
 
@@ -485,14 +492,28 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
   shape (`∞ #149 — 08 CODE-REVIEW r1/5 [GPT-5.6-SOL]`, `∞ #78 — 08 FIX r3/5 [OPUS]`); the named
   examples are not an exhaustive list.
-- **A completed step keeps its cost in the subject**: append `[<elapsed>] [<HH:MM ended>]` when you
-  complete the task — `∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL] [11min] [14:35]`. The panel is the only
-  place a finished step's numbers survive; the collection line that stated them scrolls away, and
-  the closing rail carries the unit total, not the per-step breakdown. Together the rows become a
-  cost profile you can read at a glance — which step ate the run, and whether a model was slow or
-  merely queued. Elapsed is wall time from the step's ribbon to its collection, `<n>min` under an
-  hour and `<n>h<mm>m` over it; the timestamp is the local 24-hour clock, the same one the ribbon
-  prefix uses.
+- **A completed step keeps its cost in the subject**: `[<elapsed>] [<HH:MM ended>]` —
+  `∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL] [11min] [14:35]`. **Compose it, never compute it**, from
+  the `ms` the typed result already carries:
+
+  ```bash
+  node <plugin-tools>/step-subject.mjs --subject '∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL]' --ms 660000
+  ```
+
+  It prints the finished subject — elapsed formatted, clock read, executor slot upper-cased — and
+  re-running it on an already-completed subject returns it unchanged, so a resumed unit cannot grow
+  a second pair of brackets. In-session steps have no dispatch `ms`: pass `--started-at-ms <epoch>`
+  instead. This is a command and not a formatting rule because it used to be a formatting rule and
+  the rows shipped bare: obeying it asked for millisecond division and a clock read in the same turn
+  as collecting a result, disposing findings and swapping labels, and recall-plus-arithmetic under
+  load is the shape that decays.
+
+  The panel is the only place a finished step's numbers survive; the collection line that stated
+  them scrolls away, and the closing rail carries the unit total, not the per-step breakdown.
+  Together the rows become a cost profile you can read at a glance — which step ate the run, and
+  whether a model was slow or merely queued. Elapsed is wall time from the step's ribbon to its
+  collection, `<n>min` under an hour and `<n>h<mm>m` over it; the timestamp is the local 24-hour
+  clock, the same one the ribbon prefix uses.
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
   same turn that states the duration. A staged unit's steps get their own tasks, so two units in
@@ -1247,10 +1268,13 @@ slot is the honest statement that the session (its model on the startup banner) 
 **Every model name is UPPER-CASE everywhere it appears** — executor slots, parked lines, collection
 lines, task subjects, `activeForm`, and the digest. `OPUS`, `FABLE`, `SONNET`, `GPT-5.6-SOL`. Who
 judged or wrote is the fact an operator scans for, and one casing rule makes it findable in a wall
-of lower-case prose. Outside fenced ribbon blocks, wrap the name in backticks — `` `OPUS` `` — so
-the host renders it as a distinct span rather than as another word in the sentence. Colour itself is
-the host's to choose, not ours to set: no ANSI escape survives a markdown renderer, so CAPS plus a
-code span is the whole mechanism. So: `parked — implement dispatch on `OPUS` in flight`, and
+of lower-case prose. In task subjects the rule is mechanical rather than remembered —
+`step-subject.mjs` upper-cases the executor slot as it composes the completed row — because a rule
+that holds "everywhere at once" is precisely the kind a long run applies unevenly. Outside fenced
+ribbon blocks, wrap the name in backticks — `` `OPUS` `` — so the host renders it as a distinct span
+rather than as another word in the sentence. Colour itself is the host's to choose, not ours to set:
+no ANSI escape survives a markdown renderer and a task subject is plain text, so CAPS plus a code
+span is the whole mechanism — asking for a yellow model name is asking the host theme, not the loop. So: `parked — implement dispatch on `OPUS` in flight`, and
 `plan returned · `OPUS`, `FABLE` at limit`.
 
 End a unit with one closing rail:
