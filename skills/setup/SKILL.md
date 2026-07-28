@@ -302,6 +302,13 @@ check run and commit status on the exact head must be green, read live. If a con
 carries `.autoloop/ci-policy.json`, reconcile removes it in the visible diff and the report says
 so; doctor treats a lingering copy as a finding.
 
+**Never probe for it with `ls`.** The reconcile report states the outcome either way —
+`action: "removed"` or `action: "absent"` — and `verify.mjs` carries the named
+`retired CI policy absent` check. A probe adds nothing and actively misleads: `ls` on a file that
+is correctly gone prints `No such file or directory`, so the SUCCESS case renders as an error and
+the next reader debugs a passing check. This is the same rule the proxy preflight follows for the
+same reason — read the typed report, do not re-derive what it already states.
+
 Always reconcile the host artifacts:
 
 - `.codex/agents/autoloop-reviewer.toml` from `codex-reviewer-agent.template.toml`

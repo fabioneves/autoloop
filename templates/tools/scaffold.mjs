@@ -435,6 +435,14 @@ export function reconcile(root, templates, { audit = false } = {}) {
       '.autoloop/ci-policy.json is retired (docs/specs/simple-delivery.md); '
       + (audit ? 'reconcile will remove it' : 'removed it — commit the deletion'),
     );
+  } else {
+    // Reporting the absence is the point. Saying nothing here is
+    // indistinguishable from not having looked, which is what sent a live
+    // session probing with `ls .autoloop/ci-policy.json` — a check whose
+    // SUCCESS prints `No such file or directory` and reads as a failure. The
+    // report already carries `identical` rows for files it changed nothing
+    // about; a retired artifact confirmed gone belongs in the same list.
+    results.push({ path: '.autoloop/ci-policy.json', action: 'absent' });
   }
   if (config !== null) {
     const checklist = resolve(root, config.review.checklistPath);
@@ -1646,8 +1654,11 @@ function selfTest() {
       })(),
     );
     expect(
-      'a fresh scaffold never creates the retired CI policy',
-      !first.results.some((entry) => entry.path === '.autoloop/ci-policy.json')
+      // The report NAMES the absence rather than staying silent about it: a
+      // silent report cannot be told apart from an unperformed check.
+      'a fresh scaffold never creates the retired CI policy, and says so',
+      first.results.some((entry) =>
+        entry.path === '.autoloop/ci-policy.json' && entry.action === 'absent')
         && !existsSync(join(root, '.autoloop', 'ci-policy.json')),
     );
     mkdirSync(join(root, '.autoloop'), { recursive: true });
@@ -1676,7 +1687,7 @@ function selfTest() {
     expect(
       'a second run is idempotent',
       second.results.every((entry) =>
-        ['identical', 'kept'].includes(entry.action)),
+        ['identical', 'kept', 'absent'].includes(entry.action)),
     );
 
     writeFileSync(
