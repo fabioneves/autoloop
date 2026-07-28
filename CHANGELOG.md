@@ -3,6 +3,19 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.15] - 2026-07-28
+
+### Fixed
+
+- **The setup audit battery no longer reports failure on a healthy repository.** It is a
+  diagnostic chain, so its exit status is whatever its last command returned — and the two
+  commands most likely to end it fail precisely when nothing is wrong: `grep -v '^PASS '` exits 1
+  when every check passed and it matches nothing, and `wc` exits 1 when an optional file such as
+  `ARCH.md` is absent. Both now carry `|| true`, the size probe globs `docs/agentic/*.md` so a new
+  file like `LESSONS.md` is included automatically, and the skill states the rule: read the
+  battery by its sections, never by its exit code — for a pass/fail signal run
+  `verify.mjs --install-root` on its own and read its status.
+
 ## [0.49.14] - 2026-07-28
 
 ### Fixed

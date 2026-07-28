@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.14 · starting
+∞ setup · v0.49.15 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -375,7 +375,7 @@ vendored hooks yet), stale (the session predates a plugin change), or FAILing on
 echo "=== artifact drift ==="
 node <templates>/tools/scaffold.mjs --audit .
 echo "=== sizes ==="
-wc -c docs/agentic/STATE.md docs/agentic/ARCH.md 2>/dev/null
+wc -c docs/agentic/*.md 2>/dev/null || true
 ```
 
 `verify.mjs --install-root` is deliberately NOT here: the VERIFY phase runs it after the write,
@@ -395,13 +395,21 @@ opencode --version 2>/dev/null || echo opencode:absent
 echo "=== config ==="
 node tools/agentic/config-contract.mjs docs/agentic/STATE.md 2>&1
 echo "=== contracts ==="
-node tools/agentic/verify.mjs --install-root . 2>&1 | tee /tmp/autoloop-verify-audit.txt | grep -vE '^PASS '
+node tools/agentic/verify.mjs --install-root . 2>&1 | tee /tmp/autoloop-verify-audit.txt | grep -vE '^PASS ' || true
 tail -2 /tmp/autoloop-verify-audit.txt
 echo "=== artifact drift ==="
 node <templates>/tools/scaffold.mjs --audit .
 echo "=== sizes ==="
-wc -c docs/agentic/STATE.md docs/agentic/ARCH.md 2>/dev/null
+wc -c docs/agentic/*.md 2>/dev/null || true
 ```
+
+**Read the battery by its SECTIONS, never by its exit code.** It is a diagnostic chain, so its
+status is whatever the last command happened to return — and the two commands most likely to end
+it fail on a HEALTHY repository: `grep -v '^PASS '` exits 1 precisely when every check passed and
+it matches nothing, and `wc` exits 1 when an optional file like `ARCH.md` is absent. Both now
+carry `|| true` for that reason. A live setup read the resulting `exit code 1` as a failed audit
+when nothing had failed. If you want a pass/fail signal, run `verify.mjs --install-root` on its
+own and read ITS status.
 
 A scan or audit section that fails is incomplete, not an empty success. Follow it with one targeted
 check. STATE Lessons over 3000 bytes and ARCH over 8000 bytes are compaction NOTEs, not failures.
