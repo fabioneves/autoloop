@@ -177,6 +177,28 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'slice-budget-blocked-a-finished-unit',
+    date: '2026-07-28',
+    symptom: 'A unit with both suites green, committed and pushed was blocked '
+      + 'at 722 lines against a 700-line budget, one decision short of '
+      + 'shipping. The human raised the cap — the only answer that block can '
+      + 'produce.',
+    cause: 'STATE described all caps as blocking, so a run treated a SHAPING '
+      + 'budget as a run-time gate. By the time lines are countable the work is '
+      + 'done and the budget knows nothing it did not know at shaping time; a '
+      + 'cap whose verdict is always the same is not a gate.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'Slice budgets are the exception: they NOTE, they never block',
+      }),
+      Object.freeze({
+        file: '../../templates/STATE.template.md',
+        anchor: 'They never block a\n    unit at run time',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '

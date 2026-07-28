@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.19 · starting
+∞ setup · v0.49.20 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
