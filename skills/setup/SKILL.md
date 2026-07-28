@@ -537,6 +537,14 @@ one `autoloop-config` block, a scalar value no installed line answers, a templat
 repository-owned section. There is no merged document in that case: fix exactly what the
 `ambiguities` list names and re-run. Never route around it by splicing prose.
 
+**Read that from the report, never from `$?`.** Exit 3 is a mirror of `ok: false` in the report
+already on your screen, beside the `ambiguities` list that says what to fix — and a non-zero exit
+is surfaced to you by the tool runner without being asked. `$?` is an active shell expansion, so
+the guard refuses it on sight and is right to: it cannot judge a command whose text depends on
+state it cannot read. Every session that reaches for it loses a round to a refusal and then reads
+the report anyway. Skip to the report. The same holds for the whole family — `--json` puts the
+report and the merged document on stdout together when you want one stream instead of two.
+
 `--merge-loop` normally needs no decisions at all: LOOP carries no repository-authored sections,
 only the project name, checklist path, and gate command, and the last two are read from the config
 so a stale rendering is corrected rather than carried forward. A section a repository added to its
