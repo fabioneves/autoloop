@@ -3,6 +3,28 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.9] - 2026-07-28
+
+### Added
+
+- **Every dispatch stamps the revision it launched in; no model transcribes a SHA.** A live
+  orchestrator hand-copied a head OID into a review prompt, invented its eighth character, and the
+  reviewer correctly refused to attach a closing verdict to a revision it could not match — ten
+  minutes of reviewer time lost to a transcription no model should have been asked to perform.
+  `dispatch.mjs` now appends an `autoloop-dispatch-context-v1` stamp derived from the checkout it
+  is about to launch in, naming the revision and whether the tree is clean, and declaring itself
+  the authority over any revision named elsewhere in the prompt. Fail-open: an unreadable checkout
+  stamps nothing rather than failing a dispatch. The skill adds the matching rule — a 40-hex OID
+  is copied from the tool result that produced it or supplied by the machine, never typed from
+  memory.
+
+### Changed
+
+- **The README describes the v0.49 loop.** Steps 2 and 6 are dispatches, not orchestrator work;
+  the pipeline table, the invariant-first planning rule, the same-predicate escalation, the
+  per-step model and effort division, the `plan` role, and the live-watchable dispatch pane are
+  all documented.
+
 ## [0.49.8] - 2026-07-28
 
 ### Added

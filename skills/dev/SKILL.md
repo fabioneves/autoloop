@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.8 · starting
+∞ dev · v0.49.9 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -120,6 +120,14 @@ Shapes to keep out of every command, sanctioned read or not:
 - **A shell variable standing in for a path you already know.** Write the literal path. A variable
   is one more thing the guard must resolve before it can judge the command, and it buys nothing in
   a command written once.
+- **A 40-hex OID typed from memory.** Never write a commit SHA into a prompt, a command, or a
+  request by reading it off an earlier line — copy it from the tool result that produced it, or
+  let the machine supply it. Every dispatch appends an `autoloop-dispatch-context-v1` stamp that
+  dispatch itself derives from the checkout it launches in, naming the revision and whether the
+  tree is clean; that stamp is the authority for the reviewed head, so a review prompt never needs
+  to state one. A live orchestrator invented the eighth character of a head OID, and the reviewer
+  correctly refused to attach a closing verdict to a revision it could not match — ten minutes of
+  reviewer time for a transcription no model should be asked to perform.
 - **Process substitution, `<(…)`.** Command substitution's sibling, refused for the same reason —
   and it takes the innocent front of the command down with it (a plain `wc -c` was refused because
   `diff <(cat -A …) <(cat -A …)` rode the same invocation). Byte-compare two files with

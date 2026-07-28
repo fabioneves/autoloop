@@ -20,7 +20,7 @@
 //
 // Exit 0 on a typed success, 1 on a typed failure, 2 on a usage error.
 
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
@@ -470,6 +470,31 @@ function checkoutFingerprint(cwd) {
   return `${head.stdout.trim()}\n${tree.stdout}`;
 }
 
+// The revision under dispatch is MACHINE-SUPPLIED, never typed into a prompt.
+// A live orchestrator hand-transcribed a head OID, invented one character, and
+// the reviewer correctly refused to attach a verdict to a revision it could not
+// match — ten minutes of reviewer time for a typo no human should have been
+// asked to avoid. Every prompt therefore ends with a stamp dispatch derived
+// itself from the checkout it is about to launch in, and the skill makes that
+// stamp the only authority for the reviewed head.
+// Fail-open: an unreadable checkout appends nothing rather than failing a
+// dispatch that would otherwise have run.
+export function dispatchContextStamp(cwd, role, readCheckout = checkoutFingerprint) {
+  const fingerprint = readCheckout(cwd);
+  if (fingerprint === null) return '';
+  const [head, ...rest] = fingerprint.split('\n');
+  if (!/^[0-9a-f]{40}$/u.test(head)) return '';
+  const clean = rest.join('\n').trim().length === 0;
+  return '\n\n<!-- autoloop-dispatch-context-v1\n'
+    + `role: ${role}\n`
+    + `revision: ${head}\n`
+    + `checkout: ${clean ? 'clean' : 'dirty'}\n`
+    + 'This stamp is written by dispatch.mjs from the checkout it launched in.\n'
+    + 'It is the authority for the revision under review; a revision named\n'
+    + 'anywhere else in this prompt that disagrees with it is a transcription\n'
+    + 'error, and this stamp wins.\n-->\n';
+}
+
 // Claude's stream-json output ends with exactly one `result` event. More than
 // one, none, or a non-success subtype means the child did not produce a result
 // this tool can stand behind.
@@ -642,7 +667,7 @@ function runEngine({
       env: dispatchEnvironment(
         adapter === ENGINES.claude ? resolveDefaultBaseUrl(role, cwd) : null,
       ),
-      input: prompt,
+      input: `${prompt}${dispatchContextStamp(cwd, role)}`,
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: timeoutMs,
       windowsHide: true,
@@ -1347,6 +1372,44 @@ function selfTest() {
           && readFileSync(envPath, 'utf8')
             .includes('ANTHROPIC_BASE_URL=http://127.0.0.1:18765');
       })(),
+    );
+    check(
+      'every dispatch stamps the checkout revision it launched in onto the prompt',
+      (() => {
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: PASSING_VERDICT }),
+        ));
+        const stamped = runDispatch({
+          role: 'code-review',
+          prompt: 'review the artifact at revision deadbeef',
+          tools: reviewerTools,
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: repoScratch,
+          encoding: 'utf8',
+        }).trim();
+        const delivered = readFileSync(stdinPath, 'utf8');
+        return stamped.ok === true
+          && delivered.includes('autoloop-dispatch-context-v1')
+          && delivered.includes(`revision: ${head}`)
+          && /checkout: (?:clean|dirty)\n/u.test(delivered)
+          && delivered.startsWith('review the artifact at revision deadbeef');
+      })(),
+    );
+    check(
+      'an unreadable checkout stamps nothing rather than failing the dispatch',
+      dispatchContextStamp('/nonexistent', 'code-review', () => null) === ''
+      && dispatchContextStamp('/nonexistent', 'code-review', () => 'not-a-sha\n') === '',
+    );
+    check(
+      'a dirty checkout is stamped as dirty',
+      dispatchContextStamp(
+        repoScratch,
+        'implement',
+        () => `${'a'.repeat(40)}\n M src/x.mjs\n`,
+      ).includes('checkout: dirty'),
     );
     check(
       'a recorded effort pins reviewer dispatches and reaches the engine argv',
