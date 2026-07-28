@@ -83,10 +83,14 @@ Then, in order:
    when it is the authenticated current runner's own marker and that runner still has write.
    Ignore marker-shaped comments from other identities, and fail closed when role evidence is
    incomplete. A malformed, mismatched, or duplicate trusted marker blocks selection **of the unit
-   it belongs to — never of the run**: label that issue, record the driver's typed refusal
-   verbatim in the reason, and select from the rest of the queue. A marker whose unit is already
-   TERMINAL (issue closed, PR merged) blocks nothing at all: it cannot be duplicated, abandoned,
-   or re-run, so it is a defect report and the queue is untouched. A live run met an unexplained
+   it belongs to — never of the run**: for a LIVE unit, apply `loop-blocked` + `human:decide` with
+   the driver's typed refusal recorded verbatim, then select from the rest of the queue. For a
+   unit that is already TERMINAL (issue closed, pull request merged) apply NO label — it is not
+   blocked, it is done, and a blocking label on a delivered issue is a false signal that outlives
+   the run. Post one comment carrying the refusal verbatim so the trail is complete, name it in
+   the run record as a loop defect, and move on: such a marker cannot be duplicated, abandoned, or
+   re-run, so it endangers nothing. Never hand-append the terminal outcome to close the gap —
+   marker edits and human-merge outcome appends go through the driver or not at all. A live run met an unexplained
    `ARTIFACT_IDENTITY_MISMATCH` on a merged, delivered unit and stopped to ask, leaving three
    eligible issues idle over a missing bookkeeping comment. Run each
    authoritative marker through `lifecycle-driver.mjs --reconcile-json` with its captured comment
