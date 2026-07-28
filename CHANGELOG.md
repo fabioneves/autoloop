@@ -3,6 +3,37 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.28] - 2026-07-28
+
+### Fixed
+
+- **Reconfigure asks about the gate, the one value that can rot.** Setup already listed the gate
+  among its questions, but the interview scaling expanded an item into its own question only for
+  drift, caps, or the merge policy — so on migration and reconfigure, which is what an existing
+  repository runs, the gate collapsed into the summary table and was carried forward without
+  anyone being asked again. That is the mode where it matters most: the gate decides whether code
+  ships, and it is the only setting whose value is an executable that can rot WITHOUT changing —
+  a script the repository deleted, a compose service renamed, a package script moved. A cap
+  preserved across a migration is merely unexamined; a gate command preserved across a migration
+  can point at nothing, and the run finds out at step 09 on an artifact already planned,
+  implemented, simplified and review-converged. The interview now also states whether each
+  configured command resolves, reusing the discoverability check Doctor already runs, and reports
+  rather than repairs.
+- **A refusal names its tokens as English.** A live refusal read
+  `` `$p`, a command substitution cannot be resolved statically `` — a comma splice that parses as
+  one garbled subject and hides that two separate things need fixing. Named tokens now join with
+  `and`, and an over-long list states its remainder (`and 2 more unresolved tokens`) instead of
+  truncating at three in silence, which sent the reader back for a second refusal having already
+  fixed everything the first one mentioned.
+- **The scratchpad is a write target, never a working directory.** A live run composed
+  `cd <scratchpad> && gh pr view 238 …` and lost a round to `not a git repository`: `gh` infers the
+  repository from the checkout it stands in, and the redirect had already truncated its output file
+  before the failure, leaving a zero-byte result that looks real. The skill taught this exact
+  lesson scoped to the lifecycle driver alone; it is now one general rule under Context economy
+  covering `git`, `gh`, the driver and the gate alike. The shape is tempting precisely BECAUSE
+  those rules send bulky artifacts to the scratchpad — the destination looks like somewhere to go,
+  when it is only somewhere to write.
+
 ## [0.49.27] - 2026-07-28
 
 ### Fixed
