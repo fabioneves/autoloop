@@ -494,6 +494,14 @@ rules, none of which trades away evidence:
   the turn just collected, or re-stating the ribbon in sentences, spends window on information the
   screen already shows. Evidence quality is untouched by this rule — the expensive artifacts live
   in GitHub, not in chat.
+- **The scratchpad is a write TARGET, never a working directory.** Redirect into it and stay in the
+  repository: `gh pr view 238 --json title,body > <scratchpad>/pr238.json`. Never `cd <scratchpad>
+  && gh …` — `gh` infers the repository from the checkout it is standing in, and from `/tmp` it
+  fails with `not a git repository`, having already truncated the output file it was redirecting
+  into. The same is true of every repo-scoped command: `git`, `gh`, the lifecycle driver (which
+  probes the checkout from its cwd), and the gate. A live run lost a round to exactly this, and it
+  is a tempting shape precisely BECAUSE these rules send bulky artifacts to the scratchpad — the
+  destination looks like somewhere to go, when it is only somewhere to write.
 - **After any compaction, byte-exact values are re-fetched, never recalled.** A summary that
   paraphrases a SHA, a planHash, a comment id, or a label name is the trailing-newline class of
   bug wearing a new coat. Anything hash- or OID-shaped comes from GitHub or from disk after
@@ -782,7 +790,8 @@ names the failing field and both hash prefixes.
 driver's own validator — it is the self-test fixture, so it cannot drift from what validation
 accepts. Fetch the frozen plan body to a scratchpad file, then assemble with `jq -n --rawfile`
 substituting the real values over the example's placeholders. Run the driver **from the
-repository root**: it probes the checkout from its cwd, and a scratchpad cwd fails the probe.
+repository root**: it probes the checkout from its cwd, and a scratchpad cwd fails the probe — the
+general rule under Context economy, of which this is the most expensive instance.
 
 The driver persists epoch 1 before the first effect, swaps `loop-started`/`loop:04-claim`, creates
 the exact planned-base branch and `chore: claim #N`, publishes the captured branch, posts the exact
