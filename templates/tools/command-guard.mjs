@@ -568,6 +568,26 @@ function opaqueCommandAssembler(cmd) {
 // blocked. A live run lost rounds to `for s in …; do sed …; done` reading it.
 const LOOP_KEYWORD = /(?:^|[\s;&|(])(?:for|while|until)(?=\s)/u;
 
+// Joins the named tokens as English, not as a comma-splice. A live refusal read
+// "`$p`, a command substitution cannot be resolved statically", which parses as
+// one garbled subject and buries the fact that TWO different things must be
+// fixed. The count is also stated rather than truncated: naming three of five
+// and stopping sends the reader back for a second refusal having fixed
+// everything the message mentioned — the same silent-cap failure the workflow
+// rules forbid elsewhere.
+const MAX_NAMED_TOKENS = 3;
+
+export function nameList(tokens) {
+  if (tokens.length === 0) return '';
+  const shown = tokens.slice(0, MAX_NAMED_TOKENS);
+  const hidden = tokens.length - shown.length;
+  if (hidden > 0) {
+    return `${shown.join(', ')} and ${hidden} more unresolved ${hidden === 1 ? 'token' : 'tokens'}`;
+  }
+  if (shown.length === 1) return shown[0];
+  return `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}`;
+}
+
 export function unresolvedExpansionReason(rawCmd) {
   const text = stripQuotedHeredocBodies(String(rawCmd));
   const assigned = new Set(
@@ -580,7 +600,7 @@ export function unresolvedExpansionReason(rawCmd) {
       return assigned.has(match[1]) ? null : `\`$${match[1]}\``;
     })
     .filter((token) => token !== null);
-  const named = [...new Set(tokens)].slice(0, 3).join(', ');
+  const named = nameList([...new Set(tokens)]);
   const what = named === ''
     ? 'this command carries an expansion the guard cannot read'
     : `${named} cannot be resolved statically`;
@@ -2184,6 +2204,33 @@ function selfTest() {
       + 'policy. Write the script to a file and run it, or use the typed tool commands.';
     if (inlineReason !== expectedInlineReason) {
       console.error('FAIL [inline-interpreter block is the exact policy message]');
+      ok = false;
+    }
+    // 2026-07-28: a live refusal read "`$p`, a command substitution cannot be
+    // resolved statically" -- a comma splice that parses as one garbled subject
+    // and hides that TWO things need fixing. Named tokens join as English, and
+    // an over-long list states its remainder rather than truncating silently,
+    // which would send the reader back for a second refusal having already
+    // fixed everything the first one mentioned.
+    messageChecks += 1;
+    const listCases = [
+      [[], ''],
+      [['`$p`'], '`$p`'],
+      [['`$p`', 'a command substitution'], '`$p` and a command substitution'],
+      [['`$p`', '`$q`', 'a command substitution'], '`$p`, `$q` and a command substitution'],
+      [['`$a`', '`$b`', '`$c`', '`$d`'], '`$a`, `$b`, `$c` and 1 more unresolved token'],
+      [['`$a`', '`$b`', '`$c`', '`$d`', '`$e`'], '`$a`, `$b`, `$c` and 2 more unresolved tokens'],
+    ];
+    for (const [tokens, expected] of listCases) {
+      if (nameList(tokens) !== expected) {
+        console.error(`FAIL [named-token list reads as English]: got ${nameList(tokens)}`);
+        ok = false;
+      }
+    }
+    messageChecks += 1;
+    if (!unresolvedExpansionReason('ls $p $(date)')
+      .startsWith('`$p` and a command substitution cannot be resolved statically')) {
+      console.error('FAIL [two unresolved tokens are joined, not comma-spliced]');
       ok = false;
     }
     // 2026-07-28: a live session lost a round to `ls -d … | xargs -n1 basename`

@@ -33,6 +33,23 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'unresolved-tokens-named-as-a-comma-splice',
+    date: '2026-07-28',
+    symptom: 'A refusal read "`$p`, a command substitution cannot be resolved '
+      + 'statically" — a comma splice that parses as one garbled subject and '
+      + 'hides that two separate things need fixing.',
+    cause: 'Named tokens were joined with `, ` and truncated at three with no '
+      + 'remainder, so a long list also sent the reader back for a second '
+      + 'refusal having fixed everything the first one mentioned.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function nameList(' }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'two unresolved tokens are joined, not comma-spliced',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'retired-artifact-absence-went-unreported',
     date: '2026-07-28',
     symptom: 'A live session probed `ls .autoloop/ci-policy.json` beside the '
