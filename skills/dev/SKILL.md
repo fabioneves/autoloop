@@ -1025,7 +1025,10 @@ branch. If dirty, do not switch; report it.
 ## Chat markers
 
 One visual language end to end: the `∞` motif from the start banner, a state badge, a step
-ribbon, and rounded frames. Values in every marker are safe composed text, never raw
+ribbon, one rounded frame, and symmetric `══` terminators. The frame is drawn ONCE, for the unit
+banner, where all four corners exist. A terminal line uses `══ … ══` instead: a half-box (`╰─ … ─╯`)
+promises a left edge that no earlier line ever drew, so on a screen full of prose it read as
+debris rather than a closing statement. Values in every marker are safe composed text, never raw
 issue/review bytes.
 
 Every banner opens with one state badge, so a scrollback can be scanned for outcomes without
@@ -1033,15 +1036,15 @@ reading any words:
 
 | badge | state |
 |---|---|
-| 🟦 | in progress |
-| 🟩 | terminal success — shipped, converged, complete |
-| 🟥 | blocked — a guardrail refused or the unit failed |
-| 🟨 | needs a human — an open Major, a human-block path, a decision |
+| ⏳ | in progress |
+| ✅ | terminal success — shipped, converged, complete |
+| ❌ | blocked — a guardrail refused or the unit failed |
+| ⚠️ | needs a human — an open Major, a human-block path, a decision |
 
 After prime succeeds, open the run frame:
 
 ```text
-🟦 ∞ run ─ queue <e> eligible · <policy>
+⏳ ∞ run ─ queue <e> eligible · <policy>
 ```
 
 Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
@@ -1056,8 +1059,8 @@ ribbon with a different suffix. On resuming from a parked wait, print one `▶�
 <what fired>` line and continue; the ribbon for a step already announced is never printed again.
 
 ```text
-[14:07][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN ─ <lane> · <actor>
-[14:41][#78] 🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 🧹 SIMPLIFY ─ 41 lines removed · fresh simplifier
+[14:07][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN ─ <lane> · <actor>
+[14:41][#78] ⏳ ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 🧹 SIMPLIFY ─ 41 lines removed · fresh simplifier
 ```
 
 **Each step carries its own glyph**, between the counter and the name, so the eye finds a kind of
@@ -1105,9 +1108,9 @@ configured cap, which is what makes an approaching cap visible before it blocks.
 never disappears: one format for every line in the run, whatever it counts.
 
 ```text
-[15:02][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
-[15:19][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
-[15:26][#78] 🟩 ∞ ▰▰▰▱▱ 08/11 🔍 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
+[15:02][#78] ⏳ ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
+[15:19][#78] ⏳ ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
+[15:26][#78] ✅ ∞ ▰▰▰▱▱ 08/11 🔍 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
 ```
 
 Fix rounds belong to step 08 too — they are how the step converges, not a step of their own.
@@ -1122,10 +1125,10 @@ judged or wrote is a property of the evidence, and the model is now chooseable p
 line says it:
 
 ```text
-[14:03][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [CLAUDE:FABLE] ─ full · fresh planner
-[14:19][#78] 🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
-[14:11][#87] 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
-[15:02][#78] 🟨 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
+[14:03][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [CLAUDE:FABLE] ─ full · fresh planner
+[14:19][#78] ⏳ ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
+[14:11][#87] ⏳ ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
+[15:02][#78] ⚠️ ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
 ```
 
 Two units in flight read as two prefixes, which is the point.
@@ -1136,13 +1139,13 @@ slot is the honest statement that the session (its model on the startup banner) 
 End a unit with one closing rail:
 
 ```text
-[16:12][#78] 🟩 ╰─ ✔ SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ─╯
+[16:12][#78] ✅ ∞ ══ SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ══
 ```
 
 or:
 
 ```text
-[16:12][#78] 🟥 ╰─ ✖ BLOCKED ─ <safe composed reason> ─╯
+[16:12][#78] ❌ ∞ ══ BLOCKED ─ <safe composed reason> ══
 ```
 
 **A unit's closing rail is not the run's.** Blocking, deferring, or carving a unit ends THAT unit;
@@ -1153,11 +1156,11 @@ never one of them — a human-gated unit is a row in the digest, not a reason to
 When the last eligible unit is gone, print the idle line
 (`[HH:MM] 💤 ∞ idle ─ no eligible units`) and close cleanly rather than polling.
 
-Close the run with the badge matching its outcome — 🟩 when something shipped and nothing
-blocked, 🟥 when anything blocked:
+Close the run with the badge matching its outcome — ✅ when something shipped and nothing
+blocked, ❌ when anything blocked:
 
 ```text
-[17:41] 🟩 ∞ 🏁 run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
+[17:41] ✅ ∞ ══ 🏁 RUN COMPLETE ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff> ══
 ```
 
 Never paste raw issue/review text into chat banners.

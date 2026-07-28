@@ -7,6 +7,13 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
+- **State badges say what they mean, and terminal lines stop dangling.** The coloured squares
+  become semantic across every skill and the mechanical label-swap reminder: ⏳ in progress ·
+  ✅ complete · ❌ blocked · ⚠️ needs a human. Closing rails drop the half-box `╰─ … ─╯`, which
+  promised a left edge no earlier line ever drew and read as debris on a screen full of prose, in
+  favour of a symmetric `══ … ══` terminator. The rounded frame survives in exactly one place —
+  the unit banner, where all four corners exist.
+
 - **A human gate stops a unit, never the run.** The loop runs unattended, so every human-gated
   outcome is now a label plus an evidence-backed reason plus the next unit — never a question and
   a wait. At a cap-exhausted review it applies `loop-blocked` + `human:decide` naming the open

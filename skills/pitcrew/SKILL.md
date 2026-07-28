@@ -275,11 +275,11 @@ When taking a PR, print a composed banner beside the `loop:revising` mutation:
 ╰──────────────────────────────────────────────────╯
 ```
 
-Print one badged ribbon line per step (🟦 in progress · 🟩 complete · 🟥 blocked · 🟨 needs a human) — `▰` done-or-current, `▱` remaining, always eight cells:
+Print one badged ribbon line per step (⏳ in progress · ✅ complete · ❌ blocked · ⚠️ needs a human) — `▰` done-or-current, `▱` remaining, always eight cells:
 
 ```text
-[14:07][#<N>] 🟦 ∞ ▰▰▰▱▱▱▱▱ 03/8 🔨 IMPLEMENT ─ PR #<P> · <actor>
-[15:26][#<N>] 🟩 ∞ ▰▰▰▰▰▱▱▱ 05/8 🔍 REVIEW r2/3 ─ PR #<P> · fix-delta · clean
+[14:07][#<N>] ⏳ ∞ ▰▰▰▱▱▱▱▱ 03/8 🔨 IMPLEMENT ─ PR #<P> · <actor>
+[15:26][#<N>] ✅ ∞ ▰▰▰▰▰▱▱▱ 05/8 🔍 REVIEW r2/3 ─ PR #<P> · fix-delta · clean
 ```
 
 Step glyphs are the same closed set Dev uses, for the same kinds of work — 🧭 diagnose ·
@@ -295,13 +295,13 @@ ribbon.
 End with one closing rail:
 
 ```text
-🟩 ╰─ ✔ PR #<P> REVISED ─ round <N> · <delivered|awaiting-ci> · gated <short OID> ─╯
+[HH:MM][#<N>] ✅ ∞ ══ PR #<P> REVISED ─ round <N> · <delivered|awaiting-ci> · gated <short OID> ══
 ```
 
 or:
 
 ```text
-🟥 ╰─ ✖ PR #<P> BLOCKED ─ <safe composed reason> ─╯
+[HH:MM][#<N>] ❌ ∞ ══ PR #<P> BLOCKED ─ <safe composed reason> ══
 ```
 
 Fold Pitcrew outcomes into Dev's one end-of-run digest and scoreboard when the contexts are

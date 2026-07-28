@@ -16,19 +16,19 @@ Your first output, before a tool call or question, is exactly:
 
 If a tool call already happened, print the banner with the next output. Print it once.
 
-Mark each phase with a state badge (🟦 in progress · 🟥 blocked · 🟨 needs a human) and a
+Mark each phase with a state badge (⏳ in progress · ❌ blocked · ⚠️ needs a human) and a
 five-cell ribbon in the same `∞` visual language — `▰` for done-or-current, `▱` for remaining —
 as the phase begins:
 
 ```text
-🟦 ∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base
-🟦 ∞ ▰▰▱▱▱ 2/5 AUDIT ─ one-call battery
-🟦 ∞ ▰▰▰▱▱ 3/5 INTERVIEW ─ decisions only
-🟦 ∞ ▰▰▰▰▱ 4/5 WRITE ─ reconcile · visible diff
-🟦 ∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery
+⏳ ∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base
+⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT ─ one-call battery
+⏳ ∞ ▰▰▰▱▱ 3/5 INTERVIEW ─ decisions only
+⏳ ∞ ▰▰▰▰▱ 4/5 WRITE ─ reconcile · visible diff
+⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery
 ```
 
-Do not re-print a phase's ribbon when it completes — 🟩 belongs only on the closing rail.
+Do not re-print a phase's ribbon when it completes — ✅ belongs only on the closing rail.
 
 Doctor mode replaces the ribbon with its own single line: `∞ doctor ─ <audited ref>`.
 
@@ -579,13 +579,13 @@ stopping; interrupted means reverted, not parked.
 End with:
 
 ```text
-🟩 ╰─ ∞ setup · complete ─ <mode> · <changed>/<total> artifacts · verify <state> ─╯
+✅ ∞ ══ setup complete ─ <mode> · <changed>/<total> artifacts · verify <state> ══
 ```
 
 Doctor ends with:
 
 ```text
-∞ setup · doctor complete
+∞ ══ setup doctor complete ─ <findings> finding(s) ══
 ```
 
 ## Hard rules

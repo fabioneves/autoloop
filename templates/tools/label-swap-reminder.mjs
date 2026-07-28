@@ -69,19 +69,19 @@ const DISPATCH_STEP = {
 // the one after it.
 const SETUP_PHASE_ANCHORS = [
   [/release-verify\.mjs\s+--sort-versions/,
-    'autoloop: RESOLVE is running — its ribbon `🟦 ∞ ▰▱▱▱▱ 1/5 RESOLVE` must already be printed; '
-    + 'print it NOW if missing (late beats never). Next: `🟦 ∞ ▰▰▱▱▱ 2/5 AUDIT` before the audit '
+    'autoloop: RESOLVE is running — its ribbon `⏳ ∞ ▰▱▱▱▱ 1/5 RESOLVE` must already be printed; '
+    + 'print it NOW if missing (late beats never). Next: `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` before the audit '
     + 'battery.'],
   [/scaffold\.mjs\s+--audit\b/,
-    'autoloop: the AUDIT battery just ran — `🟦 ∞ ▰▰▱▱▱ 2/5 AUDIT` must already be printed; print '
-    + 'it NOW if missing. Next: `🟦 ∞ ▰▰▰▱▱ 3/5 INTERVIEW` BEFORE the first question to the human.'],
+    'autoloop: the AUDIT battery just ran — `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` must already be printed; print '
+    + 'it NOW if missing. Next: `⏳ ∞ ▰▰▰▱▱ 3/5 INTERVIEW` BEFORE the first question to the human.'],
   [/scaffold\.mjs\s+--(?:reconcile|merge-state|merge-loop)\b/,
-    'autoloop: WRITE is running — `🟦 ∞ ▰▰▰▰▱ 4/5 WRITE` must already be printed (and 3/5 '
-    + 'INTERVIEW before it); print any missing ribbon NOW. Next: `🟦 ∞ ▰▰▰▰▰ 5/5 VERIFY` when '
+    'autoloop: WRITE is running — `⏳ ∞ ▰▰▰▰▱ 4/5 WRITE` must already be printed (and 3/5 '
+    + 'INTERVIEW before it); print any missing ribbon NOW. Next: `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` when '
     + 'evidence collection starts.'],
   [/verify\.mjs\s+--install-root\b/,
-    'autoloop: install-root verify just ran — in a setup session `🟦 ∞ ▰▰▰▰▰ 5/5 VERIFY` must '
-    + 'already be printed; print it NOW if missing. The closing rail `🟩 ╰─ ∞ setup · complete …` '
+    'autoloop: install-root verify just ran — in a setup session `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` must '
+    + 'already be printed; print it NOW if missing. The closing rail `✅ ╰─ ∞ setup · complete …` '
     + 'is the only green line.'],
 ];
 
