@@ -3,6 +3,20 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.8] - 2026-07-28
+
+### Added
+
+- **`--effort <low|medium|high|xhigh|max>` on a dispatch, and reviews run `xhigh`.** One flag
+  spans both CLIs — `--effort` on claude, the `model_reasoning_effort` config override on codex —
+  and the level is stamped into the typed result and the dispatch log beside engine and model. The
+  review-engine recording carries it as a `!<level>` token (`claude gpt-5.6-sol @<url> !xhigh`),
+  so every reviewer inherits the depth without per-call flags; an unknown level fails the whole
+  recording closed, and writers keep the engine default. A review round costs a wall-clock
+  dispatch whether it reasons hard or not, so depth spent there is rounds not spent later. Seam
+  tests drive the real CLI parse through to the engine argv — the flag-drop class that once cost
+  six releases.
+
 ## [0.49.7] - 2026-07-28
 
 ### Changed

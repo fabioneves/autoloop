@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.7 · starting
+∞ dev · v0.49.8 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -146,7 +146,7 @@ forty minutes up-context by the first code review, and a forgotten flag would si
 the writer's model:
 
 ```bash
-mkdir -p .git/autoloop && printf 'codex\n' > .git/autoloop/review-engine   # with codex
+mkdir -p .git/autoloop && printf 'codex !xhigh\n' > .git/autoloop/review-engine  # with codex
 printf 'claude\n' > .git/autoloop/review-engine                            # plain run: ALWAYS overwrite
 ```
 
@@ -161,10 +161,11 @@ roles run a proxied model. Record it once after prime — engine, model, and the
 line:
 
 ```bash
-printf 'claude gpt-5.6-sol @http://127.0.0.1:18765\n' > .git/autoloop/review-engine
+printf 'claude gpt-5.6-sol @http://127.0.0.1:18765 !xhigh\n' > .git/autoloop/review-engine
 ```
 
-The `@<url>` is what makes the mode self-contained: `dispatch.mjs` injects it as
+The `!xhigh` pins reviewer reasoning depth (see `--effort` below); the `@<url>` is what makes the
+mode self-contained: `dispatch.mjs` injects it as
 `ANTHROPIC_BASE_URL` into REVIEWER dispatches itself, so proxy mode works regardless of how this
 session was launched — the session's own environment is not a prerequisite and not evidence.
 Writer roles never read the recording, so a writer can never be proxied.
@@ -247,6 +248,13 @@ reviewer's job is to find the case the author did not consider.
   It is still judgment work — deciding a Critical against source is the orchestrator's own call,
   not a dispatch's — so run the session on a model you trust for that, and nothing in the flow
   depends on which one it is.
+- `--effort <low|medium|high|xhigh|max>` pins the dispatch's reasoning depth — `--effort` on
+  claude, the `model_reasoning_effort` config override on codex, one flag either way — and is
+  stamped into the typed result and the dispatch log beside engine and model. **Reviews run
+  `xhigh`**: a review round costs a wall-clock dispatch either way, and depth spent there is
+  rounds not spent later; the recording carries it as a `!<level>` token so every reviewer
+  inherits it without per-call flags. Writers keep the engine default — an implementer works
+  against an explicit plan and failing tests, where more deliberation buys less.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 

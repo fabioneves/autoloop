@@ -56,6 +56,10 @@ const DISPATCH_TIMEOUT_MS = 30 * 60 * 1000;
 // about reads.
 const TOOLS_REQUIRING_GRANT = Object.freeze(['Bash', 'Edit', 'Write']);
 
+// Both CLIs expose the same reasoning ladder under different spellings: claude
+// takes `--effort <level>`, codex the `model_reasoning_effort` config override.
+const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
 // The two postures, carried over unchanged from the route adapter they used to
 // live in. `writer` is the only posture that can mutate the checkout; `reviewer`
 // cannot name a write tool at all, which is the invariant the self-test pins.
@@ -270,9 +274,10 @@ export function dispatchArgv(role, tools) {
 const ENGINES = Object.freeze({
   claude: Object.freeze({
     supports: (role) => ROLES[role] !== undefined,
-    argv: (role, tools, scratch, cwd, model) => [
+    argv: (role, tools, scratch, cwd, model, effort) => [
       ...dispatchArgv(role, tools),
       ...(model === null ? [] : ['--model', model]),
+      ...(effort === null ? [] : ['--effort', effort]),
     ],
     // Claude's stream-json ends with exactly one `result` event.
     payload: (role, stdout) => {
@@ -287,7 +292,7 @@ const ENGINES = Object.freeze({
     // Reviewer-only, and refused rather than approximated: codex would need a
     // writable sandbox and a commit contract this tool does not model.
     supports: (role) => ROLES[role]?.posture === 'reviewer',
-    argv: (role, tools, scratch, cwd, model) => {
+    argv: (role, tools, scratch, cwd, model, effort) => {
       writeFileSync(
         join(scratch, 'schema.json'),
         JSON.stringify(RESULT_SCHEMAS[ROLES[role].result] ?? REVIEW_VERDICT_SCHEMA),
@@ -295,6 +300,8 @@ const ENGINES = Object.freeze({
       return [
         'exec',
         ...(model === null ? [] : ['-m', model]),
+        // codex has no --effort flag; the same knob is a config override.
+        ...(effort === null ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
         '--json',
         '--output-schema',
         join(scratch, 'schema.json'),
@@ -352,17 +359,21 @@ function recordedReviewChoice(cwd) {
     if (ENGINES[engine] === undefined) return null;
     let model = null;
     let baseUrl = null;
+    let effort = null;
     for (const token of rest) {
       if (token.startsWith('@')) {
         if (baseUrl !== null || !/^@https?:\/\/\S+$/u.test(token)) return null;
         baseUrl = token.slice(1);
+      } else if (token.startsWith('!')) {
+        if (effort !== null || !EFFORTS.has(token.slice(1))) return null;
+        effort = token.slice(1);
       } else if (model === null) {
         model = token;
       } else {
         return null;
       }
     }
-    return { engine, model, baseUrl };
+    return { engine, model, baseUrl, effort };
   } catch {
     return null;
   }
@@ -386,6 +397,13 @@ export function resolveDefaultModel(role, cwd) {
 export function resolveDefaultBaseUrl(role, cwd) {
   if (ROLES[role]?.posture !== 'reviewer') return null;
   return recordedReviewChoice(cwd)?.baseUrl ?? null;
+}
+
+// A recorded `!<level>` pins reviewer reasoning effort: review is the step where
+// depth converts directly into rounds not spent.
+export function resolveDefaultEffort(role, cwd) {
+  if (ROLES[role]?.posture !== 'reviewer') return null;
+  return recordedReviewChoice(cwd)?.effort ?? null;
 }
 
 function resolveEngine(binary) {
@@ -495,21 +513,42 @@ export function runDispatch(options) {
   const cwd = options.cwd ?? process.cwd();
   const engineBinary = options.engine ?? resolveDefaultEngine(options.role, cwd);
   const resolvedModel = options.model ?? resolveDefaultModel(options.role, cwd);
-  const result = executeDispatch({ ...options, engine: engineBinary, model: resolvedModel });
+  const resolvedEffort = options.effort ?? resolveDefaultEffort(options.role, cwd);
+  const result = executeDispatch({
+    ...options,
+    engine: engineBinary,
+    model: resolvedModel,
+    effort: resolvedEffort,
+  });
   const engine = hostName(engineBinary);
   const model = resolvedModel;
+  const effort = resolvedEffort;
   recordDispatchWindow(options.cwd ?? process.cwd(), {
     role: options.role,
     engine,
     ...(model === null ? {} : { model }),
+    ...(effort === null ? {} : { effort }),
     startedAtMs: windowStartedAtMs,
     ms: Date.now() - windowStartedAtMs,
     ok: result.ok === true,
   });
   // Stamped once here so no return path inside the dispatch can omit it.
   return result.ok
-    ? { ...result, engine, ...(model === null ? {} : { model }) }
-    : { ...result, error: { ...result.error, engine, ...(model === null ? {} : { model }) } };
+    ? {
+      ...result,
+      engine,
+      ...(model === null ? {} : { model }),
+      ...(effort === null ? {} : { effort }),
+    }
+    : {
+      ...result,
+      error: {
+        ...result.error,
+        engine,
+        ...(model === null ? {} : { model }),
+        ...(effort === null ? {} : { effort }),
+      },
+    };
 }
 
 function executeDispatch(options) {
@@ -546,6 +585,7 @@ function executeDispatch(options) {
       adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
       liveFile: options.liveFile ?? null,
       model: options.model ?? null,
+      effort: options.effort ?? null,
     });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -586,8 +626,9 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 
 function runEngine({
   adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch, liveFile, model,
+  effort,
 }) {
-  const argv = adapter.argv(role, tools, scratch, cwd, model ?? null);
+  const argv = adapter.argv(role, tools, scratch, cwd, model ?? null, effort ?? null);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
@@ -702,6 +743,7 @@ export function parseArgs(args) {
     role: null,
     engine: null,
     model: null,
+    effort: null,
     liveFile: null,
     promptFile: null,
     tools: null,
@@ -725,6 +767,7 @@ export function parseArgs(args) {
     index += 1;
     if (flag === '--engine') parsed.engine = value;
     else if (flag === '--model') parsed.model = value;
+    else if (flag === '--effort') parsed.effort = value;
     else if (flag === '--live-file') parsed.liveFile = value;
     else if (flag === '--role') parsed.role = value;
     else if (flag === '--prompt-file') parsed.promptFile = value;
@@ -740,6 +783,12 @@ export function parseArgs(args) {
   }
   if (parsed.promptFile === null) {
     return { ...parsed, error: '--prompt-file: required' };
+  }
+  if (parsed.effort !== null && !EFFORTS.has(parsed.effort)) {
+    return {
+      ...parsed,
+      error: `--effort: expected one of ${[...EFFORTS].join(', ')}`,
+    };
   }
   return parsed;
 }
@@ -1300,6 +1349,67 @@ function selfTest() {
       })(),
     );
     check(
+      'a recorded effort pins reviewer dispatches and reaches the engine argv',
+      (() => {
+        writeFileSync(engineFile, 'claude gpt-5.6-sol !xhigh\n');
+        if (
+          resolveDefaultEffort('code-review', repoScratch) !== 'xhigh'
+          || resolveDefaultEffort('implement', repoScratch) !== null
+          || resolveDefaultModel('code-review', repoScratch) !== 'gpt-5.6-sol'
+        ) {
+          return false;
+        }
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: PASSING_VERDICT }),
+        ));
+        const pinned = runDispatch({
+          role: 'code-review',
+          prompt: 'review',
+          tools: reviewerTools,
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        return pinned.ok === true
+          && pinned.effort === 'xhigh'
+          && readFileSync(argvPath, 'utf8').includes('--effort xhigh');
+      })(),
+    );
+    check(
+      'an unknown recorded effort fails the whole recording closed',
+      (() => {
+        writeFileSync(engineFile, 'claude gpt-5.6-sol !extreme\n');
+        return resolveDefaultEffort('code-review', repoScratch) === null
+          && resolveDefaultModel('code-review', repoScratch) === null;
+      })(),
+    );
+    check(
+      'the CLI carries --effort through to the engine, and rejects an unknown level',
+      (() => {
+        if (parseArgs(['--role', 'code-review', '--prompt-file', '/p', '--effort', 'nope'])
+          .error === null) {
+          return false;
+        }
+        rmSync(engineFile, { force: true });
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: PASSING_VERDICT }),
+        ));
+        const parsedCli = parseArgs([
+          '--role', 'code-review', '--prompt-file', '/p', '--effort', 'xhigh',
+        ]);
+        const viaCli = runDispatch({
+          role: 'code-review',
+          prompt: 'review',
+          tools: reviewerTools,
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+          ...(parsedCli.effort === null ? {} : { effort: parsedCli.effort }),
+        });
+        return parsedCli.error === null
+          && viaCli.ok === true
+          && readFileSync(argvPath, 'utf8').includes('--effort xhigh');
+      })(),
+    );
+    check(
       'a malformed recorded proxy URL fails closed',
       (() => {
         writeFileSync(engineFile, 'claude gpt-5.6-sol @ftp://elsewhere\n');
@@ -1501,7 +1611,8 @@ function main() {
     console.error(
       'usage: dispatch.mjs --role <'
       + `${ROLE_NAMES.join('|')}> --prompt-file <path|-> `
-      + '[--tools <csv>] [--output-file <path>] [--json]',
+      + '[--tools <csv>] [--engine <name>] [--model <name>] '
+      + `[--effort <${[...EFFORTS].join('|')}>] [--output-file <path>] [--json]`,
     );
     process.exit(2);
   }
@@ -1532,6 +1643,7 @@ function main() {
     tools,
     ...(parsed.engine === null ? {} : { engine: parsed.engine }),
     ...(parsed.model === null ? {} : { model: parsed.model }),
+    ...(parsed.effort === null ? {} : { effort: parsed.effort }),
     ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
