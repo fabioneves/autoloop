@@ -179,8 +179,8 @@ time. Global defaults may pre-fill answers but never skip confirmation.
 Scale the interview to the mode. A fresh install walks every item. Migration and reconfigure
 collapse to one summary table — every current value beside its default or migrated value — and a
 single accept-all confirmation, expanding an item into its own question only where it carries a
-real decision: drift, a cap the human may want to change, or the merge policy. Fewer questions,
-never fewer disclosures: everything still appears in the summary and the visible diff.
+real decision: drift, **the gate**, a cap the human may want to change, or the merge policy. Fewer
+questions, never fewer disclosures: everything still appears in the summary and the visible diff.
 
 Ask only:
 
@@ -189,6 +189,20 @@ Ask only:
 3. Gate, optional quick gate, optional setup command, and the complete required CI CheckRun-name
    set. An empty set must be an explicit repository-policy choice, never an inference from an
    empty API response.
+
+   **Ask in EVERY mode, including reconfigure and migration, and show the configured commands
+   verbatim beside what they resolve to.** The gate is the one setting that decides whether code
+   ships, and the only one whose value is an executable that can rot without changing: a script
+   the repository deleted, a compose service that got renamed, a package script that moved. A cap
+   preserved across a migration is merely unexamined; a gate command preserved across a migration
+   can be pointing at nothing, and the run finds out at step 09 on a converged artifact. Same
+   reasoning the caps item gives — a preserved value the human never saw is indistinguishable from
+   a silent one — applied to the value where being wrong costs the most.
+
+   State whether each configured command **resolves right now**, using the discoverability check
+   Doctor already runs (see Project configuration above) rather than a second rule that could drift
+   from it. Report what is missing; never repair it, and never substitute a command the human did
+   not choose. A gate that cannot resolve is a finding for the human, not a gap for Setup to fill.
 4. Tracker: none or Jira; Jira requires epic key and cloud ID.
 5. Review checklist path/content.
 6. Numeric caps. Show every cap with its current value and the scaffold default side by side, and
