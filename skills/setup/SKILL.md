@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.11 · starting
+∞ setup · v0.49.13 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -247,6 +247,7 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 
 | Repository path | Template | Contract |
 |---|---|---|
+| `docs/agentic/LESSONS.md` | `LESSONS.template.md` | Durable repository memory — seeded once, never overwritten, read on demand |
 | `tools/agentic/adapter-contract.mjs` | `tools/adapter-contract.mjs` | Static reviewer artifact validation |
 | `tools/agentic/attestation-contract.mjs` | `tools/attestation-contract.mjs` | Exact-head gate/policy/authorization records |
 | `tools/agentic/checkout-contract.mjs` | `tools/checkout-contract.mjs` | Stable checkout and GitHub repository identity |
@@ -533,8 +534,16 @@ only the project name, checklist path, and gate command, and the last two are re
 so a stale rendering is corrected rather than carried forward. A section a repository added to its
 own LOOP is preserved and reported like any other.
 
-The merge covers only these two documents. The review checklist and
-`ARCH.md` are separate repository-owned files it never reads or writes.
+The merge covers only these two documents. The review checklist, `LESSONS.md`, and `ARCH.md` are
+separate repository-owned files it never reads or writes.
+
+**STATE is injected into every session; LESSONS is not.** That is why durable rules live in
+`docs/agentic/LESSONS.md` and STATE holds only policy — mission, config, autonomy, protected
+ground, security. A repository that predates the split still carries its lessons inside STATE:
+reconcile preserves them (durable memory is never dropped, and STATE is a human-authorized path)
+and reports them, so a human moves the bullets across and deletes the section. Curate LESSONS like
+`ARCH.md` — periodically, against a size budget — and delete any lesson a guard rule, contract, or
+hook now enforces: the mechanism is the memory at that point.
 
 Create lifecycle and step labels idempotently. Do not create non-manual policy labels.
 

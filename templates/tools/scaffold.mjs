@@ -15,7 +15,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -63,9 +65,11 @@ const MERGE_DOCUMENTS = Object.freeze({
     label: 'STATE',
     template: 'STATE.template.md',
     install: 'docs/agentic/STATE.md',
-    repoAppendedHeadings: Object.freeze([
-      '## lessons learned (durable rules; write here, not in chat)',
-    ]),
+    // Durable memory moved to LESSONS.md, which is never injected. STATE
+    // therefore declares no repo-appended section: `migrateLessons` relocates
+    // any legacy one before the merge, so the merge's fail-closed check for a
+    // vanished repo-appended heading has nothing left to catch.
+    repoAppendedHeadings: Object.freeze([]),
   }),
   loop: Object.freeze({
     label: 'LOOP',
@@ -356,6 +360,51 @@ export function reconcile(root, templates, { audit = false } = {}) {
     );
   }
 
+  // Durable memory is MOVED, never dropped: a repository that predates the
+  // split keeps its lessons inside the injected STATE, and the merge would
+  // otherwise fail closed on a repo-appended heading the template no longer
+  // has. Relocating first makes the merge clean and costs the repository
+  // nothing — the content lands in LESSONS.md before it leaves STATE.
+  for (const migration of REPO_MIGRATIONS) {
+    const outcome = migration.apply(root, templates, audit);
+    if (outcome === null) continue;
+    results.push({ ...outcome.result, migration: migration.id });
+    warnings.push(`${migration.id}: ${outcome.warning}`);
+  }
+
+  // LESSONS is durable repository memory: seeded once, never overwritten, and
+  // deliberately NOT injected — STATE is, which is why lessons moved out of it.
+  const lessons = resolve(root, 'docs', 'agentic', 'LESSONS.md');
+  if (!existsSync(lessons)) {
+    writeArtifact(
+      root,
+      'docs/agentic/LESSONS.md',
+      readFileSync(join(templates, 'LESSONS.template.md')),
+      results,
+      undefined,
+      audit,
+      'templates/LESSONS.template.md',
+    );
+  } else {
+    results.push({ path: 'docs/agentic/LESSONS.md', action: 'kept' });
+  }
+  // A repository that predates the split still carries its lessons inside the
+  // injected STATE. The merge preserves them rather than dropping them — moving
+  // durable memory is the human's call, on a human-authorized path — but the
+  // cost is paid every session until it happens, so the report says so.
+  const statePath = resolve(root, 'docs', 'agentic', 'STATE.md');
+  if (existsSync(statePath)) {
+    const stateText = readFileSync(statePath, 'utf8');
+    const lessonsHeading = stateText.match(/^##\s+Lessons learned[^\n]*$/mu);
+    if (lessonsHeading) {
+      warnings.push(
+        'docs/agentic/STATE.md still carries its "Lessons learned" section; STATE is injected '
+        + 'into every session and LESSONS.md is read on demand. Move those bullets to '
+        + 'docs/agentic/LESSONS.md and delete the section from STATE',
+      );
+    }
+  }
+
   // The committed CI policy is retired (docs/specs/simple-delivery.md): the
   // delivery predicate is the triggered-checks floor, so a lingering copy is
   // dead configuration that reads as authoritative. Reconcile removes it in the
@@ -601,6 +650,59 @@ function alignLine(line, installLines) {
   if (tuples.size !== 1) return null;
   const values = [...tuples.values()][0];
   return Object.fromEntries(names.map((name, index) => [name, values[index]]));
+}
+
+// Extracts a legacy "Lessons learned" section from STATE and appends it to
+// LESSONS.md. Ordering is deliberate: LESSONS is written and re-read before
+// STATE is rewritten, so an interrupted migration leaves duplicated memory
+// rather than lost memory.
+export function extractLessonsSection(stateText) {
+  const match = /^##\s+Lessons learned[^\n]*$/mu.exec(stateText ?? '');
+  if (!match) return null;
+  const start = match.index;
+  const rest = stateText.slice(start + match[0].length);
+  const next = /^##\s+/mu.exec(rest);
+  const end = next === null ? stateText.length : start + match[0].length + next.index;
+  const section = stateText.slice(start, end).trimEnd();
+  const remainder = `${stateText.slice(0, start).trimEnd()}\n${stateText.slice(end)}`;
+  return { section, remainder: `${remainder.trimEnd()}\n` };
+}
+
+// Upgrade jobs. Every entry is idempotent (a second reconcile is a no-op),
+// writes the new home before clearing the old one, and REPORTS what it moved —
+// an upgrade that a repository cannot see in its diff is indistinguishable from
+// the loop rewriting its own policy. Reconcile runs them in order before any
+// document merge, so a merge never meets a half-migrated file.
+const REPO_MIGRATIONS = Object.freeze([
+  Object.freeze({ id: 'lessons-out-of-state', apply: migrateLessons }),
+]);
+
+function migrateLessons(root, templates, audit) {
+  const statePath = resolve(root, 'docs', 'agentic', 'STATE.md');
+  if (!existsSync(statePath)) return null;
+  const extracted = extractLessonsSection(readFileSync(statePath, 'utf8'));
+  if (extracted === null) return null;
+  const lessonsPath = resolve(root, 'docs', 'agentic', 'LESSONS.md');
+  if (!audit) {
+    const base = existsSync(lessonsPath)
+      ? readFileSync(lessonsPath, 'utf8')
+      : readFileSync(join(templates, 'LESSONS.template.md'), 'utf8');
+    mkdirSync(dirname(lessonsPath), { recursive: true });
+    writeFileSync(
+      lessonsPath,
+      `${base.trimEnd()}\n\n<!-- moved from STATE.md by autoloop:setup -->\n${extracted.section}\n`,
+    );
+    // Only once the memory is durable somewhere else does it leave STATE.
+    writeFileSync(statePath, extracted.remainder);
+  }
+  return {
+    result: { path: 'docs/agentic/LESSONS.md', action: 'migrated' },
+    warning:
+      'moved the "Lessons learned" section out of docs/agentic/STATE.md into '
+      + 'docs/agentic/LESSONS.md — STATE is injected into every session, LESSONS is read on '
+      + 'demand. Review both files in the diff'
+      + (audit ? ' (audit mode: nothing was written)' : ''),
+  };
 }
 
 export function mergeDocument(templateText, installText, options = {}) {
@@ -892,8 +994,23 @@ export function mergeDocumentFiles(root, templates, kind, { write = false } = {}
     );
   }
   const installText = readFileSync(installPath, 'utf8');
+  const templateText = readFileSync(join(templates, spec.template), 'utf8');
+  // Fail closed on memory the migrations have not relocated yet — but only when
+  // THIS template has no counterpart heading, which is what makes the merge
+  // destructive. A template that still owns the section merges it normally.
+  if (
+    kind === 'state'
+    && extractLessonsSection(installText) !== null
+    && extractLessonsSection(templateText) === null
+  ) {
+    throw new Error(
+      `${spec.install} still carries a "Lessons learned" section; run `
+      + '`scaffold.mjs --reconcile <root>` first — it moves durable memory into '
+      + 'docs/agentic/LESSONS.md, which this merge would otherwise replace',
+    );
+  }
   const { report, merged } = mergeDocument(
-    readFileSync(join(templates, spec.template), 'utf8'),
+    templateText,
     installText,
     {
       config: readInstalledConfig(root),
@@ -918,6 +1035,7 @@ function fixtureTemplates() {
   mkdirSync(join(templates, 'tools'), { recursive: true });
   writeFileSync(join(templates, TEMPLATE_MARKER), '# state template\n');
   writeFileSync(join(templates, 'LOOP.template.md'), '# loop template\n');
+  writeFileSync(join(templates, 'LESSONS.template.md'), '# lessons template\n');
   writeFileSync(
     join(templates, 'opencode-config.template.json'),
     stableJson({ instructions: ['docs/agentic/STATE.md'], permission: { read: 'allow' } }),
@@ -1138,6 +1256,28 @@ function mergeSelfTest(expect) {
     writeFileSync(statePath, fixtureStateInstall());
     writeFileSync(loopPath, fixtureLoopInstall());
 
+    // An unmigrated STATE is refused rather than silently stripped of memory:
+    // the merge has no counterpart heading for it, so reconcile must relocate
+    // it first.
+    const splitTemplates = mkdtempSync(join(tmpdir(), 'autoloop-scaffold-split-'));
+    for (const name of readdirSync(templates)) {
+      const from = join(templates, name);
+      if (statSync(from).isDirectory()) continue;
+      writeFileSync(join(splitTemplates, name), readFileSync(from));
+    }
+    const lessonless = extractLessonsSection(fixtureStateTemplate());
+    writeFileSync(join(splitTemplates, TEMPLATE_MARKER), lessonless.remainder);
+    let unmigratedRefused = false;
+    try {
+      mergeDocumentFiles(root, splitTemplates, 'state');
+    } catch (error) {
+      unmigratedRefused = error.message.includes('LESSONS.md');
+    }
+    rmSync(splitTemplates, { recursive: true, force: true });
+    expect('a STATE with unmigrated lessons is refused, not merged', unmigratedRefused);
+
+    const migrated = extractLessonsSection(fixtureStateInstall());
+    writeFileSync(statePath, migrated.remainder);
     const dry = mergeDocumentFiles(root, templates, 'state');
     const actions = new Map(dry.report.sections.map((entry) => [entry.heading, entry.action]));
     expect(
@@ -1149,7 +1289,6 @@ function mergeSelfTest(expect) {
         '- No ambient randomness.',
         '"version": "0.25.0"',
         '- **authoritative specification**: `spec/**`.',
-        '- **Repository lesson.** Written by this repository.',
         'A repository section the new template has no counterpart for.',
         'Template prose the new version deleted under a renamed heading.',
       ].every((fragment) => dry.merged.includes(fragment)),
@@ -1192,7 +1331,7 @@ function mergeSelfTest(expect) {
       'the dry run writes nothing',
       dry.report.wrote === false
         && dry.report.changed === true
-        && readFileSync(statePath, 'utf8') === fixtureStateInstall(),
+        && readFileSync(statePath, 'utf8') === migrated.remainder,
     );
 
     const written = mergeDocumentFiles(root, templates, 'state', { write: true });
@@ -1221,7 +1360,7 @@ function mergeSelfTest(expect) {
         '## Durable rules',
       ),
       fixtureStateInstall(),
-      { repoAppendedHeadings: MERGE_DOCUMENTS.state.repoAppendedHeadings },
+      { repoAppendedHeadings: ['## lessons learned (durable rules; write here, not in chat)'] },
     );
     expect(
       'a template that renames repository memory fails closed instead of replacing it',
@@ -1389,6 +1528,46 @@ function selfTest() {
         );
         return changed === false
           && JSON.stringify(merged) === JSON.stringify(existing);
+      })(),
+    );
+    expect(
+      'lessons are seeded once and never overwritten',
+      (() => {
+        const path = join(root, 'docs', 'agentic', 'LESSONS.md');
+        if (!existsSync(path)) return false;
+        writeFileSync(path, '# repo memory\n- a hard-won rule\n');
+        const again = reconcile(root, templates);
+        return readFileSync(path, 'utf8').includes('a hard-won rule')
+          && again.results.some((entry) =>
+            entry.path === 'docs/agentic/LESSONS.md' && entry.action === 'kept');
+      })(),
+    );
+    expect(
+      'a legacy STATE has its lessons MOVED to LESSONS.md, and moving is idempotent',
+      (() => {
+        const path = join(root, 'docs', 'agentic', 'STATE.md');
+        const lessonsPath = join(root, 'docs', 'agentic', 'LESSONS.md');
+        const before = readFileSync(path, 'utf8');
+        writeFileSync(path, `${before}\n## Lessons learned (durable rules)\n\n- legacy rule\n`);
+        const audit = reconcile(root, templates, { audit: true });
+        // Audit reports the move without performing it.
+        if (
+          !audit.results.some((entry) => entry.migration === 'lessons-out-of-state')
+          || !readFileSync(path, 'utf8').includes('legacy rule')
+          || readFileSync(lessonsPath, 'utf8').includes('legacy rule')
+        ) {
+          return false;
+        }
+        const run = reconcile(root, templates);
+        const movedOut = !readFileSync(path, 'utf8').includes('legacy rule');
+        const movedIn = readFileSync(lessonsPath, 'utf8').includes('legacy rule');
+        const reported = run.results.some((entry) =>
+          entry.migration === 'lessons-out-of-state');
+        const again = reconcile(root, templates);
+        const idempotent = !again.results.some((entry) =>
+          entry.migration === 'lessons-out-of-state')
+          && readFileSync(lessonsPath, 'utf8').match(/legacy rule/gu).length === 1;
+        return movedOut && movedIn && reported && idempotent;
       })(),
     );
     expect(
