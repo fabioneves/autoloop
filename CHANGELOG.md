@@ -3,6 +3,43 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.29] - 2026-07-28
+
+### Fixed
+
+- **The dispatch ceiling is per posture; a flat one killed a working writer.** A writer grinding a
+  Go slice was killed at the flat 30-minute bound mid-task, its tokens spent and unrecoverable.
+  The constant carried its own falsified assumption — "the longest observed healthy implement
+  dispatch is minutes, and a run that needs more than half an hour has a different problem" — and
+  a writer that had landed two commits is not a different problem. Raising it globally would have
+  bought that back by making every wedged reviewer cost four times as much to notice, so the bound
+  is now per posture: a writer grinds against the slice caps rather than the clock and gets 120
+  minutes; a reviewer returns one typed verdict, the longest healthy one observed being a
+  13-minute codex review, and gets 45. An unknown role gets the tighter one, never the writer
+  budget. The typed timeout names which ceiling fired and warns against a blind retry, because a
+  killed writer may have committed real work first.
+- **A writer commits per plan task, not once at the end.** The implement step asked for
+  "conventional commit", singular, so a writer committing incrementally was luck rather than
+  instruction — and that luck is the only reason the timeout above cost a tail instead of
+  everything, since the writer happened to have committed eight times. A commit is the only part
+  of a writer's work that outlives the writer. Committing per task turns that into a floor at no
+  cost: the plan already enumerates the tasks and TDD already makes each green before the next. It
+  is also what makes a timeout reconcilable by inspecting the branch instead of retrying blindly.
+- **The park push is not step 10.** A run parked at step 5 with eight local commits, reasoning
+  "the push happens at step 10, per the flow" — the same failure as the four-commit incident the
+  liveness rule already records, re-derived from the step list instead of from the rule. The loop
+  branch exists on the remote from the claim, so pushing while parked updates a draft nobody is
+  reading and pre-empts nothing; step 10 VERIFIES and binds a pushed head, which is a different act
+  from getting the bytes off the machine.
+- **A step is announced once, by its ribbon.** A live run followed its SIMPLIFY ribbon with an
+  improvised `▶ #123 · step 6/11 — SIMPLIFY (fresh simplifier, FABLE)`, repeating the issue,
+  counter, step name and executor while telling the reader nothing new — and overloading `▶️`,
+  which already means resumed-from-a-wait in the closed badge vocabulary.
+- **The inline-awk refusal names the plainer spelling first.** Blocked pulling a number out of
+  `git diff --stat`, it offered only "put the program in a file and run `awk -f <file>`" — more
+  ceremony than the measurement. It now names `git diff --shortstat`, `wc -l`, `cut -f<n>` and
+  `sort | uniq -c` before the file form, the lesson the fanout remedy already learned.
+
 ## [0.49.28] - 2026-07-28
 
 ### Fixed
