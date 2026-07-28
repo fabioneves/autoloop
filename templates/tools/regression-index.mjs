@@ -222,6 +222,44 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'expansion-refusal-warned-of-the-wrong-hazard',
+    date: '2026-07-28',
+    symptom: 'A read-only `for s in …; do sed …; done` byte count was refused '
+      + 'with "can hide a mutation … split discovery and mutation into separate '
+      + 'tool calls" — a hazard not present — while never mentioning the loop '
+      + 'variable that actually defeated resolution.',
+    cause: 'One generic message served every expansion shape. Wrong advice is '
+      + 'worse than none: the reader fixes the half the message names.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'a loop refusal names the loop variable and the loop remedy',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'an exit-status refusal points at the report, not at assignment',
+      }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function unresolvedExpansionReason' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'proxy-probe-had-no-executable-command',
+    date: '2026-07-28',
+    symptom: 'A run lost a round recording the proxy engine: it read the URL '
+      + 'back out of `review-engine` to probe it, and the command substitution '
+      + 'was refused.',
+    cause: 'The skill said to probe "the recorded URL" without giving the '
+      + 'command, so a session composed one from the file it had just written. '
+      + 'Same shape as the exit-3 merge contract: an outcome described without '
+      + 'an executable command is an invitation to improvise into a refusal.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'Write the URL as a literal',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '

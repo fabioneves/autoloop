@@ -550,6 +550,48 @@ function opaqueCommandAssembler(cmd) {
   }, null);
 }
 
+// Names the token that defeated resolution, and the remedy for the SHAPE that
+// produced it. The old text said "can hide a mutation. Use literal canonical
+// commands; split discovery and mutation into separate tool calls." — generic,
+// and worse than generic on a read-only measurement: it warns about a mutation
+// that is not there while saying nothing about the loop variable that actually
+// blocked. A live run lost rounds to `for s in …; do sed …; done` reading it.
+const LOOP_KEYWORD = /(?:^|[\s;&|(])(?:for|while|until)(?=\s)/u;
+
+export function unresolvedExpansionReason(rawCmd) {
+  const text = stripQuotedHeredocBodies(String(rawCmd));
+  const assigned = new Set(
+    [...literalAssignments(text).keys()].filter((name) => literalAssignments(text).get(name) !== null),
+  );
+  const tokens = [...text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?|\$\(|`|\$([?$!*@#-]|\d)/gu)]
+    .map((match) => {
+      if (match[0].startsWith('$(') || match[0] === '`') return 'a command substitution';
+      if (match[2] !== undefined) return `\`$${match[2]}\``;
+      return assigned.has(match[1]) ? null : `\`$${match[1]}\``;
+    })
+    .filter((token) => token !== null);
+  const named = [...new Set(tokens)].slice(0, 3).join(', ');
+  const what = named === ''
+    ? 'this command carries an expansion the guard cannot read'
+    : `${named} cannot be resolved statically`;
+  if (LOOP_KEYWORD.test(text)) {
+    return `${what} — a loop variable takes a new value each iteration, so the guard `
+      + 'cannot know what runs. Write the iterations as literal commands (one tool call each is '
+      + 'fine), or put the loop in a reviewed program file and run that.';
+  }
+  // `$?` has no literal to assign, so the generic "assign it in the same
+  // command" advice is impossible rather than merely unhelpful. The exit status
+  // is already available twice over without it.
+  if (/\$\?/u.test(text)) {
+    return `${what}. An exit status has no literal form: the tool runner already reports a `
+      + 'non-zero exit, and the typed tools carry their outcome in their own output '
+      + '(`ok: false` beside the reason) — read that instead of capturing it.';
+  }
+  return `${what}, so command policy cannot judge what would run. Assign it a literal in the `
+    + 'SAME command and the guard substitutes it and judges the real thing; otherwise use '
+    + 'literal canonical commands, or a reviewed program file.';
+}
+
 const ASSEMBLER_REMEDY = Object.freeze({
   fanout: '`xargs` and `parallel` build commands out of data the guard cannot read. '
     + 'To LIST, run the plain command alone (`ls -1 <dir>`) — the output is yours to '
@@ -1226,10 +1268,7 @@ export function evaluate(rawCmd, branch, options = {}) {
     }
     return {
       block: true,
-      reason:
-        'autoloop guard — active shell expansion is opaque to command policy and can hide a '
-        + 'mutation. Use literal canonical commands; split discovery and mutation into '
-        + 'separate tool calls.',
+      reason: `autoloop guard — ${unresolvedExpansionReason(rawCmd)}`,
     };
   }
   const cmd = stripHeredocs(rawCmd);
@@ -2094,6 +2133,45 @@ function selfTest() {
     // -- a plain listing -- because the refusal named its category and left the
     // reader to guess the command. Shape-shaped advice is not advice; each
     // assembler shape must name the command to run instead.
+    // 2026-07-28: the expansion refusal said "can hide a mutation. Use literal
+    // canonical commands; split discovery and mutation into separate tool
+    // calls." on a read-only `for s in …; do sed …; done` byte count — warning
+    // about a mutation that was not there, silent about the loop variable that
+    // actually blocked. Each shape must name its own token and its own remedy.
+    messageChecks += 1;
+    const loopReason = evaluate(
+      'for s in a b; do wc -c $s; done',
+      'feat/gh-1-x',
+    ).reason ?? '';
+    if (
+      !loopReason.includes('`$s`')
+      || !loopReason.includes('loop variable')
+      || !loopReason.includes('reviewed program file')
+      || loopReason.includes('hide a mutation')
+    ) {
+      console.error('FAIL [a loop refusal names the loop variable and the loop remedy]');
+      ok = false;
+    }
+    messageChecks += 1;
+    const exitReason = evaluate('node x.mjs; echo $?', 'feat/gh-1-x').reason ?? '';
+    if (
+      !exitReason.includes('`$?`')
+      || !exitReason.includes('no literal form')
+      || !exitReason.includes('ok: false')
+    ) {
+      console.error('FAIL [an exit-status refusal points at the report, not at assignment]');
+      ok = false;
+    }
+    messageChecks += 1;
+    const varReason = evaluate('wc -c $TARGET/x.md', 'feat/gh-1-x').reason ?? '';
+    if (
+      !varReason.includes('`$TARGET`')
+      || !varReason.includes('SAME command')
+      || varReason.includes('loop variable')
+    ) {
+      console.error('FAIL [a bare-variable refusal names the variable and the substitution path]');
+      ok = false;
+    }
     messageChecks += 1;
     const fanout = evaluate('ls -d /x/*/ | xargs -n1 basename', 'feat/gh-1-x').reason ?? '';
     if (!fanout.includes('ls -1 <dir>') || !fanout.includes('reviewed program file')) {

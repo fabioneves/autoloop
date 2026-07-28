@@ -3,6 +3,35 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.22] - 2026-07-28
+
+### Fixed
+
+- **An expansion refusal names the token that blocked and the remedy for its shape, instead of
+  warning about a hazard that isn't there.** A read-only `for s in …; do sed …; done` byte count was
+  refused with *"can hide a mutation. Use literal canonical commands; split discovery and mutation
+  into separate tool calls"* — there was no mutation, and the loop variable that actually defeated
+  resolution went unmentioned. Wrong advice is worse than generic advice, because the reader fixes
+  the half the message names. Each shape now answers for itself:
+  - a loop variable → names it, and says to write the iterations as literal commands or move the
+    loop into a reviewed program file;
+  - `$?` → says an exit status **has no literal form**, so the "assign it in the same command" path
+    is impossible, and points at the two places the outcome already exists: the tool runner's own
+    report of a non-zero exit, and `ok: false` in the typed tool's output;
+  - a bare variable or command substitution → names it and points at the substitution path that
+    does work (assign a literal in the SAME command and the guard judges the real thing).
+
+  The blocks themselves are unchanged and all correct — a loop variable genuinely cannot be resolved
+  statically. Three message checks and a corpus case pin the remedies, and one check asserts the old
+  "hide a mutation" text never comes back on a loop.
+- **The proxy preflight gives the command, not just the outcome.** The skill said to probe "the
+  recorded URL" without showing how, so a run read the URL back out of `.git/autoloop/review-engine`
+  with a command substitution — which the guard refuses, correctly, since it cannot see which host
+  would be contacted. The URL is a literal the run chose one command earlier: the recording exists
+  for `dispatch.mjs`, which reads the file itself, while the probe is for the run, which already
+  knows the value. Same shape as the exit-3 merge contract fixed in 0.49.17 — an outcome described
+  without an executable command is an invitation to improvise into a refusal.
+
 ## [0.49.21] - 2026-07-28
 
 ### Fixed
