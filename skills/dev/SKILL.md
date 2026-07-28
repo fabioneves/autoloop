@@ -241,8 +241,12 @@ reviewer's job is to find the case the author did not consider.
   the writer's model, and never silently drop the pin — the note is the record. Opus at its
   limit too parks the run: limits reset; a run killed by improvisation does not.
 
-  Premise and disposition are IN-SESSION work and carry no `--model` knob — they run on the
-  session's model. The standing choice is **fable**: orchestrate the loop from a fable session.
+  Premise, finding verification, and disposition are IN-SESSION work and carry no `--model`
+  knob — they run on whatever model the operator's session is, and the loop does not pin it.
+  Every bounded step names its own model above, so the session's choice is the operator's alone.
+  It is still judgment work — deciding a Critical against source is the orchestrator's own call,
+  not a dispatch's — so run the session on a model you trust for that, and nothing in the flow
+  depends on which one it is.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 
