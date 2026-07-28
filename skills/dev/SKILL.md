@@ -423,7 +423,7 @@ failure. Waiting itself has one sanctioned shape per situation:
   waits for, with the clock:
 
   ```text
-  🅿️  ∞ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
+  🅿️ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
   ├ #78 · code-review r1 on `GPT-5.6-SOL`
   ├ #87 · plan-review on `GPT-5.6-SOL`
   └ resumes on result files
@@ -441,12 +441,17 @@ failure. Waiting itself has one sanctioned shape per situation:
   `🅿️` is a variation-selector emoji and those render at inconsistent widths across terminals, so
   any indent measured from it is a guess that is wrong somewhere. Flush left is the one alignment
   that cannot drift, which is what lets this block be column-aligned at all while the badge stays
-  in a set the ribbons deliberately exclude. **Two source spaces separate the badge from the `∞`,
-  which reads as one gap**: terminals render `🅿️` at double width and swallow the first space, so a
-  single space closes up and the two marks fuse into one. Measured in a live run, not reasoned
-  about — the first attempt used one space and shipped `🅿️∞`. This is the same instability that
-  keeps the badge out of the ribbon glyph set and the branches flush at column zero; here it is
-  paid once, in a fixed string, where the cost is bounded and visible.
+  in a set the ribbons deliberately exclude.
+
+  **Nothing that needs a measured gap follows the badge — that is why the `∞` is not in this
+  header.** Two attempts tuned the space between `🅿️` and `∞`: one space fused them into `🅿️∞`, two
+  rendered as a wide gap in some surfaces and no gap at all in others, in the SAME environment. A
+  glyph whose advance width is not agreed on cannot be padded correctly, because there is no
+  correct number — every value is right somewhere and wrong somewhere else. So the badge is
+  followed only by the dotted rule, whose whole job is to be decorative: if it starts one column
+  over, nothing reads differently. The `∞` is already on every ribbon in the run and the block is
+  unmistakably the loop's without it. Removing the dependency beats tuning it, and the two tuning
+  attempts are the evidence for that rather than an argument against the badge.
 
   **The clock rides in the rule, and there is no `[HH:MM][#N]` prefix at all.** A park routinely
   waits on two units at once, so a `[#N]` would name one of them and silently misfile the rest;
@@ -1311,9 +1316,12 @@ says WHAT the step is, the badge says HOW IT IS GOING.
 
 Step glyphs deliberately avoid variation-selector emoji, because a ribbon is a column-aligned
 line and those render at inconsistent widths. 🅿️ / ▶️ / 💤 stay usable on the wait lines because
-nothing on those lines is measured FROM the badge: `▶️ resumed` and `💤 idle` are prose, and the
-`🅿️ parked` block aligns its branches flush at column zero rather than indenting under the badge.
-An unstable glyph is only a hazard when something has to line up beside it.
+nothing on those lines is measured FROM the badge: `▶️ resumed` and `💤 idle` are prose, the
+`🅿️ parked` block aligns its branches flush at column zero rather than indenting under the badge,
+and the only thing following that badge is a decorative rule. An unstable glyph is a hazard exactly
+when something has to line up beside it — so put nothing there, rather than choosing a width. There
+is no width to choose: the same badge measured wide in one surface and zero-width in another,
+in one environment, on one day.
 
 **Every timeline line starts with `[HH:MM][#N]`** — the wall clock from `date +%H:%M` in the same
 turn (one cheap read; never guessed from memory), then the unit it belongs to. Leading, not
