@@ -25,8 +25,10 @@ const EXTRAS = {
   '02-plan': ' The plan must NAME the guidance-mapped domain skills (the repo CLAUDE.md/AGENTS.md'
     + ' mapping) and carry the literal `## Constraints` section distilling them — the plan'
     + ' reviewer flags both when missing.',
-  '06-simplify': ' Simplify is folded into the writer: swap and ribbon only, dispatch nothing —'
-    + ' a simplification-class review finding becomes a normal fix dispatch.',
+  '06-simplify': ' Dispatch ONE behavior-preserving simplify pass (implement role, fable) whose'
+    + ' prompt loads `agent-skills:code-simplification` and carries the measured diff vs the'
+    + " plan's line budget; tests green before it returns, test files unedited, behavior frozen."
+    + ' Verify the returned diff yourself — a behavior change is reverted, not fixed.',
   '07-diff-review': ' Load `agent-skills:code-review-and-quality` AND the domain skills the plan'
     + ' named via the Skill tool in THIS message — naming in the plan is not loading; reviewing'
     + ' bare is a skipped rider.',
@@ -161,7 +163,7 @@ function selfTest() {
     ['gh issue edit 12 --remove-label loop-delivered --add-label loop:revising', /pitcrew take-up banner/],
     ['gh issue edit 12 --add-label "loop:09-gate"', /step 9\/11 — GATE/],
     ['gh issue edit 5 --remove-label loop:05-implement --add-label loop:06-simplify', /step 6\/11 — SIMPLIFY/],
-    ['gh issue edit 5 --add-label loop:06-simplify', /dispatch nothing/],
+    ['gh issue edit 5 --add-label loop:06-simplify', /agent-skills:code-simplification/],
     ['gh issue edit 7 --add-label "loop:02-plan"', /## Constraints/],
     ['gh issue edit 5 --remove-label loop:06-simplify --add-label loop:07-diff-review', /naming in the plan is not loading/],
     ['gh issue edit 7 --remove-label loop:09-gate,loop-started --add-label loop-delivered', /PushNotification `✔ #7/],

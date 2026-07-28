@@ -3,6 +3,24 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.7] - 2026-07-28
+
+### Changed
+
+- **Step 6 simplifies for real, before any review round sees the artifact.** The slot that cost a
+  label swap now dispatches one behavior-preserving pass (implement role, opus) whose prompt loads
+  `agent-skills:code-simplification` and carries the measured diff against the plan's predicted
+  line budget — over budget makes reduction a required outcome. The pass runs on **fable, not the
+  implementer's opus**: simplifying is a reading task before a writing one, so a fresh model that
+  does not inherit the writer's priors is the same decorrelation that makes cross-model review
+  work, applied a step earlier. The pass may not edit test files
+  and must leave the unit's tests green before returning; the orchestrator re-runs them and reads
+  the diff, and a behavior change is reverted rather than fixed. Every line the reviewer reads is
+  surface it can find something in: a live unit spent three of its four rounds re-reporting
+  `artifact-line-budget-exceeded`, a number the orchestrator can measure in one command instead of
+  learning one review round at a time. A trivial diff (~50 lines, two files) may still be handled
+  inline.
+
 ## [0.49.6] - 2026-07-28
 
 ### Changed

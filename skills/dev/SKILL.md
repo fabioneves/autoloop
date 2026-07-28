@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.6 · starting
+∞ dev · v0.49.7 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -223,7 +223,12 @@ reviewer's job is to find the case the author did not consider.
 
   Standing defaults for claude-engine dispatches (this repository's operator choice):
   - step 05 implement → `--model opus`
-  - step 08 fix dispatches (and any simplify dispatch, should one exist) → `--model opus`
+  - step 06 simplify → `--model fable` — NOT the implementer's model, deliberately: simplifying
+    is a reading task before it is a writing one, and a fresh model does not inherit the writer's
+    priors about what its own code "obviously" means. Same decorrelation that makes cross-model
+    review work, applied one step earlier. It also carries the subtlest call in the loop —
+    behavior preservation under a suite only as complete as the plan's case enumeration
+  - step 08 fix dispatches → `--model opus`
   - all other claude dispatches → no flag (the saved default)
 
   - step 02 plan (and any plan-revision dispatch) → `--model fable`
@@ -236,8 +241,12 @@ reviewer's job is to find the case the author did not consider.
   the writer's model, and never silently drop the pin — the note is the record. Opus at its
   limit too parks the run: limits reset; a run killed by improvisation does not.
 
-  Premise and disposition are IN-SESSION work and carry no `--model` knob — they run on the
-  session's model. The standing choice is **fable**: orchestrate the loop from a fable session.
+  Premise, finding verification, and disposition are IN-SESSION work and carry no `--model`
+  knob — they run on whatever model the operator's session is, and the loop does not pin it.
+  Every bounded step names its own model above, so the session's choice is the operator's alone.
+  It is still judgment work — deciding a Critical against source is the orchestrator's own call,
+  not a dispatch's — so run the session on a model you trust for that, and nothing in the flow
+  depends on which one it is.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 
@@ -565,13 +574,36 @@ no PR/merge, and no objective gate. A quick gate may run once after collection.
 
 ### 6. Simplify
 
-Move to `loop:06-simplify`, print the ribbon — **and dispatch nothing.** Simplicity is the
-writer's job, stated in the writer's prompt (lean, self-documenting, no needless indirection or
-speculative abstraction), and residual complexity is a review finding like any other: a
-simplification-class finding becomes a normal fix dispatch. A standalone same-engine polish pass
-re-read the whole unit to change nothing on its first live outing — the step keeps its slot in
-the timeline and costs a label swap, not a dispatch. Only a trivial inline edit (~five lines,
-two files) is ever made here.
+Move to `loop:06-simplify` and **dispatch one behavior-preserving simplification pass over the
+implemented artifact, before any review round sees it.** Every line the reviewer reads is surface
+it can find something in, and a live unit spent three of its four rounds re-reporting
+`artifact-line-budget-exceeded` — a number the orchestrator can measure in one command instead of
+learning one review round at a time.
+
+```bash
+bash tools/agentic/dispatch-stream.sh \
+  <scratchpad>/live/<issue>-simplify.jsonl <scratchpad>/simplify-result.json \
+  --role implement --prompt-file <path> --model fable
+```
+
+The prompt must load `agent-skills:code-simplification` (behavior preservation, project
+conventions, the complexity-reduction catalogue) and state the unit's own constraints:
+
+- **the measured budget** — the plan's predicted line count beside `git diff --stat` against the
+  claim commit. Over budget makes reduction a required outcome and names the excess; within
+  budget it is still a clarity pass;
+- **behavior is frozen** — identical outputs, errors, side effects, and ordering; a simplification
+  the writer cannot prove behavior-preserving is not made;
+- **tests are the proof and are not the subject** — the unit's tests must be green before the
+  dispatch returns, and test files may not be edited (a simplify that rewrites its own oracle
+  proves nothing);
+- the plan's file boundary, no new dependencies, no new abstractions "for later";
+- return what changed and the line delta.
+
+Then verify: run the full unit tests yourself on the returned artifact and read the diff. A
+simplify that changed behavior is reverted, not fixed — the artifact goes to review as it was.
+For a trivial diff (~50 lines, two files) an inline pass is allowed instead of a dispatch; nothing
+else is done here by hand. Residual complexity remains a review finding like any other.
 
 Update ARCH on the unit branch when structure/integrations changed. Keep curated docs
 merge-friendly: no shared freshness line, derived count prose, or table re-padding.
