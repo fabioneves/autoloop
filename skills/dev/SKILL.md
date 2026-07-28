@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.12 · starting
+∞ dev · v0.49.13 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -502,14 +502,20 @@ Record issue number, body hash, label event, dependencies, planned base OID, and
 snapshot fingerprint.
 
 **`loop-ready` must be on the issue NOW — including for a marker-driven resume.** It is the
-human's authorization token, and the loop may never apply, create, or rename it; the terminal
-finalizer checks it too, because losing it mid-run is the kill switch. A unit whose issue lost
-the label — the defer and block flows both strip it — is therefore **not resumable by the loop**,
-however complete its marker looks. Report it as awaiting re-authorization, name the one command
-its human runs (`gh issue edit <N> --add-label loop-ready`), and take other work. A live run
-resumed such a unit from its marker, spent ninety minutes across seven dispatches carrying it to
-gate-green and review-clean, and only then discovered the authorization was missing at the very
-last step. The check costs one field of a snapshot the run already has.
+human's authorization token; the loop may never apply, create, or rename it, and the terminal
+finalizer checks it too, because losing it mid-run is the kill switch. A unit whose issue lost the
+label is **not resumable by the loop**, however complete its marker looks: report it as awaiting
+re-authorization, name the one command its human runs
+(`gh issue edit <N> --add-label loop-ready`), and take other work. Two live runs carried such a
+unit through ninety minutes of dispatches to gate-green and review-clean before discovering the
+authorization was missing at the last step; this check costs one field of a snapshot the run
+already has.
+
+**Which is why blocking must never strip that label.** `loop-blocked` already removes the issue
+from the eligible set, so removing `loop-ready` too is redundant — and it is the one label the
+loop cannot restore, so it converts the human's one-action unblock (remove `loop-blocked`) into a
+deadlock: the unit converges, then dies at finalize needing a token nothing in the run may apply.
+Blocking removes `loop-started` and the `loop:*` step label. Nothing else.
 
 Challenge premises against current code and STATE. If the issue is obsolete, duplicate, ambiguous,
 outside autonomy, or requires a secret/destructive/protected choice, comment a concise evidence-
@@ -770,7 +776,8 @@ round past it, that refusal is the cap working, and a quiet ProjectConfig edit w
 its own policy author. A verified open Major is a reason not to SHIP the unit — never a reason to
 stop the RUN. So the action is mechanical and complete in one turn:
 
-1. Apply `loop-blocked` + `human:decide` to the issue, with a reason naming the open finding, the
+1. Apply `loop-blocked` + `human:decide` to the issue — **and leave `loop-ready` in place** — with
+   a reason naming the open finding, the
    fix scope, and the round history — and offering the human their three options: authorize a
    higher cap (a policy edit only they can make), re-plan, or split the predicate into its own
    issue.

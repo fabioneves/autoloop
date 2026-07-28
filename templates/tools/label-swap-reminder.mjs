@@ -126,8 +126,11 @@ export function reminderFor(command, opts = {}) {
       + `① end banner \`✖ ISSUE ${n} BLOCKED — <composed reason>\`; `
       + `② final TaskUpdate \`${n} · ✖ blocked — <reason>\` + status completed; `
       + `③ PushNotification \`✖ ${n} blocked — <reason gate>\` — report the send result; `
-      + `④ a comment recording the reason + gate label, and remove \`loop-ready\`, \`loop-started\`, `
-      + `and every \`loop:*\` step label.`;
+      + `④ a comment recording the reason + gate label, and remove \`loop-started\` `
+      + `and every \`loop:*\` step label. KEEP \`loop-ready\`: \`loop-blocked\` already takes the `
+      + `issue out of the eligible queue, and \`loop-ready\` is the human's authorization token `
+      + `that no loop path may re-apply — stripping it turns their one-label unblock into a `
+      + `deadlock the loop cannot leave.`;
   }
 
   const label = (labels.find((l) => l.startsWith('loop:')) || '').trim();
@@ -167,7 +170,8 @@ function selfTest() {
     ['gh issue edit 7 --add-label "loop:02-plan"', /## Constraints/],
     ['gh issue edit 5 --remove-label loop:06-simplify --add-label loop:07-diff-review', /naming in the plan is not loading/],
     ['gh issue edit 7 --remove-label loop:09-gate,loop-started --add-label loop-delivered', /PushNotification `✔ #7/],
-    ['gh issue edit 4 --add-label loop-blocked --remove-label loop-ready', /PushNotification `✖ #4/],
+    ['gh issue edit 4 --add-label loop-blocked', /PushNotification `✖ #4/],
+    ['gh issue edit 4 --add-label loop-blocked', /KEEP `loop-ready`/],
     // The swap chain died at 04 in a live 0.42.3 run: steps 05 through 11 never
     // swapped, so the issue still read `loop:04-claim` after implement, simplify,
     // diff review and two code-review rounds. This hook could not object — it
