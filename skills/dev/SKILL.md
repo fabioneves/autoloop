@@ -423,10 +423,10 @@ failure. Waiting itself has one sanctioned shape per situation:
   waits for, with the clock:
 
   ```text
-  [15:04][#78] 🅿️ ∞ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ PARKED ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-               ├ in flight · code-review r1 on `GPT-5.6-SOL`
-               ├ in flight · #87 plan-review on `GPT-5.6-SOL`
-               └ resumes on result files
+  🅿️ ∞ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
+       ├ #78 · code-review r1 on `GPT-5.6-SOL`
+       ├ #87 · plan-review on `GPT-5.6-SOL`
+       └ resumes on result files
   ```
 
   It is the last thing a reader sees before the run goes quiet, sometimes for many minutes, so it
@@ -436,6 +436,16 @@ failure. Waiting itself has one sanctioned shape per situation:
   of thing it is: `═` closes, `─` continues, `┄` is suspended — an interrupted line for an
   interrupted run. One `├` per thing actually in flight, `└` for the resume condition, so the count
   of branches IS the count of waits and no one has to parse a comma list to get it.
+
+  **The clock rides in the rule, and there is no `[HH:MM][#N]` prefix at all.** A park routinely
+  waits on two units at once, so a `[#N]` would name one of them and silently misfile the rest;
+  the unit belongs on the branch that actually has one, and each `├` leads with its own `#N`,
+  which is the discriminator a reader is scanning for anyway. With the unit gone the prefix was
+  carrying a bare time in brackets in front of a titled rule — two frames around one line — so the
+  time moves into the title it was already sitting next to. A titled rule states what this is and
+  when it started in one stroke. This is the only wait shape that spans units, so it is the only
+  one that leaves the prefix behind; `▶️ resumed` concerns exactly one thing firing and keeps the
+  full `[HH:MM][#N]`.
 
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
   the printed block make parked and dead distinguishable at a glance. The resume stays a single
@@ -1191,24 +1201,30 @@ After prime succeeds, open the run frame. It is the outermost thing in the sessi
 below nests visually inside it:
 
 ```text
-╔════════════════════════════════════════════════════╗
-║  ∞  RUN OPEN                                       ║
-╟────────────────────────────────────────────────────╢
-║  ⏳ queue <e> eligible · <policy>                   ║
-║  🔭 reviews <ENGINE-OR-MODEL>                       ║
-║  🔧 pitcrew: <no open PRs | <n> serviced>           ║
-╚════════════════════════════════════════════════════╝
+┏━━ ∞ RUN OPEN · <HH:MM> ━━━━━━━━━━━━━━━━━━━━━━
+┃  ⏳ queue <e> eligible · <policy>
+┃  🔭 reviews <ENGINE-OR-MODEL>
+┃  🔧 pitcrew: <no open PRs | <n> serviced>
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
+
+**Open on the right, and that is not a shortcut.** A closed box has to pad every row to one exact
+width, which means getting it right for a queue count that changes, a model name that varies in
+length, and a pitcrew state that is sometimes four words. Miss by one column and the frame renders
+visibly broken — a drawn frame that draws wrong is worse than no frame, because the reader now
+distrusts the whole surface. Ragged right has nothing to align, so it cannot fail that way. Weight
+carries the rank instead: heavy `━` outranks the unit banner's single round `╭─╮`, which outranks a
+ribbon's bare line, and the nesting reads correctly without anything having to say so.
 
 **It carries no wordmark, deliberately.** This skill's first output already draws the `AUTOLOOP`
 mark, a few lines up; a second one here would be the same name twice in one screen, and drawing it
 in a different letterform would make the product look like two products. One mark per session, at
-the top. What this frame needs is RANK, not identity — so it takes the heaviest rule in the
-vocabulary. Double `═` outranks the unit banner's single round `╭─╮`, which outranks a ribbon's
-bare line, and the nesting reads correctly without anything having to say so.
+the top. What this frame needs is RANK, not identity.
 
-Print it once, after prime succeeds and before the first unit banner, and never reprint it on
-resume — a resumed run continues an open frame, it does not open a second one.
+The title carries the clock — `RUN OPEN · 15:04` — the same titled-rule idiom the parked block
+uses, so opening a run and suspending one read as one family of thing rather than two unrelated
+decorations. Print it once, after prime succeeds and before the first unit banner, and never
+reprint it on resume: a resumed run continues an open frame, it does not open a second one.
 
 The `🔧` deliberately echoes the FIX step glyph rather than colliding with it: pitcrew is repair
 work on already-open PRs, so the glyph carries the same meaning on both surfaces, which is what the
@@ -1258,12 +1274,18 @@ line and those render at inconsistent widths. The wait lines below are prose, no
 turn (one cheap read; never guessed from memory), then the unit it belongs to. Leading, not
 trailing: a run interleaves two units and a dozen steps, and the reader scans the left edge for
 "when" and "which", not the tail of each line. The issue number therefore appears once, in the
-prefix — do not repeat it in the body. Ribbons, the `🅿️ parked` block's first line, `▶️ resumed`
-lines, and closing rails all carry it; the parked block's `├`/`└` branches are continuations of
-that line and take no prefix of their own. The wait pair reads as a pair: **🅿️ parked** when the turn ends on a wait,
+prefix — do not repeat it in the body. Ribbons, `▶️ resumed` lines, and closing rails all carry it.
+
+**One shape belongs to no single issue and drops the prefix entirely**: the `🅿️ parked` block,
+which routinely waits on two units at once — a `[#N]` there would name one and silently misfile
+the rest. Its clock rides in the titled rule instead (`PARKED · 15:04`), each `├` branch leads
+with its own `#N` where the number is actually true, and the branches are continuations that take
+no prefix of their own. The run's own `🏁 run complete` rail keeps its prefix shape but carries the
+clock without a unit, for the same reason. Everything else keeps the full `[HH:MM][#N]`.
+
+The wait pair reads as a pair: **🅿️ parked** when the turn ends on a wait,
 **▶️ resumed** when what it waited for fires, **💤 idle** on the line that reports a run with
-nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself (which
-carries the clock but no unit — it belongs to no single issue).
+nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself.
 
 The prefix time is the START time; end and duration belong to the lines that already mark
 completion, never to a re-printed ribbon:
