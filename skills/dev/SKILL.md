@@ -551,6 +551,16 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   subject must change as the phase changes.** A row that reads the same from start to finish
   asserts only that something is running, which is the always-green-status failure; the phase text
   is the entire reason it earns a row.
+
+  **It is never completed, deleted, or tidied before the closing rail, and it is recreated the
+  moment it is missing.** This row is the one deliberately long-lived entry in a panel of
+  short-lived ones, which makes it the row most likely to be mistaken for a leftover: hosts
+  periodically nudge toward pruning a stale task list, and a run row that has been in-progress for
+  an hour looks exactly like the thing that nudge is describing. It is not stale — its longevity is
+  its function. A live run lost it mid-flight and left a panel showing two dispatch rows and
+  nothing saying the RUN was alive or what phase it was in, which is the failure this row exists to
+  prevent, arrived at by housekeeping instead of by silence. Re-assert it whenever a phase changes:
+  if the retitle finds no row, create one rather than skipping the update.
 - **One task per step**, created in-progress when the step's ribbon prints, completed when the
   step ends. The subject starts with the unit prefix `∞ #<N> — ` so a unit's rows read as one
   visual group, then the ribbon core with the executor

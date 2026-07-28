@@ -35,6 +35,21 @@ Notable changes to Autoloop are recorded here. The format follows
   improvised `▶ #123 · step 6/11 — SIMPLIFY (fresh simplifier, FABLE)`, repeating the issue,
   counter, step name and executor while telling the reader nothing new — and overloading `▶️`,
   which already means resumed-from-a-wait in the closed badge vocabulary.
+- **The run row survives housekeeping.** A live panel lost the `∞ autoloop — <phase>` row
+  mid-flight and showed two dispatch rows with nothing saying the run was alive or what phase it
+  was in — the exact failure that row exists to prevent, reached by tidying instead of by silence.
+  It is the one deliberately long-lived entry in a panel of short-lived ones, which makes it the
+  row most likely to be mistaken for a leftover: hosts nudge toward pruning stale task lists, and a
+  row in-progress for an hour looks like what that nudge describes. Its longevity is its function.
+  It is now never completed, deleted or tidied before the closing rail, and a phase retitle that
+  finds no row creates one instead of skipping.
+- **Dispositions are recorded in the ledger, not recited in chat.** A live plan review printed a
+  wide table of eighteen findings, fourteen of them "fix — carried verbatim". The ledger passed
+  forward in `priorFindings` is the record and the only one with authority; a disposition string in
+  chat has none. Every Critical/Major is still dispositioned — what the run says out loud is the
+  verdict, the severity counts, and a line per finding that is NOT a plain fix, each with the
+  evidence that decided it. Judgment is the one thing a reader cannot reconstruct from the ledger;
+  "fix as written" is fully reconstructible, and the revision prompt carries it verbatim anyway.
 - **The inline-awk refusal names the plainer spelling first.** Blocked pulling a number out of
   `git diff --stat`, it offered only "put the program in a file and run `awk -f <file>`" — more
   ceremony than the measurement. It now names `git diff --shortstat`, `wc -l`, `cut -f<n>` and
