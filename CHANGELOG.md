@@ -35,6 +35,17 @@ Notable changes to Autoloop are recorded here. The format follows
   improvised `▶ #123 · step 6/11 — SIMPLIFY (fresh simplifier, FABLE)`, repeating the issue,
   counter, step name and executor while telling the reader nothing new — and overloading `▶️`,
   which already means resumed-from-a-wait in the closed badge vocabulary.
+- **The planner is handed the base as files, never as a command it cannot run.** The `plan` role's
+  posture is `Glob,Grep,Read` with no Bash, so the prompt's `git show origin/<base>:<path>` was not
+  a slow instruction but an impossible one — and a planner given it reads the working tree instead,
+  which during staged planning is checked out on the WORKED unit's branch. A live plan for `#124`
+  verified every base premise against `#123`'s branch; it disclosed this and marked the premises
+  affected, and only the reviewer's `premise-committed-base-unverified` finding caught it. The base
+  is now materialized with `git worktree add --detach <scratchpad>/base origin/<base>` and named in
+  the prompt, so ordinary reads are reads of the base; the plan reviewer and the plan revision get
+  the same directory, since they check the same premises under the same posture. The general rule:
+  a read-only role reads the working tree it is launched in, so either that tree is what you want
+  read or you give it a materialized copy that is — never a command it cannot run.
 - **The run row survives housekeeping.** A live panel lost the `∞ autoloop — <phase>` row
   mid-flight and showed two dispatch rows with nothing saying the run was alive or what phase it
   was in — the exact failure that row exists to prevent, reached by tidying instead of by silence.

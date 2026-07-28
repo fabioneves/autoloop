@@ -723,7 +723,28 @@ bash <plugin-tools>/dispatch-stream.sh \
 The prompt carries the FULL issue (body, context, acceptance criteria — never an excerpt), the
 lane and caps constraints, and the paths to STATE, the checklist, and the relevant spec — the
 planner reads those itself with its own tools. The orchestrator keeps premise, selection,
-`planHash` computation, intent composition, and claim. The dispatched plan must contain:
+`planHash` computation, intent composition, and claim.
+
+**Never ask the planner to run a command. Hand it the base as FILES.** The plan role's posture is
+`Glob,Grep,Read` — no Bash — so `git show origin/<base>:<path>` is not a slow instruction, it is an
+impossible one, and a planner given it must either fail or read something else. What it reads
+instead is the working tree, which during staged planning is checked out on the WORKED unit's
+branch: a live plan for `#124` verified its every base premise against `#123`'s branch and said so
+honestly, and only the reviewer's `premise-committed-base-unverified` finding caught it.
+
+So materialize the base before dispatching and name the directory in the prompt:
+
+```bash
+git worktree add --detach <scratchpad>/base origin/<base>
+```
+
+Then the planner's ordinary `Read`/`Grep` are reads OF THE BASE, and its premises are about the
+tree the unit will actually branch from. Remove the worktree at collection
+(`git worktree remove <scratchpad>/base`). The general rule, of which this is one instance: a
+read-only role reads the working tree it is launched in, so either that tree is the thing you want
+read, or you give it a materialized copy that is. Never a command it cannot run.
+
+The dispatched plan must contain:
 
 - verified premises and evidence;
 - named module/API seam and file boundary;
@@ -773,6 +794,12 @@ Move to `loop:03-plan-review`. Dispatch exactly one fresh reviewer:
 ```bash
 node <plugin-tools>/dispatch.mjs --role plan-review --prompt-file /tmp/autoloop-plan-review.md --json
 ```
+
+Give the reviewer the same materialized base directory the planner got, and name it in the prompt.
+It is checking premises ABOUT the base, under the same no-Bash posture, so without it the review
+either cannot verify them or verifies them against whatever branch the checkout is sitting on —
+and a reviewer that confirms a premise against the wrong tree is worse than one that flags it
+unverified. The plan-revision dispatch takes it too, for the same reason.
 
 It checks premises, scope, interface depth, tests, invariants, risk, and issue fitness — and the
 prompt asks it explicitly for **invariant completeness**: for each rule the plan states, is it
