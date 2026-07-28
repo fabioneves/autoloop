@@ -13,7 +13,7 @@
     "dispatch-render.mjs": "f9be0eba12d4110068442296ec561067e5c1b02e94ccc4cd80f0d265eac85155",
     "dispatch.mjs": "d07e45a6263bf1cc56a9e085f936466796049dc66f9cc53c8f0f5b8219776ac9",
     "escalate-paths.mjs": "f172fde38c418dc48d6ed7cccdf2a84343e609007dbdb3c62e0ea9c7c959f84b",
-    "label-swap-reminder.mjs": "947bb8a59334dc6a4b9328f3635a94b22622c2532386ea9a1e33d809872962ac",
+    "label-swap-reminder.mjs": "ddf851d93ed6e15bec2da359248c0487dbc1ba87df4e7f55394df0630d9eef0c",
     "lane-contract.mjs": "a309ab07c3fdd074799c887c5ebaeb5d99e3538392e70533d7c74e48a7f97132",
     "lifecycle-contract.mjs": "3298f27243b765829f49969e597e91bb21f5e8d640660652e70311de24d2d4ea",
     "lifecycle-driver.mjs": "22c17d9a31be00584047f636f193a76b00ac5ceaef5319b88964e1ed928da800",

@@ -223,7 +223,12 @@ reviewer's job is to find the case the author did not consider.
 
   Standing defaults for claude-engine dispatches (this repository's operator choice):
   - step 05 implement → `--model opus`
-  - step 06 simplify and step 08 fix dispatches → `--model opus`
+  - step 06 simplify → `--model fable` — NOT the implementer's model, deliberately: simplifying
+    is a reading task before it is a writing one, and a fresh model does not inherit the writer's
+    priors about what its own code "obviously" means. Same decorrelation that makes cross-model
+    review work, applied one step earlier. It also carries the subtlest call in the loop —
+    behavior preservation under a suite only as complete as the plan's case enumeration
+  - step 08 fix dispatches → `--model opus`
   - all other claude dispatches → no flag (the saved default)
 
   - step 02 plan (and any plan-revision dispatch) → `--model fable`
@@ -574,7 +579,7 @@ learning one review round at a time.
 ```bash
 bash tools/agentic/dispatch-stream.sh \
   <scratchpad>/live/<issue>-simplify.jsonl <scratchpad>/simplify-result.json \
-  --role implement --prompt-file <path> --model opus
+  --role implement --prompt-file <path> --model fable
 ```
 
 The prompt must load `agent-skills:code-simplification` (behavior preservation, project

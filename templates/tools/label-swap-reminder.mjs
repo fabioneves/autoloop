@@ -25,7 +25,7 @@ const EXTRAS = {
   '02-plan': ' The plan must NAME the guidance-mapped domain skills (the repo CLAUDE.md/AGENTS.md'
     + ' mapping) and carry the literal `## Constraints` section distilling them — the plan'
     + ' reviewer flags both when missing.',
-  '06-simplify': ' Dispatch ONE behavior-preserving simplify pass (implement role, opus) whose'
+  '06-simplify': ' Dispatch ONE behavior-preserving simplify pass (implement role, fable) whose'
     + ' prompt loads `agent-skills:code-simplification` and carries the measured diff vs the'
     + " plan's line budget; tests green before it returns, test files unedited, behavior frozen."
     + ' Verify the returned diff yourself — a behavior change is reverted, not fixed.',
