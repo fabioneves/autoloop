@@ -3,6 +3,41 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.6] - 2026-07-28
+
+### Changed
+
+- **Plans state invariants, not examples — the review-round lever.** Two live units burned five
+  and seven rounds discovering one rule case-by-case: each fix closed the reported instance and
+  the next round found the adjacent one, because the plan described *a* case instead of the
+  property holding over *all* of them. Plans now state every behavioral rule as a quantified
+  invariant citing its spec line, enumerate the cases it implies (marking deliberate exclusions
+  as non-behavior), give each case a failing-first test, and name the invariant's joint failure
+  mode. A rule that cannot be stated over its whole domain is an underspecified premise the plan
+  must declare.
+- **Plan review checks invariant completeness explicitly** — an incomplete invariant is a
+  plan-level Major, and the cheapest Major in the loop to find there rather than one review round
+  at a time.
+- **Two consecutive same-predicate Majors escalate the fix from instance to invariant.** When
+  rounds N and N+1 land on the same rule or predicate with different cases, the N+2 fix derives
+  the complete invariant from spec, enumerates every implied case including unreported ones,
+  tests each, and satisfies it jointly; the next review is scoped to the invariant. A third
+  consecutive Major in that predicate is a planning failure — block for re-plan or split the
+  predicate into its own issue. A live unit found this rule empirically at the cost of two
+  rounds.
+- **At the review cap, block — never widen it mid-unit.** `caps.codeReviewRoundsPerUnit` is STATE
+  policy on an escalate path; a verified open Major at the cap is `loop-blocked` + `human:decide`
+  carrying the finding, fix scope, and round history. A quiet ProjectConfig edit would make the
+  loop its own policy author.
+
+### Fixed
+
+- **Driver terminal results carry the transition's detail.** A live identity-mismatch
+  investigation took ten minutes because `driveLifecycle` returned only `{state,action,code}`,
+  dropping the `{artifact}` field that named the failing comparison all along.
+- **The frozen-artifact rule names the `jq -j` extraction idiom** — `--jq`/`jq -r` append the
+  trailing newline that has now cost three sessions a planHash mismatch.
+
 ## [0.49.5] - 2026-07-27
 
 ### Changed
