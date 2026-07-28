@@ -217,10 +217,12 @@ writer and reviewers alike to `claude`, and asks nothing of the machine beyond w
 already needs.
 
 **Reviews can run on a second engine, when the invocation asks for it.** `/autoloop:dev with
-codex` sends every review role to `codex`. Record the choice ONCE, immediately after prime
-succeeds, and the tool routes every reviewer dispatch from the recording — the invocation text is
-forty minutes up-context by the first code review, and a forgotten flag would silently review on
-the writer's model:
+codex` sends every review role to `codex` — `plan-review`, `code-review`, `doubt-review`, the
+three roles that return a verdict. `plan` and `implement` stay on the host engine and model:
+authoring is the writer's side of the split, whatever posture it runs under. Record the choice
+ONCE, immediately after prime succeeds, and the tool routes every verdict dispatch from the
+recording — the invocation text is forty minutes up-context by the first code review, and a
+forgotten flag would silently review on the writer's model:
 
 ```bash
 mkdir -p .git/autoloop && printf 'codex !xhigh\n' > .git/autoloop/review-engine  # with codex
@@ -243,9 +245,12 @@ printf 'claude gpt-5.6-sol @http://127.0.0.1:18765 !xhigh\n' > .git/autoloop/rev
 
 The `!xhigh` pins reviewer reasoning depth (see `--effort` below); the `@<url>` is what makes the
 mode self-contained: `dispatch.mjs` injects it as
-`ANTHROPIC_BASE_URL` into REVIEWER dispatches itself, so proxy mode works regardless of how this
+`ANTHROPIC_BASE_URL` into VERDICT dispatches itself, so proxy mode works regardless of how this
 session was launched — the session's own environment is not a prerequisite and not evidence.
-Writer roles never read the recording, so a writer can never be proxied.
+Only the roles that return a verdict — `plan-review`, `code-review`, `doubt-review` — read the
+recording. `implement` and `plan` never do, so neither the writer nor the PLANNER can be proxied:
+the plan is authored work that merely happens to run under a reading posture, and a live run
+planned on the review model because the posture, not the result, decided who read the recording.
 
 **The proxy preflight is one probe, and only a probe**: `curl -s --max-time 5 <url>/health` (or
 `<url>/v1/models`) against the recorded URL. Answering = running. **Write the URL as a literal —
@@ -262,8 +267,8 @@ itself).
 Append ` · reviews gpt-5.6-sol (proxy)` to the startup banner, and review ribbons carry the
 model in the host slot — `[GPT-5.6-SOL]` — since the engine name alone would lie about who
 judged. Trade-off vs `with codex`, stated plainly: the reviewer's read-only posture is the
-tool ceiling, not an OS sandbox. The writer never runs a proxied model: cross-MODEL review is
-the invariant, whichever harness carries it.
+tool ceiling, not an OS sandbox. Neither the writer nor the planner runs a proxied model:
+cross-MODEL review is the invariant, whichever harness carries it.
 
 Why a second model is worth asking for: a fresh process gives identity separation, not cognitive separation.
 A reviewer on the writer's own model inherits its priors and misses what it missed. A different
@@ -274,7 +279,9 @@ unusual.
 Under `with codex` the reviewer runs `--sandbox read-only`, an OS-enforced boundary rather than a
 tool allowlist, so the read-only posture is strictly stronger there. Its verdict arrives in codex's
 `--output-last-message` file and is validated against the same schema as any other. Codex refuses
-a writing role outright rather than approximating one, and if `codex` is absent the review
+any authoring role outright rather than approximating one — `implement` because it would need a
+writable sandbox, `plan` because authoring the plan on the review engine inverts the role split
+this loop is built on — and if `codex` is absent the review
 dispatch fails typed rather than falling back to the host — having asked for a second opinion,
 silently getting the first one back is worse than a refusal.
 

@@ -496,7 +496,6 @@ function inlineInterpreterSource(cmd) {
         return false;
       }
       const argumentsAfterExecutable = words.slice(index + 1);
-      if (argumentsAfterExecutable.length === 0) return true;
       if (argumentsAfterExecutable.some(
         (argument) =>
           sourceFlags.has(argument)
@@ -507,6 +506,14 @@ function inlineInterpreterSource(cmd) {
       )) {
         return true;
       }
+      // A word that merely NAMES an interpreter is data, not an invocation —
+      // `git log | grep node` searches for a string; refusing it reads a grep
+      // pattern as an interpreter waiting on stdin (same lesson as
+      // EXEC_WRAPPERS below). The source-flag shapes above stay position-
+      // blind, so `find . -exec node -e …` remains opaque wherever the name
+      // sits.
+      if (!invokedAt(words, index)) return false;
+      if (argumentsAfterExecutable.length === 0) return true;
       // A probe that only prints a version or a usage banner executes nothing,
       // so it is not the no-script-argument stdin shape the return below cat-
       // ches. Checked after the source-flag test, so `node --version -e '...'`
@@ -528,14 +535,17 @@ function opaqueCommandAssembler(cmd) {
   return shellSegments(executableLexicalText(cmd)).reduce((found, { command }) => {
     if (found !== null) return found;
     const words = shellWords(command);
-    if (
-      executableIndex(words, 'xargs') !== -1
-      || executableIndex(words, 'parallel') !== -1
-    ) {
+    // Positional for the same reason as inlineInterpreterSource: an assembler
+    // NAME in argument position is data (`git log --grep xargs`), not a fan-out.
+    const invokes = (executable) => {
+      const index = executableIndex(words, executable);
+      return index !== -1 && invokedAt(words, index) ? index : -1;
+    };
+    if (invokes('xargs') !== -1 || invokes('parallel') !== -1) {
       return 'fanout';
     }
     for (const executable of ['awk', 'gawk', 'mawk', 'nawk']) {
-      const index = executableIndex(words, executable);
+      const index = invokes(executable);
       if (index === -1) continue;
       const argumentsAfterExecutable = words.slice(index + 1);
       const fileBacked = argumentsAfterExecutable.some(
@@ -690,7 +700,32 @@ function executableIndex(words, executable) {
 // front of `git`/`gh` means the word is an ARGUMENT, not an invocation — a live
 // section banner (`echo "=== git diffstat ==="`) read as an unknown subcommand
 // because the executable was found anywhere in the segment.
-const EXEC_WRAPPERS = new Set(['command', 'env', 'nohup', 'nice', 'timeout']);
+// Every entry runs the command that FOLLOWS it, so the word after one is still
+// an invocation. The list is load-bearing in both directions: too narrow and
+// `time xargs …` slips past the rules below by sitting one word off the front.
+const EXEC_WRAPPERS = new Set([
+  'command',
+  'doas',
+  'env',
+  'exec',
+  'ionice',
+  'nice',
+  'nohup',
+  'setsid',
+  'stdbuf',
+  'sudo',
+  'time',
+  'timeout',
+]);
+
+// find(1) hands the words after these flags to the kernel verbatim, so the
+// word after the flag is an invocation even though it is not segment-initial.
+const EXEC_FORWARDING_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
+
+function invokedAt(words, index) {
+  return inExecutablePosition(words, index)
+    || EXEC_FORWARDING_FLAGS.has(words[index - 1]);
+}
 
 function inExecutablePosition(words, position) {
   for (let index = 0; index < position; index += 1) {
@@ -1796,6 +1831,24 @@ function selfTest() {
   let corpusCount = 0;
   const cases = [
     // [cmd, branch, expectBlock, baseBranch]
+    // 2026-07-28: a live `scaffold.mjs --reconcile` pipeline was refused as
+    // inline interpreter source. A word that merely NAMES an interpreter or an
+    // assembler in argument position is data, not an invocation.
+    ['cd /r\nnode /p/scaffold.mjs --reconcile . 2>&1 | head -80', 'feat/gh-1-x', false],
+    ['git log --oneline | grep node', 'feat/gh-1-x', false],
+    ['rg -c sh docs/agentic/STATE.md', 'feat/gh-1-x', false],
+    ['git log --grep xargs --oneline', 'feat/gh-1-x', false],
+    ['rg -n awk templates/tools/command-guard.mjs', 'feat/gh-1-x', false],
+    // Forwarded execution is still an invocation, wherever the name sits.
+    ['find . -name "*.js" -exec node -e "x" {} +', 'feat/gh-1-x', true],
+    ['find . -exec awk "{system(1)}" {} +', 'feat/gh-1-x', true],
+    ['sudo node -e "x"', 'feat/gh-1-x', true],
+    ['echo data | node', 'feat/gh-1-x', true],
+    ['env node', 'feat/gh-1-x', true],
+    // A passthrough wrapper must not launder the word behind it.
+    ['time xargs -n1 gh', 'feat/gh-1-x', true],
+    ['exec node -e "x"', 'feat/gh-1-x', true],
+    ['stdbuf -oL awk "{print}"', 'feat/gh-1-x', true],
     ['gh pr merge 42', 'feat/gh-1-x', true],
     // A literal path variable is resolvable, so the guard substitutes and judges
     // the real command instead of refusing the shape (the friction every live

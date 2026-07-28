@@ -325,9 +325,12 @@ const ENGINES = Object.freeze({
     },
   }),
   codex: Object.freeze({
-    // Reviewer-only, and refused rather than approximated: codex would need a
-    // writable sandbox and a commit contract this tool does not model.
-    supports: (role) => ROLES[role]?.posture === 'reviewer',
+    // Verdict roles only, and refused rather than approximated: a writing role
+    // would need a writable sandbox and a commit contract this tool does not
+    // model, and `plan` is AUTHORED work — it shares the reviewer posture for
+    // sandboxing, not for identity, so handing it to the second engine would
+    // invert the standing role split (Claude writes, codex reviews).
+    supports: (role) => ROLES[role]?.result === 'review-verdict',
     argv: (role, tools, scratch, cwd, model, effort) => {
       writeFileSync(
         join(scratch, 'schema.json'),
@@ -415,13 +418,22 @@ function recordedReviewChoice(cwd) {
   }
 }
 
+// Verdict roles, not reviewer POSTURE: `plan` sits in the reviewer posture so
+// its sandbox is read-only, but its result is authored work, and a live run
+// proved the difference matters — a recorded `claude gpt-5.6-sol` review proxy
+// silently moved PLANNING onto the review model. The plan stays on the host
+// engine and model exactly like implement; only verdicts follow the recording.
+function followsReviewChoice(role) {
+  return ROLES[role]?.result === 'review-verdict';
+}
+
 export function resolveDefaultEngine(role, cwd) {
-  if (ROLES[role]?.posture !== 'reviewer') return 'claude';
+  if (!followsReviewChoice(role)) return 'claude';
   return recordedReviewChoice(cwd)?.engine ?? 'claude';
 }
 
 export function resolveDefaultModel(role, cwd) {
-  if (ROLES[role]?.posture !== 'reviewer') return null;
+  if (!followsReviewChoice(role)) return null;
   return recordedReviewChoice(cwd)?.model ?? null;
 }
 
@@ -431,14 +443,14 @@ export function resolveDefaultModel(role, cwd) {
 // live run refused a healthy proxy because the SESSION lacked the variable.
 // Writer roles never read the recording, so a writer can never be proxied.
 export function resolveDefaultBaseUrl(role, cwd) {
-  if (ROLES[role]?.posture !== 'reviewer') return null;
+  if (!followsReviewChoice(role)) return null;
   return recordedReviewChoice(cwd)?.baseUrl ?? null;
 }
 
 // A recorded `!<level>` pins reviewer reasoning effort: review is the step where
 // depth converts directly into rounds not spent.
 export function resolveDefaultEffort(role, cwd) {
-  if (ROLES[role]?.posture !== 'reviewer') return null;
+  if (!followsReviewChoice(role)) return null;
   return recordedReviewChoice(cwd)?.effort ?? null;
 }
 
@@ -1199,6 +1211,16 @@ function selfTest() {
         engine: join(codexShimDirectory, 'codex'),
       }).error?.code === 'ENGINE_ROLE_UNSUPPORTED',
     );
+    check(
+      'codex refuses to author a plan, which is writing under a reading posture',
+      runDispatch({
+        role: 'plan',
+        prompt: 'x',
+        tools: reviewerTools,
+        cwd: repoScratch,
+        engine: join(codexShimDirectory, 'codex'),
+      }).error?.code === 'ENGINE_ROLE_UNSUPPORTED',
+    );
 
     // Overlap accounting is only trustworthy if it is measured rather than
     // narrated: the 0.39 `overlap:` line was self-reported, and the behaviour it
@@ -1375,10 +1397,12 @@ function selfTest() {
       })(),
     );
     check(
-      'a recorded review-engine choice routes reviewer defaults',
+      'a recorded review-engine choice routes verdict-role defaults only',
       resolveDefaultEngine('plan-review', repoScratch) === 'codex'
       && resolveDefaultEngine('code-review', repoScratch) === 'codex'
-      && resolveDefaultEngine('implement', repoScratch) === 'claude',
+      && resolveDefaultEngine('implement', repoScratch) === 'claude'
+      // The plan is authored work: it never follows the review recording.
+      && resolveDefaultEngine('plan', repoScratch) === 'claude',
     );
     check(
       'a recorded engine may carry a model, routing proxied reviews',
@@ -1386,7 +1410,12 @@ function selfTest() {
         writeFileSync(engineFile, 'claude gpt-5.6-sol\n');
         return resolveDefaultEngine('code-review', repoScratch) === 'claude'
           && resolveDefaultModel('code-review', repoScratch) === 'gpt-5.6-sol'
-          && resolveDefaultModel('implement', repoScratch) === null;
+          && resolveDefaultModel('implement', repoScratch) === null
+          // A live run planned on the review proxy model; the plan stays on
+          // the host model like the writer.
+          && resolveDefaultModel('plan', repoScratch) === null
+          && resolveDefaultBaseUrl('plan', repoScratch) === null
+          && resolveDefaultEffort('plan', repoScratch) === null;
       })(),
     );
     check(
@@ -1403,6 +1432,7 @@ function selfTest() {
         if (
           resolveDefaultBaseUrl('code-review', repoScratch) !== 'http://127.0.0.1:18765'
           || resolveDefaultBaseUrl('implement', repoScratch) !== null
+          || resolveDefaultBaseUrl('plan', repoScratch) !== null
           || resolveDefaultModel('code-review', repoScratch) !== 'gpt-5.6-sol'
         ) {
           return false;
@@ -1467,6 +1497,7 @@ function selfTest() {
         if (
           resolveDefaultEffort('code-review', repoScratch) !== 'xhigh'
           || resolveDefaultEffort('implement', repoScratch) !== null
+          || resolveDefaultEffort('plan', repoScratch) !== null
           || resolveDefaultModel('code-review', repoScratch) !== 'gpt-5.6-sol'
         ) {
           return false;
@@ -1575,7 +1606,7 @@ function selfTest() {
     );
     check(
       'every dispatch records its own window in the dispatch log',
-      logged.length === 4
+      logged.length === 5
       && logged.every((entry) =>
         Number.isSafeInteger(entry.startedAtMs)
         && entry.startedAtMs > 0
@@ -1586,7 +1617,7 @@ function selfTest() {
       // tell a codex review apart from a claude writer after the fact.
       && logged.map(({ role, engine, ok }) => `${role}/${engine}/${ok}`).join(' ')
         === 'implement/claude/false implement/claude/true '
-          + 'plan-review/codex/true implement/codex/false',
+          + 'plan-review/codex/true implement/codex/false plan/codex/false',
     );
     rmSync(repoScratch, { recursive: true, force: true });
 
