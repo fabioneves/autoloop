@@ -5,6 +5,17 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [0.49.13] - 2026-07-28
 
+### Fixed
+
+- **Blocking a unit no longer destroys the authorization only a human can restore.** The block
+  flow stripped `loop-ready` along with the step labels — but `loop-blocked` already removes the
+  issue from the eligible set, so removing the authorization token as well was redundant, and it
+  is the one label no loop path may re-apply. The result was a deadlock: the human's one-action
+  unblock (remove `loop-blocked`) left the unit converging all the way to a finalizer that refuses
+  without `loop-ready`, twice in live runs, after ninety minutes of dispatches each time. Blocking
+  now removes `loop-started` and the `loop:*` step label and nothing else, in the skill and in the
+  mechanical label-swap rider that had been prescribing the removal.
+
 ### Changed
 
 - **STATE goes on a diet, and setup upgrades existing repositories automatically.** The template
