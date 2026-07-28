@@ -144,6 +144,22 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'gh-json-merged-field-does-not-exist',
+    date: '2026-07-28',
+    symptom: 'A session lost a round to `gh pr view --json merged`, which is '
+      + 'not a field, while hand-querying merge state the driver already '
+      + 'reports.',
+    cause: '`merged` is a real field in the REST representation and in GraphQL '
+      + 'but not in `gh pr view --json`, which spells it `mergedAt`. Nothing '
+      + 'said to ask the driver instead of improvising a gh call.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'Never hand-query a unit',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '

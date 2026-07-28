@@ -18,6 +18,13 @@ Notable changes to Autoloop are recorded here. The format follows
   alternative; generic prose satisfied it on shape while naming nothing, so the self-test now
   checks that distinct shapes give distinct, concrete remedies.
 
+- **The driver already reports merge state; nothing said to stop hand-querying it.** A session lost
+  a round to `gh pr view --json merged`, which is not a field — `merged` is real in the REST
+  representation and in GraphQL, but `gh pr view --json` spells it `mergedAt`. Three surfaces, two
+  of which have it. The dev skill now says to read the driver's reconcile output, which reports
+  `phase`, `merged` and the merge commit from the same live facts it acts on, and names the gh-side
+  spellings for the cases that genuinely need them.
+
   This is the third instance today of one disease — `ARTIFACT_IDENTITY_MISMATCH(merge)`, the
   exit-3 merge contract, and now the guard: **a typed refusal that names only its category makes
   the reader reverse-engineer the tool.** Every one of them cost a live session a round or an hour.

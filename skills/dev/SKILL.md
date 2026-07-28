@@ -637,6 +637,15 @@ premergeRecordDraft:null}` to a bounded file and pipe it to:
 node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 ```
 
+**Never hand-query a unit's merge state — the driver already reports it.** Its reconcile output
+carries `phase`, `merged`, and the merge commit, reconciled from the same live facts it acts on, so
+a hand-rolled `gh` call is at best a second opinion and at worst a contradicting one. It is also
+the surface where improvisation bites: `merged` is a real field in the REST representation and in
+GraphQL, but **not** in `gh pr view --json`, whose set spells it `mergedAt` — a live session lost a
+round to `--json merged` on exactly that mismatch. When you genuinely need it raw, `mergedAt`
+(non-null means merged) and `state` are the gh-side spellings; `gh` lists every valid field when
+you get one wrong, which is what a refusal should do.
+
 **`plan.body` is the frozen artifact, byte for byte.** Once the plan comment exists, fetch its
 exact body from GitHub and use that — never a locally recomposed copy: `sha256(plan.body)` must
 equal `intent.planHash`, and two live sessions each lost a cycle to a recomposition that differed
