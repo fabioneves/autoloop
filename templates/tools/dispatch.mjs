@@ -43,10 +43,31 @@ import { fileURLToPath } from 'node:url';
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // A dispatch is a model round trip on a real task, not a mechanical step. The
-// bound exists to stop a wedged child from hanging a loop forever, so it is
-// deliberately generous: the longest observed healthy implement dispatch is
-// minutes, and a run that needs more than half an hour has a different problem.
-const DISPATCH_TIMEOUT_MS = 30 * 60 * 1000;
+// bound exists to stop a WEDGED child from hanging a loop forever — nothing
+// else. It is therefore per posture, because the two postures fail differently
+// and a single number cannot serve both.
+//
+// The old flat 30 minutes assumed "the longest observed healthy implement
+// dispatch is minutes, and a run that needs more than half an hour has a
+// different problem". A live run falsified that: a writer grinding a Go task
+// landed two real commits and was killed at the ceiling mid-third. Its tokens
+// were spent and unrecoverable, and the work it was holding died with it —
+// the effects already committed survived only because it had committed them.
+//
+// Raising the flat number would buy that back by making every wedged reviewer
+// cost four times as much to notice. A writer legitimately grinds: it reads,
+// edits, runs tests, and commits, bounded by the slice caps rather than the
+// clock. A reviewer reads and returns one typed verdict; the longest healthy
+// one observed is a 13-minute codex review, so a reviewer still running at 45
+// minutes is not thinking, it is stuck.
+const DISPATCH_TIMEOUT_MS = Object.freeze({
+  writer: 120 * 60 * 1000,
+  reviewer: 45 * 60 * 1000,
+});
+
+export function timeoutMsFor(role) {
+  return DISPATCH_TIMEOUT_MS[ROLES[role]?.posture] ?? DISPATCH_TIMEOUT_MS.reviewer;
+}
 
 // The mutating tools, granted explicitly in the settings allow list rather than
 // left to the permission mode alone. The grant is derived from the posture's own
@@ -630,7 +651,7 @@ function executeDispatch(options) {
     prompt,
     tools,
     cwd = process.cwd(),
-    timeoutMs = DISPATCH_TIMEOUT_MS,
+    timeoutMs = timeoutMsFor(role),
     engine = 'claude',
     startedAtMs = PROCESS_START_MS,
   } = options;
@@ -737,7 +758,9 @@ function runEngine({
     return failure(
       'dispatch',
       'DISPATCH_TIMEOUT',
-      `${role}: the engine did not finish within ${timeoutMs}ms`,
+      `${role}: the engine did not finish within the ${Math.round(timeoutMs / 60_000)}-minute `
+      + `${ROLES[role]?.posture ?? 'reviewer'} ceiling. A writer killed here may have committed `
+      + 'real work before it died — reconcile by inspecting the branch, never by blind retry.',
       { ms, startupMs, stderr },
     );
   }
@@ -1685,6 +1708,26 @@ function selfTest() {
       timedOut.ok === false
       && timedOut.step === 'dispatch'
       && timedOut.error.code === 'DISPATCH_TIMEOUT',
+    );
+    // 2026-07-28: a writer grinding a Go task landed two commits and was killed
+    // at a flat 30-minute ceiling. The bound exists for WEDGED children, and the
+    // two postures wedge differently — a writer legitimately grinds against the
+    // slice caps, a reviewer returns one verdict and is stuck if it has not.
+    check(
+      'the ceiling is per posture: a writer grinds, a reviewer should not',
+      timeoutMsFor('implement') === 120 * 60 * 1000
+      && timeoutMsFor('plan') === 45 * 60 * 1000
+      && timeoutMsFor('code-review') === 45 * 60 * 1000
+      && timeoutMsFor('implement') > timeoutMsFor('code-review'),
+    );
+    check(
+      'an unknown role gets the tighter ceiling, never the writer budget',
+      timeoutMsFor('not-a-role') === 45 * 60 * 1000,
+    );
+    check(
+      'a timeout names its ceiling and warns against a blind retry',
+      timedOut.error.message.includes('writer ceiling')
+      && timedOut.error.message.includes('never by blind retry'),
     );
 
     writeEngineShim(shimDirectory, shimBody('exit 0'));

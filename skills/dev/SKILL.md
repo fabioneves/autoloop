@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.28 · starting
+∞ dev · v0.49.29 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -422,6 +422,15 @@ failure. Waiting itself has one sanctioned shape per situation:
   commits are pushed, and the LAST thing before the turn ends is the parked block naming what it
   waits for, with the clock:
 
+  **The park push is not step 10, and step 10 does not own the push.** A live run parked at step 5
+  with EIGHT local commits, reasoning "the push happens at step 10, per the flow" — the same
+  failure as the four-commit one above, re-derived from the step list rather than from this rule.
+  The loop branch already exists on the remote from the claim, so pushing to it while parked
+  updates a draft nobody is reading; it pre-empts nothing. Step 10 is where the pushed head is
+  VERIFIED and bound to the PR, which is a different act from getting the bytes off this machine.
+  Park with unpushed commits and a dead laptop is indistinguishable from a dead run, except that
+  the run can be restarted and the commits cannot.
+
   ```text
   🅿️ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
   ├ #78 · code-review r1 on `GPT-5.6-SOL`
@@ -502,6 +511,17 @@ rules, none of which trades away evidence:
   the turn just collected, or re-stating the ribbon in sentences, spends window on information the
   screen already shows. Evidence quality is untouched by this rule — the expensive artifacts live
   in GitHub, not in chat.
+
+  **A step is announced ONCE, by its ribbon.** Never print a second header for the same step —
+  a live run followed `06/11 🧹 SIMPLIFY [CLAUDE:FABLE] ─ 589 prod lines · within budget` with
+  `▶ #123 · step 6/11 — SIMPLIFY (fresh simplifier, FABLE)`, which carried the issue, the counter,
+  the step name and the executor a second time and told the reader nothing new. It is not in this
+  skill; it was improvised, which is how a line with no owner accumulates. Two things make it worse
+  than mere duplication: `▶️` already MEANS resumed-from-a-wait in the closed badge vocabulary, so
+  reusing it as a step announcer overloads a glyph that has a job, and a reader who has learned
+  that steps are announced twice will look for the second line and pause when it is missing. If a
+  step needs to say something the ribbon cannot hold, that is a suffix on the ribbon, not another
+  line.
 - **The scratchpad is a write TARGET, never a working directory.** Redirect into it and stay in the
   repository: `gh pr view 238 --json title,body > <scratchpad>/pr238.json`. Never `cd <scratchpad>
   && gh …` — `gh` infers the repository from the checkout it is standing in, and from `/tmp` it
@@ -531,6 +551,16 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   subject must change as the phase changes.** A row that reads the same from start to finish
   asserts only that something is running, which is the always-green-status failure; the phase text
   is the entire reason it earns a row.
+
+  **It is never completed, deleted, or tidied before the closing rail, and it is recreated the
+  moment it is missing.** This row is the one deliberately long-lived entry in a panel of
+  short-lived ones, which makes it the row most likely to be mistaken for a leftover: hosts
+  periodically nudge toward pruning a stale task list, and a run row that has been in-progress for
+  an hour looks exactly like the thing that nudge is describing. It is not stale — its longevity is
+  its function. A live run lost it mid-flight and left a panel showing two dispatch rows and
+  nothing saying the RUN was alive or what phase it was in, which is the failure this row exists to
+  prevent, arrived at by housekeeping instead of by silence. Re-assert it whenever a phase changes:
+  if the retitle finds no row, create one rather than skipping the update.
 - **One task per step**, created in-progress when the step's ribbon prints, completed when the
   step ends. The subject starts with the unit prefix `∞ #<N> — ` so a unit's rows read as one
   visual group, then the ribbon core with the executor
@@ -693,7 +723,28 @@ bash <plugin-tools>/dispatch-stream.sh \
 The prompt carries the FULL issue (body, context, acceptance criteria — never an excerpt), the
 lane and caps constraints, and the paths to STATE, the checklist, and the relevant spec — the
 planner reads those itself with its own tools. The orchestrator keeps premise, selection,
-`planHash` computation, intent composition, and claim. The dispatched plan must contain:
+`planHash` computation, intent composition, and claim.
+
+**Never ask the planner to run a command. Hand it the base as FILES.** The plan role's posture is
+`Glob,Grep,Read` — no Bash — so `git show origin/<base>:<path>` is not a slow instruction, it is an
+impossible one, and a planner given it must either fail or read something else. What it reads
+instead is the working tree, which during staged planning is checked out on the WORKED unit's
+branch: a live plan for `#124` verified its every base premise against `#123`'s branch and said so
+honestly, and only the reviewer's `premise-committed-base-unverified` finding caught it.
+
+So materialize the base before dispatching and name the directory in the prompt:
+
+```bash
+git worktree add --detach <scratchpad>/base origin/<base>
+```
+
+Then the planner's ordinary `Read`/`Grep` are reads OF THE BASE, and its premises are about the
+tree the unit will actually branch from. Remove the worktree at collection
+(`git worktree remove <scratchpad>/base`). The general rule, of which this is one instance: a
+read-only role reads the working tree it is launched in, so either that tree is the thing you want
+read, or you give it a materialized copy that is. Never a command it cannot run.
+
+The dispatched plan must contain:
 
 - verified premises and evidence;
 - named module/API seam and file boundary;
@@ -744,6 +795,12 @@ Move to `loop:03-plan-review`. Dispatch exactly one fresh reviewer:
 node <plugin-tools>/dispatch.mjs --role plan-review --prompt-file /tmp/autoloop-plan-review.md --json
 ```
 
+Give the reviewer the same materialized base directory the planner got, and name it in the prompt.
+It is checking premises ABOUT the base, under the same no-Bash posture, so without it the review
+either cannot verify them or verifies them against whatever branch the checkout is sitting on —
+and a reviewer that confirms a premise against the wrong tree is worse than one that flags it
+unverified. The plan-revision dispatch takes it too, for the same reason.
+
 It checks premises, scope, interface depth, tests, invariants, risk, and issue fitness — and the
 prompt asks it explicitly for **invariant completeness**: for each rule the plan states, is it
 quantified over its whole domain with its cases enumerated and tested, or is it an example
@@ -751,7 +808,10 @@ standing in for a rule? An incomplete invariant is a plan-level Major, and it is
 Major in the whole loop to find here — the same defect costs a review round each time it surfaces
 during implementation. Verify each
 Critical/Major claim; the orchestrator records fix/rebut/defer dispositions in-session — that is
-judgment, and it stays. **The revision itself is a dispatch, not session work**: one
+judgment, and it stays. Recording them is not the same as reciting them: the revision prompt
+carries every finding and disposition, so the run says out loud only the verdict, the severity
+counts, and the ones that are not a plain `fix` (see step 8's disposition rule, which applies
+identically here). **The revision itself is a dispatch, not session work**: one
 `--role plan --model fable` dispatch whose prompt carries the current plan, every verified
 finding, and its disposition, returning the revised plan artifact as the typed result — the same
 bounded-and-bulky rule that moved planning out of the session moves plan-fixing out too. Do not
@@ -817,8 +877,21 @@ node <plugin-tools>/dispatch.mjs --role implement --prompt-file /tmp/autoloop-im
 ```
 
 Give the writer only the frozen plan, relevant STATE invariants, evidence, and named skills.
-Require TDD for behavior, lean/self-documenting code, conventional commit, no co-author trailer,
+Require TDD for behavior, lean/self-documenting code, conventional commits, no co-author trailer,
 no PR/merge, and no objective gate. A quick gate may run once after collection.
+
+**Require a commit per completed plan task, not one at the end.** A commit is the only part of a
+writer's work that outlives the writer: a dispatch killed at its ceiling takes everything still in
+the working tree with it, and leaves behind exactly what it had committed. A live writer hit the
+ceiling mid-task on a Go slice and lost only its tail — because it happened to have committed twice
+already, not because anything asked it to. Committing per task turns that luck into a floor, and it
+costs nothing: the plan already enumerates the tasks, TDD already makes each one green before the
+next, and the reviewer reads the diff either way.
+
+This is also what makes a timeout reconcilable. The step's effects are in git, so the orchestrator
+recovers by INSPECTING the branch — `git log` the claimed base against `HEAD`, compare against the
+frozen plan's task list — and re-dispatches only the remainder. Never retry a timed-out writer
+blindly: it would redo committed work against a tree that already has it.
 
 ### 6. Simplify
 
@@ -905,6 +978,21 @@ Verify every Critical/Major against code or a cheap reproduction, then dispositi
 - fix directly or with a fresh writer;
 - propose an evidence-citing rebut for the next fresh reviewer;
 - block if out-of-boundary human judgment is required.
+
+**Disposition every finding; NARRATE only the ones that are not "fix as written".** The ledger
+passed forward in `priorFindings` is the record, and it is the only one with authority — a
+disposition string in chat has none (see the review-contract rules below). So a chat table listing
+eighteen findings, fourteen of them "Fix — carried verbatim", is a non-authoritative copy of an
+authoritative artifact, and it costs the window exactly what the artifact already holds. A live
+plan review spent a wide table on that.
+
+What the run says out loud is the delta: the verdict and the severity counts
+(`fail · 2 Critical · 14 Major · 2 Minor`), then a line per finding whose disposition is NOT the
+default — a rebut, a narrowing, a defer, a block, or anything that changed the unit's outcome —
+each with the evidence that decided it. Those are the judgment calls, and judgment is the one
+thing a reader cannot reconstruct from the ledger. Everything dispositioned `fix` as written needs
+no line: the revision prompt carries it verbatim, the next reviewer sees it, and the PR body
+records it.
 
 Pass all prior findings/dispositions forward — and tell every later-round reviewer, in the
 prompt, the ledger's identity rule: **a finding id is immutable evidence — re-opening one keeps

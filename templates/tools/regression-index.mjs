@@ -33,6 +33,24 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'flat-dispatch-ceiling-killed-a-working-writer',
+    date: '2026-07-28',
+    symptom: 'An implement dispatch grinding a Go slice was killed at the flat '
+      + '30-minute ceiling mid-task. Its tokens were spent and unrecoverable; '
+      + 'only the two commits it had already made survived.',
+    cause: 'One ceiling served both postures. It was sized for "a run that '
+      + 'needs more than half an hour has a different problem", which is true '
+      + 'of a reviewer returning one verdict and false of a writer grinding '
+      + 'against the slice caps.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function timeoutMsFor(' }),
+      Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: 'the ceiling is per posture: a writer grinds, a reviewer should not',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'unresolved-tokens-named-as-a-comma-splice',
     date: '2026-07-28',
     symptom: 'A refusal read "`$p`, a command substitution cannot be resolved '
