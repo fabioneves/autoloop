@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.22 · starting
+∞ dev · v0.49.23 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -430,6 +430,34 @@ construction, because parking requires the push.
 concurrency from the dispatch log's own timestamps. `concurrent 0s` beside `eligible 5` is a run
 that serialized work it could have overlapped, and it is visible without anyone choosing to
 mention it.
+
+### Context economy — the window is a budget, spent like the caps
+
+Context spends like wall clock: silently, and mostly on bytes that were never needed. The run
+closes on "context budget spent", so every avoidable byte in the window is a unit not worked. Four
+rules, none of which trades away evidence:
+
+- **Bulky artifacts move file-to-file; the context sees hashes and verdicts.** A plan body is up
+  to 64 KB and must be handled byte-exactly — which means READING it into the window is not just
+  costly but useless: the orchestrator can never act on a paraphrase of it. Extract with
+  `jq -j .plan.body <result.json> > body.md`, post with `--body-file`, verify with the portable
+  fingerprint helper (`node <plugin-tools>/release-verify.mjs --fingerprint-stdin <body.md`) on
+  files. The window needs the title, the hash, and the verdict; it never needs the body. One
+  `cat body.md` spends 48 KB on bytes you are forbidden to retype anyway.
+- **Bounded reads only.** Collect typed results by field projection (`jq '{ok, ms, model}'`),
+  tail live and dispatch logs (`tail -20`), and never run an unbounded `cat`/full read of anything
+  a dispatch produced. When a failure needs the stderr, take its tail — the typed error already
+  names the class.
+- **Narration is the delta.** The ribbon, the task panel, and the digest already carry run state;
+  prose between them says only what CHANGED and what needs the human. Re-describing a typed result
+  the turn just collected, or re-stating the ribbon in sentences, spends window on information the
+  screen already shows. Evidence quality is untouched by this rule — the expensive artifacts live
+  in GitHub, not in chat.
+- **After any compaction, byte-exact values are re-fetched, never recalled.** A summary that
+  paraphrases a SHA, a planHash, a comment id, or a label name is the trailing-newline class of
+  bug wearing a new coat. Anything hash- or OID-shaped comes from GitHub or from disk after
+  compaction — the same rule Prime already applies to STATE. Prefer handing off at a unit boundary
+  over compacting mid-unit: a terminal unit resumes from its marker with no context at all.
 
 ### The host task panel — activity while parked
 

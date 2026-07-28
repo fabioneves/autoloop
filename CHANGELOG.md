@@ -3,6 +3,26 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.23] - 2026-07-28
+
+### Added
+
+- **Context economy: the window is a budget, spent like the caps.** The run closes on "context
+  budget spent", so every avoidable byte in the window is a unit not worked. Four rules in the dev
+  skill, none trading away evidence:
+  - **Bulky artifacts move file-to-file; the context sees hashes and verdicts.** A plan body is up
+    to 64 KB and must be handled byte-exactly — so reading it into the window is not just costly
+    but *useless*: the orchestrator can never act on a paraphrase. `jq -j` to a file, `--body-file`
+    to post, the portable fingerprint helper to verify; the window needs the title, the hash, and
+    the verdict.
+  - **Bounded reads only**: field projections on typed results, `tail -20` on logs, never an
+    unbounded read of anything a dispatch produced.
+  - **Narration is the delta**: ribbons, the task panel and the digest carry run state; prose says
+    what changed and what needs the human, and never re-describes a typed result just collected.
+  - **After compaction, byte-exact values are re-fetched, never recalled.** A summary paraphrasing
+    a SHA or planHash is the trailing-newline bug in a new coat. Prefer unit-boundary handoff over
+    mid-unit compaction — a terminal unit resumes from its marker with no context at all.
+
 ## [0.49.22] - 2026-07-28
 
 ### Fixed
