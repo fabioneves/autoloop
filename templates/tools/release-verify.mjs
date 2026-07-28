@@ -391,7 +391,23 @@ function readJsonDocument(text, path, errors) {
   }
 }
 
-function requireReleaseWorkflow(text, errors) {
+// The requirements below describe the release-verify invocation, so they are
+// counted inside it rather than across the whole workflow. Counting file-wide
+// meant no other step could ever take `--repository "$GITHUB_REPOSITORY"` —
+// adding the api-shape probe tripped a rule that had nothing to say about it.
+// A step ends at the next `- name:` at the same indentation.
+export function releaseVerifyStep(text) {
+  if (typeof text !== 'string') return '';
+  const anchor = text.indexOf('release-verify.mjs');
+  if (anchor === -1) return '';
+  const start = text.lastIndexOf('\n      - name:', anchor);
+  const rest = text.slice(anchor);
+  const end = rest.search(/\n {6}- name:/u);
+  return text.slice(start === -1 ? 0 : start, end === -1 ? text.length : anchor + end);
+}
+
+function requireReleaseWorkflow(workflow, errors) {
+  const text = releaseVerifyStep(workflow);
   const requirements = [
     ['--release-mode', '--release-mode release gate'],
     [
@@ -593,11 +609,17 @@ function fixtureFiles(version = '0.40.0') {
       + `location=${evidence.location}\n`,
     evidenceArtifacts: evidence.evidenceArtifacts,
     stateTemplate: 'the current schema is `0.25.0`.\n',
+    // Shaped like the real workflow, because the release requirements are
+    // counted inside the release-verify step rather than across the file.
     verifyWorkflow: [
-      '--release-mode',
-      '--repository "$GITHUB_REPOSITORY"',
-      '--tag "$GITHUB_REF_NAME"',
-      '--main-ref refs/remotes/origin/main',
+      '      - name: Verify release tag',
+      '        run: >-',
+      '          node templates/tools/release-verify.mjs',
+      '          --release-mode',
+      '          --check-root .',
+      '          --repository "$GITHUB_REPOSITORY"',
+      '          --tag "$GITHUB_REF_NAME"',
+      '          --main-ref refs/remotes/origin/main',
       '',
     ].join('\n'),
     portabilitySurfaces: {
@@ -695,6 +717,56 @@ async function selfTest() {
       name: 'accepts one synchronized release',
       files: fixtureFiles(),
       expected: [],
+    },
+    {
+      // 2026-07-28: counting these literals file-wide meant no other step
+      // could ever take the repository name. Adding the api-shape probe --
+      // which needs exactly that -- failed a release gate with nothing to say
+      // about it, and the tempting "fix" was to spell the flag differently.
+      name: 'another step may bind the repository without tripping the gate',
+      files: (() => {
+        const files = fixtureFiles();
+        return {
+          ...files,
+          verifyWorkflow: `${files.verifyWorkflow}`
+            + '      - name: Verify GitHub API shape\n'
+            + '        run: >-\n'
+            + '          node templates/tools/api-shape.mjs\n'
+            + '          --repository "$GITHUB_REPOSITORY"\n',
+        };
+      })(),
+      expected: [],
+    },
+    {
+      name: 'rejects a release-verify step missing its tag argument',
+      files: {
+        ...fixtureFiles(),
+        verifyWorkflow: [
+          '      - name: Verify release tag',
+          '        run: >-',
+          '          node templates/tools/release-verify.mjs',
+          '          --release-mode',
+          '          --repository "$GITHUB_REPOSITORY"',
+          '          --main-ref refs/remotes/origin/main',
+          '',
+        ].join('\n'),
+      },
+      expected: [
+        '.github/workflows/verify.yml: expected exactly one tag-bound release argument',
+      ],
+    },
+    {
+      name: 'rejects a workflow with no release-verify step at all',
+      files: {
+        ...fixtureFiles(),
+        verifyWorkflow: '      - name: Verify contracts\n        run: node x.mjs\n',
+      },
+      expected: [
+        '.github/workflows/verify.yml: expected exactly one --release-mode release gate',
+        '.github/workflows/verify.yml: expected exactly one checkout-bound repository argument',
+        '.github/workflows/verify.yml: expected exactly one tag-bound release argument',
+        '.github/workflows/verify.yml: expected exactly one origin/main ancestry argument',
+      ],
     },
     {
       name: 'rejects an invalid canonical version',
@@ -901,8 +973,11 @@ async function selfTest() {
       files: {
         ...fixtureFiles(),
         verifyWorkflow: [
-          '--release-mode',
-          '--repository "$GITHUB_REPOSITORY"',
+          '      - name: Verify release tag',
+          '        run: >-',
+          '          node templates/tools/release-verify.mjs',
+          '          --release-mode',
+          '          --repository "$GITHUB_REPOSITORY"',
           '',
         ].join('\n'),
       },

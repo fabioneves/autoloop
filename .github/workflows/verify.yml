@@ -45,6 +45,19 @@ jobs:
           --repository "$GITHUB_REPOSITORY"
           --tag "$GITHUB_REF_NAME"
           --main-ref refs/remotes/origin/main
+      # A fixture cannot catch a vendor changing its own response shape: the
+      # fixture encodes what we believe, so it agrees with the code and both are
+      # wrong together. Version 2026-03-10 dropping `merge_commit_sha` wedged
+      # four already-merged units this way. Only a live probe of the pinned
+      # version can tell us a field is gone, so it rides the release train.
+      - name: Verify GitHub API shape
+        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          node templates/tools/api-shape.mjs
+          --repository "$GITHUB_REPOSITORY"
+
       - name: Check committed whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
