@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.18] - 2026-07-28
+
+### Fixed
+
+- **A guard refusal names the command to run instead, not just the category it caught.** A live
+  session was refused for `ls -d … | xargs -n1 basename` — a plain directory listing — and the
+  advice, "use literal canonical commands, a reviewed program file, or the typed tool commands",
+  never said which literal command that was. It then ran the plain listing anyway, a round later.
+  The block itself is correct and stays: `xargs` builds commands out of data the guard cannot read.
+  What changed is that the refusal now names the remedy for the shape it actually caught — `ls -1
+  <dir>` to list, a reviewed program file to act on each entry, `awk -f <file>` for inline `awk`
+  program text. The message policy already demanded a closing sentence naming the sanctioned
+  alternative; generic prose satisfied it on shape while naming nothing, so the self-test now
+  checks that distinct shapes give distinct, concrete remedies.
+
+  This is the third instance today of one disease — `ARTIFACT_IDENTITY_MISMATCH(merge)`, the
+  exit-3 merge contract, and now the guard: **a typed refusal that names only its category makes
+  the reader reverse-engineer the tool.** Every one of them cost a live session a round or an hour.
+
 ## [0.49.17] - 2026-07-28
 
 ### Fixed

@@ -127,6 +127,23 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'guard-refusals-named-no-alternative',
+    date: '2026-07-28',
+    symptom: 'A session lost a round to `ls -d … | xargs -n1 basename` — a '
+      + 'plain listing — then ran the plain listing anyway. The refusal said '
+      + '"use literal canonical commands" without naming which one.',
+    cause: 'The refusal named its category, not its remedy. The message policy '
+      + 'required a closing sentence naming the sanctioned alternative, and '
+      + 'generic prose satisfied it on shape while naming nothing.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'fanout refusal names the listing command to use instead',
+      }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'const ASSEMBLER_REMEDY' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '
