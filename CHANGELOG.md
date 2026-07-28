@@ -3,6 +3,59 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.10] - 2026-07-28
+
+### Changed
+
+- **A branch's age can no longer block its delivery.** A unit branch snapshots `tools/agentic/**`
+  when it forks and every invocation runs the working tree's copy, so a branch that outlives a few
+  releases executes the code that had the bugs — one live unit ran a finalize with tools 4,300
+  lines behind base, and five sessions hit some version of this. The flow's CONTRACT tools
+  (dispatch, lifecycle-driver, publish-verdict, the review/delivery/attestation/snapshot
+  contracts, prime, scan) now run from the installed plugin: they are pure executors of their
+  inputs plus live GitHub state, so a branch's copy is an accident of its fork date, never an
+  authority. The repository's own policy tools stay vendored — `auto-merge.mjs`, `gate.mjs`,
+  `escalate-paths.mjs`, and every hook. Drift is checked mechanically at claim and before the
+  terminal flow (`git diff --stat origin/<base>...HEAD -- tools/agentic/`) rather than assumed.
+- **Behind base: merge for code, never for tooling.** Pre-review and behind, merge freely; a real
+  conflict is Pitcrew's revision path, which re-reviews the resolution. Post-review with no
+  conflict, do not merge — a merge moves the head, review evidence binds
+  `committedHead == reviewedHead == gatedHead`, and a live unit's base sync is exactly what
+  stranded its marker at a superseded head. The arithmetic settles it: on a day with eleven
+  plugin releases, a "behind base → merge" reflex would have re-reviewed every in-flight unit
+  eleven times over files those units never touched.
+
+- **Every timeline line leads with `[HH:MM][#N]`.** The clock and the unit move from the tail of
+  each ribbon to its left edge, and the issue number stops repeating in the body. A run interleaves
+  two units across a dozen steps, and a reader scans a column for "when" and "which" rather than
+  the end of every line. Ribbons, `♡ parked`/`♡ resumed` heartbeats, and closing rails all carry
+  the prefix, in Dev and Pitcrew alike. Round-scoped steps keep the step number too —
+  `08/11 CODE-REVIEW r2/5`, `08/11 FIX r2/5` — with the cells counting rounds against the cap, so
+  one format holds for every line in the run whatever it happens to count.
+- **Each step draws its own glyph** between the counter and the name, from a closed set where a
+  glyph never means two things: 🔁 reconcile · 🧭 premise · 📐 plan · 🔬 plan-review · 📌 claim ·
+  🔨 implement · 🧹 simplify · 👓 diff-review · 🔍 code-review · 🔧 fix · 🚦 gate · 📦 publish ·
+  📝 record. 🔬 scrutinises a plan and 🔍 scrutinises code; 🔨 builds and 🔧 repairs. The state
+  badge is unchanged — the glyph says what the step is, the badge how it is going. Pitcrew draws
+  the same glyphs for the same kinds of work. The wait lines get their own pair — 🅿️ parked,
+  ▶️ resumed — plus 💤 for an idle run and 🏁 on the run's closing rail.
+
+### Fixed
+
+- **A resumed unit learns it lost its authorization at selection, not after ninety minutes.**
+  `loop-ready` is the human's authorization token; the defer and block flows strip it and the loop
+  may never re-apply it, so a unit that lost it cannot finalize — correctly, since losing it
+  mid-run is the kill switch. A live run resumed such a unit from its marker, carried it across
+  seven dispatches to gate-green and review-clean, and only then hit the check. Selection now
+  requires the label for marker-driven resumes too, reports the one command its human runs, and
+  takes other work; and the finalizer's refusal names the failing precondition instead of
+  returning a bare mismatch.
+- **A run record that mentions the lifecycle marker is no longer treated as one.** Candidacy was a
+  substring test on `autoloop-lifecycle-v1`, so every comment discussing the marker — the loop
+  writes those — became a malformed candidate and failed the premerge derivation closed. Candidacy
+  is now the HTML-comment opening token; an edited or corrupted real marker still carries it, so
+  nothing that used to fail closed now passes.
+
 ## [0.49.9] - 2026-07-28
 
 ### Added

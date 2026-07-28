@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.9 · starting
+∞ dev · v0.49.10 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -41,7 +41,7 @@ Then one call. It validates ProjectConfig, reports the checkout against the conf
 one `scan.mjs`, persists the snapshot, and prints a decision-sized summary:
 
 ```bash
-node tools/agentic/prime.mjs --json
+node <plugin-tools>/prime.mjs --json
 ```
 
 The typed summary is
@@ -70,11 +70,11 @@ Then, in order:
 3. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
 4. Share the retained snapshot file with Pitcrew. After any Git or GitHub mutation (including the
    base switch above) or any wait boundary, pipe the retained snapshot file through
-   `node tools/agentic/snapshot-contract.mjs --invalidate <REASON> < <snapshotPath>`, write the
+   `node <plugin-tools>/snapshot-contract.mjs --invalidate <REASON> < <snapshotPath>`, write the
    exact stdout back to a retained file, and use that file for every later snapshot-derived
    decision. Use `GIT_MUTATION`, `ISSUE_MUTATION`, `PR_MUTATION`, `REVIEW_MUTATION`, or
    `WAIT_BOUNDARY`; use `UNKNOWN_MUTATION` when uncertain. Mutations may be batched only while no
-   decision intervenes. Then rerun `node tools/agentic/prime.mjs --json` (or `scan.mjs` directly)
+   decision intervenes. Then rerun `node <plugin-tools>/prime.mjs --json` (or `scan.mjs` directly)
    and replace the invalidated snapshot before actionability, absence, selection, or stop
    decisions. Never read items from an invalidated section as authority.
 5. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
@@ -98,9 +98,9 @@ sanctioned reads are typed:
 
 - the prime summary itself — `sections` already carries every per-section
   `{complete,items,error}` count, and `snapshotPath` names the durable file;
-- `node tools/agentic/snapshot-contract.mjs --summary <snapshotPath>` — the bounded per-section
+- `node <plugin-tools>/snapshot-contract.mjs --summary <snapshotPath>` — the bounded per-section
   summary of any retained snapshot file;
-- `node tools/agentic/snapshot-contract.mjs --section <name> <snapshotPath>` — one section's
+- `node <plugin-tools>/snapshot-contract.mjs --section <name> <snapshotPath>` — one section's
   exact JSON; an unknown name fails closed listing the valid catalog;
 - plain `jq` with a single-quoted filter on the exact files the prime summary names is
   sanctioned — the guard permits it, and prime naming the file keeps it targeted.
@@ -134,12 +134,63 @@ Shapes to keep out of every command, sanctioned read or not:
   `cmp -l a b | head` — exact differing offsets, no expansion — or write each transform to a
   plain file first and diff those.
 
+## The tools a unit branch runs
+
+**A unit branch snapshots `tools/agentic/**` when it forks, and every invocation and hook runs
+the WORKING TREE's copy.** A branch that outlives a few plugin releases therefore executes the
+code that had the bugs — a live unit open across ~20 releases ran tools 4,300 lines behind base
+and could not complete its finalize, five sessions in a row hit some version of this, and the
+session preflight's drift check does not re-arm after a branch switch, so it verified base and
+then ran the branch's copies.
+
+So the flow's CONTRACT TOOLS run from the installed plugin, not the checkout: resolve this
+skill's real path, then `<skill dir>/../../templates/tools/`. Every example below writes that
+resolved directory as `<plugin-tools>` — expand it to the literal absolute path in the command
+you actually run, never a shell variable (the guard resolves literals, not expansions). Use it
+for
+`dispatch.mjs`, `lifecycle-driver.mjs`, `publish-verdict.mjs`, `review-contract.mjs`,
+`delivery-contract.mjs`, `attestation-contract.mjs`, `snapshot-contract.mjs`, `prime.mjs`, and
+`scan.mjs`. They are pure executors of their inputs plus live GitHub state — nothing in them is
+repository-specific, so the branch's copy is an accident of its fork date, never an authority.
+
+Four things stay vendored **because they are the repository's own policy**, and running the
+plugin's copy of them would be wrong: `auto-merge.mjs` (Setup fills its REPO CONFIG block),
+`gate.mjs`, `escalate-paths.mjs`, and every hook (whose configuration points at the checkout by
+construction).
+
+**Check the drift, do not assume it.** At claim, and again before the terminal flow, compare the
+branch's copies against the base's:
+
+```bash
+git diff --stat origin/<base>...HEAD -- tools/agentic/
+```
+
+Non-empty means this branch's tools are not the base's. That is a NOTE, not a block — the plugin
+invocations above make it harmless — but it belongs in the run record, and if the difference is
+the unit's own work, that is a protected path and its own review.
+
+### Behind base: merge for code, never for tooling
+
+Being behind base is not a defect. `ready-head` means deliver me: the merge executor binds the
+exact PR head with CAS and requires the triggered floor green on that head, so behind-base alone
+changes nothing it checks.
+
+- **Pre-review and behind** — merge freely; nothing is bound yet and the cost is zero.
+- **A real conflict with base** (`mergeStateStatus` DIRTY) — you must merge, and that is
+  Pitcrew's revision path, which re-reviews the resolution properly.
+- **Post-review, no conflict** — do NOT merge. A merge moves the head, and review evidence binds
+  `committedHead == reviewedHead == gatedHead`, so refreshing a converged unit costs a re-gate and
+  a closing round. A live unit's base sync is exactly what stranded its marker at a superseded
+  head. And the arithmetic is decisive: on a day with eleven plugin releases, a
+  "behind base → merge" reflex would have re-reviewed every in-flight unit eleven times for
+  changes those units never touched. Merge for code reasons, never to refresh tooling.
+
 ## Dispatch
 
 Every role runs in a fresh process through one call:
 
 ```bash
-node tools/agentic/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
+node <plugin-tools>/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
   --prompt-file <path> [--tools <csv>] [--engine <claude|codex>] [--output-file <path>] [--json]
 ```
 
@@ -271,7 +322,7 @@ vendored wrapper, which makes the task its own watcher — the host streams a ba
 stdout into its task view, and the wrapper tails the live file to exactly there:
 
 ```bash
-bash tools/agentic/dispatch-stream.sh \
+bash <plugin-tools>/dispatch-stream.sh \
   <scratchpad>/live/<issue>-<role>-r<N>.jsonl <scratchpad>/<role>-result.json \
   --role <role> --prompt-file <path> [--engine codex] [--tools <csv>]
 ```
@@ -284,14 +335,12 @@ under a minute may skip the wrapper and run `dispatch.mjs` directly.
   engine starts), and `engine` — the host that actually produced it, stamped from the spawn. Typed
   failures carry it too. Report it on the step's ribbon rather than composing a host name by hand.
 
-**On a resumed unit branch, run tools from the installed plugin, not the checkout.** A unit
-branch carries the `tools/agentic/` copies it forked with — a live resume sat 18 commits behind
-base with a dispatch that predated `--engine`, and the call failed usage-typed. Working the unit
-on its branch is correct; trusting its tools is not. When the preflight NOTEs vendored drift (or a
-vendored tool rejects a documented flag), invoke the same tool from
-`<newest installed plugin>/templates/tools/` instead — same contract, current version. The hooks
-still run the branch's copies; expect their older behavior until the unit lands, and never "fix"
-that by committing tool refreshes into the unit branch — scaffold changes are Setup's, on base.
+**On a resumed unit branch this matters most** (see "The tools a unit branch runs"): working the
+unit on its branch is correct, trusting its tools is not. A live resume sat 18 commits behind base
+with a dispatch that predated `--engine` and failed usage-typed; another ran a finalize with tools
+4,300 lines behind. The hooks still run the branch's copies — expect their older behavior until
+the unit lands, and never "fix" that by committing tool refreshes into the unit branch, because
+scaffold changes are Setup's work on base and would land in a diff the plan never mentioned.
 
 Write prompts to a file; never inline untrusted issue or review text into a shell command. Give a
 dispatch only what it needs: the frozen plan, the relevant STATE invariants, the evidence, and the
@@ -316,7 +365,7 @@ working tree, which the in-flight unit's writer owns.
 One idiom on every host:
 
 ```bash
-node tools/agentic/dispatch.mjs --role implement --prompt-file <p> \
+node <plugin-tools>/dispatch.mjs --role implement --prompt-file <p> \
   --output-file <result.json> --json      # run in background; collect when it exits
 ```
 
@@ -334,11 +383,11 @@ failure. Waiting itself has one sanctioned shape per situation:
   Monitor (or the background task's own completion signal) is armed on each result file, all
   commits are pushed, and the LAST line before the turn ends is the parked heartbeat naming what
   it waits for, with the clock:
-  `♡ parked — #78 codex r1 + #87 plan-review in flight · resumes on result files · 15:04`.
+  `[15:04][#78] 🅿️ parked — codex r1 + #87 plan-review in flight · resumes on result files`.
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
   the printed line make parked and dead distinguishable at a glance.
 - **In-turn wait (fallback, no monitor available).** One typed bounded wait —
-  `node tools/agentic/dispatch.mjs --wait-file <result.json> --timeout-seconds 600` — then the
+  `node <plugin-tools>/dispatch.mjs --wait-file <result.json> --timeout-seconds 600` — then the
   heartbeat pair. Never `bash -c 'until …'` (inline interpreter source; the guard refuses it —
   a live run was blocked by exactly that shape) and never bare `sleep N;` chains: the host
   blocks them and tells you so.
@@ -370,7 +419,7 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   says what the spinner should read while it runs (`Implementing #149 on opus`,
   `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped steps use one task per round, and EVERY
   dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
-  shape (`∞ #149 — 08 CODE-REVIEW r1 [GPT-5.6-SOL]`, `∞ #78 — 08 FIX r3 [OPUS]`); the named
+  shape (`∞ #149 — 08 CODE-REVIEW r1/5 [GPT-5.6-SOL]`, `∞ #78 — 08 FIX r3/5 [OPUS]`); the named
   examples are not an exhaustive list.
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
@@ -444,6 +493,16 @@ Invalidate/refetch queue sections affected by Pitcrew. Choose highest priority, 
 Record issue number, body hash, label event, dependencies, planned base OID, and selection
 snapshot fingerprint.
 
+**`loop-ready` must be on the issue NOW — including for a marker-driven resume.** It is the
+human's authorization token, and the loop may never apply, create, or rename it; the terminal
+finalizer checks it too, because losing it mid-run is the kill switch. A unit whose issue lost
+the label — the defer and block flows both strip it — is therefore **not resumable by the loop**,
+however complete its marker looks. Report it as awaiting re-authorization, name the one command
+its human runs (`gh issue edit <N> --add-label loop-ready`), and take other work. A live run
+resumed such a unit from its marker, spent ninety minutes across seven dispatches carrying it to
+gate-green and review-clean, and only then discovered the authorization was missing at the very
+last step. The check costs one field of a snapshot the run already has.
+
 Challenge premises against current code and STATE. If the issue is obsolete, duplicate, ambiguous,
 outside autonomy, or requires a secret/destructive/protected choice, comment a concise evidence-
 backed disposition and transition to the appropriate human block. Do not silently redesign scope.
@@ -463,7 +522,7 @@ Move to `loop:02-plan`. **The plan is a dispatch** — `--role plan`, read-only 
 the typed `{title, prBody, body}` the driver's request wants, no markdown parsing:
 
 ```bash
-bash tools/agentic/dispatch-stream.sh \
+bash <plugin-tools>/dispatch-stream.sh \
   <scratchpad>/live/<issue>-plan.jsonl <scratchpad>/plan-result.json \
   --role plan --prompt-file <path> --model fable
 ```
@@ -519,7 +578,7 @@ context. Concurrency never skips the review — it moves the wait, not the gate.
 Move to `loop:03-plan-review`. Dispatch exactly one fresh reviewer:
 
 ```bash
-node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/autoloop-plan-review.md --json
+node <plugin-tools>/dispatch.mjs --role plan-review --prompt-file /tmp/autoloop-plan-review.md --json
 ```
 
 It checks premises, scope, interface depth, tests, invariants, risk, and issue fitness — and the
@@ -551,7 +610,7 @@ Write the closed driver request
 premergeRecordDraft:null}` to a bounded file and pipe it to:
 
 ```bash
-node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
+node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 ```
 
 **`plan.body` is the frozen artifact, byte for byte.** Once the plan comment exists, fetch its
@@ -563,7 +622,7 @@ third session lost a minute to exactly that byte) — save the API response to a
 names the failing field and both hash prefixes.
 
 **Composing the request costs three literal commands, never a read of the driver's source.**
-`node tools/agentic/lifecycle-driver.mjs --example-request` prints a request that passes the
+`node <plugin-tools>/lifecycle-driver.mjs --example-request` prints a request that passes the
 driver's own validator — it is the self-test fixture, so it cannot drift from what validation
 accepts. Fetch the frozen plan body to a scratchpad file, then assemble with `jq -n --rawfile`
 substituting the real values over the example's placeholders. Run the driver **from the
@@ -581,7 +640,7 @@ append a second marker or perform one of these effects outside the driver.
 Move to `loop:05-implement`. Dispatch the writer:
 
 ```bash
-node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/autoloop-implement.md --json
+node <plugin-tools>/dispatch.mjs --role implement --prompt-file /tmp/autoloop-implement.md --json
 ```
 
 Give the writer only the frozen plan, relevant STATE invariants, evidence, and named skills.
@@ -597,7 +656,7 @@ it can find something in, and a live unit spent three of its four rounds re-repo
 learning one review round at a time.
 
 ```bash
-bash tools/agentic/dispatch-stream.sh \
+bash <plugin-tools>/dispatch-stream.sh \
   <scratchpad>/live/<issue>-simplify.jsonl <scratchpad>/simplify-result.json \
   --role implement --prompt-file <path> --model fable
 ```
@@ -663,7 +722,7 @@ Move to `loop:08-code-review`. Reclassify the complete final diff and bind its e
 Dispatch round 1:
 
 ```bash
-node tools/agentic/dispatch.mjs --role code-review \
+node <plugin-tools>/dispatch.mjs --role code-review \
   --prompt-file /tmp/autoloop-code-review-1.md \
   --output-file /tmp/autoloop-code-review-1.json --json
 ```
@@ -705,7 +764,7 @@ policy edit they own) or re-plan or split the unit. A live run correctly refused
 cap here; the wrong move is a quiet ProjectConfig edit that makes the loop its own policy author.
 
 `reviewTransition()` is authoritative for clean/block/cap behavior. Invoke
-`node tools/agentic/review-contract.mjs` with one JSON object on stdin:
+`node <plugin-tools>/review-contract.mjs` with one JSON object on stdin:
 
 ```
 {round,scope,projectConfig,
@@ -837,8 +896,8 @@ Use the universal effectful terminal finalizer. Write this closed request to a b
 Then run:
 
 ```bash
-node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
-node tools/agentic/publish-verdict.mjs terminal-finalize \
+node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
+node <plugin-tools>/publish-verdict.mjs terminal-finalize \
   --request-file <terminal-request.json> \
   --review-evidence-file <exact-clean-review-input.json>
 ```
@@ -888,7 +947,7 @@ Post one issue run record via body file containing:
 - delivery/CI/merge or queue outcome;
 - lifecycle/premerge record identifiers;
 - recovery outcomes;
-- the `overlap:` line, verbatim from `node tools/agentic/overlap-report.mjs --eligible <e>`. It is
+- the `overlap:` line, verbatim from `node <plugin-tools>/overlap-report.mjs --eligible <e>`. It is
   computed from the dispatch log, never composed by hand — a hand-written one is what let overlap
   disappear for three releases unnoticed.
 
@@ -940,38 +999,71 @@ Print one ribbon line per step — `▰` for done-or-current cells, `▱` for re
 eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
 that decides nothing is due still happened, and a missing ribbon reads as a skipped step. A unit
 that runs steps 1–11 prints eleven ribbons; orphan reconciliation before selection prints its own
-`00/11 RECONCILE` ribbon the moment Prime surfaces the orphan, before any fetch or driver call.
+`00/11 🔁 RECONCILE` ribbon the moment Prime surfaces the orphan, before any fetch or driver call.
 Never withhold a ribbon to reduce output, and never re-print one: a step's ribbon appears
 **exactly once, when the step begins**. A ribbon is an announcement, not a status display —
 "still in flight" is heartbeat news and uses the heartbeat line, never a second copy of the
-ribbon with a different suffix. On resuming from a parked wait, print one `♡ resumed —
+ribbon with a different suffix. On resuming from a parked wait, print one `▶️ resumed —
 <what fired>` line and continue; the ribbon for a step already announced is never printed again.
 
 ```text
-🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor> · 14:07
-🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 SIMPLIFY ─ #<N> · no change required · orchestrator · 14:41
+[14:07][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN ─ <lane> · <actor>
+[14:41][#78] 🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 🧹 SIMPLIFY ─ 41 lines removed · fresh simplifier
 ```
 
-**Every ribbon's last cell is the wall clock** — `HH:MM`, 24-hour, from `date +%H:%M` in the
-same turn (one cheap read; never guess it from memory). The ribbon carries the START time; the
-step's end and duration belong to the lines that already mark completion, never to a re-printed
-ribbon:
+**Each step carries its own glyph**, between the counter and the name, so the eye finds a kind of
+work without reading the word. The set is closed — a step always draws the same glyph, and a glyph
+never means two things:
+
+| Step | Glyph | Step | Glyph |
+|---|---|---|---|
+| 00 RECONCILE | 🔁 | 06 SIMPLIFY | 🧹 |
+| 01 PREMISE | 🧭 | 07 DIFF-REVIEW | 👓 |
+| 02 PLAN | 📐 | 08 CODE-REVIEW | 🔍 |
+| 03 PLAN-REVIEW | 🔬 | 08 FIX | 🔧 |
+| 04 CLAIM | 📌 | 09 GATE | 🚦 |
+| 05 IMPLEMENT | 🔨 | 10 PUBLISH | 📦 |
+| | | 11 RECORD | 📝 |
+
+Reading them apart is the point: 🔬 scrutinises a plan and 🔍 scrutinises code, 👓 is the
+orchestrator's own read, 🔨 builds and 🔧 repairs. The state badge stays where it is — the glyph
+says WHAT the step is, the badge says HOW IT IS GOING.
+
+Step glyphs deliberately avoid variation-selector emoji, because a ribbon is a column-aligned
+line and those render at inconsistent widths. The wait lines below are prose, not columns, so
+🅿️ / ▶️ / 💤 are fine there.
+
+**Every timeline line starts with `[HH:MM][#N]`** — the wall clock from `date +%H:%M` in the same
+turn (one cheap read; never guessed from memory), then the unit it belongs to. Leading, not
+trailing: a run interleaves two units and a dozen steps, and the reader scans the left edge for
+"when" and "which", not the tail of each line. The issue number therefore appears once, in the
+prefix — do not repeat it in the body. Ribbons, `🅿️ parked`/`▶️ resumed` lines, and closing rails
+all carry it. The wait pair reads as a pair: **🅿️ parked** when the turn ends on a wait,
+**▶️ resumed** when what it waited for fires, **💤 idle** on the line that reports a run with
+nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself (which
+carries the clock but no unit — it belongs to no single issue).
+
+The prefix time is the START time; end and duration belong to the lines that already mark
+completion, never to a re-printed ribbon:
 
 - collecting a dispatched step's typed result, state the duration from the result's own `ms`
-  field — `plan returned · 6m41s`, computed from `ms`, never hand-timed;
-- a `♡ resumed` line carries the clock and what fired: `♡ resumed — codex r1 returned · 14:32`;
+  field — `[14:14][#78] ▶️ resumed — plan returned · 6m41s`, computed from `ms`, never hand-timed;
 - the closing rail carries the unit's total (from the run record's per-step timings).
 
-Code review converges over rounds, so it also prints a round ribbon against the configured
-cap — same grammar, cells counting rounds — which makes an approaching cap visible before it
-blocks:
+Code review converges over rounds, so its ribbons keep the same grammar and add the round after
+the step name — `<step>/11 CODE-REVIEW r<n>/<cap>` — with the cells counting ROUNDS against the
+configured cap, which is what makes an approaching cap visible before it blocks. The step number
+never disappears: one format for every line in the run, whatever it counts.
 
 ```text
-🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · 0 Critical · 2 Major open · 15:02
-🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · clean · converged · 15:26
+[15:02][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
+[15:19][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
+[15:26][#78] 🟩 ∞ ▰▰▰▱▱ 08/11 🔍 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
 ```
 
-Plan review is one dispatch and has no round ribbon.
+Fix rounds belong to step 08 too — they are how the step converges, not a step of their own.
+
+Plan review is one dispatch and carries no round: `03/11 🔬 PLAN-REVIEW [<executor>]`.
 
 Every dispatched step names its **executor** in a fixed slot immediately after the step name —
 upper-case and bracketed so it reads as a label. The slot is `[ENGINE]` when no model is pinned
@@ -981,11 +1073,13 @@ judged or wrote is a property of the evidence, and the model is now chooseable p
 line says it:
 
 ```text
-🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 PLAN [CLAUDE:FABLE] ─ #<N> · full · fresh planner · 14:03
-🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE:OPUS] ─ #<N> · full · fresh writer · 14:19
-🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN-REVIEW [CODEX] ─ #<N> · full · fresh reviewer · 14:11
-🟨 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ #<N> · fix-delta · 1 Major open · proxy · 15:02
+[14:03][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [CLAUDE:FABLE] ─ full · fresh planner
+[14:19][#78] 🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
+[14:11][#87] 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
+[15:02][#78] 🟨 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
 ```
+
+Two units in flight read as two prefixes, which is the point.
 
 Steps the orchestrator runs itself take no executor slot — there was no dispatch, and an absent
 slot is the honest statement that the session (its model on the startup banner) did the work.
@@ -993,20 +1087,20 @@ slot is the honest statement that the session (its model on the startup banner) 
 End a unit with one closing rail:
 
 ```text
-🟩 ╰─ ✔ #<N> SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 16:12 · 2h09m ─╯
+[16:12][#78] 🟩 ╰─ ✔ SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ─╯
 ```
 
 or:
 
 ```text
-🟥 ╰─ ✖ #<N> BLOCKED ─ <safe composed reason> ─╯
+[16:12][#78] 🟥 ╰─ ✖ BLOCKED ─ <safe composed reason> ─╯
 ```
 
 Close the run with the badge matching its outcome — 🟩 when something shipped and nothing
 blocked, 🟥 when anything blocked:
 
 ```text
-🟩 ∞ run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
+[17:41] 🟩 ∞ 🏁 run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
 ```
 
 Never paste raw issue/review text into chat banners.
