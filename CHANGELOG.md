@@ -5,6 +5,21 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [0.49.16] - 2026-07-28
 
+### Changed
+
+- **The loop never presents a menu.** v0.49.12 removed the question-and-wait from every *gate*,
+  but a live run hit a case no rule named — an unexplained `ARTIFACT_IDENTITY_MISMATCH` on a unit
+  that was already merged and delivered — and fell back to asking, leaving three eligible issues
+  idle over a missing bookkeeping comment. The rule is now general and covers novel situations
+  explicitly: no "how should I proceed?", no options A/B/C, no "shall I continue?". Take the most
+  conservative action that keeps the run moving — label the affected unit, record the evidence
+  verbatim, continue with the rest of the queue — and put the decision and its reasoning in the
+  run record, which is where the operator reviews and reverses it. An unattended run is unattended
+  at the moment it would ask, so a question is a stop with extra words.
+- **A mismatched marker blocks its own unit, never the run.** And a marker whose unit is already
+  terminal — issue closed, pull request merged — blocks nothing at all: it cannot be duplicated,
+  abandoned, or re-run, so it is a defect report and the queue is untouched.
+
 ### Fixed
 
 - **`ARTIFACT_IDENTITY_MISMATCH` names the predicate that fired, not just the artifact.** A live
