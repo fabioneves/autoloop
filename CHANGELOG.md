@@ -3,6 +3,32 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.19] - 2026-07-28
+
+### Fixed
+
+- **The lessons curation budget was orphaned by its own migration.** `docs/agentic/LESSONS.md`
+  reached 8010 bytes with nothing reporting it, while ARCH's budget worked fine. The rule existed —
+  as dev-skill prose naming "STATE Lessons over 3000 bytes", a section the v0.49.14 STATE diet had
+  moved into its own file. It pointed at nothing, so it silently never fired: a migration
+  retargeted the document and left its maintenance rule behind. Both budgets now live in
+  `scaffold.mjs --reconcile`/`--audit`, which names the file, its size, and the curation rule in
+  its warnings, so the check fires whether or not a session remembers the rule.
+- **STATE stops implying the loop enforces slice size.** It described all five caps with one
+  sentence — "at a cap it blocks that unit and takes the next one" — which is true of
+  `gateRetriesPerUnit`, `codeReviewRoundsPerUnit` and `reviseRoundsPerPr`, and false of
+  `sliceMaxLines` and `sliceMaxFiles`. Those two are shaping budgets: `autoloop:shape` sizes issues
+  against them while decomposing a spec, and `autoloop:dev` never re-checks size, so an oversized
+  issue that reached the queue is not refused at selection — it is discovered mid-build. A reader
+  who believed the loop guarded slice size had no reason to look for the real guard, which runs
+  before the queue and is human-invoked. The two kinds are now stated separately.
+- **LESSONS is budgeted at 6000 bytes, tighter than ARCH's 8000, on purpose.** ARCH maps a whole
+  codebase and grows with it. LESSONS is supposed to *shrink*: its own pruning rule retires any
+  lesson a guard, contract, or hook has since come to enforce. v0.49.18 is exactly that case — the
+  command-guard change turned "name the remedy, not the category" from a lesson into a mechanism,
+  so any entry about vague guard refusals is now deletable. A lessons file that only grows stops
+  being read, and an unread lesson prevents nothing.
+
 ## [0.49.18] - 2026-07-28
 
 ### Changed

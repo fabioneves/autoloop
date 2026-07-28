@@ -45,9 +45,15 @@ names every error, so this list is orientation, not the schema.
 - `tracker` — `{ "provider": "none" }` or
   `{ "provider": "jira", "epicKey": "TEAM-123", "cloudId": "<Atlassian UUID>" }`.
 - `review.checklistPath` — the criteria both reviewers grade against.
-- `caps` — per-unit budgets: `gateRetriesPerUnit`, `codeReviewRoundsPerUnit`, `reviseRoundsPerPr`,
-  `sliceMaxLines`, `sliceMaxFiles`. **Caps are policy: the loop reads them and never edits them.**
-  At a cap it blocks that unit and takes the next one; raising a cap is your decision, made here.
+- `caps` — two kinds, both policy the loop reads and never edits; raising either is your decision,
+  made here.
+  - **Run-time budgets** — `gateRetriesPerUnit`, `codeReviewRoundsPerUnit`, `reviseRoundsPerPr` —
+    bind during a unit: at a cap the loop blocks that unit and takes the next one.
+  - **Shaping budgets** — `sliceMaxLines`, `sliceMaxFiles` — bind BEFORE the loop sees a unit.
+    `autoloop:shape` sizes issues against them while decomposing a spec. **`autoloop:dev` never
+    re-checks unit size**, so an oversized issue that reached the queue is not refused at
+    selection — it is discovered mid-build. If a unit turns out too large to slice, that is a
+    block for re-shaping, not a cap the loop can enforce for you.
 
 There are no other keys — the schema rejects anything else.
 

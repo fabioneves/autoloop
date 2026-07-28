@@ -407,6 +407,22 @@ export function reconcile(root, templates, { audit = false } = {}) {
     }
   }
 
+  // ARCH and LESSONS are curated documents: allowed to grow between maintenance
+  // units, not forever. Both budgets lived only as dev-skill prose, and the
+  // lessons one still named "STATE Lessons" — a section the v0.49.14 diet moved
+  // into its own file — so it pointed at nothing and silently never fired.
+  // LESSONS reached 8010 bytes with no one told. A budget that lives in the
+  // battery fires whether or not a session remembers the rule.
+  for (const { path: relative, budget, guidance } of CURATED_DOCUMENTS) {
+    const path = resolve(root, relative);
+    if (!existsSync(path)) continue;
+    const size = readFileSync(path).length;
+    if (size <= budget) continue;
+    warnings.push(
+      `${relative} is ${size} bytes, over its ${budget}-byte curation budget: ${guidance}`,
+    );
+  }
+
   // The committed CI policy is retired (docs/specs/simple-delivery.md): the
   // delivery predicate is the triggered-checks floor, so a lingering copy is
   // dead configuration that reads as authoritative. Reconcile removes it in the
@@ -675,6 +691,26 @@ export function extractLessonsSection(stateText) {
 // an upgrade that a repository cannot see in its diff is indistinguishable from
 // the loop rewriting its own policy. Reconcile runs them in order before any
 // document merge, so a merge never meets a half-migrated file.
+// LESSONS gets a tighter budget than ARCH on purpose. ARCH maps a whole
+// codebase and grows with it; LESSONS is supposed to SHRINK over time, because
+// its own pruning rule retires any lesson a guard, contract, or hook has since
+// come to enforce. A lessons file that only grows stops being read, and an
+// unread lesson prevents nothing.
+const CURATED_DOCUMENTS = Object.freeze([
+  Object.freeze({
+    path: 'docs/agentic/ARCH.md',
+    budget: 8000,
+    guidance: 're-curate the map, dropping imperative policy, shared freshness lines, '
+      + 'restated counts, and width-aligned tables',
+  }),
+  Object.freeze({
+    path: 'docs/agentic/LESSONS.md',
+    budget: 6000,
+    guidance: 'delete every lesson a guard rule, contract, or hook now enforces — the '
+      + 'mechanism is the memory — and keep the rest rule-first, evidence-second',
+  }),
+]);
+
 const REPO_MIGRATIONS = Object.freeze([
   Object.freeze({ id: 'lessons-out-of-state', apply: migrateLessons }),
 ]);
@@ -1541,6 +1577,32 @@ function selfTest() {
         return run.results.some((entry) =>
           entry.path === 'docs/agentic/STATE.md' && entry.action === 'kept')
           && run.warnings.some((warning) => warning.includes('--merge-state'));
+      })(),
+    );
+    expect(
+      // 2026-07-28: both budgets lived only as dev-skill prose, and the lessons
+      // one still named "STATE Lessons" after the v0.49.14 diet moved lessons
+      // into their own file, so it pointed at nothing. LESSONS reached 8010
+      // bytes with nothing reporting it.
+      'a curated document over its budget is reported with the curation rule',
+      (() => {
+        const path = join(root, 'docs', 'agentic', 'LESSONS.md');
+        writeFileSync(path, `# lessons\n${'- a rule that became a mechanism\n'.repeat(300)}`);
+        const run = reconcile(root, templates, { audit: true });
+        const warning = run.warnings.find((entry) =>
+          entry.includes('docs/agentic/LESSONS.md') && entry.includes('curation budget'));
+        return warning !== undefined
+          && warning.includes('6000')
+          && warning.includes('now enforces');
+      })(),
+    );
+    expect(
+      'a curated document inside its budget is silent',
+      (() => {
+        const path = join(root, 'docs', 'agentic', 'LESSONS.md');
+        writeFileSync(path, '# lessons\n- one short rule\n');
+        const run = reconcile(root, templates, { audit: true });
+        return !run.warnings.some((entry) => entry.includes('curation budget'));
       })(),
     );
     expect(

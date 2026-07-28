@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.18 · starting
+∞ setup · v0.49.19 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -412,7 +412,8 @@ when nothing had failed. If you want a pass/fail signal, run `verify.mjs --insta
 own and read ITS status.
 
 A scan or audit section that fails is incomplete, not an empty success. Follow it with one targeted
-check. STATE Lessons over 3000 bytes and ARCH over 8000 bytes are compaction NOTEs, not failures.
+check. `docs/agentic/LESSONS.md` over 6000 bytes and ARCH over 8000 bytes are compaction NOTEs,
+not failures; the reconcile battery raises both as warnings naming the curation rule.
 
 ### No improvised inspection
 
