@@ -149,6 +149,18 @@ const LIFECYCLE_BINDING_QUERY = `
   }
 `;
 
+// A lifecycle marker is an HTML comment block, so candidacy is the OPENING
+// TOKEN, never a bare mention of the name. Substring matching made every run
+// record that discusses the marker — the loop writes those — a malformed
+// candidate, and the evidence derivation then failed closed on a comment that
+// was never a marker. An edited or corrupted real marker still carries the
+// opener, so the fail-closed property this replaces is preserved.
+const LIFECYCLE_MARKER_OPENER = /<!--\s*autoloop-lifecycle-v1\b/u;
+
+export function carriesLifecycleMarker(body) {
+  return typeof body === 'string' && LIFECYCLE_MARKER_OPENER.test(body);
+}
+
 function readBoundedNoFollow(path, maximum) {
   const descriptor = openSync(
     path,
@@ -383,7 +395,7 @@ function fetchLifecycleBindingSnapshot(
   const roles = new Map();
   for (const author of new Set(
     comments
-      .filter((comment) => comment.body.includes('autoloop-lifecycle-v1'))
+      .filter((comment) => carriesLifecycleMarker(comment.body))
       .map((comment) => comment.author.login),
   )) {
     const permissionEndpoint =
@@ -402,7 +414,7 @@ function fetchLifecycleBindingSnapshot(
       || (comment.author.login === expectedViewer && role === 'write');
   });
   if (authorized.some((comment) => {
-    if (!comment.body.includes('autoloop-lifecycle-v1')) return false;
+    if (!carriesLifecycleMarker(comment.body)) return false;
     const parsed = parseLifecycleComment(comment.body);
     return !parsed.ok || parsed.marker.issue !== issueNumber;
   })) {
@@ -410,7 +422,7 @@ function fetchLifecycleBindingSnapshot(
   }
   let chain = resolveLifecycleCommentChain(
     authorized
-      .filter((comment) => comment.body.includes('autoloop-lifecycle-v1'))
+      .filter((comment) => carriesLifecycleMarker(comment.body))
       .map(lifecycleChainInput),
     commentId,
   );
@@ -419,7 +431,7 @@ function fetchLifecycleBindingSnapshot(
     (comment) => comment.id === chain.root.id,
   )?.author.login;
   const authorizedMarkers = authorized.filter((comment) =>
-    comment.body.includes('autoloop-lifecycle-v1'));
+    carriesLifecycleMarker(comment.body));
   if (
     typeof rootAuthor !== 'string'
     || authorizedMarkers.some((candidate) => {
@@ -629,8 +641,7 @@ export function derivePremergeComponentEvidence(record, live) {
   const planMatches = commentById(record.plan.commentId);
   const planComment = planMatches.length === 1 ? planMatches[0] : null;
   const lifecycleMarkerComments = live.comments.items.filter((comment) =>
-    typeof comment?.body === 'string'
-    && comment.body.includes('autoloop-lifecycle-v1'));
+    carriesLifecycleMarker(comment?.body));
   // Live comment evidence must carry derived edit evidence; a fetcher that omits
   // it is incomplete, not silently unedited.
   if (lifecycleMarkerComments.some((comment) =>
@@ -1640,7 +1651,7 @@ function bindPremergeLifecycle(record, created, repository, overrides = {}) {
     const author = roots[0].author.login;
     const markerItems = items.filter((comment) =>
       typeof comment?.body === 'string'
-      && comment.body.includes('autoloop-lifecycle-v1'));
+      && carriesLifecycleMarker(comment.body));
     if (markerItems.some((comment) => {
       const parsed = parseLifecycleComment(comment.body);
       return parsed.ok
@@ -1741,22 +1752,47 @@ function bindPremergeLifecycle(record, created, repository, overrides = {}) {
   return { verified: true, marker: current.marker, observation: observed.observation };
 }
 
+// Named gaps, not a bare boolean: a live finalize refused after 90 minutes of
+// work and the operator had to read this function's source to learn which
+// precondition failed. `loop-ready` is the human's authorization token and its
+// ABSENCE IS A KILL SWITCH — the loop may never re-apply it — so the remedy has
+// to be stated rather than discovered.
+export function terminalStateGaps(state, input) {
+  const gaps = [];
+  if (state?.complete !== true) return ['terminal state evidence is incomplete'];
+  if (state.issue !== input.record.issue) gaps.push('issue does not match the record');
+  if (state.pullRequest !== input.record.pullRequest) {
+    gaps.push('pull request does not match the record');
+  }
+  if (state.headOid !== input.record.headOid) {
+    gaps.push(`live head ${String(state.headOid).slice(0, 12)}… is not the recorded head `
+      + `${String(input.record.headOid).slice(0, 12)}…`);
+  }
+  if (typeof state.draft !== 'boolean') gaps.push('draft state is unknown');
+  if (
+    !Array.isArray(state.labels)
+    || state.labels.some((label) => typeof label !== 'string' || label.length === 0)
+    || new Set(state.labels).size !== state.labels.length
+  ) {
+    gaps.push('issue labels are missing, malformed, or duplicated');
+    return gaps;
+  }
+  if (!state.labels.includes('loop-ready')) {
+    gaps.push(
+      `issue #${input.record.issue} is missing loop-ready — a deferred or blocked unit keeps `
+      + 'its authorization only while a human re-applies it, and the loop may never apply, '
+      + 'create, or rename that label. Ask for it, then re-run this finalize; do not resume a '
+      + 'unit whose issue lost it (the selection step refuses such a unit before any work)',
+    );
+  }
+  const blocking = state.labels.filter((label) =>
+    TERMINAL_BLOCKING_ISSUE_LABELS.has(label));
+  if (blocking.length > 0) gaps.push(`blocking label present: ${blocking.sort().join(', ')}`);
+  return gaps;
+}
+
 function terminalStateMatches(state, input) {
-  return (
-    state?.complete === true
-    && state.issue === input.record.issue
-    && state.pullRequest === input.record.pullRequest
-    && state.headOid === input.record.headOid
-    && typeof state.draft === 'boolean'
-    && Array.isArray(state.labels)
-    && state.labels.every(
-      (label) => typeof label === 'string' && label.length > 0,
-    )
-    && new Set(state.labels).size === state.labels.length
-    && state.labels.includes('loop-ready')
-    && !state.labels.some((label) =>
-      TERMINAL_BLOCKING_ISSUE_LABELS.has(label))
-  );
+  return terminalStateGaps(state, input).length === 0;
 }
 
 function deliveredState(state) {
@@ -1936,7 +1972,10 @@ export function finalizeTerminalDelivery(input, context = {}) {
     input.record.pullRequest,
   );
   if (!terminalStateMatches(state, input)) {
-    throw new Error('terminal state does not match the exact record identity');
+    throw new Error(
+      `terminal state does not match the exact record identity: ${
+        terminalStateGaps(state, input).join('; ')}`,
+    );
   }
   if (state.draft) {
     (adapters.markReady ?? markPullRequestReady)(snapshot.repository, state);
@@ -3491,6 +3530,50 @@ function selfTest() {
   } else {
     console.error('FAIL a ready PR revalidates CI before delivered mutation');
   }
+  check_marker_and_labels: {
+    const base = {
+      complete: true,
+      issue: premerge.issue,
+      pullRequest: premerge.pullRequest,
+      headOid: premerge.headOid,
+      draft: false,
+      labels: ['loop-ready', 'loop-delivered'],
+    };
+    const named = terminalStateGaps(
+      { ...base, labels: ['loop-delivered'] },
+      terminalInput,
+    );
+    if (
+      terminalStateGaps(base, terminalInput).length === 0
+      && named.length === 1
+      && named[0].includes('missing loop-ready')
+      && named[0].includes('may never apply')
+      && terminalStateGaps(
+        { ...base, labels: ['loop-ready', 'loop-blocked'] },
+        terminalInput,
+      ).some((gap) => gap.includes('blocking label present: loop-blocked'))
+    ) {
+      passed += 1;
+    } else {
+      console.error('FAIL a refused terminal state names the precondition that failed');
+    }
+    // A run record that DISCUSSES the marker is not a marker: substring
+    // candidacy made every such comment a malformed candidate and failed the
+    // whole derivation closed.
+    if (
+      carriesLifecycleMarker(lifecycleBody)
+      && carriesLifecycleMarker('  <!--  autoloop-lifecycle-v1\n{}\n-->')
+      && !carriesLifecycleMarker(
+        'the run wrote its autoloop-lifecycle-v1 marker and bound the record',
+      )
+      && !carriesLifecycleMarker('`autoloop-lifecycle-v1`')
+      && !carriesLifecycleMarker(null)
+    ) {
+      passed += 1;
+    } else {
+      console.error('FAIL a prose mention of the marker name is not a marker candidate');
+    }
+  }
   let blockedTerminalRejected = false;
   try {
     finalizeTerminalDelivery(terminalInput, {
@@ -3613,7 +3696,7 @@ function selfTest() {
   } else {
     console.error('FAIL acknowledged solo delivery posts exactly the two verdict statuses');
   }
-  const total = cases.length + 45;
+  const total = cases.length + 47;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }

@@ -40,6 +40,22 @@ Notable changes to Autoloop are recorded here. The format follows
   the same glyphs for the same kinds of work. The wait lines get their own pair — 🅿️ parked,
   ▶️ resumed — plus 💤 for an idle run and 🏁 on the run's closing rail.
 
+### Fixed
+
+- **A resumed unit learns it lost its authorization at selection, not after ninety minutes.**
+  `loop-ready` is the human's authorization token; the defer and block flows strip it and the loop
+  may never re-apply it, so a unit that lost it cannot finalize — correctly, since losing it
+  mid-run is the kill switch. A live run resumed such a unit from its marker, carried it across
+  seven dispatches to gate-green and review-clean, and only then hit the check. Selection now
+  requires the label for marker-driven resumes too, reports the one command its human runs, and
+  takes other work; and the finalizer's refusal names the failing precondition instead of
+  returning a bare mismatch.
+- **A run record that mentions the lifecycle marker is no longer treated as one.** Candidacy was a
+  substring test on `autoloop-lifecycle-v1`, so every comment discussing the marker — the loop
+  writes those — became a malformed candidate and failed the premerge derivation closed. Candidacy
+  is now the HTML-comment opening token; an edited or corrupted real marker still carries it, so
+  nothing that used to fail closed now passes.
+
 ## [0.49.9] - 2026-07-28
 
 ### Added

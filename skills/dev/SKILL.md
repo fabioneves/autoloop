@@ -493,6 +493,16 @@ Invalidate/refetch queue sections affected by Pitcrew. Choose highest priority, 
 Record issue number, body hash, label event, dependencies, planned base OID, and selection
 snapshot fingerprint.
 
+**`loop-ready` must be on the issue NOW — including for a marker-driven resume.** It is the
+human's authorization token, and the loop may never apply, create, or rename it; the terminal
+finalizer checks it too, because losing it mid-run is the kill switch. A unit whose issue lost
+the label — the defer and block flows both strip it — is therefore **not resumable by the loop**,
+however complete its marker looks. Report it as awaiting re-authorization, name the one command
+its human runs (`gh issue edit <N> --add-label loop-ready`), and take other work. A live run
+resumed such a unit from its marker, spent ninety minutes across seven dispatches carrying it to
+gate-green and review-clean, and only then discovered the authorization was missing at the very
+last step. The check costs one field of a snapshot the run already has.
+
 Challenge premises against current code and STATE. If the issue is obsolete, duplicate, ambiguous,
 outside autonomy, or requires a secret/destructive/protected choice, comment a concise evidence-
 backed disposition and transition to the appropriate human block. Do not silently redesign scope.
