@@ -282,6 +282,33 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'label-refusal-named-no-command',
+    date: '2026-07-28',
+    symptom: 'Seventeen loop runs in one day applied `human:authorize` via '
+      + '`gh pr edit` (which dies on gh that still queries Projects-classic '
+      + 'cards), fell back to raw `gh api …/issues/<n>/labels`, and ate the '
+      + 'deny with no vehicle to retry.',
+    cause: 'The refusal said "use a canonical gh issue command" without '
+      + 'naming one, so every run re-derived `gh issue edit <n> --add-label` '
+      + '— which works on PRs and never touches project cards. The refusal '
+      + 'now names the vehicle, and the dev skill and STATE template '
+      + 'prescribe it where the label self-apply is described.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'avoids the Projects-classic GraphQL failure',
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'gh issue edit <pr-number> --add-label human:authorize',
+      }),
+      Object.freeze({
+        file: '../STATE.template.md',
+        anchor: 'gh issue edit <pr-number> --add-label human:authorize',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '

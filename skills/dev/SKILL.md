@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.24 · starting
+∞ dev · v0.49.25 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1015,7 +1015,10 @@ equals the gated OID. If and only if the branch was rebased, use
 `git push --force-with-lease=refs/heads/<captured-loop-branch>:<expected-remote-oid> origin HEAD:refs/heads/<captured-loop-branch>`.
 A mismatch means re-review/re-gate.
 Apply `human:authorize` when the shared final path policy reports a hit; it is a human signal, not
-automatic merge authorization. Keep the PR draft until terminal evidence is durable.
+automatic merge authorization. Apply it with `gh issue edit <pr-number> --add-label human:authorize`
+— it works on PRs, while `gh pr edit` fails on hosts whose gh still queries deprecated
+Projects-classic cards and a raw `gh api …/labels` fallback is guard-denied. Keep the PR draft until
+terminal evidence is durable.
 
 Use the universal effectful terminal finalizer. Write this closed request to a bounded file:
 
