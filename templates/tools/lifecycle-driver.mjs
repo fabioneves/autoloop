@@ -206,6 +206,35 @@ function api(repository, endpoint) {
   return JSON.parse(command('gh', apiArgs(repository, endpoint)));
 }
 
+// REST API version 2026-03-10 REMOVED `merge_commit_sha` from both the list and
+// the single pull-request representation, so every merged unit produced
+// `mergeOid: undefined` and the contract refused the terminal backfill with
+// ARTIFACT_IDENTITY_MISMATCH(merge) — four live units wedged this way, all
+// already shipped and merged. GraphQL still exposes the merge commit, and it is
+// the same fact from the same source of truth.
+function mergeCommitOid(repository, pullRequest) {
+  const data = JSON.parse(command('gh', [
+    'api',
+    '--hostname',
+    repository.host,
+    'graphql',
+    '-f',
+    'query=query($owner:String!,$name:String!,$number:Int!){'
+    + 'repository(owner:$owner,name:$name){pullRequest(number:$number){'
+    + 'merged mergeCommit{oid}}}}',
+    '-F',
+    `owner=${repository.owner}`,
+    '-F',
+    `name=${repository.repo}`,
+    '-F',
+    `number=${pullRequest}`,
+  ]));
+  const node = data?.data?.repository?.pullRequest;
+  if (node?.merged !== true) return null;
+  const oid = node.mergeCommit?.oid;
+  return typeof oid === 'string' ? oid.toLowerCase() : null;
+}
+
 function apiOptional(repository, endpoint) {
   const result = commandResult('gh', apiArgs(repository, endpoint));
   if (result.status === 0 && !result.error) return JSON.parse(result.stdout);
@@ -621,7 +650,7 @@ function readOperationalState(request, root) {
       ...(merged
         ? {
           headOid: pullRequest.head.sha.toLowerCase(),
-          mergeOid: pullRequest.merge_commit_sha?.toLowerCase(),
+          mergeOid: mergeCommitOid(repository, pullRequest.number) ?? undefined,
         }
         : {}),
     },

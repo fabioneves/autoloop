@@ -107,8 +107,23 @@ function completeExistence(value) {
   return value?.complete === true && typeof value.exists === 'boolean';
 }
 
-function artifactMismatch(artifact) {
-  return transition('block', 'identity-mismatch', 'ARTIFACT_IDENTITY_MISMATCH', { artifact });
+// The artifact name alone is not a diagnosis: a live run met
+// ARTIFACT_IDENTITY_MISMATCH(merge) on a unit whose every observable merge fact
+// was consistent, and could not tell which of four predicates had fired without
+// reading this file. `mismatch` names the predicate and the two values it
+// compared, so a refusal explains itself.
+function artifactMismatch(artifact, mismatch = null) {
+  return transition('block', 'identity-mismatch', 'ARTIFACT_IDENTITY_MISMATCH', {
+    artifact,
+    ...(mismatch === null ? {} : { mismatch }),
+  });
+}
+
+function compared(field, observed, expected) {
+  const show = (value) => (typeof value === 'string' && /^[0-9a-f]{40}$/u.test(value)
+    ? `${value.slice(0, 12)}…`
+    : JSON.stringify(value) ?? String(value));
+  return `${field}: observed ${show(observed)} · expected ${show(expected)}`;
 }
 
 const MARKER_KEYS = new Set([
@@ -946,7 +961,7 @@ export function reconcileLifecycle(input, context = {}) {
   const facts = input.observed;
   if (!facts || typeof facts !== 'object') return inspect('lifecycle');
   if (facts.merge?.complete === true && typeof facts.merge.merged !== 'boolean') {
-    return artifactMismatch('merge');
+    return artifactMismatch('merge', 'merge evidence is complete but carries no merged boolean');
   }
   const merged = facts.merge?.complete === true && facts.merge.merged === true;
   const readyIdentityComplete = (
@@ -955,15 +970,19 @@ export function reconcileLifecycle(input, context = {}) {
     && SHA_RE.test(input.marker.headOid ?? '')
   );
   if (readyIdentityComplete && facts.merge?.complete !== true) return inspect('merge');
-  if (
-    merged
-    && (
-      !SHA_RE.test(facts.merge.headOid ?? '')
-      || !SHA_RE.test(facts.merge.mergeOid ?? '')
-      || (input.marker.headOid && facts.merge.headOid !== input.marker.headOid)
-    )
-  ) {
-    return artifactMismatch('merge');
+  if (merged) {
+    if (!SHA_RE.test(facts.merge.headOid ?? '')) {
+      return artifactMismatch('merge', `merged head is not a commit OID (${facts.merge.headOid})`);
+    }
+    if (!SHA_RE.test(facts.merge.mergeOid ?? '')) {
+      return artifactMismatch('merge', `merge commit is not a commit OID (${facts.merge.mergeOid})`);
+    }
+    if (input.marker.headOid && facts.merge.headOid !== input.marker.headOid) {
+      return artifactMismatch(
+        'merge',
+        compared('merged head vs marker head', facts.merge.headOid, input.marker.headOid),
+      );
+    }
   }
 
   if (!completeExistence(facts.localClaim)) return inspect('local-claim');
@@ -1244,11 +1263,14 @@ export function reconcileLifecycle(input, context = {}) {
   }
   if (facts.merge?.complete !== true) return inspect('merge');
   if (facts.merge.merged === true) {
-    if (
-      facts.merge.headOid !== input.marker.headOid ||
-      !SHA_RE.test(facts.merge.mergeOid ?? '')
-    ) {
-      return artifactMismatch('merge');
+    if (facts.merge.headOid !== input.marker.headOid) {
+      return artifactMismatch(
+        'merge',
+        compared('merged head vs marker head', facts.merge.headOid, input.marker.headOid),
+      );
+    }
+    if (!SHA_RE.test(facts.merge.mergeOid ?? '')) {
+      return artifactMismatch('merge', `merge commit is not a commit OID (${facts.merge.mergeOid})`);
     }
     if (operation?.state === 'attempt') {
       return transition('act', 'record-merge-result', 'MERGE_RESULT_OBSERVED', {
@@ -1286,7 +1308,12 @@ export function reconcileLifecycle(input, context = {}) {
       markerPatch: { phase: 'terminal-record', mergeOid: facts.merge.mergeOid },
     });
   }
-  if (facts.merge.merged !== false) return artifactMismatch('merge');
+  if (facts.merge.merged !== false) {
+    return artifactMismatch(
+      'merge',
+      'this path requires an unmerged pull request; the live one reports merged',
+    );
+  }
   if (intentValue.mergePolicy === 'manual') {
     return transition('wait', 'await-human-merge', 'MANUAL_MERGE_PENDING');
   }
@@ -2326,6 +2353,33 @@ function selfTest() {
         }),
       },
       expected: ['resume', 'resume-unit'],
+    },
+    {
+      name: 'a merge mismatch names the predicate and both values',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({
+          mergePolicy: 'auto',
+          claimCommit: SHA,
+          pr: 12,
+          headOid: SHA,
+          phase: 'ready-head',
+        }),
+        observed: observed({
+          merge: {
+            complete: true,
+            merged: true,
+            headOid: OTHER_SHA,
+            mergeOid: '9'.repeat(40),
+          },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
+      verify: (outcome) => outcome.artifact === 'merge'
+        && typeof outcome.mismatch === 'string'
+        && outcome.mismatch.includes('merged head vs marker head')
+        && outcome.mismatch.includes(OTHER_SHA.slice(0, 12))
+        && outcome.mismatch.includes(SHA.slice(0, 12)),
     },
     {
       name: 'a superseded ready-head unbinds to draft-pr instead of wedging',

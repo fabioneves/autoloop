@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.15 · starting
+∞ dev · v0.49.16 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -82,7 +82,17 @@ Then, in order:
    draft PR existed. A marker has authority only when its author currently has admin/maintain, or
    when it is the authenticated current runner's own marker and that runner still has write.
    Ignore marker-shaped comments from other identities, and fail closed when role evidence is
-   incomplete. A malformed, mismatched, or duplicate trusted marker blocks selection. Run each
+   incomplete. A malformed, mismatched, or duplicate trusted marker blocks selection **of the unit
+   it belongs to — never of the run**: for a LIVE unit, apply `loop-blocked` + `human:decide` with
+   the driver's typed refusal recorded verbatim, then select from the rest of the queue. For a
+   unit that is already TERMINAL (issue closed, pull request merged) apply NO label — it is not
+   blocked, it is done, and a blocking label on a delivered issue is a false signal that outlives
+   the run. Post one comment carrying the refusal verbatim so the trail is complete, name it in
+   the run record as a loop defect, and move on: such a marker cannot be duplicated, abandoned, or
+   re-run, so it endangers nothing. Never hand-append the terminal outcome to close the gap —
+   marker edits and human-merge outcome appends go through the driver or not at all. A live run met an unexplained
+   `ARTIFACT_IDENTITY_MISMATCH` on a merged, delivered unit and stopped to ask, leaving three
+   eligible issues idle over a missing bookkeeping comment. Run each
    authoritative marker through `lifecycle-driver.mjs --reconcile-json` with its captured comment
    ID and exact frozen artifacts. The driver independently performs stable Git/GitHub reads,
    invokes `reconcileLifecycle()`, and applies only its typed action with marker compare-and-swap
@@ -1198,6 +1208,16 @@ worse than idling.
 
 Everything else the loop decides for itself. Asking permission mid-run is not caution; it is an
 unattended run that stopped being unattended.
+
+**Never present a menu.** Not "how should I proceed?", not options A/B/C, not "shall I continue?".
+The loop is unattended by definition: nobody is reading at the moment it asks, so a question is
+just a stop with extra words. This holds even when the situation is genuinely novel — an
+unexplained tool refusal, a state no rule names, a defect in the loop's own machinery. In those
+cases: take the most conservative action that keeps the run moving (usually: label the affected
+unit, record the evidence verbatim, continue with the rest of the queue), and put the decision and
+its reasoning in the run record. The operator reads the digest and reverses anything they dislike;
+that is the review point, not a prompt mid-run. If nothing conservative exists — the two blocking
+exceptions above — report and stop, still without asking.
 
 ## Hard rules
 

@@ -3,6 +3,66 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.16] - 2026-07-28
+
+### Changed
+
+- **The loop never presents a menu.** v0.49.12 removed the question-and-wait from every *gate*,
+  but a live run hit a case no rule named — an unexplained `ARTIFACT_IDENTITY_MISMATCH` on a unit
+  that was already merged and delivered — and fell back to asking, leaving three eligible issues
+  idle over a missing bookkeeping comment. The rule is now general and covers novel situations
+  explicitly: no "how should I proceed?", no options A/B/C, no "shall I continue?". Take the most
+  conservative action that keeps the run moving — label the affected unit, record the evidence
+  verbatim, continue with the rest of the queue — and put the decision and its reasoning in the
+  run record, which is where the operator reviews and reverses it. An unattended run is unattended
+  at the moment it would ask, so a question is a stop with extra words.
+- **A mismatched marker blocks its own unit, never the run.** And a marker whose unit is already
+  terminal — issue closed, pull request merged — blocks nothing at all: it cannot be duplicated,
+  abandoned, or re-run, so it is a defect report and the queue is untouched.
+
+### Fixed
+
+- **`ARTIFACT_IDENTITY_MISMATCH` names the predicate that fired, not just the artifact.** A live
+  run met `ARTIFACT_IDENTITY_MISMATCH(merge)` on a unit whose every observable merge fact was
+  consistent — single pull request on the branch, marker head equal to the pull request head, a
+  valid merge commit, no terminal record yet — and could not tell which of four merge predicates
+  had refused without reading `lifecycle-contract.mjs`. Each now reports what it compared and both
+  values (`merged head vs marker head: observed 37d4ff0e45d8… · expected d00a9fbb6c20…`), and the
+  fourth, which requires an UNMERGED pull request, says so in words rather than presenting as an
+  identity mismatch. Same disease as the reconcile-request and terminal-state refusals fixed
+  earlier today: a typed refusal that names only its category makes the operator reverse-engineer
+  the tool.
+- **The merge commit is read from GraphQL, and the wedge it caused is cleared.** Naming the
+  predicate immediately exposed the real defect behind every `ARTIFACT_IDENTITY_MISMATCH(merge)`:
+  REST API version `2026-03-10` removed `merge_commit_sha` from *both* the list and the single
+  pull-request representation, so `lifecycle-driver.mjs` read `undefined` and the contract
+  correctly refused a merge fact it could not verify. The contract was right the whole time; the
+  facts handed to it were incomplete. GraphQL still exposes `mergeCommit.oid` — the same fact from
+  the same source of truth — so the driver reads it there. Every already-merged unit stuck this way
+  reconciles to `terminal-record` on its next pass.
+
+### Added
+
+- **A live API-shape check on the release train.** No fixture could have caught the field removal
+  above: a fixture encodes what we *believe* the API returns, so it agrees with the code and both
+  are wrong together. `api-shape.mjs` probes the pinned API version for every field these tools
+  actually read, names the tool that reads each one, and fails with the field, the surface and the
+  version when one disappears. It runs on tags, where a network call is affordable.
+- **An incident index that keeps its own tests honest.** `guard-corpus.json` already required every
+  case to name the run that earned it; `regression-index.mjs` extends that to defects whose
+  enforcer is a self-test elsewhere in the tree. It deliberately does not re-test them — it asserts
+  the pinning case still exists, because a regression suite fails by having a case quietly deleted
+  during a refactor, not by asserting the wrong thing. Seven incidents registered, and adding one
+  without an enforcer fails the battery.
+
+### Fixed (found by the release gate itself)
+
+- **Release workflow requirements are counted inside the release-verify step.** They describe that
+  invocation, but were counted across the whole workflow, which silently reserved
+  `--repository "$GITHUB_REPOSITORY"` file-wide — so adding the api-shape step failed a rule that
+  had nothing to say about it. The tempting fix was to spell the flag differently and dodge the
+  contract; the correct one was to scope the check to what it actually means.
+
 ## [0.49.15] - 2026-07-28
 
 ### Fixed
