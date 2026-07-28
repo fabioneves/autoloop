@@ -3,6 +3,19 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.11] - 2026-07-28
+
+### Fixed
+
+- **The merge executor runs from the base checkout, closing the last fossil hole.** v0.49.10 moved
+  the flow's contract tools to the installed plugin but kept `auto-merge.mjs` vendored, because it
+  carries the repository's Setup-filled policy — which left a unit branch able to reach delivery
+  and then face a merge executor 1,500 lines behind base. A live run refused to perform an
+  irreversible merge with it, correctly. The executor is a GitHub-API operation on a pull request
+  and reads nothing from the worktree, so it now runs after the switch back to base, where the
+  vendored copy is the repository's current policy. `gate.mjs` remains the exception that must run
+  against the unit's own tree; hooks remain the only tools with no escape from a fossil branch.
+
 ## [0.49.10] - 2026-07-28
 
 ### Changed
