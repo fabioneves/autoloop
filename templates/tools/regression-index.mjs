@@ -110,6 +110,23 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'exit-code-contract-unreadable-under-the-guard',
+    date: '2026-07-28',
+    symptom: 'Every setup lost a round to a guard refusal: the merge step '
+      + 'documents its outcome as "exit 3", so sessions reached for `$?`, '
+      + 'which the guard blocks as an active shell expansion.',
+    cause: 'A tool contract expressed only as an exit code, under a guard that '
+      + 'forbids the idiom for reading exit codes. The same fact was in the '
+      + 'report all along as `ok: false`, but nothing said so.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/setup/SKILL.md',
+        anchor: 'Read that from the report, never from `$?`',
+      }),
+      Object.freeze({ file: 'scaffold.mjs', anchor: 'return report.ok ? 0 : 3;' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '
