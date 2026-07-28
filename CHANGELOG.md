@@ -3,6 +3,42 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.26] - 2026-07-28
+
+### Fixed
+
+- **The plan stays on the host model.** The review-engine recording was keyed to the reviewer
+  POSTURE, and `plan` shares that posture for its read-only sandbox while being authored work — so
+  a recorded `claude gpt-5.6-sol @<proxy> !xhigh` fed its model, proxy URL and effort to the
+  PLANNER. The skill's `--model fable` pin did not save it: a pin sets a model NAME while the
+  injected `ANTHROPIC_BASE_URL` made the review proxy resolve it, so planning silently ran on the
+  reviewer's model — the exact decorrelation the loop exists to preserve, inverted. Routing now
+  keys on the verdict RESULT: only `plan-review`, `code-review` and `doubt-review` read the
+  recording, `plan` and `implement` stay on the host engine, model, proxy and effort, and codex
+  refuses to author a plan as it already refuses to implement.
+- **A tool name in argument position is data, not an invocation.** `git log --oneline | grep node`
+  was refused as inline interpreter source, and `git log --grep xargs` as inline command assembly —
+  plain read-only history queries denied for naming a tool, because detection searched the whole
+  segment while the `git`/`gh` rules had judged by position for versions. Interpreter and assembler
+  detection is now positional too. Closing that opened a laundering gap one word wide
+  (`time xargs -n1 gh`), so the passthrough-wrapper set grew — `time`, `exec`, `sudo`, `doas`,
+  `setsid`, `stdbuf`, `ionice` — and `find -exec`/`-execdir`/`-ok`/`-okdir` are understood to
+  forward execution. Old was diffed against new across every affected shape: three cases flip to
+  allow and nothing that previously denied escapes.
+
+### Added
+
+- **A completed step composes its cost instead of remembering it.** The panel rule shipped in
+  v0.49.21 as prose and live runs kept shipping bare rows (`∞ #123 — 02 PLAN [OPUS]`) with no
+  `[elapsed] [HH:MM]`. The rule was never the problem: obeying it asked for millisecond division
+  and a clock read in the same turn as collecting a typed result, disposing findings and swapping
+  labels, and recall-plus-arithmetic under load is the shape that decays. `step-subject.mjs` turns
+  the numbers the loop already holds into a command — elapsed formatted, clock read, executor slot
+  upper-cased, composition idempotent so a resumed unit cannot grow a second pair of brackets.
+  Sub-minute steps round up to `1min`, because a cost profile must never report a step as free.
+  Colour stays the host's: a task subject is plain text and no ANSI escape survives a markdown
+  renderer, so CAPS is the whole highlight mechanism the panel affords.
+
 ## [0.49.25] - 2026-07-28
 
 ### Fixed
