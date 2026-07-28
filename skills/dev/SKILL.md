@@ -422,6 +422,15 @@ failure. Waiting itself has one sanctioned shape per situation:
   commits are pushed, and the LAST thing before the turn ends is the parked block naming what it
   waits for, with the clock:
 
+  **The park push is not step 10, and step 10 does not own the push.** A live run parked at step 5
+  with EIGHT local commits, reasoning "the push happens at step 10, per the flow" — the same
+  failure as the four-commit one above, re-derived from the step list rather than from this rule.
+  The loop branch already exists on the remote from the claim, so pushing to it while parked
+  updates a draft nobody is reading; it pre-empts nothing. Step 10 is where the pushed head is
+  VERIFIED and bound to the PR, which is a different act from getting the bytes off this machine.
+  Park with unpushed commits and a dead laptop is indistinguishable from a dead run, except that
+  the run can be restarted and the commits cannot.
+
   ```text
   🅿️ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
   ├ #78 · code-review r1 on `GPT-5.6-SOL`
@@ -502,6 +511,17 @@ rules, none of which trades away evidence:
   the turn just collected, or re-stating the ribbon in sentences, spends window on information the
   screen already shows. Evidence quality is untouched by this rule — the expensive artifacts live
   in GitHub, not in chat.
+
+  **A step is announced ONCE, by its ribbon.** Never print a second header for the same step —
+  a live run followed `06/11 🧹 SIMPLIFY [CLAUDE:FABLE] ─ 589 prod lines · within budget` with
+  `▶ #123 · step 6/11 — SIMPLIFY (fresh simplifier, FABLE)`, which carried the issue, the counter,
+  the step name and the executor a second time and told the reader nothing new. It is not in this
+  skill; it was improvised, which is how a line with no owner accumulates. Two things make it worse
+  than mere duplication: `▶️` already MEANS resumed-from-a-wait in the closed badge vocabulary, so
+  reusing it as a step announcer overloads a glyph that has a job, and a reader who has learned
+  that steps are announced twice will look for the second line and pause when it is missing. If a
+  step needs to say something the ribbon cannot hold, that is a suffix on the ribbon, not another
+  line.
 - **The scratchpad is a write TARGET, never a working directory.** Redirect into it and stay in the
   repository: `gh pr view 238 --json title,body > <scratchpad>/pr238.json`. Never `cd <scratchpad>
   && gh …` — `gh` infers the repository from the checkout it is standing in, and from `/tmp` it
@@ -817,8 +837,21 @@ node <plugin-tools>/dispatch.mjs --role implement --prompt-file /tmp/autoloop-im
 ```
 
 Give the writer only the frozen plan, relevant STATE invariants, evidence, and named skills.
-Require TDD for behavior, lean/self-documenting code, conventional commit, no co-author trailer,
+Require TDD for behavior, lean/self-documenting code, conventional commits, no co-author trailer,
 no PR/merge, and no objective gate. A quick gate may run once after collection.
+
+**Require a commit per completed plan task, not one at the end.** A commit is the only part of a
+writer's work that outlives the writer: a dispatch killed at its ceiling takes everything still in
+the working tree with it, and leaves behind exactly what it had committed. A live writer hit the
+ceiling mid-task on a Go slice and lost only its tail — because it happened to have committed twice
+already, not because anything asked it to. Committing per task turns that luck into a floor, and it
+costs nothing: the plan already enumerates the tasks, TDD already makes each one green before the
+next, and the reviewer reads the diff either way.
+
+This is also what makes a timeout reconcilable. The step's effects are in git, so the orchestrator
+recovers by INSPECTING the branch — `git log` the claimed base against `HEAD`, compare against the
+frozen plan's task list — and re-dispatches only the remainder. Never retry a timed-out writer
+blindly: it would redo committed work against a tree that already has it.
 
 ### 6. Simplify
 

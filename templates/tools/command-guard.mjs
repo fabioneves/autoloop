@@ -626,8 +626,14 @@ const ASSEMBLER_REMEDY = Object.freeze({
   fanout: '`xargs` and `parallel` build commands out of data the guard cannot read. '
     + 'To LIST, run the plain command alone (`ls -1 <dir>`) — the output is yours to '
     + 'read directly. To ACT on each entry, write a reviewed program file and run it.',
-  awk: 'Inline `awk` program text is source code in an argument. '
-    + 'Put the program in a file and run `awk -f <file>`.',
+  // Naming only the file form made the remedy read as "do something absurd":
+  // a live run was blocked extracting a number from `git diff --stat` and
+  // authoring an awk FILE for that is more ceremony than the measurement. The
+  // fanout remedy above already learned this — name the command to run instead.
+  awk: 'Inline `awk` program text is source code in an argument. Most loop uses of it are a '
+    + 'measurement with a plainer spelling: `git diff --shortstat` for insert/delete counts, '
+    + '`wc -l` for a line count, `cut -f<n>` for a column, `sort | uniq -c` for a tally. '
+    + 'For a real program, put it in a file and run `awk -f <file>`.',
 });
 
 function shellSegments(cmd) {
@@ -2284,8 +2290,16 @@ function selfTest() {
     }
     messageChecks += 1;
     const awkReason = evaluate("ps aux | awk 'NR==1'", 'feat/gh-1-x').reason ?? '';
-    if (!awkReason.includes('awk -f <file>')) {
-      console.error('FAIL [inline-awk refusal names the file-backed form]');
+    // 2026-07-28: a live run was blocked pulling a number out of `git diff
+    // --stat` and told to author an awk FILE — more ceremony than the
+    // measurement it was making. A remedy that is absurd for the common case
+    // is not a remedy, so the plainer spellings are named before the file form.
+    if (
+      !awkReason.includes('awk -f <file>')
+      || !awkReason.includes('--shortstat')
+      || !awkReason.includes('wc -l')
+    ) {
+      console.error('FAIL [inline-awk refusal names plainer spellings and the file-backed form]');
       ok = false;
     }
     messageChecks += 1;
