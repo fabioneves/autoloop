@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.11 · starting
+∞ dev · v0.49.12 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -764,12 +764,49 @@ after two, and that is when it must be acted on. A third consecutive Major in th
 after an invariant-scoped fix is a planning failure, not a review failure: block for re-plan or
 split the predicate into its own issue — never spend another instance-scoped round.
 
-**At the cap, block — never widen it mid-unit.** `caps.codeReviewRoundsPerUnit` is STATE policy
-on an escalate path; the contract hard-refuses a round past it, and that refusal is the cap
-working. A verified open Major at the cap is `loop-blocked` + `human:decide` with the finding,
-the fix scope, and the round history in the reason — the human may authorize one more round (a
-policy edit they own) or re-plan or split the unit. A live run correctly refused to raise its own
-cap here; the wrong move is a quiet ProjectConfig edit that makes the loop its own policy author.
+**At the cap: label it and move on. Do not ask, do not widen, do not stop.**
+`caps.codeReviewRoundsPerUnit` is STATE policy on an escalate path: the contract hard-refuses a
+round past it, that refusal is the cap working, and a quiet ProjectConfig edit would make the loop
+its own policy author. A verified open Major is a reason not to SHIP the unit — never a reason to
+stop the RUN. So the action is mechanical and complete in one turn:
+
+1. Apply `loop-blocked` + `human:decide` to the issue, with a reason naming the open finding, the
+   fix scope, and the round history — and offering the human their three options: authorize a
+   higher cap (a policy edit only they can make), re-plan, or split the predicate into its own
+   issue.
+2. Print the unit's blocked rail and **take the next eligible unit immediately.** Do not pause for
+   an answer, do not summarise and wait, do not end the run. A human-gated unit is a row in the
+   digest, not a reason to stop working.
+
+Splitting the predicate is the human's call, not the loop's opening move — a carve-out that the
+loop reaches for on its own is how scope evasion starts. When they ask for one, the runbook is
+below.
+
+### Carving out a predicate (on human instruction)
+
+A carve-out is scope surgery, not scope evasion, and it is only honest when all three hold: the
+carved predicate is **separable** (removing it leaves working code, not a stub), the remainder is
+**independently valuable**, and the shipped unit **no longer claims what it no longer does**. If
+shipping the remainder would leave the artifact asserting a behaviour it does not implement, there
+is no carve-out — block, and take the next unit.
+
+When it is honest, do all of this in one pass:
+
+- **File the new issue** with the complete invariant the predicate needs (the same standard step 2
+  applies to plans), every open finding with its ID and evidence carried across verbatim, the
+  round history that produced them, and a link to the parent PR. It enters the queue only when a
+  human labels it `loop-ready` — the loop may never apply that label, so a carved issue is filed,
+  not queued.
+- **Amend the frozen plan on the unit branch**, so the artifact and its plan agree: the carved
+  behaviour moves from behaviour to explicit non-behaviour, naming the new issue.
+- **Reduce the artifact** to the converged scope, restoring anything the carved work touched to
+  its pre-unit state — a live unit restored one module byte-identical, which is what made its
+  reduction provable.
+- **Say it in the PR body**: what shipped, what did not, which issue carries the remainder, and
+  which acceptance criteria are explicitly not claimed.
+- **Review the reduced artifact once more, full-artifact**, and treat the carved predicate as out
+  of scope for that round — it is not this unit's work any more. That round is a normal round
+  against the cap; if the cap is already spent, the reduction is a block, not a ship.
 
 `reviewTransition()` is authoritative for clean/block/cap behavior. Invoke
 `node <plugin-tools>/review-contract.mjs` with one JSON object on stdin:
@@ -988,7 +1025,10 @@ branch. If dirty, do not switch; report it.
 ## Chat markers
 
 One visual language end to end: the `∞` motif from the start banner, a state badge, a step
-ribbon, and rounded frames. Values in every marker are safe composed text, never raw
+ribbon, one rounded frame, and symmetric `══` terminators. The frame is drawn ONCE, for the unit
+banner, where all four corners exist. A terminal line uses `══ … ══` instead: a half-box (`╰─ … ─╯`)
+promises a left edge that no earlier line ever drew, so on a screen full of prose it read as
+debris rather than a closing statement. Values in every marker are safe composed text, never raw
 issue/review bytes.
 
 Every banner opens with one state badge, so a scrollback can be scanned for outcomes without
@@ -996,15 +1036,15 @@ reading any words:
 
 | badge | state |
 |---|---|
-| 🟦 | in progress |
-| 🟩 | terminal success — shipped, converged, complete |
-| 🟥 | blocked — a guardrail refused or the unit failed |
-| 🟨 | needs a human — an open Major, a human-block path, a decision |
+| ⏳ | in progress |
+| ✅ | terminal success — shipped, converged, complete |
+| ❌ | blocked — a guardrail refused or the unit failed |
+| ⚠️ | needs a human — an open Major, a human-block path, a decision |
 
 After prime succeeds, open the run frame:
 
 ```text
-🟦 ∞ run ─ queue <e> eligible · <policy>
+⏳ ∞ run ─ queue <e> eligible · <policy>
 ```
 
 Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
@@ -1019,8 +1059,8 @@ ribbon with a different suffix. On resuming from a parked wait, print one `▶�
 <what fired>` line and continue; the ribbon for a step already announced is never printed again.
 
 ```text
-[14:07][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN ─ <lane> · <actor>
-[14:41][#78] 🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 🧹 SIMPLIFY ─ 41 lines removed · fresh simplifier
+[14:07][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN ─ <lane> · <actor>
+[14:41][#78] ⏳ ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 🧹 SIMPLIFY ─ 41 lines removed · fresh simplifier
 ```
 
 **Each step carries its own glyph**, between the counter and the name, so the eye finds a kind of
@@ -1068,9 +1108,9 @@ configured cap, which is what makes an approaching cap visible before it blocks.
 never disappears: one format for every line in the run, whatever it counts.
 
 ```text
-[15:02][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
-[15:19][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
-[15:26][#78] 🟩 ∞ ▰▰▰▱▱ 08/11 🔍 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
+[15:02][#78] ⏳ ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
+[15:19][#78] ⏳ ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
+[15:26][#78] ✅ ∞ ▰▰▰▱▱ 08/11 🔍 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
 ```
 
 Fix rounds belong to step 08 too — they are how the step converges, not a step of their own.
@@ -1085,10 +1125,10 @@ judged or wrote is a property of the evidence, and the model is now chooseable p
 line says it:
 
 ```text
-[14:03][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [CLAUDE:FABLE] ─ full · fresh planner
-[14:19][#78] 🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
-[14:11][#87] 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
-[15:02][#78] 🟨 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
+[14:03][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [CLAUDE:FABLE] ─ full · fresh planner
+[14:19][#78] ⏳ ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
+[14:11][#87] ⏳ ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
+[15:02][#78] ⚠️ ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
 ```
 
 Two units in flight read as two prefixes, which is the point.
@@ -1099,20 +1139,28 @@ slot is the honest statement that the session (its model on the startup banner) 
 End a unit with one closing rail:
 
 ```text
-[16:12][#78] 🟩 ╰─ ✔ SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ─╯
+[16:12][#78] ✅ ∞ ══ SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ══
 ```
 
 or:
 
 ```text
-[16:12][#78] 🟥 ╰─ ✖ BLOCKED ─ <safe composed reason> ─╯
+[16:12][#78] ❌ ∞ ══ BLOCKED ─ <safe composed reason> ══
 ```
 
-Close the run with the badge matching its outcome — 🟩 when something shipped and nothing
-blocked, 🟥 when anything blocked:
+**A unit's closing rail is not the run's.** Blocking, deferring, or carving a unit ends THAT unit;
+the run then invalidates the affected queue sections, re-primes, and takes the next eligible unit
+without asking. The run closes on exactly three conditions: the queue is drained of eligible work,
+a configured bound is reached, or the context needs handing off. "One unit needed a human" is
+never one of them — a human-gated unit is a row in the digest, not a reason to stop working.
+When the last eligible unit is gone, print the idle line
+(`[HH:MM] 💤 ∞ idle ─ no eligible units`) and close cleanly rather than polling.
+
+Close the run with the badge matching its outcome — ✅ when something shipped and nothing
+blocked, ❌ when anything blocked:
 
 ```text
-[17:41] 🟩 ∞ 🏁 run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
+[17:41] ✅ ∞ ══ 🏁 RUN COMPLETE ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff> ══
 ```
 
 Never paste raw issue/review text into chat banners.
@@ -1125,6 +1173,25 @@ Dev invokes exactly these entry points: `prime.mjs`, `dispatch.mjs`, `scan.mjs`,
 Every other file in `tools/agentic/` is a library those entry points own — never invoke a contract
 module directly.
 
+## Autonomy: a gate stops a unit, never the run
+
+The loop runs unattended, and every human-gated outcome is a LABEL plus a reason plus the next
+unit — never a question and a wait. Applies uniformly to a cap-exhausted review, a missing
+`loop-ready`, a `human:authorize` protected path, a dependency or secret hard-defer, a
+premise that fails its check, and a refused merge predicate: apply the gate label with an
+evidence-backed reason naming what a human would decide, print the unit's rail, and move to the
+next eligible unit in the same turn.
+
+Two things stay genuinely blocking, because continuing past them would be worse than stopping:
+a **red baseline gate** parks the run on the base going green (v0.49.2 — the remedy is usually one
+merge, and every unit would fail identically until it lands), and a **guardrail refusal the loop
+cannot satisfy** — an unauthorised protected path, an unreadable STATE, divergent human work in the
+tree — stops with the remedy stated, because improvising past a guardrail is the one failure mode
+worse than idling.
+
+Everything else the loop decides for itself. Asking permission mid-run is not caution; it is an
+unattended run that stopped being unattended.
+
 ## Hard rules
 
 - Read STATE once from a current un-compacted injection or from disk after the base switch.
@@ -1132,7 +1199,9 @@ module directly.
 - Use the configured base for every diff/classifier/gate decision.
 - Dispatch one plan reviewer only.
 - Preserve delta-scoped convergence after full round 1.
-- Block verified late Critical/Major and unresolved cap findings.
+- Block verified late Critical/Major and unresolved cap findings — then TAKE THE NEXT UNIT. A
+  human gate stops a unit, never the run; the run closes only on a drained queue, a configured
+  bound, or a context handoff.
 - Keep writers serialized and reviewers fresh/read-only.
 - Never claim delivered before exact-head CI green.
 - Never use incomplete data to prove absence.
