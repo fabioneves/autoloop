@@ -425,12 +425,17 @@ into the task panel so a parked wait never looks like a stop — the panel keeps
 spinner on exactly the work that is actually in flight. Hosts without task tools skip this
 silently; it never replaces ribbons, labels, or heartbeat lines.
 
-- **One umbrella task per worked unit**, created at selection, in-progress until the closing
-  rail: subject `∞ #<N> — <issue title>`. This is the standing "the loop is alive" row; complete
-  it whatever the unit's outcome (the closing rail says shipped/blocked, the panel just closes).
+- **One run row, retitled at every phase change**: subject `∞ autoloop — <phase>`
+  (`selecting`, `syncing base`, `parked on 2 dispatches`, `draining queue`, `posting digest`),
+  in-progress for the whole run, completed at the closing rail. It exists because the panel would
+  otherwise be EMPTY in the gaps between units — prime, queue scan, base sync, digest — which is
+  exactly when a live run looks stopped, since no dispatch is producing output either. **Its
+  subject must change as the phase changes.** A row that reads the same from start to finish
+  asserts only that something is running, which is the always-green-status failure; the phase text
+  is the entire reason it earns a row.
 - **One task per step**, created in-progress when the step's ribbon prints, completed when the
-  step ends. The subject starts with the unit prefix — the SAME `∞ #<N> — ` the umbrella row
-  carries, so a unit's rows read as one visual group — then the ribbon core with the executor
+  step ends. The subject starts with the unit prefix `∞ #<N> — ` so a unit's rows read as one
+  visual group, then the ribbon core with the executor
   slot — MODEL-ONLY in task subjects: `[OPUS]`, not `[CLAUDE:OPUS]` (the panel is narrow; the
   engine still rides the ribbon and the stamped result, and a dispatch with no pinned model
   falls back to the engine name, `[CODEX]`). So: `∞ #149 — 05 IMPLEMENT [OPUS]`; `activeForm`
@@ -441,10 +446,18 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   examples are not an exhaustive list.
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
-  same turn that states the duration. A staged unit's steps get their own tasks under its own
-  umbrella, so two units in flight read as two spinners, not one ambiguous row.
+  same turn that states the duration. A staged unit's steps get their own tasks, so two units in
+  flight read as two spinners, not one ambiguous row, and the run row names the wait
+  (`parked on 2 dispatches`).
 - Never batch-create the whole 11-step list up front: a wall of pending steps is noise and the
   no-op steps would need deleting. Create each task when its step actually begins.
+
+There is deliberately **no per-unit umbrella row**. It carried the issue title, but it duplicated
+the `∞ #<N> — ` prefix its own step rows already showed, doubled every unit's row count in a narrow
+panel, and — being in-progress from selection to close — was itself a row that never changed. It
+also needed creating at a moment nothing else depended on, so a live run shipped `#82` with a step
+row and no umbrella while `#87` had both: half-mirrored, which reads worse than not mirroring. The
+issue title still reaches the operator at the selection ribbon and the closing rail.
 
 ## Lane and convergence policy
 

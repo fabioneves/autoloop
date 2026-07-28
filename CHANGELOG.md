@@ -5,6 +5,20 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [0.49.18] - 2026-07-28
 
+### Changed
+
+- **The task panel drops the per-unit umbrella row and gains a run row that names the phase.** The
+  umbrella carried the issue title, but it duplicated the `∞ #<N> — ` prefix its own step rows
+  already showed, doubled every unit's row count in a narrow panel, and — in-progress from
+  selection to close — never changed. It also had to be created at a moment nothing else depended
+  on, so a live run shipped `#82` with a step row and no umbrella while `#87` had both;
+  half-mirrored reads worse than not mirroring. In its place, one `∞ autoloop — <phase>` row
+  retitled at each phase change (`selecting`, `syncing base`, `parked on 2 dispatches`,
+  `draining queue`, `posting digest`). It covers the case the umbrella never did: the panel going
+  empty *between* units, which is exactly when a live run looks stopped, since no dispatch is
+  producing output either. The changing subject is the whole point — a row that reads the same
+  from start to finish asserts only that something is running.
+
 ### Fixed
 
 - **A guard refusal names the command to run instead, not just the category it caught.** A live
