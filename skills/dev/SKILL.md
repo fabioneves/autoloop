@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.10 · starting
+∞ dev · v0.49.11 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -157,6 +157,14 @@ Four things stay vendored **because they are the repository's own policy**, and 
 plugin's copy of them would be wrong: `auto-merge.mjs` (Setup fills its REPO CONFIG block),
 `gate.mjs`, `escalate-paths.mjs`, and every hook (whose configuration points at the checkout by
 construction).
+
+**Run those from the BASE checkout, never from a unit branch.** Vendored-and-current is the
+policy; vendored-and-fossilised is an accident. `gate.mjs` is the exception to the exception — it
+must run against the unit's own tree, which is the whole point of a gate — but the merge executor
+operates on a pull request through the API and reads nothing from the worktree, so it runs after
+the switch back to base. Hooks are the only tools with no escape: they run whatever the checkout
+has, so expect a fossil branch's older hook behaviour until the unit lands, and never "fix" that
+by committing tool refreshes into the unit branch.
 
 **Check the drift, do not assume it.** At claim, and again before the terminal flow, compare the
 branch's copies against the base's:
@@ -927,9 +935,13 @@ fails before the terminal mutation and may be retried only after a fresh live re
 booleans are forbidden.
 
 Under `merge.policy: manual`, stop after the returned exact terminal result and leave the ready PR
-for a human. Under an acknowledged solo non-manual policy, invoke the vendored
-`tools/agentic/auto-merge.mjs` once for the delivered PR and treat its typed verdict as final for
-this run. The executor independently refetches every ownership, eligibility, and evidence
+for a human. Under an acknowledged solo non-manual policy, **switch to the base checkout first**,
+then invoke `tools/agentic/auto-merge.mjs` there, once, for the delivered PR, and treat its typed
+verdict as final for this run. The merge executor is a GitHub-API operation on a pull request —
+nothing in it reads the unit's worktree — so the unit branch's copy has no claim to run it, and a
+live run correctly refused to perform an irreversible merge with an executor 1,500 lines behind
+base. The base's copy is the repository's current policy: reconciled, Setup-filled, and the only
+copy that should ever decide a merge. The executor independently refetches every ownership, eligibility, and evidence
 predicate and refuses with a typed reason when any
 is missing; route a refusal to the human-block path — never retry it blindly, weaken a predicate,
 or merge through any other surface. No run submits a merge queue entry, publishes a tag, or creates
