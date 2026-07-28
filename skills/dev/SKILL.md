@@ -423,10 +423,10 @@ failure. Waiting itself has one sanctioned shape per situation:
   waits for, with the clock:
 
   ```text
-  🅿️ ∞ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
-       ├ #78 · code-review r1 on `GPT-5.6-SOL`
-       ├ #87 · plan-review on `GPT-5.6-SOL`
-       └ resumes on result files
+  🅿️  ∞ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
+  ├ #78 · code-review r1 on `GPT-5.6-SOL`
+  ├ #87 · plan-review on `GPT-5.6-SOL`
+  └ resumes on result files
   ```
 
   It is the last thing a reader sees before the run goes quiet, sometimes for many minutes, so it
@@ -436,6 +436,13 @@ failure. Waiting itself has one sanctioned shape per situation:
   of thing it is: `═` closes, `─` continues, `┄` is suspended — an interrupted line for an
   interrupted run. One `├` per thing actually in flight, `└` for the resume condition, so the count
   of branches IS the count of waits and no one has to parse a comma list to get it.
+
+  **The branches start at column zero, flush with the `🅿️` itself — never indented under it.**
+  `🅿️` is a variation-selector emoji and those render at inconsistent widths across terminals, so
+  any indent measured from it is a guess that is wrong somewhere. Flush left is the one alignment
+  that cannot drift, which is what lets this block be column-aligned at all while the badge stays
+  in a set the ribbons deliberately exclude. The `∞` takes a clear space after the badge for the
+  same reason — butted against a double-width glyph it reads as part of it.
 
   **The clock rides in the rule, and there is no `[HH:MM][#N]` prefix at all.** A park routinely
   waits on two units at once, so a `[#N]` would name one of them and silently misfile the rest;
@@ -1267,8 +1274,10 @@ orchestrator's own read, 🔨 builds and 🔧 repairs. The state badge stays whe
 says WHAT the step is, the badge says HOW IT IS GOING.
 
 Step glyphs deliberately avoid variation-selector emoji, because a ribbon is a column-aligned
-line and those render at inconsistent widths. The wait lines below are prose, not columns, so
-🅿️ / ▶️ / 💤 are fine there.
+line and those render at inconsistent widths. 🅿️ / ▶️ / 💤 stay usable on the wait lines because
+nothing on those lines is measured FROM the badge: `▶️ resumed` and `💤 idle` are prose, and the
+`🅿️ parked` block aligns its branches flush at column zero rather than indenting under the badge.
+An unstable glyph is only a hazard when something has to line up beside it.
 
 **Every timeline line starts with `[HH:MM][#N]`** — the wall clock from `date +%H:%M` in the same
 turn (one cheap read; never guessed from memory), then the unit it belongs to. Leading, not
