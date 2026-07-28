@@ -76,7 +76,7 @@ and the hooks.
 Every role runs in a fresh process through one call:
 
 ```bash
-node <plugin-tools>/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
+node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> \
   --prompt-file <path> [--tools <csv>] [--output-file <path>] [--json]
 ```
 

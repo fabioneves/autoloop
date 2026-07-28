@@ -66,6 +66,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'scan.mjs',
   'snapshot-contract.mjs',
   'stats.mjs',
+  'step-subject.mjs',
   'subagent-transcript.mjs',
   'verify.mjs',
   'writeback-check.mjs',

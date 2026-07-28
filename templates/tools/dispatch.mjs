@@ -14,7 +14,7 @@
 // operator on their own machine, so it spawns the engine directly.
 //
 // Usage:
-//   node tools/agentic/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
+//   node tools/agentic/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> \
 //     --prompt-file <path> [--tools <csv>] [--output-file <path>] [--json]
 //   node tools/agentic/dispatch.mjs --self-test
 //

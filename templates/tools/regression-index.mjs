@@ -33,6 +33,23 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'completed-step-rows-shipped-without-their-cost',
+    date: '2026-07-28',
+    symptom: 'Live panels showed bare completed rows (`∞ #123 — 02 PLAN '
+      + '[OPUS]`) with no `[elapsed] [HH:MM]`, losing the per-step cost '
+      + 'profile the panel is the only surviving record of.',
+    cause: 'The rule shipped in v0.49.21 as prose only. Obeying it required '
+      + 'millisecond arithmetic and a clock read in the same turn as '
+      + 'collecting a result, disposing findings and swapping labels.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'step-subject.mjs', anchor: 'export function completedSubject(' }),
+      Object.freeze({
+        file: 'step-subject.mjs',
+        anchor: 'The live defect: a bare completed row, now composed rather than recalled.',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'plan-followed-the-review-engine-recording',
     date: '2026-07-28',
     symptom: 'A run configured to plan on `fable` and review on a proxied '
