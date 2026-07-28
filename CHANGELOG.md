@@ -11,7 +11,9 @@ Notable changes to Autoloop are recorded here. The format follows
   each ribbon to its left edge, and the issue number stops repeating in the body. A run interleaves
   two units across a dozen steps, and a reader scans a column for "when" and "which" rather than
   the end of every line. Ribbons, `♡ parked`/`♡ resumed` heartbeats, and closing rails all carry
-  the prefix, in Dev and Pitcrew alike.
+  the prefix, in Dev and Pitcrew alike. Round-scoped steps keep the step number too —
+  `08/11 CODE-REVIEW r2/5`, `08/11 FIX r2/5` — with the cells counting rounds against the cap, so
+  one format holds for every line in the run whatever it happens to count.
 
 ## [0.49.9] - 2026-07-28
 

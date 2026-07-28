@@ -370,7 +370,7 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   says what the spinner should read while it runs (`Implementing #149 on opus`,
   `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped steps use one task per round, and EVERY
   dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
-  shape (`∞ #149 — 08 CODE-REVIEW r1 [GPT-5.6-SOL]`, `∞ #78 — 08 FIX r3 [OPUS]`); the named
+  shape (`∞ #149 — 08 CODE-REVIEW r1/5 [GPT-5.6-SOL]`, `∞ #78 — 08 FIX r3/5 [OPUS]`); the named
   examples are not an exhaustive list.
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
@@ -966,16 +966,20 @@ completion, never to a re-printed ribbon:
   field — `[14:14][#78] ♡ resumed — plan returned · 6m41s`, computed from `ms`, never hand-timed;
 - the closing rail carries the unit's total (from the run record's per-step timings).
 
-Code review converges over rounds, so it also prints a round ribbon against the configured
-cap — same grammar, cells counting rounds — which makes an approaching cap visible before it
-blocks:
+Code review converges over rounds, so its ribbons keep the same grammar and add the round after
+the step name — `<step>/11 CODE-REVIEW r<n>/<cap>` — with the cells counting ROUNDS against the
+configured cap, which is what makes an approaching cap visible before it blocks. The step number
+never disappears: one format for every line in the run, whatever it counts.
 
 ```text
-[15:02][#78] 🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
-[15:26][#78] 🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
+[15:02][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
+[15:19][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
+[15:26][#78] 🟩 ∞ ▰▰▰▱▱ 08/11 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
 ```
 
-Plan review is one dispatch and has no round ribbon.
+Fix rounds belong to step 08 too — they are how the step converges, not a step of their own.
+
+Plan review is one dispatch and carries no round: `03/11 PLAN-REVIEW [<executor>]`.
 
 Every dispatched step names its **executor** in a fixed slot immediately after the step name —
 upper-case and bracketed so it reads as a label. The slot is `[ENGINE]` when no model is pinned
@@ -988,7 +992,7 @@ line says it:
 [14:03][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 PLAN [CLAUDE:FABLE] ─ full · fresh planner
 [14:19][#78] 🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
 [14:11][#87] 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
-[15:02][#78] 🟨 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
+[15:02][#78] 🟨 ∞ ▰▰▱▱▱ 08/11 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
 ```
 
 Two units in flight read as two prefixes, which is the point.
