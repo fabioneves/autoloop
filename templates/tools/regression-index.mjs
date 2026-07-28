@@ -243,6 +243,23 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'proxy-probe-had-no-executable-command',
+    date: '2026-07-28',
+    symptom: 'A run lost a round recording the proxy engine: it read the URL '
+      + 'back out of `review-engine` to probe it, and the command substitution '
+      + 'was refused.',
+    cause: 'The skill said to probe "the recorded URL" without giving the '
+      + 'command, so a session composed one from the file it had just written. '
+      + 'Same shape as the exit-3 merge contract: an outcome described without '
+      + 'an executable command is an invitation to improvise into a refusal.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'Write the URL as a literal',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '

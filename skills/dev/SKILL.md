@@ -248,7 +248,11 @@ session was launched — the session's own environment is not a prerequisite and
 Writer roles never read the recording, so a writer can never be proxied.
 
 **The proxy preflight is one probe, and only a probe**: `curl -s --max-time 5 <url>/health` (or
-`<url>/v1/models`) against the recorded URL. Answering = running. If it does not answer, stop
+`<url>/v1/models`) against the recorded URL. Answering = running. **Write the URL as a literal —
+you chose it one command ago.** Do not read it back out of `review-engine` to probe it: a
+`"$(… review-engine …)"` substitution means the guard cannot see which host is being contacted, so
+it refuses, and a live run lost a round composing exactly that. The recording is for
+`dispatch.mjs`, which reads the file itself; the probe is for you, and you already know the value. If it does not answer, stop
 with `needs-human` naming the URL — NEVER start, install, restart, or background a proxy
 process, and never infer its absence from environment variables, PATH lookups, or the process
 name owning a port (a live run refused a healthy proxy after reading its listener as Docker

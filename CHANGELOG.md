@@ -24,6 +24,13 @@ Notable changes to Autoloop are recorded here. The format follows
   The blocks themselves are unchanged and all correct — a loop variable genuinely cannot be resolved
   statically. Three message checks and a corpus case pin the remedies, and one check asserts the old
   "hide a mutation" text never comes back on a loop.
+- **The proxy preflight gives the command, not just the outcome.** The skill said to probe "the
+  recorded URL" without showing how, so a run read the URL back out of `.git/autoloop/review-engine`
+  with a command substitution — which the guard refuses, correctly, since it cannot see which host
+  would be contacted. The URL is a literal the run chose one command earlier: the recording exists
+  for `dispatch.mjs`, which reads the file itself, while the probe is for the run, which already
+  knows the value. Same shape as the exit-3 merge contract fixed in 0.49.17 — an outcome described
+  without an executable command is an invitation to improvise into a refusal.
 
 ## [0.49.21] - 2026-07-28
 
