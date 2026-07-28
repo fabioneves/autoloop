@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.5 · starting
+∞ dev · v0.49.6 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -451,10 +451,34 @@ planner reads those itself with its own tools. The orchestrator keeps premise, s
 - verified premises and evidence;
 - named module/API seam and file boundary;
 - behavior and non-behavior;
+- **rules stated as complete invariants, with their case enumeration** (below);
 - acceptance checks and failure modes;
 - applicable STATE invariants and escalation paths;
 - test-first sequence;
 - artifact version and SHA-256 fingerprint.
+
+**Rules are invariants, not examples — this is the review-round lever.** Two live units burned
+five and seven rounds discovering one rule case-by-case: each fix closed the reported instance and
+the next round found the adjacent one, because the plan said what to do about *a* case instead of
+stating the property that holds over *all* of them. So every behavioral rule in the plan is
+written as a quantified invariant with its cases enumerated up front:
+
+- **State it over its whole domain**, citing the spec line it comes from: not "reject a
+  below-seven dismissal", but "a below-seven dismissal terminates the match, and the artifact
+  must be consistent with that termination in its event log, its result, AND its analysis prefix
+  (`REPLAY_AND_PRESENTATION.md:177-179`)".
+- **Enumerate the cases the invariant implies** — partial and complete, empty and populated,
+  present and absent — and mark any the unit deliberately excludes as non-behavior. An
+  unenumerated case is where round N+1's Major comes from.
+- **Give each case a test in the test-first sequence.** If a case is worth stating, it is worth
+  failing first.
+- **Name the invariant's own failure mode**: what an artifact that satisfies each case
+  individually but violates the invariant jointly would look like. That sentence is what a
+  reviewer checks against, and it is the one a case-by-case plan cannot write.
+
+A rule that cannot be stated over its whole domain from the spec is an underspecified premise:
+say so in the plan and let the review or the human close it — that is cheaper than discovering it
+three rounds deep.
 
 Produce the planned lane proof from complete paths/content evidence. Unknown scope is full.
 
@@ -473,7 +497,12 @@ Move to `loop:03-plan-review`. Dispatch exactly one fresh reviewer:
 node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/autoloop-plan-review.md --json
 ```
 
-It checks premises, scope, interface depth, tests, invariants, risk, and issue fitness. Verify each
+It checks premises, scope, interface depth, tests, invariants, risk, and issue fitness — and the
+prompt asks it explicitly for **invariant completeness**: for each rule the plan states, is it
+quantified over its whole domain with its cases enumerated and tested, or is it an example
+standing in for a rule? An incomplete invariant is a plan-level Major, and it is the cheapest
+Major in the whole loop to find here — the same defect costs a review round each time it surfaces
+during implementation. Verify each
 Critical/Major claim; the orchestrator records fix/rebut/defer dispositions in-session — that is
 judgment, and it stays. **The revision itself is a dispatch, not session work**: one
 `--role plan --model fable` dispatch whose prompt carries the current plan, every verified
@@ -605,6 +634,25 @@ rule has to ride in the prompt.
 After fixes, record the reviewed HEAD and dispatch a
 fresh later-round reviewer over only the new delta plus open rebuts. Give every Critical/Major a
 stable finding ID. A rebut closes only when a fresh reviewer accepts that exact ID.
+
+**Two consecutive Majors in the same predicate escalate the fix from instance to invariant.**
+When round N and round N+1 both land on the same rule, function, or predicate — different cases,
+same subject — stop patching cases: the plan's rule is incomplete, and each fix is exposing the
+next adjacent case. The round N+2 fix prompt must (a) derive the COMPLETE invariant from the
+cited spec, (b) enumerate every case it implies including the ones not yet reported, (c) test
+each, and (d) make the code satisfy the invariant jointly. Say so in the disposition, and scope
+the next review to the invariant rather than the reported instance. A live unit spent rounds
+four, five, and six on one predicate before deriving the rule this way; the pattern is visible
+after two, and that is when it must be acted on. A third consecutive Major in the same predicate
+after an invariant-scoped fix is a planning failure, not a review failure: block for re-plan or
+split the predicate into its own issue — never spend another instance-scoped round.
+
+**At the cap, block — never widen it mid-unit.** `caps.codeReviewRoundsPerUnit` is STATE policy
+on an escalate path; the contract hard-refuses a round past it, and that refusal is the cap
+working. A verified open Major at the cap is `loop-blocked` + `human:decide` with the finding,
+the fix scope, and the round history in the reason — the human may authorize one more round (a
+policy edit they own) or re-plan or split the unit. A live run correctly refused to raise its own
+cap here; the wrong move is a quiet ProjectConfig edit that makes the loop its own policy author.
 
 `reviewTransition()` is authoritative for clean/block/cap behavior. Invoke
 `node tools/agentic/review-contract.mjs` with one JSON object on stdin:
