@@ -32,6 +32,36 @@ Notable changes to Autoloop are recorded here. The format follows
   identity mismatch. Same disease as the reconcile-request and terminal-state refusals fixed
   earlier today: a typed refusal that names only its category makes the operator reverse-engineer
   the tool.
+- **The merge commit is read from GraphQL, and the wedge it caused is cleared.** Naming the
+  predicate immediately exposed the real defect behind every `ARTIFACT_IDENTITY_MISMATCH(merge)`:
+  REST API version `2026-03-10` removed `merge_commit_sha` from *both* the list and the single
+  pull-request representation, so `lifecycle-driver.mjs` read `undefined` and the contract
+  correctly refused a merge fact it could not verify. The contract was right the whole time; the
+  facts handed to it were incomplete. GraphQL still exposes `mergeCommit.oid` — the same fact from
+  the same source of truth — so the driver reads it there. Every already-merged unit stuck this way
+  reconciles to `terminal-record` on its next pass.
+
+### Added
+
+- **A live API-shape check on the release train.** No fixture could have caught the field removal
+  above: a fixture encodes what we *believe* the API returns, so it agrees with the code and both
+  are wrong together. `api-shape.mjs` probes the pinned API version for every field these tools
+  actually read, names the tool that reads each one, and fails with the field, the surface and the
+  version when one disappears. It runs on tags, where a network call is affordable.
+- **An incident index that keeps its own tests honest.** `guard-corpus.json` already required every
+  case to name the run that earned it; `regression-index.mjs` extends that to defects whose
+  enforcer is a self-test elsewhere in the tree. It deliberately does not re-test them — it asserts
+  the pinning case still exists, because a regression suite fails by having a case quietly deleted
+  during a refactor, not by asserting the wrong thing. Seven incidents registered, and adding one
+  without an enforcer fails the battery.
+
+### Fixed (found by the release gate itself)
+
+- **Release workflow requirements are counted inside the release-verify step.** They describe that
+  invocation, but were counted across the whole workflow, which silently reserved
+  `--repository "$GITHUB_REPOSITORY"` file-wide — so adding the api-shape step failed a rule that
+  had nothing to say about it. The tempting fix was to spell the flag differently and dodge the
+  contract; the correct one was to scope the check to what it actually means.
 
 ## [0.49.15] - 2026-07-28
 
