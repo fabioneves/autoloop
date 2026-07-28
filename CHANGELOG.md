@@ -3,6 +3,21 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.16] - 2026-07-28
+
+### Fixed
+
+- **`ARTIFACT_IDENTITY_MISMATCH` names the predicate that fired, not just the artifact.** A live
+  run met `ARTIFACT_IDENTITY_MISMATCH(merge)` on a unit whose every observable merge fact was
+  consistent — single pull request on the branch, marker head equal to the pull request head, a
+  valid merge commit, no terminal record yet — and could not tell which of four merge predicates
+  had refused without reading `lifecycle-contract.mjs`. Each now reports what it compared and both
+  values (`merged head vs marker head: observed 37d4ff0e45d8… · expected d00a9fbb6c20…`), and the
+  fourth, which requires an UNMERGED pull request, says so in words rather than presenting as an
+  identity mismatch. Same disease as the reconcile-request and terminal-state refusals fixed
+  earlier today: a typed refusal that names only its category makes the operator reverse-engineer
+  the tool.
+
 ## [0.49.15] - 2026-07-28
 
 ### Fixed
