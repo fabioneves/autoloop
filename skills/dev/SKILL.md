@@ -423,7 +423,7 @@ failure. Waiting itself has one sanctioned shape per situation:
   waits for, with the clock:
 
   ```text
-  🅿️  ∞ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
+  🅿️ ∞ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
   ├ #78 · code-review r1 on `GPT-5.6-SOL`
   ├ #87 · plan-review on `GPT-5.6-SOL`
   └ resumes on result files
@@ -441,8 +441,9 @@ failure. Waiting itself has one sanctioned shape per situation:
   `🅿️` is a variation-selector emoji and those render at inconsistent widths across terminals, so
   any indent measured from it is a guess that is wrong somewhere. Flush left is the one alignment
   that cannot drift, which is what lets this block be column-aligned at all while the badge stays
-  in a set the ribbons deliberately exclude. The `∞` takes a clear space after the badge for the
-  same reason — butted against a double-width glyph it reads as part of it.
+  in a set the ribbons deliberately exclude. Exactly one space separates the badge from the `∞` —
+  enough that the two read as separate marks rather than one compound glyph, and no more, since
+  padding measured against a double-width badge is the same guess the branches avoid.
 
   **The clock rides in the rule, and there is no `[HH:MM][#N]` prefix at all.** A park routinely
   waits on two units at once, so a `[#N]` would name one of them and silently misfile the rest;
