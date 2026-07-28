@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.11 · starting
+∞ dev · v0.49.12 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -764,12 +764,49 @@ after two, and that is when it must be acted on. A third consecutive Major in th
 after an invariant-scoped fix is a planning failure, not a review failure: block for re-plan or
 split the predicate into its own issue — never spend another instance-scoped round.
 
-**At the cap, block — never widen it mid-unit.** `caps.codeReviewRoundsPerUnit` is STATE policy
-on an escalate path; the contract hard-refuses a round past it, and that refusal is the cap
-working. A verified open Major at the cap is `loop-blocked` + `human:decide` with the finding,
-the fix scope, and the round history in the reason — the human may authorize one more round (a
-policy edit they own) or re-plan or split the unit. A live run correctly refused to raise its own
-cap here; the wrong move is a quiet ProjectConfig edit that makes the loop its own policy author.
+**At the cap: label it and move on. Do not ask, do not widen, do not stop.**
+`caps.codeReviewRoundsPerUnit` is STATE policy on an escalate path: the contract hard-refuses a
+round past it, that refusal is the cap working, and a quiet ProjectConfig edit would make the loop
+its own policy author. A verified open Major is a reason not to SHIP the unit — never a reason to
+stop the RUN. So the action is mechanical and complete in one turn:
+
+1. Apply `loop-blocked` + `human:decide` to the issue, with a reason naming the open finding, the
+   fix scope, and the round history — and offering the human their three options: authorize a
+   higher cap (a policy edit only they can make), re-plan, or split the predicate into its own
+   issue.
+2. Print the unit's blocked rail and **take the next eligible unit immediately.** Do not pause for
+   an answer, do not summarise and wait, do not end the run. A human-gated unit is a row in the
+   digest, not a reason to stop working.
+
+Splitting the predicate is the human's call, not the loop's opening move — a carve-out that the
+loop reaches for on its own is how scope evasion starts. When they ask for one, the runbook is
+below.
+
+### Carving out a predicate (on human instruction)
+
+A carve-out is scope surgery, not scope evasion, and it is only honest when all three hold: the
+carved predicate is **separable** (removing it leaves working code, not a stub), the remainder is
+**independently valuable**, and the shipped unit **no longer claims what it no longer does**. If
+shipping the remainder would leave the artifact asserting a behaviour it does not implement, there
+is no carve-out — block, and take the next unit.
+
+When it is honest, do all of this in one pass:
+
+- **File the new issue** with the complete invariant the predicate needs (the same standard step 2
+  applies to plans), every open finding with its ID and evidence carried across verbatim, the
+  round history that produced them, and a link to the parent PR. It enters the queue only when a
+  human labels it `loop-ready` — the loop may never apply that label, so a carved issue is filed,
+  not queued.
+- **Amend the frozen plan on the unit branch**, so the artifact and its plan agree: the carved
+  behaviour moves from behaviour to explicit non-behaviour, naming the new issue.
+- **Reduce the artifact** to the converged scope, restoring anything the carved work touched to
+  its pre-unit state — a live unit restored one module byte-identical, which is what made its
+  reduction provable.
+- **Say it in the PR body**: what shipped, what did not, which issue carries the remainder, and
+  which acceptance criteria are explicitly not claimed.
+- **Review the reduced artifact once more, full-artifact**, and treat the carved predicate as out
+  of scope for that round — it is not this unit's work any more. That round is a normal round
+  against the cap; if the cap is already spent, the reduction is a block, not a ship.
 
 `reviewTransition()` is authoritative for clean/block/cap behavior. Invoke
 `node <plugin-tools>/review-contract.mjs` with one JSON object on stdin:
@@ -1108,6 +1145,14 @@ or:
 [16:12][#78] 🟥 ╰─ ✖ BLOCKED ─ <safe composed reason> ─╯
 ```
 
+**A unit's closing rail is not the run's.** Blocking, deferring, or carving a unit ends THAT unit;
+the run then invalidates the affected queue sections, re-primes, and takes the next eligible unit
+without asking. The run closes on exactly three conditions: the queue is drained of eligible work,
+a configured bound is reached, or the context needs handing off. "One unit needed a human" is
+never one of them — a human-gated unit is a row in the digest, not a reason to stop working.
+When the last eligible unit is gone, print the idle line
+(`[HH:MM] 💤 ∞ idle ─ no eligible units`) and close cleanly rather than polling.
+
 Close the run with the badge matching its outcome — 🟩 when something shipped and nothing
 blocked, 🟥 when anything blocked:
 
@@ -1125,6 +1170,25 @@ Dev invokes exactly these entry points: `prime.mjs`, `dispatch.mjs`, `scan.mjs`,
 Every other file in `tools/agentic/` is a library those entry points own — never invoke a contract
 module directly.
 
+## Autonomy: a gate stops a unit, never the run
+
+The loop runs unattended, and every human-gated outcome is a LABEL plus a reason plus the next
+unit — never a question and a wait. Applies uniformly to a cap-exhausted review, a missing
+`loop-ready`, a `human:authorize` protected path, a dependency or secret hard-defer, a
+premise that fails its check, and a refused merge predicate: apply the gate label with an
+evidence-backed reason naming what a human would decide, print the unit's rail, and move to the
+next eligible unit in the same turn.
+
+Two things stay genuinely blocking, because continuing past them would be worse than stopping:
+a **red baseline gate** parks the run on the base going green (v0.49.2 — the remedy is usually one
+merge, and every unit would fail identically until it lands), and a **guardrail refusal the loop
+cannot satisfy** — an unauthorised protected path, an unreadable STATE, divergent human work in the
+tree — stops with the remedy stated, because improvising past a guardrail is the one failure mode
+worse than idling.
+
+Everything else the loop decides for itself. Asking permission mid-run is not caution; it is an
+unattended run that stopped being unattended.
+
 ## Hard rules
 
 - Read STATE once from a current un-compacted injection or from disk after the base switch.
@@ -1132,7 +1196,9 @@ module directly.
 - Use the configured base for every diff/classifier/gate decision.
 - Dispatch one plan reviewer only.
 - Preserve delta-scoped convergence after full round 1.
-- Block verified late Critical/Major and unresolved cap findings.
+- Block verified late Critical/Major and unresolved cap findings — then TAKE THE NEXT UNIT. A
+  human gate stops a unit, never the run; the run closes only on a drained queue, a configured
+  bound, or a context handoff.
 - Keep writers serialized and reviewers fresh/read-only.
 - Never claim delivered before exact-head CI green.
 - Never use incomplete data to prove absence.

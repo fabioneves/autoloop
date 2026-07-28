@@ -3,6 +3,30 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.12] - 2026-07-28
+
+### Changed
+
+- **A human gate stops a unit, never the run.** The loop runs unattended, so every human-gated
+  outcome is now a label plus an evidence-backed reason plus the next unit — never a question and
+  a wait. At a cap-exhausted review it applies `loop-blocked` + `human:decide` naming the open
+  finding, the fix scope, the round history, and the human's three options (authorize a higher
+  cap, re-plan, split the predicate), then takes the next eligible unit in the same turn. The same
+  shape covers a missing `loop-ready`, a `human:authorize` path, a dependency or secret
+  hard-defer, a failed premise, and a refused merge predicate. `run complete` means the queue is
+  drained, a bound was reached, or the context is handing off — never that one unit needed a
+  human.
+- Two things stay genuinely blocking, because continuing past them is worse than stopping: a red
+  baseline gate still parks the run on the base going green (every unit would fail identically
+  until the remedy lands), and a guardrail refusal the loop cannot satisfy still stops with the
+  remedy stated.
+- **The carve-out has a runbook, and it is the human's call.** Splitting an unconverged predicate
+  into its own issue is documented — separability, independent value, and the shipped unit no
+  longer claiming what it no longer does, plus findings carried across with evidence, the frozen
+  plan amended, the artifact reduced, and one more full-artifact review — but the loop performs it
+  on instruction, never as its own opening move, because a carve-out it reaches for unprompted is
+  how scope evasion starts.
+
 ## [0.49.11] - 2026-07-28
 
 ### Fixed
