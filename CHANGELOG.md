@@ -3,6 +3,19 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.14] - 2026-07-28
+
+### Fixed
+
+- **Reconcile reports STATE drift, so the diet actually reaches configured repositories.** An
+  audit of a live repo showed the gap: the lessons migration ran and LESSONS.md was seeded, but
+  STATE itself was never mentioned — LOOP has always been reported as `kept` with a pointer to its
+  merge command, and STATE had no equivalent. An operator could reconcile, watch the migration,
+  and never learn that 22 KB of superseded template prose was still being injected into every
+  session. STATE now reports `identical` or `kept` with the `--merge-state` remedy, and the stale
+  "still carries its Lessons learned section" warning is gone — the migration moves it, so the two
+  contradicted each other in the same report.
+
 ## [0.49.13] - 2026-07-28
 
 ### Fixed
