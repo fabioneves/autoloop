@@ -25,6 +25,23 @@ Notable changes to Autoloop are recorded here. The format follows
   `and`, and an over-long list states its remainder (`and 2 more unresolved tokens`) instead of
   truncating at three in silence, which sent the reader back for a second refusal having already
   fixed everything the first one mentioned.
+- **A background gate is awaited, not slept on.** The gate step said a long gate "runs in the
+  background with a monitor on the log's tail" and never named the command, while dispatch waits
+  get a concrete typed tool. Given a description instead of a shape, a live run composed
+  `sleep 45; tail -30 <log>` — which the host blocks outright — and spent the round learning a rule
+  instead of gating. The step now names the facility (`run_in_background` on Claude Code, which
+  re-invokes the turn on exit with the status), says to park with the gate as a branch, and names
+  the Monitor `until` loop for the case where something genuinely must be polled. A backgrounded
+  gate feels like something to check on when it is something to be told about — the same mistake as
+  watching a dispatch instead of parking on its result file.
+- **The parked header stops depending on a glyph width nobody agrees on.** Two attempts tuned the
+  space between `🅿️` and `∞`: one space fused them into `🅿️∞`, two rendered as a wide gap on some
+  surfaces and no gap at all on others — in the same environment, on the same day. A glyph whose
+  advance width is not agreed on cannot be padded correctly, because there is no correct number;
+  every value is right somewhere and wrong somewhere else, so each fix moves the breakage instead
+  of removing it. The `∞` leaves the header, the badge is followed only by the decorative dotted
+  rule, and the glyph rule now states the stronger conclusion: put nothing beside an unstable
+  glyph rather than choosing a width for it.
 - **The scratchpad is a write target, never a working directory.** A live run composed
   `cd <scratchpad> && gh pr view 238 …` and lost a round to `not a git repository`: `gh` infers the
   repository from the checkout it stands in, and the redirect had already truncated its output file
