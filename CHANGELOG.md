@@ -3,6 +3,28 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.13] - 2026-07-28
+
+### Changed
+
+- **STATE goes on a diet, and setup upgrades existing repositories automatically.** The template
+  was 29 KB and every byte of it is injected into every session — roughly 90% of a configured
+  repository's STATE was autoloop's own prose, including 6 KB explaining that the queue is not in
+  the file and 6 KB of playbooks the dev skill already governs. The template is now **6.8 KB** and
+  holds only what the loop cannot know without the operator: mission, config, autonomy limits,
+  protected ground, security, and where state really lives.
+- **Durable memory moves to `docs/agentic/LESSONS.md`**, read on demand instead of injected, and
+  seeded from a template that states the pruning rule: a lesson that has become a mechanism — a
+  guard rule, a contract check, a hook — is deleted, because the mechanism is the memory. Curate it
+  like `ARCH.md`: periodically, against a size budget, in its own maintenance unit. STATE keeps the
+  opposite regime: it is policy, it changes rarely and deliberately, and Setup owns the edits.
+- **Reconcile runs ordered upgrade jobs.** `REPO_MIGRATIONS` is the mechanism; its first entry
+  moves a legacy `Lessons learned` section out of STATE into LESSONS.md. Every job is idempotent,
+  writes the new home before clearing the old one (an interrupted migration duplicates memory
+  rather than losing it), and reports itself in the results so the change lands in a visible diff.
+  Audit mode reports without writing, and `--merge-state` refuses outright when a template no
+  longer owns a section the installed document still carries — no merge can strip durable memory.
+
 ## [0.49.12] - 2026-07-28
 
 ### Changed
