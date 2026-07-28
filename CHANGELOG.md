@@ -3,6 +3,20 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.25] - 2026-07-28
+
+### Fixed
+
+- **The label refusal names the working command.** Seventeen loop runs in one day walked the same
+  dead end: apply `human:authorize` with `gh pr edit` (allowed — but it fails on hosts whose gh
+  still queries deprecated Projects-classic cards), fall back to raw `gh api …/issues/<n>/labels`
+  (guard-denied), and only then rediscover `gh issue edit <n> --add-label`, which works on PRs and
+  never touches project cards. The deny reason said "use a canonical gh issue command" without
+  naming one — the same outcome-without-command gap as 0.49.22's expansion refusal. The refusal now
+  names the vehicle, the corpus pins `gh issue/pr edit … --add-label human:authorize` as allowed,
+  and the dev skill and STATE template prescribe the command where `human:authorize` self-apply is
+  described.
+
 ## [0.49.24] - 2026-07-28
 
 ### Fixed

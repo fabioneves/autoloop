@@ -1564,7 +1564,9 @@ export function evaluate(rawCmd, branch, options = {}) {
         block: true,
         reason:
           'autoloop guard — raw issue or label mutation could bypass terminal delivery '
-          + 'policy. Use a canonical gh issue command or the Autoloop terminal finalizer.',
+          + 'policy. Apply labels with `gh issue edit <number> --add-label <label>` — '
+          + 'canonical, works on PRs too, and avoids the Projects-classic GraphQL failure '
+          + 'that breaks `gh pr edit` on older gh — or use the Autoloop terminal finalizer.',
       };
     }
     if (segments.some(({ command }) => {
@@ -1998,6 +2000,8 @@ function selfTest() {
     ['gh pr edit 42 --add-label=loop-delivered', 'feat/gh-2-y', true],
     ['gh issue edit 7 --remove-label loop-ready', 'feat/gh-2-y', false],
     ['gh issue edit 7 --remove-label loop-delivered', 'feat/gh-2-y', false],
+    ['gh issue edit 218 --add-label human:authorize', 'feat/gh-2-y', false],
+    ['gh pr edit 218 --add-label human:authorize', 'feat/gh-2-y', false],
     ['gh label edit old-name --name loop-delivered', 'feat/gh-2-y', true],
     ['gh label edit old-name --name loop-ready', 'feat/gh-2-y', true],
     ['gh label edit old-name -nloop-delivered', 'feat/gh-2-y', true],

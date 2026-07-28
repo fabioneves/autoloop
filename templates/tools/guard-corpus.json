@@ -295,6 +295,18 @@
    "branch": "feat/gh-1-x",
    "expect": "block",
    "why": "0.49.22: correctly blocked (a loop variable is unresolvable) but the message warned about hiding a MUTATION on a read-only byte count and never mentioned the loop, so a live run kept rewriting the wrong half. The block stays; the refusal now names $s and the loop remedy."
+  },
+  {
+   "cmd": "gh api repos/o/r/issues/244/labels -f 'labels[]=human:authorize' --jq '[.[].name]'",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.49.25: the REST fallback seventeen runs reached after gh pr edit died on Projects-classic cards. The block stays; the refusal now names gh issue edit."
+  },
+  {
+   "cmd": "gh issue edit 244 --repo o/r --add-label 'human:authorize' 2>&1 | tail -1",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.49.25: the named remedy -- works on PRs and never queries project cards."
   }
  ]
 }
