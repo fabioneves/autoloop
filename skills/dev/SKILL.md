@@ -771,7 +771,10 @@ standing in for a rule? An incomplete invariant is a plan-level Major, and it is
 Major in the whole loop to find here — the same defect costs a review round each time it surfaces
 during implementation. Verify each
 Critical/Major claim; the orchestrator records fix/rebut/defer dispositions in-session — that is
-judgment, and it stays. **The revision itself is a dispatch, not session work**: one
+judgment, and it stays. Recording them is not the same as reciting them: the revision prompt
+carries every finding and disposition, so the run says out loud only the verdict, the severity
+counts, and the ones that are not a plain `fix` (see step 8's disposition rule, which applies
+identically here). **The revision itself is a dispatch, not session work**: one
 `--role plan --model fable` dispatch whose prompt carries the current plan, every verified
 finding, and its disposition, returning the revised plan artifact as the typed result — the same
 bounded-and-bulky rule that moved planning out of the session moves plan-fixing out too. Do not
@@ -938,6 +941,21 @@ Verify every Critical/Major against code or a cheap reproduction, then dispositi
 - fix directly or with a fresh writer;
 - propose an evidence-citing rebut for the next fresh reviewer;
 - block if out-of-boundary human judgment is required.
+
+**Disposition every finding; NARRATE only the ones that are not "fix as written".** The ledger
+passed forward in `priorFindings` is the record, and it is the only one with authority — a
+disposition string in chat has none (see the review-contract rules below). So a chat table listing
+eighteen findings, fourteen of them "Fix — carried verbatim", is a non-authoritative copy of an
+authoritative artifact, and it costs the window exactly what the artifact already holds. A live
+plan review spent a wide table on that.
+
+What the run says out loud is the delta: the verdict and the severity counts
+(`fail · 2 Critical · 14 Major · 2 Minor`), then a line per finding whose disposition is NOT the
+default — a rebut, a narrowing, a defer, a block, or anything that changed the unit's outcome —
+each with the evidence that decided it. Those are the judgment calls, and judgment is the one
+thing a reader cannot reconstruct from the ledger. Everything dispositioned `fix` as written needs
+no line: the revision prompt carries it verbatim, the next reviewer sees it, and the PR body
+records it.
 
 Pass all prior findings/dispositions forward — and tell every later-round reviewer, in the
 prompt, the ledger's identity rule: **a finding id is immutable evidence — re-opening one keeps
