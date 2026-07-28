@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.49.9 · starting
+∞ pitcrew · v0.49.10 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -266,11 +266,13 @@ When taking a PR, print a composed banner beside the `loop:revising` mutation:
 Print one badged ribbon line per step (🟦 in progress · 🟩 complete · 🟥 blocked · 🟨 needs a human) — `▰` done-or-current, `▱` remaining, always eight cells:
 
 ```text
-🟦 ∞ ▰▰▰▱▱▱▱▱ 03/8 REVISE ─ PR #<P> · <actor> · 14:07
+[14:07][#<N>] 🟦 ∞ ▰▰▰▱▱▱▱▱ 03/8 REVISE ─ PR #<P> · <actor>
 ```
 
-The last cell is the wall clock at step start (`date +%H:%M`, 24-hour), same rule as Dev's
-ribbons; end and duration ride the completion lines, never a re-printed ribbon.
+Every timeline line leads with `[HH:MM][#<N>]` — the wall clock at step start
+(`date +%H:%M`, 24-hour) and the unit it serves, same rule as Dev's ribbons — so a reader scans
+the left edge for when and which. End and duration ride the completion lines, never a re-printed
+ribbon.
 
 End with one closing rail:
 

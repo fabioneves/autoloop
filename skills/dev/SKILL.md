@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.9 · starting
+∞ dev · v0.49.10 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -334,7 +334,7 @@ failure. Waiting itself has one sanctioned shape per situation:
   Monitor (or the background task's own completion signal) is armed on each result file, all
   commits are pushed, and the LAST line before the turn ends is the parked heartbeat naming what
   it waits for, with the clock:
-  `♡ parked — #78 codex r1 + #87 plan-review in flight · resumes on result files · 15:04`.
+  `[15:04][#78] ♡ parked — codex r1 + #87 plan-review in flight · resumes on result files`.
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
   the printed line make parked and dead distinguishable at a glance.
 - **In-turn wait (fallback, no monitor available).** One typed bounded wait —
@@ -948,18 +948,22 @@ ribbon with a different suffix. On resuming from a parked wait, print one `♡ r
 <what fired>` line and continue; the ribbon for a step already announced is never printed again.
 
 ```text
-🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ #<N> · <lane> · <actor> · 14:07
-🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 SIMPLIFY ─ #<N> · no change required · orchestrator · 14:41
+[14:07][#78] 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ <lane> · <actor>
+[14:41][#78] 🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 SIMPLIFY ─ 41 lines removed · fresh simplifier
 ```
 
-**Every ribbon's last cell is the wall clock** — `HH:MM`, 24-hour, from `date +%H:%M` in the
-same turn (one cheap read; never guess it from memory). The ribbon carries the START time; the
-step's end and duration belong to the lines that already mark completion, never to a re-printed
-ribbon:
+**Every timeline line starts with `[HH:MM][#N]`** — the wall clock from `date +%H:%M` in the same
+turn (one cheap read; never guessed from memory), then the unit it belongs to. Leading, not
+trailing: a run interleaves two units and a dozen steps, and the reader scans the left edge for
+"when" and "which", not the tail of each line. The issue number therefore appears once, in the
+prefix — do not repeat it in the body. Ribbons, `♡ parked`/`♡ resumed` lines, and closing rails
+all carry it.
+
+The prefix time is the START time; end and duration belong to the lines that already mark
+completion, never to a re-printed ribbon:
 
 - collecting a dispatched step's typed result, state the duration from the result's own `ms`
-  field — `plan returned · 6m41s`, computed from `ms`, never hand-timed;
-- a `♡ resumed` line carries the clock and what fired: `♡ resumed — codex r1 returned · 14:32`;
+  field — `[14:14][#78] ♡ resumed — plan returned · 6m41s`, computed from `ms`, never hand-timed;
 - the closing rail carries the unit's total (from the run record's per-step timings).
 
 Code review converges over rounds, so it also prints a round ribbon against the configured
@@ -967,8 +971,8 @@ cap — same grammar, cells counting rounds — which makes an approaching cap v
 blocks:
 
 ```text
-🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · 0 Critical · 2 Major open · 15:02
-🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW [CLAUDE:FABLE] ─ #<N> · fix-delta · clean · converged · 15:26
+[15:02][#78] 🟦 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
+[15:26][#78] 🟩 ∞ ▰▰▰▱▱ r3/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
 ```
 
 Plan review is one dispatch and has no round ribbon.
@@ -981,11 +985,13 @@ judged or wrote is a property of the evidence, and the model is now chooseable p
 line says it:
 
 ```text
-🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 PLAN [CLAUDE:FABLE] ─ #<N> · full · fresh planner · 14:03
-🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE:OPUS] ─ #<N> · full · fresh writer · 14:19
-🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN-REVIEW [CODEX] ─ #<N> · full · fresh reviewer · 14:11
-🟨 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ #<N> · fix-delta · 1 Major open · proxy · 15:02
+[14:03][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 PLAN [CLAUDE:FABLE] ─ full · fresh planner
+[14:19][#78] 🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
+[14:11][#87] 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
+[15:02][#78] 🟨 ∞ ▰▰▱▱▱ r2/5 CODE-REVIEW [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
 ```
+
+Two units in flight read as two prefixes, which is the point.
 
 Steps the orchestrator runs itself take no executor slot — there was no dispatch, and an absent
 slot is the honest statement that the session (its model on the startup banner) did the work.
@@ -993,13 +999,13 @@ slot is the honest statement that the session (its model on the startup banner) 
 End a unit with one closing rail:
 
 ```text
-🟩 ╰─ ✔ #<N> SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 16:12 · 2h09m ─╯
+[16:12][#78] 🟩 ╰─ ✔ SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ─╯
 ```
 
 or:
 
 ```text
-🟥 ╰─ ✖ #<N> BLOCKED ─ <safe composed reason> ─╯
+[16:12][#78] 🟥 ╰─ ✖ BLOCKED ─ <safe composed reason> ─╯
 ```
 
 Close the run with the badge matching its outcome — 🟩 when something shipped and nothing
