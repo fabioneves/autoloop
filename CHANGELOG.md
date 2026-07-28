@@ -37,7 +37,8 @@ Notable changes to Autoloop are recorded here. The format follows
   🔨 implement · 🧹 simplify · 👓 diff-review · 🔍 code-review · 🔧 fix · 🚦 gate · 📦 publish ·
   📝 record. 🔬 scrutinises a plan and 🔍 scrutinises code; 🔨 builds and 🔧 repairs. The state
   badge is unchanged — the glyph says what the step is, the badge how it is going. Pitcrew draws
-  the same glyphs for the same kinds of work.
+  the same glyphs for the same kinds of work. The wait lines get their own pair — 🅿️ parked,
+  ▶️ resumed — plus 💤 for an idle run and 🏁 on the run's closing rail.
 
 ## [0.49.9] - 2026-07-28
 

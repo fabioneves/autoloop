@@ -383,7 +383,7 @@ failure. Waiting itself has one sanctioned shape per situation:
   Monitor (or the background task's own completion signal) is armed on each result file, all
   commits are pushed, and the LAST line before the turn ends is the parked heartbeat naming what
   it waits for, with the clock:
-  `[15:04][#78] ♡ parked — codex r1 + #87 plan-review in flight · resumes on result files`.
+  `[15:04][#78] 🅿️ parked — codex r1 + #87 plan-review in flight · resumes on result files`.
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
   the printed line make parked and dead distinguishable at a glance.
 - **In-turn wait (fallback, no monitor available).** One typed bounded wait —
@@ -993,7 +993,7 @@ that runs steps 1–11 prints eleven ribbons; orphan reconciliation before selec
 Never withhold a ribbon to reduce output, and never re-print one: a step's ribbon appears
 **exactly once, when the step begins**. A ribbon is an announcement, not a status display —
 "still in flight" is heartbeat news and uses the heartbeat line, never a second copy of the
-ribbon with a different suffix. On resuming from a parked wait, print one `♡ resumed —
+ribbon with a different suffix. On resuming from a parked wait, print one `▶️ resumed —
 <what fired>` line and continue; the ribbon for a step already announced is never printed again.
 
 ```text
@@ -1019,18 +1019,25 @@ Reading them apart is the point: 🔬 scrutinises a plan and 🔍 scrutinises co
 orchestrator's own read, 🔨 builds and 🔧 repairs. The state badge stays where it is — the glyph
 says WHAT the step is, the badge says HOW IT IS GOING.
 
+Step glyphs deliberately avoid variation-selector emoji, because a ribbon is a column-aligned
+line and those render at inconsistent widths. The wait lines below are prose, not columns, so
+🅿️ / ▶️ / 💤 are fine there.
+
 **Every timeline line starts with `[HH:MM][#N]`** — the wall clock from `date +%H:%M` in the same
 turn (one cheap read; never guessed from memory), then the unit it belongs to. Leading, not
 trailing: a run interleaves two units and a dozen steps, and the reader scans the left edge for
 "when" and "which", not the tail of each line. The issue number therefore appears once, in the
-prefix — do not repeat it in the body. Ribbons, `♡ parked`/`♡ resumed` lines, and closing rails
-all carry it.
+prefix — do not repeat it in the body. Ribbons, `🅿️ parked`/`▶️ resumed` lines, and closing rails
+all carry it. The wait pair reads as a pair: **🅿️ parked** when the turn ends on a wait,
+**▶️ resumed** when what it waited for fires, **💤 idle** on the line that reports a run with
+nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself (which
+carries the clock but no unit — it belongs to no single issue).
 
 The prefix time is the START time; end and duration belong to the lines that already mark
 completion, never to a re-printed ribbon:
 
 - collecting a dispatched step's typed result, state the duration from the result's own `ms`
-  field — `[14:14][#78] ♡ resumed — plan returned · 6m41s`, computed from `ms`, never hand-timed;
+  field — `[14:14][#78] ▶️ resumed — plan returned · 6m41s`, computed from `ms`, never hand-timed;
 - the closing rail carries the unit's total (from the run record's per-step timings).
 
 Code review converges over rounds, so its ribbons keep the same grammar and add the round after
@@ -1083,7 +1090,7 @@ Close the run with the badge matching its outcome — 🟩 when something shippe
 blocked, 🟥 when anything blocked:
 
 ```text
-🟩 ∞ run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
+[17:41] 🟩 ∞ 🏁 run complete ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff>
 ```
 
 Never paste raw issue/review text into chat banners.
