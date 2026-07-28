@@ -3,6 +3,24 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.24] - 2026-07-28
+
+### Fixed
+
+- **`--sort-versions` takes the basename of path lines instead of silently dropping them.** Two
+  live setups lost their first command to `ls -d <cache>/*/ | xargs -n1 basename` — refused for the
+  `xargs` — while the skill insisted there was "nothing to pre-clean". There was: a full-path line
+  (`/…/autoloop/0.49.16/`) was silently dropped, so the basename instinct was answering a **real**
+  hazard the prose denied, with the one vehicle the guard refuses. Tolerance now lives in the tool,
+  where it holds for every composition, instead of in prose that has to win an argument with a
+  model's correct intuition.
+- **The setup skill shows the whole pipeline, not half of it.** The version-currency block showed
+  only the `--sort-versions | tail -3` end and left the `ls` half to be composed — the same
+  outcome-without-command gap as the proxy probe (0.49.22) and the exit-3 merge contract (0.49.17).
+  It is now one complete literal: `ls <cache> | node <templates>/tools/release-verify.mjs
+  --sort-versions | tail -3`, with `xargs` named as the decoration that has now cost two setups
+  their first command.
+
 ## [0.49.23] - 2026-07-28
 
 ### Added

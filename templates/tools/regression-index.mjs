@@ -260,6 +260,28 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'sort-versions-dropped-path-lines',
+    date: '2026-07-28',
+    symptom: 'Two live setups lost their first command to `ls -d <cache>/*/ | '
+      + 'xargs -n1 basename` — refused for the xargs — while the skill insisted '
+      + 'there was "nothing to pre-clean".',
+    cause: 'The skill showed only half the pipeline (the ls half was left to '
+      + 'the model), and `--sort-versions` silently dropped full-path lines, so '
+      + 'the basename instinct was answering a REAL hazard with the one vehicle '
+      + 'the guard refuses. The tool now takes basenames itself and the skill '
+      + 'shows the complete pipeline.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'release-verify.mjs',
+        anchor: 'takes the basename of path lines instead of dropping them',
+      }),
+      Object.freeze({
+        file: '../../skills/setup/SKILL.md',
+        anchor: 'ONE\n   complete pipeline',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '

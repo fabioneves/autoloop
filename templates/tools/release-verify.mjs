@@ -55,10 +55,20 @@ export function fingerprintBytes(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+// Accepts bare names AND path lines: `ls -d <cache>/*/` emits
+// `/…/autoloop/0.49.16/`, and silently dropping those made the documented
+// "feed it plain ls output" advice a trap — every full-path line vanished, so a
+// live session's instinct to add `basename` was answering a REAL hazard, with
+// the one vehicle (`xargs`) the guard refuses. The tool takes the basename
+// itself; version-shaped lines are kept wherever they sat in a path.
 export function sortStableVersions(text) {
   return text
     .split(/\r?\n/u)
-    .map((line) => line.trim())
+    .map((line) => {
+      const trimmed = line.trim().replace(/\/+$/u, '');
+      const slash = trimmed.lastIndexOf('/');
+      return slash === -1 ? trimmed : trimmed.slice(slash + 1);
+    })
     .filter((line) => STABLE_SEMVER.test(line))
     .sort(compareStableVersions);
 }
@@ -1015,6 +1025,15 @@ async function selfTest() {
       name: 'sorts semantic versions numerically',
       actual: () => sortStableVersions('0.9.12\nnot-a-version\n0.40.0\n0.10.0\n'),
       expected: ['0.9.12', '0.10.0', '0.40.0'],
+    },
+    {
+      // 2026-07-28: `ls -d <cache>/*/` emits full paths with trailing slashes,
+      // and dropping them silently made "feed it plain ls output" a trap — a
+      // live setup reached for `xargs -n1 basename` (refused) because its
+      // instinct about the hazard was right.
+      name: 'takes the basename of path lines instead of dropping them',
+      actual: () => sortStableVersions('/a/b/0.49.16/\n0.49.17\n/x/0.9.2\nnot-a-version\n'),
+      expected: ['0.9.2', '0.49.16', '0.49.17'],
     },
     {
       name: 'fingerprints stdin bytes with SHA-256',
