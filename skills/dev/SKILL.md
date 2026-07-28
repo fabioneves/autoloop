@@ -325,6 +325,15 @@ reviewer's job is to find the case the author did not consider.
   It is still judgment work — deciding a Critical against source is the orchestrator's own call,
   not a dispatch's — so run the session on a model you trust for that, and nothing in the flow
   depends on which one it is.
+  **`INVALID_PLAN_TITLE` is a retitle, never a re-dispatch.** A plan result whose only fault is a
+  non-ASCII title comes back with that code and the sound artifact under `rejectedPlan` in the
+  failure detail. Composing a safe ASCII title is the ORCHESTRATOR's job and the body is the
+  model's, so take the body as-is, write a compliant title yourself, and proceed — a live run spent
+  ~40 minutes of `OPUS` re-planning because an em-dash in the title discarded a whole plan and the
+  refusal named neither the field nor the reason. `INVALID_PLAN_RESULT` is everything else and does
+  mean re-dispatch; both messages now name the field, the reason, and for a title the exact
+  character and codepoint.
+
 - `--effort <low|medium|high|xhigh|max>` pins the dispatch's reasoning depth — `--effort` on
   claude, the `model_reasoning_effort` config override on codex, one flag either way — and is
   stamped into the typed result and the dispatch log beside engine and model. **Reviews run

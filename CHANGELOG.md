@@ -19,6 +19,18 @@ Notable changes to Autoloop are recorded here. The format follows
   cases pin it, including the negative: an expansion with no literal assignment in the same command
   stays refused.
 
+- **A plan is no longer discarded over a character in its title, and the refusal says which
+  character.** `INVALID_PLAN_RESULT` reported "structured output is not a valid plan" — a boolean
+  validator behind a categorical message — and a live run spent ~40 minutes of `OPUS` re-planning
+  before finding that an em-dash in the *title* was the whole fault. A model writing in this
+  repository's own prose style hits the ASCII rule naturally. Refusals now name the field, the
+  reason, and for a title the exact character and codepoint (`replace "—" (U+2014)`). The policy was
+  also inverted: the ASCII rule exists because the ORCHESTRATOR composes titles from a safe
+  allowlist while the body is the model's work, so a non-ASCII title now returns the new
+  `INVALID_PLAN_TITLE` with the sound artifact under `rejectedPlan` — retitle and proceed, never
+  re-dispatch. Throwing away a 48 KB body to protect a field the caller was going to author anyway
+  had it backwards.
+
 ### Changed
 
 - **Every model name is UPPER-CASE everywhere it appears** — executor slots, parked lines,

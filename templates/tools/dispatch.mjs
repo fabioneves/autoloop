@@ -141,16 +141,52 @@ export const PLAN_SCHEMA = Object.freeze({
   additionalProperties: false,
 });
 
+// Names the field and the reason, because "not a valid plan" made a live run
+// spend ~40 minutes of opus rediscovering that an em-dash in the TITLE was the
+// whole problem. A model writing in this repository's own prose style hits the
+// ASCII rule naturally.
+export function planResultProblem(value) {
+  if (!isPlainObject(value)) return 'result is not an object';
+  if (!hasExactKeys(value, ['title', 'prBody', 'body'])) {
+    return `keys must be exactly title, prBody, body (got ${
+      Object.keys(value).sort().join(', ') || 'none'})`;
+  }
+  for (const field of ['title', 'prBody', 'body']) {
+    if (typeof value[field] !== 'string') return `${field} must be a string`;
+  }
+  if (value.title.length < 1 || value.title.length > 256) {
+    return `title must be 1-256 characters (got ${value.title.length})`;
+  }
+  const offending = [...value.title].filter((char) => !/^[\x20-\x7e]$/.test(char));
+  if (offending.length > 0) {
+    return `title must be printable ASCII only; replace ${
+      [...new Set(offending)].map((char) =>
+        `${JSON.stringify(char)} (U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')})`)
+        .join(', ')}`;
+  }
+  for (const field of ['prBody', 'body']) {
+    if (value[field].length < 1) return `${field} must not be empty`;
+    if (value[field].length > 65535) {
+      return `${field} must be at most 65535 characters (got ${value[field].length})`;
+    }
+  }
+  return null;
+}
+
+// True when every field holds. Kept as the boolean predicate callers already use.
 export function validPlanResult(value) {
-  return hasExactKeys(value, ['title', 'prBody', 'body'])
-    && typeof value.title === 'string'
-    && /^[\x20-\x7e]{1,256}$/.test(value.title)
-    && typeof value.prBody === 'string'
-    && value.prBody.length >= 1
-    && value.prBody.length <= 65535
-    && typeof value.body === 'string'
-    && value.body.length >= 1
-    && value.body.length <= 65535;
+  return planResultProblem(value) === null;
+}
+
+// A title that is merely non-ASCII is the ONE problem the caller can fix without
+// paying for the dispatch again: composing the title from a safe allowlist is the
+// orchestrator's job, and the body — the expensive artifact — is the model's.
+// Discarding a sound 48 KB body over a punctuation mark in a field the
+// orchestrator is supposed to author anyway inverts that split.
+export function planIsSalvageableByRetitling(value) {
+  if (!isPlainObject(value) || !hasExactKeys(value, ['title', 'prBody', 'body'])) return false;
+  const problem = planResultProblem(value);
+  return problem !== null && problem.startsWith('title must be printable ASCII');
 }
 
 const RESULT_SCHEMAS = Object.freeze({
@@ -732,12 +768,25 @@ function runEngine({
   }
   if (ROLES[role].result === 'plan') {
     const plan = payload.structured;
-    if (!validPlanResult(plan)) {
+    const problem = planResultProblem(plan);
+    if (problem !== null) {
+      const salvageable = planIsSalvageableByRetitling(plan);
       return failure(
         'result',
-        'INVALID_PLAN_RESULT',
-        `${role}: structured output is not a valid plan`,
-        { ms, startupMs, stderr },
+        salvageable ? 'INVALID_PLAN_TITLE' : 'INVALID_PLAN_RESULT',
+        `${role}: ${problem}`,
+        {
+          ms,
+          startupMs,
+          stderr,
+          ...(salvageable
+            ? {
+              // The body is sound and cost real time. Compose a compliant ASCII
+              // title yourself and proceed — do NOT re-run the dispatch.
+              rejectedPlan: plan,
+            }
+            : {}),
+        },
       );
     }
     return { ok: true, role, tools, startupMs, ms, plan };
@@ -1470,6 +1519,36 @@ function selfTest() {
         return parsedCli.error === null
           && viaCli.ok === true
           && readFileSync(argvPath, 'utf8').includes('--effort xhigh');
+      })(),
+    );
+    check(
+      // 2026-07-28: "structured output is not a valid plan" named neither the
+      // field nor the reason, and a live run spent ~40 minutes of opus finding
+      // that an em-dash in the TITLE was the whole problem.
+      'a rejected plan names the field, the reason, and the offending character',
+      (() => {
+        const sound = { title: 'feat: a thing', prBody: 'pr', body: 'plan' };
+        const emdash = { ...sound, title: 'feat: a thing — with prose' };
+        const titleProblem = planResultProblem(emdash) ?? '';
+        return planResultProblem(sound) === null
+          && titleProblem.startsWith('title must be printable ASCII')
+          && titleProblem.includes('U+2014')
+          && (planResultProblem({ title: 'a', body: 'b' }) ?? '').startsWith('keys must be exactly')
+          && planResultProblem({ ...sound, body: '' }) === 'body must not be empty'
+          && (planResultProblem({ ...sound, prBody: 'x'.repeat(65536) }) ?? '')
+            .includes('65536');
+      })(),
+    );
+    check(
+      // Composing a safe title is the ORCHESTRATOR's job and the body is the
+      // model's, so a punctuation mark in the title must not cost the artifact.
+      'only a non-ASCII title is salvageable by retitling, and it keeps the body',
+      (() => {
+        const sound = { title: 'feat: a thing', prBody: 'pr', body: 'plan' };
+        return planIsSalvageableByRetitling({ ...sound, title: 'a — b' })
+          && !planIsSalvageableByRetitling(sound)
+          && !planIsSalvageableByRetitling({ ...sound, body: '' })
+          && !planIsSalvageableByRetitling({ title: 'a', body: 'b' });
       })(),
     );
     check(
