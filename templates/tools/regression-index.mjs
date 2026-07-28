@@ -222,6 +222,27 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'expansion-refusal-warned-of-the-wrong-hazard',
+    date: '2026-07-28',
+    symptom: 'A read-only `for s in …; do sed …; done` byte count was refused '
+      + 'with "can hide a mutation … split discovery and mutation into separate '
+      + 'tool calls" — a hazard not present — while never mentioning the loop '
+      + 'variable that actually defeated resolution.',
+    cause: 'One generic message served every expansion shape. Wrong advice is '
+      + 'worse than none: the reader fixes the half the message names.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'a loop refusal names the loop variable and the loop remedy',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'an exit-status refusal points at the report, not at assignment',
+      }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function unresolvedExpansionReason' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '
