@@ -388,19 +388,21 @@ export function reconcile(root, templates, { audit = false } = {}) {
   } else {
     results.push({ path: 'docs/agentic/LESSONS.md', action: 'kept' });
   }
-  // A repository that predates the split still carries its lessons inside the
-  // injected STATE. The merge preserves them rather than dropping them — moving
-  // durable memory is the human's call, on a human-authorized path — but the
-  // cost is paid every session until it happens, so the report says so.
+  // STATE drift is reported the same way LOOP's is. Without this an operator
+  // could reconcile, watch the lessons migrate, and never learn that the
+  // template prose in STATE — every byte of it injected into every session — is
+  // still the version they installed with.
   const statePath = resolve(root, 'docs', 'agentic', 'STATE.md');
   if (existsSync(statePath)) {
-    const stateText = readFileSync(statePath, 'utf8');
-    const lessonsHeading = stateText.match(/^##\s+Lessons learned[^\n]*$/mu);
-    if (lessonsHeading) {
+    const stateTemplate = readFileSync(join(templates, TEMPLATE_MARKER));
+    if (Buffer.compare(readFileSync(statePath), stateTemplate) === 0) {
+      results.push({ path: 'docs/agentic/STATE.md', action: 'identical' });
+    } else {
+      results.push({ path: 'docs/agentic/STATE.md', action: 'kept' });
       warnings.push(
-        'docs/agentic/STATE.md still carries its "Lessons learned" section; STATE is injected '
-        + 'into every session and LESSONS.md is read on demand. Move those bullets to '
-        + 'docs/agentic/LESSONS.md and delete the section from STATE',
+        'docs/agentic/STATE.md differs from the template; merge it with '
+        + '`scaffold.mjs --merge-state <root>` and review that typed report — STATE is injected '
+        + 'into every session, so stale template prose is paid for on every run',
       );
     }
   }
@@ -1528,6 +1530,17 @@ function selfTest() {
         );
         return changed === false
           && JSON.stringify(merged) === JSON.stringify(existing);
+      })(),
+    );
+    expect(
+      'STATE drift is reported so the operator knows to merge it',
+      (() => {
+        const path = join(root, 'docs', 'agentic', 'STATE.md');
+        writeFileSync(path, `${readFileSync(path, 'utf8')}\n<!-- drifted -->\n`);
+        const run = reconcile(root, templates, { audit: true });
+        return run.results.some((entry) =>
+          entry.path === 'docs/agentic/STATE.md' && entry.action === 'kept')
+          && run.warnings.some((warning) => warning.includes('--merge-state'));
       })(),
     );
     expect(
