@@ -230,7 +230,7 @@ printf 'claude\n' > .git/autoloop/review-engine                            # pla
 ```
 
 A plain run writes `claude` rather than skipping the write, so a previous session's `codex`
-cannot leak forward. Append ` · reviews codex` to the startup banner so the run says which engine
+cannot leak forward. The run frame's queue row reads `reviews CODEX` so the run says which engine
 judges it, and the `[HOST]` slot on each review ribbon confirms it per dispatch. The writer always
 stays on the host: a second engine buys decorrelated review, not a second writer.
 
@@ -264,7 +264,7 @@ name owning a port (a live run refused a healthy proxy after reading its listene
 plumbing; another refused it because the session env lacked a variable the dispatch now injects
 itself).
 
-Append ` · reviews gpt-5.6-sol (proxy)` to the startup banner, and review ribbons carry the
+The run frame's queue row reads `reviews GPT-5.6-SOL (proxy)`, and review ribbons carry the
 model in the host slot — `[GPT-5.6-SOL]` — since the engine name alone would lie about who
 judged. Trade-off vs `with codex`, stated plainly: the reviewer's read-only posture is the
 tool ceiling, not an OS sandbox. Neither the writer nor the planner runs a proxied model:
@@ -419,11 +419,45 @@ failure. Waiting itself has one sanctioned shape per situation:
 
 - **Parked wait (preferred).** Every in-flight dispatch is backgrounded with `--output-file`, a
   Monitor (or the background task's own completion signal) is armed on each result file, all
-  commits are pushed, and the LAST line before the turn ends is the parked heartbeat naming what
-  it waits for, with the clock:
-  `[15:04][#78] 🅿️ parked — codex r1 + #87 plan-review in flight · resumes on result files`.
+  commits are pushed, and the LAST thing before the turn ends is the parked block naming what it
+  waits for, with the clock:
+
+  ```text
+  🅿️ ∞ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
+  ├ #78 · code-review r1 on `GPT-5.6-SOL`
+  ├ #87 · plan-review on `GPT-5.6-SOL`
+  └ resumes on result files
+  ```
+
+  It is the last thing a reader sees before the run goes quiet, sometimes for many minutes, so it
+  is the one heartbeat that must survive being scrolled past — and the block earns its three lines
+  by replacing a single line that had grown to carry two dispatches, two units and a resume
+  condition in one run-on sentence. **Dotted `┄`, and only here.** A rule's weight says what kind
+  of thing it is: `═` closes, `─` continues, `┄` is suspended — an interrupted line for an
+  interrupted run. One `├` per thing actually in flight, `└` for the resume condition, so the count
+  of branches IS the count of waits and no one has to parse a comma list to get it.
+
+  **The branches start at column zero, flush with the `🅿️` itself — never indented under it.**
+  `🅿️` is a variation-selector emoji and those render at inconsistent widths across terminals, so
+  any indent measured from it is a guess that is wrong somewhere. Flush left is the one alignment
+  that cannot drift, which is what lets this block be column-aligned at all while the badge stays
+  in a set the ribbons deliberately exclude. Exactly one space separates the badge from the `∞` —
+  enough that the two read as separate marks rather than one compound glyph, and no more, since
+  padding measured against a double-width badge is the same guess the branches avoid.
+
+  **The clock rides in the rule, and there is no `[HH:MM][#N]` prefix at all.** A park routinely
+  waits on two units at once, so a `[#N]` would name one of them and silently misfile the rest;
+  the unit belongs on the branch that actually has one, and each `├` leads with its own `#N`,
+  which is the discriminator a reader is scanning for anyway. With the unit gone the prefix was
+  carrying a bare time in brackets in front of a titled rule — two frames around one line — so the
+  time moves into the title it was already sitting next to. A titled rule states what this is and
+  when it started in one stroke. This is the only wait shape that spans units, so it is the only
+  one that leaves the prefix behind; `▶️ resumed` concerns exactly one thing firing and keeps the
+  full `[HH:MM][#N]`.
+
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
-  the printed line make parked and dead distinguishable at a glance.
+  the printed block make parked and dead distinguishable at a glance. The resume stays a single
+  line (`▶️ resumed — <what fired>`): waking up is an instant, not a state to be surveyed.
 - **In-turn wait (fallback, no monitor available).** One typed bounded wait —
   `node <plugin-tools>/dispatch.mjs --wait-file <result.json> --timeout-seconds 600` — then the
   heartbeat pair. Never `bash -c 'until …'` (inline interpreter source; the guard refuses it —
@@ -1167,14 +1201,58 @@ reading any words:
 |---|---|
 | ⏳ | in progress |
 | ✅ | terminal success — shipped, converged, complete |
+| 🚧 | findings to work through — a review returned `fail`, and the loop fixes them itself |
 | ❌ | blocked — a guardrail refused or the unit failed |
-| ⚠️ | needs a human — an open Major, a human-block path, a decision |
+| ⚠️ | needs a human — a human-block path, a decision, a Major the loop may not dispose |
 
-After prime succeeds, open the run frame:
+**`⚠️` means STOP AND ASK, and nothing else.** A failing review with Majors on it is not that: the
+loop dispositions every finding and fixes them in its own rounds, without a human touching
+anything. Badging that work `⚠️` cried for help four times a unit on a run that needed no help at
+all, and a badge that fires when nothing is wanted stops being read on the run where something is
+— the reader has been trained that it means "carry on". `🚧` is the honest state: work in the road,
+the crew is on it, no one needs to be called. The moment a finding genuinely cannot be disposed
+without a human, the badge flips to `⚠️` and it means what it says.
+
+Badges are ordered, and a line takes the most specific one that applies: `⚠️` over `❌` over `🚧`
+over `⏳`. So a first review round announces `⏳` because nothing is known yet, and every round
+that carries open findings — the review that found them and the fix round working them — announces
+`🚧`. Two badges for one line is the ambiguity this table exists to remove.
+
+After prime succeeds, open the run frame. It is the outermost thing in the session and prints
+**exactly once**, so it is the one place drawn art earns its width — every unit banner and ribbon
+below nests visually inside it:
 
 ```text
-⏳ ∞ run ─ queue <e> eligible · <policy>
+┏━━ ∞ RUN OPEN · <HH:MM> ━━━━━━━━━━━━━━━━━━━━━━
+┃  ⏳ queue <e> eligible · <policy>
+┃  🔭 reviews <ENGINE-OR-MODEL>
+┃  🔧 pitcrew: <no open PRs | <n> serviced>
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
+
+**Open on the right, and that is not a shortcut.** A closed box has to pad every row to one exact
+width, which means getting it right for a queue count that changes, a model name that varies in
+length, and a pitcrew state that is sometimes four words. Miss by one column and the frame renders
+visibly broken — a drawn frame that draws wrong is worse than no frame, because the reader now
+distrusts the whole surface. Ragged right has nothing to align, so it cannot fail that way. Weight
+carries the rank instead: heavy `━` outranks the unit banner's single round `╭─╮`, which outranks a
+ribbon's bare line, and the nesting reads correctly without anything having to say so.
+
+**It carries no wordmark, deliberately.** This skill's first output already draws the `AUTOLOOP`
+mark, a few lines up; a second one here would be the same name twice in one screen, and drawing it
+in a different letterform would make the product look like two products. One mark per session, at
+the top. What this frame needs is RANK, not identity.
+
+The title carries the clock — `RUN OPEN · 15:04` — the same titled-rule idiom the parked block
+uses, so opening a run and suspending one read as one family of thing rather than two unrelated
+decorations. Print it once, after prime succeeds and before the first unit banner, and never
+reprint it on resume: a resumed run continues an open frame, it does not open a second one.
+
+The `🔧` deliberately echoes the FIX step glyph rather than colliding with it: pitcrew is repair
+work on already-open PRs, so the glyph carries the same meaning on both surfaces, which is what the
+closed set below actually requires. `🔭` is not in that set and means "who will be watching" — the
+review engine, named in UPPER-CASE like every other model name (`reviews CODEX`,
+`reviews GPT-5.6-SOL (proxy)`), so the run states who judges before it judges anything.
 
 Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
 eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
@@ -1211,18 +1289,27 @@ orchestrator's own read, 🔨 builds and 🔧 repairs. The state badge stays whe
 says WHAT the step is, the badge says HOW IT IS GOING.
 
 Step glyphs deliberately avoid variation-selector emoji, because a ribbon is a column-aligned
-line and those render at inconsistent widths. The wait lines below are prose, not columns, so
-🅿️ / ▶️ / 💤 are fine there.
+line and those render at inconsistent widths. 🅿️ / ▶️ / 💤 stay usable on the wait lines because
+nothing on those lines is measured FROM the badge: `▶️ resumed` and `💤 idle` are prose, and the
+`🅿️ parked` block aligns its branches flush at column zero rather than indenting under the badge.
+An unstable glyph is only a hazard when something has to line up beside it.
 
 **Every timeline line starts with `[HH:MM][#N]`** — the wall clock from `date +%H:%M` in the same
 turn (one cheap read; never guessed from memory), then the unit it belongs to. Leading, not
 trailing: a run interleaves two units and a dozen steps, and the reader scans the left edge for
 "when" and "which", not the tail of each line. The issue number therefore appears once, in the
-prefix — do not repeat it in the body. Ribbons, `🅿️ parked`/`▶️ resumed` lines, and closing rails
-all carry it. The wait pair reads as a pair: **🅿️ parked** when the turn ends on a wait,
+prefix — do not repeat it in the body. Ribbons, `▶️ resumed` lines, and closing rails all carry it.
+
+**One shape belongs to no single issue and drops the prefix entirely**: the `🅿️ parked` block,
+which routinely waits on two units at once — a `[#N]` there would name one and silently misfile
+the rest. Its clock rides in the titled rule instead (`PARKED · 15:04`), each `├` branch leads
+with its own `#N` where the number is actually true, and the branches are continuations that take
+no prefix of their own. The run's own `🏁 run complete` rail keeps its prefix shape but carries the
+clock without a unit, for the same reason. Everything else keeps the full `[HH:MM][#N]`.
+
+The wait pair reads as a pair: **🅿️ parked** when the turn ends on a wait,
 **▶️ resumed** when what it waited for fires, **💤 idle** on the line that reports a run with
-nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself (which
-carries the clock but no unit — it belongs to no single issue).
+nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself.
 
 The prefix time is the START time; end and duration belong to the lines that already mark
 completion, never to a re-printed ribbon:
@@ -1237,8 +1324,8 @@ configured cap, which is what makes an approaching cap visible before it blocks.
 never disappears: one format for every line in the run, whatever it counts.
 
 ```text
-[15:02][#78] ⏳ ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
-[15:19][#78] ⏳ ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
+[15:02][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
+[15:19][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
 [15:26][#78] ✅ ∞ ▰▰▰▱▱ 08/11 🔍 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
 ```
 
@@ -1257,7 +1344,7 @@ line says it:
 [14:03][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [CLAUDE:FABLE] ─ full · fresh planner
 [14:19][#78] ⏳ ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
 [14:11][#87] ⏳ ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
-[15:02][#78] ⚠️ ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
+[15:02][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
 ```
 
 Two units in flight read as two prefixes, which is the point.
