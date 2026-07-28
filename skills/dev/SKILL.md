@@ -423,7 +423,7 @@ failure. Waiting itself has one sanctioned shape per situation:
   waits for, with the clock:
 
   ```text
-  🅿️ ∞ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
+  🅿️  ∞ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 15:04 ┄┄┄┄┄┄┄┄┄┄┄┄
   ├ #78 · code-review r1 on `GPT-5.6-SOL`
   ├ #87 · plan-review on `GPT-5.6-SOL`
   └ resumes on result files
@@ -441,9 +441,12 @@ failure. Waiting itself has one sanctioned shape per situation:
   `🅿️` is a variation-selector emoji and those render at inconsistent widths across terminals, so
   any indent measured from it is a guess that is wrong somewhere. Flush left is the one alignment
   that cannot drift, which is what lets this block be column-aligned at all while the badge stays
-  in a set the ribbons deliberately exclude. Exactly one space separates the badge from the `∞` —
-  enough that the two read as separate marks rather than one compound glyph, and no more, since
-  padding measured against a double-width badge is the same guess the branches avoid.
+  in a set the ribbons deliberately exclude. **Two source spaces separate the badge from the `∞`,
+  which reads as one gap**: terminals render `🅿️` at double width and swallow the first space, so a
+  single space closes up and the two marks fuse into one. Measured in a live run, not reasoned
+  about — the first attempt used one space and shipped `🅿️∞`. This is the same instability that
+  keeps the badge out of the ribbon glyph set and the branches flush at column zero; here it is
+  paid once, in a fixed string, where the cost is bounded and visible.
 
   **The clock rides in the rule, and there is no `[HH:MM][#N]` prefix at all.** A park routinely
   waits on two units at once, so a `[#N]` would name one of them and silently misfile the rest;
@@ -1041,12 +1044,21 @@ is for an empty or exhausted queue, not for a red baseline with a known fix.
 
 Move to `loop:09-gate`. Require a clean committed tree. Run one full `cfg.gate.command` as a local
 preflight on the review-converged artifact and record the gated OID. **A gate that takes more than
-a minute runs in the background** — `... > <log> 2>&1` with a monitor on the log's tail — and the
-orchestrator overlaps or parks while it runs; a blocking turn spent watching a test suite is the
-same waste as one spent watching a dispatch. Never chain anything after the gate command in the
-same invocation (`cfg.gate.command; tail <log>` reports the TAIL's exit status as the task's — a
-live run read a red gate as 0 that way); the gate runs alone, and the log plus its own exit code
-are the evidence.
+a minute runs in the background** — `... > <log> 2>&1` — and the orchestrator overlaps or parks
+while it runs; a blocking turn spent watching a test suite is the same waste as one spent watching
+a dispatch. Never chain anything after the gate command in the same invocation
+(`cfg.gate.command; tail <log>` reports the TAIL's exit status as the task's — a live run read a
+red gate as 0 that way); the gate runs alone, and the log plus its own exit code are the evidence.
+
+**Start it with the host's own background facility and let the completion signal wake you** — on
+Claude Code, `run_in_background: true`, which re-invokes the turn when the command exits and hands
+back its exit status. Then park (the wait block above) with the gate as an `├` branch. Do not poll
+it, and above all **never `sleep N; tail <log>`**: the host blocks that outright and says so, so
+the round is spent learning a rule instead of gating. A live run lost one to exactly
+`sleep 45; tail -30 <log>`. The reason it is tempting is that a backgrounded gate feels like
+something to check on, when it is something to be told about — the same mistake as watching a
+dispatch instead of parking on its result file. If a condition genuinely must be polled rather
+than awaited, that is what a Monitor with an `until` loop is for; a bare sleep is neither.
 
 The general rule, stated once: **dispatch or background what is bounded and bulky; keep in-session
 what is stateful and small.** Writing, fixing, reviewing, PLANNING, and long gates leave the
