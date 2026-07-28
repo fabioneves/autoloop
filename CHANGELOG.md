@@ -3,6 +3,26 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.16] - 2026-07-28
+
+### Fixed
+
+- **The STATE diet actually merges into an existing repository.** v0.49.13 rewrote the template
+  without accounting for how the merge reconciles it, and a live setup hit `exit 3` — a structural
+  ambiguity, correctly refused. Three causes, all in the template: sections that survive in spirit
+  had been RENAMED, so the merge could not match them and would have kept both versions;
+  `{{ESCALATE_PATHS}}` moved into a brand-new section, so its hole had no installed counterpart to
+  fill from (the single cause of the exit 3); and sections the template dropped are preserved by
+  the merge on purpose — that rule protects repository content — so retired template prose would
+  have lingered forever. Surviving sections keep their historical headings, the escalate hole
+  returns to the Autonomy section where it lived, and a second migration
+  (`retired-state-sections`) removes the three sections the template no longer owns, reporting
+  each one.
+- Verified end to end against a copy of a live 27.9 KB STATE: reconcile takes it to 17.5 KB, then
+  `--merge-state` completes with **exit 0 and zero ambiguities** at 10.1 KB, with the repository's
+  mission, invariants, config values, and its own escalate entry all intact and no unfilled
+  placeholder holes.
+
 ## [0.49.15] - 2026-07-28
 
 ### Fixed

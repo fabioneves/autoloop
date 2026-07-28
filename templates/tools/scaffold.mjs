@@ -658,6 +658,21 @@ function alignLine(line, installLines) {
 // LESSONS.md. Ordering is deliberate: LESSONS is written and re-read before
 // STATE is rewritten, so an interrupted migration leaves duplicated memory
 // rather than lost memory.
+export function extractSection(documentText, headingPrefix) {
+  const escaped = headingPrefix.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const match = new RegExp(`^##\\s+${escaped}[^\\n]*$`, 'mu').exec(documentText ?? '');
+  if (!match) return null;
+  const start = match.index;
+  const rest = documentText.slice(start + match[0].length);
+  const next = /^##\s+/mu.exec(rest);
+  const end = next === null
+    ? documentText.length
+    : start + match[0].length + next.index;
+  const section = documentText.slice(start, end).trimEnd();
+  const remainder = `${documentText.slice(0, start).trimEnd()}\n${documentText.slice(end)}`;
+  return { section, remainder: `${remainder.trimEnd()}\n` };
+}
+
 export function extractLessonsSection(stateText) {
   const match = /^##\s+Lessons learned[^\n]*$/mu.exec(stateText ?? '');
   if (!match) return null;
@@ -677,7 +692,44 @@ export function extractLessonsSection(stateText) {
 // document merge, so a merge never meets a half-migrated file.
 const REPO_MIGRATIONS = Object.freeze([
   Object.freeze({ id: 'lessons-out-of-state', apply: migrateLessons }),
+  Object.freeze({ id: 'retired-state-sections', apply: retireStateSections }),
 ]);
+
+// Sections the template used to own and no longer does. The merge cannot drop
+// them itself — it preserves any installed section without a counterpart,
+// which is exactly the rule that protects repository content — so retiring
+// template prose is a migration's job. Every heading here was authored by the
+// template alone: repositories append lessons, never playbooks, so removing
+// them costs a repository nothing and is recoverable from git history.
+const RETIRED_STATE_HEADINGS = Object.freeze([
+  'Roles — code writer ≠ code reviewer',
+  'Playbooks — decision-making with no human in the loop',
+  'Queue-drain stop condition',
+]);
+
+function retireStateSections(root, templates, audit) {
+  const statePath = resolve(root, 'docs', 'agentic', 'STATE.md');
+  if (!existsSync(statePath)) return null;
+  let text = readFileSync(statePath, 'utf8');
+  const removed = [];
+  for (const heading of RETIRED_STATE_HEADINGS) {
+    const extracted = extractSection(text, heading);
+    if (extracted === null) continue;
+    removed.push(heading);
+    text = extracted.remainder;
+  }
+  if (removed.length === 0) return null;
+  if (!audit) writeFileSync(statePath, text);
+  return {
+    result: { path: 'docs/agentic/STATE.md', action: 'retired-sections', sections: removed },
+    warning:
+      `removed ${removed.length} section(s) the template no longer owns from `
+      + `docs/agentic/STATE.md (${removed.join('; ')}) — every byte of STATE is injected into `
+      + 'every session, and the skills now carry this material. Review the diff; git history has '
+      + 'the text if a repository customised any of it'
+      + (audit ? ' (audit mode: nothing was written)' : ''),
+  };
+}
 
 function migrateLessons(root, templates, audit) {
   const statePath = resolve(root, 'docs', 'agentic', 'STATE.md');
