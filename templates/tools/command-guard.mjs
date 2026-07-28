@@ -390,7 +390,14 @@ function resolveShellExpansions(cmd) {
       .replace(new RegExp(`\\$\\{${escaped}\\}`, 'gu'), value)
       .replace(new RegExp(`\\$${escaped}(?![A-Za-z0-9_])`, 'gu'), value);
   }
-  return hasActiveShellExpansion(resolved) ? null : resolved;
+  // Judge resolvability on the SAME text the detector judges: a quoted heredoc
+  // body is inert, so a `$?` or `$(date)` sitting in prose there must not defeat
+  // resolution. The detector was taught this (see stripQuotedHeredocBodies
+  // below) and this path was not, so `SP=/tmp/x` + `cat > $SP/msg.txt <<'EOF'`
+  // was refused whenever the MESSAGE mentioned a command substitution — which is
+  // exactly what a commit message describing shell work does. Same bug as the
+  // backticked-prose refusal that comment records, one call site later.
+  return hasActiveShellExpansion(stripQuotedHeredocBodies(resolved)) ? null : resolved;
 }
 
 // A heredoc whose delimiter is quoted (`<<'EOF'`, `<<"EOF"`) has a LITERAL body:

@@ -199,6 +199,29 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'plan-discarded-over-a-title-character',
+    date: '2026-07-28',
+    symptom: 'A live run spent ~40 minutes of opus re-planning because an '
+      + 'em-dash in the plan TITLE discarded the entire plan, and the refusal '
+      + '("structured output is not a valid plan") named neither the field nor '
+      + 'the reason.',
+    cause: 'A boolean validator behind a categorical message, plus a policy '
+      + 'inversion: the ASCII rule exists because the ORCHESTRATOR composes '
+      + 'titles from a safe allowlist, so throwing away the model-authored body '
+      + 'over a title character discards the expensive artifact to protect a '
+      + 'field the caller was going to author anyway.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: 'a rejected plan names the field, the reason, and the offending character',
+      }),
+      Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: 'only a non-ASCII title is salvageable by retitling, and it keeps the body',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '

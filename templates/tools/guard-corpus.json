@@ -42,7 +42,7 @@
    "cmd": "cd /repo\nT=/tmp/templates\nnode $T/tools/scaffold.mjs --audit .",
    "branch": "feat/gh-1-x",
    "expect": "allow",
-   "why": "0.44.1: same assignment after a cd was refused \u2014 no m flag"
+   "why": "0.44.1: same assignment after a cd was refused — no m flag"
   },
   {
    "cmd": "cd /repo\nverb=merge\ngh pr $verb 42",
@@ -252,7 +252,7 @@
    "cmd": "node tools/agentic/publish-verdict.mjs gate aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
    "branch": "feat/gh-78-x",
    "expect": "allow",
-   "why": "0.49.0: the sanctioned status-post shape \u2014 the publisher executes the gate itself and binds the verdict to the exact clean head"
+   "why": "0.49.0: the sanctioned status-post shape — the publisher executes the gate itself and binds the verdict to the exact clean head"
   },
   {
    "cmd": "timeout 600 bash -c 'until [ -f /tmp/s/code-review-1.json ]; do sleep 5; done'",
@@ -276,7 +276,19 @@
    "cmd": "cmp -l /tmp/s/plan-135.md /tmp/s/plan-135-frozen.md | head -5",
    "branch": "feat/gh-135-x",
    "expect": "allow",
-   "why": "0.49.5: the sanctioned byte-compare \u2014 no expansion, reports exact differing byte offsets"
+   "why": "0.49.5: the sanctioned byte-compare — no expansion, reports exact differing byte offsets"
+  },
+  {
+   "cmd": "SP=/tmp/claude-1000/-home-dev-dev-private-x/ed01b2cb/scratchpad\ncat > $SP/commit-msg.txt <<'EOF'\nfix: the merge outcome is readable without $?\n\nThe report carries ok, and $(git rev-parse HEAD) is recorded.\nEOF",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.49.21: a QUOTED heredoc body is inert, but the expansion RESOLVER read it as live source, so any commit message mentioning $? or $(...) was refused. The detector had already been taught to strip quoted bodies; this call site had not."
+  },
+  {
+   "cmd": "SP=/tmp/claude-1000/-home-dev-dev-private-x/ed01b2cb/scratchpad\ncat > $OTHER/commit-msg.txt <<'EOF'\nmsg\nEOF",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.49.21: the fix above must not become a blanket allow -- an expansion with no literal assignment in the same command stays unresolvable and stays refused."
   }
  ]
 }

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.20 · starting
+∞ dev · v0.49.21 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -314,7 +314,7 @@ reviewer's job is to find the case the author did not consider.
   **Model-limit fallback: fable → opus, once per pin.** A dispatch that dies with a usage-limit
   message ("You've reached your … limit" in its stderr/typed error) is a resource refusal, not a
   defect: retry that dispatch ONCE with `--model opus` and note the substitution on the step's
-  collection line (`plan returned · opus, fable at limit`). The stamped result already records
+  collection line (`plan returned · OPUS, FABLE at limit`). The stamped result already records
   who actually ran. Never fall back for any other failure class, never fall back reviewers onto
   the writer's model, and never silently drop the pin — the note is the record. Opus at its
   limit too parks the run: limits reset; a run killed by improvisation does not.
@@ -325,6 +325,15 @@ reviewer's job is to find the case the author did not consider.
   It is still judgment work — deciding a Critical against source is the orchestrator's own call,
   not a dispatch's — so run the session on a model you trust for that, and nothing in the flow
   depends on which one it is.
+  **`INVALID_PLAN_TITLE` is a retitle, never a re-dispatch.** A plan result whose only fault is a
+  non-ASCII title comes back with that code and the sound artifact under `rejectedPlan` in the
+  failure detail. Composing a safe ASCII title is the ORCHESTRATOR's job and the body is the
+  model's, so take the body as-is, write a compliant title yourself, and proceed — a live run spent
+  ~40 minutes of `OPUS` re-planning because an em-dash in the title discarded a whole plan and the
+  refusal named neither the field nor the reason. `INVALID_PLAN_RESULT` is everything else and does
+  mean re-dispatch; both messages now name the field, the reason, and for a title the exact
+  character and codepoint.
+
 - `--effort <low|medium|high|xhigh|max>` pins the dispatch's reasoning depth — `--effort` on
   claude, the `model_reasoning_effort` config override on codex, one flag either way — and is
   stamped into the typed result and the dispatch log beside engine and model. **Reviews run
@@ -439,11 +448,19 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   slot — MODEL-ONLY in task subjects: `[OPUS]`, not `[CLAUDE:OPUS]` (the panel is narrow; the
   engine still rides the ribbon and the stamped result, and a dispatch with no pinned model
   falls back to the engine name, `[CODEX]`). So: `∞ #149 — 05 IMPLEMENT [OPUS]`; `activeForm`
-  says what the spinner should read while it runs (`Implementing #149 on opus`,
-  `Reviewing #149 r1 on gpt-5.6-sol`). Round-scoped steps use one task per round, and EVERY
+  says what the spinner should read while it runs (`Implementing #149 on OPUS`,
+  `Reviewing #149 r1 on GPT-5.6-SOL`). Round-scoped steps use one task per round, and EVERY
   dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
   shape (`∞ #149 — 08 CODE-REVIEW r1/5 [GPT-5.6-SOL]`, `∞ #78 — 08 FIX r3/5 [OPUS]`); the named
   examples are not an exhaustive list.
+- **A completed step keeps its cost in the subject**: append `[<elapsed>] [<HH:MM ended>]` when you
+  complete the task — `∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL] [11min] [14:35]`. The panel is the only
+  place a finished step's numbers survive; the collection line that stated them scrolls away, and
+  the closing rail carries the unit total, not the per-step breakdown. Together the rows become a
+  cost profile you can read at a glance — which step ate the run, and whether a model was slow or
+  merely queued. Elapsed is wall time from the step's ribbon to its collection, `<n>min` under an
+  hour and `<n>h<mm>m` over it; the timestamp is the local 24-hour clock, the same one the ribbon
+  prefix uses.
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
   same turn that states the duration. A staged unit's steps get their own tasks, so two units in
@@ -1191,6 +1208,15 @@ Two units in flight read as two prefixes, which is the point.
 
 Steps the orchestrator runs itself take no executor slot — there was no dispatch, and an absent
 slot is the honest statement that the session (its model on the startup banner) did the work.
+
+**Every model name is UPPER-CASE everywhere it appears** — executor slots, parked lines, collection
+lines, task subjects, `activeForm`, and the digest. `OPUS`, `FABLE`, `SONNET`, `GPT-5.6-SOL`. Who
+judged or wrote is the fact an operator scans for, and one casing rule makes it findable in a wall
+of lower-case prose. Outside fenced ribbon blocks, wrap the name in backticks — `` `OPUS` `` — so
+the host renders it as a distinct span rather than as another word in the sentence. Colour itself is
+the host's to choose, not ours to set: no ANSI escape survives a markdown renderer, so CAPS plus a
+code span is the whole mechanism. So: `parked — implement dispatch on `OPUS` in flight`, and
+`plan returned · `OPUS`, `FABLE` at limit`.
 
 End a unit with one closing rail:
 
