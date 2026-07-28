@@ -41,12 +41,12 @@ it disables the hooks those checks examine.
 
 Historical verification: checks 1–7 passed on opencode 1.18.3 on 2026-07-21 (checks 1–5 and 7
 scripted as above; 6 via the `session.prompt` spike recorded in the v0.35 planning notes). That
-predates the v0.49.7 dispatch contract, and the rerun it requires has not been performed:
+predates the v0.49.8 dispatch contract, and the rerun it requires has not been performed:
 
-- v0.49.7 live smoke evidence: untested
+- v0.49.8 live smoke evidence: untested
 
 `untested` is a declaration, not evidence. It means no check in this document was executed against
-the v0.49.7 contract, so the opencode host wiring is statically verified only. Contract
+the v0.49.8 contract, so the opencode host wiring is statically verified only. Contract
 verification and `--release-mode` both report the declaration as a note and neither treats it as a
 passed check.
 
@@ -54,7 +54,7 @@ To retire the declaration, run all seven checks and replace the line with exactl
 containing the real UTC date, installed opencode version, SHA-256 of the sanitized manifest's exact
 bytes, and its committed repository-relative location:
 
-`- v0.49.7 live smoke evidence: date=YYYY-MM-DD; opencode=X.Y.Z; checks=1-7; sha256=<64 lowercase hex>; location=evidence/opencode-v0.49.7/manifest.json`
+`- v0.49.8 live smoke evidence: date=YYYY-MM-DD; opencode=X.Y.Z; checks=1-7; sha256=<64 lowercase hex>; location=evidence/opencode-v0.49.8/manifest.json`
 
 The location is a committed repository-relative JSON manifest, not a URL or archive. It and every
 inventory member must be a bounded regular non-symlink file committed unchanged at `HEAD`.
@@ -89,5 +89,5 @@ Fingerprint the manifest with the vendored helper so the recorded digest is port
 
 ```sh
 node tools/agentic/release-verify.mjs \
-  --fingerprint-stdin <evidence/opencode-v0.49.7/manifest.json
+  --fingerprint-stdin <evidence/opencode-v0.49.8/manifest.json
 ```
