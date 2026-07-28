@@ -3,6 +3,41 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.27] - 2026-07-28
+
+### Fixed
+
+- **A review with findings is roadworks, not a warning.** The badge table put "an open Major"
+  under the needs-a-human badge, so every review returning `fail` badged itself as a cry for help —
+  four times a unit on a run that needed no help at all, because the loop dispositions every
+  finding and fixes them in its own rounds. A badge that fires when nothing is wanted stops being
+  read on the run where something is: the reader has been trained that it means carry on. `🚧` now
+  carries "findings to work through", `⚠️` means stop-and-ask and nothing else, and badges gain an
+  explicit precedence (`⚠️` › `❌` › `🚧` › `⏳`) because a round carrying open findings could
+  honestly have claimed two of them. Pitcrew takes the same split and needed it more — servicing
+  findings is its ordinary state, so it was the surface warning most often about the least.
+- **A retired artifact reports its absence instead of inviting a probe.** `.autoloop/ci-policy.json`
+  has been retired since v0.49.0, and the reconcile report named it only when it removed one. A
+  live session could not tell that silence from an unperformed check, so it probed with
+  `ls .autoloop/ci-policy.json` — where the PASSING result prints `No such file or directory` and
+  reads as an error. The report now states the outcome either way (`removed` or `absent`), matching
+  the `identical` rows it already carries for files it changed nothing about, and the setup skill
+  says to read the typed report rather than re-derive it in the shell.
+
+### Changed
+
+- **The run frame and the parked wait are drawn, not narrated.** The run frame opened the whole
+  session as a bare one-liner while a unit got a box and a close got a rail — the outermost thing
+  in the run ranked lowest on the screen. It is now an open-right block (`┏━━ ∞ RUN OPEN · HH:MM`)
+  whose rows cannot misalign, because a closed box must pad every row to one width across a
+  changing queue count and a varying model name, and a frame that draws wrong is worse than no
+  frame. It carries no wordmark: the skill's first output already draws `AUTOLOOP`, and a second
+  mark in a different letterform would make one product look like two. The review engine moves from
+  an appended banner fragment to its own row. The parked heartbeat becomes a titled block with one
+  `├` per thing in flight, drops the `[HH:MM][#N]` prefix because a park routinely spans units —
+  each branch leads with the `#N` that is actually true — and aligns flush at column zero, clear of
+  a variation-selector badge whose width no two terminals agree on.
+
 ## [0.49.26] - 2026-07-28
 
 ### Fixed
