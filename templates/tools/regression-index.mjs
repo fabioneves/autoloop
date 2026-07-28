@@ -33,6 +33,22 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'retired-artifact-absence-went-unreported',
+    date: '2026-07-28',
+    symptom: 'A live session probed `ls .autoloop/ci-policy.json` beside the '
+      + 'reconcile audit, so a PASSING check printed `No such file or '
+      + 'directory` and read as a failure.',
+    cause: 'The reconcile report named the retired artifact only when it '
+      + 'removed one. Silence about an absence cannot be told apart from an '
+      + 'unperformed check, so a reader re-derives it with a shell probe.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'scaffold.mjs',
+        anchor: 'a fresh scaffold never creates the retired CI policy, and says so',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'completed-step-rows-shipped-without-their-cost',
     date: '2026-07-28',
     symptom: 'Live panels showed bare completed rows (`∞ #123 — 02 PLAN '
