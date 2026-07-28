@@ -14,6 +14,12 @@ Notable changes to Autoloop are recorded here. The format follows
   the prefix, in Dev and Pitcrew alike. Round-scoped steps keep the step number too —
   `08/11 CODE-REVIEW r2/5`, `08/11 FIX r2/5` — with the cells counting rounds against the cap, so
   one format holds for every line in the run whatever it happens to count.
+- **Each step draws its own glyph** between the counter and the name, from a closed set where a
+  glyph never means two things: 🔁 reconcile · 🧭 premise · 📐 plan · 🔬 plan-review · 📌 claim ·
+  🔨 implement · 🧹 simplify · 👓 diff-review · 🔍 code-review · 🔧 fix · 🚦 gate · 📦 publish ·
+  📝 record. 🔬 scrutinises a plan and 🔍 scrutinises code; 🔨 builds and 🔧 repairs. The state
+  badge is unchanged — the glyph says what the step is, the badge how it is going. Pitcrew draws
+  the same glyphs for the same kinds of work.
 
 ## [0.49.9] - 2026-07-28
 

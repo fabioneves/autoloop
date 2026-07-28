@@ -940,7 +940,7 @@ Print one ribbon line per step — `▰` for done-or-current cells, `▱` for re
 eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
 that decides nothing is due still happened, and a missing ribbon reads as a skipped step. A unit
 that runs steps 1–11 prints eleven ribbons; orphan reconciliation before selection prints its own
-`00/11 RECONCILE` ribbon the moment Prime surfaces the orphan, before any fetch or driver call.
+`00/11 🔁 RECONCILE` ribbon the moment Prime surfaces the orphan, before any fetch or driver call.
 Never withhold a ribbon to reduce output, and never re-print one: a step's ribbon appears
 **exactly once, when the step begins**. A ribbon is an announcement, not a status display —
 "still in flight" is heartbeat news and uses the heartbeat line, never a second copy of the
@@ -948,9 +948,27 @@ ribbon with a different suffix. On resuming from a parked wait, print one `♡ r
 <what fired>` line and continue; the ribbon for a step already announced is never printed again.
 
 ```text
-[14:07][#78] 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN ─ <lane> · <actor>
-[14:41][#78] 🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 SIMPLIFY ─ 41 lines removed · fresh simplifier
+[14:07][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN ─ <lane> · <actor>
+[14:41][#78] 🟦 ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 🧹 SIMPLIFY ─ 41 lines removed · fresh simplifier
 ```
+
+**Each step carries its own glyph**, between the counter and the name, so the eye finds a kind of
+work without reading the word. The set is closed — a step always draws the same glyph, and a glyph
+never means two things:
+
+| Step | Glyph | Step | Glyph |
+|---|---|---|---|
+| 00 RECONCILE | 🔁 | 06 SIMPLIFY | 🧹 |
+| 01 PREMISE | 🧭 | 07 DIFF-REVIEW | 👓 |
+| 02 PLAN | 📐 | 08 CODE-REVIEW | 🔍 |
+| 03 PLAN-REVIEW | 🔬 | 08 FIX | 🔧 |
+| 04 CLAIM | 📌 | 09 GATE | 🚦 |
+| 05 IMPLEMENT | 🔨 | 10 PUBLISH | 📦 |
+| | | 11 RECORD | 📝 |
+
+Reading them apart is the point: 🔬 scrutinises a plan and 🔍 scrutinises code, 👓 is the
+orchestrator's own read, 🔨 builds and 🔧 repairs. The state badge stays where it is — the glyph
+says WHAT the step is, the badge says HOW IT IS GOING.
 
 **Every timeline line starts with `[HH:MM][#N]`** — the wall clock from `date +%H:%M` in the same
 turn (one cheap read; never guessed from memory), then the unit it belongs to. Leading, not
@@ -972,14 +990,14 @@ configured cap, which is what makes an approaching cap visible before it blocks.
 never disappears: one format for every line in the run, whatever it counts.
 
 ```text
-[15:02][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
-[15:19][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
-[15:26][#78] 🟩 ∞ ▰▰▰▱▱ 08/11 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
+[15:02][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
+[15:19][#78] 🟦 ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
+[15:26][#78] 🟩 ∞ ▰▰▰▱▱ 08/11 🔍 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
 ```
 
 Fix rounds belong to step 08 too — they are how the step converges, not a step of their own.
 
-Plan review is one dispatch and carries no round: `03/11 PLAN-REVIEW [<executor>]`.
+Plan review is one dispatch and carries no round: `03/11 🔬 PLAN-REVIEW [<executor>]`.
 
 Every dispatched step names its **executor** in a fixed slot immediately after the step name —
 upper-case and bracketed so it reads as a label. The slot is `[ENGINE]` when no model is pinned
@@ -989,10 +1007,10 @@ judged or wrote is a property of the evidence, and the model is now chooseable p
 line says it:
 
 ```text
-[14:03][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 PLAN [CLAUDE:FABLE] ─ full · fresh planner
-[14:19][#78] 🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
-[14:11][#87] 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
-[15:02][#78] 🟨 ∞ ▰▰▱▱▱ 08/11 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
+[14:03][#78] 🟦 ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [CLAUDE:FABLE] ─ full · fresh planner
+[14:19][#78] 🟦 ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
+[14:11][#87] 🟦 ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
+[15:02][#78] 🟨 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
 ```
 
 Two units in flight read as two prefixes, which is the point.

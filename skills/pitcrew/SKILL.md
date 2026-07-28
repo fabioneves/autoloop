@@ -266,8 +266,14 @@ When taking a PR, print a composed banner beside the `loop:revising` mutation:
 Print one badged ribbon line per step (🟦 in progress · 🟩 complete · 🟥 blocked · 🟨 needs a human) — `▰` done-or-current, `▱` remaining, always eight cells:
 
 ```text
-[14:07][#<N>] 🟦 ∞ ▰▰▰▱▱▱▱▱ 03/8 REVISE ─ PR #<P> · <actor>
+[14:07][#<N>] 🟦 ∞ ▰▰▰▱▱▱▱▱ 03/8 🔨 IMPLEMENT ─ PR #<P> · <actor>
+[15:26][#<N>] 🟩 ∞ ▰▰▰▰▰▱▱▱ 05/8 🔍 REVIEW r2/3 ─ PR #<P> · fix-delta · clean
 ```
+
+Step glyphs are the same closed set Dev uses, for the same kinds of work — 🧭 diagnose ·
+📌 prepare · 🔨 implement · 👓 orchestrator pass · 🔍 review · 🚦 gate · 📦 publish · ✅ finalize —
+between the counter and the name. Round-scoped steps keep their counter and add the round
+(`05/8 🔍 REVIEW r2/3`), cells counting rounds against the cap.
 
 Every timeline line leads with `[HH:MM][#<N>]` — the wall clock at step start
 (`date +%H:%M`, 24-hour) and the unit it serves, same rule as Dev's ribbons — so a reader scans
