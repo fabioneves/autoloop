@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.29 · starting
+∞ dev · v0.49.30 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -588,9 +588,11 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   as collecting a result, disposing findings and swapping labels, and recall-plus-arithmetic under
   load is the shape that decays.
 
-  The panel is the only place a finished step's numbers survive; the collection line that stated
-  them scrolls away, and the closing rail carries the unit total, not the per-step breakdown.
-  Together the rows become a cost profile you can read at a glance — which step ate the run, and
+  The panel is where a finished step's numbers are read AT A GLANCE — the collection line that
+  stated them scrolls away and the closing rail carries only the unit total. It is not the only
+  place they survive: `stats.mjs` derives cross-unit step timings from the label timeline, so the
+  durable record is GitHub's and a pruned row loses convenience, not evidence. Together the rows
+  become a cost profile you can read without leaving the panel — which step ate the run, and
   whether a model was slow or merely queued. Elapsed is wall time from the step's ribbon to its
   collection, `<n>min` under an hour and `<n>h<mm>m` over it; the timestamp is the local 24-hour
   clock, the same one the ribbon prefix uses.
@@ -601,6 +603,22 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   (`parked on 2 dispatches`).
 - Never batch-create the whole 11-step list up front: a wall of pending steps is noise and the
   no-op steps would need deleting. Create each task when its step actually begins.
+- **Completed rows read newest-first, and that takes a deliberate rewrite.** The panel groups by
+  status and orders within a group by task ID, which is assigned at creation and never changes; no
+  task field sets position. Left alone, completed rows therefore sit oldest-first and the panel
+  truncates the tail — so the rows it hides are always the most recent ones, which is exactly
+  backwards. A live 16-row panel hid eleven completed rows, all of them newer than the three shown.
+
+  The only lever is ID order, so on completing a step: keep a window of the **five** most recent
+  completed rows, delete the others, and delete-and-recreate the rows that are now older than the
+  one just completed so their IDs land above it. The just-completed row keeps its original ID and
+  therefore sits at the top of the completed group, directly under the in-progress spinners.
+  Recreate each with the subject `step-subject.mjs` already composed — same text, new ID.
+
+  Two things make the cost acceptable. The window is bounded, so this is a fixed handful of calls
+  per step rather than growing with the run. And a deleted row loses nothing durable: `stats.mjs`
+  derives step timings from the label timeline, so the record is GitHub's and the panel is a view
+  of it. A shipped unit's rows go at its closing rail for the same reason.
 
 There is deliberately **no per-unit umbrella row**. It carried the issue title, but it duplicated
 the `∞ #<N> — ` prefix its own step rows already showed, doubled every unit's row count in a narrow

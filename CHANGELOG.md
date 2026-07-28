@@ -3,6 +3,21 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.30] - 2026-07-28
+
+### Fixed
+
+- **Completed panel rows read newest-first.** The panel groups by status and orders within a group
+  by task ID, which is assigned at creation and never changes — no task field sets position. Left
+  alone, completed rows sit oldest-first and the panel truncates the tail, so the rows it hides are
+  always the most recent ones. A live 16-row panel hid eleven completed rows, every one of them
+  newer than the three shown, which is exactly backwards for a reader asking what just finished.
+  Completing a step now keeps a bounded window of the five most recent completed rows and
+  delete-and-recreates the ones older than it, so their IDs land above and the just-completed row
+  sits directly under the in-progress spinners. A pruned row loses convenience, not evidence:
+  `stats.mjs` derives step timings from the label timeline, so the durable record is GitHub's — a
+  correction to this skill's own claim that the panel was the only place those numbers survived.
+
 ## [0.49.29] - 2026-07-28
 
 ### Fixed
