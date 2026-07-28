@@ -3,6 +3,36 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.21] - 2026-07-28
+
+### Fixed
+
+- **A quoted heredoc body no longer defeats the expansion resolver, so the loop can write its own
+  commit messages again.** `<<'EOF'` has a literal body — the shell expands nothing inside it — and
+  the guard's *detector* was taught that (`stripQuotedHeredocBodies`) after a commit message
+  carrying backticks was refused as command substitution. The *resolver* was not. So
+  `SP=/tmp/…` + `cat > $SP/commit-msg.txt <<'EOF'` resolved fine until the message itself mentioned
+  `$?` or `$(git rev-parse HEAD)`, at which point the resolver read prose as live source, returned
+  null, and the whole command was refused as opaque. Commit messages describing shell work are
+  exactly the ones that mention shell — every message written today about the `$?` fix would have
+  tripped it. Resolvability is now judged on the same stripped text the detector judges. Two corpus
+  cases pin it, including the negative: an expansion with no literal assignment in the same command
+  stays refused.
+
+### Changed
+
+- **Every model name is UPPER-CASE everywhere it appears** — executor slots, parked lines,
+  collection lines, task subjects, `activeForm`, digest: `OPUS`, `FABLE`, `SONNET`, `GPT-5.6-SOL`.
+  Who judged or wrote is the fact an operator scans for, and one casing rule makes it findable in a
+  wall of lower-case prose. Outside fenced ribbon blocks the name is a code span so the host renders
+  it distinctly. Colour stays the host's choice — no ANSI escape survives a markdown renderer, so
+  CAPS plus a code span is the whole mechanism.
+- **A completed step keeps its cost in the task subject**: `∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL]
+  [11min] [14:35]`. The panel is the only place a finished step's numbers survive — the collection
+  line that stated them scrolls away, and the closing rail carries the unit total, not the per-step
+  breakdown. Read down the rows and you have a cost profile: which step ate the run, and whether a
+  model was slow or merely queued.
+
 ## [0.49.20] - 2026-07-28
 
 ### Changed
