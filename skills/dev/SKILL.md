@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.19 · starting
+∞ dev · v0.49.20 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -826,6 +826,17 @@ stop the RUN. So the action is mechanical and complete in one turn:
 Splitting the predicate is the human's call, not the loop's opening move — a carve-out that the
 loop reaches for on its own is how scope evasion starts. When they ask for one, the runbook is
 below.
+
+**Slice budgets are the exception: they NOTE, they never block.** `caps.sliceMaxLines` and
+`caps.sliceMaxFiles` are shaping budgets — `autoloop:shape` sizes issues against them before the
+queue. A finished slice that lands over one still goes ready: state the overage in the pull-request
+body (`slice: 722 lines vs 700 budget`) and continue to step 09. Do not block, do not ask, and do
+not shave code to clear the number — a diff edited to satisfy a count is worse than the honest
+overage. A live unit was blocked at 722/700 with both suites green, committed and pushed, one
+decision short of shipping; the human raised the cap, which is the only answer that block can ever
+produce, because by the time lines are countable the work is done and the budget knows nothing it
+did not know at shaping time. Unlike the round caps above, an over-budget slice is not a reason not
+to ship — so it is not a reason to stop.
 
 ### Carving out a predicate (on human instruction)
 

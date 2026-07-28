@@ -6,8 +6,14 @@ description: Turn a feature description, spec/ADR, or brain-dump into PR-sized, 
 # autoloop:shape — spec in, PR-sized issues out
 
 Issue quality is the loop's main input constraint: a vague issue burns a whole unit on a defer, and
-an oversized one blows the slice cap mid-build. This skill front-loads the checks `autoloop:dev`
-step 1 would fail a unit on — so issues are born eligible.
+an oversized one lands a pull request too big to review well. This skill front-loads the checks
+`autoloop:dev` step 1 would fail a unit on — so issues are born eligible.
+
+**Sizing here is the only sizing there is.** `caps.sliceMaxLines` / `caps.sliceMaxFiles` are shaping
+budgets: `autoloop:dev` NOTES an overage on the pull request and ships anyway, because by the time
+lines are countable the work is done and blocking spends a human decision to learn nothing. So an
+oversized unit filed here is not caught later — it is simply reviewed at a size where cross-model
+review thins out silently.
 
 **This is an interactive, human-run skill.** It asks questions (the loop never does), and it NEVER
 applies `loop-ready` or any state label: the label is the maintainer's trust act (STATE →

@@ -50,10 +50,13 @@ names every error, so this list is orientation, not the schema.
   - **Run-time budgets** — `gateRetriesPerUnit`, `codeReviewRoundsPerUnit`, `reviseRoundsPerPr` —
     bind during a unit: at a cap the loop blocks that unit and takes the next one.
   - **Shaping budgets** — `sliceMaxLines`, `sliceMaxFiles` — bind BEFORE the loop sees a unit.
-    `autoloop:shape` sizes issues against them while decomposing a spec. **`autoloop:dev` never
-    re-checks unit size**, so an oversized issue that reached the queue is not refused at
-    selection — it is discovered mid-build. If a unit turns out too large to slice, that is a
-    block for re-shaping, not a cap the loop can enforce for you.
+    `autoloop:shape` sizes issues against them while decomposing a spec. **They never block a
+    unit at run time.** An over-budget slice that is complete, gated and reviewed gets a NOTE on
+    the pull request stating the overage, and ships. Blocking it would spend a human decision to
+    learn nothing: by the time the count is known the work is done, the cap holds no information
+    it did not hold at shaping time, and the answer is "merge it anyway" every time. A cap whose
+    verdict is always the same is not a gate. Persistent overages mean the budget is miscalibrated
+    for this repository — raise it here, or re-shape smaller units next time.
 
 There are no other keys — the schema rejects anything else.
 

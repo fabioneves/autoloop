@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.20] - 2026-07-28
+
+### Changed
+
+- **Slice budgets NOTE an overage; they never block a unit.** A live unit sat at 722 lines against a
+  700-line budget with both suites green, committed and pushed, one decision short of shipping. The
+  human raised the cap — which is the only answer that block can ever produce, because by the time
+  lines are countable the work is done, the budget knows nothing it did not know at shaping time,
+  and the answer is "merge it anyway" every time. **A cap whose verdict is always the same is not a
+  gate**, it is a human decision spent per unit for no information. `caps.sliceMaxLines` and
+  `caps.sliceMaxFiles` stay exactly where they pay off — `autoloop:shape` sizing issues before the
+  queue — and a finished over-budget slice now states the overage in its pull-request body
+  (`slice: 722 lines vs 700 budget`) and goes ready. Shaving code to clear a count is explicitly
+  forbidden: a diff edited to satisfy a number is worse than an honest overage.
+- **`autoloop:shape` says that its sizing is the only sizing.** Its intro promised an oversized unit
+  would "blow the slice cap mid-build", which is no longer true and was the weaker claim anyway. The
+  real consequence of filing an oversized unit is a pull request reviewed at a size where
+  cross-model review thins out silently — nothing downstream catches it.
+
 ## [0.49.19] - 2026-07-28
 
 ### Fixed
