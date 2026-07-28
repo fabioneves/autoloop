@@ -25,7 +25,7 @@ prime twice.
 Standalone, prime once:
 
 ```bash
-node tools/agentic/prime.mjs --json
+node <plugin-tools>/prime.mjs --json
 ```
 
 It validates ProjectConfig, reports the checkout against the configured base, runs one `scan.mjs`,
@@ -40,7 +40,7 @@ Then, in order:
    actor is a hard stop; never stash, discard, or overwrite it.
 3. Use the retained snapshot file. Every collection is `{items,complete,error}`. Follow up only
    incomplete sections. After any Git or GitHub mutation or any wait boundary, pipe the retained
-   snapshot through `node tools/agentic/snapshot-contract.mjs --invalidate <REASON>` and replace it
+   snapshot through `node <plugin-tools>/snapshot-contract.mjs --invalidate <REASON>` and replace it
    with the exact stdout before making another snapshot-derived decision. Use `GIT_MUTATION`,
    `ISSUE_MUTATION`, `PR_MUTATION`, `REVIEW_MUTATION`, or `WAIT_BOUNDARY`; use `UNKNOWN_MUTATION`
    when uncertain. Mutations may be batched only while no decision intervenes. Then rerun the full
@@ -58,17 +58,25 @@ Then, in order:
 No improvised inspection: the command guard blocks inline interpreters (`node -e`, `python -c`,
 interpreter heredocs) by policy — a guard block is the policy working, never an error to engineer
 around. Read retained snapshots only through the typed accessors —
-`node tools/agentic/snapshot-contract.mjs --summary <snapshotPath>` for bounded per-section
+`node <plugin-tools>/snapshot-contract.mjs --summary <snapshotPath>` for bounded per-section
 `{complete,items,error}` counts and `--section <name> <snapshotPath>` for one section's exact
 JSON (unknown names fail closed listing the valid catalog) — or with plain `jq` (single-quoted
 filter) on the exact file the prime summary names, which the guard sanctions.
 
 ## Dispatch
 
+**Contract tools run from the installed plugin, not the serviced branch.** Pitcrew works the
+branches most likely to have fossilised — a PR open across a dozen plugin releases carries the
+`tools/agentic/**` it forked with, and every invocation runs the working tree's copy. Resolve this
+skill's real path, then `<skill dir>/../../templates/tools/`; every `<plugin-tools>` below is that
+resolved directory, written as a literal absolute path in the command you actually run. The
+repository's own policy tools stay vendored: `auto-merge.mjs`, `gate.mjs`, `escalate-paths.mjs`,
+and the hooks.
+
 Every role runs in a fresh process through one call:
 
 ```bash
-node tools/agentic/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
+node <plugin-tools>/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
   --prompt-file <path> [--tools <csv>] [--output-file <path>] [--json]
 ```
 
@@ -112,7 +120,11 @@ A loop PR is actionable when complete evidence proves at least one:
 **A marker at `ready-head` or beyond makes the PR Dev's to finalize, never Pitcrew's to revise.**
 `ready-head` means "deliver me": GitHub merges a behind-but-`MERGEABLE`/`CLEAN` PR fine — the
 merge executor binds the exact PR head with CAS and requires CI green on that head, so
-behind-base alone changes nothing it checks. A live unit at `ready-head`, 26 commits behind after
+behind-base alone changes nothing it checks. Merge base for CODE reasons only — pre-review
+freshness or a real conflict — never to refresh tooling: a merge moves the head, review evidence
+binds `committedHead == reviewedHead == gatedHead`, and on a day with eleven plugin releases a
+"behind base → merge" reflex would re-review every in-flight unit eleven times over files those
+units never touched. A live unit at `ready-head`, 26 commits behind after
 an operator policy fix, was claimed by Pitcrew, hit `beginLifecycleRevision`'s
 `premerge-record` requirement, and blocked with "no sanctioned loop path" — correctly refusing
 to force, but the claim itself was the error. When the marker phase is past review and the PR is
@@ -161,7 +173,7 @@ skipped.
 3. **Implement.** Dispatch exactly one fresh writer for full-lane revision implementation:
 
    ```bash
-   node tools/agentic/dispatch.mjs --role implement \
+   node <plugin-tools>/dispatch.mjs --role implement \
      --prompt-file /tmp/autoloop-revise.md --json
    ```
 
@@ -180,7 +192,7 @@ skipped.
    - verified out-of-delta Critical/Major enters the existing human-block state;
    - unresolved Major at the configured cap blocks for a human.
 
-   Invoke `node tools/agentic/review-contract.mjs` on stdin with
+   Invoke `node <plugin-tools>/review-contract.mjs` on stdin with
    `{round,scope,projectConfig,expected:{planFingerprint,repositoryFingerprint,configuredBaseOid,artifactVersion,artifactFingerprint,headOid},findingAnnotations:[{id,verified,inScope}],reviewRounds:[...]}`
    and retain the byte-exact clean input as the review CheckRun evidence. Each `reviewRounds` entry
    records one dispatched round: its unique `dispatchId`, differing `authorIdentity` and
@@ -207,7 +219,7 @@ skipped.
 8. **Finalize.** From the exact clean checkout, invoke the universal terminal path:
 
    ```bash
-   node tools/agentic/publish-verdict.mjs terminal-finalize \
+   node <plugin-tools>/publish-verdict.mjs terminal-finalize \
      --request-file <terminal-request.json> \
      --review-evidence-file <exact-clean-review-input.json>
    ```

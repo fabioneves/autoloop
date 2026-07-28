@@ -7,6 +7,24 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
+- **A branch's age can no longer block its delivery.** A unit branch snapshots `tools/agentic/**`
+  when it forks and every invocation runs the working tree's copy, so a branch that outlives a few
+  releases executes the code that had the bugs — one live unit ran a finalize with tools 4,300
+  lines behind base, and five sessions hit some version of this. The flow's CONTRACT tools
+  (dispatch, lifecycle-driver, publish-verdict, the review/delivery/attestation/snapshot
+  contracts, prime, scan) now run from the installed plugin: they are pure executors of their
+  inputs plus live GitHub state, so a branch's copy is an accident of its fork date, never an
+  authority. The repository's own policy tools stay vendored — `auto-merge.mjs`, `gate.mjs`,
+  `escalate-paths.mjs`, and every hook. Drift is checked mechanically at claim and before the
+  terminal flow (`git diff --stat origin/<base>...HEAD -- tools/agentic/`) rather than assumed.
+- **Behind base: merge for code, never for tooling.** Pre-review and behind, merge freely; a real
+  conflict is Pitcrew's revision path, which re-reviews the resolution. Post-review with no
+  conflict, do not merge — a merge moves the head, review evidence binds
+  `committedHead == reviewedHead == gatedHead`, and a live unit's base sync is exactly what
+  stranded its marker at a superseded head. The arithmetic settles it: on a day with eleven
+  plugin releases, a "behind base → merge" reflex would have re-reviewed every in-flight unit
+  eleven times over files those units never touched.
+
 - **Every timeline line leads with `[HH:MM][#N]`.** The clock and the unit move from the tail of
   each ribbon to its left edge, and the issue number stops repeating in the body. A run interleaves
   two units across a dozen steps, and a reader scans a column for "when" and "which" rather than
