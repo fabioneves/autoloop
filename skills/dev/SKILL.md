@@ -501,10 +501,12 @@ node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecyc
 ```
 
 **`plan.body` is the frozen artifact, byte for byte.** Once the plan comment exists, fetch its
-exact body from GitHub (`gh api` on the captured comment ID, `.body` to a file) and use that —
-never a locally recomposed copy: `sha256(plan.body)` must equal `intent.planHash`, and two live
-sessions each lost a cycle to a recomposition that differed by invisible bytes. The driver's
-refusal names the failing field and both hash prefixes.
+exact body from GitHub and use that — never a locally recomposed copy: `sha256(plan.body)` must
+equal `intent.planHash`, and two live sessions each lost a cycle to a recomposition that differed
+by invisible bytes. The extraction idiom matters: `--jq`/`jq -r` APPEND a trailing newline (a
+third session lost a minute to exactly that byte) — save the API response to a file, then
+`jq -j .body <response.json> > body.md`, which emits the raw string alone. The driver's refusal
+names the failing field and both hash prefixes.
 
 **Composing the request costs three literal commands, never a read of the driver's source.**
 `node tools/agentic/lifecycle-driver.mjs --example-request` prints a request that passes the

@@ -1061,11 +1061,25 @@ export function driveLifecycle(request, context = {}) {
           continue;
         }
       }
+      // The transition's extra detail fields (e.g. which artifact mismatched)
+      // ride the typed result: a live session spent ten minutes rediscovering
+      // WHICH comparison failed because the driver returned only the code.
+      const {
+        state: resultState,
+        action,
+        code,
+        marker: ignoredMarker,
+        markerPatch: ignoredPatch,
+        record: ignoredRecord,
+        body: ignoredBody,
+        ...detail
+      } = result;
       return {
         schemaVersion: 1,
-        state: result.state,
-        action: result.action,
-        code: result.code,
+        state: resultState,
+        action,
+        code,
+        ...detail,
         lifecycleCommentId: current.lifecycleCommentId,
         marker: state.marker,
       };
