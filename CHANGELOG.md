@@ -3,6 +3,46 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.18] - 2026-07-28
+
+### Changed
+
+- **The task panel drops the per-unit umbrella row and gains a run row that names the phase.** The
+  umbrella carried the issue title, but it duplicated the `∞ #<N> — ` prefix its own step rows
+  already showed, doubled every unit's row count in a narrow panel, and — in-progress from
+  selection to close — never changed. It also had to be created at a moment nothing else depended
+  on, so a live run shipped `#82` with a step row and no umbrella while `#87` had both;
+  half-mirrored reads worse than not mirroring. In its place, one `∞ autoloop — <phase>` row
+  retitled at each phase change (`selecting`, `syncing base`, `parked on 2 dispatches`,
+  `draining queue`, `posting digest`). It covers the case the umbrella never did: the panel going
+  empty *between* units, which is exactly when a live run looks stopped, since no dispatch is
+  producing output either. The changing subject is the whole point — a row that reads the same
+  from start to finish asserts only that something is running.
+
+### Fixed
+
+- **A guard refusal names the command to run instead, not just the category it caught.** A live
+  session was refused for `ls -d … | xargs -n1 basename` — a plain directory listing — and the
+  advice, "use literal canonical commands, a reviewed program file, or the typed tool commands",
+  never said which literal command that was. It then ran the plain listing anyway, a round later.
+  The block itself is correct and stays: `xargs` builds commands out of data the guard cannot read.
+  What changed is that the refusal now names the remedy for the shape it actually caught — `ls -1
+  <dir>` to list, a reviewed program file to act on each entry, `awk -f <file>` for inline `awk`
+  program text. The message policy already demanded a closing sentence naming the sanctioned
+  alternative; generic prose satisfied it on shape while naming nothing, so the self-test now
+  checks that distinct shapes give distinct, concrete remedies.
+
+- **The driver already reports merge state; nothing said to stop hand-querying it.** A session lost
+  a round to `gh pr view --json merged`, which is not a field — `merged` is real in the REST
+  representation and in GraphQL, but `gh pr view --json` spells it `mergedAt`. Three surfaces, two
+  of which have it. The dev skill now says to read the driver's reconcile output, which reports
+  `phase`, `merged` and the merge commit from the same live facts it acts on, and names the gh-side
+  spellings for the cases that genuinely need them.
+
+  This is the third instance today of one disease — `ARTIFACT_IDENTITY_MISMATCH(merge)`, the
+  exit-3 merge contract, and now the guard: **a typed refusal that names only its category makes
+  the reader reverse-engineer the tool.** Every one of them cost a live session a round or an hour.
+
 ## [0.49.17] - 2026-07-28
 
 ### Fixed

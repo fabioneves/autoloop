@@ -512,14 +512,20 @@ function inlineInterpreterSource(cmd) {
   });
 }
 
+// Returns the SHAPE that fired, not just a boolean, so the refusal can name the
+// command to run instead. A refusal that names only its category makes the
+// reader reverse-engineer the guard: a live session lost a round to
+// `ls -d … | xargs -n1 basename` -- a plain listing -- because the advice
+// ("use literal canonical commands") never said which literal command that was.
 function opaqueCommandAssembler(cmd) {
-  return shellSegments(executableLexicalText(cmd)).some(({ command }) => {
+  return shellSegments(executableLexicalText(cmd)).reduce((found, { command }) => {
+    if (found !== null) return found;
     const words = shellWords(command);
     if (
       executableIndex(words, 'xargs') !== -1
       || executableIndex(words, 'parallel') !== -1
     ) {
-      return true;
+      return 'fanout';
     }
     for (const executable of ['awk', 'gawk', 'mawk', 'nawk']) {
       const index = executableIndex(words, executable);
@@ -531,11 +537,19 @@ function opaqueCommandAssembler(cmd) {
           || argument === '--file'
           || argument.startsWith('--file='),
       );
-      if (!fileBacked) return true;
+      if (!fileBacked) return 'awk';
     }
-    return false;
-  });
+    return null;
+  }, null);
 }
+
+const ASSEMBLER_REMEDY = Object.freeze({
+  fanout: '`xargs` and `parallel` build commands out of data the guard cannot read. '
+    + 'To LIST, run the plain command alone (`ls -1 <dir>`) — the output is yours to '
+    + 'read directly. To ACT on each entry, write a reviewed program file and run it.',
+  awk: 'Inline `awk` program text is source code in an argument. '
+    + 'Put the program in a file and run `awk -f <file>`.',
+});
 
 function shellSegments(cmd) {
   const segments = [];
@@ -1186,12 +1200,13 @@ export function evaluate(rawCmd, branch, options = {}) {
         + 'policy. Write the script to a file and run it, or use the typed tool commands.',
     };
   }
-  if (opaqueCommandAssembler(rawCmd)) {
+  const assembler = opaqueCommandAssembler(rawCmd);
+  if (assembler !== null) {
     return {
       block: true,
       reason:
         'autoloop guard — inline command assembly is opaque to command policy. '
-        + 'Use literal canonical commands, a reviewed program file, or the typed tool commands.',
+        + ASSEMBLER_REMEDY[assembler],
     };
   }
   if (opaqueMutationSyntax(rawCmd)) {
@@ -2066,6 +2081,27 @@ function selfTest() {
       + 'policy. Write the script to a file and run it, or use the typed tool commands.';
     if (inlineReason !== expectedInlineReason) {
       console.error('FAIL [inline-interpreter block is the exact policy message]');
+      ok = false;
+    }
+    // 2026-07-28: a live session lost a round to `ls -d … | xargs -n1 basename`
+    // -- a plain listing -- because the refusal named its category and left the
+    // reader to guess the command. Shape-shaped advice is not advice; each
+    // assembler shape must name the command to run instead.
+    messageChecks += 1;
+    const fanout = evaluate('ls -d /x/*/ | xargs -n1 basename', 'feat/gh-1-x').reason ?? '';
+    if (!fanout.includes('ls -1 <dir>') || !fanout.includes('reviewed program file')) {
+      console.error('FAIL [fanout refusal names the listing command to use instead]');
+      ok = false;
+    }
+    messageChecks += 1;
+    const awkReason = evaluate("ps aux | awk 'NR==1'", 'feat/gh-1-x').reason ?? '';
+    if (!awkReason.includes('awk -f <file>')) {
+      console.error('FAIL [inline-awk refusal names the file-backed form]');
+      ok = false;
+    }
+    messageChecks += 1;
+    if (fanout === awkReason) {
+      console.error('FAIL [distinct assembler shapes give distinct remedies]');
       ok = false;
     }
   }

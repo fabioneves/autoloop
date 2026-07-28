@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.17 · starting
+∞ dev · v0.49.18 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -425,12 +425,17 @@ into the task panel so a parked wait never looks like a stop — the panel keeps
 spinner on exactly the work that is actually in flight. Hosts without task tools skip this
 silently; it never replaces ribbons, labels, or heartbeat lines.
 
-- **One umbrella task per worked unit**, created at selection, in-progress until the closing
-  rail: subject `∞ #<N> — <issue title>`. This is the standing "the loop is alive" row; complete
-  it whatever the unit's outcome (the closing rail says shipped/blocked, the panel just closes).
+- **One run row, retitled at every phase change**: subject `∞ autoloop — <phase>`
+  (`selecting`, `syncing base`, `parked on 2 dispatches`, `draining queue`, `posting digest`),
+  in-progress for the whole run, completed at the closing rail. It exists because the panel would
+  otherwise be EMPTY in the gaps between units — prime, queue scan, base sync, digest — which is
+  exactly when a live run looks stopped, since no dispatch is producing output either. **Its
+  subject must change as the phase changes.** A row that reads the same from start to finish
+  asserts only that something is running, which is the always-green-status failure; the phase text
+  is the entire reason it earns a row.
 - **One task per step**, created in-progress when the step's ribbon prints, completed when the
-  step ends. The subject starts with the unit prefix — the SAME `∞ #<N> — ` the umbrella row
-  carries, so a unit's rows read as one visual group — then the ribbon core with the executor
+  step ends. The subject starts with the unit prefix `∞ #<N> — ` so a unit's rows read as one
+  visual group, then the ribbon core with the executor
   slot — MODEL-ONLY in task subjects: `[OPUS]`, not `[CLAUDE:OPUS]` (the panel is narrow; the
   engine still rides the ribbon and the stamped result, and a dispatch with no pinned model
   falls back to the engine name, `[CODEX]`). So: `∞ #149 — 05 IMPLEMENT [OPUS]`; `activeForm`
@@ -441,10 +446,18 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   examples are not an exhaustive list.
 - **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
   dispatch's step task is the visible activity; completing them happens at collection, in the
-  same turn that states the duration. A staged unit's steps get their own tasks under its own
-  umbrella, so two units in flight read as two spinners, not one ambiguous row.
+  same turn that states the duration. A staged unit's steps get their own tasks, so two units in
+  flight read as two spinners, not one ambiguous row, and the run row names the wait
+  (`parked on 2 dispatches`).
 - Never batch-create the whole 11-step list up front: a wall of pending steps is noise and the
   no-op steps would need deleting. Create each task when its step actually begins.
+
+There is deliberately **no per-unit umbrella row**. It carried the issue title, but it duplicated
+the `∞ #<N> — ` prefix its own step rows already showed, doubled every unit's row count in a narrow
+panel, and — being in-progress from selection to close — was itself a row that never changed. It
+also needed creating at a moment nothing else depended on, so a live run shipped `#82` with a step
+row and no umbrella while `#87` had both: half-mirrored, which reads worse than not mirroring. The
+issue title still reaches the operator at the selection ribbon and the closing rail.
 
 ## Lane and convergence policy
 
@@ -636,6 +649,15 @@ premergeRecordDraft:null}` to a bounded file and pipe it to:
 ```bash
 node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 ```
+
+**Never hand-query a unit's merge state — the driver already reports it.** Its reconcile output
+carries `phase`, `merged`, and the merge commit, reconciled from the same live facts it acts on, so
+a hand-rolled `gh` call is at best a second opinion and at worst a contradicting one. It is also
+the surface where improvisation bites: `merged` is a real field in the REST representation and in
+GraphQL, but **not** in `gh pr view --json`, whose set spells it `mergedAt` — a live session lost a
+round to `--json merged` on exactly that mismatch. When you genuinely need it raw, `mergedAt`
+(non-null means merged) and `state` are the gh-side spellings; `gh` lists every valid field when
+you get one wrong, which is what a refusal should do.
 
 **`plan.body` is the frozen artifact, byte for byte.** Once the plan comment exists, fetch its
 exact body from GitHub and use that — never a locally recomposed copy: `sha256(plan.body)` must
