@@ -10,7 +10,7 @@
 <strong>Labelled GitHub issues in. Gated, independently reviewed PRs out.</strong>
 
 <p>
-  <img alt="release v0.49.8" src="https://img.shields.io/badge/release-v0.49.8-8b5cf6?style=flat-square">
+  <img alt="release v0.49.9" src="https://img.shields.io/badge/release-v0.49.9-8b5cf6?style=flat-square">
   <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
   <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square">
   <img alt="human controlled merge" src="https://img.shields.io/badge/authority-human_merge-f59e0b?style=flat-square">
@@ -217,11 +217,11 @@ The label timeline measures each step and the run record posts the durations.
 | Step label | Actor | What happens | Evidence produced |
 |---|---|---|---|
 | `loop:01-premise` | Orchestrator | Verifies named symbols, routes, paths, tables, data shape, blockers, and reachable environments. | Proceed/defer decision and captured premises. |
-| `loop:02-plan` | Orchestrator | Defines the one-module boundary, acceptance mapping, invariants, constraints, and test plan. | Tight implementation plan. |
+| `loop:02-plan` | Fresh planner | Defines the one-module boundary, acceptance mapping, constraints, and test plan — and states each behavioral rule as a **quantified invariant** with its cases enumerated and tested. | Tight implementation plan. |
 | `loop:03-plan-review` | Independent reviewer | Adversarially tries to disprove feasibility, scope, and correctness against the full issue. | Findings, verdict, and dispositions. |
 | `loop:04-claim` | Orchestrator | Freezes the reviewed plan, creates a typed branch and claim commit, then opens a draft PR. | Recoverable branch, plan comment, `Closes #N`. |
 | `loop:05-implement` | Fresh implementer | Implements the frozen plan test-first, inside the boundary, without reviewing its own work. | Conventional implementation commit. |
-| `loop:06-simplify` | Orchestrator | Removes needless abstraction, scaffolding, dead code, duplication, and narration comments. | The final shape reviewers will actually inspect. |
+| `loop:06-simplify` | Fresh simplifier | Behavior-preserving pass over the implemented artifact, on a model that did not write it, measured against the plan's line budget. Tests must be green and untouched; a behavior change is reverted. | The final shape reviewers will actually inspect. |
 | `loop:07-diff-review` | Orchestrator | Reviews the simplified diff against the repo checklist, invariants, security, and domain rules; fixes problems. | Clean committed tree and recorded dispositions. |
 | `loop:08-code-review` | Fresh reviewer | Reviews the full diff. Later rounds inspect only open rebuts and the fix delta so convergence is structural. | Independent clean verdict on the final code. |
 | `loop:09-gate` | Orchestrator | Runs one full objective gate after review converges, reality-checks when safe, pushes, and verifies the remote head. | Gated SHA equal to the PR head. |
@@ -232,9 +232,19 @@ exact head must be green, read live from GitHub — red blocks, pending blocks, 
 with no CI has nothing to wait for. There is no committed required-check list to keep in sync
 (docs/specs/simple-delivery.md).
 
+**Rules are invariants, not examples.** A plan that describes *a* case instead of the property
+holding over *all* of them makes the unit rediscover its own rule one review round at a time —
+observed twice, at five and seven rounds. So each rule is quantified over its domain with its
+spec line cited, its cases enumerated (deliberate exclusions marked as non-behavior), each case
+given a failing-first test, and the invariant's joint failure mode named. Plan review checks that
+completeness explicitly, and during code review two consecutive findings in the same predicate
+escalate the fix from the reported instance to the whole invariant; a third is a planning failure
+that blocks rather than spending another round.
+
 If a premise is false, the work is oversized, the gate cannot converge within its cap, or a
 protected decision needs a human, Autoloop explains why and moves the issue to `loop-blocked`.
-It does not improvise a substitute requirement.
+It does not improvise a substitute requirement. At the review cap it blocks with the finding and
+round history rather than widening its own policy.
 
 Draft PRs are recoverable state. A later run can adopt a genuine orphan only after proving the
 head repository, branch convention, trusted linked issue, claim commit, and frozen plan all match
@@ -351,19 +361,34 @@ setup only; runtime never reads them. Project facts and secrets do not belong th
 
 Roles stay fixed and there is no routing decision to make.
 
-v0.49.8 dispatches every role through one call:
+v0.49.9 dispatches every role through one call:
 
 ```bash
-node tools/agentic/dispatch.mjs --role <plan-review|implement|code-review|doubt-review> \
-  --prompt-file <path> [--tools <csv>] [--output-file <path>] [--json]
+node tools/agentic/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> \
+  --prompt-file <path> [--tools <csv>] [--engine <claude|codex>] [--model <name>] \
+  [--effort <low|medium|high|xhigh|max>] [--output-file <path>] [--json]
 ```
 
 | Role | Posture | Tools | Result |
 |---|---|---|---|
+| `plan` | reviewer | `Glob,Grep,Read` | structured `{title,prBody,body}` |
 | `plan-review` | reviewer | `Glob,Grep,Read` | structured `{verdict,findings,rebuts}` |
 | `implement` | writer | `Bash,Edit,Glob,Grep,Read,Write` | the writer's terminal text |
 | `code-review` | reviewer | `Glob,Grep,Read` | structured `{verdict,findings,rebuts}` |
 | `doubt-review` | reviewer | `Glob,Grep,Read` | structured `{verdict,findings,rebuts}` |
+
+**Model and depth are per step, and the record says who actually ran.** `--model` and `--effort`
+are stamped into the typed result and the dispatch log beside the engine, so a verdict names the
+model that produced it. A second engine or a proxied model is opt-in per invocation and recorded
+once, so reviewer choice never leaks between runs. The division this repository runs:
+
+| Step | Runs on | Why |
+|---|---|---|
+| plan, plan revision | the deepest available model | the highest-leverage artifact in the unit |
+| implement, fix rounds | the writing model | volume writing against an explicit plan and failing tests |
+| simplify | **not the implementer's model** | simplifying is a reading task first, and a fresh model does not inherit the author's priors |
+| every review | a different model from the writer, at `xhigh` effort | a review round costs a dispatch either way, so depth spent there is rounds not spent later |
+| orchestration | whatever the operator's session is | every bounded step names its own model; nothing in the flow depends on the session's |
 
 The posture is the whole safety story, and it is enforced by construction: a reviewer role cannot
 name a write tool, `--tools` may narrow a posture but never widen it, and each child launches with
@@ -394,6 +419,8 @@ Autoloop spends depth where it changes the outcome and keeps every wait visible:
   cover, never who reviews it — code writer ≠ code reviewer and the full gate always apply.
 - **Delta convergence:** code review round 1 covers the complete artifact; later rounds cover only
   the fix delta and the open rebuts, so convergence is structural rather than a re-read.
+- **Simplify before review, not after:** the artifact is reduced against its planned line budget
+  before a reviewer reads it, because every extra line is surface a round can spend itself on.
 - **Two-tier gate:** an optional quick command gives inner-loop feedback; the full gate always
   runs last on the review-converged tree.
 - **Idle exit:** no actionable PRs and no eligible issues means a clean stop, not a polling loop.
@@ -405,7 +432,10 @@ There is no silent “agent is thinking” state:
 - step labels form a GitHub-native timeline and drive per-step duration telemetry;
 - Claude's task UI mirrors one unit as a task renamed through the pipeline; hosts without task
   tools skip the mirror;
-- background waits emit heartbeats and an aging task row;
+- background waits emit heartbeats and an aging task row, and every step ribbon carries its wall
+  clock while durations come from the dispatch's own measured time;
+- a background dispatch is watchable live: its task view streams the engine's own events —
+  reasoning ticks, tool calls, output text — rendered from the live log rather than raw JSON;
 - terminal outcomes push a notification when the host exposes that surface and park safely on the
   base branch;
 - every active run ends with one scoreboard and digest, including delivered PRs, elapsed time,
@@ -509,7 +539,7 @@ are the maintainer's responsibility; the release gate does not read or verify th
 configuration.
 
 Configured repositories record their scaffold contract version in the JSON block inside
-`docs/agentic/STATE.md`. v0.49.8 uses schema `0.26.0`. Breaking config-shape changes bump the minor
+`docs/agentic/STATE.md`. v0.49.9 uses schema `0.26.0`. Breaking config-shape changes bump the minor
 version while the project is `0.x`; re-running setup audits and migrates the repository-owned layer
 through a visible diff and, when policy is involved, a human-reviewed and human-merged policy PR.
 
