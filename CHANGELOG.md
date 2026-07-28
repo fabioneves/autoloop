@@ -3,6 +3,24 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.17] - 2026-07-28
+
+### Fixed
+
+- **The merge outcome is readable without the idiom the guard forbids.** Setup documented its
+  merge outcome as "exit 3", and the guard blocks `$?` as an active shell expansion — correctly,
+  since it cannot judge a command whose text depends on state it cannot read. So every setup ran
+  the documented command, lost a round to a refusal, and then read the report anyway. The contract
+  was never exit-only: `mergeMain` returns `report.ok ? 0 : 3`, so the same fact sits in the report
+  beside the `ambiguities` list that says what to fix. Nothing pointed at it, and the default mode
+  splits the report to stderr and the document to stdout, which is what makes the outcome look
+  unreachable once stdout is redirected. A tool contract expressed only as an exit code, under a
+  guard that forbids reading exit codes, is a defect in the pair rather than in either half.
+- **Shipped as its own version, because the cache is keyed by one.** The fix above merged to `main`
+  without a version bump, leaving `main` claiming `0.49.16` while the `v0.49.16` tag pointed at an
+  earlier commit — and since the plugin cache is keyed by version, a reinstall would have reused
+  the stale build and silently delivered none of it.
+
 ## [0.49.16] - 2026-07-28
 
 ### Changed
