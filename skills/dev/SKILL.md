@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.18 · starting
+∞ dev · v0.49.19 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -510,9 +510,15 @@ Reconcile trusted markers, never duplicate them.
 Maintenance issues are selected only after product work. File at most one open
 `loop-maintenance` issue per target when:
 
-- STATE Lessons exceeds 3000 bytes: compact only Lessons, keeping rules rather than stories.
+- `docs/agentic/LESSONS.md` exceeds 6000 bytes: delete every lesson a guard rule, contract, or
+  hook now enforces — the mechanism is the memory — and keep the rest rule-first, evidence-second.
+  It is budgeted tighter than ARCH because it is meant to SHRINK: each lesson that becomes a
+  mechanism leaves.
 - ARCH exceeds 8000 bytes: re-curate the map without imperative policy, shared freshness lines,
   restated counts, or width-aligned tables.
+
+Both budgets are enforced by `scaffold.mjs --reconcile`/`--audit`, which names the file, its size,
+and the curation rule in its warnings. Don't re-measure by hand — read the battery.
 
 Maintenance uses the full workflow. STATE is protected; ARCH remains ordinary map data.
 

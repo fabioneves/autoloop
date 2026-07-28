@@ -160,6 +160,23 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'lessons-budget-orphaned-by-its-own-migration',
+    date: '2026-07-28',
+    symptom: 'LESSONS.md reached 8010 bytes with nothing reporting it, while '
+      + 'ARCH had a working budget.',
+    cause: 'The lessons budget was dev-skill prose naming "STATE Lessons" — a '
+      + 'section the v0.49.14 diet had moved into its own file — so it pointed '
+      + 'at nothing and silently never fired. A migration retargeted the '
+      + 'document and left its maintenance rule behind.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'scaffold.mjs', anchor: 'const CURATED_DOCUMENTS' }),
+      Object.freeze({
+        file: 'scaffold.mjs',
+        anchor: 'a curated document over its budget is reported with the curation rule',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'state-sections-never-migrated',
     date: '2026-07-27',
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '
