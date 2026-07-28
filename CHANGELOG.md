@@ -5,6 +5,18 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [0.49.30] - 2026-07-28
 
+### Added
+
+- **A clean sweep is celebrated, and only a clean sweep.** A unit reaching `delivered` earns a `🎉`
+  on its SHIPPED rail, and a run whose every unit shipped — nothing blocked, deferred, or waiting
+  on a human — closes with a flourish instead of the plain rail. One blocked unit and the run gets
+  the plain form with `🏁`, no confetti and no stars: a run that ends with a human gated out is not
+  a clean sweep, and saying so beside a celebration would teach the reader to skim both. This is
+  the `⚠️`-on-every-review lesson applied before the mark exists rather than after it stops being
+  read. The run's close now bookends the `┏━━ ∞ RUN OPEN` frame in the same open-right shape, so a
+  scrollback shows both ends of a run at a glance — ragged-right and padded by nothing, so no
+  terminal can misalign it.
+
 ### Fixed
 
 - **Completed panel rows read newest-first.** The panel groups by status and orders within a group

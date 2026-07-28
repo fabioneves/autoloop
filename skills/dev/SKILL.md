@@ -1444,7 +1444,10 @@ clock without a unit, for the same reason. Everything else keeps the full `[HH:M
 
 The wait pair reads as a pair: **🅿️ parked** when the turn ends on a wait,
 **▶️ resumed** when what it waited for fires, **💤 idle** on the line that reports a run with
-nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself.
+nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself — swapped
+for **🎉** only on a clean sweep, where every unit shipped and none blocked, deferred or wanted a
+human. `🎉` also rides a unit's SHIPPED rail. Those two places are its whole domain: it marks the
+loop completing the thing it exists to do, never a step completing the job it was given.
 
 The prefix time is the START time; end and duration belong to the lines that already mark
 completion, never to a re-printed ribbon:
@@ -1502,7 +1505,7 @@ span is the whole mechanism — asking for a yellow model name is asking the hos
 End a unit with one closing rail:
 
 ```text
-[16:12][#78] ✅ ∞ ══ SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ══
+[16:12][#78] ✅ ∞ ══ SHIPPED 🎉 ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ══
 ```
 
 or:
@@ -1511,6 +1514,12 @@ or:
 [16:12][#78] ❌ ∞ ══ BLOCKED ─ <safe composed reason> ══
 ```
 
+The `🎉` rides the SHIPPED rail and nowhere else — not on a step, not on a round, not on a blocked
+unit. A unit reaching `delivered` is the loop doing the whole thing it exists to do, which is worth
+one mark; a step finishing is the loop doing its job, which is not. Confetti on every completion
+is the `⚠️`-on-every-review failure wearing a party hat: fire it when nothing is special and it
+stops being read on the run where something is.
+
 **A unit's closing rail is not the run's.** Blocking, deferring, or carving a unit ends THAT unit;
 the run then invalidates the affected queue sections, re-primes, and takes the next eligible unit
 without asking. The run closes on exactly three conditions: the queue is drained of eligible work,
@@ -1518,6 +1527,36 @@ a configured bound is reached, or the context needs handing off. "One unit neede
 never one of them — a human-gated unit is a row in the digest, not a reason to stop working.
 When the last eligible unit is gone, print the idle line
 (`[HH:MM] 💤 ∞ idle ─ no eligible units`) and close cleanly rather than polling.
+
+The run's own close bookends the `┏━━ ∞ RUN OPEN` frame it started with — same open-right block,
+same titled rule with the clock, so a scrollback shows the run's two ends in one shape:
+
+```text
+┏━━ ∞ RUN COMPLETE · 21:14 ━━━━━━━━━━━━━━━━━━━━
+┃  🏁 4 shipped · 0 blocked · 0 deferred
+┃  ⏱ 6h12m · 11 dispatches · 2h41m overlapped
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**A clean sweep — every unit shipped, nothing blocked, deferred or left for a human — earns the
+flourish.** Nothing else does:
+
+```text
+┏━━ ∞ RUN COMPLETE · 21:14 ━━━━━━━━━━━━━━━━━━━━
+┃  🎉 4 shipped · 0 blocked · 0 deferred
+┃  ⏱ 6h12m · 11 dispatches · 2h41m overlapped
+┃
+┃      · ˚ ✦ .    ∞    . ✦ ˚ ·
+┃     a l l   u n i t s   g r e e n
+┃      · ˚ ✦ .    ∞    . ✦ ˚ ·
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+One blocked unit and it is the plain form — no confetti, no stars, `🏁` instead of `🎉`. That is
+the whole point: a run that ends with a human gated out is not a clean sweep, and saying so in the
+same breath as a celebration would teach the reader to skim both. The flourish is ragged-right and
+padded by nothing, so no terminal can misalign it, and the glyphs are plain ASCII beside two
+non-variation-selector emoji — the width lesson the parked header paid for twice.
 
 Close the run with the badge matching its outcome — ✅ when something shipped and nothing
 blocked, ❌ when anything blocked:
