@@ -275,7 +275,11 @@ When taking a PR, print a composed banner beside the `loop:revising` mutation:
 ╰──────────────────────────────────────────────────╯
 ```
 
-Print one badged ribbon line per step (⏳ in progress · ✅ complete · ❌ blocked · ⚠️ needs a human) — `▰` done-or-current, `▱` remaining, always eight cells:
+Print one badged ribbon line per step (⏳ in progress · ✅ complete · 🚧 findings to work through ·
+❌ blocked · ⚠️ needs a human) — `▰` done-or-current, `▱` remaining, always eight cells. Pitcrew
+exists to work findings, so `🚧` is its ordinary state and `⚠️` stays reserved for the moment a
+human genuinely has to decide something; badging routine repair as a warning trains the reader to
+ignore the one line that matters:
 
 ```text
 [14:07][#<N>] ⏳ ∞ ▰▰▰▱▱▱▱▱ 03/8 🔨 IMPLEMENT ─ PR #<P> · <actor>

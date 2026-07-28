@@ -1201,8 +1201,22 @@ reading any words:
 |---|---|
 | ⏳ | in progress |
 | ✅ | terminal success — shipped, converged, complete |
+| 🚧 | findings to work through — a review returned `fail`, and the loop fixes them itself |
 | ❌ | blocked — a guardrail refused or the unit failed |
-| ⚠️ | needs a human — an open Major, a human-block path, a decision |
+| ⚠️ | needs a human — a human-block path, a decision, a Major the loop may not dispose |
+
+**`⚠️` means STOP AND ASK, and nothing else.** A failing review with Majors on it is not that: the
+loop dispositions every finding and fixes them in its own rounds, without a human touching
+anything. Badging that work `⚠️` cried for help four times a unit on a run that needed no help at
+all, and a badge that fires when nothing is wanted stops being read on the run where something is
+— the reader has been trained that it means "carry on". `🚧` is the honest state: work in the road,
+the crew is on it, no one needs to be called. The moment a finding genuinely cannot be disposed
+without a human, the badge flips to `⚠️` and it means what it says.
+
+Badges are ordered, and a line takes the most specific one that applies: `⚠️` over `❌` over `🚧`
+over `⏳`. So a first review round announces `⏳` because nothing is known yet, and every round
+that carries open findings — the review that found them and the fix round working them — announces
+`🚧`. Two badges for one line is the ambiguity this table exists to remove.
 
 After prime succeeds, open the run frame. It is the outermost thing in the session and prints
 **exactly once**, so it is the one place drawn art earns its width — every unit banner and ribbon
@@ -1310,8 +1324,8 @@ configured cap, which is what makes an approaching cap visible before it blocks.
 never disappears: one format for every line in the run, whatever it counts.
 
 ```text
-[15:02][#78] ⏳ ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
-[15:19][#78] ⏳ ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
+[15:02][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 2 Major open
+[15:19][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE:OPUS] ─ 2 Major · invariant-scoped
 [15:26][#78] ✅ ∞ ▰▰▰▱▱ 08/11 🔍 CODE-REVIEW r3/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · clean · converged
 ```
 
@@ -1330,7 +1344,7 @@ line says it:
 [14:03][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [CLAUDE:FABLE] ─ full · fresh planner
 [14:19][#78] ⏳ ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
 [14:11][#87] ⏳ ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
-[15:02][#78] ⚠️ ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
+[15:02][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
 ```
 
 Two units in flight read as two prefixes, which is the point.
