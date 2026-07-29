@@ -31,6 +31,11 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Added
 
+- **The dispatch result's payload field is documented per role.** The skill named `.plan.body` once
+  and never said where a verdict or a writer's text lands, so a live run spent three calls probing
+  `jq -r '.text // .result // .finalMessage'` for a review result that was under `.verdict` — a
+  guess sequence that cannot succeed, since none of those names exists on a verdict. There are
+  exactly three payload fields, one per role shape: `.plan`, `.verdict`, `.text`.
 - **Shaping predictions and unit outcomes are recorded as typed markers.** Shape ends every issue
   body with `<!-- autoloop-shape-v1 {"cases":…,"invariants":…} -->` and the loop ends every run
   record with `<!-- autoloop-outcome-v1 {"issue":…,"codeRounds":…,"escalated":…} -->`. Neither adds

@@ -316,6 +316,20 @@ reviewer's job is to find the case the author did not consider.
   retries and no fallback engine: a failed dispatch is a decision for the orchestrator.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
+- **The payload field is named by the role, and there are exactly three.** A success is
+  `{ok:true, role, tools, startupMs, ms, <payload>}` where `<payload>` is:
+
+  | role | field | shape |
+  |---|---|---|
+  | `plan` | `.plan` | `{title, prBody, body}` |
+  | `plan-review`, `code-review`, `doubt-review` | `.verdict` | `{verdict, findings, rebuts}` |
+  | `implement` | `.text` | the writer's final message |
+
+  Stated because a live run spent three calls probing `jq -r '.text // .result // .finalMessage'`
+  for a review result that was under `.verdict` all along — a guess sequence that never reaches the
+  answer, since none of those three names exists on a verdict. Project the field, never the whole
+  object: `jq '{ok, ms}' <result.json>` and `jq -r .verdict.verdict <result.json>` cost bytes; a
+  bare `cat` of a plan result costs 48 KB you are forbidden to retype anyway.
 - `--model <name>` pins the engine's model for one dispatch, and is stamped into the typed result
   and the dispatch log so the record says who actually judged or wrote. **Model names are ENGINE
   vocabulary**: `opus`, `fable`, `sonnet` are claude-engine aliases and mean nothing to codex,
