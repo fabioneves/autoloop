@@ -15,35 +15,50 @@ lines are countable the work is done and blocking spends a human decision to lea
 oversized unit filed here is not caught later — it is simply reviewed at a size where cross-model
 review thins out silently.
 
-**Aim at 300 production lines. The caps are a CEILING, and a ceiling is an attractor.** Under a
-700-line cap, units reliably landed at 800–1000 — work expands toward whatever number it is
-measured against and then overshoots it. Raising the cap to 1000 therefore does not buy headroom;
-it moves the overshoot. A unit that lands near `sliceMaxLines` is not a well-sized unit that
-happened to fit, it is a unit that will take hours and several review rounds.
+### The size metric is CASES, not lines
 
-So the target is stated as its own number rather than derived from the cap: a cap raised for an
-unrelated reason (a verbose language, a generated file) must not drag the target up with it.
-**Overshooting 300 is fine** — landing at 400 or 500 is a good unit. Landing at 900 means the split
-was never made. Measured evidence from two live runs, both of which shipped nothing:
+**One unit = one invariant whose complete case enumeration fits in about five cases.** That is the
+measure. Write the list while shaping; if you cannot finish it, the unit is wrong — not too big,
+*wrong*, because an invariant whose cases cannot be enumerated cannot be tested or reviewed either.
 
-- A unit at 858 production lines across 14 files — comfortably inside a 1000/20 cap — spent 4 of 6
-  review rounds and blocked on **one** predicate that three separate fixes each failed to close,
-  because the plan enumerated stored *states* rather than the unbounded stored *encoding domain*.
-- A unit whose own run concluded it should have been split: "the vendoring half converged cleanly
-  and is what unblocks three queued issues; the extractor half did not."
+Cases beat every other candidate on the axes that matter here:
 
-Both blocked on the same-predicate escalation, which is the loop noticing that a unit carries an
-invariant too large to enumerate. That is a SHAPING failure surfacing three hours late, and it is
-the failure this rule exists to prevent.
+- **Checkable when it matters.** Lines are countable only after the work is done — this skill says
+  so itself, two paragraphs down. A case list is written from the issue text, before anything is
+  filed.
+- **Causal, not correlated.** Cases drive tests, tests drive the diff, and the diff drives review
+  rounds. Line count is a downstream shadow of the case count.
+- **Language-neutral.** 300 lines of Go and 300 lines of PHP are different amounts of behavior; five
+  cases are five cases.
+- **Not gameable in the harmful direction.** Splitting to hit a line budget produces halves that
+  need each other; hiding cases is already a plan-level Major, since the reviewer checks enumeration
+  completeness.
+- **Free.** The plan must enumerate cases per invariant anyway. Shape is demanding upfront what the
+  plan already owes.
 
-**The real unit of size is the invariant, not the line count.** Prefer one hard invariant per unit.
-A unit stating two or more independent invariants gets two or more independent chances to trip
-escalation, and its plan must enumerate every case of each — the cost is multiplicative, not
-additive. Two signals that a unit must be split, both taken from the runs above:
+Both blocked runs are explained by this and by nothing else. `#123` was 858 lines and blocked on
+**one** predicate whose domain was the unbounded set of stored *encodings* — unenumerable, so three
+successive fixes each closed a case and admitted another. A 200-line unit with that invariant fails
+identically, which is exactly why the line budget would not have saved it. `#219` was not too
+voluminous either; it was two units, and the half with the enumerable case list converged cleanly.
 
-- its acceptance criteria contain an independently shippable half (vendoring vs extractor);
-- an invariant quantifies over an open-ended domain ("every stored encoding") rather than an
-  enumerable one ("these four states").
+**Lines are a tripwire, not a target.** Keep ~300 production lines as a smoke signal: a higher
+estimate means *go count your cases*, not *cut lines*. The tripwire is stated as its own number
+rather than derived from `sliceMaxLines`, because a cap raised for an unrelated reason — a verbose
+language, a generated file — must not drag it up. And the cap is an attractor: under a 700-line cap
+units reliably landed at 800–1000, so raising the cap to 1000 moves the overshoot rather than
+buying headroom.
+
+Both blocked on the same-predicate escalation — the loop noticing an invariant too large to
+enumerate. That is a SHAPING failure surfacing three hours late, and it is the failure this rule
+exists to prevent.
+
+**Three signals, any one of which means SPLIT:**
+
+- the case list for one invariant runs past about five, or cannot be finished at all;
+- the unit states more than one hard invariant — each is an independent chance to trip escalation,
+  and each needs its own complete enumeration, so the cost is multiplicative rather than additive;
+- the acceptance criteria contain an independently shippable half (vendoring vs extractor).
 
 Split at the invariant boundary and chain with `## Blocked by`. A unit small enough that a reviewer
 holds its whole diff at once is the goal; if a slice reads as trivially small, that is the correct
@@ -117,11 +132,11 @@ Grade an existing issue the way `autoloop:dev` step 1 will:
   miss). Data premises: is the verifying read-only query stated?
 - **Acceptance**: each criterion objectively verifiable? Flag vibes ("improve", "clean up",
   "better") and propose testable rewrites.
-- **Scope**: single module? Estimated size against the **300-line target**, not against the caps —
-  and how many hard invariants does it carry? More than one, an independently shippable half, or an
-  invariant quantified over an open-ended domain all mean SPLIT, whatever the line estimate says.
+- **Size**: list the cases the unit's invariant must prove. Past ~5, unfinishable, more than one
+  hard invariant, or an independently shippable half — SPLIT, whatever the line estimate says.
   Propose the split concretely (per-invariant slices + dependency order), never as advice to
-  "consider splitting".
+  "consider splitting". The ~300-line tripwire is a smoke signal that sends you to the case list,
+  never a criterion on its own.
 - **Hard-defer smells**: hidden new dependency, secret/env need, production data write — surface
   them so the maintainer routes them consciously.
 - **Structure**: `## Blocked by` present/correct; Out of scope stated; title composable into a
