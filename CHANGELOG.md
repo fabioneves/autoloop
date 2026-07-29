@@ -3,6 +3,29 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.41] - 2026-07-29
+
+### Fixed
+
+- **Step 1 states the label mutation that everything downstream swaps.** A live run reached step 2 on
+  both a worked and a staged unit with the issues still showing only `loop-ready` — an in-progress
+  unit indistinguishable on GitHub from an untouched queued one, and `stats.mjs`, which derives every
+  cross-unit step timing from the label timeline, with no events to derive from. Missing labels and
+  missing times were one defect, not two. The cause was a dangling reference: step 1 said to print
+  the unit banner "beside the first lifecycle/label mutation" and never said what that mutation was.
+  Every later step says "Move to `loop:0N`" — a swap presuming the pair exists — and blocking
+  "removes `loop-started` and the `loop:*` step label", presuming the same. The labels existed in the
+  repository and `label-swap-reminder.mjs` carried the exact command in a fixture; only the
+  instruction to run it was missing, so nothing ran it and every later swap had nothing to move. Step
+  1 now names it: `gh issue edit <N> --add-label loop-started,loop:01-premise`. The staged unit stays
+  the deliberate exception — overlap keeps label mutations serialized to the worked unit, so a unit
+  staged through read-only steps 1–3 carries no labels and receives `loop-started` with
+  `loop:04-claim` directly at claim (verified: `lifecycle-driver.mjs`'s `ensureLocalClaim` filters
+  every `loop:*` label, adds `loop-started` when absent, and replaces the whole set, so that path
+  cannot fail on a missing prior step label). Its 01–03 timings are absent from `stats.mjs` by
+  design — the price of staging ahead, not a gap to close by labelling a unit that may still be
+  abandoned.
+
 ## [0.49.40] - 2026-07-29
 
 ### Changed
