@@ -1,6 +1,6 @@
 ---
 name: shape
-description: Turn a feature description, spec/ADR, or brain-dump into PR-sized, loop-ready-candidate GitHub issues — or lint an existing issue against the loop's standards (shape lint #N). Interviews the human when underspecified, verifies premises against the code before filing, sizes units against STATE caps, writes acceptance criteria as testable assertions, chains dependencies via "Blocked by", and files issues UNLABELLED — applying loop-ready stays the maintainer's trust act. An interactive human-run skill; the loop never invokes it.
+description: Turn a feature description, spec/ADR, or brain-dump into PR-sized, loop-ready-candidate GitHub issues — or lint an existing issue against the loop's standards (shape lint #N). Interviews the human when underspecified, verifies premises against the code before filing, sizes units against STATE caps, writes acceptance criteria as testable assertions, maps every source clause onto a unit before filing, chains dependencies via "Blocked by" derived from what each unit reads, and files issues UNLABELLED — applying loop-ready stays the maintainer's trust act. An interactive human-run skill; the loop never invokes it.
 ---
 
 # autoloop:shape — spec in, PR-sized issues out
@@ -99,6 +99,13 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    no hard-defer inside (a needed new dependency or secret becomes its own explicitly-flagged
    human task, never buried in a unit). Order units by dependency; express ordering as
    `## Blocked by` links, not prose.
+
+   **Derive every edge from what a unit READS, never from the order you wrote the units in.** List
+   the symbols, fields and files each unit's acceptance criteria need to already exist, and point
+   the edge at whoever creates each one — including a unit in a different chain. Edges set by
+   narrative order ("second slice of X, so it follows the first") were wrong 4 times out of 20 in
+   one live reshape, and the miss that mattered was a sort-key field defined by another chain's
+   unit — invisible precisely because the author was thinking in slice order rather than in reads.
 3. **Verify premises before filing.** Grep the code for every symbol / route / path / table a unit
    names; bake the found `file:line` references into the issue's Evidence section. A premise you
    couldn't verify is stated as an open question in the issue — never as fact. For data premises,
@@ -134,9 +141,42 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    looks like data. It refuses a record it cannot validate rather than emitting a broken one. Write
    it even when the estimate is uncertain: a recorded guess that turns out wrong is the data point
    that improves the rule, while an omitted one is silence.
-5. **Review with the human, then file.** Show the full set (titles + one-line summaries + the
-   dependency graph) before creating anything. On approval, file via `gh issue create
-   --body-file <scratchpad>/…` (bodies via scratch files outside the repo — never inline `--body`).
+5. **Map every source clause onto a unit.** Everything above checks a unit against the code (step
+   3) and against the sizing rule (step 2). Nothing yet checks the units against the SOURCE, so a
+   requirement the split dropped is invisible to all of it — and to every later phase, since the
+   loop only ever sees the units. Enumerate every clause of what you sliced — each bullet of the
+   source's acceptance criteria, each numbered requirement, each sentence the spec marks normative
+   — and give each exactly one verdict:
+
+   - **claimed by unit N** — that unit's acceptance criteria assert it, not merely touch its area;
+   - **deferred to `<named home>`** — a spec task ID, or an issue you file in this same batch.
+     "A later unit", "the other chain" and "a follow-up" are not homes;
+   - **out of scope because `<reason>`**.
+
+   A clause with no verdict is a shaping defect, not a documentation gap. Live evidence from a
+   9-issue → 21-unit reshape where every check above passed: a forward-only same-tick data-flow
+   rule the spec marked *normative* appeared in none of the source issue's own six criteria and so
+   survived into none of its five units; an inter-stage PRNG draw-ORDER clause was read as covered
+   by a unit asserting draw ATTRIBUTION, which does not imply it; and a whole-match checksum clause
+   was deferred to units that neither assert it nor can.
+
+   **Then check the failure splitting CREATES.** For each property a unit asserts, ask whether a
+   LATER sibling changes the state that property ranges over. If one does, the property silently
+   stops being checked while every unit's tests still pass — so no test failure can ever surface
+   it. Fix it in the sibling that invalidates it, by restating THAT unit's invariant with its
+   complement ("exactly these five are cadence-gated; the other eight still run every tick") — the
+   same invariant stated with its boundary, not a second one, so the sizing rule is untouched. Only
+   when no single sibling is last — two siblings each invalidating, neither ordered after the
+   other — does the re-assertion need a unit of its own, `## Blocked by` all of them. Observed: one
+   unit proved all 16 scheduler stages run every tick, two later siblings gated five stage
+   families, and nothing re-asserted the other eight; a regression gating a sixth passes the entire
+   set.
+
+6. **Review with the human, then file.** Show the full set (titles + one-line summaries + the
+   dependency graph + the clause → unit table) before creating anything. The table is what makes
+   coverage reviewable — a unit list can only show what IS there. On approval, file via
+   `gh issue create --body-file <scratchpad>/…` (bodies via scratch files outside the repo — never
+   inline `--body`).
    File **unlabelled**, and close by explaining WHY in one line (the loop only builds issues a
    maintainer labelled — labeling is your trust act, so shape never does it) plus the ready-to-run
    commands for the human, one per filed issue:
@@ -154,6 +194,14 @@ Grade an existing issue the way `autoloop:dev` step 1 will:
   miss). Data premises: is the verifying read-only query stated?
 - **Acceptance**: each criterion objectively verifiable? Flag vibes ("improve", "clean up",
   "better") and propose testable rewrites.
+- **Coverage**: does the issue carry every clause of the spec section it cites? Read that section
+  and check its clauses against the acceptance criteria one by one — a criterion covering the
+  clause's *area* is not the clause. A silently dropped clause is a defect in the issue, and it is
+  cheapest to catch here: the forward-only miss above was already in the original issue, so lint
+  would have caught it before any split existed to hide it. If the issue is one slice of a split,
+  the clause may belong to a sibling — name the sibling, or report the clause unowned. (This is a
+  different question from `autoloop:queue-trace`, which asks whether a spec task HAS an issue; this
+  asks whether the issue carries the task.)
 - **Size**: list the cases the unit's invariant must prove. Past ~5, unfinishable, more than one
   hard invariant, or an independently shippable half — SPLIT, whatever the line estimate says.
   Propose the split concretely (per-invariant slices + dependency order), never as advice to
@@ -161,7 +209,8 @@ Grade an existing issue the way `autoloop:dev` step 1 will:
   never a criterion on its own.
 - **Hard-defer smells**: hidden new dependency, secret/env need, production data write — surface
   them so the maintainer routes them consciously.
-- **Structure**: `## Blocked by` present/correct; Out of scope stated; title composable into a
+- **Structure**: `## Blocked by` present, and each edge justified by something this issue READS
+  that another issue creates — never by slice order; Out of scope stated; title composable into a
   branch slug.
 
 Output: a PASS / gaps report, then a proposed rewritten body. Offer to apply it via `gh issue edit

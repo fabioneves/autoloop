@@ -3,6 +3,62 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.36] - 2026-07-29
+
+### Added
+
+- **Shaping maps every source clause onto a unit before filing.** A live 9-issue → 21-unit reshape
+  passed every check the skill had — premises verified, acceptance criteria testable, cases
+  enumerated — and still left three normative clauses belonging to no unit. Nothing mapped the
+  SOURCE onto the result, so a dropped requirement was invisible to all of them and to every later
+  phase, since the loop only ever sees the units. A new step 5 enumerates each clause of what was
+  sliced and gives it exactly one verdict: claimed by unit N, deferred to a NAMED home (a task ID
+  or an issue filed in the same batch — "a later unit" is not a home), or out of scope with a
+  reason. A clause with no verdict is a shaping defect, not a documentation gap. The table is shown
+  to the human beside the unit list, which can only ever show what IS there.
+- **Shaping checks the failure that splitting creates.** One unit proved all 16 scheduler stages run
+  every tick; two later siblings gated five stage families; nothing re-asserted the other eight, and
+  every unit's tests still passed — so a regression gating a sixth family passes the whole set. This
+  class is invisible from any single unit. Each asserted property is now checked against later
+  siblings that change the state it ranges over, and the fix goes in the sibling that invalidates
+  it, by restating THAT unit's invariant with its complement ("exactly these five are gated; the
+  other eight still run every tick") — the same invariant with its boundary, not a second one, so
+  the sizing rule is untouched. Only when no single sibling is last does the re-assertion need a
+  unit of its own.
+- **Mode 2 lint gains a Coverage check** beside Premise, Acceptance and Size: does the issue carry
+  every clause of the spec section it cites? A criterion covering the clause's *area* is not the
+  clause. The forward-only miss above was already present in the original issue, so lint would have
+  caught it before any split existed to hide it.
+
+### Fixed
+
+- **Dependency edges are derived from what a unit READS, never from the order the units were
+  written in.** Setting `## Blocked by` by slice order ("second slice of X, so it follows the
+  first") produced 4 wrong edges out of 20 in one reshape, and the miss that mattered was a sort-key
+  field defined by another chain's unit — lost precisely because the author was thinking in
+  narrative order. Stated where `## Blocked by` is introduced, and lint's Structure check now asks
+  for the read that justifies each edge rather than grading it "present/correct".
+- **A command-substitution refusal answers a reader who is navigating, not only one who is
+  measuring.** Both spellings the remedy offered — `wc -l` and `git diff --shortstat` — are
+  measurements, so a session wanting one method body (grep the signature, feed its line number to
+  `sed -n`) was again left with nowhere to go. Locating a definition and reading around it is the
+  commonest reason to reach for a substitution at all, and unlike a measurement it has an exact
+  one-command answer, so it is named first: `rg -n -A<lines> <pattern> <file>` prints the match and
+  what follows in one pass, and the host file-reading tool takes an offset directly. Verified that
+  the guard accepts every command the message now recommends — advice the guard would itself refuse
+  is the same defect one layer down.
+- **The documented label-provenance check reads a paginated timeline correctly.** The REST timeline
+  paginates at 30 and orders oldest-first, so `| last` returned the newest labelling **on page one**.
+  On a live issue with 11 comments plus label, cross-reference and rename events, the documented
+  command returned a labelling from the previous day while the real one was 90 seconds old — making
+  a correctly-labelled issue look like one whose body was edited after approval. The command now
+  passes `per_page=100` and selects with `max_by(.created_at)`, which does not depend on page
+  ordering and gives the same answer on a short timeline; the prose states that 100 is a cap rather
+  than a guarantee. This is the MANUAL check only — `scan.mjs` already paginates the GraphQL
+  timeline connection and marks a truncated read incomplete, so discovery was never affected. It
+  failed closed (a stale, older timestamp only ever refuses valid work), so it is a debugging trap
+  and a false negative, not a trust hole.
+
 ## [0.49.35] - 2026-07-29
 
 ### Fixed
