@@ -476,6 +476,7 @@ function inlineInterpreterSource(cmd) {
   ]);
   return shellSegments(executableLexicalText(cmd)).some(({ command }) => {
     const words = shellWords(command);
+    if (isLookupSegment(words)) return false;
     const shellSource = words.findIndex((word) =>
       word === 'source' || word === '.');
     if (
@@ -535,6 +536,7 @@ function opaqueCommandAssembler(cmd) {
   return shellSegments(executableLexicalText(cmd)).reduce((found, { command }) => {
     if (found !== null) return found;
     const words = shellWords(command);
+    if (isLookupSegment(words)) return found;
     // Positional for the same reason as inlineInterpreterSource: an assembler
     // NAME in argument position is data (`git log --grep xargs`), not a fan-out.
     const invokes = (executable) => {
@@ -751,6 +753,21 @@ const EXEC_FORWARDING_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 function invokedAt(words, index) {
   return inExecutablePosition(words, index)
     || EXEC_FORWARDING_FLAGS.has(words[index - 1]);
+}
+
+// `command -v php` ASKS WHERE php IS. It does not run it — that is the entire
+// difference `-v`/`-V` make to the builtin. But `command` is a passthrough
+// wrapper, so without this the name behind it reads as an invocation with no
+// script argument, which is the stdin shape, and a discoverability probe gets
+// refused as inline interpreter source. A live setup lost a round to
+// `command -v php` while checking whether its configured gate still resolves —
+// the check this plugin's own setup skill asks for. `which php` and
+// `type -p python3` were never affected: neither is a wrapper, so the name
+// after them was already in argument position.
+function isLookupSegment(words) {
+  const index = executableIndex(words, 'command');
+  if (index === -1 || !inExecutablePosition(words, index)) return false;
+  return words.slice(index + 1).some((word) => /^-[A-Za-z]*[vV][A-Za-z]*$/u.test(word));
 }
 
 function inExecutablePosition(words, position) {
@@ -1871,6 +1888,18 @@ function selfTest() {
     ['sudo node -e "x"', 'feat/gh-1-x', true],
     ['echo data | node', 'feat/gh-1-x', true],
     ['env node', 'feat/gh-1-x', true],
+    // 2026-07-29: `command -v php` ASKS WHERE php is; `-v` is the whole
+    // difference. A live setup lost a round to it while checking that its
+    // configured gate still resolves — the probe this plugin's setup skill
+    // asks for. `command` without `-v` still launders nothing.
+    ['command -v php', 'feat/gh-1-x', false],
+    ['command -v node', 'feat/gh-1-x', false],
+    ['command -v awk', 'feat/gh-1-x', false],
+    ['ls -d .ddev >/dev/null 2>&1 && echo present; command -v php', 'feat/gh-1-x', false],
+    ['which php', 'feat/gh-1-x', false],
+    ['type -p python3', 'feat/gh-1-x', false],
+    ['command php -r "x"', 'feat/gh-1-x', true],
+    ['command node', 'feat/gh-1-x', true],
     // A passthrough wrapper must not launder the word behind it.
     ['time xargs -n1 gh', 'feat/gh-1-x', true],
     ['exec node -e "x"', 'feat/gh-1-x', true],

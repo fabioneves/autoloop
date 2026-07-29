@@ -63,6 +63,13 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **`command -v <interpreter>` is a lookup, not an invocation.** A live setup lost a round to
+  `command -v php` while checking whether its configured gate still resolves — the discoverability
+  probe this plugin's own setup skill asks for, refused as inline interpreter source. `command` is
+  a passthrough wrapper, so the name behind it read as an invocation with no script argument, which
+  is the stdin shape; `-v`/`-V` are the whole difference, and they run nothing. `which php` and
+  `type -p python3` were never affected, since neither is a wrapper. `command php -r …` still
+  blocks: the wrapper launders nothing without the lookup flag.
 - **A rebased claim branch can no longer wedge a merged unit.** `#149` shipped and PR `#238` merged,
   but its terminal backfill was refused `ARTIFACT_IDENTITY_MISMATCH(local-claim)` on every attempt,
   leaving a permanent `draft-pr` marker on a closed unit. The branch had been rebased after the
