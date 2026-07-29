@@ -7,6 +7,14 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **The completed-step stamp names the call that carries it.** A live panel showed
+  `✔ ∞ #220 — 08 FIX r3/7 [OPUS]` with no `[elapsed] [HH:MM]`, with `step-subject.mjs` available and
+  the rule followed right up to the last step. That step is where it is lost: completing a task is
+  `status: "completed"`, the subject is a SEPARATE field, and a turn that reaches for the obvious
+  call flips the status and leaves the subject exactly as created — bare. The rule now names the
+  single call that carries both, `TaskUpdate({taskId, status, subject})`, because composing a
+  subject and not passing it is the same as not composing it. v0.49.29 made the stamp a command and
+  stopped short of saying where its output goes.
 - **A `for` over a literal word list expands instead of being refused.** Three live runs lost a
   round to this — `for n in 222 223 224; do gh issue view $n …; done` and a sweep over eight named
   spec files — and were told to write the iterations out by hand. The guard already resolved a

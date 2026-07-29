@@ -616,6 +616,15 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   node <plugin-tools>/step-subject.mjs --subject '∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL]' --ms 660000
   ```
 
+  **Then complete the task and set the subject in ONE call** —
+  `TaskUpdate({taskId, status: "completed", subject: <the composed line>})`. Both fields, one call.
+  This is where the stamp is actually lost: completing a task is `status: "completed"`, the subject
+  is a separate field, and a turn that reaches for the obvious call flips the status and leaves the
+  subject exactly as it was created — bare. A live panel showed
+  `✔ ∞ #220 — 08 FIX r3/7 [OPUS]` with no cost on it for that reason, with the composer available
+  and the rule followed right up to the last step. Composing a subject and not passing it is the
+  same as not composing it.
+
   It prints the finished subject — elapsed formatted, clock read, executor slot upper-cased — and
   re-running it on an already-completed subject returns it unchanged, so a resumed unit cannot grow
   a second pair of brackets. In-session steps have no dispatch `ms`: pass `--started-at-ms <epoch>`
