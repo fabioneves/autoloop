@@ -7,6 +7,14 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **The slice-overage note names the commands that measure it.** Four live runs have now lost a
+  round to `git diff --numstat | awk '{a+=$1}'` while measuring exactly this note, and each time the
+  fix went into the guard's remedy — catching the derivation instead of preventing it. The skill
+  asked for a number and never said how to get it, which is what sends a reader to a summing script.
+  It now names all three forms where the number is asked for: `--shortstat` for the total,
+  `--shortstat … -- . ':(exclude)<glob>'` for production or reviewable surface, and
+  `--name-only … | wc -l` for a file count. A pathspec exclusion is how "production lines" is
+  measured — exclude the test and vendored globs rather than filtering a file list through a script.
 - **A refusal names the token that actually blocked, not the one beside it.** With literal loops now
   expanding, `for d in kernel field …; do echo "$(wc -l …)"; done` was still refused naming BOTH
   `$d` and the command substitution, with the loop remedy attached — but the loop expands fine and
