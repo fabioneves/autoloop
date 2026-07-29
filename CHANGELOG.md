@@ -3,6 +3,28 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.34] - 2026-07-29
+
+### Fixed
+
+- **A `needs-human-review` STATE section is asked about, not silently preserved.** "Preserved in
+  place" is the safe default and it is also what makes silence easy: the merged document comes back
+  byte-identical to the installed one, `changed` is false, the diff is empty, and the pending
+  decisions sit in a `counts.needsHumanReview` field nobody reads. A live repository carries seven
+  such sections — a whole `## Playbooks` tree and a queue-drain stop condition — preserved across
+  every reconfigure and never once surfaced as a question; the other repository in the same account
+  carries none, which is what a real divergence looks like when nothing asks about it.
+
+  Setup now lists each by heading with context and takes a keep/fold/delete answer, and the
+  reconfigure interview expands them rather than folding them into accept-all. Keeping is a fine
+  answer and usually the right one — repository-authored policy is exactly what a template cannot
+  know. What is not fine is never being asked, because a section the template dropped and a section
+  the repository authored deliberately are indistinguishable once both are silently preserved.
+
+  Second item added to that expand list in two releases, after the gate, and both were found by a
+  human noticing an absence rather than by anything in the skill. An accept-all that swallows a
+  decision is not a shorter interview, it is a missing one.
+
 ## [0.49.33] - 2026-07-29
 
 ### Fixed
