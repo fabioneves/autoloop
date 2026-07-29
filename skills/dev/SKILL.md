@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.32 · starting
+∞ dev · v0.49.33 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1077,17 +1077,45 @@ its own policy author. A verified open Major is a reason not to SHIP the unit �
 stop the RUN. So the action is mechanical and complete in one turn:
 
 1. Apply `loop-blocked` + `human:decide` to the issue — **and leave `loop-ready` in place** — with
-   a reason naming the open finding, the
-   fix scope, and the round history — and offering the human their three options: authorize a
-   higher cap (a policy edit only they can make), re-plan, or split the predicate into its own
-   issue.
+   a reason naming the open finding, the fix scope, and the round history, and offering the human
+   their three options: authorize a higher cap (a policy edit only they can make), re-plan, or
+   split the predicate into its own issue.
+
+   **Write each option as the instruction the human pastes back, not as prose describing it.** The
+   decision is theirs; the ASSEMBLY is not, and the loop already holds everything the assembly
+   needs. A live block offered three options in prose and left a human to derive a forty-line
+   carve-out instruction from the round table — including which findings belong to which predicate,
+   where exactly one of five sat in the OTHER predicate and had to stay rather than carve. Ship that
+   derivation with the block or it gets done by hand, once, under less context than the loop had.
+
+   Each option therefore carries, pre-computed:
+
+   - **Authorize a higher cap** — the current cap, the rounds spent, and the exact `caps` field to
+     edit. Name the round history so the choice is informed: three rounds in one predicate after an
+     invariant-scoped fix predicts a fourth.
+   - **Re-plan** — which invariant was enumerated wrongly and over what domain it actually
+     quantifies. Say plainly that a re-plan cannot resume this unit: the marker binds `planHash` and
+     `issueBodyHash`, so it is a new issue and the converged work is rebuilt.
+   - **Carve out the predicate** — every open finding grouped BY PREDICATE with carve-or-stay
+     marked per finding, what ships, what the PR body must disclaim, the remaining cap, and the
+     loop's own assessment of the three honesty conditions with evidence for each. A finding in a
+     predicate that is NOT being carved stays and must be fixed; letting it ride out with the
+     carve-out ships a known defect under a clean-looking reduction.
+
+   **Give all three equal specificity, then state a recommendation and argue it.** An option that is
+   cheaper to say yes to because it arrived ready-to-run is a thumb on the scale, and the scale here
+   guards against scope evasion — so the carve-out must not be the only one that is easy. The
+   recommendation is the loop's read, not its decision: name the option, the reason, and what it
+   costs.
 2. Print the unit's blocked rail and **take the next eligible unit immediately.** Do not pause for
    an answer, do not summarise and wait, do not end the run. A human-gated unit is a row in the
    digest, not a reason to stop working.
 
 Splitting the predicate is the human's call, not the loop's opening move — a carve-out that the
-loop reaches for on its own is how scope evasion starts. When they ask for one, the runbook is
-below.
+loop reaches for on its own is how scope evasion starts. Pre-computing the instruction is not
+reaching for it: the loop still may not carve until told, and a ready instruction nobody authorizes
+does nothing. What changes is only that the authorization costs a word instead of an hour. When
+they ask for one, the runbook is below.
 
 **Slice budgets are the exception: they NOTE, they never block.** `caps.sliceMaxLines` and
 `caps.sliceMaxFiles` are shaping budgets — `autoloop:shape` sizes issues against them before the
