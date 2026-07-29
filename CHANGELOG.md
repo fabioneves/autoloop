@@ -23,6 +23,20 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **A rejected flag is no longer reported as a missing one.** `escalate-paths.mjs --planned` was
+  given `--artifact-fingerprint <40-hex commit OID>` and answered *"planned evidence is incomplete;
+  supply --artifact-version --artifact-fingerprint"* — both of which had just been supplied. The
+  fingerprint wants a 64-character sha256 of the plan artifact, so it failed `HEX_64`, and
+  `lane-contract` normalized the subject to 64 zeros. That normalization is correct and stays: an
+  unusable subject must fail closed. The defect was purely diagnostic — the guidance could not tell
+  absent from present-but-malformed, so it asked for what the caller already had and left no route to
+  the real problem. It now validates each flag against its own shape and says which was rejected and
+  what shape it needs, naming the commit-OID confusion explicitly because `--base-oid` sits two flags
+  away. Validation is per FLAG, not per reason code: a reason code is subject-level, so blaming every
+  flag it maps to would have accused the valid `--artifact-version 1` too — the same defect one layer
+  over. A flag that is present and well-formed is never mentioned, and if every flag checks out the
+  message says the gap is upstream of the arguments rather than going silent, which is how the bare
+  exit 2 that this guidance was originally added for used to read.
 - **The inline-interpreter refusal answers the question that was asked.** v0.49.38 gave that refusal
   a single remedy, written from the `zsh -ic 'alias …'` case that produced it — so `python3 -c
   "import json…"` was answered with "read `~/.zshrc`" and a parse check, advice for a question

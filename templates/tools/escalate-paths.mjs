@@ -333,6 +333,43 @@ function selfTest() {
       finalGaps.includes('--base-oid')],
     ['unknown reason codes never fabricate guidance',
       incompleteInputGuidance('planned', ['SOMETHING_ELSE']) === null],
+    // 2026-07-29: a live run passed --artifact-fingerprint <40-hex commit OID>
+    // and was told to supply the flag it had just supplied. Absent and
+    // supplied-but-rejected are different failures.
+    ['a SUPPLIED but rejected flag is not reported as missing',
+      (() => {
+        const text = incompleteInputGuidance('planned', ['PLAN_SUBJECT_UNAVAILABLE'],
+          ['--artifact-version', '1', '--artifact-fingerprint', 'cd13'.repeat(10)]);
+        return text.includes('REJECTED, not missing')
+          && text.includes('64-character sha256')
+          && !text.includes('supply --artifact-fingerprint');
+      })()],
+    // The reason code is subject-level, so blaming every flag it maps to would
+    // accuse the valid one. --artifact-version 1 was fine in the live run.
+    ['a valid flag beside a rejected one is never accused',
+      (() => {
+        const text = incompleteInputGuidance('planned', ['PLAN_SUBJECT_UNAVAILABLE'],
+          ['--artifact-version', '1', '--artifact-fingerprint', 'cd13'.repeat(10)]);
+        return !text.includes('--artifact-version was passed')
+          && !text.includes('supply --artifact-version');
+      })()],
+    ['all flags well-formed points upstream instead of going silent',
+      (() => {
+        const text = incompleteInputGuidance('planned', ['PLAN_SUBJECT_UNAVAILABLE'],
+          ['--artifact-version', '2', '--artifact-fingerprint', 'a'.repeat(64)]);
+        return text.includes('present and well-formed')
+          && text.includes('PLAN_SUBJECT_UNAVAILABLE');
+      })()],
+    ['an ABSENT flag still reads as supply',
+      incompleteInputGuidance('planned', ['PLAN_SUBJECT_UNAVAILABLE'], [])
+        === 'planned evidence is incomplete; supply --artifact-version --artifact-fingerprint'],
+    ['absent and rejected are reported together, each in its own clause',
+      (() => {
+        const text = incompleteInputGuidance('planned', ['PLAN_SUBJECT_UNAVAILABLE'],
+          ['--artifact-fingerprint', 'nope']);
+        return text.includes('supply --artifact-version')
+          && text.includes('--artifact-fingerprint was passed and REJECTED');
+      })()],
   );
   for (const [name, passed] of diffChecks) {
     if (!passed) {
@@ -378,15 +415,76 @@ const REASON_GUIDANCE = Object.freeze({
   FINAL_DIFF_INCOMPLETE: ['--base-oid'],
 });
 
-function incompleteInputGuidance(mode, reasonCodes) {
-  const flags = [];
+// A flag that was SUPPLIED but rejected is not a missing flag, and telling its
+// caller to supply it is a dead end — they already did. 2026-07-29, live run:
+// `--artifact-fingerprint <40-hex commit OID>` failed `HEX_64`, normalized to
+// ZERO_64 (correct — an unusable subject must fail closed), and was then
+// reported as absent, so the remedy asked for exactly what had been passed and
+// the caller had no way to reach the real problem. The guidance above was itself
+// added for the bare-exit-2 version of this, and covered only the witness it had.
+// Absent and malformed are different failures and get different sentences, and a
+// malformed one names the shape it wanted: the value passed here by mistake is
+// almost always a commit OID, because one sits in `--base-oid` two flags away.
+// Validated per FLAG, not per reason code. A reason code is subject-level — it
+// fires for the whole `{artifactVersion, fingerprint}` pair — so blaming every
+// flag it maps to would accuse the valid one too, which is the same defect this
+// block exists to fix, one layer over. Each flag is checked against its own
+// shape, and a flag that is present and well-formed is never mentioned.
+const FLAG_RULES = Object.freeze({
+  '--artifact-fingerprint': {
+    ok: (value) => /^[0-9a-f]{64}$/iu.test(value ?? ''),
+    shape: 'a 64-character sha256 of the plan artifact — a 40-character commit OID is not one',
+  },
+  '--artifact-version': {
+    ok: (value) => /^[1-9][0-9]*$/u.test(value ?? ''),
+    shape: 'a positive integer',
+  },
+  '--base-oid': {
+    ok: (value) => /^[0-9a-f]{40}$/iu.test(value ?? ''),
+    shape: 'a 40-character commit OID',
+  },
+  '--base': {
+    ok: (value) => typeof value === 'string' && value.length > 0 && !value.startsWith('-'),
+    shape: 'a ref name',
+  },
+  '--estimated-lines': {
+    ok: (value) => /^[0-9]+$/u.test(value ?? ''),
+    shape: 'a non-negative integer',
+  },
+});
+
+function incompleteInputGuidance(mode, reasonCodes, args = []) {
+  const absent = [];
+  const malformed = [];
+  const supplied = [];
   for (const code of reasonCodes ?? []) {
     for (const flag of REASON_GUIDANCE[code] ?? []) {
-      if (!flags.includes(flag)) flags.push(flag);
+      if (absent.includes(flag) || malformed.includes(flag) || supplied.includes(flag)) continue;
+      if (!args.includes(flag)) { absent.push(flag); continue; }
+      const rule = FLAG_RULES[flag];
+      if (rule && !rule.ok(flagValue(args, flag))) malformed.push(flag);
+      else supplied.push(flag);
     }
   }
-  if (flags.length === 0) return null;
-  return `${mode} evidence is incomplete; supply ${flags.join(' ')}`;
+  if (absent.length === 0 && malformed.length === 0 && supplied.length === 0) return null;
+  const parts = [];
+  if (absent.length > 0) parts.push(`supply ${absent.join(' ')}`);
+  for (const flag of malformed) {
+    parts.push(
+      `${flag} was passed and REJECTED, not missing — it needs `
+      + `${FLAG_RULES[flag]?.shape ?? 'a valid value'}`,
+    );
+  }
+  // Every flag present and well-formed, yet the code still fired: the cause is
+  // upstream of the arguments. Say so rather than going silent, which is how the
+  // bare exit 2 that started all this read.
+  if (parts.length === 0) {
+    parts.push(
+      `${supplied.join(' ')} ${supplied.length === 1 ? 'is' : 'are'} present and well-formed, so `
+      + `the gap is upstream of the arguments — reason codes: ${(reasonCodes ?? []).join(' ')}`,
+    );
+  }
+  return `${mode} evidence is incomplete; ${parts.join('; ')}`;
 }
 
 function outputResult(files, laneProof, args, sourceComplete, error = null) {
@@ -404,6 +502,7 @@ function outputResult(files, laneProof, args, sourceComplete, error = null) {
     const guidance = incompleteInputGuidance(
       laneProof.mode,
       laneProof.reasonCodes,
+      args,
     );
     if (guidance) console.error(`escalate-paths: ${guidance}`);
     return 2;
