@@ -655,10 +655,19 @@ export function unresolvedExpansionReason(rawCmd) {
   const what = named === ''
     ? 'this command carries an expansion the guard cannot read'
     : `${named} cannot be resolved statically`;
+  // 2026-07-29: `for f in <dir>/*.json; do jq -c <filter> "$f"; done` — the loop
+  // was pure ceremony, because jq (like rg, wc, cat, grep) takes many paths at
+  // once and the glob can simply be the argument. Advising "one tool call each"
+  // for a case that needs exactly one call is the shape-shaped advice the
+  // assembler remedies were already taught out of, so the no-loop spelling
+  // comes first and the per-iteration fallback stays for loops that need it.
   if (LOOP_KEYWORD.test(text)) {
     return `${what} — a loop variable takes a new value each iteration, so the guard `
-      + 'cannot know what runs. Write the iterations as literal commands (one tool call each is '
-      + 'fine), or put the loop in a reviewed program file and run that.';
+      + 'cannot know what runs. Most file loops need no loop at all: `jq`, `rg`, `grep`, `wc` and '
+      + '`cat` each take many paths at once, so pass the glob as the argument — '
+      + '`jq -c <filter> <dir>/*.json` reads every file in ONE call. Otherwise write the '
+      + 'iterations as literal commands (one tool call each is fine), or put the loop in a '
+      + 'reviewed program file and run that.';
   }
   // `$?` has no literal to assign, so the generic "assign it in the same
   // command" advice is impossible rather than merely unhelpful. The exit status
@@ -2476,6 +2485,20 @@ function selfTest() {
       || !regionReason.includes('offset')
     ) {
       console.error('FAIL [a substitution refusal names the region-read spelling]');
+      ok = false;
+    }
+    // 2026-07-29: `for f in <dir>/*.json; do jq -c <filter> "$f"; done` was told to
+    // write one tool call per iteration, when jq takes the glob and needs exactly one.
+    messageChecks += 1;
+    const fileLoop = evaluate(
+      'for f in .git/autoloop/run/*.json; do jq -c \'{pid}\' "$f"; done',
+      'feat/gh-1-x',
+    ).reason ?? '';
+    if (
+      !fileLoop.includes('take many paths at once')
+      || !fileLoop.includes('reviewed program file')
+    ) {
+      console.error('FAIL [a file loop is offered the no-loop multi-path spelling]');
       ok = false;
     }
     messageChecks += 1;

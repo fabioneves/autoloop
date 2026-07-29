@@ -3,6 +3,37 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.37] - 2026-07-29
+
+### Fixed
+
+Three refusals from one live session reading a shell config, each the same defect v0.49.35 and
+v0.49.36 fixed elsewhere: a message that describes the shape it refused without answering the
+question in front of it. The guard's own rule — every shape names the command to run instead — now
+holds for the three that were still naming a category.
+
+- **An inline-`awk` refusal answers a region read.** The remedy listed measurements and file
+  splicing, so `sed -n <range>p <file> | cat -n | awk '{print $1+<offset>, …}'` — a numbered read of
+  a config file — got back `git diff --shortstat` and `wc -l`. The `awk` was only ever undoing
+  `cat -n` renumbering, and that renumbering happens only because `sed` ran FIRST. The remedy now
+  names the pipeline order that removes the arithmetic entirely: `cat -n <file> | sed -n
+  <first>,<last>p` keeps the real line numbers.
+- **An inline-interpreter refusal names a command instead of "write a script to a file".** That was
+  the shape-shaped advice the assembler remedies were already taught out of — authoring a file to
+  inspect an alias is more ceremony than the question. `zsh -ic 'alias | grep -i <name>; whence -w
+  <name>'` asks a live interactive shell what a name resolves to when the definition is sitting in a
+  readable file: `rg -n <name> ~/.zshrc`. To check a file parses, the interpreter does it directly
+  (`zsh -n <file>`, `node --check <file>`); the write-a-file escape hatch remains for real programs.
+- **A file loop is offered the spelling that needs no loop.** `for f in <dir>/*.json; do jq -c
+  <filter> "$f"; done` was told to write one tool call per iteration — for a case that needs exactly
+  one. `jq`, `rg`, `grep`, `wc` and `cat` all take many paths at once, so the glob can simply be the
+  argument: `jq -c <filter> <dir>/*.json` reads every file in one call. The per-iteration fallback
+  and the program-file escape hatch stay for loops that genuinely need them.
+
+Unchanged, deliberately: `zsh -n <file>; echo "exit: $?"`. That refusal is already correct and
+directly actionable — drop the `echo` and run `zsh -n <file>` alone, which the guard allows and
+whose exit status the tool runner reports.
+
 ## [0.49.36] - 2026-07-29
 
 ### Added
