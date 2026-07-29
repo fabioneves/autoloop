@@ -33,6 +33,24 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'literal-for-loop-refused-as-unresolvable',
+    date: '2026-07-29',
+    symptom: 'Three live runs lost a round to a `for` over a LITERAL word list '
+      + '— `for n in 222 223 224` and a sweep over eight named spec files — '
+      + 'and were told to write the iterations out by hand.',
+    cause: 'The guard resolved a literal ASSIGNMENT by substituting and judging '
+      + 'the real command, but refused a literal loop, which is the same '
+      + 'operation repeated. The printed remedy was the expansion the guard '
+      + 'could perform itself.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function expandLiteralForLoops(' }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: "['for f in 41 42; do gh pr merge $f; done', 'feat/gh-1-x', true]",
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'command-v-lookup-read-as-an-invocation',
     date: '2026-07-29',
     symptom: '`command -v php` was refused as inline interpreter source while a '
@@ -46,6 +64,24 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({
         file: 'command-guard.mjs',
         anchor: "['command -v php', 'feat/gh-1-x', false]",
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'rebased-claim-branch-wedged-a-merged-unit-remotely',
+    date: '2026-07-29',
+    symptom: 'With the local-claim fix in place, #149 advanced exactly one '
+      + 'check and was refused ARTIFACT_IDENTITY_MISMATCH(remote-claim). The '
+      + 'run read it as "branch deleted on merge"; the branch was present on '
+      + 'the remote at the PR head.',
+    cause: 'The rebase that orphaned the claim commit locally orphaned it on '
+      + 'the remote too, so containsClaimCommit was false against a branch '
+      + 'that had merged cleanly. Fixing one side and not the other moved the '
+      + 'refusal one check along.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'lifecycle-contract.mjs',
+        anchor: 'a rebased remote claim branch cannot wedge a merged unit either',
       }),
     ]),
   }),

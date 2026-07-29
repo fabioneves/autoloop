@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.33 · starting
+∞ dev · v0.49.34 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -36,6 +36,26 @@ four separate sessions. Before the prime call:
    block; the remote default branch until STATE is readable), and pull fast-forward. A pull that
    cannot fast-forward is human divergence — stop and report. Then use the base's STATE, not a
    session injection that may have come from a parked unit branch.
+
+3. **Check whether the vendored tooling is current, and stop if it is not:**
+
+   ```bash
+   node <plugin-tools>/scaffold.mjs --audit .
+   ```
+
+   `reconcileNeeded: false` means proceed. `true` means the repository's `tools/agentic/**` is
+   older than this plugin, and `reconcileSummary` names how many artifacts and why. **Stop and
+   report the Setup remedy — do not reconcile inside a Dev run**, for two reasons the loop cannot
+   argue past: Setup asks questions only a human answers, and a reconcile is loop-infrastructure
+   code, which STATE routes through the queue like any other change. A Dev run that quietly
+   committed tooling would be authoring policy mid-unit.
+
+   This check is cheap and it is not optional, because stale tooling is SILENT: the hooks load the
+   working tree's copies, so a fixed guard that has shipped, installed and reconciled onto the base
+   still refuses from a stale repository, and three separate sessions misdiagnosed exactly that as
+   a new bug. **Most releases do not need it** — skills load from the plugin, so a skills-only
+   release changes nothing here and this reports `false`. That is the whole answer to "must I run
+   Setup every version": no, and this is how you know.
 
 Then one call. It validates ProjectConfig, reports the checkout against the configured base, runs
 one `scan.mjs`, persists the snapshot, and prints a decision-sized summary:
@@ -538,6 +558,14 @@ rules, none of which trades away evidence:
   fingerprint helper (`node <plugin-tools>/release-verify.mjs --fingerprint-stdin <body.md`) on
   files. The window needs the title, the hash, and the verdict; it never needs the body. One
   `cat body.md` spends 48 KB on bytes you are forbidden to retype anyway.
+
+  **Assemble a prompt or body by CONCATENATION, never by templating.** Write the parts as separate
+  files and `cat head.md findings.md tail.md > prompt.md`; for JSON, `jq -n --rawfile`. A live run
+  reached for `awk '/^FINDINGS_PLACEHOLDER$/{…getline…}'` to splice a findings block into a prompt
+  and was refused as inline interpreter source — correctly, because a placeholder that has to be
+  found and replaced IS an interpreter program, while a file boundary is not. The parts are already
+  on disk for the file-to-file reason above, so the template was buying nothing the concatenation
+  does not.
 - **Bounded reads only.** Collect typed results by field projection (`jq '{ok, ms, model}'`),
   tail live and dispatch logs (`tail -20`), and never run an unbounded `cat`/full read of anything
   a dispatch produced. When a failure needs the stderr, take its tail — the typed error already
@@ -615,6 +643,15 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   ```bash
   node <plugin-tools>/step-subject.mjs --subject '∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL]' --ms 660000
   ```
+
+  **Then complete the task and set the subject in ONE call** —
+  `TaskUpdate({taskId, status: "completed", subject: <the composed line>})`. Both fields, one call.
+  This is where the stamp is actually lost: completing a task is `status: "completed"`, the subject
+  is a separate field, and a turn that reaches for the obvious call flips the status and leaves the
+  subject exactly as it was created — bare. A live panel showed
+  `✔ ∞ #220 — 08 FIX r3/7 [OPUS]` with no cost on it for that reason, with the composer available
+  and the rule followed right up to the last step. Composing a subject and not passing it is the
+  same as not composing it.
 
   It prints the finished subject — elapsed formatted, clock read, executor slot upper-cased — and
   re-running it on an already-completed subject returns it unchanged, so a resumed unit cannot grow

@@ -3,6 +3,103 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.34] - 2026-07-29
+
+### Fixed
+
+- **The audit states whether a reconcile is needed, and Dev checks it.** `scaffold.mjs --audit` knew
+  the answer and never said it, leaving a reader to count per-file actions — which is why every
+  release felt like it demanded a Setup. Most do not: skills load from the plugin, so a skills-only
+  release changes nothing vendored and now reports `reconcileNeeded: false` explicitly. The report
+  carries `reconcileNeeded` and a `reconcileSummary` naming how many artifacts and why. `kept`,
+  `kept-modified` and `absent` are settled states and never count as work — `absent` in particular
+  is a RETIRED artifact confirmed gone, so counting it would have made every audit demand a
+  reconcile that changes nothing.
+
+  Dev's prime now runs that audit and STOPS with the Setup remedy when it is true, rather than
+  proceeding on stale tooling. It does not reconcile inside a Dev run, for two reasons the loop
+  cannot argue past: Setup asks questions only a human answers, and a reconcile is
+  loop-infrastructure code, which STATE routes through the queue like any other change. The check
+  is not optional because stale tooling is silent — the hooks load the working tree's copies, so a
+  guard fix that shipped, installed and reconciled onto the base still refuses from a stale
+  repository, and three sessions misdiagnosed exactly that as a new bug.
+- **A recovered draft says what it is waiting on.** Two different situations returned
+  `ACTIVE_DRAFT_RECOVERED` with nothing to tell them apart: no delivery request exists yet, or one
+  exists but `agentic/gate` and `agentic/review` are not published on the head. A live run opened
+  `lifecycle-contract.mjs` mid-unit and read eighty lines of source to learn which — the answer
+  being "neither is a failure, publish the statuses and re-run". The code stays, since callers match
+  on it; the result now carries `waitingOn` and a `nextStep` naming the tool. Publishing is the
+  finalizer's job and not the driver's, because the driver never runs a gate — saying so in the
+  result is the difference between a run that continues and one that investigates.
+- **Prompts are assembled by concatenation, and the awk remedy says so.** A live run reached for
+  `awk '/^FINDINGS_PLACEHOLDER$/{…getline…}'` to splice a findings block into a prompt template and
+  was refused — correctly, since a placeholder that must be found and replaced IS an interpreter
+  program, while a file boundary is not. The remedy answered totals and column extraction but not
+  the assembly the caller was doing, so it refused without redirecting. Both the guard remedy and
+  the context-economy rule now name it: write the parts and `cat head.md findings.md tail.md >
+  prompt.md`, or `jq -n --rawfile` for JSON. The parts are already on disk for the file-to-file
+  reason, so the template was buying nothing the concatenation does not.
+- **The completed-step stamp names the call that carries it.** A live panel showed
+  `✔ ∞ #220 — 08 FIX r3/7 [OPUS]` with no `[elapsed] [HH:MM]`, with `step-subject.mjs` available and
+  the rule followed right up to the last step. That step is where it is lost: completing a task is
+  `status: "completed"`, the subject is a SEPARATE field, and a turn that reaches for the obvious
+  call flips the status and leaves the subject exactly as created — bare. The rule now names the
+  single call that carries both, `TaskUpdate({taskId, status, subject})`, because composing a
+  subject and not passing it is the same as not composing it. v0.49.29 made the stamp a command and
+  stopped short of saying where its output goes.
+- **A `for` over a literal word list expands instead of being refused.** Three live runs lost a
+  round to this — `for n in 222 223 224; do gh issue view $n …; done` and a sweep over eight named
+  spec files — and were told to write the iterations out by hand. The guard already resolved a
+  literal ASSIGNMENT by substituting and judging the real command; a literal loop is that same
+  operation repeated, so refusing one while accepting the other was inconsistent, and the remedy it
+  printed was precisely the expansion the guard could do itself. It now unrolls the loop and judges
+  each iteration.
+
+  Expansion is stronger than refusal, not weaker: `for f in 41 42; do gh pr merge $f; done` now
+  blocks on merge authority rather than on shape, because the real command became visible. A list
+  that is not literal — a command substitution, a glob, a `while read` — stays refused, since what
+  it iterates over is not knowable here, and the unroll is bounded at 32 iterations so a
+  pathological list cannot turn one refusal into a thousand judgements.
+- **A rebased claim branch cannot wedge a merged unit on the REMOTE side either.** v0.49.30 fixed
+  the local claim comparison for merged units and #149 advanced exactly one check before being
+  refused again — `ARTIFACT_IDENTITY_MISMATCH(remote-claim)`. Same root cause: the rebase that
+  rewrote the claim commit locally rewrote it on the remote too, so `containsClaimCommit` was false
+  against a branch that had merged cleanly. Fixing one side and not the other only moved the
+  refusal along, which is how one defect cost two releases. Merged units now skip the remote claim
+  comparison for the same reason they skip the local one — the merge commit is the proof, and the
+  merge facts already bind the head. The one check that stays is a branch which SURVIVES the merge
+  pointing somewhere other than the head that merged: that catches reuse or a force-push after
+  delivery, and has nothing to do with the claim commit.
+
+  Also worth recording: the run reported this as "branch deleted on merge" and the branch was not
+  deleted — it is on the remote at the PR head. The previous round reported the local branch as
+  absent when it was present and rebased. Two misreadings of the same defect, both plausible, both
+  wrong, and the contract's refusal named the artifact without naming which comparison failed.
+- **Setup no longer asks for a required CI CheckRun-name set.** There is nothing to configure: the
+  list was retired with `.autoloop/ci-policy.json` in v0.49.0, and `delivery-contract.mjs` states in
+  its own header that "there is deliberately no committed required-check list". Delivery's predicate
+  is the live triggered-checks floor. The question survived the machinery it configured by
+  thirty-three releases, carrying a warning ("an empty set must be an explicit repository-policy
+  choice") that implied the answer mattered. A question whose answer nothing reads is worse than no
+  question — it spends attention and then vouches for the value it collected.
+- **A `needs-human-review` STATE section is asked about, not silently preserved.** "Preserved in
+  place" is the safe default and it is also what makes silence easy: the merged document comes back
+  byte-identical to the installed one, `changed` is false, the diff is empty, and the pending
+  decisions sit in a `counts.needsHumanReview` field nobody reads. A live repository carries seven
+  such sections — a whole `## Playbooks` tree and a queue-drain stop condition — preserved across
+  every reconfigure and never once surfaced as a question; the other repository in the same account
+  carries none, which is what a real divergence looks like when nothing asks about it.
+
+  Setup now lists each by heading with context and takes a keep/fold/delete answer, and the
+  reconfigure interview expands them rather than folding them into accept-all. Keeping is a fine
+  answer and usually the right one — repository-authored policy is exactly what a template cannot
+  know. What is not fine is never being asked, because a section the template dropped and a section
+  the repository authored deliberately are indistinguishable once both are silently preserved.
+
+  Second item added to that expand list in two releases, after the gate, and both were found by a
+  human noticing an absence rather than by anything in the skill. An accept-all that swallows a
+  decision is not a shorter interview, it is a missing one.
+
 ## [0.49.33] - 2026-07-29
 
 ### Fixed

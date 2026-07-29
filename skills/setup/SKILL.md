@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.33 · starting
+∞ setup · v0.49.34 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -180,16 +180,25 @@ time. Global defaults may pre-fill answers but never skip confirmation.
 Scale the interview to the mode. A fresh install walks every item. Migration and reconfigure
 collapse to one summary table — every current value beside its default or migrated value — and a
 single accept-all confirmation, expanding an item into its own question only where it carries a
-real decision: drift, **the gate**, a cap the human may want to change, or the merge policy. Fewer
-questions, never fewer disclosures: everything still appears in the summary and the visible diff.
+real decision: drift, **the gate**, **every `needs-human-review` STATE section**, a cap the human
+may want to change, or the merge policy. Fewer questions, never fewer disclosures: everything still
+appears in the summary and the visible diff.
+
+An accept-all that silently swallows a decision is not a shorter interview, it is a missing one —
+and the two items added to that list were both found by a human noticing their absence rather than
+by anything in this skill.
 
 Ask only:
 
 1. Mission and non-negotiable invariants.
 2. Configured base branch.
-3. Gate, optional quick gate, optional setup command, and the complete required CI CheckRun-name
-   set. An empty set must be an explicit repository-policy choice, never an inference from an
-   empty API response.
+3. Gate, optional quick gate, optional setup command. **Do not ask for a required CI CheckRun-name
+   set** — there is no longer one to configure. It was retired with `.autoloop/ci-policy.json` in
+   v0.49.0, and delivery's predicate is the live triggered-checks floor: every check run and commit
+   status on the exact head must be green, read at delivery time. `delivery-contract.mjs` says so
+   in its own header — "there is deliberately no committed required-check list". A question whose
+   answer nothing reads is worse than no question: it spends the human's attention and then implies
+   the value matters.
 
    **Ask in EVERY mode, including reconfigure and migration, and show the configured commands
    verbatim beside what they resolve to.** The gate is the one setting that decides whether code
@@ -243,8 +252,11 @@ Ask only:
     rejects the flag without it. Never offer solo mode when more than one trusted human exists —
     the gate hard-fails a solo config whose trusted list is not exactly the loop login.
 
-Never infer that an empty required-check list means CI is safe. Merge, merge queue, tag
-publication, and release publication require an independent maintainer action outside the run.
+Never infer that green CI means the run may finish itself. Merge, merge queue, tag publication, and
+release publication require an independent maintainer action outside the run. Delivery's own
+predicate is the triggered-checks floor — every check run and commit status on the exact head
+green, and at least one actually triggered, since a head that ran nothing is not a head that
+passed.
 
 Global defaults contain only non-project preferences:
 
@@ -558,9 +570,24 @@ Lessons), which template sections are `new`, and which installed sections are
 `needs-human-review`. Read that report — not the template.
 
 1. Resolve only what the report flags. `needs-human-review` is an installed section the template
-   has no counterpart for: it is preserved in place, never dropped, and you decide to keep, fold,
-   or delete it. A section renamed upstream appears as one `needs-human-review` entry beside one
-   `new` entry — that pair is the rename.
+   has no counterpart for: it is preserved in place, never dropped, and the human decides to keep,
+   fold, or delete it. A section renamed upstream appears as one `needs-human-review` entry beside
+   one `new` entry — that pair is the rename.
+
+   **ASK, section by section — never let a preserved section pass silently.** "Preserved in place"
+   is the safe default and it is also what makes silence easy: the merged document is
+   byte-identical to the installed one, `changed` is false, the diff is empty, and seven pending
+   decisions sit in a `counts.needsHumanReview` field nobody reads. A live repository carries
+   exactly that — seven sections (a whole `## Playbooks` tree and a queue-drain stop condition)
+   that no template knows about, preserved across every reconfigure, never once surfaced as a
+   question. The other repository in the same account has none, which is how a real divergence
+   looks when nothing asks about it.
+
+   List each one by heading with its first line as context, and take a keep/fold/delete answer.
+   Keeping is a fine answer and usually the right one — repository-authored policy is exactly what
+   the template cannot know. What is not fine is never being asked, because a section the template
+   dropped and a section the repository authored deliberately are indistinguishable once both are
+   silently preserved.
 2. Act on every `warnings` entry. A preserved `autoloop-config` older than the current schema means
    the migrated block still has to land in this same commit.
 3. Re-run the identical command with `--write` to apply it, then show the diff.
