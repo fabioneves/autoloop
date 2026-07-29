@@ -1,6 +1,6 @@
 ---
 name: shape
-description: Turn a feature description, spec/ADR, or brain-dump into PR-sized, loop-ready-candidate GitHub issues — or lint an existing issue against the loop's standards (shape lint #N). Interviews the human when underspecified, verifies premises against the code before filing, sizes units against STATE caps, writes acceptance criteria as testable assertions, maps every source clause onto a unit before filing, chains dependencies via "Blocked by" derived from what each unit reads, and files issues UNLABELLED — applying loop-ready stays the maintainer's trust act. An interactive human-run skill; the loop never invokes it.
+description: Turn a feature description, spec/ADR, or brain-dump into PR-sized, loop-ready-candidate GitHub issues — or lint an existing issue against the loop's standards (shape lint #N). Interviews the human when underspecified, then runs one mandatory seven-axis rule check on every unit before anything is filed — premise, acceptance, coverage, proof-terminates, size, hard-defer, structure — the same axes both modes share. Verifies premises against the code, sizes units against the enforced split rule, requires each acceptance criterion to name a proof that terminates, maps every source clause onto a unit, chains dependencies via "Blocked by" derived from what each unit reads, and files issues UNLABELLED — applying loop-ready stays the maintainer's trust act. An interactive human-run skill; the loop never invokes it.
 ---
 
 # autoloop:shape — spec in, PR-sized issues out
@@ -82,6 +82,50 @@ input tool when surfaced, otherwise one concise plain-text question per turn. Op
 may be namespaced (`agent-skills:<name>`) or installed directly; resolve them from available skill
 metadata and use the host's normal skill invocation syntax. Their absence never blocks the inline
 workflow below.
+
+## The rule check — seven axes, every unit, both modes
+
+These are the axes `autoloop:dev` step 1 will grade a unit by. **They are defined once, here, and
+both modes run the same list** — a checklist restated per mode drifts, and the halves then disagree
+about what "shaped" means.
+
+**Running them is not optional.** Every axis below existed for releases as Mode 2 content, reachable
+only by typing `shape lint #N` — so a freshly shaped issue was never graded before filing, and a
+check that runs only when someone remembers to ask is a check that does not run. A live queue proved
+it: 21 units filed, 16 breaching the size axis, three clauses owned by no unit, and one criterion
+whose proof could not terminate. Every one of those is an axis on this list.
+
+- **Premise**: every named symbol/route/path/table exists — grep and report `file:line` (or the
+  miss). Data premises: is the verifying read-only query stated? A cited spec section is a premise
+  too.
+- **Acceptance**: each criterion objectively verifiable? Flag vibes ("improve", "clean up",
+  "better") and propose testable rewrites.
+- **Coverage**: does the unit carry every clause of the spec section it cites? Check the section's
+  clauses against the acceptance criteria one by one — a criterion covering the clause's *area* is
+  not the clause. A silently dropped clause is a defect in the unit. If it is one slice of a split,
+  the clause may belong to a sibling: name the sibling, or report the clause unowned. (A different
+  question from `autoloop:queue-trace`, which asks whether a spec task HAS an issue; this asks
+  whether the issue carries the task.)
+- **Proof**: does each criterion name a method that terminates? Flag every quantifier (*every, all,
+  no, any, never*) and name the set it ranges over — if a later edit can add a member, the criterion
+  is unprovable as written and no case count will say so. Propose the closed-domain rewrite
+  concretely (constructor, closed API surface, single boundary, allowlisted gate), never as advice
+  to "consider a different approach".
+- **Size**: list the cases the unit's invariant must prove. Past ~5, unfinishable, more than one
+  hard invariant, or an independently shippable half — SPLIT, whatever the line estimate says.
+  Propose the split concretely (per-invariant slices + dependency order), never as advice to
+  "consider splitting". The ~300-line tripwire is a smoke signal that sends you to the case list,
+  never a criterion on its own.
+- **Hard-defer smells**: hidden new dependency, secret/env need, production data write — surface
+  them so the maintainer routes them consciously.
+- **Structure**: `## Blocked by` present, and each edge justified by something this unit READS
+  that another unit creates — never by slice order; Out of scope stated; title composable into a
+  branch slug.
+
+A unit passes only when every axis passes. An axis that cannot pass is either fixed before filing or
+carried as a recorded exception naming why — never a silent gap, and never a note in prose that no
+later phase reads, because `autoloop:dev` NOTES rather than blocks on exactly these and by then the
+work is done.
 
 ## Mode 1 — shape (default)
 
@@ -225,8 +269,18 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    families, and nothing re-asserted the other eight; a regression gating a sixth passes the entire
    set.
 
-6. **Review with the human, then file.** Show the full set (titles + one-line summaries + the
-   dependency graph + the clause → unit table) before creating anything. The table is what makes
+6. **Run the rule check on every unit — mandatory, before the human sees the set.** Walk the seven
+   axes above for each unit and report the result per unit, not as one aggregate "looks good": an
+   aggregate hides the one unit that fails, which is the only information the pass produces. Step 5's
+   clause → unit table is the set-level input to the Coverage axis; the other six are per-unit. Fix
+   what fails and re-check, or record the exception with its reason. **Nothing is filed while any
+   axis fails.** This is the same pass as Mode 2 — the difference is only that here it runs without
+   being asked, which is the whole point: the queue that failed was shaped by a run that had every
+   one of these checks available and invoked none of them.
+
+7. **Review with the human, then file.** Show the full set (titles + one-line summaries + the
+   dependency graph + the clause → unit table + the rule-check result per unit) before creating
+   anything. The table is what makes
    coverage reviewable — a unit list can only show what IS there. On approval, file via
    `gh issue create --body-file <scratchpad>/…` (bodies via scratch files outside the repo — never
    inline `--body`).
@@ -241,43 +295,22 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
 
 ## Mode 2 — lint (`shape lint #N`)
 
-Grade an existing issue the way `autoloop:dev` step 1 will:
+The same seven axes, run against an issue that already exists. Mode 2 is not a second checklist and
+never grows one of its own — it is this skill's entry point for a unit shaped before the rule check
+was mandatory, or filed by hand. Mode 1 step 6 runs the identical pass on the way in, so an issue
+this skill shaped has already been graded and re-linting it should be a no-op; an issue that came
+from anywhere else has not been graded at all.
 
-- **Premise**: every named symbol/route/path/table exists — grep and report `file:line` (or the
-  miss). Data premises: is the verifying read-only query stated?
-- **Acceptance**: each criterion objectively verifiable? Flag vibes ("improve", "clean up",
-  "better") and propose testable rewrites.
-- **Coverage**: does the issue carry every clause of the spec section it cites? Read that section
-  and check its clauses against the acceptance criteria one by one — a criterion covering the
-  clause's *area* is not the clause. A silently dropped clause is a defect in the issue, and it is
-  cheapest to catch here: the forward-only miss above was already in the original issue, so lint
-  would have caught it before any split existed to hide it. If the issue is one slice of a split,
-  the clause may belong to a sibling — name the sibling, or report the clause unowned. (This is a
-  different question from `autoloop:queue-trace`, which asks whether a spec task HAS an issue; this
-  asks whether the issue carries the task.)
-- **Proof**: does each criterion name a method that terminates? Flag every quantifier (*every, all,
-  no, any, never*) and name the set it ranges over — if a later edit can add a member, the criterion
-  is unprovable as written and no case count will say so. Propose the closed-domain rewrite
-  concretely (constructor, closed API surface, single boundary, allowlisted gate), never as advice
-  to "consider a different approach".
-- **Size**: list the cases the unit's invariant must prove. Past ~5, unfinishable, more than one
-  hard invariant, or an independently shippable half — SPLIT, whatever the line estimate says.
-  Propose the split concretely (per-invariant slices + dependency order), never as advice to
-  "consider splitting". The ~300-line tripwire is a smoke signal that sends you to the case list,
-  never a criterion on its own.
-- **Hard-defer smells**: hidden new dependency, secret/env need, production data write — surface
-  them so the maintainer routes them consciously.
-- **Structure**: `## Blocked by` present, and each edge justified by something this issue READS
-  that another issue creates — never by slice order; Out of scope stated; title composable into a
-  branch slug.
-
-Output: a PASS / gaps report, then a proposed rewritten body. Offer to apply it via `gh issue edit
+Output: a PASS / gaps report **per axis**, then a proposed rewritten body. Offer to apply it via `gh issue edit
 --body-file` **only if the issue is not yet labelled `loop-ready`** — editing a labelled issue
 invalidates the label's trust (the loop's edited-after-label check will treat it as unlabelled), so
 for labelled issues: post the rewrite as a comment and ask the maintainer to re-label after editing.
 
 ## Hard rules
 
+- **Never file a unit that fails an axis of the rule check.** The pass is mandatory in both modes;
+  fix it, split it, or record the exception with its reason. A gap that survives filing is a gap
+  `autoloop:dev` will only NOTE, by which time the work is done.
 - **Never apply `loop-ready`** (or any loop state label). Filing ≠ queueing; the maintainer queues.
 - **Issue bodies via `--body-file` scratch files**; titles composed plain-ASCII (they become branch
   slugs).

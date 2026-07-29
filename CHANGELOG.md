@@ -3,6 +3,65 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.40] - 2026-07-29
+
+### Changed
+
+- **The rule check is mandatory on every shaped unit, and the axes are defined once.** Every check
+  the skill had — premise, acceptance, coverage, proof-terminates, size, hard-defer, structure — sat
+  in Mode 2, reachable only by typing `shape lint #N`. So a freshly shaped issue was never graded
+  before filing, and a check that runs only when someone remembers to ask is a check that does not
+  run. The live queue is the proof: 21 units filed, 16 breaching the size axis, three clauses owned
+  by no unit, one criterion whose proof could not terminate — every one of those an axis that was
+  already written down and never applied. The seven axes now live in a single shared section that
+  both modes bind to, so neither can drift into its own checklist; Mode 1 gains a mandatory step 6
+  that walks them per unit and reports per unit rather than as an aggregate, since an aggregate hides
+  the single failing unit which is the only thing the pass produces; and filing while any axis fails
+  is now a hard rule. Mode 2 keeps its entry point for issues shaped elsewhere or filed by hand, but
+  is explicitly no longer a second checklist — re-linting an issue this skill shaped should be a
+  no-op.
+
+### Fixed
+
+- **A rejected flag is no longer reported as a missing one.** `escalate-paths.mjs --planned` was
+  given `--artifact-fingerprint <40-hex commit OID>` and answered *"planned evidence is incomplete;
+  supply --artifact-version --artifact-fingerprint"* — both of which had just been supplied. The
+  fingerprint wants a 64-character sha256 of the plan artifact, so it failed `HEX_64`, and
+  `lane-contract` normalized the subject to 64 zeros. That normalization is correct and stays: an
+  unusable subject must fail closed. The defect was purely diagnostic — the guidance could not tell
+  absent from present-but-malformed, so it asked for what the caller already had and left no route to
+  the real problem. It now validates each flag against its own shape and says which was rejected and
+  what shape it needs, naming the commit-OID confusion explicitly because `--base-oid` sits two flags
+  away. Validation is per FLAG, not per reason code: a reason code is subject-level, so blaming every
+  flag it maps to would have accused the valid `--artifact-version 1` too — the same defect one layer
+  over. A flag that is present and well-formed is never mentioned, and if every flag checks out the
+  message says the gap is upstream of the arguments rather than going silent, which is how the bare
+  exit 2 that this guidance was originally added for used to read.
+- **The inline-interpreter refusal answers the question that was asked.** v0.49.38 gave that refusal
+  a single remedy, written from the `zsh -ic 'alias …'` case that produced it — so `python3 -c
+  "import json…"` was answered with "read `~/.zshrc`" and a parse check, advice for a question
+  nobody asked. That is precisely the defect v0.49.38 existed to fix, reintroduced one release later
+  by over-fitting a remedy to its first witness. An inline *program* is usually reshaping data; an
+  inline *shell* is usually interrogating its own configuration. Two questions, so two answers: the
+  program shape now gets `jq -r <filter> <file>` for JSON (many files at once), `rg` to find,
+  `cut -f<n>` for a column, `sort | uniq -c` for a tally, and `node --check` / `python3 -m json.tool`
+  for a parse check; the shell shape keeps the config-reading remedy. Selection is by interpreter
+  and is used for the message only — the block decision is untouched, so a misclassification costs a
+  less apt remedy and never a wrong verdict. Every command both remedies name is verified accepted
+  by the guard.
+- **Returning a pull request to draft is no longer refused as a readiness mutation.**
+  `gh pr ready <N> --undo` was blocked by the rule that reserves readiness for the exact-head
+  terminal finalizer — but `--undo` REMOVES readiness. It returns the PR to draft, which is the
+  state the loop is built to hold: one draft opened at claim, kept draft until the finalizer marks
+  it ready under an exact-head binding. A draft cannot be merged, so drafting can never deliver
+  anything, and returning a PR to draft is exactly what servicing one after a red check wants. The
+  test matched every `gh pr ready` regardless of direction and answered the safe one with the
+  message for the unsafe one — the same direction-blindness as the `+<refspec>` force test fixed in
+  v0.49.38. Granting readiness stays blocked, the carve-out is per segment so an `--undo` beside a
+  bare `ready` cannot launder it, and the refusal now names the allowed form. `--undo` is matched as
+  an exact token rather than a prefix: an abbreviation gh rejects is a command that does nothing,
+  while one gh accepts and this test missed would be a readiness mutation waved through.
+
 ## [0.49.39] - 2026-07-29
 
 ### Fixed

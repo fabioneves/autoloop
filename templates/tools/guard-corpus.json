@@ -325,6 +325,18 @@
    "branch": "feat/gh-1-x",
    "expect": "block",
    "why": "a QUOTED + refspec: shellWords strips the quotes, so scoping to post-push words keeps this caught."
+  },
+  {
+   "cmd": "gh pr ready 264 --undo 2>&1; echo '=== readback ==='; gh pr view 264 --json isDraft,labels,autoMergeRequest 2>&1",
+   "branch": "feat/gh-240-checksum-domain-tag",
+   "expect": "allow",
+   "why": "0.49.40: --undo REMOVES readiness, returning the PR to the draft state the loop is supposed to hold. Refused with the message for granting readiness -- direction-blind, like the +refspec force test. A draft cannot be merged, so this can never deliver."
+  },
+  {
+   "cmd": "gh pr ready 264 --undo; gh pr ready 265",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "the carve-out is per SEGMENT: an undo beside a bare ready must not launder the ready."
   }
  ]
 }
