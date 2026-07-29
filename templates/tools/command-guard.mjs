@@ -668,6 +668,17 @@ export function unresolvedExpansionReason(rawCmd) {
       + 'non-zero exit, and the typed tools carry their outcome in their own output '
       + '(`ok: false` beside the reason) — read that instead of capturing it.';
   }
+  // A command substitution has no literal to assign either — its value is
+  // whatever the inner command PRINTS, which is exactly what cannot be known
+  // before running it. Telling the reader to "assign it a literal" is advice
+  // they cannot follow, the same defect the `$?` branch above exists to avoid.
+  // A live run measuring per-package sizes hit this and had nowhere to go.
+  if (tokens.every((token) => token === 'a command substitution')) {
+    return `${what}, because its value is whatever the inner command prints and that is not `
+      + 'knowable before running it. Run the inner command as its own call and use the value it '
+      + 'returns, or pick a spelling that needs no substitution — `wc -l <paths>` and '
+      + '`git diff --shortstat` print their numbers directly. A real program goes in a file.';
+  }
   return `${what}, so command policy cannot judge what would run. Assign it a literal in the `
     + 'SAME command and the guard substitutes it and judges the real thing; otherwise use '
     + 'literal canonical commands, or a reviewed program file.';
@@ -1400,9 +1411,17 @@ export function evaluate(rawCmd, branch, options = {}) {
     if (resolved !== null) {
       return evaluate(resolved, branch, { ...options, expansionResolved: true });
     }
+    // Report on what is ACTUALLY unresolvable. A literal loop expands, so a
+    // refusal that still names its loop variable sends the reader to fix the
+    // one part that was never the problem: `for d in a b; do echo $(wc -l $d);
+    // done` blocks on the command substitution alone, and naming `$d` beside it
+    // — with the loop remedy attached — describes a command the guard would
+    // otherwise have accepted. Expansion is best-effort here: if it cannot
+    // unroll, the raw text is still the honest subject.
+    const reportSubject = expandLiteralForLoops(rawCmd) ?? rawCmd;
     return {
       block: true,
-      reason: `autoloop guard — ${unresolvedExpansionReason(rawCmd)}`,
+      reason: `autoloop guard — ${unresolvedExpansionReason(reportSubject)}`,
     };
   }
   const cmd = stripHeredocs(rawCmd);
@@ -2351,6 +2370,24 @@ function selfTest() {
     // about a mutation that was not there, silent about the loop variable that
     // actually blocked. Each shape must name its own token and its own remedy.
     messageChecks += 1;
+    // 2026-07-29: `for d in kernel field …; do echo "$(wc -l …)"; done` was
+    // refused naming `$d` AND the substitution, with the loop remedy attached —
+    // but the loop expands fine and the substitution is the only blocker, so
+    // the message sent the reader to fix the one part that was never wrong.
+    messageChecks += 1;
+    const mixedReason = evaluate(
+      'for d in a b; do echo "$(wc -l $d)"; done',
+      'feat/gh-1-x',
+    ).reason ?? '';
+    if (
+      mixedReason.includes('`$d`')
+      || mixedReason.includes('loop variable')
+      || !mixedReason.includes('command substitution')
+      || !mixedReason.includes('inner command prints')
+    ) {
+      console.error('FAIL [an expandable loop is not blamed for its body\'s substitution]');
+      ok = false;
+    }
     // A GLOB list, deliberately: a literal list expands and is judged, so the
     // loop remedy only has to read well for the loops that stay unresolvable.
     const loopReason = evaluate(

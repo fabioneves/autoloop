@@ -3,6 +3,23 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.35] - 2026-07-29
+
+### Fixed
+
+- **A refusal names the token that actually blocked, not the one beside it.** With literal loops now
+  expanding, `for d in kernel field …; do echo "$(wc -l …)"; done` was still refused naming BOTH
+  `$d` and the command substitution, with the loop remedy attached — but the loop expands fine and
+  the substitution is the only blocker. The message sent the reader to rewrite the one part that was
+  never wrong. The reason is now computed on the EXPANDED text, so a resolvable loop variable never
+  appears in it and the loop remedy does not fire for a loop the guard would have accepted.
+- **A command substitution gets advice its reader can follow.** The generic remedy said "assign it a
+  literal in the SAME command", which is impossible for `$(wc -l < file)` — its value is whatever
+  the inner command prints, which is exactly what cannot be known before running it. That is the
+  same defect the `$?` branch already exists to avoid, so substitutions get their own: run the inner
+  command as its own call and use the value, or pick a spelling that needs none — `wc -l <paths>`
+  and `git diff --shortstat` print their numbers directly.
+
 ## [0.49.34] - 2026-07-29
 
 ### Fixed
