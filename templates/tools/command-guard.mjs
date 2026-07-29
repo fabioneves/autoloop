@@ -1660,7 +1660,17 @@ export function evaluate(rawCmd, branch, options = {}) {
           || /^-[^-]*f[^-]*$/u.test(word),
       );
     });
-    const refspecForce = /(?:^|\s)\+\S/.test(lexicalCmd);
+    // Scoped to the words AFTER `push`, exactly as flagForce above is. Testing
+    // the whole command line meant any `+`-prefixed token in ANY segment read as
+    // a force refspec: 2026-07-29 a plain
+    // `git push origin HEAD:refs/heads/<branch>; …; date +%H:%M` was refused as
+    // destructive, because `+%H:%M` matched. shellWords strips quotes, so a
+    // quoted `'+refs/…'` still resolves to a `+`-leading word and is still caught.
+    const refspecForce = segments.some(({ command }) => {
+      const words = shellWords(command);
+      const push = gitSubcommandIndex(words, 'push');
+      return push !== -1 && words.slice(push + 1).some((word) => /^\+\S/u.test(word));
+    });
     if (flagForce || refspecForce) {
       return {
         block: true,

@@ -3,11 +3,23 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
-## [0.49.37] - 2026-07-29
+## [0.49.38] - 2026-07-29
 
 ### Fixed
 
-Three refusals from one live session reading a shell config, each the same defect v0.49.35 and
+- **A plain push is no longer refused as a force push.** `git push origin
+  HEAD:refs/heads/<branch> …; date +%H:%M` was blocked as destructive. The push carries no
+  `--force`, no `-f` and no `+` refspec — but the `+<refspec>` test was a raw regex over the WHOLE
+  command line, so `+%H:%M` in a later segment matched it. The flag test directly above it was
+  already scoped correctly (it finds the `push` subcommand and inspects only the words after it);
+  the refspec test now works the same way. Every `+`-prefixed token in any segment of any command
+  containing a `git push` was a false positive, and this one refused a legitimate branch push with
+  a message about destruction. A quoted `'+refs/…'` is still caught — `shellWords` strips the
+  quotes, so it still resolves to a `+`-leading word after `push` — as are `--force` and `-f`;
+  three corpus cases pin all of it.
+
+The rest of this release is three refusals from one live session reading a shell config, each the
+same defect v0.49.35 and
 v0.49.36 fixed elsewhere: a message that describes the shape it refused without answering the
 question in front of it. The guard's own rule — every shape names the command to run instead — now
 holds for the three that were still naming a category.
