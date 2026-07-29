@@ -7,6 +7,34 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **The split rule is enforced where it is judged, instead of recorded and ignored.** A live queue
+  of 21 shaped units had **16 over the five-case threshold and none under it** — every breach
+  written into the unit's own sizing marker, none acted on. The rule lived in prose in
+  `autoloop:shape` and was binding nowhere: `sizing-contract.mjs` validated structure only and
+  composed `cases: 15` as readily as `cases: 5`, and `autoloop:dev` deliberately does not re-size,
+  so nothing between shaping and the same-predicate escalation ever read the number. One of those
+  units burned four dispatch rounds before blocking on exactly the overage its own marker had
+  declared at filing time. `--shape` now exits non-zero on a breach with the split guidance, and
+  `--split-exempt "<reason>"` records the exception IN the marker, so an unsplit unit is a decision
+  someone made rather than a threshold nobody applied. Enforcement is at write time only: markers
+  filed before this rule still parse, because reading history must never fail.
+- **Sizing counts come from a written enumeration, not a guess.** The same 21 units recorded
+  `invariants: 1` on every single one, including one whose escalation later proved two independent
+  predicates — a field that never varies was never measured, and a defaulted field cannot trip the
+  signal it exists to trip. Shaping now names each invariant and lists its cases before the counts
+  are composed.
+- **Every acceptance criterion must name a proof that terminates.** Testable is not the same as
+  provable by a method that ends, and nothing asked the difference. A unit asserting that every
+  construction site carried a domain tag was checked by an AST scan inside its own package: five
+  distinct bypasses across two review rounds, each fix admitting the next, blocked after roughly
+  forty minutes of dispatch. The invariant was correct; the proof was an arms race, and no case
+  count would have said so. Shaping now states the method beside each criterion and refuses one
+  whose method is a scan over an open domain — source text, stored encodings, anything a later edit
+  can add a form to. This is the failure the sizing section already described (`#123`, the
+  unbounded set of stored encodings) and never turned into a check.
+- **A cited spec section is a premise and is verified like one.** A unit cited a `§3.3` that two
+  documents referenced and that does not exist, sending premise work to reconstruct the requirement
+  from surrounding prose.
 - **The background-dispatch wrapper has one documented home.** `dispatch-stream.sh` was missing
   from the `<plugin-tools>` enumeration that tells the flow which tools run from the installed
   plugin rather than the checkout, while the prose beside its three call sites called it "the

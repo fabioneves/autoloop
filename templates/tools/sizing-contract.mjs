@@ -38,6 +38,39 @@ const RESULTS = new Set(['shipped', 'blocked', 'deferred']);
 // should never have been filed, and either way the record must not carry it.
 const MAX_COUNT = 9999;
 
+// The split rule, made binding at the moment the judgement is written. It was
+// prose in `autoloop:shape` and enforced nowhere: the tool composed whatever
+// count it was handed, shape filed it, and dev deliberately does not re-size.
+// A live queue of 21 shaped units had 16 over the case threshold, none under
+// it, and every single one claiming exactly one invariant — including one whose
+// escalation later PROVED two predicates. A rule that records its own breach and
+// proceeds is not a rule, and the marker was built to make this judgement
+// checkable. Refusing here is the only point where splitting is still cheap.
+const SPLIT_MAX_CASES = 5;
+const SPLIT_MAX_INVARIANTS = 1;
+const MAX_EXEMPT_REASON = 500;
+
+// Deliberately NOT part of validateShapeRecord: that validator also parses
+// markers already living in issue bodies, and every breaching record filed
+// before this rule existed must keep parsing. Enforcement belongs at write
+// time, where a split is still possible; reading history must never fail.
+export function splitBreaches(record) {
+  const breaches = [];
+  if (Number.isSafeInteger(record?.cases) && record.cases > SPLIT_MAX_CASES) {
+    breaches.push(
+      `${record.cases} cases exceeds the ~${SPLIT_MAX_CASES} split threshold — one unit is one `
+      + 'invariant whose complete case enumeration fits in about five cases',
+    );
+  }
+  if (Number.isSafeInteger(record?.invariants) && record.invariants > SPLIT_MAX_INVARIANTS) {
+    breaches.push(
+      `${record.invariants} hard invariants in one unit — each is an independent chance to trip `
+      + 'the same-predicate escalation, so the cost is multiplicative rather than additive',
+    );
+  }
+  return breaches;
+}
+
 function countProblem(label, value, { min = 0 } = {}) {
   if (!Number.isSafeInteger(value)) return `${label}: must be an integer`;
   if (value < min) return `${label}: must be >= ${min}`;
@@ -66,7 +99,16 @@ export function validateShapeRecord(record) {
     const problem = countProblem(key, record[key], { min: 0 });
     if (problem !== null) errors.push(problem);
   }
-  const known = new Set(['v', 'cases', 'invariants', 'filesEstimate', 'linesEstimate']);
+  if (record.splitExempt !== undefined) {
+    if (typeof record.splitExempt !== 'string' || record.splitExempt.trim() === '') {
+      errors.push('splitExempt: must be a non-empty reason');
+    } else if (record.splitExempt.length > MAX_EXEMPT_REASON) {
+      errors.push(`splitExempt: must be <= ${MAX_EXEMPT_REASON} characters`);
+    }
+  }
+  const known = new Set([
+    'v', 'cases', 'invariants', 'filesEstimate', 'linesEstimate', 'splitExempt',
+  ]);
   for (const key of Object.keys(record)) {
     if (!known.has(key)) errors.push(`${key}: unknown field`);
   }
@@ -168,6 +210,16 @@ export function parseArgs(argv) {
       continue;
     }
     if (flag === '--escalated') { out.flags.add('escalated'); continue; }
+    if (flag === '--split-exempt') {
+      const value = argv[index + 1];
+      if (typeof value !== 'string' || value.trim() === '' || value.startsWith('--')) {
+        out.error = '--split-exempt needs a reason';
+        return out;
+      }
+      out.values.splitExempt = value;
+      index += 1;
+      continue;
+    }
     if (flag === '--result') {
       const value = argv[index + 1];
       if (!RESULTS.has(value)) {
@@ -200,6 +252,7 @@ export function recordFromArgs(parsed) {
     const record = { v: 1, cases: parsed.values.cases, invariants: parsed.values.invariants };
     if (parsed.values.files !== undefined) record.filesEstimate = parsed.values.files;
     if (parsed.values.lines !== undefined) record.linesEstimate = parsed.values.lines;
+    if (parsed.values.splitExempt !== undefined) record.splitExempt = parsed.values.splitExempt;
     return { serialize: serializeShapeRecord, record };
   }
   const record = {
@@ -303,7 +356,49 @@ function selfTest() {
     ])).record.escalated === false,
   );
 
-  const total = 21;
+  // The breach rule. A live queue of 21 shaped units had 16 over the case
+  // threshold and 0 under it, so these assertions pin the exact shapes that
+  // queue produced.
+  check('five cases is within the rule', splitBreaches({ cases: 5, invariants: 1 }).length === 0);
+  check('six cases breaches', splitBreaches({ cases: 6, invariants: 1 }).length === 1);
+  check('fifteen cases breaches', splitBreaches({ cases: 15, invariants: 1 }).length === 1);
+  check('two invariants breaches', splitBreaches({ cases: 3, invariants: 2 }).length === 1);
+  check(
+    'both signals are reported together, never one at a time',
+    splitBreaches({ cases: 9, invariants: 2 }).length === 2,
+  );
+  check(
+    'a breaching record still PARSES — history filed before the rule must stay readable',
+    parseShapeRecord(
+      '<!-- autoloop-shape-v1\n{"cases":7,"filesEstimate":5,"invariants":1,"linesEstimate":210,"v":1}\n-->',
+    ).ok === true,
+  );
+  check(
+    'an exemption reason round-trips in the marker',
+    parseShapeRecord(serializeShapeRecord({
+      v: 1, cases: 7, invariants: 1, splitExempt: 'AST grammar cases are irreducible',
+    })).record.splitExempt === 'AST grammar cases are irreducible',
+  );
+  check(
+    'an empty exemption is refused, so the flag cannot be used as a silent override',
+    validateShapeRecord({ v: 1, cases: 7, invariants: 1, splitExempt: '  ' }).length > 0,
+  );
+  check(
+    'args refuse a bare --split-exempt with no reason',
+    parseArgs(['--shape', '--cases', '7', '--invariants', '1', '--split-exempt']).error !== null,
+  );
+  check(
+    'args refuse --split-exempt swallowing the next flag as its reason',
+    parseArgs(['--shape', '--split-exempt', '--cases', '7']).error !== null,
+  );
+  check(
+    'a composed exempt record carries the reason',
+    recordFromArgs(parseArgs([
+      '--shape', '--cases', '7', '--invariants', '1', '--split-exempt', 'irreducible',
+    ])).record.splitExempt === 'irreducible',
+  );
+
+  const total = 32;
   console.log(fail === 0 ? `self-test OK (${total} cases)` : `self-test: ${fail} FAILED`);
   return fail === 0;
 }
@@ -318,6 +413,22 @@ function main() {
   let output;
   try {
     const { serialize: emit, record } = recordFromArgs(parsed);
+    if (parsed.mode === 'shape' && record.splitExempt === undefined) {
+      const breaches = splitBreaches(record);
+      if (breaches.length > 0) {
+        console.error(`sizing-contract: refused — ${breaches.join('; and ')}.`);
+        console.error(
+          'Split at the invariant boundary and chain the halves with `## Blocked by`. A slice that '
+          + 'reads as trivially small is the correct size, not a reason to bundle it.',
+        );
+        console.error(
+          'If this unit genuinely cannot be split, record why and it will be emitted: '
+          + '--split-exempt "<reason>". The reason rides in the marker, so an exception is a '
+          + 'decision someone made rather than a threshold nobody applied.',
+        );
+        process.exit(2);
+      }
+    }
     output = emit(record);
   } catch (error) {
     console.error(`sizing-contract: ${error.message}`);

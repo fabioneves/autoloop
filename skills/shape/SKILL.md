@@ -110,7 +110,22 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    names; bake the found `file:line` references into the issue's Evidence section. A premise you
    couldn't verify is stated as an open question in the issue — never as fact. For data premises,
    write the exact read-only query the planner should run (run it yourself only if it is cheap and
-   read-only; never write to any store).
+   read-only; never write to any store). A citation is a premise too: a spec section a unit points
+   at must be found by grep before it is quoted, because a pointer that resolves to nothing sends
+   the planner to reconstruct the requirement from the surrounding prose.
+
+   **Then name the PROOF for each acceptance criterion, and check that it terminates.** Testable is
+   not the same as provable by a method that ends. State the method beside each criterion — the type
+   system, an exhaustive enumeration over a closed domain, a property test with a stated generator,
+   a golden file. **If the method is a scan over an OPEN domain — source text, stored encodings,
+   anything a later edit can add a new form to — the criterion is unprovable as written.** Close the
+   domain, or move the guarantee to where it holds by construction. This is the failure the sizing
+   section above already describes and never turned into a check: `#123` blocked on a predicate
+   ranging over the unbounded set of stored encodings, and a second unit asserted that every
+   construction site carried a domain tag, checked by an AST scan inside its own package — five
+   distinct bypasses across two review rounds, each fix admitting the next, blocked after roughly
+   forty minutes of dispatch. Both invariants were correct. Both proofs were arms races, and no
+   number of cases would have said so.
 4. **Write each issue** using the repo's loop-unit template (`.github/ISSUE_TEMPLATE/loop-unit.md`,
    scaffolded by setup): Context · Acceptance criteria (each an observable, testable assertion —
    "X returns Y", "the gate stays green", never "works well") · Boundary (the one module) ·
@@ -141,6 +156,21 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    looks like data. It refuses a record it cannot validate rather than emitting a broken one. Write
    it even when the estimate is uncertain: a recorded guess that turns out wrong is the data point
    that improves the rule, while an omitted one is silence.
+
+   **Compose the counts from a written enumeration, never from a guess.** Name each invariant the
+   unit carries, list the cases under it, then count: `--invariants` is the length of that list and
+   `--cases` the total beneath it. A live queue of 21 shaped units recorded `invariants: 1` on every
+   single one — including a unit whose escalation later proved two independent predicates. A field
+   that never varies was never measured; it was defaulted, and a defaulted field cannot trip the
+   signal it exists to trip.
+
+   **The tool now refuses a breaching record** — over ~5 cases, or more than one invariant — rather
+   than composing it. That same queue had 16 of 21 units over the case threshold and none under it,
+   every breach recorded in its own marker and none acted on, because the rule lived in prose here
+   and was enforced nowhere: `autoloop:dev` deliberately does not re-size, so shaping is the last
+   point at which splitting is still cheap. If a unit genuinely cannot be split, pass
+   `--split-exempt "<reason>"`; the reason rides in the marker, so an exception is a decision
+   someone made rather than a threshold nobody applied.
 5. **Map every source clause onto a unit.** Everything above checks a unit against the code (step
    3) and against the sizing rule (step 2). Nothing yet checks the units against the SOURCE, so a
    requirement the split dropped is invisible to all of it — and to every later phase, since the
