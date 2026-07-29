@@ -7,6 +7,22 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **The audit states whether a reconcile is needed, and Dev checks it.** `scaffold.mjs --audit` knew
+  the answer and never said it, leaving a reader to count per-file actions — which is why every
+  release felt like it demanded a Setup. Most do not: skills load from the plugin, so a skills-only
+  release changes nothing vendored and now reports `reconcileNeeded: false` explicitly. The report
+  carries `reconcileNeeded` and a `reconcileSummary` naming how many artifacts and why. `kept`,
+  `kept-modified` and `absent` are settled states and never count as work — `absent` in particular
+  is a RETIRED artifact confirmed gone, so counting it would have made every audit demand a
+  reconcile that changes nothing.
+
+  Dev's prime now runs that audit and STOPS with the Setup remedy when it is true, rather than
+  proceeding on stale tooling. It does not reconcile inside a Dev run, for two reasons the loop
+  cannot argue past: Setup asks questions only a human answers, and a reconcile is
+  loop-infrastructure code, which STATE routes through the queue like any other change. The check
+  is not optional because stale tooling is silent — the hooks load the working tree's copies, so a
+  guard fix that shipped, installed and reconciled onto the base still refuses from a stale
+  repository, and three sessions misdiagnosed exactly that as a new bug.
 - **A recovered draft says what it is waiting on.** Two different situations returned
   `ACTIVE_DRAFT_RECOVERED` with nothing to tell them apart: no delivery request exists yet, or one
   exists but `agentic/gate` and `agentic/review` are not published on the head. A live run opened

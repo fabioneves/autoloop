@@ -37,6 +37,26 @@ four separate sessions. Before the prime call:
    cannot fast-forward is human divergence — stop and report. Then use the base's STATE, not a
    session injection that may have come from a parked unit branch.
 
+3. **Check whether the vendored tooling is current, and stop if it is not:**
+
+   ```bash
+   node <plugin-tools>/scaffold.mjs --audit .
+   ```
+
+   `reconcileNeeded: false` means proceed. `true` means the repository's `tools/agentic/**` is
+   older than this plugin, and `reconcileSummary` names how many artifacts and why. **Stop and
+   report the Setup remedy — do not reconcile inside a Dev run**, for two reasons the loop cannot
+   argue past: Setup asks questions only a human answers, and a reconcile is loop-infrastructure
+   code, which STATE routes through the queue like any other change. A Dev run that quietly
+   committed tooling would be authoring policy mid-unit.
+
+   This check is cheap and it is not optional, because stale tooling is SILENT: the hooks load the
+   working tree's copies, so a fixed guard that has shipped, installed and reconciled onto the base
+   still refuses from a stale repository, and three separate sessions misdiagnosed exactly that as
+   a new bug. **Most releases do not need it** — skills load from the plugin, so a skills-only
+   release changes nothing here and this reports `false`. That is the whole answer to "must I run
+   Setup every version": no, and this is how you know.
+
 Then one call. It validates ProjectConfig, reports the checkout against the configured base, runs
 one `scan.mjs`, persists the snapshot, and prints a decision-sized summary:
 

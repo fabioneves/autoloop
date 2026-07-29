@@ -450,10 +450,29 @@ export function reconcile(root, templates, { audit = false } = {}) {
       warnings.push(`${config.review.checklistPath} is absent; author the review checklist`);
     }
   }
+  const sorted = results.sort((left, right) => left.path.localeCompare(right.path));
+  // The audit already knew whether a reconcile would change anything; it just
+  // never said so, leaving the reader to count actions. That is why every
+  // release felt like it required a Setup — most do not. Skills load from the
+  // plugin and need nothing; only the VENDORED tools under `tools/agentic/**`
+  // are copies, so a skills-only release changes nothing here and this reports
+  // `false`.
+  //
+  // `kept` and `kept-modified` are repository-owned and deliberately untouched.
+  // `absent` is a RETIRED artifact confirmed gone — the report says so precisely
+  // to prove the check ran, so counting it as work to do would make every audit
+  // demand a reconcile that changes nothing.
+  const settled = new Set(['identical', 'kept', 'kept-modified', 'absent']);
+  const changing = sorted.filter((entry) => !settled.has(entry.action));
   return {
     version: 1,
     nonManualTooling: nonManual,
-    results: results.sort((left, right) => left.path.localeCompare(right.path)),
+    reconcileNeeded: changing.length > 0,
+    reconcileSummary: changing.length === 0
+      ? 'current — no reconcile needed'
+      : `reconcile needed: ${changing.length} artifact(s) — `
+        + `${[...new Set(changing.map((entry) => entry.action))].sort().join(', ')}`,
+    results: sorted,
     warnings,
   };
 }
