@@ -655,10 +655,19 @@ export function unresolvedExpansionReason(rawCmd) {
   const what = named === ''
     ? 'this command carries an expansion the guard cannot read'
     : `${named} cannot be resolved statically`;
+  // 2026-07-29: `for f in <dir>/*.json; do jq -c <filter> "$f"; done` — the loop
+  // was pure ceremony, because jq (like rg, wc, cat, grep) takes many paths at
+  // once and the glob can simply be the argument. Advising "one tool call each"
+  // for a case that needs exactly one call is the shape-shaped advice the
+  // assembler remedies were already taught out of, so the no-loop spelling
+  // comes first and the per-iteration fallback stays for loops that need it.
   if (LOOP_KEYWORD.test(text)) {
     return `${what} — a loop variable takes a new value each iteration, so the guard `
-      + 'cannot know what runs. Write the iterations as literal commands (one tool call each is '
-      + 'fine), or put the loop in a reviewed program file and run that.';
+      + 'cannot know what runs. Most file loops need no loop at all: `jq`, `rg`, `grep`, `wc` and '
+      + '`cat` each take many paths at once, so pass the glob as the argument — '
+      + '`jq -c <filter> <dir>/*.json` reads every file in ONE call. Otherwise write the '
+      + 'iterations as literal commands (one tool call each is fine), or put the loop in a '
+      + 'reviewed program file and run that.';
   }
   // `$?` has no literal to assign, so the generic "assign it in the same
   // command" advice is impossible rather than merely unhelpful. The exit status
@@ -704,6 +713,14 @@ const ASSEMBLER_REMEDY = Object.freeze({
   awk: 'Inline `awk` program text is source code in an argument. Most loop uses of it are a '
     + 'measurement with a plainer spelling: `git diff --shortstat` for insert/delete counts, '
     + '`wc -l` for a line count, `cut -f<n>` for a column, `sort | uniq -c` for a tally. '
+    // 2026-07-29: `sed -n <range>p file | cat -n | awk '{print $1+<offset>, ...}'` — the awk
+    // existed only to undo `cat -n` renumbering from 1, which happens only because `sed` ran
+    // FIRST. Number before slicing and the arithmetic disappears, so the remedy names the
+    // pipeline order rather than a plainer measurement, none of which reads a region.
+    + 'To read a NUMBERED region, number before slicing — `cat -n <file> | sed -n <first>,<last>p` '
+    + 'keeps the real line numbers, while slicing first makes `cat -n` restart at 1 and is the '
+    + 'usual reason to reach for `awk` arithmetic here. The host file-reading tool takes an offset '
+    + 'and a line count directly. '
     + 'To total a diff while EXCLUDING paths — the reviewable-surface measurement that most often '
     + 'reaches for `awk` over `--numstat` — git does it natively: '
     + "`git diff --shortstat <range> -- . ':(exclude)<glob>'`. "
@@ -1395,12 +1412,21 @@ export function evaluate(rawCmd, branch, options = {}) {
         + 'command policy. Write the script to a file and run it, or use the typed tool commands.',
     };
   }
+  // "Write the script to a file" names no command, which is the shape-shaped
+  // advice the assembler remedies were already taught out of: authoring a file
+  // to inspect an alias is more ceremony than the question. 2026-07-29:
+  // `zsh -ic 'alias | grep -i <name>; whence -w <name>'` — asking a live
+  // interactive shell what a name resolves to, when the definition is sitting
+  // in a file that can simply be read.
   if (inlineInterpreterSource(rawCmd)) {
     return {
       block: true,
       reason:
         'autoloop guard — inline shell or language-interpreter source is opaque to command '
-        + 'policy. Write the script to a file and run it, or use the typed tool commands.',
+        + 'policy. To learn what a shell name resolves to or what a startup file does, read the '
+        + 'file — `rg -n <name> ~/.zshrc` — instead of starting an interactive shell to ask it. '
+        + 'To check that a file parses, the interpreter does it directly: `zsh -n <file>`, '
+        + '`node --check <file>`. For a real program, write it to a file and run that.',
     };
   }
   const assembler = opaqueCommandAssembler(rawCmd);
@@ -1634,7 +1660,17 @@ export function evaluate(rawCmd, branch, options = {}) {
           || /^-[^-]*f[^-]*$/u.test(word),
       );
     });
-    const refspecForce = /(?:^|\s)\+\S/.test(lexicalCmd);
+    // Scoped to the words AFTER `push`, exactly as flagForce above is. Testing
+    // the whole command line meant any `+`-prefixed token in ANY segment read as
+    // a force refspec: 2026-07-29 a plain
+    // `git push origin HEAD:refs/heads/<branch>; …; date +%H:%M` was refused as
+    // destructive, because `+%H:%M` matched. shellWords strips quotes, so a
+    // quoted `'+refs/…'` still resolves to a `+`-leading word and is still caught.
+    const refspecForce = segments.some(({ command }) => {
+      const words = shellWords(command);
+      const push = gitSubcommandIndex(words, 'push');
+      return push !== -1 && words.slice(push + 1).some((word) => /^\+\S/u.test(word));
+    });
     if (flagForce || refspecForce) {
       return {
         block: true,
@@ -2337,9 +2373,41 @@ function selfTest() {
     ).reason;
     const expectedInlineReason =
       'autoloop guard — inline shell or language-interpreter source is opaque to command '
-      + 'policy. Write the script to a file and run it, or use the typed tool commands.';
+      + 'policy. To learn what a shell name resolves to or what a startup file does, read the '
+      + 'file — `rg -n <name> ~/.zshrc` — instead of starting an interactive shell to ask it. '
+      + 'To check that a file parses, the interpreter does it directly: `zsh -n <file>`, '
+      + '`node --check <file>`. For a real program, write it to a file and run that.';
     if (inlineReason !== expectedInlineReason) {
       console.error('FAIL [inline-interpreter block is the exact policy message]');
+      ok = false;
+    }
+    // 2026-07-29: `zsh -ic 'alias | grep -i <name>; whence -w <name>'` was told to
+    // write a script file to inspect an alias. The remedy must name a command.
+    messageChecks += 1;
+    const shellIntrospection = evaluate(
+      "zsh -ic 'alias | grep -i claudep; whence -w claudep'",
+      'feat/gh-1-x',
+    ).reason ?? '';
+    if (
+      !shellIntrospection.includes('rg -n <name> ~/.zshrc')
+      || !shellIntrospection.includes('zsh -n <file>')
+    ) {
+      console.error('FAIL [an inline-interpreter refusal names a command, not just a file]');
+      ok = false;
+    }
+    // 2026-07-29: `sed -n <range>p f | cat -n | awk '{print $1+<offset>}'` got only
+    // measurement spellings back, none of which reads a region. The awk was undoing
+    // `cat -n` renumbering caused by slicing first; naming the order removes it.
+    messageChecks += 1;
+    const regionAwk = evaluate(
+      "sed -n '160,215p' /home/dev/.zshrc | cat -n | awk '{printf \"%d\\t%s\\n\", $1+159, $0}'",
+      'feat/gh-1-x',
+    ).reason ?? '';
+    if (
+      !regionAwk.includes('cat -n <file> | sed -n <first>,<last>p')
+      || !regionAwk.includes('restart at 1')
+    ) {
+      console.error('FAIL [an inline-awk refusal names the numbered-region spelling]');
       ok = false;
     }
     // 2026-07-28: a live refusal read "`$p`, a command substitution cannot be
@@ -2427,6 +2495,20 @@ function selfTest() {
       || !regionReason.includes('offset')
     ) {
       console.error('FAIL [a substitution refusal names the region-read spelling]');
+      ok = false;
+    }
+    // 2026-07-29: `for f in <dir>/*.json; do jq -c <filter> "$f"; done` was told to
+    // write one tool call per iteration, when jq takes the glob and needs exactly one.
+    messageChecks += 1;
+    const fileLoop = evaluate(
+      'for f in .git/autoloop/run/*.json; do jq -c \'{pid}\' "$f"; done',
+      'feat/gh-1-x',
+    ).reason ?? '';
+    if (
+      !fileLoop.includes('take many paths at once')
+      || !fileLoop.includes('reviewed program file')
+    ) {
+      console.error('FAIL [a file loop is offered the no-loop multi-path spelling]');
       ok = false;
     }
     messageChecks += 1;

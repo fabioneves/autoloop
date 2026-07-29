@@ -3,6 +3,93 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.38] - 2026-07-29
+
+### Fixed
+
+- **The split rule is enforced where it is judged, instead of recorded and ignored.** A live queue
+  of 21 shaped units had **16 over the five-case threshold and none under it** — every breach
+  written into the unit's own sizing marker, none acted on. The rule lived in prose in
+  `autoloop:shape` and was binding nowhere: `sizing-contract.mjs` validated structure only and
+  composed `cases: 15` as readily as `cases: 5`, and `autoloop:dev` deliberately does not re-size,
+  so nothing between shaping and the same-predicate escalation ever read the number. One of those
+  units burned four dispatch rounds before blocking on exactly the overage its own marker had
+  declared at filing time. `--shape` now exits non-zero on a breach with the split guidance, and
+  `--split-exempt "<reason>"` records the exception IN the marker, so an unsplit unit is a decision
+  someone made rather than a threshold nobody applied. Enforcement is at write time only: markers
+  filed before this rule still parse, because reading history must never fail.
+- **Sizing counts come from a written enumeration, not a guess.** The same 21 units recorded
+  `invariants: 1` on every single one, including one whose escalation later proved two independent
+  predicates — a field that never varies was never measured, and a defaulted field cannot trip the
+  signal it exists to trip. Shaping now names each invariant and lists its cases before the counts
+  are composed.
+- **Every acceptance criterion must name a proof that terminates.** Testable is not the same as
+  provable by a method that ends, and nothing asked the difference. A unit asserting that every
+  construction site carried a domain tag was checked by an AST scan inside its own package: five
+  distinct bypasses across two review rounds, each fix admitting the next, blocked after roughly
+  forty minutes of dispatch. The invariant was correct; the proof was an arms race, and no case
+  count would have said so. Shaping now states the method beside each criterion and refuses one
+  whose method is a scan over an open domain — source text, stored encodings, anything a later edit
+  can add a form to. This is the failure the sizing section already described (`#123`, the
+  unbounded set of stored encodings) and never turned into a check. The check ships with the
+  remedy, because this release has repeatedly shown that naming a category instead of a command
+  does not get followed: the tell is a quantifier (*every, all, no, any, never*) over a set a later
+  edit can grow, the test is whether the criterion can be stated as "X is impossible" rather than
+  "no X exists today", and the four closures are ranked — make the illegal state unrepresentable,
+  quantify over a closed API surface rather than open call sites, move the guarantee to one
+  boundary, or gate a scan behind an explicit allowlist. Mode 2 lint grades the same question and
+  must propose the rewrite concretely.
+- **A cited spec section is a premise and is verified like one.** A unit cited a `§3.3` that two
+  documents referenced and that does not exist, sending premise work to reconstruct the requirement
+  from surrounding prose.
+- **The background-dispatch wrapper has one documented home.** `dispatch-stream.sh` was missing
+  from the `<plugin-tools>` enumeration that tells the flow which tools run from the installed
+  plugin rather than the checkout, while the prose beside its three call sites called it "the
+  **vendored** wrapper" — the opposite resolution — and those call sites all wrote
+  `<plugin-tools>/dispatch-stream.sh`. A reader following the enumeration and the word "vendored"
+  reaches for `tools/agentic/dispatch-stream.sh`, which on a unit branch forked before a reconcile
+  is stale or absent, and a wrapper that will not start is a wrapper skipped. The wrapper is a pure
+  executor like every tool already in that list, so it joins the list and the prose now says where
+  it comes from. Behavior is unchanged; the plugin has always shipped it.
+- **A plain push is no longer refused as a force push.** `git push origin
+  HEAD:refs/heads/<branch> …; date +%H:%M` was blocked as destructive. The push carries no
+  `--force`, no `-f` and no `+` refspec — but the `+<refspec>` test was a raw regex over the WHOLE
+  command line, so `+%H:%M` in a later segment matched it. The flag test directly above it was
+  already scoped correctly (it finds the `push` subcommand and inspects only the words after it);
+  the refspec test now works the same way. Every `+`-prefixed token in any segment of any command
+  containing a `git push` was a false positive, and this one refused a legitimate branch push with
+  a message about destruction. A quoted `'+refs/…'` is still caught — `shellWords` strips the
+  quotes, so it still resolves to a `+`-leading word after `push` — as are `--force` and `-f`;
+  three corpus cases pin all of it.
+
+The rest of this release is three refusals from one live session reading a shell config, each the
+same defect v0.49.35 and
+v0.49.36 fixed elsewhere: a message that describes the shape it refused without answering the
+question in front of it. The guard's own rule — every shape names the command to run instead — now
+holds for the three that were still naming a category.
+
+- **An inline-`awk` refusal answers a region read.** The remedy listed measurements and file
+  splicing, so `sed -n <range>p <file> | cat -n | awk '{print $1+<offset>, …}'` — a numbered read of
+  a config file — got back `git diff --shortstat` and `wc -l`. The `awk` was only ever undoing
+  `cat -n` renumbering, and that renumbering happens only because `sed` ran FIRST. The remedy now
+  names the pipeline order that removes the arithmetic entirely: `cat -n <file> | sed -n
+  <first>,<last>p` keeps the real line numbers.
+- **An inline-interpreter refusal names a command instead of "write a script to a file".** That was
+  the shape-shaped advice the assembler remedies were already taught out of — authoring a file to
+  inspect an alias is more ceremony than the question. `zsh -ic 'alias | grep -i <name>; whence -w
+  <name>'` asks a live interactive shell what a name resolves to when the definition is sitting in a
+  readable file: `rg -n <name> ~/.zshrc`. To check a file parses, the interpreter does it directly
+  (`zsh -n <file>`, `node --check <file>`); the write-a-file escape hatch remains for real programs.
+- **A file loop is offered the spelling that needs no loop.** `for f in <dir>/*.json; do jq -c
+  <filter> "$f"; done` was told to write one tool call per iteration — for a case that needs exactly
+  one. `jq`, `rg`, `grep`, `wc` and `cat` all take many paths at once, so the glob can simply be the
+  argument: `jq -c <filter> <dir>/*.json` reads every file in one call. The per-iteration fallback
+  and the program-file escape hatch stay for loops that genuinely need them.
+
+Unchanged, deliberately: `zsh -n <file>; echo "exit: $?"`. That refusal is already correct and
+directly actionable — drop the `echo` and run `zsh -n <file>` alone, which the guard allows and
+whose exit status the tool runner reports.
+
 ## [0.49.36] - 2026-07-29
 
 ### Added
@@ -47,6 +134,18 @@ Notable changes to Autoloop are recorded here. The format follows
   what follows in one pass, and the host file-reading tool takes an offset directly. Verified that
   the guard accepts every command the message now recommends — advice the guard would itself refuse
   is the same defect one layer down.
+- **An inline-`awk` refusal answers a region read.** The remedy listed measurements and file
+  splicing, so `sed -n <range>p <file> | cat -n | awk '{print $1+<offset>, …}'` — a numbered read of
+  a config file — got back `git diff --shortstat` and `wc -l`. The `awk` was only ever undoing
+  `cat -n` renumbering, and that renumbering happens only because `sed` ran FIRST. The remedy now
+  names the pipeline order that removes the arithmetic entirely: `cat -n <file> | sed -n
+  <first>,<last>p` keeps the real line numbers.
+- **An inline-interpreter refusal names a command instead of "write a script to a file".** That was
+  the shape-shaped advice the assembler remedies were already taught out of — authoring a file to
+  inspect an alias is more ceremony than the question. `zsh -ic 'alias | grep -i <name>; whence -w
+  <name>'` asks a live interactive shell what a name resolves to when the definition is sitting in a
+  readable file: `rg -n <name> ~/.zshrc`. To check a file parses, the interpreter does it directly
+  (`zsh -n <file>`, `node --check <file>`); the write-a-file escape hatch remains for real programs.
 - **The documented label-provenance check reads a paginated timeline correctly.** The REST timeline
   paginates at 30 and orders oldest-first, so `| last` returned the newest labelling **on page one**.
   On a live issue with 11 comments plus label, cross-reference and rename events, the documented

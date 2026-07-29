@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.36 · starting
+∞ dev · v0.49.38 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -190,10 +190,11 @@ skill's real path, then `<skill dir>/../../templates/tools/`. Every example belo
 resolved directory as `<plugin-tools>` — expand it to the literal absolute path in the command
 you actually run, never a shell variable (the guard resolves literals, not expansions). Use it
 for
-`dispatch.mjs`, `lifecycle-driver.mjs`, `publish-verdict.mjs`, `review-contract.mjs`,
-`delivery-contract.mjs`, `attestation-contract.mjs`, `snapshot-contract.mjs`, `prime.mjs`, and
-`scan.mjs`. They are pure executors of their inputs plus live GitHub state — nothing in them is
-repository-specific, so the branch's copy is an accident of its fork date, never an authority.
+`dispatch.mjs`, `dispatch-stream.sh`, `lifecycle-driver.mjs`, `publish-verdict.mjs`,
+`review-contract.mjs`, `delivery-contract.mjs`, `attestation-contract.mjs`,
+`snapshot-contract.mjs`, `prime.mjs`, and `scan.mjs`. They are pure executors of their inputs plus
+live GitHub state — nothing in them is repository-specific, so the branch's copy is an accident of
+its fork date, never an authority.
 
 Four things stay vendored **because they are the repository's own policy**, and running the
 plugin's copy of them would be wrong: `auto-merge.mjs` (Setup fills its REPO CONFIG block),
@@ -411,8 +412,9 @@ reviewer's job is to find the case the author did not consider.
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 
 **Every background dispatch is watchable, natively.** Background dispatches run through the
-vendored wrapper, which makes the task its own watcher — the host streams a background shell's
-stdout into its task view, and the wrapper tails the live file to exactly there:
+wrapper — from `<plugin-tools>` like every other contract tool, never the branch's copy — which
+makes the task its own watcher: the host streams a background shell's stdout into its task view,
+and the wrapper tails the live file to exactly there:
 
 ```bash
 bash <plugin-tools>/dispatch-stream.sh \
