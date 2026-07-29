@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const CONFIG_VERSION = '0.26.0';
@@ -1831,15 +1832,104 @@ function selfTest() {
         && got.selfTest === expected.selfTest;
     expect(`parseArgs ${name}`, pass);
   }
+  expect('parseArgs resolve flag', parseArgs(['--resolve']).resolve === true);
+  expect('parseArgs resolve defaults off', parseArgs([]).resolve === false);
+
+  // 2026-07-29: setup's own audit probed `command -v <exe>` and was refused by
+  // the repository's PRE-RECONCILE guard — the very file the reconcile was
+  // about to replace. A rule with no command gets re-derived as a shell line,
+  // and a shell line is the one thing a guard can refuse.
+  {
+    const present = new Set(['npm', '/repo/tools/gate.mjs']);
+    const lookup = (exe) => present.has(exe);
+    const rows = resolveConfiguredCommands(
+      {
+        gate: {
+          command: 'npm test',
+          quickCommand: 'pnpm lint',
+          setupCommand: null,
+        },
+      },
+      lookup,
+    );
+    expect('resolve examines only the executable', rows[0].executable === 'npm');
+    expect('resolve reports a present command', rows[0].resolved === true);
+    expect('resolve reports an absent command', rows[1].resolved === false);
+    expect('resolve skips an unconfigured command', rows.length === 2);
+    expect(
+      'resolve names the key so a finding points at the field',
+      rows[1].key === 'gate.quickCommand',
+    );
+    const empty = resolveConfiguredCommands({ gate: { command: '   ' } }, lookup);
+    expect('a blank command is not a resolvable command', empty.length === 0);
+    const pathShaped = resolveConfiguredCommands(
+      { gate: { command: '/repo/tools/gate.mjs --full' } },
+      lookup,
+    );
+    // A path-shaped name never consults PATH, so treating it as a bare name
+    // would report a present script as missing.
+    expect('a path-shaped command is a file question', pathShaped[0].resolved === true);
+  }
 
   console.log(ok ? `self-test OK (${count} cases)` : 'self-test FAILED');
   return ok;
+}
+
+// Whether a configured command could actually run, without running it.
+//
+// Setup and doctor both owe this answer — "does `cfg.gate.command` still
+// resolve" — and until now it was prose telling the reader to check, which the
+// reader implemented as `command -v <exe>`. That is a shell probe against the
+// repository's OWN vendored guard, and during setup that guard is the
+// pre-reconcile copy: a live run was refused mid-audit by the very file the
+// reconcile was about to replace. A rule with no command gets re-derived as a
+// shell line, and a shell line is the one thing that can be refused. So the
+// rule gets a command.
+//
+// Only the executable is examined — the first word, resolved against PATH the
+// way a shell would. Arguments are not inspected and nothing is executed: this
+// answers "is it there", never "does it work", and a gate that resolves can
+// still fail for its own reasons.
+export function resolveConfiguredCommands(cfg, lookup = defaultLookup) {
+  const commands = [
+    ['gate.command', cfg?.gate?.command],
+    ['gate.quickCommand', cfg?.gate?.quickCommand],
+    ['gate.setupCommand', cfg?.gate?.setupCommand],
+  ];
+  return commands
+    .filter(([, value]) => typeof value === 'string' && value.trim() !== '')
+    .map(([key, value]) => {
+      const executable = value.trim().split(/\s+/u)[0];
+      return { key, command: value, executable, resolved: lookup(executable) };
+    });
+}
+
+function defaultLookup(executable) {
+  // A path-shaped name is a file question, not a PATH question — `./x` and
+  // `/usr/bin/x` never consult PATH, and treating them as bare names would
+  // report a present script as missing.
+  if (executable.includes('/')) {
+    try {
+      return statSync(executable).isFile();
+    } catch {
+      return false;
+    }
+  }
+  const path = process.env.PATH ?? '';
+  return path.split(':').filter(Boolean).some((directory) => {
+    try {
+      return statSync(join(directory, executable)).isFile();
+    } catch {
+      return false;
+    }
+  });
 }
 
 export function parseArgs(args) {
   const parsed = {
     statePath: 'docs/agentic/STATE.md',
     selfTest: false,
+    resolve: false,
     error: null,
   };
   const positionals = [];
@@ -1851,6 +1941,8 @@ export function parseArgs(args) {
         return parsed;
       }
       parsed.selfTest = true;
+    } else if (arg === '--resolve') {
+      parsed.resolve = true;
     } else if (arg.startsWith('-')) {
       parsed.error = 'unknown flag';
       return parsed;
@@ -1892,6 +1984,19 @@ function main() {
   if (errors.length > 0) {
     for (const error of errors) console.log(`FAIL  autoloop config: ${error}`);
     process.exit(1);
+  }
+  if (parsed.resolve) {
+    const rows = resolveConfiguredCommands(cfg);
+    for (const row of rows) {
+      console.log(
+        `${row.resolved ? 'PASS' : 'FAIL'}  ${row.key}: ${row.executable}`
+        + `${row.resolved ? '' : ' is not on PATH'} — ${row.command}`,
+      );
+    }
+    if (rows.length === 0) console.log('NOTE  no gate commands are configured');
+    // A command that does not resolve is a finding for the human, never a
+    // repair: Setup reports it and never substitutes a command nobody chose.
+    if (rows.some((row) => !row.resolved)) process.exit(1);
   }
   console.log(`PASS  autoloop config v${cfg.version}`);
 }

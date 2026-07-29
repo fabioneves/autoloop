@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.31 · starting
+∞ setup · v0.49.32 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -132,7 +132,8 @@ with the machinery they configured; the schema rejects them outright.
 
 Validate configuration only through `config-contract.mjs`. Unknown keys, invalid enums, unsafe
 paths/model identifiers, commands with control characters, or out-of-range caps fail. Doctor also
-checks that each configured command's executable is discoverable and that the checklist exists at
+checks that each configured command's executable is discoverable — `config-contract.mjs --resolve`,
+which examines the first word against PATH and executes nothing — and that the checklist exists at
 the audited base ref.
 
 ## Schema migration
@@ -199,10 +200,19 @@ Ask only:
    reasoning the caps item gives — a preserved value the human never saw is indistinguishable from
    a silent one — applied to the value where being wrong costs the most.
 
-   State whether each configured command **resolves right now**, using the discoverability check
-   Doctor already runs (see Project configuration above) rather than a second rule that could drift
-   from it. Report what is missing; never repair it, and never substitute a command the human did
-   not choose. A gate that cannot resolve is a finding for the human, not a gap for Setup to fill.
+   State whether each configured command **resolves right now** — with the tool, never a shell probe:
+
+   ```bash
+   node <templates>/tools/config-contract.mjs --resolve <repo>/docs/agentic/STATE.md
+   ```
+
+   It prints one PASS/FAIL line per configured gate command and exits non-zero if any executable is
+   absent. Use it rather than composing `command -v <exe>`: that probe runs against the repository's
+   OWN vendored guard, and during Setup that guard is the PRE-RECONCILE copy — a live audit was
+   refused by the very file the reconcile was about to replace, which is a bootstrap the session
+   cannot argue its way out of. Report what is missing; never repair it, and never substitute a
+   command the human did not choose. A gate that cannot resolve is a finding for the human, not a
+   gap for Setup to fill.
 4. Tracker: none or Jira; Jira requires epic key and cloud ID.
 5. Review checklist path/content.
 6. Numeric caps. Show every cap with its current value and the scaffold default side by side, and
