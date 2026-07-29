@@ -7,7 +7,7 @@
     "auto-merge.mjs": "2b521205891a53a008b0eaca89411216a5103471175ad5ffd1f04095a3c8b210",
     "checkout-contract.mjs": "3c9e7708f27ce0fc808488bcc44361b8c7d8e18086fc4449dcb1abaa58c5a52b",
     "claim-contract.mjs": "5db0b31ad846bf2b1f14ef03ebd28515e61a5aba82f6de1fcfa67ea95670af0e",
-    "command-guard.mjs": "eda19607011a0fc47c9ba7cf5a81c89254295296cbd6c1b266ee044106e63049",
+    "command-guard.mjs": "5e5cc156b4ba45f3e7a7e93d9362611b3c362acd16c788d5c37b96644db41510",
     "config-contract.mjs": "3ed45e4e7383c230cd68949c269d37f0c11f447ade0e0a11a5ba7895dffac66d",
     "contract-lint.mjs": "91e33170fcc2050e5f2dd2787acb9a110923660616cfe6ff2ac8fa31374231dc",
     "delivery-contract.mjs": "d071252667f6143672b0a9e38aa2849f033299db60eb385fb81c7fdd2ef14b01",

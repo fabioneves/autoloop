@@ -47,6 +47,18 @@ Notable changes to Autoloop are recorded here. The format follows
   what follows in one pass, and the host file-reading tool takes an offset directly. Verified that
   the guard accepts every command the message now recommends — advice the guard would itself refuse
   is the same defect one layer down.
+- **An inline-`awk` refusal answers a region read.** The remedy listed measurements and file
+  splicing, so `sed -n <range>p <file> | cat -n | awk '{print $1+<offset>, …}'` — a numbered read of
+  a config file — got back `git diff --shortstat` and `wc -l`. The `awk` was only ever undoing
+  `cat -n` renumbering, and that renumbering happens only because `sed` ran FIRST. The remedy now
+  names the pipeline order that removes the arithmetic entirely: `cat -n <file> | sed -n
+  <first>,<last>p` keeps the real line numbers.
+- **An inline-interpreter refusal names a command instead of "write a script to a file".** That was
+  the shape-shaped advice the assembler remedies were already taught out of — authoring a file to
+  inspect an alias is more ceremony than the question. `zsh -ic 'alias | grep -i <name>; whence -w
+  <name>'` asks a live interactive shell what a name resolves to when the definition is sitting in a
+  readable file: `rg -n <name> ~/.zshrc`. To check a file parses, the interpreter does it directly
+  (`zsh -n <file>`, `node --check <file>`); the write-a-file escape hatch remains for real programs.
 - **The documented label-provenance check reads a paginated timeline correctly.** The REST timeline
   paginates at 30 and orders oldest-first, so `| last` returned the newest labelling **on page one**.
   On a live issue with 11 comments plus label, cross-reference and rename events, the documented
