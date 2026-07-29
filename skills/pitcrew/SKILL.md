@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.49.29 · starting
+∞ pitcrew · v0.49.30 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -116,6 +116,15 @@ A loop PR is actionable when complete evidence proves at least one:
 - a current-head check is failure/error/cancelled;
 - the branch **conflicts** with `cfg.baseBranch`, or is behind it **while its lifecycle marker is
   at a phase the revision contract can enter** (`premerge-record`).
+
+**A marker BEFORE `premerge-record` makes the PR Dev's to resume, never Pitcrew's to revise.**
+`beginLifecycleRevision` enters at `premerge-record`, so a unit that never got that far has no
+revision to begin — it has an unfinished Dev run. A live PR sat at `draft-pr` with a red check;
+Pitcrew claimed it, diagnosed the failure correctly (a browser-test flake outside the diff, with
+base green on the same job at two SHAs), and then could not act, because there was no sanctioned
+path from that phase. The diagnosis was worth having and the claim was not: report the phase, the
+diagnosis, and that Dev resumes from the marker, then move on. Both ends of the range behave the
+same way for the same reason — the marker phase names the owner, and Pitcrew owns only the middle.
 
 **A marker at `ready-head` or beyond makes the PR Dev's to finalize, never Pitcrew's to revise.**
 `ready-head` means "deliver me": GitHub merges a behind-but-`MERGEABLE`/`CLEAN` PR fine — the

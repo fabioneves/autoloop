@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.29 · starting
+∞ dev · v0.49.30 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -66,6 +66,18 @@ Then, in order:
 
 1. Read `docs/agentic/STATE.md` in full from the base checkout (a SessionStart injection may
    predate the base switch). If absent, stop and run Setup.
+
+   **Policy is read from the configured base, never from the working tree — every time, not just
+   here.** A unit branch forked days ago carries a fossilized `STATE.md`, and a stale cap reads
+   exactly like a real one. A live review raised a Critical for a 700-line slice-cap breach that
+   did not exist: 700 was the value on the unit branch, the base had since raised it to 1000, and
+   closing that finding cost a review round plus a rebuttal a fresh reviewer then had to accept.
+   This is the same trap as `tools/agentic/**` running from the branch it forked with, and as a
+   planner reading base premises out of whatever checkout it was launched in — three instances of
+   one rule, so state it once: **anything that governs the run (caps, invariants, escalate paths,
+   hard-defers, protected paths) comes from `origin/<base>`; only the unit's own code comes from
+   the unit's tree.** When a step needs both, materialize the base (`git worktree add --detach
+   <scratchpad>/base origin/<base>`) rather than reading policy out of the branch under review.
 2. Verify GitHub authentication and repository access.
 3. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
 4. Share the retained snapshot file with Pitcrew. After any Git or GitHub mutation (including the
@@ -304,6 +316,20 @@ reviewer's job is to find the case the author did not consider.
   retries and no fallback engine: a failed dispatch is a decision for the orchestrator.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
+- **The payload field is named by the role, and there are exactly three.** A success is
+  `{ok:true, role, tools, startupMs, ms, <payload>}` where `<payload>` is:
+
+  | role | field | shape |
+  |---|---|---|
+  | `plan` | `.plan` | `{title, prBody, body}` |
+  | `plan-review`, `code-review`, `doubt-review` | `.verdict` | `{verdict, findings, rebuts}` |
+  | `implement` | `.text` | the writer's final message |
+
+  Stated because a live run spent three calls probing `jq -r '.text // .result // .finalMessage'`
+  for a review result that was under `.verdict` all along — a guess sequence that never reaches the
+  answer, since none of those three names exists on a verdict. Project the field, never the whole
+  object: `jq '{ok, ms}' <result.json>` and `jq -r .verdict.verdict <result.json>` cost bytes; a
+  bare `cat` of a plan result costs 48 KB you are forbidden to retype anyway.
 - `--model <name>` pins the engine's model for one dispatch, and is stamped into the typed result
   and the dispatch log so the record says who actually judged or wrote. **Model names are ENGINE
   vocabulary**: `opus`, `fable`, `sonnet` are claude-engine aliases and mean nothing to codex,
@@ -325,7 +351,16 @@ reviewer's job is to find the case the author did not consider.
   **Model-limit fallback: fable → opus, once per pin.** A dispatch that dies with a usage-limit
   message ("You've reached your … limit" in its stderr/typed error) is a resource refusal, not a
   defect: retry that dispatch ONCE with `--model opus` and note the substitution on the step's
-  collection line (`plan returned · OPUS, FABLE at limit`). The stamped result already records
+  collection line (`plan returned · OPUS, FABLE at limit`).
+
+  **Except for step 06 simplify, where opus IS the writer's model.** Simplify is pinned to `fable`
+  precisely so a fresh model reads what `opus` wrote; falling it back onto `opus` satisfies the
+  letter of the retry and destroys the decorrelation the step exists for — a reviewer of its own
+  code, one step early. A live run did exactly this and recorded the loss honestly. When simplify's
+  pin is at its limit, fall back to any claude model that is NOT the implementer's (`sonnet`), and
+  if none is available SKIP the step rather than run it on the writer's model: step 06 is a clarity
+  pass, so not running it costs clarity, while running it decorrelated-in-name-only costs the
+  guarantee. Note whichever happened on the collection line. The stamped result already records
   who actually ran. Never fall back for any other failure class, never fall back reviewers onto
   the writer's model, and never silently drop the pin — the note is the record. Opus at its
   limit too parks the run: limits reset; a run killed by improvisation does not.
@@ -588,9 +623,11 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   as collecting a result, disposing findings and swapping labels, and recall-plus-arithmetic under
   load is the shape that decays.
 
-  The panel is the only place a finished step's numbers survive; the collection line that stated
-  them scrolls away, and the closing rail carries the unit total, not the per-step breakdown.
-  Together the rows become a cost profile you can read at a glance — which step ate the run, and
+  The panel is where a finished step's numbers are read AT A GLANCE — the collection line that
+  stated them scrolls away and the closing rail carries only the unit total. It is not the only
+  place they survive: `stats.mjs` derives cross-unit step timings from the label timeline, so the
+  durable record is GitHub's and a pruned row loses convenience, not evidence. Together the rows
+  become a cost profile you can read without leaving the panel — which step ate the run, and
   whether a model was slow or merely queued. Elapsed is wall time from the step's ribbon to its
   collection, `<n>min` under an hour and `<n>h<mm>m` over it; the timestamp is the local 24-hour
   clock, the same one the ribbon prefix uses.
@@ -601,6 +638,22 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   (`parked on 2 dispatches`).
 - Never batch-create the whole 11-step list up front: a wall of pending steps is noise and the
   no-op steps would need deleting. Create each task when its step actually begins.
+- **Completed rows read newest-first, and that takes a deliberate rewrite.** The panel groups by
+  status and orders within a group by task ID, which is assigned at creation and never changes; no
+  task field sets position. Left alone, completed rows therefore sit oldest-first and the panel
+  truncates the tail — so the rows it hides are always the most recent ones, which is exactly
+  backwards. A live 16-row panel hid eleven completed rows, all of them newer than the three shown.
+
+  The only lever is ID order, so on completing a step: keep a window of the **five** most recent
+  completed rows, delete the others, and delete-and-recreate the rows that are now older than the
+  one just completed so their IDs land above it. The just-completed row keeps its original ID and
+  therefore sits at the top of the completed group, directly under the in-progress spinners.
+  Recreate each with the subject `step-subject.mjs` already composed — same text, new ID.
+
+  Two things make the cost acceptable. The window is bounded, so this is a fixed handful of calls
+  per step rather than growing with the run. And a deleted row loses nothing durable: `stats.mjs`
+  derives step timings from the label timeline, so the record is GitHub's and the panel is a view
+  of it. A shipped unit's rows go at its closing rail for the same reason.
 
 There is deliberately **no per-unit umbrella row**. It carried the issue title, but it duplicated
 the `∞ #<N> — ` prefix its own step rows already showed, doubled every unit's row count in a narrow
@@ -1277,6 +1330,26 @@ Post one issue run record via body file containing:
   computed from the dispatch log, never composed by hand — a hand-written one is what let overlap
   disappear for three releases unnoticed.
 
+**End the run record with the outcome marker, composed by the tool — never hand-written:**
+
+```bash
+node <plugin-tools>/sizing-contract.mjs --outcome --issue 219 \
+  --plan-rounds 1 --code-rounds 3 --escalated --result blocked --prod-lines 858 --files 14
+```
+
+`--result` is one of `shipped`, `blocked`, `deferred`; omit `--escalated` when the unit never
+tripped the same-predicate rule. Append the output verbatim as the record's last line.
+
+It is the other half of the issue body's `autoloop-shape-v1` marker: that one records what shaping
+PREDICTED, this one records what the unit COST, and only the pair can answer whether the sizing rule
+works. Everything in it is already in the prose above — the marker exists because prose is authored
+fresh each run and cannot be queried across units, so today the numbers are readable and
+uncountable. Put it on the issue rather than in `.git/autoloop/`: the dispatch log is per-checkout
+and machine-local, and a rule calibrated on one laptop's history is not calibrated. Emit it for
+every terminal outcome, blocked and deferred included — a unit that cost four rounds and shipped
+nothing is the most informative row there is, and recording only successes would calibrate the rule
+on the cases where it was never tested.
+
 Post one end-of-run digest and scoreboard, not one per tool phase. `stats.mjs` presents cross-unit
 step timings from the label timeline; it is presentation only.
 
@@ -1426,7 +1499,10 @@ clock without a unit, for the same reason. Everything else keeps the full `[HH:M
 
 The wait pair reads as a pair: **🅿️ parked** when the turn ends on a wait,
 **▶️ resumed** when what it waited for fires, **💤 idle** on the line that reports a run with
-nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself.
+nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself — swapped
+for **🎉** only on a clean sweep, where every unit shipped and none blocked, deferred or wanted a
+human. `🎉` also rides a unit's SHIPPED rail. Those two places are its whole domain: it marks the
+loop completing the thing it exists to do, never a step completing the job it was given.
 
 The prefix time is the START time; end and duration belong to the lines that already mark
 completion, never to a re-printed ribbon:
@@ -1484,7 +1560,7 @@ span is the whole mechanism — asking for a yellow model name is asking the hos
 End a unit with one closing rail:
 
 ```text
-[16:12][#78] ✅ ∞ ══ SHIPPED ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ══
+[16:12][#78] ✅ ∞ ══ SHIPPED 🎉 ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ══
 ```
 
 or:
@@ -1493,6 +1569,12 @@ or:
 [16:12][#78] ❌ ∞ ══ BLOCKED ─ <safe composed reason> ══
 ```
 
+The `🎉` rides the SHIPPED rail and nowhere else — not on a step, not on a round, not on a blocked
+unit. A unit reaching `delivered` is the loop doing the whole thing it exists to do, which is worth
+one mark; a step finishing is the loop doing its job, which is not. Confetti on every completion
+is the `⚠️`-on-every-review failure wearing a party hat: fire it when nothing is special and it
+stops being read on the run where something is.
+
 **A unit's closing rail is not the run's.** Blocking, deferring, or carving a unit ends THAT unit;
 the run then invalidates the affected queue sections, re-primes, and takes the next eligible unit
 without asking. The run closes on exactly three conditions: the queue is drained of eligible work,
@@ -1500,6 +1582,36 @@ a configured bound is reached, or the context needs handing off. "One unit neede
 never one of them — a human-gated unit is a row in the digest, not a reason to stop working.
 When the last eligible unit is gone, print the idle line
 (`[HH:MM] 💤 ∞ idle ─ no eligible units`) and close cleanly rather than polling.
+
+The run's own close bookends the `┏━━ ∞ RUN OPEN` frame it started with — same open-right block,
+same titled rule with the clock, so a scrollback shows the run's two ends in one shape:
+
+```text
+┏━━ ∞ RUN COMPLETE · 21:14 ━━━━━━━━━━━━━━━━━━━━
+┃  🏁 4 shipped · 0 blocked · 0 deferred
+┃  ⏱ 6h12m · 11 dispatches · 2h41m overlapped
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**A clean sweep — every unit shipped, nothing blocked, deferred or left for a human — earns the
+flourish.** Nothing else does:
+
+```text
+┏━━ ∞ RUN COMPLETE · 21:14 ━━━━━━━━━━━━━━━━━━━━
+┃  🎉 4 shipped · 0 blocked · 0 deferred
+┃  ⏱ 6h12m · 11 dispatches · 2h41m overlapped
+┃
+┃      · ˚ ✦ .    ∞    . ✦ ˚ ·
+┃     a l l   u n i t s   g r e e n
+┃      · ˚ ✦ .    ∞    . ✦ ˚ ·
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+One blocked unit and it is the plain form — no confetti, no stars, `🏁` instead of `🎉`. That is
+the whole point: a run that ends with a human gated out is not a clean sweep, and saying so in the
+same breath as a celebration would teach the reader to skim both. The flourish is ragged-right and
+padded by nothing, so no terminal can misalign it, and the glyphs are plain ASCII beside two
+non-variation-selector emoji — the width lesson the parked header paid for twice.
 
 Close the run with the badge matching its outcome — ✅ when something shipped and nothing
 blocked, ❌ when anything blocked:

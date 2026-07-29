@@ -3,6 +3,114 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.30] - 2026-07-28
+
+### Changed
+
+- **Shape sizes a unit by CASES, not lines.** One unit is one invariant whose complete case
+  enumeration fits in about five cases; past that, unfinishable, more than one hard invariant, or an
+  independently shippable half all mean split. Lines were the wrong measure and only looked right:
+  they are countable solely after the work is done, they are language-relative, and they did not
+  explain either failure — an 858-line unit blocked on ONE predicate whose domain was the unbounded
+  set of stored encodings, and a 200-line unit with that invariant fails identically. Cases are
+  checkable from the issue text before filing, causal rather than correlated (cases drive tests
+  drive diff drive review rounds), language-neutral, and already owed by the plan, so shape asks
+  upfront for what the plan must produce anyway. The ~300-line figure survives as a tripwire that
+  sends the reader to the case list — the caps stay a ceiling, and a ceiling is an attractor: under
+  a 700-line cap units reliably landed at 800–1000, so raising it to 1000 moves the overshoot rather
+  than buying headroom. Two live runs
+  shipped nothing and both blocked on the same-predicate escalation — the loop noticing an
+  invariant too large to enumerate, which is a shaping failure surfacing three hours late. One unit
+  ran 858 production lines across 14 files inside a 1000/20 cap and spent 4 of 6 review rounds on a
+  single predicate three fixes each failed to close; another's own run concluded it should have
+  been split, one half having converged cleanly. The real unit of size is the invariant, not the
+  line count: a unit stating two independent invariants gets two independent chances to trip
+  escalation, and the cost is multiplicative. Shape now aims at roughly a third of the caps and
+  splits on any of — more than one hard invariant, an independently shippable half, or an invariant
+  quantified over an open-ended domain — proposing the split concretely rather than advising one.
+
+### Added
+
+- **The dispatch result's payload field is documented per role.** The skill named `.plan.body` once
+  and never said where a verdict or a writer's text lands, so a live run spent three calls probing
+  `jq -r '.text // .result // .finalMessage'` for a review result that was under `.verdict` — a
+  guess sequence that cannot succeed, since none of those names exists on a verdict. There are
+  exactly three payload fields, one per role shape: `.plan`, `.verdict`, `.text`.
+- **Shaping predictions and unit outcomes are recorded as typed markers.** Shape ends every issue
+  body with `<!-- autoloop-shape-v1 {"cases":…,"invariants":…} -->` and the loop ends every run
+  record with `<!-- autoloop-outcome-v1 {"issue":…,"codeRounds":…,"escalated":…} -->`. Neither adds
+  information — both restate what the prose already says — but prose is authored fresh each run and
+  cannot be queried across units, so today the numbers are readable and uncountable, and the sizing
+  rule above can only ever be argued rather than measured. The pair is what makes "do five-case
+  units really converge faster than nine-case ones" an answerable question. Both live on the issue
+  rather than in `.git/autoloop/`, because the dispatch log is per-checkout and machine-local and a
+  rule calibrated on one laptop's history is not calibrated. Outcomes are emitted for blocked and
+  deferred units too: a unit that cost four rounds and shipped nothing is the most informative row
+  there is. Both are composed by `sizing-contract.mjs` rather than hand-written — a format recalled
+  under load decays, and a field that drifts across runs makes the whole series unqueryable, so the
+  tool validates and refuses rather than emitting a broken record. Two records in one body are a
+  conflict, not a last-write-wins. Instrumentation only — nothing reads them yet, and a handful of
+  units is not a sample.
+- **A clean sweep is celebrated, and only a clean sweep.** A unit reaching `delivered` earns a `🎉`
+  on its SHIPPED rail, and a run whose every unit shipped — nothing blocked, deferred, or waiting
+  on a human — closes with a flourish instead of the plain rail. One blocked unit and the run gets
+  the plain form with `🏁`, no confetti and no stars: a run that ends with a human gated out is not
+  a clean sweep, and saying so beside a celebration would teach the reader to skim both. This is
+  the `⚠️`-on-every-review lesson applied before the mark exists rather than after it stops being
+  read. The run's close now bookends the `┏━━ ∞ RUN OPEN` frame in the same open-right shape, so a
+  scrollback shows both ends of a run at a glance — ragged-right and padded by nothing, so no
+  terminal can misalign it.
+
+### Fixed
+
+- **A rebased claim branch can no longer wedge a merged unit.** `#149` shipped and PR `#238` merged,
+  but its terminal backfill was refused `ARTIFACT_IDENTITY_MISMATCH(local-claim)` on every attempt,
+  leaving a permanent `draft-pr` marker on a closed unit. The branch had been rebased after the
+  claim — which rewrites every OID on it, the claim commit included — so the marker held the
+  original while the surviving local branch carried the rewrite. Once a PR is merged the local
+  branch is leftover history, not evidence: the merge commit on the base is the proof. The
+  absent-and-merged case was already handled; presence was the gap. Live units keep the full
+  comparison, which is where it does its job.
+- **Policy is read from the configured base, never the working tree.** A unit branch that forked
+  days ago carries a fossilized `STATE.md`, and a stale cap reads exactly like a real one: a live
+  review raised a Critical for a 700-line slice-cap breach that did not exist — 700 was the unit
+  branch's value, the base had since raised it to 1000 — and closing it cost a review round plus a
+  rebuttal. This is the third instance of one trap, after `tools/agentic/**` running from the
+  branch it forked with and a planner reading base premises from its launch checkout, so it is now
+  stated once as a rule: anything governing the run comes from `origin/<base>`; only the unit's own
+  code comes from the unit's tree.
+- **Simplify never falls back onto the writer's model.** Step 06 is pinned to `fable` precisely so
+  a fresh model reads what `opus` wrote, and the usage-limit fallback sent it to `opus` — satisfying
+  the retry while destroying the decorrelation the step exists for. It now falls back to a
+  non-implementer model, and skips rather than running decorrelated-in-name-only: not running a
+  clarity pass costs clarity, running a fake one costs the guarantee.
+- **Pitcrew reports a pre-publish marker instead of claiming it.** A PR sitting at `draft-pr` with a
+  red check was claimed, correctly diagnosed as a flake outside the diff, and then could not be
+  acted on — `beginLifecycleRevision` enters at `premerge-record`, so a unit that never got that far
+  has an unfinished Dev run rather than a revision. Both ends of the phase range now behave the
+  same way: the marker phase names the owner, and Pitcrew owns only the middle.
+- **Overlap accounting measures THIS run, not the last prime.** A live five-hour run reported
+  `dispatches 8 · concurrent 0s` while its dispatch log held 57 entries and four genuinely
+  concurrent pairs; the run recorded it as a possible tool gap rather than correcting it by hand,
+  which is how it got found. Run markers accumulate — one per prime, never pruned, 27 in that
+  checkout — and the window boundary was `Math.max` over all their mtimes, so it anchored to the
+  most recent PRIME and discarded every dispatch issued before it. The boundary is now the marker
+  naming a live PID in this process's ancestry, the same evidence `command-guard.mjs` uses to
+  decide a run is open; a marker whose orchestrator has exited cannot be this run, and an
+  unresolvable ancestry means no boundary rather than a wrong one. Measured against the same log,
+  the corrected report reads `dispatches 57 · wall 564m · concurrent 93m`. The accounting that
+  exists to make overlap a measurement instead of a claim was itself unmeasured.
+- **Completed panel rows read newest-first.** The panel groups by status and orders within a group
+  by task ID, which is assigned at creation and never changes — no task field sets position. Left
+  alone, completed rows sit oldest-first and the panel truncates the tail, so the rows it hides are
+  always the most recent ones. A live 16-row panel hid eleven completed rows, every one of them
+  newer than the three shown, which is exactly backwards for a reader asking what just finished.
+  Completing a step now keeps a bounded window of the five most recent completed rows and
+  delete-and-recreates the ones older than it, so their IDs land above and the just-completed row
+  sits directly under the in-progress spinners. A pruned row loses convenience, not evidence:
+  `stats.mjs` derives step timings from the label timeline, so the durable record is GitHub's — a
+  correction to this skill's own claim that the panel was the only place those numbers survived.
+
 ## [0.49.29] - 2026-07-28
 
 ### Fixed

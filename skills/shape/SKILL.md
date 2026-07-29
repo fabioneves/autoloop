@@ -15,6 +15,60 @@ lines are countable the work is done and blocking spends a human decision to lea
 oversized unit filed here is not caught later — it is simply reviewed at a size where cross-model
 review thins out silently.
 
+### The size metric is CASES, not lines
+
+**One unit = one invariant whose complete case enumeration fits in about five cases.** That is the
+measure. Write the list while shaping; if you cannot finish it, the unit is wrong — not too big,
+*wrong*, because an invariant whose cases cannot be enumerated cannot be tested or reviewed either.
+
+Cases beat every other candidate on the axes that matter here:
+
+- **Checkable when it matters.** Lines are countable only after the work is done — this skill says
+  so itself, two paragraphs down. A case list is written from the issue text, before anything is
+  filed.
+- **Causal, not correlated.** Cases drive tests, tests drive the diff, and the diff drives review
+  rounds. Line count is a downstream shadow of the case count.
+- **Language-neutral.** 300 lines of Go and 300 lines of PHP are different amounts of behavior; five
+  cases are five cases.
+- **Not gameable in the harmful direction.** Splitting to hit a line budget produces halves that
+  need each other; hiding cases is already a plan-level Major, since the reviewer checks enumeration
+  completeness.
+- **Free.** The plan must enumerate cases per invariant anyway. Shape is demanding upfront what the
+  plan already owes.
+
+Both blocked runs are explained by this and by nothing else. `#123` was 858 lines and blocked on
+**one** predicate whose domain was the unbounded set of stored *encodings* — unenumerable, so three
+successive fixes each closed a case and admitted another. A 200-line unit with that invariant fails
+identically, which is exactly why the line budget would not have saved it. `#219` was not too
+voluminous either; it was two units, and the half with the enumerable case list converged cleanly.
+
+**Lines are a tripwire, and a tripwire only fires in one direction.** ~300 production lines is a
+smoke signal: over it, *go count your cases*. **Under it proves nothing** — a unit is never
+well-sized because of its line estimate, only because its cases enumerate. That direction is the
+whole point, because the failure being fixed here was a number granting permission: 858 lines read
+as "comfortably inside a 1000/20 cap" and the unit shipped nothing. A 300 tripwire read as a budget
+would fail exactly the same way, just sooner.
+
+The number is stated as its own rather than derived from `sliceMaxLines`, because a cap raised for
+an unrelated reason — a verbose language, a generated file — must not drag it up. And the cap is an
+attractor: under a 700-line cap units reliably landed at 800–1000, so raising the cap to 1000 moves
+the overshoot rather than buying headroom.
+
+Both blocked on the same-predicate escalation — the loop noticing an invariant too large to
+enumerate. That is a SHAPING failure surfacing three hours late, and it is the failure this rule
+exists to prevent.
+
+**Three signals, any one of which means SPLIT:**
+
+- the case list for one invariant runs past about five, or cannot be finished at all;
+- the unit states more than one hard invariant — each is an independent chance to trip escalation,
+  and each needs its own complete enumeration, so the cost is multiplicative rather than additive;
+- the acceptance criteria contain an independently shippable half (vendoring vs extractor).
+
+Split at the invariant boundary and chain with `## Blocked by`. A unit small enough that a reviewer
+holds its whole diff at once is the goal; if a slice reads as trivially small, that is the correct
+size and not a reason to bundle it with its neighbour.
+
 **This is an interactive, human-run skill.** It asks questions (the loop never does), and it NEVER
 applies `loop-ready` or any state label: the label is the maintainer's trust act (STATE →
 guardrail), and shape output is a proposal until a human reads and labels it.
@@ -63,6 +117,23 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    composes so the queue scans at a glance. The type is a guess, not a contract: the plan may
    land the PR under a different type, and a human-filed issue without a prefix is fine —
    format is never validated and never gates.
+   **End every body with the sizing marker, composed by the tool — never hand-written:**
+
+   ```bash
+   node <plugin-tools>/sizing-contract.mjs --shape --cases 5 --invariants 1 --files 3 --lines 260
+   ```
+
+   Append its output verbatim as the body's last line. It records what this skill JUDGED at shaping
+   time, so the judgement can later be checked against what the unit actually cost. Without it the
+   case count lives only in prose and nothing can ever ask whether five-case units really do
+   converge faster than nine-case ones — the sizing rule above stays an argument instead of becoming
+   a measurement.
+
+   The tool composes it because a format recalled under load decays, and a field that drifts across
+   runs makes the whole series unqueryable — a marker nobody validates is worse than none, since it
+   looks like data. It refuses a record it cannot validate rather than emitting a broken one. Write
+   it even when the estimate is uncertain: a recorded guess that turns out wrong is the data point
+   that improves the rule, while an omitted one is silence.
 5. **Review with the human, then file.** Show the full set (titles + one-line summaries + the
    dependency graph) before creating anything. On approval, file via `gh issue create
    --body-file <scratchpad>/…` (bodies via scratch files outside the repo — never inline `--body`).
@@ -83,8 +154,11 @@ Grade an existing issue the way `autoloop:dev` step 1 will:
   miss). Data premises: is the verifying read-only query stated?
 - **Acceptance**: each criterion objectively verifiable? Flag vibes ("improve", "clean up",
   "better") and propose testable rewrites.
-- **Scope**: single module? Estimated size vs the caps? If oversized, propose the split (per-module
-  slices + dependency order).
+- **Size**: list the cases the unit's invariant must prove. Past ~5, unfinishable, more than one
+  hard invariant, or an independently shippable half — SPLIT, whatever the line estimate says.
+  Propose the split concretely (per-invariant slices + dependency order), never as advice to
+  "consider splitting". The ~300-line tripwire is a smoke signal that sends you to the case list,
+  never a criterion on its own.
 - **Hard-defer smells**: hidden new dependency, secret/env need, production data write — surface
   them so the maintainer routes them consciously.
 - **Structure**: `## Blocked by` present/correct; Out of scope stated; title composable into a

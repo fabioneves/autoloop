@@ -986,9 +986,24 @@ export function reconcileLifecycle(input, context = {}) {
   }
 
   if (!completeExistence(facts.localClaim)) return inspect('local-claim');
-  if (facts.localClaim.exists !== true) {
-    if (!merged) return transition('act', 'ensure-local-claim', 'LOCAL_CLAIM_MISSING');
+  // Once the PR is MERGED the local claim branch is leftover history, not
+  // evidence. It may be absent, or present and rewritten — a rebase onto a
+  // moved base rewrites every OID on the branch, the claim commit included —
+  // and neither fact changes what the merge commit on the base already proves.
+  //
+  // Comparing it anyway wedged a delivered unit: #149 shipped, PR #238 merged,
+  // and the terminal backfill was refused ARTIFACT_IDENTITY_MISMATCH(local-claim)
+  // because the marker recorded the pre-rebase claim commit while the surviving
+  // local branch carried the post-rebase one. Unfixable by hand, since marker
+  // edits go through the driver or not at all, so the unit kept a stale
+  // `draft-pr` marker forever.
+  //
+  // The absent-and-merged case was already handled here; presence was the gap.
+  // Live units keep the full comparison, which is where it does its job.
+  if (merged) {
     if (!input.marker.claimCommit) return artifactMismatch('terminal-marker');
+  } else if (facts.localClaim.exists !== true) {
+    return transition('act', 'ensure-local-claim', 'LOCAL_CLAIM_MISSING');
   } else {
     if (
       facts.localClaim.branch !== intentValue.branch
@@ -2463,6 +2478,28 @@ function selfTest() {
       expected: ['act', 'write-premerge-record'],
     },
     {
+      // 2026-07-28: #149 shipped, PR #238 merged, and the terminal backfill was
+      // refused ARTIFACT_IDENTITY_MISMATCH(local-claim) forever. The branch had
+      // been rebased after the claim, so the surviving local branch carried a
+      // rewritten claim commit while the marker held the original. A merged
+      // unit's local branch is leftover history; the merge commit is the proof.
+      name: 'a rebased local claim branch cannot wedge a merged unit',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12, headOid: SHA }),
+        observed: observed({
+          localClaim: {
+            complete: true,
+            exists: true,
+            branch: 'feat/gh-7-contract',
+            claimCommit: OTHER_SHA,
+          },
+          merge: { complete: true, merged: true, headOid: SHA, mergeOid: OTHER_SHA },
+        }),
+      },
+      unexpectedArtifact: 'local-claim',
+    },
+    {
       name: 'bound premerge evidence restores a missing delivered label',
       input: {
         intent: intent(),
@@ -3151,6 +3188,20 @@ function selfTest() {
       withTestPremergeDraft(fixture.input),
       testReconcileContext(),
     );
+    // A case may pin the exact decision, or only that one decision is FORBIDDEN.
+    // The negative form exists for regressions whose defect is "refused at all":
+    // pinning whichever downstream action follows would make the case fail for
+    // unrelated reasons the next time that path grows a step.
+    if (fixture.unexpectedArtifact !== undefined) {
+      if (actual.artifact === fixture.unexpectedArtifact) {
+        console.error(
+          `FAIL ${fixture.name}: refused on forbidden artifact ${actual.artifact}`,
+        );
+        continue;
+      }
+      passed += 1;
+      continue;
+    }
     if (actual.state !== fixture.expected[0] || actual.action !== fixture.expected[1]) {
       console.error(`FAIL ${fixture.name}: expected ${fixture.expected.join('/')}, got ${actual.state}/${actual.action}`);
       continue;
