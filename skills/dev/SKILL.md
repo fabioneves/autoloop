@@ -454,8 +454,9 @@ failure. Waiting itself has one sanctioned shape per situation:
 
 - **Parked wait (preferred).** Every in-flight dispatch is backgrounded with `--output-file`, a
   Monitor (or the background task's own completion signal) is armed on each result file, all
-  commits are pushed, and the LAST thing before the turn ends is the parked block naming what it
-  waits for, with the clock:
+  commits are pushed, **the task panel is pruned to its four most recent completed rows** (see the
+  panel section — park is when the panel is read, so it is when it must be readable), and the LAST
+  thing before the turn ends is the parked block naming what it waits for, with the clock:
 
   **The park push is not step 10, and step 10 does not own the push.** A live run parked at step 5
   with EIGHT local commits, reasoning "the push happens at step 10, per the flow" — the same
@@ -644,16 +645,23 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   truncates the tail — so the rows it hides are always the most recent ones, which is exactly
   backwards. A live 16-row panel hid eleven completed rows, all of them newer than the three shown.
 
-  The only lever is ID order, so on completing a step: keep a window of the **five** most recent
-  completed rows, delete the others, and delete-and-recreate the rows that are now older than the
-  one just completed so their IDs land above it. The just-completed row keeps its original ID and
-  therefore sits at the top of the completed group, directly under the in-progress spinners.
-  Recreate each with the subject `step-subject.mjs` already composed — same text, new ID.
+  **Prune instead of sorting: at each park and at a unit's closing rail, delete completed rows
+  beyond the four most recent.** Four fit without truncation, so the newest work is always visible —
+  which is the harm. Re-sorting to put newest on top would take a delete-and-recreate of the whole
+  window on a panel that orders by an ID nothing can set, about ten tool calls in a bookkeeping
+  turn, and it buys only reading order on rows that each already carry `[<elapsed>] [<HH:MM>]`. A
+  reader can order four timestamped rows by eye; a reader cannot see a row the panel is hiding. Buy
+  the visibility, skip the ordering.
 
-  Two things make the cost acceptable. The window is bounded, so this is a fixed handful of calls
-  per step rather than growing with the run. And a deleted row loses nothing durable: `stats.mjs`
-  derives step timings from the label timeline, so the record is GitHub's and the panel is a view
-  of it. A shipped unit's rows go at its closing rail for the same reason.
+  Park is where the prune belongs. It is already a bookkeeping moment (push, arm the monitor, print
+  the block), it happens a handful of times per unit rather than at every step, and it is exactly
+  when a human reads the panel — the run has gone quiet and that list is what says it is alive. A
+  per-completion version of this rule shipped in v0.49.30 and a live run on that version did not
+  follow it, which is the answer to whether the per-step cost was affordable.
+
+  A deleted row loses nothing durable: `stats.mjs` derives step timings from the label timeline, so
+  the record is GitHub's and the panel is a view of it. A shipped unit's rows go at its closing rail
+  for the same reason.
 
 There is deliberately **no per-unit umbrella row**. It carried the issue title, but it duplicated
 the `∞ #<N> — ` prefix its own step rows already showed, doubled every unit's row count in a narrow

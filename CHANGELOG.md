@@ -5,6 +5,21 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [0.49.33] - 2026-07-29
 
+### Fixed
+
+- **The panel is pruned at the park; the newest-first rewrite is dropped.** v0.49.30 asked for a
+  delete-and-recreate of the completed window on EVERY step completion, so the newest finish would
+  take the lowest ID and sit on top. A live run on that version did not do it, which is the answer
+  to whether the cost was affordable: about ten tool calls in the same turn that collects a typed
+  result, composes a subject, swaps labels and prints a ribbon — the same
+  recall-plus-mechanical-work shape that made three earlier rules decay.
+
+  The rewrite is gone. What replaces it is a prune to the four most recent completed rows at each
+  park and closing rail, which fits without truncation. That buys the thing that was actually
+  broken: a hidden row cannot be read at all, while an out-of-order one can, because every row
+  already carries `[<elapsed>] [<HH:MM>]` and four timestamped rows order by eye. Buy the
+  visibility, skip the ordering.
+
 ### Changed
 
 - **An escalation block ships its options as instructions, not as prose.** The decision stays the
