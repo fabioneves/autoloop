@@ -466,6 +466,12 @@ export function reconcile(root, templates, { audit = false } = {}) {
   const changing = sorted.filter((entry) => !settled.has(entry.action));
   return {
     version: 1,
+    // `ok` is not decoration: the command guard's `$?` refusal tells a caller to
+    // read the typed outcome instead of capturing an exit status, and that
+    // advice was false for this tool — the report had no outcome field, so a
+    // live run reached for `$?` to learn whether the audit had worked and was
+    // refused for it. A tool the guard points at has to carry what it promises.
+    ok: true,
     nonManualTooling: nonManual,
     reconcileNeeded: changing.length > 0,
     reconcileSummary: changing.length === 0
@@ -1834,6 +1840,17 @@ function mergeMain(args, kind, flagAt) {
     return 2;
   }
   if (templates.value === null) {
+    // Typed on stdout as well, for the same reason `ok: true` exists above: a
+    // caller told not to capture `$?` needs the failure to be readable in the
+    // output it already parses. A vendored copy has no templates beside it by
+    // construction, so this is the ORDINARY failure for a repo-run audit, not
+    // an exotic one.
+    console.log(JSON.stringify({
+      version: 1,
+      ok: false,
+      error: 'cannot locate the plugin templates directory from this vendored copy',
+      remedy: 'run the plugin copy, or pass --templates <plugin templates dir>',
+    }, null, 2));
     console.error(
       'scaffold: cannot locate the plugin templates directory from this vendored '
       + 'copy; pass --templates <plugin templates dir>',
@@ -1881,6 +1898,18 @@ function main(args) {
     return 2;
   }
   if (templates === null) {
+    // Typed on stdout, for the same reason `ok: true` rides the success report:
+    // the command guard's `$?` refusal tells a caller to read the typed outcome
+    // rather than capture an exit status, and a caller that does exactly that
+    // must find the failure there. A vendored copy has no templates beside it
+    // by construction, so this is the ORDINARY failure for a repo-run audit —
+    // a live run hit it and reached for `$?` to detect it.
+    console.log(JSON.stringify({
+      version: 1,
+      ok: false,
+      error: 'cannot locate the plugin templates directory from this vendored copy',
+      remedy: 'run the plugin copy of scaffold.mjs, or pass --templates <plugin templates dir>',
+    }, null, 2));
     console.error(
       'scaffold: cannot locate the plugin templates directory from this vendored '
       + 'copy; pass --templates <plugin templates dir>',

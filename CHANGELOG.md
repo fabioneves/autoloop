@@ -7,6 +7,14 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **The scaffold report carries the outcome the guard tells callers to read.** The `$?` refusal
+  says "the typed tools carry their outcome in their own output (`ok: false` beside the reason) —
+  read that instead of capturing it", and that advice was false for this tool: the reconcile report
+  had no outcome field at all. A live run auditing a repository reached for `$?` to learn whether
+  the audit had worked, and was refused for it. The report now carries `ok`, and the ordinary
+  failure for a repo-run audit — a vendored copy has no templates beside it by construction — emits
+  `{ok:false, error, remedy}` on stdout instead of only a stderr line and an exit code. A tool the
+  guard points at has to carry what the guard promises.
 - **The audit states whether a reconcile is needed, and Dev checks it.** `scaffold.mjs --audit` knew
   the answer and never said it, leaving a reader to count per-file actions — which is why every
   release felt like it demanded a Setup. Most do not: skills load from the plugin, so a skills-only
