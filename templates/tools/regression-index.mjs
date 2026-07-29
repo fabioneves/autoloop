@@ -33,6 +33,23 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'command-v-lookup-read-as-an-invocation',
+    date: '2026-07-29',
+    symptom: '`command -v php` was refused as inline interpreter source while a '
+      + 'live setup checked whether its configured gate still resolves — the '
+      + 'probe this plugin\'s own setup skill asks for.',
+    cause: '`command` is a passthrough wrapper, so the name behind it read as '
+      + 'an invocation with no script argument, which is the stdin shape. '
+      + '`-v`/`-V` make it a lookup that runs nothing.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'function isLookupSegment(' }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: "['command -v php', 'feat/gh-1-x', false]",
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'rebased-claim-branch-wedged-a-merged-unit',
     date: '2026-07-28',
     symptom: '#149 shipped and PR #238 merged, but every terminal backfill was '
