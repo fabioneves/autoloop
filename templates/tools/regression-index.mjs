@@ -33,6 +33,23 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'rebased-claim-branch-wedged-a-merged-unit',
+    date: '2026-07-28',
+    symptom: '#149 shipped and PR #238 merged, but every terminal backfill was '
+      + 'refused ARTIFACT_IDENTITY_MISMATCH(local-claim), leaving a permanent '
+      + '`draft-pr` marker on a closed unit that no hand edit may repair.',
+    cause: 'The branch was rebased after the claim, rewriting every OID on it '
+      + 'including the claim commit, so the marker held the original while the '
+      + 'surviving local branch carried the rewrite. A merged unit\'s local '
+      + 'branch is leftover history; the merge commit is the proof.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'lifecycle-contract.mjs',
+        anchor: 'a rebased local claim branch cannot wedge a merged unit',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'overlap-window-anchored-to-the-last-prime',
     date: '2026-07-28',
     symptom: 'A five-hour run reported `dispatches 8 · concurrent 0s` while '

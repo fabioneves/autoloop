@@ -15,6 +15,33 @@ lines are countable the work is done and blocking spends a human decision to lea
 oversized unit filed here is not caught later — it is simply reviewed at a size where cross-model
 review thins out silently.
 
+**The caps are a CEILING, not a target — aim at roughly a third of them.** A unit that lands near
+`sliceMaxLines` is not a well-sized unit that happened to fit; it is a unit that will take hours and
+several review rounds. Measured evidence from two live runs, both of which shipped nothing:
+
+- A unit at 858 production lines across 14 files — comfortably inside a 1000/20 cap — spent 4 of 6
+  review rounds and blocked on **one** predicate that three separate fixes each failed to close,
+  because the plan enumerated stored *states* rather than the unbounded stored *encoding domain*.
+- A unit whose own run concluded it should have been split: "the vendoring half converged cleanly
+  and is what unblocks three queued issues; the extractor half did not."
+
+Both blocked on the same-predicate escalation, which is the loop noticing that a unit carries an
+invariant too large to enumerate. That is a SHAPING failure surfacing three hours late, and it is
+the failure this rule exists to prevent.
+
+**The real unit of size is the invariant, not the line count.** Prefer one hard invariant per unit.
+A unit stating two or more independent invariants gets two or more independent chances to trip
+escalation, and its plan must enumerate every case of each — the cost is multiplicative, not
+additive. Two signals that a unit must be split, both taken from the runs above:
+
+- its acceptance criteria contain an independently shippable half (vendoring vs extractor);
+- an invariant quantifies over an open-ended domain ("every stored encoding") rather than an
+  enumerable one ("these four states").
+
+Split at the invariant boundary and chain with `## Blocked by`. A unit small enough that a reviewer
+holds its whole diff at once is the goal; if a slice reads as trivially small, that is the correct
+size and not a reason to bundle it with its neighbour.
+
 **This is an interactive, human-run skill.** It asks questions (the loop never does), and it NEVER
 applies `loop-ready` or any state label: the label is the maintainer's trust act (STATE →
 guardrail), and shape output is a proposal until a human reads and labels it.
@@ -83,8 +110,11 @@ Grade an existing issue the way `autoloop:dev` step 1 will:
   miss). Data premises: is the verifying read-only query stated?
 - **Acceptance**: each criterion objectively verifiable? Flag vibes ("improve", "clean up",
   "better") and propose testable rewrites.
-- **Scope**: single module? Estimated size vs the caps? If oversized, propose the split (per-module
-  slices + dependency order).
+- **Scope**: single module? Estimated size against **a third of the caps**, not against the caps —
+  and how many hard invariants does it carry? More than one, an independently shippable half, or an
+  invariant quantified over an open-ended domain all mean SPLIT, whatever the line estimate says.
+  Propose the split concretely (per-invariant slices + dependency order), never as advice to
+  "consider splitting".
 - **Hard-defer smells**: hidden new dependency, secret/env need, production data write — surface
   them so the maintainer routes them consciously.
 - **Structure**: `## Blocked by` present/correct; Out of scope stated; title composable into a

@@ -66,6 +66,18 @@ Then, in order:
 
 1. Read `docs/agentic/STATE.md` in full from the base checkout (a SessionStart injection may
    predate the base switch). If absent, stop and run Setup.
+
+   **Policy is read from the configured base, never from the working tree — every time, not just
+   here.** A unit branch forked days ago carries a fossilized `STATE.md`, and a stale cap reads
+   exactly like a real one. A live review raised a Critical for a 700-line slice-cap breach that
+   did not exist: 700 was the value on the unit branch, the base had since raised it to 1000, and
+   closing that finding cost a review round plus a rebuttal a fresh reviewer then had to accept.
+   This is the same trap as `tools/agentic/**` running from the branch it forked with, and as a
+   planner reading base premises out of whatever checkout it was launched in — three instances of
+   one rule, so state it once: **anything that governs the run (caps, invariants, escalate paths,
+   hard-defers, protected paths) comes from `origin/<base>`; only the unit's own code comes from
+   the unit's tree.** When a step needs both, materialize the base (`git worktree add --detach
+   <scratchpad>/base origin/<base>`) rather than reading policy out of the branch under review.
 2. Verify GitHub authentication and repository access.
 3. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
 4. Share the retained snapshot file with Pitcrew. After any Git or GitHub mutation (including the
@@ -325,7 +337,16 @@ reviewer's job is to find the case the author did not consider.
   **Model-limit fallback: fable → opus, once per pin.** A dispatch that dies with a usage-limit
   message ("You've reached your … limit" in its stderr/typed error) is a resource refusal, not a
   defect: retry that dispatch ONCE with `--model opus` and note the substitution on the step's
-  collection line (`plan returned · OPUS, FABLE at limit`). The stamped result already records
+  collection line (`plan returned · OPUS, FABLE at limit`).
+
+  **Except for step 06 simplify, where opus IS the writer's model.** Simplify is pinned to `fable`
+  precisely so a fresh model reads what `opus` wrote; falling it back onto `opus` satisfies the
+  letter of the retry and destroys the decorrelation the step exists for — a reviewer of its own
+  code, one step early. A live run did exactly this and recorded the loss honestly. When simplify's
+  pin is at its limit, fall back to any claude model that is NOT the implementer's (`sonnet`), and
+  if none is available SKIP the step rather than run it on the writer's model: step 06 is a clarity
+  pass, so not running it costs clarity, while running it decorrelated-in-name-only costs the
+  guarantee. Note whichever happened on the collection line. The stamped result already records
   who actually ran. Never fall back for any other failure class, never fall back reviewers onto
   the writer's model, and never silently drop the pin — the note is the record. Opus at its
   limit too parks the run: limits reset; a run killed by improvisation does not.
