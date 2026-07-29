@@ -673,10 +673,19 @@ export function unresolvedExpansionReason(rawCmd) {
   // before running it. Telling the reader to "assign it a literal" is advice
   // they cannot follow, the same defect the `$?` branch above exists to avoid.
   // A live run measuring per-package sizes hit this and had nowhere to go.
+  // 2026-07-29: the alternatives named were BOTH measurements, so a session
+  // wanting one method body — grep for the signature, feed its line number to
+  // `sed -n` — was answered with `wc -l` and `git diff --shortstat` and had
+  // nowhere to go again. Locating a definition and reading around it is the
+  // commonest reason to reach for a substitution at all, and unlike a
+  // measurement it has an exact one-command answer, so it is named first.
   if (tokens.every((token) => token === 'a command substitution')) {
     return `${what}, because its value is whatever the inner command prints and that is not `
       + 'knowable before running it. Run the inner command as its own call and use the value it '
-      + 'returns, or pick a spelling that needs no substitution — `wc -l <paths>` and '
+      + 'returns, or pick a spelling that needs no substitution. To read the region around a '
+      + 'match — the usual reason to feed `grep -n` into `sed` — `rg -n -A<lines> <pattern> '
+      + '<file>` prints the match and what follows in one pass, and the host file-reading tool '
+      + 'takes an offset and a line count directly. To measure, `wc -l <paths>` and '
       + '`git diff --shortstat` print their numbers directly. A real program goes in a file.';
   }
   return `${what}, so command policy cannot judge what would run. Assign it a literal in the `
@@ -2401,6 +2410,23 @@ function selfTest() {
       || loopReason.includes('hide a mutation')
     ) {
       console.error('FAIL [a loop refusal names the loop variable and the loop remedy]');
+      ok = false;
+    }
+    // 2026-07-29: a session wanting the body of one PHP method wrote
+    // `sed -n "$(grep -n '<signature>' f | cut -d: -f1),+40p" f` and the remedy
+    // offered only `wc -l` and `git diff --shortstat` — measurements, when the
+    // reader was navigating. A region read has an exact spelling; name it.
+    messageChecks += 1;
+    const regionReason = evaluate(
+      'sed -n "$(grep -n \'private function credentials(\' a.php | cut -d: -f1),+40p" a.php',
+      'feat/gh-1-x',
+    ).reason ?? '';
+    if (
+      !regionReason.includes('command substitution')
+      || !regionReason.includes('-A<lines>')
+      || !regionReason.includes('offset')
+    ) {
+      console.error('FAIL [a substitution refusal names the region-read spelling]');
       ok = false;
     }
     messageChecks += 1;
