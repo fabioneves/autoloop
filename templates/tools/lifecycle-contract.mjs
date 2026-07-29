@@ -1133,8 +1133,17 @@ export function reconcileLifecycle(input, context = {}) {
   if (!merged) {
     if (facts.delivery.exists !== true) {
       if (!input.marker.headOid) {
+        // Two different situations reach ACTIVE_DRAFT_RECOVERED, and a caller
+        // that cannot tell them apart has to read this file to find out which.
+        // A live run did exactly that — it opened the contract source mid-unit
+        // to learn that its statuses were simply not published yet. The code
+        // stays (callers match on it); `waitingOn` says which one it is.
         if (facts.delivery.request == null) {
-          return transition('resume', 'resume-unit', 'ACTIVE_DRAFT_RECOVERED');
+          return transition('resume', 'resume-unit', 'ACTIVE_DRAFT_RECOVERED', {
+            waitingOn: 'delivery-request',
+            nextStep: 'no delivery request exists yet — finish the unit through its gate, then '
+              + 're-run the driver',
+          });
         }
         const finalizedDelivery = finalizeDeliveryRequest(
           facts.delivery.request,
@@ -1152,7 +1161,15 @@ export function reconcileLifecycle(input, context = {}) {
           return artifactMismatch('delivery');
         }
         if (!verdictStatusesGreen(finalizedDelivery)) {
-          return transition('resume', 'resume-unit', 'ACTIVE_DRAFT_RECOVERED');
+          // Not a failure and not a stop: the head is bindable the moment the
+          // evidence exists, and publishing it is the finalizer's job, not the
+          // driver's — the driver never runs a gate. Saying so here is the
+          // difference between a run that continues and one that investigates.
+          return transition('resume', 'resume-unit', 'ACTIVE_DRAFT_RECOVERED', {
+            waitingOn: 'verdict-statuses',
+            nextStep: 'agentic/gate and agentic/review are not green on this head — run '
+              + 'publish-verdict.mjs to publish them, then re-run the driver to bind ready-head',
+          });
         }
         return transition('act', 'bind-ready-head', 'READY_HEAD_DISCOVERED', {
           markerPatch: { phase: 'ready-head', headOid: finalizedDelivery.headOid },
@@ -2345,6 +2362,14 @@ function selfTest() {
       expected: ['act', 'bind-draft-pr'],
     },
     {
+      // 2026-07-29: a live run opened this file mid-unit to learn why the
+      // driver would not advance. Two situations share ACTIVE_DRAFT_RECOVERED,
+      // so the code alone cannot say which — `waitingOn` and `nextStep` can.
+      name: 'a recovered draft says WHAT it is waiting on',
+      input: { intent: intent(), marker: marker({ claimCommit: SHA, pr: 12 }), observed: observed() },
+      expectFields: { waitingOn: 'delivery-request' },
+    },
+    {
       name: 'active draft resumes unit work',
       input: { intent: intent(), marker: marker({ claimCommit: SHA, pr: 12 }), observed: observed() },
       expected: ['resume', 'resume-unit'],
@@ -3232,6 +3257,18 @@ function selfTest() {
     // The negative form exists for regressions whose defect is "refused at all":
     // pinning whichever downstream action follows would make the case fail for
     // unrelated reasons the next time that path grows a step.
+    if (fixture.expectFields !== undefined) {
+      const wrong = Object.entries(fixture.expectFields)
+        .filter(([key, value]) => actual[key] !== value);
+      if (wrong.length > 0) {
+        console.error(
+          `FAIL ${fixture.name}: ${wrong.map(([k, v]) => `${k}=${v} got ${actual[k]}`).join('; ')}`,
+        );
+        continue;
+      }
+      passed += 1;
+      continue;
+    }
     if (fixture.unexpectedArtifact !== undefined) {
       if (actual.artifact === fixture.unexpectedArtifact) {
         console.error(

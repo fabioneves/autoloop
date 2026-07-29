@@ -16,7 +16,7 @@
     "escalate-paths.mjs": "f172fde38c418dc48d6ed7cccdf2a84343e609007dbdb3c62e0ea9c7c959f84b",
     "label-swap-reminder.mjs": "80cd6b76d4276c97d48c479e988d93a166d5045d6bdbdc6b991b14f367ae4f00",
     "lane-contract.mjs": "a309ab07c3fdd074799c887c5ebaeb5d99e3538392e70533d7c74e48a7f97132",
-    "lifecycle-contract.mjs": "6daa93c84b10abdf74a5d43416e84e49b6a895b591672c33c0fcca1a8aee2843",
+    "lifecycle-contract.mjs": "2f13061fff81e2be413c7f7b7f3a30265ca8cb35c50457852b541ffc6f20d2e0",
     "lifecycle-driver.mjs": "7d9d0d8b7a22cdae134073d3bcf73b312c12857d77b1c238a0c7695419f28626",
     "loop-scope.mjs": "08971d89af13191207970581b4b2e46b1fe5d5dc7b3c5bc11920a1faf6e7fcde",
     "loop-smoke.mjs": "1ea07a2613e22ed968c5a919baa472dab0948665212993f4bb153bf38d050ae9",

@@ -7,6 +7,14 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **A recovered draft says what it is waiting on.** Two different situations returned
+  `ACTIVE_DRAFT_RECOVERED` with nothing to tell them apart: no delivery request exists yet, or one
+  exists but `agentic/gate` and `agentic/review` are not published on the head. A live run opened
+  `lifecycle-contract.mjs` mid-unit and read eighty lines of source to learn which — the answer
+  being "neither is a failure, publish the statuses and re-run". The code stays, since callers match
+  on it; the result now carries `waitingOn` and a `nextStep` naming the tool. Publishing is the
+  finalizer's job and not the driver's, because the driver never runs a gate — saying so in the
+  result is the difference between a run that continues and one that investigates.
 - **Prompts are assembled by concatenation, and the awk remedy says so.** A live run reached for
   `awk '/^FINDINGS_PLACEHOLDER$/{…getline…}'` to splice a findings block into a prompt template and
   was refused — correctly, since a placeholder that must be found and replaced IS an interpreter
