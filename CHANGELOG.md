@@ -7,8 +7,12 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
-- **Shape targets a third of the caps, and splits at the invariant boundary.** The caps were being
-  read as a target rather than a ceiling, so units landed near them and took hours. Two live runs
+- **Shape targets 300 production lines, and splits at the invariant boundary.** The caps were being
+  read as a target rather than a ceiling, and a ceiling is an attractor: under a 700-line cap units
+  reliably landed at 800–1000, so raising the cap to 1000 does not buy headroom, it moves the
+  overshoot. The target is now stated as its own number rather than derived from the cap, so a cap
+  raised for an unrelated reason cannot drag it up; overshooting 300 is fine, and landing at 900
+  means the split was never made. Two live runs
   shipped nothing and both blocked on the same-predicate escalation — the loop noticing an
   invariant too large to enumerate, which is a shaping failure surfacing three hours late. One unit
   ran 858 production lines across 14 files inside a 1000/20 cap and spent 4 of 6 review rounds on a

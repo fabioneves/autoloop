@@ -15,9 +15,16 @@ lines are countable the work is done and blocking spends a human decision to lea
 oversized unit filed here is not caught later — it is simply reviewed at a size where cross-model
 review thins out silently.
 
-**The caps are a CEILING, not a target — aim at roughly a third of them.** A unit that lands near
-`sliceMaxLines` is not a well-sized unit that happened to fit; it is a unit that will take hours and
-several review rounds. Measured evidence from two live runs, both of which shipped nothing:
+**Aim at 300 production lines. The caps are a CEILING, and a ceiling is an attractor.** Under a
+700-line cap, units reliably landed at 800–1000 — work expands toward whatever number it is
+measured against and then overshoots it. Raising the cap to 1000 therefore does not buy headroom;
+it moves the overshoot. A unit that lands near `sliceMaxLines` is not a well-sized unit that
+happened to fit, it is a unit that will take hours and several review rounds.
+
+So the target is stated as its own number rather than derived from the cap: a cap raised for an
+unrelated reason (a verbose language, a generated file) must not drag the target up with it.
+**Overshooting 300 is fine** — landing at 400 or 500 is a good unit. Landing at 900 means the split
+was never made. Measured evidence from two live runs, both of which shipped nothing:
 
 - A unit at 858 production lines across 14 files — comfortably inside a 1000/20 cap — spent 4 of 6
   review rounds and blocked on **one** predicate that three separate fixes each failed to close,
@@ -110,7 +117,7 @@ Grade an existing issue the way `autoloop:dev` step 1 will:
   miss). Data premises: is the verifying read-only query stated?
 - **Acceptance**: each criterion objectively verifiable? Flag vibes ("improve", "clean up",
   "better") and propose testable rewrites.
-- **Scope**: single module? Estimated size against **a third of the caps**, not against the caps —
+- **Scope**: single module? Estimated size against the **300-line target**, not against the caps —
   and how many hard invariants does it carry? More than one, an independently shippable half, or an
   invariant quantified over an open-ended domain all mean SPLIT, whatever the line estimate says.
   Propose the split concretely (per-invariant slices + dependency order), never as advice to
