@@ -7,6 +7,28 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **A rebased claim branch cannot wedge a merged unit on the REMOTE side either.** v0.49.30 fixed
+  the local claim comparison for merged units and #149 advanced exactly one check before being
+  refused again — `ARTIFACT_IDENTITY_MISMATCH(remote-claim)`. Same root cause: the rebase that
+  rewrote the claim commit locally rewrote it on the remote too, so `containsClaimCommit` was false
+  against a branch that had merged cleanly. Fixing one side and not the other only moved the
+  refusal along, which is how one defect cost two releases. Merged units now skip the remote claim
+  comparison for the same reason they skip the local one — the merge commit is the proof, and the
+  merge facts already bind the head. The one check that stays is a branch which SURVIVES the merge
+  pointing somewhere other than the head that merged: that catches reuse or a force-push after
+  delivery, and has nothing to do with the claim commit.
+
+  Also worth recording: the run reported this as "branch deleted on merge" and the branch was not
+  deleted — it is on the remote at the PR head. The previous round reported the local branch as
+  absent when it was present and rebased. Two misreadings of the same defect, both plausible, both
+  wrong, and the contract's refusal named the artifact without naming which comparison failed.
+- **Setup no longer asks for a required CI CheckRun-name set.** There is nothing to configure: the
+  list was retired with `.autoloop/ci-policy.json` in v0.49.0, and `delivery-contract.mjs` states in
+  its own header that "there is deliberately no committed required-check list". Delivery's predicate
+  is the live triggered-checks floor. The question survived the machinery it configured by
+  thirty-three releases, carrying a warning ("an empty set must be an explicit repository-policy
+  choice") that implied the answer mattered. A question whose answer nothing reads is worse than no
+  question — it spends attention and then vouches for the value it collected.
 - **A `needs-human-review` STATE section is asked about, not silently preserved.** "Preserved in
   place" is the safe default and it is also what makes silence easy: the merged document comes back
   byte-identical to the installed one, `changed` is false, the diff is empty, and the pending

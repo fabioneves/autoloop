@@ -192,9 +192,13 @@ Ask only:
 
 1. Mission and non-negotiable invariants.
 2. Configured base branch.
-3. Gate, optional quick gate, optional setup command, and the complete required CI CheckRun-name
-   set. An empty set must be an explicit repository-policy choice, never an inference from an
-   empty API response.
+3. Gate, optional quick gate, optional setup command. **Do not ask for a required CI CheckRun-name
+   set** — there is no longer one to configure. It was retired with `.autoloop/ci-policy.json` in
+   v0.49.0, and delivery's predicate is the live triggered-checks floor: every check run and commit
+   status on the exact head must be green, read at delivery time. `delivery-contract.mjs` says so
+   in its own header — "there is deliberately no committed required-check list". A question whose
+   answer nothing reads is worse than no question: it spends the human's attention and then implies
+   the value matters.
 
    **Ask in EVERY mode, including reconfigure and migration, and show the configured commands
    verbatim beside what they resolve to.** The gate is the one setting that decides whether code
@@ -248,8 +252,11 @@ Ask only:
     rejects the flag without it. Never offer solo mode when more than one trusted human exists —
     the gate hard-fails a solo config whose trusted list is not exactly the loop login.
 
-Never infer that an empty required-check list means CI is safe. Merge, merge queue, tag
-publication, and release publication require an independent maintainer action outside the run.
+Never infer that green CI means the run may finish itself. Merge, merge queue, tag publication, and
+release publication require an independent maintainer action outside the run. Delivery's own
+predicate is the triggered-checks floor — every check run and commit status on the exact head
+green, and at least one actually triggered, since a head that ran nothing is not a head that
+passed.
 
 Global defaults contain only non-project preferences:
 

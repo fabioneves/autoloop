@@ -1026,11 +1026,22 @@ export function reconcileLifecycle(input, context = {}) {
   }
 
   if (!completeExistence(facts.remoteClaim)) return inspect('remote-claim');
-  if (facts.remoteClaim.exists !== true) {
-    if (!merged) {
+  // Merged units skip the remote claim branch for the same reason they skip the
+  // local one: it is leftover history, and the merge commit on the base is the
+  // proof. #149 was refused here immediately after the local-claim fix let it
+  // through — the rebase that rewrote its claim commit rewrote it on the remote
+  // too, so `containsClaimCommit` was false against a branch that had merged
+  // cleanly. Fixing one side and not the other only moved the refusal one check
+  // along, which is how the same defect cost two releases.
+  //
+  // Nothing is lost by skipping: when `merged` is true the merge facts already
+  // bind `merge.headOid` to the marker head and require a real merge OID, so
+  // the head this branch happens to point at now proves nothing the merge has
+  // not already proved.
+  if (!merged) {
+    if (facts.remoteClaim.exists !== true) {
       return transition('act', 'ensure-remote-claim', 'REMOTE_CLAIM_MISSING', { claimCommit });
     }
-  } else {
     if (
       facts.remoteClaim.branch !== intentValue.branch
       || !SHA_RE.test(facts.remoteClaim.headOid ?? '')
@@ -1039,13 +1050,15 @@ export function reconcileLifecycle(input, context = {}) {
     }
     if (facts.remoteClaim.containsClaimCommit == null) return inspect('remote-claim');
     if (facts.remoteClaim.containsClaimCommit !== true) return artifactMismatch('remote-claim');
-    if (
-      merged
-      && input.marker.headOid
-      && facts.remoteClaim.headOid !== input.marker.headOid
-    ) {
-      return artifactMismatch('remote-claim');
-    }
+  } else if (
+    // A branch that SURVIVES a merge must still point at the head that merged.
+    // This is not about the claim commit — it catches a branch reused or
+    // force-pushed to something else after delivery, and it stays.
+    facts.remoteClaim.exists === true
+    && input.marker.headOid
+    && facts.remoteClaim.headOid !== input.marker.headOid
+  ) {
+    return artifactMismatch('remote-claim');
   }
 
   if (!completeExistence(facts.planComment)) return inspect('plan-comment');
@@ -2498,6 +2511,33 @@ function selfTest() {
         }),
       },
       unexpectedArtifact: 'local-claim',
+    },
+    {
+      // The same rebase that orphaned the LOCAL claim commit orphaned it on the
+      // remote. Fixing one side and not the other moved #149's refusal from
+      // local-claim to remote-claim and cost a second release.
+      name: 'a rebased remote claim branch cannot wedge a merged unit either',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12, headOid: SHA }),
+        observed: observed({
+          localClaim: {
+            complete: true,
+            exists: true,
+            branch: 'feat/gh-7-contract',
+            claimCommit: OTHER_SHA,
+          },
+          remoteClaim: {
+            complete: true,
+            exists: true,
+            branch: 'feat/gh-7-contract',
+            headOid: SHA,
+            containsClaimCommit: false,
+          },
+          merge: { complete: true, merged: true, headOid: SHA, mergeOid: OTHER_SHA },
+        }),
+      },
+      unexpectedArtifact: 'remote-claim',
     },
     {
       name: 'bound premerge evidence restores a missing delivered label',

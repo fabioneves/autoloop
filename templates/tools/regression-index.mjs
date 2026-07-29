@@ -50,6 +50,24 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'rebased-claim-branch-wedged-a-merged-unit-remotely',
+    date: '2026-07-29',
+    symptom: 'With the local-claim fix in place, #149 advanced exactly one '
+      + 'check and was refused ARTIFACT_IDENTITY_MISMATCH(remote-claim). The '
+      + 'run read it as "branch deleted on merge"; the branch was present on '
+      + 'the remote at the PR head.',
+    cause: 'The rebase that orphaned the claim commit locally orphaned it on '
+      + 'the remote too, so containsClaimCommit was false against a branch '
+      + 'that had merged cleanly. Fixing one side and not the other moved the '
+      + 'refusal one check along.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'lifecycle-contract.mjs',
+        anchor: 'a rebased remote claim branch cannot wedge a merged unit either',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'rebased-claim-branch-wedged-a-merged-unit',
     date: '2026-07-28',
     symptom: '#149 shipped and PR #238 merged, but every terminal backfill was '
