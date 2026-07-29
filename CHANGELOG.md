@@ -3,6 +3,23 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.40] - 2026-07-29
+
+### Fixed
+
+- **Returning a pull request to draft is no longer refused as a readiness mutation.**
+  `gh pr ready <N> --undo` was blocked by the rule that reserves readiness for the exact-head
+  terminal finalizer — but `--undo` REMOVES readiness. It returns the PR to draft, which is the
+  state the loop is built to hold: one draft opened at claim, kept draft until the finalizer marks
+  it ready under an exact-head binding. A draft cannot be merged, so drafting can never deliver
+  anything, and returning a PR to draft is exactly what servicing one after a red check wants. The
+  test matched every `gh pr ready` regardless of direction and answered the safe one with the
+  message for the unsafe one — the same direction-blindness as the `+<refspec>` force test fixed in
+  v0.49.38. Granting readiness stays blocked, the carve-out is per segment so an `--undo` beside a
+  bare `ready` cannot launder it, and the refusal now names the allowed form. `--undo` is matched as
+  an exact token rather than a prefix: an abbreviation gh rejects is a command that does nothing,
+  while one gh accepts and this test missed would be a readiness mutation waved through.
+
 ## [0.49.39] - 2026-07-29
 
 ### Fixed

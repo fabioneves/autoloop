@@ -1523,13 +1523,26 @@ export function evaluate(rawCmd, branch, options = {}) {
   }
 
   const segments = shellSegments(lexicalCmd);
-  if (segments.some(({ command }) =>
-    hasGhScopedAction(shellWords(command), 'pr', 'ready'))) {
+  // `--undo` REMOVES readiness: it returns a pull request to draft, which is the
+  // state the loop is supposed to hold — one draft opened at claim, kept draft
+  // until the terminal finalizer marks it ready under an exact-head binding. So
+  // blocking it was direction-blind, the same defect as the `+<refspec>` force
+  // test: the safe direction refused, with the message for the unsafe one. A
+  // draft cannot be merged, so drafting can never deliver anything, and
+  // returning a PR to draft is exactly what servicing one after a red check
+  // wants. Matched as the exact token rather than a prefix: an abbreviation gh
+  // rejects is a command that does nothing, but an abbreviation gh accepts and
+  // this test misses would be a readiness mutation waved through.
+  if (segments.some(({ command }) => {
+    const words = shellWords(command);
+    return hasGhScopedAction(words, 'pr', 'ready') && !words.includes('--undo');
+  })) {
     return {
       block: true,
       reason:
         'autoloop guard — raw pull-request readiness mutation is outside loop authority. '
-        + 'Use the exact-head Autoloop terminal finalizer.',
+        + 'Use the exact-head Autoloop terminal finalizer. Returning a PR to draft is allowed '
+        + '(`gh pr ready <N> --undo`) — it removes readiness rather than granting it.',
     };
   }
   if (segments.some(({ command }) =>
