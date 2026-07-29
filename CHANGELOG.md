@@ -3,6 +3,27 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.39] - 2026-07-29
+
+### Fixed
+
+- **Staging is a precondition of parking, not an alternative to it.** A live run recorded
+  `dispatches 21 · wall 185m · concurrent 12m · eligible 3` — 6.5% concurrency with three genuinely
+  unblocked units sitting in the queue for its whole duration. `overlap-report.mjs` was not at
+  fault: it computed the number correctly from the dispatch log, and the dispatches really were
+  backgrounded through the wrapper, so the overlap trigger did fire. The skill contradicted itself.
+  The Efficiency section says idling while a dispatch runs is not acceptable and to stage the next
+  eligible issue; the gate step said the orchestrator "overlaps **or** parks". Offered as a free
+  choice, the cheaper branch of an `or` wins every time. The two are now sequential — stage, then
+  park — and park is only what remains once there is nothing left to stage.
+- **The idling is visible at the moment it happens, not in the run record.** The `overlap:` line is
+  computed at the end of a run, after the last point at which anything can be done about it: true,
+  faithfully reported, binding on nothing — the same structure as a sizing marker recording its own
+  breach. The check moves to the park, the one moment where both facts are known at once (a dispatch
+  is in flight; N units are eligible). It needs no new output: a staged unit's plan-review dispatch
+  is itself in flight and earns its own `├` branch, so **a park showing one branch while the queue
+  holds eligible work is the defect, legible at a glance.**
+
 ## [0.49.38] - 2026-07-29
 
 ### Fixed

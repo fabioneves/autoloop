@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.38 · starting
+∞ dev · v0.49.39 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -469,6 +469,18 @@ ahead; never two writers; never claim the staged unit (step 4) until the worked 
 terminal state — delivered, blocked, or deferred. Every marker and step label names its own issue.
 At collection, finish the worked unit through step 11, then claim the staged one with its
 already-reviewed plan.
+
+**Staging is a PRECONDITION of parking, never an alternative to it.** Before ending a turn on any
+in-flight dispatch, count the eligible queue: non-empty with nothing staged means stage one first.
+Parking with eligible work unstaged IS the idling this section forbids — the two are sequential,
+overlap then park, and park is only what remains once there is nothing left to stage. The park
+block reads it back for free: a staged unit's plan-review dispatch is itself in flight, so it earns
+its own `├`. **A park showing one branch while the queue holds eligible work is the defect, visible
+at the moment it happens.** That moment is the only one where both facts are known at once, which
+is why the check lives here and not in the end-of-run `overlap:` line — that line is computed after
+the last point anything can be done about it. A live run recorded `dispatches 21 · wall 185m ·
+concurrent 12m · eligible 3`: true, faithfully reported, and binding on nothing. Three eligible
+units sat unstaged for the whole run, and the number that proved it arrived with the run record.
 
 **Liveness — never go dark; parking is not stopping.** A live run once ended its turn at step 8
 with four commits unpushed and nothing on screen to distinguish that from work — that is the
@@ -1279,9 +1291,11 @@ is for an empty or exhausted queue, not for a red baseline with a known fix.
 
 Move to `loop:09-gate`. Require a clean committed tree. Run one full `cfg.gate.command` as a local
 preflight on the review-converged artifact and record the gated OID. **A gate that takes more than
-a minute runs in the background** — `... > <log> 2>&1` — and the orchestrator overlaps or parks
-while it runs; a blocking turn spent watching a test suite is the same waste as one spent watching
-a dispatch. Never chain anything after the gate command in the same invocation
+a minute runs in the background** — `... > <log> 2>&1` — and the orchestrator stages the next
+eligible unit and THEN parks while it runs; a blocking turn spent watching a test suite is the same
+waste as one spent watching a dispatch. Overlap and park are sequential, not a choice: "overlaps or
+parks" read as a free pick is how a run reached `concurrent 12m` across `wall 185m` with three
+eligible units, because the cheaper branch of an `or` wins every time it is offered. Never chain anything after the gate command in the same invocation
 (`cfg.gate.command; tail <log>` reports the TAIL's exit status as the task's — a live run read a
 red gate as 0 that way); the gate runs alone, and the log plus its own exit code are the evidence.
 
