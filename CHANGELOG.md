@@ -3,6 +3,56 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.33] - 2026-07-29
+
+### Fixed
+
+- **The awk remedy names the path-exclusion form git already has.** A carve-out run was measuring
+  reviewable surface excluding vendored files and reached for
+  `git diff --numstat … | awk '{a+=$1; d+=$2}'`, which the guard refuses. The refusal was right and
+  the remedy was incomplete: it named `--shortstat` for totals but not how to exclude paths, which
+  is the whole reason `--numstat` and a summing script get reached for. Git does it natively —
+  `git diff --shortstat <range> -- . ':(exclude)<glob>'` — and on the branch in question that is
+  `33 files, 5490 insertions` against `11 files, 2491 insertions` once the vendored tree is
+  excluded. A remedy that stops one step short of the caller's actual question sends them back to
+  the shape it just refused.
+- **The panel is pruned at the park; the newest-first rewrite is dropped.** v0.49.30 asked for a
+  delete-and-recreate of the completed window on EVERY step completion, so the newest finish would
+  take the lowest ID and sit on top. A live run on that version did not do it, which is the answer
+  to whether the cost was affordable: about ten tool calls in the same turn that collects a typed
+  result, composes a subject, swaps labels and prints a ribbon — the same
+  recall-plus-mechanical-work shape that made three earlier rules decay.
+
+  The rewrite is gone. What replaces it is a prune to the four most recent completed rows at each
+  park and closing rail, which fits without truncation. That buys the thing that was actually
+  broken: a hidden row cannot be read at all, while an out-of-order one can, because every row
+  already carries `[<elapsed>] [<HH:MM>]` and four timestamped rows order by eye. Buy the
+  visibility, skip the ordering.
+
+### Changed
+
+- **An escalation block ships its options as instructions, not as prose.** The decision stays the
+  human's — the loop still may not carve a predicate until told, because a loop that shrinks its own
+  scope when work gets hard does exactly that, invisibly. What moves is the ASSEMBLY, which was
+  never the human's job and which the loop already holds every input for. A live block offered three
+  options in prose and left a human to derive a forty-line carve-out instruction from the round
+  table, including which findings belonged to which predicate — where exactly one of five sat in the
+  other predicate and had to STAY rather than carve. Get that wrong and the reduction ships a known
+  unbounded enumeration under a clean-looking diff.
+
+  Each option now arrives pre-computed: the cap option names the field, the cap and the rounds
+  spent; the re-plan option names the mis-enumerated invariant and says plainly that a re-plan
+  cannot resume the unit, since the marker binds `planHash` and `issueBodyHash`; the carve-out
+  option groups every open finding BY PREDICATE with carve-or-stay marked, names what ships and
+  what the PR body must disclaim, and states the loop's own assessment of the three honesty
+  conditions with evidence. All three carry equal specificity — an option that is cheaper to accept
+  because it arrived ready-to-run is a thumb on a scale that exists to guard against scope evasion —
+  and the loop states a recommendation and argues it.
+
+  Same lesson as the completed-step cost, the background gate wait and the gate-resolution check,
+  with a human in the middle instead of a shell: work described in prose gets re-derived by hand,
+  once, under less context than the writer had.
+
 ## [0.49.32] - 2026-07-29
 
 ### Added

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.32 · starting
+∞ dev · v0.49.33 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -454,8 +454,9 @@ failure. Waiting itself has one sanctioned shape per situation:
 
 - **Parked wait (preferred).** Every in-flight dispatch is backgrounded with `--output-file`, a
   Monitor (or the background task's own completion signal) is armed on each result file, all
-  commits are pushed, and the LAST thing before the turn ends is the parked block naming what it
-  waits for, with the clock:
+  commits are pushed, **the task panel is pruned to its four most recent completed rows** (see the
+  panel section — park is when the panel is read, so it is when it must be readable), and the LAST
+  thing before the turn ends is the parked block naming what it waits for, with the clock:
 
   **The park push is not step 10, and step 10 does not own the push.** A live run parked at step 5
   with EIGHT local commits, reasoning "the push happens at step 10, per the flow" — the same
@@ -644,16 +645,23 @@ silently; it never replaces ribbons, labels, or heartbeat lines.
   truncates the tail — so the rows it hides are always the most recent ones, which is exactly
   backwards. A live 16-row panel hid eleven completed rows, all of them newer than the three shown.
 
-  The only lever is ID order, so on completing a step: keep a window of the **five** most recent
-  completed rows, delete the others, and delete-and-recreate the rows that are now older than the
-  one just completed so their IDs land above it. The just-completed row keeps its original ID and
-  therefore sits at the top of the completed group, directly under the in-progress spinners.
-  Recreate each with the subject `step-subject.mjs` already composed — same text, new ID.
+  **Prune instead of sorting: at each park and at a unit's closing rail, delete completed rows
+  beyond the four most recent.** Four fit without truncation, so the newest work is always visible —
+  which is the harm. Re-sorting to put newest on top would take a delete-and-recreate of the whole
+  window on a panel that orders by an ID nothing can set, about ten tool calls in a bookkeeping
+  turn, and it buys only reading order on rows that each already carry `[<elapsed>] [<HH:MM>]`. A
+  reader can order four timestamped rows by eye; a reader cannot see a row the panel is hiding. Buy
+  the visibility, skip the ordering.
 
-  Two things make the cost acceptable. The window is bounded, so this is a fixed handful of calls
-  per step rather than growing with the run. And a deleted row loses nothing durable: `stats.mjs`
-  derives step timings from the label timeline, so the record is GitHub's and the panel is a view
-  of it. A shipped unit's rows go at its closing rail for the same reason.
+  Park is where the prune belongs. It is already a bookkeeping moment (push, arm the monitor, print
+  the block), it happens a handful of times per unit rather than at every step, and it is exactly
+  when a human reads the panel — the run has gone quiet and that list is what says it is alive. A
+  per-completion version of this rule shipped in v0.49.30 and a live run on that version did not
+  follow it, which is the answer to whether the per-step cost was affordable.
+
+  A deleted row loses nothing durable: `stats.mjs` derives step timings from the label timeline, so
+  the record is GitHub's and the panel is a view of it. A shipped unit's rows go at its closing rail
+  for the same reason.
 
 There is deliberately **no per-unit umbrella row**. It carried the issue title, but it duplicated
 the `∞ #<N> — ` prefix its own step rows already showed, doubled every unit's row count in a narrow
@@ -1077,17 +1085,45 @@ its own policy author. A verified open Major is a reason not to SHIP the unit �
 stop the RUN. So the action is mechanical and complete in one turn:
 
 1. Apply `loop-blocked` + `human:decide` to the issue — **and leave `loop-ready` in place** — with
-   a reason naming the open finding, the
-   fix scope, and the round history — and offering the human their three options: authorize a
-   higher cap (a policy edit only they can make), re-plan, or split the predicate into its own
-   issue.
+   a reason naming the open finding, the fix scope, and the round history, and offering the human
+   their three options: authorize a higher cap (a policy edit only they can make), re-plan, or
+   split the predicate into its own issue.
+
+   **Write each option as the instruction the human pastes back, not as prose describing it.** The
+   decision is theirs; the ASSEMBLY is not, and the loop already holds everything the assembly
+   needs. A live block offered three options in prose and left a human to derive a forty-line
+   carve-out instruction from the round table — including which findings belong to which predicate,
+   where exactly one of five sat in the OTHER predicate and had to stay rather than carve. Ship that
+   derivation with the block or it gets done by hand, once, under less context than the loop had.
+
+   Each option therefore carries, pre-computed:
+
+   - **Authorize a higher cap** — the current cap, the rounds spent, and the exact `caps` field to
+     edit. Name the round history so the choice is informed: three rounds in one predicate after an
+     invariant-scoped fix predicts a fourth.
+   - **Re-plan** — which invariant was enumerated wrongly and over what domain it actually
+     quantifies. Say plainly that a re-plan cannot resume this unit: the marker binds `planHash` and
+     `issueBodyHash`, so it is a new issue and the converged work is rebuilt.
+   - **Carve out the predicate** — every open finding grouped BY PREDICATE with carve-or-stay
+     marked per finding, what ships, what the PR body must disclaim, the remaining cap, and the
+     loop's own assessment of the three honesty conditions with evidence for each. A finding in a
+     predicate that is NOT being carved stays and must be fixed; letting it ride out with the
+     carve-out ships a known defect under a clean-looking reduction.
+
+   **Give all three equal specificity, then state a recommendation and argue it.** An option that is
+   cheaper to say yes to because it arrived ready-to-run is a thumb on the scale, and the scale here
+   guards against scope evasion — so the carve-out must not be the only one that is easy. The
+   recommendation is the loop's read, not its decision: name the option, the reason, and what it
+   costs.
 2. Print the unit's blocked rail and **take the next eligible unit immediately.** Do not pause for
    an answer, do not summarise and wait, do not end the run. A human-gated unit is a row in the
    digest, not a reason to stop working.
 
 Splitting the predicate is the human's call, not the loop's opening move — a carve-out that the
-loop reaches for on its own is how scope evasion starts. When they ask for one, the runbook is
-below.
+loop reaches for on its own is how scope evasion starts. Pre-computing the instruction is not
+reaching for it: the loop still may not carve until told, and a ready instruction nobody authorizes
+does nothing. What changes is only that the authorization costs a word instead of an hour. When
+they ask for one, the runbook is below.
 
 **Slice budgets are the exception: they NOTE, they never block.** `caps.sliceMaxLines` and
 `caps.sliceMaxFiles` are shaping budgets — `autoloop:shape` sizes issues against them before the
