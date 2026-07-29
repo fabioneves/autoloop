@@ -3,6 +3,24 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.32] - 2026-07-29
+
+### Added
+
+- **Gate-command discoverability is a command, not a rule.** `config-contract.mjs --resolve` prints
+  one PASS/FAIL line per configured gate command and exits non-zero when an executable is absent.
+  It examines only the first word, resolved against PATH the way a shell would, and executes
+  nothing — "is it there", never "does it work". Path-shaped names are treated as a file question,
+  since `./x` and `/usr/bin/x` never consult PATH.
+
+  It exists because v0.49.30 asked Setup to state whether each configured command resolves and gave
+  it no command to do so, and a rule with no command gets re-derived as a shell line. The line the
+  reader reaches for is `command -v <exe>` — which runs against the repository's OWN vendored guard,
+  and during Setup that guard is the PRE-RECONCILE copy. A live audit was refused by the very file
+  the reconcile was about to replace: a bootstrap no session can argue its way out of, since the
+  fix it needs is the one it is installing. v0.49.31 fixed the guard; this removes the shell probe
+  entirely, which is the part that stops the next such fix from having the same problem.
+
 ## [0.49.31] - 2026-07-29
 
 ### Fixed
