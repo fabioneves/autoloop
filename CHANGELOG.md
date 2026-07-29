@@ -7,6 +7,14 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **Prompts are assembled by concatenation, and the awk remedy says so.** A live run reached for
+  `awk '/^FINDINGS_PLACEHOLDER$/{…getline…}'` to splice a findings block into a prompt template and
+  was refused — correctly, since a placeholder that must be found and replaced IS an interpreter
+  program, while a file boundary is not. The remedy answered totals and column extraction but not
+  the assembly the caller was doing, so it refused without redirecting. Both the guard remedy and
+  the context-economy rule now name it: write the parts and `cat head.md findings.md tail.md >
+  prompt.md`, or `jq -n --rawfile` for JSON. The parts are already on disk for the file-to-file
+  reason, so the template was buying nothing the concatenation does not.
 - **The completed-step stamp names the call that carries it.** A live panel showed
   `✔ ∞ #220 — 08 FIX r3/7 [OPUS]` with no `[elapsed] [HH:MM]`, with `step-subject.mjs` available and
   the rule followed right up to the last step. That step is where it is lost: completing a task is

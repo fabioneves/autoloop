@@ -687,6 +687,10 @@ const ASSEMBLER_REMEDY = Object.freeze({
     + 'To total a diff while EXCLUDING paths — the reviewable-surface measurement that most often '
     + 'reaches for `awk` over `--numstat` — git does it natively: '
     + "`git diff --shortstat <range> -- . ':(exclude)<glob>'`. "
+    + 'To splice one file into another — a findings block into a prompt template — do not template '
+    + 'at all: write the parts and `cat head.md findings.md tail.md > prompt.md`, or for JSON use '
+    + '`jq -n --rawfile <name> <file>`. A placeholder line that has to be found and replaced is an '
+    + 'interpreter program; a file boundary is not. '
     + 'For a real program, put it in a file and run `awk -f <file>`.',
 });
 

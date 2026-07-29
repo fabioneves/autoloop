@@ -538,6 +538,14 @@ rules, none of which trades away evidence:
   fingerprint helper (`node <plugin-tools>/release-verify.mjs --fingerprint-stdin <body.md`) on
   files. The window needs the title, the hash, and the verdict; it never needs the body. One
   `cat body.md` spends 48 KB on bytes you are forbidden to retype anyway.
+
+  **Assemble a prompt or body by CONCATENATION, never by templating.** Write the parts as separate
+  files and `cat head.md findings.md tail.md > prompt.md`; for JSON, `jq -n --rawfile`. A live run
+  reached for `awk '/^FINDINGS_PLACEHOLDER$/{…getline…}'` to splice a findings block into a prompt
+  and was refused as inline interpreter source — correctly, because a placeholder that has to be
+  found and replaced IS an interpreter program, while a file boundary is not. The parts are already
+  on disk for the file-to-file reason above, so the template was buying nothing the concatenation
+  does not.
 - **Bounded reads only.** Collect typed results by field projection (`jq '{ok, ms, model}'`),
   tail live and dispatch logs (`tail -20`), and never run an unbounded `cat`/full read of anything
   a dispatch produced. When a failure needs the stderr, take its tail — the typed error already
