@@ -31,7 +31,14 @@ Notable changes to Autoloop are recorded here. The format follows
   count would have said so. Shaping now states the method beside each criterion and refuses one
   whose method is a scan over an open domain — source text, stored encodings, anything a later edit
   can add a form to. This is the failure the sizing section already described (`#123`, the
-  unbounded set of stored encodings) and never turned into a check.
+  unbounded set of stored encodings) and never turned into a check. The check ships with the
+  remedy, because this release has repeatedly shown that naming a category instead of a command
+  does not get followed: the tell is a quantifier (*every, all, no, any, never*) over a set a later
+  edit can grow, the test is whether the criterion can be stated as "X is impossible" rather than
+  "no X exists today", and the four closures are ranked — make the illegal state unrepresentable,
+  quantify over a closed API surface rather than open call sites, move the guarantee to one
+  boundary, or gate a scan behind an explicit allowlist. Mode 2 lint grades the same question and
+  must propose the rewrite concretely.
 - **A cited spec section is a premise and is verified like one.** A unit cited a `§3.3` that two
   documents referenced and that does not exist, sending premise work to reconstruct the requirement
   from surrounding prose.

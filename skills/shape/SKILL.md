@@ -118,8 +118,31 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    not the same as provable by a method that ends. State the method beside each criterion — the type
    system, an exhaustive enumeration over a closed domain, a property test with a stated generator,
    a golden file. **If the method is a scan over an OPEN domain — source text, stored encodings,
-   anything a later edit can add a new form to — the criterion is unprovable as written.** Close the
-   domain, or move the guarantee to where it holds by construction. This is the failure the sizing
+   anything a later edit can add a new form to — the criterion is unprovable as written.**
+
+   The tell is a quantifier — *every, all, no, any, never* — ranging over a set a later edit can
+   grow: call sites, subclasses, stored values, source files. One test settles it: **can the
+   criterion be stated as "X is impossible" rather than "no X exists today"?** If verifying it needs
+   a SEARCH, the domain is open. Four ways to close it, best first:
+
+   1. **Make the illegal state unrepresentable.** Unexported fields plus exactly one constructor
+      that establishes the property. "Every value is tagged" becomes true because an untagged value
+      cannot be built — enforced by the compiler, not by a search.
+   2. **Quantify over a closed set instead.** A package's exported API surface is closed and
+      enumerable; its call sites are not. Assert which constructors exist, never which callers
+      behave.
+   3. **Move the guarantee to one boundary** — where values are serialized, persisted, or cross the
+      API edge. One choke point is finite; "everywhere" is not.
+   4. **A build gate with an explicit allowlist**, when a scan is genuinely unavoidable. The
+      allowlist closes the domain, and every exception lands as a reviewed diff instead of a silent
+      gap.
+
+   The rewrite that would have saved the run below: not "every construction site of a domain-tagged
+   digest carries the tag" — find them all, forever — but "`DomainTag`'s fields are unexported,
+   `NewDomainTag` is the package's only exported constructor, and the zero value fails `Sum`":
+   three assertions over a closed set. Same guarantee; one is a proof, the other is a manhunt.
+
+   This is the failure the sizing
    section above already describes and never turned into a check: `#123` blocked on a predicate
    ranging over the unbounded set of stored encodings, and a second unit asserted that every
    construction site carried a domain tag, checked by an AST scan inside its own package — five
@@ -232,6 +255,11 @@ Grade an existing issue the way `autoloop:dev` step 1 will:
   the clause may belong to a sibling — name the sibling, or report the clause unowned. (This is a
   different question from `autoloop:queue-trace`, which asks whether a spec task HAS an issue; this
   asks whether the issue carries the task.)
+- **Proof**: does each criterion name a method that terminates? Flag every quantifier (*every, all,
+  no, any, never*) and name the set it ranges over — if a later edit can add a member, the criterion
+  is unprovable as written and no case count will say so. Propose the closed-domain rewrite
+  concretely (constructor, closed API surface, single boundary, allowlisted gate), never as advice
+  to "consider a different approach".
 - **Size**: list the cases the unit's invariant must prove. Past ~5, unfinishable, more than one
   hard invariant, or an independently shippable half — SPLIT, whatever the line estimate says.
   Propose the split concretely (per-invariant slices + dependency order), never as advice to
