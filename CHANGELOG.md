@@ -23,6 +23,22 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **Step 1 states the label mutation that everything downstream swaps.** A live run reached step 2 on
+  both a worked and a staged unit with the issues still showing only `loop-ready` — an in-progress
+  unit indistinguishable on GitHub from an untouched queued one, and `stats.mjs`, which derives every
+  cross-unit step timing from the label timeline, with no events to derive from. The cause was a
+  dangling reference: step 1 said to print the unit banner "beside the first lifecycle/label
+  mutation" and never said what that mutation was. Every later step says "Move to `loop:0N`" — a swap
+  presuming the pair exists — and blocking "removes `loop-started` and the `loop:*` step label",
+  presuming the same. The step labels existed in the repository and `label-swap-reminder.mjs` carried
+  the exact command in a fixture; only the instruction to run it was missing. Step 1 now names it:
+  `gh issue edit <N> --add-label loop-started,loop:01-premise`. The staged unit stays the deliberate
+  exception — overlap keeps label mutations serialized to the worked unit, so a unit staged through
+  read-only steps 1–3 carries no labels and receives `loop-started` with `loop:04-claim` directly at
+  claim (verified: `lifecycle-driver.mjs` replaces the whole label set and adds `loop-started` when
+  absent, so that path needs no prior step label). Its 01–03 timings are absent from `stats.mjs` by
+  design — the price of staging ahead, not a gap to close by labelling a unit that may still be
+  abandoned.
 - **A rejected flag is no longer reported as a missing one.** `escalate-paths.mjs --planned` was
   given `--artifact-fingerprint <40-hex commit OID>` and answered *"planned evidence is incomplete;
   supply --artifact-version --artifact-fingerprint"* — both of which had just been supplied. The

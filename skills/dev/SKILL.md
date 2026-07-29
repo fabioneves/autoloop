@@ -812,7 +812,27 @@ Challenge premises against current code and STATE. If the issue is obsolete, dup
 outside autonomy, or requires a secret/destructive/protected choice, comment a concise evidence-
 backed disposition and transition to the appropriate human block. Do not silently redesign scope.
 
-Print the unit banner beside the first lifecycle/label mutation:
+**Apply the run's first labels here — this is the mutation everything downstream swaps:**
+
+```bash
+gh issue edit <N> --add-label loop-started,loop:01-premise
+```
+
+Every later step says "Move to `loop:0N`", which is a SWAP and presumes the pair already exists;
+blocking likewise "removes `loop-started` and the `loop:*` step label". Nothing stated what put them
+there. A live run reached step 2 on both a worked and a staged unit with the issues still showing
+`loop-ready` and nothing else — an in-progress unit indistinguishable on GitHub from an untouched
+queued one, and `stats.mjs`, which derives every cross-unit step timing from this label timeline, had
+no events to derive from. The step labels existed in the repository and the swap reminder knew the
+exact command; only the instruction to run it was missing.
+
+**The staged unit is the one exception, and it is deliberate.** Overlap keeps label mutations
+serialized to the worked unit, so a unit staged through read-only steps 1–3 carries no labels at all:
+it gets `loop-started` with `loop:04-claim` directly when it is claimed. Its 01–03 steps are
+therefore absent from `stats.mjs` — the known price of staging ahead, not a gap to fill by labelling
+a unit two writers might still abandon.
+
+Print the unit banner beside that first mutation:
 
 ```text
 ╭──────────────────────────────────────────────────╮
