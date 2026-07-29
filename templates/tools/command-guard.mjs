@@ -635,6 +635,9 @@ const ASSEMBLER_REMEDY = Object.freeze({
   awk: 'Inline `awk` program text is source code in an argument. Most loop uses of it are a '
     + 'measurement with a plainer spelling: `git diff --shortstat` for insert/delete counts, '
     + '`wc -l` for a line count, `cut -f<n>` for a column, `sort | uniq -c` for a tally. '
+    + 'To total a diff while EXCLUDING paths — the reviewable-surface measurement that most often '
+    + 'reaches for `awk` over `--numstat` — git does it natively: '
+    + "`git diff --shortstat <range> -- . ':(exclude)<glob>'`. "
     + 'For a real program, put it in a file and run `awk -f <file>`.',
 });
 

@@ -7,6 +7,15 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **The awk remedy names the path-exclusion form git already has.** A carve-out run was measuring
+  reviewable surface excluding vendored files and reached for
+  `git diff --numstat … | awk '{a+=$1; d+=$2}'`, which the guard refuses. The refusal was right and
+  the remedy was incomplete: it named `--shortstat` for totals but not how to exclude paths, which
+  is the whole reason `--numstat` and a summing script get reached for. Git does it natively —
+  `git diff --shortstat <range> -- . ':(exclude)<glob>'` — and on the branch in question that is
+  `33 files, 5490 insertions` against `11 files, 2491 insertions` once the vendored tree is
+  excluded. A remedy that stops one step short of the caller's actual question sends them back to
+  the shape it just refused.
 - **The panel is pruned at the park; the newest-first rewrite is dropped.** v0.49.30 asked for a
   delete-and-recreate of the completed window on EVERY step completion, so the newest finish would
   take the lowest ID and sit on top. A live run on that version did not do it, which is the answer
