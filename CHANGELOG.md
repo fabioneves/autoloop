@@ -46,7 +46,11 @@ Notable changes to Autoloop are recorded here. The format follows
   rather than in `.git/autoloop/`, because the dispatch log is per-checkout and machine-local and a
   rule calibrated on one laptop's history is not calibrated. Outcomes are emitted for blocked and
   deferred units too: a unit that cost four rounds and shipped nothing is the most informative row
-  there is. Instrumentation only — nothing reads them yet, and a handful of units is not a sample.
+  there is. Both are composed by `sizing-contract.mjs` rather than hand-written — a format recalled
+  under load decays, and a field that drifts across runs makes the whole series unqueryable, so the
+  tool validates and refuses rather than emitting a broken record. Two records in one body are a
+  conflict, not a last-write-wins. Instrumentation only — nothing reads them yet, and a handful of
+  units is not a sample.
 - **A clean sweep is celebrated, and only a clean sweep.** A unit reaching `delivered` earns a `🎉`
   on its SHIPPED rail, and a run whose every unit shipped — nothing blocked, deferred, or waiting
   on a human — closes with a flourish instead of the plain rail. One blocked unit and the run gets

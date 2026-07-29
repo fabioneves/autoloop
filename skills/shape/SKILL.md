@@ -117,19 +117,23 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    composes so the queue scans at a glance. The type is a guess, not a contract: the plan may
    land the PR under a different type, and a human-filed issue without a prefix is fine —
    format is never validated and never gates.
-   **End every body with the sizing marker**, one line, exactly this shape:
+   **End every body with the sizing marker, composed by the tool — never hand-written:**
 
-   ```text
-   <!-- autoloop-shape-v1 {"cases":5,"invariants":1,"filesEstimate":3,"linesEstimate":260} -->
+   ```bash
+   node <plugin-tools>/sizing-contract.mjs --shape --cases 5 --invariants 1 --files 3 --lines 260
    ```
 
-   It records what this skill JUDGED at shaping time, so the judgement can later be checked against
-   what the unit actually cost. Without it the case count lives only in prose and nothing can ever
-   ask whether five-case units really do converge faster than nine-case ones — the sizing rule above
-   stays an argument instead of becoming a measurement. Same HTML-comment-plus-JSON pattern as the
-   lifecycle marker, so it is inert to every reader and greppable by any. Write it even when the
-   estimate is uncertain; a recorded guess that turns out wrong is the data point that improves the
-   rule, while an omitted one is silence.
+   Append its output verbatim as the body's last line. It records what this skill JUDGED at shaping
+   time, so the judgement can later be checked against what the unit actually cost. Without it the
+   case count lives only in prose and nothing can ever ask whether five-case units really do
+   converge faster than nine-case ones — the sizing rule above stays an argument instead of becoming
+   a measurement.
+
+   The tool composes it because a format recalled under load decays, and a field that drifts across
+   runs makes the whole series unqueryable — a marker nobody validates is worse than none, since it
+   looks like data. It refuses a record it cannot validate rather than emitting a broken one. Write
+   it even when the estimate is uncertain: a recorded guess that turns out wrong is the data point
+   that improves the rule, while an omitted one is silence.
 5. **Review with the human, then file.** Show the full set (titles + one-line summaries + the
    dependency graph) before creating anything. On approval, file via `gh issue create
    --body-file <scratchpad>/…` (bodies via scratch files outside the repo — never inline `--body`).

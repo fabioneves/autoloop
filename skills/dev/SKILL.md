@@ -1330,12 +1330,15 @@ Post one issue run record via body file containing:
   computed from the dispatch log, never composed by hand — a hand-written one is what let overlap
   disappear for three releases unnoticed.
 
-**End the run record with the outcome marker**, one line, exactly this shape:
+**End the run record with the outcome marker, composed by the tool — never hand-written:**
 
-```text
-<!-- autoloop-outcome-v1 {"issue":219,"planRounds":1,"codeRounds":3,"escalated":true,
-"shipped":false,"prodLines":858,"files":14} -->
+```bash
+node <plugin-tools>/sizing-contract.mjs --outcome --issue 219 \
+  --plan-rounds 1 --code-rounds 3 --escalated --result blocked --prod-lines 858 --files 14
 ```
+
+`--result` is one of `shipped`, `blocked`, `deferred`; omit `--escalated` when the unit never
+tripped the same-predicate rule. Append the output verbatim as the record's last line.
 
 It is the other half of the issue body's `autoloop-shape-v1` marker: that one records what shaping
 PREDICTED, this one records what the unit COST, and only the pair can answer whether the sizing rule
@@ -1344,7 +1347,8 @@ fresh each run and cannot be queried across units, so today the numbers are read
 uncountable. Put it on the issue rather than in `.git/autoloop/`: the dispatch log is per-checkout
 and machine-local, and a rule calibrated on one laptop's history is not calibrated. Emit it for
 every terminal outcome, blocked and deferred included — a unit that cost four rounds and shipped
-nothing is the most informative row there is.
+nothing is the most informative row there is, and recording only successes would calibrate the rule
+on the cases where it was never tested.
 
 Post one end-of-run digest and scoreboard, not one per tool phase. `stats.mjs` presents cross-unit
 step timings from the label timeline; it is presentation only.

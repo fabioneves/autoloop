@@ -29,6 +29,7 @@
     "review-contract.mjs": "c3c5ada9723b07da1bc883103622937c956a576029d91c020d1a6094b3a42f2a",
     "scaffold.mjs": "1dddbcbcd8af50c5194afaf4aa190a3a9b359511b9834d4b2f3230163042aa48",
     "scan.mjs": "74c6fafd732cddb351e1fd9255e6f3240ce18ca797ba1964a0fc4bec03793add",
+    "sizing-contract.mjs": "fb1d6a6c4d22a47ecff47acf2dde83384dc31a7ba746e7e7ddc7c6edfa2705f3",
     "snapshot-contract.mjs": "8f9d3ba00df52587f09ec02fa543c8fa8f710223e8570c33224068016889b8fb",
     "stats.mjs": "86a8f95bad038bb191654aa1f215867992141d27657df2200659e91513889dc3",
     "step-subject.mjs": "4dd187646d383688089b6682df086fa5bf1d9c96378f387e5edfab55e2bd2807",
