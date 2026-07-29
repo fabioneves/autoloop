@@ -1316,6 +1316,22 @@ Post one issue run record via body file containing:
   computed from the dispatch log, never composed by hand — a hand-written one is what let overlap
   disappear for three releases unnoticed.
 
+**End the run record with the outcome marker**, one line, exactly this shape:
+
+```text
+<!-- autoloop-outcome-v1 {"issue":219,"planRounds":1,"codeRounds":3,"escalated":true,
+"shipped":false,"prodLines":858,"files":14} -->
+```
+
+It is the other half of the issue body's `autoloop-shape-v1` marker: that one records what shaping
+PREDICTED, this one records what the unit COST, and only the pair can answer whether the sizing rule
+works. Everything in it is already in the prose above — the marker exists because prose is authored
+fresh each run and cannot be queried across units, so today the numbers are readable and
+uncountable. Put it on the issue rather than in `.git/autoloop/`: the dispatch log is per-checkout
+and machine-local, and a rule calibrated on one laptop's history is not calibrated. Emit it for
+every terminal outcome, blocked and deferred included — a unit that cost four rounds and shipped
+nothing is the most informative row there is.
+
 Post one end-of-run digest and scoreboard, not one per tool phase. `stats.mjs` presents cross-unit
 step timings from the label timeline; it is presentation only.
 

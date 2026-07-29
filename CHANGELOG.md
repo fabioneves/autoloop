@@ -31,6 +31,17 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Added
 
+- **Shaping predictions and unit outcomes are recorded as typed markers.** Shape ends every issue
+  body with `<!-- autoloop-shape-v1 {"cases":…,"invariants":…} -->` and the loop ends every run
+  record with `<!-- autoloop-outcome-v1 {"issue":…,"codeRounds":…,"escalated":…} -->`. Neither adds
+  information — both restate what the prose already says — but prose is authored fresh each run and
+  cannot be queried across units, so today the numbers are readable and uncountable, and the sizing
+  rule above can only ever be argued rather than measured. The pair is what makes "do five-case
+  units really converge faster than nine-case ones" an answerable question. Both live on the issue
+  rather than in `.git/autoloop/`, because the dispatch log is per-checkout and machine-local and a
+  rule calibrated on one laptop's history is not calibrated. Outcomes are emitted for blocked and
+  deferred units too: a unit that cost four rounds and shipped nothing is the most informative row
+  there is. Instrumentation only — nothing reads them yet, and a handful of units is not a sample.
 - **A clean sweep is celebrated, and only a clean sweep.** A unit reaching `delivered` earns a `🎉`
   on its SHIPPED rail, and a run whose every unit shipped — nothing blocked, deferred, or waiting
   on a human — closes with a flourish instead of the plain rail. One blocked unit and the run gets

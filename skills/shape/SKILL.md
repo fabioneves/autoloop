@@ -42,12 +42,17 @@ successive fixes each closed a case and admitted another. A 200-line unit with t
 identically, which is exactly why the line budget would not have saved it. `#219` was not too
 voluminous either; it was two units, and the half with the enumerable case list converged cleanly.
 
-**Lines are a tripwire, not a target.** Keep ~300 production lines as a smoke signal: a higher
-estimate means *go count your cases*, not *cut lines*. The tripwire is stated as its own number
-rather than derived from `sliceMaxLines`, because a cap raised for an unrelated reason — a verbose
-language, a generated file — must not drag it up. And the cap is an attractor: under a 700-line cap
-units reliably landed at 800–1000, so raising the cap to 1000 moves the overshoot rather than
-buying headroom.
+**Lines are a tripwire, and a tripwire only fires in one direction.** ~300 production lines is a
+smoke signal: over it, *go count your cases*. **Under it proves nothing** — a unit is never
+well-sized because of its line estimate, only because its cases enumerate. That direction is the
+whole point, because the failure being fixed here was a number granting permission: 858 lines read
+as "comfortably inside a 1000/20 cap" and the unit shipped nothing. A 300 tripwire read as a budget
+would fail exactly the same way, just sooner.
+
+The number is stated as its own rather than derived from `sliceMaxLines`, because a cap raised for
+an unrelated reason — a verbose language, a generated file — must not drag it up. And the cap is an
+attractor: under a 700-line cap units reliably landed at 800–1000, so raising the cap to 1000 moves
+the overshoot rather than buying headroom.
 
 Both blocked on the same-predicate escalation — the loop noticing an invariant too large to
 enumerate. That is a SHAPING failure surfacing three hours late, and it is the failure this rule
@@ -112,6 +117,19 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    composes so the queue scans at a glance. The type is a guess, not a contract: the plan may
    land the PR under a different type, and a human-filed issue without a prefix is fine —
    format is never validated and never gates.
+   **End every body with the sizing marker**, one line, exactly this shape:
+
+   ```text
+   <!-- autoloop-shape-v1 {"cases":5,"invariants":1,"filesEstimate":3,"linesEstimate":260} -->
+   ```
+
+   It records what this skill JUDGED at shaping time, so the judgement can later be checked against
+   what the unit actually cost. Without it the case count lives only in prose and nothing can ever
+   ask whether five-case units really do converge faster than nine-case ones — the sizing rule above
+   stays an argument instead of becoming a measurement. Same HTML-comment-plus-JSON pattern as the
+   lifecycle marker, so it is inert to every reader and greppable by any. Write it even when the
+   estimate is uncertain; a recorded guess that turns out wrong is the data point that improves the
+   rule, while an omitted one is silence.
 5. **Review with the human, then file.** Show the full set (titles + one-line summaries + the
    dependency graph) before creating anything. On approval, file via `gh issue create
    --body-file <scratchpad>/…` (bodies via scratch files outside the repo — never inline `--body`).
