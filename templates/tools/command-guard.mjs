@@ -379,10 +379,59 @@ function literalAssignments(cmd) {
   return values;
 }
 
+// A `for` over a LITERAL word list is not opaque — it is N literal commands
+// written once. The guard already resolves `S=/tmp/x; sha256sum $S/plan.md` by
+// substituting and judging the real command; a loop is the same operation
+// repeated, and refusing it while accepting the assignment was inconsistent.
+//
+// Three live runs lost a round to this shape: `for n in 222 223 224; do gh issue
+// view $n …; done` and a spec sweep over eight named files. The advice they got
+// — "write the iterations as literal commands" — is correct and is exactly what
+// this does mechanically, so the guard was asking the reader to perform an
+// expansion the guard could perform itself.
+//
+// Only a fully literal list expands. A word carrying `$`, a command
+// substitution, or a glob stays unexpanded and the loop stays refused, because
+// what those iterate over is not knowable here. The bound keeps a pathological
+// list from turning one refusal into a thousand judgements.
+const MAX_LOOP_EXPANSION = 32;
+
+export function expandLiteralForLoops(cmd) {
+  const pattern =
+    /(^|[\s;&|])for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;\n]+?)\s*;\s*do\s+([\s\S]*?)\s*;?\s*done(?=$|[\s;&|\n])/u;
+  let text = String(cmd);
+  let changed = false;
+  for (let guard = 0; guard < 4; guard += 1) {
+    const match = pattern.exec(text);
+    if (match === null) break;
+    const [whole, lead, name, listText, body] = match;
+    const words = shellWords(listText);
+    if (words.length === 0 || words.length > MAX_LOOP_EXPANSION) return null;
+    if (!words.every((word) => RESOLVABLE_VALUE.test(word))) return null;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const iterations = words.map((word) => body
+      .replace(new RegExp(`\\$\\{${escaped}\\}`, 'gu'), word)
+      .replace(new RegExp(`\\$${escaped}(?![A-Za-z0-9_])`, 'gu'), word)
+      .trim()
+      .replace(/;+$/u, ''));
+    text = text.slice(0, match.index)
+      + lead
+      + iterations.join('; ')
+      + text.slice(match.index + whole.length);
+    changed = true;
+  }
+  return changed ? text : null;
+}
+
 function resolveShellExpansions(cmd) {
-  const values = literalAssignments(cmd);
-  if (values.size === 0) return null;
-  let resolved = String(cmd);
+  const unrolled = expandLiteralForLoops(cmd);
+  const source = unrolled ?? String(cmd);
+  const values = literalAssignments(source);
+  if (values.size === 0) {
+    if (unrolled === null) return null;
+    return hasActiveShellExpansion(stripQuotedHeredocBodies(unrolled)) ? null : unrolled;
+  }
+  let resolved = source;
   for (const [name, value] of values) {
     if (value === null) continue;
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
@@ -1907,6 +1956,23 @@ function selfTest() {
     ['time xargs -n1 gh', 'feat/gh-1-x', true],
     ['exec node -e "x"', 'feat/gh-1-x', true],
     ['stdbuf -oL awk "{print}"', 'feat/gh-1-x', true],
+    // 2026-07-29: three live runs lost a round to a `for` over a LITERAL list —
+    // `for n in 222 223 224` and a sweep over eight named spec files. A literal
+    // list is N literal commands written once, and the guard already resolves a
+    // literal assignment the same way; refusing one while accepting the other
+    // was inconsistent. The remedy it printed ("write the iterations as literal
+    // commands") is exactly what expansion does mechanically.
+    ['for f in a.md b.md; do rg -n "^## " $f; done', 'feat/gh-1-x', false],
+    ['for n in 222 223 224; do gh issue view $n --json title; done', 'feat/gh-1-x', false],
+    ['for s in a b; do wc -c ${s}; done', 'feat/gh-1-x', false],
+    // Expansion is STRONGER than refusal: the real command becomes visible, so
+    // this blocks on merge authority rather than on shape.
+    ['for f in 41 42; do gh pr merge $f; done', 'feat/gh-1-x', true],
+    // A list that is not literal stays refused — what it iterates over is not
+    // knowable here.
+    ['for f in $(ls); do rm $f; done', 'feat/gh-1-x', true],
+    ['for f in *.md; do rm $f; done', 'feat/gh-1-x', true],
+    ['while read l; do echo $l; done', 'feat/gh-1-x', true],
     ['gh pr merge 42', 'feat/gh-1-x', true],
     // A literal path variable is resolvable, so the guard substitutes and judges
     // the real command instead of refusing the shape (the friction every live
@@ -2281,8 +2347,10 @@ function selfTest() {
     // about a mutation that was not there, silent about the loop variable that
     // actually blocked. Each shape must name its own token and its own remedy.
     messageChecks += 1;
+    // A GLOB list, deliberately: a literal list expands and is judged, so the
+    // loop remedy only has to read well for the loops that stay unresolvable.
     const loopReason = evaluate(
-      'for s in a b; do wc -c $s; done',
+      'for s in *.md; do wc -c $s; done',
       'feat/gh-1-x',
     ).reason ?? '';
     if (

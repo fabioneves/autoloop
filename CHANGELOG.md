@@ -7,6 +7,19 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **A `for` over a literal word list expands instead of being refused.** Three live runs lost a
+  round to this — `for n in 222 223 224; do gh issue view $n …; done` and a sweep over eight named
+  spec files — and were told to write the iterations out by hand. The guard already resolved a
+  literal ASSIGNMENT by substituting and judging the real command; a literal loop is that same
+  operation repeated, so refusing one while accepting the other was inconsistent, and the remedy it
+  printed was precisely the expansion the guard could do itself. It now unrolls the loop and judges
+  each iteration.
+
+  Expansion is stronger than refusal, not weaker: `for f in 41 42; do gh pr merge $f; done` now
+  blocks on merge authority rather than on shape, because the real command became visible. A list
+  that is not literal — a command substitution, a glob, a `while read` — stays refused, since what
+  it iterates over is not knowable here, and the unroll is bounded at 32 iterations so a
+  pathological list cannot turn one refusal into a thousand judgements.
 - **A rebased claim branch cannot wedge a merged unit on the REMOTE side either.** v0.49.30 fixed
   the local claim comparison for merged units and #149 advanced exactly one check before being
   refused again — `ARTIFACT_IDENTITY_MISMATCH(remote-claim)`. Same root cause: the rebase that

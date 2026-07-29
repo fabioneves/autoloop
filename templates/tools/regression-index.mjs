@@ -33,6 +33,24 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'literal-for-loop-refused-as-unresolvable',
+    date: '2026-07-29',
+    symptom: 'Three live runs lost a round to a `for` over a LITERAL word list '
+      + '— `for n in 222 223 224` and a sweep over eight named spec files — '
+      + 'and were told to write the iterations out by hand.',
+    cause: 'The guard resolved a literal ASSIGNMENT by substituting and judging '
+      + 'the real command, but refused a literal loop, which is the same '
+      + 'operation repeated. The printed remedy was the expansion the guard '
+      + 'could perform itself.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function expandLiteralForLoops(' }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: "['for f in 41 42; do gh pr merge $f; done', 'feat/gh-1-x', true]",
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'command-v-lookup-read-as-an-invocation',
     date: '2026-07-29',
     symptom: '`command -v php` was refused as inline interpreter source while a '
