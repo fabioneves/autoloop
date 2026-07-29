@@ -7,6 +7,15 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **The background-dispatch wrapper has one documented home.** `dispatch-stream.sh` was missing
+  from the `<plugin-tools>` enumeration that tells the flow which tools run from the installed
+  plugin rather than the checkout, while the prose beside its three call sites called it "the
+  **vendored** wrapper" — the opposite resolution — and those call sites all wrote
+  `<plugin-tools>/dispatch-stream.sh`. A reader following the enumeration and the word "vendored"
+  reaches for `tools/agentic/dispatch-stream.sh`, which on a unit branch forked before a reconcile
+  is stale or absent, and a wrapper that will not start is a wrapper skipped. The wrapper is a pure
+  executor like every tool already in that list, so it joins the list and the prose now says where
+  it comes from. Behavior is unchanged; the plugin has always shipped it.
 - **A plain push is no longer refused as a force push.** `git push origin
   HEAD:refs/heads/<branch> …; date +%H:%M` was blocked as destructive. The push carries no
   `--force`, no `-f` and no `+` refspec — but the `+<refspec>` test was a raw regex over the WHOLE
