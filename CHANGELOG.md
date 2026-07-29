@@ -5,6 +5,22 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [0.49.40] - 2026-07-29
 
+### Changed
+
+- **The rule check is mandatory on every shaped unit, and the axes are defined once.** Every check
+  the skill had — premise, acceptance, coverage, proof-terminates, size, hard-defer, structure — sat
+  in Mode 2, reachable only by typing `shape lint #N`. So a freshly shaped issue was never graded
+  before filing, and a check that runs only when someone remembers to ask is a check that does not
+  run. The live queue is the proof: 21 units filed, 16 breaching the size axis, three clauses owned
+  by no unit, one criterion whose proof could not terminate — every one of those an axis that was
+  already written down and never applied. The seven axes now live in a single shared section that
+  both modes bind to, so neither can drift into its own checklist; Mode 1 gains a mandatory step 6
+  that walks them per unit and reports per unit rather than as an aggregate, since an aggregate hides
+  the single failing unit which is the only thing the pass produces; and filing while any axis fails
+  is now a hard rule. Mode 2 keeps its entry point for issues shaped elsewhere or filed by hand, but
+  is explicitly no longer a second checklist — re-linting an issue this skill shaped should be a
+  no-op.
+
 ### Fixed
 
 - **The inline-interpreter refusal answers the question that was asked.** v0.49.38 gave that refusal
