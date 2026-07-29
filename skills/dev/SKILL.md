@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.34 · starting
+∞ dev · v0.49.35 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1165,7 +1165,21 @@ they ask for one, the runbook is below.
 **Slice budgets are the exception: they NOTE, they never block.** `caps.sliceMaxLines` and
 `caps.sliceMaxFiles` are shaping budgets — `autoloop:shape` sizes issues against them before the
 queue. A finished slice that lands over one still goes ready: state the overage in the pull-request
-body (`slice: 722 lines vs 700 budget`) and continue to step 09. Do not block, do not ask, and do
+body (`slice: 722 lines vs 700 budget`) and continue to step 09.
+
+**Measure it with git, never with a summing script.** Git prints every number this note needs, and
+composing `--numstat | awk '{a+=$1}'` is the shape the guard refuses — four live runs have lost a
+round to it while measuring exactly this:
+
+```bash
+git diff --shortstat <base>...<head>                                  # files, insertions, deletions
+git diff --shortstat <base>...<head> -- . ':(exclude)<glob>'          # …excluding vendored/generated
+git diff --name-only <base>...<head> -- . ':(exclude)<glob>' | wc -l  # file count only
+```
+
+A pathspec exclusion is how "production lines" and "reviewable surface" are measured — exclude the
+test and vendored globs rather than filtering a file list through a script. The numbers are the
+same; only the shape the guard has to read is different. Do not block, do not ask, and do
 not shave code to clear the number — a diff edited to satisfy a count is worse than the honest
 overage. A live unit was blocked at 722/700 with both suites green, committed and pushed, one
 decision short of shipping; the human raised the cap, which is the only answer that block can ever
