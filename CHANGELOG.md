@@ -3,6 +3,23 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.31] - 2026-07-29
+
+### Fixed
+
+- **`command -v <interpreter>` is a lookup, not an invocation.** A live setup lost a round to
+  `command -v php` while checking whether its configured gate still resolves — the discoverability
+  probe this plugin's own setup skill asks for, refused as inline interpreter source. `command` is
+  a passthrough wrapper, so the name behind it sat in executable position, and with no script
+  argument that is the read-from-stdin shape; `-v`/`-V` are exactly the flags that make the builtin
+  describe rather than execute. `which php` and `type -p python3` were never affected, since
+  neither is a wrapper and the name after them was already in argument position. `command php -r …`
+  and bare `command node` still block — the wrapper launders nothing without the lookup flag.
+
+  Recorded plainly because the plugin caused its own refusal from both ends: v0.49.30's setup skill
+  asks for a gate-resolution probe, `command -v` is the portable way to write one, and v0.49.26's
+  positional fix is what made the wrapper case reachable at all.
+
 ## [0.49.30] - 2026-07-28
 
 ### Changed
@@ -63,13 +80,6 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
-- **`command -v <interpreter>` is a lookup, not an invocation.** A live setup lost a round to
-  `command -v php` while checking whether its configured gate still resolves — the discoverability
-  probe this plugin's own setup skill asks for, refused as inline interpreter source. `command` is
-  a passthrough wrapper, so the name behind it read as an invocation with no script argument, which
-  is the stdin shape; `-v`/`-V` are the whole difference, and they run nothing. `which php` and
-  `type -p python3` were never affected, since neither is a wrapper. `command php -r …` still
-  blocks: the wrapper launders nothing without the lookup flag.
 - **A rebased claim branch can no longer wedge a merged unit.** `#149` shipped and PR `#238` merged,
   but its terminal backfill was refused `ARTIFACT_IDENTITY_MISMATCH(local-claim)` on every attempt,
   leaving a permanent `draft-pr` marker on a closed unit. The branch had been rebased after the
