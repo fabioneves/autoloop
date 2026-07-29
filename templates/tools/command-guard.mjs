@@ -484,6 +484,30 @@ function interpreterHeredoc(cmd) {
     ));
 }
 
+// Remedy selection ONLY — never gating. `inlineInterpreterSource` decides
+// WHETHER to block; this decides which remedy fits, so a wrong answer costs a
+// less apt message and never a wrong verdict. Deliberately not threaded through
+// that detector: it is security-critical and this is prose.
+//
+// 2026-07-29: v0.49.38 gave the inline-interpreter refusal ONE remedy, written
+// from the `zsh -ic 'alias …'` case that produced it. A `python3 -c "import
+// json…"` then got told to read `~/.zshrc` and check that a file parses —
+// answering a question nobody asked, which is the exact defect that release
+// existed to fix. An inline program is usually reshaping data; an inline shell
+// is usually interrogating its own configuration. Different questions, so
+// different answers.
+const SHELL_INTERPRETERS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh', 'fish']);
+
+function inlineInterpreterKind(cmd) {
+  const named = shellWords(executableLexicalText(cmd))
+    .map((word) => word.slice(word.lastIndexOf('/') + 1));
+  const program = named.some((name) =>
+    /^python\d*(?:\.\d+)?$/u.test(name)
+    || ['node', 'nodejs', 'deno', 'bun', 'ruby', 'perl', 'php', 'lua', 'luajit',
+      'R', 'Rscript', 'tclsh', 'wish', 'osascript'].includes(name));
+  return program ? 'program' : 'shell';
+}
+
 function inlineInterpreterSource(cmd) {
   const sourceFlags = new Set([
     '-c',
@@ -1423,10 +1447,18 @@ export function evaluate(rawCmd, branch, options = {}) {
       block: true,
       reason:
         'autoloop guard — inline shell or language-interpreter source is opaque to command '
-        + 'policy. To learn what a shell name resolves to or what a startup file does, read the '
-        + 'file — `rg -n <name> ~/.zshrc` — instead of starting an interactive shell to ask it. '
-        + 'To check that a file parses, the interpreter does it directly: `zsh -n <file>`, '
-        + '`node --check <file>`. For a real program, write it to a file and run that.',
+        + 'policy. '
+        + (inlineInterpreterKind(rawCmd) === 'program'
+          ? 'Most inline programs are reading or reshaping data, which a typed tool does '
+            + 'without putting source in an argument: `jq` for JSON — `jq -r <filter> <file>`, '
+            + 'and it accepts many files at once — `rg` to find, `cut -f<n>` for a column, '
+            + '`sort | uniq -c` for a tally. To check a file parses, the interpreter does it '
+            + 'directly: `node --check <file>`, `python3 -m json.tool <file>`. For a real '
+            + 'program, write it to a file and run that.'
+          : 'To learn what a shell name resolves to or what a startup file does, read the '
+            + 'file — `rg -n <name> ~/.zshrc` — instead of starting an interactive shell to ask '
+            + 'it. To check that a file parses, the interpreter does it directly: '
+            + '`zsh -n <file>`. For a real program, write it to a file and run that.'),
     };
   }
   const assembler = opaqueCommandAssembler(rawCmd);
@@ -2386,12 +2418,36 @@ function selfTest() {
     ).reason;
     const expectedInlineReason =
       'autoloop guard — inline shell or language-interpreter source is opaque to command '
-      + 'policy. To learn what a shell name resolves to or what a startup file does, read the '
-      + 'file — `rg -n <name> ~/.zshrc` — instead of starting an interactive shell to ask it. '
-      + 'To check that a file parses, the interpreter does it directly: `zsh -n <file>`, '
-      + '`node --check <file>`. For a real program, write it to a file and run that.';
+      + 'policy. Most inline programs are reading or reshaping data, which a typed tool does '
+      + 'without putting source in an argument: `jq` for JSON — `jq -r <filter> <file>`, '
+      + 'and it accepts many files at once — `rg` to find, `cut -f<n>` for a column, '
+      + '`sort | uniq -c` for a tally. To check a file parses, the interpreter does it '
+      + 'directly: `node --check <file>`, `python3 -m json.tool <file>`. For a real '
+      + 'program, write it to a file and run that.';
     if (inlineReason !== expectedInlineReason) {
       console.error('FAIL [inline-interpreter block is the exact policy message]');
+      ok = false;
+    }
+    // 2026-07-29: v0.49.38 wrote ONE remedy for this refusal, from the zsh case
+    // that produced it, so `python3 -c "import json…"` was told to read
+    // ~/.zshrc. An inline program reshapes data; an inline shell interrogates
+    // its config. The remedy must match which was asked.
+    messageChecks += 1;
+    const pyReason = evaluate('python3 -c "import json; print(1)"', 'feat/gh-1-x').reason ?? '';
+    if (
+      !pyReason.includes('`jq` for JSON')
+      || pyReason.includes('~/.zshrc')
+    ) {
+      console.error('FAIL [an inline PROGRAM refusal answers data reshaping, not shell config]');
+      ok = false;
+    }
+    messageChecks += 1;
+    const shReason = evaluate("zsh -ic 'alias | grep x'", 'feat/gh-1-x').reason ?? '';
+    if (
+      !shReason.includes('~/.zshrc')
+      || shReason.includes('`jq` for JSON')
+    ) {
+      console.error('FAIL [an inline SHELL refusal keeps the config-reading remedy]');
       ok = false;
     }
     // 2026-07-29: `zsh -ic 'alias | grep -i <name>; whence -w <name>'` was told to

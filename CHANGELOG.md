@@ -7,6 +7,18 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **The inline-interpreter refusal answers the question that was asked.** v0.49.38 gave that refusal
+  a single remedy, written from the `zsh -ic 'alias …'` case that produced it — so `python3 -c
+  "import json…"` was answered with "read `~/.zshrc`" and a parse check, advice for a question
+  nobody asked. That is precisely the defect v0.49.38 existed to fix, reintroduced one release later
+  by over-fitting a remedy to its first witness. An inline *program* is usually reshaping data; an
+  inline *shell* is usually interrogating its own configuration. Two questions, so two answers: the
+  program shape now gets `jq -r <filter> <file>` for JSON (many files at once), `rg` to find,
+  `cut -f<n>` for a column, `sort | uniq -c` for a tally, and `node --check` / `python3 -m json.tool`
+  for a parse check; the shell shape keeps the config-reading remedy. Selection is by interpreter
+  and is used for the message only — the block decision is untouched, so a misclassification costs a
+  less apt remedy and never a wrong verdict. Every command both remedies name is verified accepted
+  by the guard.
 - **Returning a pull request to draft is no longer refused as a readiness mutation.**
   `gh pr ready <N> --undo` was blocked by the rule that reserves readiness for the exact-head
   terminal finalizer — but `--undo` REMOVES readiness. It returns the PR to draft, which is the
