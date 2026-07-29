@@ -33,6 +33,23 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'overlap-window-anchored-to-the-last-prime',
+    date: '2026-07-28',
+    symptom: 'A five-hour run reported `dispatches 8 · concurrent 0s` while '
+      + 'its dispatch log held 57 entries and four concurrent pairs. The same '
+      + 'log now reports `dispatches 57 · concurrent 93m`.',
+    cause: 'Run markers accumulate, one per prime and never pruned (27 in the '
+      + 'live checkout). The window boundary was Math.max over all their '
+      + 'mtimes, so it anchored to the most recent PRIME rather than to the '
+      + 'run being reported.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'overlap-report.mjs',
+        anchor: 'the boundary is the marker for this run, never the newest one',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'flat-dispatch-ceiling-killed-a-working-writer',
     date: '2026-07-28',
     symptom: 'An implement dispatch grinding a Go slice was killed at the flat '

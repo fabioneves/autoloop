@@ -19,6 +19,17 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **Overlap accounting measures THIS run, not the last prime.** A live five-hour run reported
+  `dispatches 8 · concurrent 0s` while its dispatch log held 57 entries and four genuinely
+  concurrent pairs; the run recorded it as a possible tool gap rather than correcting it by hand,
+  which is how it got found. Run markers accumulate — one per prime, never pruned, 27 in that
+  checkout — and the window boundary was `Math.max` over all their mtimes, so it anchored to the
+  most recent PRIME and discarded every dispatch issued before it. The boundary is now the marker
+  naming a live PID in this process's ancestry, the same evidence `command-guard.mjs` uses to
+  decide a run is open; a marker whose orchestrator has exited cannot be this run, and an
+  unresolvable ancestry means no boundary rather than a wrong one. Measured against the same log,
+  the corrected report reads `dispatches 57 · wall 564m · concurrent 93m`. The accounting that
+  exists to make overlap a measurement instead of a claim was itself unmeasured.
 - **Completed panel rows read newest-first.** The panel groups by status and orders within a group
   by task ID, which is assigned at creation and never changes — no task field sets position. Left
   alone, completed rows sit oldest-first and the panel truncates the tail, so the rows it hides are

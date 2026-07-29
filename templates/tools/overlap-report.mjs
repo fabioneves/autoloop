@@ -24,7 +24,17 @@
 //   node tools/agentic/overlap-report.mjs [--root <dir>] [--eligible <n>] [--json]
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
 function gitPath(root, relative) {
@@ -113,22 +123,68 @@ export function formatOverlapLine(summary) {
   return `overlap: ${parts.join(' · ')}`;
 }
 
-// The newest run marker's mtime is when this run opened. Without one, every
-// entry is in scope and the report says so rather than inventing a boundary.
-export function runStartedAtMs(root) {
+// THIS run's marker is the boundary — not the newest of all markers.
+//
+// Markers accumulate: one per prime, never pruned, and a checkout that has been
+// primed all day holds dozens (27 observed in a live repository). Taking
+// `Math.max` over their mtimes therefore anchored the window to the most recent
+// PRIME rather than to the run being reported, so every dispatch issued before
+// it fell out of scope. A live five-hour run reported `dispatches 8 · concurrent
+// 0s` while its log held 57 entries and four genuinely concurrent pairs — the
+// accounting that exists to make overlap a measurement instead of a claim was
+// itself unmeasured.
+//
+// This run's marker is the one naming a live PID in this process's ancestry,
+// the same evidence `command-guard.mjs` uses to decide a run is open. A marker
+// whose orchestrator has exited names nothing alive and cannot be this run.
+// Falling back to the newest marker would reintroduce the bug on the exact
+// input that produced it, so an unresolvable ancestry means "no boundary": every
+// entry is in scope and `runScoped` says so.
+function ancestorPids(limit = 64) {
+  const pids = new Set();
+  let pid = process.ppid;
+  for (let depth = 0; depth < limit && pid > 1; depth += 1) {
+    pids.add(pid);
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+      if (!Number.isSafeInteger(parent) || parent <= 0) return pids;
+      pid = parent;
+    } catch {
+      return pids;
+    }
+  }
+  return pids;
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+export function runStartedAtMs(root, ancestors = ancestorPids()) {
   try {
     const directory = gitPath(root, 'autoloop/run');
     if (directory === null || !existsSync(directory)) return null;
-    const stamps = readdirSync(directory)
-      .map((name) => {
-        try {
-          return statSync(join(directory, name)).mtimeMs;
-        } catch {
-          return null;
-        }
-      })
-      .filter((value) => value !== null);
-    return stamps.length === 0 ? null : Math.max(...stamps);
+    for (const name of readdirSync(directory)) {
+      if (!name.endsWith('.json')) continue;
+      const path = join(directory, name);
+      let marker;
+      try {
+        marker = JSON.parse(readFileSync(path, 'utf8'));
+      } catch {
+        continue;
+      }
+      if (marker?.version !== 1 || !Array.isArray(marker.pids)) continue;
+      const mine = marker.pids.some((pid) =>
+        Number.isSafeInteger(pid) && pid > 1 && ancestors.has(pid) && processAlive(pid));
+      if (mine) return statSync(path).mtimeMs;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -226,8 +282,38 @@ function selfTest() {
     parseArgs(['--root', '/r', '--eligible', '3', '--json'])?.eligible === 3,
   );
 
+  // 2026-07-28: a live five-hour run reported `dispatches 8 · concurrent 0s`
+  // while its log held 57 entries. Markers accumulate — 27 in that checkout —
+  // and the boundary was the NEWEST marker's mtime, so the window started at the
+  // last prime instead of at this run. The marker naming a live ancestor is the
+  // only one that can be this run's.
+  {
+    const scratch = mkdtempSync(join(tmpdir(), 'autoloop-overlap-'));
+    spawnSync('git', ['-C', scratch, 'init', '-q'], { encoding: 'utf8', timeout: 10_000 });
+    const directory = join(scratch, '.git', 'autoloop', 'run');
+    mkdirSync(directory, { recursive: true });
+    const stale = join(directory, 'stale.json');
+    const mine = join(directory, 'mine.json');
+    // Mine is written FIRST, so its mtime is the older of the two: the max-mtime
+    // rule would pick the stale marker and start the window after this run began.
+    writeFileSync(mine, JSON.stringify({ version: 1, pids: [process.ppid] }));
+    writeFileSync(stale, JSON.stringify({ version: 1, pids: [999_999_999] }));
+    const mineMs = statSync(mine).mtimeMs;
+    const staleMs = statSync(stale).mtimeMs;
+    check(
+      'the boundary is the marker for this run, never the newest one',
+      runStartedAtMs(scratch, new Set([process.ppid])) === mineMs
+      && staleMs >= mineMs,
+    );
+    check(
+      'a marker naming only dead pids yields no boundary, not a wrong one',
+      runStartedAtMs(scratch, new Set([123_456_789])) === null,
+    );
+    rmSync(scratch, { recursive: true, force: true });
+  }
+
   for (const name of failures) console.error(`FAIL ${name}`);
-  const total = 12;
+  const total = 14;
   console.log(
     failures.length === 0
       ? `self-test OK (${total} cases)`
