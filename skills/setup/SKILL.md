@@ -252,6 +252,19 @@ Ask only:
     rejects the flag without it. Never offer solo mode when more than one trusted human exists —
     the gate hard-fails a solo config whose trusted list is not exactly the loop login.
 
+    **The answer determines `AUTOMERGE_MODE` in the vendored merge executor — derive it, never pick
+    it separately.** `auto` writes `'all-green'`; `ratified` writes `'classified'`. That constant is
+    the ONLY one the gate reads: it computes the contract's `mergePolicy`, and the committed
+    `merge.policy` is never consulted at runtime. Writing `'classified'` for a repository that
+    answered `auto` leaves a config whose merge setting does nothing, and the refusal blames a
+    `ratified` policy the config never names. That happened: a live repository answered `auto`, got
+    `'classified'`, and every code pull request was refused as unclassified — the maintainer's
+    reasonable reading was that `auto` means merge, and nothing pointed at the constant. Disclose
+    both in one sentence when the answer is `ratified`: that only Path A (a human `risk:*` label) or
+    Path B (`REVERSIBLE_PATHS`, docs-only by default) can merge, so ordinary code changes will wait
+    for a human. `REVERSIBLE_PATHS` is meaningless under `auto` and must not be presented as a
+    control there.
+
 Never infer that green CI means the run may finish itself. Merge, merge queue, tag publication, and
 release publication require an independent maintainer action outside the run. Delivery's own
 predicate is the triggered-checks floor — every check run and commit status on the exact head
@@ -530,6 +543,12 @@ Always check:
 - hooks parse and refer only to present vendored tools;
 - Codex hook shape/tool references separately from effective enablement and hash trust (unproven
   activation is a NOTE, not a PASS);
+- **`AUTOMERGE_MODE` agrees with the committed `merge.policy`** — `auto` requires `'all-green'`,
+  `ratified` requires `'classified'`. A disagreement is a **FAIL**, not a NOTE: the constant is the
+  only one the gate reads, so a repository answering `auto` and carrying `'classified'` has a merge
+  setting that does nothing and gets refusals citing a `ratified` policy its config never names.
+  Nothing checked this, which is exactly why it went unnoticed on a live repository until every code
+  pull request had been refused;
 - open duplicate migration PRs;
 - no stale broker/route/measurement prose in forward operational artifacts;
 - static Codex and opencode reviewer contracts;

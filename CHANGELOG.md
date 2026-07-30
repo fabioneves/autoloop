@@ -36,6 +36,20 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **`merge.policy: auto` now means what it says.** The vendored executor's `AUTOMERGE_MODE` is the
+  only constant the merge gate reads — it computes the contract's `mergePolicy`, and the committed
+  `merge.policy` is never consulted at runtime. Setup asked which policy to use, recorded the answer
+  in `ProjectConfig`, and then hardcoded `'classified'` independently of it. A live repository had
+  carried `merge.policy: "auto"` with both acknowledgements since setup and never auto-merged
+  anything: every code pull request was refused as unclassified, and the refusal cited a `ratified`
+  policy the config never names, so nothing pointed at the constant that actually decided. The
+  maintainer's reading — that `auto` means merge — was the correct one. `AUTOMERGE_MODE` is now
+  **derived** from `merge.policy` (`auto` → `'all-green'`, `ratified` → `'classified'`), setup must
+  disclose what `ratified` costs rather than presenting `REVERSIBLE_PATHS` as a control under `auto`
+  where it is inert, and **doctor FAILS on a disagreement between the two** — nothing checked it,
+  which is why it survived until a whole queue had been refused. The floor is untouched and remains
+  unwaivable by the mode: protected paths, hard-block labels, exact-head green checks, both verdict
+  statuses, clean merge state, resolved threads.
 - **`stats.mjs` reads its own payload size.** `execSync`'s 1 MB default `maxBuffer` is smaller than
   this tool's own reads: 60 issues with bodies and comments is 1.1 MB on a real repository, because
   every run record is an issue comment and they are long. The sizing join hit `ENOBUFS` the first time

@@ -77,9 +77,12 @@ export const REVERSIBLE_PATHS = ['docs/**'];
 // Repo crown jewels beyond the generic structural families below. Setup mirrors
 // STATE's escalate-list here (auth, secrets, schema, payments, external contracts, …).
 export const EXTRA_PROTECTED_PATHS = [];
-// Authorization mode:
+// Authorization mode. **DERIVED from the repository's committed `merge.policy`,
+// never chosen independently of it** — setup writes `'all-green'` for
+// `merge.policy: auto` and `'classified'` for `merge.policy: ratified`:
 //   'classified' — only the reversible class auto-merges: Path A (human risk label)
 //                  or Path B (REVERSIBLE_PATHS allowlist + ≤20 files / ≤700 lines).
+//                  This is what `merge.policy: ratified` means.
 //   'all-green'  — every loop PR auto-merges when ALL evidence is green (verdicts,
 //                  CI, clean merge state, no unresolved threads) — EXCEPT the floor
 //                  that never auto-merges in any mode: protected paths (structural +
@@ -87,6 +90,15 @@ export const EXTRA_PROTECTED_PATHS = [];
 //                  The mode widens the CLASS, never the floor. Without CI it rests
 //                  on the loop's own verdicts alone — setup must refuse to write it
 //                  unless the user explicitly accepts that in so many words.
+//                  This is what `merge.policy: auto` means.
+//
+// The two must never disagree, because this constant is the only one the gate
+// reads: `mergePolicy` below is computed from it, and the committed
+// `merge.policy` is never consulted at runtime. A repository that answered `auto`
+// and got `'classified'` written here has a config whose merge setting does
+// nothing, and the refusal it produces cites a `ratified` policy the config never
+// names — observed on a live repository, where the maintainer had set `auto`,
+// every code PR was refused as unclassified, and nothing pointed at this line.
 export const AUTOMERGE_MODE = 'classified';
 export const LOOP_LOGIN = 'autoloop[bot]';
 export const TRUSTED_HUMAN_LOGINS = ['maintainer'];
