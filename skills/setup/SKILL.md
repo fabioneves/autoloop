@@ -259,11 +259,26 @@ Ask only:
     answered `auto` leaves a config whose merge setting does nothing, and the refusal blames a
     `ratified` policy the config never names. That happened: a live repository answered `auto`, got
     `'classified'`, and every code pull request was refused as unclassified — the maintainer's
-    reasonable reading was that `auto` means merge, and nothing pointed at the constant. Disclose
-    both in one sentence when the answer is `ratified`: that only Path A (a human `risk:*` label) or
-    Path B (`REVERSIBLE_PATHS`, docs-only by default) can merge, so ordinary code changes will wait
-    for a human. `REVERSIBLE_PATHS` is meaningless under `auto` and must not be presented as a
-    control there.
+    reasonable reading was that `auto` means merge, and nothing pointed at the constant.
+
+    **`ratified` has two more values, and they were never asked for either.** The executor's comment
+    says `REVERSIBLE_PATHS` is widened "only by explicit user choice" — but nothing ever offered the
+    choice, so `['docs/**']` was imposed and then documented as a decision the human had made. Under
+    `ratified` that list IS Path B, so a repository got docs-only auto-merge without knowing it was
+    configurable. When and only when the answer is `ratified`:
+    - **ASK for `REVERSIBLE_PATHS`** — it is repo config, above the executor's `end repo config`
+      marker. Offer `['docs/**']` and state the matching rules: `**` crosses path segments, `*` stays
+      inside one, matching is case-insensitive, and **every** current and previous path must match, so
+      a rename across the boundary never qualifies. Widening it cannot expose a protected path — the
+      protected families veto independently — so ask it plainly rather than hedging.
+    - **DISCLOSE `SAFE_LABELS`, never ask** — `risk:pure-deletion` and `risk:mechanical-refactor` sit
+      BELOW that marker, in the generic engine, so they are a fixed vocabulary and not a per-repo
+      choice. Name them anyway: Path A is the per-pull-request escape hatch, and a maintainer who does
+      not know the labels exist cannot use the one mechanism that merges a change outside the
+      allowlist. Both labels must exist in the repository for it to work.
+
+    Both are meaningless under `auto`, which subsumes Path B, and must not be presented as controls
+    there — offering an inert setting is its own way of misleading someone about what governs a merge.
 
 Never infer that green CI means the run may finish itself. Merge, merge queue, tag publication, and
 release publication require an independent maintainer action outside the run. Delivery's own

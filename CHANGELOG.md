@@ -36,6 +36,18 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **Setup asks for the Path B allowlist instead of imposing it.** The executor's comment claimed
+  `REVERSIBLE_PATHS` is widened "only by explicit user choice" — and setup never mentioned it, so
+  `['docs/**']` was imposed and then documented as a decision the human had made. Under `ratified`
+  that list *is* Path B, so a repository got docs-only auto-merge without ever learning it was
+  configurable. Setup now asks for it under `ratified`, with the matching rules stated (`**` crosses
+  segments, `*` does not, case-insensitive, and every current *and previous* path must match, so a
+  rename across the boundary never qualifies). It also **discloses** `SAFE_LABELS` —
+  `risk:pure-deletion`, `risk:mechanical-refactor` — without asking, because those sit below the
+  executor's `end repo config` marker and are a fixed vocabulary rather than a per-repo choice: a
+  maintainer who does not know Path A's labels exist cannot use the one mechanism that merges a change
+  outside the allowlist. Neither is offered under `auto`, where both are inert — presenting an inert
+  setting is its own way of misleading someone about what governs a merge.
 - **Path B has no size gate, and the line limit is gone.** `REVERSIBLE_MAX_LINES` and the ≤20-file
   cap are removed: reversibility is a property of WHAT changed, never of how much, and a docs-only
   diff does not become irreversible at 701 lines. The rest of the system already refuses to treat a

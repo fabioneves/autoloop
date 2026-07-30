@@ -71,7 +71,13 @@ export const BASE_BRANCH = 'main'; // setup: the loop's base branch
 // and commit status on the exact head green) plus the two verdict statuses are
 // the whole CI predicate.
 // Path B allowlist (globs): the reversible class that may auto-merge WITHOUT a human
-// risk label. Docs-only is the safe generic default; widen only by explicit user choice.
+// risk label. Docs-only is the safe generic default, and setup ASKS for it under a
+// `ratified` policy rather than imposing it — this comment claimed "widen only by
+// explicit user choice" for several releases while nothing ever offered the choice,
+// so the default was imposed and then described as a decision the human had made.
+// Matching: `**` crosses path segments, `*` stays within one, case-insensitive, and
+// EVERY current and previous path must match, so a rename across the boundary never
+// qualifies. Inert under `auto`, which subsumes Path B.
 // (Protected families below still veto — a reversible glob can never expose a protected path.)
 export const REVERSIBLE_PATHS = ['docs/**'];
 // Repo crown jewels beyond the generic structural families below. Setup mirrors
