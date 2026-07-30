@@ -17,8 +17,31 @@ Notable changes to Autoloop are recorded here. The format follows
   `IMPLEMENT [CLAUDE:OPUS]`, a form only reachable by pinning a model, on the one step the skill says
   never pins one; it now shows the real unpinned rendering.
 
+### Added
+
+- **`stats.mjs --sizing` joins the shaping prediction to the delivered outcome.** `sizing-contract.mjs`
+  has recorded a prediction per unit (cases, invariants, estimated files/lines, in the issue body) and
+  an outcome per unit (review rounds, escalation, result, actual files/lines, in the run-record
+  comment) since it was written, and its own header says "Only the PAIR is useful" — but nothing had
+  ever read them together. So the five-case threshold stayed an argument from two runs, and there was
+  no way to ask whether the new shaping strictness helps or merely adds friction. Both records are
+  issue-local, so one issue-list call carries both. The report buckets cost by PREDICTED case count —
+  n, blocked, escalated, median review rounds, median rounds among shipped units — and reports the
+  signed production-line error, kept separate because a bad line estimate and a bad case count are
+  different shaping errors with different fixes. Buckets rather than a correlation: n is small, and a
+  bucket survives a small n legibly where a coefficient invites reading noise as signal. Unpaired
+  units are NAMED in both directions — shaped-but-not-yet-run, and ran-without-a-marker — since a
+  report that silently drops rows reads as complete. The pure join is exported and self-tested against
+  the real records from three units.
+
 ### Fixed
 
+- **`stats.mjs` reads its own payload size.** `execSync`'s 1 MB default `maxBuffer` is smaller than
+  this tool's own reads: 60 issues with bodies and comments is 1.1 MB on a real repository, because
+  every run record is an issue comment and they are long. The sizing join hit `ENOBUFS` the first time
+  it ran against a live queue. `maxBuffer` is raised, and the fetch now returns the failure REASON
+  instead of swallowing it — a bare `null` reported "could not read issues" for what was a buffer
+  size, sending the reader to check permissions and the repository instead.
 - **`stats.mjs` no longer loses the whole scoreboard to one deleted issue.** A deleted issue answers
   the timeline endpoint with HTTP 410, and the bare `JSON.parse(execSync(…))` threw it straight
   through `main`, so a run that had read every other unit successfully reported **no timings at all**.

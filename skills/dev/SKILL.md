@@ -1501,6 +1501,18 @@ on the cases where it was never tested.
 Post one end-of-run digest and scoreboard, not one per tool phase. `stats.mjs` presents cross-unit
 step timings from the label timeline; it is presentation only.
 
+**`stats.mjs --sizing` joins the shaping PREDICTION to the delivered OUTCOME** — the pair
+`sizing-contract.mjs` has been recording all along and nothing had ever read together, which is why
+the five-case rule stayed an argument from two runs. Predictions ride the issue body, outcomes ride
+the run-record comment this step posts, so one issue-list call carries both. It reports cost bucketed
+by predicted case count — blocked, escalated, median review rounds — plus the signed
+production-line error, and it NAMES the unpaired units in both directions: shaped-but-not-yet-run,
+and ran-without-a-marker. Run it when the queue turns over, not every unit; a bucket needs units in
+it before it says anything. The first live join already showed a 5-case unit shipping in 7 rounds at
+33 production lines against a 120-line estimate, and its sibling shipping in 4 rounds at 205 against
+130 — so on the evidence so far the line estimate does not predict review cost, which is exactly the
+kind of claim this is here to settle instead of assert.
+
 Invalidate relevant snapshot sections, re-derive state, and take the next unit unless:
 
 - the queue is exhausted with complete absence evidence;

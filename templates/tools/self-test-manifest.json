@@ -31,7 +31,7 @@
     "scan.mjs": "74c6fafd732cddb351e1fd9255e6f3240ce18ca797ba1964a0fc4bec03793add",
     "sizing-contract.mjs": "d37b91eec295a80886c406dbfea039b6dd76ed68cd466baf4c53145764e61f40",
     "snapshot-contract.mjs": "8f9d3ba00df52587f09ec02fa543c8fa8f710223e8570c33224068016889b8fb",
-    "stats.mjs": "bc1726a8a341467115822a49aa1df0fd045a0c4540ca0ffec8665834652760b1",
+    "stats.mjs": "380e6526eaddbf4769486038c57311bdee6577d6e409b41ba70c598a30fbe190",
     "step-subject.mjs": "4dd187646d383688089b6682df086fa5bf1d9c96378f387e5edfab55e2bd2807",
     "subagent-transcript.mjs": "bf3d9e913735987fbb28eeba091b4a1012345cced08866e4a9036d1e78c54c40",
     "writeback-check.mjs": "39ce6e98e51d7b2cb67858d77f2329ac4ba6f42791950e64a3088ae55440d8da"
