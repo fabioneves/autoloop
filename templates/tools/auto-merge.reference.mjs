@@ -81,7 +81,8 @@ export const EXTRA_PROTECTED_PATHS = [];
 // never chosen independently of it** — setup writes `'all-green'` for
 // `merge.policy: auto` and `'classified'` for `merge.policy: ratified`:
 //   'classified' — only the reversible class auto-merges: Path A (human risk label)
-//                  or Path B (REVERSIBLE_PATHS allowlist + ≤20 files / ≤700 lines).
+//                  or Path B (every current AND previous path matches the
+//                  REVERSIBLE_PATHS allowlist). No size gate.
 //                  This is what `merge.policy: ratified` means.
 //   'all-green'  — every loop PR auto-merges when ALL evidence is green (verdicts,
 //                  CI, clean merge state, no unresolved threads) — EXCEPT the floor
