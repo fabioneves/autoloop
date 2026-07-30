@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.40 · starting
+∞ dev · v0.49.41 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -392,6 +392,24 @@ reviewer's job is to find the case the author did not consider.
   It is still judgment work — deciding a Critical against source is the orchestrator's own call,
   not a dispatch's — so run the session on a model you trust for that, and nothing in the flow
   depends on which one it is.
+  **State the title contract IN the prompt so the retitle is rare.** Every plan and plan-revision
+  prompt says what `title` must be: plain ASCII, `<type>: <summary>` imperative — the same shape as
+  the issue titles `autoloop:shape` composes — and **a description of the change, never of the
+  artifact**. One live run hit `INVALID_PLAN_TITLE` four times because nothing asked for ASCII, and
+  both revisions in it returned `plan(#266) v2 - …`, which became the pull request title: the
+  revision brief asked for a revised plan and got a title naming the plan instead of the work. The
+  recovery below is sound and cheap, but a constraint the prompt never states is one the model has
+  no reason to meet.
+
+  **Restate the WHOLE artifact contract on a revision, not just the part being revised.** The
+  result is `{title, prBody, body}` and all three are replaced. The same run had both revisions come
+  back without `Closes #N` in `prBody` — the driver refused them (`closing claim does not name
+  intent.issue on intent.branch`) because the brief restated only the plan-body contract.
+  `parseLoopClaim` needs exactly one closing reference matching the branch's issue. Verify it with
+  an anchored pattern (`^(Closes|Fixes|Resolves) #<N>`) and never a substring tally: `rg -ci
+  'closes|fixes|resolves'` reported a match in that run on the word *prefixes*, so the count said
+  present while the line was absent.
+
   **`INVALID_PLAN_TITLE` is a retitle, never a re-dispatch.** A plan result whose only fault is a
   non-ASCII title comes back with that code and the sound artifact under `rejectedPlan` in the
   failure detail. Composing a safe ASCII title is the ORCHESTRATOR's job and the body is the
@@ -812,7 +830,27 @@ Challenge premises against current code and STATE. If the issue is obsolete, dup
 outside autonomy, or requires a secret/destructive/protected choice, comment a concise evidence-
 backed disposition and transition to the appropriate human block. Do not silently redesign scope.
 
-Print the unit banner beside the first lifecycle/label mutation:
+**Apply the run's first labels here — this is the mutation everything downstream swaps:**
+
+```bash
+gh issue edit <N> --add-label loop-started,loop:01-premise
+```
+
+Every later step says "Move to `loop:0N`", which is a SWAP and presumes the pair already exists;
+blocking likewise "removes `loop-started` and the `loop:*` step label". Nothing stated what put them
+there. A live run reached step 2 on both a worked and a staged unit with the issues still showing
+`loop-ready` and nothing else — an in-progress unit indistinguishable on GitHub from an untouched
+queued one, and `stats.mjs`, which derives every cross-unit step timing from this label timeline, had
+no events to derive from. The step labels existed in the repository and the swap reminder knew the
+exact command; only the instruction to run it was missing.
+
+**The staged unit is the one exception, and it is deliberate.** Overlap keeps label mutations
+serialized to the worked unit, so a unit staged through read-only steps 1–3 carries no labels at all:
+it gets `loop-started` with `loop:04-claim` directly when it is claimed. Its 01–03 steps are
+therefore absent from `stats.mjs` — the known price of staging ahead, not a gap to fill by labelling
+a unit two writers might still abandon.
+
+Print the unit banner beside that first mutation:
 
 ```text
 ╭──────────────────────────────────────────────────╮
@@ -1269,6 +1307,13 @@ Each entry in `reviewRounds` is the record of one dispatched round:
 - `verdict` is the exact object `dispatch.mjs` parsed. Do not edit it.
 - `configFingerprint` is the SHA-256 of the canonical `projectConfig`; the contract derives the
   review cap from `projectConfig.caps.codeReviewRoundsPerUnit` and never takes a separate cap.
+  **Canonical means `jq -S -c -j`** — keys sorted recursively, compact, no trailing newline, which
+  is exactly what the contract's `hashValue` hashes (`JSON.stringify` over a key-sorted clone).
+  "Canonical" alone does not determine the bytes, and the wrong ones fail with a fingerprint
+  mismatch that looks like a stale config: a live run lost a round computing it over
+  pretty-printed output, because `jq -j` suppresses the trailing newline but keeps the
+  indentation. Check any spelling against a fingerprint the contract already accepted before
+  trusting it.
 
 Pass only orchestrator verification/scope annotations beside that evidence; caller-authored rebut
 statuses and unsealed disposition strings have no authority. Retain the byte-exact clean input as
@@ -1456,6 +1501,18 @@ on the cases where it was never tested.
 Post one end-of-run digest and scoreboard, not one per tool phase. `stats.mjs` presents cross-unit
 step timings from the label timeline; it is presentation only.
 
+**`stats.mjs --sizing` joins the shaping PREDICTION to the delivered OUTCOME** — the pair
+`sizing-contract.mjs` has been recording all along and nothing had ever read together, which is why
+the five-case rule stayed an argument from two runs. Predictions ride the issue body, outcomes ride
+the run-record comment this step posts, so one issue-list call carries both. It reports cost bucketed
+by predicted case count — blocked, escalated, median review rounds — plus the signed
+production-line error, and it NAMES the unpaired units in both directions: shaped-but-not-yet-run,
+and ran-without-a-marker. Run it when the queue turns over, not every unit; a bucket needs units in
+it before it says anything. The first live join already showed a 5-case unit shipping in 7 rounds at
+33 production lines against a 120-line estimate, and its sibling shipping in 4 rounds at 205 against
+130 — so on the evidence so far the line estimate does not predict review cost, which is exactly the
+kind of claim this is here to settle instead of assert.
+
 Invalidate relevant snapshot sections, re-derive state, and take the next unit unless:
 
 - the queue is exhausted with complete absence evidence;
@@ -1630,16 +1687,21 @@ Fix rounds belong to step 08 too — they are how the step converges, not a step
 Plan review is one dispatch and carries no round: `03/11 🔬 PLAN-REVIEW [<executor>]`.
 
 Every dispatched step names its **executor** in a fixed slot immediately after the step name —
-upper-case and bracketed so it reads as a label. The slot is `[ENGINE]` when no model is pinned
-and `[ENGINE:MODEL]` when one is (from the `engine` and `model` fields on the dispatch result,
-never composed by hand; drop a trailing `[context]` suffix from the model for display). Who
-judged or wrote is a property of the evidence, and the model is now chooseable per step — so the
-line says it:
+upper-case and bracketed so it reads as a label. **The slot is the MODEL: `[OPUS]`, `[FABLE]`,
+`[GPT-5.6-SOL]`** (from the `model` field on the dispatch result, never composed by hand; drop a
+trailing `[context]` suffix for display). Model names identify their engine on sight, so carrying
+both spent width on a word the model already implies — and the engine still rides the stamped
+result and the dispatch log, which is where an engine mismatch is proven anyway. This matches the
+task panel, so one name means one thing in both places. **`[ENGINE]` is the fallback for the one
+case where no model is knowable** — an unpinned writer role, where `resolveDefaultModel` returns
+null because only review roles follow the recorded choice, so the host CLI picks a default the loop
+never sees. Who judged or wrote is a property of the evidence, so the line says as much of it as
+the result actually carries:
 
 ```text
-[14:03][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [CLAUDE:FABLE] ─ full · fresh planner
-[14:19][#78] ⏳ ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE:OPUS] ─ full · fresh writer
-[14:11][#87] ⏳ ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [CODEX] ─ full · fresh reviewer · staged
+[14:03][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [FABLE] ─ full · fresh planner
+[14:19][#78] ⏳ ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE] ─ full · fresh writer · engine default
+[14:11][#87] ⏳ ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [GPT-5.6-SOL] ─ full · fresh reviewer · staged
 [15:02][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [CLAUDE:GPT-5.6-SOL] ─ fix-delta · 1 Major open · proxy
 ```
 

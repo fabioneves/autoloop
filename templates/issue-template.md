@@ -1,6 +1,6 @@
 ---
 name: Loop unit
-about: A PR-sized unit of work for the autoloop (one module, testable acceptance, explicit deps)
+about: A PR-sized unit of work for the autoloop (one invariant, vertical slice, testable acceptance, explicit deps)
 title: "feat: "
 labels: []
 ---
@@ -21,8 +21,11 @@ labels: []
 
 ## Boundary
 
-<!-- The ONE module/directory this touches (e.g. `src/billing/`). One module per issue —
-     cross-module work is split into multiple issues chained via Blocked by. -->
+<!-- The PRIMARY module this changes (e.g. `src/billing/`), then every additional path this slice
+     touches. A unit is a vertical slice — it may span modules when its invariant requires it, and
+     the size that matters is the invariant's case list, not the directory count. Name the extra
+     paths here rather than leaving them to be discovered: an issue bounded to one module whose
+     acceptance criterion needs a second one cannot be satisfied as written. -->
 
 ## Task
 

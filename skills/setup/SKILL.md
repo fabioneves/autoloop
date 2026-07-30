@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.40 · starting
+∞ setup · v0.49.41 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -251,6 +251,34 @@ Ask only:
     `merge.soloOperatorAcknowledged: true` alongside the invocation acknowledgement; the schema
     rejects the flag without it. Never offer solo mode when more than one trusted human exists —
     the gate hard-fails a solo config whose trusted list is not exactly the loop login.
+
+    **The answer determines `AUTOMERGE_MODE` in the vendored merge executor — derive it, never pick
+    it separately.** `auto` writes `'all-green'`; `ratified` writes `'classified'`. That constant is
+    the ONLY one the gate reads: it computes the contract's `mergePolicy`, and the committed
+    `merge.policy` is never consulted at runtime. Writing `'classified'` for a repository that
+    answered `auto` leaves a config whose merge setting does nothing, and the refusal blames a
+    `ratified` policy the config never names. That happened: a live repository answered `auto`, got
+    `'classified'`, and every code pull request was refused as unclassified — the maintainer's
+    reasonable reading was that `auto` means merge, and nothing pointed at the constant.
+
+    **`ratified` has two more values, and they were never asked for either.** The executor's comment
+    says `REVERSIBLE_PATHS` is widened "only by explicit user choice" — but nothing ever offered the
+    choice, so `['docs/**']` was imposed and then documented as a decision the human had made. Under
+    `ratified` that list IS Path B, so a repository got docs-only auto-merge without knowing it was
+    configurable. When and only when the answer is `ratified`:
+    - **ASK for `REVERSIBLE_PATHS`** — it is repo config, above the executor's `end repo config`
+      marker. Offer `['docs/**']` and state the matching rules: `**` crosses path segments, `*` stays
+      inside one, matching is case-insensitive, and **every** current and previous path must match, so
+      a rename across the boundary never qualifies. Widening it cannot expose a protected path — the
+      protected families veto independently — so ask it plainly rather than hedging.
+    - **DISCLOSE `SAFE_LABELS`, never ask** — `risk:pure-deletion` and `risk:mechanical-refactor` sit
+      BELOW that marker, in the generic engine, so they are a fixed vocabulary and not a per-repo
+      choice. Name them anyway: Path A is the per-pull-request escape hatch, and a maintainer who does
+      not know the labels exist cannot use the one mechanism that merges a change outside the
+      allowlist. Both labels must exist in the repository for it to work.
+
+    Both are meaningless under `auto`, which subsumes Path B, and must not be presented as controls
+    there — offering an inert setting is its own way of misleading someone about what governs a merge.
 
 Never infer that green CI means the run may finish itself. Merge, merge queue, tag publication, and
 release publication require an independent maintainer action outside the run. Delivery's own
@@ -530,6 +558,17 @@ Always check:
 - hooks parse and refer only to present vendored tools;
 - Codex hook shape/tool references separately from effective enablement and hash trust (unproven
   activation is a NOTE, not a PASS);
+- **`AUTOMERGE_MODE` agrees with the committed `merge.policy`.** Do not re-derive this by reading:
+  `scaffold.mjs --audit` computes it and reports `policyConflicts` (also in `warnings`), so the check
+  is mechanical and cannot be skipped by forgetting a bullet. A non-empty `policyConflicts` is a
+  **FAIL**, not a NOTE — the constant is the only value the merge gate reads, so a repository
+  answering `auto` while carrying `'classified'` has a merge setting that does nothing, and gets
+  refusals citing a `ratified` policy its config never names. Nothing checked it before, which is why
+  it survived on a live repository until every code pull request had been refused. **Reconcile
+  repairs it**: `auto-merge.mjs` is repo-owned and never overwritten, so rewrite that ONE constant to
+  the derived value, show the one-line diff, and leave the rest of the file untouched — a policy the
+  human already answered is not a new decision to re-ask, but the edit is still shown because it
+  changes what merges without a human;
 - open duplicate migration PRs;
 - no stale broker/route/measurement prose in forward operational artifacts;
 - static Codex and opencode reviewer contracts;

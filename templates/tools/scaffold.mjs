@@ -187,6 +187,55 @@ export function mergeOpencodeConfig(existing, template) {
   return merged;
 }
 
+// `merge.policy` decides nothing at runtime: the merge gate reads AUTOMERGE_MODE
+// out of the vendored executor and computes its `mergePolicy` from THAT. So the
+// two can disagree, and when they do the config's answer is silently discarded.
+// Observed 2026-07-29 on a live repository that had carried `merge.policy: auto`
+// with both acknowledgements since setup: the executor said 'classified', every
+// code pull request was refused as unclassified, and the refusal cited a
+// `ratified` policy the config never names — so nothing pointed at the constant
+// that actually decided.
+//
+// Prose asking setup to derive one from the other is not a fix; that is what was
+// already implied and it is how this shipped. This is the mechanical check, and
+// it is a CONFLICT rather than a warning so a caller cannot read past it.
+export const POLICY_TO_MODE = Object.freeze({
+  auto: 'all-green',
+  ratified: 'classified',
+});
+
+/**
+ * Pure. Rewrites ONLY the AUTOMERGE_MODE line, so a repo-owned policy file keeps
+ * every other Setup-filled value. Returns the new text, or null when there is
+ * nothing to change. Repairing mechanically matters as much as detecting
+ * mechanically: an instruction to "rewrite that one constant" is the same prose
+ * that let the contradiction ship, and setup is where the human expects the fix.
+ */
+export function repairMergeMode(executorText, expectedMode) {
+  if (typeof executorText !== 'string' || typeof expectedMode !== 'string') return null;
+  const line = /^export const AUTOMERGE_MODE = '([^']*)';$/mu;
+  const found = line.exec(executorText);
+  if (found === null || found[1] === expectedMode) return null;
+  return executorText.replace(line, `export const AUTOMERGE_MODE = '${expectedMode}';`);
+}
+
+/** Pure. Returns a conflict string, or null when the two agree or cannot be compared. */
+export function mergeModeConflict(mergePolicy, executorText) {
+  if (typeof executorText !== 'string' || executorText === '') return null;
+  const declared = /^export const AUTOMERGE_MODE = '([^']*)';$/mu.exec(executorText)?.[1];
+  if (declared === undefined) return null;
+  if (mergePolicy === 'manual') {
+    // The executor is not vendored for a manual policy; if it is present it is
+    // inert, so the mode cannot contradict anything.
+    return null;
+  }
+  const expected = POLICY_TO_MODE[mergePolicy];
+  if (expected === undefined || declared === expected) return null;
+  return `merge.policy is "${mergePolicy}" but tools/agentic/auto-merge.mjs declares `
+    + `AUTOMERGE_MODE = '${declared}'; the executor's constant is the only value the merge gate `
+    + `reads, so the committed policy is being discarded. Set it to '${expected}'`;
+}
+
 function readProjectConfig(root, warnings) {
   let text;
   try {
@@ -462,11 +511,40 @@ export function reconcile(root, templates, { audit = false } = {}) {
   // `absent` is a RETIRED artifact confirmed gone — the report says so precisely
   // to prove the check ran, so counting it as work to do would make every audit
   // demand a reconcile that changes nothing.
+  // Read from the repository, not from the template: the vendored copy is the
+  // policy, and it is `kept-modified` so a wholesale reconcile never corrects it.
+  // The ONE constant that must agree with the committed config is repaired in
+  // place, before `changing` is computed, so a pending repair counts as work to
+  // do rather than reporting `reconcileNeeded: false` beside a live conflict.
+  let executorText = '';
+  try {
+    executorText = readFileSync(resolve(root, 'tools', 'agentic', 'auto-merge.mjs'), 'utf8');
+  } catch { /* not vendored — a manual policy, or nothing to contradict */ }
+  const policyConflict = mergeModeConflict(config?.merge?.policy, executorText);
+  let policyRepaired = null;
+  if (policyConflict !== null) {
+    warnings.push(policyConflict);
+    const expected = POLICY_TO_MODE[config?.merge?.policy];
+    const repaired = repairMergeMode(executorText, expected);
+    if (repaired !== null) {
+      policyRepaired = expected;
+      if (!audit) {
+        writeFileSync(resolve(root, 'tools', 'agentic', 'auto-merge.mjs'), repaired);
+      }
+      sorted.push({
+        path: 'tools/agentic/auto-merge.mjs',
+        action: audit ? 'policy-repair-pending' : 'policy-repaired',
+        source: `derived from merge.policy: ${config?.merge?.policy}`,
+      });
+    }
+  }
   const settled = new Set(['identical', 'kept', 'kept-modified', 'absent']);
   const changing = sorted.filter((entry) => !settled.has(entry.action));
   return {
     version: 1,
     nonManualTooling: nonManual,
+    policyConflicts: policyConflict === null ? [] : [policyConflict],
+    policyRepaired,
     reconcileNeeded: changing.length > 0,
     reconcileSummary: changing.length === 0
       ? 'current — no reconcile needed'
@@ -1794,6 +1872,61 @@ function selfTest() {
       refused = true;
     }
     expect('a directory without the template marker is refused', refused);
+
+    // The merge-policy conflict check. Prose asking setup to derive one value
+    // from the other is how the contradiction shipped in the first place, so
+    // these assert the mechanism rather than the instruction.
+    const mode = (value) => `export const AUTOMERGE_MODE = '${value}';\n`;
+    expect(
+      'auto against a classified executor is a conflict',
+      (mergeModeConflict('auto', mode('classified')) ?? '').includes("Set it to 'all-green'"),
+    );
+    expect(
+      'ratified against an all-green executor is a conflict',
+      (mergeModeConflict('ratified', mode('all-green')) ?? '').includes("Set it to 'classified'"),
+    );
+    expect(
+      'the conflict names the discarded config, not just the mismatch',
+      (mergeModeConflict('auto', mode('classified')) ?? '').includes('being discarded'),
+    );
+    expect('auto against all-green agrees', mergeModeConflict('auto', mode('all-green')) === null);
+    expect(
+      'ratified against classified agrees',
+      mergeModeConflict('ratified', mode('classified')) === null,
+    );
+    expect(
+      'a manual policy cannot be contradicted by an inert executor',
+      mergeModeConflict('manual', mode('classified')) === null,
+    );
+    expect(
+      'an absent executor is not a conflict',
+      mergeModeConflict('auto', '') === null,
+    );
+    expect(
+      'an executor without the constant is not a conflict',
+      mergeModeConflict('auto', 'export const OTHER = 1;\n') === null,
+    );
+    // The repair is mechanical too: detecting without repairing would have left
+    // "rewrite that one constant" as prose, which is how this shipped.
+    expect(
+      'the repair rewrites the constant to the derived value',
+      repairMergeMode(mode('classified'), 'all-green') === mode('all-green'),
+    );
+    expect(
+      'the repair touches ONLY that line, keeping every other Setup-filled value',
+      repairMergeMode(
+        `export const REPOSITORY = { owner: 'o' };\n${mode('classified')}export const X = 1;\n`,
+        'all-green',
+      ) === `export const REPOSITORY = { owner: 'o' };\n${mode('all-green')}export const X = 1;\n`,
+    );
+    expect(
+      'an already-correct constant is not rewritten',
+      repairMergeMode(mode('all-green'), 'all-green') === null,
+    );
+    expect(
+      'a missing constant is not invented',
+      repairMergeMode('export const OTHER = 1;\n', 'all-green') === null,
+    );
     mergeSelfTest(expect);
   } finally {
     rmSync(templates, { recursive: true, force: true });

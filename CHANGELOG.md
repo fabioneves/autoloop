@@ -3,10 +3,168 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.41] - 2026-07-29
+
+### Changed
+
+- **The ribbon's executor slot is the MODEL, not `ENGINE:MODEL`.** A model name identifies its engine
+  on sight, so carrying both spent width on a word the model already implies, and it disagreed with
+  the task panel, which was already model-only. One name now means one thing in both places. The
+  engine still rides the stamped result and the dispatch log, which is where an engine mismatch is
+  proven. `[ENGINE]` remains the fallback for the one case where no model is knowable — an unpinned
+  writer role, where `resolveDefaultModel` returns null because only review roles follow the recorded
+  choice, so the host CLI picks a default the loop never sees. The old example showed
+  `IMPLEMENT [CLAUDE:OPUS]`, a form only reachable by pinning a model, on the one step the skill says
+  never pins one; it now shows the real unpinned rendering.
+
+### Added
+
+- **`stats.mjs --sizing` joins the shaping prediction to the delivered outcome.** `sizing-contract.mjs`
+  has recorded a prediction per unit (cases, invariants, estimated files/lines, in the issue body) and
+  an outcome per unit (review rounds, escalation, result, actual files/lines, in the run-record
+  comment) since it was written, and its own header says "Only the PAIR is useful" — but nothing had
+  ever read them together. So the five-case threshold stayed an argument from two runs, and there was
+  no way to ask whether the new shaping strictness helps or merely adds friction. Both records are
+  issue-local, so one issue-list call carries both. The report buckets cost by PREDICTED case count —
+  n, blocked, escalated, median review rounds, median rounds among shipped units — and reports the
+  signed production-line error, kept separate because a bad line estimate and a bad case count are
+  different shaping errors with different fixes. Buckets rather than a correlation: n is small, and a
+  bucket survives a small n legibly where a coefficient invites reading noise as signal. Unpaired
+  units are NAMED in both directions — shaped-but-not-yet-run, and ran-without-a-marker — since a
+  report that silently drops rows reads as complete. The pure join is exported and self-tested against
+  the real records from three units.
+
+### Fixed
+
+- **Setup asks for the Path B allowlist instead of imposing it.** The executor's comment claimed
+  `REVERSIBLE_PATHS` is widened "only by explicit user choice" — and setup never mentioned it, so
+  `['docs/**']` was imposed and then documented as a decision the human had made. Under `ratified`
+  that list *is* Path B, so a repository got docs-only auto-merge without ever learning it was
+  configurable. Setup now asks for it under `ratified`, with the matching rules stated (`**` crosses
+  segments, `*` does not, case-insensitive, and every current *and previous* path must match, so a
+  rename across the boundary never qualifies). It also **discloses** `SAFE_LABELS` —
+  `risk:pure-deletion`, `risk:mechanical-refactor` — without asking, because those sit below the
+  executor's `end repo config` marker and are a fixed vocabulary rather than a per-repo choice: a
+  maintainer who does not know Path A's labels exist cannot use the one mechanism that merges a change
+  outside the allowlist. Neither is offered under `auto`, where both are inert — presenting an inert
+  setting is its own way of misleading someone about what governs a merge.
+- **Path B has no size gate, and the line limit is gone.** `REVERSIBLE_MAX_LINES` and the ≤20-file
+  cap are removed: reversibility is a property of WHAT changed, never of how much, and a docs-only
+  diff does not become irreversible at 701 lines. The rest of the system already refuses to treat a
+  line budget as a control — `autoloop:dev` NOTES a slice overage and ships anyway, because "by the
+  time lines are countable the work is done and blocking spends a human decision to learn nothing".
+  Re-applying that cap at the merge spent the same decision at the moment it costs most: the work
+  exists, it is reviewed and green, and the number changes nothing about whether reverting is cheap.
+  A `path=none` refusal also now names the Path A labels that would have authorized it, instead of
+  listing only what failed.
+- **`merge.policy: auto` now means what it says.** The vendored executor's `AUTOMERGE_MODE` is the
+  only constant the merge gate reads — it computes the contract's `mergePolicy`, and the committed
+  `merge.policy` is never consulted at runtime. Setup asked which policy to use, recorded the answer
+  in `ProjectConfig`, and then hardcoded `'classified'` independently of it. A live repository had
+  carried `merge.policy: "auto"` with both acknowledgements since setup and never auto-merged
+  anything: every code pull request was refused as unclassified, and the refusal cited a `ratified`
+  policy the config never names, so nothing pointed at the constant that actually decided. The
+  maintainer's reading — that `auto` means merge — was the correct one. `AUTOMERGE_MODE` is now
+  **derived** from `merge.policy` (`auto` → `'all-green'`, `ratified` → `'classified'`), and setup
+  must disclose what `ratified` costs rather than presenting `REVERSIBLE_PATHS` as a control under
+  `auto` where it is inert. **The check is mechanical, not prose:** `scaffold.mjs --audit` computes
+  the contradiction and reports it in a `policyConflicts` field and in `warnings`, doctor FAILS on a
+  non-empty one, and **reconcile repairs it** — `repairMergeMode` rewrites only the
+  `AUTOMERGE_MODE` line, so every other Setup-filled value in the repo-owned executor survives, and
+  the pending repair is counted before `reconcileNeeded` is computed so an audit can never report
+  `false` beside a live conflict. Proven end to end against a copy of the affected repository at its
+  pre-fix state: the audit reported the conflict and a `policy-repair-pending` action, and the
+  reconcile flipped `'classified'` to `'all-green'` while `REPOSITORY`, `EXTRA_PROTECTED_PATHS` and
+  `LOOP_LOGIN` were left untouched. The first version of this fix was a comment plus two skill bullets — the
+  exact "a value nothing verifies" pattern the rest of this release removes, and it would have shipped
+  a second contradiction nobody checked. Verified against the live repository's `main`, where the new
+  check reproduces the original fault verbatim. The floor is untouched and remains
+  unwaivable by the mode: protected paths, hard-block labels, exact-head green checks, both verdict
+  statuses, clean merge state, resolved threads.
+- **`stats.mjs` reads its own payload size.** `execSync`'s 1 MB default `maxBuffer` is smaller than
+  this tool's own reads: 60 issues with bodies and comments is 1.1 MB on a real repository, because
+  every run record is an issue comment and they are long. The sizing join hit `ENOBUFS` the first time
+  it ran against a live queue. `maxBuffer` is raised, and the fetch now returns the failure REASON
+  instead of swallowing it — a bare `null` reported "could not read issues" for what was a buffer
+  size, sending the reader to check permissions and the repository instead.
+- **`stats.mjs` no longer loses the whole scoreboard to one deleted issue.** A deleted issue answers
+  the timeline endpoint with HTTP 410, and the bare `JSON.parse(execSync(…))` threw it straight
+  through `main`, so a run that had read every other unit successfully reported **no timings at all**.
+  Observed after 26 issues were deleted while re-shaping a queue. An unreadable unit now takes its own
+  row out instead of the report, and the excluded issues are **named** — a scoreboard that silently
+  drops rows it never mentions reads as a complete one, which is worse than a crash.
+- **The plan prompt states its title contract, so the retitle is rare.** `INVALID_PLAN_TITLE` fired
+  four times in one run because nothing asked the planner for ASCII, and both plan revisions in it
+  returned `plan(#266) v2 - …`, which became the pull request title — the brief asked for a revised
+  plan and got a title naming the plan instead of the work. The prompt now specifies plain ASCII,
+  `<type>: <summary>` imperative matching the issue titles `autoloop:shape` composes, and a
+  description of the change rather than of the artifact. The existing retitle recovery is sound and
+  stays; a constraint the prompt never states is one the model has no reason to meet.
+- **A revision restates the whole artifact contract, not just the part being revised.** Both
+  revisions in that run returned a `prBody` without `Closes #N` and were refused by the driver,
+  because the brief restated only the plan-body contract while the result replaces all of
+  `{title, prBody, body}`. Also documented: verify the closing reference with an anchored pattern,
+  never a substring tally — `rg -ci 'closes|fixes|resolves'` matched the word *prefixes* in that run,
+  so the count said present while the line was absent.
+- **"Canonical" now names the bytes for `configFingerprint`.** A live run lost a round computing it
+  over pretty-printed output, because `jq -j` suppresses the trailing newline but keeps the
+  indentation, and the mismatch looks like a stale config rather than a formatting error. The
+  canonicalization is `jq -S -c -j`, verified here to reproduce the contract's `hashValue` byte for
+  byte.
+
+- **Step 1 states the label mutation that everything downstream swaps.** A live run reached step 2 on
+  both a worked and a staged unit with the issues still showing only `loop-ready` — an in-progress
+  unit indistinguishable on GitHub from an untouched queued one, and `stats.mjs`, which derives every
+  cross-unit step timing from the label timeline, with no events to derive from. Missing labels and
+  missing times were one defect, not two. The cause was a dangling reference: step 1 said to print
+  the unit banner "beside the first lifecycle/label mutation" and never said what that mutation was.
+  Every later step says "Move to `loop:0N`" — a swap presuming the pair exists — and blocking
+  "removes `loop-started` and the `loop:*` step label", presuming the same. The labels existed in the
+  repository and `label-swap-reminder.mjs` carried the exact command in a fixture; only the
+  instruction to run it was missing, so nothing ran it and every later swap had nothing to move. Step
+  1 now names it: `gh issue edit <N> --add-label loop-started,loop:01-premise`. The staged unit stays
+  the deliberate exception — overlap keeps label mutations serialized to the worked unit, so a unit
+  staged through read-only steps 1–3 carries no labels and receives `loop-started` with
+  `loop:04-claim` directly at claim (verified: `lifecycle-driver.mjs`'s `ensureLocalClaim` filters
+  every `loop:*` label, adds `loop-started` when absent, and replaces the whole set, so that path
+  cannot fail on a missing prior step label). Its 01–03 timings are absent from `stats.mjs` by
+  design — the price of staging ahead, not a gap to close by labelling a unit that may still be
+  abandoned.
+
 ## [0.49.40] - 2026-07-29
 
 ### Changed
 
+- **A unit is a vertical slice, and the unit of size is the invariant — not the module.** Shaping
+  asked for "small, atomic, vertically-sliced" units and then enforced **one module × one change
+  class** in the same sentence, which is a horizontal rule. The contradiction cost a run: a unit
+  bounded to one module could not satisfy its own first acceptance criterion, because the type it had
+  to accept was defined in a second module, and premise verification found the conflict only after
+  the unit had been filed and selected. A slice may now span modules when its invariant requires it;
+  what stays narrow is the invariant and its case list, never the directory count. `Boundary` names
+  the PRIMARY module so review keeps a centre of gravity, plus every additional path the slice
+  touches, so those are declared rather than discovered mid-implementation. The old rule was also
+  attributed to `STATE → playbooks` — **a section the STATE template does not contain**, a dangling
+  citation of exactly the kind the premise axis now refuses.
+- **Prefactoring is a first-class first slice.** Where a change would be awkward against the current
+  shape of the code, the behaviour-preserving move that makes it easy is its own leading unit and
+  blocks the rest. It sizes trivially — one invariant, behaviour unchanged — and keeps the feature
+  slice from carrying a refactor its acceptance criteria never mention.
+
+### Added
+
+- **The wide refactor gets the one shape a vertical slice cannot take.** A mechanical change whose
+  blast radius fans across the codebase — rename a shared field, retype a symbol everyone calls —
+  cannot land green as a vertical slice, and the existing signals would have kept demanding one: the
+  case list is short because behaviour is unchanged, so every signal reads "fine" right up to the
+  point nothing compiles. Shaping now sequences it **expand → migrate → contract**, each step its own
+  unit: add the new form beside the old (blocks the rest), move call sites in batches sized by blast
+  radius (each blocked by the expand, green batch to batch), then delete the old form (blocked by
+  every batch). Where a batch cannot stay green alone, the batches share an integration branch that
+  all block one final integrate-and-verify unit — declared on the units instead of discovered by the
+  loop. The migrate batches are the legitimate home for `--split-exempt`: one invariant over a domain
+  that is closed and countable but larger than five. Adapted from the `to-tickets` skill in
+  `github.com/mattpocock/skills`.
 - **The rule check is mandatory on every shaped unit, and the axes are defined once.** Every check
   the skill had — premise, acceptance, coverage, proof-terminates, size, hard-defer, structure — sat
   in Mode 2, reachable only by typing `shape lint #N`. So a freshly shaped issue was never graded
