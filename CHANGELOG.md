@@ -5,7 +5,44 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [0.49.41] - 2026-07-29
 
+### Changed
+
+- **The ribbon's executor slot is the MODEL, not `ENGINE:MODEL`.** A model name identifies its engine
+  on sight, so carrying both spent width on a word the model already implies, and it disagreed with
+  the task panel, which was already model-only. One name now means one thing in both places. The
+  engine still rides the stamped result and the dispatch log, which is where an engine mismatch is
+  proven. `[ENGINE]` remains the fallback for the one case where no model is knowable — an unpinned
+  writer role, where `resolveDefaultModel` returns null because only review roles follow the recorded
+  choice, so the host CLI picks a default the loop never sees. The old example showed
+  `IMPLEMENT [CLAUDE:OPUS]`, a form only reachable by pinning a model, on the one step the skill says
+  never pins one; it now shows the real unpinned rendering.
+
 ### Fixed
+
+- **`stats.mjs` no longer loses the whole scoreboard to one deleted issue.** A deleted issue answers
+  the timeline endpoint with HTTP 410, and the bare `JSON.parse(execSync(…))` threw it straight
+  through `main`, so a run that had read every other unit successfully reported **no timings at all**.
+  Observed after 26 issues were deleted while re-shaping a queue. An unreadable unit now takes its own
+  row out instead of the report, and the excluded issues are **named** — a scoreboard that silently
+  drops rows it never mentions reads as a complete one, which is worse than a crash.
+- **The plan prompt states its title contract, so the retitle is rare.** `INVALID_PLAN_TITLE` fired
+  four times in one run because nothing asked the planner for ASCII, and both plan revisions in it
+  returned `plan(#266) v2 - …`, which became the pull request title — the brief asked for a revised
+  plan and got a title naming the plan instead of the work. The prompt now specifies plain ASCII,
+  `<type>: <summary>` imperative matching the issue titles `autoloop:shape` composes, and a
+  description of the change rather than of the artifact. The existing retitle recovery is sound and
+  stays; a constraint the prompt never states is one the model has no reason to meet.
+- **A revision restates the whole artifact contract, not just the part being revised.** Both
+  revisions in that run returned a `prBody` without `Closes #N` and were refused by the driver,
+  because the brief restated only the plan-body contract while the result replaces all of
+  `{title, prBody, body}`. Also documented: verify the closing reference with an anchored pattern,
+  never a substring tally — `rg -ci 'closes|fixes|resolves'` matched the word *prefixes* in that run,
+  so the count said present while the line was absent.
+- **"Canonical" now names the bytes for `configFingerprint`.** A live run lost a round computing it
+  over pretty-printed output, because `jq -j` suppresses the trailing newline but keeps the
+  indentation, and the mismatch looks like a stale config rather than a formatting error. The
+  canonicalization is `jq -S -c -j`, verified here to reproduce the contract's `hashValue` byte for
+  byte.
 
 - **Step 1 states the label mutation that everything downstream swaps.** A live run reached step 2 on
   both a worked and a staged unit with the issues still showing only `loop-ready` — an in-progress

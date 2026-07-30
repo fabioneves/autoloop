@@ -106,8 +106,24 @@ function discoverIssues(limit) {
   return claimedIssues(gh(`pr list --state all --json headRefName,body --limit ${limit}`));
 }
 
+// A unit whose issue is gone takes its own row out, never the scoreboard. A
+// deleted issue answers the timeline endpoint with HTTP 410, and the bare
+// JSON.parse(execSync(...)) in `gh` above threw it straight through main: one
+// deleted issue and a whole run reported NO timings, having read every other
+// unit successfully. Observed 2026-07-29 — 26 issues were deleted while
+// re-shaping a queue, and the next scoreboard produced nothing at all.
+//
+// A reporting tool must never wedge on the thing it reports. `null` here means
+// unreadable, and the caller counts those and names them, because a scoreboard
+// that silently drops units is worse than one that crashes — it looks complete.
 function fetchTimeline(issue) {
-  const raw = gh(`api repos/{owner}/{repo}/issues/${issue}/timeline --paginate`);
+  let raw;
+  try {
+    raw = gh(`api repos/{owner}/{repo}/issues/${issue}/timeline --paginate`);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(raw)) return null;
   return raw
     .filter((e) => e.event === 'labeled' || e.event === 'unlabeled')
     .map((e) => ({ event: e.event, label: e.label?.name ?? '', at: e.created_at }));
@@ -176,10 +192,25 @@ function main() {
   const issues = argv.includes('--issues')
     ? issuesArg.split(',').map(Number)
     : discoverIssues(limit);
-  const units = issues.map((issue) => ({ issue, stats: computeUnitStats(fetchTimeline(issue)) }))
+  const timelines = issues.map((issue) => ({ issue, timeline: fetchTimeline(issue) }));
+  const unreadable = timelines.filter(({ timeline }) => timeline === null).map(({ issue }) => issue);
+  const units = timelines
+    .filter(({ timeline }) => timeline !== null)
+    .map(({ issue, timeline }) => ({ issue, stats: computeUnitStats(timeline) }))
     .filter((u) => u.stats.started != null);
   const agg = aggregate(units);
-  if (json) { console.log(JSON.stringify({ units, aggregate: agg }, null, 2)); return; }
+  if (json) {
+    console.log(JSON.stringify({ units, unreadable, aggregate: agg }, null, 2));
+    return;
+  }
+  // Named, never silently dropped: an unreadable unit is usually a deleted issue,
+  // and a scoreboard missing rows it never mentions reads as a complete one.
+  if (unreadable.length > 0) {
+    console.log(
+      `⚠ ${unreadable.length} issue(s) unreadable (deleted, or no access) — excluded: `
+      + unreadable.map((n) => `#${n}`).join(', '),
+    );
+  }
 
   console.log('issue  outcome    total     ' + STEP_KEYS.map((k) => k.slice(3, 9).padEnd(8)).join(''));
   for (const { issue, stats } of units) {
