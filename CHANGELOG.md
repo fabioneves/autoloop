@@ -36,6 +36,15 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- **Path B has no size gate, and the line limit is gone.** `REVERSIBLE_MAX_LINES` and the ≤20-file
+  cap are removed: reversibility is a property of WHAT changed, never of how much, and a docs-only
+  diff does not become irreversible at 701 lines. The rest of the system already refuses to treat a
+  line budget as a control — `autoloop:dev` NOTES a slice overage and ships anyway, because "by the
+  time lines are countable the work is done and blocking spends a human decision to learn nothing".
+  Re-applying that cap at the merge spent the same decision at the moment it costs most: the work
+  exists, it is reviewed and green, and the number changes nothing about whether reverting is cheap.
+  A `path=none` refusal also now names the Path A labels that would have authorized it, instead of
+  listing only what failed.
 - **`merge.policy: auto` now means what it says.** The vendored executor's `AUTOMERGE_MODE` is the
   only constant the merge gate reads — it computes the contract's `mergePolicy`, and the committed
   `merge.policy` is never consulted at runtime. Setup asked which policy to use, recorded the answer
@@ -44,10 +53,15 @@ Notable changes to Autoloop are recorded here. The format follows
   anything: every code pull request was refused as unclassified, and the refusal cited a `ratified`
   policy the config never names, so nothing pointed at the constant that actually decided. The
   maintainer's reading — that `auto` means merge — was the correct one. `AUTOMERGE_MODE` is now
-  **derived** from `merge.policy` (`auto` → `'all-green'`, `ratified` → `'classified'`), setup must
-  disclose what `ratified` costs rather than presenting `REVERSIBLE_PATHS` as a control under `auto`
-  where it is inert, and **doctor FAILS on a disagreement between the two** — nothing checked it,
-  which is why it survived until a whole queue had been refused. The floor is untouched and remains
+  **derived** from `merge.policy` (`auto` → `'all-green'`, `ratified` → `'classified'`), and setup
+  must disclose what `ratified` costs rather than presenting `REVERSIBLE_PATHS` as a control under
+  `auto` where it is inert. **The check is mechanical, not prose:** `scaffold.mjs --audit` computes
+  the contradiction and reports it in a `policyConflicts` field and in `warnings`, doctor FAILS on a
+  non-empty one, and reconcile repairs the single constant in the repo-owned executor without
+  touching the rest of it. The first version of this fix was a comment plus two skill bullets — the
+  exact "a value nothing verifies" pattern the rest of this release removes, and it would have shipped
+  a second contradiction nobody checked. Verified against the live repository's `main`, where the new
+  check reproduces the original fault verbatim. The floor is untouched and remains
   unwaivable by the mode: protected paths, hard-block labels, exact-head green checks, both verdict
   statuses, clean merge state, resolved threads.
 - **`stats.mjs` reads its own payload size.** `execSync`'s 1 MB default `maxBuffer` is smaller than

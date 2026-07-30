@@ -543,12 +543,17 @@ Always check:
 - hooks parse and refer only to present vendored tools;
 - Codex hook shape/tool references separately from effective enablement and hash trust (unproven
   activation is a NOTE, not a PASS);
-- **`AUTOMERGE_MODE` agrees with the committed `merge.policy`** — `auto` requires `'all-green'`,
-  `ratified` requires `'classified'`. A disagreement is a **FAIL**, not a NOTE: the constant is the
-  only one the gate reads, so a repository answering `auto` and carrying `'classified'` has a merge
-  setting that does nothing and gets refusals citing a `ratified` policy its config never names.
-  Nothing checked this, which is exactly why it went unnoticed on a live repository until every code
-  pull request had been refused;
+- **`AUTOMERGE_MODE` agrees with the committed `merge.policy`.** Do not re-derive this by reading:
+  `scaffold.mjs --audit` computes it and reports `policyConflicts` (also in `warnings`), so the check
+  is mechanical and cannot be skipped by forgetting a bullet. A non-empty `policyConflicts` is a
+  **FAIL**, not a NOTE — the constant is the only value the merge gate reads, so a repository
+  answering `auto` while carrying `'classified'` has a merge setting that does nothing, and gets
+  refusals citing a `ratified` policy its config never names. Nothing checked it before, which is why
+  it survived on a live repository until every code pull request had been refused. **Reconcile
+  repairs it**: `auto-merge.mjs` is repo-owned and never overwritten, so rewrite that ONE constant to
+  the derived value, show the one-line diff, and leave the rest of the file untouched — a policy the
+  human already answered is not a new decision to re-ask, but the edit is still shown because it
+  changes what merges without a human;
 - open duplicate migration PRs;
 - no stale broker/route/measurement prose in forward operational artifacts;
 - static Codex and opencode reviewer contracts;

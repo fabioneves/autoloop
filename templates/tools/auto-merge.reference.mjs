@@ -114,10 +114,6 @@ export const SOLO_OPERATOR = false;
 export const REQUIRED_APPROVING_REVIEW_COUNT = 0;
 export const REQUIRE_CODE_OWNER_REVIEWS = false;
 export const BASE_FRESHNESS_STRATEGY = 'direct-strict';
-// This is separately human-ratified merge authority, not a live read of ProjectConfig. New
-// scaffolds align it with caps.sliceMaxLines, but changing either value never silently changes the
-// other.
-export const REVERSIBLE_MAX_LINES = 700;
 // ── end repo config — everything below is the generic engine ──
 
 // The two verdict COMMIT STATUSES the finalizer posts (success-only,
@@ -1538,12 +1534,17 @@ export function decide(pr, config = engineConfig()) {
   }
 
   const pathA = SAFE_LABELS.some((label) => labels.includes(label));
-  const hasKnownSize = Number.isInteger(pr.changedFiles) && Number.isInteger(pr.additions) && Number.isInteger(pr.deletions);
   const pathBFiles = entries.length > 0 && paths.length > 0 && paths.every(pathBAllowed);
-  const pathBSize = hasKnownSize
-    && pr.changedFiles <= 20
-    && pr.additions + pr.deletions <= REVERSIBLE_MAX_LINES;
-  const pathB = pathBFiles && pathBSize && pr.filePaginationComplete === true && !malformed && pr.changedFiles === entries.length;
+  // No size gate. Path B is defined by WHAT changed, never by how much: the
+  // reversibility of a docs-only diff does not depend on its line count, and the
+  // rest of the system already refuses to treat a line budget as a control —
+  // `autoloop:dev` NOTES a slice overage on the pull request and ships anyway,
+  // because "by the time lines are countable the work is done and blocking spends
+  // a human decision to learn nothing" (autoloop:shape). A cap the run declines to
+  // enforce, re-applied at the merge, is that same spent decision at the moment it
+  // costs the most: the work exists, it is reviewed and green, and the number
+  // changes nothing about whether reverting it is cheap.
+  const pathB = pathBFiles && pr.filePaginationComplete === true && !malformed && pr.changedFiles === entries.length;
   // 'all-green' authorizes any complete, well-formed changed-file set; every other
   // check in this function (protected paths, hard-block labels, evidence, threads,
   // kill-switch) still applies — the mode widens the CLASS, never the floor.
@@ -1560,13 +1561,9 @@ export function decide(pr, config = engineConfig()) {
       reasons.push('not authorized: changed-file evidence incomplete or empty');
     } else {
       if (!pathBFiles) reasons.push(`not authorized: Path B requires every current and previous file path to match the reversible allowlist (${REVERSIBLE_PATHS.join(', ') || 'empty'})`);
-      if (!pathBSize) {
-        if (!hasKnownSize) reasons.push('not authorized: Path B changed-file size is unknown');
-        else {
-          if (pr.changedFiles > 20) reasons.push(`not authorized: Path B has too many files (${pr.changedFiles} > 20)`);
-          if (pr.additions + pr.deletions > REVERSIBLE_MAX_LINES) reasons.push(`not authorized: Path B has too many changed lines (${pr.additions + pr.deletions} > ${REVERSIBLE_MAX_LINES})`);
-        }
-      }
+      // Names the escape hatch, because the refusal that started this listed
+      // everything that failed and never the one label that would have passed.
+      if (!pathA) reasons.push(`not authorized: no Path A risk label (${SAFE_LABELS.join(' or ')})`);
     }
   }
 
@@ -2164,27 +2161,19 @@ export const FIXTURES = [
     expectCalls: 0,
   },
   {
-    name: `21 files (size cap applies only to classified mode: ${AUTOMERGE_MODE})`,
+    // Size is no longer a Path B predicate: 21 allowlisted files and a large
+    // docs-only diff both merge, because reversibility is a property of WHAT
+    // changed and never of how much.
+    name: '21 allowlisted files, no size gate → allow',
     input: makeInput({ files: Array.from({ length: 21 }, (_, index) => allowedPathN(index)), additions: 200, deletions: 200 }),
-    expectExit: ALLOW_ALL ? 0 : 1,
-    expectCalls: ALLOW_ALL ? 1 : 0,
-  },
-  {
-    name: `${REVERSIBLE_MAX_LINES + 1} changed lines (size cap applies only to classified mode: ${AUTOMERGE_MODE})`,
-    input: makeInput({ additions: Math.ceil((REVERSIBLE_MAX_LINES + 1) / 2), deletions: Math.floor((REVERSIBLE_MAX_LINES + 1) / 2) }),
-    expectExit: ALLOW_ALL ? 0 : 1,
-    expectCalls: ALLOW_ALL ? 1 : 0,
-  },
-  {
-    name: `boundary exactly 20 files and exactly ${REVERSIBLE_MAX_LINES} lines → allow`,
-    input: makeInput({
-      files: Array.from({ length: 20 }, (_, index) => allowedPathN(100 + index)),
-      additions: Math.ceil(REVERSIBLE_MAX_LINES / 2),
-      deletions: Math.floor(REVERSIBLE_MAX_LINES / 2),
-    }),
     expectExit: 0,
     expectCalls: 1,
-    expectArgs: { sha: HEAD_SHA, squash: true },
+  },
+  {
+    name: '1400 changed lines, all allowlisted, no size gate → allow',
+    input: makeInput({ additions: 700, deletions: 700 }),
+    expectExit: 0,
+    expectCalls: 1,
   },
   {
     name: 'CAS 409 from mock → resolves refusal',

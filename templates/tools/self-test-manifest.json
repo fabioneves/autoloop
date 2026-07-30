@@ -4,7 +4,7 @@
   "tools": {
     "api-shape.mjs": "1f3cb7851f4c10ea344a688930a22d5b7aec9405bf74cc4d71c7b2b1327a94b8",
     "attestation-contract.mjs": "07932a317cae83aba72e5513cf8b8a7147ca67d3bf18cf33ec460dc197119711",
-    "auto-merge.mjs": "ea657338d01b47b51390a742f5be1565d3c9041cf73612abe284cec4bd5291e7",
+    "auto-merge.mjs": "1e5e9551b9956bd8d62ec5e6799a2f5af1b57b524e4cd234756d367e23ba3173",
     "checkout-contract.mjs": "3c9e7708f27ce0fc808488bcc44361b8c7d8e18086fc4449dcb1abaa58c5a52b",
     "claim-contract.mjs": "5db0b31ad846bf2b1f14ef03ebd28515e61a5aba82f6de1fcfa67ea95670af0e",
     "command-guard.mjs": "8b696274b02ec5da1c588be3438e4db93832e226c862f1a41c5cfd811d64f58e",
@@ -27,7 +27,7 @@
     "regression-index.mjs": "5efb8668b2cb6b99c967deb2c2b236fa81c8a330fc7d7115cd1dfadd262cf725",
     "release-verify.mjs": "65bf7e799b423aca7a1a5b8eef4821ae9d85a405085123b8095d046b58a27ede",
     "review-contract.mjs": "c3c5ada9723b07da1bc883103622937c956a576029d91c020d1a6094b3a42f2a",
-    "scaffold.mjs": "c91c48bae5711163db915a425e499564fde5cffc42ec977955e2f8ecdb89b6d5",
+    "scaffold.mjs": "74eea2660f7401338795e02adf4db92166fc56c722a1bfc051346db457bfdc7f",
     "scan.mjs": "74c6fafd732cddb351e1fd9255e6f3240ce18ca797ba1964a0fc4bec03793add",
     "sizing-contract.mjs": "d37b91eec295a80886c406dbfea039b6dd76ed68cd466baf4c53145764e61f40",
     "snapshot-contract.mjs": "8f9d3ba00df52587f09ec02fa543c8fa8f710223e8570c33224068016889b8fb",
