@@ -57,8 +57,13 @@ Notable changes to Autoloop are recorded here. The format follows
   must disclose what `ratified` costs rather than presenting `REVERSIBLE_PATHS` as a control under
   `auto` where it is inert. **The check is mechanical, not prose:** `scaffold.mjs --audit` computes
   the contradiction and reports it in a `policyConflicts` field and in `warnings`, doctor FAILS on a
-  non-empty one, and reconcile repairs the single constant in the repo-owned executor without
-  touching the rest of it. The first version of this fix was a comment plus two skill bullets — the
+  non-empty one, and **reconcile repairs it** — `repairMergeMode` rewrites only the
+  `AUTOMERGE_MODE` line, so every other Setup-filled value in the repo-owned executor survives, and
+  the pending repair is counted before `reconcileNeeded` is computed so an audit can never report
+  `false` beside a live conflict. Proven end to end against a copy of the affected repository at its
+  pre-fix state: the audit reported the conflict and a `policy-repair-pending` action, and the
+  reconcile flipped `'classified'` to `'all-green'` while `REPOSITORY`, `EXTRA_PROTECTED_PATHS` and
+  `LOOP_LOGIN` were left untouched. The first version of this fix was a comment plus two skill bullets — the
   exact "a value nothing verifies" pattern the rest of this release removes, and it would have shipped
   a second contradiction nobody checked. Verified against the live repository's `main`, where the new
   check reproduces the original fault verbatim. The floor is untouched and remains
