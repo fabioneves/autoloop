@@ -69,6 +69,34 @@ Split at the invariant boundary and chain with `## Blocked by`. A unit small eno
 holds its whole diff at once is the goal; if a slice reads as trivially small, that is the correct
 size and not a reason to bundle it with its neighbour.
 
+### The wide refactor — the one shape a vertical slice cannot take
+
+A **wide refactor** is one mechanical change — rename a field, retype a shared symbol, change a
+signature everyone calls — whose blast radius fans across the codebase, so a single edit breaks
+hundreds of call sites at once and **no vertical slice lands green**. Demanding a five-case slice
+here asks for something impossible, and the rules above would keep asking: the case list is short
+(behaviour is unchanged) while the diff is enormous, so every signal reads "fine" right up to the
+point nothing compiles.
+
+Sequence it **expand → migrate → contract**, each step its own unit:
+
+1. **Expand** — add the new form beside the old, changing no caller. Nothing breaks, everything is
+   green, and this unit blocks the rest.
+2. **Migrate** — move call sites over in batches sized by blast radius (per package, per directory),
+   each batch its own unit blocked by the expand. Green batch to batch, because the old form still
+   exists.
+3. **Contract** — delete the old form once no caller remains, in a unit blocked by every migrate
+   batch.
+
+Where even a batch cannot stay green alone, keep the sequence but let the batches share an
+integration branch that all block one final integrate-and-verify unit — green is promised only
+there, and it is stated on the units rather than discovered by the loop.
+
+The migrate batches are the legitimate home for `--split-exempt`: their case list is one invariant
+("every call site of X uses Y, behaviour unchanged") over a domain that is closed and countable but
+larger than five, so record the reason rather than pretending the count is small. This shape is
+adapted from the `to-tickets` skill in `github.com/mattpocock/skills`, which states it well.
+
 **This is an interactive, human-run skill.** It asks questions (the loop never does), and it NEVER
 applies `loop-ready` or any state label: the label is the maintainer's trust act (STATE →
 guardrail), and shape output is a proposal until a human reads and labels it.
@@ -136,13 +164,33 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    (load `agent-skills:idea-refine` or `agent-skills:interview-me` for vague inputs, and
    `agent-skills:spec-driven-development` to shape acceptance criteria, when the agent-skills
    plugin is installed). Don't slice what you can't state acceptance for.
-2. **Decompose into units** (method: `agent-skills:planning-and-task-breakdown` when installed —
-   small, atomic, vertically-sliced). Each unit must pass the proceed/defer boundary it will later
-   be judged by (STATE → playbooks): **one module × one change class**, estimated within
-   `caps.sliceMaxLines` / `caps.sliceMaxFiles` (production code), acceptance achievable as written,
-   no hard-defer inside (a needed new dependency or secret becomes its own explicitly-flagged
-   human task, never buried in a unit). Order units by dependency; express ordering as
-   `## Blocked by` links, not prose.
+2. **Decompose into units** (method: `agent-skills:planning-and-task-breakdown` when installed).
+   Every unit is a **vertical slice**: a narrow but COMPLETE path through every layer it needs —
+   schema, core, API, tests — so finishing it is independently verifiable. Horizontal slices, one
+   layer at a time, are what produce a unit that cannot be true on its own.
+
+   **The unit of size is the INVARIANT, not the module.** A slice may span modules when its
+   invariant requires it; what must stay narrow is the invariant and its case list, never the
+   directory count. This corrects a rule that used to read "one module × one change class" and
+   contradicted the vertical-slice requirement in the same sentence — and the contradiction cost a
+   run: a unit bounded to one module could not satisfy its own first acceptance criterion, because
+   the type it had to accept was defined in a second module, and premise verification found the
+   conflict only after the unit was filed and selected. The `Boundary` section still names the
+   PRIMARY module so review has a centre of gravity, and every additional path a slice touches is
+   named there too rather than being discovered during implementation. (The old rule was attributed
+   to `STATE → playbooks`, a section the STATE template does not contain — a dangling citation of
+   exactly the kind step 3 now refuses.)
+
+   Each unit still must be estimated within `caps.sliceMaxLines` / `caps.sliceMaxFiles` (production
+   code), have acceptance achievable as written, and contain no hard-defer (a needed new dependency
+   or secret becomes its own explicitly-flagged human task, never buried in a unit). Order units by
+   dependency; express ordering as `## Blocked by` links, not prose.
+
+   **Prefactor first, as its own slice.** Where the change would be awkward against the current
+   shape of the code, the behaviour-preserving move that makes it easy is the first unit and blocks
+   the rest — make the change easy, then make the easy change. It sizes trivially (one invariant:
+   behaviour is unchanged), and it keeps the feature slice from carrying a refactor its acceptance
+   criteria never mention.
 
    **Derive every edge from what a unit READS, never from the order you wrote the units in.** List
    the symbols, fields and files each unit's acceptance criteria need to already exist, and point
@@ -195,7 +243,7 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    number of cases would have said so.
 4. **Write each issue** using the repo's loop-unit template (`.github/ISSUE_TEMPLATE/loop-unit.md`,
    scaffolded by setup): Context · Acceptance criteria (each an observable, testable assertion —
-   "X returns Y", "the gate stays green", never "works well") · Boundary (the one module) ·
+   "X returns Y", "the gate stays green", never "works well") · Boundary (the primary module plus every other path the slice touches) ·
    Task (when shaping from a spec that has a task-ID scheme, the spec task ID this unit delivers,
    so the queue stays traceable for `autoloop:queue-trace` — `none` for a genuine out-of-spec unit;
    omit the section entirely when the repo has no spec, and never invent an ID) ·

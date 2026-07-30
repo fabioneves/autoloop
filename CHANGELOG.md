@@ -135,6 +135,36 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
+- **A unit is a vertical slice, and the unit of size is the invariant — not the module.** Shaping
+  asked for "small, atomic, vertically-sliced" units and then enforced **one module × one change
+  class** in the same sentence, which is a horizontal rule. The contradiction cost a run: a unit
+  bounded to one module could not satisfy its own first acceptance criterion, because the type it had
+  to accept was defined in a second module, and premise verification found the conflict only after
+  the unit had been filed and selected. A slice may now span modules when its invariant requires it;
+  what stays narrow is the invariant and its case list, never the directory count. `Boundary` names
+  the PRIMARY module so review keeps a centre of gravity, plus every additional path the slice
+  touches, so those are declared rather than discovered mid-implementation. The old rule was also
+  attributed to `STATE → playbooks` — **a section the STATE template does not contain**, a dangling
+  citation of exactly the kind the premise axis now refuses.
+- **Prefactoring is a first-class first slice.** Where a change would be awkward against the current
+  shape of the code, the behaviour-preserving move that makes it easy is its own leading unit and
+  blocks the rest. It sizes trivially — one invariant, behaviour unchanged — and keeps the feature
+  slice from carrying a refactor its acceptance criteria never mention.
+
+### Added
+
+- **The wide refactor gets the one shape a vertical slice cannot take.** A mechanical change whose
+  blast radius fans across the codebase — rename a shared field, retype a symbol everyone calls —
+  cannot land green as a vertical slice, and the existing signals would have kept demanding one: the
+  case list is short because behaviour is unchanged, so every signal reads "fine" right up to the
+  point nothing compiles. Shaping now sequences it **expand → migrate → contract**, each step its own
+  unit: add the new form beside the old (blocks the rest), move call sites in batches sized by blast
+  radius (each blocked by the expand, green batch to batch), then delete the old form (blocked by
+  every batch). Where a batch cannot stay green alone, the batches share an integration branch that
+  all block one final integrate-and-verify unit — declared on the units instead of discovered by the
+  loop. The migrate batches are the legitimate home for `--split-exempt`: one invariant over a domain
+  that is closed and countable but larger than five. Adapted from the `to-tickets` skill in
+  `github.com/mattpocock/skills`.
 - **The rule check is mandatory on every shaped unit, and the axes are defined once.** Every check
   the skill had — premise, acceptance, coverage, proof-terminates, size, hard-defer, structure — sat
   in Mode 2, reachable only by typing `shape lint #N`. So a freshly shaped issue was never graded
