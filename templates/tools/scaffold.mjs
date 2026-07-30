@@ -1941,6 +1941,22 @@ function defaultTemplates() {
   return existsSync(join(candidate, TEMPLATE_MARKER)) ? candidate : null;
 }
 
+// Names the RIGHT invocation first, not the flag that makes the wrong one work.
+// The vendored copy can never self-locate: `defaultTemplates` resolves
+// <script dir>/.. and looks for the template marker, which is `templates/` in the
+// plugin and `tools/` in a repository. So the plugin copy needs no flag and the
+// vendored copy always needs one — and both skills already say to run the plugin
+// copy. 2026-07-30: a live run hit this on `tools/agentic/scaffold.mjs --audit .`,
+// paused a delivery, loaded the debugging skill, and recovered by passing
+// --templates with a hardcoded version-pinned plugin path. That path goes stale
+// at the next release; running the plugin copy never does. The old message
+// offered only the flag, so the workaround was the only thing it pointed at.
+const NO_TEMPLATES = 'scaffold: this vendored copy cannot locate the plugin templates directory. '
+  + 'Run the PLUGIN copy instead — `node <plugin-tools>/scaffold.mjs --audit <root>` self-locates '
+  + 'and needs no flag, and it is what autoloop:dev and autoloop:setup both specify. Only when the '
+  + 'plugin is genuinely unavailable, pass --templates <plugin templates dir> here; a version-pinned '
+  + 'path goes stale at the next release.';
+
 const USAGE = 'usage: scaffold.mjs --reconcile <repository root> [--templates <dir>]\n'
   + '       scaffold.mjs --audit <repository root> [--templates <dir>]\n'
   + '       scaffold.mjs --merge-state <repository root> [--templates <dir>] [--write] [--json]\n'
@@ -1968,8 +1984,7 @@ function mergeMain(args, kind, flagAt) {
   }
   if (templates.value === null) {
     console.error(
-      'scaffold: cannot locate the plugin templates directory from this vendored '
-      + 'copy; pass --templates <plugin templates dir>',
+      NO_TEMPLATES,
     );
     return 2;
   }
@@ -2015,8 +2030,7 @@ function main(args) {
   }
   if (templates === null) {
     console.error(
-      'scaffold: cannot locate the plugin templates directory from this vendored '
-      + 'copy; pass --templates <plugin templates dir>',
+      NO_TEMPLATES,
     );
     return 2;
   }

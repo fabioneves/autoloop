@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.41 · starting
+∞ dev · v0.49.42 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -192,9 +192,16 @@ you actually run, never a shell variable (the guard resolves literals, not expan
 for
 `dispatch.mjs`, `dispatch-stream.sh`, `lifecycle-driver.mjs`, `publish-verdict.mjs`,
 `review-contract.mjs`, `delivery-contract.mjs`, `attestation-contract.mjs`,
-`snapshot-contract.mjs`, `prime.mjs`, and `scan.mjs`. They are pure executors of their inputs plus
-live GitHub state — nothing in them is repository-specific, so the branch's copy is an accident of
-its fork date, never an authority.
+`snapshot-contract.mjs`, `prime.mjs`, `scan.mjs`, and `scaffold.mjs`. They are pure executors of
+their inputs plus live GitHub state — nothing in them is repository-specific, so the branch's copy is
+an accident of its fork date, never an authority.
+
+**`scaffold.mjs` additionally CANNOT work from the branch's copy**, so it is the one entry here where
+the vendored path is not merely stale but non-functional: it locates the templates it compares
+against as `<its own dir>/..`, which is `templates/` in the plugin and `tools/` in a repository. A
+live run invoked `tools/agentic/scaffold.mjs --audit .`, paused a delivery, and recovered by passing
+`--templates` with a version-pinned plugin path — which works once and goes stale at the next
+release. Use `<plugin-tools>`; it needs no flag.
 
 Four things stay vendored **because they are the repository's own policy**, and running the
 plugin's copy of them would be wrong: `auto-merge.mjs` (Setup fills its REPO CONFIG block),
