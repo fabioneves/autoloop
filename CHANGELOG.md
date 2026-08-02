@@ -3,6 +3,23 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.42] - 2026-07-30
+
+### Fixed
+
+- **A refusal that can only be resolved by running a different copy says so.** `scaffold.mjs` locates
+  the templates it compares against as `<its own dir>/..` — `templates/` in the plugin, `tools/` in a
+  repository — so the vendored copy can never self-locate, and the plugin copy never needs a flag.
+  Both `autoloop:dev` and `autoloop:setup` already specify the plugin copy, but the refusal offered
+  only `--templates`, so it pointed at the workaround rather than the fix. A live run invoked
+  `tools/agentic/scaffold.mjs --audit .`, **paused a delivery**, loaded the debugging skill, and
+  recovered by passing a version-pinned plugin path that works once and goes stale at the next
+  release. The message now names the plugin invocation first and keeps `--templates` for a genuinely
+  absent plugin, warning that a pinned path expires; it is also a single constant rather than the same
+  sentence written at two call sites. `scaffold.mjs` joins the `<plugin-tools>` enumeration in
+  `autoloop:dev`, flagged as the one entry there whose vendored path is not merely stale but
+  non-functional.
+
 ## [0.49.41] - 2026-07-29
 
 ### Changed
