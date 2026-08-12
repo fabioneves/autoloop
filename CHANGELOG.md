@@ -3,6 +3,19 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.43] - 2026-08-12
+
+### Changed
+
+- **The scaffolded `codeReviewRoundsPerUnit` default is 10, up from 5.** Units were reaching the
+  5-round review cap before converging and blocking instead of shipping. Ten rounds gives
+  convergence more headroom; the schema ceiling stays 20, the cap still bounds ping-pong, and the
+  at-cap escalate path is unchanged. The two setup-skill configuration examples mirror the scaffold
+  literal. Migration backfills (`0.23.0` → `0.24.0`, and the `0.25.0` copy) deliberately keep 5: a
+  migrated repository preserves the policy its operator accepted, and the setup interview already
+  shows every cap against the scaffold default. Slice budgets are untouched — they note, never
+  block, and the cap-as-attractor lesson in `autoloop:shape` argues against raising them.
+
 ## [0.49.42] - 2026-07-30
 
 ### Fixed
