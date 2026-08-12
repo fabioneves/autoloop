@@ -509,6 +509,32 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'scaffold.mjs', anchor: 'lessons-out-of-state' }),
     ]),
   }),
+  Object.freeze({
+    id: 'exit-echo-decoration-took-the-typed-front-down',
+    date: '2026-08-12',
+    symptom: 'A live run appended `; echo "exit=$?"` to a typed escalate-paths '
+      + 'call; the refusal cost the call and its useful front, and the retry '
+      + 'that worked was the same command with the echo deleted.',
+    cause: 'The `$?` remedy pointed at the report but never named the '
+      + 'executable step for the trailing-echo form, which is deletion.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'the fix is deletion' }),
+      Object.freeze({ file: 'guard-corpus.json', anchor: 'exit=$?' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'label-only-substitution-had-no-bare-spelling',
+    date: '2026-08-12',
+    symptom: 'A live run labeled two counts with `echo ".test.ts tracked: '
+      + '$(git ls-files … | wc -l)"` and was refused with measuring remedies '
+      + 'that never said how to get a LABELED count.',
+    cause: 'The substitution remedy named the numbers but not the labeling '
+      + 'spelling — run the counter bare and let prose carry the label.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'let prose carry the label' }),
+      Object.freeze({ file: 'guard-corpus.json', anchor: '.test.ts tracked:' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

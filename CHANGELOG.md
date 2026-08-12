@@ -3,6 +3,26 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.44] - 2026-08-12
+
+### Fixed
+
+- **The sanctioned snapshot `jq` read states the contract's shape, not `gh`'s.** A live run read the
+  queue section with `.labels[].name` — correct against `gh issue list --json labels`, dead on the
+  snapshot, whose `labels` are bare sorted strings by contract — and its hedge
+  `.labels[]?.name // .labels[]?` lost the call anyway, because the postfix `?` binds to the `[]`
+  before it, not to the `.name` after it. The dev skill now names the shape where plain `jq` is
+  sanctioned: `labels` are bare strings, a queue item's exact keys (no `createdAt`), and the literal
+  queue projection `jq '[.items[] | {number, title, labels, dependencies}]' <file>`.
+- **Two guard refusals gained the executable remedy for the shape they actually caught.** The `$?`
+  message now says the fix for a trailing `echo "exit=$?"` is deletion — re-run the same command
+  without the tail — after a live run decorated a typed `escalate-paths` call whose JSON already
+  carries `ok: false`. The command-substitution message now names the labeled-count spelling — run
+  the counting command bare and let prose carry the label — after
+  `echo ".test.ts tracked: $(git ls-files … | wc -l)"` was refused with remedies that covered the
+  number but not the label. Both shapes join the guard corpus, and both incidents are pinned in
+  `regression-index.mjs`.
+
 ## [0.49.43] - 2026-08-12
 
 ### Changed

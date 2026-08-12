@@ -337,6 +337,18 @@
    "branch": "feat/gh-1-x",
    "expect": "block",
    "why": "the carve-out is per SEGMENT: an undo beside a bare ready must not launder the ready."
+  },
+  {
+   "cmd": "node tools/agentic/escalate-paths.mjs --base main --base-oid cafecafecafecafecafecafecafecafecafecafe --artifact-version 1 --json; echo \"exit=$?\"",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.49.44: exit echo decorated a typed escalate-paths call; ok:false already carries the outcome, and the remedy is deleting the tail."
+  },
+  {
+   "cmd": "cd /tmp/autoloop-270/base && echo \".test.ts tracked: $(git ls-files '*.test.ts' | wc -l)\" && echo \".go tracked: $(git ls-files '*.go' | wc -l)\"",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.49.44: substitutions whose only job was labeling counts; run each counter bare and let prose carry the labels."
   }
  ]
 }

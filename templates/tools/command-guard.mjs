@@ -696,10 +696,16 @@ export function unresolvedExpansionReason(rawCmd) {
   // `$?` has no literal to assign, so the generic "assign it in the same
   // command" advice is impossible rather than merely unhelpful. The exit status
   // is already available twice over without it.
+  // 2026-08-12: `node tools/agentic/escalate-paths.mjs … --json; echo "exit=$?"` — the
+  // decoration rode a typed tool whose JSON already carries ok:false, and the refusal
+  // took the useful front down with it. The retry that worked was pure deletion, so
+  // the message names deletion as the executable step for the trailing form.
   if (/\$\?/u.test(text)) {
     return `${what}. An exit status has no literal form: the tool runner already reports a `
       + 'non-zero exit, and the typed tools carry their outcome in their own output '
-      + '(`ok: false` beside the reason) — read that instead of capturing it.';
+      + '(`ok: false` beside the reason) — read that instead of capturing it. When the `$?` '
+      + 'rides a trailing `echo`, the fix is deletion: re-run the SAME command with that '
+      + 'final echo removed — the front needed no change.';
   }
   // A command substitution has no literal to assign either — its value is
   // whatever the inner command PRINTS, which is exactly what cannot be known
@@ -712,6 +718,9 @@ export function unresolvedExpansionReason(rawCmd) {
   // nowhere to go again. Locating a definition and reading around it is the
   // commonest reason to reach for a substitution at all, and unlike a
   // measurement it has an exact one-command answer, so it is named first.
+  // 2026-08-12: `echo ".test.ts tracked: $(git ls-files '*.test.ts' | wc -l)"` — a
+  // substitution whose only job was labeling a count. The measuring remedies name the
+  // numbers but never the label, so the labeling spelling is stated with them.
   if (tokens.every((token) => token === 'a command substitution')) {
     return `${what}, because its value is whatever the inner command prints and that is not `
       + 'knowable before running it. Run the inner command as its own call and use the value it '
@@ -719,7 +728,9 @@ export function unresolvedExpansionReason(rawCmd) {
       + 'match — the usual reason to feed `grep -n` into `sed` — `rg -n -A<lines> <pattern> '
       + '<file>` prints the match and what follows in one pass, and the host file-reading tool '
       + 'takes an offset and a line count directly. To measure, `wc -l <paths>` and '
-      + '`git diff --shortstat` print their numbers directly. A real program goes in a file.';
+      + '`git diff --shortstat` print their numbers directly. To label a count, run the '
+      + 'counting command bare and let prose carry the label — two counts are two commands, '
+      + 'and their order says which is which. A real program goes in a file.';
   }
   return `${what}, so command policy cannot judge what would run. Assign it a literal in the `
     + 'SAME command and the guard substitutes it and judges the real thing; otherwise use '
@@ -2586,8 +2597,24 @@ function selfTest() {
       !exitReason.includes('`$?`')
       || !exitReason.includes('no literal form')
       || !exitReason.includes('ok: false')
+      || !exitReason.includes('deletion')
     ) {
       console.error('FAIL [an exit-status refusal points at the report, not at assignment]');
+      ok = false;
+    }
+    // 2026-08-12: a substitution used only to label a count was answered with the
+    // measuring remedies and no labeling spelling, so the labeled-echo shape kept
+    // coming back.
+    messageChecks += 1;
+    const labelReason = evaluate(
+      'echo ".test.ts tracked: $(git ls-files \'*.test.ts\' | wc -l)"',
+      'feat/gh-1-x',
+    ).reason ?? '';
+    if (
+      !labelReason.includes('label')
+      || !labelReason.includes('bare')
+    ) {
+      console.error('FAIL [a label-only substitution is offered the bare-count spelling]');
       ok = false;
     }
     messageChecks += 1;
