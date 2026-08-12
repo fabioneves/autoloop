@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.42 · starting
+∞ setup · v0.49.43 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -120,7 +120,7 @@ Schema `0.26.0` stores repository policy, never session intent:
   "caps": {
     "gateRetriesPerUnit": 2,
     "reviseRoundsPerPr": 3,
-    "codeReviewRoundsPerUnit": 5,
+    "codeReviewRoundsPerUnit": 10,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10
   }
@@ -295,7 +295,7 @@ Global defaults contain only non-project preferences:
   "caps": {
     "gateRetriesPerUnit": 2,
     "reviseRoundsPerPr": 3,
-    "codeReviewRoundsPerUnit": 5,
+    "codeReviewRoundsPerUnit": 10,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10
   },

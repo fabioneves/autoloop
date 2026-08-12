@@ -1225,7 +1225,7 @@ function fixtureState(policy) {
       caps: {
         gateRetriesPerUnit: 2,
         reviseRoundsPerPr: 3,
-        codeReviewRoundsPerUnit: 5,
+        codeReviewRoundsPerUnit: 10,
         sliceMaxLines: 700,
         sliceMaxFiles: 10,
       },
