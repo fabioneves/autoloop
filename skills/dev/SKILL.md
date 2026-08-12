@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.43 · starting
+∞ dev · v0.49.44 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -145,7 +145,15 @@ sanctioned reads are typed:
 - `node <plugin-tools>/snapshot-contract.mjs --section <name> <snapshotPath>` — one section's
   exact JSON; an unknown name fails closed listing the valid catalog;
 - plain `jq` with a single-quoted filter on the exact files the prime summary names is
-  sanctioned — the guard permits it, and prime naming the file keeps it targeted.
+  sanctioned — the guard permits it, and prime naming the file keeps it targeted. Project the
+  CONTRACT's shape, not `gh`'s: snapshot `labels` are bare sorted strings — `.labels[]` IS the
+  name, and `.labels[].name` dies on the first item (`Cannot index string`) — and a queue item
+  has no `createdAt`; its keys are exactly `number`, `title`, `body`, `bodySha256`, `updatedAt`,
+  `lastEditedAt`, `labels`, `blockedBy`, `dependencies`, `provenance`. The queue read is
+  `jq '[.items[] | {number, title, labels, dependencies}]' <file>`. A live run hedged the two
+  shapes with `.labels[]?.name // .labels[]?` and lost the call anyway — the postfix `?` binds
+  to the `[]` before it, not to the `.name` after it — and no hedge is needed for a shape this
+  list states.
 
 Shapes to keep out of every command, sanctioned read or not:
 
