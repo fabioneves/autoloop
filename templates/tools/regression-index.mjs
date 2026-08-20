@@ -33,6 +33,51 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'task-mirror-died-with-the-harness-surface',
+    date: '2026-08-20',
+    symptom: 'Claude Code 2.1.234 removed TaskCreate/TaskUpdate and two full '
+      + 'runs across four context windows mirrored nothing and said nothing; '
+      + 'delivery push notifications were dropped as "does not exist" while '
+      + 'PushNotification — merely deferred — sat one ToolSearch away.',
+    cause: 'The mirror rule told hosts without task tools to "skip this '
+      + 'silently", so an absent surface read exactly like a forgotten one, '
+      + 'and the run diagnosed the tool roster from what was visible instead '
+      + 'of asking ToolSearch.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'the skip is no longer silent',
+      }),
+      Object.freeze({
+        file: 'label-swap-reminder.mjs',
+        anchor: 'ToolSearch("select:PushNotification")',
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'hook-demanded-the-header-the-skill-bans',
+    date: '2026-08-20',
+    symptom: 'The swap riders named a `▶ #N · step X/11` step line as due '
+      + 'while the dev skill bans that exact shape as a duplicate of the '
+      + 'ribbon; obeying either surface violated the other, and a run that '
+      + 'learns riders cannot all be followed stops following the rest — the '
+      + 'same run skipped eight of eleven ribbons.',
+    cause: 'Two surfaces specified the same step announcement independently '
+      + 'and drifted: the skill moved to glyphed ribbons while the hook kept '
+      + 'the retired step-line grammar, alongside riders naming tools the '
+      + 'harness had removed.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'A step is announced ONCE, by its ribbon',
+      }),
+      Object.freeze({
+        file: 'label-swap-reminder.mjs',
+        anchor: 'never reprint a ribbon already announced',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'literal-for-loop-refused-as-unresolvable',
     date: '2026-07-29',
     symptom: 'Three live runs lost a round to a `for` over a LITERAL word list '
