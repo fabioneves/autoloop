@@ -3,6 +3,24 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.46] - 2026-08-20
+
+### Fixed
+
+- **The pre-merge record freezes the settled post-ready evidence, closing the Copilot wedge
+  (#132).** `terminal-finalize` froze `ci.evidenceHash` while the PR was still draft, then marked
+  it ready — the one mutation it performs that itself grows the triggered-check set: on
+  repositories with Copilot Code Review enabled, readiness triggered a check run that landed
+  after the freeze, so no later readback could reproduce the recorded fingerprint. Six
+  consecutive delivered units refused auto-merge that way and every finalizer errored on its own
+  postcondition. The sequence is now ready-then-settle-then-freeze: after the ready transition
+  the finalizer waits — bounded, two consecutive green observations spaced apart with the same
+  fingerprint — before sealing the record, so the record binds the evidence the readbacks will
+  actually see. Red after readiness still refuses immediately; a settle timeout is a typed
+  refusal that leaves no record behind, so a re-invocation freezes the settled set. The incident
+  is pinned in `regression-index.mjs`, and the dev skill states the retry semantics: a
+  `did not settle` refusal is the checks still landing, not the unit failing.
+
 ## [0.49.45] - 2026-08-20
 
 ### Fixed

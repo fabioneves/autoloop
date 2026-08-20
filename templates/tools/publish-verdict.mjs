@@ -90,6 +90,18 @@ const MAX_STATUS_CONTEXTS = 100;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const REPOSITORY_PART_RE =
   /^[a-z0-9](?:[a-z0-9._-]{0,99})$/;
+// The ready transition can trigger repository apps (GitHub Copilot Code
+// Review) whose check runs land on the exact head seconds later and run for
+// minutes; freezing the delivery evidence before they settle bound every
+// record on such repositories to a fingerprint no later readback could
+// reproduce (autoloop#132). Settled = two consecutive green observations,
+// spaced TERMINAL_SETTLE_DELAY_MS apart, carrying the same fingerprint.
+const TERMINAL_SETTLE_DELAY_MS = 15000;
+const TERMINAL_SETTLE_ATTEMPTS = 40;
+
+function settleSleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 const HOST_RE =
   /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
 const POLICY_EVIDENCE_QUERY = `
@@ -1908,56 +1920,18 @@ export function finalizeTerminalDelivery(input, context = {}) {
   const finalize = adapters.delivery ?? (
     (request) => finalizeHead(request, { repositoryRoot: snapshot.checkout.root })
   );
-  const delivery = finalize(deliveryRequest);
+  const preDelivery = finalize(deliveryRequest);
   if (
-    delivery?.canMarkDelivered !== true
-    || delivery.headOid !== input.record.headOid
-    || delivery.liveEvidence?.baseRefName !== config.baseBranch
+    preDelivery?.canMarkDelivered !== true
+    || preDelivery.headOid !== input.record.headOid
+    || preDelivery.liveEvidence?.baseRefName !== config.baseBranch
     || !HASH_RE.test(
-      delivery.liveEvidence?.provenance?.evidenceFingerprint ?? '',
+      preDelivery.liveEvidence?.provenance?.evidenceFingerprint ?? '',
     )
   ) {
     throw new Error(
-      `exact-head delivery is not green (${delivery?.state ?? 'unknown'}/${delivery?.code ?? 'unknown'})`,
+      `exact-head delivery is not green (${preDelivery?.state ?? 'unknown'}/${preDelivery?.code ?? 'unknown'})`,
     );
-  }
-  const record = createPremergeRecord({
-    ...structuredClone(input.record),
-    review: {
-      summaryHash: sha256(review),
-    },
-    gate: {
-      summaryHash: sha256(gate),
-    },
-    ci: {
-      evidenceHash: delivery.liveEvidence.provenance.evidenceFingerprint,
-    },
-  });
-  const create = adapters.createPremerge ?? (
-    (value) => createPremergeRecordComment(
-      value,
-      snapshot.repository,
-      { repositoryRoot: snapshot.checkout.root },
-    )
-  );
-  const premerge = create(record, snapshot.repository);
-  if (
-    premerge?.observation?.verified !== true
-    || premerge.attestation?.premergeRecordId !== record.recordId
-  ) {
-    throw new Error('premerge record creation postcondition is unverified');
-  }
-  const bind = adapters.bindLifecycle ?? (
-    (value, created) => bindPremergeLifecycle(
-      value,
-      created,
-      snapshot.repository,
-      { repositoryRoot: snapshot.checkout.root },
-    )
-  );
-  const binding = bind(record, premerge, snapshot.repository);
-  if (binding?.verified !== true) {
-    throw new Error('lifecycle premerge binding postcondition is unverified');
   }
   const beforeEffects = (adapters.snapshot ?? snapshotExecutionRepository)(
     snapshot.checkout.root,
@@ -1987,6 +1961,86 @@ export function finalizeTerminalDelivery(input, context = {}) {
     if (!terminalStateMatches(state, input) || state.draft) {
       throw new Error('ready transition changed the terminal record identity');
     }
+  }
+  // The record freezes AFTER the ready transition settles, never before it:
+  // readiness is the one mutation this function performs that can itself grow
+  // the triggered-check set, and a record sealed against the draft-time set
+  // can never be reproduced by a later readback. Red after readiness refuses
+  // immediately; pending merely waits, up to the attempt ceiling; timing out
+  // is a typed refusal that leaves no record behind, so a re-invocation
+  // freezes the settled set.
+  const sleep = adapters.sleep ?? settleSleep;
+  const settleAttempts = adapters.settleAttempts ?? TERMINAL_SETTLE_ATTEMPTS;
+  let settledDelivery = null;
+  let previousFingerprint = null;
+  for (let attempt = 0; attempt < settleAttempts; attempt += 1) {
+    if (attempt > 0) sleep(TERMINAL_SETTLE_DELAY_MS);
+    const observation = finalize(deliveryRequest);
+    const fingerprint =
+      observation?.liveEvidence?.provenance?.evidenceFingerprint ?? null;
+    if (
+      observation?.canMarkDelivered === true
+      && observation.headOid === input.record.headOid
+      && observation.liveEvidence?.baseRefName === config.baseBranch
+      && HASH_RE.test(fingerprint ?? '')
+    ) {
+      if (previousFingerprint === fingerprint) {
+        settledDelivery = observation;
+        break;
+      }
+      previousFingerprint = fingerprint;
+    } else if (observation?.state === 'awaiting-ci') {
+      previousFingerprint = null;
+    } else {
+      throw new Error(
+        `exact-head delivery is not green after the ready transition (${observation?.state ?? 'unknown'}/${observation?.code ?? 'unknown'})`,
+      );
+    }
+  }
+  if (settledDelivery === null) {
+    throw new Error(
+      'delivery evidence did not settle after the ready transition: post-ready '
+      + 'check runs are still pending or changing — re-invoke terminal-finalize '
+      + 'once they complete',
+    );
+  }
+  const record = createPremergeRecord({
+    ...structuredClone(input.record),
+    review: {
+      summaryHash: sha256(review),
+    },
+    gate: {
+      summaryHash: sha256(gate),
+    },
+    ci: {
+      evidenceHash: settledDelivery.liveEvidence.provenance.evidenceFingerprint,
+    },
+  });
+  const create = adapters.createPremerge ?? (
+    (value) => createPremergeRecordComment(
+      value,
+      snapshot.repository,
+      { repositoryRoot: snapshot.checkout.root },
+    )
+  );
+  const premerge = create(record, snapshot.repository);
+  if (
+    premerge?.observation?.verified !== true
+    || premerge.attestation?.premergeRecordId !== record.recordId
+  ) {
+    throw new Error('premerge record creation postcondition is unverified');
+  }
+  const bind = adapters.bindLifecycle ?? (
+    (value, created) => bindPremergeLifecycle(
+      value,
+      created,
+      snapshot.repository,
+      { repositoryRoot: snapshot.checkout.root },
+    )
+  );
+  const binding = bind(record, premerge, snapshot.repository);
+  if (binding?.verified !== true) {
+    throw new Error('lifecycle premerge binding postcondition is unverified');
   }
   const effectDelivery = finalize(deliveryRequest);
   if (
@@ -3370,6 +3424,7 @@ function selfTest() {
   let terminalDraft = true;
   let terminalLabels = ['loop-ready', 'loop-started', 'loop:09-gate'];
   const terminalAdapters = {
+    sleep: () => {},
     snapshot: () => structuredClone(gateSnapshot),
     config: () => structuredClone(gateConfig),
     bindFinalizedLifecycle: () => {
@@ -3439,11 +3494,13 @@ function selfTest() {
       'status:review',
       'status:gate',
       'delivery',
-      'premerge',
-      'bind',
       'terminal-read',
       'ready',
       'terminal-read',
+      'delivery',
+      'delivery',
+      'premerge',
+      'bind',
       'delivery',
       'terminal-read',
       'delivered',
@@ -3492,12 +3549,14 @@ function selfTest() {
   }
   let deliveryReads = 0;
   let staleReadyDelivered = false;
-  let staleReadyRejected = false;
+  let staleReadyError = null;
+  let staleReadyPremerge = false;
   try {
     finalizeTerminalDelivery(terminalInput, {
       repositoryRoot: '/repo',
       adapters: {
         ...terminalAdapters,
+        settleAttempts: 3,
         terminalState: () => ({
           complete: true,
           issue: premerge.issue,
@@ -3517,18 +3576,93 @@ function selfTest() {
                 canMarkDelivered: false,
               };
         },
+        createPremerge: () => {
+          staleReadyPremerge = true;
+          throw new Error('a record must not freeze unsettled evidence');
+        },
         markDelivered: () => {
           staleReadyDelivered = true;
         },
       },
     });
-  } catch {
-    staleReadyRejected = true;
+  } catch (error) {
+    staleReadyError = error;
   }
-  if (staleReadyRejected && !staleReadyDelivered && deliveryReads === 2) {
+  if (
+    staleReadyError !== null
+    && staleReadyError.message.includes('did not settle')
+    && !staleReadyDelivered
+    && !staleReadyPremerge
+    && deliveryReads === 4
+  ) {
     passed += 1;
   } else {
     console.error('FAIL a ready PR revalidates CI before delivered mutation');
+  }
+  // The 2026-08-20 premerge wedge (autoloop#132): readiness triggered Copilot
+  // Code Review, whose check run landed after ci.evidenceHash froze, so no
+  // later readback could reproduce the record's fingerprint. The freeze now
+  // follows the settle: the record must seal the POST-ready evidence.
+  {
+    const settledFingerprint = 'b'.repeat(64);
+    let copilotDraft = true;
+    let copilotLabels = ['loop-ready', 'loop-started', 'loop:09-gate'];
+    let copilotReads = 0;
+    let copilotRecord = null;
+    const copilotResult = finalizeTerminalDelivery(terminalInput, {
+      repositoryRoot: '/repo',
+      adapters: {
+        ...terminalAdapters,
+        terminalState: () => ({
+          complete: true,
+          issue: premerge.issue,
+          pullRequest: premerge.pullRequest,
+          headOid: premerge.headOid,
+          draft: copilotDraft,
+          labels: [...copilotLabels],
+        }),
+        markReady: () => {
+          copilotDraft = false;
+        },
+        markDelivered: () => {
+          copilotLabels = ['loop-ready', 'loop-delivered'];
+        },
+        delivery: () => {
+          copilotReads += 1;
+          if (copilotDraft) return structuredClone(delivery);
+          if (copilotReads === 2) {
+            return {
+              ...structuredClone(delivery),
+              state: 'awaiting-ci',
+              code: 'CI_PENDING',
+              canMarkDelivered: false,
+            };
+          }
+          const settled = structuredClone(delivery);
+          settled.liveEvidence.provenance.evidenceFingerprint =
+            settledFingerprint;
+          return settled;
+        },
+        createPremerge: (record) => {
+          copilotRecord = record;
+          return {
+            created: true,
+            attestation: policyAttestationForRecord(record, 'autoloop[bot]'),
+            observation: { verified: true },
+          };
+        },
+      },
+    });
+    if (
+      copilotResult.ready === true
+      && copilotResult.delivered === true
+      && copilotRecord?.ci?.evidenceHash === settledFingerprint
+      && copilotResult.delivery.evidenceFingerprint === settledFingerprint
+    ) {
+      passed += 1;
+    } else {
+      console.error('FAIL the record freezes the settled post-ready evidence');
+    }
   }
   check_marker_and_labels: {
     const base = {
@@ -3696,7 +3830,7 @@ function selfTest() {
   } else {
     console.error('FAIL acknowledged solo delivery posts exactly the two verdict statuses');
   }
-  const total = cases.length + 47;
+  const total = cases.length + 48;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }
