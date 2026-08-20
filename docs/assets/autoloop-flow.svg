@@ -1,118 +1,208 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
-  <title id="title">Autoloop forward and return paths</title>
-  <desc id="desc">Five stages take a trusted issue through planning, implementation, review, and the objective gate to a ready pull request. A smaller Pitcrew row returns feedback, failed CI, or conflicts through revision and re-verification to the same pull request.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="770" viewBox="0 0 1200 770" role="img" aria-labelledby="title desc" style="max-width:100%;height:auto">
+  <title id="title">Autoloop's eleven-step forward path</title>
+  <desc id="desc">A maintainer-approved issue moves through eleven numbered steps: premise, plan, plan review, claim, implement, simplify, diff review, code review and fixes, gate, publish, and record. The result is a ready pull request with exact-head evidence. Reconcile may run before step one but is outside the eleven-step unit.</desc>
   <defs>
     <marker id="arrow" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto" markerUnits="strokeWidth">
       <path d="M0 0L9 4.5L0 9Z" fill="#64748b"/>
     </marker>
-    <marker id="arrow-return" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0 0L9 4.5L0 9Z" fill="#e11d48"/>
-    </marker>
     <style>
-      .lane { fill: #64748b; font: 700 12px Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 1.8px; }
-      .step { font: 700 11px Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.7px; }
-      .card-title { fill: #111827; font: 700 19px Inter, ui-sans-serif, system-ui, sans-serif; }
-      .copy { fill: #475569; font: 400 13px Inter, ui-sans-serif, system-ui, sans-serif; }
-      .rule { fill: #334155; font: 600 13px Inter, ui-sans-serif, system-ui, sans-serif; }
+      svg { container-type: inline-size; }
+      .bg { fill: #ffffff; }
+      .card { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+      .outcome { fill: #fffbeb; stroke: #f59e0b; stroke-width: 1.5; }
+      .note-card { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1; }
+      .heading { fill: #0f172a; font: 750 25px Inter, ui-sans-serif, system-ui, sans-serif; }
+      .subtitle { fill: #475569; font: 450 14px Inter, ui-sans-serif, system-ui, sans-serif; }
+      .step { font: 750 13px Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.45px; }
+      .card-title { fill: #0f172a; font: 700 18px Inter, ui-sans-serif, system-ui, sans-serif; }
+      .copy { fill: #475569; font: 450 13px Inter, ui-sans-serif, system-ui, sans-serif; }
+      .note-title { fill: #334155; font: 700 12px Inter, ui-sans-serif, system-ui, sans-serif; }
+      .note { fill: #475569; font: 450 12px Inter, ui-sans-serif, system-ui, sans-serif; }
       .flow { fill: none; stroke: #64748b; stroke-width: 2.25; marker-end: url(#arrow); }
-      .return-flow { fill: none; stroke: #e11d48; stroke-width: 2.25; marker-end: url(#arrow-return); }
+      .mobile-flow, .mobile-note { display: none; }
+      @media (prefers-color-scheme: dark) {
+        .bg { fill: #0d1117; }
+        .card, .note-card { fill: #161b22; stroke: #30363d; }
+        .outcome { fill: #272115; stroke: #d29922; }
+        .heading, .card-title, .step { fill: #f0f6fc; }
+        .subtitle, .copy, .note { fill: #b1bac4; }
+        .note-title { fill: #d0d7de; }
+      }
+      @container (max-width: 600px) {
+        .desktop-flow, .desktop-note, .copy { display: none; }
+        .mobile-flow, .mobile-note { display: inline; }
+        .heading { font-size: 42px; }
+        .subtitle { font-size: 30px; }
+        .step { font-size: 38px; letter-spacing: 0.2px; }
+        .card-title { font-size: 42px; transform: translateY(14px); }
+        .card, .outcome { width: 540px; height: 100px; }
+        #step-01 { transform: translate(30px, 80px); }
+        #step-02 { transform: translate(630px, 80px); }
+        #step-03 { transform: translate(630px, 190px); }
+        #step-04 { transform: translate(30px, 190px); }
+        #step-05 { transform: translate(30px, 300px); }
+        #step-06 { transform: translate(630px, 300px); }
+        #step-07 { transform: translate(630px, 410px); }
+        #step-08 { transform: translate(30px, 410px); }
+        #step-09 { transform: translate(30px, 520px); }
+        #step-10 { transform: translate(630px, 520px); }
+        #step-11 { transform: translate(630px, 630px); }
+        #outcome { transform: translate(30px, 630px); }
+      }
     </style>
   </defs>
 
-  <rect width="1200" height="430" fill="#ffffff"/>
-  <text x="0" y="13" class="lane">FORWARD PATH</text>
+  <rect class="bg" width="1200" height="770"/>
+  <text x="30" y="37" class="heading">ONE APPROVED ISSUE → ONE READY PR</text>
+  <g class="desktop-note">
+    <text x="30" y="65" class="subtitle">Eleven numbered steps. Every step announces one ribbon, including no-ops.</text>
+    <g>
+      <rect x="820" y="24" width="350" height="54" rx="8" class="note-card"/>
+      <text x="838" y="46" class="note-title">PRE-UNIT · 00 RECONCILE</text>
+      <text x="838" y="65" class="note">May adopt an orphan before 01; not a twelfth step.</text>
+    </g>
+  </g>
+  <text x="30" y="68" class="subtitle mobile-note">00 RECONCILE is pre-unit · 11 ribboned steps follow</text>
 
-  <path class="flow" d="M224 108H238"/>
-  <path class="flow" d="M468 108H482"/>
-  <path class="flow" d="M712 108H726"/>
-  <path class="flow" d="M956 108H970"/>
-
-  <g transform="translate(0 28)">
-    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
-    <rect width="224" height="5" rx="2.5" fill="#0891b2"/>
-    <text x="16" y="33" class="step" fill="#0e7490">01 · TRUST</text>
-    <text x="16" y="66" class="card-title">Trusted issue</text>
-    <text x="16" y="96" class="copy">Shape is optional.</text>
-    <text x="16" y="118" class="copy">A maintainer reads the issue</text>
-    <text x="16" y="140" class="copy">and applies loop-ready last.</text>
+  <g class="desktop-flow">
+    <path class="flow" d="M290 190H320"/>
+    <path class="flow" d="M580 190H610"/>
+    <path class="flow" d="M870 190H900"/>
+    <path class="flow" d="M1030 260V310"/>
+    <path class="flow" d="M900 380H870"/>
+    <path class="flow" d="M610 380H580"/>
+    <path class="flow" d="M320 380H290"/>
+    <path class="flow" d="M160 450V500"/>
+    <path class="flow" d="M290 570H320"/>
+    <path class="flow" d="M580 570H610"/>
+    <path class="flow" d="M870 570H900"/>
   </g>
 
-  <g transform="translate(244 28)">
-    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
-    <rect width="224" height="5" rx="2.5" fill="#7c3aed"/>
-    <text x="16" y="33" class="step" fill="#6d28d9">02 · PLAN</text>
-    <text x="16" y="66" class="card-title">Reviewed plan</text>
-    <text x="16" y="96" class="copy">Verify premises and scope.</text>
-    <text x="16" y="118" class="copy">A fresh reviewer challenges</text>
-    <text x="16" y="140" class="copy">the complete plan.</text>
+  <g class="mobile-flow">
+    <path class="flow" d="M570 130H630"/>
+    <path class="flow" d="M900 180V190"/>
+    <path class="flow" d="M630 240H570"/>
+    <path class="flow" d="M300 290V300"/>
+    <path class="flow" d="M570 350H630"/>
+    <path class="flow" d="M900 400V410"/>
+    <path class="flow" d="M630 460H570"/>
+    <path class="flow" d="M300 510V520"/>
+    <path class="flow" d="M570 570H630"/>
+    <path class="flow" d="M900 620V630"/>
+    <path class="flow" d="M630 680H570"/>
   </g>
 
-  <g transform="translate(488 28)">
-    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
-    <rect width="224" height="5" rx="2.5" fill="#2563eb"/>
-    <text x="16" y="33" class="step" fill="#1d4ed8">03 · BUILD</text>
-    <text x="16" y="66" class="card-title">Built change</text>
-    <text x="16" y="96" class="copy">A draft PR freezes the plan.</text>
-    <text x="16" y="118" class="copy">A fresh implementer writes;</text>
-    <text x="16" y="140" class="copy">the orchestrator simplifies.</text>
+  <g id="step-01" transform="translate(30 120)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#0e7490">01 PREMISE</text>
+    <text x="16" y="59" class="card-title">Orchestrator</text>
+    <text x="16" y="88" class="copy">Select eligible work.</text>
+    <text x="16" y="110" class="copy">Verify trust and premises.</text>
   </g>
 
-  <g transform="translate(732 28)">
-    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
-    <rect width="224" height="5" rx="2.5" fill="#16a34a"/>
-    <text x="16" y="33" class="step" fill="#15803d">04 · PROVE</text>
-    <text x="16" y="66" class="card-title">Proven head</text>
-    <text x="16" y="96" class="copy">Diff review + fresh review.</text>
-    <text x="16" y="118" class="copy">One full objective gate.</text>
-    <text x="16" y="140" class="copy">Pushed head = gated SHA.</text>
+  <g id="step-02" transform="translate(320 120)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#6d28d9">02 PLAN</text>
+    <text x="16" y="59" class="card-title">Fresh planner</text>
+    <text x="16" y="88" class="copy">Define one boundary,</text>
+    <text x="16" y="110" class="copy">invariants, and tests.</text>
   </g>
 
-  <g transform="translate(976 28)">
-    <rect width="224" height="160" rx="8" fill="#f1f5f9"/>
-    <rect width="224" height="5" rx="2.5" fill="#d97706"/>
-    <text x="16" y="33" class="step" fill="#b45309">05 · DELIVER</text>
-    <text x="16" y="66" class="card-title">Ready PR</text>
-    <text x="16" y="96" class="copy">CI passes when present.</text>
-    <text x="16" y="118" class="copy">A human merges by default;</text>
-    <text x="16" y="140" class="copy">ratified policy is the exception.</text>
+  <g id="step-03" transform="translate(610 120)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#6d28d9">03 PLAN-REVIEW</text>
+    <text x="16" y="59" class="card-title">Fresh reviewer</text>
+    <text x="16" y="88" class="copy">Challenge the complete plan;</text>
+    <text x="16" y="110" class="copy">orchestrator dispositions findings.</text>
   </g>
 
-  <text x="0" y="226" class="lane" fill="#be123c">PITCREW RETURN PATH</text>
-  <path class="return-flow" d="M270 298H304"/>
-  <path class="return-flow" d="M580 298H614"/>
-  <path class="return-flow" d="M890 298H924"/>
-  <path class="return-flow" d="M1088 244V194"/>
-
-  <g transform="translate(0 244)">
-    <rect width="270" height="108" rx="8" fill="#fff1f2"/>
-    <text x="16" y="30" class="step" fill="#be123c">TRIGGER</text>
-    <text x="16" y="61" class="card-title">PR needs attention</text>
-    <text x="16" y="88" class="copy">Feedback · failed CI · conflict</text>
+  <g id="step-04" transform="translate(900 120)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#6d28d9">04 CLAIM</text>
+    <text x="16" y="59" class="card-title">Orchestrator</text>
+    <text x="16" y="88" class="copy">Persist intent, freeze plan,</text>
+    <text x="16" y="110" class="copy">open the draft PR.</text>
   </g>
 
-  <g transform="translate(310 244)">
-    <rect width="270" height="108" rx="8" fill="#fff1f2"/>
-    <text x="16" y="30" class="step" fill="#be123c">DIAGNOSE + REVISE</text>
-    <text x="16" y="61" class="card-title">Fix only what changed</text>
-    <text x="16" y="88" class="copy">Prove ownership; fresh implementer.</text>
+  <g id="step-05" transform="translate(900 310)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#1d4ed8">05 IMPLEMENT</text>
+    <text x="16" y="59" class="card-title">Fresh implementer</text>
+    <text x="16" y="88" class="copy">Build test-first;</text>
+    <text x="16" y="110" class="copy">commit each plan task.</text>
   </g>
 
-  <g transform="translate(620 244)">
-    <rect width="270" height="108" rx="8" fill="#fff1f2"/>
-    <text x="16" y="30" class="step" fill="#be123c">RE-PROVE</text>
-    <text x="16" y="61" class="card-title">Fresh review + full gate</text>
-    <text x="16" y="88" class="copy">Verify the new pushed head.</text>
+  <g id="step-06" transform="translate(610 310)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#1d4ed8">06 SIMPLIFY</text>
+    <text x="16" y="59" class="card-title">Fresh simplifier</text>
+    <text x="16" y="88" class="copy">Reduce the artifact</text>
+    <text x="16" y="110" class="copy">without changing behavior.</text>
   </g>
 
-  <g transform="translate(930 244)">
-    <rect width="270" height="108" rx="8" fill="#fff1f2"/>
-    <text x="16" y="30" class="step" fill="#be123c">RETURN</text>
-    <text x="16" y="61" class="card-title">Same PR, ready again</text>
-    <text x="16" y="88" class="copy">Resolve threads; return to human.</text>
+  <g id="step-07" transform="translate(320 310)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#15803d">07 DIFF-REVIEW</text>
+    <text x="16" y="59" class="card-title">Orchestrator</text>
+    <text x="16" y="88" class="copy">Plain: inspect and fix.</text>
+    <text x="16" y="110" class="copy">Codex: build/test handoff.</text>
   </g>
 
-  <text x="0" y="406" class="rule">Writer ≠ reviewer</text>
-  <text x="254" y="406" class="rule">Full gate on final tree</text>
-  <text x="520" y="406" class="rule">Remote head = gated SHA</text>
-  <text x="834" y="406" class="rule">Human merge by default</text>
+  <g id="step-08" transform="translate(30 310)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#15803d">08 CODE-REVIEW / FIX</text>
+    <text x="16" y="59" class="card-title">Review → fresh fixes</text>
+    <text x="16" y="88" class="copy">Review full; writers fix.</text>
+    <text x="16" y="110" class="copy">Delta mid-storm; full close.</text>
+  </g>
+
+  <g id="step-09" transform="translate(30 500)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#15803d">09 GATE</text>
+    <text x="16" y="59" class="card-title">Orchestrator</text>
+    <text x="16" y="88" class="copy">Run the full objective gate;</text>
+    <text x="16" y="110" class="copy">record the gated OID.</text>
+  </g>
+
+  <g id="step-10" transform="translate(320 500)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#b45309">10 PUBLISH</text>
+    <text x="16" y="59" class="card-title">Orchestrator</text>
+    <text x="16" y="88" class="copy">Verify and bind the already-</text>
+    <text x="16" y="110" class="copy">pushed gated remote head.</text>
+  </g>
+
+  <g id="step-11" transform="translate(610 500)">
+    <rect class="card" width="260" height="140" rx="9"/>
+    <text x="16" y="29" class="step" fill="#b45309">11 RECORD</text>
+    <text x="16" y="59" class="card-title">Orchestrator</text>
+    <text x="16" y="88" class="copy">Post one durable run record;</text>
+    <text x="16" y="110" class="copy">continue or stop clean.</text>
+  </g>
+
+  <g id="outcome" transform="translate(900 500)">
+    <rect class="outcome" width="260" height="140" rx="9"/>
+    <text x="16" y="33" class="step" fill="#b45309">OUTCOME</text>
+    <text x="16" y="64" class="card-title">Ready PR</text>
+    <text x="16" y="93" class="copy">Exact-head evidence attached.</text>
+    <text x="16" y="115" class="copy">Human merges by default.</text>
+  </g>
+
+  <g class="desktop-note">
+    <g transform="translate(30 672)">
+      <rect class="note-card" width="360" height="70" rx="8"/>
+      <text x="16" y="25" class="note-title">RIBBONS</text>
+      <text x="16" y="47" class="note">10/11 and 11/11 print even without step labels.</text>
+    </g>
+    <g transform="translate(420 672)">
+      <rect class="note-card" width="360" height="70" rx="8"/>
+      <text x="16" y="25" class="note-title">GITHUB LABELS</text>
+      <text x="16" y="47" class="note">Step 10 swaps loop:09-gate → loop-delivered.</text>
+    </g>
+    <g transform="translate(810 672)">
+      <rect class="note-card" width="360" height="70" rx="8"/>
+      <text x="16" y="25" class="note-title">PUSH OWNERSHIP</text>
+      <text x="16" y="47" class="note">Park pushes continuously; step 10 verifies/binds.</text>
+    </g>
+  </g>
 </svg>

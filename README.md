@@ -1,142 +1,62 @@
-<div align="center">
+# Autoloop
 
-<pre align="center" role="img" aria-label="Autoloop">
-┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
-├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
-┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴&#160;&#160;
-∞
-</pre>
+**Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<strong>Labelled GitHub issues in. Gated, independently reviewed PRs out.</strong>
+<img alt="release v0.49.44" src="https://img.shields.io/badge/release-v0.49.44-8b5cf6?style=flat-square">
+![Claude Code, Codex CLI, and opencode](https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square)
+![code writer does not equal code reviewer](https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square)
+![human merge by default](https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square)
 
-<p>
-  <img alt="release v0.49.44" src="https://img.shields.io/badge/release-v0.49.44-8b5cf6?style=flat-square">
-  <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
-  <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square">
-  <img alt="human controlled merge" src="https://img.shields.io/badge/authority-human_merge-f59e0b?style=flat-square">
-</p>
-
-A standing, self-prompting development loop for
+Autoloop is a standing, self-prompting development loop for
 [Claude Code](https://claude.com/claude-code),
 [Codex CLI](https://developers.openai.com/codex/cli), and
-[opencode](https://opencode.ai).
+[opencode](https://opencode.ai). It turns a maintainer-approved queue into small, reviewed,
+evidence-bound pull requests, then takes the next issue. **Pitcrew** repairs owned PRs before new
+work begins.
 
-</div>
+The output is a proposal: human merge is the default; acknowledged solo repositories may opt into a non-manual policy.
 
-Autoloop turns a maintainer-approved queue into small, reviewable pull requests. One supported
-host session acts as the **orchestrator**: it verifies the issue, writes the plan, sends the plan
-to an independent reviewer, gives the reviewed plan to a fresh implementer, simplifies and
-reviews the diff, gets a fresh code review, runs the repository's objective gate, and opens a
-ready PR carrying `Closes #N`.
+## Contract
 
-Then it takes the next issue. If an existing loop PR receives human feedback, fails CI, or falls
-behind its base, **Pitcrew** repairs that same PR before new work begins.
+**Input:** one open, PR-sized issue whose `loop-ready` label was applied by a verified maintainer
+after reading it. **Output:** one ready PR carrying `Closes #N`, a reviewed plan and final diff,
+one full objective gate, exact-head checks/statuses, and a durable run record.
 
-> Autoloop is not an agent that happens to open pull requests. It is a review-separated,
-> evidence-producing delivery protocol with explicit human authority.
+<img src="docs/assets/autoloop-guardrails.svg" alt="Four Autoloop guardrails: maintainer-authorized input, fresh independent review, exact-head evidence, and human merge by default with explicit acknowledged solo exceptions">
 
-## In plain terms
+*Overview only. This table is the normative text equivalent.*
 
-New to AI coding tools? Here is the whole idea without the jargon.
-
-Autoloop lets an AI assistant do real programming work for you — but supervised, in small
-steps, and never trusted blindly. Think of it as a junior developer working under strict house
-rules:
-
-- **You hand it one small, clearly written task.** On GitHub a task is called an *issue*. You
-  describe what you want, then approve it by adding a label (`loop-ready`). Nothing starts until
-  you approve — and if you edit the task after approving, the approval is cancelled on purpose.
-- **The AI works in eleven small steps, not one big leap.** It checks the task makes sense, writes
-  a plan, gets the plan reviewed, writes the code, tidies it up, reviews the change and then has a
-  separate AI review it again, runs the project's tests to *prove* the code works, publishes the
-  result, and writes down what it did. Each step announces itself, so you can watch it happen.
-- **A different AI always checks the work.** This is the most important rule: the AI that
-  *writes* something never *reviews* it. A separate, fresh AI reviews the plan and the code —
-  like having one person write an essay and a different person grade it. It catches mistakes the
-  author is blind to.
-- **The result is a proposal, not a done deal.** The AI opens a *pull request* (a proposed code
-  change) for you to look at. **A human always decides whether to merge it** into the project.
-  The AI never ships code on its own.
-- **If a proposal needs fixing, it gets fixed.** When your review comments come back, tests
-  fail, or the change falls out of date, a part of Autoloop called *Pitcrew* repairs that same
-  proposal before any new work begins.
-
-So the cycle is simple: **an approved task goes in → a small, tested, independently reviewed
-proposal comes out → you merge it.** Autoloop works through your approved tasks one at a time,
-and you stay in control of what actually ships.
-
-The rest of this document explains how each stage works in detail.
-
-## How it works
-
-Eleven steps take a trusted issue to a proven, ready PR. The diagram groups them into the five
-stages they serve — trust, plan, build, prove, deliver — and
-[the table below](#how-one-issue-becomes-one-pr) names each one. When that PR needs attention,
-Pitcrew revises, re-reviews, and re-gates the same branch before returning it to the human.
-
-<img src="docs/assets/autoloop-flow.svg" alt="Autoloop forward and return workflow" width="1200">
-
-Every step announces itself on one ribbon line as the unit moves, so the eleven are visible while
-they happen rather than only in the end-of-unit record:
-
-```text
-[14:07][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN ─ full · fresh planner
-[14:41][#78] ⏳ ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 🧹 SIMPLIFY ─ 41 lines removed · fresh simplifier
-```
-
-## At a glance
-
-| | Autoloop's contract |
+| Guardrail | Contract |
 |---|---|
-| **Input** | An open GitHub issue whose `loop-ready` label was applied by a verified maintainer after reading it. |
-| **Unit of work** | One PR-sized issue, one module boundary, one pull request. |
-| **Roles** | Orchestrator plans and gates; a fresh implementer writes; independent fresh threads review. |
-| **Proof** | Reviewed plan, reviewed final diff, one full objective gate, CI when present, and pushed head all tied to the delivered SHA. |
-| **Output** | A ready PR with `Closes #N`, findings and dispositions, gate evidence, and per-step timings. |
-| **Return path** | Pitcrew handles review feedback, failed CI, and base conflicts on the existing PR. |
-| **Authority** | `merge.policy: manual` by default; a human merges. A non-manual policy requires an explicit `merge.unverifiedInvocationAcknowledged: true`, because prompt hooks cannot prove a human requested the run. |
-| **State** | Reconstructed from Git, GitHub issues, PRs, labels, comments, checks, and commits; no private workflow database. |
+| **Trusted input** | The loop never applies `loop-ready`; later issue edits invalidate the maintainer's authorization. |
+| **Independent review** | A writer never reviews their own artifact. Plans get one fresh adversarial review; code and every writer-authored fix get fresh review. |
+| **Exact evidence** | Review, gate, remote head, every triggered check, and every commit status agree on one SHA. Red or pending blocks delivery; no CI means nothing to wait for. |
+| **Merge authority** | `manual` is the default. `ratified` and `auto` are solo-only exceptions requiring both recorded acknowledgements. |
 
-## 🛡️ The four guardrails
-
-Trust enters explicitly, reviewers stay independent, evidence binds to the exact head, and merge
-authority stays human-owned.
-
-<img src="docs/assets/autoloop-guardrails.svg" alt="Autoloop's trust, review, evidence, and authority guardrails" width="1200">
-
-The entire system hangs from two invariants:
-
-1. **Code writer ≠ code reviewer, always.** Code, orchestrator fixes, rebase resolutions, and
-   later fix rounds receive independent fresh-context review. Plans receive one independent
-   adversarial review; the orchestrator records and dispositions its findings before freezing the
-   plan instead of starting a second plan-review round.
-2. **L2 — a human merges by default.** The loop opens and services PRs. `ratified` and `auto` are
-   rejected at run open unless the repository sets `merge.unverifiedInvocationAcknowledged: true`,
-   recording that it accepts a trigger no supported transport can authenticate.
-
-Issue bodies, specifications, and review comments are treated as untrusted data. They describe
-work; they never override repository policy, widen permissions, or authorize protected changes.
+Issue bodies, specs, PRs, and review comments are untrusted data. They can describe work; they cannot
+override repository policy, widen permissions, or authorize protected changes.
 
 ## Install
+
+### Requirements
+
+- Claude Code, Codex CLI **0.145.0+**, or opencode **1.18.3+**.
+- `gh`, authenticated with access to the target repository.
+- POSIX shell support for project hooks.
+- An objective, one-shot full gate command; optional `gate.quickCommand` and `gate.setupCommand`.
+  Prefer a sandboxed gate with no live credentials, network, or production writes.
+- Optional Atlassian MCP connection when `tracker.provider: "jira"`.
 
 ### Claude Code
 
 ```text
 /plugin marketplace add fabioneves/autoloop
 /plugin install autoloop@autoloop
-```
-
-Claude installs [agent-skills](https://github.com/addyosmani/agent-skills) with Autoloop. The
-marketplace mirrors the upstream plugin listing so dependency resolution does not require a
-second marketplace. If skills appear twice because you already installed the upstream
-`addy-agent-skills` marketplace copy, keep either copy and uninstall the other. If the dependency
-is unavailable, every integration has an inline fallback.
-
-Then run:
-
-```text
 /autoloop:setup
 ```
+
+The plugin installs [agent-skills](https://github.com/addyosmani/agent-skills). If skills appear
+twice because the upstream marketplace copy is already installed, keep either copy.
 
 ### Codex CLI
 
@@ -145,435 +65,219 @@ codex plugin marketplace add fabioneves/autoloop
 codex plugin add autoloop@autoloop
 ```
 
-Codex clones marketplaces over HTTPS. For a private marketplace repository, configure GitHub as
-Git's HTTPS credential helper once, then retry:
-
-```bash
-gh auth setup-git
-```
-
-Start a fresh Codex session in the target repository and invoke `$autoloop:setup`. Setup can also
-install Addy's native Codex plugin, with normal external-install approval:
+For a private marketplace, run `gh auth setup-git` once. Start a fresh session in the target repo
+and invoke `$autoloop:setup`. Addy's native Codex plugin is optional:
 
 ```bash
 codex plugin marketplace add addyosmani/agent-skills
 codex plugin add agent-skills@agent-skills
 ```
 
-Declining that optional dependency is supported.
-
 ### opencode
 
-opencode has no plugin marketplace; skills load from skill directories, and the identifier is
-each skill's frontmatter `name` (`setup`, `shape`, `dev`, `pitcrew` — there is no `autoloop:`
-namespace on this host). Install machine-wide with the open agent-skills CLI:
+opencode loads skills from directories and uses bare identifiers (`setup`, `shape`, `dev`,
+`pitcrew`) rather than the `autoloop:` namespace:
 
 ```bash
 npx skills add fabioneves/autoloop -g
-```
-
-A private copy of this repo works too — the CLI clones with your normal git credentials. Update
-every installed skill later with:
-
-```bash
 npx skills update -g
 ```
 
-then re-run `setup` in each configured repo to audit template drift. Start a fresh opencode
-session in the target repository (skills are discovered at startup) and ask for the `setup`
-skill — plain language works: "run autoloop setup".
+Start a fresh opencode session in the target repo and explicitly invoke the bare `setup` skill.
+Re-run setup after updates to audit repository-owned template drift.
 
-Maintainer alternative: symlink each `skills/<name>` directory from a working clone into
-`~/.config/opencode/skills/` so the live tree IS the install; `git pull` updates it.
+## Quickstart
 
-## 🚀 Quickstart
-
-1. Run `/autoloop:setup` on Claude Code, `$autoloop:setup` on Codex CLI, or the `setup` skill on opencode.
-2. Create a small issue with objective acceptance criteria. You can write it by hand or use
-   `/autoloop:shape <feature or spec>` / `$autoloop:shape <feature or spec>` / the `shape` skill
-   on opencode.
-3. Read the issue, make any final edits, then apply `loop-ready`. **Label last:** editing the body
-   after labeling deliberately invalidates the trust grant.
-4. Run one supervised unit with no active queue-wide goal: `/autoloop:dev`, `$autoloop:dev`, or
-   the `dev` skill on opencode, explicitly bounded to “take ONE issue and stop.”
-5. Review and merge the resulting PR like any teammate's work.
-6. After the supervised run succeeds, use your normal cadence. On Claude Code:
+1. Run setup on your host.
+2. Create one small issue with objective acceptance criteria, by hand or with `/autoloop:shape`,
+   `$autoloop:shape`, or the opencode `shape` skill.
+3. Read and finish the issue, then apply `loop-ready` **last**. Editing after labeling revokes trust.
+4. Run one supervised unit: `/autoloop:dev`, `$autoloop:dev`, or the opencode `dev` skill, bounded to
+   “take ONE issue and stop.”
+5. Review and merge the ready PR like any teammate's work.
+6. After that succeeds, choose a cadence. Claude Code can self-prompt:
 
    ```text
    /loop 30m /goal <the stop condition in docs/agentic/STATE.md>
    ```
 
-   Codex CLI supports `/goal` but not `/loop`; invoke `$autoloop:dev` manually or from a desktop
-   scheduled task. opencode reruns the `dev` skill manually, or on a cadence via cron wrapping
-   `opencode run` from the repo root. Every cycle services open PRs with Pitcrew before taking
-   new queue work.
+Codex supports manual or desktop-scheduled `$autoloop:dev`; opencode can run `opencode run` from
+cron. A bare Dev invocation drains the eligible queue. Every cycle services Pitcrew work first.
 
-> **`autoloop:dev` is the skill identifier.** Invoke it directly (`/autoloop:dev` /
-> `$autoloop:dev`; on opencode the identifier is the bare `dev`), select that named skill in the
-> host UI, or wrap the explicit identifier in `/loop <interval> /goal <stop>` so a cadence
-> re-invokes it. Natural-language skill matching may help discovery, but no flow is inferred
-> from unconstrained prose. A run drains the eligible queue by default; it is single-unit
-> only when the invocation says so (“take ONE issue and stop”). The same holds for the others:
-> `setup`, `shape`, and `pitcrew` are identifiers you point at, not commands to recall.
+## Forward path: one issue to one PR
 
-There is nothing to select. Every role — plan review, implementation, code review, and bounded
-doubt review — is one call to `tools/agentic/dispatch.mjs`, which spawns a fresh engine process
-with that role's fixed tool posture. Claude Code, Codex CLI, and opencode are hosts for the
-orchestrator; the dispatch surface is the same on all three.
+<img src="docs/assets/autoloop-flow.svg" alt="Eleven-step Autoloop forward path from premise checking through planning, independent reviews, implementation, simplification, gate, publish, and durable record to a ready pull request">
 
-Progress is visible on the issue itself: `loop-started`, then exactly one `loop:NN-<step>` label.
-The label timeline measures each step and the run record posts the durations.
+*Overview only. The eleven rows below are the normative text equivalent.*
 
-## How one issue becomes one PR
+| Step | Actor | Contract |
+|---|---|---|
+| **01 PREMISE** · `loop:01-premise` | Orchestrator | Select eligible work; verify current `loop-ready`, dependencies, symbols, paths, data, and reachable environments. |
+| **02 PLAN** · `loop:02-plan` | Fresh planner | Define one module boundary, acceptance mapping, quantified invariants, and failing-first tests. |
+| **03 PLAN-REVIEW** · `loop:03-plan-review` | Independent reviewer | Challenge feasibility, scope, and correctness once; the orchestrator dispositions findings. |
+| **04 CLAIM** · `loop:04-claim` | Orchestrator | Persist intent, freeze the reviewed plan, create the typed branch/claim commit, and open a draft PR. |
+| **05 IMPLEMENT** · `loop:05-implement` | Fresh implementer | Build test-first inside the boundary, one commit per completed plan task, without self-review. |
+| **06 SIMPLIFY** · `loop:06-simplify` | Fresh simplifier | Reduce the artifact without changing behavior; tests remain green and untouched. |
+| **07 DIFF-REVIEW** · `loop:07-diff-review` | Orchestrator | Plain run: review the simplified diff against invariants, checklist, security, and domain rules; fix defects. With Codex: only verify build/tests—the fresh full-artifact closing review carries the five-axis pass. |
+| **08 CODE-REVIEW / FIX** · `loop:08-code-review` | Fresh reviewers + writers | Review round 1 in full; fresh writers fix verified findings. Use delta/open-rebuttal scope only mid-storm; a fresh full-artifact round must close convergence. |
+| **09 GATE** · `loop:09-gate` | Orchestrator | Run one full objective gate on a clean tree and record the gated OID. A red untouched base parks the run. |
+| **10 PUBLISH** · no step label | Orchestrator | Verify and bind the already-pushed remote head; finalize exact-head checks and mark the draft ready. |
+| **11 RECORD** · no step label | Orchestrator | Post one run record with plan, review, gate, CI, recovery, overlap, and outcome evidence. |
 
-Eleven steps, in order. Each one announces itself and each one runs, including the steps that
-turn out to be no-ops — a step that decides nothing is due still happened, and a missing ribbon
-would read as a skipped step.
+Every step emits one `NN/11` ribbon, including no-ops and steps 10–11. GitHub labels run through
+`loop:09-gate`; step 10 swaps directly to `loop-delivered`. Commits are pushed whenever the run
+parks—PUBLISH verifies and binds them rather than owning the first push. `00 RECONCILE` may adopt a
+proven orphan before selection; it is outside the eleven-step unit.
 
-| Step | Actor | What happens | Evidence produced |
-|---|---|---|---|
-| 🧭 **01 PREMISE**<br>`loop:01-premise` | Orchestrator | Selects the highest-priority eligible issue and verifies named symbols, routes, paths, tables, data shape, blockers, and reachable environments. `loop-ready` must be on the issue right now, including on a resume. | Proceed/defer decision and captured premises. |
-| 📐 **02 PLAN**<br>`loop:02-plan` | Fresh planner | Defines the one-module boundary, acceptance mapping, constraints, and test plan — and states each behavioral rule as a **quantified invariant** with its cases enumerated and tested. | Tight implementation plan. |
-| 🔬 **03 PLAN-REVIEW**<br>`loop:03-plan-review` | Independent reviewer | Adversarially tries to disprove feasibility, scope, and correctness against the full issue. Exactly one round: findings are dispositioned, not re-reviewed. | Findings, verdict, and dispositions. |
-| 📌 **04 CLAIM**<br>`loop:04-claim` | Orchestrator | Posts the durable lifecycle intent marker, freezes the reviewed plan, creates a typed branch and claim commit, then opens a draft PR. | Recoverable branch, plan comment, `Closes #N`. |
-| 🔨 **05 IMPLEMENT**<br>`loop:05-implement` | Fresh implementer | Implements the frozen plan test-first, inside the boundary, one commit per completed plan task, without reviewing its own work. | Conventional implementation commits. |
-| 🧹 **06 SIMPLIFY**<br>`loop:06-simplify` | Fresh simplifier | Behavior-preserving pass over the implemented artifact, on a model that did not write it, measured against the plan's line budget. Tests must be green and untouched; a behavior change is reverted. | The final shape reviewers will actually inspect. |
-| 👓 **07 DIFF-REVIEW**<br>`loop:07-diff-review` | Orchestrator | Reviews the simplified diff against the repo checklist, invariants, security, and domain rules; fixes problems. Its own fixes are covered by step 08. | Clean committed tree and recorded dispositions. |
-| 🔍 **08 CODE-REVIEW**<br>🔧 **08 FIX**<br>`loop:08-code-review` | Fresh reviewer | Reviews the full diff. Every Critical and Major is verified against code or a cheap reproduction, then fixed or rebutted with evidence for the next fresh reviewer. Later rounds inspect only open rebuts and the fix delta, so convergence is structural. | Independent clean verdict on the final code. |
-| 🚦 **09 GATE**<br>`loop:09-gate` | Orchestrator | Runs one full objective gate on the review-converged tree and records the gated OID. A gate red on the untouched base parks the run and names the remedy; it never ends it. | Gated SHA on a clean committed tree. |
-| 📦 **10 PUBLISH** | Orchestrator | Verifies the remote head equals the gated OID and binds it to the PR, then runs the single terminal finalizer that marks the draft ready and swaps the issue to `loop-delivered`. Commits are pushed continuously before this; step 10 verifies and binds the head rather than being the moment it first leaves the machine. | Ready PR whose head is the gated SHA, plus a durable pre-merge record. |
-| 📝 **11 RECORD** | Orchestrator | Posts one run record — frozen plan, plan-review findings and dispositions, loaded skills, every code-review round with its dispatch id, gate command and OID, delivery and CI outcome, recovery outcomes, and the machine-computed `overlap:` line — then takes the next issue. | One auditable record per unit, tied to the delivered head. |
+Plans state rules as quantified invariants, enumerate deliberate cases, and map each case to a
+failing-first test. Repeated findings in one predicate escalate from an instance fix to the whole
+invariant; caps block rather than silently widening policy.
 
-Steps 10 and 11 carry no step label of their own; step 10's finalizer swaps the issue straight from
-`loop:09-gate` to `loop-delivered`.
-A further step, `🔁 00 RECONCILE`, runs before selection when a session finds an orphaned draft PR
-to adopt, which is why a live ribbon can read `00/11`.
+## Pitcrew: return the same PR
 
-`loop-delivered` is applied only when committed, reviewed, gated, remote, and CI evidence all name
-the same head, everything that ran on that head is green, and the pre-merge record is durably
-bound. Delivery's CI predicate is the triggered-checks floor: every check run and commit status on
-the exact head must be green, read live from GitHub — red blocks, pending blocks, and a repository
-with no CI has nothing to wait for. There is no committed required-check list to keep in sync
-(docs/specs/simple-delivery.md).
+Pitcrew acts only on a same-repository PR whose branch, closing claim, issue, and lifecycle marker
+prove loop ownership. It triggers on trusted actionable feedback, failed/errored/cancelled
+exact-head checks, or a conflict/behind state at marker phase `premerge-record`. Earlier phases and
+`ready-head` or later remain Dev-owned.
 
-**Rules are invariants, not examples.** A plan that describes *a* case instead of the property
-holding over *all* of them makes the unit rediscover its own rule one review round at a time —
-observed twice, at five and seven rounds. So each rule is quantified over its domain with its
-spec line cited, its cases enumerated (deliberate exclusions marked as non-behavior), each case
-given a failing-first test, and the invariant's joint failure mode named. Plan review checks that
-completeness explicitly, and during code review two consecutive findings in the same predicate
-escalate the fix from the reported instance to the whole invariant; a third is a planning failure
-that blocks rather than spending another round.
+<img src="docs/assets/autoloop-pitcrew.svg" alt="Eight-step Pitcrew path that diagnoses and repairs a proven Autoloop pull request, independently reviews and gates the revision, verifies the remote head, and returns the same ready pull request to the human">
 
-If a premise is false, the work is oversized, the gate cannot converge within its cap, or a
-protected decision needs a human, Autoloop explains why and moves the issue to `loop-blocked`.
-It does not improvise a substitute requirement. At the review cap it blocks with the finding and
-round history rather than widening its own policy.
+*Overview only. This ordered list is the normative text equivalent.*
 
-Draft PRs are recoverable state. A later run can adopt a genuine orphan only after proving the
-head repository, branch convention, trusted linked issue, claim commit, and frozen plan all match
-the loop's provenance contract.
+1. **DIAGNOSE** — snapshot the whole PR and freeze the exact revision plan.
+2. **PREPARE** — bind the head and marker, fetch, switch, and rebase only when required.
+3. **IMPLEMENT** — send the frozen scope to one fresh full-lane writer.
+4. **ORCHESTRATOR PASS** — apply the checklist and focused behavior-preserving simplification.
+5. **INDEPENDENT REVIEW** — review the full revision, then deltas and open rebuttals with fresh threads.
+6. **GATE** — run the full gate on a clean tree and bind the new OID.
+7. **PUBLISH** — push safely, verify the remote head, and resolve addressed threads.
+8. **FINALIZE** — require exact-head evidence and return the same ready PR.
 
-## 🔁 Pitcrew: the return path
+Green manual-policy PRs are left alone; repaired ones return to the human without merging.
 
-`autoloop:pitcrew` runs before the forward path and watches only PRs the loop can prove it owns:
-the branch must match `<type>/gh-<N>-<slug>` and the body must contain `Closes #N`.
+## Skills
 
-A loop PR becomes actionable when it has:
+All supported hosts use the same `skills/` tree.
 
-- an unresolved review thread from a verified repository writer, maintainer, or admin;
-- an outstanding change-request review;
-- a failed, errored, or cancelled CI check; or
-- a dirty or behind merge state.
-
-Pitcrew diagnoses the entire PR first, rebases if needed, sends the exact revision scope to a
-fresh implementer, simplifies and reviews the revision, gets a fresh independent code review,
-runs the full gate, verifies the pushed head, replies to and resolves addressed threads, and
-returns the same PR to the human. Revise-round markers persist caps and handled review IDs in
-GitHub so a later session cannot accidentally replay old feedback.
-
-Green manual-policy PRs are left alone. v0.40 rejects `ratified` and `auto` at run open because its
-prompt transport cannot authenticate invocation provenance.
-
-## What ships
-
-Both plugin manifests and the opencode skill links point to one `skills/` tree, so Claude Code,
-Codex CLI, and opencode use the same process definitions.
-
-| Skill | Role |
+| Skill | Purpose |
 |---|---|
-| [`autoloop:setup`](skills/setup/SKILL.md) | Fresh install, reconfiguration, migrations, global defaults, and read-only doctor checks. |
-| [`autoloop:shape`](skills/shape/SKILL.md) | Interactive queue feeder: description/spec → verified, PR-sized issues; `shape lint #N` grades existing issues. It never labels them. |
-| [`autoloop:queue-trace`](skills/queue-trace/SKILL.md) | Read-only spec ⇄ queue reconciliation: which spec tasks have issues, which issues trace to a task, per-milestone exit accounting; `queue-trace annotate` emits (never runs) the commands to add a missing task ID. |
-| [`autoloop:dev`](skills/dev/SKILL.md) | Forward path: trusted issue → reviewed plan → implementation → independent code review → full gate → ready PR. |
-| [`autoloop:pitcrew`](skills/pitcrew/SKILL.md) | Return path: human feedback / red CI / conflicts → revised, re-gated, re-reviewed PR. |
-| [`autoloop:lean-code`](skills/lean-code/SKILL.md) | Lean, self-documenting source with near-zero inline comments; rationale belongs in commits and PRs. |
-| [`autoloop:codebase-design`](skills/codebase-design/SKILL.md) | Deep-module vocabulary, seam placement, deepening playbook, and design-it-twice guidance. |
+| [`setup`](skills/setup/SKILL.md) | Install, migrate, reconfigure, or run read-only doctor checks. |
+| [`shape`](skills/shape/SKILL.md) | Turn a description/spec into PR-sized issues, or lint an issue; never label it. |
+| [`queue-trace`](skills/queue-trace/SKILL.md) | Reconcile specs and queue issues without mutation. |
+| [`dev`](skills/dev/SKILL.md) | Trusted issue → reviewed plan → implementation → gate → ready PR. |
+| [`pitcrew`](skills/pitcrew/SKILL.md) | Feedback/red CI/conflict → revised, re-reviewed, re-gated PR. |
+| [`lean-code`](skills/lean-code/SKILL.md) | Keep source lean and rationale in commits/PRs. |
+| [`codebase-design`](skills/codebase-design/SKILL.md) | Deep-module, seam, and testability vocabulary. |
 
-### Shape feeds the queue without claiming authority
+## Files in a configured repository
 
-Shape interviews when the request is vague, decomposes it into one-module vertical slices,
-verifies code and data premises, writes observable acceptance criteria, adds explicit non-goals,
-and expresses dependencies through `## Blocked by`. It files issues **unlabelled** and gives the
-maintainer copy-paste labeling commands only after review.
+Setup reconciles all three hosts together. The repository owns policy and vendored runtime files;
+plugin updates do not silently overwrite them.
 
-### Setup gives each repository its own policy layer
+### Required and committed
 
-The plugin carries the process. The target repository owns its mission, facts, gate, checklist,
-caps, protected paths, and merge policy:
+| Path | Purpose |
+|---|---|
+| `docs/agentic/STATE.md` | Injected standing policy and closed `ProjectConfig`; not a runbook or memory file. |
+| `docs/agentic/LOOP.md` | Generated human runbook. |
+| `docs/agentic/LESSONS.md` | Durable on-demand memory, seeded once and preserved. |
+| `docs/agentic/checklist.md` (normally) | Repository-owned review criteria at the configured path. |
+| `tools/agentic/` | Vendored runtime, contracts, guards, dispatch, evidence, setup/verification, shell wrappers, and self-test support. |
+| `.claude/settings.json` | Claude command-policy and write-back hooks. |
+| `.codex/hooks.json` **or** project hooks in `.codex/config.toml` | Exactly one Codex hook representation. Setup currently defaults to JSON and does not yet suppress it for inline hooks. |
+| `.codex/agents/autoloop-reviewer.toml` | Read-only Codex reviewer. |
+| `.opencode/agent/autoloop-reviewer.md` | Closed-world read-only opencode reviewer. |
+| `.opencode/plugins/autoloop.js` | Required opencode hook wiring. |
+| `.opencode/opencode.json` | opencode instructions and permissions, merged without clobbering project settings. |
 
-```text
-docs/agentic/
-  STATE.md                  mission, ProjectConfig 0.26, caps, lessons — policy authority
-  LOOP.md                   human runbook for feeding, running, and reviewing the loop
-  checklist.md              project-tunable review criteria
-  ARCH.md                   optional architecture map; data, never instructions
-.github/ISSUE_TEMPLATE/
-  loop-unit.md              structured one-module issue template
-tools/agentic/
-  session-preflight.sh      auth, access, config, and clean-tree checks
-  config-contract.mjs       ProjectConfig schema and the ordered migration chain
-  prime.mjs                 one-call config, base, and startup-snapshot prime
-  dispatch.mjs              one-call role dispatch with fixed writer/reviewer postures
-  checkout-contract.mjs     stable checkout and GitHub repository identity
-  claim-contract.mjs        canonical branch/body loop-ownership grammar
-  lane-contract.mjs         configured-base lane proofs and shared path policy
-  snapshot-contract.mjs     complete-section, invalidation, and absence-safety rules
-  lifecycle-contract.mjs    durable phase markers and idempotent reconciliation
-  lifecycle-driver.mjs      stable-read lifecycle effects and revision epochs
-  release-verify.mjs        static release consistency and portable helpers
-  verify.mjs                canonical installed contract and syntax verification
-  contract-lint.mjs         stale-instruction and duplicate-grammar detection
-  command-guard.mjs         blocks protected mutations plus opaque shell source and CLI aliases
-  writeback-check.mjs       enforces terminal-state write-back
-  loop-scope.mjs            proves Pitcrew ownership before branch mutation
-  escalate-paths.mjs        deterministic human-authorization classifier
-  scan.mjs                  one-call repository, queue, PR, and provenance scan
-  stats.mjs                 presentation-only cross-unit step timings
-  label-swap-reminder.mjs   anchors step narration, task mirror, and required skill loads
-  publish-verdict.mjs       universal exact-head gate/check/premerge/ready/delivered finalizer
-  auto-merge.mjs            dormant fail-closed reference policy engine
-.claude/settings.json       mandatory Claude command-policy and write-back hooks
-.codex/hooks.json           mandatory equivalent Codex hooks
-.codex/agents/
-  autoloop-reviewer.toml    reviewer identity + defense-in-depth defaults
-.opencode/plugins/
-  autoloop.js               optional opencode plugin wiring the same vendored guards
-.opencode/agent/
-  autoloop-reviewer.md      closed-world reviewer; only in-worktree read/glob/grep/list survive
-.opencode/opencode.json     instructions entry auto-priming STATE.md (merged, never clobbered)
-```
+### Optional or conditional and committed
 
-The command guard hardens literal model-issued shell operations; it is not an arbitrary-program
-sandbox. No-bypass repository rules remain the protected-branch enforcement boundary.
+| Path or value | Purpose |
+|---|---|
+| `docs/agentic/ARCH.md` | Optional architecture/data map; setup does not create it. |
+| `.github/ISSUE_TEMPLATE/loop-unit.md` | Optional manual convenience; setup does not currently scaffold it. |
+| `tools/agentic/auto-merge.mjs` and `tools/agentic/merge-authorization-contract.mjs` | Vendored for `ratified`/`auto` and absent under `manual`; execution still requires acknowledged solo scope. |
+| Quick/setup gate commands, Jira fields, protected/escalation paths | Optional config values, not required files. |
 
-Codex requires a human `/hooks` review for every new or hash-changed project hook. Static
-verification proves the definition and its vendored targets, not effective hash trust.
+`.autoloop/ci-policy.json` is retired and must not be created. Optional setup defaults may live at
+`~/.config/autoloop/defaults.json`; runtime never reads them, and secrets do not belong there.
 
-Vendored means the repository's copy is authoritative. Updating the plugin never silently
-changes a guard or merge rule inside a configured project. Re-run setup to audit template drift,
-review the exact diff, and deliberately adopt a migration. `setup doctor` is read-only and audits
-the configured base ref rather than mistaking a parked unit branch for current state.
+### Generated locally, never committed
 
-Setup reconciles the safe repository artifacts for Claude Code, Codex CLI, and opencode together.
-Changing the host therefore needs no repository reconfiguration.
+| Path | Purpose |
+|---|---|
+| `.git/autoloop/` | Run markers, typed snapshots, dispatch logs/events, reviewer choice, transcript captures, and host nudges. |
+| `/tmp/autoloop-*` | Bounded prompt, result, body, and contract scratch files. |
 
-Cross-project wizard preferences may live at `~/.config/autoloop/defaults.json`. They pre-fill
-setup only; runtime never reads them. Project facts and secrets do not belong there.
+Unit branches and commits are normal Git provenance, not setup files.
 
-## ⚙️ Dispatch
+### Durable GitHub state
 
-Roles stay fixed and there is no routing decision to make.
+| Surface | Purpose |
+|---|---|
+| Maintainer-applied `loop-ready` | Queue authorization; the loop never applies or creates it. |
+| Lifecycle/step/terminal labels | Visible queue and unit state. |
+| Issue comments | Lifecycle markers, frozen plan, pre-merge evidence, outcomes, and one run record. |
+| Draft/ready PR, remote head, checks, statuses | Recoverable work and exact-head delivery evidence. |
+
+## Configuration and merge policy
+
+v0.49.44 uses schema `0.26.0`. The JSON block in `docs/agentic/STATE.md` accepts only `version`,
+`baseBranch`, `gate`, `merge`, `tracker`, `review`, and `caps`. Project facts stay there;
+cross-project defaults are setup-only.
+
+| Policy | Behavior |
+|---|---|
+| `manual` | Default. The loop marks the PR ready; a human merges. |
+| `ratified` | Solo-only; may merge with a trusted human risk label or when every path matches the reversible allowlist. |
+| `auto` | Solo-only; may merge a fully proven loop PR except protected paths. |
+
+Both non-manual policies require `merge.unverifiedInvocationAcknowledged: true` **and**
+`merge.soloOperatorAcknowledged: true`. The invocation flag accepts that no supported transport can
+prove a human requested a run, so an unauthenticated trigger can merge. Solo mode also waives identity
+separation, App attestation, live server-policy verification, and approving review because one login
+cannot satisfy them. Exact-head CAS merge, the triggered-check/status floor on that head, ownership
+binding, protected paths, pre-merge record, and the `loop-ready` kill switch remain enforced.
+
+## Security, operation, and recovery
 
 v0.49.44 dispatches every role through one call:
 
 ```bash
-node tools/agentic/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> \
-  --prompt-file <path> [--tools <csv>] [--engine <claude|codex>] [--model <name>] \
-  [--effort <low|medium|high|xhigh|max>] [--output-file <path>] [--json]
+node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> --prompt-file <path>
 ```
 
-| Role | Posture | Tools | Result |
-|---|---|---|---|
-| `plan` | reviewer | `Glob,Grep,Read` | structured `{title,prBody,body}` |
-| `plan-review` | reviewer | `Glob,Grep,Read` | structured `{verdict,findings,rebuts}` |
-| `implement` | writer | `Bash,Edit,Glob,Grep,Read,Write` | the writer's terminal text |
-| `code-review` | reviewer | `Glob,Grep,Read` | structured `{verdict,findings,rebuts}` |
-| `doubt-review` | reviewer | `Glob,Grep,Read` | structured `{verdict,findings,rebuts}` |
+Resolve `<plugin-tools>` from the installed skill at `<skill-dir>/../../templates/tools` and expand
+it to a literal absolute path. Contract tools never run from the serviced branch's potentially stale
+vendored copy; repository-owned policy tools remain vendored.
 
-**Model and depth are per step, and the record says who actually ran.** `--model` and `--effort`
-are stamped into the typed result and the dispatch log beside the engine, so a verdict names the
-model that produced it. A second engine or a proxied model is opt-in per invocation and recorded
-once, so reviewer choice never leaks between runs. The division this repository runs:
-
-| Step | Runs on | Why |
-|---|---|---|
-| plan, plan revision | the deepest available model | the highest-leverage artifact in the unit |
-| implement, fix rounds | the writing model | volume writing against an explicit plan and failing tests |
-| simplify | **not the implementer's model** | simplifying is a reading task first, and a fresh model does not inherit the author's priors |
-| every review | a different model from the writer, at `xhigh` effort | a review round costs a dispatch either way, so depth spent there is rounds not spent later |
-| orchestration | whatever the operator's session is | every bounded step names its own model; nothing in the flow depends on the session's |
-
-The posture is the whole safety story, and it is enforced by construction: a reviewer role cannot
-name a write tool, `--tools` may narrow a posture but never widen it, and each child launches with
-no session persistence and an explicit deny list over `~/.ssh`, `~/.netrc`, `~/.git-credentials`,
-`~/.gitconfig`, and the `gh` configuration directory.
-
-Freshness is process identity. A writer and a reviewer are never the same process, and each review
-round records the dispatch that produced it — a repeated dispatch id, or a reviewer identity equal
-to the author's, is refused as evidence.
-
-Failure is typed: `{ok:false, step, error}` with the child's stderr preserved, for a spawn failure,
-a non-zero exit, a missing or malformed result, or a timeout. There are no retries and no fallback
-engine. A failed dispatch is a decision for the orchestrator, not something the tool papers over.
-
-Reviewer prompts are adversarial: artifact plus contract, no parent conclusions. Prompts are always
-passed as files, so untrusted issue and review text never rides in shell source.
-
-## Efficient without hiding work
-
-Autoloop spends depth where it changes the outcome and keeps every wait visible:
-
-- **One-call scan:** repository facts, tree state, queue provenance, blocked issues, owned PRs,
-  orphan candidates, and close-out facts arrive in one startup scan.
-- **Depth-one overlap:** while one unit waits on a background dispatch, the next issue may move through
-  read-only premise, plan, and plan-review stages against `origin/<base>`. Checkout,
-  implementation, claim, and gate stay serial.
-- **Lanes:** a mechanically proven docs-only or non-escalated change narrows what a review has to
-  cover, never who reviews it — code writer ≠ code reviewer and the full gate always apply.
-- **Delta convergence:** code review round 1 covers the complete artifact; later rounds cover only
-  the fix delta and the open rebuts, so convergence is structural rather than a re-read.
-- **Simplify before review, not after:** the artifact is reduced against its planned line budget
-  before a reviewer reads it, because every extra line is surface a round can spend itself on.
-- **Two-tier gate:** an optional quick command gives inner-loop feedback; the full gate always
-  runs last on the review-converged tree.
-- **Idle exit:** no actionable PRs and no eligible issues means a clean stop, not a polling loop.
-
-## Observable and recoverable
-
-There is no silent “agent is thinking” state:
-
-- step labels form a GitHub-native timeline and drive per-step duration telemetry;
-- Claude's task UI mirrors one unit as a task renamed through the pipeline; hosts without task
-  tools skip the mirror;
-- background waits emit heartbeats and an aging task row, and every step ribbon carries its wall
-  clock while durations come from the dispatch's own measured time;
-- a background dispatch is watchable live: its task view streams the engine's own events —
-  reasoning ticks, tool calls, output text — rendered from the live log rather than raw JSON;
-- terminal outcomes push a notification when the host exposes that surface and park safely on the
-  base branch;
-- every active run ends with one scoreboard and digest, including delivered PRs, elapsed time,
-  degraded reviews, blocked work, and awaiting-merge age; idle runs report no eligible units and
-  post no digest; and
-- `stats.mjs` aggregates cross-unit timings so the real bottleneck is visible.
-
-Recovery is designed into the state model:
-
-- startup reconstructs truth from GitHub and Git rather than trusting a previous chat;
-- genuine draft-PR orphans can be adopted after provenance verification;
-- stale step labels and non-default-base issue close-out are reconciled;
-- a red candidate head remains the current run's unfinished work while retries remain;
-- a failed dispatch surfaces as a typed error the orchestrator decides on; nothing improvises a
-  second attempt.
-
-Every degraded review is disclosed. “No review” is never the fallback.
-
-## Merge policy
-
-| Policy | Behavior |
+| Boundary | Behavior |
 |---|---|
-| **`manual`** | The default policy. The loop marks the PR ready; a human merges. |
-| **`ratified`** | Valid only when the config records `merge.unverifiedInvocationAcknowledged: true`; the vendored gate then merges only the classified reversible paths. |
-| **`auto`** | Same acknowledgement contract as `ratified`; the vendored gate may merge any loop PR whose full evidence is green, protected paths always excluded. |
+| **Role separation** | `dispatch.mjs` launches fresh fixed-posture processes; reviewer tools are read-only and cannot be widened by prompts. |
+| **Untrusted text** | Issue/PR/review bodies travel through bounded files and `--body-file`, never shell source. |
+| **Tool enforcement** | Vendored hooks block direct merge, unsafe force-push, loop self-authorization, release publication, and opaque mutation shapes. |
+| **Protected work** | Deterministic paths stop for `human:authorize`; comments cannot grant authority. |
+| **Repository rules** | The command guard is not a general sandbox. Branch/tag/release protection remains the maintainer's server-side boundary. |
+| **Visibility** | Labels, one ribbon per step, heartbeats, task rows, timings, and a final digest expose progress and waits. |
+| **Efficiency** | One-call scan, depth-one read-only overlap, lane proofs, delta review, simplify-before-review, and one final full gate reduce waste without skipping proof. |
+| **Recovery** | Startup rebuilds truth from Git/GitHub, adopts only proven orphans, reconciles stale labels, and keeps red candidate heads unfinished. |
+| **Failure** | Dispatch failures are typed and preserved; no silent retry, engine fallback, or “no review” mode exists. A usage-limit model substitution is explicit, one-time, and recorded. |
+| **Idle** | No actionable PRs and no eligible issues means a clean stop, not polling. |
 
-Nothing can authenticate that a human requested a given run. A non-manual policy is therefore
-valid only with the recorded `merge.unverifiedInvocationAcknowledged: true` acceptance. A single-identity repository may additionally record
-`merge.soloOperatorAcknowledged: true`, which waives the four gate controls one login cannot
-satisfy — identity separation, App attestation, live server policy, and approving review — while
-exact-head CAS merge, CI on the exact head, ownership binding, protected paths, and the kill
-switch keep full strength.
+Codex requires human `/hooks` review for new or hash-changed hooks. Re-run setup to inspect vendored
+drift; `setup doctor` is read-only.
 
-The command guard blocks direct merge, `loop-ready` creation/application, and tag/release
-publication. Dev can act only on a pre-existing `loop-ready` event whose labeler role and
-post-label issue immutability are independently fetched. Pitcrew can act only on a previously
-loop-owned PR with fresh review, CI, and base evidence. Doctor is read-only.
+## Versioning and governance
 
-## 🔐 Security model
-
-- **Queue trust is explicit.** The `loop-ready` labeler must have maintainer authority and the
-  issue body must be unchanged since labeling.
-- **Lifecycle authority is authenticated.** Recovery accepts markers from current admins and
-  maintainers, plus the authenticated runner's own marker while that runner still has write;
-  untrusted lookalikes are ignored and incomplete role evidence fails closed.
-- **Untrusted text never becomes shell source.** Issue, plan, PR, and review bodies travel through
-  validated scratch files and `--body-file`; branch slugs and titles use strict allowlists.
-- **Review isolation is verified.** Fresh context, read-only posture where the runtime supports
-  it, disabled external mutation surfaces, pre/post worktree fingerprints, and transcript scans
-  guard reviewer integrity.
-- **Guards are enforced at the tool layer.** Vendored hooks block direct merges, force-pushes,
-  branch-protection changes, inline bodies, and other forbidden commands.
-- **Protected work stops for a human.** Deterministic escalate paths apply `human:authorize`;
-  comments and issue text cannot grant themselves authority. Protected families include
-  `.opencode/**` and `.githooks/**`.
-- **The exact SHA matters.** Review, gate, CI, pushed head, and the dormant non-manual reference
-  verdicts agree on the same commit.
-- **Branch protection remains yours.** Autoloop never edits or reads repository protection.
-  Non-manual merge policies are solo-only and require the recorded
-  `merge.soloOperatorAcknowledged: true` + `merge.unverifiedInvocationAcknowledged: true`
-  acknowledgements; every remaining control (exact-head CAS merge, triggered-checks floor,
-  premerge record, protected paths, kill switch) stays active.
-
-## Requirements
-
-- Claude Code, Codex CLI **0.145.0+**, or opencode **1.18.3+**, with `gh` installed,
-  authenticated, and able to resolve the target repository. These are Autoloop's conservative
-  tested CLI floors.
-- Every dispatch is a fresh `claude` process with a fixed tool posture. A missing or
-  unauthenticated engine surfaces as a typed dispatch failure carrying the child's own stderr.
-- An objective, one-shot gate command: test, build, lint, or a repository-specific composition.
-  Prefer a sandboxed command with no live credentials, network, or production writes.
-- Optional `gate.quickCommand` for cheap inner-loop feedback. It never replaces the final full
-  gate.
-- POSIX shell support for project prompt hooks. They are mandatory best-effort transport and
-  replay binding, not attributable intent. Missing capture disables runtime; a valid capture opens
-  only manual policy and grants no lifecycle, merge, or release authority.
-- Optional Atlassian MCP connection when `tracker.provider: "jira"` is configured.
-
-## Versioning
-
-Autoloop follows semver. Root [`VERSION`](VERSION) is the canonical release value. Claude and Codex
-cache plugins by manifest version, so both manifests, the README badge, the changelog release, and
-the `∞ <skill> · vX.Y.Z · starting` banners in `dev`, `pitcrew`, and `setup` must agree with it.
-The banner reveals which cached skill the current session loaded before the first tool call.
-
-Before a release, run the portable Linux/macOS verification command:
+Root [`VERSION`](VERSION) is canonical. Manifests, release badge, changelog heading, startup banners,
+and annotated `v<VERSION>` tag must agree. Before release:
 
 ```bash
 node templates/tools/release-verify.mjs
 ```
 
-The release gate verifies the static release contract only: synchronized version literals and
-manifests, the release badge, a dated changelog heading, the skill startup banners, the committed
-release evidence, and the tag workflow's shape. Tag CI adds `--release-mode`, which also proves
-from local git objects that `v<VERSION>` is an annotated tag on the exact checked-out commit
-reachable from `origin/main` and that the checkout's origin is the repository CI runs for.
+Tag CI adds release-mode ancestry/origin checks. GitHub rulesets and immutable-release settings
+remain maintainer-owned and are not verified by doctor.
 
-Branch, tag, and release protection (rulesets, immutable releases) are configured on GitHub and
-are the maintainer's responsibility; the release gate does not read or verify that server-side
-configuration.
-
-Configured repositories record their scaffold contract version in the JSON block inside
-`docs/agentic/STATE.md`. v0.49.44 uses schema `0.26.0`. Breaking config-shape changes bump the minor
-version while the project is `0.x`; re-running setup audits and migrates the repository-owned layer
-through a visible diff and, when policy is involved, a human-reviewed and human-merged policy PR.
-
-Project governance lives in the [MIT License](LICENSE), [contribution guide](CONTRIBUTING.md),
-[security policy](SECURITY.md), and [changelog](CHANGELOG.md).
-
----
-
-<div align="center">
-
-**The queue stays visible. The evidence stays attached. The merge stays accountable.**
-
-</div>
+See the [contribution guide](CONTRIBUTING.md), [security policy](SECURITY.md),
+[changelog](CHANGELOG.md), and [MIT License](LICENSE).
