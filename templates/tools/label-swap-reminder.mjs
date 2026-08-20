@@ -52,6 +52,15 @@ const PUSH_NOTE = ' — DEFERRED on newer hosts, not absent: ToolSearch("select:
   + ' loads it; report the send result, and only a host that cannot load it may say so on the'
   + ' rail instead;';
 
+// The task tools are model-gated off since Claude Code 2.1.233 and restored by
+// the operator's CLAUDE_CODE_ENABLE_TODO_TOOLS — so the panel exists in one
+// world and not the other, and the run open already decided which. A rider
+// that demands the row unconditionally is unfollowable half the time (which
+// teaches a run to ignore riders wholesale); one that never mentions it
+// half-mirrors when the tools ARE there. Conditional is the only honest form.
+const PANEL_NOTE = ' — plus its task row if the run open said `mirroring`,'
+  + ' skip it if the panel is off;';
+
 // Per-step extras: skill-load riders the dev skill anchors to these swaps (naming ≠ loading).
 const EXTRAS = {
   '02-plan': ' The plan must NAME the guidance-mapped domain skills (the repo CLAUDE.md/AGENTS.md'
@@ -134,8 +143,10 @@ export function reminderFor(command, opts = {}) {
     return "autoloop: prime just ran — if this is a Dev run's FIRST successful prime, the run "
       + 'frame `┏━━ ∞ RUN OPEN · <HH:MM> ━━…` prints NOW, exactly once (a resume or mid-run '
       + 're-prime never reprints it), with the task-panel fate line directly beneath it: probe '
-      + 'the host roster — task tools present → `🗒 task panel: mirroring`; absent → `🗒 task '
-      + 'panel: none on this host — dispatch descriptions carry the in-flight view`. In the same '
+      + 'the host roster — task tools present → `🗒 task panel: mirroring` and every step rider '
+      + 'below carries its row; absent → ``🗒 task panel: off — `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` '
+      + '+ restart restores it; dispatch descriptions carry the view`` (state the flag, never set '
+      + "it — it is the operator's environment and takes effect only at CLI startup). In the same "
       + 'turn load the terminal notifier once via ToolSearch("select:PushNotification") — on '
       + 'newer hosts it is DEFERRED, not absent.';
   }
@@ -172,7 +183,10 @@ export function reminderFor(command, opts = {}) {
       + `current step label on this unit's issue. If it is not, swap it NOW (late beats never) `
       + `and print the step's ribbon \`${ribbonFor('#<N>', key)}\`. A step that dispatches `
       + 'without swapping strands the label timeline — the issue keeps advertising an earlier '
-      + 'step, which is how a crashed or abandoned run gets mis-reconciled by the next one.';
+      + 'step, which is how a crashed or abandoned run gets mis-reconciled by the next one. '
+      + "A backgrounded dispatch's Bash `description` is the parked run's visible row where the "
+      + 'panel is off — write it in the panel grammar (`∞ #<N> — <step> [<MODEL>]`), not as a '
+      + 'sentence.';
   }
 
   if (!/gh\s+issue\s+edit\b/.test(command)) return null;
@@ -189,7 +203,8 @@ export function reminderFor(command, opts = {}) {
       + `② the unit's closing rail \`[HH:MM][${n}] ✅ ∞ ══ SHIPPED 🎉 ─ PR #<P> · `
       + '<delivered|merged> · <short OID> · <total> ══`; '
       + `③ PushNotification \`✔ ${n} PR #<P> ready for your merge · <elapsed>\`${PUSH_NOTE} `
-      + `④ remove \`loop-started\` and every \`loop:*\` step label still on the issue.`;
+      + `④ remove \`loop-started\` and every \`loop:*\` step label still on the issue; `
+      + `⑤ complete this unit's step rows with their cost stamps and prune${PANEL_NOTE}`;
   }
   if (labels.includes('loop-blocked')) {
     return `autoloop: \`loop-blocked\` landed for ${n} — TERMINAL riders due NOW, same message or the next: `
@@ -213,10 +228,11 @@ export function reminderFor(command, opts = {}) {
   }
   if (!STEPS[key]) return null;
   const entry = key === '01-premise'
-    ? `① unit banner; ② its step ribbon \`${ribbonFor(n, key)}\``
+    ? `① unit banner; ② its step ribbon \`${ribbonFor(n, key)}\`; ③ TaskCreate `
+      + `\`∞ ${n} — 01 PREMISE\`${PANEL_NOTE}`
     : `① the step ribbon \`${ribbonFor(n, key)}\`${key === '08-code-review'
       ? ' (its cells count ROUNDS against the configured cap, one ▰ per round done-or-current)'
-      : ''}`;
+      : ''}; ② TaskUpdate the step row to the same core + activeForm${PANEL_NOTE}`;
   const [nextLabel, nextWhen] = NEXT[key];
   const archNudge = key === '06-simplify' && opts.archMap
     ? ` Structure changed this unit (component/dir/CI path filter/integration point)? Update the curated facts in docs/agentic/ARCH.md on the unit branch now — it must ride this unit's review and gate. Never add freshness metadata or a shared timestamp.`
@@ -247,6 +263,13 @@ function selfTest() {
     ['gh issue edit 7 --add-label loop:07-diff-review', /07\/11 👓 DIFF-REVIEW ─/],
     ['gh issue edit 7 --add-label loop:08-code-review', /ROUNDS against the configured cap/],
     ['gh issue edit 7 --add-label loop:08-code-review', /r<n>\/<cap>/],
+    // The panel is one env var away in either direction, so its riders are
+    // conditional rather than absent (gated host) or unconditional (enabled).
+    ['gh issue edit 9 --add-label loop-started,loop:01-premise', /TaskCreate `∞ #9 — 01 PREMISE`/],
+    ['gh issue edit 7 --add-label loop:05-implement', /if the run open said `mirroring`/],
+    ['node /cache/0.49.48/templates/tools/prime.mjs --json', /CLAUDE_CODE_ENABLE_TODO_TOOLS=1/],
+    ['node /cache/0.49.48/templates/tools/prime.mjs --json', /never set it/],
+    ['node tools/agentic/dispatch.mjs --role code-review --prompt-file /tmp/p.md --json', /panel grammar/],
     // The `▶ … step X/11` header is the duplicate announcement the dev skill
     // bans; the rider that used to demand it now bans it in the same breath.
     ['gh issue edit 7 --add-label loop:05-implement', /never also print a `▶/],
@@ -289,17 +312,22 @@ function selfTest() {
     const ok = want === null ? got === null : typeof got === 'string' && want.test(got);
     if (!ok) { fail++; console.error(`FAIL: ${cmd}\n  got: ${got}`); }
   }
-  // No rider may name the removed host task tools: two impossible riders per
-  // swap taught a live run to ignore the possible ones too.
-  const sample = [
-    reminderFor('gh issue edit 9 --add-label loop-started,loop:01-premise'),
-    reminderFor('gh issue edit 7 --add-label loop:05-implement'),
-    reminderFor('gh issue edit 7 --remove-label loop:09-gate,loop-started --add-label loop-delivered'),
-    reminderFor('gh issue edit 4 --add-label loop-blocked'),
-  ].join('\n');
-  if (/Task(Create|Update|List)/.test(sample)) {
-    fail++;
-    console.error('FAIL: a rider names the removed host task tools');
+  // A rider may name the task panel ONLY as a conditional. Unconditional was
+  // unfollowable on a gated host — two impossible riders per swap taught a live
+  // run to ignore the possible ones too — and silence half-mirrored on a host
+  // where the operator had turned the tools back on. Every message naming the
+  // task tools must therefore also say what makes them due.
+  for (const [label, command] of [
+    ['premise', 'gh issue edit 9 --add-label loop-started,loop:01-premise'],
+    ['step', 'gh issue edit 7 --add-label loop:05-implement'],
+    ['delivered', 'gh issue edit 7 --remove-label loop:09-gate,loop-started --add-label loop-delivered'],
+    ['blocked', 'gh issue edit 4 --add-label loop-blocked'],
+  ]) {
+    const message = reminderFor(command) ?? '';
+    if (/Task(Create|Update|List)|task row/.test(message) && !message.includes('mirroring')) {
+      fail++;
+      console.error(`FAIL: the ${label} rider demands a task row unconditionally`);
+    }
   }
   const withMap = reminderFor('gh issue edit 5 --add-label loop:06-simplify', { archMap: true });
   const withoutMap = reminderFor('gh issue edit 5 --add-label loop:06-simplify', {});
