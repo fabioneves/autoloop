@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.47] - 2026-08-20
+
+### Changed
+
+- **Lifecycle marker comments carry a visible caption; they no longer render as blank cards.**
+  Every unit posted six comments whose whole body was an HTML comment — the append-only lifecycle
+  chain (`intent-recorded` → … → `premerge-record`) — and GitHub rendered each one as an empty
+  card, which reads as noise on the issue. The canonical serialization now leads with one visible
+  line derived from the marker itself (`∞ lifecycle · ready-head · PR #301`), so the caption can
+  never disagree with the state it labels, and — being part of the canonical, hashed bytes — an
+  edited caption is tamper evidence like any other. The change is version-gated: the parser
+  accepts exactly two canonical forms, captioned and legacy-bare, so every marker written before
+  this release stays valid forever, mixed chains resolve (a captioned successor extends a
+  pre-caption chain — the upgrade path every live unit takes), and nothing rewrites an existing
+  comment to migrate it. The pre-merge record comment deliberately keeps its bare form: its body
+  hash is recomputed from the record JSON across the merge-authorization surface, where a second
+  canonical form would widen the audited byte surface for one blank card that already sits
+  directly above the visible run record.
+
 ## [0.49.46] - 2026-08-20
 
 ### Fixed
