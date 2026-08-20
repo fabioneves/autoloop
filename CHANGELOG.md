@@ -3,6 +3,50 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.45] - 2026-08-20
+
+### Fixed
+
+- **The task-panel mirror probes its surface, and the skip is never silent.** Claude Code 2.1.234
+  removed the native task tools (TaskCreate/TaskUpdate) outright — absent even from ToolSearch —
+  and the dev skill's mirror died without a line of output, because the rule for hosts without
+  task tools was "skip this silently": two full runs across four context windows mirrored nothing
+  and said nothing. The run now probes the roster at run open and prints the panel's fate in one
+  line under the run frame (`🗒 task panel: none on this host — dispatch descriptions carry the
+  in-flight view`, or `mirroring` where the tools exist). `PushNotification` was only DEFERRED by
+  the same harness change, but the run declared it nonexistent from the visible roster and dropped
+  every delivery notification; the skill and every terminal rider now carry the loading
+  instruction — `ToolSearch("select:PushNotification")` — and only a host that cannot load it may
+  say so on the rail. Both incidents are pinned in `regression-index.mjs`.
+- **The swap riders demand the ribbon the skill specifies, not the header it bans.** The hook's
+  riders still named the retired `▶ #N · step X/11` step line — the exact shape the dev skill
+  bans as a duplicate announcement — plus a TaskCreate/TaskUpdate rename no current host can
+  perform: two impossible riders per swap, and the live run that received them skipped eight of
+  eleven ribbons too. Every rider now hands over the glyphed ribbon exemplar to fill (composed
+  per step, model-only executor slot on dispatched steps, a round-counting note on 08), states
+  that the ribbon is the step's one announcement, and the terminal riders carry the
+  SHIPPED/BLOCKED closing-rail shapes verbatim.
+- **The dispatch anchor matches the stream wrapper, and two new anchors cover what labels
+  cannot.** A live 0.49.44 run dispatched every role through `dispatch-stream.sh` and the
+  dispatch anchor — matching only `dispatch.mjs` — never fired once; it now matches both, and an
+  implement-role dispatch names both steps it can serve (05 writer, 06 simplify). The run frame
+  and the panel probe ride `prime.mjs`, which every run inevitably starts with; the terminal
+  riders ride `publish-verdict.mjs terminal-finalize`, whose label mutations go through the
+  driver and therefore never fire the `gh issue edit` reminder — which is how a delivered unit
+  shipped with no closing rail and no notification.
+
+### Changed
+
+- **The task-panel choreography is compressed to the probe, the fate line, and the notifier.**
+  The full mirror discipline (run row per phase, task per step, `step-subject.mjs` cost stamps,
+  prune-to-four) applies only where a host exposes the tools; the paragraphs teaching it live in
+  v0.49.44's history, because instructions for a surface no current host exposes are context
+  spent teaching nobody. `step-subject.mjs` itself survives for hosts that regain the surface.
+- **Four review-round ribbon examples caught up with the v0.49.41 executor-slot rule.** They
+  still showed `[CLAUDE:GPT-5.6-SOL]`/`[CLAUDE:OPUS]` engine:model slots three releases after
+  the slot became model-only; a spec that contradicts itself twenty lines apart is part of how
+  marker compliance decays.
+
 ## [0.49.44] - 2026-08-12
 
 ### Fixed
