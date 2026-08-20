@@ -677,10 +677,29 @@ function validateMarker(markerValue) {
   return errors;
 }
 
+// The whole marker body used to live inside the HTML comment, so GitHub
+// rendered every lifecycle comment as a blank card — six per unit. The
+// canonical form now leads with one visible caption line derived from the
+// marker itself, so the caption can never disagree with the state it labels,
+// and — being part of the canonical bytes — a "helpful" edit to it is tamper
+// evidence like any other. Bodies written before the caption existed stay
+// canonical forever: the parser accepts exactly the two forms, captioned and
+// legacy-bare, and nothing may rewrite an existing comment to migrate it.
+function lifecycleCaption(markerValue) {
+  const pr = Number.isSafeInteger(markerValue.pr) && markerValue.pr >= 1
+    ? ` · PR #${markerValue.pr}`
+    : '';
+  return `∞ lifecycle · ${markerValue.phase}${pr}`;
+}
+
+function bareLifecycleMarker(markerValue) {
+  return `<!-- autoloop-lifecycle-v1\n${stableJson(markerValue)}\n-->`;
+}
+
 export function serializeLifecycleMarker(markerValue) {
   const errors = validateMarker(markerValue);
   if (errors.length > 0) throw new Error(`invalid lifecycle marker: ${errors.join('; ')}`);
-  return `<!-- autoloop-lifecycle-v1\n${stableJson(markerValue)}\n-->`;
+  return `${lifecycleCaption(markerValue)}\n\n${bareLifecycleMarker(markerValue)}`;
 }
 
 export function parseLifecycleMarker(text) {
@@ -715,13 +734,19 @@ function validateLifecycleSuccessor(value) {
   );
 }
 
+function bareLifecycleSuccessor(markerValue, successor) {
+  return `${bareLifecycleMarker(markerValue)}\n<!-- autoloop-lifecycle-successor-v1\n`
+    + `${stableJson(successor)}\n-->`;
+}
+
 export function serializeLifecycleSuccessor(markerValue, successor) {
-  const markerBody = serializeLifecycleMarker(markerValue);
+  const errors = validateMarker(markerValue);
+  if (errors.length > 0) throw new Error(`invalid lifecycle marker: ${errors.join('; ')}`);
   if (!validateLifecycleSuccessor(successor)) {
     throw new Error('invalid lifecycle successor');
   }
-  return `${markerBody}\n<!-- autoloop-lifecycle-successor-v1\n`
-    + `${stableJson(successor)}\n-->`;
+  return `${lifecycleCaption(markerValue)}\n\n`
+    + bareLifecycleSuccessor(markerValue, successor);
 }
 
 export function parseLifecycleComment(text) {
@@ -731,7 +756,10 @@ export function parseLifecycleComment(text) {
     /<!-- autoloop-lifecycle-successor-v1\r?\n([\s\S]*?)\r?\n-->/gu,
   )];
   if (matches.length === 0) {
-    if (text !== serializeLifecycleMarker(parsed.marker)) {
+    if (
+      text !== serializeLifecycleMarker(parsed.marker)
+      && text !== bareLifecycleMarker(parsed.marker)
+    ) {
       return { ok: false, error: 'root lifecycle comment is not canonical' };
     }
     return { ok: true, marker: parsed.marker, successor: null };
@@ -751,7 +779,10 @@ export function parseLifecycleComment(text) {
   if (!validateLifecycleSuccessor(successor)) {
     return { ok: false, error: 'lifecycle successor is invalid' };
   }
-  if (text !== serializeLifecycleSuccessor(parsed.marker, successor)) {
+  if (
+    text !== serializeLifecycleSuccessor(parsed.marker, successor)
+    && text !== bareLifecycleSuccessor(parsed.marker, successor)
+  ) {
     return { ok: false, error: 'lifecycle successor comment is not canonical' };
   }
   return { ok: true, marker: parsed.marker, successor };
@@ -3310,6 +3341,51 @@ function selfTest() {
   })).recordId;
   const markerCases = [
     ['lifecycle marker round trips', parsed.ok === true && parsed.marker.pr === 12],
+    // Marker comments rendered as blank cards — the whole body was an HTML
+    // comment — so the canonical form gained one visible caption line. The
+    // caption is derived, hashed, and version-gated: pre-caption bodies stay
+    // canonical forever, and an edited caption is tamper evidence.
+    ['the canonical marker leads with a visible caption', (() => {
+      const value = marker({ claimCommit: SHA, pr: 12 });
+      return serializeLifecycleMarker(value).startsWith(
+        `∞ lifecycle · ${value.phase} · PR #12\n\n<!-- autoloop-lifecycle-v1`,
+      ) && parseLifecycleComment(serializeLifecycleMarker(value)).ok;
+    })()],
+    ['a pre-caption bare marker body stays canonical forever', (() => {
+      const value = marker();
+      const bare = `<!-- autoloop-lifecycle-v1\n${stableJson(value)}\n-->`;
+      const parsedBare = parseLifecycleComment(bare);
+      return parsedBare.ok && parsedBare.successor === null;
+    })()],
+    ['a pre-caption bare successor body stays canonical forever', (() => {
+      const bare = `<!-- autoloop-lifecycle-v1\n${
+        stableJson(marker({ phase: 'local-claim', claimCommit: SHA }))}\n-->\n`
+        + `<!-- autoloop-lifecycle-successor-v1\n${stableJson(chainLink)}\n-->`;
+      return parseLifecycleComment(bare).ok;
+    })()],
+    ['a captioned successor extends a pre-caption chain', (() => {
+      const bareRoot = `<!-- autoloop-lifecycle-v1\n${stableJson(marker())}\n-->`;
+      const successorBody = serializeLifecycleSuccessor(
+        marker({ phase: 'local-claim', claimCommit: SHA }),
+        {
+          v: 1,
+          rootCommentId: 'IC_legacy_root',
+          previousCommentId: 'IC_legacy_root',
+          previousBodyHash: lifecycleCommentBodyHash(bareRoot),
+          sequence: 1,
+        },
+      );
+      const resolved = resolveLifecycleCommentChain([
+        { id: 'IC_legacy_root', body: bareRoot, neverEdited: true },
+        { id: 'IC_legacy_next', body: successorBody, neverEdited: true },
+      ], 'IC_legacy_root');
+      return resolved !== null && resolved.tip.marker.phase === 'local-claim';
+    })()],
+    ['an edited caption is tamper evidence, not decoration', (() => {
+      const body = serializeLifecycleMarker(marker())
+        .replace('∞ lifecycle', '∞ lifecycle (edited)');
+      return parseLifecycleComment(body).ok === false;
+    })()],
     ['append-only lifecycle successor round trips and resolves', (
       parseLifecycleComment(chainSuccessorBody).ok
       && chain.root.id === 'IC_chain_root'

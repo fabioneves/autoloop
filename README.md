@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.49.46" src="https://img.shields.io/badge/release-v0.49.46-8b5cf6?style=flat-square">
+<img alt="release v0.49.47" src="https://img.shields.io/badge/release-v0.49.47-8b5cf6?style=flat-square">
 ![Claude Code, Codex CLI, and opencode](https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square)
 ![code writer does not equal code reviewer](https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square)
 ![human merge by default](https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square)
@@ -222,7 +222,7 @@ Unit branches and commits are normal Git provenance, not setup files.
 
 ## Configuration and merge policy
 
-v0.49.46 uses schema `0.26.0`. The JSON block in `docs/agentic/STATE.md` accepts only `version`,
+v0.49.47 uses schema `0.26.0`. The JSON block in `docs/agentic/STATE.md` accepts only `version`,
 `baseBranch`, `gate`, `merge`, `tracker`, `review`, and `caps`. Project facts stay there;
 cross-project defaults are setup-only.
 
@@ -241,7 +241,7 @@ binding, protected paths, pre-merge record, and the `loop-ready` kill switch rem
 
 ## Security, operation, and recovery
 
-v0.49.46 dispatches every role through one call:
+v0.49.47 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> --prompt-file <path>
