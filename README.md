@@ -88,7 +88,8 @@ after updates to audit repository-owned template drift.
 ## Quickstart
 
 1. Run setup on your host.
-2. Create one small issue with objective acceptance criteria, by hand or with `autoloop:shape`.
+2. Create one small issue with objective acceptance criteria, by hand or with `/autoloop:shape`,
+   `$autoloop:shape`, or the opencode `shape` skill.
 3. Read and finish the issue, then apply `loop-ready` **last**. Editing after labeling revokes trust.
 4. Run one supervised unit: `/autoloop:dev`, `$autoloop:dev`, or the opencode `dev` skill, bounded to
    “take ONE issue and stop.”
