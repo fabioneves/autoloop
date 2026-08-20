@@ -317,69 +317,66 @@ verifies code and data premises, writes observable acceptance criteria, adds exp
 and expresses dependencies through `## Blocked by`. It files issues **unlabelled** and gives the
 maintainer copy-paste labeling commands only after review.
 
-### Setup gives each repository its own policy layer
+### Files in a configured repository
 
 The plugin carries the process. The target repository owns its mission, facts, gate, checklist,
-caps, protected paths, and merge policy:
+caps, protected paths, and merge policy.
 
-```text
-docs/agentic/
-  STATE.md                  mission, ProjectConfig 0.26, caps, lessons — policy authority
-  LOOP.md                   human runbook for feeding, running, and reviewing the loop
-  checklist.md              project-tunable review criteria
-  ARCH.md                   optional architecture map; data, never instructions
-.github/ISSUE_TEMPLATE/
-  loop-unit.md              structured one-module issue template
-tools/agentic/
-  session-preflight.sh      auth, access, config, and clean-tree checks
-  config-contract.mjs       ProjectConfig schema and the ordered migration chain
-  prime.mjs                 one-call config, base, and startup-snapshot prime
-  dispatch.mjs              one-call role dispatch with fixed writer/reviewer postures
-  checkout-contract.mjs     stable checkout and GitHub repository identity
-  claim-contract.mjs        canonical branch/body loop-ownership grammar
-  lane-contract.mjs         configured-base lane proofs and shared path policy
-  snapshot-contract.mjs     complete-section, invalidation, and absence-safety rules
-  lifecycle-contract.mjs    durable phase markers and idempotent reconciliation
-  lifecycle-driver.mjs      stable-read lifecycle effects and revision epochs
-  release-verify.mjs        static release consistency and portable helpers
-  verify.mjs                canonical installed contract and syntax verification
-  contract-lint.mjs         stale-instruction and duplicate-grammar detection
-  command-guard.mjs         blocks protected mutations plus opaque shell source and CLI aliases
-  writeback-check.mjs       enforces terminal-state write-back
-  loop-scope.mjs            proves Pitcrew ownership before branch mutation
-  escalate-paths.mjs        deterministic human-authorization classifier
-  scan.mjs                  one-call repository, queue, PR, and provenance scan
-  stats.mjs                 presentation-only cross-unit step timings
-  label-swap-reminder.mjs   anchors step narration, task mirror, and required skill loads
-  publish-verdict.mjs       universal exact-head gate/check/premerge/ready/delivered finalizer
-  auto-merge.mjs            dormant fail-closed reference policy engine
-.claude/settings.json       mandatory Claude command-policy and write-back hooks
-.codex/hooks.json           mandatory equivalent Codex hooks
-.codex/agents/
-  autoloop-reviewer.toml    reviewer identity + defense-in-depth defaults
-.opencode/plugins/
-  autoloop.js               optional opencode plugin wiring the same vendored guards
-.opencode/agent/
-  autoloop-reviewer.md      closed-world reviewer; only in-worktree read/glob/grep/list survive
-.opencode/opencode.json     instructions entry auto-priming STATE.md (merged, never clobbered)
-```
+#### Required and committed
+
+| Path | Purpose |
+|---|---|
+| `docs/agentic/STATE.md` | Standing policy and the closed `ProjectConfig` injected into every run. It is not a runbook or memory file. |
+| `docs/agentic/LOOP.md` | Generated human runbook for feeding, running, and reviewing the loop. |
+| `docs/agentic/LESSONS.md` | Durable operational memory read on demand, seeded once and preserved. |
+| `docs/agentic/checklist.md` (normally) | Repository-owned review criteria; the configured path must exist. |
+| `tools/agentic/` | Vendored runtime, typed contracts, guards, dispatch, scan, evidence, setup/verification, shell wrappers, and self-test support. |
+| `.claude/settings.json` | Claude command-policy and write-back hooks. |
+| `.codex/hooks.json` **or** project hooks in `.codex/config.toml` | Exactly one Codex hook representation. Setup currently reconciles the JSON form by default; it does not yet suppress it when inline project hooks exist. |
+| `.codex/agents/autoloop-reviewer.toml` | Read-only Codex reviewer identity and defaults. |
+| `.opencode/agent/autoloop-reviewer.md` | Closed-world read-only opencode reviewer. |
+| `.opencode/plugins/autoloop.js` | Required opencode hook wiring for the same vendored guards. |
+| `.opencode/opencode.json` | opencode instructions and permissions, merged without clobbering project settings. |
+
+Setup reconciles the host files for Claude Code, Codex CLI, and opencode together. Vendored files
+remain repository-authoritative: plugin updates do not silently replace them. Re-run setup to audit
+template drift and adopt migrations through a visible diff; `setup doctor` is read-only.
+
+#### Optional or conditional and committed
+
+| Path or value | When it exists |
+|---|---|
+| `docs/agentic/ARCH.md` | Optional curated architecture/data map; setup does not create it. |
+| `.github/ISSUE_TEMPLATE/loop-unit.md` | Optional issue-writing convenience installed manually; setup does not currently scaffold it. |
+| `tools/agentic/auto-merge.mjs` and `merge-authorization-contract.mjs` | Vendored only for acknowledged solo `ratified` or `auto` policy. Manual policy has no merge executor. |
+| `gate.quickCommand`, `gate.setupCommand`, Jira fields, protected/escalation paths | Optional values inside `ProjectConfig` or STATE policy, not additional required files. |
+
+`.autoloop/ci-policy.json` is retired: setup removes it and verification requires it absent. Do not
+create it. Cross-project setup defaults may live in `~/.config/autoloop/defaults.json`; runtime
+never reads them, and project facts or secrets do not belong there.
+
+#### Generated locally, never committed
+
+| Path | Purpose |
+|---|---|
+| `.git/autoloop/` | Live-run markers, typed startup snapshots, dispatch logs/events, reviewer choice, transcript captures, and one-use host nudges. |
+| `/tmp/autoloop-*` | Bounded prompt, result, body, and contract scratch files. |
+
+Unit branches, claim commits, implementation commits, and the remote PR head are normal Git
+provenance rather than setup files.
+
+#### Durable GitHub state
+
+| Surface | Purpose |
+|---|---|
+| Maintainer-applied `loop-ready` | Queue authorization; the loop never applies or creates it. |
+| Lifecycle, step, and terminal labels | Visible queue/unit state from `loop-started` through `loop-delivered` or `loop-blocked`. |
+| Issue comments | Append-only lifecycle markers, frozen plan, pre-merge evidence, outcomes, and one run record. |
+| Draft/ready PR, remote head, checks, and statuses | Recoverable work plus review, gate, triggered-check, and delivery evidence bound to the exact head. |
 
 The command guard hardens literal model-issued shell operations; it is not an arbitrary-program
-sandbox. No-bypass repository rules remain the protected-branch enforcement boundary.
-
-Codex requires a human `/hooks` review for every new or hash-changed project hook. Static
-verification proves the definition and its vendored targets, not effective hash trust.
-
-Vendored means the repository's copy is authoritative. Updating the plugin never silently
-changes a guard or merge rule inside a configured project. Re-run setup to audit template drift,
-review the exact diff, and deliberately adopt a migration. `setup doctor` is read-only and audits
-the configured base ref rather than mistaking a parked unit branch for current state.
-
-Setup reconciles the safe repository artifacts for Claude Code, Codex CLI, and opencode together.
-Changing the host therefore needs no repository reconfiguration.
-
-Cross-project wizard preferences may live at `~/.config/autoloop/defaults.json`. They pre-fill
-setup only; runtime never reads them. Project facts and secrets do not belong there.
+sandbox. No-bypass repository rules remain the protected-branch enforcement boundary. Codex still
+requires a human `/hooks` review for every new or hash-changed project hook.
 
 ## ⚙️ Dispatch
 
