@@ -46,8 +46,10 @@ rules:
 - **You hand it one small, clearly written task.** On GitHub a task is called an *issue*. You
   describe what you want, then approve it by adding a label (`loop-ready`). Nothing starts until
   you approve — and if you edit the task after approving, the approval is cancelled on purpose.
-- **The AI works in stages, not one big leap.** It checks the task makes sense, writes a plan,
-  writes the code, tidies it up, and runs the project's tests to *prove* the code actually works.
+- **The AI works in eleven small steps, not one big leap.** It checks the task makes sense, writes
+  a plan, gets the plan reviewed, writes the code, tidies it up, reviews the change and then has a
+  separate AI review it again, runs the project's tests to *prove* the code works, publishes the
+  result, and writes down what it did. Each step announces itself, so you can watch it happen.
 - **A different AI always checks the work.** This is the most important rule: the AI that
   *writes* something never *reviews* it. A separate, fresh AI reviews the plan and the code —
   like having one person write an essay and a different person grade it. It catches mistakes the
@@ -67,10 +69,20 @@ The rest of this document explains how each stage works in detail.
 
 ## How it works
 
-Five visible stages take a trusted issue to a proven, ready PR. When that PR needs attention,
+Eleven steps take a trusted issue to a proven, ready PR. The diagram groups them into the five
+stages they serve — trust, plan, build, prove, deliver — and
+[the table below](#how-one-issue-becomes-one-pr) names each one. When that PR needs attention,
 Pitcrew revises, re-reviews, and re-gates the same branch before returning it to the human.
 
 <img src="docs/assets/autoloop-flow.svg" alt="Autoloop forward and return workflow" width="1200">
+
+Every step announces itself on one ribbon line as the unit moves, so the eleven are visible while
+they happen rather than only in the end-of-unit record:
+
+```text
+[14:07][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN ─ full · fresh planner
+[14:41][#78] ⏳ ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 🧹 SIMPLIFY ─ 41 lines removed · fresh simplifier
+```
 
 ## At a glance
 
@@ -214,21 +226,33 @@ The label timeline measures each step and the run record posts the durations.
 
 ## How one issue becomes one PR
 
-| Step label | Actor | What happens | Evidence produced |
-|---|---|---|---|
-| `loop:01-premise` | Orchestrator | Verifies named symbols, routes, paths, tables, data shape, blockers, and reachable environments. | Proceed/defer decision and captured premises. |
-| `loop:02-plan` | Fresh planner | Defines the one-module boundary, acceptance mapping, constraints, and test plan — and states each behavioral rule as a **quantified invariant** with its cases enumerated and tested. | Tight implementation plan. |
-| `loop:03-plan-review` | Independent reviewer | Adversarially tries to disprove feasibility, scope, and correctness against the full issue. | Findings, verdict, and dispositions. |
-| `loop:04-claim` | Orchestrator | Freezes the reviewed plan, creates a typed branch and claim commit, then opens a draft PR. | Recoverable branch, plan comment, `Closes #N`. |
-| `loop:05-implement` | Fresh implementer | Implements the frozen plan test-first, inside the boundary, without reviewing its own work. | Conventional implementation commit. |
-| `loop:06-simplify` | Fresh simplifier | Behavior-preserving pass over the implemented artifact, on a model that did not write it, measured against the plan's line budget. Tests must be green and untouched; a behavior change is reverted. | The final shape reviewers will actually inspect. |
-| `loop:07-diff-review` | Orchestrator | Reviews the simplified diff against the repo checklist, invariants, security, and domain rules; fixes problems. | Clean committed tree and recorded dispositions. |
-| `loop:08-code-review` | Fresh reviewer | Reviews the full diff. Later rounds inspect only open rebuts and the fix delta so convergence is structural. | Independent clean verdict on the final code. |
-| `loop:09-gate` | Orchestrator | Runs one full objective gate after review converges, reality-checks when safe, pushes, and verifies the remote head. | Gated SHA equal to the PR head. |
-| `loop-delivered` | GitHub state | Applied only when committed, reviewed, gated, remote, and CI evidence name the same head, everything that ran on that head is green, and the pre-merge record is durably bound. | Ready PR and end-of-unit run record. |
+Eleven steps, in order. Each one announces itself and each one runs, including the steps that
+turn out to be no-ops — a step that decides nothing is due still happened, and a missing ribbon
+would read as a skipped step.
 
-Delivery's CI predicate is the triggered-checks floor: every check run and commit status on the
-exact head must be green, read live from GitHub — red blocks, pending blocks, and a repository
+| Step | Actor | What happens | Evidence produced |
+|---|---|---|---|
+| 🧭 **01 PREMISE**<br>`loop:01-premise` | Orchestrator | Selects the highest-priority eligible issue and verifies named symbols, routes, paths, tables, data shape, blockers, and reachable environments. `loop-ready` must be on the issue right now, including on a resume. | Proceed/defer decision and captured premises. |
+| 📐 **02 PLAN**<br>`loop:02-plan` | Fresh planner | Defines the one-module boundary, acceptance mapping, constraints, and test plan — and states each behavioral rule as a **quantified invariant** with its cases enumerated and tested. | Tight implementation plan. |
+| 🔬 **03 PLAN-REVIEW**<br>`loop:03-plan-review` | Independent reviewer | Adversarially tries to disprove feasibility, scope, and correctness against the full issue. Exactly one round: findings are dispositioned, not re-reviewed. | Findings, verdict, and dispositions. |
+| 📌 **04 CLAIM**<br>`loop:04-claim` | Orchestrator | Posts the durable lifecycle intent marker, freezes the reviewed plan, creates a typed branch and claim commit, then opens a draft PR. | Recoverable branch, plan comment, `Closes #N`. |
+| 🔨 **05 IMPLEMENT**<br>`loop:05-implement` | Fresh implementer | Implements the frozen plan test-first, inside the boundary, one commit per completed plan task, without reviewing its own work. | Conventional implementation commits. |
+| 🧹 **06 SIMPLIFY**<br>`loop:06-simplify` | Fresh simplifier | Behavior-preserving pass over the implemented artifact, on a model that did not write it, measured against the plan's line budget. Tests must be green and untouched; a behavior change is reverted. | The final shape reviewers will actually inspect. |
+| 👓 **07 DIFF-REVIEW**<br>`loop:07-diff-review` | Orchestrator | Reviews the simplified diff against the repo checklist, invariants, security, and domain rules; fixes problems. Its own fixes are covered by step 08. | Clean committed tree and recorded dispositions. |
+| 🔍 **08 CODE-REVIEW**<br>🔧 **08 FIX**<br>`loop:08-code-review` | Fresh reviewer | Reviews the full diff. Every Critical and Major is verified against code or a cheap reproduction, then fixed or rebutted with evidence for the next fresh reviewer. Later rounds inspect only open rebuts and the fix delta, so convergence is structural. | Independent clean verdict on the final code. |
+| 🚦 **09 GATE**<br>`loop:09-gate` | Orchestrator | Runs one full objective gate on the review-converged tree and records the gated OID. A gate red on the untouched base parks the run and names the remedy; it never ends it. | Gated SHA on a clean committed tree. |
+| 📦 **10 PUBLISH** | Orchestrator | Verifies the remote head equals the gated OID and binds it to the PR, then runs the single terminal finalizer that marks the draft ready and swaps the issue to `loop-delivered`. Commits are pushed continuously before this; step 10 verifies and binds the head rather than being the moment it first leaves the machine. | Ready PR whose head is the gated SHA, plus a durable pre-merge record. |
+| 📝 **11 RECORD** | Orchestrator | Posts one run record — frozen plan, plan-review findings and dispositions, loaded skills, every code-review round with its dispatch id, gate command and OID, delivery and CI outcome, recovery outcomes, and the machine-computed `overlap:` line — then takes the next issue. | One auditable record per unit, tied to the delivered head. |
+
+Steps 10 and 11 carry no step label of their own; step 10's finalizer swaps the issue straight from
+`loop:09-gate` to `loop-delivered`.
+A further step, `🔁 00 RECONCILE`, runs before selection when a session finds an orphaned draft PR
+to adopt, which is why a live ribbon can read `00/11`.
+
+`loop-delivered` is applied only when committed, reviewed, gated, remote, and CI evidence all name
+the same head, everything that ran on that head is green, and the pre-merge record is durably
+bound. Delivery's CI predicate is the triggered-checks floor: every check run and commit status on
+the exact head must be green, read live from GitHub — red blocks, pending blocks, and a repository
 with no CI has nothing to wait for. There is no committed required-check list to keep in sync
 (docs/specs/simple-delivery.md).
 
