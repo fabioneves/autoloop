@@ -50,7 +50,6 @@
 
   <g transform="translate(30 120)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#0891b2"/>
     <text x="16" y="29" class="step" fill="#0e7490">01 PREMISE</text>
     <text x="16" y="59" class="card-title">Orchestrator</text>
     <text x="16" y="88" class="copy">Select eligible work.</text>
@@ -59,7 +58,6 @@
 
   <g transform="translate(320 120)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#7c3aed"/>
     <text x="16" y="29" class="step" fill="#6d28d9">02 PLAN</text>
     <text x="16" y="59" class="card-title">Fresh planner</text>
     <text x="16" y="88" class="copy">Define one boundary,</text>
@@ -68,7 +66,6 @@
 
   <g transform="translate(610 120)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#7c3aed"/>
     <text x="16" y="29" class="step" fill="#6d28d9">03 PLAN-REVIEW</text>
     <text x="16" y="59" class="card-title">Fresh reviewer</text>
     <text x="16" y="88" class="copy">Challenge the complete plan</text>
@@ -77,7 +74,6 @@
 
   <g transform="translate(900 120)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#7c3aed"/>
     <text x="16" y="29" class="step" fill="#6d28d9">04 CLAIM</text>
     <text x="16" y="59" class="card-title">Orchestrator</text>
     <text x="16" y="88" class="copy">Persist intent, freeze plan,</text>
@@ -86,7 +82,6 @@
 
   <g transform="translate(900 310)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#2563eb"/>
     <text x="16" y="29" class="step" fill="#1d4ed8">05 IMPLEMENT</text>
     <text x="16" y="59" class="card-title">Fresh implementer</text>
     <text x="16" y="88" class="copy">Build test-first;</text>
@@ -95,7 +90,6 @@
 
   <g transform="translate(610 310)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#2563eb"/>
     <text x="16" y="29" class="step" fill="#1d4ed8">06 SIMPLIFY</text>
     <text x="16" y="59" class="card-title">Fresh simplifier</text>
     <text x="16" y="88" class="copy">Reduce the artifact</text>
@@ -104,7 +98,6 @@
 
   <g transform="translate(320 310)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#16a34a"/>
     <text x="16" y="29" class="step" fill="#15803d">07 DIFF-REVIEW</text>
     <text x="16" y="59" class="card-title">Orchestrator</text>
     <text x="16" y="88" class="copy">Inspect the simplified diff;</text>
@@ -113,7 +106,6 @@
 
   <g transform="translate(30 310)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#16a34a"/>
     <text x="16" y="29" class="step" fill="#15803d">08 CODE-REVIEW / FIX</text>
     <text x="16" y="59" class="card-title">Fresh reviewers</text>
     <text x="16" y="88" class="copy">Review full diff, then only</text>
@@ -122,7 +114,6 @@
 
   <g transform="translate(30 500)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#16a34a"/>
     <text x="16" y="29" class="step" fill="#15803d">09 GATE</text>
     <text x="16" y="59" class="card-title">Orchestrator</text>
     <text x="16" y="88" class="copy">Run the full objective gate;</text>
@@ -131,7 +122,6 @@
 
   <g transform="translate(320 500)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#d97706"/>
     <text x="16" y="29" class="step" fill="#b45309">10 PUBLISH</text>
     <text x="16" y="59" class="card-title">Orchestrator</text>
     <text x="16" y="88" class="copy">Verify and bind the already-</text>
@@ -140,7 +130,6 @@
 
   <g transform="translate(610 500)">
     <rect class="card" width="260" height="140" rx="9"/>
-    <rect width="260" height="5" rx="2.5" fill="#d97706"/>
     <text x="16" y="29" class="step" fill="#b45309">11 RECORD</text>
     <text x="16" y="59" class="card-title">Orchestrator</text>
     <text x="16" y="88" class="copy">Post one durable run record;</text>

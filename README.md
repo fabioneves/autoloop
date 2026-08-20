@@ -14,8 +14,7 @@ Autoloop is a standing, self-prompting development loop for
 evidence-bound pull requests, then takes the next issue. **Pitcrew** repairs owned PRs before new
 work begins.
 
-The output is a proposal. A human merges by default; acknowledged solo repositories may explicitly
-choose a non-manual policy.
+The output is a proposal: human merge is the default; acknowledged solo repositories may opt into a non-manual policy.
 
 ## Contract
 
@@ -151,8 +150,7 @@ exact-head checks, or a revision-eligible conflict/behind state.
 7. **PUBLISH** — push safely, verify the remote head, and resolve addressed threads.
 8. **FINALIZE** — require exact-head evidence and return the same ready PR.
 
-Green manual-policy PRs are left alone. Manual policy returns the PR to the human; Pitcrew does not
-merge it.
+Green manual-policy PRs are left alone; repaired ones return to the human without merging.
 
 ## Skills
 
