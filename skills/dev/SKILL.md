@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.45 · starting
+∞ dev · v0.49.46 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1388,9 +1388,14 @@ This is the sole ready/delivered mutation surface. It requires the exact clean l
 executes the configured full gate, publishes or reuses the exact-head `agentic/review` and
 `agentic/gate` success commit statuses (SHA-bound, description carrying the verdict summary's
 sha256 prefix), fetches the PR, all current-head check runs, and the latest status per context
-completely and stably, creates or observes one deterministic pre-merge record, binds it into the
-lifecycle marker, marks a draft ready, swaps the issue to `loop-delivered`, and reads every
-terminal postcondition back. The CI predicate is the triggered-checks floor: everything that ran
+completely and stably, marks a draft ready, waits — bounded — for the triggered-check set to
+settle (readiness can trigger repository apps like Copilot Code Review, whose check runs land on
+the head seconds later; a record frozen before they settle binds a fingerprint no later readback
+can reproduce), creates or observes one deterministic pre-merge record sealed to the settled
+evidence, binds it into the lifecycle marker, swaps the issue to `loop-delivered`, and reads
+every terminal postcondition back. A typed `did not settle` refusal leaves no record behind:
+re-invoke terminal-finalize once the post-ready checks complete, and never treat that refusal as
+the unit failing. The CI predicate is the triggered-checks floor: everything that ran
 on the exact head must be green — red blocks, pending blocks, and a repo with no CI has nothing to
 wait for. Missing, pending, changed, stale, wrong-head, duplicate, edited, or incomplete evidence
 fails before the terminal mutation and may be retried only after a fresh live read. Raw

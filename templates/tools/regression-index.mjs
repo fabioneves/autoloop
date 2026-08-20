@@ -33,6 +33,29 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'ready-transition-invalidated-the-frozen-delivery-evidence',
+    date: '2026-08-20',
+    symptom: 'Six consecutive delivered units on a Copilot-review repository '
+      + 'refused auto-merge and failed their finalizer readbacks: the ready '
+      + 'transition triggered a check run that landed after ci.evidenceHash '
+      + 'froze, so no later observation could reproduce the recorded '
+      + 'fingerprint.',
+    cause: 'terminal-finalize froze the delivery evidence while the PR was '
+      + 'still draft, then marked it ready — the one mutation it performs '
+      + 'that itself grows the triggered-check set on repositories where '
+      + 'readiness triggers an app review.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'publish-verdict.mjs',
+        anchor: 'did not settle after the ready transition',
+      }),
+      Object.freeze({
+        file: 'publish-verdict.mjs',
+        anchor: 'the record freezes the settled post-ready evidence',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'task-mirror-died-with-the-harness-surface',
     date: '2026-08-20',
     symptom: 'Claude Code 2.1.234 removed TaskCreate/TaskUpdate and two full '
