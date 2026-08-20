@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc" style="max-width:100%;height:auto">
   <title id="title">Pitcrew's eight-step return path</title>
   <desc id="desc">A provably owned Autoloop pull request with trusted feedback, failed exact-head checks, or a revision-eligible conflict enters eight steps: diagnose, prepare, implement, orchestrator pass, independent review, gate, publish, and finalize. Pitcrew returns the same ready pull request to the human under the default manual policy.</desc>
   <defs>
@@ -6,6 +6,7 @@
       <path d="M0 0L9 4.5L0 9Z" fill="#64748b"/>
     </marker>
     <style>
+      svg { container-type: inline-size; }
       .bg { fill: #ffffff; }
       .card { fill: #fff7f8; stroke: #fecdd3; stroke-width: 1.5; }
       .trigger { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.25; }
@@ -20,6 +21,7 @@
       .card-title { fill: #0f172a; font: 700 18px Inter, ui-sans-serif, system-ui, sans-serif; }
       .copy { fill: #475569; font: 450 13px Inter, ui-sans-serif, system-ui, sans-serif; }
       .flow { fill: none; stroke: #64748b; stroke-width: 2.25; marker-end: url(#arrow); }
+      .mobile-flow, .mobile-trigger, .mobile-subtitle { display: none; }
       @media (prefers-color-scheme: dark) {
         .bg { fill: #0d1117; }
         .card { fill: #25171b; stroke: #6e2438; }
@@ -30,41 +32,84 @@
         .trigger-title { fill: #d0d7de; }
         .label, .step, .step-small { fill: #ff7b9c; }
       }
+      @container (max-width: 600px) {
+        .desktop-flow, .desktop-trigger, .desktop-subtitle, .copy { display: none; }
+        .mobile-flow, .mobile-trigger, .mobile-subtitle { display: inline; }
+        .heading { font-size: 42px; }
+        .subtitle { font-size: 30px; }
+        .label { font-size: 30px; letter-spacing: 0.2px; }
+        .step, .step-small { font-size: 38px; letter-spacing: 0.2px; }
+        .card-title { font-size: 42px; transform: translateY(14px); }
+        .card { width: 540px; height: 105px; }
+        #pit-step-1 { transform: translate(30px, 150px); }
+        #pit-step-2 { transform: translate(630px, 150px); }
+        #pit-step-3 { transform: translate(630px, 275px); }
+        #pit-step-4 { transform: translate(30px, 275px); }
+        #pit-step-5 { transform: translate(30px, 400px); }
+        #pit-step-6 { transform: translate(630px, 400px); }
+        #pit-step-7 { transform: translate(630px, 525px); }
+        #pit-step-8 { transform: translate(30px, 525px); }
+        #pit-outcome { transform: translate(60px, 655px); }
+        #pit-outcome .outcome { width: 1080px; }
+        #pit-outcome text { transform: translateX(260px); }
+        #pit-outcome .card-title { font-size: 38px; transform: translate(260px, 14px); }
+      }
     </style>
   </defs>
 
   <rect class="bg" width="1200" height="760"/>
   <text x="30" y="37" class="heading">PITCREW · THE SAME PR RETURNS READY</text>
-  <text x="30" y="65" class="subtitle">Only a same-repository PR with matching branch, issue, claim, and lifecycle evidence enters repair.</text>
+  <text x="30" y="65" class="subtitle desktop-subtitle">Only a same-repository PR with matching branch, issue, claim, and lifecycle evidence enters repair.</text>
+  <text x="30" y="65" class="subtitle mobile-subtitle">Owned PR · matched branch, issue, claim, and marker</text>
 
-  <text x="30" y="102" class="label">TRUSTED TRIGGERS</text>
-  <g transform="translate(30 118)">
-    <rect class="trigger" width="350" height="70" rx="8"/>
-    <text x="16" y="28" class="trigger-title">Actionable human feedback</text>
-    <text x="16" y="50" class="trigger-copy">Trusted unresolved thread or change request.</text>
+  <g class="desktop-trigger">
+    <text x="30" y="102" class="label">TRUSTED TRIGGERS</text>
+    <g transform="translate(30 118)">
+      <rect class="trigger" width="350" height="70" rx="8"/>
+      <text x="16" y="28" class="trigger-title">Actionable human feedback</text>
+      <text x="16" y="50" class="trigger-copy">Trusted unresolved thread or change request.</text>
+    </g>
+    <g transform="translate(410 118)">
+      <rect class="trigger" width="350" height="70" rx="8"/>
+      <text x="16" y="28" class="trigger-title">Exact-head check failure</text>
+      <text x="16" y="50" class="trigger-copy">Failed, errored, or cancelled current check.</text>
+    </g>
+    <g transform="translate(790 118)">
+      <rect class="trigger" width="350" height="70" rx="8"/>
+      <text x="16" y="28" class="trigger-title">Revision-eligible base state</text>
+      <text x="16" y="50" class="trigger-copy">Conflict or behind while marker is premerge-record.</text>
+    </g>
   </g>
-  <g transform="translate(410 118)">
-    <rect class="trigger" width="350" height="70" rx="8"/>
-    <text x="16" y="28" class="trigger-title">Exact-head check failure</text>
-    <text x="16" y="50" class="trigger-copy">Failed, errored, or cancelled current check.</text>
-  </g>
-  <g transform="translate(790 118)">
-    <rect class="trigger" width="350" height="70" rx="8"/>
-    <text x="16" y="28" class="trigger-title">Revision-eligible base state</text>
-    <text x="16" y="50" class="trigger-copy">Conflict or behind while marker is premerge-record.</text>
+  <g class="mobile-trigger">
+    <text x="30" y="95" class="label">TRUSTED TRIGGERS</text>
+    <text x="30" y="122" class="label">feedback · exact-head failure · premerge-record conflict/behind</text>
   </g>
 
-  <path class="flow" d="M600 188V205H160V220"/>
-  <path class="flow" d="M290 290H320"/>
-  <path class="flow" d="M580 290H610"/>
-  <path class="flow" d="M870 290H900"/>
-  <path class="flow" d="M1030 360V410"/>
-  <path class="flow" d="M900 480H870"/>
-  <path class="flow" d="M610 480H580"/>
-  <path class="flow" d="M320 480H290"/>
-  <path class="flow" d="M160 550V590H600V625"/>
+  <g class="desktop-flow">
+    <path class="flow" d="M600 188V205H160V220"/>
+    <path class="flow" d="M290 290H320"/>
+    <path class="flow" d="M580 290H610"/>
+    <path class="flow" d="M870 290H900"/>
+    <path class="flow" d="M1030 360V410"/>
+    <path class="flow" d="M900 480H870"/>
+    <path class="flow" d="M610 480H580"/>
+    <path class="flow" d="M320 480H290"/>
+    <path class="flow" d="M160 550V590H600V625"/>
+  </g>
 
-  <g transform="translate(30 220)">
+  <g class="mobile-flow">
+    <path class="flow" d="M300 135V150"/>
+    <path class="flow" d="M570 203H630"/>
+    <path class="flow" d="M900 255V275"/>
+    <path class="flow" d="M630 328H570"/>
+    <path class="flow" d="M300 380V400"/>
+    <path class="flow" d="M570 453H630"/>
+    <path class="flow" d="M900 505V525"/>
+    <path class="flow" d="M630 578H570"/>
+    <path class="flow" d="M300 630V642H600V655"/>
+  </g>
+
+  <g id="pit-step-1" transform="translate(30 220)">
     <rect class="card" width="260" height="140" rx="9"/>
     <text x="16" y="29" class="step">1 DIAGNOSE</text>
     <text x="16" y="59" class="card-title">Freeze the scope</text>
@@ -72,7 +117,7 @@
     <text x="16" y="110" class="copy">post the exact revision plan.</text>
   </g>
 
-  <g transform="translate(320 220)">
+  <g id="pit-step-2" transform="translate(320 220)">
     <rect class="card" width="260" height="140" rx="9"/>
     <text x="16" y="29" class="step">2 PREPARE</text>
     <text x="16" y="59" class="card-title">Bind and check out</text>
@@ -80,7 +125,7 @@
     <text x="16" y="110" class="copy">fetch and rebase if needed.</text>
   </g>
 
-  <g transform="translate(610 220)">
+  <g id="pit-step-3" transform="translate(610 220)">
     <rect class="card" width="260" height="140" rx="9"/>
     <text x="16" y="29" class="step">3 IMPLEMENT</text>
     <text x="16" y="59" class="card-title">Fresh implementer</text>
@@ -88,7 +133,7 @@
     <text x="16" y="110" class="copy">full-lane revision scope.</text>
   </g>
 
-  <g transform="translate(900 220)">
+  <g id="pit-step-4" transform="translate(900 220)">
     <rect class="card" width="260" height="140" rx="9"/>
     <text x="16" y="29" class="step-small">4 ORCHESTRATOR PASS</text>
     <text x="16" y="59" class="card-title">Inspect and simplify</text>
@@ -96,7 +141,7 @@
     <text x="16" y="110" class="copy">focused simplification.</text>
   </g>
 
-  <g transform="translate(900 410)">
+  <g id="pit-step-5" transform="translate(900 410)">
     <rect class="card" width="260" height="140" rx="9"/>
     <text x="16" y="29" class="step-small">5 INDEPENDENT REVIEW</text>
     <text x="16" y="59" class="card-title">Fresh reviewers</text>
@@ -104,7 +149,7 @@
     <text x="16" y="110" class="copy">deltas and open rebuts.</text>
   </g>
 
-  <g transform="translate(610 410)">
+  <g id="pit-step-6" transform="translate(610 410)">
     <rect class="card" width="260" height="140" rx="9"/>
     <text x="16" y="29" class="step">6 GATE</text>
     <text x="16" y="59" class="card-title">Full objective gate</text>
@@ -112,7 +157,7 @@
     <text x="16" y="110" class="copy">bind the new gated OID.</text>
   </g>
 
-  <g transform="translate(320 410)">
+  <g id="pit-step-7" transform="translate(320 410)">
     <rect class="card" width="260" height="140" rx="9"/>
     <text x="16" y="29" class="step">7 PUBLISH</text>
     <text x="16" y="59" class="card-title">Verify remote head</text>
@@ -120,7 +165,7 @@
     <text x="16" y="110" class="copy">resolve addressed threads.</text>
   </g>
 
-  <g transform="translate(30 410)">
+  <g id="pit-step-8" transform="translate(30 410)">
     <rect class="card" width="260" height="140" rx="9"/>
     <text x="16" y="29" class="step">8 FINALIZE</text>
     <text x="16" y="59" class="card-title">Bind final evidence</text>
@@ -128,7 +173,7 @@
     <text x="16" y="110" class="copy">mark the same PR ready.</text>
   </g>
 
-  <g transform="translate(320 625)">
+  <g id="pit-outcome" transform="translate(320 625)">
     <rect class="outcome" width="560" height="90" rx="9"/>
     <text x="280" y="32" text-anchor="middle" class="step" fill="#b45309">OUTCOME</text>
     <text x="280" y="59" text-anchor="middle" class="card-title">Same PR · ready again · returned to the human</text>
