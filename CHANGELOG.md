@@ -3,6 +3,36 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.48] - 2026-08-20
+
+### Fixed
+
+- **The task panel is one environment variable away, and the skill teaches both worlds again.**
+  v0.49.45 diagnosed the missing panel as a surface "no current host exposes" and compressed its
+  choreography out of the dev skill on that basis. The real mechanism is narrower: Claude Code
+  2.1.233 gated `TaskCreate`/`TaskUpdate`/`TaskList` **by model** — off on Opus 4.8, Sonnet 5,
+  Fable 5, Mythos 5 and newer — and the operator restores them with
+  `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`. So the probe could print `mirroring` while the instructions
+  for what to do next had been deleted, which half-mirrors: the failure mode the no-umbrella-row
+  rule already names as worse than not mirroring. The full discipline is restored under the probe
+  — run row retitled per phase, one task per step with the `∞ #<N> — 05 IMPLEMENT [OPUS]` core,
+  `step-subject.mjs` cost stamps, prune-to-four at each park — and the off-branch fate line now
+  names the flag that turns it back on. A run states that flag and never sets it: it is the
+  operator's environment and takes effect only at CLI startup. The incident is pinned in
+  `regression-index.mjs`.
+- **Swap riders name the task row conditionally instead of not at all.** v0.49.45 stripped every
+  task-tool rider (they were unfollowable on a gated host) and pinned that with a self-test
+  banning the tool names outright — which silently became the opposite defect for operators who
+  had the panel enabled. Riders now carry the row with its condition attached (`plus its task row
+  if the run open said mirroring, skip it if the panel is off`), and the self-test enforces the
+  conditional form rather than absence: a message naming the task tools must also say what makes
+  them due.
+- **A backgrounded dispatch's `description` is written in the panel's grammar.** Where the panel
+  is off, the host's background-task list is the parked run's only in-flight view, and it labels
+  each row with that field — so it now reads `∞ #291 — 05 IMPLEMENT [OPUS]` rather than
+  `Dispatch writer for issue 291 in background`. One format serves both worlds, at no cost: the
+  description is written either way.
+
 ## [0.49.47] - 2026-08-20
 
 ### Changed

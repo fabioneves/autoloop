@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.47 · starting
+∞ dev · v0.49.48 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -650,27 +650,131 @@ rules, none of which trades away evidence:
 
 ### The host task panel — activity while parked
 
-**Probe the surface before mirroring into it, and state what the probe found.** Claude Code once
-exposed native task tools (TaskCreate/TaskUpdate) and this section mirrored the run into that
-panel; harness 2.1.234 removed them outright — absent even from ToolSearch — and the mirror died
-without a line of output, because the rule for hosts without task tools was "skip this silently".
-Two full runs across four context windows mirrored nothing and said nothing, and the operator
-learned it from the missing rows. Silence about an absent surface reads exactly like a forgotten
-one, so the skip is no longer silent: directly under the run frame, print one line stating the
-panel's fate and move on —
+**Probe the surface before mirroring into it, and state what the probe found.** The panel is
+where a parked wait stops looking like a stop: it keeps an in-progress spinner on exactly the
+work that is in flight, and it is the only surface carrying a finished step's cost at a glance.
+Claude Code 2.1.233 made its task tools MODEL-GATED — `TaskCreate`/`TaskUpdate`/`TaskList` are
+off on Opus 4.8, Sonnet 5, Fable 5, Mythos 5 and newer — and because the rule for hosts without
+them was "skip this silently", the mirror died without a line of output: two full runs across
+four context windows mirrored nothing and said nothing, and the operator learned it from the
+missing rows. Silence about an absent surface reads exactly like a forgotten one.
+
+So the skip is no longer silent, and it names its own remedy. Directly under the run frame print
+one line stating the panel's fate:
 
 ```text
-🗒 task panel: none on this host — dispatch descriptions carry the in-flight view
+🗒 task panel: mirroring
+🗒 task panel: off — `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` + restart restores it; dispatch descriptions carry the view
 ```
 
-A host whose roster does have the task tools prints `🗒 task panel: mirroring` instead and keeps
-the discipline this section carried in full through v0.49.44: one run row retitled at every phase
-change and completed only at the closing rail, one task per step created when its ribbon prints
-and completed at collection with the cost stamp `step-subject.mjs` composes from the result's own
-`ms`, and completed rows pruned to the four most recent at each park so the panel never hides its
-newest work. The composer tool survives for exactly that host; the paragraphs teaching the
-choreography live in v0.49.44's history rather than here, because instructions for a surface no
-current host exposes are context spent teaching nobody.
+The flag is the operator's environment (shell export or the `env` block of their settings), read
+once at CLI startup, so a run **states it and never sets it**: writing another process's
+configuration mid-run is out of scope, and the value could not take effect in the session that
+wrote it anyway. Report the fate, take the fallback, move on.
+
+**Everything below applies whenever the probe says `mirroring`.** It is not dead prose for a
+surface nobody has — one environment variable separates the two worlds, and a run that finds the
+tools and has no instructions for them half-mirrors, which reads worse than not mirroring.
+
+- **One run row, retitled at every phase change**: subject `∞ autoloop — <phase>`
+  (`selecting`, `syncing base`, `parked on 2 dispatches`, `draining queue`, `posting digest`),
+  in-progress for the whole run, completed at the closing rail. It exists because the panel would
+  otherwise be EMPTY in the gaps between units — prime, queue scan, base sync, digest — which is
+  exactly when a live run looks stopped, since no dispatch is producing output either. **Its
+  subject must change as the phase changes.** A row that reads the same from start to finish
+  asserts only that something is running, which is the always-green-status failure; the phase text
+  is the entire reason it earns a row.
+
+  **It is never completed, deleted, or tidied before the closing rail, and it is recreated the
+  moment it is missing.** This row is the one deliberately long-lived entry in a panel of
+  short-lived ones, which makes it the row most likely to be mistaken for a leftover: hosts
+  periodically nudge toward pruning a stale task list, and a run row that has been in-progress for
+  an hour looks exactly like the thing that nudge is describing. It is not stale — its longevity is
+  its function. A live run lost it mid-flight and left a panel showing two dispatch rows and
+  nothing saying the RUN was alive or what phase it was in, which is the failure this row exists to
+  prevent, arrived at by housekeeping instead of by silence. Re-assert it whenever a phase changes:
+  if the retitle finds no row, create one rather than skipping the update.
+- **One task per step**, created in-progress when the step's ribbon prints, completed when the
+  step ends. The subject starts with the unit prefix `∞ #<N> — ` so a unit's rows read as one
+  visual group, then the ribbon core with the executor
+  slot — MODEL-ONLY in task subjects: `[OPUS]`, not `[CLAUDE:OPUS]` (the panel is narrow; the
+  engine still rides the ribbon and the stamped result, and a dispatch with no pinned model
+  falls back to the engine name, `[CODEX]`). So: `∞ #149 — 05 IMPLEMENT [OPUS]`; `activeForm`
+  says what the spinner should read while it runs (`Implementing #149 on OPUS`,
+  `Reviewing #149 r1 on GPT-5.6-SOL`). Round-scoped steps use one task per round, and EVERY
+  dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
+  shape (`∞ #149 — 08 CODE-REVIEW r1/5 [GPT-5.6-SOL]`, `∞ #78 — 08 FIX r3/5 [OPUS]`); the named
+  examples are not an exhaustive list.
+- **A completed step keeps its cost in the subject**: `[<elapsed>] [<HH:MM ended>]` —
+  `∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL] [11min] [14:35]`. **Compose it, never compute it**, from
+  the `ms` the typed result already carries:
+
+  ```bash
+  node <plugin-tools>/step-subject.mjs --subject '∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL]' --ms 660000
+  ```
+
+  **Then complete the task and set the subject in ONE call** —
+  `TaskUpdate({taskId, status: "completed", subject: <the composed line>})`. Both fields, one call.
+  This is where the stamp is actually lost: completing a task is `status: "completed"`, the subject
+  is a separate field, and a turn that reaches for the obvious call flips the status and leaves the
+  subject exactly as it was created — bare. A live panel showed
+  `✔ ∞ #220 — 08 FIX r3/7 [OPUS]` with no cost on it for that reason, with the composer available
+  and the rule followed right up to the last step. Composing a subject and not passing it is the
+  same as not composing it.
+
+  It prints the finished subject — elapsed formatted, clock read, executor slot upper-cased — and
+  re-running it on an already-completed subject returns it unchanged, so a resumed unit cannot grow
+  a second pair of brackets. In-session steps have no dispatch `ms`: pass `--started-at-ms <epoch>`
+  instead. This is a command and not a formatting rule because it used to be a formatting rule and
+  the rows shipped bare: obeying it asked for millisecond division and a clock read in the same turn
+  as collecting a result, disposing findings and swapping labels, and recall-plus-arithmetic under
+  load is the shape that decays.
+
+  The panel is where a finished step's numbers are read AT A GLANCE — the collection line that
+  stated them scrolls away and the closing rail carries only the unit total. It is not the only
+  place they survive: `stats.mjs` derives cross-unit step timings from the label timeline, so the
+  durable record is GitHub's and a pruned row loses convenience, not evidence. Together the rows
+  become a cost profile you can read without leaving the panel — which step ate the run, and
+  whether a model was slow or merely queued. Elapsed is wall time from the step's ribbon to its
+  collection, `<n>min` under an hour and `<n>h<mm>m` over it; the timestamp is the local 24-hour
+  clock, the same one the ribbon prefix uses.
+- **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
+  dispatch's step task is the visible activity; completing them happens at collection, in the
+  same turn that states the duration. A staged unit's steps get their own tasks, so two units in
+  flight read as two spinners, not one ambiguous row, and the run row names the wait
+  (`parked on 2 dispatches`).
+- Never batch-create the whole 11-step list up front: a wall of pending steps is noise and the
+  no-op steps would need deleting. Create each task when its step actually begins.
+- **Completed rows read newest-first, and that takes a deliberate rewrite.** The panel groups by
+  status and orders within a group by task ID, which is assigned at creation and never changes; no
+  task field sets position. Left alone, completed rows therefore sit oldest-first and the panel
+  truncates the tail — so the rows it hides are always the most recent ones, which is exactly
+  backwards. A live 16-row panel hid eleven completed rows, all of them newer than the three shown.
+
+  **Prune instead of sorting: at each park and at a unit's closing rail, delete completed rows
+  beyond the four most recent.** Four fit without truncation, so the newest work is always visible —
+  which is the harm. Re-sorting to put newest on top would take a delete-and-recreate of the whole
+  window on a panel that orders by an ID nothing can set, about ten tool calls in a bookkeeping
+  turn, and it buys only reading order on rows that each already carry `[<elapsed>] [<HH:MM>]`. A
+  reader can order four timestamped rows by eye; a reader cannot see a row the panel is hiding. Buy
+  the visibility, skip the ordering.
+
+  Park is where the prune belongs. It is already a bookkeeping moment (push, arm the monitor, print
+  the block), it happens a handful of times per unit rather than at every step, and it is exactly
+  when a human reads the panel — the run has gone quiet and that list is what says it is alive. A
+  per-completion version of this rule shipped in v0.49.30 and a live run on that version did not
+  follow it, which is the answer to whether the per-step cost was affordable.
+
+  A deleted row loses nothing durable: `stats.mjs` derives step timings from the label timeline, so
+  the record is GitHub's and the panel is a view of it. A shipped unit's rows go at its closing rail
+  for the same reason.
+
+There is deliberately **no per-unit umbrella row**. It carried the issue title, but it duplicated
+the `∞ #<N> — ` prefix its own step rows already showed, doubled every unit's row count in a narrow
+panel, and — being in-progress from selection to close — was itself a row that never changed. It
+also needed creating at a moment nothing else depended on, so a live run shipped `#82` with a step
+row and no umbrella while `#87` had both: half-mirrored, which reads worse than not mirroring. The
+issue title still reaches the operator at the selection ribbon and the closing rail.
 
 **`PushNotification` is not gone, and concluding otherwise from the visible roster is the
 defect.** Newer harnesses DEFER it: `ToolSearch("select:PushNotification")` loads it in one call.
@@ -681,11 +785,14 @@ say so, once, on the unit's closing rail. A live run wrote "surfaces DO NOT EXIS
 session" into its own handoff summary and dropped every delivery notification while a working
 tool sat one ToolSearch away: the roster names what is LOADED, not what exists.
 
-Where no panel exists, the background dispatches themselves are the in-flight view: the host
-lists each running background command under its Bash `description`, so write those descriptions
-as the row a human reads while the run is parked — `Dispatch writer for issue 291 in background`
-already reads as one. The parked block, the heartbeat line, and the ribbons carry everything
-else; none of them gained a new job when the panel lost its.
+**Where the panel is off, the background dispatches are the in-flight view**, and the host lists
+each running background command under its Bash `description`. That field is therefore written as
+the row a human reads while the run is parked, in the panel's own grammar so one format serves
+both worlds: `∞ #291 — 05 IMPLEMENT [OPUS]`, not `Dispatch writer for issue 291 in background`.
+It costs nothing — the description is written either way — and it is the whole difference between
+a parked run that shows which unit, step and model are burning time and one that shows a sentence.
+The parked block, the heartbeat line, and the ribbons carry everything else; none of them gained a
+new job when the panel lost its.
 
 ## Lane and convergence policy
 

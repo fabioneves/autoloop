@@ -33,6 +33,28 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'panel-choreography-deleted-for-a-surface-one-flag-away',
+    date: '2026-08-20',
+    symptom: 'v0.49.45 compressed the task-panel choreography out of the dev '
+      + 'skill as "instructions for a surface no current host exposes", '
+      + 'leaving a probe that can print `mirroring` and no instructions for '
+      + 'what to do when it does — a run finding the tools would half-mirror.',
+    cause: 'The removal was diagnosed from the visible roster: Claude Code '
+      + '2.1.233 gated the task tools by MODEL, and the operator restores '
+      + 'them with CLAUDE_CODE_ENABLE_TODO_TOOLS. Absent-for-this-session was '
+      + 'read as gone-for-good, and load-bearing prose was deleted on it.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'Everything below applies whenever the probe says',
+      }),
+      Object.freeze({
+        file: 'label-swap-reminder.mjs',
+        anchor: 'demands a task row unconditionally',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'ready-transition-invalidated-the-frozen-delivery-evidence',
     date: '2026-08-20',
     symptom: 'Six consecutive delivered units on a Copilot-review repository '
