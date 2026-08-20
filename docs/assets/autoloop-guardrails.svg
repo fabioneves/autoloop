@@ -1,55 +1,68 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="210" viewBox="0 0 1200 210" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="250" viewBox="0 0 1200 250" role="img" aria-labelledby="title desc">
   <title id="title">Autoloop's four guardrails</title>
-  <desc id="desc">Four guardrails cover trusted input, independent review, exact evidence, and human authority.</desc>
+  <desc id="desc">Four guardrails keep queue authorization with a maintainer, separate writers from fresh reviewers, bind review, gate, remote head, and triggered checks to one commit, and keep human merge as the default while acknowledged solo ratified and auto policies remain explicit exceptions.</desc>
   <style>
-    .number { font: 700 13px Inter, ui-sans-serif, system-ui, sans-serif; }
-    .title { fill: #111827; font: 700 19px Inter, ui-sans-serif, system-ui, sans-serif; }
-    .copy { fill: #475569; font: 400 14px Inter, ui-sans-serif, system-ui, sans-serif; }
-    .rule { fill: #334155; font: 600 13px Inter, ui-sans-serif, system-ui, sans-serif; }
+    .bg { fill: #ffffff; }
+    .divider { stroke: #e2e8f0; stroke-width: 1; }
+    .number { font: 750 13px Inter, ui-sans-serif, system-ui, sans-serif; }
+    .title { fill: #0f172a; font: 700 18px Inter, ui-sans-serif, system-ui, sans-serif; }
+    .copy { fill: #475569; font: 450 13px Inter, ui-sans-serif, system-ui, sans-serif; }
+    .rule { fill: #334155; font: 650 12px Inter, ui-sans-serif, system-ui, sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .divider { stroke: #30363d; }
+      .title { fill: #f0f6fc; }
+      .copy { fill: #b1bac4; }
+      .rule { fill: #d0d7de; }
+    }
   </style>
 
-  <rect width="1200" height="210" fill="#ffffff"/>
+  <rect class="bg" width="1200" height="250"/>
 
-  <g transform="translate(0 8)">
+  <g transform="translate(20 12)">
     <circle cx="20" cy="20" r="20" fill="#cffafe"/>
     <text x="20" y="25" text-anchor="middle" class="number" fill="#0e7490">01</text>
     <text x="0" y="72" class="title">Trusted input</text>
-    <text x="0" y="104" class="copy">A maintainer labels after reading.</text>
-    <text x="0" y="126" class="copy">Later edits invalidate that trust.</text>
-    <text x="0" y="174" class="rule">The queue cannot authorize itself.</text>
+    <text x="0" y="102" class="copy">A maintainer applies loop-ready</text>
+    <text x="0" y="123" class="copy">after reading the issue.</text>
+    <text x="0" y="144" class="copy">Later edits revoke that trust.</text>
+    <text x="0" y="213" class="rule">The queue cannot authorize itself.</text>
   </g>
 
-  <line x1="290" y1="0" x2="290" y2="194" stroke="#e2e8f0"/>
+  <line x1="300" y1="8" x2="300" y2="232" class="divider"/>
 
-  <g transform="translate(310 8)">
+  <g transform="translate(320 12)">
     <circle cx="20" cy="20" r="20" fill="#ede9fe"/>
     <text x="20" y="25" text-anchor="middle" class="number" fill="#6d28d9">02</text>
     <text x="0" y="72" class="title">Independent review</text>
-    <text x="0" y="104" class="copy">A different fresh thread reviews.</text>
-    <text x="0" y="126" class="copy">Zero parent context prevents echo.</text>
-    <text x="0" y="174" class="rule">Writer ≠ reviewer.</text>
+    <text x="0" y="102" class="copy">A fresh process reviews with</text>
+    <text x="0" y="123" class="copy">zero parent conclusions.</text>
+    <text x="0" y="144" class="copy">Writer-authored fixes re-enter review.</text>
+    <text x="0" y="213" class="rule">Writer ≠ reviewer.</text>
   </g>
 
-  <line x1="600" y1="0" x2="600" y2="194" stroke="#e2e8f0"/>
+  <line x1="600" y1="8" x2="600" y2="232" class="divider"/>
 
-  <g transform="translate(620 8)">
+  <g transform="translate(620 12)">
     <circle cx="20" cy="20" r="20" fill="#dcfce7"/>
     <text x="20" y="25" text-anchor="middle" class="number" fill="#15803d">03</text>
     <text x="0" y="72" class="title">Exact evidence</text>
-    <text x="0" y="104" class="copy">Review, gate, and pushed head</text>
-    <text x="0" y="126" class="copy">bind to one commit.</text>
-    <text x="0" y="148" class="copy">CI joins when present.</text>
-    <text x="0" y="190" class="rule">Opinion never replaces the gate.</text>
+    <text x="0" y="102" class="copy">Review, gate, and remote head</text>
+    <text x="0" y="123" class="copy">bind to one commit.</text>
+    <text x="0" y="144" class="copy">Triggered checks and statuses</text>
+    <text x="0" y="165" class="copy">must be green on that exact head.</text>
+    <text x="0" y="213" class="rule">Opinion never replaces the gate.</text>
   </g>
 
-  <line x1="910" y1="0" x2="910" y2="194" stroke="#e2e8f0"/>
+  <line x1="900" y1="8" x2="900" y2="232" class="divider"/>
 
-  <g transform="translate(930 8)">
+  <g transform="translate(920 12)">
     <circle cx="20" cy="20" r="20" fill="#fef3c7"/>
     <text x="20" y="25" text-anchor="middle" class="number" fill="#b45309">04</text>
-    <text x="0" y="72" class="title">Human authority</text>
-    <text x="0" y="104" class="copy">A human merges by default.</text>
-    <text x="0" y="126" class="copy">Ratified policy is the exception.</text>
-    <text x="0" y="174" class="rule">Automation cannot widen itself.</text>
+    <text x="0" y="72" class="title">Merge authority</text>
+    <text x="0" y="102" class="copy">A human merges by default.</text>
+    <text x="0" y="123" class="copy">Ratified + auto need both</text>
+    <text x="0" y="144" class="copy">solo acknowledgements.</text>
+    <text x="0" y="213" class="rule">Automation cannot widen itself.</text>
   </g>
 </svg>
