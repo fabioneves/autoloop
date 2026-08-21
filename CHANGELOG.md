@@ -3,6 +3,22 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.49] - 2026-08-21
+
+### Changed
+
+- **The default `caps.reviseRoundsPerPr` is 10, up from 3.** A live unit
+  (living-football-engine #293) blocked at a 4-round plan-review cap with every round still
+  surfacing new verified Criticals in different places — the rounds were converging work, and the
+  cap stopped them three decisions short of a human's attention being worth more than a fifth
+  round. Three rounds was sized as a ping-pong backstop, but a pre-claim plan round is the
+  cheapest place in the whole loop to spend model time: nothing is branched, claimed, or built,
+  so an early cap trades cheap rounds for an expensive human block. Ten aligns the revise budget
+  with `codeReviewRoundsPerUnit`'s existing default and leaves the cap as what it is meant to be —
+  a runaway backstop, not a convergence quota. Scaffolded and global-default configs pick this up;
+  migration deliberately preserves an existing repository's explicit value, so already-configured
+  repos change only when their human edits STATE.
+
 ## [0.49.48] - 2026-08-20
 
 ### Fixed
