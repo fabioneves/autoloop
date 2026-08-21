@@ -33,6 +33,29 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'loop-reapplied-block-labels-over-a-human-unblock',
+    date: '2026-08-21',
+    symptom: 'A unit blocked at the plan-review cap was unblocked by its '
+      + 'human (loop-blocked + human:decide removed in one edit); five hours '
+      + 'later a run re-applied both labels as "bookkeeping — blocking labels '
+      + 'restored", reversing the unblock and costing the human a second one.',
+    cause: 'Block state was inferred from the PRESENCE of the historical '
+      + 'block comment instead of from the label timeline, whose unlabeled '
+      + 'events postdating the comment ARE the unblock. Nothing stated the '
+      + 'mirror of the loop-ready rule: removing the block labels is the '
+      + "human's one-action decision, and no loop path may reverse it.",
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'label-swap-reminder.mjs',
+        anchor: 'reversed a human unblock',
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'equally one human action, and equally irreversible',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'panel-choreography-deleted-for-a-surface-one-flag-away',
     date: '2026-08-20',
     symptom: 'v0.49.45 compressed the task-panel choreography out of the dev '

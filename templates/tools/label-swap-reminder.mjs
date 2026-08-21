@@ -214,7 +214,13 @@ export function reminderFor(command, opts = {}) {
       + `and every \`loop:*\` step label. KEEP \`loop-ready\`: \`loop-blocked\` already takes the `
       + `issue out of the eligible queue, and \`loop-ready\` is the human's authorization token `
       + `that no loop path may re-apply — stripping it turns their one-label unblock into a `
-      + `deadlock the loop cannot leave.`;
+      + `deadlock the loop cannot leave. `
+      + `④ LEGITIMACY: this apply is valid ONLY if THIS run is blocking ${n} NOW, with ③'s fresh `
+      + `reason comment. If it "restored" labels inferred from an OLD block comment, you reversed `
+      + `a human unblock — a trusted actor removing \`loop-blocked\` IS the unblock decision, the `
+      + `exact mirror of \`loop-ready\` (the timeline shows it: \`unlabeled\` events after the `
+      + `block comment). Remove the labels you just added and select the unit as ordinary `
+      + `eligible work; the stale comment is history, never authority.`;
   }
 
   const label = (labels.find((l) => l.startsWith('loop:')) || '').trim();
@@ -279,6 +285,8 @@ function selfTest() {
     ['gh issue edit 4 --add-label loop-blocked', /PushNotification `✖ #4/],
     ['gh issue edit 4 --add-label loop-blocked', /══ BLOCKED/],
     ['gh issue edit 4 --add-label loop-blocked', /KEEP `loop-ready`/],
+    ['gh issue edit 4 --add-label loop-blocked', /reversed a human unblock/],
+    ['gh issue edit 293 --add-label loop-blocked,human:decide', /unlabeled` events after the block comment/],
     ['ls /cache | node /cache/0.47.0/templates/tools/release-verify.mjs --sort-versions | tail -3', /1\/5 RESOLVE/],
     ['node /cache/templates/tools/scaffold.mjs --audit .', /2\/5 AUDIT/],
     ['node /cache/templates/tools/scaffold.mjs --reconcile /repo', /4\/5 WRITE/],
