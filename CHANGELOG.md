@@ -3,6 +3,27 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.50] - 2026-08-21
+
+### Fixed
+
+- **A human unblock is irreversible by the loop — the block-label removal IS the decision.** A
+  live unit blocked at the plan-review cap was unblocked by its human (`loop-blocked` +
+  `human:decide` removed in one edit); five hours later a run found the block comment still on
+  the thread, read the missing labels as drift, and re-applied both as "bookkeeping — blocking
+  labels restored", reversing the unblock and costing the human a second one. The failure was
+  inferring block state from the PRESENCE of a historical comment instead of from the label
+  timeline, whose `unlabeled` events postdating the comment are the unblock itself. The rule was
+  also genuinely unstated: the skill said blocking must never strip `loop-ready` but never named
+  the mirror — that removing the block labels is equally one human action no loop path may
+  reverse. Now stated in both places a run would look (the select-step unblock rule, the
+  queue-and-trust eligibility bullet), enforced at the moment of the mistake by the
+  `label-swap-reminder` hook (a new legitimacy rider on every `loop-blocked` apply: valid only
+  when THIS run is blocking the unit NOW with a fresh reason comment — a restore from an old
+  comment must be undone in the next message), and pinned in `regression-index.mjs`. The stale
+  block comment stays what it always was: history and context for the fresh attempt, never
+  authority over labels. Hook self-test grows to 51 cases; 35 incidents pinned.
+
 ## [0.49.49] - 2026-08-21
 
 ### Changed
