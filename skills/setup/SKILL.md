@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.48 · starting
+∞ setup · v0.49.49 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -119,7 +119,7 @@ Schema `0.26.0` stores repository policy, never session intent:
   "review": { "checklistPath": "docs/agentic/checklist.md" },
   "caps": {
     "gateRetriesPerUnit": 2,
-    "reviseRoundsPerPr": 3,
+    "reviseRoundsPerPr": 10,
     "codeReviewRoundsPerUnit": 10,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10
@@ -294,7 +294,7 @@ Global defaults contain only non-project preferences:
   "tracker": { "provider": "none" },
   "caps": {
     "gateRetriesPerUnit": 2,
-    "reviseRoundsPerPr": 3,
+    "reviseRoundsPerPr": 10,
     "codeReviewRoundsPerUnit": 10,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10
