@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { validPremergeRecordId } from './attestation-contract.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/i;
+const PLANNED_BASE_REACHABLE = new Set(['identical', 'ahead']);
 const HASH_RE = /^[0-9a-f]{64}$/i;
 const SAFE_LABELS = new Set(['risk:pure-deletion', 'risk:mechanical-refactor']);
 const HARD_LABELS = new Set([
@@ -178,12 +179,21 @@ function validateOwnership(config, pr, reasons) {
     if (first?.message !== `chore: claim #${pr.claim?.issue}`) {
       reasons.push('branch-starting claim commit message is not canonical');
     }
+    // The claim forks from the marker-sealed planned base, and the base branch
+    // keeps moving for the whole unit — a parent-equals-current-tip test passed
+    // only when nothing had merged since claim. Ancestry is the real invariant:
+    // the claim's parent IS the planned base, and the current base still
+    // descends from it (the compare status the driver uses for draft creation).
     if (
       first?.parentOids?.length !== 1
-      || first.parentOids[0] !== pr.baseRefOid
+      || !SHA_RE.test(claimCommit.plannedBaseOid ?? '')
+      || first.parentOids[0] !== claimCommit.plannedBaseOid
       || claimCommit.baseOid !== pr.baseRefOid
     ) {
-      reasons.push('branch-starting claim commit is not parented by the current base');
+      reasons.push('branch-starting claim commit is not parented by the planned base');
+    }
+    if (!PLANNED_BASE_REACHABLE.has(claimCommit.plannedBaseReachable)) {
+      reasons.push('current base does not descend from the planned base');
     }
     if (last?.oid !== pr.headRefOid) reasons.push('claim commit metadata does not reach the current PR head');
   }
@@ -349,6 +359,7 @@ export function authorizeMerge(input) {
 const HEAD = 'a'.repeat(40);
 const BASE = 'e'.repeat(40);
 const CLAIM = 'd'.repeat(40);
+const PLANNED_BASE = '9'.repeat(40);
 
 function verdictStatuses() {
   return [
@@ -426,12 +437,14 @@ function fixture(overrides = {}) {
           issue: 7,
           headOid: HEAD,
           baseOid: BASE,
+          plannedBaseOid: PLANNED_BASE,
+          plannedBaseReachable: 'ahead',
           oid: CLAIM,
           commits: [
             {
               oid: CLAIM,
               message: 'chore: claim #7',
-              parentOids: [BASE],
+              parentOids: [PLANNED_BASE],
             },
             {
               oid: HEAD,
@@ -564,7 +577,7 @@ function selfTest() {
         },
       },
     }), false],
-    ['claim commit not parented by the current base blocks', fixture({
+    ['claim commit not parented by the planned base blocks', fixture({
       pr: {
         ...base.pr,
         ownership: {
@@ -573,6 +586,58 @@ function selfTest() {
             ...base.pr.ownership.claimCommit,
             commits: base.pr.ownership.claimCommit.commits.map((commit, index) =>
               index === 0 ? { ...commit, parentOids: ['f'.repeat(40)] } : commit),
+          },
+        },
+      },
+    }), false],
+    // A live unit (#296) was refused after three unrelated commits landed on
+    // main during its 4-hour run: the claim's parent can equal the current tip
+    // only when nothing has merged since claim, which is never true in a busy
+    // queue. Forward-moved base allows; a rewritten or unknown one refuses.
+    ['claim parented by the planned base with a forward-moved current base allows', fixture({
+      pr: {
+        ...base.pr,
+        ownership: {
+          ...base.pr.ownership,
+          claimCommit: {
+            ...base.pr.ownership.claimCommit,
+            plannedBaseReachable: 'identical',
+          },
+        },
+      },
+    }), true],
+    ['claim parented by the planned base with a rewritten current base blocks', fixture({
+      pr: {
+        ...base.pr,
+        ownership: {
+          ...base.pr.ownership,
+          claimCommit: {
+            ...base.pr.ownership.claimCommit,
+            plannedBaseReachable: 'diverged',
+          },
+        },
+      },
+    }), false],
+    ['claim parented by the planned base with unknown base ancestry blocks', fixture({
+      pr: {
+        ...base.pr,
+        ownership: {
+          ...base.pr.ownership,
+          claimCommit: {
+            ...base.pr.ownership.claimCommit,
+            plannedBaseReachable: null,
+          },
+        },
+      },
+    }), false],
+    ['claim commit with no sealed planned base blocks', fixture({
+      pr: {
+        ...base.pr,
+        ownership: {
+          ...base.pr.ownership,
+          claimCommit: {
+            ...base.pr.ownership.claimCommit,
+            plannedBaseOid: undefined,
           },
         },
       },

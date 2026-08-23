@@ -33,6 +33,38 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'auto-merge-demanded-the-claim-parent-equal-the-moving-base-tip',
+    date: '2026-08-23',
+    symptom: 'A delivered unit under merge.policy auto was refused with '
+      + '"branch-starting claim commit is not parented by the current base" '
+      + 'after three unrelated commits landed on main during its 4-hour run; '
+      + 'the branch even carried a base merge.',
+    cause: 'validateOwnership compared the claim commit\'s parent to '
+      + 'pr.baseRefOid — the CURRENT tip — which equals the planned base only '
+      + 'while nothing has merged since claim. The same equality-against-a-'
+      + 'moving-tip defect as the draft-creation wedge, one predicate over. '
+      + 'The invariant is ancestry: parent IS the marker-sealed plannedBaseOid '
+      + 'and the current base descends from it.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'merge-authorization-contract.mjs',
+        anchor: 'current base does not descend from the planned base',
+      }),
+      Object.freeze({
+        file: 'merge-authorization-contract.mjs',
+        anchor: 'claim parented by the planned base with a forward-moved current base allows',
+      }),
+      Object.freeze({
+        file: 'auto-merge.reference.mjs',
+        anchor: 'function fetchPlannedBaseComparison(',
+      }),
+      Object.freeze({
+        file: 'auto-merge.reference.mjs',
+        anchor: 'claim commit whose planned base the current base no longer descends from blocks',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'invented-step-label-stripped-the-gate-label',
     date: '2026-08-23',
     symptom: 'After a green gate a run swapped `loop:09-gate` for an invented '
