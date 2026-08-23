@@ -85,7 +85,9 @@ const NEXT = {
   '06-simplify': ['loop:07-diff-review', 'the diff review starts'],
   '07-diff-review': ['loop:08-code-review', 'the fresh code-review dispatch goes out'],
   '08-code-review': ['loop:09-gate', 'the gate runs'],
-  '09-gate': ['loop-delivered (or loop-blocked)', 'the unit reaches its terminal state'],
+  '09-gate': ['loop-delivered (or loop-blocked)', 'the terminal finalizer swaps it itself — '
+    + 'steps 10 PUBLISH and 11 RECORD carry NO label; `loop:09-gate` stays on until then, and '
+    + 'a `gh issue edit --add-label loop:10-*` is a guard block, not a step'],
 };
 
 // A dispatch IS the step it serves, which makes it an anchor a skipped swap
@@ -259,6 +261,9 @@ function selfTest() {
     ['gh issue edit 7 --remove-label loop:03-plan-review --add-label loop:04-claim', /Next: swap `loop:05-implement`/],
     ['gh issue edit 12 --remove-label loop-delivered --add-label loop:revising', /pitcrew take-up banner/],
     ['gh issue edit 12 --add-label "loop:09-gate"', /09\/11 🚦 GATE/],
+    // A live 0.49.51 run swapped `loop:09-gate` for an invented `loop:10-publish`.
+    ['gh issue edit 12 --add-label "loop:09-gate"', /carry NO label/],
+    ['gh issue edit 296 --remove-label loop:09-gate --add-label loop:10-publish', null],
     ['gh issue edit 5 --remove-label loop:05-implement --add-label loop:06-simplify', /06\/11 🧹 SIMPLIFY/],
     ['gh issue edit 5 --add-label loop:06-simplify', /agent-skills:code-simplification/],
     ['gh issue edit 7 --add-label "loop:02-plan"', /## Constraints/],

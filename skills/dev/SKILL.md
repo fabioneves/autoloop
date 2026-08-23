@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.51 · starting
+∞ dev · v0.49.52 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1448,6 +1448,12 @@ delta-review path, then runs a new full gate. Exhausted retries block.
 
 ### 10. Publish, finalize, and submit
 
+**No label swap opens this step, or step 11.** The step ladder ends at `loop:09-gate`; it stays on
+the issue until the terminal finalizer swaps it to `loop-delivered` itself. A live run invented
+`loop:10-publish` here: `gh issue edit` removed `09-gate`, failed on the unknown label behind a
+`2>/dev/null`, and left the unit wearing only `loop-ready` + `loop-started` — indistinguishable
+from a freshly selected issue. The guard now blocks any `--add-label loop:*` outside the ladder.
+
 Publish with `git push origin HEAD:refs/heads/<captured-loop-branch>` and verify the remote PR head
 equals the gated OID. If and only if the branch was rebased, use
 `git push --force-with-lease=refs/heads/<captured-loop-branch>:<expected-remote-oid> origin HEAD:refs/heads/<captured-loop-branch>`.
@@ -1704,6 +1710,8 @@ never means two things:
 | 04 CLAIM | 📌 | 09 GATE | 🚦 |
 | 05 IMPLEMENT | 🔨 | 10 PUBLISH | 📦 |
 | | | 11 RECORD | 📝 |
+
+Steps 10 and 11 have ribbons but no `loop:*` label — `loop:09-gate` is the last step label.
 
 Reading them apart is the point: 🔬 scrutinises a plan and 🔍 scrutinises code, 👓 is the
 orchestrator's own read, 🔨 builds and 🔧 repairs. The state badge stays where it is — the glyph

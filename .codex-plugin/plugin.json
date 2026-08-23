@@ -1,6 +1,6 @@
 {
   "name": "autoloop",
-  "version": "0.49.51",
+  "version": "0.49.52",
   "description": "A native-first development loop for Codex CLI, Claude Code, and opencode: labelled GitHub issues in, gated and independently reviewed PRs out; a human merges by default.",
   "author": {
     "name": "Fábio Neves",

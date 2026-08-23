@@ -3,6 +3,22 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.52] - 2026-08-23
+
+### Fixed
+
+- **An invented step label can no longer strip the gate label.** After a green gate a live run
+  ran `gh issue edit --remove-label loop:09-gate --add-label loop:10-publish 2>/dev/null`. No
+  such label exists — the ladder ends at `loop:09-gate`, and the terminal finalizer swaps it to
+  `loop-delivered` itself — so gh removed `09-gate`, failed on the add behind the discarded
+  stderr, and the unit read as freshly selected (`loop-ready` + `loop-started`, no step label)
+  for the rest of publish. The step table numbered 10 PUBLISH and 11 RECORD like every other
+  step and nothing said they carry no label. The command guard now blocks any `--add-label
+  loop:*` outside the ladder (rule 9, corpus case from the live command), the swap reminder's
+  `09-gate` pointer says the finalizer owns the next swap, and the dev skill states it at step
+  10 and under the step table. Pinned in `regression-index.mjs` (37 incidents). The guard and
+  reminder are vendored — reconcile `tools/agentic/` in host repos to pick them up.
+
 ## [0.49.51] - 2026-08-21
 
 ### Fixed
