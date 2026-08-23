@@ -20,6 +20,8 @@
 //        subcommands — opaque syntax can conceal any rule above.
 //     9. applying a `loop:*` label outside the step ladder (`loop:10-publish`) — steps
 //        10/11 carry no label; `loop:09-gate` stays until the terminal finalizer swaps it.
+//    10. swapping a step label backward (`--add-label loop:02-plan --remove-label
+//        loop:03-plan-review`) — the ladder only climbs; plan review is one dispatch.
 //
 //   ALLOW other literal canonical commands (exit 0). An invalid hook payload fails
 //   closed because it cannot prove which command the host is about to execute.
@@ -1222,6 +1224,28 @@ function addsUnknownStepLabel(words) {
     }));
 }
 
+// The ladder only climbs. A live run swapped 03-plan-review back to 02-plan
+// twice to re-review a revised plan — plan review is one dispatch, and a step
+// label never moves backward; each swap hid a second review round as a step.
+function stepNumber(label) {
+  const match = label.trim().toLowerCase().match(/^loop:(\d{2})-/);
+  return match ? Number(match[1]) : null;
+}
+
+function swapsStepLabelBackward(words) {
+  const edit =
+    hasGhScopedAction(words, 'issue', 'edit')
+    || hasGhScopedAction(words, 'pr', 'edit');
+  if (!edit) return false;
+  const numbers = (option) => optionValues(words, option)
+    .flatMap((value) => value.split(','))
+    .map(stepNumber)
+    .filter((number) => number !== null);
+  const added = numbers('--add-label');
+  const removed = numbers('--remove-label');
+  return added.some((add) => removed.some((remove) => add < remove));
+}
+
 function renamesProtectedLifecycleLabel(words) {
   return hasGhScopedAction(words, 'label', 'edit')
     && optionValues(words, '--name', '-n').some(
@@ -1639,6 +1663,16 @@ export function evaluate(rawCmd, branch, options = {}) {
         + '10 PUBLISH and 11 RECORD carry no label, and the terminal finalizer swaps '
         + '`loop:09-gate` to `loop-delivered` itself. Leave `loop:09-gate` on the issue and run '
         + 'publish-verdict.mjs terminal-finalize.',
+    };
+  }
+  if (segments.some(({ command }) => swapsStepLabelBackward(shellWords(command)))) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — step labels only climb. Re-reviewing a revised plan is not a step: '
+        + 'plan review is ONE dispatch, the revision ships reviewed-once with dispositions '
+        + 'recorded and carried into code-review r1. Leave the current step label and continue '
+        + 'forward (claim).',
     };
   }
   if (segments.some(({ command }) =>
@@ -2351,6 +2385,13 @@ function selfTest() {
     ['gh issue edit 296 --remove-label loop:08-code-review --add-label loop:09-gate', 'feat/gh-296-x', false],
     ['gh issue edit 296 --remove-label loop-delivered --add-label loop:revising', 'feat/gh-296-x', false],
     ['gh issue edit 296 --remove-label loop:10-publish', 'feat/gh-296-x', false],
+    // The ladder only climbs: a live run swapped 03 back to 02 to re-review a plan.
+    ['gh issue edit 298 --add-label "loop:02-plan" --remove-label "loop:03-plan-review" 2>&1 | tail -1', 'main', true],
+    ['gh issue edit 298 --remove-label loop:08-code-review --add-label loop:05-implement', 'feat/gh-298-x', true],
+    ['gh issue edit 298 --remove-label loop:02-plan --add-label loop:03-plan-review', 'main', false],
+    ['gh issue edit 298 --add-label loop:02-plan', 'main', false],
+    ['gh issue edit 298 --remove-label loop:09-gate,loop-started', 'main', false],
+    ['gh issue edit 298 --remove-label loop-delivered --add-label loop:revising', 'main', false],
     ['gh label edit old-name --name loop-delivered', 'feat/gh-2-y', true],
     ['gh label edit old-name --name loop-ready', 'feat/gh-2-y', true],
     ['gh label edit old-name -nloop-delivered', 'feat/gh-2-y', true],

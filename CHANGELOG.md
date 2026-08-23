@@ -3,6 +3,23 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.54] - 2026-08-23
+
+### Fixed
+
+- **Plan review is one dispatch again, mechanically.** A staged unit ran PLAN-REVIEW r1, r2, r3
+  against one plan (v2, v3, v4), swapping `loop:03-plan-review` back to `loop:02-plan` before
+  each revision. The dev skill's "Review the plan once" was prose only: the dispatch anchor
+  treated plan-review like any repeatable step, the swap reminder knew only forward swaps, and no
+  guard refused a backward one — so re-review read as a round (0.49.49 had already raised a
+  pitcrew cap in its name). Now: guard rule 10 blocks any backward step swap (`--add-label
+  loop:0A --remove-label loop:0B` with A < B; live command in the corpus), the plan-review
+  dispatch anchor says this is the ONE plan review and the label never moves back, and the skill
+  states that a second plan-review dispatch is a defect — a finding the revised plan still
+  carries is a recorded disposition that rides into code-review r1. `reviseRoundsPerPr` is
+  named for what it is: the pitcrew post-human-review budget. Pinned in `regression-index.mjs`
+  (39 incidents). Guard and reminder are vendored — reconcile `tools/agentic/` in host repos.
+
 ## [0.49.53] - 2026-08-23
 
 ### Fixed
