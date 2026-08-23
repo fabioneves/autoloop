@@ -739,6 +739,8 @@ export function deriveLiveIssueEvidence(input) {
       issue: marker.issue,
       headOid: marker.headOid,
       baseOid: pullRequest?.baseOid,
+      plannedBaseOid: marker.plannedBaseOid ?? null,
+      plannedBaseReachable: input?.plannedBaseComparison?.status ?? null,
       oid: marker.claimCommit,
       commits: commitMetadata,
     },
@@ -1014,6 +1016,20 @@ function fetchDependencies(body) {
   return { complete: true, items };
 }
 
+// The base branch moves for the whole unit, so the claim's parent is proven
+// against the marker-sealed planned base and the compare endpoint proves the
+// current base still descends from it. A failed or malformed compare hydrates
+// null, which the authorization contract refuses.
+function fetchPlannedBaseComparison(plannedBaseOid, baseOid) {
+  if (!SHA_RE.test(plannedBaseOid ?? '') || !SHA_RE.test(baseOid ?? '')) return null;
+  try {
+    const comparison = ghJson(ghApiArgs(`repos/${REPO_SLUG}/compare/${plannedBaseOid}...${baseOid}`));
+    return typeof comparison?.status === 'string' ? { status: comparison.status } : null;
+  } catch {
+    return null;
+  }
+}
+
 function fetchLinkedIssueEvidence(number, policyLive) {
   const record = fetchIssueRecord(number);
   const timeline = fetchTimeline(number);
@@ -1021,11 +1037,13 @@ function fetchLinkedIssueEvidence(number, policyLive) {
   const loopReadyPermission = readyEvent?.actor?.login
     ? fetchPermission(readyEvent.actor.login)
     : { complete: false, login: null, roleName: null };
+  const marker = finalizedDeliveryMarker(record.comments, LOOP_LOGIN, policyLive.pullRequest?.headOid);
   return deriveLiveIssueEvidence({
     ...record,
     timeline,
     dependencies: fetchDependencies(record.issue.body),
     loopReadyPermission,
+    plannedBaseComparison: fetchPlannedBaseComparison(marker?.plannedBaseOid, policyLive.pullRequest?.baseOid),
     ...policyLive,
     loopLogin: LOOP_LOGIN,
   });
@@ -1810,6 +1828,8 @@ function makeInput({
         issue: LOOP_ISSUE,
         headOid: HEAD_SHA,
         baseOid: BASE_SHA,
+        plannedBaseOid: BASE_SHA,
+        plannedBaseReachable: 'identical',
         oid: CLAIM_SHA,
         commits: [
           {
@@ -2005,10 +2025,18 @@ export const FIXTURES = [
     commits: claimCommit.commits.map((commit, index) =>
       index === 0 ? { ...commit, message: 'chore: claim issue 7' } : commit),
   })),
-  invalidClaimFixture('claim commit parent not equal to base blocks', (claimCommit) => ({
+  invalidClaimFixture('claim commit parent not equal to the planned base blocks', (claimCommit) => ({
     ...claimCommit,
     commits: claimCommit.commits.map((commit, index) =>
       index === 0 ? { ...commit, parentOids: ['f'.repeat(40)] } : commit),
+  })),
+  invalidClaimFixture('claim commit whose planned base the current base no longer descends from blocks', (claimCommit) => ({
+    ...claimCommit,
+    plannedBaseReachable: 'diverged',
+  })),
+  invalidClaimFixture('claim commit with an unknown planned-base comparison blocks', (claimCommit) => ({
+    ...claimCommit,
+    plannedBaseReachable: null,
   })),
   {
     name: 'missing linked issue and ownership evidence blocks',
@@ -2360,6 +2388,7 @@ function statusStampCases() {
     commitMetadata,
     statuses: publicationStatuses,
     delivery,
+    plannedBaseComparison: { status: 'ahead' },
     loopLogin: LOOP_LOGIN,
   };
   const hydrated = deriveLiveIssueEvidence(policyLiveInput);
@@ -2369,6 +2398,8 @@ function statusStampCases() {
       hydrated.ownership?.claimCommitAncestor === true
       && hydrated.ownership?.claimCommit?.commits?.[0]?.message === `chore: claim #${LOOP_ISSUE}`
       && hydrated.ownership?.claimCommit?.baseOid === BASE_SHA
+      && hydrated.ownership?.claimCommit?.plannedBaseOid === BASE_SHA
+      && hydrated.ownership?.claimCommit?.plannedBaseReachable === 'ahead'
       && hydrated.ownership?.claimCommit?.headOid === HEAD_SHA
       && hydrated.ownership?.frozenPlanCommentVerified === true
       && hydrated.lifecycle?.complete === true

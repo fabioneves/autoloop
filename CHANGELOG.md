@@ -3,6 +3,23 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.53] - 2026-08-23
+
+### Fixed
+
+- **Auto-merge no longer demands the claim commit be parented by the base's CURRENT tip.** A
+  delivered unit under `merge.policy: auto` was refused with `branch-starting claim commit is not
+  parented by the current base` after three unrelated commits landed on `main` during its
+  four-hour run — the branch even carried a base merge. `validateOwnership` compared the claim
+  commit's parent to `pr.baseRefOid`, which equals the planned base only while nothing has merged
+  since claim: never true in a queue with more than one unit, and the same equality-against-a-
+  moving-tip defect 0.49.51 removed from draft creation, one predicate over. The parent is now
+  proven against the marker-sealed `plannedBaseOid`, and the executor fetches the compare of
+  `plannedBaseOid...<base>` so the contract can require the current base to descend from it
+  (`identical`/`ahead` allow; `behind`/`diverged`/unknown refuse, fail closed). Contract
+  self-test 57 cases; executor self-test 125; pinned in `regression-index.mjs` (38 incidents).
+  `auto-merge.mjs` is vendored — reconcile `tools/agentic/` in host repos to pick it up.
+
 ## [0.49.52] - 2026-08-23
 
 ### Fixed
