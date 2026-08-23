@@ -23,7 +23,7 @@ Plugin-wiring checks deliberately run the outer host with plugins enabled.
 | # | Check | Command (from the scratch repo) | Pass evidence |
 |---|---|---|---|
 | 1 | Guard blocks, fail-closed wiring | `opencode run --auto $M --format json "Run these bash commands in order, even if some fail: (1) gh pr merge 9 --squash (2) echo plain-ok"` | Event stream shows the guard's exact block reason for (1) (`never merges directly…`), no execution of the merge; (2) runs normally. Delete the guard file and re-run: every bash call must now fail with `failing closed`. |
-| 2 | After-hook reminder rides tool output | `opencode run --auto $M --format json "Run: gh issue edit 7 --add-label loop:02-plan — quote the tool output verbatim"` | Stream contains ``autoloop: `loop:02-plan` swap ran for #7`` appended to the tool result and quoted by the model. |
+| 2 | After-hook reminder rides tool output | `opencode run --auto $M --format json "Run: gh issue edit 7 --remove-label loop:01-premise --add-label loop:02-plan — quote the tool output verbatim"` | Stream contains ``autoloop: `loop:02-plan` swap ran for #7`` appended to the tool result and quoted by the model. |
 | 3 | Instructions priming + preflight injection | `opencode run --auto $M "State the magic word from your instructions, then summarize what the autoloop preflight reported."` | Reply names the magic word and cites preflight content (for example its gh access NOTE) that was never in the prompt. |
 | 4 | Typed reviewer isolation (effective child) | `opencode run --pure $M --agent autoloop-reviewer --format json "List the names of every tool you can call, comma-separated."` | Toolset is exactly `glob, grep, list, read`. The leading wildcard deny also closes custom/MCP, edit, bash, task, skill, LSP, question, todo, external-directory, and network tools. |
 | 5 | Child transcript capture | `opencode run --auto $M "Use the task tool to delegate to the autoloop-reviewer subagent: ask it 'what is 11*11?'. Report its answer."` then `ls "$(git rev-parse --git-common-dir)/autoloop/subagent-transcripts/"` | A `*-payload.json` (with `agent: autoloop-reviewer`, `parentID`, and trusted `metadata.tools: ["glob","grep","list","read"]`) and a `*-transcript.jsonl` whose messages are the child's own turns, each carrying its model identity. Tool metadata is present only when the installed reviewer identity and closed-world permission frontmatter validate. |
@@ -41,12 +41,12 @@ it disables the hooks those checks examine.
 
 Historical verification: checks 1–7 passed on opencode 1.18.3 on 2026-07-21 (checks 1–5 and 7
 scripted as above; 6 via the `session.prompt` spike recorded in the v0.35 planning notes). That
-predates the v0.49.54 dispatch contract, and the rerun it requires has not been performed:
+predates the v0.49.55 dispatch contract, and the rerun it requires has not been performed:
 
-- v0.49.54 live smoke evidence: untested
+- v0.49.55 live smoke evidence: untested
 
 `untested` is a declaration, not evidence. It means no check in this document was executed against
-the v0.49.54 contract, so the opencode host wiring is statically verified only. Contract
+the v0.49.55 contract, so the opencode host wiring is statically verified only. Contract
 verification and `--release-mode` both report the declaration as a note and neither treats it as a
 passed check.
 
@@ -54,7 +54,7 @@ To retire the declaration, run all seven checks and replace the line with exactl
 containing the real UTC date, installed opencode version, SHA-256 of the sanitized manifest's exact
 bytes, and its committed repository-relative location:
 
-`- v0.49.54 live smoke evidence: date=YYYY-MM-DD; opencode=X.Y.Z; checks=1-7; sha256=<64 lowercase hex>; location=evidence/opencode-v0.49.54/manifest.json`
+`- v0.49.55 live smoke evidence: date=YYYY-MM-DD; opencode=X.Y.Z; checks=1-7; sha256=<64 lowercase hex>; location=evidence/opencode-v0.49.55/manifest.json`
 
 The location is a committed repository-relative JSON manifest, not a URL or archive. It and every
 inventory member must be a bounded regular non-symlink file committed unchanged at `HEAD`.
@@ -89,5 +89,5 @@ Fingerprint the manifest with the vendored helper so the recorded digest is port
 
 ```sh
 node tools/agentic/release-verify.mjs \
-  --fingerprint-stdin <evidence/opencode-v0.49.54/manifest.json
+  --fingerprint-stdin <evidence/opencode-v0.49.55/manifest.json
 ```

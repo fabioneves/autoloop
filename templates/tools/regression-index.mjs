@@ -33,6 +33,32 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'add-only-step-swap-stranded-the-claim-label',
+    date: '2026-08-23',
+    symptom: 'A unit wore loop:04-claim and loop:08-code-review at once: the '
+      + 'first model-driven swap after the driver\'s claim was '
+      + '`--add-label loop:05-implement` with no remove, and the 06→08 swap '
+      + 'left no 07-diff-review on the timeline.',
+    cause: 'The guard validated what a swap adds (rules 9, 10) and the '
+      + 'reminder knew only the forward pointer; nothing required the '
+      + 'predecessor to be retired in the same command, so an add-only swap '
+      + 'and a skipped step both passed as progress.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'function addsStepWithoutRetiringPredecessor(',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: "['gh issue edit 298 --add-label loop:05-implement', 'feat/gh-298-x', true]",
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'A swap is one command with both halves',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'plan-review-re-dispatched-as-rounds-with-backward-step-swaps',
     date: '2026-08-23',
     symptom: 'A staged unit ran PLAN-REVIEW r1, r2, r3 against one plan '

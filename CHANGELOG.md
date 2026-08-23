@@ -3,6 +3,22 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.55] - 2026-08-23
+
+### Fixed
+
+- **A step swap must retire its predecessor in the same command.** A unit wore `loop:04-claim`
+  and `loop:08-code-review` at once: the first model-driven swap after the driver's claim was
+  `--add-label loop:05-implement` with no remove, and the 06→08 swap left no `07-diff-review` on
+  the timeline. The guard validated what a swap adds (rules 9, 10) and the reminder knew only the
+  forward pointer; nothing required the old label to go. Guard rule 11 now refuses
+  `--add-label loop:<N>-…` without `--remove-label loop:<N-1>-…` (01 has no predecessor; 04 is
+  the driver's swap), so add-only swaps and skipped steps fail closed before gh runs. Removing a
+  label that is not present is a no-op, so the rule holds when an earlier swap already lost it.
+  Live command in the corpus; skill line under the step table; opencode smoke check 2 uses the
+  swap shape. Pinned in `regression-index.mjs` (40 incidents). The guard is vendored —
+  reconcile `tools/agentic/` in host repos.
+
 ## [0.49.54] - 2026-08-23
 
 ### Fixed

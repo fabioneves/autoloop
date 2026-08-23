@@ -22,6 +22,8 @@
 //        10/11 carry no label; `loop:09-gate` stays until the terminal finalizer swaps it.
 //    10. swapping a step label backward (`--add-label loop:02-plan --remove-label
 //        loop:03-plan-review`) — the ladder only climbs; plan review is one dispatch.
+//    11. adding step N without removing step N-1 in the same command — an add-only swap
+//        strands the old label; a skipped step leaves no timeline trace.
 //
 //   ALLOW other literal canonical commands (exit 0). An invalid hook payload fails
 //   closed because it cannot prove which command the host is about to execute.
@@ -1246,6 +1248,27 @@ function swapsStepLabelBackward(words) {
   return added.some((add) => removed.some((remove) => add < remove));
 }
 
+// A swap is add AND remove in one command. A live run's first model-driven
+// swap after the driver's claim was `--add-label loop:05-implement` alone, so
+// `loop:04-claim` rode to code review beside it; the next swap went 06→08 and
+// 07 never existed on the timeline. Step N must retire step N-1 in the same
+// command (01 has no predecessor; 04 is the driver's swap, never gh edit).
+// Removing a label that is not present is a no-op, so the rule holds when an
+// earlier label is already missing.
+function addsStepWithoutRetiringPredecessor(words) {
+  const edit =
+    hasGhScopedAction(words, 'issue', 'edit')
+    || hasGhScopedAction(words, 'pr', 'edit');
+  if (!edit) return false;
+  const numbers = (option) => optionValues(words, option)
+    .flatMap((value) => value.split(','))
+    .map(stepNumber)
+    .filter((number) => number !== null);
+  const removed = numbers('--remove-label');
+  return numbers('--add-label').some((add) =>
+    add >= 2 && add !== 4 && !removed.includes(add - 1));
+}
+
 function renamesProtectedLifecycleLabel(words) {
   return hasGhScopedAction(words, 'label', 'edit')
     && optionValues(words, '--name', '-n').some(
@@ -1673,6 +1696,16 @@ export function evaluate(rawCmd, branch, options = {}) {
         + 'plan review is ONE dispatch, the revision ships reviewed-once with dispositions '
         + 'recorded and carried into code-review r1. Leave the current step label and continue '
         + 'forward (claim).',
+    };
+  }
+  if (segments.some(({ command }) => addsStepWithoutRetiringPredecessor(shellWords(command)))) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — a step swap retires the previous step in the same command: '
+        + '`--remove-label loop:<N-1>-… --add-label loop:<N>-…`. An add-only swap strands the '
+        + 'old label beside the new one, and a skipped step (06→08) leaves no trace that it ran. '
+        + 'Removing a label that is not present is a no-op, so always name the predecessor.',
     };
   }
   if (segments.some(({ command }) =>
@@ -2389,9 +2422,18 @@ function selfTest() {
     ['gh issue edit 298 --add-label "loop:02-plan" --remove-label "loop:03-plan-review" 2>&1 | tail -1', 'main', true],
     ['gh issue edit 298 --remove-label loop:08-code-review --add-label loop:05-implement', 'feat/gh-298-x', true],
     ['gh issue edit 298 --remove-label loop:02-plan --add-label loop:03-plan-review', 'main', false],
-    ['gh issue edit 298 --add-label loop:02-plan', 'main', false],
     ['gh issue edit 298 --remove-label loop:09-gate,loop-started', 'main', false],
     ['gh issue edit 298 --remove-label loop-delivered --add-label loop:revising', 'main', false],
+    // A swap is add AND remove: the live 04→05 add-only stranded 04-claim, and 06→08 skipped 07.
+    ['gh issue edit 298 --add-label loop:05-implement', 'feat/gh-298-x', true],
+    ['gh issue edit 298 --remove-label loop:06-simplify --add-label loop:08-code-review', 'feat/gh-298-x', true],
+    ['gh issue edit 298 --remove-label loop:04-claim --add-label loop:05-implement', 'feat/gh-298-x', false],
+    ['gh issue edit 298 --remove-label loop:06-simplify --add-label loop:07-diff-review', 'feat/gh-298-x', false],
+    ['gh issue edit 298 --remove-label=loop:07-diff-review --add-label=loop:08-code-review', 'feat/gh-298-x', false],
+    ['gh issue edit 298 --remove-label loop:03-plan-review --add-label loop:04-claim', 'main', false],
+    ['gh issue edit 298 --add-label loop-started,loop:01-premise', 'main', false],
+    ['gh issue edit 298 --add-label loop:02-plan', 'main', true],
+    ['gh issue edit 298 --remove-label loop:01-premise --add-label loop:02-plan', 'main', false],
     ['gh label edit old-name --name loop-delivered', 'feat/gh-2-y', true],
     ['gh label edit old-name --name loop-ready', 'feat/gh-2-y', true],
     ['gh label edit old-name -nloop-delivered', 'feat/gh-2-y', true],

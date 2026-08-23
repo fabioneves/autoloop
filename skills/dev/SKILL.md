@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.54 · starting
+∞ dev · v0.49.55 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1722,6 +1722,12 @@ never means two things:
 | | | 11 RECORD | 📝 |
 
 Steps 10 and 11 have ribbons but no `loop:*` label — `loop:09-gate` is the last step label.
+
+A swap is one command with both halves: `--remove-label loop:<N-1>-… --add-label loop:<N>-…`. A
+live run's first swap after the driver's claim was add-only, so `loop:04-claim` rode beside
+`05`, `06` and `08` to code review, and its next swap went 06→08 with no `07-diff-review` on the
+timeline. The guard refuses an add that does not retire its predecessor; removing a label that is
+not present is a no-op, so name the predecessor even when an earlier swap already lost it.
 
 Reading them apart is the point: 🔬 scrutinises a plan and 🔍 scrutinises code, 👓 is the
 orchestrator's own read, 🔨 builds and 🔧 repairs. The state badge stays where it is — the glyph
