@@ -33,6 +33,36 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'invented-step-label-stripped-the-gate-label',
+    date: '2026-08-23',
+    symptom: 'After a green gate a run swapped `loop:09-gate` for an invented '
+      + '`loop:10-publish`; gh removed 09-gate, failed on the unknown label '
+      + 'behind a `2>/dev/null`, and the unit read as freshly selected '
+      + '(`loop-ready` + `loop-started`, no step label) through publish.',
+    cause: 'The step table numbers 10 PUBLISH and 11 RECORD like every other '
+      + 'step, and nothing said the ladder ends at 09-gate, so "new step ⇒ '
+      + 'new loop:NN label" pattern-matched. The terminal finalizer owns the '
+      + 'only swap after the gate, and no guard refused the invented label.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'function addsUnknownStepLabel(',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: '--add-label loop:10-publish 2>/dev/null',
+      }),
+      Object.freeze({
+        file: 'label-swap-reminder.mjs',
+        anchor: 'carry NO label',
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'No label swap opens this step, or step 11',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'base-advanced-between-intent-and-draft-wedged-the-unit',
     date: '2026-08-21',
     symptom: 'A unit with a review-converged plan blocked at phase '

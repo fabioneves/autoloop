@@ -349,6 +349,12 @@
    "branch": "feat/gh-1-x",
    "expect": "block",
    "why": "0.49.44: substitutions whose only job was labeling counts; run each counter bare and let prose carry the labels."
+  },
+  {
+   "cmd": "gh issue edit 296 --remove-label loop:09-gate --add-label loop:10-publish 2>/dev/null; jq -c '.intent.plannedBaseOid' /tmp/autoloop-scratch/lifecycle-request-296.json",
+   "branch": "feat/gh-296-entity-assignment",
+   "expect": "block",
+   "why": "0.49.51: invented loop:10-publish at the gate; gh stripped 09-gate and the add failed silently"
   }
  ]
 }

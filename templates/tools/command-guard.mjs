@@ -18,6 +18,8 @@
 //        GitHub release mutations — prompt transport grants none of that authority.
 //     8. active shell expansion, inline interpreter source, and unknown Git/GitHub
 //        subcommands — opaque syntax can conceal any rule above.
+//     9. applying a `loop:*` label outside the step ladder (`loop:10-publish`) — steps
+//        10/11 carry no label; `loop:09-gate` stays until the terminal finalizer swaps it.
 //
 //   ALLOW other literal canonical commands (exit 0). An invalid hook payload fails
 //   closed because it cannot prove which command the host is about to execute.
@@ -1191,6 +1193,35 @@ function addsProtectedLifecycleLabel(words) {
     value.split(',').some(protectedLifecycleLabel));
 }
 
+// The step ladder ends at 09-gate: steps 10 PUBLISH and 11 RECORD carry no
+// label, and the terminal finalizer swaps `loop:09-gate` to `loop-delivered`
+// itself. A live 0.49.51 run invented `loop:10-publish` at the gate; gh removed
+// `09-gate`, failed on the unknown label behind a `2>/dev/null`, and left the
+// unit reading as freshly selected.
+const STEP_LABELS = new Set([
+  'loop:01-premise',
+  'loop:02-plan',
+  'loop:03-plan-review',
+  'loop:04-claim',
+  'loop:05-implement',
+  'loop:06-simplify',
+  'loop:07-diff-review',
+  'loop:08-code-review',
+  'loop:09-gate',
+  'loop:revising',
+]);
+
+function addsUnknownStepLabel(words) {
+  const edit =
+    hasGhScopedAction(words, 'issue', 'edit')
+    || hasGhScopedAction(words, 'pr', 'edit');
+  return edit && optionValues(words, '--add-label').some((value) =>
+    value.split(',').some((label) => {
+      const name = label.trim().toLowerCase();
+      return name.startsWith('loop:') && !STEP_LABELS.has(name);
+    }));
+}
+
 function renamesProtectedLifecycleLabel(words) {
   return hasGhScopedAction(words, 'label', 'edit')
     && optionValues(words, '--name', '-n').some(
@@ -1598,6 +1629,16 @@ export function evaluate(rawCmd, branch, options = {}) {
         'autoloop guard — raw protected lifecycle-label mutation is outside loop authority. '
         + 'Ask a maintainer to apply `loop-ready`; deliver `loop-delivered` through the '
         + 'exact-head Autoloop terminal finalizer.',
+    };
+  }
+  if (segments.some(({ command }) => addsUnknownStepLabel(shellWords(command)))) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — that is not a step label. The ladder ends at `loop:09-gate`: steps '
+        + '10 PUBLISH and 11 RECORD carry no label, and the terminal finalizer swaps '
+        + '`loop:09-gate` to `loop-delivered` itself. Leave `loop:09-gate` on the issue and run '
+        + 'publish-verdict.mjs terminal-finalize.',
     };
   }
   if (segments.some(({ command }) =>
@@ -2303,6 +2344,13 @@ function selfTest() {
     ['gh issue edit 7 --remove-label loop-delivered', 'feat/gh-2-y', false],
     ['gh issue edit 218 --add-label human:authorize', 'feat/gh-2-y', false],
     ['gh pr edit 218 --add-label human:authorize', 'feat/gh-2-y', false],
+    // The step ladder ends at 09-gate; an invented 10/11 label strands the unit.
+    ['gh issue edit 296 --remove-label loop:09-gate --add-label loop:10-publish 2>/dev/null', 'feat/gh-296-x', true],
+    ['gh issue edit 296 --add-label loop:11-record', 'feat/gh-296-x', true],
+    ['gh issue edit 296 --add-label=loop-started,loop:10-publish', 'feat/gh-296-x', true],
+    ['gh issue edit 296 --remove-label loop:08-code-review --add-label loop:09-gate', 'feat/gh-296-x', false],
+    ['gh issue edit 296 --remove-label loop-delivered --add-label loop:revising', 'feat/gh-296-x', false],
+    ['gh issue edit 296 --remove-label loop:10-publish', 'feat/gh-296-x', false],
     ['gh label edit old-name --name loop-delivered', 'feat/gh-2-y', true],
     ['gh label edit old-name --name loop-ready', 'feat/gh-2-y', true],
     ['gh label edit old-name -nloop-delivered', 'feat/gh-2-y', true],
