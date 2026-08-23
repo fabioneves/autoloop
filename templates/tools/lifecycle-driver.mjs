@@ -841,6 +841,18 @@ export function claimCommitIdentity(viewer) {
   };
 }
 
+// The draft PR targets the base BRANCH; the unit's branch already forked from
+// `plannedBaseOid` (verified at local claim). Requiring the live tip to still
+// EQUAL the planned base wedged a unit permanently: main advanced by one commit
+// in the minutes between intent persist and draft creation, the marker's
+// identity is immutable, and no epoch-bump verb exists before premerge. Forward
+// motion of the base is the ordinary case the unit's base sync handles later;
+// only a rewritten base — the planned commit no longer an ancestor — is a
+// reason to refuse.
+export function plannedBaseStillReachable(compareStatus) {
+  return compareStatus === 'identical' || compareStatus === 'ahead';
+}
+
 function ensureLocalClaimGit(root, request, viewer) {
   const status = command(
     'git',
@@ -942,13 +954,16 @@ function productionAdapters(root) {
     ensurePlanComment: (state, request) =>
       postIssueComment(state, request.plan.body),
     ensureDraftPr: (state, request) => {
-      const baseRef = api(
+      const comparison = api(
         state.repository,
-        `repos/${state.repository.owner}/${state.repository.repo}/git/ref/heads/`
-        + `${request.baseBranch}`,
+        `repos/${state.repository.owner}/${state.repository.repo}/compare/`
+        + `${request.intent.plannedBaseOid}...${request.baseBranch}`,
       );
-      if (baseRef?.object?.sha?.toLowerCase() !== request.intent.plannedBaseOid) {
-        throw new Error('configured base moved before draft creation');
+      if (!plannedBaseStillReachable(comparison?.status)) {
+        throw new Error(
+          'configured base no longer descends from the planned base '
+          + `(compare status: ${comparison?.status ?? 'unknown'})`,
+        );
       }
       const response = mutate(
         state.repository,
@@ -1808,6 +1823,17 @@ function selfTest() {
       && cliMode(['--help']) === null
       && cliMode([]) === null
       && cliMode(['--reconcile-json', '--extra']) === null,
+    ],
+    [
+      'draft creation tolerates a forward-moved base and refuses a rewritten one',
+      // A live unit wedged at phase plan-comment when main advanced by one
+      // commit between intent persist and draft creation — the old check
+      // demanded tip equality, which could never again be true.
+      plannedBaseStillReachable('identical')
+      && plannedBaseStillReachable('ahead')
+      && !plannedBaseStillReachable('behind')
+      && !plannedBaseStillReachable('diverged')
+      && !plannedBaseStillReachable(undefined),
     ],
     [
       'claim identity refuses anything that is not a GitHub login',

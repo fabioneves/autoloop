@@ -33,6 +33,29 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'base-advanced-between-intent-and-draft-wedged-the-unit',
+    date: '2026-08-21',
+    symptom: 'A unit with a review-converged plan blocked at phase '
+      + 'plan-comment with "configured base moved before draft creation", '
+      + 'deterministically across three attempts: main had advanced by one '
+      + 'commit in the minutes between intent persist and draft creation.',
+    cause: 'ensureDraftPr demanded the live base tip EQUAL the marker\'s '
+      + 'immutable plannedBaseOid. The branch had already forked from that '
+      + 'OID at local claim and the PR targets the base BRANCH, so the '
+      + 'equality protected nothing the next commit would not break again — '
+      + 'and with no epoch-bump verb before premerge the refusal was permanent.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'lifecycle-driver.mjs',
+        anchor: 'function plannedBaseStillReachable(',
+      }),
+      Object.freeze({
+        file: 'lifecycle-driver.mjs',
+        anchor: 'tolerates a forward-moved base and refuses a rewritten one',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'loop-reapplied-block-labels-over-a-human-unblock',
     date: '2026-08-21',
     symptom: 'A unit blocked at the plan-review cap was unblocked by its '

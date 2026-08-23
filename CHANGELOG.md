@@ -3,6 +3,26 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.51] - 2026-08-21
+
+### Fixed
+
+- **A base that advances between intent and draft creation no longer wedges the unit.** A
+  live unit with a review-converged plan blocked at phase `plan-comment` with `configured base
+  moved before draft creation`, deterministically across three attempts: `main` had advanced by
+  one commit in the minutes between intent persist and draft-PR creation. `ensureDraftPr`
+  demanded the live base tip EQUAL the marker's immutable `plannedBaseOid` — but the unit's
+  branch had already forked from that OID at local claim, the PR targets the base BRANCH, and
+  the base can move one second after the draft opens with identical consequences, which the
+  unit's later base sync handles routinely. The equality protected nothing and, with no
+  epoch-bump verb before premerge, its refusal was permanent; the only exit was deleting the
+  lifecycle comments and branch and re-planning. The check is now ancestry: the compare of
+  `plannedBaseOid...<base>` must be `identical` or `ahead`. A REWRITTEN base (`behind`,
+  `diverged`) still refuses, now with the compare status in the message. Pinned in
+  `regression-index.mjs` (36 incidents); driver self-test 14 cases. The driver is vendored —
+  wedged units recover by reconciling `tools/agentic/lifecycle-driver.mjs` and removing the
+  block labels; nothing durable needs deleting.
+
 ## [0.49.50] - 2026-08-21
 
 ### Fixed
