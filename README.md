@@ -2,10 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.49.55" src="https://img.shields.io/badge/release-v0.49.55-8b5cf6?style=flat-square">
-<img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square">
-<img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square">
-<img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.49.55" src="https://img.shields.io/badge/release-v0.49.55-8b5cf6?style=flat-square"> <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a standing, self-prompting development loop for
 [Claude Code](https://claude.com/claude-code),
