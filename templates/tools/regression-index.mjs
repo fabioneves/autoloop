@@ -33,6 +33,37 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'plan-review-re-dispatched-as-rounds-with-backward-step-swaps',
+    date: '2026-08-23',
+    symptom: 'A staged unit ran PLAN-REVIEW r1, r2, r3 against one plan '
+      + '(v2, v3, v4), swapping loop:03-plan-review back to loop:02-plan '
+      + 'before each revision; it had also never received loop-started or '
+      + 'the 01/02 labels at selection.',
+    cause: 'The dev skill said "review the plan once" in prose only. The '
+      + 'dispatch anchor treated plan-review like any repeatable step, the '
+      + 'swap reminder knew only forward swaps, and no guard refused a '
+      + 'backward one — so re-review read as a round, and 0.49.49 had '
+      + 'already raised a pitcrew cap in its name.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'function swapsStepLabelBackward(',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: '--add-label "loop:02-plan" --remove-label "loop:03-plan-review"',
+      }),
+      Object.freeze({
+        file: 'label-swap-reminder.mjs',
+        anchor: 'This is the ONE plan review',
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'A second plan-review dispatch is a loop defect, not a round',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'auto-merge-demanded-the-claim-parent-equal-the-moving-base-tip',
     date: '2026-08-23',
     symptom: 'A delivered unit under merge.policy auto was refused with '

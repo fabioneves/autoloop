@@ -181,9 +181,14 @@ export function reminderFor(command, opts = {}) {
         + `\`${ribbonFor('#<N>', '06-simplify')}\`. A step that dispatches without swapping `
         + 'strands the label timeline.';
     }
+    const once = role === 'plan-review'
+      ? ' This is the ONE plan review: a Critical/Major on the revised plan is a recorded '
+        + 'disposition carried into code-review r1, never a second plan-review dispatch, and '
+        + 'the step label never moves back to `loop:02-plan` — next is claim.'
+      : '';
     return `autoloop: the ${role} dispatch just went out — \`loop:${key}\` must ALREADY be the `
       + `current step label on this unit's issue. If it is not, swap it NOW (late beats never) `
-      + `and print the step's ribbon \`${ribbonFor('#<N>', key)}\`. A step that dispatches `
+      + `and print the step's ribbon \`${ribbonFor('#<N>', key)}\`.${once} A step that dispatches `
       + 'without swapping strands the label timeline — the issue keeps advertising an earlier '
       + 'step, which is how a crashed or abandoned run gets mis-reconciled by the next one. '
       + "A backgrounded dispatch's Bash `description` is the parked run's visible row where the "
@@ -307,6 +312,9 @@ function selfTest() {
     ['node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json', /loop:06-simplify/],
     ['node tools/agentic/dispatch.mjs --role code-review --prompt-file /tmp/p.md --json', /loop:08-code-review/],
     ['node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/p.md --json', /loop:03-plan-review/],
+    // A live run dispatched plan review three times for one plan (r1..r3).
+    ['node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/p.md --json', /ONE plan review/],
+    ['node tools/agentic/dispatch.mjs --role code-review --prompt-file /tmp/p.md --json', /^(?![\s\S]*ONE plan review)/],
     // A live 0.49.44 run dispatched every role through dispatch-stream.sh and
     // the dispatch anchor, matching only dispatch.mjs, never fired once.
     ['bash /cache/0.49.45/templates/tools/dispatch-stream.sh /tmp/l.jsonl /tmp/r.json --role code-review --prompt-file /tmp/p.md --model x', /loop:08-code-review/],

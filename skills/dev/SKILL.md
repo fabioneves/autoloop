@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.53 · starting
+∞ dev · v0.49.54 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1034,6 +1034,16 @@ identically here). **The revision itself is a dispatch, not session work**: one
 finding, and its disposition, returning the revised plan artifact as the typed result — the same
 bounded-and-bulky rule that moved planning out of the session moves plan-fixing out too. Do not
 re-dispatch plan review: the revision ships reviewed-once with dispositions recorded.
+
+**A second plan-review dispatch is a loop defect, not a round.** A live run reviewed one plan
+three times (r1→v2→r2→v3→r3→v4), swapping `loop:03-plan-review` back to `loop:02-plan` before
+each revision, and the step ladder read it as progress. The guard now blocks a backward step
+swap, and the plan-review dispatch anchor says so. A Critical or Major that the revised plan
+still carries is recorded as a disposition and rides into the code-review r1 prompt as context
+— the code reviewer sees real code against the plan, which is a better check than a third read
+of the plan. `caps.reviseRoundsPerPr` is the pitcrew budget for post-human-review revisions; it
+has never been a plan-review budget, and its 0.49.49 raise was a symptom of this defect, not a
+licence for it.
 
 ### 4. Persist intent and claim
 
