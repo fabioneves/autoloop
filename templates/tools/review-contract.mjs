@@ -309,12 +309,33 @@ function validCumulativeLedger(previous, current) {
   return true;
 }
 
+// Fingerprints and OIDs are unreadable at full length in a one-line gap, and a
+// gap nobody reads is the bare code again.
+function brief(value) {
+  return typeof value === 'string' && /^[0-9a-f]{40,64}$/u.test(value)
+    ? `${value.slice(0, 12)}…`
+    : String(value);
+}
+
+// EVERY refusal here names itself. A single undifferentiated null cost one live
+// run a bisect and another most of a day: the caller's one
+// INVALID_REVIEW_EVIDENCE code cannot say which chain rule broke, and the rules
+// that bit hardest — `artifactVersion`, and a top-level `scope` that disagrees
+// with the closing round's own — are stated nowhere the orchestrator reads.
 function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) {
-  if (
-    !Array.isArray(rounds)
-    || rounds.length !== round
-    || rounds.some((record) => !validReviewRound(record))
-  ) {
+  if (!Array.isArray(rounds) || rounds.length !== round) {
+    gaps.push(
+      `reviewRounds must hold exactly ${round} record(s), one per round `
+      + `(got ${Array.isArray(rounds) ? rounds.length : typeof rounds})`,
+    );
+    return null;
+  }
+  const malformed = rounds.findIndex((record) => !validReviewRound(record));
+  if (malformed !== -1) {
+    gaps.push(
+      `round ${malformed + 1}: the record is not a valid review round — check `
+      + 'its key set, hashes, oids, ledger entries and verdict shape',
+    );
     return null;
   }
   const first = rounds[0];
@@ -325,28 +346,56 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
     'configuredBaseOid',
     'authorIdentity',
   ];
-  if (
-    rounds.some((record, index) =>
-      record.round !== index + 1
-      || (index === 0
-        ? record.scope !== REVIEW_SCOPES.get('full')
-        : ![...REVIEW_SCOPES.values()].includes(record.scope))
-      || stable.some((key) => record[key] !== first[key]))
-    || rounds.some((record) =>
+  for (const [index, record] of rounds.entries()) {
+    const at = `round ${index + 1}`;
+    if (record.round !== index + 1) {
+      gaps.push(`${at}: the record numbers itself ${record.round}`);
+      return null;
+    }
+    if (index === 0 && record.scope !== REVIEW_SCOPES.get('full')) {
+      gaps.push(`${at}: round 1 is always the complete artifact`);
+      return null;
+    }
+    const drifted = stable.find((key) => record[key] !== first[key]);
+    if (drifted !== undefined) {
+      gaps.push(
+        `${at}: ${drifted} is ${brief(record[drifted])} but round 1 recorded `
+        + `${brief(first[drifted])} — it may not change across a review chain`,
+      );
+      return null;
+    }
+    if (
       record.checkout.root !== first.checkout.root
-      || record.checkout.branch !== first.checkout.branch)
-    // A repeated dispatch id is a replayed reviewer, not a fresh one.
-    || new Set(rounds.map(({ dispatchId }) => dispatchId)).size !== rounds.length
-    || rounds.some((record) => !verdictMatchesOpenRebuts(record))
-  ) {
+      || record.checkout.branch !== first.checkout.branch
+    ) {
+      gaps.push(`${at}: the reviewed checkout moved root or branch`);
+      return null;
+    }
+    if (!verdictMatchesOpenRebuts(record)) {
+      gaps.push(
+        `${at}: openRebuttals and the verdict's rebuts are not the same set, `
+        + 'or a rebut status disagrees with whether the finding still gates',
+      );
+      return null;
+    }
+  }
+  // A repeated dispatch id is a replayed reviewer, not a fresh one.
+  if (new Set(rounds.map(({ dispatchId }) => dispatchId)).size !== rounds.length) {
+    gaps.push('dispatchId must be distinct per round — a repeat is a replayed reviewer');
     return null;
   }
-  if (first.configFingerprint !== hashValue(projectConfig)) return null;
-  if (rounds[0].deltaBaseOid !== first.configuredBaseOid) return null;
-  // A single undifferentiated null here cost a live run a bisect: the caller's
-  // one INVALID_REVIEW_EVIDENCE code cannot say which chain rule broke, and
-  // `artifactVersion` in particular is refused for a reason stated nowhere the
-  // orchestrator reads. Each rule now names itself.
+  if (first.configFingerprint !== hashValue(projectConfig)) {
+    gaps.push(
+      `round 1: configFingerprint is ${brief(first.configFingerprint)} but the `
+      + `supplied projectConfig hashes to ${brief(hashValue(projectConfig))} — `
+      + 'canonical is `jq -S -c -j`, keys sorted, compact, no trailing newline',
+    );
+    return null;
+  }
+  if (first.deltaBaseOid !== first.configuredBaseOid) {
+    gaps.push("round 1: deltaBaseOid must equal the configured base");
+    return null;
+  }
   for (let index = 1; index < rounds.length; index += 1) {
     const previous = rounds[index - 1];
     const current = rounds[index];
@@ -372,15 +421,20 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
     }
   }
   const current = rounds.at(-1);
-  if (
-    current.scope !== REVIEW_SCOPES.get(scope)
-    || current.planFingerprint !== expected.planFingerprint
-    || current.repositoryFingerprint !== expected.repositoryFingerprint
-    || current.configuredBaseOid !== expected.configuredBaseOid
-    || current.artifactVersion !== expected.artifactVersion
-    || current.artifactFingerprint !== expected.artifactFingerprint
-    || current.headOid !== expected.headOid
-  ) {
+  const declared = [
+    ['scope', current.scope, REVIEW_SCOPES.get(scope)],
+    ['planFingerprint', current.planFingerprint, expected.planFingerprint],
+    ['repositoryFingerprint', current.repositoryFingerprint, expected.repositoryFingerprint],
+    ['configuredBaseOid', current.configuredBaseOid, expected.configuredBaseOid],
+    ['artifactVersion', current.artifactVersion, expected.artifactVersion],
+    ['artifactFingerprint', current.artifactFingerprint, expected.artifactFingerprint],
+    ['headOid', current.headOid, expected.headOid],
+  ].find(([, recorded, wanted]) => recorded !== wanted);
+  if (declared !== undefined) {
+    gaps.push(
+      `round ${rounds.length}: the closing round records ${declared[0]} `
+      + `${brief(declared[1])} but the transition declares ${brief(declared[2])}`,
+    );
     return null;
   }
   return { current, rounds };
@@ -469,12 +523,27 @@ export function reviewTransition(input) {
   const authenticatedRebutIds = currentVerdict.rebuts.map(
     ({ findingId }) => findingId,
   );
-  if (
-    !sameSet(currentIds, annotationIds)
-    || !sameSet(rebutIds, authenticatedRebutIds)
-    || (input.round === 1 && rebutIds.length > 0)
-  ) {
-    return decision('error', 'INVALID_REVIEW_EVIDENCE');
+  if (!sameSet(currentIds, annotationIds)) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: 'findingAnnotations must annotate exactly the closing '
+        + `verdict's findings (verdict ${currentIds.length}, annotations `
+        + `${annotationIds.length})`,
+    });
+  }
+  if (!sameSet(rebutIds, authenticatedRebutIds)) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: "the closing round's openRebuttals and its verdict's rebuts "
+        + 'must name the same findings',
+    });
+  }
+  // A brief that invites the reviewer to "re-examine" a prior disposition gets
+  // that agreement recorded as a rebut, and round 1 has nothing to rebut. One
+  // live dispatch was spent, clean, and unpublishable.
+  if (input.round === 1 && rebutIds.length > 0) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: 'round 1 has no prior round, so its verdict carries no '
+        + 'rebuts — rebuts adjudicate open rebuttals from a preceding round',
+    });
   }
 
   const annotations = new Map(
@@ -482,19 +551,26 @@ export function reviewTransition(input) {
   );
   const currentGating = gatingFindings(currentVerdict);
   const currentGatingIds = new Set(currentGating.map(({ id }) => id));
-  if (
-    currentVerdict.rebuts.some(({ findingId, status }) =>
-      status === 'accepted'
-        ? currentGatingIds.has(findingId)
-        : !currentGatingIds.has(findingId))
-  ) {
-    return decision('error', 'INVALID_REVIEW_EVIDENCE');
+  const inconsistentRebut = currentVerdict.rebuts.find(({ findingId, status }) =>
+    status === 'accepted'
+      ? currentGatingIds.has(findingId)
+      : !currentGatingIds.has(findingId));
+  if (inconsistentRebut !== undefined) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: `rebut ${inconsistentRebut.findingId} is `
+        + `${inconsistentRebut.status} but the same verdict `
+        + `${inconsistentRebut.status === 'accepted' ? 'still raises' : 'no longer raises'}`
+        + ' it as a gating finding',
+    });
   }
   if (
     input.round === 1
     && input.findingAnnotations.some(({ inScope }) => inScope !== true)
   ) {
-    return decision('error', 'INVALID_REVIEW_EVIDENCE');
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: 'round 1 reviews the complete artifact, so no finding of '
+        + 'its can be annotated out of scope',
+    });
   }
   if (currentGating.some(({ id }) => annotations.get(id).verified !== true)) {
     return decision('verify', 'FINDING_VERIFICATION_REQUIRED');
@@ -759,6 +835,11 @@ function selfTest() {
   const rewordSecond = rewordFactory(2, failWith([rewordedFinding]));
   const rewordClose = rewordFactory(3, pass, { scope: 'full-artifact' });
 
+  const roundOneRebut = roundFactory(fixtureProjectConfig(), { seed: 'rebut1' })(
+    1,
+    { verdict: 'pass', findings: [], rebuts: [accept(finding.id, 'Agreed at plan review.')] },
+  );
+
   const escalateFactory = roundFactory(fixtureProjectConfig(), { seed: 'escalate' });
   const escalateFirst = escalateFactory(1, failWith([finding]));
   const escalateSecond = escalateFactory(2, failWith([escalatedFinding]));
@@ -901,6 +982,21 @@ function selfTest() {
       name: 'a re-raised finding may not change severity',
       input: inputFor([escalateFirst, escalateSecond]),
       expected: ['error', false],
+      expectedGap: 'a finding id is immutable',
+    },
+    {
+      // The failure that cost living-football-engine #314 a bisect: the only
+      // signal was a bare INVALID_REVIEW_EVIDENCE for one wrong word.
+      name: 'a transition scope that disagrees with the closing round names itself',
+      input: inputFor([fixedFirst, fixed], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedGap: 'records scope',
+    },
+    {
+      name: 'a round-1 verdict carrying rebuts names the rule it broke',
+      input: inputFor([roundOneRebut]),
+      expected: ['error', false],
+      expectedGap: 'round 1 has no prior round',
     },
     {
       name: 'a Major continues below the cap',
@@ -1102,6 +1198,16 @@ function selfTest() {
       console.error(
         `FAIL ${fixture.name}: expected ${fixture.expected.join('/')}, `
         + `got ${actual.state}/${actual.publishReviewSuccess} (${actual.code})`,
+      );
+      continue;
+    }
+    if (
+      fixture.expectedGap !== undefined
+      && !String(actual.evidenceGap ?? '').includes(fixture.expectedGap)
+    ) {
+      console.error(
+        `FAIL ${fixture.name}: expected an evidenceGap naming `
+        + `"${fixture.expectedGap}", got ${actual.evidenceGap ?? '<none>'}`,
       );
       continue;
     }

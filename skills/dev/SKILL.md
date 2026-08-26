@@ -1397,6 +1397,13 @@ Each entry in `reviewRounds` is the record of one dispatched round:
   indentation. Check any spelling against a fingerprint the contract already accepted before
   trusting it.
 
+**Every refusal names itself.** An `INVALID_REVIEW_EVIDENCE` carries an `evidenceGap` saying
+which rule broke and what it saw — read it before touching the artifact. Until 0.49.56 six of the
+seven refusals returned a bare code, and diagnosing one meant bisecting the evidence by
+resubmitting a round-1-only input; two live units paid that cost, one of them for a single wrong
+word. If a gap ever comes back empty, that is a defect in the contract, not a puzzle to solve by
+hand.
+
 Pass only orchestrator verification/scope annotations beside that evidence; caller-authored rebut
 statuses and unsealed disposition strings have no authority. Retain the byte-exact clean input as
 the later review-verdict evidence. The clean transition's `reviewedHead` and checkout are
