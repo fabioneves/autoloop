@@ -1224,8 +1224,8 @@ function fixtureState(policy) {
       review: { checklistPath: 'docs/agentic/checklist.md' },
       caps: {
         gateRetriesPerUnit: 2,
-        reviseRoundsPerPr: 3,
-        codeReviewRoundsPerUnit: 10,
+        reviseRoundsPerPr: 10,
+        codeReviewRoundsPerUnit: 20,
         sliceMaxLines: 700,
         sliceMaxFiles: 10,
       },

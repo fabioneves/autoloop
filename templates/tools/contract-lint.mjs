@@ -230,6 +230,66 @@ export function lintClaimRegexDefinitions(files) {
   return findings;
 }
 
+// One scaffolded STATE block is the policy every repository starts from, and
+// the setup skill shows it twice during the interview. 0.49.49 raised
+// `reviseRoundsPerPr` to 10 in both skill examples and left `scaffold.mjs`
+// writing 3, so for six releases the tool contradicted its own documentation
+// and nothing said so. The literals ARE the policy; drift between them is
+// silent by construction.
+const SCAFFOLDED_CAP_KEYS = Object.freeze([
+  'gateRetriesPerUnit',
+  'reviseRoundsPerPr',
+  'codeReviewRoundsPerUnit',
+  'sliceMaxLines',
+  'sliceMaxFiles',
+]);
+
+function capLiteralBlocks(text) {
+  const blocks = [];
+  for (const match of String(text).matchAll(/"?caps"?\s*:\s*\{([^{}]*)\}/gu)) {
+    const caps = {};
+    for (const pair of match[1].matchAll(/"?([A-Za-z]+)"?\s*:\s*(\d+)/gu)) {
+      caps[pair[1]] = Number(pair[2]);
+    }
+    if (SCAFFOLDED_CAP_KEYS.every((key) => Object.hasOwn(caps, key))) {
+      blocks.push({ caps, index: match.index });
+    }
+  }
+  return blocks;
+}
+
+export function lintScaffoldCapDrift(files) {
+  const scaffoldPath = Object.keys(files)
+    .find((path) => path.endsWith('scaffold.mjs'));
+  const scaffold = capLiteralBlocks(files[scaffoldPath] ?? '');
+  if (scaffold.length !== 1) {
+    return [{
+      path: scaffoldPath ?? 'templates/tools/scaffold.mjs',
+      line: 1,
+      code: 'MISSING_SCAFFOLD_CAPS',
+      message: 'expected exactly one complete scaffolded caps block',
+    }];
+  }
+  const scaffolded = scaffold[0].caps;
+  const findings = [];
+  for (const [path, text] of Object.entries(files)) {
+    if (path === scaffoldPath) continue;
+    for (const block of capLiteralBlocks(text)) {
+      for (const key of SCAFFOLDED_CAP_KEYS) {
+        if (block.caps[key] === scaffolded[key]) continue;
+        findings.push({
+          path,
+          line: lineNumber(String(text), block.index),
+          code: 'SCAFFOLD_CAP_DRIFT',
+          message: `caps.${key} is ${block.caps[key]}; `
+            + `scaffold.mjs writes ${scaffolded[key]}`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
 function lintArtifactPaths(root, relativePaths, requiredPaths = relativePaths) {
   const findings = [];
   const required = new Set(requiredPaths);
@@ -285,10 +345,29 @@ function lintClaimConsumers(root, directory) {
   return findings;
 }
 
+function lintCapPolicy(root) {
+  const paths = ['templates/tools/scaffold.mjs', 'skills/setup/SKILL.md'];
+  const files = {};
+  for (const relativePath of paths) {
+    try {
+      files[relativePath] = readFileSync(resolve(root, relativePath), 'utf8');
+    } catch (error) {
+      return [{
+        path: relativePath,
+        line: 1,
+        code: 'MISSING_FORWARD_ARTIFACT',
+        message: error.message,
+      }];
+    }
+  }
+  return lintScaffoldCapDrift(files);
+}
+
 function lintRoot(root) {
   return [
     ...lintArtifactPaths(root, FORWARD_ARTIFACTS),
     ...lintClaimConsumers(root, 'templates/tools'),
+    ...lintCapPolicy(root),
   ];
 }
 
@@ -357,6 +436,36 @@ function selfTest() {
     'claim-contract.mjs': 'export const CLOSES_RE = /x/;',
     'scan.mjs': 'const CLOSES_RE = /y/;',
   });
+  const scaffoldCaps = [
+    'caps: {',
+    '  gateRetriesPerUnit: 2,',
+    '  reviseRoundsPerPr: 10,',
+    '  codeReviewRoundsPerUnit: 20,',
+    '  sliceMaxLines: 700,',
+    '  sliceMaxFiles: 10,',
+    '}',
+  ].join('\n');
+  const skillCaps = (reviseRounds) => [
+    '"caps": {',
+    '  "gateRetriesPerUnit": 2,',
+    `  "reviseRoundsPerPr": ${reviseRounds},`,
+    '  "codeReviewRoundsPerUnit": 20,',
+    '  "sliceMaxLines": 700,',
+    '  "sliceMaxFiles": 10',
+    '}',
+  ].join('\n');
+  const capsAgree = lintScaffoldCapDrift({
+    'templates/tools/scaffold.mjs': scaffoldCaps,
+    'skills/setup/SKILL.md': skillCaps(10),
+  });
+  const capsDrifted = lintScaffoldCapDrift({
+    'templates/tools/scaffold.mjs': scaffoldCaps,
+    'skills/setup/SKILL.md': skillCaps(3),
+  });
+  const capsUnreadable = lintScaffoldCapDrift({
+    'templates/tools/scaffold.mjs': 'caps: { gateRetriesPerUnit: 2 }',
+    'skills/setup/SKILL.md': skillCaps(10),
+  });
   const wrappedRefusal = lintRoutingText(
     '**A human merges.** v0.40 refuses\n  non-manual run open because prompt provenance is unverified.',
   );
@@ -379,6 +488,19 @@ function selfTest() {
   );
   const cases = [
     ['migration prose is allowed', clean.length === 0],
+    ['identical scaffold and skill cap literals pass', capsAgree.length === 0],
+    [
+      'a skill cap literal the scaffold does not write is drift',
+      capsDrifted.length === 1
+        && capsDrifted[0].code === 'SCAFFOLD_CAP_DRIFT'
+        && capsDrifted[0].message.includes('caps.reviseRoundsPerPr is 3')
+        && capsDrifted[0].message.includes('scaffold.mjs writes 10'),
+    ],
+    [
+      'an unparseable scaffolded caps block fails rather than passing silently',
+      capsUnreadable.length === 1
+        && capsUnreadable[0].code === 'MISSING_SCAFFOLD_CAPS',
+    ],
     [
       'a line-wrapped unconditional refusal is still rejected',
       wrappedRefusal.length === 1

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.55 · starting
+∞ dev · v0.49.56 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -68,6 +68,10 @@ The typed summary is
 `{ok,version,repository,checkout,config,base,runMarker,timings,snapshotPath,snapshotBytes,sections}`:
 
 - `checkout` — root, repository fingerprint, branch, HEAD, and whether the tree is clean.
+- `config` — the five decision fields (`version`, `baseBranch`, `mergePolicy`, `gateCommand`,
+  `checklistPath`) plus `projectConfig`, the whole validated config, and `fingerprint`, its
+  canonical SHA-256. Those last two are the review contract's `projectConfig` and
+  `configFingerprint`: pass them as a pair and never hand-derive either.
 - `base` — the configured base branch, whether you are on it, and how far behind
   `origin/<base>` HEAD is. Prime never fetches, switches, or resets; it reports.
 - `sections` — per-section `{complete,items,error}` counts, never item bodies. A full snapshot
@@ -454,6 +458,12 @@ bash <plugin-tools>/dispatch-stream.sh \
   <scratchpad>/live/<issue>-<role>-r<N>.jsonl <scratchpad>/<role>-result.json \
   --role <role> --prompt-file <path> [--engine codex] [--tools <csv>]
 ```
+
+**A backgrounded dispatch carries no host timeout.** `dispatch.mjs` holds its own ceilings — 120
+minutes for a writer, 45 for a reviewer — and they are sized for the work; a host-side timeout on
+top of them only truncates. One live round passed `timeout: 600000` alongside `run_in_background`,
+and the ten-minute ceiling killed a reviewer 48 tool calls deep with 462 KB of stream and no
+verdict, on a unit whose earlier rounds had each run 12-16 minutes.
 
 One background task per dispatch, engine events flowing in its own view for the whole run, exit
 code propagated — a 13-minute codex review is a window, not a sealed box. Collect the typed
@@ -877,6 +887,16 @@ unit through ninety minutes of dispatches to gate-green and review-clean before 
 authorization was missing at the last step; this check costs one field of a snapshot the run
 already has.
 
+**A resume at the review cap is reported, not claimed.** Same shape, one field further on: if the
+unit's recorded rounds already reach `caps.codeReviewRoundsPerUnit`, the contract refuses the next
+one, so claiming it spends a premise, a plan and a writer to arrive at a refusal the queue read
+could have predicted. Name the unit, the rounds spent, the open findings, and the three options
+the cap block offers — raise the cap, re-plan, carve the predicate — and take other work. A human
+who removed `loop-blocked` without choosing one of them has unblocked the issue without changing
+what blocked it; that removal is still their decision and the loop still may not re-block from it
+(see the unblock rule below), which is exactly why the run must be able to skip a unit it cannot
+advance.
+
 **Which is why blocking must never strip that label.** `loop-blocked` already removes the issue
 from the eligible set, so removing `loop-ready` too is redundant — and it is the one label the
 loop cannot restore, so it converts the human's one-action unblock (remove `loop-blocked`) into a
@@ -1177,7 +1197,8 @@ the mid-pipeline pass did not prevent codex finding two Majors an hour later, an
 the orchestrator did catch came from a full-artifact look at the delivery head.
 
 There is no separate five-axis dispatch. Its job is done by a scope rule instead:
-**convergence may only close on a full-artifact round.** And close optimistically: after a fix
+**convergence may only close on a full-artifact round** — enforced by the contract since 0.49.56,
+which returns `REVIEW_FULL_CLOSE_REQUIRED` rather than `REVIEW_CLEAN` for a clean delta round. And close optimistically: after a fix
 batch, the next round is dispatched **full-artifact and closing** — full scope covers the delta
 by definition, so a pure delta round before a mandatory full-close is a round wasted. Delta
 scope is for mid-storm only, when multiple Criticals make further fix cycles certain. A typical
@@ -1201,6 +1222,21 @@ node <plugin-tools>/dispatch.mjs --role code-review \
   --output-file /tmp/autoloop-code-review-1.json --json
 ```
 
+**Two things every reviewer brief owes the reviewer, both enforced:**
+
+- **No commands.** A reviewer holds `Glob,Grep,Read` and never Bash, so `git show <sha>` or
+  `go test ./...` in a brief is not a slow instruction, it is an unexecutable one — and the
+  reviewer spends its budget trying. Two round-4 attempts on a live unit died exactly that way.
+  Give it the diff, the output, or a path with a line range. `dispatch.mjs` refuses a
+  reviewer prompt carrying a shell code fence before the engine starts
+  (`REVIEWER_PROMPT_NOT_EXECUTABLE`); fence a command quoted as evidence as `text`.
+- **The verdict rule, stated.** `pass` means no Critical or Major finding; `fail` means at least
+  one. A round that found only Minors is a `pass` that lists them. "Fail if you find anything"
+  is the natural phrasing and it produces an envelope the harness rejects — it cost two
+  consecutive live rounds, whose findings were real. When one is rejected anyway, the failure
+  carries `rejectedVerdict`: disposition those findings, fix, and re-review. Never re-run the
+  round to obtain a well-formed envelope for work already done.
+
 Verify every Critical/Major against code or a cheap reproduction, then disposition it:
 
 - fix directly or with a fresh writer;
@@ -1223,11 +1259,15 @@ no line: the revision prompt carries it verbatim, the next reviewer sees it, and
 records it.
 
 Pass all prior findings/dispositions forward — and tell every later-round reviewer, in the
-prompt, the ledger's identity rule: **a finding id is immutable evidence — re-opening one keeps
-its ORIGINAL severity, summary, and evidence byte-identical; anything newly discovered is a NEW
-finding with a new id.** A live round re-used a prior id with rewritten text and the contract
-correctly refused to authenticate the whole round history — unfixable after the fact, so the
-rule has to ride in the prompt.
+prompt, the ledger's identity rule: **a finding id is its defect AND its severity — re-opening one
+keeps both; anything reassessed at a different severity is a NEW finding with a new id.** The
+prose is not pinned: re-raising a finding is how a reviewer says what the fix missed, and saying
+it means rewriting the summary and the evidence. Until 0.49.56 the contract demanded all three
+byte-identical, which asked a second reviewer to repeat the first one's words and cost
+living-football-engine #313 its `agentic/review` status permanently — rounds 1 and 2 raised the
+same two Majors with different explanations, the authentication check runs ahead of the ledger,
+and the only input that would have satisfied it was one with the reviewers' verdicts rewritten to
+agree.
 
 After fixes, record the reviewed HEAD and dispatch a
 fresh later-round reviewer over only the new delta plus open rebuts. Give every Critical/Major a
@@ -1372,26 +1412,51 @@ Each entry in `reviewRounds` is the record of one dispatched round:
 
 - `artifactVersion` versions the **reviewed artifact**, not the plan, and must **strictly increase
   every round**: round 1 is 1, round 2 is 2, and so on. Stamping each round with the plan's own
-  version is the natural mistake — the field sits beside `planFingerprint` — and it is refused
-  without naming itself, which has cost a live run a bisect. `artifactFingerprint` must also
-  differ from the previous round's: a round that reviewed byte-identical work is not a round.
+  version is the natural mistake — the field sits beside `planFingerprint`. `artifactFingerprint`
+  must also differ from the previous round's: a round that reviewed byte-identical work is not a
+  round. Both rules are lifted for the one round that re-reads the same bytes at a wider scope —
+  see the `scope` bullet.
 - `dispatchId` is unique per round — a repeated id is a replayed reviewer, not a fresh one.
 - `authorIdentity` and `reviewerIdentity` must differ. That is the writer ≠ reviewer invariant.
-- `scope` is `full-artifact` for round 1 and `fix-delta-and-open-rebuttals` afterwards.
+- `scope` is `full-artifact` for round 1 and either afterwards — and the transition's own
+  top-level `scope` must name the CLOSING round's: `full` pairs with `full-artifact`, `delta` with
+  `fix-delta-and-open-rebuttals`. They are two spellings of one fact and a run lost a debugging
+  cycle to declaring one over the other.
+- **A clean delta round does not converge the unit.** It returns
+  `REVIEW_FULL_CLOSE_REQUIRED`, because a delta round sees the last fix and nothing else, and the
+  defect it structurally cannot see is the one an earlier fix made vacuous. A live unit ran rounds
+  2-5 all delta and found exactly that in round 4 — an assertion killed two rounds before.
+  Dispatch one more round, `full-artifact`, over the same head.
+- **That closing round records as a scope escalation.** It reviews strictly more of the same
+  artifact, so it carries the previous round's `headOid`, `artifactVersion` and
+  `artifactFingerprint` unchanged, with a new `dispatchId` and `scope: full-artifact`; its
+  `deltaBaseOid` is the previous head, which makes its delta empty by construction. That is the
+  ONLY shape allowed to repeat a fingerprint, and it is allowed one round past
+  `caps.codeReviewRoundsPerUnit` so the rule is always executable. Commit nothing before it —
+  a commit makes it an ordinary full round with a real new fingerprint, which is also fine, just
+  more expensive.
 - `deltaBaseOid` is the configured base for round 1 and the previous round's reviewed head after.
 - `priorFindings` carries the complete preceding Critical/Major ledger with each `fix`/`rebut`
   disposition; retain resolved entries as `state: closed`, and only open rebut entries remain
   actionable.
 - `verdict` is the exact object `dispatch.mjs` parsed. Do not edit it.
-- `configFingerprint` is the SHA-256 of the canonical `projectConfig`; the contract derives the
-  review cap from `projectConfig.caps.codeReviewRoundsPerUnit` and never takes a separate cap.
-  **Canonical means `jq -S -c -j`** — keys sorted recursively, compact, no trailing newline, which
-  is exactly what the contract's `hashValue` hashes (`JSON.stringify` over a key-sorted clone).
-  "Canonical" alone does not determine the bytes, and the wrong ones fail with a fingerprint
-  mismatch that looks like a stale config: a live run lost a round computing it over
-  pretty-printed output, because `jq -j` suppresses the trailing newline but keeps the
-  indentation. Check any spelling against a fingerprint the contract already accepted before
-  trusting it.
+- `configFingerprint` and `projectConfig` both come from **prime**, which returns the validated
+  config and its fingerprint together (`.config.projectConfig`, `.config.fingerprint`). Pass them
+  as a pair and derive neither by hand. The contract compares the two, and takes the review cap
+  from `projectConfig.caps.codeReviewRoundsPerUnit` — never a separate cap.
+  Should you ever need to compute it outside prime, **canonical means `jq -S -c -j`** — keys
+  sorted recursively, compact, no trailing newline, exactly what the contract's `hashValue` hashes
+  (`JSON.stringify` over a key-sorted clone). "Canonical" alone does not determine the bytes: a
+  live run lost a round computing it over pretty-printed output, because `jq -j` suppresses the
+  trailing newline but keeps the indentation. Two more read STATE off `origin/<base>` by hand
+  because prime's summary did not carry the config at all.
+
+**Every refusal names itself.** An `INVALID_REVIEW_EVIDENCE` carries an `evidenceGap` saying
+which rule broke and what it saw — read it before touching the artifact. Until 0.49.56 six of the
+seven refusals returned a bare code, and diagnosing one meant bisecting the evidence by
+resubmitting a round-1-only input; two live units paid that cost, one of them for a single wrong
+word. If a gap ever comes back empty, that is a defect in the contract, not a puzzle to solve by
+hand.
 
 Pass only orchestrator verification/scope annotations beside that evidence; caller-authored rebut
 statuses and unsealed disposition strings have no authority. Retain the byte-exact clean input as
@@ -1537,6 +1602,16 @@ wait for. Missing, pending, changed, stale, wrong-head, duplicate, edited, or in
 fails before the terminal mutation and may be retried only after a fresh live read. Raw
 `gh pr ready`, raw `loop-delivered` label edits, split `premerge-create`, and caller delivery
 booleans are forbidden.
+
+**The finalizer is not optional and not skippable.** It is the only thing that marks the PR ready,
+settles the triggered checks, writes the pre-merge audit record and swaps the issue to
+`loop-delivered` — every one of which the merge executor requires. A unit that reaches `auto-merge`
+without it fails six preconditions at once, and the refusal reads like six independent blockers. A
+live run read exactly that list on a converged, gated, review-clean unit, concluded the Copilot
+ready-trigger wedge, and left it an unmerged draft; `terminal-finalize` had never been invoked for
+that PR at all. Since 0.49.56 the executor says so in its first line. **Declining to invoke the
+finalizer is not an outcome — only its typed refusal is**, and the ready-trigger wedge in
+particular is what the bounded settle window above exists to absorb.
 
 Under `merge.policy: manual`, stop after the returned exact terminal result and leave the ready PR
 for a human. Under an acknowledged solo non-manual policy, **switch to the base checkout first**,

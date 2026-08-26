@@ -37,12 +37,13 @@ import {
   runMarkerDirectory,
 } from './command-guard.mjs';
 import { extractConfig, validateProjectConfig } from './config-contract.mjs';
+import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import { SNAPSHOT_SECTIONS, writeStdoutSync } from './snapshot-contract.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.49.55';
+const AUTOLOOP_VERSION = '0.49.56';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -222,17 +223,33 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [] } = {}) {
     version: AUTOLOOP_VERSION,
     repository: `${repository.owner}/${repository.repo}`,
     checkout,
-    config: {
-      version: config.version,
-      baseBranch: config.baseBranch,
-      mergePolicy: config.merge.policy,
-      gateCommand: config.gate.command,
-      checklistPath: config.review.checklistPath,
-    },
+    config: configSummary(config),
     base,
     runMarker,
     timings: { scanMs, primeMs: Date.now() - PROCESS_START_MS },
     snapshot,
+  };
+}
+
+// The five summary fields are what a run decides with. `projectConfig` and
+// `fingerprint` are what it must not hand-derive: the review contract compares
+// a round's `configFingerprint` against the hash of the projectConfig the caller
+// supplies, so a run needs both, they have to be the same object, and the
+// canonicalization is exact — `jq -S -c -j`, keys sorted recursively, compact,
+// no trailing newline. A live run lost a round computing it over pretty-printed
+// output, and two more read STATE off `origin/<base>` by hand because the
+// summary did not carry the config at all. Both are prime's answer to give.
+//
+// `hashValue` is imported from the contract that compares it, never copied.
+export function configSummary(config) {
+  return {
+    version: config.version,
+    baseBranch: config.baseBranch,
+    mergePolicy: config.merge.policy,
+    gateCommand: config.gate.command,
+    checklistPath: config.review.checklistPath,
+    fingerprint: hashValue(config),
+    projectConfig: config,
   };
 }
 
@@ -440,6 +457,21 @@ function selfTest() {
       === JSON.stringify(['--pr', '7'])
     && parseArgs(['--scan-arg']).error !== null
     && parseArgs(['--measure']).error !== null,
+  );
+
+  const summary = configSummary(fixtureConfig());
+  check(
+    'the config block carries the validated ProjectConfig and its review fingerprint',
+    summary.fingerprint === hashValue(fixtureConfig())
+    && /^[0-9a-f]{64}$/.test(summary.fingerprint)
+    && summary.projectConfig.caps.codeReviewRoundsPerUnit === 5
+    && summary.mergePolicy === 'manual'
+    // Key ORDER must not change the fingerprint: canonicalization sorts
+    // recursively, which is the whole reason a hash taken over raw STATE text
+    // drifts from the one the contract computes.
+    && configSummary(Object.fromEntries(
+      Object.entries(fixtureConfig()).reverse(),
+    )).fingerprint === summary.fingerprint,
   );
 
   const scratch = mkdtempSync(join(tmpdir(), 'autoloop-prime-'));

@@ -229,11 +229,15 @@ function gatingFindings(verdict) {
     GATING_SEVERITIES.has(severity));
 }
 
+// A finding is its id and its severity. Severity is the field that gates, so
+// pinning it is what stops a Critical being carried forward as a Minor; the
+// summary and evidence are prose, and they belong to whichever reviewer wrote
+// them. Requiring those to stay byte-identical across rounds sounded like
+// authentication and was really a demand that a second reviewer repeat the
+// first one's words — see `authenticatedFindings`.
 function findingCoreMatches(ledgerFinding, finding) {
   return ledgerFinding.findingId === finding.id
-    && ledgerFinding.severity === finding.severity
-    && ledgerFinding.summary === finding.summary
-    && ledgerFinding.evidence === finding.evidence;
+    && ledgerFinding.severity === finding.severity;
 }
 
 function verdictMatchesOpenRebuts(record) {
@@ -305,12 +309,56 @@ function validCumulativeLedger(previous, current) {
   return true;
 }
 
+// Convergence closes on a full-artifact round, and the closing round may be a
+// re-read of bytes a delta round already saw. That round is distinguished by
+// its SCOPE, not by its content: it reviews strictly more of the same artifact.
+// Without this the rule deadlocks — the moment a delta round comes back clean,
+// the mandated full round has nothing new to fingerprint and the chain refuses
+// it as "nothing was re-reviewed". A live run hit exactly that, ran the closing
+// round anyway, and could not record it.
+function scopeEscalates(previous, current) {
+  return isPlainObject(previous)
+    && isPlainObject(current)
+    && previous.scope === REVIEW_SCOPES.get('delta')
+    && current.scope === REVIEW_SCOPES.get('full')
+    && current.artifactFingerprint === previous.artifactFingerprint
+    && current.artifactVersion === previous.artifactVersion
+    && current.headOid === previous.headOid;
+}
+
+function closesByScopeEscalation(rounds) {
+  return Array.isArray(rounds)
+    && rounds.length >= 2
+    && scopeEscalates(rounds.at(-2), rounds.at(-1));
+}
+
+// Fingerprints and OIDs are unreadable at full length in a one-line gap, and a
+// gap nobody reads is the bare code again.
+function brief(value) {
+  return typeof value === 'string' && /^[0-9a-f]{40,64}$/u.test(value)
+    ? `${value.slice(0, 12)}…`
+    : String(value);
+}
+
+// EVERY refusal here names itself. A single undifferentiated null cost one live
+// run a bisect and another most of a day: the caller's one
+// INVALID_REVIEW_EVIDENCE code cannot say which chain rule broke, and the rules
+// that bit hardest — `artifactVersion`, and a top-level `scope` that disagrees
+// with the closing round's own — are stated nowhere the orchestrator reads.
 function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) {
-  if (
-    !Array.isArray(rounds)
-    || rounds.length !== round
-    || rounds.some((record) => !validReviewRound(record))
-  ) {
+  if (!Array.isArray(rounds) || rounds.length !== round) {
+    gaps.push(
+      `reviewRounds must hold exactly ${round} record(s), one per round `
+      + `(got ${Array.isArray(rounds) ? rounds.length : typeof rounds})`,
+    );
+    return null;
+  }
+  const malformed = rounds.findIndex((record) => !validReviewRound(record));
+  if (malformed !== -1) {
+    gaps.push(
+      `round ${malformed + 1}: the record is not a valid review round — check `
+      + 'its key set, hashes, oids, ledger entries and verdict shape',
+    );
     return null;
   }
   const first = rounds[0];
@@ -321,28 +369,56 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
     'configuredBaseOid',
     'authorIdentity',
   ];
-  if (
-    rounds.some((record, index) =>
-      record.round !== index + 1
-      || (index === 0
-        ? record.scope !== REVIEW_SCOPES.get('full')
-        : ![...REVIEW_SCOPES.values()].includes(record.scope))
-      || stable.some((key) => record[key] !== first[key]))
-    || rounds.some((record) =>
+  for (const [index, record] of rounds.entries()) {
+    const at = `round ${index + 1}`;
+    if (record.round !== index + 1) {
+      gaps.push(`${at}: the record numbers itself ${record.round}`);
+      return null;
+    }
+    if (index === 0 && record.scope !== REVIEW_SCOPES.get('full')) {
+      gaps.push(`${at}: round 1 is always the complete artifact`);
+      return null;
+    }
+    const drifted = stable.find((key) => record[key] !== first[key]);
+    if (drifted !== undefined) {
+      gaps.push(
+        `${at}: ${drifted} is ${brief(record[drifted])} but round 1 recorded `
+        + `${brief(first[drifted])} — it may not change across a review chain`,
+      );
+      return null;
+    }
+    if (
       record.checkout.root !== first.checkout.root
-      || record.checkout.branch !== first.checkout.branch)
-    // A repeated dispatch id is a replayed reviewer, not a fresh one.
-    || new Set(rounds.map(({ dispatchId }) => dispatchId)).size !== rounds.length
-    || rounds.some((record) => !verdictMatchesOpenRebuts(record))
-  ) {
+      || record.checkout.branch !== first.checkout.branch
+    ) {
+      gaps.push(`${at}: the reviewed checkout moved root or branch`);
+      return null;
+    }
+    if (!verdictMatchesOpenRebuts(record)) {
+      gaps.push(
+        `${at}: openRebuttals and the verdict's rebuts are not the same set, `
+        + 'or a rebut status disagrees with whether the finding still gates',
+      );
+      return null;
+    }
+  }
+  // A repeated dispatch id is a replayed reviewer, not a fresh one.
+  if (new Set(rounds.map(({ dispatchId }) => dispatchId)).size !== rounds.length) {
+    gaps.push('dispatchId must be distinct per round — a repeat is a replayed reviewer');
     return null;
   }
-  if (first.configFingerprint !== hashValue(projectConfig)) return null;
-  if (rounds[0].deltaBaseOid !== first.configuredBaseOid) return null;
-  // A single undifferentiated null here cost a live run a bisect: the caller's
-  // one INVALID_REVIEW_EVIDENCE code cannot say which chain rule broke, and
-  // `artifactVersion` in particular is refused for a reason stated nowhere the
-  // orchestrator reads. Each rule now names itself.
+  if (first.configFingerprint !== hashValue(projectConfig)) {
+    gaps.push(
+      `round 1: configFingerprint is ${brief(first.configFingerprint)} but the `
+      + `supplied projectConfig hashes to ${brief(hashValue(projectConfig))} — `
+      + 'canonical is `jq -S -c -j`, keys sorted, compact, no trailing newline',
+    );
+    return null;
+  }
+  if (first.deltaBaseOid !== first.configuredBaseOid) {
+    gaps.push('round 1: deltaBaseOid must equal the configured base');
+    return null;
+  }
   for (let index = 1; index < rounds.length; index += 1) {
     const previous = rounds[index - 1];
     const current = rounds[index];
@@ -354,6 +430,7 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
       gaps.push(`round ${index + 1}: the cumulative finding ledger is not carried forward`);
       return null;
     }
+    if (scopeEscalates(previous, current)) continue;
     if (current.artifactVersion <= previous.artifactVersion) {
       gaps.push(
         `round ${index + 1}: artifactVersion must strictly increase per round `
@@ -363,41 +440,60 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
       return null;
     }
     if (current.artifactFingerprint === previous.artifactFingerprint) {
-      gaps.push(`round ${index + 1}: artifactFingerprint is unchanged — nothing was re-reviewed`);
+      gaps.push(
+        `round ${index + 1}: artifactFingerprint is unchanged — nothing was `
+        + 're-reviewed. A closing full-artifact round over an unchanged '
+        + 'artifact must also carry the previous round\'s artifactVersion and '
+        + 'headOid to record as a scope escalation',
+      );
       return null;
     }
   }
   const current = rounds.at(-1);
-  if (
-    current.scope !== REVIEW_SCOPES.get(scope)
-    || current.planFingerprint !== expected.planFingerprint
-    || current.repositoryFingerprint !== expected.repositoryFingerprint
-    || current.configuredBaseOid !== expected.configuredBaseOid
-    || current.artifactVersion !== expected.artifactVersion
-    || current.artifactFingerprint !== expected.artifactFingerprint
-    || current.headOid !== expected.headOid
-  ) {
+  const declared = [
+    ['scope', current.scope, REVIEW_SCOPES.get(scope)],
+    ['planFingerprint', current.planFingerprint, expected.planFingerprint],
+    ['repositoryFingerprint', current.repositoryFingerprint, expected.repositoryFingerprint],
+    ['configuredBaseOid', current.configuredBaseOid, expected.configuredBaseOid],
+    ['artifactVersion', current.artifactVersion, expected.artifactVersion],
+    ['artifactFingerprint', current.artifactFingerprint, expected.artifactFingerprint],
+    ['headOid', current.headOid, expected.headOid],
+  ].find(([, recorded, wanted]) => recorded !== wanted);
+  if (declared !== undefined) {
+    gaps.push(
+      `round ${rounds.length}: the closing round records ${declared[0]} `
+      + `${brief(declared[1])} but the transition declares ${brief(declared[2])}`,
+    );
     return null;
   }
   return { current, rounds };
 }
 
-function authenticatedFindings(rounds) {
+// Re-raising a finding id keeps its severity. It does NOT keep its prose: a
+// later reviewer re-raises precisely to say why the fix fell short, and saying
+// that is rewriting the summary and the evidence.
+//
+// The rule used to demand all three, and living-football-engine #313 hit the
+// consequence exactly: rounds 1 and 2 both raised two Majors, round 2 rewording
+// each to explain what the fix missed, and the chain became unauthenticatable
+// at every head. The check runs ahead of the ledger, so no construction
+// satisfied it — the only input that would have was one with the reviewers'
+// recorded verdicts rewritten to agree, which is fabricated evidence. That unit
+// still has no `agentic/review` status and no run can ever give it one.
+function authenticatedFindings(rounds, gaps = []) {
   const history = new Map();
   for (const record of rounds) {
     for (const finding of record.verdict.findings) {
       const previous = history.get(finding.id);
-      if (
-        previous
-        && (
-          previous.severity !== finding.severity
-          || previous.summary !== finding.summary
-          || previous.evidence !== finding.evidence
-        )
-      ) {
+      if (previous && previous.severity !== finding.severity) {
+        gaps.push(
+          `round ${record.round}: finding ${finding.id} re-raised as `
+          + `${finding.severity} after ${previous.severity} — a finding id is `
+          + 'immutable; anything reassessed is a new finding with a new id',
+        );
         return null;
       }
-      history.set(finding.id, finding);
+      if (!previous) history.set(finding.id, finding);
     }
   }
   return history;
@@ -422,7 +518,9 @@ export function reviewTransition(input) {
     // optimistic close was prose a live session could not execute.
     || (input.round === 1 && input.scope !== 'full')
     || validateProjectConfig(input.projectConfig).length > 0
-    || input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
+    || (input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
+      && !(input.round === input.projectConfig.caps.codeReviewRoundsPerUnit + 1
+        && closesByScopeEscalation(input.reviewRounds)))
     || !validExpected(input.expected)
     || !validAnnotations(input.findingAnnotations)
   ) {
@@ -443,8 +541,10 @@ export function reviewTransition(input) {
       ? { evidenceGap: evidenceGaps[0] }
       : {});
   }
-  if (!authenticatedFindings(history.rounds)) {
-    return decision('error', 'INVALID_REVIEW_EVIDENCE');
+  if (!authenticatedFindings(history.rounds, evidenceGaps)) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', evidenceGaps.length > 0
+      ? { evidenceGap: evidenceGaps[0] }
+      : {});
   }
 
   const currentVerdict = history.current.verdict;
@@ -454,12 +554,27 @@ export function reviewTransition(input) {
   const authenticatedRebutIds = currentVerdict.rebuts.map(
     ({ findingId }) => findingId,
   );
-  if (
-    !sameSet(currentIds, annotationIds)
-    || !sameSet(rebutIds, authenticatedRebutIds)
-    || (input.round === 1 && rebutIds.length > 0)
-  ) {
-    return decision('error', 'INVALID_REVIEW_EVIDENCE');
+  if (!sameSet(currentIds, annotationIds)) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: 'findingAnnotations must annotate exactly the closing '
+        + `verdict's findings (verdict ${currentIds.length}, annotations `
+        + `${annotationIds.length})`,
+    });
+  }
+  if (!sameSet(rebutIds, authenticatedRebutIds)) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: "the closing round's openRebuttals and its verdict's rebuts "
+        + 'must name the same findings',
+    });
+  }
+  // A brief that invites the reviewer to "re-examine" a prior disposition gets
+  // that agreement recorded as a rebut, and round 1 has nothing to rebut. One
+  // live dispatch was spent, clean, and unpublishable.
+  if (input.round === 1 && rebutIds.length > 0) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: 'round 1 has no prior round, so its verdict carries no '
+        + 'rebuts — rebuts adjudicate open rebuttals from a preceding round',
+    });
   }
 
   const annotations = new Map(
@@ -467,19 +582,26 @@ export function reviewTransition(input) {
   );
   const currentGating = gatingFindings(currentVerdict);
   const currentGatingIds = new Set(currentGating.map(({ id }) => id));
-  if (
-    currentVerdict.rebuts.some(({ findingId, status }) =>
-      status === 'accepted'
-        ? currentGatingIds.has(findingId)
-        : !currentGatingIds.has(findingId))
-  ) {
-    return decision('error', 'INVALID_REVIEW_EVIDENCE');
+  const inconsistentRebut = currentVerdict.rebuts.find(({ findingId, status }) =>
+    status === 'accepted'
+      ? currentGatingIds.has(findingId)
+      : !currentGatingIds.has(findingId));
+  if (inconsistentRebut !== undefined) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: `rebut ${inconsistentRebut.findingId} is `
+        + `${inconsistentRebut.status} but the same verdict `
+        + `${inconsistentRebut.status === 'accepted' ? 'still raises' : 'no longer raises'}`
+        + ' it as a gating finding',
+    });
   }
   if (
     input.round === 1
     && input.findingAnnotations.some(({ inScope }) => inScope !== true)
   ) {
-    return decision('error', 'INVALID_REVIEW_EVIDENCE');
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+      evidenceGap: 'round 1 reviews the complete artifact, so no finding of '
+        + 'its can be annotated out of scope',
+    });
   }
   if (currentGating.some(({ id }) => annotations.get(id).verified !== true)) {
     return decision('verify', 'FINDING_VERIFICATION_REQUIRED');
@@ -498,6 +620,18 @@ export function reviewTransition(input) {
     ({ status }) => status === 'rejected',
   );
   if (currentGating.length === 0 && rejectedRebuts.length === 0) {
+    // Convergence closes on a full-artifact round. A delta round sees the last
+    // fix and nothing else, so the defect it structurally cannot see is the one
+    // an earlier fix made vacuous. living-football-engine #314 ran rounds 2-5
+    // all delta and closed on one; round 4 had already caught an assertion
+    // killed two rounds before, which is that defect class exactly. The rule
+    // was 0.46.0 prose and the contract accepted a delta close for ten
+    // releases.
+    if (input.scope !== 'full') {
+      return decision('continue', 'REVIEW_FULL_CLOSE_REQUIRED', {
+        reviewedHead: history.current.headOid,
+      });
+    }
     return decision('clean', 'REVIEW_CLEAN', {
       reviewedHead: history.current.headOid,
       reviewedCheckout: structuredClone(history.current.checkout),
@@ -718,7 +852,7 @@ function selfTest() {
     verdict: 'pass',
     findings: [],
     rebuts: [accept(finding.id, 'The fix closes the finding.')],
-  });
+  }, { scope: 'full-artifact' });
 
   const fullFactory = roundFactory(fixtureProjectConfig(), { seed: 'fullclose' });
   const fullFirst = fullFactory(1, failWith([finding]));
@@ -728,9 +862,54 @@ function selfTest() {
     rebuts: [accept(finding.id, 'The fix closes the finding.')],
   }, { scope: 'full-artifact' });
 
+  // A round-2 reviewer explaining why a round-1 fix fell short necessarily
+  // rewrites the prose. living-football-engine #313 raised both its Majors
+  // twice with reworded text and could never publish `agentic/review`.
+  const rewordedFinding = {
+    id: finding.id,
+    severity: finding.severity,
+    summary: 'The fix narrows the defect but the gate still passes the original input',
+    evidence: 'src/reviewed.mjs:1-9',
+  };
+  const escalatedFinding = { ...finding, severity: 'Critical' };
+
+  const rewordFactory = roundFactory(fixtureProjectConfig(), { seed: 'reword' });
+  const rewordFirst = rewordFactory(1, failWith([finding]));
+  const rewordSecond = rewordFactory(2, failWith([rewordedFinding]));
+  const rewordClose = rewordFactory(3, pass, { scope: 'full-artifact' });
+
+  const roundOneRebut = roundFactory(fixtureProjectConfig(), { seed: 'rebut1' })(
+    1,
+    { verdict: 'pass', findings: [], rebuts: [accept(finding.id, 'Agreed at plan review.')] },
+  );
+
+  const escalateFactory = roundFactory(fixtureProjectConfig(), { seed: 'escalate' });
+  const escalateFirst = escalateFactory(1, failWith([finding]));
+  const escalateSecond = escalateFactory(2, failWith([escalatedFinding]));
+
+  const mismatchFactory = roundFactory(fixtureProjectConfig(), { seed: 'mismatch' });
+  const mismatchFirst = mismatchFactory(1, failWith([finding]));
+  const mismatchDelta = mismatchFactory(2, pass);
+
+  const escalationCap = fixtureProjectConfig(2);
+  const escalationFactory = roundFactory(escalationCap, { seed: 'escalation' });
+  const escalationFirst = escalationFactory(1, failWith([finding]));
+  const escalationDelta = escalationFactory(2, pass);
+  const widerFactory = roundFactory(escalationCap, { seed: 'wider' });
+  const widerFirst = widerFactory(1, failWith([finding]));
+  const widerDelta = widerFactory(2, pass);
+  const escalationWiderArtifact = widerFactory(3, pass, { scope: 'full-artifact' });
+
+  const escalationClose = escalationFactory(3, pass, {
+    scope: 'full-artifact',
+    artifactVersion: escalationDelta.artifactVersion,
+    artifactFingerprint: escalationDelta.artifactFingerprint,
+    headOid: escalationDelta.headOid,
+  });
+
   const fixedFactory = roundFactory(fixtureProjectConfig(), { seed: 'fixed' });
   const fixedFirst = fixedFactory(1, failWith([finding]));
-  const fixed = fixedFactory(2, pass);
+  const fixed = fixedFactory(2, pass, { scope: 'full-artifact' });
 
   const rejectedFactory = roundFactory(fixtureProjectConfig(), { seed: 'rejected' });
   const rejectedFirst = rejectedFactory(1, failWith([finding]));
@@ -793,7 +972,7 @@ function selfTest() {
   const cumulativeFactory = roundFactory(fixtureProjectConfig(), { seed: 'cumulative' });
   const cumulativeFirst = cumulativeFactory(1, failWith([finding]));
   const cumulativeSecond = cumulativeFactory(2, failWith([cumulativeFinding]));
-  const cumulativeThird = cumulativeFactory(3, pass);
+  const cumulativeThird = cumulativeFactory(3, pass, { scope: 'full-artifact' });
 
   const omittedHistoryFactory = roundFactory(fixtureProjectConfig(), { seed: 'history' });
   const omittedHistoryFirst = omittedHistoryFactory(1, failWith([finding]));
@@ -854,18 +1033,84 @@ function selfTest() {
       expected: ['clean', true],
     },
     {
+      name: 'a later reviewer may reword a re-raised finding',
+      input: inputFor(
+        [rewordFirst, rewordSecond, rewordClose],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
+      expected: ['clean', true],
+    },
+    {
+      name: 'a re-raised finding may not change severity',
+      input: inputFor([escalateFirst, escalateSecond]),
+      expected: ['error', false],
+      expectedGap: 'a finding id is immutable',
+    },
+    {
+      // The failure that cost living-football-engine #314 a bisect: the only
+      // signal was a bare INVALID_REVIEW_EVIDENCE for one wrong word.
+      name: 'a transition scope that disagrees with the closing round names itself',
+      input: inputFor(
+        [mismatchFirst, mismatchDelta],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
+      expected: ['error', false],
+      expectedGap: 'records scope',
+    },
+    {
+      name: 'a round-1 verdict carrying rebuts names the rule it broke',
+      input: inputFor([roundOneRebut]),
+      expected: ['error', false],
+      expectedGap: 'round 1 has no prior round',
+    },
+    {
+      name: 'convergence may not close on a delta round',
+      input: inputFor([mismatchFirst, mismatchDelta]),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
+    },
+    {
+      name: 'a full round past the cap that is not a scope escalation is refused',
+      input: inputFor(
+        [widerFirst, widerDelta, escalationWiderArtifact],
+        escalationCap,
+        { scope: 'full' },
+      ),
+      expected: ['error', false],
+      expectedCode: 'INVALID_REVIEW_INPUT',
+    },
+    {
+      name: 'a full-artifact round re-reading the delta head closes the review',
+      input: inputFor(
+        [escalationFirst, escalationDelta, escalationClose],
+        escalationCap,
+        { scope: 'full' },
+      ),
+      expected: ['clean', true],
+    },
+    {
       name: 'a Major continues below the cap',
       input: inputFor([acceptedFirst]),
       expected: ['continue', false],
     },
     {
       name: 'an accepted rebut permits a clean result',
-      input: inputFor([acceptedFirst, accepted]),
+      input: inputFor(
+        [acceptedFirst, accepted],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
       expected: ['clean', true],
     },
     {
       name: 'a reviewed fix permits a clean result',
-      input: inputFor([fixedFirst, fixed]),
+      input: inputFor(
+        [fixedFirst, fixed],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
       expected: ['clean', true],
     },
     {
@@ -940,7 +1185,11 @@ function selfTest() {
     },
     {
       name: 'three rounds retain closed and open cumulative findings',
-      input: inputFor([cumulativeFirst, cumulativeSecond, cumulativeThird]),
+      input: inputFor(
+        [cumulativeFirst, cumulativeSecond, cumulativeThird],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
       expected: ['clean', true],
     },
     {
@@ -1053,6 +1302,23 @@ function selfTest() {
       console.error(
         `FAIL ${fixture.name}: expected ${fixture.expected.join('/')}, `
         + `got ${actual.state}/${actual.publishReviewSuccess} (${actual.code})`,
+      );
+      continue;
+    }
+    if (fixture.expectedCode !== undefined && actual.code !== fixture.expectedCode) {
+      console.error(
+        `FAIL ${fixture.name}: expected code ${fixture.expectedCode}, `
+        + `got ${actual.code}`,
+      );
+      continue;
+    }
+    if (
+      fixture.expectedGap !== undefined
+      && !String(actual.evidenceGap ?? '').includes(fixture.expectedGap)
+    ) {
+      console.error(
+        `FAIL ${fixture.name}: expected an evidenceGap naming `
+        + `"${fixture.expectedGap}", got ${actual.evidenceGap ?? '<none>'}`,
       );
       continue;
     }
