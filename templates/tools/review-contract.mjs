@@ -416,7 +416,7 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
     return null;
   }
   if (first.deltaBaseOid !== first.configuredBaseOid) {
-    gaps.push("round 1: deltaBaseOid must equal the configured base");
+    gaps.push('round 1: deltaBaseOid must equal the configured base');
     return null;
   }
   for (let index = 1; index < rounds.length; index += 1) {
