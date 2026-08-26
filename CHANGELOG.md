@@ -3,6 +3,90 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.56] - 2026-08-26
+
+Everything here was found by reading one three-day live run end to end
+(living-football-engine, nine units, three merged, two finished-but-unmerged
+drafts). Each item names the unit that paid for it.
+
+### Fixed
+
+- **A finding id is its defect and its severity, not its prose.** `authenticatedFindings`
+  rejected a whole review chain whenever a finding id reappeared with a different severity,
+  summary OR evidence, and `findingCoreMatches` enforced the same identity in the cumulative
+  ledger, so both refused together. A round-2 reviewer re-raises a finding precisely to say what
+  the fix missed, and saying that rewrites the prose. #313 raised both its Majors twice with
+  fresh explanations and `agentic/review` became unpublishable at every head — the check runs
+  ahead of the ledger, so the only input that would have satisfied it was one with the reviewers'
+  recorded verdicts rewritten to agree. PR #330 is still an unmerged draft, and no future run
+  could have rescued it. Severity is the field that gates and stays pinned; a reassessment at a
+  different severity is a new finding with a new id. Filed live as living-football-engine #331.
+- **Convergence closes on a full-artifact round, mechanically.** The rule has been the skill's
+  since 0.46.0 and prose the whole time: `reviewTransition` returned `REVIEW_CLEAN` for a clean
+  delta round. #314 ran rounds 2 through 5 all delta and closed on one, four fixes and a
+  near-total test rewrite after anything had read the artifact whole — and its round 4 had already
+  caught an assertion made vacuous two rounds earlier, which is the defect class a delta round
+  structurally cannot see. A clean delta round now returns `REVIEW_FULL_CLOSE_REQUIRED`. The
+  closing round it demands re-reads bytes a delta round already saw, which
+  `artifactFingerprint`-must-differ would refuse, so a round keeping the previous `headOid`,
+  `artifactVersion` and `artifactFingerprint` while widening scope is recorded as a **scope
+  escalation** — the only shape allowed to repeat a fingerprint, and allowed one round past the
+  cap so the rule is always executable. The live run ran that closing round and could not record
+  it.
+- **Every review-evidence refusal names the rule it broke.** Six of seven returned a bare
+  `INVALID_REVIEW_EVIDENCE`, and diagnosing one meant bisecting the evidence by resubmitting a
+  round-1-only input. On #314 the entire cost was one wrong word: the transition declared
+  `scope: "full"` over a closing round whose own scope was `fix-delta-and-open-rebuttals`. Each
+  refusal now pushes an `evidenceGap` naming the field, what the round recorded, and what the
+  transition declared.
+- **A reviewer brief cannot carry commands.** A reviewer posture is `Glob,Grep,Read` and
+  `resolveTools` refuses Bash for it outright, so a `git show` in a brief is unexecutable — and
+  the reviewer spends its budget trying. Two #313 round-4 attempts died that way. `dispatch.mjs`
+  refuses a reviewer prompt containing a shell code fence before the engine starts
+  (`REVIEWER_PROMPT_NOT_EXECUTABLE`); a command quoted as evidence fences as `text`.
+- **A rejected verdict keeps its findings.** `INVALID_REVIEW_VERDICT` said "structured output is
+  not a valid review verdict" and discarded the payload. #310 rounds 4 and 5 both returned real
+  findings and both were rejected under the internal-consistency rule — the brief said to fail on
+  "at least one finding", so a Minor-only round answered `fail`. Recovering the content meant
+  scraping the live event stream. The refusal now names that rule and carries `rejectedVerdict`,
+  the way an unpublishable plan keeps its body.
+- **The merge executor names a missing finalizer instead of listing its six consequences.**
+  #314 / PR #332 was converged, gated, and green on the exact head; the run went from
+  `READY_HEAD_BOUND` straight to `auto-merge`, read its refusal (draft, issue not delivered,
+  ownership incomplete, no premerge record) as the Copilot ready-trigger wedge, and stopped.
+  `terminal-finalize` had never been invoked for that PR — every refusal reason was the state it
+  exists to change. The executor now detects that shape and says so first. The skill says it too:
+  declining to invoke the finalizer is not an outcome, only its typed refusal is.
+- **`reviseRoundsPerPr` returns to 10, which 0.49.49 said it already was.** That release raised it
+  in the setup skill's two interview examples and left `scaffold.mjs` writing 3, so every
+  repository scaffolded across six releases carried a cap its own documentation denied.
+  `contract-lint` now reads the caps block out of `scaffold.mjs` and refuses any forward artifact
+  whose cap literals disagree with it; the check found this drift on its first run.
+
+### Changed
+
+- **The scaffolded `codeReviewRoundsPerUnit` default is 20, up from 10.** #311 spent all 12 of its
+  configured rounds without converging and blocked, stranding #315, #317 and #318 behind it. The
+  cap is a runaway backstop, not a convergence quota — the reasoning 0.49.49 applied to
+  `reviseRoundsPerPr`. Twenty is the schema ceiling `config-contract.mjs` already enforces. The
+  legacy migration backfill stays 5, as 0.49.43 settled: a migrated repository keeps the policy
+  its operator accepted.
+- **`prime` returns the validated ProjectConfig and its review fingerprint.** The config block was
+  five decision fields, so a run needing the whole config — which every review transition does,
+  for `projectConfig` and `configFingerprint` — went and got it: one live run read STATE off
+  `origin/main` by hand twice, another lost a round hashing pretty-printed output. `config` now
+  carries `projectConfig` and `fingerprint`, and `hashValue` is imported from the contract that
+  compares it rather than copied.
+
+### Documentation
+
+- The dev skill gains three rules the run paid for: a backgrounded dispatch carries no host
+  timeout (a `timeout: 600000` killed a reviewer 48 tool calls deep, against dispatch's own
+  45-minute ceiling); a round-1 verdict has no `rebuts`, so a brief must not invite the reviewer
+  to re-examine a plan-review disposition; and a marker-driven resume already at the review cap is
+  reported, not claimed.
+- Five incidents join `regression-index.mjs` (45 total).
+
 ## [0.49.55] - 2026-08-23
 
 ### Fixed

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.55 · starting
+∞ dev · v0.49.56 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -886,6 +886,16 @@ re-authorization, name the one command its human runs
 unit through ninety minutes of dispatches to gate-green and review-clean before discovering the
 authorization was missing at the last step; this check costs one field of a snapshot the run
 already has.
+
+**A resume at the review cap is reported, not claimed.** Same shape, one field further on: if the
+unit's recorded rounds already reach `caps.codeReviewRoundsPerUnit`, the contract refuses the next
+one, so claiming it spends a premise, a plan and a writer to arrive at a refusal the queue read
+could have predicted. Name the unit, the rounds spent, the open findings, and the three options
+the cap block offers — raise the cap, re-plan, carve the predicate — and take other work. A human
+who removed `loop-blocked` without choosing one of them has unblocked the issue without changing
+what blocked it; that removal is still their decision and the loop still may not re-block from it
+(see the unblock rule below), which is exactly why the run must be able to skip a unit it cannot
+advance.
 
 **Which is why blocking must never strip that label.** `loop-blocked` already removes the issue
 from the eligible set, so removing `loop-ready` too is redundant — and it is the one label the
