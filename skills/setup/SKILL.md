@@ -120,7 +120,7 @@ Schema `0.26.0` stores repository policy, never session intent:
   "caps": {
     "gateRetriesPerUnit": 2,
     "reviseRoundsPerPr": 10,
-    "codeReviewRoundsPerUnit": 10,
+    "codeReviewRoundsPerUnit": 20,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10
   }
@@ -295,7 +295,7 @@ Global defaults contain only non-project preferences:
   "caps": {
     "gateRetriesPerUnit": 2,
     "reviseRoundsPerPr": 10,
-    "codeReviewRoundsPerUnit": 10,
+    "codeReviewRoundsPerUnit": 20,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10
   },
