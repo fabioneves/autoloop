@@ -4,7 +4,7 @@
   "tools": {
     "api-shape.mjs": "1f3cb7851f4c10ea344a688930a22d5b7aec9405bf74cc4d71c7b2b1327a94b8",
     "attestation-contract.mjs": "07932a317cae83aba72e5513cf8b8a7147ca67d3bf18cf33ec460dc197119711",
-    "auto-merge.mjs": "18ddc491c50ada2e0f0f818b0520f0a4ca17e58c12e667da2208d0fe9efa05ed",
+    "auto-merge.mjs": "187f49d97abcffc8d3c4c0c79a0e0c93ae07e6ba870d773c76cca918c28b199c",
     "checkout-contract.mjs": "3c9e7708f27ce0fc808488bcc44361b8c7d8e18086fc4449dcb1abaa58c5a52b",
     "claim-contract.mjs": "5db0b31ad846bf2b1f14ef03ebd28515e61a5aba82f6de1fcfa67ea95670af0e",
     "command-guard.mjs": "be617ceae899f48a868279fd2f1358eec8d6651e5703818ba9cac157cff6bf34",
@@ -24,7 +24,7 @@
     "overlap-report.mjs": "f2e13b9962663135b2e4ccb1d3ea2c6091ad12386965bdb6680da29d2a2b0788",
     "prime.mjs": "0512da2b34d423cd9c9ee26d6d1eb5ed99ccba05e31b4f4750ccea09c8324d66",
     "publish-verdict.mjs": "0c5f84c07bbdfc2392b3d288e2878c79380b9101f8ba909b3abaee64d5ac2625",
-    "regression-index.mjs": "d89118dc01159d092d8577b0ac3918c1367f99a1f77406f3d8c080205e17952d",
+    "regression-index.mjs": "5e581cff3aec082385dcd84a334013dfb1616fa4cc1478c724395f8a8753812d",
     "release-verify.mjs": "65bf7e799b423aca7a1a5b8eef4821ae9d85a405085123b8095d046b58a27ede",
     "review-contract.mjs": "454b1c324c70e39ee3caf09c30fae0afe53a76639ac8f26163d272f3d18aae1d",
     "scaffold.mjs": "0d31e7699ce8d73b468dbc6a94be086b9e82cb510dd1d26b9be696b433f3d4dd",

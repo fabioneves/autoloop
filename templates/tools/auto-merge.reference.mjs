@@ -1595,7 +1595,35 @@ export function decide(pr, config = engineConfig()) {
   const authorization = authorizeMerge(mergeAuthorizationInput(pr, path, config));
   reasons.push(...authorization.reasons.map((reason) => `merge authorization: ${reason}`));
 
+  // `publish-verdict terminal-finalize` is what marks the PR ready, settles the
+  // triggered checks, writes the pre-merge audit record and swaps the issue to
+  // `loop-delivered`. Every one of those is a merge precondition, so a unit that
+  // reaches this executor without it fails six of them at once and the refusal
+  // reads like six independent problems. A live run read exactly that list on a
+  // converged, gated, review-clean unit, concluded the Copilot ready-trigger
+  // wedge, and left it an unmerged draft — the finalizer had never been invoked
+  // for that PR at all. Say which step is missing, first, in its own words.
+  if (reasons.length > 0 && finalizerHasNotRun(pr)) {
+    reasons.unshift(
+      'the terminal finalizer has not run for this PR: it is a draft and its '
+      + 'issue is not loop-delivered, so no pre-merge audit record exists. Run '
+      + '`publish-verdict.mjs terminal-finalize` first — the refusals below are '
+      + 'its output, not independent blockers',
+    );
+  }
+
   return { allow: reasons.length === 0, reasons, path };
+}
+
+// Direct facts only. `lifecycle` is null exactly when no policy attestation was
+// observed, which is the shape of a PR the finalizer never touched.
+function finalizerHasNotRun(pr) {
+  const issue = pr?.linkedIssue;
+  return pr?.isDraft === true
+    && issue?.complete === true
+    && Array.isArray(issue.labels)
+    && !issue.labels.includes('loop-delivered')
+    && pr?.lifecycle?.delivered !== true;
 }
 
 function apiErrorStatus(error) {
@@ -2847,6 +2875,30 @@ function liveEvidenceCases() {
     {
       name: 'label removal and loop re-add cannot reuse human authorization',
       ok: relabeledByLoop.eventVerified === false,
+    },
+    {
+      // The refusal a live run misread as the Copilot ready-trigger wedge on a
+      // converged unit whose finalizer had simply never been invoked.
+      name: 'a PR the terminal finalizer never touched says so first',
+      ok: (() => {
+        const base = { files: [NEUTRAL_PATH], labels: ['risk:pure-deletion'] };
+        // What a PR looks like before terminal-finalize: still a draft, issue
+        // not delivered, no pre-merge audit record observed.
+        const unfinalized = decide(makeInput({
+          ...base,
+          isDraft: true,
+          lifecycle: null,
+          linkedIssue: { ...makeInput(base).linkedIssue, labels: ['loop-ready'] },
+        }), SELF_TEST_CONFIG);
+        const finalized = decide(makeInput({ ...base, isDraft: true }), SELF_TEST_CONFIG);
+        return unfinalized.allow === false
+          && unfinalized.reasons[0].startsWith('the terminal finalizer has not run')
+          // A delivered issue on a draft PR is a different failure and must not
+          // borrow the headline.
+          && finalized.allow === false
+          && !finalized.reasons[0].startsWith('the terminal finalizer has not run')
+          && decide(makeInput(base), SELF_TEST_CONFIG).allow === true;
+      })(),
     },
   ];
 }

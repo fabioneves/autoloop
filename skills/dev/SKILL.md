@@ -1588,6 +1588,16 @@ fails before the terminal mutation and may be retried only after a fresh live re
 `gh pr ready`, raw `loop-delivered` label edits, split `premerge-create`, and caller delivery
 booleans are forbidden.
 
+**The finalizer is not optional and not skippable.** It is the only thing that marks the PR ready,
+settles the triggered checks, writes the pre-merge audit record and swaps the issue to
+`loop-delivered` — every one of which the merge executor requires. A unit that reaches `auto-merge`
+without it fails six preconditions at once, and the refusal reads like six independent blockers. A
+live run read exactly that list on a converged, gated, review-clean unit, concluded the Copilot
+ready-trigger wedge, and left it an unmerged draft; `terminal-finalize` had never been invoked for
+that PR at all. Since 0.49.56 the executor says so in its first line. **Declining to invoke the
+finalizer is not an outcome — only its typed refusal is**, and the ready-trigger wedge in
+particular is what the bounded settle window above exists to absorb.
+
 Under `merge.policy: manual`, stop after the returned exact terminal result and leave the ready PR
 for a human. Under an acknowledged solo non-manual policy, **switch to the base checkout first**,
 then invoke `tools/agentic/auto-merge.mjs` there, once, for the delivered PR, and treat its typed

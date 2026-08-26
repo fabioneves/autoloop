@@ -33,6 +33,35 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'auto-merge-refusal-read-as-a-wedge-when-the-finalizer-never-ran',
+    date: '2026-08-26',
+    symptom: 'living-football-engine #314 / PR #332 was converged, gated, and '
+      + 'carried both verdict statuses green on the exact head. After '
+      + 'READY_HEAD_BOUND the run went straight to auto-merge, read its refusal '
+      + '(draft, issue not delivered, ownership incomplete, no premerge '
+      + 'record) as the Copilot ready-trigger wedge, and stopped. The unit is '
+      + 'still an unmerged draft.',
+    cause: 'publish-verdict terminal-finalize was never invoked for that PR — '
+      + 'the last invocation in the session predated it by a day. Every '
+      + 'refusal reason was the state the finalizer exists to change, and the '
+      + 'executor listed them as six equal blockers with nothing naming the '
+      + 'missing step.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'auto-merge.reference.mjs',
+        anchor: 'function finalizerHasNotRun(pr) {',
+      }),
+      Object.freeze({
+        file: 'auto-merge.reference.mjs',
+        anchor: "name: 'a PR the terminal finalizer never touched says so first',",
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'Declining to invoke the\nfinalizer is not an outcome',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'reviewer-briefs-carried-commands-a-reviewer-cannot-run',
     date: '2026-08-25',
     symptom: 'Two code-review round-4 attempts on living-football-engine #313 '
