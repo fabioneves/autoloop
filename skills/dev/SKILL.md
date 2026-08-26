@@ -157,7 +157,15 @@ sanctioned reads are typed:
   `jq '[.items[] | {number, title, labels, dependencies}]' <file>`. A live run hedged the two
   shapes with `.labels[]?.name // .labels[]?` and lost the call anyway — the postfix `?` binds
   to the `[]` before it, not to the `.name` after it — and no hedge is needed for a shape this
-  list states.
+  list states. **`openPrs` flattens three more of `gh`'s objects and drops one key entirely:**
+  `author` and `headRepository` are bare strings (`.author.login` dies with the same
+  `Cannot index string`), and there is **no `labels`** — asking for one returns `null` silently,
+  which is worse, because the read succeeds and the answer is empty. Its keys are exactly
+  `number`, `title`, `body`, `isDraft`, `reviewDecision`, `headRefName`, `headRefOid`,
+  `baseRefName`, `mergeStateStatus`, `mergeable`, `mergedAt`, `updatedAt`, `author`,
+  `headRepository`, `statusCheckState`, `statusCheckRollup`, `issue`, `orphanCandidate`,
+  `ownership`. The open-PR read is
+  `jq '[.items[] | {number, headRefName, isDraft, mergeStateStatus, issue, ownership}]' <file>`.
 
 Shapes to keep out of every command, sanctioned read or not:
 
