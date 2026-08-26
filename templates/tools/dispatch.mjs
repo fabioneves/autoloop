@@ -264,6 +264,37 @@ export function validReviewVerdict(value) {
     );
 }
 
+// `validReviewVerdict` answers yes or no, and "structured output is not a valid
+// review verdict" sent a live run to scrape 462 KB of event stream to find out
+// which rule broke. Twice, on consecutive rounds, for the same reason: the brief
+// said to fail on "at least one finding", the reviewer returned `fail` with only
+// Minors, and the internal-consistency rule rejected the envelope. Both rounds'
+// findings were real and the work was thrown away.
+//
+// So the failure names the rule AND carries the rejected verdict, the way an
+// unpublishable plan keeps its body in `rejectedPlan`. The envelope is invalid;
+// the findings inside it are still evidence.
+export function reviewVerdictProblem(value) {
+  if (validReviewVerdict(value)) return null;
+  const findings = Array.isArray(value?.findings) ? value.findings : null;
+  if (findings !== null && ['pass', 'fail'].includes(value.verdict)) {
+    const gating = findings.filter(({ severity }) =>
+      ['Critical', 'Major'].includes(severity));
+    if (value.verdict === 'pass' && gating.length > 0) {
+      return `the verdict is \`pass\` but ${gating.length} finding(s) are `
+        + 'Critical or Major. A gating finding means `fail`';
+    }
+    if (value.verdict === 'fail' && gating.length === 0) {
+      return 'the verdict is `fail` but no finding is Critical or Major. '
+        + '`fail` requires at least one gating finding; a round that found only '
+        + 'Minors is a `pass` that lists them. Tell the reviewer this rule in '
+        + 'the brief — "fail if you find anything" produces exactly this '
+        + 'envelope, and the round is lost';
+    }
+  }
+  return 'structured output is not a valid review verdict';
+}
+
 function processSettings(tools) {
   return {
     permissions: {
@@ -645,6 +676,34 @@ export function runDispatch(options) {
     };
 }
 
+// A reviewer holds `Glob,Grep,Read` and never Bash — `resolveTools` refuses it
+// outright. So a command in a reviewer's brief is not a slow instruction, it is
+// an unexecutable one, and the reviewer spends its budget trying anyway: two
+// round-4 attempts on a live unit died having searched the filesystem for a
+// commit the brief told them to `git show`. The skill has said "never a command
+// it cannot run" since 0.47 and the briefs kept carrying them, so the rule needs
+// a mechanism rather than more prose.
+//
+// Fenced shell blocks only. That is the shape a brief uses to TELL a reviewer to
+// run something, it is unambiguous, and a command quoted as evidence has a
+// remedy that costs nothing: fence it as `text`.
+const SHELL_FENCE_RE =
+  /^[ \t]*(?:`{3,}|~{3,})[ \t]*(bash|sh|shell|zsh|console|shell-session|shellsession)\b/gimu;
+
+export function reviewerPromptProblem(role, prompt) {
+  if (ROLES[role]?.posture !== 'reviewer') return null;
+  const text = String(prompt);
+  SHELL_FENCE_RE.lastIndex = 0;
+  const match = SHELL_FENCE_RE.exec(text);
+  if (match === null) return null;
+  const line = text.slice(0, match.index).split('\n').length;
+  return `the prompt carries a ${match[1]} code fence at line ${line}, but a `
+    + `${role} reviewer holds no Bash and cannot run it. Paste what you want `
+    + 'reviewed — the diff, the output, a path with a line range — instead of '
+    + 'the command that would produce it; if a command must appear as evidence, '
+    + 'fence it as `text`.';
+}
+
 function executeDispatch(options) {
   const {
     role,
@@ -655,6 +714,15 @@ function executeDispatch(options) {
     engine = 'claude',
     startedAtMs = PROCESS_START_MS,
   } = options;
+  const promptProblem = reviewerPromptProblem(role, prompt);
+  if (promptProblem !== null) {
+    return failure(
+      'prompt',
+      'REVIEWER_PROMPT_NOT_EXECUTABLE',
+      `${role}: ${promptProblem}`,
+      { ms: 0, startupMs: 0, stderr: '' },
+    );
+  }
   const adapter = resolveEngine(engine);
   if (adapter === null) {
     return failure('spawn', 'ENGINE_UNKNOWN', `${role}: unknown engine ${hostName(engine)}`, {
@@ -791,12 +859,22 @@ function runEngine({
   }
   if (ROLES[role].result === 'review-verdict') {
     const verdict = payload.structured;
-    if (!validReviewVerdict(verdict)) {
+    const problem = reviewVerdictProblem(verdict);
+    if (problem !== null) {
       return failure(
         'result',
         'INVALID_REVIEW_VERDICT',
-        `${role}: structured output is not a valid review verdict`,
-        { ms, startupMs, stderr },
+        `${role}: ${problem}`,
+        {
+          ms,
+          startupMs,
+          stderr,
+          // The findings survive even when the envelope cannot: disposition
+          // them, fix, and re-review. Do NOT re-run the round for the envelope.
+          ...(verdict !== null && typeof verdict === 'object'
+            ? { rejectedVerdict: verdict }
+            : {}),
+        },
       );
     }
     return { ok: true, role, tools, startupMs, ms, verdict };
@@ -1028,6 +1106,43 @@ function selfTest() {
       && argv.includes('--disable-slash-commands')
       && JSON.parse(argvValue(argv, '--settings')).permissions.deny
         .includes('Read(~/.ssh/**)')),
+  );
+
+  check(
+    'an inconsistent verdict names the rule it broke',
+    reviewVerdictProblem({
+      verdict: 'fail',
+      findings: [{ id: 'f1', severity: 'Minor', summary: 's', evidence: 'e' }],
+      rebuts: [],
+    })?.includes('a round that found only Minors is a `pass`')
+    && reviewVerdictProblem({
+      verdict: 'pass',
+      findings: [{ id: 'f1', severity: 'Major', summary: 's', evidence: 'e' }],
+      rebuts: [],
+    })?.includes('A gating finding means `fail`')
+    && reviewVerdictProblem(PASSING_VERDICT) === null
+    && reviewVerdictProblem(null) === 'structured output is not a valid review verdict',
+  );
+
+  check(
+    'a reviewer brief carrying a shell fence is refused before the engine starts',
+    reviewerPromptProblem('code-review', 'Review the diff.\n\n```bash\ngit show HEAD\n```')
+      ?.includes('holds no Bash')
+    && reviewerPromptProblem('plan-review', '~~~sh\nls\n~~~') !== null
+    && reviewerPromptProblem('doubt-review', '```console\n$ go test\n```') !== null
+    // The evidence spelling stays open, and a writer may be told to run things.
+    && reviewerPromptProblem('code-review', '```text\ngit show HEAD\n```') === null
+    && reviewerPromptProblem('code-review', '```diff\n+const x = 1;\n```') === null
+    && reviewerPromptProblem('implement', '```bash\ngo test ./...\n```') === null,
+  );
+  check(
+    'the refusal names the fence and its line',
+    reviewerPromptProblem('code-review', 'a\nb\n```bash\nls\n```')
+      === 'the prompt carries a bash code fence at line 3, but a code-review '
+        + 'reviewer holds no Bash and cannot run it. Paste what you want '
+        + 'reviewed — the diff, the output, a path with a line range — instead '
+        + 'of the command that would produce it; if a command must appear as '
+        + 'evidence, fence it as `text`.',
   );
 
   check(

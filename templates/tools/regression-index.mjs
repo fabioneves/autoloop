@@ -33,6 +33,63 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'reviewer-briefs-carried-commands-a-reviewer-cannot-run',
+    date: '2026-08-25',
+    symptom: 'Two code-review round-4 attempts on living-football-engine #313 '
+      + 'died three and two minutes in, having spent their whole budget '
+      + 'searching the filesystem for a commit the brief told them to inspect '
+      + 'with git. Round 3 had passed only because it read files directly.',
+    cause: 'A reviewer posture is Glob,Grep,Read — resolveTools refuses Bash '
+      + 'for it outright — so every git command written into those briefs was '
+      + 'unexecutable. The skill had said "never a command it cannot run" '
+      + 'since 0.47 in prose, and the briefs kept carrying them.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: 'export function reviewerPromptProblem(role, prompt) {',
+      }),
+      Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: "'a reviewer brief carrying a shell fence is refused before the engine starts',",
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'REVIEWER_PROMPT_NOT_EXECUTABLE',
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'a-fail-verdict-with-only-minors-threw-away-two-rounds',
+    date: '2026-08-24',
+    symptom: 'living-football-engine #310 rounds 4 and 5 both returned real '
+      + 'findings and both were rejected as INVALID_REVIEW_VERDICT. The '
+      + 'content was recoverable only by scraping the live event stream, and '
+      + 'the message named no rule.',
+    cause: 'dispatch enforces pass => no Critical/Major and fail => at least '
+      + 'one. The brief said to fail on "at least one finding", so a '
+      + 'Minor-only round returned `fail` and the envelope was self-'
+      + 'inconsistent. The refusal said only "not a valid review verdict" and '
+      + 'discarded the findings with the envelope.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: 'export function reviewVerdictProblem(value) {',
+      }),
+      Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: "? { rejectedVerdict: verdict }",
+      }),
+      Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: "'an inconsistent verdict names the rule it broke',",
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'A round that found only Minors is a `pass` that lists them.',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'a-delta-round-closed-a-review-the-contract-called-clean',
     date: '2026-08-26',
     symptom: 'living-football-engine #314 ran code-review rounds 2 through 5 '

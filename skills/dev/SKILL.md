@@ -455,6 +455,12 @@ bash <plugin-tools>/dispatch-stream.sh \
   --role <role> --prompt-file <path> [--engine codex] [--tools <csv>]
 ```
 
+**A backgrounded dispatch carries no host timeout.** `dispatch.mjs` holds its own ceilings — 120
+minutes for a writer, 45 for a reviewer — and they are sized for the work; a host-side timeout on
+top of them only truncates. One live round passed `timeout: 600000` alongside `run_in_background`,
+and the ten-minute ceiling killed a reviewer 48 tool calls deep with 462 KB of stream and no
+verdict, on a unit whose earlier rounds had each run 12-16 minutes.
+
 One background task per dispatch, engine events flowing in its own view for the whole run, exit
 code propagated — a 13-minute codex review is a window, not a sealed box. Collect the typed
 result from the output file, never by parsing the stream. Only a dispatch expected to finish in
@@ -1201,6 +1207,21 @@ node <plugin-tools>/dispatch.mjs --role code-review \
   --prompt-file /tmp/autoloop-code-review-1.md \
   --output-file /tmp/autoloop-code-review-1.json --json
 ```
+
+**Two things every reviewer brief owes the reviewer, both enforced:**
+
+- **No commands.** A reviewer holds `Glob,Grep,Read` and never Bash, so `git show <sha>` or
+  `go test ./...` in a brief is not a slow instruction, it is an unexecutable one — and the
+  reviewer spends its budget trying. Two round-4 attempts on a live unit died exactly that way.
+  Give it the diff, the output, or a path with a line range. `dispatch.mjs` refuses a
+  reviewer prompt carrying a shell code fence before the engine starts
+  (`REVIEWER_PROMPT_NOT_EXECUTABLE`); fence a command quoted as evidence as `text`.
+- **The verdict rule, stated.** `pass` means no Critical or Major finding; `fail` means at least
+  one. A round that found only Minors is a `pass` that lists them. "Fail if you find anything"
+  is the natural phrasing and it produces an envelope the harness rejects — it cost two
+  consecutive live rounds, whose findings were real. When one is rejected anyway, the failure
+  carries `rejectedVerdict`: disposition those findings, fix, and re-review. Never re-run the
+  round to obtain a well-formed envelope for work already done.
 
 Verify every Critical/Major against code or a cheap reproduction, then disposition it:
 
