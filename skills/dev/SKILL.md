@@ -68,6 +68,10 @@ The typed summary is
 `{ok,version,repository,checkout,config,base,runMarker,timings,snapshotPath,snapshotBytes,sections}`:
 
 - `checkout` — root, repository fingerprint, branch, HEAD, and whether the tree is clean.
+- `config` — the five decision fields (`version`, `baseBranch`, `mergePolicy`, `gateCommand`,
+  `checklistPath`) plus `projectConfig`, the whole validated config, and `fingerprint`, its
+  canonical SHA-256. Those last two are the review contract's `projectConfig` and
+  `configFingerprint`: pass them as a pair and never hand-derive either.
 - `base` — the configured base branch, whether you are on it, and how far behind
   `origin/<base>` HEAD is. Prime never fetches, switches, or resets; it reports.
 - `sections` — per-section `{complete,items,error}` counts, never item bodies. A full snapshot
@@ -1426,15 +1430,16 @@ Each entry in `reviewRounds` is the record of one dispatched round:
   disposition; retain resolved entries as `state: closed`, and only open rebut entries remain
   actionable.
 - `verdict` is the exact object `dispatch.mjs` parsed. Do not edit it.
-- `configFingerprint` is the SHA-256 of the canonical `projectConfig`; the contract derives the
-  review cap from `projectConfig.caps.codeReviewRoundsPerUnit` and never takes a separate cap.
-  **Canonical means `jq -S -c -j`** — keys sorted recursively, compact, no trailing newline, which
-  is exactly what the contract's `hashValue` hashes (`JSON.stringify` over a key-sorted clone).
-  "Canonical" alone does not determine the bytes, and the wrong ones fail with a fingerprint
-  mismatch that looks like a stale config: a live run lost a round computing it over
-  pretty-printed output, because `jq -j` suppresses the trailing newline but keeps the
-  indentation. Check any spelling against a fingerprint the contract already accepted before
-  trusting it.
+- `configFingerprint` and `projectConfig` both come from **prime**, which returns the validated
+  config and its fingerprint together (`.config.projectConfig`, `.config.fingerprint`). Pass them
+  as a pair and derive neither by hand. The contract compares the two, and takes the review cap
+  from `projectConfig.caps.codeReviewRoundsPerUnit` — never a separate cap.
+  Should you ever need to compute it outside prime, **canonical means `jq -S -c -j`** — keys
+  sorted recursively, compact, no trailing newline, exactly what the contract's `hashValue` hashes
+  (`JSON.stringify` over a key-sorted clone). "Canonical" alone does not determine the bytes: a
+  live run lost a round computing it over pretty-printed output, because `jq -j` suppresses the
+  trailing newline but keeps the indentation. Two more read STATE off `origin/<base>` by hand
+  because prime's summary did not carry the config at all.
 
 **Every refusal names itself.** An `INVALID_REVIEW_EVIDENCE` carries an `evidenceGap` saying
 which rule broke and what it saw — read it before touching the artifact. Until 0.49.56 six of the
