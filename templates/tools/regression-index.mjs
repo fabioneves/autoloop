@@ -33,6 +33,37 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'reworded-re-raise-made-a-review-chain-unpublishable',
+    date: '2026-08-25',
+    symptom: 'living-football-engine #313 converged clean at round 4 and its '
+      + '`agentic/review` status could never be published at any head; PR '
+      + '#330 is still an unmerged draft. Rounds 1 and 2 both raised the same '
+      + 'two Majors, round 2 rewording each to say what the fix missed.',
+    cause: 'A finding id was identified by severity AND summary AND evidence, '
+      + 'so re-raising one with a fresh explanation broke authentication for '
+      + 'the whole chain. The check runs ahead of the ledger, so no evidence '
+      + 'construction satisfied it — the only input that would have was one '
+      + 'with the reviewers\' recorded verdicts rewritten to agree.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: 'function authenticatedFindings(rounds, gaps = []) {',
+      }),
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: "name: 'a later reviewer may reword a re-raised finding',",
+      }),
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: "name: 'a re-raised finding may not change severity',",
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'a finding id is its defect AND its severity',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'add-only-step-swap-stranded-the-claim-label',
     date: '2026-08-23',
     symptom: 'A unit wore loop:04-claim and loop:08-code-review at once: the '

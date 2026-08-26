@@ -1223,11 +1223,15 @@ no line: the revision prompt carries it verbatim, the next reviewer sees it, and
 records it.
 
 Pass all prior findings/dispositions forward — and tell every later-round reviewer, in the
-prompt, the ledger's identity rule: **a finding id is immutable evidence — re-opening one keeps
-its ORIGINAL severity, summary, and evidence byte-identical; anything newly discovered is a NEW
-finding with a new id.** A live round re-used a prior id with rewritten text and the contract
-correctly refused to authenticate the whole round history — unfixable after the fact, so the
-rule has to ride in the prompt.
+prompt, the ledger's identity rule: **a finding id is its defect AND its severity — re-opening one
+keeps both; anything reassessed at a different severity is a NEW finding with a new id.** The
+prose is not pinned: re-raising a finding is how a reviewer says what the fix missed, and saying
+it means rewriting the summary and the evidence. Until 0.49.56 the contract demanded all three
+byte-identical, which asked a second reviewer to repeat the first one's words and cost
+living-football-engine #313 its `agentic/review` status permanently — rounds 1 and 2 raised the
+same two Majors with different explanations, the authentication check runs ahead of the ledger,
+and the only input that would have satisfied it was one with the reviewers' verdicts rewritten to
+agree.
 
 After fixes, record the reviewed HEAD and dispatch a
 fresh later-round reviewer over only the new delta plus open rebuts. Give every Critical/Major a

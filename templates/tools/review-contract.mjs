@@ -229,11 +229,15 @@ function gatingFindings(verdict) {
     GATING_SEVERITIES.has(severity));
 }
 
+// A finding is its id and its severity. Severity is the field that gates, so
+// pinning it is what stops a Critical being carried forward as a Minor; the
+// summary and evidence are prose, and they belong to whichever reviewer wrote
+// them. Requiring those to stay byte-identical across rounds sounded like
+// authentication and was really a demand that a second reviewer repeat the
+// first one's words — see `authenticatedFindings`.
 function findingCoreMatches(ledgerFinding, finding) {
   return ledgerFinding.findingId === finding.id
-    && ledgerFinding.severity === finding.severity
-    && ledgerFinding.summary === finding.summary
-    && ledgerFinding.evidence === finding.evidence;
+    && ledgerFinding.severity === finding.severity;
 }
 
 function verdictMatchesOpenRebuts(record) {
@@ -382,22 +386,31 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
   return { current, rounds };
 }
 
-function authenticatedFindings(rounds) {
+// Re-raising a finding id keeps its severity. It does NOT keep its prose: a
+// later reviewer re-raises precisely to say why the fix fell short, and saying
+// that is rewriting the summary and the evidence.
+//
+// The rule used to demand all three, and living-football-engine #313 hit the
+// consequence exactly: rounds 1 and 2 both raised two Majors, round 2 rewording
+// each to explain what the fix missed, and the chain became unauthenticatable
+// at every head. The check runs ahead of the ledger, so no construction
+// satisfied it — the only input that would have was one with the reviewers'
+// recorded verdicts rewritten to agree, which is fabricated evidence. That unit
+// still has no `agentic/review` status and no run can ever give it one.
+function authenticatedFindings(rounds, gaps = []) {
   const history = new Map();
   for (const record of rounds) {
     for (const finding of record.verdict.findings) {
       const previous = history.get(finding.id);
-      if (
-        previous
-        && (
-          previous.severity !== finding.severity
-          || previous.summary !== finding.summary
-          || previous.evidence !== finding.evidence
-        )
-      ) {
+      if (previous && previous.severity !== finding.severity) {
+        gaps.push(
+          `round ${record.round}: finding ${finding.id} re-raised as `
+          + `${finding.severity} after ${previous.severity} — a finding id is `
+          + 'immutable; anything reassessed is a new finding with a new id',
+        );
         return null;
       }
-      history.set(finding.id, finding);
+      if (!previous) history.set(finding.id, finding);
     }
   }
   return history;
@@ -443,8 +456,10 @@ export function reviewTransition(input) {
       ? { evidenceGap: evidenceGaps[0] }
       : {});
   }
-  if (!authenticatedFindings(history.rounds)) {
-    return decision('error', 'INVALID_REVIEW_EVIDENCE');
+  if (!authenticatedFindings(history.rounds, evidenceGaps)) {
+    return decision('error', 'INVALID_REVIEW_EVIDENCE', evidenceGaps.length > 0
+      ? { evidenceGap: evidenceGaps[0] }
+      : {});
   }
 
   const currentVerdict = history.current.verdict;
@@ -728,6 +743,26 @@ function selfTest() {
     rebuts: [accept(finding.id, 'The fix closes the finding.')],
   }, { scope: 'full-artifact' });
 
+  // A round-2 reviewer explaining why a round-1 fix fell short necessarily
+  // rewrites the prose. living-football-engine #313 raised both its Majors
+  // twice with reworded text and could never publish `agentic/review`.
+  const rewordedFinding = {
+    id: finding.id,
+    severity: finding.severity,
+    summary: 'The fix narrows the defect but the gate still passes the original input',
+    evidence: 'src/reviewed.mjs:1-9',
+  };
+  const escalatedFinding = { ...finding, severity: 'Critical' };
+
+  const rewordFactory = roundFactory(fixtureProjectConfig(), { seed: 'reword' });
+  const rewordFirst = rewordFactory(1, failWith([finding]));
+  const rewordSecond = rewordFactory(2, failWith([rewordedFinding]));
+  const rewordClose = rewordFactory(3, pass, { scope: 'full-artifact' });
+
+  const escalateFactory = roundFactory(fixtureProjectConfig(), { seed: 'escalate' });
+  const escalateFirst = escalateFactory(1, failWith([finding]));
+  const escalateSecond = escalateFactory(2, failWith([escalatedFinding]));
+
   const fixedFactory = roundFactory(fixtureProjectConfig(), { seed: 'fixed' });
   const fixedFirst = fixedFactory(1, failWith([finding]));
   const fixed = fixedFactory(2, pass);
@@ -852,6 +887,20 @@ function selfTest() {
         { scope: 'full' },
       ),
       expected: ['clean', true],
+    },
+    {
+      name: 'a later reviewer may reword a re-raised finding',
+      input: inputFor(
+        [rewordFirst, rewordSecond, rewordClose],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
+      expected: ['clean', true],
+    },
+    {
+      name: 'a re-raised finding may not change severity',
+      input: inputFor([escalateFirst, escalateSecond]),
+      expected: ['error', false],
     },
     {
       name: 'a Major continues below the cap',
