@@ -1177,7 +1177,8 @@ the mid-pipeline pass did not prevent codex finding two Majors an hour later, an
 the orchestrator did catch came from a full-artifact look at the delivery head.
 
 There is no separate five-axis dispatch. Its job is done by a scope rule instead:
-**convergence may only close on a full-artifact round.** And close optimistically: after a fix
+**convergence may only close on a full-artifact round** — enforced by the contract since 0.49.56,
+which returns `REVIEW_FULL_CLOSE_REQUIRED` rather than `REVIEW_CLEAN` for a clean delta round. And close optimistically: after a fix
 batch, the next round is dispatched **full-artifact and closing** — full scope covers the delta
 by definition, so a pure delta round before a mandatory full-close is a round wasted. Delta
 scope is for mid-storm only, when multiple Criticals make further fix cycles certain. A typical
@@ -1376,12 +1377,29 @@ Each entry in `reviewRounds` is the record of one dispatched round:
 
 - `artifactVersion` versions the **reviewed artifact**, not the plan, and must **strictly increase
   every round**: round 1 is 1, round 2 is 2, and so on. Stamping each round with the plan's own
-  version is the natural mistake — the field sits beside `planFingerprint` — and it is refused
-  without naming itself, which has cost a live run a bisect. `artifactFingerprint` must also
-  differ from the previous round's: a round that reviewed byte-identical work is not a round.
+  version is the natural mistake — the field sits beside `planFingerprint`. `artifactFingerprint`
+  must also differ from the previous round's: a round that reviewed byte-identical work is not a
+  round. Both rules are lifted for the one round that re-reads the same bytes at a wider scope —
+  see the `scope` bullet.
 - `dispatchId` is unique per round — a repeated id is a replayed reviewer, not a fresh one.
 - `authorIdentity` and `reviewerIdentity` must differ. That is the writer ≠ reviewer invariant.
-- `scope` is `full-artifact` for round 1 and `fix-delta-and-open-rebuttals` afterwards.
+- `scope` is `full-artifact` for round 1 and either afterwards — and the transition's own
+  top-level `scope` must name the CLOSING round's: `full` pairs with `full-artifact`, `delta` with
+  `fix-delta-and-open-rebuttals`. They are two spellings of one fact and a run lost a debugging
+  cycle to declaring one over the other.
+- **A clean delta round does not converge the unit.** It returns
+  `REVIEW_FULL_CLOSE_REQUIRED`, because a delta round sees the last fix and nothing else, and the
+  defect it structurally cannot see is the one an earlier fix made vacuous. A live unit ran rounds
+  2-5 all delta and found exactly that in round 4 — an assertion killed two rounds before.
+  Dispatch one more round, `full-artifact`, over the same head.
+- **That closing round records as a scope escalation.** It reviews strictly more of the same
+  artifact, so it carries the previous round's `headOid`, `artifactVersion` and
+  `artifactFingerprint` unchanged, with a new `dispatchId` and `scope: full-artifact`; its
+  `deltaBaseOid` is the previous head, which makes its delta empty by construction. That is the
+  ONLY shape allowed to repeat a fingerprint, and it is allowed one round past
+  `caps.codeReviewRoundsPerUnit` so the rule is always executable. Commit nothing before it —
+  a commit makes it an ordinary full round with a real new fingerprint, which is also fine, just
+  more expensive.
 - `deltaBaseOid` is the configured base for round 1 and the previous round's reviewed head after.
 - `priorFindings` carries the complete preceding Critical/Major ledger with each `fix`/`rebut`
   disposition; retain resolved entries as `state: closed`, and only open rebut entries remain

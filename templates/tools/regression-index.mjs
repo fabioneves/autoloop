@@ -33,6 +33,41 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'a-delta-round-closed-a-review-the-contract-called-clean',
+    date: '2026-08-26',
+    symptom: 'living-football-engine #314 ran code-review rounds 2 through 5 '
+      + 'all delta and converged on one; nobody had read the artifact whole '
+      + 'since round 1, four fixes and a near-total test rewrite earlier. '
+      + 'Round 4 had already caught an assertion made vacuous two rounds '
+      + 'before. The corrective full round could not be recorded at all.',
+    cause: '"Convergence closes on a full-artifact round" was 0.46.0 prose. '
+      + '`reviewTransition` returned REVIEW_CLEAN for a clean delta round, and '
+      + 'the artifactFingerprint-must-differ rule then refused the closing '
+      + 'round over unchanged bytes, so noticing the gap late was unfixable.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: "return decision('continue', 'REVIEW_FULL_CLOSE_REQUIRED', {",
+      }),
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: 'function scopeEscalates(previous, current) {',
+      }),
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: "name: 'convergence may not close on a delta round',",
+      }),
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: "name: 'a full-artifact round re-reading the delta head closes the review',",
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'A clean delta round does not converge the unit.',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'reworded-re-raise-made-a-review-chain-unpublishable',
     date: '2026-08-25',
     symptom: 'living-football-engine #313 converged clean at round 4 and its '

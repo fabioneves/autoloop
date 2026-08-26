@@ -309,6 +309,29 @@ function validCumulativeLedger(previous, current) {
   return true;
 }
 
+// Convergence closes on a full-artifact round, and the closing round may be a
+// re-read of bytes a delta round already saw. That round is distinguished by
+// its SCOPE, not by its content: it reviews strictly more of the same artifact.
+// Without this the rule deadlocks — the moment a delta round comes back clean,
+// the mandated full round has nothing new to fingerprint and the chain refuses
+// it as "nothing was re-reviewed". A live run hit exactly that, ran the closing
+// round anyway, and could not record it.
+function scopeEscalates(previous, current) {
+  return isPlainObject(previous)
+    && isPlainObject(current)
+    && previous.scope === REVIEW_SCOPES.get('delta')
+    && current.scope === REVIEW_SCOPES.get('full')
+    && current.artifactFingerprint === previous.artifactFingerprint
+    && current.artifactVersion === previous.artifactVersion
+    && current.headOid === previous.headOid;
+}
+
+function closesByScopeEscalation(rounds) {
+  return Array.isArray(rounds)
+    && rounds.length >= 2
+    && scopeEscalates(rounds.at(-2), rounds.at(-1));
+}
+
 // Fingerprints and OIDs are unreadable at full length in a one-line gap, and a
 // gap nobody reads is the bare code again.
 function brief(value) {
@@ -407,6 +430,7 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
       gaps.push(`round ${index + 1}: the cumulative finding ledger is not carried forward`);
       return null;
     }
+    if (scopeEscalates(previous, current)) continue;
     if (current.artifactVersion <= previous.artifactVersion) {
       gaps.push(
         `round ${index + 1}: artifactVersion must strictly increase per round `
@@ -416,7 +440,12 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
       return null;
     }
     if (current.artifactFingerprint === previous.artifactFingerprint) {
-      gaps.push(`round ${index + 1}: artifactFingerprint is unchanged — nothing was re-reviewed`);
+      gaps.push(
+        `round ${index + 1}: artifactFingerprint is unchanged — nothing was `
+        + 're-reviewed. A closing full-artifact round over an unchanged '
+        + 'artifact must also carry the previous round\'s artifactVersion and '
+        + 'headOid to record as a scope escalation',
+      );
       return null;
     }
   }
@@ -489,7 +518,9 @@ export function reviewTransition(input) {
     // optimistic close was prose a live session could not execute.
     || (input.round === 1 && input.scope !== 'full')
     || validateProjectConfig(input.projectConfig).length > 0
-    || input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
+    || (input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
+      && !(input.round === input.projectConfig.caps.codeReviewRoundsPerUnit + 1
+        && closesByScopeEscalation(input.reviewRounds)))
     || !validExpected(input.expected)
     || !validAnnotations(input.findingAnnotations)
   ) {
@@ -589,6 +620,18 @@ export function reviewTransition(input) {
     ({ status }) => status === 'rejected',
   );
   if (currentGating.length === 0 && rejectedRebuts.length === 0) {
+    // Convergence closes on a full-artifact round. A delta round sees the last
+    // fix and nothing else, so the defect it structurally cannot see is the one
+    // an earlier fix made vacuous. living-football-engine #314 ran rounds 2-5
+    // all delta and closed on one; round 4 had already caught an assertion
+    // killed two rounds before, which is that defect class exactly. The rule
+    // was 0.46.0 prose and the contract accepted a delta close for ten
+    // releases.
+    if (input.scope !== 'full') {
+      return decision('continue', 'REVIEW_FULL_CLOSE_REQUIRED', {
+        reviewedHead: history.current.headOid,
+      });
+    }
     return decision('clean', 'REVIEW_CLEAN', {
       reviewedHead: history.current.headOid,
       reviewedCheckout: structuredClone(history.current.checkout),
@@ -809,7 +852,7 @@ function selfTest() {
     verdict: 'pass',
     findings: [],
     rebuts: [accept(finding.id, 'The fix closes the finding.')],
-  });
+  }, { scope: 'full-artifact' });
 
   const fullFactory = roundFactory(fixtureProjectConfig(), { seed: 'fullclose' });
   const fullFirst = fullFactory(1, failWith([finding]));
@@ -844,9 +887,29 @@ function selfTest() {
   const escalateFirst = escalateFactory(1, failWith([finding]));
   const escalateSecond = escalateFactory(2, failWith([escalatedFinding]));
 
+  const mismatchFactory = roundFactory(fixtureProjectConfig(), { seed: 'mismatch' });
+  const mismatchFirst = mismatchFactory(1, failWith([finding]));
+  const mismatchDelta = mismatchFactory(2, pass);
+
+  const escalationCap = fixtureProjectConfig(2);
+  const escalationFactory = roundFactory(escalationCap, { seed: 'escalation' });
+  const escalationFirst = escalationFactory(1, failWith([finding]));
+  const escalationDelta = escalationFactory(2, pass);
+  const widerFactory = roundFactory(escalationCap, { seed: 'wider' });
+  const widerFirst = widerFactory(1, failWith([finding]));
+  const widerDelta = widerFactory(2, pass);
+  const escalationWiderArtifact = widerFactory(3, pass, { scope: 'full-artifact' });
+
+  const escalationClose = escalationFactory(3, pass, {
+    scope: 'full-artifact',
+    artifactVersion: escalationDelta.artifactVersion,
+    artifactFingerprint: escalationDelta.artifactFingerprint,
+    headOid: escalationDelta.headOid,
+  });
+
   const fixedFactory = roundFactory(fixtureProjectConfig(), { seed: 'fixed' });
   const fixedFirst = fixedFactory(1, failWith([finding]));
-  const fixed = fixedFactory(2, pass);
+  const fixed = fixedFactory(2, pass, { scope: 'full-artifact' });
 
   const rejectedFactory = roundFactory(fixtureProjectConfig(), { seed: 'rejected' });
   const rejectedFirst = rejectedFactory(1, failWith([finding]));
@@ -909,7 +972,7 @@ function selfTest() {
   const cumulativeFactory = roundFactory(fixtureProjectConfig(), { seed: 'cumulative' });
   const cumulativeFirst = cumulativeFactory(1, failWith([finding]));
   const cumulativeSecond = cumulativeFactory(2, failWith([cumulativeFinding]));
-  const cumulativeThird = cumulativeFactory(3, pass);
+  const cumulativeThird = cumulativeFactory(3, pass, { scope: 'full-artifact' });
 
   const omittedHistoryFactory = roundFactory(fixtureProjectConfig(), { seed: 'history' });
   const omittedHistoryFirst = omittedHistoryFactory(1, failWith([finding]));
@@ -988,7 +1051,11 @@ function selfTest() {
       // The failure that cost living-football-engine #314 a bisect: the only
       // signal was a bare INVALID_REVIEW_EVIDENCE for one wrong word.
       name: 'a transition scope that disagrees with the closing round names itself',
-      input: inputFor([fixedFirst, fixed], fixtureProjectConfig(), { scope: 'full' }),
+      input: inputFor(
+        [mismatchFirst, mismatchDelta],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
       expected: ['error', false],
       expectedGap: 'records scope',
     },
@@ -999,18 +1066,51 @@ function selfTest() {
       expectedGap: 'round 1 has no prior round',
     },
     {
+      name: 'convergence may not close on a delta round',
+      input: inputFor([mismatchFirst, mismatchDelta]),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
+    },
+    {
+      name: 'a full round past the cap that is not a scope escalation is refused',
+      input: inputFor(
+        [widerFirst, widerDelta, escalationWiderArtifact],
+        escalationCap,
+        { scope: 'full' },
+      ),
+      expected: ['error', false],
+      expectedCode: 'INVALID_REVIEW_INPUT',
+    },
+    {
+      name: 'a full-artifact round re-reading the delta head closes the review',
+      input: inputFor(
+        [escalationFirst, escalationDelta, escalationClose],
+        escalationCap,
+        { scope: 'full' },
+      ),
+      expected: ['clean', true],
+    },
+    {
       name: 'a Major continues below the cap',
       input: inputFor([acceptedFirst]),
       expected: ['continue', false],
     },
     {
       name: 'an accepted rebut permits a clean result',
-      input: inputFor([acceptedFirst, accepted]),
+      input: inputFor(
+        [acceptedFirst, accepted],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
       expected: ['clean', true],
     },
     {
       name: 'a reviewed fix permits a clean result',
-      input: inputFor([fixedFirst, fixed]),
+      input: inputFor(
+        [fixedFirst, fixed],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
       expected: ['clean', true],
     },
     {
@@ -1085,7 +1185,11 @@ function selfTest() {
     },
     {
       name: 'three rounds retain closed and open cumulative findings',
-      input: inputFor([cumulativeFirst, cumulativeSecond, cumulativeThird]),
+      input: inputFor(
+        [cumulativeFirst, cumulativeSecond, cumulativeThird],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
       expected: ['clean', true],
     },
     {
@@ -1198,6 +1302,13 @@ function selfTest() {
       console.error(
         `FAIL ${fixture.name}: expected ${fixture.expected.join('/')}, `
         + `got ${actual.state}/${actual.publishReviewSuccess} (${actual.code})`,
+      );
+      continue;
+    }
+    if (fixture.expectedCode !== undefined && actual.code !== fixture.expectedCode) {
+      console.error(
+        `FAIL ${fixture.name}: expected code ${fixture.expectedCode}, `
+        + `got ${actual.code}`,
       );
       continue;
     }
