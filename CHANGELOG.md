@@ -3,6 +3,30 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.58] - 2026-08-27
+
+### Fixed
+
+- **The session preflight called a self-contained proxy broken, and its remedy would have
+  proxied the writers.** A live setup run ended by handing the operator an unresolved blocker:
+  "review-engine records a proxied model but `ANTHROPIC_BASE_URL` is unset — reviews will fail
+  typed". The recording carried `@http://127.0.0.1:18765`, the proxy answered, and the previous
+  run had completed every review through it. The check predates self-contained proxy mode
+  (0.49.2) and kept reading the session environment, which the dev skill says in as many words is
+  "not a prerequisite and not evidence" — `dispatch.mjs` injects the recorded url into verdict
+  dispatches itself.
+
+  The remedy was the worse half. `dispatchEnvironment` spreads `process.env`, so a session-wide
+  `ANTHROPIC_BASE_URL` is inherited by **every** dispatch child — including `implement` and
+  `plan`, the two roles `resolveDefaultBaseUrl` deliberately returns null for. Starting the
+  session behind the proxy, as advised, would have routed the writers through the review model
+  and quietly broken the invariant that an engine never reviews its own code.
+
+  The check now reads the recording instead of the environment: `@<url>` present is INFO
+  (self-contained), `@<url>` present **and** a session-wide value set is a NOTE that writers are
+  being proxied, and only a recording with no `@<url>` reports a missing endpoint — with
+  "append ` @<url>`" as the first remedy rather than the environment.
+
 ## [0.49.57] - 2026-08-27
 
 ### Added
