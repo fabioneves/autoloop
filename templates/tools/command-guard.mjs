@@ -2047,21 +2047,23 @@ function processAlive(pid) {
   }
 }
 
-export function loopRunIsOpen(cwd = process.cwd()) {
+export function ownRunMarkers(cwd = process.cwd()) {
   const directory = runMarkerDirectory(cwd);
-  if (directory === null) return false;
+  if (directory === null) return [];
   let entries;
   try {
     entries = readdirSync(directory);
   } catch {
-    return false;
+    return [];
   }
   const ancestors = ancestorPids();
+  const markers = [];
   for (const entry of entries) {
     if (!entry.endsWith('.json')) continue;
+    const path = join(directory, entry);
     let marker;
     try {
-      marker = JSON.parse(readFileSync(join(directory, entry), 'utf8'));
+      marker = JSON.parse(readFileSync(path, 'utf8'));
     } catch {
       continue;
     }
@@ -2071,10 +2073,24 @@ export function loopRunIsOpen(cwd = process.cwd()) {
       && pid > 1
       && ancestors.has(pid)
       && processAlive(pid))) {
-      return true;
+      markers.push({ path, marker });
     }
   }
-  return false;
+  return markers;
+}
+
+export function loopRunIsOpen(cwd = process.cwd()) {
+  return ownRunMarkers(cwd).length > 0;
+}
+
+// A run that closed deliberately is still OPEN to the command guard — the
+// session goes on issuing commands and the rules that block `gh pr merge` have
+// no reason to relax. `closedAt` answers a different question, asked only by the
+// Stop hook: is this run still supposed to be taking work? Anything present but
+// unrecognised counts as closed, because the liveness guard's failure direction
+// is silence.
+export function loopRunIsLive(cwd = process.cwd()) {
+  return ownRunMarkers(cwd).some(({ marker }) => marker.closedAt === undefined);
 }
 
 export function loadConfiguredBase(statePath) {
@@ -2855,6 +2871,28 @@ function selfTest() {
         writeFileSync(marker, JSON.stringify({ version: 1, pids: [process.ppid] }));
         if (process.platform === 'linux' && loopRunIsOpen(scratch) !== true) {
           console.error('FAIL [a live marker in this ancestry opens a run]');
+          ok = false;
+        }
+        if (process.platform === 'linux' && loopRunIsLive(scratch) !== true) {
+          console.error('FAIL [an unclosed live marker is a live run]');
+          ok = false;
+        }
+        writeFileSync(marker, JSON.stringify({
+          version: 1,
+          pids: [process.ppid],
+          closedAt: '2026-08-27T22:16:56.088Z',
+        }));
+        if (process.platform === 'linux' && loopRunIsLive(scratch) !== false) {
+          console.error('FAIL [a closed marker is not a live run]');
+          ok = false;
+        }
+        if (process.platform === 'linux' && loopRunIsOpen(scratch) !== true) {
+          console.error('FAIL [closing a run does not disarm the command guard]');
+          ok = false;
+        }
+        writeFileSync(marker, JSON.stringify({ version: 1, pids: [process.ppid], closedAt: null }));
+        if (process.platform === 'linux' && loopRunIsLive(scratch) !== false) {
+          console.error('FAIL [an unrecognised closedAt counts as closed]');
           ok = false;
         }
       }

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.49.58 · starting
+∞ pitcrew · v0.49.59 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -319,6 +319,11 @@ or:
 
 Fold Pitcrew outcomes into Dev's one end-of-run digest and scoreboard when the contexts are
 shared.
+
+**A standalone run closes the marker it opened: `node <plugin-tools>/prime.mjs --close-run`.**
+Embedded in a Dev cycle it does not — Dev opened the run and Dev closes it. The Stop hook reads
+that marker to tell a finished run from one that went dark, so a standalone Pitcrew that primed
+and never closed is refused a stop while the forward queue holds eligible units.
 
 ## Hard rules
 

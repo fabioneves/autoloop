@@ -17,6 +17,7 @@
 //
 // Usage:
 //   node tools/agentic/prime.mjs [--json] [--scan-arg <value>]...
+//   node tools/agentic/prime.mjs --close-run
 //   node tools/agentic/prime.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
@@ -33,7 +34,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ancestorPids,
+  loopRunIsLive,
   loopRunIsOpen,
+  ownRunMarkers,
   runMarkerDirectory,
 } from './command-guard.mjs';
 import { extractConfig, validateProjectConfig } from './config-contract.mjs';
@@ -43,7 +46,7 @@ import { SNAPSHOT_SECTIONS, writeStdoutSync } from './snapshot-contract.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.49.58';
+const AUTOLOOP_VERSION = '0.49.59';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -270,6 +273,29 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()]) {
   return path;
 }
 
+// The counterpart to the marker prime writes: the run says, once, that it is
+// done taking work. Only the run can say it — a hook can see that a session is
+// idle but not whether that is a finished run or a run that went dark, and the
+// live 0.49.58 session that stopped with thirteen eligible units is what the
+// distinction costs when it is left to inference.
+//
+// The marker itself stays exactly where it is, pids intact: a closed run keeps
+// issuing commands, and disarming the command guard at the close would trade
+// this defect for a worse one.
+export function closeRunMarkers(root = process.cwd(), now = new Date()) {
+  const closed = [];
+  for (const { path, marker } of ownRunMarkers(root)) {
+    if (marker.closedAt !== undefined) continue;
+    try {
+      writeFileSync(path, `${JSON.stringify({ ...marker, closedAt: now.toISOString() })}\n`);
+      closed.push(path);
+    } catch (error) {
+      return { ok: false, closed, error: { code: 'RUN_MARKER_UNWRITABLE', message: String(error?.message ?? error) } };
+    }
+  }
+  return { ok: true, closed };
+}
+
 export function sectionSummary(snapshot) {
   return Object.fromEntries(
     Object.entries(snapshot?.sections ?? {}).map(([name, section]) => [name, {
@@ -332,6 +358,9 @@ export function parseArgs(args) {
   const parsed = { mode: 'prime', json: false, scanArgs: [], error: null };
   if (args.length === 1 && args[0] === '--self-test') {
     return { ...parsed, mode: 'self-test' };
+  }
+  if (args.length === 1 && args[0] === '--close-run') {
+    return { ...parsed, mode: 'close-run' };
   }
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === '--json') {
@@ -450,9 +479,11 @@ function selfTest() {
   );
 
   check(
-    'argument parsing accepts only --json and repeated --scan-arg',
+    'argument parsing accepts only --json, repeated --scan-arg, and a lone --close-run',
     parseArgs([]).error === null
     && parseArgs(['--json']).json === true
+    && parseArgs(['--close-run']).mode === 'close-run'
+    && parseArgs(['--close-run', '--json']).error !== null
     && JSON.stringify(parseArgs(['--scan-arg', '--pr', '--scan-arg', '7']).scanArgs)
       === JSON.stringify(['--pr', '7'])
     && parseArgs(['--scan-arg']).error !== null
@@ -537,6 +568,20 @@ function selfTest() {
       && (process.platform !== 'linux' || loopRunIsOpen(root) === true),
     );
 
+    const closed = closeRunMarkers(root);
+    const reclosed = closeRunMarkers(root);
+    check(
+      'closing the run stamps closedAt, ends liveness, and leaves the guard armed',
+      closed.ok === true
+      && closed.closed.includes(markerPath)
+      && typeof JSON.parse(readFileSync(markerPath, 'utf8')).closedAt === 'string'
+      && JSON.parse(readFileSync(markerPath, 'utf8')).version === 1
+      && (process.platform !== 'linux' || loopRunIsLive(root) === false)
+      && (process.platform !== 'linux' || loopRunIsOpen(root) === true)
+      && reclosed.ok === true
+      && reclosed.closed.length === 0,
+    );
+
     const persisted = persistPrimeSnapshot({
       ok: true,
       checkout: { headOid: 'a'.repeat(40) },
@@ -587,10 +632,15 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`prime: ${parsed.error}`);
-    console.error('usage: prime.mjs [--json] [--scan-arg <value>]...');
+    console.error('usage: prime.mjs [--json] [--scan-arg <value>]... | --close-run | --self-test');
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+  if (parsed.mode === 'close-run') {
+    const outcome = closeRunMarkers();
+    writeStdoutSync(`${JSON.stringify(outcome, null, 1)}\n`);
+    process.exit(outcome.ok === true ? 0 : 1);
+  }
   const result = primeDev({ scanArgs: parsed.scanArgs });
   const summary = result.ok === true
     ? persistPrimeSnapshot(result, result.checkout.root)
