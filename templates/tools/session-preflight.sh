@@ -95,19 +95,37 @@ if [ -f "$vendored_prime" ] && [ -d "$plugin_cache" ] && [ -f "$release_helper" 
   fi
 fi
 
-# 3b. Proxied review recording sanity: `claude <non-claude-model>` only works when
-# the environment routes through claude-code-proxy; otherwise every review
-# dispatch fails typed on an unknown model.
+# 3b. Proxied review recording sanity. A recording carrying `@<url>` is
+# SELF-CONTAINED: dispatch.mjs reads that url and injects it as
+# ANTHROPIC_BASE_URL into verdict dispatches itself, so how this session was
+# launched is neither a prerequisite nor evidence. This check predated that
+# (0.49.2) and kept reading the session environment, so it told every
+# self-contained run that reviews would fail — and its remedy was worse than the
+# non-problem: a session-wide ANTHROPIC_BASE_URL is inherited by EVERY dispatch
+# child, including `implement` and `plan`, for which resolveDefaultBaseUrl
+# deliberately returns null. Writers are never proxied; exporting it proxies
+# them.
 review_engine_file="$(git rev-parse --git-path autoloop/review-engine 2>/dev/null)"
 if [ -n "$review_engine_file" ] && [ -f "$review_engine_file" ]; then
   recorded="$(head -1 "$review_engine_file")"
   case "$recorded" in
     claude\ *)
-      if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
-        echo "NOTE  review-engine records a proxied model ($recorded) but ANTHROPIC_BASE_URL is unset — reviews will fail typed; start the session behind claude-code-proxy or re-record 'claude'"
-      else
-        echo "INFO  proxied reviews recorded: $recorded via $ANTHROPIC_BASE_URL"
-      fi
+      case "$recorded" in
+        *@http://*|*@https://*)
+          if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+            echo "NOTE  review-engine is self-contained ($recorded) AND ANTHROPIC_BASE_URL is set session-wide — every dispatch child inherits it, so writers are proxied too; unset it and let the recording route verdict roles alone"
+          else
+            echo "INFO  proxied reviews are self-contained: $recorded (dispatch injects the url; this session's environment is not used)"
+          fi
+          ;;
+        *)
+          if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+            echo "NOTE  review-engine records a proxied model ($recorded) with no @<url> and ANTHROPIC_BASE_URL is unset — nothing supplies the endpoint and reviews fail typed; append ' @<url>' to the recording to make it self-contained, or re-record 'claude'"
+          else
+            echo "NOTE  proxied reviews rely on this session's ANTHROPIC_BASE_URL ($ANTHROPIC_BASE_URL), which every dispatch child inherits — writers included; append ' @<url>' to the recording and unset it"
+          fi
+          ;;
+      esac
       ;;
   esac
 fi

@@ -33,6 +33,35 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'preflight-called-a-self-contained-proxy-broken',
+    date: '2026-08-27',
+    symptom: 'A setup run reported "review-engine records a proxied model but '
+      + 'ANTHROPIC_BASE_URL is unset — reviews will fail typed" and handed it '
+      + 'to the operator as an unresolved blocker. The recording carried '
+      + '`@http://127.0.0.1:18765`, the proxy answered 200, and the previous '
+      + 'run had completed every review through it.',
+    cause: 'The check predates self-contained proxy mode (0.49.2) and kept '
+      + 'reading the session environment. Worse than the false alarm was its '
+      + 'remedy: dispatchEnvironment spreads process.env, so a session-wide '
+      + 'ANTHROPIC_BASE_URL is inherited by EVERY dispatch child including '
+      + 'implement and plan — exactly the writers resolveDefaultBaseUrl '
+      + 'returns null for. Following the advice would have proxied them.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'session-preflight.sh',
+        anchor: 'proxied reviews are self-contained',
+      }),
+      Object.freeze({
+        file: 'session-preflight.sh',
+        anchor: 'so writers are proxied too',
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'the session\'s own environment is not a prerequisite and not evidence',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'hand-assembled-review-evidence-halted-a-run',
     date: '2026-08-27',
     symptom: 'A run reached living-football-engine #314 one step from delivery '
