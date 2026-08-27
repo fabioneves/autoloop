@@ -22,7 +22,7 @@
 //   node tools/agentic/review-contract.mjs --self-test
 
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { validateProjectConfig } from './config-contract.mjs';
 import { validReviewVerdict } from './dispatch.mjs';
@@ -36,6 +36,7 @@ const HASH_RE = /^[0-9a-f]{64}$/;
 const OID_RE = /^[0-9a-f]{40}$/;
 const FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
+const DISPATCH_ID_RE = IDENTITY_RE;
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
 const DISPOSITIONS = new Set(['fix', 'rebut']);
 const LEDGER_STATES = new Set(['open', 'closed']);
@@ -648,6 +649,111 @@ export function reviewTransition(input) {
     unresolvedFindings: currentGating.length,
     rejectedRebuts: rejectedRebuts.length,
   });
+}
+
+// The closing full-artifact round is the ONE round nobody can derive from the
+// repository: it re-reads bytes already reviewed, so every field except its own
+// number, scope, dispatch and verdict is inherited from the round before it.
+// Until 0.49.57 an orchestrator assembled that by hand, and the live evidence
+// of how that goes is five bespoke `assemble-evidence-<issue>.jq` programs on
+// one run host, a unit that lost a debugging cycle to declaring the wrong
+// top-level `scope`, and a session halted outright because a permission
+// classifier — correctly — would not run an ad-hoc program that writes review
+// verdicts into an audit artifact.
+//
+// So the tool does it. Nothing here is a judgement: the ledger carry-forward is
+// `validCumulativeLedger`'s own rule read constructively, and the result is
+// handed to `reviewTransition` before it is returned, so this can never emit
+// evidence the contract would refuse.
+function carriedLedger(previous) {
+  const rebuts = new Map(
+    previous.verdict.rebuts.map((rebut) => [rebut.findingId, rebut]),
+  );
+  const carried = [];
+  for (const entry of previous.priorFindings) {
+    const state = entry.state === 'closed'
+      || entry.disposition === 'fix'
+      || rebuts.get(entry.findingId)?.status === 'accepted'
+      ? 'closed'
+      : null;
+    if (state === null) return null;
+    carried.push({ ...entry, state });
+  }
+  return carried;
+}
+
+export function appendEscalationRound(evidence, result, options = {}) {
+  const refuse = (code, reason) => ({ ok: false, code, reason });
+  const pending = reviewTransition(evidence);
+  if (pending.code !== 'REVIEW_FULL_CLOSE_REQUIRED') {
+    return refuse(
+      'NOT_AWAITING_FULL_CLOSE',
+      'the evidence is not a clean delta round awaiting its closing '
+      + `full-artifact round (${pending.code}${pending.evidenceGap ? `: ${pending.evidenceGap}` : ''})`,
+    );
+  }
+  const verdict = result?.verdict;
+  if (result?.ok !== true || !validReviewVerdict(verdict)) {
+    return refuse(
+      'INVALID_DISPATCH_RESULT',
+      'the dispatch result is not a successful review with a valid verdict',
+    );
+  }
+  if (verdict.rebuts.length > 0) {
+    return refuse(
+      'ESCALATION_ROUND_CANNOT_REBUT',
+      'the preceding round closed clean, so no rebuttal is open for this round '
+      + 'to adjudicate — a verdict carrying rebuts here reviewed something else',
+    );
+  }
+  const annotations = options.findingAnnotations ?? [];
+  if (verdict.findings.length > 0 && annotations.length === 0) {
+    return refuse(
+      'FINDING_ANNOTATIONS_REQUIRED',
+      `the closing round raised ${verdict.findings.length} finding(s); verify `
+      + 'each against source and supply findingAnnotations — a tool may not '
+      + 'stamp them verified',
+    );
+  }
+  if (!DISPATCH_ID_RE.test(options.dispatchId ?? '')) {
+    return refuse('INVALID_DISPATCH_ID', 'dispatchId must identify this round\'s reviewer process');
+  }
+  const previous = evidence.reviewRounds.at(-1);
+  const priorFindings = carriedLedger(previous);
+  if (priorFindings === null) {
+    return refuse(
+      'LEDGER_CANNOT_CARRY_FORWARD',
+      'a prior finding is neither closed, dispositioned fix, nor rebutted and '
+      + 'accepted, so the preceding round did not close it',
+    );
+  }
+  const appended = {
+    ...evidence,
+    round: evidence.round + 1,
+    scope: 'full',
+    findingAnnotations: annotations,
+    reviewRounds: [
+      ...evidence.reviewRounds,
+      {
+        ...structuredClone(previous),
+        round: previous.round + 1,
+        scope: REVIEW_SCOPES.get('full'),
+        dispatchId: options.dispatchId,
+        deltaBaseOid: previous.headOid,
+        priorFindings,
+        openRebuttals: [],
+        verdict: structuredClone(verdict),
+      },
+    ],
+  };
+  const transition = reviewTransition(appended);
+  if (transition.state === 'error') {
+    return refuse(
+      transition.code,
+      transition.evidenceGap ?? 'the appended round does not validate',
+    );
+  }
+  return { ok: true, code: transition.code, evidence: appended };
 }
 
 export function authorizeReviewPublication(input, targetHeadOid, liveCheckout) {
@@ -1325,6 +1431,76 @@ function selfTest() {
     passed += 1;
   }
 
+  const deltaClose = inputFor([mismatchFirst, mismatchDelta]);
+  const passResult = { ok: true, role: 'code-review', verdict: pass };
+  const appended = appendEscalationRound(deltaClose, passResult, {
+    dispatchId: 'dispatch-escalation',
+  });
+  const appendCases = [
+    {
+      name: 'appending the closing round to a clean delta converges the review',
+      actual: appended.ok === true
+        && appended.code === 'REVIEW_CLEAN'
+        && appended.evidence.round === 3
+        && appended.evidence.scope === 'full'
+        && appended.evidence.reviewRounds.length === 3
+        && reviewTransition(appended.evidence).state === 'clean',
+      expected: true,
+    },
+    {
+      name: 'the appended round inherits the reviewed artifact and widens only its scope',
+      actual: (() => {
+        const [, previous, closing] = appended.evidence.reviewRounds;
+        return closing.scope === 'full-artifact'
+          && closing.headOid === previous.headOid
+          && closing.artifactFingerprint === previous.artifactFingerprint
+          && closing.artifactVersion === previous.artifactVersion
+          && closing.deltaBaseOid === previous.headOid
+          && closing.dispatchId !== previous.dispatchId;
+      })(),
+      expected: true,
+    },
+    {
+      name: 'a review that is not awaiting its full close is refused',
+      actual: appendEscalationRound(appended.evidence, passResult, {
+        dispatchId: 'dispatch-again',
+      }).code,
+      expected: 'NOT_AWAITING_FULL_CLOSE',
+    },
+    {
+      name: 'a closing verdict carrying rebuts is refused',
+      actual: appendEscalationRound(deltaClose, {
+        ok: true,
+        role: 'code-review',
+        verdict: { verdict: 'pass', findings: [], rebuts: [accept(finding.id, 'Closed.')] },
+      }, { dispatchId: 'dispatch-rebut' }).code,
+      expected: 'ESCALATION_ROUND_CANNOT_REBUT',
+    },
+    {
+      name: 'a tool may not stamp a finding verified',
+      actual: appendEscalationRound(deltaClose, {
+        ok: true,
+        role: 'code-review',
+        verdict: failWith([lateFinding]),
+      }, { dispatchId: 'dispatch-late' }).code,
+      expected: 'FINDING_ANNOTATIONS_REQUIRED',
+    },
+    {
+      name: 'a replayed dispatch id is caught before the evidence is returned',
+      actual: appendEscalationRound(deltaClose, passResult, {
+        dispatchId: mismatchDelta.dispatchId,
+      }).ok,
+      expected: false,
+    },
+    {
+      name: 'a failed dispatch is not a round',
+      actual: appendEscalationRound(deltaClose, { ok: false }, {
+        dispatchId: 'dispatch-dead',
+      }).code,
+      expected: 'INVALID_DISPATCH_RESULT',
+    },
+  ];
+
   const cleanInput = inputFor([clean]);
   const publicationCases = [
     {
@@ -1373,6 +1549,16 @@ function selfTest() {
       expected: true,
     },
   ];
+  for (const fixture of appendCases) {
+    if (fixture.actual === fixture.expected) {
+      passed += 1;
+    } else {
+      console.error(
+        `FAIL ${fixture.name}: expected ${fixture.expected}, got ${fixture.actual}`,
+      );
+    }
+  }
+
   for (const fixture of publicationCases) {
     if (fixture.actual === fixture.expected) {
       passed += 1;
@@ -1383,7 +1569,7 @@ function selfTest() {
     }
   }
 
-  const total = cases.length + publicationCases.length;
+  const total = cases.length + appendCases.length + publicationCases.length;
   console.log(
     passed === total
       ? `self-test OK (${passed} cases)`
@@ -1392,8 +1578,59 @@ function selfTest() {
   return passed === total;
 }
 
+function flagValue(args, flag) {
+  const index = args.indexOf(flag);
+  return index === -1 ? null : args[index + 1] ?? null;
+}
+
+function readJsonFile(path) {
+  return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+// `dispatchId` identifies the reviewer process. The run convention is the
+// result file's mtime in epoch-ms, which is distinct per dispatch by
+// construction and needs nothing the caller must remember to vary.
+function appendMain(args) {
+  const evidenceFile = flagValue(args, '--evidence-file');
+  const resultFile = flagValue(args, '--result-file');
+  if (evidenceFile === null || resultFile === null) {
+    process.stderr.write(
+      'review-contract: --append-escalation-round requires --evidence-file '
+      + '<path> --result-file <path> '
+      + '[--annotations-file <path>] [--dispatch-id <id>]\n',
+    );
+    process.exit(2);
+  }
+  let evidence;
+  let result;
+  let annotations;
+  try {
+    evidence = readJsonFile(evidenceFile);
+    result = readJsonFile(resultFile);
+    const annotationsFile = flagValue(args, '--annotations-file');
+    annotations = annotationsFile === null ? [] : readJsonFile(annotationsFile);
+  } catch (error) {
+    process.stderr.write(`review-contract: unreadable input: ${error.message}\n`);
+    process.exit(2);
+  }
+  const appended = appendEscalationRound(evidence, result, {
+    dispatchId: flagValue(args, '--dispatch-id')
+      ?? String(statSync(resultFile).mtimeMs).replace('.', '-'),
+    findingAnnotations: annotations,
+  });
+  if (appended.ok !== true) {
+    process.stdout.write(`${JSON.stringify(appended)}\n`);
+    process.exit(1);
+  }
+  process.stdout.write(`${JSON.stringify(appended.evidence, null, 1)}\n`);
+}
+
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
+  if (process.argv.includes('--append-escalation-round')) {
+    appendMain(process.argv.slice(2));
+    return;
+  }
   const raw = readFileSync(0, 'utf8');
   if (Buffer.byteLength(raw) > MAX_INPUT_BYTES) {
     process.stdout.write(

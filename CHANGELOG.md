@@ -3,6 +3,36 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.57] - 2026-08-27
+
+### Added
+
+- **The closing full-artifact round is recorded by a tool, not by hand.**
+  `review-contract.mjs --append-escalation-round --evidence-file <p> --result-file <p>` derives
+  the round 0.49.56 made mandatory: every field except its number, scope, dispatch and verdict is
+  inherited from the round before it, and the ledger carry-forward is `validCumulativeLedger`'s
+  own rule read constructively. It refuses typed unless the evidence is a clean delta awaiting
+  its close, and it hands the result to `reviewTransition` before returning, so it cannot emit
+  evidence the contract would reject. A closing round that RAISES findings refuses with
+  `FINDING_ANNOTATIONS_REQUIRED` — no tool may stamp a finding verified.
+
+  A live run halted on this. living-football-engine #314 was one step from delivery, gate and
+  review both green on the exact head, and its closing round had genuinely run and passed;
+  recording it needed a jq append the permission classifier refused three times. That refusal was
+  right: an ad-hoc program writing review verdicts into an audit artifact is exactly the shape a
+  classifier should stop, and there was no sanctioned path. One host carried five bespoke
+  `assemble-evidence-<issue>.jq` programs, which is what this replaces. Verified against that
+  unit's retained evidence: the appended chain returns `REVIEW_CLEAN` at `9d3b303`.
+
+### Documentation
+
+- **The `openPrs` snapshot item shape is stated beside the queue's.** The passage already taught
+  the rule — project the CONTRACT's shape, not `gh`'s — and enumerated the queue item's keys,
+  naming the `Cannot index string` error a wrong `.labels[].name` produces. It said nothing about
+  `openPrs`, where `author` and `headRepository` are bare strings and `labels` does not exist at
+  all. A live session read it with `author: .author.login` and got exactly that error; the
+  missing `labels` is worse, because asking returns `null` and the read looks like it worked.
+
 ## [0.49.56] - 2026-08-26
 
 Everything here was found by reading one three-day live run end to end

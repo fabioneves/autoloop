@@ -33,6 +33,39 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'hand-assembled-review-evidence-halted-a-run',
+    date: '2026-08-27',
+    symptom: 'A run reached living-football-engine #314 one step from delivery '
+      + '— gate and review both green on the exact head — and halted. The '
+      + 'closing full-artifact round had genuinely run and passed; recording '
+      + 'it needed a jq append that the permission classifier refused three '
+      + 'times, including a minimal one. The unit is still undelivered.',
+    cause: 'The closing round was assembled by hand. Every field but four is '
+      + 'inherited and the ledger carry-forward is validCumulativeLedger read '
+      + 'constructively, yet each unit wrote its own program — five bespoke '
+      + '`assemble-evidence-<issue>.jq` files on one host. An ad-hoc program '
+      + 'writing review verdicts into an audit artifact is exactly the shape a '
+      + 'classifier should refuse, and there was no sanctioned path.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: 'export function appendEscalationRound(evidence, result, options = {}) {',
+      }),
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: "name: 'appending the closing round to a clean delta converges the review',",
+      }),
+      Object.freeze({
+        file: 'review-contract.mjs',
+        anchor: "name: 'a tool may not stamp a finding verified',",
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: '--append-escalation-round',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'auto-merge-refusal-read-as-a-wedge-when-the-finalizer-never-ran',
     date: '2026-08-26',
     symptom: 'living-football-engine #314 / PR #332 was converged, gated, and '
