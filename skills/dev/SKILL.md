@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.56 · starting
+∞ dev · v0.49.57 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1205,7 +1205,7 @@ the mid-pipeline pass did not prevent codex finding two Majors an hour later, an
 the orchestrator did catch came from a full-artifact look at the delivery head.
 
 There is no separate five-axis dispatch. Its job is done by a scope rule instead:
-**convergence may only close on a full-artifact round** — enforced by the contract since 0.49.56,
+**convergence may only close on a full-artifact round** — enforced by the contract since 0.49.57,
 which returns `REVIEW_FULL_CLOSE_REQUIRED` rather than `REVIEW_CLEAN` for a clean delta round. And close optimistically: after a fix
 batch, the next round is dispatched **full-artifact and closing** — full scope covers the delta
 by definition, so a pure delta round before a mandatory full-close is a round wasted. Delta
@@ -1270,7 +1270,7 @@ Pass all prior findings/dispositions forward — and tell every later-round revi
 prompt, the ledger's identity rule: **a finding id is its defect AND its severity — re-opening one
 keeps both; anything reassessed at a different severity is a NEW finding with a new id.** The
 prose is not pinned: re-raising a finding is how a reviewer says what the fix missed, and saying
-it means rewriting the summary and the evidence. Until 0.49.56 the contract demanded all three
+it means rewriting the summary and the evidence. Until 0.49.57 the contract demanded all three
 byte-identical, which asked a second reviewer to repeat the first one's words and cost
 living-football-engine #313 its `agentic/review` status permanently — rounds 1 and 2 raised the
 same two Majors with different explanations, the authentication check runs ahead of the ledger,
@@ -1443,6 +1443,25 @@ Each entry in `reviewRounds` is the record of one dispatched round:
   `caps.codeReviewRoundsPerUnit` so the rule is always executable. Commit nothing before it —
   a commit makes it an ordinary full round with a real new fingerprint, which is also fine, just
   more expensive.
+- **Do not assemble that round by hand.** Every field except its number, scope, dispatch and
+  verdict is inherited, and the ledger carry-forward is the contract's own rule, so the tool does
+  it:
+
+  ```bash
+  node <plugin-tools>/review-contract.mjs --append-escalation-round \
+    --evidence-file <current-evidence.json> --result-file <closing-round-result.json> \
+    [--annotations-file <annotations.json>] > <next-evidence.json>
+  ```
+
+  It refuses typed unless the evidence is a clean delta awaiting its close, and it hands the
+  result to `reviewTransition` before returning, so it cannot emit evidence the contract would
+  reject. `dispatchId` defaults to the result file's mtime — distinct per dispatch by
+  construction. If the closing round RAISES findings it refuses with
+  `FINDING_ANNOTATIONS_REQUIRED`: verify each against source and pass them, because no tool may
+  stamp a finding verified. A live session was halted outright by a permission classifier that
+  — correctly — would not run an ad-hoc program writing review verdicts into an audit artifact;
+  a sanctioned plugin tool is not that shape, and five bespoke `assemble-evidence-<issue>.jq`
+  programs on one run host are what it replaces.
 - `deltaBaseOid` is the configured base for round 1 and the previous round's reviewed head after.
 - `priorFindings` carries the complete preceding Critical/Major ledger with each `fix`/`rebut`
   disposition; retain resolved entries as `state: closed`, and only open rebut entries remain
@@ -1460,7 +1479,7 @@ Each entry in `reviewRounds` is the record of one dispatched round:
   because prime's summary did not carry the config at all.
 
 **Every refusal names itself.** An `INVALID_REVIEW_EVIDENCE` carries an `evidenceGap` saying
-which rule broke and what it saw — read it before touching the artifact. Until 0.49.56 six of the
+which rule broke and what it saw — read it before touching the artifact. Until 0.49.57 six of the
 seven refusals returned a bare code, and diagnosing one meant bisecting the evidence by
 resubmitting a round-1-only input; two live units paid that cost, one of them for a single wrong
 word. If a gap ever comes back empty, that is a defect in the contract, not a puzzle to solve by
@@ -1617,7 +1636,7 @@ settles the triggered checks, writes the pre-merge audit record and swaps the is
 without it fails six preconditions at once, and the refusal reads like six independent blockers. A
 live run read exactly that list on a converged, gated, review-clean unit, concluded the Copilot
 ready-trigger wedge, and left it an unmerged draft; `terminal-finalize` had never been invoked for
-that PR at all. Since 0.49.56 the executor says so in its first line. **Declining to invoke the
+that PR at all. Since 0.49.57 the executor says so in its first line. **Declining to invoke the
 finalizer is not an outcome — only its typed refusal is**, and the ready-trigger wedge in
 particular is what the bounded settle window above exists to absorb.
 
