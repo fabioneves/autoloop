@@ -3,6 +3,24 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.60] - 2026-08-28
+
+### Fixed
+
+- **The backward-swap refusal now prescribes the remedy for the swap it caught, not the incident
+  that motivated the rule.** A live run at `loop:08-code-review` tried to swap back to
+  `loop:05-implement` and was correctly blocked — but told "Re-reviewing a revised plan is not a
+  step … continue forward (claim)": the 03→02 plan-re-review diagnosis, at a step long past claim,
+  with no plan review in sight. That message violated the guard's own standing contract, pinned
+  three times over — a refusal names the token it caught and gives a remedy the reader can
+  execute. The reason now names the actual pair (`` `loop:08-code-review` → `loop:05-implement`
+  moves backward ``) and states the remedy for it: work that answers this step's findings runs
+  under this step's label — keep it, dispatch the writer there, and let the round count against
+  the step's cap. The plan-review wording survives, reserved for the 03→02 swap it describes.
+  The rule's blocking behavior is unchanged; two mutants (remedy hardcoded again, pair dropped
+  from the message) die in the self-test, and the 08→05 spelling is pinned in the guard corpus
+  and the regression index.
+
 ## [0.49.59] - 2026-08-27
 
 ### Fixed

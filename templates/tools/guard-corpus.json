@@ -363,6 +363,12 @@
    "why": "0.49.53: plan review re-dispatched three times for one plan; each round swapped 03 back to 02"
   },
   {
+   "cmd": "gh issue edit 339 --remove-label loop:08-code-review --add-label loop:05-implement",
+   "branch": "feat/gh-339-x",
+   "expect": "block",
+   "why": "0.49.60: block was right, remedy was wrong — a live 08→05 refusal advised 'continue forward (claim)'; the reason now names the caught pair"
+  },
+  {
    "cmd": "gh issue edit 298 --add-label loop:05-implement",
    "branch": "feat/gh-298-period-routing",
    "expect": "block",

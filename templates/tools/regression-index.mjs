@@ -33,6 +33,35 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'backward-swap-refusal-prescribed-the-wrong-incident-remedy',
+    date: '2026-08-28',
+    symptom: 'A live run at loop:08-code-review tried to swap back to '
+      + 'loop:05-implement and was refused with "Re-reviewing a revised plan '
+      + 'is not a step … continue forward (claim)" — a diagnosis and a remedy '
+      + 'that belong to the 03→02 plan-re-review incident, at a step long '
+      + 'past claim, with no plan review anywhere in sight.',
+    cause: 'The backward-swap rule blocks every descending pair, but its '
+      + 'reason string was hardcoded to the incident that motivated the rule. '
+      + 'The standing refusal contract — name the token you caught, give a '
+      + 'remedy the reader can execute — was violated by the guard\'s own '
+      + 'message: the reader at 08 had to reverse-engineer the rule to learn '
+      + 'that fix rounds run under the current step label.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'backward-swap refusal names the caught pair and its own remedy',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'The remedy must fit the swap the guard caught',
+      }),
+      Object.freeze({
+        file: 'guard-corpus.json',
+        anchor: 'block was right, remedy was wrong',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'preflight-called-a-self-contained-proxy-broken',
     date: '2026-08-27',
     symptom: 'A setup run reported "review-engine records a proxied model but '
