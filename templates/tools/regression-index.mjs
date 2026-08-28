@@ -33,6 +33,85 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'the-dark-run-gap-hard-blocked-the-skills-own-park',
+    date: '2026-08-28',
+    symptom: 'A live run parked twice exactly as the Dev skill prescribes — '
+      + 'once with two planner dispatches streaming, once with a 20-minute '
+      + 'background verify gate against a just-pushed draft PR — and the '
+      + 'Stop hook hard-blocked both turns as a dark run with eligible units '
+      + 'queued. The run spent about an hour polling in-turn to appease it.',
+    cause: 'checkDarkRun counted the queue but had no notion of in-flight '
+      + 'work, so a park (which ends the turn on purpose and is re-invoked by '
+      + 'the background completion) was indistinguishable from the abandoned '
+      + 'run the gap exists for.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'writeback-check.mjs',
+        anchor: 'export function runInFlightEvidence(prs, streamAgeMs, nowMs) {',
+      }),
+      Object.freeze({
+        file: 'writeback-check.mjs',
+        anchor: "runInFlightEvidence([], 5_000, nowMs) === 'a dispatch stream is live'",
+      }),
+      Object.freeze({
+        file: 'writeback-check.mjs',
+        anchor: 'parked.hard.length === 0 && parked.reminders.length === 1',
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'A PARK is not a dark run',
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'the-captured-root-refusal-named-neither-comment',
+    date: '2026-08-28',
+    symptom: 'A live run captured the newest lifecycle marker comment id '
+      + 'instead of the chain root, and terminal-finalize refused with '
+      + '"captured lifecycle root comment is not canonical" — after a '
+      + '20-minute gate, with nothing on the wire saying which comment the '
+      + 'contract wanted instead.',
+    cause: 'resolveLifecycleCommentChain resolves the root itself and holds '
+      + 'both ids at the point of refusal, but the message carried neither, '
+      + 'so the remedy had to be reverse-engineered from the contract source.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'lifecycle-contract.mjs',
+        anchor: "pass the chain's ROOT comment id",
+      }),
+      Object.freeze({
+        file: 'lifecycle-contract.mjs',
+        anchor: 'a captured tip id is refused by name, with the root id to use instead',
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: "it is\nthe chain's ROOT and stays the captured ID",
+      }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'the-dispatch-anchor-advised-the-swap-the-guard-refuses',
+    date: '2026-08-28',
+    symptom: 'A live run at loop:08-code-review dispatched nine implement-'
+      + 'role fix rounds, and the label-swap reminder told it each time that '
+      + 'loop:05-implement must already be current — the exact backward swap '
+      + 'the command guard refuses. The orchestrator overrode the advice by '
+      + 'hand every round.',
+    cause: 'The implement dispatch anchor knew only steps 05 and 06; a fix '
+      + 'round inside a later step was not a case it stated, so its advice '
+      + 'contradicted the labels-only-climb rule.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'label-swap-reminder.mjs',
+        anchor: 'A fix answering review findings runs under the CURRENT ',
+      }),
+      Object.freeze({
+        file: 'label-swap-reminder.mjs',
+        anchor: 'The fix-round case rides the same reminder.',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'backward-swap-refusal-prescribed-the-wrong-incident-remedy',
     date: '2026-08-28',
     symptom: 'A live run at loop:08-code-review tried to swap back to '
@@ -204,8 +283,12 @@ export const INCIDENTS = Object.freeze([
         anchor: "'an inconsistent verdict names the rule it broke',",
       }),
       Object.freeze({
+        file: 'dispatch.mjs',
+        anchor: 'export function reviewEnvelopeStamp(role) {',
+      }),
+      Object.freeze({
         file: '../../skills/dev/SKILL.md',
-        anchor: 'A round that found only Minors is a `pass` that lists them.',
+        anchor: 'a round that found only Minors is a `pass` that\n  lists them',
       }),
     ]),
   }),
