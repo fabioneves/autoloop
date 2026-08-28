@@ -495,6 +495,18 @@ named skills.
 A writer that reports partial or unknown effects enters lifecycle reconciliation. Never blind-retry
 it. A review dispatch that mutated the repository is invalid.
 
+**A dispatch the host kills is a fault to bound, not to diagnose.** The signature: the background
+task dies with no error output and no result file, minutes in. That is not a ceiling (`dispatch.mjs`
+reports its own timeouts), not a unit defect, and not the reconciliation case above unless effects
+exist — so the drill starts there: `git status --short`, the branch log, the absent result file. A
+killed dispatch with zero effects re-dispatches unchanged, serially, and the attempts are counted:
+**three consecutive kills on one step is the bound** — push whatever commits exist, block the unit
+(`loop-blocked` + `human:decide`) with the kill evidence on the issue, and stop paying. One live run
+had four of seven dispatches die inside two minutes while its survivors ran 11 to 58 minutes; every
+retry succeeded, but the orchestrator spent three extra rounds testing hypotheses — memory,
+concurrency, its own tool calls — it could neither confirm nor act on. The cause of an external kill
+lives outside the session, so the run's job is the bound and the evidence, never the diagnosis.
+
 ## Efficiency — overlap and liveness
 
 A dispatch is a model round trip measured in minutes. One live run spent 23 minutes on the

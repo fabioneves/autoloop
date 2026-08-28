@@ -44,6 +44,16 @@ Notable changes to Autoloop are recorded here. The format follows
   made every query throw, which the fail-open `catch` turned into a silent exit 0. The self-test
   now names the one primitive every child in the file goes through.
 
+- **A dispatch killed by the host now has a fixed drill instead of an improvised diagnosis.** In
+  the same live session, four of seven dispatches were killed externally 1–2 minutes in — no error
+  output, no result file — while the survivors ran 11 to 58 minutes and every retry succeeded. The
+  orchestrator handled it well but derived the policy from scratch across three investigative
+  rounds. The Dev skill's dispatch contract now states it: verify zero effects first (a killed
+  writer that left effects is lifecycle reconciliation, not a retry), re-dispatch unchanged and
+  serially, and stop at three consecutive kills on one step — push what exists, block the unit
+  with the kill evidence, and leave the diagnosis to the human, because the cause of an external
+  kill lives outside the session.
+
 - **The write-back hook ran git through a shell, with a ref name in the command string.** Git
   permits `$`, backticks and quotes in a ref name, and a pull request's BASE ref passes through no
   branch pattern at all — anyone who can open a PR picks it. Quoting it into `execSync` is one
