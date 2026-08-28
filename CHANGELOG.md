@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.62] - 2026-08-28
+
+### Added
+
+- **An invariant-heavy unit earns one orchestrator oracle sweep before its closing round.** On a
+  live unit whose plan pinned bit-exact numeric behavior, two of the four late Majors came from
+  the orchestrator's own probes rather than any reviewer — including a 224-wrong-value class
+  that five reviewer rounds had passed. The strongest check for such a unit is a program: an
+  independent oracle recomputing expected outputs by a different method and sweeping the
+  decision surface against it — and a reviewer holding `Glob,Grep,Read` cannot run one. The Dev
+  skill now prescribes exactly one bounded sweep, at the head the closing round will close, only
+  when the frozen plan carries a numeric or bit-exactness invariant section: oracle derived from
+  the invariant's statement (never the implementation's helpers), oracle verified against a
+  known case before a mismatch is believed (a live 2048-bit oracle produced a false failure its
+  4096-bit rerun retracted), probes in scratch and removed after, findings disposed exactly like
+  reviewer findings, a clean sweep recorded in one line and never re-run. Units without such an
+  invariant section skip the step; the disposition-only sentence in step 7 now names this as its
+  one exception.
+
 ## [0.49.61] - 2026-08-28
 
 ### Fixed
