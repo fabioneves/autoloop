@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.58 · starting
+∞ dev · v0.49.59 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -494,6 +494,18 @@ named skills.
 
 A writer that reports partial or unknown effects enters lifecycle reconciliation. Never blind-retry
 it. A review dispatch that mutated the repository is invalid.
+
+**A dispatch the host kills is a fault to bound, not to diagnose.** The signature: the background
+task dies with no error output and no result file, minutes in. That is not a ceiling (`dispatch.mjs`
+reports its own timeouts), not a unit defect, and not the reconciliation case above unless effects
+exist — so the drill starts there: `git status --short`, the branch log, the absent result file. A
+killed dispatch with zero effects re-dispatches unchanged, serially, and the attempts are counted:
+**three consecutive kills on one step is the bound** — push whatever commits exist, block the unit
+(`loop-blocked` + `human:decide`) with the kill evidence on the issue, and stop paying. One live run
+had four of seven dispatches die inside two minutes while its survivors ran 11 to 58 minutes; every
+retry succeeded, but the orchestrator spent three extra rounds testing hypotheses — memory,
+concurrency, its own tool calls — it could neither confirm nor act on. The cause of an external kill
+lives outside the session, so the run's job is the bound and the evidence, never the diagnosis.
 
 ## Efficiency — overlap and liveness
 
@@ -1711,6 +1723,11 @@ Invalidate relevant snapshot sections, re-derive state, and take the next unit u
 - an explicit invocation bound is reached;
 - a guardrail failed.
 
+**Any of those four closes the RUN, so record it: `node <plugin-tools>/prime.mjs --close-run`.**
+The Stop hook refuses a turn that ends with eligible units queued and no close on the record —
+that is the shape a dark run has, and this rule has now been written three times and broken
+twice. Closing stamps the run marker the prime wrote; the command guard stays armed either way.
+
 Queue exhaustion requires complete absence evidence: run a fresh full `scan.mjs`, and require every
 queue/lifecycle/dependency section to be complete. Never conclude absence from an incomplete
 section.
@@ -1948,6 +1965,10 @@ never one of them — a human-gated unit is a row in the digest, not a reason to
 When the last eligible unit is gone, print the idle line
 (`[HH:MM] 💤 ∞ idle ─ no eligible units`) and close cleanly rather than polling.
 
+Closing is an action, not a sentence: `prime.mjs --close-run` before the closing rail. A run that
+just stops writing is indistinguishable from a run that went dark, and the Stop hook treats it as
+the latter.
+
 The run's own close bookends the `┏━━ ∞ RUN OPEN` frame it started with — same open-right block,
 same titled rule with the clock, so a scrollback shows the run's two ends in one shape:
 
@@ -1989,7 +2010,8 @@ Never paste raw issue/review text into chat banners.
 
 ## Tool surface
 
-Dev invokes exactly these entry points: `prime.mjs`, `dispatch.mjs`, `scan.mjs`,
+Dev invokes exactly these entry points: `prime.mjs` (`--json` to open a run, `--close-run` to
+close it), `dispatch.mjs`, `scan.mjs`,
 `snapshot-contract.mjs` (invalidate/summary/section), `review-contract.mjs`, `publish-verdict.mjs`,
 `lifecycle-driver.mjs`, `escalate-paths.mjs`, and the vendored `auto-merge.mjs` terminal exception.
 Every other file in `tools/agentic/` is a library those entry points own — never invoke a contract

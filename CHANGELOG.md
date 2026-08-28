@@ -3,6 +3,64 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.59] - 2026-08-27
+
+### Fixed
+
+- **A run that goes dark is now a mechanical fault, not a broken prose rule.** A live 0.49.58
+  session delivered two units, re-delivered one after catching a base-move break, printed no
+  closing rail, and ended its turn with thirteen dependency-free `loop-ready` units queued and
+  nothing in flight. Its own away-summary said the next thing it would do was re-scan the queue.
+  The rule it broke is written three times in the Dev skill — liveness, "take the next unit
+  unless", "the run closes on exactly three conditions" — and one of those paragraphs already
+  records a 0.42.3 run that ended its turn at step 8 of 11. The second failure of a rule is not
+  an argument for writing it a fourth time.
+
+  The Stop hook refuses it instead. `writeback-check.mjs` gains a hard gap: a LIVE run plus at
+  least one eligible unit is an abandoned RUN, which no unit-shaped evidence can see because
+  every unit is perfectly terminal. Eligibility is deliberately narrower than the loop's own
+  selection rule — no terminal label, no `human:*`/`needs-human`, no open `## Blocked by`
+  dependency, nothing an open loop PR already claims — because a false positive argues with a run
+  that stopped for a reason the hook cannot see. On the exact repository state that ended that
+  run, it names 13 units, byte-identical to the set `scan.mjs`'s own dependency resolution
+  produces.
+
+  `prime.mjs --close-run` is the counterpart: the run says once, on the record, that it is done
+  taking work. It stamps `closedAt` on the marker prime already writes, and `loopRunIsOpen` is
+  untouched, so closing a run does NOT disarm the command guard that blocks `gh pr merge`.
+
+- **The Stop hook's own pull-request query had been failing, silently, on any repository with
+  more than ~49 open PRs' worth of commit nodes.** It asked for `commits` on `gh pr list --limit
+  50`, which is a 100-commit page per PR — 505,050 possible nodes against GitHub's 500,000 limit.
+  On living-football-engine, with four open PRs, the query failed outright, `prs` hydrated null,
+  and every PR-side gap in the file — invalid ownership, unpushed loop work, step-label drift —
+  went quietly dead. The count now comes from the local tracking refs, which is cheaper, needs no
+  API call, and cannot blow a node budget.
+
+  Fail-open stays, but stops being invisible: a query that could not run now emits a reminder
+  naming the checks it silenced, and a stop where NO GitHub data was reachable at all says so
+  instead of exiting mute. A hook that checks nothing looked exactly like a repository with
+  nothing to report — and during this change's own development an undefined child-process import
+  made every query throw, which the fail-open `catch` turned into a silent exit 0. The self-test
+  now names the one primitive every child in the file goes through.
+
+- **A dispatch killed by the host now has a fixed drill instead of an improvised diagnosis.** In
+  the same live session, four of seven dispatches were killed externally 1–2 minutes in — no error
+  output, no result file — while the survivors ran 11 to 58 minutes and every retry succeeded. The
+  orchestrator handled it well but derived the policy from scratch across three investigative
+  rounds. The Dev skill's dispatch contract now states it: verify zero effects first (a killed
+  writer that left effects is lifecycle reconciliation, not a retry), re-dispatch unchanged and
+  serially, and stop at three consecutive kills on one step — push what exists, block the unit
+  with the kill evidence, and leave the diagnosis to the human, because the cause of an external
+  kill lives outside the session.
+
+- **The write-back hook ran git through a shell, with a ref name in the command string.** Git
+  permits `$`, backticks and quotes in a ref name, and a pull request's BASE ref passes through no
+  branch pattern at all — anyone who can open a PR picks it. Quoting it into `execSync` is one
+  escape away from executing it (demonstrated: a base ref of `main$(touch …)` runs the
+  substitution; the same string through `execFileSync` does not). Every child in the file now goes
+  through argv, `gh` included, so no shell parses anything this hook reads from GitHub.
+
 ## [0.49.58] - 2026-08-27
 
 ### Fixed
