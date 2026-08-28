@@ -3,6 +3,59 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.61] - 2026-08-28
+
+### Fixed
+
+- **The verdict envelope rules now ride every reviewer prompt mechanically.** The dispatcher's
+  consistency rule — `fail` requires a Critical or Major; a Minor-only round is a `pass` that
+  lists them — has been documented at its rejection site since 0.49.56, with the advice "tell
+  the reviewer this rule in the brief". A third live round was lost to a brief that did not:
+  the reviewer returned a complete, correct `fail` beside two Minors and the verdict was
+  rejected, its findings recovered only from the raw event stream. A rule every brief must
+  restate is a rule the dispatcher should state itself, so `dispatch.mjs` now appends a
+  machine-owned envelope stamp to every review-verdict prompt — the same mechanism as the
+  context stamp — carrying the pass/fail rule and the rebut semantics (`rebuts` adjudicates
+  prior finding ids only; a brief-prose concern is answered as a finding, and a rejected
+  rebuttal keeps its original id). Writer and plan prompts are untouched, and the self-test
+  pins both the stamp's presence on reviewer stdin and its absence on the writer's.
+
+- **A park is no longer a dark run.** The 0.49.59 dark-run gap hard-blocked two turns of one
+  live session that ended exactly as the Dev skill prescribes — once with two planner
+  dispatches streaming, once with a 20-minute background verify gate running against a
+  just-pushed head — and the run spent about an hour polling in-turn to appease the hook.
+  `writeback-check.mjs` now reads the in-flight evidence both parks left behind: a dispatch
+  stream appended within the last three minutes, or a claimed draft loop PR updated inside
+  thirty. With either present, the queued-units gap rides as a non-blocking reminder that
+  still says "take the next unit when this lands"; with neither, the hard block is unchanged —
+  the 0.49.58 motivating incident (delivered READY PRs, nothing in flight) stays caught, and
+  so does a stale draft that aged out of the window.
+
+- **The captured-root refusal names both comments.** Passing the newest lifecycle marker's
+  comment id where the chain's root id belongs got "captured lifecycle root comment is not
+  canonical" — after a 20-minute gate, with nothing on the wire saying which comment the
+  contract wanted. `resolveLifecycleCommentChain` holds both ids at the point of refusal and
+  now says so: a successor id is named as a successor with the root id to use instead, and the
+  skill's claim step states outright that the driver's returned comment id is the chain's ROOT
+  for the unit's whole life.
+
+- **The implement-dispatch anchor knows about fix rounds.** Nine implement-role fix dispatches
+  inside `loop:08-code-review` each drew the reminder that `loop:05-implement` must already be
+  current — the exact backward swap the command guard refuses, overridden by hand every round.
+  The reminder now states the fix-round case first: work answering review findings runs under
+  the current step label, labels only climb.
+
+### Changed
+
+- The Dev skill's closing-review guidance requires an explicit reading plan in the brief for
+  large artifacts (roughly 100 KB of unit files and up) — whole files where the unit created
+  them, diff plus cited ranges where a few lines changed in a large pre-existing file. A live
+  closing round without one burned 17 minutes into `Prompt is too long` over 558 KB of source.
+
+- Three new incidents in the regression index pin the park, captured-root, and dispatch-anchor
+  fixes to their enforcing self-test cases; the Minor-only-fail incident gains the envelope
+  stamp as an enforcing anchor.
+
 ## [0.49.60] - 2026-08-28
 
 ### Fixed

@@ -48,9 +48,9 @@
 // broke and the guard should be re-verified against the Codex hooks docs.
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
 import { loopRunIsLive } from './command-guard.mjs';
 import { blockedByIssueNumbers } from './snapshot-contract.mjs';
@@ -68,6 +68,31 @@ function ghJson(cmd) {
     return JSON.parse(out);
   } catch {
     return null; // fail-open: any gh error skips the check
+  }
+}
+
+/** Milliseconds since the newest dispatch-live file was appended, or null when
+ *  none exists or the directory is unreadable. dispatch.mjs streams every
+ *  engine event to `<git-common-dir>/autoloop/dispatch-live/` as it happens, so
+ *  this age is the distance to the last moment any dispatch was demonstrably
+ *  alive. Fail-open like every other read in this hook. */
+function dispatchStreamAgeMs(root) {
+  try {
+    const common = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: root,
+      timeout: 10000,
+    }).trim();
+    const directory = join(resolve(root, common), 'autoloop', 'dispatch-live');
+    let newest = null;
+    for (const entry of readdirSync(directory)) {
+      const { mtimeMs } = statSync(join(directory, entry));
+      if (newest === null || mtimeMs > newest) newest = mtimeMs;
+    }
+    return newest === null ? null : Math.max(0, Date.now() - newest);
+  } catch {
+    return null;
   }
 }
 
@@ -261,6 +286,53 @@ export function checkBlockedIssues(issues) {
     .map((i) => `Issue #${i.number} is loop-blocked with NO comment — record the reason + gate label (STATE → Defer)`);
 }
 
+/** Pure: evidence that a live run is parked on in-flight work rather than dark.
+ *
+ *  The Dev skill's own park design ends turns on purpose: dispatch the writer
+ *  or the gate in the background, stage the next unit, park, and let the
+ *  completion signal re-invoke the turn. The dark-run gap hard-blocked two such
+ *  parks in one live session — once with two planners streaming, once with a
+ *  20-minute verify gate running against a just-pushed PR — and the run spent
+ *  an hour polling in-turn to appease it. Both parks left evidence this
+ *  function reads:
+ *
+ *  - a dispatch streaming right now: dispatch.mjs appends every engine event to
+ *    a live file as it happens, so a running dispatch keeps its file's mtime
+ *    within seconds of now. Three minutes of silence on a stream that writes
+ *    continuously means no dispatch is running.
+ *  - a claimed DRAFT loop PR pushed or updated in the last thirty minutes: a
+ *    unit actively mid-flight (a gate, publish, or record step in progress).
+ *    Draft-ness matters — the 0.49.58 run this gap exists for had DELIVERED
+ *    (ready) PRs and nothing in flight, and stays caught; a stale draft from an
+ *    abandoned unit ages out of the window and stays caught too.
+ *
+ *  `streamAgeMs` and `nowMs` are passed in so the classifier stays pure;
+ *  main() reads the live directory's mtimes via `dispatchStreamAgeMs`. */
+const DISPATCH_STREAM_FRESH_MS = 3 * 60_000;
+const MID_UNIT_PR_FRESH_MS = 30 * 60_000;
+
+export function runInFlightEvidence(prs, streamAgeMs, nowMs) {
+  if (
+    Number.isFinite(streamAgeMs)
+    && streamAgeMs >= 0
+    && streamAgeMs < DISPATCH_STREAM_FRESH_MS
+  ) {
+    return 'a dispatch stream is live';
+  }
+  for (const pr of prs ?? []) {
+    if (!LOOP_BRANCH_RE.test(pr.headRefName ?? '')) continue;
+    if (pr.isDraft !== true) continue;
+    if (!parseLoopClaim({ branch: pr.headRefName, body: pr.body }).valid) continue;
+    const updated = Date.parse(pr.updatedAt ?? '');
+    if (!Number.isFinite(updated)) continue;
+    const ageMs = nowMs - updated;
+    if (ageMs >= 0 && ageMs < MID_UNIT_PR_FRESH_MS) {
+      return `PR #${pr.number} is mid-unit, updated ${Math.max(1, Math.round(ageMs / 60_000))}m ago`;
+    }
+  }
+  return null;
+}
+
 /** Pure: a live run ending its turn while the queue still holds work it could take.
  *
  *  Eligibility is deliberately narrower than the loop's own selection rule. A
@@ -270,10 +342,17 @@ export function checkBlockedIssues(issues) {
  *  an open `## Blocked by` dependency, and anything an open loop PR already
  *  claims. What survives is work the run had no account of.
  *
+ *  A non-empty queue beside in-flight evidence (`inFlight`, from
+ *  `runInFlightEvidence`) is a PARK, not a dark run: the skill tells the run to
+ *  end exactly this turn and let the background work re-invoke it. Blocking it
+ *  taught a live session to poll in-turn instead, so the queue rides as a
+ *  reminder there and hard-blocks only when nothing is demonstrably running.
+ *
  *  `runIsLive` is passed in rather than read here so the classifier stays pure;
  *  main() answers it from the run marker prime wrote. */
-export function checkDarkRun(runIsLive, issues, prs) {
-  if (runIsLive !== true) return [];
+export function checkDarkRun(runIsLive, issues, prs, inFlight = null) {
+  const silent = { hard: [], reminders: [] };
+  if (runIsLive !== true) return silent;
   const claimed = new Set(
     (prs ?? [])
       .filter((pr) => LOOP_BRANCH_RE.test(pr.headRefName ?? ''))
@@ -296,17 +375,30 @@ export function checkDarkRun(runIsLive, issues, prs) {
     if (blockedByIssueNumbers(issue.body).some((dependency) => openNumbers.has(dependency))) continue;
     eligible.push(issue.number);
   }
-  if (eligible.length === 0) return [];
+  if (eligible.length === 0) return silent;
   const named = eligible.slice(0, 8).map((number) => `#${number}`).join(', ');
   const rest = eligible.length > 8 ? `, +${eligible.length - 8} more` : '';
-  return [
-    `The run is still open and ${eligible.length} eligible unit(s) are queued (${named}${rest}) `
-    + '— this turn ended without taking one. A unit that needs a human is a row in the digest, '
-    + 'not a reason to stop: take the next unit. If the queue is genuinely not why this run is '
-    + 'stopping — a human asked for the session back, the context needs handing off, an '
-    + 'invocation bound was reached — then close the run on the record instead, and stop: '
-    + '`node tools/agentic/prime.mjs --close-run`',
-  ];
+  if (inFlight !== null) {
+    return {
+      hard: [],
+      reminders: [
+        `${eligible.length} eligible unit(s) are queued (${named}${rest}) and the run is `
+        + `mid-flight (${inFlight}) — parking is fine; take the next unit when the in-flight `
+        + 'work lands',
+      ],
+    };
+  }
+  return {
+    hard: [
+      `The run is still open and ${eligible.length} eligible unit(s) are queued (${named}${rest}) `
+      + '— this turn ended without taking one. A unit that needs a human is a row in the digest, '
+      + 'not a reason to stop: take the next unit. If the queue is genuinely not why this run is '
+      + 'stopping — a human asked for the session back, the context needs handing off, an '
+      + 'invocation bound was reached — then close the run on the record instead, and stop: '
+      + '`node tools/agentic/prime.mjs --close-run`',
+    ],
+    reminders: [],
+  };
 }
 
 /** Pure: render the exact Stop-hook wire result. Reminders ride the hard-gap
@@ -417,6 +509,36 @@ function selfTest() {
     ],
     [{ number: 60, headRefName: 'feat/gh-46-x', body: 'Closes #46' }],
   );
+  // The two parks a live session had hard-blocked: a streaming dispatch (two
+  // planners away, nothing claimed yet) and a mid-unit draft PR updated inside
+  // the window (a background gate running against a just-pushed head). The
+  // exclusions pin the 0.49.58 shape as still-dark: a READY PR however fresh
+  // (delivered, nothing in flight), a stale draft (abandoned unit), an invalid
+  // claim, a silent dispatch stream, and an unparseable or future timestamp.
+  const nowMs = Date.parse('2026-01-01T12:00:00Z');
+  const midUnitPr = {
+    number: 61,
+    headRefName: 'feat/gh-46-x',
+    body: 'Closes #46',
+    isDraft: true,
+    updatedAt: '2026-01-01T11:45:00Z',
+  };
+  const inFlightCases =
+    runInFlightEvidence([], 5_000, nowMs) === 'a dispatch stream is live' &&
+    runInFlightEvidence([], 3 * 60_000, nowMs) === null &&
+    runInFlightEvidence([], null, nowMs) === null &&
+    runInFlightEvidence([midUnitPr], null, nowMs) === 'PR #61 is mid-unit, updated 15m ago' &&
+    runInFlightEvidence([{ ...midUnitPr, isDraft: false }], null, nowMs) === null &&
+    runInFlightEvidence([{ ...midUnitPr, updatedAt: '2026-01-01T11:00:00Z' }], null, nowMs) === null &&
+    runInFlightEvidence([{ ...midUnitPr, body: 'no claim' }], null, nowMs) === null &&
+    runInFlightEvidence([{ ...midUnitPr, updatedAt: 'not a date' }], null, nowMs) === null &&
+    runInFlightEvidence([{ ...midUnitPr, updatedAt: '2026-01-01T12:05:00Z' }], null, nowMs) === null;
+  const parked = checkDarkRun(
+    true,
+    [{ number: 40, labels: [{ name: 'loop-ready' }], body: '' }],
+    [],
+    'a dispatch stream is live',
+  );
   const stranded = checkStrandedStepLabels([
     { number: 7, labels: [{ name: 'loop-ready' }, { name: 'loop-delivered' }, { name: 'loop:04-claim' }, { name: 'loop:07-diff-review' }] },
     { number: 8, labels: [{ name: 'loop-delivered' }] },
@@ -457,12 +579,18 @@ function selfTest() {
     checkSkippedQueries({ openPrs: true, blockedIssues: true, mergedPrs: true, openIssues: true }).length === 0 &&
     // #40 (clean) and #45 (its only dependency is closed) are the whole eligible
     // set; a closed run and an empty set are both silent.
-    dark.length === 1 && dark[0].includes('#40') && dark[0].includes('#45') &&
-    dark[0].includes('2 eligible') && dark[0].includes('--close-run') &&
-    !dark[0].includes('#41') && !dark[0].includes('#42') && !dark[0].includes('#43') &&
-    !dark[0].includes('#44') && !dark[0].includes('#46') && !dark[0].includes('#47') &&
-    checkDarkRun(false, [{ number: 40, labels: [{ name: 'loop-ready' }], body: '' }], []).length === 0 &&
-    checkDarkRun(true, [], []).length === 0 &&
+    dark.hard.length === 1 && dark.reminders.length === 0 &&
+    dark.hard[0].includes('#40') && dark.hard[0].includes('#45') &&
+    dark.hard[0].includes('2 eligible') && dark.hard[0].includes('--close-run') &&
+    !dark.hard[0].includes('#41') && !dark.hard[0].includes('#42') && !dark.hard[0].includes('#43') &&
+    !dark.hard[0].includes('#44') && !dark.hard[0].includes('#46') && !dark.hard[0].includes('#47') &&
+    checkDarkRun(false, [{ number: 40, labels: [{ name: 'loop-ready' }], body: '' }], []).hard.length === 0 &&
+    checkDarkRun(true, [], []).hard.length === 0 &&
+    checkDarkRun(true, [], []).reminders.length === 0 &&
+    inFlightCases &&
+    parked.hard.length === 0 && parked.reminders.length === 1 &&
+    parked.reminders[0].includes('#40') && parked.reminders[0].includes('a dispatch stream is live') &&
+    parked.reminders[0].includes('take the next unit') &&
     stranded.length === 1 && stranded[0].includes('#7') && stranded[0].includes('loop:04-claim') &&
     stranded[0].includes('--remove-label loop:07-diff-review') &&
     reminderWire.exitCode === 0 && reminderWire.stderr === '' &&
@@ -487,7 +615,7 @@ function main() {
     /* no payload (manual run) — proceed */
   }
 
-  const prs = ghJson('pr list --state open --json number,headRefName,baseRefName,body,isDraft --limit 50');
+  const prs = ghJson('pr list --state open --json number,headRefName,baseRefName,body,isDraft,updatedAt --limit 50');
   const issues = ghJson('issue list --label loop-blocked --state open --json number,comments --limit 50');
   if (prs === null && issues === null) {
     // Fail open, but not mute. This branch fired for a completely different
@@ -514,7 +642,16 @@ function main() {
     hard.push(...checkStepLabelDrift(prs, openIssues, pushedCommitCount));
     // Only with BOTH lists on the wire: without the PRs, a claimed unit reads as
     // eligible and the gap would argue with a run that is mid-flight.
-    if (prs !== null) hard.push(...checkDarkRun(loopRunIsLive(ROOT), openIssues, prs));
+    if (prs !== null) {
+      const dark = checkDarkRun(
+        loopRunIsLive(ROOT),
+        openIssues,
+        prs,
+        runInFlightEvidence(prs, dispatchStreamAgeMs(ROOT), Date.now()),
+      );
+      hard.push(...dark.hard);
+      reminders.push(...dark.reminders);
+    }
   }
   reminders.push(...checkSkippedQueries({
     openPrs: prs !== null,

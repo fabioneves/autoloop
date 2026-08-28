@@ -174,10 +174,12 @@ export function reminderFor(command, opts = {}) {
     if (!key) return null;
     if (role === 'implement') {
       return 'autoloop: an implement-role dispatch just went out — it serves step 05 '
-        + '(`loop:05-implement`, writer) or step 06 (`loop:06-simplify`, simplify pass). The '
-        + "matching label must ALREADY be current on this unit's issue; if not, swap it NOW "
-        + "(late beats never) and print the step's ribbon — writer: "
-        + `\`${ribbonFor('#<N>', '05-implement')}\`; simplify: `
+        + '(`loop:05-implement`, writer), step 06 (`loop:06-simplify`, simplify pass), or a FIX '
+        + 'round inside a later step. A fix answering review findings runs under the CURRENT '
+        + 'step label (`loop:08-code-review` stays — labels only climb, and the guard refuses '
+        + 'the backward swap). Otherwise the matching label must ALREADY be current on this '
+        + "unit's issue; if not, swap it NOW (late beats never) and print the step's ribbon — "
+        + `writer: \`${ribbonFor('#<N>', '05-implement')}\`; simplify: `
         + `\`${ribbonFor('#<N>', '06-simplify')}\`. A step that dispatches without swapping `
         + 'strands the label timeline.';
     }
@@ -310,6 +312,11 @@ function selfTest() {
     ['node /x/templates/tools/publish-verdict.mjs gate 5e8fce7f17abd16922882ded89ad6dcabbf4d14b', null],
     ['node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json', /loop:05-implement/],
     ['node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json', /loop:06-simplify/],
+    // A live run at loop:08-code-review dispatched nine implement-role fix
+    // rounds and this anchor told it to swap back to 05 every time; the guard
+    // then refused each swap. The fix-round case rides the same reminder.
+    ['node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json', /FIX/],
+    ['node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json', /labels only climb/],
     ['node tools/agentic/dispatch.mjs --role code-review --prompt-file /tmp/p.md --json', /loop:08-code-review/],
     ['node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/p.md --json', /loop:03-plan-review/],
     // A live run dispatched plan review three times for one plan (r1..r3).

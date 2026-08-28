@@ -570,6 +570,32 @@ function checkoutFingerprint(cwd) {
   return `${head.stdout.trim()}\n${tree.stdout}`;
 }
 
+// The verdict envelope rules are MACHINE-SUPPLIED, never left to the brief.
+// `reviewVerdictProblem` has carried "tell the reviewer this rule in the brief"
+// since the second time a brief invited `fail` beside only Minors — and a third
+// live round was lost to exactly that invitation anyway, its real findings
+// recovered by hand from the raw event stream. A rule that every brief must
+// restate is a rule the dispatcher should state itself, the same reasoning that
+// put the context stamp below on every prompt. The rebut clause rides along
+// because it has the same failure shape: a reviewer spent `rebuts` answering
+// the brief's own prose concerns, and the chain the rounds were meant to form
+// would not validate.
+export function reviewEnvelopeStamp(role) {
+  if (ROLES[role]?.result !== 'review-verdict') return '';
+  return '\n\n<!-- autoloop-review-envelope-v1\n'
+    + 'Verdict envelope rules, enforced mechanically on this review\'s output —\n'
+    + 'a verdict that breaks them is rejected and the round is lost:\n'
+    + '- `fail` requires at least one Critical or Major finding. A round whose\n'
+    + '  findings are all Minor or Suggestion is a `pass` that lists them.\n'
+    + '- `pass` beside a Critical or Major finding is invalid.\n'
+    + '- `rebuts` adjudicates only finding ids recorded in earlier rounds and\n'
+    + '  named by this brief. Answer a concern raised in the brief\'s own prose\n'
+    + '  with a finding or not at all, never with a rebut; a rejected rebuttal\n'
+    + '  keeps the original finding id rather than re-filing the defect as new.\n'
+    + 'These rules override any instruction elsewhere in this prompt that\n'
+    + 'disagrees with them (for example "fail if you find anything").\n-->\n';
+}
+
 // The revision under dispatch is MACHINE-SUPPLIED, never typed into a prompt.
 // A live orchestrator hand-transcribed a head OID, invented one character, and
 // the reviewer correctly refused to attach a verdict to a revision it could not
@@ -804,7 +830,7 @@ function runEngine({
       env: dispatchEnvironment(
         adapter === ENGINES.claude ? resolveDefaultBaseUrl(role, cwd) : null,
       ),
-      input: `${prompt}${dispatchContextStamp(cwd, role)}`,
+      input: `${prompt}${reviewEnvelopeStamp(role)}${dispatchContextStamp(cwd, role)}`,
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: timeoutMs,
       windowsHide: true,
@@ -1204,9 +1230,18 @@ function selfTest() {
       reviewed.ok === true
       && reviewed.role === 'code-review'
       && reviewed.verdict.verdict === 'pass'
-      && readFileSync(stdinPath, 'utf8') === 'review the delta'
+      && readFileSync(stdinPath, 'utf8')
+        === `review the delta${reviewEnvelopeStamp('code-review')}`
       && launchedArgv.includes('--permission-mode plan')
       && launchedArgv.includes('--tools Glob,Grep,Read'),
+    );
+    check(
+      'every reviewer prompt carries the envelope rules and no writer prompt does',
+      ['plan-review', 'code-review', 'doubt-review'].every((role) =>
+        reviewEnvelopeStamp(role).includes('at least one Critical or Major')
+        && reviewEnvelopeStamp(role).includes('rebuts'))
+      && ['plan', 'implement'].every((role) => reviewEnvelopeStamp(role) === '')
+      && readFileSync(stdinPath, 'utf8').includes('autoloop-review-envelope-v1'),
     );
     check(
       'a live reviewer spawn never receives a write tool',
@@ -1247,6 +1282,7 @@ function selfTest() {
       'an implement dispatch returns the terminal text and the writing tool set',
       implemented.ok === true
       && implemented.text === 'implemented the slice'
+      && !readFileSync(stdinPath, 'utf8').includes('autoloop-review-envelope-v1')
       && readFileSync(argvPath, 'utf8').includes('--permission-mode acceptEdits'),
     );
 

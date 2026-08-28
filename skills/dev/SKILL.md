@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.60 · starting
+∞ dev · v0.49.61 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1133,7 +1133,10 @@ The driver persists epoch 1 before the first effect, swaps `loop-started`/`loop:
 the exact planned-base branch and `chore: claim #N`, publishes the captured branch, posts the exact
 hash-bound frozen plan, opens one draft whose body passes `parseLoopClaim()`, and binds every
 discovered identity into the same marker. It returns `ACTIVE_DRAFT_RECOVERED` only after stable
-readback. Retain its returned lifecycle comment ID in the request for every later call. Never
+readback. Retain its returned lifecycle comment ID in the request for every later call — it is
+the chain's ROOT and stays the captured ID for the unit's whole life; successor marker comments
+never replace it, and passing the newest marker's ID instead is a refusal (`captured lifecycle
+root comment is not canonical`) that on a live run landed after a 20-minute gate. Never
 append a second marker or perform one of these effects outside the driver.
 
 ### 5. Implement
@@ -1225,6 +1228,13 @@ scope is for mid-storm only, when multiple Criticals make further fix cycles cer
 unit runs r1 full → fix → r2 full-close; the cap bounds any ping-pong. The closing prompt
 carries the checklist, frozen plan, invariants, and untrusted-input model.
 
+**A large closing artifact needs an explicit reading plan in the brief.** A reviewer told only
+"review the full artifact" reads everything: on a live unit that was 558 KB of source at xhigh
+effort, and it burned the round on `Prompt is too long` after 17 minutes. When the unit's files
+run past roughly 100 KB, the brief says what to read at which grain — whole files where the unit
+created them, diff-plus-cited-ranges where a handful of lines changed in a large pre-existing
+file — and that budgeted round closed the same unit cleanly on the next dispatch.
+
 The active ingredient is scope, not engine: a delta-blind Major (a missing presence check
 survived three delta rounds and fell to the first whole-artifact re-read) is caught by
 re-reading everything at the final head, and doing that on codex keeps it cross-model over what
@@ -1250,12 +1260,14 @@ node <plugin-tools>/dispatch.mjs --role code-review \
   Give it the diff, the output, or a path with a line range. `dispatch.mjs` refuses a
   reviewer prompt carrying a shell code fence before the engine starts
   (`REVIEWER_PROMPT_NOT_EXECUTABLE`); fence a command quoted as evidence as `text`.
-- **The verdict rule, stated.** `pass` means no Critical or Major finding; `fail` means at least
-  one. A round that found only Minors is a `pass` that lists them. "Fail if you find anything"
-  is the natural phrasing and it produces an envelope the harness rejects — it cost two
-  consecutive live rounds, whose findings were real. When one is rejected anyway, the failure
-  carries `rejectedVerdict`: disposition those findings, fix, and re-review. Never re-run the
-  round to obtain a well-formed envelope for work already done.
+- **The verdict rule rides every reviewer prompt mechanically.** `pass` means no Critical or
+  Major finding; `fail` means at least one; a round that found only Minors is a `pass` that
+  lists them. "Fail if you find anything" is the natural brief phrasing and it produced a
+  rejected envelope in three separate live rounds, so `dispatch.mjs` now appends the rule (and
+  the rebut semantics) to every review-verdict prompt itself — do not restate it, and do not
+  write a brief that contradicts it. When an envelope is rejected anyway, the failure carries
+  `rejectedVerdict`: disposition those findings, fix, and re-review. Never re-run the round to
+  obtain a well-formed envelope for work already done.
 
 Verify every Critical/Major against code or a cheap reproduction, then disposition it:
 
@@ -1726,7 +1738,10 @@ Invalidate relevant snapshot sections, re-derive state, and take the next unit u
 **Any of those four closes the RUN, so record it: `node <plugin-tools>/prime.mjs --close-run`.**
 The Stop hook refuses a turn that ends with eligible units queued and no close on the record —
 that is the shape a dark run has, and this rule has now been written three times and broken
-twice. Closing stamps the run marker the prime wrote; the command guard stays armed either way.
+twice. A PARK is not a dark run: with a dispatch stream live or a mid-unit draft PR freshly
+updated, the queue rides as a non-blocking reminder instead, so end the parked turn cleanly
+rather than polling in-turn to appease the hook. Closing stamps the run marker the prime wrote;
+the command guard stays armed either way.
 
 Queue exhaustion requires complete absence evidence: run a fresh full `scan.mjs`, and require every
 queue/lifecycle/dependency section to be complete. Never conclude absence from an incomplete

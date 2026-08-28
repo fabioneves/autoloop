@@ -845,7 +845,19 @@ export function resolveLifecycleCommentChain(comments, rootCommentId = null) {
   }
   const root = roots[0];
   if (rootCommentId !== null && root.id !== rootCommentId) {
-    throw new Error('captured lifecycle root comment is not canonical');
+    // The terse refusal cost a live run a refetch AFTER a 20-minute gate: the
+    // orchestrator had captured the newest marker comment's id, and nothing on
+    // the wire said which comment the contract wanted instead. The chain knows
+    // its own root, so the refusal names it — and names the successor mistake
+    // outright when that is what happened.
+    const captured = entries.find((entry) => entry.id === rootCommentId);
+    throw new Error(
+      captured?.parsed.successor != null
+        ? `captured lifecycle root comment is not canonical: ${rootCommentId} is a successor `
+          + `in the chain, not its root — pass the chain's ROOT comment id ${root.id}`
+        : `captured lifecycle root comment is not canonical: ${rootCommentId} is not the `
+          + `chain's root, which is ${root.id}`,
+    );
   }
   const successors = entries.filter((entry) => entry.parsed.successor !== null);
   if (successors.some((entry) => !entry.neverEdited)) {
@@ -3393,6 +3405,19 @@ function selfTest() {
       && chain.tip.marker.phase === 'local-claim'
       && chain.sequence === 1
     )],
+    ['a captured tip id is refused by name, with the root id to use instead', (() => {
+      try {
+        resolveLifecycleCommentChain([
+          { id: 'IC_chain_root', body: chainRootBody, neverEdited: true },
+          { id: 'IC_chain_next', body: chainSuccessorBody, neverEdited: true },
+        ], 'IC_chain_next');
+        return false;
+      } catch (error) {
+        return error.message.includes('IC_chain_next')
+          && error.message.includes('successor in the chain')
+          && error.message.includes('ROOT comment id IC_chain_root');
+      }
+    })()],
     ['duplicate identical lifecycle successors are idempotent', (() => {
       const duplicate = resolveLifecycleCommentChain([
         { id: 'IC_chain_root', body: chainRootBody, neverEdited: true },
