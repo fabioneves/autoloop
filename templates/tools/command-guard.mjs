@@ -1238,14 +1238,17 @@ function swapsStepLabelBackward(words) {
   const edit =
     hasGhScopedAction(words, 'issue', 'edit')
     || hasGhScopedAction(words, 'pr', 'edit');
-  if (!edit) return false;
-  const numbers = (option) => optionValues(words, option)
+  if (!edit) return null;
+  const steps = (option) => optionValues(words, option)
     .flatMap((value) => value.split(','))
-    .map(stepNumber)
-    .filter((number) => number !== null);
-  const added = numbers('--add-label');
-  const removed = numbers('--remove-label');
-  return added.some((add) => removed.some((remove) => add < remove));
+    .map((value) => ({ label: value.trim().toLowerCase(), step: stepNumber(value) }))
+    .filter(({ step }) => step !== null);
+  const added = steps('--add-label');
+  for (const remove of steps('--remove-label')) {
+    const add = added.find((candidate) => candidate.step < remove.step);
+    if (add !== undefined) return { added: add, removed: remove };
+  }
+  return null;
 }
 
 // A swap is add AND remove in one command. A live run's first model-driven
@@ -1688,14 +1691,26 @@ export function evaluate(rawCmd, branch, options = {}) {
         + 'publish-verdict.mjs terminal-finalize.',
     };
   }
-  if (segments.some(({ command }) => swapsStepLabelBackward(shellWords(command)))) {
+  const backwardSwap = segments
+    .map(({ command }) => swapsStepLabelBackward(shellWords(command)))
+    .find((pair) => pair !== null);
+  if (backwardSwap !== undefined) {
+    const { added, removed } = backwardSwap;
+    // The remedy must fit the swap the guard caught, not the incident that
+    // motivated the rule: a live 08→05 refusal advised "continue forward
+    // (claim)" — the plan-review remedy — at a step long past claim.
+    const remedy = added.step === 2 && removed.step === 3
+      ? 'Re-reviewing a revised plan is not a step: plan review is ONE dispatch, the revision '
+        + 'ships reviewed-once with dispositions recorded and carried into code-review r1. '
+        + 'Leave the current step label and continue forward (claim).'
+      : `Work that answers this step's findings runs under this step's label: keep `
+        + `\`${removed.label}\`, dispatch the writer there, and let the round count against `
+        + `the step's cap — the ladder never returns to \`${added.label}\`.`;
     return {
       block: true,
       reason:
-        'autoloop guard — step labels only climb. Re-reviewing a revised plan is not a step: '
-        + 'plan review is ONE dispatch, the revision ships reviewed-once with dispositions '
-        + 'recorded and carried into code-review r1. Leave the current step label and continue '
-        + 'forward (claim).',
+        `autoloop guard — step labels only climb: \`${removed.label}\` → \`${added.label}\` `
+        + `moves backward. ${remedy}`,
     };
   }
   if (segments.some(({ command }) => addsStepWithoutRetiringPredecessor(shellWords(command)))) {
@@ -2797,6 +2812,23 @@ function selfTest() {
     messageChecks += 1;
     if (fanout === awkReason) {
       console.error('FAIL [distinct assembler shapes give distinct remedies]');
+      ok = false;
+    }
+    messageChecks += 1;
+    const reviewBack = evaluate(
+      'gh issue edit 339 --remove-label loop:08-code-review --add-label loop:05-implement',
+      'feat/gh-339-x',
+    ).reason ?? '';
+    const planBack = evaluate(
+      'gh issue edit 298 --add-label "loop:02-plan" --remove-label "loop:03-plan-review"',
+      'main',
+    ).reason ?? '';
+    if (!(reviewBack.includes('`loop:08-code-review` → `loop:05-implement`')
+      && reviewBack.includes('keep `loop:08-code-review`')
+      && !reviewBack.includes('claim')
+      && planBack.includes('`loop:03-plan-review` → `loop:02-plan`')
+      && planBack.includes('plan review is ONE dispatch'))) {
+      console.error('FAIL [backward-swap refusal names the caught pair and its own remedy]');
       ok = false;
     }
   }
