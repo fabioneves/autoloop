@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.64] - 2026-08-29
+
+### Changed
+
+- **Dispatches launch foreground while the host's background-task sweep stands.** Across two
+  live sessions, explicitly backgrounded dispatch tasks were killed 68–107 seconds in — once 54
+  minutes in, while returning — with only `[killed]` on the task, no stderr, and no result file;
+  the identical brief launched as a plain foreground command was auto-backgrounded by the host
+  and ran 619 seconds to completion. Kernel logs show no OOM, two kills once landed in the same
+  millisecond, and the host's documentation says an explicitly backgrounded task persists — so
+  this is an undocumented host-side sweep (reported upstream), and the auto-background handoff
+  is the documented path that demonstrably survives it. The Dev skill now launches
+  `dispatch-stream.sh` as an ordinary foreground command on Claude Code — no
+  `run_in_background`, no host `timeout` — with overlap staging moved BEFORE the dispatch goes
+  out; everything downstream (handoff, park, result collection, the three-kill bound) is
+  unchanged. Gates keep the background facility, with the note that a gate dying with bare
+  `[killed]` is the same sweep and reruns once, foreground. The workaround is pinned in the
+  regression index and reverts when the sweep stops being observed.
+
 ## [0.49.63] - 2026-08-29
 
 ### Fixed

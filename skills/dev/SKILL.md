@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.63 · starting
+∞ dev · v0.49.64 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -507,6 +507,21 @@ retry succeeded, but the orchestrator spent three extra rounds testing hypothese
 concurrency, its own tool calls — it could neither confirm nor act on. The cause of an external kill
 lives outside the session, so the run's job is the bound and the evidence, never the diagnosis.
 
+**While the host sweep stands: launch dispatches FOREGROUND and let the host background them
+itself.** The kill above has a launch-mode discriminator, established live and checked against
+the host's documentation: explicitly backgrounded dispatches were swept — 68 s, 90 s, 107 s in,
+and once 54 minutes in while returning — with only `[killed]` on the task and no signal the
+child could report, while the same briefs launched as plain foreground commands were
+auto-backgrounded at the host's ceiling and every one survived to completion, a 619-second
+review included. The documented lifecycle says an explicitly backgrounded task persists, so the
+sweep is a host defect, and the auto-background handoff is the documented path that demonstrably
+survives it. So on Claude Code, until the sweep stops being observed: launch `dispatch-stream.sh`
+as an ordinary foreground command — no `run_in_background`, no host `timeout` — accept the short
+blocked window until the host hands it to the background on its own, and do the overlap staging
+BEFORE the dispatch goes out instead of during that window. Everything downstream is unchanged:
+the handed-off task re-invokes the turn on exit, the result is still collected from
+`--output-file`, and the kill bound above still applies to whatever dies anyway.
+
 ## Efficiency — overlap and liveness
 
 A dispatch is a model round trip measured in minutes. One live run spent 23 minutes on the
@@ -524,7 +539,7 @@ One idiom on every host:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role implement --prompt-file <p> \
-  --output-file <result.json> --json      # run in background; collect when it exits
+  --output-file <result.json> --json      # foreground on Claude Code (host backgrounds it — see the sweep note); collect when it exits
 ```
 
 `--output-file` exists so a result can be collected later. Hard limits: at most ONE unit staged
@@ -1559,7 +1574,10 @@ red gate as 0 that way); the gate runs alone, and the log plus its own exit code
 
 **Start it with the host's own background facility and let the completion signal wake you** — on
 Claude Code, `run_in_background: true`, which re-invokes the turn when the command exits and hands
-back its exit status. Then park (the wait block above) with the gate as an `├` branch. Do not poll
+back its exit status. (Dispatches are the exception while the host's background-task sweep
+stands — they launch foreground and get handed off; see the sweep note under Dispatch. A gate
+killed with only `[killed]` and no log tail is the same sweep: rerun it once, foreground.)
+Then park (the wait block above) with the gate as an `├` branch. Do not poll
 it, and above all **never `sleep N; tail <log>`**: the host blocks that outright and says so, so
 the round is spent learning a rule instead of gating. A live run lost one to exactly
 `sleep 45; tail -30 <log>`. The reason it is tempting is that a backgrounded gate feels like

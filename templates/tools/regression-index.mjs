@@ -33,6 +33,36 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'the-host-swept-backgrounded-dispatches-and-foreground-survived',
+    date: '2026-08-29',
+    symptom: 'Across two sessions, explicitly backgrounded dispatch tasks '
+      + 'were killed 68-107 seconds in (once 54 minutes in, while returning) '
+      + 'with only [killed] on the task, no stderr, no result file — while '
+      + 'the identical brief launched as a plain foreground command was '
+      + 'auto-backgrounded by the host and ran 619 seconds to completion. '
+      + 'Kernel logs showed no OOM; two kills once landed in the same '
+      + 'millisecond; the host documentation says an explicitly backgrounded '
+      + 'task persists.',
+    cause: 'An undocumented host-side sweep of run_in_background tasks — a '
+      + 'harness defect, reported upstream. The auto-background handoff is '
+      + 'the documented path that demonstrably survives it, so the skill '
+      + 'launches dispatches foreground until the sweep stops being observed.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'launch dispatches FOREGROUND and let the host background them',
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'foreground on Claude Code (host backgrounds it — see the sweep note)',
+      }),
+      Object.freeze({
+        file: '../../skills/dev/SKILL.md',
+        anchor: 'A gate\nkilled with only `[killed]` and no log tail is the same sweep',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'a-unit-branch-ran-fossil-hooks-for-the-life-of-the-unit',
     date: '2026-08-29',
     symptom: 'A live run ended its turn mid-unit on a promise ("Round 10 is '
