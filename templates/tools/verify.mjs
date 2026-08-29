@@ -51,6 +51,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'dispatch-render.mjs',
   'dispatch.mjs',
   'escalate-paths.mjs',
+  'hook-relay.mjs',
   'label-swap-reminder.mjs',
   'lane-contract.mjs',
   'lifecycle-contract.mjs',

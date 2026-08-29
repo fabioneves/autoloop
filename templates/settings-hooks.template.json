@@ -1,5 +1,5 @@
 {
-  "//": "Claude Code hook fragment merged into the host repo's .claude/settings.json by autoloop:setup. Paths point at the VENDORED tools in the host repo — never at the plugin — so guard behavior stays under the repo's own review.",
+  "//": "Claude Code hook fragment merged into the host repo's .claude/settings.json by autoloop:setup. Paths point at the VENDORED tools in the host repo — never at the plugin — so guard behavior stays under the repo's own review. The behavior-bearing tools relay themselves to the base branch's copy when the checked-out branch carries an older one (hook-relay.mjs), so a unit branch forked before a reconcile no longer runs fossil guards.",
   "hooks": {
     "SessionStart": [
       {

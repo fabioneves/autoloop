@@ -7,14 +7,15 @@
     "auto-merge.mjs": "187f49d97abcffc8d3c4c0c79a0e0c93ae07e6ba870d773c76cca918c28b199c",
     "checkout-contract.mjs": "3c9e7708f27ce0fc808488bcc44361b8c7d8e18086fc4449dcb1abaa58c5a52b",
     "claim-contract.mjs": "5db0b31ad846bf2b1f14ef03ebd28515e61a5aba82f6de1fcfa67ea95670af0e",
-    "command-guard.mjs": "a8615689542646102fdcf740a806acc05e64444f0181e2f77c06e76ab45d528b",
+    "command-guard.mjs": "3de049bfe283e3e7264f0dd26f02ecc521fda56710718cd8e0b3c73e8b13d401",
     "config-contract.mjs": "3ed45e4e7383c230cd68949c269d37f0c11f447ade0e0a11a5ba7895dffac66d",
     "contract-lint.mjs": "187763cb4f66971ab726e3de9a99ebe4a51223996e1b67a9ef5b23c142680d95",
     "delivery-contract.mjs": "d071252667f6143672b0a9e38aa2849f033299db60eb385fb81c7fdd2ef14b01",
     "dispatch-render.mjs": "f9be0eba12d4110068442296ec561067e5c1b02e94ccc4cd80f0d265eac85155",
     "dispatch.mjs": "63ff731d3de251281a1f3c212579b32a4bbdf9364db21d030efd50769e9dfeb5",
     "escalate-paths.mjs": "d5703b6cb870904d45450e62ffe1089795fbf61ec2c687bd6545acc981917635",
-    "label-swap-reminder.mjs": "e0c64ea0f011f87596c78f8f0bc2d0bc7657115cdcf43c46c763af17c75ace95",
+    "hook-relay.mjs": "611f18a3349966907a7f506cd6fab1375179918d548add4d75c7401d7149c28f",
+    "label-swap-reminder.mjs": "b1f9f77fd4d1061299f99d87e5a745c9ff0c85aa25748a172a69ea19c82899d6",
     "lane-contract.mjs": "a309ab07c3fdd074799c887c5ebaeb5d99e3538392e70533d7c74e48a7f97132",
     "lifecycle-contract.mjs": "90e62c1ff4d0f9a8824a269fa2c4e70d944d6b639f8edb3fa708a08a5301939b",
     "lifecycle-driver.mjs": "f294c3a08a928531a027a898469208ac1e5908f679e1e18acba240e973a88c49",
@@ -22,9 +23,9 @@
     "loop-smoke.mjs": "1ea07a2613e22ed968c5a919baa472dab0948665212993f4bb153bf38d050ae9",
     "merge-authorization-contract.mjs": "ee02a4728755b483b81126aa387febbed73d8d80c82a7aba306815e32fd78250",
     "overlap-report.mjs": "f2e13b9962663135b2e4ccb1d3ea2c6091ad12386965bdb6680da29d2a2b0788",
-    "prime.mjs": "0b5726c803f63fecf17b83907b2c58c5b889e5b7567c94d34923a8a54c2f08ab",
+    "prime.mjs": "385e9e065735de7f19d760485991b1a8b0b179b813d329514eb7ea157624538f",
     "publish-verdict.mjs": "0c5f84c07bbdfc2392b3d288e2878c79380b9101f8ba909b3abaee64d5ac2625",
-    "regression-index.mjs": "c1f0788ce728e0dc8947fd3f6b52922650c86c3a79d3f5c2aa3ecb9f5fcda2e3",
+    "regression-index.mjs": "00533f7d7bdb2c91eb4a1ce2a5bb13e69bce0e00eba39c0789827e5d94d99335",
     "release-verify.mjs": "65bf7e799b423aca7a1a5b8eef4821ae9d85a405085123b8095d046b58a27ede",
     "review-contract.mjs": "d052dbef09a5490f794e61ddc96fcd6d89ec4c0ab915b20104421d6f7679b4e7",
     "scaffold.mjs": "0d31e7699ce8d73b468dbc6a94be086b9e82cb510dd1d26b9be696b433f3d4dd",
@@ -34,6 +35,6 @@
     "stats.mjs": "380e6526eaddbf4769486038c57311bdee6577d6e409b41ba70c598a30fbe190",
     "step-subject.mjs": "4dd187646d383688089b6682df086fa5bf1d9c96378f387e5edfab55e2bd2807",
     "subagent-transcript.mjs": "bf3d9e913735987fbb28eeba091b4a1012345cced08866e4a9036d1e78c54c40",
-    "writeback-check.mjs": "937fc93d5659991342510637f3cfc9480703e3a26f3f8ecb9aa9c1f29bc0db49"
+    "writeback-check.mjs": "6175380be236fbaaf467a7ebd1a50aaacefba065fe1537bf32ff107d026567ef"
   }
 }
