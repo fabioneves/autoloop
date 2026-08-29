@@ -3,6 +3,34 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.63] - 2026-08-29
+
+### Fixed
+
+- **A unit branch no longer runs fossil hooks.** Hooks execute the checkout's vendored copy —
+  deliberately, so guard behavior stays under the repo's own review — which made them
+  branch-local: a live run went dark mid-unit (turn ended on "Round 10 is next" with nothing in
+  flight, then hours of silence) under a Stop hook three releases too old to refuse it, while
+  the base branch had carried the current hook for hours. The unit's branch had forked two days
+  before the reconcile, and hooks ran its copy for the life of the unit.
+
+  The wiring cannot fix this — the hook command must name a stable path — so the tools fix it
+  themselves: `hook-relay.mjs`, called first on the execution path of `writeback-check.mjs`,
+  `command-guard.mjs`, and `label-swap-reminder.mjs`, compares the running file against the base
+  branch's copy (`origin/HEAD`, falling back to `origin/main`, then `main`) and, when the branch
+  is behind, materializes the base's `tools/agentic` tree under the git common dir (cached by
+  tree OID, stale entries pruned) and re-executes the base copy with the repository root handed
+  over on `AUTOLOOP_HOOK_ROOT`. The trust rule is preserved: the base copy landed through the
+  repo's own reviewed reconcile PRs — it is the branch-local fossil that escapes review by
+  standing still.
+
+  Fail-open everywhere: no base ref, no vendored tree on base, any git error, or a base copy too
+  old to be relay-aware (no marker) runs the local copy exactly as today. Self-tests and corpus
+  replays are exempt — they exercise the file they were invoked on. Ten relay self-test cases
+  cover delegation, caching, the no-re-relay guard, the pre-relay-base refusal, the identical-
+  copy fast path, and fail-open in a repo with no committed vendor tree; an end-to-end fixture
+  proved the real Stop hook relays with sibling imports resolving from the cache.
+
 ## [0.49.62] - 2026-08-28
 
 ### Added

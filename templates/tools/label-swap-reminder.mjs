@@ -17,6 +17,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { relayHookToBase } from './hook-relay.mjs';
 
 // name, ribbon glyph, dispatched (a dispatched step's ribbon carries the
 // model-only executor slot; an orchestrator-run step carries none).
@@ -374,6 +375,10 @@ function selfTest() {
 
 const entry = process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (entry) {
+  // A unit branch forked before a reconcile carries a fossil copy of this
+  // hook; the base branch's copy decides instead. Runs before stdin is
+  // consumed; self-test invocations are exempt inside the relay.
+  relayHookToBase(import.meta.url);
   if (process.argv.includes('--self-test')) selfTest();
   else {
     let raw = '';

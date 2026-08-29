@@ -53,9 +53,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
 import { loopRunIsLive } from './command-guard.mjs';
+import { relayHookToBase } from './hook-relay.mjs';
 import { blockedByIssueNumbers } from './snapshot-contract.mjs';
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+// When relayed, this file executes from a cache under the git common dir, so
+// its own location no longer names the repository — the relay hands the real
+// root over on the environment instead.
+const ROOT = process.env.AUTOLOOP_HOOK_ROOT
+  ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function ghJson(cmd) {
   try {
@@ -605,6 +610,10 @@ function selfTest() {
 }
 
 function main() {
+  // A unit branch forked before a reconcile carries a fossil copy of this
+  // hook; the base branch's copy decides instead. Must run before stdin is
+  // consumed — the relayed child inherits and reads it.
+  relayHookToBase(import.meta.url);
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
 
   // Never re-block a Stop that a previous block already continued.

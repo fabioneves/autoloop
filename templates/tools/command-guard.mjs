@@ -50,6 +50,7 @@ import {
   validateConfig,
 } from './config-contract.mjs';
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
+import { relayHookToBase } from './hook-relay.mjs';
 
 const BRANCH_CREATION_FLAGS = new Set([
   '-c',
@@ -2969,6 +2970,11 @@ function refuse(reason) {
 }
 
 function main() {
+  // A unit branch forked before a reconcile carries a fossil copy of this
+  // guard; the base branch's copy decides instead. Must run before stdin is
+  // consumed — the relayed child inherits and reads it. Self-test and corpus
+  // invocations are exempt inside the relay: they exercise THIS file.
+  relayHookToBase(import.meta.url);
   if (process.argv.includes('--corpus')) {
     const { total, failures } = replayCorpus();
     for (const line of failures) console.error(line);

@@ -33,6 +33,48 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'a-unit-branch-ran-fossil-hooks-for-the-life-of-the-unit',
+    date: '2026-08-29',
+    symptom: 'A live run ended its turn mid-unit on a promise ("Round 10 is '
+      + 'next") with nothing in flight and idled for hours. The dark-run Stop '
+      + 'hook that exists to refuse exactly that had been on the repository\'s '
+      + 'base branch for hours — but the checkout sat on a unit branch forked '
+      + 'two days and three releases earlier, and hooks execute the checkout\'s '
+      + 'copy, so a 0.49.58 hook with no dark-run gap ran instead.',
+    cause: 'Hooks are wired to $CLAUDE_PROJECT_DIR/tools/agentic/<tool> — '
+      + 'deliberately vendored so guard behavior stays under the repo\'s own '
+      + 'review — which makes them branch-local: a branch forked before a '
+      + 'scaffold reconcile carries fossil guards until it merges. The wiring '
+      + 'cannot fix it (the hook command must name a stable path), so the '
+      + 'tools relay themselves to the base branch\'s copy.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'hook-relay.mjs',
+        anchor: 'export function relayHookToBase(importMetaUrl, argv = process.argv) {',
+      }),
+      Object.freeze({
+        file: 'hook-relay.mjs',
+        anchor: 'a drifted branch copy delegates to the base copy with the repo root on the wire',
+      }),
+      Object.freeze({
+        file: 'hook-relay.mjs',
+        anchor: 'a base copy that predates the relay contract is never handed the process',
+      }),
+      Object.freeze({
+        file: 'writeback-check.mjs',
+        anchor: 'const ROOT = process.env.AUTOLOOP_HOOK_ROOT',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'relayHookToBase(import.meta.url);',
+      }),
+      Object.freeze({
+        file: 'label-swap-reminder.mjs',
+        anchor: 'relayHookToBase(import.meta.url);',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'the-dark-run-gap-hard-blocked-the-skills-own-park',
     date: '2026-08-28',
     symptom: 'A live run parked twice exactly as the Dev skill prescribes — '
