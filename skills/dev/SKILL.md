@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.61 · starting
+∞ dev · v0.49.62 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -1238,8 +1238,27 @@ file — and that budgeted round closed the same unit cleanly on the next dispat
 The active ingredient is scope, not engine: a delta-blind Major (a missing presence check
 survived three delta rounds and fell to the first whole-artifact re-read) is caught by
 re-reading everything at the final head, and doing that on codex keeps it cross-model over what
-actually ships — something a claude final pass never was. The orchestrator's only in-session
-work stays disposition: per finding, fix (dispatched), rebut, or note, judged from the verdict.
+actually ships — something a claude final pass never was. The orchestrator's in-session work
+stays disposition — per finding, fix (dispatched), rebut, or note, judged from the verdict —
+plus the one oracle sweep an invariant-heavy unit earns below.
+
+**An invariant-heavy unit earns one orchestrator oracle sweep before its closing round.** When
+the frozen plan carries a numeric or bit-exactness invariant section, no reviewer can execute
+the strongest check that exists for it: reviewers hold no Bash, and the check is a program — an
+independent oracle recomputing expected outputs by a *different method* (exact rational or
+big-float arithmetic, an exhaustive walk of one input class) and sweeping the artifact's
+decision surface against it. On a live unit that sweep found a 224-wrong-value class that five
+reviewer rounds had passed, and two of the unit's four late Majors came from orchestrator
+probes — the round structure alone never guarantees anyone attacks the artifact. So before
+dispatching the closing full-artifact round, run ONE bounded sweep at the head that will be
+closed. The oracle's independence is the whole value: derive it from the invariant's statement,
+never from the implementation's own helpers, and verify the oracle itself against a known case
+before believing a mismatch (a live oracle at 2048 bits produced a false failure its 4096-bit
+rerun retracted). Probes live in scratch — never committed, removed after the sweep — and
+anything found is disposed exactly like a reviewer finding: verify, dispatch the fix, record
+the outcome on the issue. One sweep per unit, not a review habit: a clean sweep is one recorded
+line (`oracle sweep clean · <N> calls · <head>`), never a re-run, and a unit whose plan carries
+no such invariant section skips this step entirely.
 
 ### 8. Independent code review
 
