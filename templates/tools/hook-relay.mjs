@@ -38,6 +38,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -197,7 +198,10 @@ function selfTest() {
     && resolveBaseVendorTree(() => 'not-an-oid') === null,
   );
 
-  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-hook-relay-'));
+  // realpath'd because node canonicalizes the entry module's path: on macOS
+  // /var/folders is a symlink into /private/var, so a probe launched from the
+  // raw mkdtemp path reports its repository root in the canonical spelling.
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'autoloop-hook-relay-')));
   try {
     const repo = join(scratch, 'repo');
     const tools = join(repo, VENDOR_DIR);
