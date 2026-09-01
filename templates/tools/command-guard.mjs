@@ -2186,6 +2186,25 @@ export function replayCorpus() {
   return { total, failures };
 }
 
+// The 0.49.64 skill said "launch dispatches foreground while the host sweep
+// stands" and the very next live run launched every dispatch with
+// `run_in_background: true` anyway — one new paragraph lost to years of
+// background idiom in the same file, and three proxied reviews died mid-stream
+// with bare `[killed]`. A rule every run must remember is a rule the guard
+// should enforce: the PreToolUse payload carries `run_in_background`, so the
+// launch shape is checkable mechanically. Scoped to dispatches — gates,
+// pollers, and every other background use are untouched.
+export function backgroundDispatchProblem(command, runInBackground) {
+  if (runInBackground !== true) return null;
+  if (!/dispatch(?:-stream\.sh|\.mjs\b[^\n]*--role)/u.test(String(command))) return null;
+  return 'autoloop guard — a dispatch may not launch with `run_in_background` while the '
+    + 'host\'s background-task sweep stands: explicitly backgrounded dispatches are killed '
+    + 'mid-stream (`[killed]`, no result, no stderr), while a plain foreground launch is '
+    + 'handed to the background by the host itself and survives. Re-run the SAME command as '
+    + 'an ordinary foreground Bash call — no `run_in_background`, no host `timeout` — and '
+    + 'collect the result from `--output-file` as usual.';
+}
+
 function selfTest() {
   let corpusCount = 0;
   const cases = [
@@ -2571,6 +2590,34 @@ function selfTest() {
   // Every refusal must read as policy: a consistent guard identity prefix and a
   // closing sentence naming the sanctioned alternative, never an error dump.
   let messageChecks = 0;
+  {
+    messageChecks += 1;
+    const dispatchBg = backgroundDispatchProblem(
+      'bash /x/templates/tools/dispatch-stream.sh /tmp/l.jsonl /tmp/r.json --role code-review --prompt-file /tmp/p.md',
+      true,
+    );
+    const launchCases =
+      typeof dispatchBg === 'string'
+      && dispatchBg.startsWith('autoloop guard — ')
+      && dispatchBg.includes('foreground')
+      && dispatchBg.trimEnd().endsWith('.')
+      && backgroundDispatchProblem(
+        'node /x/tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json',
+        true,
+      ) !== null
+      // The same command foreground is the remedy, never a refusal.
+      && backgroundDispatchProblem(
+        'bash /x/templates/tools/dispatch-stream.sh /tmp/l.jsonl /tmp/r.json --role plan --prompt-file /tmp/p.md',
+        false,
+      ) === null
+      && backgroundDispatchProblem('docker compose run --rm verify', true) === null
+      && backgroundDispatchProblem('while kill -0 123 2>/dev/null; do sleep 20; done', true) === null
+      && backgroundDispatchProblem('node /x/tools/agentic/dispatch.mjs --self-test', true) === null;
+    if (!launchCases) {
+      console.error('FAIL [background dispatch launch rule]');
+      ok = false;
+    }
+  }
   {
     messageChecks += 1;
     const offPolicy = cases
@@ -3014,6 +3061,12 @@ function main() {
   // Ordered before configuration loading: with no run open there is nothing to
   // guard, so a configuration problem must not block a human's command either.
   if (!loopRunIsOpen()) process.exit(0);
+
+  const launchProblem = backgroundDispatchProblem(
+    cmd,
+    payload?.tool_input?.run_in_background,
+  );
+  if (launchProblem !== null) refuse(launchProblem);
 
   let baseBranch;
   try {

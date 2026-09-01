@@ -49,6 +49,14 @@ export const INCIDENTS = Object.freeze([
       + 'launches dispatches foreground until the sweep stops being observed.',
     enforcedBy: Object.freeze([
       Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'export function backgroundDispatchProblem(command, runInBackground) {',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'FAIL [background dispatch launch rule]',
+      }),
+      Object.freeze({
         file: '../../skills/dev/SKILL.md',
         anchor: 'launch dispatches FOREGROUND and let the host background them',
       }),

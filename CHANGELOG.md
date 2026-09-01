@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.65] - 2026-09-01
+
+### Fixed
+
+- **The foreground-launch rule is now the guard's, not the prose's.** 0.49.64 told runs to
+  launch dispatches foreground while the host's background-task sweep stands, and the very next
+  live run launched every dispatch with `run_in_background: true` anyway — one new paragraph
+  lost to years of background idiom in the same skill, and three proxied reviews died mid-stream
+  at 231–410 KB with bare `[killed]`, blocking a unit the run had to close around (it still
+  delivered four). A rule every run must remember is a rule the guard should enforce: the
+  PreToolUse payload carries `run_in_background`, so `command-guard.mjs` now refuses a dispatch
+  launched with it — policy-shaped, with the executable remedy (re-run the same command
+  foreground, collect from `--output-file` as usual). Scoped to `dispatch-stream.sh` /
+  `dispatch.mjs --role` only: gates, pollers, and every other background use are untouched, and
+  the rule rides the sweep workaround — both revert together when the sweep stops being
+  observed. The skill's dispatch-watching section now states the launch mode inline, and the
+  sweep incident in the regression index gains the guard function and its self-test as
+  enforcing anchors.
+
 ## [0.49.64] - 2026-08-29
 
 ### Changed
