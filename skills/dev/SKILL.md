@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.49.64 · starting
+∞ dev · v0.49.65 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -456,10 +456,13 @@ reviewer's job is to find the case the author did not consider.
 - `--live-file <path>` streams the engine's events to `<path>` as they happen (omitted: auto-named
   under `autoloop/dispatch-live/` in the common Git directory, announced on stderr).
 
-**Every background dispatch is watchable, natively.** Background dispatches run through the
+**Every background dispatch is watchable, natively.** Dispatches run through the
 wrapper — from `<plugin-tools>` like every other contract tool, never the branch's copy — which
 makes the task its own watcher: the host streams a background shell's stdout into its task view,
-and the wrapper tails the live file to exactly there:
+and the wrapper tails the live file to exactly there. (On Claude Code the wrapper is launched
+FOREGROUND — the guard refuses `run_in_background` on a dispatch while the host sweep stands,
+see the sweep note below — and becomes a background task when the host hands it off; everything
+in this section describes it from that point on.)
 
 ```bash
 bash <plugin-tools>/dispatch-stream.sh \

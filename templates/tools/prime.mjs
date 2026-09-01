@@ -46,7 +46,7 @@ import { SNAPSHOT_SECTIONS, writeStdoutSync } from './snapshot-contract.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.49.64';
+const AUTOLOOP_VERSION = '0.49.65';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
