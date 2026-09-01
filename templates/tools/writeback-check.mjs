@@ -101,6 +101,56 @@ function dispatchStreamAgeMs(root) {
   }
 }
 
+/** Pure: is `cwd` inside any of the repository's worktree roots? The path
+ *  boundary matters: /repo-two is not inside /repo. */
+export function cwdWithinWorktrees(cwd, worktrees) {
+  return (worktrees ?? []).some((root) =>
+    typeof root === 'string' && root.length > 0
+    && (cwd === root || String(cwd).startsWith(`${root}/`)));
+}
+
+/** A dispatch process currently running for THIS repository, or null. The
+ *  live-file mtime signal misses dispatches launched with an explicit
+ *  `--live-file` outside the common dir — which is exactly how the skill's
+ *  wrapper idiom launches them — and a live run answered three hard blocks in
+ *  70 minutes with "the hook can't see the in-flight dispatch". The process
+ *  table can: a dispatch wrapper or tool whose cwd sits inside one of this
+ *  repository's worktrees is in-flight evidence no launch style hides.
+ *  Linux-only (/proc); anywhere it cannot look it returns null and the other
+ *  signals decide, like every fail-open read in this hook. */
+function dispatchProcessInFlight(root) {
+  try {
+    const worktrees = execFileSync(
+      'git',
+      ['-C', root, 'worktree', 'list', '--porcelain'],
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 },
+    )
+      .split('\n')
+      .filter((line) => line.startsWith('worktree '))
+      .map((line) => line.slice('worktree '.length));
+    for (const entry of readdirSync('/proc')) {
+      if (!/^\d+$/u.test(entry)) continue;
+      let cmdline;
+      try {
+        cmdline = readFileSync(`/proc/${entry}/cmdline`, 'utf8');
+      } catch {
+        continue;
+      }
+      if (!/dispatch(?:-stream\.sh|\.mjs)/u.test(cmdline) || !cmdline.includes('--role')) continue;
+      let cwd;
+      try {
+        cwd = realpathSync(`/proc/${entry}/cwd`);
+      } catch {
+        continue;
+      }
+      if (cwdWithinWorktrees(cwd, worktrees)) {
+        return `a dispatch process is running (pid ${entry})`;
+      }
+    }
+  } catch { /* fail-open: the other in-flight signals decide */ }
+  return null;
+}
+
 /** Pure: classify PRs → { hard: string[], reminders: string[] } */
 export function checkPrs(prs) {
   const hard = [];
@@ -544,6 +594,14 @@ function selfTest() {
     [],
     'a dispatch stream is live',
   );
+  const worktreeScope =
+    cwdWithinWorktrees('/repo', ['/repo']) === true &&
+    cwdWithinWorktrees('/repo/engine/internal', ['/repo']) === true &&
+    cwdWithinWorktrees('/repo-two', ['/repo']) === false &&
+    cwdWithinWorktrees('/elsewhere', ['/repo', '/tmp/worktree-a']) === false &&
+    cwdWithinWorktrees('/tmp/worktree-a/src', ['/repo', '/tmp/worktree-a']) === true &&
+    cwdWithinWorktrees('/repo', []) === false &&
+    cwdWithinWorktrees('/repo', ['']) === false;
   const stranded = checkStrandedStepLabels([
     { number: 7, labels: [{ name: 'loop-ready' }, { name: 'loop-delivered' }, { name: 'loop:04-claim' }, { name: 'loop:07-diff-review' }] },
     { number: 8, labels: [{ name: 'loop-delivered' }] },
@@ -593,6 +651,7 @@ function selfTest() {
     checkDarkRun(true, [], []).hard.length === 0 &&
     checkDarkRun(true, [], []).reminders.length === 0 &&
     inFlightCases &&
+    worktreeScope &&
     parked.hard.length === 0 && parked.reminders.length === 1 &&
     parked.reminders[0].includes('#40') && parked.reminders[0].includes('a dispatch stream is live') &&
     parked.reminders[0].includes('take the next unit') &&
@@ -656,7 +715,8 @@ function main() {
         loopRunIsLive(ROOT),
         openIssues,
         prs,
-        runInFlightEvidence(prs, dispatchStreamAgeMs(ROOT), Date.now()),
+        runInFlightEvidence(prs, dispatchStreamAgeMs(ROOT), Date.now())
+          ?? dispatchProcessInFlight(ROOT),
       );
       hard.push(...dark.hard);
       reminders.push(...dark.reminders);

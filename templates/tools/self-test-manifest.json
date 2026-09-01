@@ -23,9 +23,9 @@
     "loop-smoke.mjs": "1ea07a2613e22ed968c5a919baa472dab0948665212993f4bb153bf38d050ae9",
     "merge-authorization-contract.mjs": "ee02a4728755b483b81126aa387febbed73d8d80c82a7aba306815e32fd78250",
     "overlap-report.mjs": "f2e13b9962663135b2e4ccb1d3ea2c6091ad12386965bdb6680da29d2a2b0788",
-    "prime.mjs": "3ce38c41ec66e17b2d6e5d1f4921a6362f530a95f73c89f0ee1ec07c071bd3cb",
+    "prime.mjs": "b442b456f254dc671837b17e96e1d14c2c7136ba7f84ac65e2dc2de974221543",
     "publish-verdict.mjs": "0c5f84c07bbdfc2392b3d288e2878c79380b9101f8ba909b3abaee64d5ac2625",
-    "regression-index.mjs": "3bdc5a6144f0c71fc667f76dd8850bde1362e1ae43f42073948cd319f1c49f6b",
+    "regression-index.mjs": "c72d097495376b6ee5eddcd95566531174f86e9d132a48e0a0d8f162604ec0aa",
     "release-verify.mjs": "65bf7e799b423aca7a1a5b8eef4821ae9d85a405085123b8095d046b58a27ede",
     "review-contract.mjs": "d052dbef09a5490f794e61ddc96fcd6d89ec4c0ab915b20104421d6f7679b4e7",
     "scaffold.mjs": "0d31e7699ce8d73b468dbc6a94be086b9e82cb510dd1d26b9be696b433f3d4dd",
@@ -35,6 +35,6 @@
     "stats.mjs": "380e6526eaddbf4769486038c57311bdee6577d6e409b41ba70c598a30fbe190",
     "step-subject.mjs": "4dd187646d383688089b6682df086fa5bf1d9c96378f387e5edfab55e2bd2807",
     "subagent-transcript.mjs": "bf3d9e913735987fbb28eeba091b4a1012345cced08866e4a9036d1e78c54c40",
-    "writeback-check.mjs": "6175380be236fbaaf467a7ebd1a50aaacefba065fe1537bf32ff107d026567ef"
+    "writeback-check.mjs": "9923798d81285df231786a2e22d1d6eb77c348a8e5d34e854914c78bda6d730c"
   }
 }
