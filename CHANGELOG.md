@@ -3,6 +3,23 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.49.66] - 2026-09-01
+
+### Fixed
+
+- **The park guard can now see every in-flight dispatch, whatever its launch style.** The
+  0.49.61 park-awareness read live-stream mtimes under the common dir's `dispatch-live/`
+  directory — but the skill's own wrapper idiom passes an explicit scratchpad live-file path,
+  so every wrapper-launched dispatch was invisible to that signal, and a live run was
+  hard-blocked three times in 70 minutes while a dispatch was demonstrably running ("the hook
+  can't see the in-flight dispatch", it wrote, correctly). `writeback-check.mjs` gains a
+  process-table signal: a `dispatch-stream.sh`/`dispatch.mjs --role` process whose cwd sits
+  inside one of the repository's worktrees is in-flight evidence no launch style hides. It is
+  consulted only when the stream and PR-recency signals both miss, is scoped by `git worktree
+  list` so another repository's loop never suppresses this one's guard, and fails open
+  (Linux-only /proc read) like every other read in the hook. The path-boundary helper is pinned
+  in the self-test (`/repo-two` is not inside `/repo`).
+
 ## [0.49.65] - 2026-09-01
 
 ### Fixed

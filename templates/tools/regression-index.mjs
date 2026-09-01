@@ -33,6 +33,36 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'the-park-guard-could-not-see-a-dispatch-with-an-explicit-live-file',
+    date: '2026-09-01',
+    symptom: 'A live run was hard-blocked three times in 70 minutes for '
+      + 'ending turns with eligible units queued while a dispatch was '
+      + 'demonstrably in flight, and answered the third with "the hook can\'t '
+      + 'see the in-flight dispatch". Each block cost a turn of explanation; '
+      + 'one usefully forced read-only staging, the others repeated it.',
+    cause: 'The park-awareness stream signal reads mtimes under the common '
+      + 'dir\'s dispatch-live directory, but the skill\'s own wrapper idiom '
+      + 'passes an explicit scratchpad live-file path, so every '
+      + 'wrapper-launched dispatch was invisible to it and only the '
+      + '30-minute PR-recency signal remained. The process table sees what '
+      + 'no launch style hides: a dispatch process whose cwd sits inside one '
+      + 'of the repository\'s worktrees.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'writeback-check.mjs',
+        anchor: 'function dispatchProcessInFlight(root) {',
+      }),
+      Object.freeze({
+        file: 'writeback-check.mjs',
+        anchor: '?? dispatchProcessInFlight(ROOT),',
+      }),
+      Object.freeze({
+        file: 'writeback-check.mjs',
+        anchor: "cwdWithinWorktrees('/repo-two', ['/repo']) === false",
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'the-host-swept-backgrounded-dispatches-and-foreground-survived',
     date: '2026-08-29',
     symptom: 'Across two sessions, explicitly backgrounded dispatch tasks '
