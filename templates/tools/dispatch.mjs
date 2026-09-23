@@ -32,6 +32,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   unlinkSync,
   rmSync,
   writeFileSync,
@@ -95,12 +96,19 @@ export const POSTURES = Object.freeze({
   }),
 });
 
+// `simplify` (step 06) and `fix` (step 08) write exactly like `implement`, and
+// `diff-review` (step 07) judges exactly like `code-review`. They are separate
+// roles so each carries its own route and fallback: a role never inherits
+// another role's model (SPEC-model-routing.md).
 export const ROLES = Object.freeze({
   plan: Object.freeze({ posture: 'reviewer', result: 'plan' }),
   'plan-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
   implement: Object.freeze({ posture: 'writer', result: 'text' }),
+  simplify: Object.freeze({ posture: 'writer', result: 'text' }),
+  'diff-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
   'code-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
   'doubt-review': Object.freeze({ posture: 'reviewer', result: 'review-verdict' }),
+  fix: Object.freeze({ posture: 'writer', result: 'text' }),
 });
 
 export const ROLE_NAMES = Object.freeze(Object.keys(ROLES));
@@ -370,7 +378,9 @@ const ENGINES = Object.freeze({
     // Claude's stream-json ends with exactly one `result` event.
     payload: (role, stdout) => {
       const event = parseResultEvent(stdout);
-      if (event === null || event.subtype !== 'success') return null;
+      // A usage limit arrives as `subtype: success` with `is_error: true` and
+      // the refusal as its result text — not a result this tool can stand behind.
+      if (event === null || event.subtype !== 'success' || event.is_error === true) return null;
       return RESULT_SCHEMAS[ROLES[role].result] !== undefined
         ? { structured: event.structured_output }
         : { text: typeof event.result === 'string' ? event.result : '' };
@@ -438,7 +448,7 @@ export function defaultEngineFor() {
 // and an unrecognised or absent recording falls back to the host engine.
 // The recording is one line: `<engine>` or `<engine> <model>`. The second token
 // serves the proxy mode — reviews on the claude HARNESS but a proxied model
-// (`claude gpt-5.6-sol`), which keeps structured output and live streaming
+// (`claude gpt-6-astra`), which keeps structured output and live streaming
 // while decorrelating the reviewer model from the writer. Reviewer roles only,
 // and an unrecognised engine discards the whole line.
 function recordedReviewChoice(cwd) {
@@ -479,31 +489,181 @@ function followsReviewChoice(role) {
   return ROLES[role]?.result === 'review-verdict';
 }
 
+// 0.50.0: per-role routes, `autoloop/routes` beside the dispatch log. One line
+// per role: `<role> <engine> [model] [@url] [!effort] [>model[@url]]` — the
+// review-engine grammar behind a role name, plus one fallback route that a
+// usage-limit retry selects with `--fallback`, so the retry's URL lives in the
+// recording rather than on a command line. This reverses "writers are never
+// proxied"; the invariant it kept — no artifact judged by the model that wrote
+// it — is now the recording's job, and the standing table below keeps it.
+// Any bad line fails the WHOLE file closed: a half-read routing table would
+// silently put some roles on host defaults.
+const HOST_ROUTE = Object.freeze({
+  engine: 'claude', model: null, baseUrl: null, effort: null, fallback: null,
+});
+
+export function parseRoutes(text) {
+  const routes = {};
+  const lines = String(text).split('\n');
+  for (const [index, raw] of lines.entries()) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) continue;
+    const where = `line ${index + 1}`;
+    const [role, engine, ...rest] = line.split(/\s+/u);
+    if (ROLES[role] === undefined) return { error: `${where}: unknown role ${role}` };
+    if (routes[role] !== undefined) return { error: `${where}: ${role} is routed twice` };
+    if (ENGINES[engine] === undefined || !ENGINES[engine].supports(role)) {
+      return { error: `${where}: ${engine ?? 'no engine'} cannot run ${role}` };
+    }
+    const route = { ...HOST_ROUTE, engine };
+    for (const token of rest) {
+      if (token.startsWith('@')) {
+        if (route.baseUrl !== null || !/^@https?:\/\/\S+$/u.test(token)) {
+          return { error: `${where}: bad or repeated URL ${token}` };
+        }
+        route.baseUrl = token.slice(1);
+      } else if (token.startsWith('!')) {
+        if (route.effort !== null || !EFFORTS.has(token.slice(1))) {
+          return { error: `${where}: bad or repeated effort ${token}` };
+        }
+        route.effort = token.slice(1);
+      } else if (token.startsWith('>')) {
+        const fallback = /^>([^@\s]+)(?:@(https?:\/\/\S+))?$/u.exec(token);
+        if (route.fallback !== null || fallback === null || engine !== 'claude') {
+          return { error: `${where}: bad or repeated fallback ${token}` };
+        }
+        route.fallback = Object.freeze({ model: fallback[1], baseUrl: fallback[2] ?? null });
+      } else if (route.model === null) {
+        route.model = token;
+      } else {
+        return { error: `${where}: more than one model` };
+      }
+    }
+    routes[role] = Object.freeze(route);
+  }
+  return { routes };
+}
+
+function routesPath(cwd) {
+  const logPath = resolveDispatchLogPath(cwd);
+  return logPath === null ? null : join(dirname(logPath), 'routes');
+}
+
+// null = no routes file (legacy resolution applies); `{ error }` = fail closed.
+function recordedRoutes(cwd) {
+  let text;
+  try {
+    const path = routesPath(cwd);
+    if (path === null) return null;
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    return error?.code === 'ENOENT' ? null : { error: `unreadable: ${error.message}` };
+  }
+  return parseRoutes(text);
+}
+
+// Resolution per role: its own `routes` line → host defaults when a routes file
+// exists; otherwise the legacy review-engine recording (verdict roles only) →
+// host defaults. `source` lets the dispatch tell explicit routing from legacy.
+export function resolveRoute(role, cwd) {
+  const recorded = recordedRoutes(cwd);
+  if (recorded?.error !== undefined) {
+    return { error: { code: 'ROUTES_INVALID', message: `autoloop/routes ${recorded.error}` } };
+  }
+  if (recorded !== null) {
+    return { ...(recorded.routes[role] ?? HOST_ROUTE), source: 'routes' };
+  }
+  const legacy = followsReviewChoice(role) ? recordedReviewChoice(cwd) : null;
+  return legacy === null
+    ? { ...HOST_ROUTE, source: 'host' }
+    : { ...HOST_ROUTE, ...legacy, source: 'review-engine' };
+}
+
+function resolvedField(role, cwd, field, fallback) {
+  const route = resolveRoute(role, cwd);
+  return route.error === undefined ? route[field] : fallback;
+}
+
 export function resolveDefaultEngine(role, cwd) {
-  if (!followsReviewChoice(role)) return 'claude';
-  return recordedReviewChoice(cwd)?.engine ?? 'claude';
+  return resolvedField(role, cwd, 'engine', 'claude');
 }
 
 export function resolveDefaultModel(role, cwd) {
-  if (!followsReviewChoice(role)) return null;
-  return recordedReviewChoice(cwd)?.model ?? null;
+  return resolvedField(role, cwd, 'model', null);
 }
 
-// A recorded `@<url>` routes proxied review dispatches to the proxy DIRECTLY:
-// the dispatch injects ANTHROPIC_BASE_URL into the reviewer child, so proxy
-// mode no longer depends on how the host session happened to be launched — a
-// live run refused a healthy proxy because the SESSION lacked the variable.
-// Writer roles never read the recording, so a writer can never be proxied.
+// A recorded `@<url>` routes proxied dispatches to the proxy DIRECTLY: the
+// dispatch injects ANTHROPIC_BASE_URL into the child, so proxy mode no longer
+// depends on how the host session happened to be launched — a live run refused
+// a healthy proxy because the SESSION lacked the variable.
 export function resolveDefaultBaseUrl(role, cwd) {
-  if (!followsReviewChoice(role)) return null;
-  return recordedReviewChoice(cwd)?.baseUrl ?? null;
+  return resolvedField(role, cwd, 'baseUrl', null);
 }
 
-// A recorded `!<level>` pins reviewer reasoning effort: review is the step where
-// depth converts directly into rounds not spent.
+// A recorded `!<level>` pins reasoning effort: review is the step where depth
+// converts directly into rounds not spent.
 export function resolveDefaultEffort(role, cwd) {
-  if (!followsReviewChoice(role)) return null;
-  return recordedReviewChoice(cwd)?.effort ?? null;
+  return resolvedField(role, cwd, 'effort', null);
+}
+
+// The operator's standing assignment (SPEC-model-routing.md). Every artifact
+// is judged by a model that did not write it: astra plans → Fable reviews the
+// plan; Opus writes and fixes, Fable simplifies → astra reviews 07 and 08.
+// Fallbacks are usage-limit retries only, and never move a reviewer onto the
+// writer's model: plan-review falls back to Opus, not astra, because astra
+// wrote the plan. `implement` has none — Opus at its limit parks.
+export function standingRoutes(proxyUrl) {
+  const proxy = `@${proxyUrl}`;
+  return [
+    `plan claude gpt-6-astra ${proxy} !xhigh >claude-opus-5-5`,
+    'plan-review claude claude-fable-5-1 !xhigh >claude-opus-5-5',
+    'implement claude claude-opus-5-5',
+    `fix claude claude-opus-5-5 >gpt-6-astra${proxy}`,
+    `simplify claude claude-fable-5-1 >gpt-6-astra${proxy}`,
+    `diff-review claude gpt-6-astra ${proxy} !xhigh`,
+    `code-review claude gpt-6-astra ${proxy} !xhigh`,
+    `doubt-review claude gpt-6-astra ${proxy} !xhigh`,
+  ].join('\n');
+}
+
+const ROUTE_PRESETS = Object.freeze({
+  proxy: standingRoutes,
+  // `with codex`: verdicts on codex, every writer on host defaults.
+  codex: () => ROLE_NAMES
+    .filter((role) => ROLES[role].result === 'review-verdict')
+    .map((role) => `${role} codex !xhigh`)
+    .join('\n'),
+  // A plain host run still writes the file, so a previous session's routes or
+  // review-engine recording cannot leak forward.
+  host: () => '',
+});
+
+// Writes the routes file through this tool, never a shell redirect: `.git/` is
+// a protected path, and a redirect into it is a permission-classifier gate.
+// The whole table is validated before anything is written, and the write is
+// atomic, so a refused recording leaves the previous one in force.
+export function recordRoutes(cwd, { preset, proxyUrl = null, overrides = [] }) {
+  if (ROUTE_PRESETS[preset] === undefined) {
+    return failure('record', 'ROUTES_INVALID', `unknown preset ${preset} (proxy|codex|host)`);
+  }
+  if (preset === 'proxy' && !/^https?:\/\/\S+$/u.test(String(proxyUrl))) {
+    return failure('record', 'ROUTES_INVALID', 'the proxy preset needs --proxy-url http(s)://…');
+  }
+  const lines = new Map(ROUTE_PRESETS[preset](proxyUrl).split('\n').filter(Boolean)
+    .map((line) => [line.split(/\s+/u)[0], line]));
+  for (const line of overrides) lines.set(String(line).trim().split(/\s+/u)[0], String(line).trim());
+  const text = [...lines.values()].join('\n');
+  const parsed = parseRoutes(text);
+  if (parsed.error !== undefined) {
+    return failure('record', 'ROUTES_INVALID', `routes ${parsed.error}`);
+  }
+  const path = routesPath(cwd);
+  if (path === null) return failure('record', 'ROUTES_INVALID', 'not inside a Git repository');
+  mkdirSync(dirname(path), { recursive: true });
+  const staged = `${path}.${process.pid}.tmp`;
+  writeFileSync(staged, text === '' ? '' : `${text}\n`);
+  renameSync(staged, path);
+  return { ok: true, path, routes: parsed.routes };
 }
 
 function resolveEngine(binary) {
@@ -518,11 +678,14 @@ function resolveEngine(binary) {
 // the self-test pins: the child ignores `--permission-mode`, the checkout gains
 // seventeen zero-byte stubs nobody removes, and every Bash call dies at sandbox
 // start on `/home/.mcp.json`.
-function dispatchEnvironment(baseUrl = null) {
-  return {
-    ...process.env,
-    ...(baseUrl === null ? {} : { ANTHROPIC_BASE_URL: baseUrl }),
-  };
+// Under explicit routes a native route also drops a session-wide
+// ANTHROPIC_BASE_URL: the proxy never serves Claude models, so a native Opus
+// writer inheriting it would fail on every call.
+function dispatchEnvironment(baseUrl = null, native = false) {
+  const env = { ...process.env };
+  if (native) delete env.ANTHROPIC_BASE_URL;
+  if (baseUrl !== null) env.ANTHROPIC_BASE_URL = baseUrl;
+  return env;
 }
 
 function failure(step, code, message, detail = {}) {
@@ -642,6 +805,31 @@ export function parseResultEvent(stdout) {
   return resultEvent;
 }
 
+// A usage limit is a resource refusal, not a defect: rerunning the same route
+// is refused again, and its fallback is the only useful next attempt. Read
+// only where an engine reports its own failure — stderr, and the error-bearing
+// final events of either stream — never the transcript body, which a reviewer
+// fills with the very code under review (and code mentions rate limits).
+const USAGE_LIMIT_RE =
+  /usage limit|(?:hit|reached) your (?:[\w-]+ )*limit|rate[_ -]?limit|\b429\b|quota exceeded|insufficient_quota/iu;
+
+export function usageLimitIn(stderr, stdout) {
+  const reports = [String(stderr ?? '')];
+  for (const line of String(stdout ?? '').split(/\r?\n/u)) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const failed = (event?.type === 'result' && (event.is_error === true || event.subtype !== 'success'))
+      || event?.type === 'error'
+      || event?.type === 'turn.failed';
+    if (failed) reports.push(line);
+  }
+  return USAGE_LIMIT_RE.test(reports.join('\n'));
+}
+
 // Wall clock at module load. `startupMs` on every result is the distance from
 // here to the engine spawn — this tool's own overhead, with model time
 // excluded — so a regression in the wrapper is visible without a profiler.
@@ -656,25 +844,51 @@ function hostName(engine) {
   return value.slice(value.lastIndexOf('/') + 1);
 }
 
-// Every dispatch — typed success or typed failure alike — contributes its window
-// to the log, so idle wall-clock cannot be understated by a run that only counts
-// the dispatches that worked.
-export function runDispatch(options) {
+function routeFor(options, cwd) {
+  const route = resolveRoute(options.role, cwd);
+  if (route.error !== undefined || !options.fallback) return route;
+  if (route.fallback === null) {
+    return {
+      error: {
+        code: 'ROUTE_FALLBACK_MISSING',
+        message: `${options.role}: --fallback given but its route records no >model`,
+      },
+    };
+  }
+  return { ...route, model: route.fallback.model, baseUrl: route.fallback.baseUrl };
+}
+
+function dispatchOnce(options, cwd) {
   const windowStartedAtMs = Date.now();
-  const cwd = options.cwd ?? process.cwd();
-  const engineBinary = options.engine ?? resolveDefaultEngine(options.role, cwd);
-  const resolvedModel = options.model ?? resolveDefaultModel(options.role, cwd);
-  const resolvedEffort = options.effort ?? resolveDefaultEffort(options.role, cwd);
-  const result = executeDispatch({
-    ...options,
-    engine: engineBinary,
-    model: resolvedModel,
-    effort: resolvedEffort,
-  });
+  const route = routeFor(options, cwd);
+  const engineBinary = options.engine ?? route.engine ?? 'claude';
+  const resolvedModel = options.model ?? route.model ?? null;
+  const resolvedEffort = options.effort ?? route.effort ?? null;
+  // The URL belongs to the route's model: `--model claude-opus-5-5` on a
+  // proxied route must not send Opus to a proxy that serves only astra.
+  const baseUrl = route.error === undefined
+    && hostName(engineBinary) === 'claude'
+    && resolvedModel === route.model
+    ? route.baseUrl
+    : null;
+  const result = route.error !== undefined
+    ? failure('route', route.error.code, route.error.message, { ms: 0, startupMs: 0, stderr: '' })
+    : executeDispatch({
+      ...options,
+      engine: engineBinary,
+      model: resolvedModel,
+      effort: resolvedEffort,
+      baseUrl,
+      native: baseUrl === null && route.source === 'routes',
+    });
   const engine = hostName(engineBinary);
   const model = resolvedModel;
   const effort = resolvedEffort;
-  recordDispatchWindow(options.cwd ?? process.cwd(), {
+  const stamp = {
+    route: baseUrl === null ? 'native' : 'proxy',
+    ...(options.fallback && route.error === undefined ? { fallback: true } : {}),
+  };
+  recordDispatchWindow(cwd, {
     role: options.role,
     engine,
     ...(model === null ? {} : { model }),
@@ -682,6 +896,9 @@ export function runDispatch(options) {
     startedAtMs: windowStartedAtMs,
     ms: Date.now() - windowStartedAtMs,
     ok: result.ok === true,
+    ...(result.ok === true ? {} : { code: result.error.code }),
+    ...(result.error?.usageLimit === true ? { usageLimit: true } : {}),
+    ...(stamp.fallback === true ? { fallback: true } : {}),
   });
   // Stamped once here so no return path inside the dispatch can omit it.
   return result.ok
@@ -690,6 +907,7 @@ export function runDispatch(options) {
       engine,
       ...(model === null ? {} : { model }),
       ...(effort === null ? {} : { effort }),
+      ...stamp,
     }
     : {
       ...result,
@@ -698,8 +916,79 @@ export function runDispatch(options) {
         engine,
         ...(model === null ? {} : { model }),
         ...(effort === null ? {} : { effort }),
+        ...stamp,
       },
     };
+}
+
+// Failures an effect-free dispatch may simply run again: the engine died or
+// answered nothing. Every other code is either a defect of the request
+// (prompt, route, role) or carries salvageable output (a rejected verdict or
+// plan), and rerunning either costs a round trip to learn nothing.
+const TRANSIENT_CODES = new Set([
+  'ENGINE_EXIT_NONZERO',
+  'ENGINE_RESULT_MISSING',
+  'ENGINE_RESULT_EMPTY',
+  'DISPATCH_TIMEOUT',
+]);
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 10_000;
+
+// What a failed dispatch does next: 'retry' the same route, move to the
+// route's 'fallback', or stop (null). Only a reviewer-posture role is ever run
+// again — it holds no write tool, so a rerun cannot double an effect. A writer
+// may have committed before it died; the orchestrator reconciles it by
+// inspecting the branch. A usage limit never retries the same route (it will
+// refuse again), and two consecutive failures on one route move to its
+// fallback when it records one (SPEC-self-healing.md, dispatch-resilience).
+export function nextAttempt(role, error, { attempts, timeouts, onFallback, fallbackAvailable }) {
+  if (ROLES[role]?.posture !== 'reviewer') return null;
+  const canFallBack = fallbackAvailable && !onFallback;
+  if (error.usageLimit === true) return canFallBack ? 'fallback' : null;
+  if (!TRANSIENT_CODES.has(error.code) || attempts >= MAX_ATTEMPTS) return null;
+  if (canFallBack && attempts >= 2) return 'fallback';
+  // A reviewer ceiling is 45 minutes; a second wedge on the same route is not
+  // bad luck.
+  if (error.code === 'DISPATCH_TIMEOUT' && timeouts >= 2) return null;
+  return 'retry';
+}
+
+function sleepMs(ms) {
+  if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Every attempt — typed success or typed failure alike — contributes its window
+// to the log, so idle wall-clock cannot be understated by a run that only counts
+// the dispatches that worked. The final result names every earlier attempt's
+// failure, so a collection line can say why the fallback ran.
+export function runDispatch(options) {
+  const cwd = options.cwd ?? process.cwd();
+  const primary = resolveRoute(options.role, cwd);
+  const fallbackAvailable = primary.error === undefined
+    && primary.fallback !== null
+    && options.model === undefined
+    && hostName(options.engine ?? primary.engine ?? 'claude') === 'claude';
+  let onFallback = options.fallback === true;
+  let timeouts = 0;
+  const earlier = [];
+  for (let attempts = 1; ; attempts += 1) {
+    const result = dispatchOnce({ ...options, fallback: onFallback }, cwd);
+    if (result.ok) return earlier.length === 0 ? result : { ...result, earlierAttempts: earlier };
+    const { error } = result;
+    if (error.code === 'DISPATCH_TIMEOUT') timeouts += 1;
+    const next = nextAttempt(options.role, error, {
+      attempts, timeouts, onFallback, fallbackAvailable,
+    });
+    if (next === null) {
+      return earlier.length === 0
+        ? result
+        : { ...result, error: { ...error, earlierAttempts: earlier } };
+    }
+    earlier.push(`${error.code}${error.usageLimit === true ? ' (usage limit)' : ''}`
+      + ` on ${error.model ?? error.engine}`);
+    if (next === 'fallback') onFallback = true;
+    else sleepMs((options.retryDelayMs ?? RETRY_DELAY_MS) * attempts);
+  }
 }
 
 // A reviewer holds `Glob,Grep,Read` and never Bash — `resolveTools` refuses it
@@ -774,6 +1063,8 @@ function executeDispatch(options) {
       liveFile: options.liveFile ?? null,
       model: options.model ?? null,
       effort: options.effort ?? null,
+      baseUrl: options.baseUrl ?? null,
+      native: options.native === true,
     });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -814,7 +1105,7 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 
 function runEngine({
   adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch, liveFile, model,
-  effort,
+  effort, baseUrl, native,
 }) {
   const argv = adapter.argv(role, tools, scratch, cwd, model ?? null, effort ?? null);
   const checkoutBefore =
@@ -827,9 +1118,7 @@ function runEngine({
     result = spawnSync(engine, argv, {
       cwd,
       encoding: 'utf8',
-      env: dispatchEnvironment(
-        adapter === ENGINES.claude ? resolveDefaultBaseUrl(role, cwd) : null,
-      ),
+      env: dispatchEnvironment(adapter === ENGINES.claude ? baseUrl : null, native),
       input: `${prompt}${reviewEnvelopeStamp(role)}${dispatchContextStamp(cwd, role)}`,
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: timeoutMs,
@@ -848,6 +1137,7 @@ function runEngine({
   }
   const ms = Date.now() - started;
   const stderr = String(result.stderr ?? '');
+  const limited = usageLimitIn(stderr, result.stdout) ? { usageLimit: true } : {};
   if (result.error?.code === 'ETIMEDOUT' || result.signal === 'SIGTERM') {
     return failure(
       'dispatch',
@@ -871,7 +1161,7 @@ function runEngine({
       'dispatch',
       'ENGINE_EXIT_NONZERO',
       `${role}: engine exited ${result.status}`,
-      { ms, startupMs, exitCode: result.status, stderr },
+      { ms, startupMs, exitCode: result.status, stderr, ...limited },
     );
   }
   const payload = adapter.payload(role, result.stdout ?? '', scratch);
@@ -880,7 +1170,7 @@ function runEngine({
       'result',
       'ENGINE_RESULT_MISSING',
       `${role}: the engine produced no single successful result`,
-      { ms, startupMs, stderr },
+      { ms, startupMs, stderr, ...limited },
     );
   }
   if (ROLES[role].result === 'review-verdict') {
@@ -936,7 +1226,7 @@ function runEngine({
       'result',
       'ENGINE_RESULT_EMPTY',
       `${role}: the engine returned an empty result`,
-      { ms, startupMs, stderr },
+      { ms, startupMs, stderr, ...limited },
     );
   }
   if (checkoutBefore !== null && checkoutFingerprint(cwd) === checkoutBefore) {
@@ -962,6 +1252,7 @@ export function parseArgs(args) {
     tools: null,
     outputFile: null,
     json: false,
+    fallback: false,
     error: null,
   };
   if (args.length === 1 && args[0] === '--self-test') {
@@ -971,6 +1262,10 @@ export function parseArgs(args) {
     const flag = args[index];
     if (flag === '--json') {
       parsed.json = true;
+      continue;
+    }
+    if (flag === '--fallback') {
+      parsed.fallback = true;
       continue;
     }
     const value = args[index + 1];
@@ -1073,10 +1368,10 @@ function selfTest() {
 
   check(
     'every role maps to exactly one posture',
-    ROLE_NAMES.length === 5
+    ROLE_NAMES.length === 8
     && ROLE_NAMES.every((role) => POSTURES[ROLES[role].posture] !== undefined)
-    && ROLES.implement.posture === 'writer'
-    && ['plan', 'plan-review', 'code-review', 'doubt-review']
+    && ['implement', 'simplify', 'fix'].every((role) => ROLES[role].posture === 'writer')
+    && ['plan', 'plan-review', 'diff-review', 'code-review', 'doubt-review']
       .every((role) => ROLES[role].posture === 'reviewer'),
   );
 
@@ -1581,9 +1876,9 @@ function selfTest() {
     check(
       'a recorded engine may carry a model, routing proxied reviews',
       (() => {
-        writeFileSync(engineFile, 'claude gpt-5.6-sol\n');
+        writeFileSync(engineFile, 'claude gpt-6-astra\n');
         return resolveDefaultEngine('code-review', repoScratch) === 'claude'
-          && resolveDefaultModel('code-review', repoScratch) === 'gpt-5.6-sol'
+          && resolveDefaultModel('code-review', repoScratch) === 'gpt-6-astra'
           && resolveDefaultModel('implement', repoScratch) === null
           // A live run planned on the review proxy model; the plan stays on
           // the host model like the writer.
@@ -1602,12 +1897,12 @@ function selfTest() {
     check(
       'a recorded proxy URL is injected into reviewer dispatches only',
       (() => {
-        writeFileSync(engineFile, 'claude gpt-5.6-sol @http://127.0.0.1:18765\n');
+        writeFileSync(engineFile, 'claude gpt-6-astra @http://127.0.0.1:18765\n');
         if (
           resolveDefaultBaseUrl('code-review', repoScratch) !== 'http://127.0.0.1:18765'
           || resolveDefaultBaseUrl('implement', repoScratch) !== null
           || resolveDefaultBaseUrl('plan', repoScratch) !== null
-          || resolveDefaultModel('code-review', repoScratch) !== 'gpt-5.6-sol'
+          || resolveDefaultModel('code-review', repoScratch) !== 'gpt-6-astra'
         ) {
           return false;
         }
@@ -1667,12 +1962,12 @@ function selfTest() {
     check(
       'a recorded effort pins reviewer dispatches and reaches the engine argv',
       (() => {
-        writeFileSync(engineFile, 'claude gpt-5.6-sol !xhigh\n');
+        writeFileSync(engineFile, 'claude gpt-6-astra !xhigh\n');
         if (
           resolveDefaultEffort('code-review', repoScratch) !== 'xhigh'
           || resolveDefaultEffort('implement', repoScratch) !== null
           || resolveDefaultEffort('plan', repoScratch) !== null
-          || resolveDefaultModel('code-review', repoScratch) !== 'gpt-5.6-sol'
+          || resolveDefaultModel('code-review', repoScratch) !== 'gpt-6-astra'
         ) {
           return false;
         }
@@ -1694,7 +1989,7 @@ function selfTest() {
     check(
       'an unknown recorded effort fails the whole recording closed',
       (() => {
-        writeFileSync(engineFile, 'claude gpt-5.6-sol !extreme\n');
+        writeFileSync(engineFile, 'claude gpt-6-astra !extreme\n');
         return resolveDefaultEffort('code-review', repoScratch) === null
           && resolveDefaultModel('code-review', repoScratch) === null;
       })(),
@@ -1759,10 +2054,10 @@ function selfTest() {
     check(
       'a malformed recorded proxy URL fails closed',
       (() => {
-        writeFileSync(engineFile, 'claude gpt-5.6-sol @ftp://elsewhere\n');
+        writeFileSync(engineFile, 'claude gpt-6-astra @ftp://elsewhere\n');
         const scheme = resolveDefaultBaseUrl('code-review', repoScratch) === null
           && resolveDefaultModel('code-review', repoScratch) === null;
-        writeFileSync(engineFile, 'claude gpt-5.6-sol @http://a @http://b\n');
+        writeFileSync(engineFile, 'claude gpt-6-astra @http://a @http://b\n');
         const duplicate = resolveDefaultBaseUrl('code-review', repoScratch) === null;
         return scheme && duplicate;
       })(),
@@ -1793,6 +2088,307 @@ function selfTest() {
         === 'implement/claude/false implement/claude/true '
           + 'plan-review/codex/true implement/codex/false plan/codex/false',
     );
+
+    // 0.50.0 per-role routing (SPEC-model-routing.md). Each role resolves ONLY
+    // its own line: the 2026-08 incident was a plan that inherited the review
+    // model because one recording served every role.
+    const routesFile = join(repoScratch, '.git', 'autoloop', 'routes');
+    const proxyUrl = 'http://127.0.0.1:18765';
+    writeFileSync(routesFile, `${standingRoutes(proxyUrl)}\n`);
+    check(
+      'every role resolves its own recorded route and nothing else',
+      (() => {
+        const want = {
+          plan: ['gpt-6-astra', proxyUrl, 'claude-opus-5-5'],
+          'plan-review': ['claude-fable-5-1', null, 'claude-opus-5-5'],
+          implement: ['claude-opus-5-5', null, null],
+          fix: ['claude-opus-5-5', null, 'gpt-6-astra'],
+          simplify: ['claude-fable-5-1', null, 'gpt-6-astra'],
+          'diff-review': ['gpt-6-astra', proxyUrl, null],
+          'code-review': ['gpt-6-astra', proxyUrl, null],
+          'doubt-review': ['gpt-6-astra', proxyUrl, null],
+        };
+        return ROLE_NAMES.length === 8 && ROLE_NAMES.every((role) => {
+          const route = resolveRoute(role, repoScratch);
+          const [model, baseUrl, fallbackModel] = want[role];
+          return route.error === undefined
+            && route.engine === 'claude'
+            && route.model === model
+            && route.baseUrl === baseUrl
+            && (route.fallback?.model ?? null) === fallbackModel;
+        });
+      })(),
+    );
+    const routedEnv = (role, extra = {}) => {
+      writeEngineShim(shimDirectory, shimBody(ROLES[role].result === 'text'
+        ? `printf x > "routed-$$.txt"\n${resultEvent({ result: 'done' })}`
+        : resultEvent({ structured_output: role === 'plan'
+          ? { title: 'Plan', prBody: 'p', body: 'b' }
+          : PASSING_VERDICT })));
+      const saved = process.env.ANTHROPIC_BASE_URL;
+      process.env.ANTHROPIC_BASE_URL = 'http://session-wide.invalid';
+      try {
+        const result = runDispatch({
+          role,
+          prompt: 'route me',
+          tools: resolveTools(role),
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+          ...extra,
+        });
+        const env = readFileSync(envPath, 'utf8');
+        const url = /^ANTHROPIC_BASE_URL=(.*)$/mu.exec(env)?.[1] ?? null;
+        return { result, url, argv: readFileSync(argvPath, 'utf8') };
+      } finally {
+        if (saved === undefined) delete process.env.ANTHROPIC_BASE_URL;
+        else process.env.ANTHROPIC_BASE_URL = saved;
+      }
+    };
+    check(
+      'a proxied route injects exactly its URL; a native route injects none',
+      (() => {
+        const plan = routedEnv('plan');
+        const review = routedEnv('code-review');
+        const write = routedEnv('implement');
+        return plan.url === proxyUrl && plan.argv.includes('--model gpt-6-astra')
+          && review.url === proxyUrl
+          // The session's own variable must not reach a native Claude route:
+          // the proxy never serves Claude models.
+          && write.url === null && write.argv.includes('--model claude-opus-5-5')
+          && write.result.route === 'native' && review.result.route === 'proxy';
+      })(),
+    );
+    check(
+      'a --model override never borrows the route URL of a different model',
+      (() => {
+        const overridden = routedEnv('code-review', { model: 'claude-opus-5-5' });
+        return overridden.url === null && overridden.argv.includes('--model claude-opus-5-5');
+      })(),
+    );
+    check(
+      '--fallback runs the recorded fallback model on its own URL, stamped',
+      (() => {
+        const simplify = routedEnv('simplify', { fallback: true });
+        const planReview = routedEnv('plan-review', { fallback: true });
+        return simplify.result.ok === true
+          && simplify.argv.includes('--model gpt-6-astra') && simplify.url === proxyUrl
+          && simplify.result.fallback === true && simplify.result.model === 'gpt-6-astra'
+          && planReview.argv.includes('--model claude-opus-5-5') && planReview.url === null;
+      })(),
+    );
+    check(
+      '--fallback on a route without one fails typed, without spawning',
+      (() => {
+        const refused = runDispatch({
+          role: 'code-review', prompt: 'x', tools: reviewerTools, cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'), fallback: true,
+        });
+        return refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING';
+      })(),
+    );
+    check(
+      'a malformed, duplicate or unknown-role routes file fails closed, typed',
+      ['plan claude a b', 'plan claude a\nplan claude b', 'planner claude a',
+        'plan codex x', 'plan claude a @ftp://x', 'plan claude a >b >c']
+        .every((body) => {
+          writeFileSync(routesFile, `${body}\n`);
+          const refused = runDispatch({
+            role: 'implement', prompt: 'x', tools: writerTools, cwd: repoScratch,
+            engine: join(shimDirectory, 'claude'),
+          });
+          return refused.ok === false && refused.error.code === 'ROUTES_INVALID'
+            && resolveRoute('implement', repoScratch).error !== undefined;
+        }),
+    );
+    check(
+      'routes supersede a legacy review-engine recording; absent routes keep it',
+      (() => {
+        writeFileSync(engineFile, 'codex !xhigh\n');
+        writeFileSync(routesFile, 'implement claude claude-opus-5-5\n');
+        const superseded = resolveRoute('code-review', repoScratch);
+        rmSync(routesFile);
+        const legacy = resolveRoute('code-review', repoScratch);
+        const legacyPlan = resolveRoute('plan', repoScratch);
+        rmSync(engineFile);
+        return superseded.engine === 'claude' && superseded.model === null
+          && legacy.engine === 'codex' && legacy.effort === 'xhigh'
+          && legacyPlan.engine === 'claude' && legacyPlan.model === null;
+      })(),
+    );
+    check(
+      'simplify and fix write; diff-review reads and returns a verdict',
+      ROLES.simplify.posture === 'writer' && ROLES.fix.posture === 'writer'
+      && ROLES['diff-review'].posture === 'reviewer'
+      && ROLES['diff-review'].result === 'review-verdict'
+      && resolveTools('diff-review', 'Read,Write') === null
+      && resolveTools('simplify', 'Edit,Read') !== null,
+    );
+    check(
+      'the recorder writes a validated routes file and refuses a bad one',
+      (() => {
+        const recorded = recordRoutes(repoScratch, {
+          preset: 'proxy', proxyUrl, overrides: ['doubt-review claude claude-fable-5-1'],
+        });
+        const doubt = resolveRoute('doubt-review', repoScratch);
+        const plan = resolveRoute('plan', repoScratch);
+        const codex = recordRoutes(repoScratch, { preset: 'codex' });
+        const codexReview = resolveRoute('code-review', repoScratch);
+        const codexPlan = resolveRoute('plan', repoScratch);
+        const bad = recordRoutes(repoScratch, { preset: 'host', overrides: ['plan claude a b'] });
+        const afterBad = resolveRoute('code-review', repoScratch).engine;
+        const host = recordRoutes(repoScratch, { preset: 'host' });
+        return recorded.ok === true
+          && doubt.model === 'claude-fable-5-1' && doubt.baseUrl === null
+          && plan.model === 'gpt-6-astra'
+          && codex.ok === true && codexReview.engine === 'codex' && codexPlan.model === null
+          && bad.ok === false && bad.error.code === 'ROUTES_INVALID'
+          // A refused recording leaves the previous one in place.
+          && afterBad === 'codex'
+          && host.ok === true && resolveRoute('code-review', repoScratch).engine === 'claude';
+      })(),
+    );
+    check(
+      'the CLI carries --fallback and parses a routes recording',
+      parseArgs(['--role', 'simplify', '--prompt-file', 'p', '--fallback']).fallback === true
+      && parseRecordRoutesArgs(['--record-routes', '--preset', 'proxy', '--proxy-url', proxyUrl,
+        '--route', 'fix claude claude-opus-5-5']).overrides.length === 1
+      && parseRecordRoutesArgs(['--record-routes']).error === '--preset: required'
+      && parseRecordRoutesArgs(['--role', 'plan']) === null,
+    );
+
+    // dispatch-resilience (SPEC-self-healing.md). Runs stopped on failures that
+    // a rerun would have cleared: a reviewer that died mid-stream, a planner at
+    // its usage limit with a recorded fallback it never took.
+    writeFileSync(routesFile, `${standingRoutes(proxyUrl)}\n`);
+    const countFile = join(scratch, 'spawns.txt');
+    const spawnsOf = (role, script, extra = {}) => {
+      rmSync(countFile, { force: true });
+      writeEngineShim(shimDirectory, shimBody(`echo x >> "${countFile}"\n${script}`));
+      const result = runDispatch({
+        role,
+        prompt: 'resilience',
+        tools: resolveTools(role),
+        cwd: repoScratch,
+        engine: join(shimDirectory, 'claude'),
+        retryDelayMs: 0,
+        ...extra,
+      });
+      return { result, spawns: readFileSync(countFile, 'utf8').trim().split('\n').length };
+    };
+    const verdictOnSecond = `[ "$(wc -l < "${countFile}")" -ge 2 ] || exit 7\n`
+      + resultEvent({ structured_output: PASSING_VERDICT });
+    check(
+      'an effect-free role retries a transient failure unchanged, and logs each code',
+      (() => {
+        const { result, spawns } = spawnsOf('code-review', verdictOnSecond);
+        const tail = readFileSync(logPath, 'utf8').trim().split('\n').slice(-2)
+          .map((line) => JSON.parse(line));
+        return result.ok === true && spawns === 2
+          && result.earlierAttempts?.[0] === 'ENGINE_EXIT_NONZERO on gpt-6-astra'
+          && tail[0].ok === false && tail[0].code === 'ENGINE_EXIT_NONZERO'
+          && tail[1].ok === true && tail[1].code === undefined;
+      })(),
+    );
+    check(
+      'a route without a fallback retries at most twice, then fails typed',
+      (() => {
+        const { result, spawns } = spawnsOf('code-review', 'exit 7');
+        return result.ok === false && spawns === 3
+          && result.error.code === 'ENGINE_EXIT_NONZERO'
+          && result.error.earlierAttempts.length === 2;
+      })(),
+    );
+    check(
+      'a writer is never rerun by the tool: it may have committed before it died',
+      ['implement', 'fix', 'simplify'].every((role) => {
+        const { result, spawns } = spawnsOf(role, 'exit 7');
+        return result.ok === false && spawns === 1;
+      }),
+    );
+    const limitedOnAstra = 'case "$*" in *gpt-6-astra*) '
+      + `printf 'You have hit your usage limit\\n' >&2; exit 1;; esac\n`
+      + resultEvent({ structured_output: { title: 'Plan', prBody: 'p', body: 'b' } });
+    check(
+      'a usage limit moves an effect-free role straight to its fallback, stamped',
+      (() => {
+        const { result, spawns } = spawnsOf('plan', limitedOnAstra);
+        const last = JSON.parse(readFileSync(logPath, 'utf8').trim().split('\n').at(-1));
+        return result.ok === true && spawns === 2
+          && result.fallback === true && result.model === 'claude-opus-5-5'
+          && result.earlierAttempts[0] === 'ENGINE_EXIT_NONZERO (usage limit) on gpt-6-astra'
+          && last.fallback === true;
+      })(),
+    );
+    check(
+      'a usage limit with no fallback is flagged and never rerun on the same route',
+      (() => {
+        const review = spawnsOf('code-review', limitedOnAstra);
+        const pinned = spawnsOf('plan', limitedOnAstra, { model: 'gpt-6-astra' });
+        return review.result.ok === false && review.spawns === 1
+          && review.result.error.usageLimit === true
+          // An explicit --model is the caller's choice; the tool does not reroute it.
+          && pinned.result.ok === false && pinned.spawns === 1;
+      })(),
+    );
+    check(
+      'a writer at its limit is flagged for the orchestrator, not rerouted',
+      (() => {
+        writeFileSync(routesFile, `${standingRoutes(proxyUrl)}\n`
+          .replace('fix claude claude-opus-5-5', 'fix claude gpt-6-astra @http://127.0.0.1:1'));
+        const { result, spawns } = spawnsOf('fix', limitedOnAstra);
+        writeFileSync(routesFile, `${standingRoutes(proxyUrl)}\n`);
+        return result.ok === false && spawns === 1 && result.error.usageLimit === true
+          && result.fallback === undefined;
+      })(),
+    );
+    check(
+      'two consecutive failures on a route move to its fallback, once',
+      (() => {
+        const failsOnFable = 'case "$*" in *claude-fable-5-1*) exit 7;; esac\n'
+          + resultEvent({ structured_output: PASSING_VERDICT });
+        const moved = spawnsOf('plan-review', failsOnFable);
+        const nowhere = spawnsOf('plan-review', 'exit 7');
+        return moved.result.ok === true && moved.spawns === 3
+          && moved.result.model === 'claude-opus-5-5' && moved.result.fallback === true
+          && nowhere.result.ok === false && nowhere.spawns === 3
+          && nowhere.result.error.fallback === true;
+      })(),
+    );
+    check(
+      'a result the engine flags as an error is never accepted as a result',
+      (() => {
+        const { result, spawns } = spawnsOf('code-review', resultEvent({
+          is_error: true, result: 'Claude AI usage limit reached|1760000000',
+        }));
+        return result.ok === false && spawns === 1
+          && result.error.code === 'ENGINE_RESULT_MISSING' && result.error.usageLimit === true;
+      })(),
+    );
+    check(
+      'the limit detector reads failure reports, never the transcript body',
+      usageLimitIn("You've reached your weekly limit", '')
+      && usageLimitIn('', '{"type":"error","message":"429 rate_limit_error"}')
+      && usageLimitIn('', '{"type":"turn.failed","error":{"message":"usage limit"}}')
+      && !usageLimitIn('', JSON.stringify({
+        type: 'assistant', message: { content: 'the proxy returns 429 on rate limit' },
+      }))
+      && !usageLimitIn('', JSON.stringify({ type: 'result', subtype: 'success', result: 'rate limit' }))
+      && !usageLimitIn('engine blew up', 'not json'),
+    );
+    check(
+      'only reviewer-posture roles, transient codes, and the attempt bound allow a rerun',
+      nextAttempt('code-review', { code: 'INVALID_REVIEW_VERDICT' },
+        { attempts: 1, timeouts: 0, onFallback: false, fallbackAvailable: true }) === null
+      && nextAttempt('code-review', { code: 'DISPATCH_TIMEOUT' },
+        { attempts: 2, timeouts: 2, onFallback: false, fallbackAvailable: false }) === null
+      && nextAttempt('plan', { code: 'DISPATCH_TIMEOUT' },
+        { attempts: 1, timeouts: 1, onFallback: false, fallbackAvailable: true }) === 'retry'
+      && nextAttempt('plan', { code: 'ENGINE_RESULT_EMPTY' },
+        { attempts: 3, timeouts: 0, onFallback: true, fallbackAvailable: true }) === null
+      && nextAttempt('implement', { code: 'ENGINE_EXIT_NONZERO', usageLimit: true },
+        { attempts: 1, timeouts: 0, onFallback: false, fallbackAvailable: true }) === null,
+    );
+    rmSync(routesFile, { force: true });
     rmSync(repoScratch, { recursive: true, force: true });
 
     writeEngineShim(shimDirectory, shimBody(
@@ -1907,6 +2503,28 @@ function selfTest() {
     rmSync(scratch, { recursive: true, force: true });
   }
 
+  check(
+    'a wait ends early only when the recorded dispatch is gone without a result',
+    (() => {
+      const directory = mkdtempSync(join(tmpdir(), 'autoloop-wait-'));
+      try {
+        const result = join(directory, 'r.json');
+        const none = waitState(result);
+        writeFileSync(`${result}.pid`, '4242\n');
+        const running = waitState(result, () => true);
+        const gone = waitState(result, () => false);
+        writeFileSync(`${result}.pid`, 'garbage\n');
+        const unreadable = waitState(result, () => false);
+        writeFileSync(result, '{}');
+        const done = waitState(result, () => false);
+        return none === 'waiting' && running === 'waiting' && gone === 'gone'
+          && unreadable === 'waiting' && done === 'done';
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    })(),
+  );
+
   for (const name of failures) console.error(`FAIL ${name}`);
   console.log(
     failures.length === 0
@@ -1946,12 +2564,44 @@ export function parseWaitArgs(args) {
   return parsed;
 }
 
+// dispatch-stream.sh detaches the dispatch and records its pid beside the
+// result, so a killed stream task no longer means a dead dispatch. `gone` is
+// the one state a wait can end on early: the recorded process no longer exists
+// and left no result. Anything unreadable is `waiting` — the bound still ends it.
+export function waitState(path, alive = processAlive) {
+  if (existsSync(path)) return 'done';
+  let pid;
+  try {
+    pid = Number(readFileSync(`${path}.pid`, 'utf8').trim());
+  } catch {
+    return 'waiting';
+  }
+  if (!Number.isSafeInteger(pid) || pid <= 0 || alive(pid)) return 'waiting';
+  // The result is renamed into place before the process exits; look once more.
+  return existsSync(path) ? 'done' : 'gone';
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
 function runWaitCli(parsed) {
   const deadline = Date.now() + parsed.timeoutSeconds * 1000;
   const poll = () => {
-    if (existsSync(parsed.path)) {
+    const state = waitState(parsed.path);
+    if (state === 'done') {
       console.log(`wait: ${parsed.path} exists`);
       process.exit(0);
+    }
+    if (state === 'gone') {
+      console.error(`wait: the dispatch recorded in ${parsed.path}.pid ended without writing `
+        + `${parsed.path} — a killed dispatch; run the kill drill`);
+      process.exit(3);
     }
     if (Date.now() >= deadline) {
       console.error(`wait: ${parsed.path} absent after ${parsed.timeoutSeconds}s`);
@@ -1962,7 +2612,34 @@ function runWaitCli(parsed) {
   poll();
 }
 
+export function parseRecordRoutesArgs(args) {
+  if (args[0] !== '--record-routes') return null;
+  const parsed = { preset: null, proxyUrl: null, overrides: [], error: null };
+  for (let index = 1; index < args.length; index += 1) {
+    const flag = args[index];
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith('--')) {
+      return { ...parsed, error: `${flag}: expected a value` };
+    }
+    index += 1;
+    if (flag === '--preset') parsed.preset = value;
+    else if (flag === '--proxy-url') parsed.proxyUrl = value;
+    else if (flag === '--route') parsed.overrides.push(value);
+    else return { ...parsed, error: `unknown flag ${flag}` };
+  }
+  if (parsed.preset === null) return { ...parsed, error: '--preset: required' };
+  return parsed;
+}
+
 function main() {
+  const recording = parseRecordRoutesArgs(process.argv.slice(2));
+  if (recording) {
+    const result = recording.error
+      ? failure('record', 'ROUTES_INVALID', recording.error)
+      : recordRoutes(process.cwd(), recording);
+    process.stdout.write(`${JSON.stringify(result, null, 1)}\n`);
+    process.exit(result.ok === true ? 0 : 1);
+  }
   const wait = parseWaitArgs(process.argv.slice(2));
   if (wait) {
     if (wait.error) {
@@ -1978,8 +2655,10 @@ function main() {
     console.error(
       'usage: dispatch.mjs --role <'
       + `${ROLE_NAMES.join('|')}> --prompt-file <path|-> `
-      + '[--tools <csv>] [--engine <name>] [--model <name>] '
-      + `[--effort <${[...EFFORTS].join('|')}>] [--output-file <path>] [--json]`,
+      + '[--tools <csv>] [--engine <name>] [--model <name>] [--fallback] '
+      + `[--effort <${[...EFFORTS].join('|')}>] [--output-file <path>] [--json]\n`
+      + '       dispatch.mjs --record-routes --preset <proxy|codex|host> '
+      + '[--proxy-url <url>] [--route "<role> <engine> [model] [@url] [!effort] [>model[@url]]"]...',
     );
     process.exit(2);
   }
@@ -2012,12 +2691,15 @@ function main() {
     ...(parsed.model === null ? {} : { model: parsed.model }),
     ...(parsed.effort === null ? {} : { effort: parsed.effort }),
     ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
+    ...(parsed.fallback ? { fallback: true } : {}),
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
   if (parsed.outputFile !== null) {
     const path = resolve(parsed.outputFile);
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, serialized);
+    // Renamed into place, so a waiter polling for the file never reads half of it.
+    writeFileSync(`${path}.tmp`, serialized);
+    renameSync(`${path}.tmp`, path);
   }
   process.stdout.write(parsed.json ? serialized : `${report(result)}\n`);
   process.exit(result.ok === true ? 0 : 1);

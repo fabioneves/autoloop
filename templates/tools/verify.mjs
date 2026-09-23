@@ -70,6 +70,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'stats.mjs',
   'step-subject.mjs',
   'subagent-transcript.mjs',
+  'unit.mjs',
   'verify.mjs',
   'writeback-check.mjs',
 ]);
@@ -83,7 +84,8 @@ export const NON_MANUAL_TOOL_FILES = Object.freeze([
   'merge-authorization-contract.mjs',
 ]);
 const CLAUDE_HOOK_CONTRACT = Object.freeze({
-  'command-guard.mjs': Object.freeze({ event: 'PreToolUse', matcher: 'Bash' }),
+  // The guard also refuses a synchronous question while a run is live (0.50.0).
+  'command-guard.mjs': Object.freeze({ event: 'PreToolUse', matcher: 'Bash|AskUserQuestion' }),
   'label-swap-reminder.mjs': Object.freeze({ event: 'PostToolUse', matcher: 'Bash' }),
   'session-preflight.sh': Object.freeze({ event: 'SessionStart', matcher: null }),
   'subagent-transcript.mjs': Object.freeze({ event: 'SubagentStop', matcher: null }),
@@ -91,6 +93,8 @@ const CLAUDE_HOOK_CONTRACT = Object.freeze({
 });
 const CODEX_HOOK_CONTRACT = Object.freeze({
   ...CLAUDE_HOOK_CONTRACT,
+  // Codex has no AskUserQuestion tool; its guard binding stays Bash-only.
+  'command-guard.mjs': Object.freeze({ event: 'PreToolUse', matcher: 'Bash' }),
   'session-preflight.sh': Object.freeze({
     event: 'SessionStart',
     matcher: 'startup|resume|clear|compact',

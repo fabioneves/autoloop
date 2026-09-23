@@ -612,34 +612,97 @@ function inlineInterpreterSource(cmd) {
 // reader reverse-engineer the guard: a live session lost a round to
 // `ls -d … | xargs -n1 basename` -- a plain listing -- because the advice
 // ("use literal canonical commands") never said which literal command that was.
+const AWK_NAMES = ['awk', 'gawk', 'mawk', 'nawk'];
+
+function invokingIndex(words, executable) {
+  const index = executableIndex(words, executable);
+  return index !== -1 && invokedAt(words, index) ? index : -1;
+}
+
 function opaqueCommandAssembler(cmd) {
-  return shellSegments(executableLexicalText(cmd)).reduce((found, { command }) => {
-    if (found !== null) return found;
+  let awkInvocations = 0;
+  const found = shellSegments(executableLexicalText(cmd)).reduce((shape, { command }) => {
+    if (shape !== null) return shape;
     const words = shellWords(command);
-    if (isLookupSegment(words)) return found;
+    if (isLookupSegment(words)) return shape;
     // Positional for the same reason as inlineInterpreterSource: an assembler
     // NAME in argument position is data (`git log --grep xargs`), not a fan-out.
-    const invokes = (executable) => {
-      const index = executableIndex(words, executable);
-      return index !== -1 && invokedAt(words, index) ? index : -1;
-    };
-    if (invokes('xargs') !== -1 || invokes('parallel') !== -1) {
+    if (invokingIndex(words, 'xargs') !== -1 || invokingIndex(words, 'parallel') !== -1) {
       return 'fanout';
     }
-    for (const executable of ['awk', 'gawk', 'mawk', 'nawk']) {
-      const index = invokes(executable);
-      if (index === -1) continue;
-      const argumentsAfterExecutable = words.slice(index + 1);
-      const fileBacked = argumentsAfterExecutable.some(
-        (argument) =>
-          argument === '-f'
-          || argument === '--file'
-          || argument.startsWith('--file='),
-      );
-      if (!fileBacked) return 'awk';
-    }
+    awkInvocations += AWK_NAMES.filter((name) => invokingIndex(words, name) !== -1).length;
     return null;
   }, null);
+  if (found !== null || awkInvocations === 0) return found;
+  // The lexical text above drops quotes, which splits an awk program at its own
+  // `|`; the programs are read from the quote-aware segments instead. When the
+  // two readings disagree on how many awk runs there are, the program is not
+  // known, and it stays refused.
+  let programsRead = 0;
+  for (const { command } of shellSegments(cmd)) {
+    const words = shellWords(command);
+    for (const name of AWK_NAMES) {
+      const index = invokingIndex(words, name);
+      if (index === -1) continue;
+      programsRead += 1;
+      if (awkProgramsOf(words.slice(index + 1)).some(awkProgramCanRunCommands)) return 'awk';
+    }
+  }
+  return programsRead === awkInvocations ? null : 'awk';
+}
+
+// 0.50.0: inline awk is refused only when its program can start a process.
+// Before, every inline program was refused, and ~13 live refusals in ten days
+// were ranges, sums and column picks — `awk '/^## Lessons/,0' STATE.md` — none
+// of which can run anything. awk reaches a process only through `system()`,
+// a `|` into or out of `getline`/`print`, or a loaded extension, so those
+// stay refused. A program file (`-f`) was always allowed and still is.
+function awkProgramsOf(argumentsAfterExecutable) {
+  const programs = [];
+  for (let index = 0; index < argumentsAfterExecutable.length; index += 1) {
+    const argument = argumentsAfterExecutable[index];
+    if (['-f', '--file', '-i', '--include', '-l', '--load'].includes(argument)) {
+      index += 1;
+      if (argument !== '-f' && argument !== '--file') programs.push('@include');
+      continue;
+    }
+    if (/^--(?:file|include|load)=/u.test(argument)) {
+      if (!argument.startsWith('--file=')) programs.push('@include');
+      continue;
+    }
+    if (argument === '-e' || argument === '--source') {
+      programs.push(argumentsAfterExecutable[index + 1] ?? '');
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith('--source=')) {
+      programs.push(argument.slice('--source='.length));
+      continue;
+    }
+    if (argument === '-F' || argument === '-v' || argument === '--assign') {
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith('-')) continue;
+    // The first operand is the program unless one arrived by flag.
+    if (programs.length === 0 && !argumentsAfterExecutable.slice(0, index)
+      .some((word) => ['-f', '--file'].includes(word) || word.startsWith('--file='))) {
+      programs.push(argument);
+    }
+    break;
+  }
+  return programs;
+}
+
+function awkProgramCanRunCommands(program) {
+  if (/\bsystem\s*\(|\bgetline\b|@(?:include|load)\b|\|&/u.test(program)) return true;
+  // A lone `|` outside strings and regex literals is a pipe to or from a
+  // command; `||` is logical or.
+  const code = program
+    .replace(/"(?:[^"\\]|\\.)*"/gu, '""')
+    .replace(/\/(?:[^/\\\n]|\\.)+\//gu, '//')
+    .replaceAll('||', '');
+  return code.includes('|');
 }
 
 // Names the token that defeated resolution, and the remedy for the SHAPE that
@@ -700,24 +763,10 @@ export function unresolvedExpansionReason(rawCmd) {
       + 'iterations as literal commands (one tool call each is fine), or put the loop in a '
       + 'reviewed program file and run that.';
   }
-  // `$?` has no literal to assign, so the generic "assign it in the same
-  // command" advice is impossible rather than merely unhelpful. The exit status
-  // is already available twice over without it.
-  // 2026-08-12: `node tools/agentic/escalate-paths.mjs … --json; echo "exit=$?"` — the
-  // decoration rode a typed tool whose JSON already carries ok:false, and the refusal
-  // took the useful front down with it. The retry that worked was pure deletion, so
-  // the message names deletion as the executable step for the trailing form.
-  if (/\$\?/u.test(text)) {
-    return `${what}. An exit status has no literal form: the tool runner already reports a `
-      + 'non-zero exit, and the typed tools carry their outcome in their own output '
-      + '(`ok: false` beside the reason) — read that instead of capturing it. When the `$?` '
-      + 'rides a trailing `echo`, the fix is deletion: re-run the SAME command with that '
-      + 'final echo removed — the front needed no change.';
-  }
   // A command substitution has no literal to assign either — its value is
   // whatever the inner command PRINTS, which is exactly what cannot be known
   // before running it. Telling the reader to "assign it a literal" is advice
-  // they cannot follow, the same defect the `$?` branch above exists to avoid.
+  // they cannot follow.
   // A live run measuring per-package sizes hit this and had nowhere to go.
   // 2026-07-29: the alternatives named were BOTH measurements, so a session
   // wanting one method body — grep for the signature, feed its line number to
@@ -752,7 +801,8 @@ const ASSEMBLER_REMEDY = Object.freeze({
   // a live run was blocked extracting a number from `git diff --stat` and
   // authoring an awk FILE for that is more ceremony than the measurement. The
   // fanout remedy above already learned this — name the command to run instead.
-  awk: 'Inline `awk` program text is source code in an argument. Most loop uses of it are a '
+  awk: 'This inline `awk` program can start a process (`system()`, `getline` or a `|` to or '
+    + 'from a command), and the guard cannot see what that process is. Most loop uses of it are a '
     + 'measurement with a plainer spelling: `git diff --shortstat` for insert/delete counts, '
     + '`wc -l` for a line count, `cut -f<n>` for a column, `sort | uniq -c` for a tally. '
     // 2026-07-29: `sed -n <range>p file | cat -n | awk '{print $1+<offset>, ...}'` — the awk
@@ -1519,8 +1569,271 @@ function hasOpaqueGraphqlInput(words) {
  * Pure rule evaluation — returns { block: boolean, reason?: string }.
  * `branch` is the current Git branch; null keeps branch-sensitive mutations fail-closed.
  */
-export function evaluate(rawCmd, branch, options = {}) {
-  if (typeof rawCmd !== 'string' || rawCmd.length === 0) return { block: false };
+// 0.50.0 guard-friction. The guard exists to see git/gh mutations, and it
+// refused 128 live commands in ten days, most of them reads: ~29 command
+// substitutions, ~21 `$?`, ~13 inline awk. Each refusal cost a turn and none
+// was hiding anything. What follows narrows refusal to the shapes that CAN hide
+// a mutation, and keeps every one of those refused.
+//
+// Special parameters are numbers — an exit status, a pid, an argument count —
+// so no position makes them a command. They are judged as a literal `0`.
+export function neutralizeSpecialParameters(cmd) {
+  let out = '';
+  let quote = null;
+  for (let index = 0; index < cmd.length; index += 1) {
+    const char = cmd[index];
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === '\\') {
+      out += cmd.slice(index, index + 2);
+      index += 1;
+      continue;
+    }
+    if (char === "'" && quote === null) quote = "'";
+    else if (char === '"') quote = quote === '"' ? null : '"';
+    if (char === '$') {
+      const braced = /^\$\{([?$#!])\}/u.exec(cmd.slice(index));
+      if (braced !== null) {
+        out += '0';
+        index += braced[0].length - 1;
+        continue;
+      }
+      if (/[?$#!]/u.test(cmd[index + 1] ?? '')) {
+        out += '0';
+        index += 1;
+        continue;
+      }
+    }
+    out += char;
+  }
+  return out;
+}
+
+const SUBSTITUTION_MARK = 'AUTOLOOPSUBSTITUTION';
+const VARIABLE_MARK = 'AUTOLOOPVARIABLE';
+const MAX_SUBSTITUTION_DEPTH = 4;
+
+// End of a `$(` body starting at `start`, honouring quotes and nesting; -1 when
+// the body is not one this reader can delimit with certainty.
+function substitutionEnd(cmd, start) {
+  let depth = 1;
+  let quote = null;
+  for (let index = start; index < cmd.length; index += 1) {
+    const char = cmd[index];
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === '\\') {
+      index += 1;
+      continue;
+    }
+    if (char === '"') {
+      quote = quote === '"' ? null : '"';
+      continue;
+    }
+    if (quote === '"') continue;
+    if (char === "'") quote = "'";
+    else if (char === '`') {
+      const close = cmd.indexOf('`', index + 1);
+      if (close === -1) return -1;
+      index = close;
+    } else if (char === '(') depth += 1;
+    else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+// Replaces every top-level substitution with one mark and every unassigned
+// `$name` with another, returning the marked text and the substitution bodies.
+// Anything it cannot delimit with certainty — process substitution, arithmetic,
+// `${…}` operators, positional parameters, ANSI-C quoting, a `case` or heredoc
+// inside a body — returns null, and the command stays refused as before.
+function markExpansions(cmd) {
+  if (cmd.includes("$'")) return null;
+  const bodies = [];
+  let out = '';
+  let quote = null;
+  for (let index = 0; index < cmd.length; index += 1) {
+    const char = cmd[index];
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === '\\') {
+      out += cmd.slice(index, index + 2);
+      index += 1;
+      continue;
+    }
+    if (char === "'" && quote === null) quote = "'";
+    else if (char === '"') quote = quote === '"' ? null : '"';
+    if ((char === '<' || char === '>') && cmd[index + 1] === '(' && quote === null) return null;
+    if (char === '`') {
+      const close = cmd.indexOf('`', index + 1);
+      if (close === -1) return null;
+      bodies.push(cmd.slice(index + 1, close));
+      out += SUBSTITUTION_MARK;
+      index = close;
+      continue;
+    }
+    if (char === '$') {
+      const rest = cmd.slice(index);
+      if (rest.startsWith('$((')) return null;
+      if (rest.startsWith('$(')) {
+        const close = substitutionEnd(cmd, index + 2);
+        if (close === -1) return null;
+        const body = cmd.slice(index + 2, close);
+        if (/<<|(?:^|[\s;&|(])case\s/u.test(body)) return null;
+        bodies.push(body);
+        out += SUBSTITUTION_MARK;
+        index = close;
+        continue;
+      }
+      const variable = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/u.exec(rest);
+      // A variable's value was set out of view, so it must at least be one
+      // word: unquoted, it splits and globs into words no one has read.
+      if (variable !== null) {
+        if (quote !== '"') return null;
+        out += VARIABLE_MARK;
+        index += variable[0].length - 1;
+        continue;
+      }
+      if (/[{@*0-9#?$!-]/u.test(cmd[index + 1] ?? '')) return null;
+    }
+    out += char;
+  }
+  return { text: out, bodies };
+}
+
+const SHELL_KEYWORDS = new Set([
+  '!', '(', '{', 'do', 'elif', 'else', 'if', 'then', 'time', 'until', 'while',
+]);
+// Commands whose arguments are code: a mark there is an opaque program.
+const CODE_TAKING = new Set(['.', 'alias', 'builtin', 'eval', 'source', 'trap']);
+// Commands that can run another command named in their arguments. No mark may
+// reach them: `find . $(cat args)` becomes `-exec git push ;` when it splits.
+const COMMAND_RUNNING = new Set([
+  'bunx', 'busybox', 'chroot', 'docker', 'entr', 'find', 'flock', 'gdb',
+  'kubectl', 'ltrace', 'make', 'nodemon', 'npm', 'npx', 'nsenter', 'pnpm',
+  'podman', 'rsync', 'runuser', 'script', 'ssh', 'strace', 'su', 'tar',
+  'unshare', 'uvx', 'valgrind', 'watch', 'yarn',
+]);
+// Program-taking tools: a substitution here is a program read from a file the
+// body names — what `sed -f`/`awk -f` already do — but a variable's value was
+// set out of view, and `sed` runs commands through its `e` flag.
+const PROGRAM_TAKING = new Set([...AWK_NAMES, 'sed']);
+const INTERPRETER_NAMES = /^(?:bash|bun|dash|deno|fish|ksh|lua|luajit|node|nodejs|osascript|perl|php|python\d*(?:\.\d+)?|R|Rscript|ruby|sh|tclsh|wish|zsh)$/u;
+// Subcommands that read the repository and cannot move a ref or a remote.
+const READ_ONLY_GIT = new Set([
+  'blame', 'cat-file', 'describe', 'diff', 'log', 'ls-files', 'ls-tree',
+  'merge-base', 'rev-list', 'rev-parse', 'shortlog', 'show', 'status',
+]);
+
+function isAssignmentWord(word) {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word);
+}
+
+function commandPosition(words, position) {
+  for (let index = 0; index < position; index += 1) {
+    const word = words[index];
+    if (isAssignmentWord(word) || SHELL_KEYWORDS.has(word)) continue;
+    if (EXEC_WRAPPERS.has(word.slice(word.lastIndexOf('/') + 1))) continue;
+    if (/^-/u.test(word) || /^[0-9]+[smhd]?$/u.test(word)) continue;
+    return false;
+  }
+  return true;
+}
+
+function commandHead(words) {
+  const index = words.findIndex((word, position) =>
+    !isAssignmentWord(word) && commandPosition(words, position)
+    && !SHELL_KEYWORDS.has(word)
+    && !EXEC_WRAPPERS.has(word.slice(word.lastIndexOf('/') + 1)));
+  return index === -1 ? { index: -1, name: '' } : {
+    index,
+    name: words[index].slice(words[index].lastIndexOf('/') + 1),
+  };
+}
+
+function markedPositionProblem(text) {
+  const marked = (word) => word.includes(SUBSTITUTION_MARK) || word.includes(VARIABLE_MARK);
+  const segments = shellSegments(text).map(({ command }) => shellWords(command));
+  const invokesGitOrGh = segments.some((words) => ['git', 'gh'].includes(commandHead(words).name));
+  for (const words of segments) {
+    const positions = words.flatMap((word, index) => (marked(word) ? [index] : []));
+    if (positions.length === 0) continue;
+    if (positions.some((index) => /^(?:GIT|GH)_[A-Za-z0-9_]*=/u.test(words[index]))) {
+      return 'sets a Git or GitHub CLI environment variable';
+    }
+    if (positions.some((index) =>
+      (!isAssignmentWord(words[index]) && commandPosition(words, index))
+      || EXEC_FORWARDING_FLAGS.has(words[index - 1]))) {
+      return 'sits where a command name goes';
+    }
+    const head = commandHead(words);
+    const variable = positions.some((index) => words[index].includes(VARIABLE_MARK));
+    if (
+      CODE_TAKING.has(head.name)
+      || INTERPRETER_NAMES.test(head.name)
+      || COMMAND_RUNNING.has(head.name)
+      || (variable && PROGRAM_TAKING.has(head.name))
+    ) {
+      return `reaches \`${head.name}\`, which can run it as code`;
+    }
+    if (!invokesGitOrGh) continue;
+    const readOnly = head.name === 'git'
+      && !variable
+      && READ_ONLY_GIT.has(words[head.index + 1])
+      && positions.every((index) => index > head.index + 1);
+    if (!readOnly) {
+      return 'sits in a command that also runs git or gh, outside the arguments '
+        + 'of a read-only git subcommand, where it could steer a mutation';
+    }
+  }
+  return null;
+}
+
+// An unresolvable expansion is tolerated when every substitution body passes
+// the guard on its own and no marked value can steer execution — see
+// `markedPositionProblem`. Returns `{ verdict }`, or `{ problem }` (possibly
+// null) to fall through to the refusal the guard gave before 0.50.0.
+function tolerateExpansions(rawCmd, branch, options) {
+  const depth = options.substitutionDepth ?? 0;
+  if (depth >= MAX_SUBSTITUTION_DEPTH) return { problem: null };
+  const subject = expandLiteralForLoops(rawCmd) ?? rawCmd;
+  const marked = markExpansions(stripQuotedHeredocBodies(subject));
+  if (marked === null || hasActiveShellExpansion(marked.text)) return { problem: null };
+  const problem = markedPositionProblem(marked.text);
+  if (problem !== null) return { problem };
+  for (const body of marked.bodies) {
+    const inner = evaluate(body, branch, {
+      ...options,
+      expansionResolved: false,
+      substitutionDepth: depth + 1,
+    });
+    if (inner.block) {
+      return {
+        verdict: {
+          block: true,
+          reason: `autoloop guard — inside a command substitution: ${
+            String(inner.reason).replace(/^autoloop guard — /u, '')}`,
+        },
+      };
+    }
+  }
+  return { verdict: evaluate(marked.text, branch, { ...options, expansionResolved: true }) };
+}
+
+export function evaluate(inputCmd, branch, options = {}) {
+  if (typeof inputCmd !== 'string' || inputCmd.length === 0) return { block: false };
+  const rawCmd = neutralizeSpecialParameters(inputCmd);
   if (interpreterHeredoc(rawCmd)) {
     return {
       block: true,
@@ -1571,6 +1884,10 @@ export function evaluate(rawCmd, branch, options = {}) {
     if (resolved !== null) {
       return evaluate(resolved, branch, { ...options, expansionResolved: true });
     }
+    const tolerated = options.expansionResolved
+      ? { problem: null }
+      : tolerateExpansions(rawCmd, branch, options);
+    if (tolerated.verdict !== undefined) return tolerated.verdict;
     // Report on what is ACTUALLY unresolvable. A literal loop expands, so a
     // refusal that still names its loop variable sends the reader to fix the
     // one part that was never the problem: `for d in a b; do echo $(wc -l $d);
@@ -1581,7 +1898,8 @@ export function evaluate(rawCmd, branch, options = {}) {
     const reportSubject = expandLiteralForLoops(rawCmd) ?? rawCmd;
     return {
       block: true,
-      reason: `autoloop guard — ${unresolvedExpansionReason(reportSubject)}`,
+      reason: `autoloop guard — ${unresolvedExpansionReason(reportSubject)}${
+        tolerated.problem ? ` Refused here because the unreadable value ${tolerated.problem}.` : ''}`,
     };
   }
   const cmd = stripHeredocs(rawCmd);
@@ -2205,6 +2523,18 @@ export function backgroundDispatchProblem(command, runInBackground) {
     + 'collect the result from `--output-file` as usual.';
 }
 
+// A question asked mid-run waits on a human who is, by design, not there:
+// three AskUserQuestion calls in live LFE runs idled 2.2h, 23.2h and more,
+// every other unit in the queue waiting behind one unit's decision. The
+// decision belongs on that unit's issue, where the human will look anyway.
+export function askUserQuestionProblem(runIsLive) {
+  if (runIsLive !== true) return null;
+  return 'autoloop guard — a live run never waits on a synchronous question: every other '
+    + 'queued unit would wait behind it. Record the question as a comment on the unit\'s '
+    + 'issue, label it `human:decide`, and take the next unit. If no unit can proceed, '
+    + 'close the run first (`node tools/agentic/prime.mjs --close-run`), then ask.';
+}
+
 function selfTest() {
   let corpusCount = 0;
   const cases = [
@@ -2238,7 +2568,7 @@ function selfTest() {
     // A passthrough wrapper must not launder the word behind it.
     ['time xargs -n1 gh', 'feat/gh-1-x', true],
     ['exec node -e "x"', 'feat/gh-1-x', true],
-    ['stdbuf -oL awk "{print}"', 'feat/gh-1-x', true],
+    ['stdbuf -oL awk "{system(1)}"', 'feat/gh-1-x', true],
     // 2026-07-29: three live runs lost a round to a `for` over a LITERAL list —
     // `for n in 222 223 224` and a sweep over eight named spec files. A literal
     // list is N literal commands written once, and the guard already resolves a
@@ -2578,6 +2908,48 @@ function selfTest() {
     ["printf '\\x67\\x68 pr ready 42\\n' | source /dev/stdin", 'feat/gh-2-y', true],
     ['. /dev/fd/0 < /tmp/opaque.sh', 'feat/gh-2-y', true],
     ['source scripts/reviewed.sh', 'feat/gh-2-y', false],
+    // 0.50.0 guard-friction: the guard refuses only what can hide a git/gh
+    // mutation. 128 live refusals were mostly harmless reads — ~29 command
+    // substitutions, ~21 `$?`, ~13 inline awk.
+    // Special parameters are numbers: inert wherever they sit.
+    ['git status --short; echo "exit=$?"', 'feat/gh-1-x', false],
+    ['kill $!', 'feat/gh-1-x', false],
+    ['echo "pid $$ args $#"', 'feat/gh-1-x', false],
+    // A substitution whose body passes, in argument position, outside git/gh.
+    ['sed -n "$(rg -n \'private function credentials(\' a.php | cut -d: -f1),+40p" a.php', 'feat/gh-1-x', false],
+    ['echo "count: $(wc -l < a.txt)"', 'feat/gh-1-x', false],
+    ['for f in docs/*.md; do wc -l "$f"; done', 'feat/gh-1-x', false],
+    ['ls "$HOME/.claude"', 'feat/gh-1-x', false],
+    ['echo "files: `ls | wc -l`"', 'feat/gh-1-x', false],
+    // Read-only git takes a substituted argument after its literal subcommand.
+    ['git diff --stat $(git merge-base HEAD origin/main) -- src', 'feat/gh-1-x', false],
+    ['git log --oneline "$(git merge-base HEAD origin/main)..HEAD"', 'feat/gh-1-x', false],
+    // Everything that can hide a mutation stays refused.
+    ['$(echo git) push origin feat/gh-1-x', 'feat/gh-1-x', true],
+    ['x=$(cat f); $x', 'feat/gh-1-x', true],
+    ['sudo $(cat cmd)', 'feat/gh-1-x', true],
+    ['find . -exec $(cat c) {} +', 'feat/gh-1-x', true],
+    ['git push origin $(git branch --show-current)', 'feat/gh-1-x', true],
+    ['git -C $(pwd) log --oneline', 'feat/gh-1-x', true],
+    ['GIT_DIR=$X git log', 'feat/gh-1-x', true],
+    ['export GIT_DIR=$(mktemp -d); ls', 'feat/gh-1-x', true],
+    ['cd "$(git rev-parse --show-toplevel)" && git push origin feat/gh-1-x', 'feat/gh-1-x', true],
+    ['gh issue edit 5 --add-label "$(cat label.txt)"', 'feat/gh-1-x', true],
+    ['echo $(git push origin HEAD:main)', 'feat/gh-1-x', true],
+    ['eval "$(cat script.sh)"', 'feat/gh-1-x', true],
+    ['trap "$(cat hook)" EXIT', 'feat/gh-1-x', true],
+    ['node "$(cat path.txt)"', 'feat/gh-1-x', true],
+    ['diff <(git show a:f) <(git show b:f)', 'feat/gh-1-x', true],
+    ['echo "${X:-$(cat f)}"', 'feat/gh-1-x', true],
+    ['echo "$@"', 'feat/gh-1-x', true],
+    // awk is refused only when its program can run a command.
+    ["awk '/^## Lessons/,0' docs/agentic/STATE.md", 'feat/gh-1-x', false],
+    ["awk '{s+=$1} END {print s}' nums.txt", 'feat/gh-1-x', false],
+    ["awk -F: 'NR==1 || /x/ {print $2}' f", 'feat/gh-1-x', false],
+    ["awk '{ print | \"sh\" }' f", 'feat/gh-1-x', true],
+    ["awk '{ \"date\" | getline d; print d }' f", 'feat/gh-1-x', true],
+    ["awk '@include \"x.awk\"' f", 'feat/gh-1-x', true],
+    ["awk 'BEGIN { system(\"true\") }'", 'feat/gh-1-x', true],
   ];
   let ok = true;
   for (const [cmd, branch, expect, baseBranch] of cases) {
@@ -2615,6 +2987,21 @@ function selfTest() {
       && backgroundDispatchProblem('node /x/tools/agentic/dispatch.mjs --self-test', true) === null;
     if (!launchCases) {
       console.error('FAIL [background dispatch launch rule]');
+      ok = false;
+    }
+  }
+  {
+    messageChecks += 1;
+    const asked = askUserQuestionProblem(true);
+    const askCases =
+      typeof asked === 'string'
+      && asked.startsWith('autoloop guard — ')
+      && asked.includes('human:decide')
+      && asked.includes('--close-run')
+      && asked.trimEnd().endsWith('.')
+      && askUserQuestionProblem(false) === null;
+    if (!askCases) {
+      console.error('FAIL [no synchronous question mid-run]');
       ok = false;
     }
   }
@@ -2690,7 +3077,7 @@ function selfTest() {
     // `cat -n` renumbering caused by slicing first; naming the order removes it.
     messageChecks += 1;
     const regionAwk = evaluate(
-      "sed -n '160,215p' /home/dev/.zshrc | cat -n | awk '{printf \"%d\\t%s\\n\", $1+159, $0}'",
+      "sed -n '160,215p' /home/dev/.zshrc | cat -n | awk '{print $1+159, $0 | \"cat\"}'",
       'feat/gh-1-x',
     ).reason ?? '';
     if (
@@ -2742,8 +3129,11 @@ function selfTest() {
     // but the loop expands fine and the substitution is the only blocker, so
     // the message sent the reader to fix the one part that was never wrong.
     messageChecks += 1;
+    // 0.50.0: that command is now allowed outright (the substitution body is a
+    // read), so the check moves to one the guard still refuses — the value
+    // reaches `find`, which can run it.
     const mixedReason = evaluate(
-      'for d in a b; do echo "$(wc -l $d)"; done',
+      'for d in a b; do find "$(wc -l $d)"; done',
       'feat/gh-1-x',
     ).reason ?? '';
     if (
@@ -2751,6 +3141,7 @@ function selfTest() {
       || mixedReason.includes('loop variable')
       || !mixedReason.includes('command substitution')
       || !mixedReason.includes('inner command prints')
+      || !mixedReason.includes('reaches `find`')
     ) {
       console.error('FAIL [an expandable loop is not blamed for its body\'s substitution]');
       ok = false;
@@ -2774,55 +3165,73 @@ function selfTest() {
     // `sed -n "$(grep -n '<signature>' f | cut -d: -f1),+40p" f` and the remedy
     // offered only `wc -l` and `git diff --shortstat` — measurements, when the
     // reader was navigating. A region read has an exact spelling; name it.
+    // 0.50.0: the region read itself is now allowed; the remedy still has to
+    // read well where a substitution stays refused.
     messageChecks += 1;
     const regionReason = evaluate(
-      'sed -n "$(grep -n \'private function credentials(\' a.php | cut -d: -f1),+40p" a.php',
+      'git -C "$(grep -n \'private function credentials(\' a.php | cut -d: -f1)" log',
       'feat/gh-1-x',
     ).reason ?? '';
     if (
       !regionReason.includes('command substitution')
       || !regionReason.includes('-A<lines>')
       || !regionReason.includes('offset')
+      || evaluate(
+        'sed -n "$(grep -n \'private function credentials(\' a.php | cut -d: -f1),+40p" a.php',
+        'feat/gh-1-x',
+      ).block
     ) {
       console.error('FAIL [a substitution refusal names the region-read spelling]');
       ok = false;
     }
     // 2026-07-29: `for f in <dir>/*.json; do jq -c <filter> "$f"; done` was told to
     // write one tool call per iteration, when jq takes the glob and needs exactly one.
+    // 0.50.0: a quoted loop variable is one word and jq cannot run it, so that
+    // loop is allowed; the remedy is checked on the unquoted spelling.
     messageChecks += 1;
     const fileLoop = evaluate(
-      'for f in .git/autoloop/run/*.json; do jq -c \'{pid}\' "$f"; done',
+      'for f in .git/autoloop/run/*.json; do jq -c \'{pid}\' $f; done',
       'feat/gh-1-x',
     ).reason ?? '';
     if (
       !fileLoop.includes('take many paths at once')
       || !fileLoop.includes('reviewed program file')
+      || evaluate(
+        'for f in .git/autoloop/run/*.json; do jq -c \'{pid}\' "$f"; done',
+        'feat/gh-1-x',
+      ).block
     ) {
       console.error('FAIL [a file loop is offered the no-loop multi-path spelling]');
       ok = false;
     }
+    // 0.50.0: an exit status is a number and is judged as `0`, so the trailing
+    // echo that used to take the typed front down is simply allowed.
     messageChecks += 1;
-    const exitReason = evaluate('node x.mjs; echo $?', 'feat/gh-1-x').reason ?? '';
     if (
-      !exitReason.includes('`$?`')
-      || !exitReason.includes('no literal form')
-      || !exitReason.includes('ok: false')
-      || !exitReason.includes('deletion')
+      evaluate('node x.mjs; echo $?', 'feat/gh-1-x').block
+      || evaluate('echo "exit=${?}"', 'feat/gh-1-x').block
+      || !evaluate("echo '$?' $(git push origin HEAD:main)", 'feat/gh-1-x').block
     ) {
-      console.error('FAIL [an exit-status refusal points at the report, not at assignment]');
+      console.error('FAIL [an exit status is inert, and it never masks a mutation beside it]');
       ok = false;
     }
     // 2026-08-12: a substitution used only to label a count was answered with the
     // measuring remedies and no labeling spelling, so the labeled-echo shape kept
     // coming back.
+    // 0.50.0: that labeled echo is now allowed (the body is a read); the
+    // labeling remedy is checked where a substitution stays refused.
     messageChecks += 1;
     const labelReason = evaluate(
-      'echo ".test.ts tracked: $(git ls-files \'*.test.ts\' | wc -l)"',
+      'find ".test.ts tracked: $(git ls-files \'*.test.ts\' | wc -l)"',
       'feat/gh-1-x',
     ).reason ?? '';
     if (
       !labelReason.includes('label')
       || !labelReason.includes('bare')
+      || evaluate(
+        'echo ".test.ts tracked: $(git ls-files \'*.test.ts\' | wc -l)"',
+        'feat/gh-1-x',
+      ).block
     ) {
       console.error('FAIL [a label-only substitution is offered the bare-count spelling]');
       ok = false;
@@ -2844,7 +3253,7 @@ function selfTest() {
       ok = false;
     }
     messageChecks += 1;
-    const awkReason = evaluate("ps aux | awk 'NR==1'", 'feat/gh-1-x').reason ?? '';
+    const awkReason = evaluate("ps aux | awk 'NR==1 {system(\"true\")}'", 'feat/gh-1-x').reason ?? '';
     // 2026-07-28: a live run was blocked pulling a number out of `git diff
     // --stat` and told to author an awk FILE — more ceremony than the
     // measurement it was making. A remedy that is absurd for the common case
@@ -3048,6 +3457,11 @@ function main() {
       + 'cannot be proven safe. Re-run the command; if this repeats, re-run autoloop:setup '
       + 'to repair the hook wiring.',
     );
+  }
+  if (payload?.tool_name === 'AskUserQuestion') {
+    const problem = askUserQuestionProblem(loopRunIsLive());
+    if (problem !== null) refuse(problem);
+    process.exit(0);
   }
   const cmd = payload?.tool_input?.command;
   if (typeof cmd !== 'string') {

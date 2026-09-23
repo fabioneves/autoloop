@@ -1110,6 +1110,7 @@ function eligibleQueueIssueNumbers(snapshot) {
         && bodyUnchanged
         && !blocked.has(issue.number)
         && !issue.labels.includes('loop-blocked')
+        && !issue.labels.includes('loop-waiting')
         && !owned.has(issue.number)
         && !recovering.has(issue.number)
         && issue.dependencies.every((dependency) => dependency.state === 'CLOSED');
@@ -1429,7 +1430,7 @@ async function selfTest() {
     url: 'https://example.test/issues/7#issuecomment-1',
     ...overrides,
   });
-  const queueSnapshot = ({ blocked = false, incomplete = null } = {}) => {
+  const queueSnapshot = ({ blocked = false, waiting = false, incomplete = null } = {}) => {
     const sections = Object.fromEntries(
       SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
     );
@@ -1439,7 +1440,7 @@ async function selfTest() {
       body: 'body',
       updatedAt: '2026-01-01T00:00:00Z',
       lastEditedAt: null,
-      labels: ['loop-ready', ...(blocked ? ['loop-blocked'] : [])],
+      labels: ['loop-ready', ...(blocked ? ['loop-blocked'] : []), ...(waiting ? ['loop-waiting'] : [])],
     });
     sections.repo = completeSection([{
       owner: 'owner',
@@ -1602,19 +1603,20 @@ async function selfTest() {
         instanceFingerprint: 'd'.repeat(64),
       });
   });
-  await check('queue evidence excludes blocked work without calling it absent', () => {
-    const snapshot = queueSnapshot({ blocked: true });
-    const evidence = createQueueEvidence({
-      snapshot,
-      purpose: 'queueExhaustion',
-      runInstanceFingerprint: queueRun.instanceFingerprint,
-      configFingerprint: queueRun.configFingerprint,
-      configuredBaseBranch: queueRun.configuredBaseBranch,
-    });
-    return evidence.eligibleIssueNumbers.length === 0
-      && snapshot.sections.queue.items.length === 1
-      && verifyQueueEvidence(evidence, snapshot, queueRun);
-  });
+  await check('queue evidence excludes blocked and waiting work without calling it absent', () =>
+    [{ blocked: true }, { waiting: true }].every((options) => {
+      const snapshot = queueSnapshot(options);
+      const evidence = createQueueEvidence({
+        snapshot,
+        purpose: 'queueExhaustion',
+        runInstanceFingerprint: queueRun.instanceFingerprint,
+        configFingerprint: queueRun.configFingerprint,
+        configuredBaseBranch: queueRun.configuredBaseBranch,
+      });
+      return evidence.eligibleIssueNumbers.length === 0
+        && snapshot.sections.queue.items.length === 1
+        && verifyQueueEvidence(evidence, snapshot, queueRun);
+    }));
   await check('queue evidence rejects incomplete or invalidated snapshots', () => {
     const incomplete = queueSnapshot({ incomplete: 'openIssues' });
     const invalidated = invalidateSnapshot(queueSnapshot(), 'WAIT_BOUNDARY');

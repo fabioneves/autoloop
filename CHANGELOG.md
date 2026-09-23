@@ -3,6 +3,47 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.50.0] - 2026-09-23
+
+A loop that fixes itself and keeps going. Runs stopped too often: most stops were mechanical
+outcomes routed to a human, a limit parking a unit on a question, or friction in the command
+guard. Each now resolves inside the run; a human is asked only for a real decision, and every
+such decision arrives in one place.
+
+### Added
+
+- **Per-role model routing.** `dispatch.mjs` routes each role (`plan`, `plan-review`,
+  `implement`, `simplify`, `diff-review`, `code-review`, `doubt-review`, `fix`) to its own engine
+  and model, with a recorded fallback route per role. A native route drops a session-wide
+  `ANTHROPIC_BASE_URL`. The reviewer ≠ writer invariant is unchanged.
+- **Self-resolving units (`unit.mjs`).** `--obsolete` closes an already-delivered unit as not
+  planned after verifying the merged PR or base-reachable commit. `--wait` parks a unit as
+  `loop-waiting` on another issue, a red base, or a time (`--minutes`); prime lifts the wait
+  before its scan once the condition clears. `loop-waiting` units are ineligible and never adopted.
+- **Review `defer` disposition.** A Major raised in three rounds may be filed as a follow-up and
+  deferred; a Critical never defers. An out-of-delta finding or a gating cap round now earns one
+  closing full round instead of a block.
+- **Cap hand-off.** Past the closing round, under manual merge policy with only Majors open, the
+  contract returns `clean REVIEW_CAP_HANDOFF`: each Major is filed as a follow-up and listed in the
+  PR body, and the human decides at merge. A Critical or a non-manual policy still blocks.
+- **Decision digest.** `prime.mjs --close-run` and `--park` rewrite one pinned `loop-digest` issue
+  listing every `loop-blocked` issue and `human:authorize` PR with its one-line question.
+- **Run continuity.** A usage limit or red base parks the run (`prime.mjs --park`) with a timed
+  wake instead of closing it.
+
+### Changed
+
+- **One full gate per unit.** Step 9 pushes, then gates through `publish-verdict.mjs gate`;
+  `terminal-finalize` reuses that exact-head attestation instead of running the gate again.
+- **Dispatch resilience.** Read-only roles retry a transient failure (bounded) and move to their
+  fallback on a usage limit; writers never retry blindly.
+- **Guard friction.** The command guard refuses only shapes that can hide a mutation: quoted
+  variables in argument position, read-only substitutions, and `awk` programs that cannot start
+  a process are allowed.
+- **Three kills on one step** become a 60-minute timed wait, not a `human:decide`.
+- **Issue identity** ignores task-list ticks, and a closed issue skips the live body check.
+- **Shape** checks each acceptance criterion against the spec and corpus it cites.
+
 ## [0.49.66] - 2026-09-01
 
 ### Fixed

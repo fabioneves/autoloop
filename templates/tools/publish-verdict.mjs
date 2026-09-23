@@ -1189,14 +1189,44 @@ export function gateSummary(config, sha, before, after, result) {
       + (Number.isInteger(result?.status) ? ` (exit ${result.status})` : ''),
     );
   }
+  return gateAttestation(config, sha, after.checkout.repositoryFingerprint);
+}
+
+function gateAttestation(config, sha, repositoryFingerprint) {
   return serializeAttestation({
     kind: 'gate',
     v: 1,
     headOid: sha,
     commandHash: sha256(config.gate.command),
     configHash: sha256(JSON.stringify(config)),
-    repositoryFingerprint: after.checkout.repositoryFingerprint,
+    repositoryFingerprint,
   });
+}
+
+// Step 9 publishes `agentic/gate` for the head it gated, and the description
+// seals this attestation's hash: the same head, gate command, config and
+// repository. An exact match is that gate's own evidence, so the finalizer
+// reuses it instead of running the whole gate again, and again on every
+// re-invoke after a settle refusal (83h of 09-gate label time on LFE). Any
+// doubt runs the gate: no status, a different command or config, a conflict,
+// or a read that is incomplete or fails.
+export function terminalGateSummary(
+  snapshot,
+  config,
+  { fetchStatuses = fetchPublicationStatuses, execute = executeGateSummary } = {},
+) {
+  const expected = gateAttestation(
+    config,
+    snapshot.checkout.headOid,
+    snapshot.checkout.repositoryFingerprint,
+  );
+  try {
+    const statuses = fetchStatuses(snapshot.repository, snapshot.checkout.headOid);
+    if (exactVerdictStatus(statuses, 'gate', sha256(expected)) !== null) return expected;
+  } catch {
+    // An unreadable status is no evidence; the gate below is.
+  }
+  return execute(snapshot, config);
 }
 
 function runGate(command, cwd) {
@@ -1890,7 +1920,7 @@ export function finalizeTerminalDelivery(input, context = {}) {
   if (reviewReceiptFingerprint(review) !== input.record.run.receiptFingerprint) {
     throw new Error('review receipt does not match the terminal record');
   }
-  const gate = (adapters.gate ?? executeGateSummary)(snapshot, config);
+  const gate = (adapters.gate ?? terminalGateSummary)(snapshot, config);
   const afterGate = (adapters.snapshot ?? snapshotExecutionRepository)(
     snapshot.checkout.root,
   );
@@ -3105,6 +3135,45 @@ function selfTest() {
   } else {
     console.error('FAIL gate evidence is derived from the executed config and clean head');
   }
+  // speed: terminal-finalize reuses the step-9 gate's exact-head status instead
+  // of running the whole gate a second time, and runs it on any doubt.
+  const gateStatusFor = (summary) => ({
+    complete: true,
+    items: [{
+      context: 'agentic/gate',
+      state: 'success',
+      description: buildStatusDescription('gate', sha256(summary)),
+    }],
+  });
+  const otherCommandEvidence = gateSummary(
+    { ...gateConfig, gate: { ...gateConfig.gate, command: 'npm run other' } },
+    gateSnapshot.checkout.headOid,
+    gateSnapshot,
+    structuredClone(gateSnapshot),
+    { status: 0, signal: null, error: null },
+  );
+  const reuseCases = [
+    ['a matching exact-head gate status is reused', () => gateStatusFor(gateEvidence), false],
+    ['a gate status from another command runs the gate', () => gateStatusFor(otherCommandEvidence), true],
+    ['an incomplete status read runs the gate', () => ({ complete: false, items: [] }), true],
+    ['a failed status read runs the gate', () => { throw new Error('offline'); }, true],
+    ['no gate status runs the gate', () => ({ complete: true, items: [] }), true],
+  ];
+  for (const [name, fetchStatuses, runs] of reuseCases) {
+    let executed = 0;
+    const result = terminalGateSummary(gateSnapshot, gateConfig, {
+      fetchStatuses,
+      execute: () => {
+        executed += 1;
+        return 'ran';
+      },
+    });
+    if (executed === (runs ? 1 : 0) && result === (runs ? 'ran' : gateEvidence)) {
+      passed += 1;
+    } else {
+      console.error(`FAIL ${name}`);
+    }
+  }
   try {
     gateSummary(
       gateConfig,
@@ -3830,7 +3899,7 @@ function selfTest() {
   } else {
     console.error('FAIL acknowledged solo delivery posts exactly the two verdict statuses');
   }
-  const total = cases.length + 48;
+  const total = cases.length + 53;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }

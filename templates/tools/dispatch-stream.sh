@@ -5,9 +5,9 @@
 # shell's stdout into its task view natively; dispatch.mjs streams engine events
 # to a live FILE while its own stdout stays silent, so a bare dispatch renders
 # as a sealed box. This wrapper starts the dispatch in the background of its own
-# shell, tails the live file to its own stdout — which the host renders live —
-# and exits with the dispatch's exit code. No second tail task, no `$!` on the
-# hook-guarded command line (the shell internals below are a reviewed program
+# session (detached, so it outlives a killed task), tails the live file to its
+# own stdout — which the host renders live — and exits with the result's `ok`.
+# No second tail task, no `$!` on the hook-guarded command line (the shell internals below are a reviewed program
 # file, which is the sanctioned shape).
 #
 # Usage:
@@ -35,9 +35,20 @@ self_dir="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$(dirname "$live")"
 : > "$live"
 
-node "$self_dir/dispatch.mjs" "$@" --live-file "$live" --output-file "$out" --json \
-  > /dev/null 2>&1 &
-dispatch_pid=$!
+# The typed result is the only completion signal, so a result left by an
+# earlier attempt at the same path must not read as this one's.
+rm -f "$out" "$out.pid"
+
+# Double fork: the dispatch is reparented to init in its own session, so a host
+# kill of THIS task — which walks the task's process tree — leaves it running,
+# and its result still lands in $out. Spike 2026-09-23: TaskStop killed a plain
+# `setsid` child of a background task and spared a double-forked one. The pid
+# file is how a later `dispatch.mjs --wait-file $out` tells a survivor still
+# working from a dispatch that died without a result.
+( setsid node "$self_dir/dispatch.mjs" "$@" --live-file "$live" --output-file "$out" --json \
+    > /dev/null 2>&1 < /dev/null &
+  echo "$!" > "$out.pid" )
+dispatch_pid="$(cat "$out.pid")"
 
 # --pid ends the tail when the dispatch exits, so the task closes itself. The
 # renderer turns raw engine JSONL into pane-readable lines (reasoning ticks,
@@ -50,7 +61,13 @@ else
   tail --pid "$dispatch_pid" -n +1 -F "$live" 2>/dev/null
 fi
 
-wait "$dispatch_pid"
+# Not this shell's child any more, so there is no `wait` status: the result
+# file's own `ok` is the exit code, and no file means the dispatch died.
+if [ ! -f "$out" ]; then
+  echo "dispatch-stream: dispatch $dispatch_pid ended without a result at $out"
+  exit 1
+fi
+node -e 'process.exit(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).ok === true ? 0 : 1)' "$out"
 status=$?
 echo "dispatch-stream: dispatch exited $status · result at $out"
 exit "$status"

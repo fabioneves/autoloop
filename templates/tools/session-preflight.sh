@@ -105,8 +105,19 @@ fi
 # child, including `implement` and `plan`, for which resolveDefaultBaseUrl
 # deliberately returns null. Writers are never proxied; exporting it proxies
 # them.
+# 0.50.0: per-role routes supersede the review-engine recording whenever the
+# routes file exists. dispatch injects each proxied route's own URL and strips a
+# session-wide ANTHROPIC_BASE_URL from native routes, so the session variable is
+# harmless there — but still worth naming, because non-dispatch tools inherit it.
+routes_file="$(git rev-parse --git-path autoloop/routes 2>/dev/null)"
 review_engine_file="$(git rev-parse --git-path autoloop/review-engine 2>/dev/null)"
-if [ -n "$review_engine_file" ] && [ -f "$review_engine_file" ]; then
+if [ -n "$routes_file" ] && [ -f "$routes_file" ]; then
+  echo "INFO  per-role routes ($routes_file) — review-engine is ignored while they exist:"
+  sed -e '/^[[:space:]]*$/d' -e '/^#/d' -e 's/^/INFO    /' "$routes_file"
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+    echo "NOTE  ANTHROPIC_BASE_URL is set session-wide ($ANTHROPIC_BASE_URL); dispatch strips it from native routes and injects each proxied route's own URL"
+  fi
+elif [ -n "$review_engine_file" ] && [ -f "$review_engine_file" ]; then
   recorded="$(head -1 "$review_engine_file")"
   case "$recorded" in
     claude\ *)

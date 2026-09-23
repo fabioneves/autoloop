@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.49.66 · starting
+∞ pitcrew · v0.50.0 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -198,8 +198,10 @@ skipped.
    - every Critical/Major has a stable ID, and a rebut closes only when a fresh reviewer's typed
      verdict accepts that exact ID;
    - verified Critical/Major in the delta is fixed or rebutted;
-   - verified out-of-delta Critical/Major enters the existing human-block state;
-   - unresolved Major at the configured cap blocks for a human.
+   - verified out-of-delta Critical/Major is fixed and the next round is full;
+   - a gating cap round earns one closing full round. If only Majors gate there under manual policy,
+     the result is `REVIEW_CAP_HANDOFF`: file each Major as a follow-up and list it in the PR body.
+     A Critical, or a non-manual policy, blocks for a human.
 
    Invoke `node <plugin-tools>/review-contract.mjs` on stdin with
    `{round,scope,projectConfig,expected:{planFingerprint,repositoryFingerprint,configuredBaseOid,artifactVersion,artifactFingerprint,headOid},findingAnnotations:[{id,verified,inScope}],reviewRounds:[...]}`

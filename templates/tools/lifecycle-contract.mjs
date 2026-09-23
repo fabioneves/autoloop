@@ -226,6 +226,23 @@ function verdictStatusesGreen(finalized) {
       && String(status?.state ?? '').toUpperCase() === 'SUCCESS'));
 }
 
+// Task-list marks are progress on the approved scope, not a change to it: a
+// ticked `- [x]` hashes as `- [ ]`. Any other byte still changes the identity.
+const TASK_MARK_RE = /^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)\[[xX]\]/gmu;
+
+export function issueBodyIdentity(body) {
+  return createHash('sha256')
+    .update(String(body ?? '').replace(TASK_MARK_RE, '$1[ ]'))
+    .digest('hex');
+}
+
+// A recorded hash is the raw body the unit was approved on. It still matches
+// when the only edits since are task-list ticks.
+export function issueBodyMatches(recorded, body) {
+  return recorded === createHash('sha256').update(String(body ?? '')).digest('hex')
+    || recorded === issueBodyIdentity(body);
+}
+
 export function lifecycleIdentityHash(markerValue) {
   const identity = {
     v: markerValue?.v,

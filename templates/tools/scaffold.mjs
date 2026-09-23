@@ -155,7 +155,20 @@ export function mergeHookDocuments(existing, template) {
     }
     for (const entry of templateEntries) {
       const present = new Set(merged.hooks[event].flatMap(hookCommands));
-      if (hookCommands(entry).some((command) => present.has(command))) continue;
+      if (hookCommands(entry).some((command) => present.has(command))) {
+        // An unchanged command under a widened template matcher (0.50.0: the
+        // guard also answers `AskUserQuestion`) is still a superseded binding.
+        // Only an entry holding exactly the template's commands is autoloop's
+        // own; a maintainer entry sharing a command keeps its matcher.
+        const same = JSON.stringify(hookCommands(entry));
+        const own = merged.hooks[event].find((candidate) =>
+          JSON.stringify(hookCommands(candidate)) === same);
+        if (own !== undefined && entry.matcher !== undefined && own.matcher !== entry.matcher) {
+          own.matcher = entry.matcher;
+          changed = true;
+        }
+        continue;
+      }
       const tools = referencedHookTools(entry);
       const superseded = merged.hooks[event].findIndex((candidate) =>
         [...referencedHookTools(candidate)].some((name) => tools.has(name)));
@@ -1651,6 +1664,28 @@ function selfTest() {
           && merged.hooks.PreToolUse.length === 2
           && merged.hooks.PreToolUse[0].hooks[0].command === 'maintainer-own'
           && merged.hooks.PreToolUse[1].hooks[0].command === newGuard;
+      })(),
+    );
+    expect(
+      'a widened matcher on an unchanged autoloop command reaches existing installs',
+      (() => {
+        // 0.50.0 widened the guard's matcher to `Bash|AskUserQuestion` without
+        // touching its command text; a present command was "unchanged", so the
+        // refusal of mid-run questions would never have reached a live repo.
+        const guard = 'node "$r/tools/agentic/command-guard.mjs" --config "$c" || exit 2';
+        const { merged, changed } = mergeHookDocuments(
+          { hooks: { PreToolUse: [
+            { matcher: 'Bash', hooks: [{ type: 'command', command: 'maintainer-own' }] },
+            { matcher: 'Bash', hooks: [{ type: 'command', command: guard }] },
+          ] } },
+          { hooks: { PreToolUse: [
+            { matcher: 'Bash|AskUserQuestion', hooks: [{ type: 'command', command: guard }] },
+          ] } },
+        );
+        return changed === true
+          && merged.hooks.PreToolUse.length === 2
+          && merged.hooks.PreToolUse[0].matcher === 'Bash'
+          && merged.hooks.PreToolUse[1].matcher === 'Bash|AskUserQuestion';
       })(),
     );
     expect(

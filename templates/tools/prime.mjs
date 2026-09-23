@@ -18,6 +18,7 @@
 // Usage:
 //   node tools/agentic/prime.mjs [--json] [--scan-arg <value>]...
 //   node tools/agentic/prime.mjs --close-run
+//   node tools/agentic/prime.mjs --park <reason> --minutes <1..720>
 //   node tools/agentic/prime.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
@@ -43,10 +44,11 @@ import { extractConfig, validateProjectConfig } from './config-contract.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import { SNAPSHOT_SECTIONS, writeStdoutSync } from './snapshot-contract.mjs';
+import { liftWaits, postDigest, realRun } from './unit.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.49.66';
+const AUTOLOOP_VERSION = '0.50.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -143,7 +145,7 @@ export function baseSyncFacts(root, baseBranch) {
   };
 }
 
-export function primeDev({ cwd = process.cwd(), scanArgs = [] } = {}) {
+export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits } = {}) {
   if (!validateScanArgs(scanArgs)) {
     return failure(
       'input',
@@ -180,7 +182,11 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [] } = {}) {
   }
 
   const base = baseSyncFacts(root, config.baseBranch);
+  clearRunParks(root);
   const runMarker = writeRunMarker(root);
+  // Before the scan, so a unit whose wait just cleared is already eligible in
+  // the snapshot this run chooses from.
+  const waits = lift({ base: config.baseBranch, run: realRun(root) });
 
   const scanStartedAt = Date.now();
   const scan = spawnSync(process.execPath, [SCAN_TOOL, ...scanArgs], {
@@ -229,6 +235,7 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [] } = {}) {
     config: configSummary(config),
     base,
     runMarker,
+    waits,
     timings: { scanMs, primeMs: Date.now() - PROCESS_START_MS },
     snapshot,
   };
@@ -296,6 +303,58 @@ export function closeRunMarkers(root = process.cwd(), now = new Date()) {
   return { ok: true, closed };
 }
 
+// A usage limit or a red base is a reason to WAIT, and the run used to have no
+// way to say so: the Stop hook saw an idle live run with a queue, refused the
+// turn, and the only escape it offered was `--close-run`, so every such park
+// ended the run. A park is a bounded promise to come back — the reason and an
+// expiry, stamped on the live markers — and the hook honours it only until then.
+export const PARK_MAX_MINUTES = 720;
+
+export function parkRunMarkers(root = process.cwd(), reason, minutes, now = new Date()) {
+  const until = new Date(now.getTime() + minutes * 60_000).toISOString();
+  const parked = [];
+  for (const { path, marker } of ownRunMarkers(root)) {
+    if (marker.closedAt !== undefined) continue;
+    try {
+      writeFileSync(path, `${JSON.stringify({ ...marker, park: { reason, until } })}\n`);
+      parked.push(path);
+    } catch (error) {
+      return { ok: false, parked, error: { code: 'RUN_MARKER_UNWRITABLE', message: String(error?.message ?? error) } };
+    }
+  }
+  if (parked.length === 0) {
+    return { ok: false, parked, error: { code: 'NO_LIVE_RUN', message: 'no live run marker belongs to this session' } };
+  }
+  return { ok: true, parked, until };
+}
+
+// A re-prime is the run waking up: whatever park an earlier marker of this
+// session carries is spent, and leaving it would let a run that parks for 12h,
+// wakes early, and then goes dark read as parked.
+export function clearRunParks(root = process.cwd()) {
+  for (const { path, marker } of ownRunMarkers(root)) {
+    if (marker.park === undefined) continue;
+    const { park, ...rest } = marker;
+    try {
+      writeFileSync(path, `${JSON.stringify(rest)}\n`);
+    } catch { /* an unwritable marker keeps its park until expiry — never worse than today */ }
+  }
+}
+
+// A close or a park is when a human reads the run, so both post the decision
+// digest themselves rather than trusting the closing prose to. A failed digest
+// is reported beside the outcome and never fails it.
+export function withDigest(outcome, post) {
+  if (outcome.ok !== true) return outcome;
+  let digest;
+  try {
+    digest = post();
+  } catch (error) {
+    digest = { ok: false, error: String(error?.message ?? error) };
+  }
+  return { ...outcome, digest };
+}
+
 export function sectionSummary(snapshot) {
   return Object.fromEntries(
     Object.entries(snapshot?.sections ?? {}).map(([name, section]) => [name, {
@@ -328,6 +387,14 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
   };
 }
 
+export function waitLines(waits) {
+  return [
+    ...(waits?.lifted ?? []).map((entry) => `lifted: #${entry.number} (${entry.reason})`),
+    ...(waits?.waiting ?? []).map((entry) => `waiting: #${entry.number} (${entry.reason})`),
+    ...(waits?.errors ?? []).map((error) => `wait-lift error: ${error}`),
+  ];
+}
+
 function report(summary) {
   if (summary.ok !== true) {
     return `prime ${summary.step} FAILED  ${summary.error.code}\n${summary.error.message}`;
@@ -343,6 +410,7 @@ function report(summary) {
     + `  gate ${summary.config.gateCommand}`,
     `scan   ${summary.timings.scanMs}ms  prime ${summary.timings.primeMs}ms`
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
+    ...waitLines(summary.waits),
     'section                    items  complete',
   ];
   for (const [name, section] of Object.entries(summary.sections)) {
@@ -361,6 +429,17 @@ export function parseArgs(args) {
   }
   if (args.length === 1 && args[0] === '--close-run') {
     return { ...parsed, mode: 'close-run' };
+  }
+  if (args[0] === '--park') {
+    const [, reason, flag, value] = args;
+    const minutes = Number(value);
+    if (args.length !== 4 || typeof reason !== 'string' || reason.trim() === '' || flag !== '--minutes') {
+      return { ...parsed, error: '--park: expected --park <reason> --minutes <n>' };
+    }
+    if (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > PARK_MAX_MINUTES) {
+      return { ...parsed, error: `--minutes: expected a whole number 1..${PARK_MAX_MINUTES}` };
+    }
+    return { ...parsed, mode: 'park', park: { reason: reason.trim(), minutes } };
   }
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === '--json') {
@@ -490,6 +569,20 @@ function selfTest() {
     && parseArgs(['--measure']).error !== null,
   );
 
+  check(
+    'a park needs a reason and whole minutes within 1..720',
+    parseArgs(['--park', 'usage limit', '--minutes', '30']).mode === 'park'
+    && parseArgs(['--park', 'usage limit', '--minutes', '30']).park.reason === 'usage limit'
+    && parseArgs(['--park', 'usage limit', '--minutes', '30']).park.minutes === 30
+    && parseArgs(['--park', 'x', '--minutes', '720']).error === null
+    && parseArgs(['--park', 'x', '--minutes', '721']).error !== null
+    && parseArgs(['--park', 'x', '--minutes', '0']).error !== null
+    && parseArgs(['--park', 'x', '--minutes', '1.5']).error !== null
+    && parseArgs(['--park', '', '--minutes', '5']).error !== null
+    && parseArgs(['--park', 'x']).error !== null
+    && parseArgs(['--park', 'x', '--minutes', '5', '--json']).error !== null,
+  );
+
   const summary = configSummary(fixtureConfig());
   check(
     'the config block carries the validated ProjectConfig and its review fingerprint',
@@ -503,6 +596,24 @@ function selfTest() {
     && configSummary(Object.fromEntries(
       Object.entries(fixtureConfig()).reverse(),
     )).fingerprint === summary.fingerprint,
+  );
+
+  check(
+    'lifted and still-waiting units are printed, one line each',
+    waitLines({
+      lifted: [{ number: 10, reason: '#4 is closed' }],
+      waiting: [{ number: 13, reason: 'no parseable waiting marker' }],
+      errors: ['list: offline'],
+    }).join('|') === 'lifted: #10 (#4 is closed)|waiting: #13 (no parseable waiting marker)|wait-lift error: list: offline'
+    && waitLines(undefined).length === 0,
+  );
+
+  check(
+    'a close or park carries the digest, and a failing digest never fails it',
+    withDigest({ ok: true, closed: [] }, () => ({ ok: true, issue: 9, rows: [] })).digest.issue === 9
+    && withDigest({ ok: true }, () => { throw new Error('offline'); }).ok === true
+    && withDigest({ ok: true }, () => { throw new Error('offline'); }).digest.ok === false
+    && withDigest({ ok: false }, () => { throw new Error('never called'); }).digest === undefined,
   );
 
   const scratch = mkdtempSync(join(tmpdir(), 'autoloop-prime-'));
@@ -566,6 +677,26 @@ function selfTest() {
       typeof markerPath === 'string'
       && JSON.parse(readFileSync(markerPath, 'utf8')).version === 1
       && (process.platform !== 'linux' || loopRunIsOpen(root) === true),
+    );
+
+    const parkedAt = new Date('2026-01-01T12:00:00Z');
+    const parked = parkRunMarkers(root, 'usage limit on claude-opus-5-5', 45, parkedAt);
+    const parkedMarker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    check(
+      'a timed park stamps reason and expiry on the live marker and keeps the run live',
+      parked.ok === true
+      && parked.parked.includes(markerPath)
+      && parkedMarker.park?.reason === 'usage limit on claude-opus-5-5'
+      && parkedMarker.park?.until === '2026-01-01T12:45:00.000Z'
+      && parkedMarker.closedAt === undefined
+      && (process.platform !== 'linux' || loopRunIsLive(root) === true),
+    );
+
+    clearRunParks(root);
+    check(
+      'a re-prime clears a spent park from this session\'s markers',
+      JSON.parse(readFileSync(markerPath, 'utf8')).park === undefined
+      && JSON.parse(readFileSync(markerPath, 'utf8')).version === 1,
     );
 
     const closed = closeRunMarkers(root);
@@ -632,12 +763,21 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`prime: ${parsed.error}`);
-    console.error('usage: prime.mjs [--json] [--scan-arg <value>]... | --close-run | --self-test');
+    console.error('usage: prime.mjs [--json] [--scan-arg <value>]... | --close-run | --park <reason> --minutes <n> | --self-test');
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+  const digest = () => postDigest({ run: realRun(process.cwd()) });
+  if (parsed.mode === 'park') {
+    const outcome = withDigest(
+      parkRunMarkers(process.cwd(), parsed.park.reason, parsed.park.minutes),
+      digest,
+    );
+    writeStdoutSync(`${JSON.stringify(outcome, null, 1)}\n`);
+    process.exit(outcome.ok === true ? 0 : 1);
+  }
   if (parsed.mode === 'close-run') {
-    const outcome = closeRunMarkers();
+    const outcome = withDigest(closeRunMarkers(), digest);
     writeStdoutSync(`${JSON.stringify(outcome, null, 1)}\n`);
     process.exit(outcome.ok === true ? 0 : 1);
   }

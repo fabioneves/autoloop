@@ -67,13 +67,13 @@ const EXTRAS = {
   '02-plan': ' The plan must NAME the guidance-mapped domain skills (the repo CLAUDE.md/AGENTS.md'
     + ' mapping) and carry the literal `## Constraints` section distilling them — the plan'
     + ' reviewer flags both when missing.',
-  '06-simplify': ' Dispatch ONE behavior-preserving simplify pass (implement role, fable) whose'
+  '06-simplify': ' Dispatch ONE behavior-preserving simplify pass (`--role simplify`, routed) whose'
     + ' prompt loads `agent-skills:code-simplification` and carries the measured diff vs the'
     + " plan's line budget; tests green before it returns, test files unedited, behavior frozen."
     + ' Verify the returned diff yourself — a behavior change is reverted, not fixed.',
   '07-diff-review': ' Load `agent-skills:code-review-and-quality` AND the domain skills the plan'
     + ' named via the Skill tool in THIS message — naming in the plan is not loading; reviewing'
-    + ' bare is a skipped rider.',
+    + ' bare is a skipped rider. Plain run: the review is a `--role diff-review` dispatch.',
 };
 
 // key → [next swap, when it is due]

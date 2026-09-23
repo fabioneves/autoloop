@@ -40,7 +40,7 @@ import { fileURLToPath } from 'node:url';
 const ELAPSED_TOKEN = /^(?:\d+min|\d+h\d{2}m)$/u;
 const CLOCK_TOKEN = /^\d{2}:\d{2}$/u;
 
-// Model and engine names: `opus`, `fable`, `gpt-5.6-sol`, `claude:opus`. Kept
+// Model and engine names: `opus`, `fable`, `gpt-6-astra`, `claude:opus`. Kept
 // narrow on purpose — a bracket group that is not a name shape is left alone
 // rather than mangled, because this tool must never rewrite a step's title.
 const EXECUTOR_SLOT = /^[A-Za-z][A-Za-z0-9.:-]*$/u;
@@ -132,17 +132,20 @@ function selfTest() {
   const clockNow = formatClock(NOW);
   const cases = [
     // [subject, opts, expected]
-    ['∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL]', { ms: 660_000 },
-      `∞ #123 — 03 PLAN-REVIEW [GPT-5.6-SOL] [11min] [${clockNow}]`],
+    ['∞ #123 — 03 PLAN-REVIEW [GPT-6-ASTRA]', { ms: 660_000 },
+      `∞ #123 — 03 PLAN-REVIEW [GPT-6-ASTRA] [11min] [${clockNow}]`],
     // The live defect: a bare completed row, now composed rather than recalled.
     ['∞ #123 — 02 PLAN [OPUS]', { ms: 300_000 },
       `∞ #123 — 02 PLAN [OPUS] [5min] [${clockNow}]`],
     // One rule, applied by the mechanism instead of by memory.
     ['∞ #123 — 02 PLAN [opus]', { ms: 60_000 },
       `∞ #123 — 02 PLAN [OPUS] [1min] [${clockNow}]`],
-    ['∞ #78 — 08 FIX r3/5 [gpt-5.6-sol]', { ms: 60_000 },
-      `∞ #78 — 08 FIX r3/5 [GPT-5.6-SOL] [1min] [${clockNow}]`],
+    ['∞ #78 — 08 FIX r3/5 [gpt-6-astra]', { ms: 60_000 },
+      `∞ #78 — 08 FIX r3/5 [GPT-6-ASTRA] [1min] [${clockNow}]`],
     // At and over an hour, zero-padded, matching the closing rail's 2h09m.
+    // 0.50.0 ribbons carry explicit model IDs, not aliases.
+    ['∞ #78 — 05 IMPLEMENT [CLAUDE-OPUS-5-5]', { ms: 60_000 },
+      `∞ #78 — 05 IMPLEMENT [CLAUDE-OPUS-5-5] [1min] [${clockNow}]`],
     ['∞ #78 — 05 IMPLEMENT [OPUS]', { ms: 60 * 60_000 },
       `∞ #78 — 05 IMPLEMENT [OPUS] [1h00m] [${clockNow}]`],
     ['∞ #78 — 05 IMPLEMENT [OPUS]', { ms: 129 * 60_000 },

@@ -225,7 +225,7 @@ function commandError(error) {
     .slice(0, 300) || 'command failed';
 }
 
-async function jsonCommand(file, args, input = undefined) {
+async function jsonCommandOnce(file, args, input) {
   return limitCommand(async () => {
     const stdout = await new Promise((resolve, reject) => {
       const child = execFile(file, args, {
@@ -245,6 +245,35 @@ async function jsonCommand(file, args, input = undefined) {
     });
     return JSON.parse(stdout);
   });
+}
+
+// Every gh call this scan makes is a read, so rerunning one cannot double an
+// effect. A GitHub 5xx, a dropped connection or a 30 s stall used to fail the
+// whole prime and end the run on a blip; now it costs a few seconds instead.
+// Auth, not-found and malformed-query failures are not here: they fail again.
+const TRANSIENT_COMMAND_RE =
+  /HTTP 5\d\d|\b50[234]\b|timed? ?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|connection reset|unexpected EOF|TLS handshake|could not resolve host|secondary rate limit|rate limit exceeded/iu;
+const COMMAND_RETRY_DELAYS_MS = Object.freeze([2000, 6000]);
+
+export function transientCommandFailure(error) {
+  if (error?.killed === true || error?.signal === 'SIGTERM') return true;
+  return TRANSIENT_COMMAND_RE.test(`${error?.message ?? ''}\n${error?.stderr ?? ''}`);
+}
+
+export async function withCommandRetries(run, delaysMs = COMMAND_RETRY_DELAYS_MS, sleep = (ms) =>
+  new Promise((resolve) => { setTimeout(resolve, ms); })) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (attempt >= delaysMs.length || !transientCommandFailure(error)) throw error;
+      await sleep(delaysMs[attempt]);
+    }
+  }
+}
+
+async function jsonCommand(file, args, input = undefined) {
+  return withCommandRetries(() => jsonCommandOnce(file, args, input));
 }
 
 async function ghJson(args, input = undefined) {
@@ -1723,7 +1752,32 @@ async function selfTest() {
     scannedAt: '2026-01-01T00:00:00.000Z',
     sections: mergedFocusSections,
   }), 4);
+  const retried = [];
+  const flaky = async (failures, error) => {
+    let calls = 0;
+    const value = await withCommandRetries(async () => {
+      calls += 1;
+      if (calls <= failures) throw error;
+      return 'ok';
+    }, [1, 1], async (ms) => { retried.push(ms); }).catch(() => 'threw');
+    return { value, calls };
+  };
+  const blip = await flaky(2, Object.assign(new Error('gh: HTTP 502'), { stderr: '' }));
+  const outage = await flaky(3, Object.assign(new Error('x'), { killed: true }));
+  const denied = await flaky(1, Object.assign(new Error('gh: HTTP 401: Bad credentials'), {
+    stderr: 'HTTP 401',
+  }));
   const checks = [
+    [
+      // A single 502 during prime used to end the run before any unit started.
+      'transient gh reads retry with backoff; auth and bounded outages fail',
+      blip.value === 'ok' && blip.calls === 3
+        && outage.value === 'threw' && outage.calls === 3
+        && denied.value === 'threw' && denied.calls === 1
+        && retried.length === 4
+        && transientCommandFailure({ message: 'x', stderr: 'read: connection reset by peer' })
+        && !transientCommandFailure({ message: 'Could not resolve to an Issue', stderr: '' }),
+    ],
     [
       'canonical ownership parser',
       loopOwned.map((pr) => pr.issue).join(',') === expectedIssues.join(',')
