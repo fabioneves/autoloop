@@ -77,7 +77,7 @@ Every role runs in a fresh process through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> \
-  --prompt-file <path> [--tools <csv>] [--output-file <path>] [--json]
+  --prompt-file <path> --issue <N> [--tools <csv>] [--output-file <path>] [--json]
 ```
 
 `implement` is the only writing posture (`Bash,Edit,Glob,Grep,Read,Write`); every review role is
@@ -183,7 +183,7 @@ skipped.
 
    ```bash
    node <plugin-tools>/dispatch.mjs --role implement \
-     --prompt-file /tmp/autoloop-revise.md --json
+     --prompt-file /tmp/autoloop-revise.md --issue <N> --json
    ```
 
    Reconcile partial or unknown effects through lifecycle recovery; never blind-retry a writer.

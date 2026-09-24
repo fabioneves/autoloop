@@ -30,9 +30,10 @@ such decision arrives in one place.
   listing every `loop-blocked` issue and `human:authorize` PR with its one-line question.
 - **Run continuity.** A usage limit or red base parks the run (`prime.mjs --park`) with a timed
   wake instead of closing it.
-- **A unit's cost on its issue.** Each dispatch logs its branch, and the run record ends with
-  `stats.mjs --record`: active time per step summed across sessions, with the dispatches behind
-  each step (role, model, effort, duration, failure, fallback) and an `autoloop-timing-v1` marker.
+- **A unit's cost on its issue.** Each dispatch logs its `--issue` and branch, and the run record
+  ends with `stats.mjs --record`: active time per step summed across sessions (paused while
+  blocked or waiting), with the dispatches behind each step (role, model, effort, duration,
+  failure, fallback) and an `autoloop-timing-v1` marker.
 
 ### Changed
 

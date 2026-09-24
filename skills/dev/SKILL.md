@@ -271,8 +271,12 @@ Every role runs in a fresh process through one call:
 ```bash
 node <plugin-tools>/dispatch.mjs \
   --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> \
-  --prompt-file <path> [--fallback] [--tools <csv>] [--output-file <path>] [--json]
+  --prompt-file <path> --issue <N> [--fallback] [--tools <csv>] [--output-file <path>] [--json]
 ```
+
+`--issue <N>` names the unit on every dispatch, so the run record's timing block can itemize its
+cost. Plan and plan-review run before the unit's branch exists, often while the checkout is on
+another unit's branch, so without it they are charged to no unit.
 
 **Every role runs on its own recorded route.** Record the routes ONCE, immediately after prime
 succeeds, through the tool — never a `printf … >` redirect: `.git/` is a protected path, and a
@@ -467,7 +471,7 @@ in this section describes it from that point on.)
 ```bash
 bash <plugin-tools>/dispatch-stream.sh \
   <scratchpad>/live/<issue>-<role>-r<N>.jsonl <scratchpad>/<role>-result.json \
-  --role <role> --prompt-file <path> [--engine codex] [--tools <csv>]
+  --role <role> --prompt-file <path> --issue <N> [--engine codex] [--tools <csv>]
 ```
 
 **A backgrounded dispatch carries no host timeout.** `dispatch.mjs` holds its own ceilings — 120
@@ -552,7 +556,7 @@ working tree, which the in-flight unit's writer owns.
 One idiom on every host:
 
 ```bash
-node <plugin-tools>/dispatch.mjs --role implement --prompt-file <p> \
+node <plugin-tools>/dispatch.mjs --role implement --prompt-file <p> --issue <N> \
   --output-file <result.json> --json      # foreground on Claude Code (host backgrounds it — see the sweep note); collect when it exits
 ```
 
@@ -1021,7 +1025,7 @@ the typed `{title, prBody, body}` the driver's request wants, no markdown parsin
 ```bash
 bash <plugin-tools>/dispatch-stream.sh \
   <scratchpad>/live/<issue>-plan.jsonl <scratchpad>/plan-result.json \
-  --role plan --prompt-file <path>
+  --role plan --prompt-file <path> --issue <N>
 ```
 
 The prompt carries the FULL issue (body, context, acceptance criteria — never an excerpt), the
@@ -1096,7 +1100,7 @@ context. Concurrency never skips the review — it moves the wait, not the gate.
 Move to `loop:03-plan-review`. Dispatch exactly one fresh reviewer:
 
 ```bash
-node <plugin-tools>/dispatch.mjs --role plan-review --prompt-file /tmp/autoloop-plan-review.md --json
+node <plugin-tools>/dispatch.mjs --role plan-review --prompt-file /tmp/autoloop-plan-review.md --issue <N> --json
 ```
 
 Give the reviewer the same materialized base directory the planner got, and name it in the prompt.
@@ -1190,7 +1194,7 @@ append a second marker or perform one of these effects outside the driver.
 Move to `loop:05-implement`. Dispatch the writer:
 
 ```bash
-node <plugin-tools>/dispatch.mjs --role implement --prompt-file /tmp/autoloop-implement.md --json
+node <plugin-tools>/dispatch.mjs --role implement --prompt-file /tmp/autoloop-implement.md --issue <N> --json
 ```
 
 Give the writer only the frozen plan, relevant STATE invariants, evidence, and named skills.
@@ -1221,7 +1225,7 @@ learning one review round at a time.
 ```bash
 bash <plugin-tools>/dispatch-stream.sh \
   <scratchpad>/live/<issue>-simplify.jsonl <scratchpad>/simplify-result.json \
-  --role simplify --prompt-file <path>
+  --role simplify --prompt-file <path> --issue <N>
 ```
 
 The prompt must load `agent-skills:code-simplification` (behavior preservation, project
@@ -1257,7 +1261,7 @@ code-review, security, and domain guidance into the prompt as applicable:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role diff-review \
-  --prompt-file /tmp/autoloop-diff-review.md \
+  --prompt-file /tmp/autoloop-diff-review.md --issue <N> \
   --output-file /tmp/autoloop-diff-review.json --json
 ```
 
@@ -1323,7 +1327,7 @@ Dispatch round 1:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role code-review \
-  --prompt-file /tmp/autoloop-code-review-1.md \
+  --prompt-file /tmp/autoloop-code-review-1.md --issue <N> \
   --output-file /tmp/autoloop-code-review-1.json --json
 ```
 
@@ -1838,7 +1842,10 @@ Post one issue run record via body file containing:
 - the timing block, verbatim from `node <plugin-tools>/stats.mjs --record --issue <N>`: active time
   per step summed across every session, and under each step the dispatches that ran on the unit's
   branch (role, model, effort, duration, failure code, fallback). It is read from the label
-  timeline and the dispatch log, so a unit's cost stays on GitHub after the session is gone.
+  timeline and the dispatch log, so a unit's cost stays on GitHub after the session is gone. The
+  clock stops while the unit is blocked, waiting, or between sessions; a run-level park (usage
+  limit) leaves no label, so its sleep counts toward the step it interrupted. A resumed unit posts
+  another record, and its newest `autoloop-timing-v1` marker is the current one.
 
 **End the run record with the outcome marker, composed by the tool — never hand-written:**
 

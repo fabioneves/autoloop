@@ -121,6 +121,7 @@ export function unitActiveTime(events, now) {
   const ev = (events ?? [])
     .filter((e) => typeof e?.label === 'string' && e.label.startsWith('loop'))
     .map((e) => ({ ...e, t: typeof e.at === 'number' ? e.at : Date.parse(e.at) }))
+    .filter((e) => Number.isFinite(e.t))
     .sort((a, b) => a.t - b.t);
   const open = new Map();
   const steps = {};
@@ -130,26 +131,40 @@ export function unitActiveTime(events, now) {
     open.delete(label);
   };
   let sessions = 0;
+  const closeAll = (t, except = null) => {
+    for (const label of [...open.keys()]) if (label !== except) close(label, t);
+  };
   for (const e of ev) {
     if (e.event === 'labeled' && e.label === 'loop-started') sessions += 1;
-    const isStep = e.label.startsWith('loop:');
-    const isTerminal = e.label === 'loop-delivered' || e.label === 'loop-blocked';
-    if (e.event === 'labeled' && (isStep || isTerminal)) {
-      for (const label of [...open.keys()]) if (label !== e.label) close(label, e.t);
-      if (isStep && !open.has(e.label)) open.set(e.label, e.t);
+    // The unit stops accruing when it turns terminal, is set waiting, or its
+    // session ends; a step label left on across a pause is not work.
+    const pauses = e.event === 'labeled'
+      ? ['loop-delivered', 'loop-blocked', 'loop-waiting'].includes(e.label)
+      : e.label === 'loop-started';
+    if (pauses) {
+      closeAll(e.t);
+    } else if (e.event === 'labeled' && e.label.startsWith('loop:')) {
+      closeAll(e.t, e.label);
+      if (!open.has(e.label)) open.set(e.label, e.t);
     } else if (e.event === 'unlabeled' && open.has(e.label)) {
       close(e.label, e.t);
     }
   }
-  if (Number.isFinite(now)) for (const label of [...open.keys()]) close(label, now);
+  if (Number.isFinite(now)) closeAll(now);
   const activeMs = Object.values(steps).reduce((sum, ms) => sum + ms, 0);
   return { steps, activeMs, sessions };
 }
 
+// Plan and plan-review run before the unit's branch exists, from whatever the
+// orchestrator's checkout is on (often the in-flight unit's branch while the
+// next unit is staged), so a branch never attributes them.
+const PRE_CLAIM_ROLES = new Set(['plan', 'plan-review']);
+
 /**
- * Pure. The dispatch-log lines that ran on this issue's loop branch, oldest
- * first. Parsed here, not through overlap-report.mjs, which runs its CLI on
- * import. A torn line from a concurrent append is skipped.
+ * Pure. The dispatch-log lines that belong to this issue, oldest first: by the
+ * `--issue` a dispatch was given, else by its loop branch for post-claim roles.
+ * Parsed here, not through overlap-report.mjs, which runs its CLI on import. A
+ * torn line from a concurrent append is skipped.
  */
 export function unitDispatches(logText, issue) {
   const entries = [];
@@ -163,7 +178,9 @@ export function unitDispatches(logText, issue) {
   return entries
     .filter((entry) => typeof entry?.role === 'string'
       && Number.isSafeInteger(entry.startedAtMs) && Number.isSafeInteger(entry.ms)
-      && parseLoopBranchIssue(entry.branch) === issue)
+      && (Number.isSafeInteger(entry.issue)
+        ? entry.issue === issue
+        : !PRE_CLAIM_ROLES.has(entry.role) && parseLoopBranchIssue(entry.branch) === issue))
     .sort((a, b) => a.startedAtMs - b.startedAtMs);
 }
 
@@ -196,7 +213,7 @@ export function timingRecord(issue, active, dispatches) {
     .map((key) => `| ${key} | ${fmtMs(active.steps[key])} | ${(byStep.get(key) ?? []).join('<br>') || '—'} |`);
   return [
     `**Timing** · active ${fmtMs(active.activeMs)} over ${active.sessions} session${active.sessions === 1 ? '' : 's'} · `
-      + `${dispatches.length} dispatches · `
+      + `${dispatches.length} attributed dispatches · `
       + `${rounds} code-review round${rounds === 1 ? '' : 's'}`,
     '',
     ...(rows.length === 0 ? [] : ['| step | wall | dispatches |', '|---|---|---|', ...rows, '']),
@@ -470,7 +487,11 @@ function selfTest() {
         { event: 'labeled', label: 'loop:08-code-review', at: T('16:10:00') },
       ], Date.parse(T('16:30:00')));
       const log = [
-        { role: 'plan', engine: 'claude', model: 'gpt-6-astra', effort: 'xhigh', branch: 'feat/gh-7-x', startedAtMs: 3, ms: 150000, ok: true },
+        { role: 'plan', engine: 'claude', model: 'gpt-6-astra', effort: 'xhigh', branch: 'main', issue: 7, startedAtMs: 3, ms: 150000, ok: true },
+        // #8's plan staged while the checkout sat on #7's branch: it is #8's.
+        { role: 'plan', engine: 'claude', branch: 'feat/gh-7-x', issue: 8, startedAtMs: 4, ms: 1, ok: true },
+        // A plan with no --issue is never charged by branch.
+        { role: 'plan-review', engine: 'claude', branch: 'feat/gh-7-x', startedAtMs: 4, ms: 1, ok: true },
         { role: 'code-review', engine: 'claude', model: 'gpt-6-astra', branch: 'feat/gh-7-x', startedAtMs: 5, ms: 60000, ok: false, code: 'ENGINE_TIMEOUT' },
         { role: 'code-review', engine: 'claude', model: 'claude-opus-5-5', branch: 'feat/gh-7-x', startedAtMs: 6, ms: 70000, ok: true, fallback: true },
         { role: 'implement', engine: 'claude', branch: 'feat/gh-8-y', startedAtMs: 4, ms: 1, ok: true },
@@ -496,10 +517,27 @@ function selfTest() {
           /\| 02-plan \| 2m 41s \| plan · gpt-6-astra\/xhigh · 2m 30s \|/u.test(record)
           && record.includes('code-review · gpt-6-astra · 1m 0s ✖ ENGINE_TIMEOUT')
           && record.includes('code-review · claude-opus-5-5 · 1m 10s ↪ fallback')],
-        ['the header counts dispatches and completed review rounds',
-          record.includes('3 dispatches · 1 code-review round')],
+        ['the header counts attributed dispatches and completed review rounds',
+          record.includes('3 attributed dispatches · 1 code-review round')],
+        ['a pause stops the clock: loop-waiting on, or the session\'s loop-started off',
+          (() => {
+            const paused = unitActiveTime([
+              { event: 'labeled', label: 'loop-started', at: T('10:00:00') },
+              { event: 'labeled', label: 'loop:05-implement', at: T('10:00:00') },
+              { event: 'unlabeled', label: 'loop-started', at: T('11:00:00') },
+              { event: 'labeled', label: 'loop-started', at: T('20:00:00') },
+              { event: 'labeled', label: 'loop:05-implement', at: T('20:00:00') },
+              { event: 'labeled', label: 'loop-waiting', at: T('20:30:00') },
+              { event: 'unlabeled', label: 'loop-waiting', at: T('22:00:00') },
+              { event: 'labeled', label: 'loop:05-implement', at: T('22:00:00') },
+              { event: 'labeled', label: 'loop:06-simplify', at: T('22:10:00') },
+            ], null);
+            return paused.steps['05-implement'] === 100 * 60000 && paused.sessions === 2;
+          })()],
+        ['an unparseable timestamp is skipped, never NaN',
+          unitActiveTime([{ event: 'labeled', label: 'loop:02-plan', at: 'garbage' }], 5).activeMs === 0],
         ['a unit with no logged dispatch still records its steps',
-          timingRecord(7, active, []).includes('0 dispatches')],
+          timingRecord(7, active, []).includes('0 attributed dispatches')],
       ];
     })(),
     // The sizing join, on the two units that actually produced records: #240

@@ -903,6 +903,7 @@ function dispatchOnce(options, cwd) {
     role: options.role,
     engine,
     ...(branch === null ? {} : { branch }),
+    ...(Number.isSafeInteger(options.issue) ? { issue: options.issue } : {}),
     ...(model === null ? {} : { model }),
     ...(effort === null ? {} : { effort }),
     startedAtMs: windowStartedAtMs,
@@ -1263,6 +1264,7 @@ export function parseArgs(args) {
     promptFile: null,
     tools: null,
     outputFile: null,
+    issue: null,
     json: false,
     fallback: false,
     error: null,
@@ -1293,7 +1295,13 @@ export function parseArgs(args) {
     else if (flag === '--prompt-file') parsed.promptFile = value;
     else if (flag === '--tools') parsed.tools = value;
     else if (flag === '--output-file') parsed.outputFile = value;
-    else return { ...parsed, error: `unknown flag ${flag}` };
+    else if (flag === '--issue') {
+      const issue = Number(value);
+      if (!/^[1-9]\d*$/u.test(value) || !Number.isSafeInteger(issue)) {
+        return { ...parsed, error: '--issue: expected a positive issue number' };
+      }
+      parsed.issue = issue;
+    } else return { ...parsed, error: `unknown flag ${flag}` };
   }
   if (parsed.role === null || !ROLE_NAMES.includes(parsed.role)) {
     return {
@@ -1640,6 +1648,7 @@ function selfTest() {
       tools: writerTools,
       cwd: repoScratch,
       engine,
+      issue: 7,
     });
     check(
       'an implement that moves the checkout still succeeds',
@@ -2105,6 +2114,15 @@ function selfTest() {
     check(
       'every dispatch log entry names the branch it ran on',
       logged.length > 0 && logged.every(({ branch }) => branch === 'main'),
+    );
+    // Plan and plan-review run before the unit's branch exists, often while the
+    // checkout sits on another unit's branch, so the issue is passed explicitly.
+    check(
+      'a dispatch given --issue logs it, and one without logs none',
+      logged[1]?.issue === 7 && logged[0]?.issue === undefined
+      && parseArgs(['--role', 'plan', '--prompt-file', '/p', '--issue', '42']).issue === 42
+      && parseArgs(['--role', 'plan', '--prompt-file', '/p', '--issue', '0']).error !== null
+      && parseArgs(['--role', 'plan', '--prompt-file', '/p', '--issue', 'x']).error !== null,
     );
 
     // 0.50.0 per-role routing (SPEC-model-routing.md). Each role resolves ONLY
@@ -2710,6 +2728,7 @@ function main() {
     ...(parsed.effort === null ? {} : { effort: parsed.effort }),
     ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
     ...(parsed.fallback ? { fallback: true } : {}),
+    ...(parsed.issue === null ? {} : { issue: parsed.issue }),
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
   if (parsed.outputFile !== null) {
