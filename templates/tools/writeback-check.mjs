@@ -114,6 +114,19 @@ export function cwdWithinWorktrees(cwd, worktrees) {
     && (cwd === root || String(cwd).startsWith(`${root}/`)));
 }
 
+/** Pure: `git worktree list --porcelain` → [{ root, branch }]; a detached or
+ *  bare worktree has branch null. */
+export function parseWorktreePorcelain(text) {
+  const worktrees = [];
+  for (const line of String(text ?? '').split('\n')) {
+    if (line.startsWith('worktree ')) worktrees.push({ root: line.slice('worktree '.length), branch: null });
+    else if (line.startsWith('branch refs/heads/') && worktrees.length > 0) {
+      worktrees.at(-1).branch = line.slice('branch refs/heads/'.length);
+    }
+  }
+  return worktrees;
+}
+
 /** Pure: the branch of the innermost worktree holding `cwd`, or null. Innermost,
  *  because agent worktrees nest inside the main checkout's directory. */
 export function worktreeBranchFor(cwd, worktrees) {
@@ -135,11 +148,14 @@ export function dispatchIssueFromCmdline(cmdline) {
 
 /** Pure: evidence that a dispatch for THIS PR's unit is running, or null. A
  *  dispatch for another unit is not: a reviewer running for unit B says
- *  nothing about unit A's stranded commits. */
+ *  nothing about unit A's stranded commits. `--issue` wins over the branch:
+ *  dispatches launch from the repository root, so a staged unit's dispatch
+ *  inherits whatever unit branch the root checkout is on. */
 export function unitDispatchEvidence(pr, processes) {
   const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
-  const own = (processes ?? []).find((process) =>
-    process.branch === pr.headRefName || (claim.valid && process.issue === claim.issue));
+  const own = (processes ?? []).find((process) => (process.issue === null
+    ? process.branch === pr.headRefName
+    : claim.valid && process.issue === claim.issue));
   return own === undefined ? null : `a dispatch for this unit is running (pid ${own.pid})`;
 }
 
@@ -156,17 +172,11 @@ export function unitDispatchEvidence(pr, processes) {
  *  signals decide, like every fail-open read in this hook. */
 function dispatchProcesses(root) {
   try {
-    const worktrees = [];
-    for (const line of execFileSync(
+    const worktrees = parseWorktreePorcelain(execFileSync(
       'git',
       ['-C', root, 'worktree', 'list', '--porcelain'],
       { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 },
-    ).split('\n')) {
-      if (line.startsWith('worktree ')) worktrees.push({ root: line.slice('worktree '.length), branch: null });
-      else if (line.startsWith('branch refs/heads/') && worktrees.length > 0) {
-        worktrees.at(-1).branch = line.slice('branch refs/heads/'.length);
-      }
-    }
+    ));
     const processes = [];
     for (const entry of readdirSync('/proc')) {
       if (!/^\d+$/u.test(entry)) continue;
@@ -606,11 +616,27 @@ function selfTest() {
     (pr) => unitDispatchEvidence(pr, [{ pid: 42, branch: 'fix/gh-3-z', issue: null }]));
   const ownIssueRunning = checkUnpushedLoopWork(prs, unpushedFor,
     (pr) => unitDispatchEvidence(pr, [{ pid: 43, branch: 'main', issue: 3 }]));
+  // Launched from the root while it sits on #3's branch, #1's dispatch still
+  // names #1: the branch it inherited is not its unit.
+  const stagedOnOwnBranch = checkUnpushedLoopWork(prs, unpushedFor,
+    (pr) => unitDispatchEvidence(pr, [{ pid: 44, branch: 'fix/gh-3-z', issue: 1 }]));
   const keyedCases =
     otherUnitRunning.hard.length === 1 && otherUnitRunning.hard[0].includes('#3') &&
     otherUnitRunning.reminders.length === 0 &&
     ownBranchRunning.hard.length === 0 && ownBranchRunning.reminders[0]?.includes('pid 42') === true &&
     ownIssueRunning.hard.length === 0 && ownIssueRunning.reminders[0]?.includes('pid 43') === true &&
+    stagedOnOwnBranch.hard.length === 1 && stagedOnOwnBranch.reminders.length === 0 &&
+    JSON.stringify(parseWorktreePorcelain([
+      'worktree /repo', 'HEAD a', 'branch refs/heads/main', '',
+      'worktree /repo/.claude/worktrees/a', 'HEAD b', 'detached', '',
+      'worktree /bare', 'bare', '',
+      'worktree /tmp/w', 'HEAD c', 'branch refs/heads/feat/gh-9-a', 'prunable gitdir file points to non-existent location', '',
+    ].join('\n'))) === JSON.stringify([
+      { root: '/repo', branch: 'main' },
+      { root: '/repo/.claude/worktrees/a', branch: null },
+      { root: '/bare', branch: null },
+      { root: '/tmp/w', branch: 'feat/gh-9-a' },
+    ]) &&
     dispatchIssueFromCmdline(['node', 'dispatch.mjs', '--role', 'implement', '--issue', '342', ''].join('\0')) === 342 &&
     dispatchIssueFromCmdline(['node', 'dispatch.mjs', '--issue', ''].join('\0')) === null &&
     dispatchIssueFromCmdline(['node', 'dispatch.mjs', '--issue', '0'].join('\0')) === null &&
@@ -849,9 +875,10 @@ function main() {
   const processes = dispatchProcesses(ROOT);
   const dispatchInFlight = streamLive
     ?? (processes?.length > 0 ? `a dispatch process is running (pid ${processes[0].pid})` : null);
-  // Unpushed work is excused only by a dispatch for ITS unit. Where the process
-  // table is unreadable nothing ties a dispatch to a unit, and the unkeyed
-  // stream decides as it did before.
+  // Unpushed work is excused only by a dispatch for ITS unit, so where the
+  // process table is readable a fresh stream alone no longer excuses it. Where
+  // it is unreadable nothing ties a dispatch to a unit, and the unkeyed stream
+  // decides as it did before.
   const unpushed = checkUnpushedLoopWork(
     prs,
     unpushedCommitCount,

@@ -1436,7 +1436,7 @@ export const INCIDENTS = Object.freeze([
       + 'while ANY dispatch ran: a writer for unit A dying mid-push was excused by a '
       + 'reviewer still running for unit B.',
     cause: 'The in-flight signal was one repository-wide fact. The process table now '
-      + 'ties each dispatch to its unit by its worktree branch and its --issue, and '
+      + 'ties each dispatch to its unit by its --issue, else its worktree branch, and '
       + 'unpushed work is excused only by a dispatch for its own unit.',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'export function unitDispatchEvidence(pr, processes) {' }),
