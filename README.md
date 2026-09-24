@@ -10,7 +10,7 @@ label a small issue `loop-ready`; it plans, has the plan reviewed, implements, h
 reviewed, runs your full test gate, and marks a pull request ready. Then it takes the next issue.
 You merge.
 
-Every artifact is reviewed by a fresh process that did not write it. The PR is evidence-bound: the
+Every artifact is reviewed by a fresh process that did not write it, on a different model. The PR is evidence-bound: the
 reviewed diff, the gate, the remote head, and every CI check agree on one commit.
 
 ## How it works
@@ -23,17 +23,37 @@ issue (loop-ready)
   → 04 claim     branch, claim commit, draft PR, frozen plan
   → 05 build     fresh implementer, one commit per plan task
   → 06 simplify  fresh pass, behavior frozen, tests untouched
-  → 07 diff      orchestrator reads the diff against invariants and checklist
+  → 07 diff      fresh reviewer reads the diff against invariants and checklist
   → 08 review    fresh code review; fresh writers fix verified findings
   → 09 gate      full objective gate on a clean tree
   → 10 publish   bind the pushed head, mark the PR ready
-  → 11 record    one run record on the issue
+  → 11 record    one run record on the issue, with the unit's timing
 ready PR → you merge
 ```
 
 **Pitcrew** is the return path: when a human leaves review feedback, CI goes red, or the branch
 falls behind, it diagnoses, repairs with a fresh writer, re-reviews, re-gates, and hands the same PR
 back. Every cycle services Pitcrew work before new issues.
+
+**The loop keeps going.** A unit that can resolve itself does, and the run takes the next one:
+
+- An issue already delivered is closed as `loop-obsolete`, with the merged PR or commit as evidence.
+- A unit waiting on another issue, on a red base, or on time gets `loop-waiting`. The next run
+  lifts the wait once the condition clears.
+- At the review cap under `manual` merge, open Major findings become follow-up issues listed in the
+  PR, and the PR still goes to you. An open Critical still stops the unit.
+- A usage limit moves a role to its fallback model, or parks the run until the limit resets.
+
+What truly needs you is collected in one pinned `loop-digest` issue, rewritten at each close or
+park.
+
+## Models and routes
+
+Each role runs on its own recorded route: engine, model, effort, and a fallback for usage limits.
+The standing table has `gpt-6-astra` (through a local proxy) plan and review, `claude-fable-5-1`
+review plans and simplify, and `claude-opus-5-5` implement and fix, so no artifact is judged by the
+model that wrote it. `/autoloop:dev with codex` sends the verdict roles to Codex; `with host` runs
+every role on the host default. Proxy URLs must be loopback.
 
 ## Guardrails
 
@@ -144,7 +164,7 @@ kill switch stay enforced regardless.
 | `tools/agentic/` | Vendored runtime: guards, dispatch, lifecycle driver, verification. Setup reconciles it; re-run setup after a plugin update. |
 | `.claude/settings.json`, `.codex/hooks.json`, `.opencode/` | Host hooks and the read-only reviewer agents. |
 | `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch. Never committed. |
-| Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked`; lifecycle markers, the frozen plan, and the run record. |
+| Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked` / `loop-waiting` / `loop-obsolete`, the `loop-digest` issue; lifecycle markers, the frozen plan, and the run record. |
 
 ## How it stays safe
 
@@ -159,12 +179,13 @@ a prompt. Untrusted text travels in files, never shell source. Vendored hooks bl
 unsafe force-pushes, self-applied authorization labels, release publication, and malformed step
 swaps. Protected paths stop for `human:authorize`. Dispatch failures are typed and recorded. A
 read-only role retries a transient failure a bounded number of times and moves to its recorded
-fallback route on a usage limit; a writer never retries blindly, and there is no "skip review" mode. On restart the loop rebuilds state from Git and GitHub,
+fallback route on a usage limit; a writer never retries blindly, and there is no "skip review" mode.
+On restart the loop rebuilds state from Git and GitHub,
 adopts only proven orphans, and finishes or blocks them before taking new work. With nothing to do,
 it stops rather than polls.
 
-The command guard is not a sandbox. Branch, tag, and release protection remain your server-side
-rules.
+The command guard is not a sandbox and not a secrets boundary. Branch, tag, and release protection
+remain your server-side rules; give the loop a repository-scoped token without admin rights.
 
 ## Releases
 
