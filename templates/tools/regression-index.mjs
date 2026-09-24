@@ -1471,6 +1471,18 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'dispatch.mjs', anchor: "if (route.baseUrl !== null || !loopbackUrl(token.slice(1))) {" }),
       Object.freeze({ file: 'dispatch.mjs', anchor: '|| (fallback[2] !== undefined && !loopbackUrl(fallback[2]))) {' }),
     ]),
+  }),  Object.freeze({
+    id: 'a-route-without-a-fallback-stopped-on-an-unavailable-model',
+    date: '2026-09-24',
+    symptom: 'A route with no recorded >model failed ROUTE_FALLBACK_MISSING at a usage '
+      + 'limit or an unavailable model, although every model on the table is available '
+      + 'to the operator.',
+    cause: 'Fallbacks were opt-in per route. Every route now defaults to Opus, and the '
+      + 'code reviewers default to Fable, because Opus wrote the code they judge.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function effectiveFallback(role, route) {' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "const CODE_REVIEW_ROLES = new Set(['diff-review', 'code-review', 'doubt-review']);" }),
+    ]),
   }),
 ]);
 

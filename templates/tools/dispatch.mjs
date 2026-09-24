@@ -875,18 +875,34 @@ function hostName(engine) {
   return value.slice(value.lastIndexOf('/') + 1);
 }
 
+// Every routed model is assumed available. One that is not falls back to what
+// its route records, else to Opus on the native route. Code reviewers default
+// to Fable instead: Opus writes the code they judge. A route already on its
+// default has nowhere further to go.
+const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5';
+const CODE_REVIEW_FALLBACK_MODEL = 'claude-fable-5-1';
+const CODE_REVIEW_ROLES = new Set(['diff-review', 'code-review', 'doubt-review']);
+
+export function effectiveFallback(role, route) {
+  if (route.fallback !== null) return route.fallback;
+  const model = CODE_REVIEW_ROLES.has(role) ? CODE_REVIEW_FALLBACK_MODEL : DEFAULT_FALLBACK_MODEL;
+  if (route.model === model) return null;
+  return Object.freeze({ model, baseUrl: null });
+}
+
 function routeFor(options, cwd) {
   const route = resolveRoute(options.role, cwd);
   if (route.error !== undefined || !options.fallback) return route;
-  if (route.fallback === null) {
+  const fallback = effectiveFallback(options.role, route);
+  if (fallback === null) {
     return {
       error: {
         code: 'ROUTE_FALLBACK_MISSING',
-        message: `${options.role}: --fallback given but its route records no >model`,
+        message: `${options.role}: --fallback given but its route already runs its default fallback model`,
       },
     };
   }
-  return { ...route, model: route.fallback.model, baseUrl: route.fallback.baseUrl };
+  return { ...route, model: fallback.model, baseUrl: fallback.baseUrl };
 }
 
 function dispatchOnce(options, cwd) {
@@ -999,7 +1015,7 @@ export function runDispatch(options) {
   const cwd = options.cwd ?? process.cwd();
   const primary = resolveRoute(options.role, cwd);
   const fallbackAvailable = primary.error === undefined
-    && primary.fallback !== null
+    && effectiveFallback(options.role, primary) !== null
     && options.model === undefined
     && hostName(options.engine ?? primary.engine ?? 'claude') === 'claude';
   let onFallback = options.fallback === true;
@@ -2255,14 +2271,26 @@ function selfTest() {
           && planReview.argv.includes('--model claude-opus-5-5') && planReview.url === null;
       })(),
     );
+    // Every model is assumed available; one that is not falls back to Opus
+    // when its route names nothing else. Opus has nowhere further to go.
     check(
-      '--fallback on a route without one fails typed, without spawning',
+      '--fallback on a route without one runs its default natively; on the default it fails typed',
       (() => {
+        const review = routedEnv('code-review', { fallback: true });
         const refused = runDispatch({
-          role: 'code-review', prompt: 'x', tools: reviewerTools, cwd: repoScratch,
+          role: 'implement', prompt: 'x', tools: 'Read', cwd: repoScratch,
           engine: join(shimDirectory, 'claude'), fallback: true,
         });
-        return refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING';
+        return review.result.fallback === true && review.result.model === 'claude-fable-5-1'
+          && review.argv.includes('--model claude-fable-5-1') && review.url === null
+          && refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING'
+          && effectiveFallback('plan', { model: 'gpt-6-astra', fallback: null })?.model === 'claude-opus-5-5'
+          && effectiveFallback('implement', { model: 'claude-opus-5-5', fallback: null }) === null
+          // Opus wrote the code a code reviewer judges: it never reviews it.
+          && ['diff-review', 'code-review', 'doubt-review'].every((role) =>
+            effectiveFallback(role, { model: 'gpt-6-astra', fallback: null })?.model === 'claude-fable-5-1')
+          && effectiveFallback('code-review', { model: 'claude-fable-5-1', fallback: null }) === null
+          && effectiveFallback('x', { model: 'x', fallback: { model: 'y', baseUrl: null } }).model === 'y';
       })(),
     );
     check(
@@ -2399,12 +2427,15 @@ function selfTest() {
       })(),
     );
     check(
-      'a usage limit with no fallback is flagged and never rerun on the same route',
+      'a usage limit on a route with no recorded fallback moves to its default; a pinned model is not rerouted',
       (() => {
-        const review = spawnsOf('code-review', limitedOnAstra);
+        const limitedReview = 'case "$*" in *gpt-6-astra*) '
+          + `printf 'You have hit your usage limit\\n' >&2; exit 1;; esac\n`
+          + resultEvent({ structured_output: PASSING_VERDICT });
+        const review = spawnsOf('code-review', limitedReview);
         const pinned = spawnsOf('plan', limitedOnAstra, { model: 'gpt-6-astra' });
-        return review.result.ok === false && review.spawns === 1
-          && review.result.error.usageLimit === true
+        return review.result.ok === true && review.spawns === 2
+          && review.result.model === 'claude-fable-5-1' && review.result.fallback === true
           // An explicit --model is the caller's choice; the tool does not reroute it.
           && pinned.result.ok === false && pinned.spawns === 1;
       })(),
@@ -2439,7 +2470,9 @@ function selfTest() {
         const { result, spawns } = spawnsOf('code-review', resultEvent({
           is_error: true, result: 'Claude AI usage limit reached|1760000000',
         }));
-        return result.ok === false && spawns === 1
+        // The limit moves it to the Fable default once; that attempt is refused
+        // the same way and is not accepted either.
+        return result.ok === false && spawns === 2 && result.fallback === undefined
           && result.error.code === 'ENGINE_RESULT_MISSING' && result.error.usageLimit === true;
       })(),
     );

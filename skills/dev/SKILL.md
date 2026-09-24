@@ -302,9 +302,13 @@ up-context never has to be remembered. The standing table — the operator's cho
 | 03 plan review | `plan-review` | `claude-fable-5-1` | native | `claude-opus-5-5` |
 | 05 implement | `implement` | `claude-opus-5-5` | native | none — park |
 | 06 simplify | `simplify` | `claude-fable-5-1` | native | `gpt-6-astra` (proxy) |
-| 07 diff review | `diff-review` | `gpt-6-astra` | proxy | none |
-| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | proxy | none |
+| 07 diff review | `diff-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` (default) |
+| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` (default) |
 | 08 fixes | `fix` | `claude-opus-5-5` | native | `gpt-6-astra` (proxy) |
+
+Every model is assumed available. A route with no recorded `>model` still has a fallback:
+`claude-opus-5-5`, or `claude-fable-5-1` for the code reviewers (07/08), because Opus wrote the code
+they judge. A route already on its default has none.
 
 **No artifact is judged by the model that wrote it** — that is the invariant the table carries:
 astra plans and Fable reviews the plan; Opus writes and fixes and Fable simplifies, and astra
@@ -395,7 +399,7 @@ reviewer's job is to find the case the author did not consider.
   and `doubt-review` hold no write tool, so `dispatch.mjs` reruns them itself: a transient failure
   (`ENGINE_EXIT_NONZERO`, `ENGINE_RESULT_MISSING`, `ENGINE_RESULT_EMPTY`, `DISPATCH_TIMEOUT`) is
   retried unchanged; two consecutive failures on a route, or one usage limit, move to the route's
-  fallback when it records one. Every attempt is a dispatch-log line with its `code`, and the final
+  fallback (the recorded one, else the default above). Every attempt is a dispatch-log line with its `code`, and the final
   result lists the earlier ones in `earlierAttempts` — so a failure that reaches you has ALREADY been
   retried: never re-dispatch it by hand; it is a probe-rule or park case. A success carrying
   `fallback: true` gets the collection-line note below.
@@ -403,9 +407,9 @@ reviewer's job is to find the case the author did not consider.
   **Usage-limit fallback for writers: `--fallback`, once per dispatch, per the table.** A writer
   failure with `error.usageLimit: true` is a resource refusal, not a defect: inspect the branch for
   effects as for any writer failure, then retry that dispatch ONCE, unchanged but for `--fallback`,
-  which runs the route's recorded `>model[@url]` — and note it on the step's collection line
-  (`simplify returned · GPT-6-ASTRA, CLAUDE-FABLE-5-1 at limit`). A route without a fallback fails
-  typed (`ROUTE_FALLBACK_MISSING`) instead of guessing. The table's choices are deliberate:
+  which runs the route's recorded `>model[@url]`, else its default — and note it on the step's collection line
+  (`simplify returned · GPT-6-ASTRA, CLAUDE-FABLE-5-1 at limit`). A route already on its default
+  fails typed (`ROUTE_FALLBACK_MISSING`) instead of guessing. The table's choices are deliberate:
   - plan-review falls back to Opus, **not** astra — astra wrote the plan;
   - simplify falls back to astra, never Opus, which wrote the code. astra then reviews its own
     simplify edits at 07/08 on that run — accepted by the operator, and the stamp records it; if
@@ -413,6 +417,7 @@ reviewer's job is to find the case the author did not consider.
     writer's model costs the guarantee);
   - fix falls back to astra — accepted: astra then judges its own fixes on those rounds, and the
     collection line says so;
+  - diff/code/doubt review fall back to Fable, never Opus, which wrote the code;
   - implement has no fallback: Opus at its limit parks the unit; so does a fallback at its limit.
     A park is recorded, never a close — see "Timed park" below.
   Never fall back for any other failure class, and never onto the writer's model for a reviewer.

@@ -12,9 +12,10 @@ Decisions (operator, 2026-09-24):
 - Setup's reconcile deletes the codex/opencode files it generated in target repositories, and only
   those. Anything it cannot prove it generated is reported and left alone.
 - Every model on the standing table is assumed available. When a route's model fails and the route
-  records no `>model`, the fallback is `claude-opus-5-5` on the native route. Opus is the default
-  fallback for every role whose route names none. A route whose own model is already Opus has no
-  fallback and parks as today.
+  records no `>model`, the fallback is `claude-opus-5-5` on the native route. The exception is the
+  code reviewers (`diff-review`, `code-review`, `doubt-review`), which default to `claude-fable-5-1`,
+  because Opus wrote the code they judge (operator, same day). A route already on its default has
+  no fallback and parks as today.
 
 ## Scope
 
