@@ -721,6 +721,16 @@ function recordDispatchWindow(cwd, entry) {
   }
 }
 
+// The checkout's branch, so a log entry can be tied to its unit afterwards.
+// null on a detached head or any read failure: accounting stays fail-open.
+function currentBranch(cwd) {
+  const result = spawnSync('git', ['branch', '--show-current'], {
+    cwd, encoding: 'utf8', timeout: 5000, windowsHide: true,
+  });
+  const branch = result.status === 0 ? String(result.stdout ?? '').trim() : '';
+  return branch === '' ? null : branch;
+}
+
 // What the writer is supposed to have moved: the committed history plus the
 // working tree. `null` means there is nothing to compare — the cwd is not a Git
 // work tree, or carries no commit yet — and this tool does not invent a
@@ -888,9 +898,11 @@ function dispatchOnce(options, cwd) {
     route: baseUrl === null ? 'native' : 'proxy',
     ...(options.fallback && route.error === undefined ? { fallback: true } : {}),
   };
+  const branch = currentBranch(cwd);
   recordDispatchWindow(cwd, {
     role: options.role,
     engine,
+    ...(branch === null ? {} : { branch }),
     ...(model === null ? {} : { model }),
     ...(effort === null ? {} : { effort }),
     startedAtMs: windowStartedAtMs,
@@ -2087,6 +2099,12 @@ function selfTest() {
       && logged.map(({ role, engine, ok }) => `${role}/${engine}/${ok}`).join(' ')
         === 'implement/claude/false implement/claude/true '
           + 'plan-review/codex/true implement/codex/false plan/codex/false',
+    );
+    // The branch ties a dispatch to its unit (a loop branch names its issue), so
+    // the run record can itemize a unit's dispatches from this log alone.
+    check(
+      'every dispatch log entry names the branch it ran on',
+      logged.length > 0 && logged.every(({ branch }) => branch === 'main'),
     );
 
     // 0.50.0 per-role routing (SPEC-model-routing.md). Each role resolves ONLY

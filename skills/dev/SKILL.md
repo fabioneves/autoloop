@@ -1835,6 +1835,10 @@ Post one issue run record via body file containing:
 - the `overlap:` line, verbatim from `node <plugin-tools>/overlap-report.mjs --eligible <e>`. It is
   computed from the dispatch log, never composed by hand — a hand-written one is what let overlap
   disappear for three releases unnoticed.
+- the timing block, verbatim from `node <plugin-tools>/stats.mjs --record --issue <N>`: active time
+  per step summed across every session, and under each step the dispatches that ran on the unit's
+  branch (role, model, effort, duration, failure code, fallback). It is read from the label
+  timeline and the dispatch log, so a unit's cost stays on GitHub after the session is gone.
 
 **End the run record with the outcome marker, composed by the tool — never hand-written:**
 

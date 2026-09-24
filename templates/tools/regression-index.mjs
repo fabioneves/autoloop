@@ -1408,6 +1408,24 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: '../../skills/shape/SKILL.md', anchor: 'Each criterion must also AGREE with what it cites' }),
     ]),
   }),
+  Object.freeze({
+    id: 'a-units-cost-left-with-the-session',
+    date: '2026-09-24',
+    symptom: 'Per-step timings lived in the session panel and the dispatch log was '
+      + 'machine-local with no issue on it, so a unit\'s cost could not be read back '
+      + 'from GitHub; the scoreboard also dropped plan, plan-review and every resumed '
+      + 'session (an issue with 2h57m of review across two sessions showed 1h51m).',
+    cause: 'Nothing wrote the numbers to the issue, and the scoreboard measures one '
+      + 'session from loop-started. Since 0.50.0 each dispatch logs its branch and '
+      + 'step 11 appends stats.mjs --record: active time per step across sessions, '
+      + 'with the dispatches under each step.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'stats.mjs', anchor: 'export function unitActiveTime(' }),
+      Object.freeze({ file: 'stats.mjs', anchor: 'export function timingRecord(' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'function currentBranch(cwd) {' }),
+      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '`node <plugin-tools>/stats.mjs --record --issue <N>`' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>
