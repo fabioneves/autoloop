@@ -17,6 +17,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { CLAIM_CONTRACT_FIXTURES, parseLoopBranchIssue, parseLoopClaim } from './claim-contract.mjs';
 import { resolveDispatchLogPath } from './dispatch.mjs';
+import { parseDispatchLog } from './overlap-report.mjs';
 import { parseOutcomeRecord, parseShapeRecord } from './sizing-contract.mjs';
 const STEP_KEYS = ['01-premise', '02-plan', '03-plan-review', '04-claim', '05-implement',
   '06-simplify', '07-diff-review', '08-code-review', '09-gate'];
@@ -163,24 +164,12 @@ const PRE_CLAIM_ROLES = new Set(['plan', 'plan-review']);
 /**
  * Pure. The dispatch-log lines that belong to this issue, oldest first: by the
  * `--issue` a dispatch was given, else by its loop branch for post-claim roles.
- * Parsed here, not through overlap-report.mjs, which runs its CLI on import. A
- * torn line from a concurrent append is skipped.
  */
 export function unitDispatches(logText, issue) {
-  const entries = [];
-  for (const line of String(logText ?? '').split('\n')) {
-    try {
-      entries.push(JSON.parse(line));
-    } catch {
-      // torn or blank line
-    }
-  }
-  return entries
-    .filter((entry) => typeof entry?.role === 'string'
-      && Number.isSafeInteger(entry.startedAtMs) && Number.isSafeInteger(entry.ms)
-      && (Number.isSafeInteger(entry.issue)
-        ? entry.issue === issue
-        : !PRE_CLAIM_ROLES.has(entry.role) && parseLoopBranchIssue(entry.branch) === issue))
+  return parseDispatchLog(logText)
+    .filter((entry) => (Number.isSafeInteger(entry.issue)
+      ? entry.issue === issue
+      : !PRE_CLAIM_ROLES.has(entry.role) && parseLoopBranchIssue(entry.branch) === issue))
     .sort((a, b) => a.startedAtMs - b.startedAtMs);
 }
 
