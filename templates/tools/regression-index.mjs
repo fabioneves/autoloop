@@ -110,11 +110,11 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'writeback-check.mjs',
-        anchor: 'function dispatchProcessInFlight(root) {',
+        anchor: 'function dispatchProcesses(root) {',
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
-        anchor: '?? dispatchProcessInFlight(ROOT);',
+        anchor: '?? (processes?.length > 0 ? `a dispatch process is running',
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
@@ -1427,6 +1427,33 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'stats.mjs', anchor: "const PRE_CLAIM_ROLES = new Set(['plan', 'plan-review']);" }),
       Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '`--issue <N>` names the unit on every dispatch' }),
       Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '`node <plugin-tools>/stats.mjs --record --issue <N>`' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'any-dispatch-excused-every-units-unpushed-work',
+    date: '2026-09-24',
+    symptom: 'The Stop hook demoted every stranded-commit hard block to a reminder '
+      + 'while ANY dispatch ran: a writer for unit A dying mid-push was excused by a '
+      + 'reviewer still running for unit B.',
+    cause: 'The in-flight signal was one repository-wide fact. The process table now '
+      + 'ties each dispatch to its unit by its worktree branch and its --issue, and '
+      + 'unpushed work is excused only by a dispatch for its own unit.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'export function unitDispatchEvidence(pr, processes) {' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'export function dispatchIssueFromCmdline(cmdline) {' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'overlap-report-blind-in-a-linked-worktree',
+    date: '2026-09-24',
+    symptom: 'overlap-report run from a linked worktree reported no dispatches, and '
+      + 'importing it ran its CLI, so stats.mjs kept a second copy of its parser.',
+    cause: 'It resolved the dispatch log with --git-path, which is per worktree; '
+      + 'dispatch.mjs writes the log in the common Git directory. It now uses '
+      + 'dispatch.mjs\'s resolver, and a main guard makes it importable.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'overlap-report.mjs', anchor: 'const logPath = resolveDispatchLogPath(root);' }),
+      Object.freeze({ file: 'overlap-report.mjs', anchor: 'if (isMain) main();' }),
     ]),
   }),
 ]);

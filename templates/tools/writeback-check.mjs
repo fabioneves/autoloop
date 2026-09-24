@@ -114,25 +114,60 @@ export function cwdWithinWorktrees(cwd, worktrees) {
     && (cwd === root || String(cwd).startsWith(`${root}/`)));
 }
 
-/** A dispatch process currently running for THIS repository, or null. The
+/** Pure: the branch of the innermost worktree holding `cwd`, or null. Innermost,
+ *  because agent worktrees nest inside the main checkout's directory. */
+export function worktreeBranchFor(cwd, worktrees) {
+  let best = null;
+  for (const worktree of worktrees ?? []) {
+    if (!cwdWithinWorktrees(cwd, [worktree.root])) continue;
+    if (best === null || worktree.root.length > best.root.length) best = worktree;
+  }
+  return best?.branch ?? null;
+}
+
+/** Pure: the unit a dispatch command line names with `--issue <N>`, or null.
+ *  `/proc/<pid>/cmdline` separates arguments with NUL. */
+export function dispatchIssueFromCmdline(cmdline) {
+  const args = String(cmdline ?? '').split('\0');
+  const index = args.indexOf('--issue');
+  return index >= 0 && /^[1-9]\d*$/u.test(args[index + 1] ?? '') ? Number(args[index + 1]) : null;
+}
+
+/** Pure: evidence that a dispatch for THIS PR's unit is running, or null. A
+ *  dispatch for another unit is not: a reviewer running for unit B says
+ *  nothing about unit A's stranded commits. */
+export function unitDispatchEvidence(pr, processes) {
+  const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
+  const own = (processes ?? []).find((process) =>
+    process.branch === pr.headRefName || (claim.valid && process.issue === claim.issue));
+  return own === undefined ? null : `a dispatch for this unit is running (pid ${own.pid})`;
+}
+
+/** The dispatch processes currently running for THIS repository, each with the
+ *  unit it can be tied to, or null where the process table cannot be read. The
  *  live-file mtime signal misses dispatches launched with an explicit
  *  `--live-file` outside the common dir — which is exactly how the skill's
  *  wrapper idiom launches them — and a live run answered three hard blocks in
  *  70 minutes with "the hook can't see the in-flight dispatch". The process
  *  table can: a dispatch wrapper or tool whose cwd sits inside one of this
- *  repository's worktrees is in-flight evidence no launch style hides.
+ *  repository's worktrees is in-flight evidence no launch style hides, and its
+ *  worktree's branch and its `--issue` name the unit it serves.
  *  Linux-only (/proc); anywhere it cannot look it returns null and the other
  *  signals decide, like every fail-open read in this hook. */
-function dispatchProcessInFlight(root) {
+function dispatchProcesses(root) {
   try {
-    const worktrees = execFileSync(
+    const worktrees = [];
+    for (const line of execFileSync(
       'git',
       ['-C', root, 'worktree', 'list', '--porcelain'],
       { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 },
-    )
-      .split('\n')
-      .filter((line) => line.startsWith('worktree '))
-      .map((line) => line.slice('worktree '.length));
+    ).split('\n')) {
+      if (line.startsWith('worktree ')) worktrees.push({ root: line.slice('worktree '.length), branch: null });
+      else if (line.startsWith('branch refs/heads/') && worktrees.length > 0) {
+        worktrees.at(-1).branch = line.slice('branch refs/heads/'.length);
+      }
+    }
+    const processes = [];
     for (const entry of readdirSync('/proc')) {
       if (!/^\d+$/u.test(entry)) continue;
       let cmdline;
@@ -148,12 +183,18 @@ function dispatchProcessInFlight(root) {
       } catch {
         continue;
       }
-      if (cwdWithinWorktrees(cwd, worktrees)) {
-        return `a dispatch process is running (pid ${entry})`;
+      if (cwdWithinWorktrees(cwd, worktrees.map((worktree) => worktree.root))) {
+        processes.push({
+          pid: Number(entry),
+          branch: worktreeBranchFor(cwd, worktrees),
+          issue: dispatchIssueFromCmdline(cmdline),
+        });
       }
     }
-  } catch { /* fail-open: the other in-flight signals decide */ }
-  return null;
+    return processes;
+  } catch {
+    return null; // fail-open: the other in-flight signals decide
+  }
 }
 
 /** Pure: classify PRs → { hard: string[], reminders: string[] } */
@@ -187,13 +228,14 @@ export function checkPrs(prs) {
  *  was softened in the first place. `unpushedFor` returns null when the
  *  comparison is unanswerable (branch absent locally, no remote ref yet); that
  *  is skipped rather than guessed at. */
-export function checkUnpushedLoopWork(prs, unpushedFor, dispatchInFlight = null) {
+export function checkUnpushedLoopWork(prs, unpushedFor, dispatchInFlightFor = () => null) {
   const hard = [];
   const reminders = [];
   for (const pr of prs ?? []) {
     if (!LOOP_BRANCH_RE.test(pr.headRefName ?? '')) continue;
     const ahead = unpushedFor(pr.headRefName);
     if (!Number.isSafeInteger(ahead) || ahead <= 0) continue;
+    const dispatchInFlight = dispatchInFlightFor(pr);
     if (dispatchInFlight !== null) {
       reminders.push(
         `PR #${pr.number} (${pr.headRefName}) has ${ahead} local-only commit(s) while `
@@ -555,7 +597,29 @@ function selfTest() {
   // A writer dispatch commits as it goes: while one is demonstrably running,
   // its local-only commits are work in progress, not a stranded unit, and a
   // hard block there pushed the orchestrator toward pushing half-done work.
-  const unpushedMidDispatch = checkUnpushedLoopWork(prs, unpushedFor, 'a dispatch stream is live');
+  const unpushedMidDispatch = checkUnpushedLoopWork(prs, unpushedFor, () => 'a dispatch stream is live');
+  // A dispatch excuses only its own unit's commits: a reviewer running for #1
+  // said nothing about #3's stranded work, yet it demoted #3's block.
+  const otherUnitRunning = checkUnpushedLoopWork(prs, unpushedFor,
+    (pr) => unitDispatchEvidence(pr, [{ pid: 41, branch: 'feat/gh-1-x', issue: 1 }]));
+  const ownBranchRunning = checkUnpushedLoopWork(prs, unpushedFor,
+    (pr) => unitDispatchEvidence(pr, [{ pid: 42, branch: 'fix/gh-3-z', issue: null }]));
+  const ownIssueRunning = checkUnpushedLoopWork(prs, unpushedFor,
+    (pr) => unitDispatchEvidence(pr, [{ pid: 43, branch: 'main', issue: 3 }]));
+  const keyedCases =
+    otherUnitRunning.hard.length === 1 && otherUnitRunning.hard[0].includes('#3') &&
+    otherUnitRunning.reminders.length === 0 &&
+    ownBranchRunning.hard.length === 0 && ownBranchRunning.reminders[0]?.includes('pid 42') === true &&
+    ownIssueRunning.hard.length === 0 && ownIssueRunning.reminders[0]?.includes('pid 43') === true &&
+    dispatchIssueFromCmdline(['node', 'dispatch.mjs', '--role', 'implement', '--issue', '342', ''].join('\0')) === 342 &&
+    dispatchIssueFromCmdline(['node', 'dispatch.mjs', '--issue', ''].join('\0')) === null &&
+    dispatchIssueFromCmdline(['node', 'dispatch.mjs', '--issue', '0'].join('\0')) === null &&
+    worktreeBranchFor('/repo/.claude/worktrees/a/src', [
+      { root: '/repo', branch: 'main' },
+      { root: '/repo/.claude/worktrees/a', branch: 'feat/gh-9-a' },
+    ]) === 'feat/gh-9-a' &&
+    worktreeBranchFor('/repo/src', [{ root: '/repo', branch: null }]) === null &&
+    worktreeBranchFor('/elsewhere', [{ root: '/repo', branch: 'main' }]) === null;
   // A human session in a loop repository is never the run's to block: with no
   // run open, every hard gap is still reported, as a reminder.
   const outsideRun = scopeToOpenRun(['gap one'], ['note'], false);
@@ -704,6 +768,7 @@ function selfTest() {
     unpushedMidDispatch.reminders[0].includes('#3') &&
     unpushedMidDispatch.reminders[0].includes('a dispatch stream is live') &&
     checkUnpushedLoopWork(prs, unpushedFor).reminders.length === 0 &&
+    keyedCases &&
     outsideRun.hard.length === 0 && outsideRun.reminders.length === 2 &&
     outsideRun.reminders[1].includes('gap one') && outsideRun.reminders[1].includes('no loop run is open') &&
     insideRun.hard.length === 1 && insideRun.reminders.length === 1 &&
@@ -780,9 +845,18 @@ function main() {
 
   const { hard, reminders } = checkPrs(prs);
   const nowMs = Date.now();
-  const streamAgeMs = dispatchStreamAgeMs(ROOT);
-  const dispatchInFlight = runInFlightEvidence([], streamAgeMs, nowMs) ?? dispatchProcessInFlight(ROOT);
-  const unpushed = checkUnpushedLoopWork(prs, unpushedCommitCount, dispatchInFlight);
+  const streamLive = runInFlightEvidence([], dispatchStreamAgeMs(ROOT), nowMs);
+  const processes = dispatchProcesses(ROOT);
+  const dispatchInFlight = streamLive
+    ?? (processes?.length > 0 ? `a dispatch process is running (pid ${processes[0].pid})` : null);
+  // Unpushed work is excused only by a dispatch for ITS unit. Where the process
+  // table is unreadable nothing ties a dispatch to a unit, and the unkeyed
+  // stream decides as it did before.
+  const unpushed = checkUnpushedLoopWork(
+    prs,
+    unpushedCommitCount,
+    processes === null ? () => streamLive : (pr) => unitDispatchEvidence(pr, processes),
+  );
   hard.push(...unpushed.hard);
   reminders.push(...unpushed.reminders);
   if (merged !== null && openIssues !== null) {
