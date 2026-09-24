@@ -49,11 +49,23 @@ park.
 
 ## Models and routes
 
-Each role runs on its own recorded route: engine, model, effort, and a fallback for usage limits.
-The standing table has `gpt-6-astra` (through a local proxy) plan and review, `claude-fable-5-1`
-review plans and simplify, and `claude-opus-5-5` implement and fix, so no artifact is judged by the
-model that wrote it. `/autoloop:dev with codex` sends the verdict roles to Codex; `with host` runs
-every role on the host default. Proxy URLs must be loopback.
+Each role runs on its own recorded route: model, effort, and a fallback used when the model hits a
+usage limit or keeps failing. Other models run through a local Claude Code proxy, whose URL must be
+loopback. The standing table:
+
+| Step | Role | Model | Route | Fallback |
+|---|---|---|---|---|
+| 02 plan | `plan` | `gpt-6-astra` | proxy | `claude-opus-5-5` |
+| 03 plan review | `plan-review` | `claude-fable-5-1` | native | `claude-opus-5-5` |
+| 05 implement | `implement` | `claude-opus-5-5` | native | none (the unit parks) |
+| 06 simplify | `simplify` | `claude-fable-5-1` | native | `gpt-6-astra` (proxy) |
+| 07 diff review | `diff-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` |
+| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` |
+| 08 fixes | `fix` | `claude-opus-5-5` | native | `gpt-6-astra` (proxy) |
+
+No artifact is judged by the model that wrote it. A route with no recorded fallback defaults to
+`claude-opus-5-5`, except the code reviewers, which default to `claude-fable-5-1` because Opus
+wrote the code they judge. `/autoloop:dev with host` runs every role on the host default.
 
 ## Guardrails
 
