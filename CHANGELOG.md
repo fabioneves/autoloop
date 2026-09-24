@@ -3,6 +3,38 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.51.0] - 2026-09-24
+
+Claude Code only. Autoloop no longer supports Codex CLI or opencode, as a host or as a dispatch
+engine. Other models, such as `gpt-6-astra`, run through a local Claude Code proxy route, which the
+routing table already supported. Every route now has a fallback.
+
+### Removed
+
+- **Codex CLI and opencode hosts.** Removed:
+  - the Codex plugin manifest and the Codex marketplace file;
+  - the Codex and opencode hook, reviewer-agent, config and plugin templates;
+  - the opencode smoke document;
+  - `adapter-contract.mjs`;
+  - every verify, release and lint check for them.
+- **The codex dispatch engine** and the `with codex` preset. `--engine codex`, a `review-engine`
+  recording naming codex, and a routes line naming it now fail typed (`ENGINE_REMOVED` or
+  `ROUTES_INVALID`) instead of running something else.
+
+### Changed
+
+- **Setup removes its own Codex and opencode files.** A reconcile deletes a `.codex/**` or
+  `.opencode/**` file only when its content matches a version setup generated, and the vendored
+  `tools/agentic/adapter-contract.mjs` as well. Any other copy is reported `stale-left` and kept;
+  opencode's own `node_modules` and package files are never touched. Run setup after updating and
+  commit the removal.
+- **Every route has a fallback.** When a model is unavailable and its route records no `>model`,
+  the dispatch falls back natively to `claude-opus-5-5`. The code reviewers (diff, code and doubt
+  review) fall back to `claude-fable-5-1` instead, because Opus wrote the code they judge. A route
+  already on its default has no fallback, so `implement` still parks.
+- The README carries the model and fallback table and describes the 0.50 loop: self-resolving
+  units, the `loop-digest` issue, and per-role routes.
+
 ## [0.50.1] - 2026-09-24
 
 Follow-ups from the 0.50.0 review.

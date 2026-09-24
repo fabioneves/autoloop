@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.50.1" src="https://img.shields.io/badge/release-v0.50.1-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.51.0" src="https://img.shields.io/badge/release-v0.51.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -131,7 +131,7 @@ it installed from its own marketplace, keep either copy.
 
 ## Configuration and merge policy
 
-v0.50.1 uses schema `0.26.0`. Policy lives in the JSON block of `docs/agentic/STATE.md`:
+v0.51.0 uses schema `0.26.0`. Policy lives in the JSON block of `docs/agentic/STATE.md`:
 `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and `caps`. The repository owns it;
 plugin updates never overwrite it.
 
@@ -162,7 +162,7 @@ kill switch stay enforced regardless.
 
 ## How it stays safe
 
-v0.50.1 dispatches every role through one call:
+v0.51.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>
