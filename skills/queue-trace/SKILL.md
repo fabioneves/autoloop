@@ -17,8 +17,7 @@ the spec, or any store. It complements `autoloop:shape` (spec → issues) and `a
 
 Read `docs/agentic/STATE.md` first — the Mission section lists the **authoritative spec, in
 order** (that is where the task packets and milestones live) plus the repo guidance files. If
-STATE is missing, stop — run `/autoloop:setup` (`$autoloop:setup` on Codex, the `setup` skill on
-opencode). Use the active host's interaction surface for any question; plain text is fine.
+STATE is missing, stop — run `/autoloop:setup`. Ask any question with `AskUserQuestion`; plain text is fine.
 
 ## Discover the conventions — never hardcode them
 

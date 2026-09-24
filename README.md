@@ -2,10 +2,9 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.50.1" src="https://img.shields.io/badge/release-v0.50.1-8b5cf6?style=flat-square"> <img alt="Claude Code, Codex CLI, and opencode" src="https://img.shields.io/badge/hosts-Claude_Code_%2B_Codex_CLI_%2B_opencode-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.51.0" src="https://img.shields.io/badge/release-v0.51.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
-Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code),
-[Codex CLI](https://developers.openai.com/codex/cli), or [opencode](https://opencode.ai). You
+Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
 reviewed, runs your full test gate, and marks a pull request ready. Then it takes the next issue.
 You merge.
@@ -49,11 +48,25 @@ park.
 
 ## Models and routes
 
-Each role runs on its own recorded route: engine, model, effort, and a fallback for usage limits.
-The standing table has `gpt-6-astra` (through a local proxy) plan and review, `claude-fable-5-1`
-review plans and simplify, and `claude-opus-5-5` implement and fix, so no artifact is judged by the
-model that wrote it. `/autoloop:dev with codex` sends the verdict roles to Codex; `with host` runs
-every role on the host default. Proxy URLs must be loopback.
+Each role runs on its own recorded route: model, effort, and a fallback used when the model hits a
+usage limit or keeps failing. Other models run through a local Claude Code proxy, whose URL must be
+loopback. The standing table:
+
+| Step | Role | Model | Route | Fallback |
+|---|---|---|---|---|
+| 02 plan | `plan` | `gpt-6-astra` | proxy | `claude-opus-5-5` |
+| 03 plan review | `plan-review` | `claude-fable-5-1` | native | `claude-opus-5-5` |
+| 05 implement | `implement` | `claude-opus-5-5` | native | none (the unit parks) |
+| 06 simplify | `simplify` | `claude-fable-5-1` | native | `gpt-6-astra` (proxy) |
+| 07 diff review | `diff-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` |
+| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` |
+| 08 fixes | `fix` | `claude-opus-5-5` | native | `gpt-6-astra` (proxy) |
+
+On the standing routes, no artifact is judged by the model that wrote it. A fallback can bend
+that for one run (for example, astra reviewing the simplify pass it covered for), and the run
+record says so. A route with no recorded fallback defaults to
+`claude-opus-5-5`, except the code reviewers, which default to `claude-fable-5-1` because Opus
+wrote the code they judge. `/autoloop:dev with host` runs every role on the host default.
 
 ## Guardrails
 
@@ -74,32 +87,14 @@ cannot widen permissions, change policy, or authorize protected changes.
 You need `gh` authenticated for the target repository, a POSIX shell, and one objective full gate
 command (tests, lint, build — ideally sandboxed with no credentials or network).
 
-**Claude Code**
-
 ```text
 /plugin marketplace add fabioneves/autoloop
 /plugin install autoloop@autoloop
 /autoloop:setup
 ```
 
-**Codex CLI** (0.145.0+)
-
-```bash
-codex plugin marketplace add fabioneves/autoloop
-codex plugin add autoloop@autoloop
-```
-
-Then start a fresh session in the target repo and run `$autoloop:setup`. For a private
-marketplace, run `gh auth setup-git` once.
-
-**opencode** (1.18.3+)
-
-```bash
-npx skills add fabioneves/autoloop -g
-```
-
-Then start a fresh session in the target repo and invoke the `setup` skill. opencode uses bare
-skill names (`setup`, `shape`, `dev`, `pitcrew`) instead of the `autoloop:` prefix.
+Other models (for example `gpt-6-astra`) run through a local Claude Code proxy; see
+[Models and routes](#models-and-routes).
 
 The plugin bundles [agent-skills](https://github.com/addyosmani/agent-skills). If you already have
 it installed from its own marketplace, keep either copy.
@@ -111,17 +106,16 @@ it installed from its own marketplace, keep either copy.
 2. Write one small issue with objective acceptance criteria — by hand, or from a spec with the
    `shape` skill.
 3. Read it, finish it, then apply `loop-ready` **last**.
-4. Run one supervised unit — `/autoloop:dev`, `$autoloop:dev`, or the `dev` skill — and tell it
+4. Run one supervised unit with `/autoloop:dev` and tell it
    to take ONE issue and stop.
 5. Review and merge the PR like a teammate's.
-6. Then pick a cadence. Claude Code can self-prompt:
+6. Then pick a cadence. Claude Code self-prompts:
 
    ```text
    /loop 30m /goal <the stop condition in docs/agentic/STATE.md>
    ```
 
-   Codex runs `$autoloop:dev` manually or on a desktop schedule; opencode runs from cron. A bare
-   `dev` invocation drains the whole eligible queue.
+   A bare `/autoloop:dev` drains the whole eligible queue.
 
 ## Skills
 
@@ -137,7 +131,7 @@ it installed from its own marketplace, keep either copy.
 
 ## Configuration and merge policy
 
-v0.50.1 uses schema `0.26.0`. Policy lives in the JSON block of `docs/agentic/STATE.md`:
+v0.51.0 uses schema `0.26.0`. Policy lives in the JSON block of `docs/agentic/STATE.md`:
 `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and `caps`. The repository owns it;
 plugin updates never overwrite it.
 
@@ -162,13 +156,13 @@ kill switch stay enforced regardless.
 | `docs/agentic/LESSONS.md` | Durable memory, seeded once, yours to edit. |
 | `docs/agentic/checklist.md` | Your review criteria. |
 | `tools/agentic/` | Vendored runtime: guards, dispatch, lifecycle driver, verification. Setup reconciles it; re-run setup after a plugin update. |
-| `.claude/settings.json`, `.codex/hooks.json`, `.opencode/` | Host hooks and the read-only reviewer agents. |
+| `.claude/settings.json` | Claude Code hooks. |
 | `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch. Never committed. |
 | Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked` / `loop-waiting` / `loop-obsolete`, the `loop-digest` issue; lifecycle markers, the frozen plan, and the run record. |
 
 ## How it stays safe
 
-v0.50.1 dispatches every role through one call:
+v0.51.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>

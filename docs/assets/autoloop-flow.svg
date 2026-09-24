@@ -143,9 +143,9 @@
   <g id="step-07" transform="translate(320 310)">
     <rect class="card" width="260" height="140" rx="9"/>
     <text x="16" y="29" class="step" fill="#15803d">07 DIFF-REVIEW</text>
-    <text x="16" y="59" class="card-title">Orchestrator</text>
-    <text x="16" y="88" class="copy">Plain: inspect and fix.</text>
-    <text x="16" y="110" class="copy">Codex: build/test handoff.</text>
+    <text x="16" y="59" class="card-title">Fresh reviewer</text>
+    <text x="16" y="88" class="copy">Diff vs invariants.</text>
+    <text x="16" y="110" class="copy">Fixes dispatched.</text>
   </g>
 
   <g id="step-08" transform="translate(30 310)">

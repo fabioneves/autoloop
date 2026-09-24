@@ -34,13 +34,7 @@ const SELF_TEST_PATTERN = /(?:async\s+)?function\s+selfTest\s*\(/;
 const TOOL_INSTALL_NAMES = Object.freeze({
   'auto-merge.reference.mjs': 'auto-merge.mjs',
 });
-// Self-tests whose evidence is bound to the surrounding root rather than the
-// tool's own bytes: adapter-contract validates THIS root's reviewer artifacts
-// (verify hands it --install-root), so byte-identity with the template proves
-// nothing about the install and it always self-tests live.
-const ROOT_BOUND_SELF_TESTS = Object.freeze(['adapter-contract.mjs']);
 export const UNIVERSAL_TOOL_FILES = Object.freeze([
-  'adapter-contract.mjs',
   'attestation-contract.mjs',
   'checkout-contract.mjs',
   'claim-contract.mjs',
@@ -91,18 +85,6 @@ const CLAUDE_HOOK_CONTRACT = Object.freeze({
   'subagent-transcript.mjs': Object.freeze({ event: 'SubagentStop', matcher: null }),
   'writeback-check.mjs': Object.freeze({ event: 'Stop', matcher: null }),
 });
-const CODEX_HOOK_CONTRACT = Object.freeze({
-  ...CLAUDE_HOOK_CONTRACT,
-  // Codex has no AskUserQuestion tool; its guard binding stays Bash-only.
-  'command-guard.mjs': Object.freeze({ event: 'PreToolUse', matcher: 'Bash' }),
-  'session-preflight.sh': Object.freeze({
-    event: 'SessionStart',
-    matcher: 'startup|resume|clear|compact',
-  }),
-});
-const OPENCODE_PLUGIN_TOOLS = Object.freeze([
-  ...Object.keys(CODEX_HOOK_CONTRACT),
-]);
 
 function run(executable, args, cwd) {
   const result = spawnSync(executable, args, {
@@ -144,22 +126,14 @@ function checkRetiredCiPolicy(root) {
     : { ok: true, detail: '' };
 }
 
-// The release contract reports pending live evidence as a typed note: it never
-// blocks contract verification and never passes `--release-mode`.
+// The release contract never passes `--release-mode` here.
 function checkReleaseContract(root) {
   const result = run(
     process.execPath,
     [resolve(root, 'templates', 'tools', 'release-verify.mjs'), '--check-root', root],
     root,
   );
-  if (!result.ok) return result;
-  const notes = result.detail
-    .split('\n')
-    .filter((line) => line.startsWith('note: '))
-    .map((line) => line.slice('note: '.length));
-  return notes.length === 0
-    ? { ok: true, detail: '' }
-    : { ok: true, note: true, detail: notes.join('; ') };
+  return result.ok ? { ok: true, detail: '' } : result;
 }
 
 function checkExists(path) {
@@ -260,44 +234,6 @@ function invokesVendoredTool(command, name) {
     return true;
   }
   return false;
-}
-
-function referencedPluginTools(text) {
-  const names = new Set();
-  for (const match of String(text).matchAll(
-    /\btool\(\s*["']([A-Za-z0-9][A-Za-z0-9._-]*)["']\s*\)/gu,
-  )) {
-    names.add(match[1]);
-  }
-  return names;
-}
-
-function validateToolReferences(
-  text,
-  toolsDir,
-  expected,
-  referenceExtractor,
-  requireExpected = true,
-) {
-  const references = referenceExtractor(text);
-  const errors = [];
-  if (String(text).includes('tools/agentic/') && references.size === 0) {
-    errors.push('contains an unparseable tools/agentic reference');
-  }
-  if (requireExpected || references.size > 0) {
-    for (const name of expected) {
-      if (!references.has(name)) errors.push(`missing configured tool reference ${name}`);
-    }
-  }
-  for (const name of references) {
-    if (!existsSync(resolve(toolsDir, name))) {
-      errors.push(`configured tool reference does not resolve: ${name}`);
-    }
-  }
-  return {
-    ok: errors.length === 0,
-    detail: errors.join('; '),
-  };
 }
 
 function plainObject(value) {
@@ -422,132 +358,6 @@ function inspectHookJson(source, toolsDir, contract, requireConfigured = false) 
   );
 }
 
-function tomlString(value) {
-  const trimmed = value.trim();
-  if (trimmed.length < 2) return null;
-  const quote = trimmed[0];
-  if (!['"', "'"].includes(quote) || trimmed.at(-1) !== quote) return null;
-  if (quote === "'" && trimmed.slice(1, -1).includes("'")) return null;
-  try {
-    return quote === '"' ? JSON.parse(trimmed) : trimmed.slice(1, -1);
-  } catch {
-    return null;
-  }
-}
-
-function inlineCodexBindings(source) {
-  const bindings = [];
-  const errors = [];
-  const groups = new Map();
-  let current = null;
-  const finishHandler = () => {
-    if (!current || current.kind !== 'handler') return;
-    if (current.type !== 'command' || current.commands.length === 0) {
-      errors.push(`${current.path}: expected a command handler`);
-    } else {
-      current.commands.forEach((command) => {
-        bindings.push({
-          event: current.event,
-          matcher: current.matcher,
-          command,
-        });
-      });
-    }
-  };
-  for (const [index, line] of String(source).split(/\r?\n/u).entries()) {
-    const trimmed = line.trim();
-    if (
-      current
-      && /^(?:command|commandWindows|command_windows)\s*=.*(?:'''|""")/u.test(trimmed)
-    ) {
-      errors.push(`${current.path}: multiline hook commands are unsupported`);
-    }
-    const section = /^\[\[hooks\.([A-Za-z][A-Za-z0-9]*)(\.hooks)?\]\]$/u.exec(trimmed);
-    if (section) {
-      finishHandler();
-      const event = section[1];
-      if (section[2]) {
-        const group = groups.get(event);
-        current = {
-          kind: 'handler',
-          event,
-          matcher: group?.matcher ?? null,
-          type: null,
-          commands: [],
-          path: `line ${index + 1}`,
-        };
-        if (!group) errors.push(`line ${index + 1}: hook handler has no matcher group`);
-      } else {
-        current = {
-          kind: 'group',
-          event,
-          matcher: null,
-          path: `line ${index + 1}`,
-        };
-        groups.set(event, current);
-      }
-      continue;
-    }
-    if (/^\[/u.test(trimmed)) {
-      finishHandler();
-      current = null;
-      continue;
-    }
-    if (!current || !trimmed || trimmed.startsWith('#')) continue;
-    const assignment = /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/u.exec(trimmed);
-    if (!assignment) continue;
-    const value = tomlString(assignment[2]);
-    if (value === null) {
-      errors.push(`${current.path}.${assignment[1]}: expected one quoted line`);
-      continue;
-    }
-    if (current.kind === 'group' && assignment[1] === 'matcher') {
-      current.matcher = value;
-    } else if (current.kind === 'handler' && assignment[1] === 'type') {
-      current.type = value;
-    } else if (
-      current.kind === 'handler'
-      && ['command', 'commandWindows', 'command_windows'].includes(assignment[1])
-    ) {
-      current.commands.push(value);
-    }
-  }
-  finishHandler();
-  return { bindings, errors };
-}
-
-function inspectCodexConfig(
-  source,
-  toolsDir,
-  siblingHooks,
-  requireConfigured = false,
-) {
-  const hasInlineHooks = /^\s*\[\[?hooks(?:[.\]])/mu.test(source);
-  if (hasInlineHooks && siblingHooks) {
-    return {
-      ok: false,
-      detail: 'inline Codex hooks and .codex/hooks.json coexist in one project layer',
-    };
-  }
-  if (!hasInlineHooks) {
-    return requireConfigured
-      ? { ok: false, detail: 'inline Codex hook tables are missing' }
-      : { ok: true, detail: '' };
-  }
-  const parsed = inlineCodexBindings(source);
-  if (parsed.bindings.length === 0 && parsed.errors.length === 0) {
-    parsed.errors.push('inline Codex hook tables are malformed or unsupported');
-  }
-  return validateHookBindings(
-    parsed.bindings,
-    source,
-    toolsDir,
-    CODEX_HOOK_CONTRACT,
-    requireConfigured,
-    parsed.errors,
-  );
-}
-
 function checkHookJson(path, toolsDir, contract, requireConfigured = false) {
   try {
     return inspectHookJson(
@@ -561,65 +371,6 @@ function checkHookJson(path, toolsDir, contract, requireConfigured = false) {
   }
 }
 
-function checkRequiredCodexEntrypoint(root, toolsDir) {
-  const hooksPath = resolve(root, '.codex', 'hooks.json');
-  const configPath = resolve(root, '.codex', 'config.toml');
-  const hasHooks = existsSync(hooksPath);
-  const hasConfig = existsSync(configPath);
-  if (!hasHooks && !hasConfig) {
-    return {
-      ok: false,
-      detail: 'Codex requires .codex/hooks.json or project-layer inline hooks',
-    };
-  }
-  if (hasHooks) {
-    const hooks = checkHookJson(
-      hooksPath,
-      toolsDir,
-      CODEX_HOOK_CONTRACT,
-      true,
-    );
-    if (!hooks.ok) return hooks;
-  }
-  if (hasConfig) {
-    try {
-      const config = inspectCodexConfig(
-        readFileSync(configPath, 'utf8'),
-        toolsDir,
-        hasHooks,
-        !hasHooks,
-      );
-      if (!config.ok) return config;
-    } catch (error) {
-      return { ok: false, detail: error.message };
-    }
-  }
-  return { ok: true, detail: '' };
-}
-
-function checkOpencodePlugin(path, toolsDir) {
-  try {
-    return validateToolReferences(
-      readFileSync(path, 'utf8'),
-      toolsDir,
-      OPENCODE_PLUGIN_TOOLS,
-      referencedPluginTools,
-      true,
-    );
-  } catch (error) {
-    return { ok: false, detail: error.message };
-  }
-}
-
-function checkRequiredOpencodeEntrypoint(root, toolsDir) {
-  const path = resolve(root, '.opencode', 'plugins', 'autoloop.js');
-  const present = checkExists(path);
-  if (!present.ok) return present;
-  const references = checkOpencodePlugin(path, toolsDir);
-  if (!references.ok) return references;
-  return run(process.execPath, ['--check', path], root);
-}
-
 function installedEntrypointChecks(root, toolsDir) {
   return [
     {
@@ -630,14 +381,6 @@ function installedEntrypointChecks(root, toolsDir) {
         CLAUDE_HOOK_CONTRACT,
         true,
       ),
-    },
-    {
-      name: 'required Codex prompt entrypoint',
-      execute: () => checkRequiredCodexEntrypoint(root, toolsDir),
-    },
-    {
-      name: 'required opencode prompt entrypoint',
-      execute: () => checkRequiredOpencodeEntrypoint(root, toolsDir),
     },
   ];
 }
@@ -666,7 +409,7 @@ function selfTestManifestTools(toolsDir) {
   const ownName = basename(fileURLToPath(import.meta.url));
   const tools = {};
   for (const name of readdirSync(toolsDir).filter((entry) => entry.endsWith('.mjs')).sort()) {
-    if (name === ownName || ROOT_BOUND_SELF_TESTS.includes(name)) continue;
+    if (name === ownName) continue;
     const source = readFileSync(join(toolsDir, name));
     if (!SELF_TEST_PATTERN.test(source.toString('utf8'))) continue;
     tools[TOOL_INSTALL_NAMES[name] ?? name] = createHash('sha256').update(source).digest('hex');
@@ -748,35 +491,9 @@ function pluginChecks(root) {
   const toolsDir = resolve(root, 'templates', 'tools');
   const checks = toolChecks(root, toolsDir, PLUGIN_TOOL_FILES, 'template');
 
-  checks.push({
-    name: 'syntax opencode plugin',
-    execute: () => run(
-      process.execPath,
-      ['--check', resolve(root, 'templates', 'opencode-plugin.template.js')],
-      root,
-    ),
-  });
-  checks.push({
-    name: 'self-test opencode plugin',
-    execute: () => run(
-      process.execPath,
-      [resolve(root, 'templates', 'opencode-plugin.test.mjs')],
-      root,
-    ),
-  });
-  checks.push({
-    name: 'opencode plugin tool references',
-    execute: () => checkOpencodePlugin(
-      resolve(root, 'templates', 'opencode-plugin.template.js'),
-      toolsDir,
-    ),
-  });
   for (const relativePath of [
-    '.agents/plugins/marketplace.json',
     '.claude-plugin/marketplace.json',
     '.claude-plugin/plugin.json',
-    '.codex-plugin/plugin.json',
-    'templates/opencode-config.template.json',
   ]) {
     checks.push({
       name: `json ${relativePath}`,
@@ -784,7 +501,6 @@ function pluginChecks(root) {
     });
   }
   for (const [relativePath, contract] of [
-    ['templates/codex-hooks.template.json', CODEX_HOOK_CONTRACT],
     ['templates/settings-hooks.template.json', CLAUDE_HOOK_CONTRACT],
   ]) {
     checks.push({
@@ -872,7 +588,7 @@ function toolChecks(root, toolsDir, requiredFiles, artifactMode, { full = false 
     const source = readFileSync(path);
     if (!SELF_TEST_PATTERN.test(source.toString('utf8'))) continue;
     let proven = false;
-    if (manifest !== null && !ROOT_BOUND_SELF_TESTS.includes(name)) {
+    if (manifest !== null) {
       try {
         proven = manifest[name] !== undefined
           && createHash('sha256').update(source).digest('hex') === manifest[name];
@@ -889,18 +605,7 @@ function toolChecks(root, toolsDir, requiredFiles, artifactMode, { full = false 
     }
     checks.push({
       name: `self-test ${name}`,
-      execute: () => run(
-        process.execPath,
-        name === 'adapter-contract.mjs'
-          ? [
-            path,
-            '--self-test',
-            artifactMode === 'template' ? '--template-root' : '--install-root',
-            root,
-          ]
-          : [path, '--self-test'],
-        root,
-      ),
+      execute: () => run(process.execPath, [path, '--self-test'], root),
     });
   }
   return checks;
@@ -927,17 +632,10 @@ function installChecks(root, { full = false } = {}) {
   }
   const requiredFiles = installedToolFiles(config);
   const checks = toolChecks(root, toolsDir, requiredFiles, 'install', { full });
-  for (const relativePath of [
-    '.codex/agents/autoloop-reviewer.toml',
-    '.opencode/agent/autoloop-reviewer.md',
-    'docs/agentic/LOOP.md',
-    '.opencode/opencode.json',
-  ]) {
-    checks.push({
-      name: `required artifact ${relativePath}`,
-      execute: () => checkExists(resolve(root, relativePath)),
-    });
-  }
+  checks.push({
+    name: 'required artifact docs/agentic/LOOP.md',
+    execute: () => checkExists(resolve(root, 'docs', 'agentic', 'LOOP.md')),
+  });
   checks.push({
     name: 'retired CI policy absent',
     execute: () => checkRetiredCiPolicy(root),
@@ -993,19 +691,6 @@ function installChecks(root, { full = false } = {}) {
       root,
     ),
   });
-  for (const relativePath of [
-    '.opencode/opencode.json',
-  ]) {
-    try {
-      readFileSync(resolve(root, relativePath));
-    } catch {
-      continue;
-    }
-    checks.push({
-      name: `json ${relativePath}`,
-      execute: () => checkJson(resolve(root, relativePath)),
-    });
-  }
   checks.push(...installedEntrypointChecks(root, toolsDir));
   return checks;
 }
@@ -1018,8 +703,11 @@ function selfTest() {
   const success = run(process.execPath, ['--version'], process.cwd());
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
   const toolsDir = resolve(fileURLToPath(new URL('.', import.meta.url)));
-  const hookInvocation = (name, path) =>
-    `${name.endsWith('.sh') ? 'bash' : 'node'} "${path}/${name}"`;
+  // The guard binding must fail closed, which only the shipped conditional
+  // shape expresses; a bare invocation of it is correctly rejected.
+  const hookInvocation = (name, path) => (name === 'command-guard.mjs'
+    ? `s="${path}/${name}"; if [ -f "$s" ]; then node "$s" || exit 2; else exit 2; fi`
+    : `${name.endsWith('.sh') ? 'bash' : 'node'} "${path}/${name}"`);
   const hookDocument = (contract) => {
     const hooks = {};
     for (const [name, binding] of Object.entries(contract)) {
@@ -1047,13 +735,6 @@ function selfTest() {
     }
     return JSON.stringify(document);
   };
-  const inlineHooks = (contract) => Object.entries(contract).map(([name, binding]) => [
-    `[[hooks.${binding.event}]]`,
-    ...(binding.matcher === null ? [] : [`matcher = "${binding.matcher}"`]),
-    `[[hooks.${binding.event}.hooks]]`,
-    'type = "command"',
-    `command = '${hookInvocation(name, 'tools/agentic')}'`,
-  ].join('\n')).join('\n');
   const partialHook = inspectHookJson(JSON.stringify({
     hooks: {
       PreToolUse: [{
@@ -1069,18 +750,6 @@ function selfTest() {
     hookDocument(CLAUDE_HOOK_CONTRACT),
     toolsDir,
     CLAUDE_HOOK_CONTRACT,
-    true,
-  );
-  const completeInlineCodex = inspectCodexConfig(
-    inlineHooks(CODEX_HOOK_CONTRACT),
-    toolsDir,
-    false,
-    true,
-  );
-  const duplicateCodex = inspectCodexConfig(
-    inlineHooks(CODEX_HOOK_CONTRACT),
-    toolsDir,
-    true,
     true,
   );
   const swappedEvent = inspectHookJson(JSON.stringify({
@@ -1121,26 +790,16 @@ function selfTest() {
     CLAUDE_HOOK_CONTRACT,
     true,
   );
-  const multilineInline = inspectCodexConfig(
-    '[[hooks.PreToolUse]]\nmatcher = "Bash"\n'
-    + '[[hooks.PreToolUse.hooks]]\ntype = "command"\n'
-    + 'command = """node tools/agentic/command-guard.mjs\n"""',
-    toolsDir,
-    false,
-    true,
-  );
-  const malformedInline = inspectCodexConfig(
-    '[hooks]\nenabled = true\n',
-    toolsDir,
-    false,
-    false,
-  );
-  const missingReference = validateToolReferences(
-    'node "$ROOT/tools/agentic/not-installed.mjs"',
-    toolsDir,
-    [],
-    referencedVendoredTools,
-  );
+  const missingReference = inspectHookJson(JSON.stringify({
+    hooks: {
+      Stop: [{
+        hooks: [{
+          type: 'command',
+          command: 'node "$ROOT/tools/agentic/not-installed.mjs"',
+        }],
+      }],
+    },
+  }), toolsDir, CLAUDE_HOOK_CONTRACT, false);
   const invalidClaudeHook = (name, command) => inspectHookJson(
     hookDocumentWithCommand(CLAUDE_HOOK_CONTRACT, name, command),
     toolsDir,
@@ -1184,42 +843,11 @@ function selfTest() {
   const entrypointRoot = mkdtempSync(join(tmpdir(), 'autoloop-entrypoints-'));
   let completeEntrypoints;
   let disabledClaudeEntrypoint;
-  let missingCodexEntrypoint;
-  let missingOpencodeEntrypoint;
   try {
     mkdirSync(resolve(entrypointRoot, '.claude'), { recursive: true });
-    mkdirSync(resolve(entrypointRoot, '.codex'), { recursive: true });
-    mkdirSync(
-      resolve(entrypointRoot, '.opencode', 'plugins'),
-      { recursive: true },
-    );
     writeFileSync(
       resolve(entrypointRoot, '.claude', 'settings.json'),
       hookDocument(CLAUDE_HOOK_CONTRACT),
-    );
-    writeFileSync(
-      resolve(entrypointRoot, '.codex', 'hooks.json'),
-      hookDocument(CODEX_HOOK_CONTRACT),
-    );
-    // In the plugin repo the template sits beside tools/; in an install root it
-    // does not exist, but scaffold vendors a byte-identical copy at
-    // .opencode/plugins/autoloop.js — use whichever is present so the vendored
-    // self-test runs everywhere instead of crashing on the plugin-repo path.
-    const opencodePluginSources = [
-      resolve(toolsDir, '..', 'opencode-plugin.template.js'),
-      resolve(toolsDir, '..', '..', '.opencode', 'plugins', 'autoloop.js'),
-    ];
-    const opencodePluginSource = opencodePluginSources.find((path) =>
-      existsSync(path));
-    if (!opencodePluginSource) {
-      throw new Error(
-        'opencode plugin source not found; looked at: '
-        + opencodePluginSources.join(', '),
-      );
-    }
-    writeFileSync(
-      resolve(entrypointRoot, '.opencode', 'plugins', 'autoloop.js'),
-      readFileSync(opencodePluginSource),
     );
     completeEntrypoints = installedEntrypointChecks(
       entrypointRoot,
@@ -1234,33 +862,6 @@ function selfTest() {
       toolsDir,
     ).some((check) =>
       check.name === 'required Claude prompt entrypoint'
-      && !check.execute().ok);
-    writeFileSync(
-      resolve(entrypointRoot, '.claude', 'settings.json'),
-      hookDocument(CLAUDE_HOOK_CONTRACT),
-    );
-    rmSync(resolve(entrypointRoot, '.codex', 'hooks.json'));
-    writeFileSync(
-      resolve(entrypointRoot, '.codex', 'config.toml'),
-      '[project]\nname = "no-hooks"\n',
-    );
-    missingCodexEntrypoint = installedEntrypointChecks(
-      entrypointRoot,
-      toolsDir,
-    ).some((check) =>
-      check.name === 'required Codex prompt entrypoint'
-      && !check.execute().ok);
-    rmSync(resolve(entrypointRoot, '.codex', 'config.toml'));
-    writeFileSync(
-      resolve(entrypointRoot, '.codex', 'hooks.json'),
-      hookDocument(CODEX_HOOK_CONTRACT),
-    );
-    rmSync(resolve(entrypointRoot, '.opencode', 'plugins', 'autoloop.js'));
-    missingOpencodeEntrypoint = installedEntrypointChecks(
-      entrypointRoot,
-      toolsDir,
-    ).some((check) =>
-      check.name === 'required opencode prompt entrypoint'
       && !check.execute().ok);
   } finally {
     rmSync(entrypointRoot, { recursive: true, force: true });
@@ -1337,15 +938,11 @@ function selfTest() {
     ['structured command failure', !failure.ok && failure.detail.length > 0],
     ['invalid JSON is rejected', checkJson(fileURLToPath(import.meta.url)).ok === false],
     ['complete JSON hook wiring resolves', completeHook.ok],
-    ['complete inline Codex hook wiring resolves', completeInlineCodex.ok],
     ['partial hook wiring is rejected', !partialHook.ok],
     ['swapped hook event is rejected', !swappedEvent.ok],
     ['matcher on an unfiltered event is rejected', !matcherOnUnmatchedEvent.ok],
     ['references outside hook handlers are rejected', !bogusNesting.ok],
     ['empty required hook artifact is rejected', !emptyRequiredHooks.ok],
-    ['multiline inline Codex hook command is rejected', !multilineInline.ok],
-    ['malformed inline Codex hook tables are rejected', !malformedInline.ok],
-    ['duplicate Codex hook representations are rejected', !duplicateCodex.ok],
     ['missing vendored hook target is rejected', !missingReference.ok],
     ['text-only hook references are rejected', !inertEchoHook.ok],
     ['short-circuited hook commands are rejected', !shortCircuitedHook.ok],
@@ -1364,8 +961,6 @@ function selfTest() {
     ['manual installs include the lifecycle driver', manualTools.includes('lifecycle-driver.mjs')],
     ['complete host prompt entrypoints pass', completeEntrypoints],
     ['disabled Claude prompt entrypoint fails closed', disabledClaudeEntrypoint],
-    ['missing Codex prompt entrypoint fails closed', missingCodexEntrypoint],
-    ['missing opencode prompt entrypoint fails closed', missingOpencodeEntrypoint],
     ['release-proven identical tool skips its spawn', provenSkips],
     ['release-proven fast path keeps the syntax check', provenSyntaxKept],
     ['--full forces a release-proven tool to self-test live', fullFlagSpawns],
@@ -1438,11 +1033,7 @@ function main() {
     // itself instead of the log stalling on the previous check's PASS line.
     const timing = elapsedMs >= 1000 ? ` (${(elapsedMs / 1000).toFixed(1)}s)` : '';
     if (result.ok) {
-      console.log(
-        result.note
-          ? `NOTE ${check.name}: ${result.detail}`
-          : `PASS ${check.name}${timing}`,
-      );
+      console.log(`PASS ${check.name}${timing}`);
       // A passing child's stdout is otherwise discarded, which swallowed the
       // self-tests' diagnostic attribution — surface every such line.
       for (const line of result.detail?.match(/^(?:slow checks|matrix phases): .+$/gmu) ?? []) {

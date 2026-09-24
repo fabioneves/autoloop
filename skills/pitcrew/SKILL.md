@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.50.1 · starting
+∞ pitcrew · v0.51.0 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -83,7 +83,7 @@ node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|code-review|
 `implement` is the only writing posture (`Bash,Edit,Glob,Grep,Read,Write`); every review role is
 read-only (`Glob,Grep,Read`) and can never receive a write tool. Review roles return a validated
 `{verdict,findings,rebuts}` or fail typed. Failure is `{ok:false, step, error}` with the child's
-stderr preserved — there are no retries and no fallback engine. Write prompts to a file; never
+stderr preserved, after the tool's own retries and fallback (see Dev). Write prompts to a file; never
 inline untrusted review text into a shell command.
 
 Print:

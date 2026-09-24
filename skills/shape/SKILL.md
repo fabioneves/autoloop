@@ -103,10 +103,9 @@ guardrail), and shape output is a proposal until a human reads and labels it.
 
 Read `docs/agentic/STATE.md` first (caps, invariants, escalate-list, hard-defers), then every
 applicable repo guidance file (`AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md`) and the module map they identify. If
-STATE is missing, stop — run `/autoloop:setup` on Claude Code, `$autoloop:setup` on Codex, or the `setup` skill on opencode.
+STATE is missing, stop — run `/autoloop:setup`.
 
-Use the active host's interaction surface: `AskUserQuestion` on Claude Code; opencode's structured question tool; Codex's structured
-input tool when surfaced, otherwise one concise plain-text question per turn. Optional Addy skills
+Ask with `AskUserQuestion`, otherwise one concise plain-text question per turn. Optional Addy skills
 may be namespaced (`agent-skills:<name>`) or installed directly; resolve them from available skill
 metadata and use the host's normal skill invocation syntax. Their absence never blocks the inline
 workflow below.

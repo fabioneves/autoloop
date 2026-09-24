@@ -83,23 +83,6 @@ export function createRenderer() {
         return [`■ done · ${event.subtype ?? 'result'}`];
       }
 
-      // codex exec --json
-      if (event.type === 'item.completed' || event.type === 'item.updated') {
-        const item = event.item ?? {};
-        if (item.type === 'reasoning') return ['⋯ reasoning'];
-        if (item.type === 'command_execution') {
-          return [`→ $ ${compact(item.command ?? '', 140)}`];
-        }
-        if (item.type === 'agent_message') {
-          return textLines(item.text ?? '', '│ ');
-        }
-        return [`· ${item.type ?? event.type}`];
-      }
-      if (event.type === 'turn.completed') {
-        const used = event.usage?.output_tokens;
-        return [`■ turn done${Number.isFinite(used) ? ` · ${used} out tok` : ''}`];
-      }
-      if (event.type === 'thread.started') return ['■ engine up'];
       if (event.type === 'error') return [`✖ ${compact(event.message ?? event, 200)}`];
 
       const label = [event.type, event.subtype].filter(Boolean).join('/');
@@ -129,12 +112,6 @@ function selfTest() {
       message: { content: [{ type: 'tool_use', name: 'Read', input: { file: '/x.go' } }] },
     })[0].startsWith('→ Read'),
     ],
-    ['codex command execution renders', feed({
-      type: 'item.completed', item: { type: 'command_execution', command: 'rg -n foo' },
-    }).join('') === '→ $ rg -n foo'],
-    ['codex agent message renders text', feed({
-      type: 'item.completed', item: { type: 'agent_message', text: 'verdict: fail' },
-    }).join('') === '│ verdict: fail'],
     ['terminal result renders', feed({ type: 'result', subtype: 'success' }).join('') === '■ done · success'],
     ['unknown typed events degrade to a marker', feed({ type: 'stream_event', subtype: 'x' }).join('') === '· stream_event/x'],
     ['non-JSON garbage passes through truncated', render('not json at all')[0] === '· not json at all'],

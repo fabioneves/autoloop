@@ -47,10 +47,7 @@
 // never wedge a session. --self-test runs the pure-function fixtures.
 //
 // Host contract: the wire shape (stdin `stop_hook_active`, stdout `{systemMessage}`) is Claude
-// Code's Stop-hook contract. Codex's hooks feature deliberately mirrors Claude's (verified for
-// tool naming in codex-rs hook_names.rs @ 0.144.5); `stop_hook_active` mirroring is assumed,
-// not verified — if a Codex session ever re-blocks the same Stop repeatedly, this assumption
-// broke and the guard should be re-verified against the Codex hooks docs.
+// Code's Stop-hook contract.
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';

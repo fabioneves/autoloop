@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Run Autoloop's forward GitHub issue-to-PR workflow from Claude Code, Codex CLI, or opencode. One prime call, one dispatch call per role, no routing to choose.
+description: Run Autoloop's forward GitHub issue-to-PR workflow from Claude Code. One prime call, one dispatch call per role, no routing to choose.
 ---
 
 # autoloop:dev — forward path
@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.50.1 · starting
+∞ dev · v0.51.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -284,7 +284,6 @@ redirect into it is a permission-classifier gate that has halted live runs:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --record-routes --preset proxy --proxy-url http://127.0.0.1:18765  # standing
-node <plugin-tools>/dispatch.mjs --record-routes --preset codex    # /autoloop:dev with codex
 node <plugin-tools>/dispatch.mjs --record-routes --preset host     # /autoloop:dev with host
 ```
 
@@ -302,16 +301,20 @@ up-context never has to be remembered. The standing table — the operator's cho
 | 03 plan review | `plan-review` | `claude-fable-5-1` | native | `claude-opus-5-5` |
 | 05 implement | `implement` | `claude-opus-5-5` | native | none — park |
 | 06 simplify | `simplify` | `claude-fable-5-1` | native | `gpt-6-astra` (proxy) |
-| 07 diff review | `diff-review` | `gpt-6-astra` | proxy | none |
-| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | proxy | none |
+| 07 diff review | `diff-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` (default) |
+| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` (default) |
 | 08 fixes | `fix` | `claude-opus-5-5` | native | `gpt-6-astra` (proxy) |
+
+Every model is assumed available. A route with no recorded `>model` still has a fallback:
+`claude-opus-5-5`, or `claude-fable-5-1` for the code reviewers (07/08), because Opus wrote the code
+they judge. A route already on its default has none.
 
 **No artifact is judged by the model that wrote it** — that is the invariant the table carries:
 astra plans and Fable reviews the plan; Opus writes and fixes and Fable simplifies, and astra
 reviews both at 07 and 08. A proxied route gets its own `@<url>` injected as
 `ANTHROPIC_BASE_URL`; a native route gets none, and a session-wide one is stripped from it (the
 proxy never serves Claude models):
-the session's own environment is not a prerequisite and not evidence. `with codex` sends every verdict role to `codex` and leaves every writer on the host;
+the session's own environment is not a prerequisite and not evidence.
 `with host` records an empty table, so every role runs on the host default and a previous
 session's routes cannot leak forward. The legacy `review-engine` recording is read only when no
 routes file exists.
@@ -332,24 +335,13 @@ itself).
 
 The run frame's queue row reads `reviews GPT-6-ASTRA (proxy)`, and every ribbon carries the
 model in the host slot — `[GPT-6-ASTRA]`, `[CLAUDE-OPUS-5-5]` — since the engine name alone would
-lie about who judged. Trade-off vs `with codex`, stated plainly: the reviewer's read-only posture
-is the tool ceiling, not an OS sandbox. Cross-MODEL review is the invariant, whichever harness
-carries it.
+lie about who judged. The reviewer's read-only posture is the tool ceiling, not an OS sandbox.
+Cross-MODEL review is the invariant.
 
 Why a second model is worth asking for: a fresh process gives identity separation, not cognitive separation.
 A reviewer on the writer's own model inherits its priors and misses what it missed. A different
-model does not. The cost is another CLI to install and authenticate, which is why this is a
-choice rather than an assumption — an absent codex must never break a run that asked for nothing
-unusual.
-
-Under `with codex` the reviewer runs `--sandbox read-only`, an OS-enforced boundary rather than a
-tool allowlist, so the read-only posture is strictly stronger there. Its verdict arrives in codex's
-`--output-last-message` file and is validated against the same schema as any other. Codex refuses
-any authoring role outright rather than approximating one — `implement` because it would need a
-writable sandbox, `plan` because authoring the plan on the review engine inverts the role split
-this loop is built on — and if `codex` is absent the review
-dispatch fails typed rather than falling back to the host — having asked for a second opinion,
-silently getting the first one back is worse than a refusal.
+model does not. Every model reaches the loop through Claude Code: other vendors' models run on a
+proxied route, never a second CLI.
 
 **Frame review prompts adversarially.** A different model is only worth its cost if it is asked to
 disagree. Plan review and code review both challenge the approach — the assumptions it depends on,
@@ -366,8 +358,9 @@ reviewer's job is to find the case the author did not consider.
   is a usage error, not a silently dropped entry.
 - Review roles return a structured verdict `{verdict,findings,rebuts}`, parsed and validated, or
   fail typed. `implement` returns the writer's terminal text.
-- Failure is always `{ok:false, step, error}` with the child's stderr preserved. There are no
-  retries and no fallback engine: a failed dispatch is a decision for the orchestrator.
+- Failure is always `{ok:false, step, error}` with the child's stderr preserved. A failure that
+  reaches you has already been through the tool's own retries and fallback (below); what is left
+  is a decision for the orchestrator.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
 - **The payload field is named by the role, and there are exactly three.** A success is
@@ -388,14 +381,13 @@ reviewer's job is to find the case the author did not consider.
   `fallback: true` when the fallback ran, and the dispatch log records the same — so the record
   says who actually judged or wrote. `--model <name>` still overrides one dispatch; it never
   borrows the route's URL for a different model. **Model names are ENGINE vocabulary**: explicit
-  IDs (`claude-opus-5-5`, `claude-fable-5-1`) for claude, never an alias that can move under a
-  step; codex's models are set in its own config.
+  IDs (`claude-opus-5-5`, `claude-fable-5-1`), never an alias that can move under a step.
 
   **Effect-free roles heal inside the tool.** `plan`, `plan-review`, `diff-review`, `code-review`
   and `doubt-review` hold no write tool, so `dispatch.mjs` reruns them itself: a transient failure
   (`ENGINE_EXIT_NONZERO`, `ENGINE_RESULT_MISSING`, `ENGINE_RESULT_EMPTY`, `DISPATCH_TIMEOUT`) is
   retried unchanged; two consecutive failures on a route, or one usage limit, move to the route's
-  fallback when it records one. Every attempt is a dispatch-log line with its `code`, and the final
+  fallback (the recorded one, else the default above). Every attempt is a dispatch-log line with its `code`, and the final
   result lists the earlier ones in `earlierAttempts` — so a failure that reaches you has ALREADY been
   retried: never re-dispatch it by hand; it is a probe-rule or park case. A success carrying
   `fallback: true` gets the collection-line note below.
@@ -403,9 +395,9 @@ reviewer's job is to find the case the author did not consider.
   **Usage-limit fallback for writers: `--fallback`, once per dispatch, per the table.** A writer
   failure with `error.usageLimit: true` is a resource refusal, not a defect: inspect the branch for
   effects as for any writer failure, then retry that dispatch ONCE, unchanged but for `--fallback`,
-  which runs the route's recorded `>model[@url]` — and note it on the step's collection line
-  (`simplify returned · GPT-6-ASTRA, CLAUDE-FABLE-5-1 at limit`). A route without a fallback fails
-  typed (`ROUTE_FALLBACK_MISSING`) instead of guessing. The table's choices are deliberate:
+  which runs the route's recorded `>model[@url]`, else its default — and note it on the step's collection line
+  (`simplify returned · GPT-6-ASTRA, CLAUDE-FABLE-5-1 at limit`). A route already on its default
+  fails typed (`ROUTE_FALLBACK_MISSING`) instead of guessing. The table's choices are deliberate:
   - plan-review falls back to Opus, **not** astra — astra wrote the plan;
   - simplify falls back to astra, never Opus, which wrote the code. astra then reviews its own
     simplify edits at 07/08 on that run — accepted by the operator, and the stamp records it; if
@@ -413,9 +405,12 @@ reviewer's job is to find the case the author did not consider.
     writer's model costs the guarantee);
   - fix falls back to astra — accepted: astra then judges its own fixes on those rounds, and the
     collection line says so;
+  - diff/code/doubt review fall back to Fable, never Opus, which wrote the code. Fable then
+    judges its own simplify edits on that run — accepted, and the stamp records it;
   - implement has no fallback: Opus at its limit parks the unit; so does a fallback at its limit.
     A park is recorded, never a close — see "Timed park" below.
-  Never fall back for any other failure class, and never onto the writer's model for a reviewer.
+  Never fall back for any other failure class, and never onto Opus for a reviewer of the code
+  Opus wrote.
   A proxy that does not answer the probe is not a usage limit: block the unit (probe rule).
 
   Premise, finding verification, and disposition are IN-SESSION work and carry no `--model`
@@ -451,8 +446,7 @@ reviewer's job is to find the case the author did not consider.
   mean re-dispatch; both messages now name the field, the reason, and for a title the exact
   character and codepoint.
 
-- `--effort <low|medium|high|xhigh|max>` pins the dispatch's reasoning depth — `--effort` on
-  claude, the `model_reasoning_effort` config override on codex, one flag either way — and is
+- `--effort <low|medium|high|xhigh|max>` pins the dispatch's reasoning depth and is
   stamped into the typed result and the dispatch log beside engine and model. **Reviews run
   `xhigh`**: a review round costs a wall-clock dispatch either way, and depth spent there is
   rounds not spent later; the recording carries it as a `!<level>` token so every reviewer
@@ -472,7 +466,7 @@ in this section describes it from that point on.)
 ```bash
 bash <plugin-tools>/dispatch-stream.sh \
   <scratchpad>/live/<issue>-<role>-r<N>.jsonl <scratchpad>/<role>-result.json \
-  --role <role> --prompt-file <path> --issue <N> [--engine codex] [--tools <csv>]
+  --role <role> --prompt-file <path> --issue <N> [--tools <csv>]
 ```
 
 **A backgrounded dispatch carries no host timeout.** `dispatch.mjs` holds its own ceilings — 120
@@ -482,7 +476,7 @@ and the ten-minute ceiling killed a reviewer 48 tool calls deep with 462 KB of s
 verdict, on a unit whose earlier rounds had each run 12-16 minutes.
 
 One background task per dispatch, engine events flowing in its own view for the whole run, exit
-code propagated — a 13-minute codex review is a window, not a sealed box. Collect the typed
+code propagated — a 13-minute review is a window, not a sealed box. Collect the typed
 result from the output file, never by parsing the stream. Only a dispatch expected to finish in
 under a minute may skip the wrapper and run `dispatch.mjs` directly.
 - Every result reports `ms` (the dispatch), `startupMs` (this tool's own overhead before the
@@ -554,7 +548,7 @@ eligible issue through its read-only steps 1–3: premise-check and plan against
 then its plan-review dispatch. Read the committed tree (`git show`, `git grep`) and never the
 working tree, which the in-flight unit's writer owns.
 
-One idiom on every host:
+One idiom:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role implement --prompt-file <p> --issue <N> \
@@ -763,7 +757,7 @@ tools and has no instructions for them half-mirrors, which reads worse than not 
   visual group, then the ribbon core with the executor
   slot — MODEL-ONLY in task subjects: `[CLAUDE-OPUS-5-5]`, not `[CLAUDE:OPUS]` (the panel is narrow; the
   engine still rides the ribbon and the stamped result, and a dispatch with no pinned model
-  falls back to the engine name, `[CODEX]`). So: `∞ #149 — 05 IMPLEMENT [CLAUDE-OPUS-5-5]`; `activeForm`
+  falls back to the engine name, `[CLAUDE]`). So: `∞ #149 — 05 IMPLEMENT [CLAUDE-OPUS-5-5]`; `activeForm`
   says what the spinner should read while it runs (`Implementing #149 on CLAUDE-OPUS-5-5`,
   `Reviewing #149 r1 on GPT-6-ASTRA`). Round-scoped steps use one task per round, and EVERY
   dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
@@ -844,7 +838,7 @@ issue title still reaches the operator at the selection ribbon and the closing r
 defect.** Newer harnesses DEFER it: `ToolSearch("select:PushNotification")` loads it in one call.
 Run that load once at run open, beside the panel probe. The terminal notifications —
 `✔ #<N> PR #<P> ready for your merge · <elapsed>` on delivered, `✖ #<N> blocked — <reason gate>`
-on blocked — are due on every host that can load the tool; only a host that genuinely cannot may
+on blocked — are due whenever the tool loads; only a session that genuinely cannot load it may
 say so, once, on the unit's closing rail. A live run wrote "surfaces DO NOT EXIST in this
 session" into its own handoff summary and dropped every delivery notification while a working
 tool sat one ToolSearch away: the roster names what is LOADED, not what exists.
@@ -1270,16 +1264,6 @@ Verify and disposition its findings exactly like step 8's; fixes go to one `--ro
 dispatch carrying every verified finding. The orchestrator does not edit the checkout during
 step 7 itself. The fresh reviewer in step 8 covers those fixes.
 
-**`with codex`:** step 7 is a slim handoff check only — build and tests green
-(`cfg.gate.quickCommand` when configured), nothing else — and it runs **concurrently with the
-round-1 dispatch**, not before it: reviewers hold no Bash, so the review does not depend on the
-tests having finished. Fire the quick gate in the background, dispatch r1 immediately, and if
-the quick gate fails, discard the r1 verdict, fix, and redo both. The
-five-axis pass moves to the END, where it reviews what actually ships: mid-pipeline it reads the
-pre-review artifact, and every fix round lands after it unseen. A live unit proved both halves —
-the mid-pipeline pass did not prevent codex finding two Majors an hour later, and the one Major
-the orchestrator did catch came from a full-artifact look at the delivery head.
-
 There is no separate five-axis dispatch. Its job is done by a scope rule instead:
 **convergence may only close on a full-artifact round** — enforced by the contract since 0.49.58,
 which returns `REVIEW_FULL_CLOSE_REQUIRED` rather than `REVIEW_CLEAN` for a clean delta round. And close optimistically: after a fix
@@ -1298,8 +1282,8 @@ file — and that budgeted round closed the same unit cleanly on the next dispat
 
 The active ingredient is scope, not engine: a delta-blind Major (a missing presence check
 survived three delta rounds and fell to the first whole-artifact re-read) is caught by
-re-reading everything at the final head, and doing that on codex keeps it cross-model over what
-actually ships — something a claude final pass never was. The orchestrator's in-session work
+re-reading everything at the final head, and doing that on a model other than the writer's keeps
+it cross-model over what actually ships. The orchestrator's in-session work
 stays disposition — per finding, fix (dispatched), rebut, or note, judged from the verdict —
 plus the one oracle sweep an invariant-heavy unit earns below.
 
@@ -2007,8 +1991,7 @@ task-panel fate line (panel section) prints directly beneath it, in the same tur
 The `🔧` deliberately echoes the FIX step glyph rather than colliding with it: pitcrew is repair
 work on already-open PRs, so the glyph carries the same meaning on both surfaces, which is what the
 closed set below actually requires. `🔭` is not in that set and means "who will be watching" — the
-review engine, named in UPPER-CASE like every other model name (`reviews CODEX`,
-`reviews GPT-6-ASTRA (proxy)`), so the run states who judges before it judges anything.
+review engine, named in UPPER-CASE like every other model name (`reviews GPT-6-ASTRA (proxy)`), so the run states who judges before it judges anything.
 
 Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
 eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
@@ -2284,5 +2267,3 @@ exceptions above — report and stop, still without asking.
 /autoloop:dev maxUnits: 3
 /autoloop:dev drain the queue
 ```
-
-Codex and opencode use their installed skill surface names; the workflow is identical.

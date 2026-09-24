@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // PreToolUse(Bash) guard — converts the autoloop NEVER rules from prose into blocks.
 // Vendored by autoloop:setup and wired into the active host's project hooks
-// (.claude/settings.json and/or .codex/hooks.json).
+// (.claude/settings.json).
 //
 //   BLOCK (exit 2)
 //     1. `gh pr merge` in any form            — L2: the loop/agent never merges (STATE.md).
@@ -2622,7 +2622,7 @@ function selfTest() {
     // A version or help probe runs no source at all. The rule below treats an
     // interpreter with no script argument as reading from stdin, which is right
     // for a bare `node` and wrong for `node --version` — and the setup audit
-    // battery is exactly `gh auth status && node --version && codex --version`.
+    // battery is exactly `gh auth status && node --version`.
     // A newline is a command separator like `;` is. The resolver anchored on
     // `^` without the `m` flag, so only an assignment on the FIRST line counted:
     // a live battery worked as `T=...` on line 1 and was refused the moment a
@@ -3414,10 +3414,9 @@ function selfTest() {
 // framing disappears and the reason survives verbatim.
 //
 // All three parts are load-bearing. The JSON removes the error framing. `exit 2`
-// keeps the refusal failing CLOSED on any host that does not parse this shape —
-// Codex and opencode run this same guard, and JSON with exit 0 would fail OPEN
-// there, which is a security regression rather than a cosmetic change. stderr
-// keeps the reason visible on exactly those hosts.
+// keeps the refusal failing CLOSED if the host ever stops parsing this shape —
+// JSON with exit 0 would then fail OPEN, a security regression rather than a
+// cosmetic change. stderr keeps the reason visible in that case too.
 function refuse(reason) {
   process.stdout.write(`${JSON.stringify({
     hookSpecificOutput: {

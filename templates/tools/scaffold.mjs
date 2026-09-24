@@ -9,6 +9,7 @@
 // interview, whatever the merge report flags for human
 // review, the visible diff, and the commit.
 
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -16,6 +17,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmdirSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -45,15 +47,100 @@ const PRESERVE_IF_MODIFIED = Object.freeze(new Map([
   ['escalate-paths.mjs', 'repository-owned escalate entries'],
   ['auto-merge.mjs', 'the Setup-filled merge REPO CONFIG block'],
 ]));
-const HOST_ARTIFACTS = Object.freeze([
-  ['codex-reviewer-agent.template.toml', '.codex/agents/autoloop-reviewer.toml'],
-  ['opencode-reviewer-agent.template.md', '.opencode/agent/autoloop-reviewer.md'],
-  ['opencode-plugin.template.js', '.opencode/plugins/autoloop.js'],
-]);
 const HOOK_MERGES = Object.freeze([
   ['settings-hooks.template.json', '.claude/settings.json'],
-  ['codex-hooks.template.json', '.codex/hooks.json'],
 ]);
+// Codex and opencode were retired in 0.51.0. These are the fingerprints of every
+// version setup ever generated at each path, from the template history: a
+// template copy, or a JSON merge with nothing repository-owned in it. JSON is
+// compared canonically (sorted keys, no whitespace), since installs differed in
+// formatting only. A file that matches is setup's own and is removed; any other
+// is repository-owned and is reported, never deleted.
+export const RETIRED_HOST_FILES = Object.freeze(new Map([
+  ['.codex/agents/autoloop-reviewer.toml', new Set([
+    '38b3a8c61507b8255ea5e83d32460da5f7d1e089ae39399ad32ba539dd00b908',
+    '496af65a6e655b4ea71e9fb36b3006d0c2bb943f5801fac827a21952594c7fa5',
+  ])],
+  ['.opencode/agent/autoloop-reviewer.md', new Set([
+    'c64c98b9028691eecaf5369302c143839d8813609a115359f9b47e389e883ead',
+    'f85e0bba653f49e88fe8fb1a7b173b9e0bfbf271224c22852390714936aad515',
+    'b8a5234528b1bf47a96fb04a83fda753206bd9283e493c57906e8ded17f80af2',
+  ])],
+  ['.opencode/plugins/autoloop.js', new Set([
+    '5773a74bd929fb9ccfdce870f5d38ed5a07d5fc8de42d203c2f71bfeaf68f500',
+    '29c340b20c43cd219c64c85b3f8ce567c9bd4aa64a75c2efecdf8312e411a030',
+    '7c47d383c5514cb0c5f7a6a6181b676ca817a5015bc47caad688fd477b95ea81',
+    '912e4662005d320285dfc205076bba69dfc6aa84bdcc22520a5ca5005f5622a7',
+    'b498ab9574e25baa6300b91c5f0c06abbd8ebd511c52b0536181fb18b6802145',
+    '2ae0e178baf873488ef21e4cad96bc64af733c1d9b964a29eaf91b6ef39d9609',
+    '6305724b4e7381cc7d416be9c380189762486eabeece3cea29852aae757872cc',
+  ])],
+  ['.codex/hooks.json', new Set([
+    'ee1c1b19e1011c4cea63d07fc114f83167abcf3447cc63da90bbf05a24cb6be1',
+    'dcab1ce8811be09d7ffb8be2ceeb2397c9e14f3a0d2ea7150cdf6fc6ca46e8e4',
+    '49ce6d0d6aa2cb654d8b0f60c719dbf221baae5329c1d3bd6b3285feebe7ba81',
+    '31e4a5e441d45a4a67288f33d1c16b76ae3d324d0aeaad89485e5805f88961ad',
+    '6a7a7cd5848931610db2ec6780436d3e139d6ff7bc1c5f6d5a896b36cc82b837',
+    '911f68a4a2d489ebd04989251b52fb90b3a7c41d80328c0947339bd429c717a4',
+    '5579520e787f3efa9b8fe8987dec0960240b3973e3f9452f6862fa69dce57808',
+    '4b8a3f54de680b87767928f025ef685ebc5f4be394e011f0043ed91a1f95e884',
+    '65e9de60952fcac2456b0291cd70fc408a4fa5cbbfa398ffaf315a82915fb906',
+    '2900c35f414ccc3eead966f8693c42c175709c71eced20e184b033d01bc2ab24',
+    '914b833bc9fa9af540c3703f199e45bf0d0f0eaf562df6633bc566985f60191d',
+    '4545d19f48333e60d02df1e72172b3c007b8884af83360ab50673d3cdceb65ba',
+    'a30188d4e9981e942344b9f0b652f18185aa85f8a4d463257c78492ef64d91c5',
+    '8588844da3dbaef3cf603df5e22fc7a66b67224f704775a03ca32cf35472abbe',
+  ])],
+  ['.opencode/opencode.json', new Set([
+    '1ca6ea9bbc9cba57de327853553546a653e9ed3808ddaa628a871c1c5d6e86d3',
+    '7d922bb38fc9232928804f3efdae4919553e6ac252943be98bb19ffbbbf4a407',
+    '6a31d52e7855dc3dbfc3c9d9bcc66552dd57701ce5e7db17739469f9b77a68ee',
+  ])],
+]));
+// Vendored tools a release deleted. Every tools/agentic copy is template-owned,
+// so a retired one is removed outright, like the non-manual set on a manual repo.
+const RETIRED_TOOL_FILES = Object.freeze(['adapter-contract.mjs']);
+const RETIRED_HOST_DIRECTORIES = Object.freeze([
+  '.codex/agents', '.opencode/agent', '.opencode/plugins', '.codex', '.opencode',
+]);
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]));
+}
+
+export function hostFileFingerprint(path, text) {
+  let body = text;
+  if (path.endsWith('.json')) {
+    try {
+      body = JSON.stringify(canonicalJson(JSON.parse(text)));
+    } catch {
+      // Unparseable JSON matches no generated fingerprint.
+    }
+  }
+  return createHash('sha256').update(body).digest('hex');
+}
+
+export function removeRetiredHostFiles(root, results, audit, retired = RETIRED_HOST_FILES) {
+  for (const [relativePath, fingerprints] of retired) {
+    const target = resolve(root, relativePath);
+    if (!existsSync(target)) continue;
+    // A symlink is followed for the comparison and only the link is removed.
+    const generated = statSync(target).isFile()
+      && fingerprints.has(hostFileFingerprint(relativePath, readFileSync(target, 'utf8')));
+    if (generated && !audit) unlinkSync(target);
+    results.push({ path: relativePath, action: generated ? 'removed' : 'stale-left' });
+  }
+  if (audit) return;
+  for (const directory of RETIRED_HOST_DIRECTORIES) {
+    try {
+      rmdirSync(resolve(root, directory));
+    } catch {
+      // Not empty (repository-owned or opencode's own files), or absent.
+    }
+  }
+}
 // `repoAppendedHeadings` names the repository memory a template cannot mark
 // with a placeholder, because the template ships seed content the repository
 // then appends to. It is keyed by the template's own heading: a template that
@@ -181,23 +268,6 @@ export function mergeHookDocuments(existing, template) {
     }
   }
   return { merged, changed };
-}
-
-// Per-key merge where existing repository configuration wins; the instructions
-// array is a union that preserves the repository's order.
-export function mergeOpencodeConfig(existing, template) {
-  const merged = structuredClone(template ?? {});
-  for (const [key, value] of Object.entries(existing ?? {})) {
-    merged[key] = structuredClone(value);
-  }
-  const instructions = [
-    ...(Array.isArray(existing?.instructions) ? existing.instructions : []),
-  ];
-  for (const entry of Array.isArray(template?.instructions) ? template.instructions : []) {
-    if (!instructions.includes(entry)) instructions.push(entry);
-  }
-  merged.instructions = instructions;
-  return merged;
 }
 
 // `merge.policy` decides nothing at runtime: the merge gate reads AUTOMERGE_MODE
@@ -343,18 +413,15 @@ export function reconcile(root, templates, { audit = false } = {}) {
       }
     }
   }
-
-  for (const [templateName, relativePath] of HOST_ARTIFACTS) {
-    writeArtifact(
-      root,
-      relativePath,
-      readFileSync(join(templates, templateName)),
-      results,
-      undefined,
-      audit,
-      `templates/${templateName}`,
-    );
+  for (const name of RETIRED_TOOL_FILES) {
+    const stale = resolve(root, 'tools', 'agentic', name);
+    if (existsSync(stale)) {
+      if (!audit) unlinkSync(stale);
+      results.push({ path: `tools/agentic/${name}`, action: 'removed' });
+    }
   }
+
+  removeRetiredHostFiles(root, results, audit);
 
   for (const [templateName, relativePath] of HOOK_MERGES) {
     const template = readJson(join(templates, templateName));
@@ -378,27 +445,6 @@ export function reconcile(root, templates, { audit = false } = {}) {
       results.push({ path: relativePath, action: 'identical' });
     }
   }
-
-  // Legacy root opencode.json folds into .opencode/opencode.json; the
-  // repository's own values win over the template's.
-  const template = readJson(join(templates, 'opencode-config.template.json'));
-  const contained = resolve(root, '.opencode', 'opencode.json');
-  const legacyPath = resolve(root, 'opencode.json');
-  let existingConfig = existsSync(contained) ? readJson(contained) : null;
-  if (existsSync(legacyPath)) {
-    existingConfig = mergeOpencodeConfig(readJson(legacyPath), existingConfig ?? {});
-    if (!audit) unlinkSync(legacyPath);
-    results.push({ path: 'opencode.json', action: 'removed' });
-  }
-  writeArtifact(
-    root,
-    '.opencode/opencode.json',
-    stableJson(mergeOpencodeConfig(existingConfig, template)),
-    results,
-    undefined,
-    audit,
-    'templates/opencode-config.template.json',
-  );
 
   const loop = resolve(root, 'docs', 'agentic', 'LOOP.md');
   const loopTemplate = readFileSync(join(templates, 'LOOP.template.md'));
@@ -551,7 +597,7 @@ export function reconcile(root, templates, { audit = false } = {}) {
       });
     }
   }
-  const settled = new Set(['identical', 'kept', 'kept-modified', 'absent']);
+  const settled = new Set(['identical', 'kept', 'kept-modified', 'stale-left', 'absent']);
   const changing = sorted.filter((entry) => !settled.has(entry.action));
   return {
     version: 1,
@@ -1192,13 +1238,6 @@ function fixtureTemplates() {
   writeFileSync(join(templates, TEMPLATE_MARKER), '# state template\n');
   writeFileSync(join(templates, 'LOOP.template.md'), '# loop template\n');
   writeFileSync(join(templates, 'LESSONS.template.md'), '# lessons template\n');
-  writeFileSync(
-    join(templates, 'opencode-config.template.json'),
-    stableJson({ instructions: ['docs/agentic/STATE.md'], permission: { read: 'allow' } }),
-  );
-  for (const [templateName] of HOST_ARTIFACTS) {
-    writeFileSync(join(templates, templateName), `fixture ${templateName}\n`);
-  }
   for (const [templateName] of HOOK_MERGES) {
     writeFileSync(join(templates, templateName), stableJson({
       hooks: {
@@ -1581,10 +1620,6 @@ function selfTest() {
     mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
     writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'), fixtureState('manual'));
     writeFileSync(join(root, 'docs', 'agentic', 'checklist.md'), '# checklist\n');
-    writeFileSync(join(root, 'opencode.json'), stableJson({
-      instructions: ['docs/custom.md'],
-      theme: 'dark',
-    }));
     mkdirSync(join(root, '.claude'), { recursive: true });
     writeFileSync(join(root, '.claude', 'settings.json'), stableJson({
       hooks: {
@@ -1600,9 +1635,7 @@ function selfTest() {
     expect(
       'audit mode reports the full would-be reconciliation without writing',
       auditedActions.get('tools/agentic/verify.mjs') === 'created'
-        && !existsSync(join(root, 'tools'))
-        && existsSync(join(root, 'opencode.json'))
-        && auditedActions.get('opencode.json') === 'removed',
+        && !existsSync(join(root, 'tools')),
     );
 
     const first = reconcile(root, templates);
@@ -1615,17 +1648,6 @@ function selfTest() {
     expect(
       'the release-proven self-test manifest is vendored beside the tools',
       actions.get('tools/agentic/self-test-manifest.json') === 'created',
-    );
-    expect(
-      'a legacy root opencode.json folds into .opencode with repository values winning',
-      actions.get('opencode.json') === 'removed'
-        && (() => {
-          const merged = readJson(join(root, '.opencode', 'opencode.json'));
-          return merged.theme === 'dark'
-            && merged.instructions[0] === 'docs/custom.md'
-            && merged.instructions.includes('docs/agentic/STATE.md')
-            && merged.permission.read === 'allow';
-        })(),
     );
     expect(
       'hook merging appends the template entry and keeps repository-owned hooks',
@@ -1862,9 +1884,7 @@ function selfTest() {
       nonManual.results.find((entry) => entry.path === 'tools/agentic/auto-merge.mjs')
         ?.source === 'templates/tools/auto-merge.reference.mjs'
         && nonManual.results.find((entry) => entry.path === 'tools/agentic/verify.mjs')
-          ?.source === 'templates/tools/verify.mjs'
-        && nonManual.results.find((entry) => entry.path === '.codex/agents/autoloop-reviewer.toml')
-          ?.source === 'templates/codex-reviewer-agent.template.toml',
+          ?.source === 'templates/tools/verify.mjs',
     );
 
     const vendoredMerge = join(root, 'tools', 'agentic', 'auto-merge.mjs');
@@ -1887,6 +1907,19 @@ function selfTest() {
       'returning to manual removes the non-manual tooling',
       backToManual.results.some((entry) =>
         entry.path === 'tools/agentic/auto-merge.mjs' && entry.action === 'removed'),
+    );
+
+    const retiredTool = join(root, 'tools', 'agentic', 'adapter-contract.mjs');
+    writeFileSync(retiredTool, '// vendored by an earlier release\n');
+    const retiredAudit = reconcile(root, templates, { audit: true });
+    const auditKeptRetiredTool = existsSync(retiredTool);
+    const retiredRun = reconcile(root, templates);
+    expect(
+      'a reconcile removes a retired vendored tool, and an audit only reports it',
+      [retiredAudit, retiredRun].every((run) => run.results.some((entry) =>
+        entry.path === 'tools/agentic/adapter-contract.mjs' && entry.action === 'removed'))
+        && auditKeptRetiredTool
+        && !existsSync(retiredTool),
     );
 
     writeFileSync(
@@ -1961,6 +1994,79 @@ function selfTest() {
     expect(
       'a missing constant is not invented',
       repairMergeMode('export const OTHER = 1;\n', 'all-green') === null,
+    );
+    // 0.51.0 retired Codex and opencode. A reconcile removes the host files
+    // setup itself generated, proven by fingerprint, and keeps anything else.
+    {
+      const host = mkdtempSync(join(tmpdir(), 'autoloop-scaffold-retired-'));
+      const put = (path, text) => {
+        mkdirSync(dirname(join(host, path)), { recursive: true });
+        writeFileSync(join(host, path), text);
+      };
+      put('.codex/agents/autoloop-reviewer.toml', 'generated reviewer\n');
+      put('.codex/hooks.json', '{"hooks": {"Stop": []}}\n');
+      put('.opencode/plugins/autoloop.js', 'hand-edited plugin\n');
+      put('.opencode/node_modules/dep/index.js', 'dep\n');
+      put('.opencode/package.json', '{}\n');
+      const retired = new Map([
+        ['.codex/agents/autoloop-reviewer.toml', new Set([hostFileFingerprint('x.toml', 'generated reviewer\n')])],
+        // Key order and whitespace do not matter for a generated JSON file.
+        ['.codex/hooks.json', new Set([hostFileFingerprint('x.json', '{"hooks":{"Stop":[]}}')])],
+        ['.opencode/plugins/autoloop.js', new Set([hostFileFingerprint('x.js', 'generated plugin\n')])],
+      ]);
+      const audited = [];
+      removeRetiredHostFiles(host, audited, true, retired);
+      const auditKept = existsSync(join(host, '.codex/hooks.json'));
+      const results = [];
+      removeRetiredHostFiles(host, results, false, retired);
+      const action = new Map(results.map((entry) => [entry.path, entry.action]));
+      expect(
+        'a reconcile removes the retired host files setup generated',
+        action.get('.codex/agents/autoloop-reviewer.toml') === 'removed'
+          && action.get('.codex/hooks.json') === 'removed'
+          && !existsSync(join(host, '.codex'))
+          && auditKept && audited.length === results.length,
+      );
+      expect(
+        'a hand-edited retired host file is reported and kept',
+        action.get('.opencode/plugins/autoloop.js') === 'stale-left'
+          && readFileSync(join(host, '.opencode/plugins/autoloop.js'), 'utf8') === 'hand-edited plugin\n',
+      );
+      expect(
+        'opencode\'s own dependencies are never touched',
+        existsSync(join(host, '.opencode/node_modules/dep/index.js'))
+          && existsSync(join(host, '.opencode/package.json')),
+      );
+      expect(
+        'every live generated copy is in the shipped fingerprint table',
+        [...RETIRED_HOST_FILES.keys()].length === 5
+          && [...RETIRED_HOST_FILES.values()].every((set) => set.size > 0),
+      );
+      // A directory where a generated file used to be is not setup's to touch.
+      mkdirSync(join(host, '.codex', 'hooks.json'), { recursive: true });
+      const odd = [];
+      let threw = false;
+      try {
+        removeRetiredHostFiles(host, odd, false, retired);
+      } catch {
+        threw = true;
+      }
+      expect(
+        'a directory at a retired path is reported, never read or removed',
+        !threw && odd.find((entry) => entry.path === '.codex/hooks.json')?.action === 'stale-left'
+          && existsSync(join(host, '.codex', 'hooks.json')),
+      );
+      rmSync(host, { recursive: true, force: true });
+    }
+    // A kept, repository-owned copy is settled: reconcile can never change it,
+    // so it must not hold every later Dev run at "reconcile needed".
+    mkdirSync(join(root, '.codex'), { recursive: true });
+    writeFileSync(join(root, '.codex', 'hooks.json'), '{"hooks":{"Stop":[{"repo":"owned"}]}}\n');
+    const settledAudit = reconcile(root, templates, { audit: true });
+    expect(
+      'a stale-left retired file does not make reconcile needed',
+      settledAudit.results.find((entry) => entry.path === '.codex/hooks.json')?.action === 'stale-left'
+        && settledAudit.reconcileNeeded === false,
     );
     mergeSelfTest(expect);
   } finally {

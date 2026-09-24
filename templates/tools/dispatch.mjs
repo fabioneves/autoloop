@@ -59,7 +59,7 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // cost four times as much to notice. A writer legitimately grinds: it reads,
 // edits, runs tests, and commits, bounded by the slice caps rather than the
 // clock. A reviewer reads and returns one typed verdict; the longest healthy
-// one observed is a 13-minute codex review, so a reviewer still running at 45
+// one observed took 13 minutes, so a reviewer still running at 45
 // minutes is not thinking, it is stuck.
 const DISPATCH_TIMEOUT_MS = Object.freeze({
   writer: 120 * 60 * 1000,
@@ -78,8 +78,7 @@ export function timeoutMsFor(role) {
 // about reads.
 const TOOLS_REQUIRING_GRANT = Object.freeze(['Bash', 'Edit', 'Write']);
 
-// Both CLIs expose the same reasoning ladder under different spellings: claude
-// takes `--effort <level>`, codex the `model_reasoning_effort` config override.
+// The reasoning ladder claude takes as `--effort <level>`.
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
 // The two postures, carried over unchanged from the route adapter they used to
@@ -358,88 +357,31 @@ export function dispatchArgv(role, tools) {
   ];
 }
 
-// Two engines, chosen by the binary's own name so a fixture shim on a path and
-// an installed binary resolve the same way.
-//
-// Reviews run on a different engine from the writer on purpose. A reviewer
-// sharing the writer's model shares its priors and its blind spots; a fresh
-// process gives identity separation but not cognitive separation. Codex supplies
-// the second, and `--sandbox read-only` is an OS-enforced boundary rather than a
-// tool allowlist, so the reviewer's read-only posture is stronger there than it
-// is under Claude.
-const ENGINES = Object.freeze({
-  claude: Object.freeze({
-    supports: (role) => ROLES[role] !== undefined,
-    argv: (role, tools, scratch, cwd, model, effort) => [
-      ...dispatchArgv(role, tools),
-      ...(model === null ? [] : ['--model', model]),
-      ...(effort === null ? [] : ['--effort', effort]),
-    ],
-    // Claude's stream-json ends with exactly one `result` event.
-    payload: (role, stdout) => {
-      const event = parseResultEvent(stdout);
-      // A usage limit arrives as `subtype: success` with `is_error: true` and
-      // the refusal as its result text — not a result this tool can stand behind.
-      if (event === null || event.subtype !== 'success' || event.is_error === true) return null;
-      return RESULT_SCHEMAS[ROLES[role].result] !== undefined
-        ? { structured: event.structured_output }
-        : { text: typeof event.result === 'string' ? event.result : '' };
-    },
-  }),
-  codex: Object.freeze({
-    // Verdict roles only, and refused rather than approximated: a writing role
-    // would need a writable sandbox and a commit contract this tool does not
-    // model, and `plan` is AUTHORED work — it shares the reviewer posture for
-    // sandboxing, not for identity, so handing it to the second engine would
-    // invert the standing role split (Claude writes, codex reviews).
-    supports: (role) => ROLES[role]?.result === 'review-verdict',
-    argv: (role, tools, scratch, cwd, model, effort) => {
-      writeFileSync(
-        join(scratch, 'schema.json'),
-        JSON.stringify(RESULT_SCHEMAS[ROLES[role].result] ?? REVIEW_VERDICT_SCHEMA),
-      );
-      return [
-        'exec',
-        ...(model === null ? [] : ['-m', model]),
-        // codex has no --effort flag; the same knob is a config override.
-        ...(effort === null ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
-        '--json',
-        '--output-schema',
-        join(scratch, 'schema.json'),
-        '-o',
-        join(scratch, 'last.json'),
-        '--sandbox',
-        'read-only',
-        '--ephemeral',
-        '--skip-git-repo-check',
-        '-C',
-        cwd,
-      ];
-    },
-    // Codex writes its final message to the --output-last-message file, so the
-    // verdict is read from disk instead of recovered from an event stream.
-    payload: (role, stdout, scratch) => {
-      try {
-        return { structured: JSON.parse(readFileSync(join(scratch, 'last.json'), 'utf8')) };
-      } catch {
-        return null;
-      }
-    },
-  }),
-});
-
-// The orchestrating host is the default for every role. Running reviews on a
-// second engine is a real choice with real cost — another CLI to install and
-// authenticate, another vendor in the loop — so it is opt-in at the invocation
-// (`/autoloop:dev with codex`) and passed through as `--engine`, never assumed.
-// v0.44.0 defaulted reviewers to codex and was wrong to: it made an absent codex
-// break a plain run that had asked for nothing unusual.
-export function defaultEngineFor() {
-  return 'claude';
+// The one engine is Claude Code, recognised by the binary's own name so a
+// fixture shim on a path and an installed binary resolve the same way. Other
+// models are reached through a proxied route, never a second CLI. Codex was a
+// second engine until 0.51.0 and is refused by name.
+function claudeArgv(role, tools, model, effort) {
+  return [
+    ...dispatchArgv(role, tools),
+    ...(model === null ? [] : ['--model', model]),
+    ...(effort === null ? [] : ['--effort', effort]),
+  ];
 }
 
-// The invocation's engine choice, made durable. `with codex` is prose at the
-// top of a session; by the first reviewer dispatch it is forty minutes and a
+// Claude's stream-json ends with exactly one `result` event.
+function claudePayload(role, stdout) {
+  const event = parseResultEvent(stdout);
+  // A usage limit arrives as `subtype: success` with `is_error: true` and
+  // the refusal as its result text — not a result this tool can stand behind.
+  if (event === null || event.subtype !== 'success' || event.is_error === true) return null;
+  return RESULT_SCHEMAS[ROLES[role].result] !== undefined
+    ? { structured: event.structured_output }
+    : { text: typeof event.result === 'string' ? event.result : '' };
+}
+
+// The legacy review recording, read only when no routes file exists. A choice
+// made in prose at the top of a session is, by the first reviewer dispatch it is forty minutes and a
 // hundred thousand tokens up-context, the tool default is the host engine, and
 // a forgotten `--engine` silently reviews on the writer's own model — with
 // nothing on the line to say so. The skill records the choice once, in
@@ -475,7 +417,8 @@ function recordedReviewChoice(cwd) {
     if (logPath === null) return null;
     const recorded = readFileSync(join(dirname(logPath), 'review-engine'), 'utf8').trim();
     const [engine, ...rest] = recorded.split(/\s+/).filter(Boolean);
-    if (ENGINES[engine] === undefined) return null;
+    if (engine === 'codex') return { error: 'names codex, which is no longer a dispatch engine' };
+    if (engine !== 'claude') return null;
     let model = null;
     let baseUrl = null;
     let effort = null;
@@ -530,7 +473,7 @@ export function parseRoutes(text) {
     const [role, engine, ...rest] = line.split(/\s+/u);
     if (ROLES[role] === undefined) return { error: `${where}: unknown role ${role}` };
     if (routes[role] !== undefined) return { error: `${where}: ${role} is routed twice` };
-    if (ENGINES[engine] === undefined || !ENGINES[engine].supports(role)) {
+    if (engine !== 'claude') {
       return { error: `${where}: ${engine ?? 'no engine'} cannot run ${role}` };
     }
     const route = { ...HOST_ROUTE, engine };
@@ -547,7 +490,7 @@ export function parseRoutes(text) {
         route.effort = token.slice(1);
       } else if (token.startsWith('>')) {
         const fallback = /^>([^@\s]+)(?:@(https?:\/\/\S+))?$/u.exec(token);
-        if (route.fallback !== null || fallback === null || engine !== 'claude'
+        if (route.fallback !== null || fallback === null
           || (fallback[2] !== undefined && !loopbackUrl(fallback[2]))) {
           return { error: `${where}: bad or repeated fallback ${token}` };
         }
@@ -593,6 +536,9 @@ export function resolveRoute(role, cwd) {
     return { ...(recorded.routes[role] ?? HOST_ROUTE), source: 'routes' };
   }
   const legacy = followsReviewChoice(role) ? recordedReviewChoice(cwd) : null;
+  if (legacy?.error !== undefined) {
+    return { error: { code: 'ENGINE_REMOVED', message: `autoloop/review-engine ${legacy.error}` } };
+  }
   return legacy === null
     ? { ...HOST_ROUTE, source: 'host' }
     : { ...HOST_ROUTE, ...legacy, source: 'review-engine' };
@@ -647,11 +593,6 @@ export function standingRoutes(proxyUrl) {
 
 const ROUTE_PRESETS = Object.freeze({
   proxy: standingRoutes,
-  // `with codex`: verdicts on codex, every writer on host defaults.
-  codex: () => ROLE_NAMES
-    .filter((role) => ROLES[role].result === 'review-verdict')
-    .map((role) => `${role} codex !xhigh`)
-    .join('\n'),
   // A plain host run still writes the file, so a previous session's routes or
   // review-engine recording cannot leak forward.
   host: () => '',
@@ -663,7 +604,7 @@ const ROUTE_PRESETS = Object.freeze({
 // atomic, so a refused recording leaves the previous one in force.
 export function recordRoutes(cwd, { preset, proxyUrl = null, overrides = [] }) {
   if (ROUTE_PRESETS[preset] === undefined) {
-    return failure('record', 'ROUTES_INVALID', `unknown preset ${preset} (proxy|codex|host)`);
+    return failure('record', 'ROUTES_INVALID', `unknown preset ${preset} (proxy|host)`);
   }
   if (preset === 'proxy' && !loopbackUrl(String(proxyUrl))) {
     return failure('record', 'ROUTES_INVALID', 'the proxy preset needs a loopback --proxy-url http(s)://127.0.0.1|localhost|[::1]…');
@@ -683,10 +624,6 @@ export function recordRoutes(cwd, { preset, proxyUrl = null, overrides = [] }) {
   writeFileSync(staged, text === '' ? '' : `${text}\n`);
   renameSync(staged, path);
   return { ok: true, path, routes: parsed.routes };
-}
-
-function resolveEngine(binary) {
-  return ENGINES[hostName(binary)] ?? null;
 }
 
 // The child inherits this process's environment and nothing is added to it.
@@ -854,8 +791,7 @@ export function usageLimitIn(stderr, stdout) {
       continue;
     }
     const failed = (event?.type === 'result' && (event.is_error === true || event.subtype !== 'success'))
-      || event?.type === 'error'
-      || event?.type === 'turn.failed';
+      || event?.type === 'error';
     if (failed) reports.push(line);
   }
   return USAGE_LIMIT_RE.test(reports.join('\n'));
@@ -875,18 +811,34 @@ function hostName(engine) {
   return value.slice(value.lastIndexOf('/') + 1);
 }
 
+// Every routed model is assumed available. One that is not falls back to what
+// its route records, else to Opus on the native route. Code reviewers default
+// to Fable instead: Opus writes the code they judge. A route already on its
+// default has nowhere further to go.
+const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5';
+const CODE_REVIEW_FALLBACK_MODEL = 'claude-fable-5-1';
+const CODE_REVIEW_ROLES = new Set(['diff-review', 'code-review', 'doubt-review']);
+
+export function effectiveFallback(role, route) {
+  if (route.fallback !== null) return route.fallback;
+  const model = CODE_REVIEW_ROLES.has(role) ? CODE_REVIEW_FALLBACK_MODEL : DEFAULT_FALLBACK_MODEL;
+  if (route.model === model) return null;
+  return Object.freeze({ model, baseUrl: null });
+}
+
 function routeFor(options, cwd) {
   const route = resolveRoute(options.role, cwd);
   if (route.error !== undefined || !options.fallback) return route;
-  if (route.fallback === null) {
+  const fallback = effectiveFallback(options.role, route);
+  if (fallback === null) {
     return {
       error: {
         code: 'ROUTE_FALLBACK_MISSING',
-        message: `${options.role}: --fallback given but its route records no >model`,
+        message: `${options.role}: --fallback given but its route already runs its default fallback model`,
       },
     };
   }
-  return { ...route, model: route.fallback.model, baseUrl: route.fallback.baseUrl };
+  return { ...route, model: fallback.model, baseUrl: fallback.baseUrl };
 }
 
 function dispatchOnce(options, cwd) {
@@ -910,7 +862,8 @@ function dispatchOnce(options, cwd) {
       model: resolvedModel,
       effort: resolvedEffort,
       baseUrl,
-      native: baseUrl === null && route.source === 'routes',
+      // A fallback is always native, whatever recording the route came from.
+      native: baseUrl === null && (route.source === 'routes' || options.fallback === true),
     });
   const engine = hostName(engineBinary);
   const model = resolvedModel;
@@ -999,7 +952,7 @@ export function runDispatch(options) {
   const cwd = options.cwd ?? process.cwd();
   const primary = resolveRoute(options.role, cwd);
   const fallbackAvailable = primary.error === undefined
-    && primary.fallback !== null
+    && effectiveFallback(options.role, primary) !== null
     && options.model === undefined
     && hostName(options.engine ?? primary.engine ?? 'claude') === 'claude';
   let onFallback = options.fallback === true;
@@ -1072,15 +1025,18 @@ function executeDispatch(options) {
       { ms: 0, startupMs: 0, stderr: '' },
     );
   }
-  const adapter = resolveEngine(engine);
-  if (adapter === null) {
-    return failure('spawn', 'ENGINE_UNKNOWN', `${role}: unknown engine ${hostName(engine)}`, {
+  const name = hostName(engine);
+  if (name !== 'claude') {
+    const removed = name === 'codex';
+    return failure('spawn', removed ? 'ENGINE_REMOVED' : 'ENGINE_UNKNOWN', removed
+      ? `${role}: ${name} is no longer a dispatch engine; route the model through a claude proxy route`
+      : `${role}: unknown engine ${name}`, {
       ms: 0,
       startupMs: 0,
       stderr: '',
     });
   }
-  if (!adapter.supports(role)) {
+  if (ROLES[role] === undefined) {
     return failure(
       'spawn',
       'ENGINE_ROLE_UNSUPPORTED',
@@ -1088,26 +1044,19 @@ function executeDispatch(options) {
       { ms: 0, startupMs: 0, stderr: '' },
     );
   }
-  // Only the engines that need side files get a scratch directory, and it is
-  // removed on every path out.
-  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-dispatch-io-'));
-  try {
-    return runEngine({
-      adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
-      liveFile: options.liveFile ?? null,
-      model: options.model ?? null,
-      effort: options.effort ?? null,
-      baseUrl: options.baseUrl ?? null,
-      native: options.native === true,
-    });
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
+  return runEngine({
+    role, prompt, tools, cwd, timeoutMs, engine, startedAtMs,
+    liveFile: options.liveFile ?? null,
+    model: options.model ?? null,
+    effort: options.effort ?? null,
+    baseUrl: options.baseUrl ?? null,
+    native: options.native === true,
+  });
 }
 
 // Engine stdout goes to disk as the engine emits it, so a running dispatch can
 // be watched: `tail -f` the newest file under `autoloop/dispatch-live/` in the
-// common Git directory. A 13-minute codex review used to run as a sealed box —
+// common Git directory. A 13-minute review used to run as a sealed box —
 // spawnSync buffered the stream in memory and --ephemeral persisted nothing.
 // Fail-open: when the live file cannot be opened, the stream stays in memory
 // and the dispatch proceeds exactly as before.
@@ -1138,10 +1087,10 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 }
 
 function runEngine({
-  adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch, liveFile, model,
-  effort, baseUrl, native,
+  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl,
+  native,
 }) {
-  const argv = adapter.argv(role, tools, scratch, cwd, model ?? null, effort ?? null);
+  const argv = claudeArgv(role, tools, model ?? null, effort ?? null);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
@@ -1152,7 +1101,7 @@ function runEngine({
     result = spawnSync(engine, argv, {
       cwd,
       encoding: 'utf8',
-      env: dispatchEnvironment(adapter === ENGINES.claude ? baseUrl : null, native),
+      env: dispatchEnvironment(baseUrl, native),
       input: `${prompt}${reviewEnvelopeStamp(role)}${dispatchContextStamp(cwd, role)}`,
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: timeoutMs,
@@ -1198,7 +1147,7 @@ function runEngine({
       { ms, startupMs, exitCode: result.status, stderr, ...limited },
     );
   }
-  const payload = adapter.payload(role, result.stdout ?? '', scratch);
+  const payload = claudePayload(role, result.stdout ?? '');
   if (payload === null) {
     return failure(
       'result',
@@ -1675,62 +1624,18 @@ function selfTest() {
       'an implement that moves the checkout still succeeds',
       busyWriter.ok === true && busyWriter.text === 'implemented the slice',
     );
-    // Codex is the reviewer engine: a reviewer sharing the writer's model shares
-    // its blind spots, so the decorrelation has to be structural. Its result
-    // arrives in the --output-last-message file rather than an event stream,
-    // which is a cleaner contract than parsing stdout for a single event.
-    const codexShimDirectory = join(scratch, 'codexbin');
-    writeEngineShim(codexShimDirectory, [
-      '#!/bin/sh',
-      'printf \'%s\' "$*" > "$AUTOLOOP_SHIM_ARGV"',
-      'env > "$AUTOLOOP_SHIM_ENV"',
-      'cat > "$AUTOLOOP_SHIM_STDIN"',
-      'out=""; prev=""',
-      'for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done',
-      'printf \'%s\' \'{"verdict":"pass","findings":[],"rebuts":[]}\' > "$out"',
-      'printf \'%s\\n\' \'{"type":"turn.completed"}\'',
-      '',
-    ].join('\n'), 'codex');
-    const codexReviewed = runDispatch({
-      role: 'plan-review',
-      prompt: 'review the plan',
-      tools: reviewerTools,
-      cwd: repoScratch,
-      engine: join(codexShimDirectory, 'codex'),
-    });
-    const codexArgvLaunched = readFileSync(argvPath, 'utf8');
+    // Codex was a second engine until 0.51.0; naming it is refused, typed,
+    // never silently run on claude.
     check(
-      'a codex review returns the verdict from its output-last-message file',
-      codexReviewed.ok === true
-      && codexReviewed.verdict.verdict === 'pass'
-      && codexReviewed.engine === 'codex',
-    );
-    check(
-      'a codex reviewer runs under an OS read-only sandbox, not a tool allowlist',
-      codexArgvLaunched.includes('exec')
-      && codexArgvLaunched.includes('--sandbox read-only')
-      && codexArgvLaunched.includes('--output-schema')
-      && !codexArgvLaunched.includes('--permission-mode'),
-    );
-    check(
-      'codex refuses a writing role rather than pretending to sandbox it',
-      runDispatch({
-        role: 'implement',
-        prompt: 'x',
-        tools: writerTools,
-        cwd: repoScratch,
-        engine: join(codexShimDirectory, 'codex'),
-      }).error?.code === 'ENGINE_ROLE_UNSUPPORTED',
-    );
-    check(
-      'codex refuses to author a plan, which is writing under a reading posture',
-      runDispatch({
-        role: 'plan',
-        prompt: 'x',
-        tools: reviewerTools,
-        cwd: repoScratch,
-        engine: join(codexShimDirectory, 'codex'),
-      }).error?.code === 'ENGINE_ROLE_UNSUPPORTED',
+      'a removed engine is refused by name',
+      (() => {
+        const removedDir = join(scratch, 'removedbin');
+        writeEngineShim(removedDir, shimBody('exit 0'), 'codex');
+        return runDispatch({
+          role: 'plan-review', prompt: 'x', tools: reviewerTools, cwd: repoScratch,
+          engine: join(removedDir, 'codex'),
+        }).error?.code === 'ENGINE_REMOVED';
+      })(),
     );
 
     // Overlap accounting is only trustworthy if it is measured rather than
@@ -1745,36 +1650,28 @@ function selfTest() {
       'a result names the host that produced it',
       busyWriter.engine === 'claude' && idleWriter.error.engine === 'claude',
     );
-    // The invocation's engine choice must survive 40 minutes of context: `with
-    // codex` was prose, the tool default is claude, and a forgotten --engine at
-    // step 8 silently reviewed on the writer's model. The choice is now a file
-    // the skill writes at run start and this tool reads per dispatch.
+    // The legacy review-engine recording, read when no routes file exists.
     const engineFile = join(repoScratch, '.git', 'autoloop', 'review-engine');
     mkdirSync(dirname(engineFile), { recursive: true });
-    writeFileSync(engineFile, 'codex\n');
+    writeFileSync(engineFile, 'claude gpt-6-astra\n');
     check(
       'the CLI passes --engine and --live-file through to the dispatch',
       // The flags parsed clean since 0.44.0 and were dropped at this exact
       // seam: main() built runDispatch options from role/prompt/tools only.
       // Every self-test called runDispatch directly, so a live loop found it
-      // first — a review requested on codex silently ran claude, labeled
-      // [CODEX] by a banner that trusted the flag. This case goes through the
-      // real argv boundary: a PATH holding ONLY a codex shim, so if the engine
-      // is dropped the claude fallback cannot even spawn.
+      // first. This case goes through the real argv boundary with a PATH that
+      // holds no claude at all, so a dropped --engine cannot even spawn.
       (() => {
         const cliDir = join(scratch, 'cli-seam');
         mkdirSync(cliDir, { recursive: true });
-        const codexOnly = join(cliDir, 'bin');
-        writeEngineShim(codexOnly, [
+        const onlyHere = join(cliDir, 'bin');
+        writeEngineShim(onlyHere, [
           '#!/bin/sh',
           'printf \'%s\' "$*" > "$AUTOLOOP_SHIM_ARGV"',
           'cat > /dev/null',
-          'out=""; prev=""',
-          'for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done',
-          `printf '%s' '${JSON.stringify(PASSING_VERDICT)}' > "$out"`,
-          'printf \'{"type":"turn.completed"}\\n\'',
+          `printf '%s\\n' '${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '', structured_output: PASSING_VERDICT })}'`,
           '',
-        ].join('\n'), 'codex');
+        ].join('\n'));
         const promptPath = join(cliDir, 'p.md');
         writeFileSync(promptPath, 'review');
         const chosen = join(cliDir, 'cli-live.jsonl');
@@ -1782,14 +1679,14 @@ function selfTest() {
           fileURLToPath(import.meta.url),
           '--role', 'plan-review',
           '--prompt-file', promptPath,
-          '--engine', 'codex',
+          '--engine', join(onlyHere, 'claude'),
           '--model', 'gpt-test-model',
           '--live-file', chosen,
           '--json',
         ], {
           cwd: repoScratch,
           encoding: 'utf8',
-          env: { ...process.env, PATH: `${codexOnly}:${process.env.PATH}` },
+          env: { ...process.env, PATH: dirname(process.execPath) },
         });
         const argvSeen = readFileSync(argvPath, 'utf8');
         let cliResult;
@@ -1799,12 +1696,9 @@ function selfTest() {
           return false; // usage error: empty stdout is a failed check, not a crash
         }
         return run.status === 0
-          && argvSeen.includes('--sandbox read-only')
-          // --model crosses the same seam --engine once fell through:
-          // codex spells it -m.
-          && argvSeen.includes('-m gpt-test-model')
+          && argvSeen.includes('--model gpt-test-model')
           && existsSync(chosen)
-          && cliResult.engine === 'codex'
+          && cliResult.engine === 'claude'
           && cliResult.model === 'gpt-test-model';
       })(),
     );
@@ -1909,11 +1803,21 @@ function selfTest() {
     );
     check(
       'a recorded review-engine choice routes verdict-role defaults only',
-      resolveDefaultEngine('plan-review', repoScratch) === 'codex'
-      && resolveDefaultEngine('code-review', repoScratch) === 'codex'
-      && resolveDefaultEngine('implement', repoScratch) === 'claude'
+      resolveDefaultModel('plan-review', repoScratch) === 'gpt-6-astra'
+      && resolveDefaultModel('code-review', repoScratch) === 'gpt-6-astra'
+      && resolveDefaultModel('implement', repoScratch) === null
       // The plan is authored work: it never follows the review recording.
-      && resolveDefaultEngine('plan', repoScratch) === 'claude',
+      && resolveDefaultModel('plan', repoScratch) === null,
+    );
+    check(
+      'a legacy recording naming codex fails typed for verdict roles only',
+      (() => {
+        writeFileSync(engineFile, 'codex !xhigh\n');
+        const review = resolveRoute('code-review', repoScratch);
+        const writer = resolveRoute('implement', repoScratch);
+        writeFileSync(engineFile, 'claude gpt-6-astra\n');
+        return review.error?.code === 'ENGINE_REMOVED' && writer.error === undefined;
+      })(),
     );
     check(
       'a recorded engine may carry a model, routing proxied reviews',
@@ -1932,7 +1836,7 @@ function selfTest() {
     check(
       'a bare recorded engine carries no model',
       (() => {
-        writeFileSync(engineFile, 'codex\n');
+        writeFileSync(engineFile, 'claude\n');
         return resolveDefaultModel('code-review', repoScratch) === null;
       })(),
     );
@@ -2139,7 +2043,7 @@ function selfTest() {
     );
     check(
       'every dispatch records its own window in the dispatch log',
-      logged.length === 5
+      logged.length === 3
       && logged.every((entry) =>
         Number.isSafeInteger(entry.startedAtMs)
         && entry.startedAtMs > 0
@@ -2147,10 +2051,9 @@ function selfTest() {
         && entry.ms >= 0
         && typeof entry.ok === 'boolean')
       // Roles, engines and outcomes are all recorded, so overlap accounting can
-      // tell a codex review apart from a claude writer after the fact.
+      // tell a review apart from a writer after the fact.
       && logged.map(({ role, engine, ok }) => `${role}/${engine}/${ok}`).join(' ')
-        === 'implement/claude/false implement/claude/true '
-          + 'plan-review/codex/true implement/codex/false plan/codex/false',
+        === 'implement/claude/false implement/claude/true plan-review/codex/false',
     );
     // The branch ties a dispatch to its unit (a loop branch names its issue), so
     // the run record can itemize a unit's dispatches from this log alone.
@@ -2255,14 +2158,35 @@ function selfTest() {
           && planReview.argv.includes('--model claude-opus-5-5') && planReview.url === null;
       })(),
     );
+    // Every model is assumed available; one that is not falls back to Opus
+    // when its route names nothing else. Opus has nowhere further to go.
     check(
-      '--fallback on a route without one fails typed, without spawning',
+      '--fallback on a route without one runs its default natively; on the default it fails typed',
       (() => {
+        const review = routedEnv('code-review', { fallback: true });
+        // The legacy recording has no routes file; its default fallback must
+        // still run natively, not inherit the session-wide proxy.
+        const routesText = readFileSync(routesFile, 'utf8');
+        rmSync(routesFile);
+        writeFileSync(engineFile, 'claude gpt-6-astra @http://127.0.0.1:18765\n');
+        const legacy = routedEnv('code-review', { fallback: true });
+        rmSync(engineFile);
+        writeFileSync(routesFile, routesText);
         const refused = runDispatch({
-          role: 'code-review', prompt: 'x', tools: reviewerTools, cwd: repoScratch,
+          role: 'implement', prompt: 'x', tools: 'Read', cwd: repoScratch,
           engine: join(shimDirectory, 'claude'), fallback: true,
         });
-        return refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING';
+        return review.result.fallback === true && review.result.model === 'claude-fable-5-1'
+          && review.argv.includes('--model claude-fable-5-1') && review.url === null
+          && legacy.result.model === 'claude-fable-5-1' && legacy.url === null
+          && refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING'
+          && effectiveFallback('plan', { model: 'gpt-6-astra', fallback: null })?.model === 'claude-opus-5-5'
+          && effectiveFallback('implement', { model: 'claude-opus-5-5', fallback: null }) === null
+          // Opus wrote the code a code reviewer judges: it never reviews it.
+          && ['diff-review', 'code-review', 'doubt-review'].every((role) =>
+            effectiveFallback(role, { model: 'gpt-6-astra', fallback: null })?.model === 'claude-fable-5-1')
+          && effectiveFallback('code-review', { model: 'claude-fable-5-1', fallback: null }) === null
+          && effectiveFallback('x', { model: 'x', fallback: { model: 'y', baseUrl: null } }).model === 'y';
       })(),
     );
     check(
@@ -2282,7 +2206,7 @@ function selfTest() {
     check(
       'routes supersede a legacy review-engine recording; absent routes keep it',
       (() => {
-        writeFileSync(engineFile, 'codex !xhigh\n');
+        writeFileSync(engineFile, 'claude gpt-6-astra !xhigh\n');
         writeFileSync(routesFile, 'implement claude claude-opus-5-5\n');
         const superseded = resolveRoute('code-review', repoScratch);
         rmSync(routesFile);
@@ -2290,7 +2214,7 @@ function selfTest() {
         const legacyPlan = resolveRoute('plan', repoScratch);
         rmSync(engineFile);
         return superseded.engine === 'claude' && superseded.model === null
-          && legacy.engine === 'codex' && legacy.effort === 'xhigh'
+          && legacy.model === 'gpt-6-astra' && legacy.effort === 'xhigh'
           && legacyPlan.engine === 'claude' && legacyPlan.model === null;
       })(),
     );
@@ -2311,19 +2235,17 @@ function selfTest() {
         const doubt = resolveRoute('doubt-review', repoScratch);
         const plan = resolveRoute('plan', repoScratch);
         const codex = recordRoutes(repoScratch, { preset: 'codex' });
-        const codexReview = resolveRoute('code-review', repoScratch);
-        const codexPlan = resolveRoute('plan', repoScratch);
         const bad = recordRoutes(repoScratch, { preset: 'host', overrides: ['plan claude a b'] });
-        const afterBad = resolveRoute('code-review', repoScratch).engine;
+        const afterBad = resolveRoute('code-review', repoScratch).model;
         const host = recordRoutes(repoScratch, { preset: 'host' });
         return recorded.ok === true
           && doubt.model === 'claude-fable-5-1' && doubt.baseUrl === null
           && plan.model === 'gpt-6-astra'
-          && codex.ok === true && codexReview.engine === 'codex' && codexPlan.model === null
+          && codex.ok === false && codex.error.code === 'ROUTES_INVALID'
           && bad.ok === false && bad.error.code === 'ROUTES_INVALID'
           // A refused recording leaves the previous one in place.
-          && afterBad === 'codex'
-          && host.ok === true && resolveRoute('code-review', repoScratch).engine === 'claude';
+          && afterBad === 'gpt-6-astra'
+          && host.ok === true && resolveRoute('code-review', repoScratch).model === null;
       })(),
     );
     check(
@@ -2399,12 +2321,15 @@ function selfTest() {
       })(),
     );
     check(
-      'a usage limit with no fallback is flagged and never rerun on the same route',
+      'a usage limit on a route with no recorded fallback moves to its default; a pinned model is not rerouted',
       (() => {
-        const review = spawnsOf('code-review', limitedOnAstra);
+        const limitedReview = 'case "$*" in *gpt-6-astra*) '
+          + `printf 'You have hit your usage limit\\n' >&2; exit 1;; esac\n`
+          + resultEvent({ structured_output: PASSING_VERDICT });
+        const review = spawnsOf('code-review', limitedReview);
         const pinned = spawnsOf('plan', limitedOnAstra, { model: 'gpt-6-astra' });
-        return review.result.ok === false && review.spawns === 1
-          && review.result.error.usageLimit === true
+        return review.result.ok === true && review.spawns === 2
+          && review.result.model === 'claude-fable-5-1' && review.result.fallback === true
           // An explicit --model is the caller's choice; the tool does not reroute it.
           && pinned.result.ok === false && pinned.spawns === 1;
       })(),
@@ -2439,7 +2364,9 @@ function selfTest() {
         const { result, spawns } = spawnsOf('code-review', resultEvent({
           is_error: true, result: 'Claude AI usage limit reached|1760000000',
         }));
-        return result.ok === false && spawns === 1
+        // The limit moves it to the Fable default once; that attempt is refused
+        // the same way and is not accepted either.
+        return result.ok === false && spawns === 2 && result.fallback === undefined
           && result.error.code === 'ENGINE_RESULT_MISSING' && result.error.usageLimit === true;
       })(),
     );
@@ -2447,7 +2374,6 @@ function selfTest() {
       'the limit detector reads failure reports, never the transcript body',
       usageLimitIn("You've reached your weekly limit", '')
       && usageLimitIn('', '{"type":"error","message":"429 rate_limit_error"}')
-      && usageLimitIn('', '{"type":"turn.failed","error":{"message":"usage limit"}}')
       && !usageLimitIn('', JSON.stringify({
         type: 'assistant', message: { content: 'the proxy returns 429 on rate limit' },
       }))
@@ -2742,7 +2668,7 @@ function main() {
       + `${ROLE_NAMES.join('|')}> --prompt-file <path|-> `
       + '[--tools <csv>] [--engine <name>] [--model <name>] [--fallback] '
       + `[--effort <${[...EFFORTS].join('|')}>] [--output-file <path>] [--json]\n`
-      + '       dispatch.mjs --record-routes --preset <proxy|codex|host> '
+      + '       dispatch.mjs --record-routes --preset <proxy|host> '
       + '[--proxy-url <url>] [--route "<role> <engine> [model] [@url] [!effort] [>model[@url]]"]...',
     );
     process.exit(2);

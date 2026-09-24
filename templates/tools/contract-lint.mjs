@@ -67,26 +67,14 @@ const FORWARD_ARTIFACTS = Object.freeze([
   'templates/LOOP.template.md',
   'templates/ARCH.template.md',
   'templates/settings-hooks.template.json',
-  'templates/codex-hooks.template.json',
-  'templates/opencode-config.template.json',
-  'templates/opencode-plugin.template.js',
-  'templates/codex-reviewer-agent.template.toml',
-  'templates/opencode-reviewer-agent.template.md',
   'templates/tools/label-swap-reminder.mjs',
   'templates/tools/session-preflight.sh',
   ...DISPATCH_CONSUMERS.map((name) => `templates/tools/${name}`),
-  'docs/opencode-smoke.md',
 ]);
 const INSTALLED_FORWARD_ARTIFACTS = Object.freeze([
   'docs/agentic/STATE.md',
   'docs/agentic/LOOP.md',
   '.claude/settings.json',
-  '.codex/hooks.json',
-  '.codex/config.toml',
-  '.codex/agents/autoloop-reviewer.toml',
-  '.opencode/agent/autoloop-reviewer.md',
-  '.opencode/plugins/autoloop.js',
-  '.opencode/opencode.json',
   'tools/agentic/session-preflight.sh',
   ...DISPATCH_CONSUMERS.map((name) => `tools/agentic/${name}`),
 ]);
@@ -177,15 +165,6 @@ const STALE_ROUTE_PATTERNS = Object.freeze([
     code: 'ARCH_FRESHNESS_FIELD',
     pattern: /\bLast-verified\b/giu,
     message: 'ARCH freshness comes from Git history, not shared metadata',
-  },
-  {
-    code: 'OPENCODE_EXTERNAL_AUTO_APPROVAL',
-    pattern:
-      /\bopencode run --auto(?=[^\r\n]{0,160}(?:--agent autoloop-reviewer|--format json))/giu,
-    message: 'external opencode routes use --pure and omit global auto-approval',
-    exemptMatch: ({ path, line }) =>
-      path === 'docs/opencode-smoke.md'
-      && /\bopencode run --auto \$M\b/u.test(line),
   },
 ]);
 
@@ -426,7 +405,6 @@ function selfTest() {
       'Use engine.opencode.reviewerModel.',
       'Fall back when `codex exec` is unavailable.',
       'Add Last-verified.',
-      'Launch opencode run --auto --agent autoloop-reviewer --format json.',
       'Read runtime.supportedHosts.',
       'engine.profile selects the engine.',
     ].join(' '),
@@ -478,14 +456,6 @@ function selfTest() {
   const conditionalProvenanceClaim = lintRoutingText(
     'Run open rejects an unacknowledged non-manual policy with `UNVERIFIABLE_INVOCATION_PROVENANCE`.',
   );
-  const smokeExemption = lintRoutingText(
-    '`opencode run --auto $M --format json "smoke"`',
-    'docs/opencode-smoke.md',
-  );
-  const overbroadSmokeExemption = lintRoutingText(
-    '`opencode run --auto --format json "production"`',
-    'docs/opencode-smoke.md',
-  );
   const cases = [
     ['migration prose is allowed', clean.length === 0],
     ['identical scaffold and skill cap literals pass', capsAgree.length === 0],
@@ -527,15 +497,14 @@ function selfTest() {
     ],
     [
       'operational host/profile prose is rejected',
-      stale.length === 8
+      stale.length === 7
         && stale[0].code === 'PERSISTED_HOST_AUTHORITY'
         && stale[1].code === 'RETIRED_ROUTE_FIELD_READ'
         && stale[2].code === 'RETIRED_ROUTE_FIELD_ACTION'
         && stale[3].code === 'PROFILE_ROUTE_PROSE'
         && stale[4].code === 'LEGACY_ADAPTER_OPTION_PATH'
         && stale[5].code === 'CAPABILITY_FAILURE_AS_OUTAGE'
-        && stale[6].code === 'ARCH_FRESHNESS_FIELD'
-        && stale[7].code === 'OPENCODE_EXTERNAL_AUTO_APPROVAL',
+        && stale[6].code === 'ARCH_FRESHNESS_FIELD',
     ],
     [
       'claim grammar has one owner',
@@ -548,11 +517,6 @@ function selfTest() {
         && INSTALLED_FORWARD_ARTIFACTS.includes(
           'tools/agentic/session-preflight.sh',
         ),
-    ],
-    [
-      'only the explicit opencode smoke harness is exempt',
-      smokeExemption.length === 0
-        && overbroadSmokeExemption.length === 1,
     ],
     [
       'installed dispatch consumers are linted',
