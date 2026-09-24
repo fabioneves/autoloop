@@ -22,9 +22,15 @@
 //   node tools/agentic/review-contract.mjs --self-test
 
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateProjectConfig } from './config-contract.mjs';
+import { snapshotExecutionCheckout } from './checkout-contract.mjs';
+import { extractConfig, validateProjectConfig } from './config-contract.mjs';
 import { validReviewVerdict } from './dispatch.mjs';
 
 const GATING_SEVERITIES = new Set(['Critical', 'Major']);
@@ -38,7 +44,12 @@ const FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
 const DISPATCH_ID_RE = IDENTITY_RE;
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
-const DISPOSITIONS = new Set(['fix', 'rebut']);
+const DISPOSITIONS = new Set(['fix', 'rebut', 'defer']);
+// A Major the fixes keep missing is not worth another round of the same fix:
+// after this many raisings it may be deferred to a filed follow-up issue, which
+// the PR body lists, so the human still sees it at merge. A Critical never is.
+const DEFER_AFTER_RAISINGS = 3;
+const FOLLOW_UP_RE = /#[1-9][0-9]*/u;
 const LEDGER_STATES = new Set(['open', 'closed']);
 
 const ROUND_KEYS = [
@@ -173,7 +184,9 @@ function validLedgerEntry(entry) {
     && boundedText(entry.evidence, 0, 16384)
     && DISPOSITIONS.has(entry.disposition)
     && LEDGER_STATES.has(entry.state)
-    && boundedText(entry.rationale, 1, 4096);
+    && boundedText(entry.rationale, 1, 4096)
+    && (entry.disposition !== 'defer'
+      || (entry.severity === 'Major' && FOLLOW_UP_RE.test(entry.rationale)));
 }
 
 function validRebuttal(rebuttal) {
@@ -292,13 +305,7 @@ function validCumulativeLedger(previous, current) {
       continue;
     }
     if (!previousFinding) return false;
-    const expectedState = previousFinding.state === 'closed'
-      ? 'closed'
-      : previousFinding.disposition === 'fix'
-        ? 'closed'
-        : previousRebuts.get(id)?.status === 'accepted'
-          ? 'closed'
-          : null;
+    const expectedState = ledgerEntryCloses(previousFinding, previousRebuts) ? 'closed' : null;
     if (
       expectedState === null
       || hashValue(currentFinding)
@@ -325,6 +332,32 @@ function scopeEscalates(previous, current) {
     && current.artifactFingerprint === previous.artifactFingerprint
     && current.artifactVersion === previous.artifactVersion
     && current.headOid === previous.headOid;
+}
+
+// A prior ledger entry leaves the gating set once it is closed, fixed,
+// deferred, or rebutted with the rebuttal accepted.
+function ledgerEntryCloses(entry, rebutsById) {
+  return entry.state === 'closed'
+    || entry.disposition === 'fix'
+    || entry.disposition === 'defer'
+    || rebutsById.get(entry.findingId)?.status === 'accepted';
+}
+
+// The one round past the cap that is not an escalation: the cap round still
+// gated, the fix went in, and nothing had reviewed it. Handing off there left an
+// unreviewed commit on the PR; one full round over it closes or hands off with
+// evidence. Full only, and only after a cap round that actually gated.
+function closesCappedFindings(input) {
+  const rounds = input.reviewRounds;
+  const capVerdict = Array.isArray(rounds) && rounds.length >= 2
+    ? rounds.at(-2)?.verdict
+    : undefined;
+  return input.scope === 'full'
+    && isPlainObject(capVerdict)
+    && Array.isArray(capVerdict.findings)
+    && Array.isArray(capVerdict.rebuts)
+    && (gatingFindings(capVerdict).length > 0
+      || capVerdict.rebuts.some(({ status }) => status === 'rejected'));
 }
 
 function closesByScopeEscalation(rounds) {
@@ -521,7 +554,8 @@ export function reviewTransition(input) {
     || validateProjectConfig(input.projectConfig).length > 0
     || (input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
       && !(input.round === input.projectConfig.caps.codeReviewRoundsPerUnit + 1
-        && closesByScopeEscalation(input.reviewRounds)))
+        && (closesByScopeEscalation(input.reviewRounds)
+          || closesCappedFindings(input))))
     || !validExpected(input.expected)
     || !validAnnotations(input.findingAnnotations)
   ) {
@@ -578,10 +612,36 @@ export function reviewTransition(input) {
     });
   }
 
+  const deferred = history.current.priorFindings.filter(
+    ({ disposition }) => disposition === 'defer',
+  );
+  for (const entry of deferred) {
+    const raisings = history.rounds.slice(0, -1).filter(({ verdict }) =>
+      verdict.findings.some(({ id }) => id === entry.findingId)).length;
+    if (raisings < DEFER_AFTER_RAISINGS) {
+      return decision('error', 'INVALID_REVIEW_EVIDENCE', {
+        evidenceGap: `finding ${entry.findingId} is deferred after ${raisings} raising(s); `
+          + `only a Major raised in ${DEFER_AFTER_RAISINGS} rounds may be deferred — fix or rebut it`,
+      });
+    }
+  }
+  const deferredIds = new Set(deferred.map(({ findingId }) => findingId));
+  // The evidence every publishable (clean) decision carries.
+  const closedEvidence = () => ({
+    ...(deferred.length === 0 ? {} : {
+      deferredFindings: deferred.map(({ findingId, rationale }) => ({ findingId, rationale })),
+    }),
+    reviewedHead: history.current.headOid,
+    reviewedCheckout: structuredClone(history.current.checkout),
+    reviewEvidenceFingerprint: hashValue(history.current),
+  });
   const annotations = new Map(
     input.findingAnnotations.map((annotation) => [annotation.id, annotation]),
   );
-  const currentGating = gatingFindings(currentVerdict);
+  // A deferred finding a later reviewer raises again no longer gates: it is
+  // already filed, and re-raising it is the recurrence the deferral exists for.
+  const currentGating = gatingFindings(currentVerdict)
+    .filter(({ id }) => !deferredIds.has(id));
   const currentGatingIds = new Set(currentGating.map(({ id }) => id));
   const inconsistentRebut = currentVerdict.rebuts.find(({ findingId, status }) =>
     status === 'accepted'
@@ -611,8 +671,11 @@ export function reviewTransition(input) {
   const late = input.scope === 'delta'
     ? currentGating.filter(({ id }) => annotations.get(id).inScope !== true)
     : [];
+  // A real defect the delta could not see is a reason to look wider, not to
+  // stop: fix it and review the whole artifact. At the cap that full round is
+  // the closing round.
   if (late.length > 0) {
-    return decision('human-block', 'VERIFIED_OUT_OF_DELTA_FINDING', {
+    return decision('continue', 'REVIEW_FULL_ROUND_REQUIRED', {
       findings: late.map(({ id, severity }) => ({ id, severity })),
     });
   }
@@ -633,13 +696,29 @@ export function reviewTransition(input) {
         reviewedHead: history.current.headOid,
       });
     }
-    return decision('clean', 'REVIEW_CLEAN', {
-      reviewedHead: history.current.headOid,
-      reviewedCheckout: structuredClone(history.current.checkout),
-      reviewEvidenceFingerprint: hashValue(history.current),
+    return decision('clean', 'REVIEW_CLEAN', closedEvidence());
+  }
+  if (input.round === input.projectConfig.caps.codeReviewRoundsPerUnit) {
+    return decision('continue', 'REVIEW_CLOSING_ROUND_REQUIRED', {
+      unresolvedFindings: currentGating.length,
+      rejectedRebuts: rejectedRebuts.length,
     });
   }
-  if (input.round >= input.projectConfig.caps.codeReviewRoundsPerUnit) {
+  // Past the closing round a Major is handed to the human at merge instead of
+  // parking the unit: the loop files each as a follow-up and lists it in the PR
+  // body. Only under manual policy, so a hand-off can never reach auto-merge,
+  // and never with a Critical open.
+  if (
+    input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
+    && input.projectConfig.merge?.policy === 'manual'
+    && currentGating.every(({ severity }) => severity === 'Major')
+  ) {
+    return decision('clean', 'REVIEW_CAP_HANDOFF', {
+      handedOffFindings: currentGating.map(({ id, severity }) => ({ id, severity })),
+      ...closedEvidence(),
+    });
+  }
+  if (input.round > input.projectConfig.caps.codeReviewRoundsPerUnit) {
     return decision('human-block', 'REVIEW_CAP_REACHED', {
       unresolvedFindings: currentGating.length,
       rejectedRebuts: rejectedRebuts.length,
@@ -671,15 +750,23 @@ function carriedLedger(previous) {
   );
   const carried = [];
   for (const entry of previous.priorFindings) {
-    const state = entry.state === 'closed'
-      || entry.disposition === 'fix'
-      || rebuts.get(entry.findingId)?.status === 'accepted'
-      ? 'closed'
-      : null;
-    if (state === null) return null;
-    carried.push({ ...entry, state });
+    if (!ledgerEntryCloses(entry, rebuts)) return null;
+    carried.push({ ...entry, state: 'closed' });
   }
   return carried;
+}
+
+// An appended round is returned only when the contract accepts it.
+function validatedAppend(appended) {
+  const transition = reviewTransition(appended);
+  if (transition.state === 'error') {
+    return {
+      ok: false,
+      code: transition.code,
+      reason: transition.evidenceGap ?? 'the appended round does not validate',
+    };
+  }
+  return { ok: true, code: transition.code, evidence: appended };
 }
 
 export function appendEscalationRound(evidence, result, options = {}) {
@@ -746,14 +833,226 @@ export function appendEscalationRound(evidence, result, options = {}) {
       },
     ],
   };
-  const transition = reviewTransition(appended);
-  if (transition.state === 'error') {
+  return validatedAppend(appended);
+}
+
+// Every ordinary round, built by the tool. Until 0.50.0 only the escalation
+// round had one, and the rest were hand-assembled: 9 of the 29 permission
+// classifier blocks on living-football-engine were `/tmp` evidence programs,
+// skeleton JSON, and `jq … > evidence.json`, one of them a 10.3h halt. The
+// classifier was right to refuse an ad-hoc program writing review verdicts
+// into an audit artifact; this is the sanctioned shape instead.
+//
+// What is judgement stays the caller's: the dispositions (fix or rebut, with
+// the rebuttal) and the finding annotations. Everything else is derived — the
+// checkout, the artifact fingerprint, the version, the ledger carry-forward —
+// and the result goes through `reviewTransition` before it is returned.
+function dispositionLedgerEntry(finding, disposition) {
+  return {
+    findingId: finding.id,
+    severity: finding.severity,
+    summary: finding.summary,
+    evidence: finding.evidence,
+    disposition: disposition.disposition,
+    state: 'open',
+    rationale: disposition.rationale,
+  };
+}
+
+export function appendRound(evidence, result, options = {}) {
+  const refuse = (code, reason) => ({ ok: false, code, reason });
+  const verdict = result?.verdict;
+  if (result?.ok !== true || !validReviewVerdict(verdict)) {
     return refuse(
-      transition.code,
-      transition.evidenceGap ?? 'the appended round does not validate',
+      'INVALID_DISPATCH_RESULT',
+      'the dispatch result is not a successful review with a valid verdict',
     );
   }
-  return { ok: true, code: transition.code, evidence: appended };
+  const checkout = options.checkout;
+  if (!validCheckout(checkout)) {
+    return refuse('INVALID_CHECKOUT', 'the checkout snapshot is malformed');
+  }
+  if (checkout.clean !== true) {
+    return refuse(
+      'CHECKOUT_DIRTY',
+      'the checkout has uncommitted changes — commit the artifact before it is reviewed',
+    );
+  }
+  if (!HASH_RE.test(options.artifactFingerprint ?? '')) {
+    return refuse('INVALID_ARTIFACT_FINGERPRINT', 'artifactFingerprint must be a sha256');
+  }
+  if (!DISPATCH_ID_RE.test(options.dispatchId ?? '')) {
+    return refuse('INVALID_DISPATCH_ID', 'dispatchId must identify this round\'s reviewer process');
+  }
+  const annotations = options.findingAnnotations ?? [];
+  if (verdict.findings.length > 0 && annotations.length === 0) {
+    return refuse(
+      'FINDING_ANNOTATIONS_REQUIRED',
+      `the round raised ${verdict.findings.length} finding(s); verify each `
+      + 'against source and supply findingAnnotations — a tool may not stamp '
+      + 'them verified',
+    );
+  }
+  const reviewerIdentity = [result.engine, result.model]
+    .filter((part) => typeof part === 'string' && part.length > 0)
+    .join(':');
+
+  let base;
+  let priorFindings = [];
+  let openRebuttals = [];
+  if (evidence === null || evidence === undefined) {
+    const first = options.first;
+    if (
+      !isPlainObject(first)
+      || validateProjectConfig(first.projectConfig).length > 0
+      || !HASH_RE.test(first.planFingerprint ?? '')
+      || !IDENTITY_RE.test(first.authorIdentity ?? '')
+      || !OID_RE.test(first.configuredBaseOid ?? '')
+    ) {
+      return refuse(
+        'INVALID_FIRST_ROUND',
+        'the first round needs a valid projectConfig, planFingerprint, '
+        + 'authorIdentity and configuredBaseOid',
+      );
+    }
+    base = {
+      round: 1,
+      scope: 'full',
+      projectConfig: first.projectConfig,
+      planFingerprint: first.planFingerprint,
+      configFingerprint: hashValue(first.projectConfig),
+      configuredBaseOid: first.configuredBaseOid,
+      deltaBaseOid: first.configuredBaseOid,
+      authorIdentity: first.authorIdentity,
+      artifactVersion: 1,
+      reviewRounds: [],
+    };
+  } else {
+    const previous = evidence?.reviewRounds?.at(-1);
+    if (!validReviewRound(previous)) {
+      return refuse('INVALID_EVIDENCE', 'the evidence carries no valid previous round');
+    }
+    if (!REVIEW_SCOPES.has(options.scope)) {
+      return refuse('INVALID_SCOPE', 'scope must be full or delta');
+    }
+    const dispositions = new Map(
+      (options.dispositions ?? []).map((entry) => [entry?.findingId, entry]),
+    );
+    // A deferral stands until the unit closes: a reviewer re-raising an already
+    // filed finding gets the same deferral, not a new judgement to make.
+    for (const entry of previous.priorFindings) {
+      if (entry.disposition === 'defer' && !dispositions.has(entry.findingId)) {
+        dispositions.set(entry.findingId, {
+          findingId: entry.findingId, disposition: 'defer', rationale: entry.rationale,
+        });
+      }
+    }
+    const previousGating = gatingFindings(previous.verdict);
+    for (const finding of previousGating) {
+      const disposition = dispositions.get(finding.id);
+      if (!DISPOSITIONS.has(disposition?.disposition)
+        || !boundedText(disposition.rationale, 1, 4096)) {
+        return refuse(
+          'DISPOSITION_REQUIRED',
+          `finding ${finding.id} gated the previous round; dispose it as fix, `
+          + 'rebut, or (a Major raised in 3 rounds) defer naming its follow-up #N, '
+          + 'with a rationale',
+        );
+      }
+      if (disposition.disposition === 'rebut'
+        && !validRebuttal({
+          findingId: finding.id, claim: disposition.claim, evidence: disposition.evidence,
+        })) {
+        return refuse(
+          'REBUTTAL_EVIDENCE_REQUIRED',
+          `the rebuttal of ${finding.id} needs a claim and evidence`,
+        );
+      }
+    }
+    const previousRebuts = new Map(
+      previous.verdict.rebuts.map((rebut) => [rebut.findingId, rebut]),
+    );
+    const repeated = new Set(previousGating.map(({ id }) => id));
+    // Carry-forward is `validCumulativeLedger` read constructively.
+    for (const entry of previous.priorFindings) {
+      if (repeated.has(entry.findingId)) continue;
+      if (!ledgerEntryCloses(entry, previousRebuts)) {
+        return refuse(
+          'LEDGER_CANNOT_CARRY_FORWARD',
+          `prior finding ${entry.findingId} is neither closed, fixed, nor rebutted and accepted`,
+        );
+      }
+      priorFindings.push({ ...entry, state: 'closed' });
+    }
+    for (const finding of previousGating) {
+      const disposition = dispositions.get(finding.id);
+      priorFindings.push(dispositionLedgerEntry(finding, disposition));
+      if (disposition.disposition === 'rebut') {
+        openRebuttals.push({
+          findingId: finding.id, claim: disposition.claim, evidence: disposition.evidence,
+        });
+      }
+    }
+    base = {
+      round: evidence.round + 1,
+      scope: options.scope,
+      projectConfig: evidence.projectConfig,
+      planFingerprint: previous.planFingerprint,
+      configFingerprint: previous.configFingerprint,
+      configuredBaseOid: previous.configuredBaseOid,
+      deltaBaseOid: previous.headOid,
+      authorIdentity: previous.authorIdentity,
+      artifactVersion: previous.artifactVersion + 1,
+      reviewRounds: evidence.reviewRounds,
+    };
+  }
+
+  const record = {
+    round: base.round,
+    scope: REVIEW_SCOPES.get(base.scope),
+    dispatchId: options.dispatchId,
+    authorIdentity: base.authorIdentity,
+    reviewerIdentity,
+    planFingerprint: base.planFingerprint,
+    repositoryFingerprint: checkout.repositoryFingerprint,
+    configFingerprint: base.configFingerprint,
+    configuredBaseOid: base.configuredBaseOid,
+    deltaBaseOid: base.deltaBaseOid,
+    headOid: checkout.headOid,
+    artifactVersion: base.artifactVersion,
+    artifactFingerprint: options.artifactFingerprint,
+    checkout: structuredClone(checkout),
+    priorFindings,
+    openRebuttals,
+    verdict: structuredClone(verdict),
+  };
+  const appended = {
+    round: base.round,
+    scope: base.scope,
+    projectConfig: structuredClone(base.projectConfig),
+    expected: {
+      planFingerprint: record.planFingerprint,
+      repositoryFingerprint: record.repositoryFingerprint,
+      configuredBaseOid: record.configuredBaseOid,
+      artifactVersion: record.artifactVersion,
+      artifactFingerprint: record.artifactFingerprint,
+      headOid: record.headOid,
+    },
+    findingAnnotations: structuredClone(annotations),
+    reviewRounds: [...structuredClone(base.reviewRounds), record],
+  };
+  return validatedAppend(appended);
+}
+
+// The reviewed artifact is its tree: an empty commit or a rebase that
+// reproduces the same bytes is the same artifact, and any byte change is not.
+export function artifactFingerprintOf(root) {
+  const tree = spawnSync('git', ['rev-parse', 'HEAD^{tree}'], {
+    cwd: root, encoding: 'utf8', timeout: 15000,
+  });
+  const oid = String(tree.stdout ?? '').trim();
+  if (tree.status !== 0 || !OID_RE.test(oid)) return null;
+  return hashValue({ tree: oid });
 }
 
 export function authorizeReviewPublication(input, targetHeadOid, liveCheckout) {
@@ -836,7 +1135,7 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
         if (finding.state === 'closed' || previousGating.has(finding.findingId)) {
           continue;
         }
-        finding.state = finding.disposition === 'fix'
+        finding.state = finding.disposition === 'fix' || finding.disposition === 'defer'
           ? 'closed'
           : previousRebuts.get(finding.findingId)?.status === 'accepted'
             ? 'closed'
@@ -846,16 +1145,19 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
         const rebutted = verdict.rebuts.some(
           ({ findingId }) => findingId === prior.id,
         );
+        const deferred = (overrides.defer ?? []).includes(prior.id);
         ledger.set(prior.id, {
           findingId: prior.id,
           severity: prior.severity,
           summary: prior.summary,
           evidence: prior.evidence,
-          disposition: rebutted ? 'rebut' : 'fix',
+          disposition: rebutted ? 'rebut' : deferred ? 'defer' : 'fix',
           state: 'open',
           rationale: rebutted
             ? 'The author supplied a bounded rebuttal with evidence.'
-            : 'The exact fix delta contains the bounded fix.',
+            : deferred
+              ? overrides.deferRationale ?? 'Deferred to follow-up #99.'
+              : 'The exact fix delta contains the bounded fix.',
         });
       }
     }
@@ -1033,6 +1335,59 @@ function selfTest() {
     1,
     failWith([finding]),
   );
+
+  // self-resolving-units: the cap round earns one closing full round.
+  const closingFactory = roundFactory(configuredCap, { seed: 'closing' });
+  const closingFirst = closingFactory(1, failWith([finding]));
+  const closingStillFails = closingFactory(2, failWith([cumulativeFinding]), {
+    scope: 'full-artifact',
+  });
+  const closingCleanFactory = roundFactory(configuredCap, { seed: 'closing-clean' });
+  const closingCleanFirst = closingCleanFactory(1, failWith([finding]));
+  const closingClean = closingCleanFactory(2, pass, { scope: 'full-artifact' });
+  // limits-never-stop: a closing round that still gates on Majors alone hands
+  // the unit off at merge under manual policy; a Critical or a non-manual
+  // policy still blocks.
+  const closingCriticalFactory = roundFactory(configuredCap, { seed: 'closing-critical' });
+  const closingCriticalFirst = closingCriticalFactory(1, failWith([finding]));
+  const closingCritical = closingCriticalFactory(
+    2,
+    failWith([{ ...cumulativeFinding, id: 'finding-critical', severity: 'Critical' }]),
+    { scope: 'full-artifact' },
+  );
+  const ratifiedCap = { ...fixtureProjectConfig(1), merge: { policy: 'ratified' } };
+  const closingRatifiedFactory = roundFactory(ratifiedCap, { seed: 'closing-ratified' });
+  const closingRatifiedFirst = closingRatifiedFactory(1, failWith([finding]));
+  const closingRatified = closingRatifiedFactory(2, failWith([cumulativeFinding]), {
+    scope: 'full-artifact',
+  });
+  const closingDeltaFactory = roundFactory(configuredCap, { seed: 'closing-delta' });
+  const closingDeltaFirst = closingDeltaFactory(1, failWith([finding]));
+  const closingDelta = closingDeltaFactory(2, pass);
+  const beyondFactory = roundFactory(configuredCap, { seed: 'beyond' });
+  const beyondRounds = [
+    beyondFactory(1, failWith([finding])),
+    beyondFactory(2, failWith([cumulativeFinding]), { scope: 'full-artifact' }),
+  ];
+  beyondRounds.push(beyondFactory(3, pass, { scope: 'full-artifact' }));
+
+  // A Major the fix keeps missing is deferred to a filed follow-up, not a block.
+  const deferRounds = (seed, raised, severity = 'Major', deferRationale = undefined) => {
+    const recurring = { ...finding, id: `recurring-${seed}`, severity };
+    const factory = roundFactory(fixtureProjectConfig(), { seed });
+    const rounds = [];
+    for (let round = 1; round <= raised; round += 1) {
+      rounds.push(factory(round, failWith([recurring])));
+    }
+    rounds.push(factory(raised + 1, failWith([recurring]), {
+      scope: 'full-artifact', defer: [recurring.id], deferRationale,
+    }));
+    return rounds;
+  };
+  const deferredAtThree = deferRounds('defer-3', 3);
+  const deferredAtTwo = deferRounds('defer-2', 2);
+  const deferredCritical = deferRounds('defer-critical', 3, 'Critical');
+  const deferredUnnamed = deferRounds('defer-unnamed', 3, 'Major', 'Deferred for later.');
 
   const wrongDeltaFactory = roundFactory(fixtureProjectConfig(), { seed: 'wrong-delta' });
   const wrongDeltaFirst = wrongDeltaFactory(1, failWith([finding]));
@@ -1225,12 +1580,13 @@ function selfTest() {
       expected: ['continue', false],
     },
     {
-      name: 'verified out-of-delta Major blocks for a human',
+      name: 'a verified out-of-delta Major continues with a full round',
       input: {
         ...inputFor([lateClean, late]),
         findingAnnotations: [{ id: lateFinding.id, verified: true, inScope: false }],
       },
-      expected: ['human-block', false],
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_ROUND_REQUIRED',
     },
     {
       name: 'an unverified gating finding requires verification',
@@ -1241,9 +1597,66 @@ function selfTest() {
       expected: ['verify', false],
     },
     {
-      name: 'a gating finding at the cap blocks',
+      name: 'a gating finding at the cap earns one closing full round',
       input: inputFor([cappedFailure], configuredCap),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_CLOSING_ROUND_REQUIRED',
+    },
+    {
+      name: 'a closing round that still gates on Majors hands the unit off at merge',
+      input: inputFor([closingFirst, closingStillFails], configuredCap, { scope: 'full' }),
+      expected: ['clean', true],
+      expectedCode: 'REVIEW_CAP_HANDOFF',
+    },
+    {
+      name: 'a closing round that still gates on a Critical blocks at the cap',
+      input: inputFor([closingCriticalFirst, closingCritical], configuredCap, { scope: 'full' }),
       expected: ['human-block', false],
+      expectedCode: 'REVIEW_CAP_REACHED',
+    },
+    {
+      name: 'a closing round under a non-manual merge policy blocks at the cap',
+      input: inputFor([closingRatifiedFirst, closingRatified], ratifiedCap, { scope: 'full' }),
+      expected: ['human-block', false],
+      expectedCode: 'REVIEW_CAP_REACHED',
+    },
+    {
+      name: 'a clean closing round past the cap publishes',
+      input: inputFor([closingCleanFirst, closingClean], configuredCap, { scope: 'full' }),
+      expected: ['clean', true],
+    },
+    {
+      name: 'the closing round past the cap is always full',
+      input: inputFor([closingDeltaFirst, closingDelta], configuredCap),
+      expected: ['error', false],
+      expectedCode: 'INVALID_REVIEW_INPUT',
+    },
+    {
+      name: 'there is no round after the closing round',
+      input: inputFor(beyondRounds, configuredCap, { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'INVALID_REVIEW_INPUT',
+    },
+    {
+      name: 'a Major raised in three rounds may be deferred to a named follow-up',
+      input: inputFor(deferredAtThree, fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['clean', true],
+    },
+    {
+      name: 'a finding raised only twice may not be deferred',
+      input: inputFor(deferredAtTwo, fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedGap: 'deferred',
+    },
+    {
+      name: 'a Critical is never deferred',
+      input: inputFor(deferredCritical, fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+    },
+    {
+      name: 'a deferral must name its follow-up issue',
+      input: inputFor(deferredUnnamed, fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
     },
     {
       name: 'the caller cannot inflate the configured review cap',
@@ -1501,8 +1914,248 @@ function selfTest() {
     },
   ];
 
+  // `--append-round`: every ordinary round built by the tool from the dispatch
+  // result, the checkout, and the orchestrator's dispositions — the shapes a
+  // live run improvised in /tmp and the permission classifier refused.
+  const builderCheckout = (head) => ({
+    root: '/fixture/repo',
+    repositoryFingerprint: hash('repo-builder'),
+    branch: 'loop/issue-9',
+    headOid: oid(head),
+    clean: true,
+  });
+  const builderFirst = {
+    projectConfig: fixtureProjectConfig(),
+    planFingerprint: hash('plan-builder'),
+    authorIdentity: 'claude:claude-opus-5-5',
+    configuredBaseOid: oid('base-builder'),
+  };
+  const reviewed = (verdict) => ({
+    ok: true, role: 'code-review', engine: 'claude', model: 'gpt-6-astra', verdict,
+  });
+  const verifiedIn = (id) => ({ id, verified: true, inScope: true });
+  const builtFirst = appendRound(null, reviewed(failWith([finding])), {
+    first: builderFirst,
+    scope: 'full',
+    checkout: builderCheckout('b-1'),
+    artifactFingerprint: hash('tree-1'),
+    dispatchId: 'builder-1',
+    findingAnnotations: [verifiedIn(finding.id)],
+  });
+  const secondOptions = (overrides = {}) => ({
+    scope: 'delta',
+    checkout: builderCheckout('b-2'),
+    artifactFingerprint: hash('tree-2'),
+    dispatchId: 'builder-2',
+    findingAnnotations: [],
+    dispositions: [{
+      findingId: finding.id, disposition: 'fix', rationale: 'Fixed in the delta.',
+    }],
+    ...overrides,
+  });
+  const builtSecond = builtFirst.ok
+    ? appendRound(builtFirst.evidence, reviewed(pass), secondOptions())
+    : { ok: false };
+  const rebutOptions = secondOptions({
+    dispositions: [{
+      findingId: finding.id,
+      disposition: 'rebut',
+      rationale: 'The finding misreads the invariant.',
+      claim: 'The guard already covers this path.',
+      evidence: 'src/reviewed.mjs:9 checks it first.',
+    }],
+  });
+  const builderCases = [
+    {
+      name: 'the first round is built whole from the result and the checkout',
+      actual: builtFirst.ok === true
+        && builtFirst.code === 'REVIEW_FIX_DELTA_REQUIRED'
+        && reviewTransition(builtFirst.evidence).state === 'continue'
+        && builtFirst.evidence.reviewRounds[0].reviewerIdentity === 'claude:gpt-6-astra'
+        && builtFirst.evidence.reviewRounds[0].deltaBaseOid === builderFirst.configuredBaseOid
+        && builtFirst.evidence.reviewRounds[0].configFingerprint
+          === hashValue(builderFirst.projectConfig),
+      expected: true,
+    },
+    {
+      name: 'a fixed finding is carried open into the next round and the delta closes clean',
+      actual: builtSecond.ok === true
+        && builtSecond.code === 'REVIEW_FULL_CLOSE_REQUIRED'
+        && builtSecond.evidence.reviewRounds[1].artifactVersion === 2
+        && builtSecond.evidence.reviewRounds[1].deltaBaseOid === oid('b-1')
+        && builtSecond.evidence.reviewRounds[1].priorFindings[0].disposition === 'fix'
+        && builtSecond.evidence.reviewRounds[1].priorFindings[0].state === 'open',
+      expected: true,
+    },
+    {
+      name: 'the built chain hands off to the escalation round and converges',
+      actual: builtSecond.ok === true
+        && appendEscalationRound(builtSecond.evidence, reviewed(pass), {
+          dispatchId: 'builder-3',
+        }).code === 'REVIEW_CLEAN',
+      expected: true,
+    },
+    {
+      name: 'a gating finding from the previous round needs a disposition',
+      actual: builtFirst.ok
+        ? appendRound(builtFirst.evidence, reviewed(pass), secondOptions({ dispositions: [] })).code
+        : null,
+      expected: 'DISPOSITION_REQUIRED',
+    },
+    {
+      name: 'a rebut disposition becomes the round\'s open rebuttal',
+      actual: (() => {
+        if (!builtFirst.ok) return false;
+        const built = appendRound(
+          builtFirst.evidence,
+          reviewed(failWith([finding], [reject(finding.id, 'Still reproduces.')])),
+          { ...rebutOptions, findingAnnotations: [verifiedIn(finding.id)] },
+        );
+        return built.ok === true
+          && built.evidence.reviewRounds[1].openRebuttals[0].claim
+            === 'The guard already covers this path.'
+          && built.evidence.reviewRounds[1].priorFindings[0].disposition === 'rebut';
+      })(),
+      expected: true,
+    },
+    {
+      name: 'a recurring Major is deferred by disposition and stays deferred when re-raised',
+      actual: (() => {
+        if (!builtFirst.ok) return false;
+        let evidence = builtFirst.evidence;
+        const next = (round, disposition, scope = 'delta') => appendRound(
+          evidence,
+          reviewed(failWith([finding])),
+          {
+            scope,
+            checkout: builderCheckout(`recur-${round}`),
+            artifactFingerprint: hash(`recur-tree-${round}`),
+            dispatchId: `recur-${round}`,
+            findingAnnotations: [verifiedIn(finding.id)],
+            dispositions: disposition === null ? [] : [{
+              findingId: finding.id, disposition, rationale: disposition === 'defer'
+                ? 'Filed as follow-up #123; listed in the PR body.'
+                : 'Fixed again.',
+            }],
+          },
+        );
+        for (const round of [2, 3]) {
+          const built = next(round, 'fix');
+          if (built.ok !== true) return false;
+          evidence = built.evidence;
+        }
+        const fourth = appendRound(evidence, reviewed(failWith([finding])), {
+          scope: 'delta',
+          checkout: builderCheckout('recur-4'),
+          artifactFingerprint: hash('recur-tree-4'),
+          dispatchId: 'recur-4',
+          findingAnnotations: [verifiedIn(finding.id)],
+          dispositions: [{ findingId: finding.id, disposition: 'defer', rationale: 'Later.' }],
+        });
+        const deferred = next(4, 'defer', 'full');
+        if (deferred.ok !== true) return false;
+        evidence = deferred.evidence;
+        // Round 5 re-raises it with no disposition given: the deferral carries.
+        const carried = next(5, null, 'full');
+        return fourth.ok === false
+          && deferred.code === 'REVIEW_CLEAN'
+          && reviewTransition(deferred.evidence).deferredFindings?.[0]?.findingId === finding.id
+          && carried.ok === true && carried.code === 'REVIEW_CLEAN'
+          && carried.evidence.reviewRounds[4].priorFindings
+            .find(({ findingId }) => findingId === finding.id)?.disposition === 'defer';
+      })(),
+      expected: true,
+    },
+    {
+      name: 'a rebut without its claim and evidence is refused',
+      actual: builtFirst.ok
+        ? appendRound(builtFirst.evidence, reviewed(pass), secondOptions({
+          dispositions: [{ findingId: finding.id, disposition: 'rebut', rationale: 'No.' }],
+        })).code
+        : null,
+      expected: 'REBUTTAL_EVIDENCE_REQUIRED',
+    },
+    {
+      name: 'a dirty checkout is not a reviewable artifact',
+      actual: appendRound(null, reviewed(pass), {
+        first: builderFirst,
+        scope: 'full',
+        checkout: { ...builderCheckout('b-dirty'), clean: false },
+        artifactFingerprint: hash('tree-dirty'),
+        dispatchId: 'builder-dirty',
+        findingAnnotations: [],
+      }).code,
+      expected: 'CHECKOUT_DIRTY',
+    },
+    {
+      name: 'the builder may not stamp a finding verified',
+      actual: appendRound(null, reviewed(failWith([finding])), {
+        first: builderFirst,
+        scope: 'full',
+        checkout: builderCheckout('b-unverified'),
+        artifactFingerprint: hash('tree-unverified'),
+        dispatchId: 'builder-unverified',
+        findingAnnotations: [],
+      }).code,
+      expected: 'FINDING_ANNOTATIONS_REQUIRED',
+    },
+    {
+      name: 'a reviewer stamped with the writer\'s own identity is refused',
+      actual: appendRound(null, { ...reviewed(pass), model: 'claude-opus-5-5' }, {
+        first: builderFirst,
+        scope: 'full',
+        checkout: builderCheckout('b-self'),
+        artifactFingerprint: hash('tree-self'),
+        dispatchId: 'builder-self',
+        findingAnnotations: [],
+      }).ok,
+      expected: false,
+    },
+    {
+      name: 'the artifact fingerprint follows the tree, not the commit',
+      actual: (() => {
+        const root = mkdtempSync(join(tmpdir(), 'review-contract-tree-'));
+        try {
+          const git = (...args) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+          git('init', '--quiet');
+          git('config', 'user.email', 'fixture@example.invalid');
+          git('config', 'user.name', 'fixture');
+          writeFileSync(join(root, 'a.txt'), 'one\n');
+          git('add', '.');
+          git('commit', '--quiet', '-m', 'one');
+          const first = artifactFingerprintOf(root);
+          git('commit', '--quiet', '--allow-empty', '-m', 'same tree');
+          const same = artifactFingerprintOf(root);
+          writeFileSync(join(root, 'a.txt'), 'two\n');
+          git('commit', '--quiet', '-am', 'two');
+          const changed = artifactFingerprintOf(root);
+          return HASH_RE.test(first) && first === same && changed !== first;
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      })(),
+      expected: true,
+    },
+  ];
+
   const cleanInput = inputFor([clean]);
+  const handoffInput = inputFor([closingFirst, closingStillFails], configuredCap, { scope: 'full' });
   const publicationCases = [
+    {
+      name: 'a cap hand-off publishes its reviewed head and names the handed-off Majors',
+      actual: (() => {
+        const authorization = authorizeReviewPublication(
+          handoffInput,
+          closingStillFails.headOid,
+          closingStillFails.checkout,
+        );
+        return authorization.authorized
+          && authorization.code === 'REVIEW_CAP_HANDOFF'
+          && JSON.stringify(reviewTransition(handoffInput).handedOffFindings)
+            === JSON.stringify([{ id: cumulativeFinding.id, severity: 'Major' }]);
+      })(),
+      expected: true,
+    },
     {
       name: 'a clean round authorizes only its reviewed head',
       actual: authorizeReviewPublication(cleanInput, clean.headOid, clean.checkout)
@@ -1559,7 +2212,7 @@ function selfTest() {
     }
   }
 
-  for (const fixture of publicationCases) {
+  for (const fixture of [...builderCases, ...publicationCases]) {
     if (fixture.actual === fixture.expected) {
       passed += 1;
     } else {
@@ -1569,7 +2222,8 @@ function selfTest() {
     }
   }
 
-  const total = cases.length + appendCases.length + publicationCases.length;
+  const total = cases.length + appendCases.length + builderCases.length
+    + publicationCases.length;
   console.log(
     passed === total
       ? `self-test OK (${passed} cases)`
@@ -1597,7 +2251,7 @@ function appendMain(args) {
     process.stderr.write(
       'review-contract: --append-escalation-round requires --evidence-file '
       + '<path> --result-file <path> '
-      + '[--annotations-file <path>] [--dispatch-id <id>]\n',
+      + '[--annotations-file <path>] [--dispatch-id <id>] [--out <path>]\n',
     );
     process.exit(2);
   }
@@ -1622,11 +2276,96 @@ function appendMain(args) {
     process.stdout.write(`${JSON.stringify(appended)}\n`);
     process.exit(1);
   }
-  process.stdout.write(`${JSON.stringify(appended.evidence, null, 1)}\n`);
+  writeEvidence(args, appended);
+}
+
+function writeEvidence(args, appended) {
+  const body = `${JSON.stringify(appended.evidence, null, 1)}\n`;
+  const out = flagValue(args, '--out');
+  if (out === null) {
+    process.stdout.write(body);
+    return;
+  }
+  writeFileSync(out, body);
+  process.stdout.write(`${JSON.stringify({
+    ok: true,
+    code: appended.code,
+    round: appended.evidence.round,
+    out,
+  })}\n`);
+}
+
+// `--append-round` is one bare command by design: no redirect (`--out`), no
+// pipe, no pre-built skeleton. A classifier judges a compound command whole,
+// and a live run lost five tool calls to chains that wrapped this contract in
+// `jq` and `&&`.
+function appendRoundMain(args) {
+  const usage = 'review-contract: --append-round --result-file <path> '
+    + '(--first-round --plan-fingerprint <sha256> --author <engine:model> '
+    + '--state <base STATE.md> [--base-oid <oid>] | --evidence-file <path> '
+    + '--scope full|delta [--dispositions-file <path>]) '
+    + '[--annotations-file <path>] [--checkout <dir>] [--out <path>]\n';
+  const resultFile = flagValue(args, '--result-file');
+  const first = args.includes('--first-round');
+  const evidenceFile = flagValue(args, '--evidence-file');
+  if (resultFile === null || first === (evidenceFile !== null)) {
+    process.stderr.write(usage);
+    process.exit(2);
+  }
+  const optionalJson = (flag) => {
+    const path = flagValue(args, flag);
+    return path === null ? [] : readJsonFile(path);
+  };
+  const root = flagValue(args, '--checkout') ?? process.cwd();
+  let options;
+  let evidence = null;
+  let result;
+  try {
+    result = readJsonFile(resultFile);
+    const checkout = snapshotExecutionCheckout(root);
+    options = {
+      scope: first ? 'full' : flagValue(args, '--scope'),
+      checkout,
+      artifactFingerprint: artifactFingerprintOf(checkout.root),
+      dispatchId: flagValue(args, '--dispatch-id')
+        ?? String(statSync(resultFile).mtimeMs).replace('.', '-'),
+      findingAnnotations: optionalJson('--annotations-file'),
+      dispositions: optionalJson('--dispositions-file'),
+    };
+    if (first) {
+      const projectConfig = extractConfig(readFileSync(flagValue(args, '--state') ?? '', 'utf8'));
+      const baseOid = flagValue(args, '--base-oid') ?? String(spawnSync(
+        'git',
+        ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${projectConfig.baseBranch}`],
+        { cwd: checkout.root, encoding: 'utf8', timeout: 15000 },
+      ).stdout ?? '').trim();
+      options.first = {
+        projectConfig,
+        planFingerprint: flagValue(args, '--plan-fingerprint'),
+        authorIdentity: flagValue(args, '--author'),
+        configuredBaseOid: baseOid,
+      };
+    } else {
+      evidence = readJsonFile(evidenceFile);
+    }
+  } catch (error) {
+    process.stderr.write(`review-contract: unreadable input: ${error.message}\n`);
+    process.exit(2);
+  }
+  const appended = appendRound(evidence, result, options);
+  if (appended.ok !== true) {
+    process.stdout.write(`${JSON.stringify(appended)}\n`);
+    process.exit(1);
+  }
+  writeEvidence(args, appended);
 }
 
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
+  if (process.argv.includes('--append-round')) {
+    appendRoundMain(process.argv.slice(2));
+    return;
+  }
   if (process.argv.includes('--append-escalation-round')) {
     appendMain(process.argv.slice(2));
     return;

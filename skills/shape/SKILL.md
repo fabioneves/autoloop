@@ -127,7 +127,11 @@ whose proof could not terminate. Every one of those is an axis on this list.
   miss). Data premises: is the verifying read-only query stated? A cited spec section is a premise
   too.
 - **Acceptance**: each criterion objectively verifiable? Flag vibes ("improve", "clean up",
-  "better") and propose testable rewrites.
+  "better") and propose testable rewrites. Each criterion must also AGREE with what it cites: read
+  the cited spec section and any corpus, fixture or golden file that pins the same behaviour. A
+  criterion asserting an outcome they rule out is a defect: rewrite it, or state it as an open
+  question, and never file it as is. Twenty-two units from one shape batch blocked on exactly this
+  contradiction, each found only after a planner and a writer had been paid for.
 - **Coverage**: does the unit carry every clause of the spec section it cites? Check the section's
   clauses against the acceptance criteria one by one — a criterion covering the clause's *area* is
   not the clause. A silently dropped clause is a defect in the unit. If it is one slice of a split,

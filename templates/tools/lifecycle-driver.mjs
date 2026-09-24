@@ -23,6 +23,7 @@ import { finalizeHead } from './delivery-contract.mjs';
 import {
   advanceLifecycleRevision,
   beginLifecycleRevision,
+  issueBodyMatches,
   lifecycleCommentNeverEdited,
   lifecycleIdentityHash,
   parseLifecycleComment,
@@ -488,16 +489,22 @@ function premergeFacts(comments, marker, draft) {
   };
 }
 
+// The body binds the scope a unit was approved on. A closed issue has no scope
+// left to widen — recovery and outcome backfill run after merge, and an edit
+// made then stopped them — and a task-list tick is progress, not scope.
+export function liveIssueMatchesIntent(issue, intent) {
+  if (issue?.number !== intent.issue) return false;
+  if (String(issue.state ?? '').toLowerCase() === 'closed') return true;
+  return issueBodyMatches(intent.issueBodyHash, issue.body ?? '');
+}
+
 function readOperationalState(request, root) {
   const repository = repositoryTarget(root);
   const issue = api(
     repository,
     `repos/${repository.owner}/${repository.repo}/issues/${request.intent.issue}`,
   );
-  if (
-    issue?.number !== request.intent.issue
-    || sha256(issue.body ?? '') !== request.intent.issueBodyHash
-  ) {
+  if (!liveIssueMatchesIntent(issue, request.intent)) {
     throw new Error('live issue does not match the lifecycle intent');
   }
   const viewer = api(repository, 'user')?.login;
@@ -1848,6 +1855,23 @@ function selfTest() {
         })
       && claimCommitIdentity('loop-login').email
         === 'loop-login@users.noreply.github.com',
+    ],
+    [
+      // A unit stopped because someone ticked a task-list box on its issue.
+      'a live issue keeps its identity through checkbox ticks and after close, not text edits',
+      (() => {
+        const approved = '## Tasks\n- [ ] parse\n- [ ] render\n\nScope text.';
+        const intent = { issue: 7, issueBodyHash: sha256(approved) };
+        const live = (body, state = 'open') => liveIssueMatchesIntent(
+          { number: 7, state, body }, intent,
+        );
+        return live(approved)
+          && live(approved.replace('- [ ] parse', '- [x] parse').replace('- [ ] render', '- [X] render'))
+          && !live(approved.replace('Scope text.', 'Wider scope text.'))
+          && !live(approved.replace('- [ ] parse', '- [x] parse and ship'))
+          && live('edited after delivery', 'closed')
+          && !liveIssueMatchesIntent({ number: 8, state: 'open', body: approved }, intent);
+      })(),
     ],
   ];
   const failures = checks.filter(([, ok]) => !ok);

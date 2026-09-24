@@ -30,6 +30,11 @@
 //     `prime.mjs --close-run` is the escape when the queue is not the reason to
 //     stop.
 //
+// Hard gaps are enforced only for the session that owns an open loop run; any
+// other session gets them as reminders. Unpushed work beside a running
+// dispatch, and a dark run beside an unexpired `prime.mjs --park`, are
+// reminders too: both are the run working, not the run abandoned.
+//
 // Reminders (JSON systemMessage on stdout, exit 0 — never block):
 //   - a claimed loop PR still in draft (may be mid-unit OR a forgotten autoloop:dev step 10;
 //     a stricter variant hard-fails this — we deliberately soften it because thread/CI state needs
@@ -52,7 +57,7 @@ import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
-import { loopRunIsLive } from './command-guard.mjs';
+import { loopRunIsLive, loopRunIsOpen, ownRunMarkers } from './command-guard.mjs';
 import { relayHookToBase } from './hook-relay.mjs';
 import { blockedByIssueNumbers } from './snapshot-contract.mjs';
 
@@ -182,19 +187,57 @@ export function checkPrs(prs) {
  *  was softened in the first place. `unpushedFor` returns null when the
  *  comparison is unanswerable (branch absent locally, no remote ref yet); that
  *  is skipped rather than guessed at. */
-export function checkUnpushedLoopWork(prs, unpushedFor) {
+export function checkUnpushedLoopWork(prs, unpushedFor, dispatchInFlight = null) {
   const hard = [];
+  const reminders = [];
   for (const pr of prs ?? []) {
     if (!LOOP_BRANCH_RE.test(pr.headRefName ?? '')) continue;
     const ahead = unpushedFor(pr.headRefName);
     if (!Number.isSafeInteger(ahead) || ahead <= 0) continue;
+    if (dispatchInFlight !== null) {
+      reminders.push(
+        `PR #${pr.number} (${pr.headRefName}) has ${ahead} local-only commit(s) while `
+        + `${dispatchInFlight} — push them once the writer returns`,
+      );
+      continue;
+    }
     hard.push(
       `PR #${pr.number} (${pr.headRefName}) has ${ahead} commit(s) only in the local checkout `
       + '— the unit is unfinished and its work is stranded; push and carry the unit to a '
       + 'terminal state (delivered / blocked) instead of ending the turn',
     );
   }
-  return hard;
+  return { hard, reminders };
+}
+
+/** Pure: the Stop hook enforces only for the run that owns this session. A
+ *  human session in a loop repository was hard-blocked for the loop's gaps,
+ *  which the Dev skill promises never happens outside a run; the gaps are still
+ *  reported there, as reminders. */
+export function scopeToOpenRun(hard, reminders, runIsOpen) {
+  if (runIsOpen === true) return { hard, reminders };
+  return {
+    hard: [],
+    reminders: [
+      ...reminders,
+      ...hard.map((gap) => `(no loop run is open in this session — reported, not enforced) ${gap}`),
+    ],
+  };
+}
+
+/** Pure: a deliberate, timed park recorded by `prime.mjs --park`. A usage
+ *  limit or a red base is a reason to wait, not to close, but the dark-run gap
+ *  had no evidence for either and forced `--close-run`, which ended the run.
+ *  An expired park is no evidence: a run that failed to wake is dark. */
+export function parkEvidence(markers, nowMs) {
+  for (const marker of markers ?? []) {
+    if (marker?.closedAt !== undefined) continue;
+    const until = Date.parse(marker?.park?.until ?? '');
+    if (!Number.isFinite(until) || until <= nowMs) continue;
+    const hhmm = new Date(until).toISOString().slice(11, 16);
+    return `the run is parked until ${hhmm} UTC: ${String(marker.park.reason ?? '').slice(0, 200)}`;
+  }
+  return null;
 }
 
 /** Pure: an open loop PR with work pushed beyond its claim commit, whose issue
@@ -423,6 +466,7 @@ export function checkDarkRun(runIsLive, issues, prs, inFlight = null) {
     if (names.some((name) => typeof name === 'string' && (
       name === 'loop-delivered'
       || name === 'loop-blocked'
+      || name === 'loop-waiting'
       || name === 'needs-human'
       || name.startsWith('human:')
     ))) continue;
@@ -501,12 +545,36 @@ function selfTest() {
   // draft (a reminder, not a gap), and the step labels had never advanced past
   // claim so the unit did not even look mid-flight. Unpushed work under an open
   // loop PR is the one fact that was unambiguous, and it is purely local.
-  const unpushed = checkUnpushedLoopWork(prs, (branch) => ({
+  const unpushedFor = (branch) => ({
     'feat/gh-1-x': 0,
     'fix/gh-3-z': 4,
     'hardening/human-branch': 9,
     'fix/gh-5-colon': null,
-  })[branch] ?? 0);
+  })[branch] ?? 0;
+  const unpushed = checkUnpushedLoopWork(prs, unpushedFor).hard;
+  // A writer dispatch commits as it goes: while one is demonstrably running,
+  // its local-only commits are work in progress, not a stranded unit, and a
+  // hard block there pushed the orchestrator toward pushing half-done work.
+  const unpushedMidDispatch = checkUnpushedLoopWork(prs, unpushedFor, 'a dispatch stream is live');
+  // A human session in a loop repository is never the run's to block: with no
+  // run open, every hard gap is still reported, as a reminder.
+  const outsideRun = scopeToOpenRun(['gap one'], ['note'], false);
+  const insideRun = scopeToOpenRun(['gap one'], ['note'], true);
+  // A deliberate timed park (usage limit, red base) is in-flight evidence
+  // until it expires; an expired park is ignored so a run that failed to wake
+  // is still caught as dark.
+  const parkNow = Date.parse('2026-01-01T12:00:00Z');
+  const parkMarkers = [
+    { version: 1, pids: [9], park: { reason: 'usage limit', until: '2026-01-01T12:30:00Z' } },
+  ];
+  const parkCases =
+    parkEvidence(parkMarkers, parkNow)?.includes('usage limit') === true &&
+    parkEvidence(parkMarkers, parkNow)?.includes('parked until') === true &&
+    parkEvidence(parkMarkers, Date.parse('2026-01-01T12:31:00Z')) === null &&
+    parkEvidence([{ version: 1, pids: [9] }], parkNow) === null &&
+    parkEvidence([{ version: 1, pids: [9], park: { reason: 'x', until: 'garbage' } }], parkNow) === null &&
+    parkEvidence([{ ...parkMarkers[0], closedAt: '2026-01-01T11:00:00Z' }], parkNow) === null &&
+    parkEvidence(null, parkNow) === null;
   const mergedGap = checkMergedClosedGap(
     [
       { number: 20, headRefName: 'feat/gh-7-a', body: 'Closes #7' },
@@ -561,6 +629,7 @@ function selfTest() {
       { number: 45, labels: [{ name: 'loop-ready' }], body: '## Blocked by\n- #99\n' },
       { number: 46, labels: [{ name: 'loop-ready' }], body: '' },
       { number: 47, labels: [{ name: 'loop-started' }], body: '' },
+      { number: 48, labels: [{ name: 'loop-ready' }, { name: 'loop-waiting' }], body: '' },
     ],
     [{ number: 60, headRefName: 'feat/gh-46-x', body: 'Closes #46' }],
   );
@@ -631,6 +700,14 @@ function selfTest() {
     // silent, a non-loop branch is never this hook's business, and an
     // unanswerable ref comparison is skipped rather than guessed at.
     unpushed.length === 1 && unpushed[0].includes('#3') && unpushed[0].includes('4') &&
+    unpushedMidDispatch.hard.length === 0 && unpushedMidDispatch.reminders.length === 1 &&
+    unpushedMidDispatch.reminders[0].includes('#3') &&
+    unpushedMidDispatch.reminders[0].includes('a dispatch stream is live') &&
+    checkUnpushedLoopWork(prs, unpushedFor).reminders.length === 0 &&
+    outsideRun.hard.length === 0 && outsideRun.reminders.length === 2 &&
+    outsideRun.reminders[1].includes('gap one') && outsideRun.reminders[1].includes('no loop run is open') &&
+    insideRun.hard.length === 1 && insideRun.reminders.length === 1 &&
+    parkCases &&
     drift.length === 1 && drift[0].includes('#30') && drift[0].includes('PR #30') &&
     // An unanswerable commit count is skipped, never guessed at — the same rule
     // the unpushed check has always applied to a missing tracking ref.
@@ -647,6 +724,7 @@ function selfTest() {
     dark.hard[0].includes('2 eligible') && dark.hard[0].includes('--close-run') &&
     !dark.hard[0].includes('#41') && !dark.hard[0].includes('#42') && !dark.hard[0].includes('#43') &&
     !dark.hard[0].includes('#44') && !dark.hard[0].includes('#46') && !dark.hard[0].includes('#47') &&
+    !dark.hard[0].includes('#48') &&
     checkDarkRun(false, [{ number: 40, labels: [{ name: 'loop-ready' }], body: '' }], []).hard.length === 0 &&
     checkDarkRun(true, [], []).hard.length === 0 &&
     checkDarkRun(true, [], []).reminders.length === 0 &&
@@ -701,7 +779,12 @@ function main() {
   const openIssues = ghJson('issue list --state open --json number,labels,body --limit 100');
 
   const { hard, reminders } = checkPrs(prs);
-  hard.push(...checkUnpushedLoopWork(prs, unpushedCommitCount));
+  const nowMs = Date.now();
+  const streamAgeMs = dispatchStreamAgeMs(ROOT);
+  const dispatchInFlight = runInFlightEvidence([], streamAgeMs, nowMs) ?? dispatchProcessInFlight(ROOT);
+  const unpushed = checkUnpushedLoopWork(prs, unpushedCommitCount, dispatchInFlight);
+  hard.push(...unpushed.hard);
+  reminders.push(...unpushed.reminders);
   if (merged !== null && openIssues !== null) {
     reminders.push(...checkMergedClosedGap(merged, openIssues.map((issue) => issue.number)));
   }
@@ -715,8 +798,9 @@ function main() {
         loopRunIsLive(ROOT),
         openIssues,
         prs,
-        runInFlightEvidence(prs, dispatchStreamAgeMs(ROOT), Date.now())
-          ?? dispatchProcessInFlight(ROOT),
+        dispatchInFlight
+          ?? runInFlightEvidence(prs, null, nowMs)
+          ?? parkEvidence(ownRunMarkers(ROOT).map(({ marker }) => marker), nowMs),
       );
       hard.push(...dark.hard);
       reminders.push(...dark.reminders);
@@ -728,9 +812,8 @@ function main() {
     mergedPrs: merged !== null,
     openIssues: openIssues !== null,
   }));
-  const blockedGaps = checkBlockedIssues(issues);
-  const allHard = [...hard, ...blockedGaps];
-  const result = renderHookResult(allHard, reminders);
+  const scoped = scopeToOpenRun([...hard, ...checkBlockedIssues(issues)], reminders, loopRunIsOpen(ROOT));
+  const result = renderHookResult(scoped.hard, scoped.reminders);
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   process.exit(result.exitCode);

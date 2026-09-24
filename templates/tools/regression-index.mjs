@@ -33,6 +33,66 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'improvised-review-evidence-drew-the-permission-classifier',
+    date: '2026-09-23',
+    symptom: '9 of 29 permission-classifier blocks on one repository were '
+      + 'review evidence improvised in /tmp — generated build scripts, .jq '
+      + 'programs, skeleton JSON, `jq … > evidence.json` — and one held a run '
+      + 'on a permission prompt for 10.3h before it halted.',
+    cause: 'Only the escalation round had a tool; every ordinary round was '
+      + 'hand-assembled, and fields such as artifactFingerprint and the '
+      + 'identities had no defined derivation at all.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'review-contract.mjs', anchor: 'export function appendRound(evidence, result, options = {}) {' }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: 'export function artifactFingerprintOf(root) {' }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "if (process.argv.includes('--append-round')) {" }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'a-synchronous-question-stalled-the-whole-queue',
+    date: '2026-09-23',
+    symptom: 'Three live runs asked the operator a question mid-run with '
+      + 'AskUserQuestion and waited ~25h in total, with eligible units queued '
+      + 'behind a question that concerned one unit.',
+    cause: 'The no-menu rule was prose only. The guard now refuses '
+      + 'AskUserQuestion while a run is live and names the recorded form: an '
+      + 'issue comment, `human:decide`, the next unit.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function askUserQuestionProblem(runIsLive) {' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "payload?.tool_name === 'AskUserQuestion'" }),
+      Object.freeze({ file: 'scaffold.mjs', anchor: 'a widened matcher on an unchanged autoloop command reaches existing installs' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'the-stop-hook-blocked-sessions-with-no-open-run',
+    date: '2026-09-23',
+    symptom: 'The Stop hook hard-blocked turns in loop repositories when no '
+      + 'loop run was open, and blocked unpushed work while the writer '
+      + 'dispatch that owned it was still committing.',
+    cause: 'Hard gaps fired regardless of run state, and the unpushed-work '
+      + 'check ignored in-flight evidence.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'export function scopeToOpenRun(hard, reminders, runIsOpen) {' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'reminders, loopRunIsOpen(ROOT));' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'a-usage-limit-park-became-a-run-close',
+    date: '2026-09-23',
+    symptom: 'Runs that hit a model usage limit or a red base closed instead '
+      + 'of parking, and nothing resumed them when the limit reset or the '
+      + 'base went green.',
+    cause: 'The Stop hook had no evidence for a timed wait, so a parked turn '
+      + 'read as dark and the only way to end it cleanly was --close-run. '
+      + '`prime.mjs --park` records the wait and the hook honours it until it '
+      + 'expires.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'prime.mjs', anchor: 'export function parkRunMarkers(' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'export function parkEvidence(markers, nowMs) {' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: '?? parkEvidence(ownRunMarkers(ROOT)' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'the-park-guard-could-not-see-a-dispatch-with-an-explicit-live-file',
     date: '2026-09-01',
     symptom: 'A live run was hard-blocked three times in 70 minutes for '
@@ -54,7 +114,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
-        anchor: '?? dispatchProcessInFlight(ROOT),',
+        anchor: '?? dispatchProcessInFlight(ROOT);',
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
@@ -1118,7 +1178,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'command-guard.mjs',
-        anchor: 'an exit-status refusal points at the report, not at assignment',
+        anchor: 'a bare-variable refusal names the variable and the substitution path',
       }),
       Object.freeze({ file: 'command-guard.mjs', anchor: 'export function unresolvedExpansionReason' }),
     ]),
@@ -1206,10 +1266,11 @@ export const INCIDENTS = Object.freeze([
     symptom: 'A live run appended `; echo "exit=$?"` to a typed escalate-paths '
       + 'call; the refusal cost the call and its useful front, and the retry '
       + 'that worked was the same command with the echo deleted.',
-    cause: 'The `$?` remedy pointed at the report but never named the '
-      + 'executable step for the trailing-echo form, which is deletion.',
+    cause: 'The guard refused `$?` as unresolvable although an exit status is '
+      + 'a number that no position turns into a command. Since 0.50.0 special '
+      + 'parameters are judged as a literal `0`, so the decoration is allowed.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'the fix is deletion' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function neutralizeSpecialParameters(' }),
       Object.freeze({ file: 'guard-corpus.json', anchor: 'exit=$?' }),
     ]),
   }),
@@ -1224,6 +1285,148 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'command-guard.mjs', anchor: 'let prose carry the label' }),
       Object.freeze({ file: 'guard-corpus.json', anchor: '.test.ts tracked:' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'one-recording-could-not-route-each-step',
+    date: '2026-09-23',
+    symptom: 'The operator wanted a model per step — astra plans, Fable reviews '
+      + 'the plan and simplifies, Opus writes and fixes, astra reviews 07/08 — '
+      + 'and one review-engine line could express none of it: every verdict '
+      + 'role shared one model and writers could not be routed at all.',
+    cause: 'Routing was keyed to "verdict or not". Since 0.50.0 each role '
+      + 'resolves only its own `routes` line (fail-closed on any bad line), a '
+      + 'native route never inherits a proxy URL, and the no-self-review '
+      + 'invariant is carried by the standing table instead of the code.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'every role resolves its own recorded route and nothing else' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'a proxied route injects exactly its URL; a native route injects none' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function standingRoutes(' }),
+      Object.freeze({ file: 'session-preflight.sh', anchor: 'review-engine is ignored while they exist' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'the-guard-refused-reads-that-could-hide-nothing',
+    date: '2026-09-23',
+    symptom: '128 guard refusals in ten days of LFE runs, most of them reads: '
+      + '~29 command substitutions, ~21 `$?`, ~13 inline awk ranges and sums. '
+      + 'Each cost a turn, and none hid a git or gh mutation.',
+    cause: 'Opaque syntax was refused by shape. It can only conceal a rule when '
+      + 'its value reaches a command position, code, a command-running tool, '
+      + 'Git/GitHub CLI environment, or a git/gh call other than a read-only git '
+      + 'subcommand — and awk only runs anything through system/getline/pipes.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'function markedPositionProblem(' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'function awkProgramCanRunCommands(' }),
+      Object.freeze({ file: 'guard-corpus.json', anchor: 'find . $(cat args.txt)' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'effect-free-failures-stopped-the-run',
+    date: '2026-09-23',
+    symptom: 'Runs stopped on failures a rerun would have cleared: a reviewer that '
+      + 'died mid-stream, a planner at its usage limit with a fallback recorded '
+      + 'and never taken, a transient gh failure during prime, and host-killed '
+      + 'stream tasks that took their in-flight dispatch down with them.',
+    cause: 'Every retry was orchestrator prose, so each one cost a turn or was '
+      + 'skipped. Since 0.50.0 reviewer-posture dispatches retry transient codes '
+      + 'and take their fallback in the tool, scan retries transient gh reads, '
+      + 'and the stream wrapper detaches the dispatch so a killed task is waited on.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function nextAttempt(' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'a writer is never rerun by the tool: it may have committed before it died' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function waitState(' }),
+      Object.freeze({ file: 'scan.mjs', anchor: 'export function transientCommandFailure(' }),
+      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '**A killed stream task is not a killed dispatch.**' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'mechanical-outcomes-waited-on-a-human',
+    date: '2026-09-23',
+    symptom: 'Units stopped at human:decide or a review hand-off whose outcome '
+      + 'needed no judgement: an already-delivered premise, a wait on another '
+      + 'unit or a red base, a Major re-raised every round, a verified '
+      + 'out-of-delta finding, a gating cap round, and a ticked task box.',
+    cause: 'Each had one mechanically checkable outcome, and nothing could '
+      + 'record it except a block. Since 0.50.0 the unit disposes of itself: '
+      + 'unit.mjs closes a delivered premise on evidence or parks the unit as '
+      + 'loop-waiting until prime lifts it, the review contract defers and '
+      + 'continues, and the driver ignores task-list ticks.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'unit.mjs', anchor: 'export function markObsolete(' }),
+      Object.freeze({ file: 'unit.mjs', anchor: 'export function liftWaits(' }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "&& !issue.labels.includes('loop-waiting')" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: 'const DEFER_AFTER_RAISINGS = 3;' }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "decision('continue', 'REVIEW_CLOSING_ROUND_REQUIRED'" }),
+      Object.freeze({ file: 'lifecycle-contract.mjs', anchor: 'export function issueBodyIdentity(' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'a-reached-limit-parked-the-unit-on-a-question',
+    date: '2026-09-23',
+    symptom: 'A unit at the review cap with only Majors open, or on a step the '
+      + 'host killed three times, sat at human:decide for hours. The only '
+      + 'answers were "ship it with the findings listed" and "try again later".',
+    cause: 'Reaching a limit had one outcome, a block. Since 0.50.0 a closing '
+      + 'round with only Majors under manual policy is REVIEW_CAP_HANDOFF: the '
+      + 'unit publishes with the findings filed and listed for the human at '
+      + 'merge. The kill bound becomes a timed wait that prime lifts.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'review-contract.mjs', anchor: "return decision('clean', 'REVIEW_CAP_HANDOFF', {" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "&& input.projectConfig.merge?.policy === 'manual'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "condition = { on: 'time', until: new Date(now + minutes * 60_000).toISOString() };" }),
+      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '**`REVIEW_CAP_HANDOFF` — only Majors remain, under manual merge policy.**' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'every-unit-paid-for-the-full-gate-twice',
+    date: '2026-09-23',
+    symptom: '83h of loop:09-gate label time on LFE: step 9 ran the full gate as '
+      + 'a raw preflight, terminal-finalize ran it again on the same head, and '
+      + 'again on every re-invoke after a settle refusal.',
+    cause: 'The preflight left no evidence the finalizer could trust. Since 0.50.0 '
+      + 'step 9 gates through publish-verdict, which publishes agentic/gate on '
+      + 'green, and terminal-finalize reuses that exact-head status.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'publish-verdict.mjs', anchor: 'export function terminalGateSummary(' }),
+      Object.freeze({ file: 'publish-verdict.mjs', anchor: 'const gate = (adapters.gate ?? terminalGateSummary)(snapshot, config);' }),
+      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '`node <plugin-tools>/publish-verdict.mjs gate <head> > <log> 2>&1`' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'human-decisions-trickled-in-one-unit-at-a-time',
+    date: '2026-09-23',
+    symptom: 'Decisions waiting on a human were scattered across issue threads '
+      + 'and found one at a time, and 22 of them were spec contradictions that '
+      + 'shape could have caught before the issues were queued.',
+    cause: 'Nothing gathered them, and shape checked criteria for testability, not '
+      + 'for agreement with what they cite. Since 0.50.0 prime posts one digest '
+      + 'at every close and park, and the shape Acceptance axis checks the source.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'unit.mjs', anchor: 'export function postDigest(' }),
+      Object.freeze({ file: 'prime.mjs', anchor: 'export function withDigest(' }),
+      Object.freeze({ file: '../../skills/shape/SKILL.md', anchor: 'Each criterion must also AGREE with what it cites' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'a-units-cost-left-with-the-session',
+    date: '2026-09-24',
+    symptom: 'Per-step timings lived in the session panel and the dispatch log was '
+      + 'machine-local with no issue on it, so a unit\'s cost could not be read back '
+      + 'from GitHub; the scoreboard also dropped plan, plan-review and every resumed '
+      + 'session (an issue with 2h57m of review across two sessions showed 1h51m).',
+    cause: 'Nothing wrote the numbers to the issue, and the scoreboard measures one '
+      + 'session from loop-started. Since 0.50.0 each dispatch logs its --issue and '
+      + 'branch (plan and plan-review only by --issue: they run before the branch '
+      + 'exists), and step 11 appends stats.mjs --record: active time per step '
+      + 'across sessions, paused while blocked or waiting, with its dispatches.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'stats.mjs', anchor: 'export function unitActiveTime(' }),
+      Object.freeze({ file: 'stats.mjs', anchor: 'export function timingRecord(' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'function currentBranch(cwd) {' }),
+      Object.freeze({ file: 'stats.mjs', anchor: "const PRE_CLAIM_ROLES = new Set(['plan', 'plan-review']);" }),
+      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '`--issue <N>` names the unit on every dispatch' }),
+      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '`node <plugin-tools>/stats.mjs --record --issue <N>`' }),
     ]),
   }),
 ]);

@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.49.66 · starting
+∞ setup · v0.50.0 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -338,6 +338,7 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 | `tools/agentic/session-preflight.sh` | same name | Session injection |
 | `tools/agentic/stats.mjs` | `tools/stats.mjs` | Presentation statistics only |
 | `tools/agentic/subagent-transcript.mjs` | same name | Host-subagent transcript telemetry |
+| `tools/agentic/unit.mjs` | `tools/unit.mjs` | Obsolete and waiting unit dispositions; prime lifts cleared waits |
 | `tools/agentic/verify.mjs` | `tools/verify.mjs` | Canonical installed-contract verification |
 | `tools/agentic/writeback-check.mjs` | same name | Canonical writeback checks |
 
@@ -662,7 +663,8 @@ no longer owns it and the merge would replace it. Curate LESSONS like `ARCH.md` 
 against a size budget — and delete any lesson a guard rule, contract, or hook now enforces: the
 mechanism is the memory at that point.
 
-Create lifecycle and step labels idempotently. Do not create non-manual policy labels.
+Create lifecycle and step labels idempotently, including `loop-waiting` and `loop-obsolete` (`unit.mjs`
+also creates either one on first use). Do not create non-manual policy labels.
 
 Never mutate default/release branch protection, GitHub Apps, or credentials without explicit user
 authorization. Present the exact desired settings and verify after changes.

@@ -101,14 +101,14 @@
   {
    "cmd": "git status --short; echo \"exit=$?\"",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "unresolvable expansion; observed thrice"
+   "expect": "allow",
+   "why": "unresolvable expansion; observed thrice. 0.50.0: allow — an exit status is a number, judged as `0`"
   },
   {
    "cmd": "git status --short && echo \"clean=$?\"",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "the second spelling that beat the first rule"
+   "expect": "allow",
+   "why": "the second spelling that beat the first rule. 0.50.0: allow — `$?` is inert"
   },
   {
    "cmd": "node -e \"import('/t/a.mjs').then(m=>m.x())\"",
@@ -125,8 +125,8 @@
   {
    "cmd": "awk '/^## Lessons/,0' docs/agentic/STATE.md | wc -c",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "non-file-backed awk is executable"
+   "expect": "allow",
+   "why": "was: non-file-backed awk is executable. 0.50.0: allow — a range program cannot start a process; only system/getline/pipes/@include stay refused"
   },
   {
    "cmd": "sed -n '/^## Lessons/,$p' docs/agentic/STATE.md | wc -c",
@@ -203,8 +203,8 @@
   {
    "cmd": "git diff --stat $(git merge-base origin/main origin/feat/gh-78-x)..origin/feat/gh-78-x",
    "branch": "main",
-   "expect": "block",
-   "why": "merge-base substitution; three-dot is built in"
+   "expect": "allow",
+   "why": "merge-base substitution. 0.50.0: allow — the body is a read and its value lands in a read-only git subcommand"
   },
   {
    "cmd": "gh pr merge 42 --merge",
@@ -341,14 +341,14 @@
   {
    "cmd": "node tools/agentic/escalate-paths.mjs --base main --base-oid cafecafecafecafecafecafecafecafecafecafe --artifact-version 1 --json; echo \"exit=$?\"",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.49.44: exit echo decorated a typed escalate-paths call; ok:false already carries the outcome, and the remedy is deleting the tail."
+   "expect": "allow",
+   "why": "0.49.44: exit echo decorated a typed escalate-paths call. 0.50.0: allow — `$?` is judged as `0`, so the decoration costs nothing"
   },
   {
    "cmd": "cd /tmp/autoloop-270/base && echo \".test.ts tracked: $(git ls-files '*.test.ts' | wc -l)\" && echo \".go tracked: $(git ls-files '*.go' | wc -l)\"",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.49.44: substitutions whose only job was labeling counts; run each counter bare and let prose carry the labels."
+   "expect": "allow",
+   "why": "0.49.44: substitutions whose only job was labeling counts. 0.50.0: allow — each body is a read and the value is echoed, never run"
   },
   {
    "cmd": "gh issue edit 296 --remove-label loop:09-gate --add-label loop:10-publish 2>/dev/null; jq -c '.intent.plannedBaseOid' /tmp/autoloop-scratch/lifecycle-request-296.json",
@@ -373,6 +373,60 @@
    "branch": "feat/gh-298-period-routing",
    "expect": "block",
    "why": "0.49.54: add-only swap after the driver's claim stranded loop:04-claim through code review"
+  },
+  {
+   "cmd": "$(echo git) push origin feat/gh-1-x",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.50.0: a substitution in command position stays refused"
+  },
+  {
+   "cmd": "git push origin $(git branch --show-current)",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.50.0: a substitution feeding a git mutation stays refused; only read-only git subcommands take one"
+  },
+  {
+   "cmd": "cd \"$(git rev-parse --show-toplevel)\" && git push origin feat/gh-1-x",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.50.0: a substitution anywhere in a command that also mutates through git stays refused"
+  },
+  {
+   "cmd": "find . $(cat args.txt)",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.50.0: find can run what an unquoted value splits into (-exec)"
+  },
+  {
+   "cmd": "echo $(git push origin HEAD:main)",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.50.0: substitution bodies are judged on their own"
+  },
+  {
+   "cmd": "awk '{ print | \"sh\" }' f",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.50.0: an awk pipe to a command stays refused"
+  },
+  {
+   "cmd": "sed -n \"$(rg -n 'function credentials(' a.php | cut -d: -f1),+40p\" a.php",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.50.0: the region read that ~29 substitution refusals were mostly about"
+  },
+  {
+   "cmd": "for f in docs/*.md; do wc -l \"$f\"; done",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.50.0: a quoted loop variable is one word, and wc cannot run it"
+  },
+  {
+   "cmd": "ls $UNSET_PATH/x",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.50.0: an unquoted variable set out of view splits into unread words; quote it"
   }
  ]
 }
