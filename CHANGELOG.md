@@ -17,7 +17,8 @@ Follow-ups from the 0.50.0 review.
   dispatch's credentials; `127.0.0.1`, `localhost` and `[::1]` are now the only accepted hosts, for
   routes, fallbacks, the proxy preset and the legacy recording.
 - **A bare `429` in stderr is no longer a usage limit.** A stack frame's line number moved retries
-  onto the fallback model; only `429 Too Many Requests` (and the existing rate-limit phrases) count.
+  onto the fallback model; a 429 now counts only as a rendered status (`429 Too Many Requests`,
+  `429 status code`, `API Error: 429`) or with the existing rate-limit phrases.
 - **`overlap-report.mjs` works from a linked worktree and can be imported.** It read the dispatch
   log from the per-worktree path instead of the common Git directory, and ran its CLI on import;
   `stats.mjs` now reuses its parser.

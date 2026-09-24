@@ -839,10 +839,10 @@ export function parseResultEvent(stdout) {
 // only where an engine reports its own failure — stderr, and the error-bearing
 // final events of either stream — never the transcript body, which a reviewer
 // fills with the very code under review (and code mentions rate limits). A 429
-// counts only with its reason phrase: bare, it is a stack frame's line number
-// as often as a status.
+// counts only where an engine renders a status (reason phrase, `status code`,
+// `API Error:`): bare, it is a stack frame's line number as often as a status.
 const USAGE_LIMIT_RE =
-  /usage limit|(?:hit|reached) your (?:[\w-]+ )*limit|rate[_ -]?limit|\b429 Too Many Requests\b|quota exceeded|insufficient_quota/iu;
+  /usage limit|(?:hit|reached) your (?:[\w-]+ )*limit|rate[_ -]?limit|\b429 (?:Too Many Requests|status code)\b|API Error: 429\b|last status: 429\b|quota exceeded|insufficient_quota/iu;
 
 export function usageLimitIn(stderr, stdout) {
   const reports = [String(stderr ?? '')];
@@ -2456,6 +2456,8 @@ function selfTest() {
       // A bare 429 is a line number as often as a status: a stack frame in
       // stderr must not move the retry onto the fallback model.
       && usageLimitIn('exceeded retry limit, last status: 429 Too Many Requests', '')
+      // A proxy answering 429 with no body carries no rate-limit words at all.
+      && usageLimitIn('API Error: 429 status code (no body)', '')
       && !usageLimitIn('TypeError: x is undefined\n    at run (/srv/app.js:429:12)', ''),
     );
     check(
