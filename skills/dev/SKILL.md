@@ -290,8 +290,9 @@ node <plugin-tools>/dispatch.mjs --record-routes --preset host     # /autoloop:d
 
 A plain `/autoloop:dev` records the standing preset; `with proxy <url>` swaps the URL. One bare
 command, and `--route "<role> <engine> [model] [@url] [!effort] [>model[@url]]"` (repeatable)
-overrides a single role's line. The recorder validates the whole table before writing it, a bad
-line fails the recording and leaves the previous one in force, and `dispatch.mjs` reads the file
+overrides a single role's line. Every URL must be loopback (`127.0.0.1`, `localhost`, `[::1]`):
+it receives the prompt and the dispatch's credentials. The recorder validates the whole table
+before writing it, a bad line fails the recording and leaves the previous one in force, and `dispatch.mjs` reads the file
 on every dispatch — so a role never needs `--model`, and the invocation text forty minutes
 up-context never has to be remembered. The standing table — the operator's choice:
 

@@ -1456,6 +1456,22 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'overlap-report.mjs', anchor: 'if (isMain) main();' }),
     ]),
   }),
+  Object.freeze({
+    id: 'a-route-could-send-the-prompt-and-credentials-anywhere',
+    date: '2026-09-24',
+    symptom: 'A route or review-engine recording accepted any http(s) URL, and an '
+      + 'agent can record one with a plain dispatch.mjs call: every dispatch on that '
+      + 'route would send its prompt and inherited credentials to that host.',
+    cause: 'The URL check was syntax only. Proxy URLs are now loopback only '
+      + '(127.0.0.1, localhost, [::1]) in the routes table, its fallback, the proxy '
+      + 'preset and the legacy review-engine recording.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function loopbackUrl(text) {' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "if (baseUrl !== null || !loopbackUrl(token.slice(1))) return null;" }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "if (route.baseUrl !== null || !loopbackUrl(token.slice(1))) {" }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: '|| (fallback[2] !== undefined && !loopbackUrl(fallback[2]))) {' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

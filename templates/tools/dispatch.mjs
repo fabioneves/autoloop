@@ -451,6 +451,24 @@ export function defaultEngineFor() {
 // (`claude gpt-6-astra`), which keeps structured output and live streaming
 // while decorrelating the reviewer model from the writer. Reviewer roles only,
 // and an unrecognised engine discards the whole line.
+// A proxy URL receives the whole prompt and the credentials the dispatch
+// inherits, and any agent can record one with a plain `dispatch.mjs` call. Its
+// one real use is a local proxy, so only loopback is accepted, over http(s)
+// and without userinfo.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+export function loopbackUrl(text) {
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    return false;
+  }
+  return (url.protocol === 'http:' || url.protocol === 'https:')
+    && url.username === '' && url.password === ''
+    && LOOPBACK_HOSTS.has(url.hostname);
+}
+
 function recordedReviewChoice(cwd) {
   try {
     const logPath = resolveDispatchLogPath(cwd);
@@ -463,7 +481,7 @@ function recordedReviewChoice(cwd) {
     let effort = null;
     for (const token of rest) {
       if (token.startsWith('@')) {
-        if (baseUrl !== null || !/^@https?:\/\/\S+$/u.test(token)) return null;
+        if (baseUrl !== null || !loopbackUrl(token.slice(1))) return null;
         baseUrl = token.slice(1);
       } else if (token.startsWith('!')) {
         if (effort !== null || !EFFORTS.has(token.slice(1))) return null;
@@ -518,8 +536,8 @@ export function parseRoutes(text) {
     const route = { ...HOST_ROUTE, engine };
     for (const token of rest) {
       if (token.startsWith('@')) {
-        if (route.baseUrl !== null || !/^@https?:\/\/\S+$/u.test(token)) {
-          return { error: `${where}: bad or repeated URL ${token}` };
+        if (route.baseUrl !== null || !loopbackUrl(token.slice(1))) {
+          return { error: `${where}: bad, repeated or non-loopback URL ${token}` };
         }
         route.baseUrl = token.slice(1);
       } else if (token.startsWith('!')) {
@@ -529,7 +547,8 @@ export function parseRoutes(text) {
         route.effort = token.slice(1);
       } else if (token.startsWith('>')) {
         const fallback = /^>([^@\s]+)(?:@(https?:\/\/\S+))?$/u.exec(token);
-        if (route.fallback !== null || fallback === null || engine !== 'claude') {
+        if (route.fallback !== null || fallback === null || engine !== 'claude'
+          || (fallback[2] !== undefined && !loopbackUrl(fallback[2]))) {
           return { error: `${where}: bad or repeated fallback ${token}` };
         }
         route.fallback = Object.freeze({ model: fallback[1], baseUrl: fallback[2] ?? null });
@@ -646,8 +665,8 @@ export function recordRoutes(cwd, { preset, proxyUrl = null, overrides = [] }) {
   if (ROUTE_PRESETS[preset] === undefined) {
     return failure('record', 'ROUTES_INVALID', `unknown preset ${preset} (proxy|codex|host)`);
   }
-  if (preset === 'proxy' && !/^https?:\/\/\S+$/u.test(String(proxyUrl))) {
-    return failure('record', 'ROUTES_INVALID', 'the proxy preset needs --proxy-url http(s)://…');
+  if (preset === 'proxy' && !loopbackUrl(String(proxyUrl))) {
+    return failure('record', 'ROUTES_INVALID', 'the proxy preset needs a loopback --proxy-url http(s)://127.0.0.1|localhost|[::1]…');
   }
   const lines = new Map(ROUTE_PRESETS[preset](proxyUrl).split('\n').filter(Boolean)
     .map((line) => [line.split(/\s+/u)[0], line]));
@@ -2078,9 +2097,31 @@ function selfTest() {
         writeFileSync(engineFile, 'claude gpt-6-astra @ftp://elsewhere\n');
         const scheme = resolveDefaultBaseUrl('code-review', repoScratch) === null
           && resolveDefaultModel('code-review', repoScratch) === null;
-        writeFileSync(engineFile, 'claude gpt-6-astra @http://a @http://b\n');
+        writeFileSync(engineFile, 'claude gpt-6-astra @http://127.0.0.1:1 @http://127.0.0.1:2\n');
         const duplicate = resolveDefaultBaseUrl('code-review', repoScratch) === null;
         return scheme && duplicate;
+      })(),
+    );
+    // A route's URL receives the whole prompt and the dispatch's inherited
+    // credentials, and any agent can record one with a plain dispatch.mjs call.
+    // The one real use is a local proxy, so nothing else is accepted.
+    check(
+      'a proxy URL must be loopback',
+      (() => {
+        writeFileSync(engineFile, 'claude gpt-6-astra @https://proxy.example\n');
+        const remoteReview = resolveDefaultBaseUrl('code-review', repoScratch) === null;
+        rmSync(engineFile);
+        return remoteReview
+          && ['http://127.0.0.1:18765', 'http://localhost:4000/v1', 'https://[::1]:8443']
+            .every((url) => loopbackUrl(url))
+          && ['https://proxy.example', 'http://127.0.0.1.evil.example', 'http://10.0.0.1:18765',
+            'http://user@proxy.example', 'ftp://127.0.0.1', 'not a url']
+            .every((url) => !loopbackUrl(url))
+          && parseRoutes('plan claude gpt-6-astra @https://proxy.example').error !== undefined
+          && parseRoutes('fix claude claude-opus-5-5 >gpt-6-astra@https://proxy.example').error !== undefined
+          && parseRoutes('fix claude claude-opus-5-5 >gpt-6-astra@http://127.0.0.1:18765').error === undefined
+          && recordRoutes(repoScratch, { preset: 'proxy', proxyUrl: 'https://proxy.example' })
+            .error?.code === 'ROUTES_INVALID';
       })(),
     );
     writeFileSync(engineFile, 'weird-engine\n');
