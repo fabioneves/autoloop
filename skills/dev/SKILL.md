@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Run Autoloop's forward GitHub issue-to-PR workflow from Claude Code, Codex CLI, or opencode. One prime call, one dispatch call per role, no routing to choose.
+description: Run Autoloop's forward GitHub issue-to-PR workflow from Claude Code. One prime call, one dispatch call per role, no routing to choose.
 ---
 
 # autoloop:dev — forward path
@@ -284,7 +284,6 @@ redirect into it is a permission-classifier gate that has halted live runs:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --record-routes --preset proxy --proxy-url http://127.0.0.1:18765  # standing
-node <plugin-tools>/dispatch.mjs --record-routes --preset codex    # /autoloop:dev with codex
 node <plugin-tools>/dispatch.mjs --record-routes --preset host     # /autoloop:dev with host
 ```
 
@@ -315,7 +314,7 @@ astra plans and Fable reviews the plan; Opus writes and fixes and Fable simplifi
 reviews both at 07 and 08. A proxied route gets its own `@<url>` injected as
 `ANTHROPIC_BASE_URL`; a native route gets none, and a session-wide one is stripped from it (the
 proxy never serves Claude models):
-the session's own environment is not a prerequisite and not evidence. `with codex` sends every verdict role to `codex` and leaves every writer on the host;
+the session's own environment is not a prerequisite and not evidence.
 `with host` records an empty table, so every role runs on the host default and a previous
 session's routes cannot leak forward. The legacy `review-engine` recording is read only when no
 routes file exists.
@@ -336,24 +335,13 @@ itself).
 
 The run frame's queue row reads `reviews GPT-6-ASTRA (proxy)`, and every ribbon carries the
 model in the host slot — `[GPT-6-ASTRA]`, `[CLAUDE-OPUS-5-5]` — since the engine name alone would
-lie about who judged. Trade-off vs `with codex`, stated plainly: the reviewer's read-only posture
-is the tool ceiling, not an OS sandbox. Cross-MODEL review is the invariant, whichever harness
-carries it.
+lie about who judged. The reviewer's read-only posture is the tool ceiling, not an OS sandbox.
+Cross-MODEL review is the invariant.
 
 Why a second model is worth asking for: a fresh process gives identity separation, not cognitive separation.
 A reviewer on the writer's own model inherits its priors and misses what it missed. A different
-model does not. The cost is another CLI to install and authenticate, which is why this is a
-choice rather than an assumption — an absent codex must never break a run that asked for nothing
-unusual.
-
-Under `with codex` the reviewer runs `--sandbox read-only`, an OS-enforced boundary rather than a
-tool allowlist, so the read-only posture is strictly stronger there. Its verdict arrives in codex's
-`--output-last-message` file and is validated against the same schema as any other. Codex refuses
-any authoring role outright rather than approximating one — `implement` because it would need a
-writable sandbox, `plan` because authoring the plan on the review engine inverts the role split
-this loop is built on — and if `codex` is absent the review
-dispatch fails typed rather than falling back to the host — having asked for a second opinion,
-silently getting the first one back is worse than a refusal.
+model does not. Every model reaches the loop through Claude Code: other vendors' models run on a
+proxied route, never a second CLI.
 
 **Frame review prompts adversarially.** A different model is only worth its cost if it is asked to
 disagree. Plan review and code review both challenge the approach — the assumptions it depends on,
@@ -392,8 +380,7 @@ reviewer's job is to find the case the author did not consider.
   `fallback: true` when the fallback ran, and the dispatch log records the same — so the record
   says who actually judged or wrote. `--model <name>` still overrides one dispatch; it never
   borrows the route's URL for a different model. **Model names are ENGINE vocabulary**: explicit
-  IDs (`claude-opus-5-5`, `claude-fable-5-1`) for claude, never an alias that can move under a
-  step; codex's models are set in its own config.
+  IDs (`claude-opus-5-5`, `claude-fable-5-1`), never an alias that can move under a step.
 
   **Effect-free roles heal inside the tool.** `plan`, `plan-review`, `diff-review`, `code-review`
   and `doubt-review` hold no write tool, so `dispatch.mjs` reruns them itself: a transient failure
@@ -456,8 +443,7 @@ reviewer's job is to find the case the author did not consider.
   mean re-dispatch; both messages now name the field, the reason, and for a title the exact
   character and codepoint.
 
-- `--effort <low|medium|high|xhigh|max>` pins the dispatch's reasoning depth — `--effort` on
-  claude, the `model_reasoning_effort` config override on codex, one flag either way — and is
+- `--effort <low|medium|high|xhigh|max>` pins the dispatch's reasoning depth and is
   stamped into the typed result and the dispatch log beside engine and model. **Reviews run
   `xhigh`**: a review round costs a wall-clock dispatch either way, and depth spent there is
   rounds not spent later; the recording carries it as a `!<level>` token so every reviewer
@@ -477,7 +463,7 @@ in this section describes it from that point on.)
 ```bash
 bash <plugin-tools>/dispatch-stream.sh \
   <scratchpad>/live/<issue>-<role>-r<N>.jsonl <scratchpad>/<role>-result.json \
-  --role <role> --prompt-file <path> --issue <N> [--engine codex] [--tools <csv>]
+  --role <role> --prompt-file <path> --issue <N> [--tools <csv>]
 ```
 
 **A backgrounded dispatch carries no host timeout.** `dispatch.mjs` holds its own ceilings — 120
@@ -487,7 +473,7 @@ and the ten-minute ceiling killed a reviewer 48 tool calls deep with 462 KB of s
 verdict, on a unit whose earlier rounds had each run 12-16 minutes.
 
 One background task per dispatch, engine events flowing in its own view for the whole run, exit
-code propagated — a 13-minute codex review is a window, not a sealed box. Collect the typed
+code propagated — a 13-minute review is a window, not a sealed box. Collect the typed
 result from the output file, never by parsing the stream. Only a dispatch expected to finish in
 under a minute may skip the wrapper and run `dispatch.mjs` directly.
 - Every result reports `ms` (the dispatch), `startupMs` (this tool's own overhead before the
@@ -768,7 +754,7 @@ tools and has no instructions for them half-mirrors, which reads worse than not 
   visual group, then the ribbon core with the executor
   slot — MODEL-ONLY in task subjects: `[CLAUDE-OPUS-5-5]`, not `[CLAUDE:OPUS]` (the panel is narrow; the
   engine still rides the ribbon and the stamped result, and a dispatch with no pinned model
-  falls back to the engine name, `[CODEX]`). So: `∞ #149 — 05 IMPLEMENT [CLAUDE-OPUS-5-5]`; `activeForm`
+  falls back to the engine name, `[CLAUDE]`). So: `∞ #149 — 05 IMPLEMENT [CLAUDE-OPUS-5-5]`; `activeForm`
   says what the spinner should read while it runs (`Implementing #149 on CLAUDE-OPUS-5-5`,
   `Reviewing #149 r1 on GPT-6-ASTRA`). Round-scoped steps use one task per round, and EVERY
   dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
@@ -1275,16 +1261,6 @@ Verify and disposition its findings exactly like step 8's; fixes go to one `--ro
 dispatch carrying every verified finding. The orchestrator does not edit the checkout during
 step 7 itself. The fresh reviewer in step 8 covers those fixes.
 
-**`with codex`:** step 7 is a slim handoff check only — build and tests green
-(`cfg.gate.quickCommand` when configured), nothing else — and it runs **concurrently with the
-round-1 dispatch**, not before it: reviewers hold no Bash, so the review does not depend on the
-tests having finished. Fire the quick gate in the background, dispatch r1 immediately, and if
-the quick gate fails, discard the r1 verdict, fix, and redo both. The
-five-axis pass moves to the END, where it reviews what actually ships: mid-pipeline it reads the
-pre-review artifact, and every fix round lands after it unseen. A live unit proved both halves —
-the mid-pipeline pass did not prevent codex finding two Majors an hour later, and the one Major
-the orchestrator did catch came from a full-artifact look at the delivery head.
-
 There is no separate five-axis dispatch. Its job is done by a scope rule instead:
 **convergence may only close on a full-artifact round** — enforced by the contract since 0.49.58,
 which returns `REVIEW_FULL_CLOSE_REQUIRED` rather than `REVIEW_CLEAN` for a clean delta round. And close optimistically: after a fix
@@ -1303,8 +1279,8 @@ file — and that budgeted round closed the same unit cleanly on the next dispat
 
 The active ingredient is scope, not engine: a delta-blind Major (a missing presence check
 survived three delta rounds and fell to the first whole-artifact re-read) is caught by
-re-reading everything at the final head, and doing that on codex keeps it cross-model over what
-actually ships — something a claude final pass never was. The orchestrator's in-session work
+re-reading everything at the final head, and doing that on a model other than the writer's keeps
+it cross-model over what actually ships. The orchestrator's in-session work
 stays disposition — per finding, fix (dispatched), rebut, or note, judged from the verdict —
 plus the one oracle sweep an invariant-heavy unit earns below.
 
@@ -2012,8 +1988,7 @@ task-panel fate line (panel section) prints directly beneath it, in the same tur
 The `🔧` deliberately echoes the FIX step glyph rather than colliding with it: pitcrew is repair
 work on already-open PRs, so the glyph carries the same meaning on both surfaces, which is what the
 closed set below actually requires. `🔭` is not in that set and means "who will be watching" — the
-review engine, named in UPPER-CASE like every other model name (`reviews CODEX`,
-`reviews GPT-6-ASTRA (proxy)`), so the run states who judges before it judges anything.
+review engine, named in UPPER-CASE like every other model name (`reviews GPT-6-ASTRA (proxy)`), so the run states who judges before it judges anything.
 
 Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
 eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
@@ -2290,4 +2265,3 @@ exceptions above — report and stop, still without asking.
 /autoloop:dev drain the queue
 ```
 
-Codex and opencode use their installed skill surface names; the workflow is identical.

@@ -57,7 +57,12 @@ Decisions (operator, 2026-09-24):
 - `dispatch.mjs`: `--engine codex` and a `review-engine` line naming codex are refused with a typed
   error, not silently mapped.
 - `dispatch.mjs`: a route with no `>model` falls back to Opus, native, with the URL stripped. An Opus route with none still reports `ROUTE_FALLBACK_MISSING`. A recorded fallback still wins.
-- `rg -i 'codex|opencode'` over `skills/`, `templates/`, `README.md` and `CONTRIBUTING.md` returns
-  only the protected-path lists, the reconcile's removal table, and legacy migration.
+- `rg -i 'codex|opencode'` over `skills/`, `templates/`, `README.md`, `CONTRIBUTING.md` returns
+  only deliberate residue:
+  - the protected-path lists;
+  - legacy config migration and legacy lifecycle-marker `selector` values;
+  - the guard's command corpus;
+  - the removed-engine refusal and the retired-file table;
+  - contract-lint rules that reject stale wording.
 - Live: a reconcile on living-football-engine (the operator's repository) removes its generated
   files, and a doctor run is clean.

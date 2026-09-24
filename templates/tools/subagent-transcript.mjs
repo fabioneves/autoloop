@@ -1,11 +1,8 @@
 #!/usr/bin/env node
-// Subagent transcript capture for the autoloop (Codex SubagentStop hook + opencode plugin).
-// Codex's SubagentStop hook payload carries `transcript_path` (manual, hooks "Common input
-// fields"). This hook copies that file plus the raw payload into the repository's common Git
-// directory under `autoloop/subagent-transcripts/` so captures can never be committed or dirty
-// any linked worktree. A Codex host-child route is unavailable when its typed agent/fresh-session
-// surface cannot be proven; transcript capture does not turn prompt-level isolation into a safe
-// fallback.
+// Subagent transcript capture for the autoloop (Claude Code SubagentStop hook).
+// The SubagentStop hook payload carries `transcript_path`. This hook copies that file plus the
+// raw payload into the repository's common Git directory under `autoloop/subagent-transcripts/`
+// so captures can never be committed or dirty any linked worktree.
 //
 // CAVEAT the consumer must respect (autoloop:dev Prime): the manual describes `transcript_path`
 // as "the session transcript" and subagent hooks reuse the PARENT session id, so whether the
@@ -47,13 +44,9 @@ export function resolveCaptureDirectory(root, readCommonDir = (cwd) => execFileS
 
 export function planCapture(payload, stamp, existingFiles) {
   const hasPath = payload && typeof payload.transcript_path === 'string' && payload.transcript_path;
-  // opencode child payload: the plugin ships the child's messages inline (SDK
-  // session.children/messages) instead of a file path; an EMPTY array is still captured —
-  // an empty child transcript is itself evidence.
-  const hasMessages = payload && Array.isArray(payload.messages);
   const plan = {
     payloadFile: `${stamp}-payload.json`,
-    transcriptCopy: hasPath || hasMessages ? `${stamp}-transcript.jsonl` : null,
+    transcriptCopy: hasPath ? `${stamp}-transcript.jsonl` : null,
     prune: [],
   };
   const total = existingFiles.length + 1 + (plan.transcriptCopy ? 1 : 0);
@@ -98,13 +91,7 @@ function capture() {
   const meta = payload === null ? null : normalizedMetadata(payload);
   writeFileSync(join(captureDir, plan.payloadFile), JSON.stringify(meta, null, 2) ?? 'null');
   if (plan.transcriptCopy) {
-    if (Array.isArray(payload?.messages)) {
-      writeFileSync(
-        join(captureDir, plan.transcriptCopy),
-        payload.messages.map((message) => JSON.stringify(message)).join('\n')
-          + (payload.messages.length ? '\n' : ''),
-      );
-    } else if (existsSync(payload.transcript_path)) {
+    if (existsSync(payload.transcript_path)) {
       copyFileSync(payload.transcript_path, join(captureDir, plan.transcriptCopy));
     } else {
       process.stderr.write(`autoloop: transcript_path ${payload.transcript_path} not readable — payload captured without transcript\n`);
@@ -118,9 +105,7 @@ function selfTest() {
     { name: 'payload+transcript', payload: { transcript_path: '/tmp/t.jsonl' }, existing: [], want: { transcript: true, prune: 0 } },
     { name: 'no transcript_path', payload: { hook_event_name: 'SubagentStop' }, existing: [], want: { transcript: false, prune: 0 } },
     { name: 'null payload', payload: null, existing: [], want: { transcript: false, prune: 0 } },
-    { name: 'opencode child payload', payload: { sessionID: 'ses_x', agent: 'autoloop-reviewer', messages: [{ info: { role: 'user' } }] }, existing: [], want: { transcript: true, prune: 0 } },
-    { name: 'opencode empty messages still captured', payload: { sessionID: 'ses_x', agent: 'build', messages: [] }, existing: [], want: { transcript: true, prune: 0 } },
-    { name: 'opencode messages not an array', payload: { sessionID: 'ses_x', messages: 'nope' }, existing: [], want: { transcript: false, prune: 0 } },
+    { name: 'inline messages without a path are not a transcript', payload: { messages: [{ info: { role: 'user' } }] }, existing: [], want: { transcript: false, prune: 0 } },
     { name: 'prunes oldest beyond cap', payload: { transcript_path: '/tmp/t.jsonl' }, existing: Array.from({ length: KEEP_FILES }, (_, i) => `2026-01-01T00-00-${String(i).padStart(2, '0')}-1-payload.json`), want: { transcript: true, prune: 2, oldestPruned: '2026-01-01T00-00-00-1-payload.json' } },
   ];
   let ok = true;
@@ -179,17 +164,18 @@ function selfTest() {
     timeout: 10000,
   });
   const captureDir = resolveCaptureDirectory(cliRoot);
-  const inlineMessages = [
-    { info: { role: 'user', agent: 'autoloop-reviewer' } },
-    { info: { role: 'assistant', modelID: 'fixture-model' } },
+  const transcriptLines = [
+    { type: 'user', message: { content: 'review' } },
+    { type: 'assistant', message: { model: 'fixture-model' } },
   ];
+  const transcriptSource = join(cliRoot, 'child.jsonl');
+  writeFileSync(transcriptSource, transcriptLines.map((line) => JSON.stringify(line)).join('\n') + '\n');
   try {
     execFileSync(process.execPath, [cliEntrypoint], {
       input: JSON.stringify({
-        sessionID: 'fixture-inline-session',
-        agent: 'autoloop-reviewer',
-        metadata: { tools: ['glob', 'grep', 'list', 'read'] },
-        messages: inlineMessages,
+        hook_event_name: 'SubagentStop',
+        agent_type: 'autoloop-reviewer',
+        transcript_path: transcriptSource,
       }),
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -208,16 +194,15 @@ function selfTest() {
       : [];
     if (
       created.length !== 2
-      || retainedPayload?.agent !== 'autoloop-reviewer'
-      || retainedPayload?.messages !== undefined
-      || JSON.stringify(retainedMessages) !== JSON.stringify(inlineMessages)
+      || retainedPayload?.agent_type !== 'autoloop-reviewer'
+      || JSON.stringify(retainedMessages) !== JSON.stringify(transcriptLines)
     ) {
       ok = false;
-      console.log('self-test case failed: inline-message CLI capture');
+      console.log('self-test case failed: transcript-path CLI capture');
     }
   } catch {
     ok = false;
-    console.log('self-test case failed: inline-message CLI capture');
+    console.log('self-test case failed: transcript-path CLI capture');
   } finally {
     rmSync(cliRoot, { recursive: true, force: true });
   }

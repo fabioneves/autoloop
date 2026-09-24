@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Scaffold, migrate, reconfigure, or diagnose Autoloop from Claude Code, Codex CLI, or opencode. Repository artifacts support all three hosts; doctor is read-only and verifies contracts, artifacts, and configuration.
+description: Scaffold, migrate, reconfigure, or diagnose Autoloop from Claude Code. Doctor is read-only and verifies contracts, artifacts, and configuration.
 ---
 
 # autoloop:setup — scaffold / migrate / reconfigure / doctor
@@ -40,16 +40,13 @@ Setup is idempotent and has four modes:
 - Reconfigure: STATE contains schema `0.26.0`.
 - Doctor: the invocation contains `doctor`; read-only and never writes.
 
-The repository scaffold is universal. It contains safe artifacts for Claude Code, Codex, and
-opencode so switching hosts does not require reconfiguration. Role dispatch does not depend on the
-host: `tools/agentic/dispatch.mjs` spawns `claude -p` directly for every role.
+Autoloop runs on Claude Code only. `tools/agentic/dispatch.mjs` spawns `claude -p` directly for
+every role; other models run on proxied routes.
 
 ```text
 /autoloop:setup
 /autoloop:setup doctor
 ```
-
-Codex uses `$autoloop:setup doctor`; opencode invokes the `setup` skill with `doctor`.
 
 ## Prime
 
@@ -374,15 +371,8 @@ the next reader debugs a passing check. This is the same rule the proxy prefligh
 same reason — read the typed report, do not re-derive what it already states.
 
 Always reconcile `.claude/settings.json` from
-`settings-hooks.template.json`. Doctor fails if any
-enabled host entrypoint is absent, inactive, or cannot retain one-use best-effort transport. It validates
-every installed hook/plugin artifact; disabling one disables that host's Autoloop runtime and is
-a doctor failure when the host remains configured.
-Codex skips every new or hash-changed non-managed hook until a human trusts that exact definition.
-After reconciling Codex hooks, instruct the user to open `/hooks`, review the source and hash, and
-trust it; Setup never bypasses or manufactures that trust. A static verifier PASS proves shape and
-tool targets only. Doctor reports effective activation/trust as a separate PASS; missing inventory
-or an untrusted definition is a FAIL and is never called active.
+`settings-hooks.template.json`. Doctor fails if the Claude hook entrypoint is absent or inactive,
+and validates every installed hook artifact.
 
 Perform the mechanical reconciliation with one call, never file-by-file model work:
 
@@ -391,22 +381,23 @@ node <templates>/tools/scaffold.mjs --reconcile <repository root>
 ```
 
 It vendors the policy-derived tool set (adding the non-manual merge tools only under an
-acknowledged non-manual ProjectConfig and removing them on return to `manual`), refreshes host
-artifacts, merges hooks and `.opencode/opencode.json` without clobbering repository-owned entries,
-folds a legacy root `opencode.json` into `.opencode/`, and returns a typed report. Present that
+acknowledged non-manual ProjectConfig and removing them on return to `manual`), merges hooks
+without clobbering repository-owned entries, removes the `.codex/**` and `.opencode/**` files earlier
+versions generated (only a byte-proven generated copy; anything else is reported `stale-left` and
+kept), and returns a typed report. Present that
 report; hand-copy nothing it covers. What it deliberately leaves to the model and human:
-the checklist, anything it reports `kept-modified` (a policy-bearing
+the checklist, anything it reports `stale-left` (delete it by hand if it is no longer wanted),
+anything it reports `kept-modified` (a policy-bearing
 tool such as `escalate-paths.mjs` whose repository copy differs), and the visible diff and commit.
 STATE and LOOP prose is the merge under Write and delivery — one call per document, never hand
 work.
 
-Preserve maintainer edits, show diffs, and ask before replacing edited vendored artifacts. New
-Codex agents and opencode agents/plugins require a fresh host session.
+Preserve maintainer edits, show diffs, and ask before replacing edited vendored artifacts.
 
 ## One-call audit
 
 **Trust the preflight before re-deriving it.** The SessionStart hook already ran
-`session-preflight.sh` and its output is in context: gh auth and repo access, node, codex, the
+`session-preflight.sh` and its output is in context: gh auth and repo access, node, the
 config contract, the release self-test, dispatch presence, clean-checkout state, checkout-vs-base
 identity, and vendored-vs-installed drift. When that block is present and free of FAIL lines, do
 not spend calls re-proving its facts — a live reconcile acknowledged "preflight already tells me"
@@ -434,8 +425,6 @@ diagnosing a parked branch.
 echo "=== toolchain ==="
 gh auth status 2>&1 | head -3
 node --version
-codex --version 2>/dev/null || echo codex:absent
-opencode --version 2>/dev/null || echo opencode:absent
 echo "=== config ==="
 node tools/agentic/config-contract.mjs docs/agentic/STATE.md 2>&1
 echo "=== contracts ==="
@@ -528,8 +517,6 @@ Always check:
 - every universal tool/artifact present, importable, syntactically valid, and self-tested;
 - shared STATE/path-policy fixtures, including `.opencode/**` and `.githooks/**`;
 - hooks parse and refer only to present vendored tools;
-- Codex hook shape/tool references separately from effective enablement and hash trust (unproven
-  activation is a NOTE, not a PASS);
 - **`AUTOMERGE_MODE` agrees with the committed `merge.policy`.** Do not re-derive this by reading:
   `scaffold.mjs --audit` computes it and reports `policyConflicts` (also in `warnings`), so the check
   is mechanical and cannot be skipped by forgetting a bullet. A non-empty `policyConflicts` is a
@@ -543,7 +530,6 @@ Always check:
   changes what merges without a human;
 - open duplicate migration PRs;
 - no stale broker/route/measurement prose in forward operational artifacts;
-- static Codex and opencode reviewer contracts;
 - `dispatch.mjs --self-test` passes, which is what proves the role postures: the reviewer roles
   produce a read-only argv, the writer role produces the writing set, and a malformed structured
   verdict, a non-zero exit, and a timeout are each typed failures.

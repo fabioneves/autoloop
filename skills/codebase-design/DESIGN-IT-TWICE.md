@@ -18,8 +18,7 @@ Show this to the user, then immediately proceed to Step 2. The user reads and th
 
 ### 2. Spawn sub-agents
 
-Spawn 3+ fresh, read-only sub-agents with the active host's native agent surface (Claude's Agent
-tool or Codex's subagent tools). Run them in parallel up to available capacity; run overflow
+Spawn 3+ fresh, read-only sub-agents with the Agent tool. Run them in parallel up to available capacity; run overflow
 designs sequentially. They must not edit the shared worktree. Wait for every result before
 comparison. Each must produce a **radically different** interface for the deepened module.
 

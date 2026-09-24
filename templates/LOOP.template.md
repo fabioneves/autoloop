@@ -1,7 +1,7 @@
 # The autoloop — runbook
 
 A standing, self-prompting development loop for **{{PROJECT_NAME}}**, coordinated from one Claude
-Code, Codex CLI, or opencode session. It takes each eligible **`loop-ready` GitHub issue**: the
+Code session. It takes each eligible **`loop-ready` GitHub issue**: the
 session orchestrator plans it, a fresh reviewer process reviews the plan, a fresh implementer
 process builds it, the orchestrator reviews and fixes the diff and runs the objective gate, then
 another fresh reviewer process reviews the code. It opens
@@ -26,10 +26,7 @@ config (mission, config block, caps, lessons), **not** the queue.
 | `{{CHECKLIST_PATH}}` | the criteria both reviewers grade against |
 | `{{GATE_COMMAND}}` | the objective gate — the only source of "done" |
 | `tools/agentic/*` (vendored) | project contracts, preflight, guards, lifecycle checks, and the one-call prime |
-| Host continuation | Claude: `/loop` + `/goal`; Codex CLI: `/goal` and manual reruns; opencode: manual reruns or cron + `opencode run` |
-
-Setup reconciles the safe Claude, Codex, and opencode artifacts together, so changing which host
-you drive the loop from needs no repository reconfiguration.
+| Host continuation | Claude Code: `/loop` + `/goal` |
 
 ## How to feed the queue
 
@@ -42,8 +39,7 @@ enter the queue:
    the injection guardrail in `STATE.md`). One issue = one PR-sized unit; state acceptance criteria
    and, if it depends on other issues, a `## Blocked by` section listing them.
 2. **Brainstorm → plan → queue.** A design session produces a committed artifact (a spec/ADR under
-   `docs/`); run **`/autoloop:shape <spec path>`** on Claude Code,
-   **`$autoloop:shape <spec path>`** on Codex CLI, or the **`shape`** skill on opencode to
+   `docs/`); run **`/autoloop:shape <spec path>`** to
    decompose it into PR-sized issues with
    verified premises and testable acceptance (an interactive step a human runs, not the loop).
    Slice files them **unlabelled** — you review and apply `loop-ready` yourself.
@@ -57,7 +53,7 @@ The merged PR (`Closes #N`) is the durable record.
 
 **1. Watch the first run (do this before anything unattended).** Pause or clear any active
 queue-wide `/goal`; the first run must have no persistent queue-drain goal. Invoke
-`/autoloop:dev` in Claude Code, `$autoloop:dev` in Codex CLI, or the `dev` skill in opencode and
+`/autoloop:dev` and
 say **"take ONE issue and stop"**. The single-unit bound is those words in your invocation —
 it is not repository state: any invocation without an explicit bound ("loop it", "drain the
 queue", or just invoking the skill) drains the eligible queue. Confirm that the implementer
@@ -66,8 +62,8 @@ honest.
 
 There is nothing to select. Every role — plan review, implementation, code review, and bounded
 doubt review — runs through one `tools/agentic/dispatch.mjs` call that spawns a fresh engine
-process with that role's fixed tool posture. Claude Code, Codex CLI, and opencode are hosts for
-the orchestrator; the dispatch surface is identical on all three.
+process with that role's fixed tool posture. Other models run on proxied routes, through the same
+call.
 
 Only after that bounded run succeeds, set the unattended queue goal:
 
@@ -87,12 +83,6 @@ handoff when another session is required.
 with `autoloop:dev` as the body. Each cycle runs **`autoloop:pitcrew` first** (clear review
 feedback on open PRs), then `autoloop:dev` — clear the return path before opening more forward
 work.
-
-Codex CLI has `/goal` but no `/loop`; rerun `$autoloop:dev` manually. For recurring scheduling,
-use a desktop scheduled task rather than inventing a CLI slash command. opencode likewise reruns
-the `dev` skill manually, or on a cadence via cron wrapping
-`opencode run "dev run one cycle; stop condition: <the stop
-condition above>"` from the repo root.
 
 **Unattended cadence (Claude, survives closing the terminal):** the host's native scheduler —
 a cron-style scheduled agent (`CronCreate` / the `/schedule` flow) running the pitcrew→dev cycle
