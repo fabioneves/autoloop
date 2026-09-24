@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   readFileSync,
-  readdirSync,
   realpathSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
@@ -494,21 +493,15 @@ async function selfTest() {
 
   let failed = 0;
   for (const fixture of cases) {
-    const notes = [];
-    const actual = verifyRelease(fixture.files, {
-      ...fixture.options,
-      note: (text) => notes.push(text),
-    });
-    const passed = JSON.stringify(actual) === JSON.stringify(fixture.expected)
-      && JSON.stringify(notes) === JSON.stringify(fixture.expectedNotes ?? []);
+    const actual = verifyRelease(fixture.files, fixture.options);
+    const passed = JSON.stringify(actual) === JSON.stringify(fixture.expected);
     process.stdout.write(`${passed ? 'ok' : 'not ok'} - ${fixture.name}\n`);
     if (!passed) {
       process.stdout.write(
-        `  expected: ${JSON.stringify(fixture.expected)}`
-        + ` notes ${JSON.stringify(fixture.expectedNotes ?? [])}\n`,
+        `  expected: ${JSON.stringify(fixture.expected)}\n`,
       );
       process.stdout.write(
-        `  actual:   ${JSON.stringify(actual)} notes ${JSON.stringify(notes)}\n`,
+        `  actual:   ${JSON.stringify(actual)}\n`,
       );
       failed += 1;
     }
@@ -795,11 +788,7 @@ function readReleaseTagBinding(root, version, tagName, mainRef) {
 function releaseMode(args) {
   const root = repositoryRoot(args);
   const files = loadRepository(root);
-  const notes = [];
-  const errors = verifyRelease(files, {
-    root,
-    note: (text) => notes.push(text),
-  });
+  const errors = verifyRelease(files, { root });
   const version = files.VERSION?.trim() ?? '';
   const tagName = optionValue(args, '--tag');
   const mainRef = optionValue(args, '--main-ref');
@@ -826,7 +815,6 @@ function releaseMode(args) {
     );
     return 1;
   }
-  for (const text of notes) process.stdout.write(`note: ${text}\n`);
   process.stdout.write(
     `release verification passed (v${version}; annotated tag on main; `
     + `${repository})\n`,
@@ -861,16 +849,11 @@ async function main(args) {
   if (args.includes('--release-mode')) return releaseMode(args);
   const root = repositoryRoot(args);
   const files = loadRepository(root);
-  const notes = [];
-  const errors = verifyRelease(files, {
-    root,
-    note: (text) => notes.push(text),
-  });
+  const errors = verifyRelease(files, { root });
   if (errors.length > 0) {
     process.stderr.write(`release verification failed:\n${errors.map((error) => `- ${error}`).join('\n')}\n`);
     return 1;
   }
-  for (const text of notes) process.stdout.write(`note: ${text}\n`);
   process.stdout.write(`release verification passed (v${files.VERSION.trim()})\n`);
   return 0;
 }

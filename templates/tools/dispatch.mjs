@@ -357,36 +357,27 @@ export function dispatchArgv(role, tools) {
   ];
 }
 
-// One engine, Claude Code, chosen by the binary's own name so a fixture shim on
-// a path and an installed binary resolve the same way. Other models are reached
-// through a proxied route, never a second CLI. Codex was a second engine until
-// 0.51.0 and is refused by name.
-const ENGINES = Object.freeze({
-  claude: Object.freeze({
-    supports: (role) => ROLES[role] !== undefined,
-    argv: (role, tools, scratch, cwd, model, effort) => [
-      ...dispatchArgv(role, tools),
-      ...(model === null ? [] : ['--model', model]),
-      ...(effort === null ? [] : ['--effort', effort]),
-    ],
-    // Claude's stream-json ends with exactly one `result` event.
-    payload: (role, stdout) => {
-      const event = parseResultEvent(stdout);
-      // A usage limit arrives as `subtype: success` with `is_error: true` and
-      // the refusal as its result text — not a result this tool can stand behind.
-      if (event === null || event.subtype !== 'success' || event.is_error === true) return null;
-      return RESULT_SCHEMAS[ROLES[role].result] !== undefined
-        ? { structured: event.structured_output }
-        : { text: typeof event.result === 'string' ? event.result : '' };
-    },
-  }),
-});
+// The one engine is Claude Code, recognised by the binary's own name so a
+// fixture shim on a path and an installed binary resolve the same way. Other
+// models are reached through a proxied route, never a second CLI. Codex was a
+// second engine until 0.51.0 and is refused by name.
+function claudeArgv(role, tools, model, effort) {
+  return [
+    ...dispatchArgv(role, tools),
+    ...(model === null ? [] : ['--model', model]),
+    ...(effort === null ? [] : ['--effort', effort]),
+  ];
+}
 
-const REMOVED_ENGINES = new Set(['codex']);
-
-// The orchestrating host is the default for every role.
-export function defaultEngineFor() {
-  return 'claude';
+// Claude's stream-json ends with exactly one `result` event.
+function claudePayload(role, stdout) {
+  const event = parseResultEvent(stdout);
+  // A usage limit arrives as `subtype: success` with `is_error: true` and
+  // the refusal as its result text — not a result this tool can stand behind.
+  if (event === null || event.subtype !== 'success' || event.is_error === true) return null;
+  return RESULT_SCHEMAS[ROLES[role].result] !== undefined
+    ? { structured: event.structured_output }
+    : { text: typeof event.result === 'string' ? event.result : '' };
 }
 
 // The legacy review recording, read only when no routes file exists. A choice
@@ -426,8 +417,8 @@ function recordedReviewChoice(cwd) {
     if (logPath === null) return null;
     const recorded = readFileSync(join(dirname(logPath), 'review-engine'), 'utf8').trim();
     const [engine, ...rest] = recorded.split(/\s+/).filter(Boolean);
-    if (REMOVED_ENGINES.has(engine)) return { error: `names ${engine}, which is no longer a dispatch engine` };
-    if (ENGINES[engine] === undefined) return null;
+    if (engine === 'codex') return { error: 'names codex, which is no longer a dispatch engine' };
+    if (engine !== 'claude') return null;
     let model = null;
     let baseUrl = null;
     let effort = null;
@@ -482,7 +473,7 @@ export function parseRoutes(text) {
     const [role, engine, ...rest] = line.split(/\s+/u);
     if (ROLES[role] === undefined) return { error: `${where}: unknown role ${role}` };
     if (routes[role] !== undefined) return { error: `${where}: ${role} is routed twice` };
-    if (ENGINES[engine] === undefined || !ENGINES[engine].supports(role)) {
+    if (engine !== 'claude') {
       return { error: `${where}: ${engine ?? 'no engine'} cannot run ${role}` };
     }
     const route = { ...HOST_ROUTE, engine };
@@ -499,7 +490,7 @@ export function parseRoutes(text) {
         route.effort = token.slice(1);
       } else if (token.startsWith('>')) {
         const fallback = /^>([^@\s]+)(?:@(https?:\/\/\S+))?$/u.exec(token);
-        if (route.fallback !== null || fallback === null || engine !== 'claude'
+        if (route.fallback !== null || fallback === null
           || (fallback[2] !== undefined && !loopbackUrl(fallback[2]))) {
           return { error: `${where}: bad or repeated fallback ${token}` };
         }
@@ -633,10 +624,6 @@ export function recordRoutes(cwd, { preset, proxyUrl = null, overrides = [] }) {
   writeFileSync(staged, text === '' ? '' : `${text}\n`);
   renameSync(staged, path);
   return { ok: true, path, routes: parsed.routes };
-}
-
-function resolveEngine(binary) {
-  return ENGINES[hostName(binary)] ?? null;
 }
 
 // The child inherits this process's environment and nothing is added to it.
@@ -804,8 +791,7 @@ export function usageLimitIn(stderr, stdout) {
       continue;
     }
     const failed = (event?.type === 'result' && (event.is_error === true || event.subtype !== 'success'))
-      || event?.type === 'error'
-      || event?.type === 'turn.failed';
+      || event?.type === 'error';
     if (failed) reports.push(line);
   }
   return USAGE_LIMIT_RE.test(reports.join('\n'));
@@ -1038,18 +1024,18 @@ function executeDispatch(options) {
       { ms: 0, startupMs: 0, stderr: '' },
     );
   }
-  const adapter = resolveEngine(engine);
-  if (adapter === null) {
-    const removed = REMOVED_ENGINES.has(hostName(engine));
+  const name = hostName(engine);
+  if (name !== 'claude') {
+    const removed = name === 'codex';
     return failure('spawn', removed ? 'ENGINE_REMOVED' : 'ENGINE_UNKNOWN', removed
-      ? `${role}: ${hostName(engine)} is no longer a dispatch engine; route the model through a claude proxy route`
-      : `${role}: unknown engine ${hostName(engine)}`, {
+      ? `${role}: ${name} is no longer a dispatch engine; route the model through a claude proxy route`
+      : `${role}: unknown engine ${name}`, {
       ms: 0,
       startupMs: 0,
       stderr: '',
     });
   }
-  if (!adapter.supports(role)) {
+  if (ROLES[role] === undefined) {
     return failure(
       'spawn',
       'ENGINE_ROLE_UNSUPPORTED',
@@ -1057,21 +1043,14 @@ function executeDispatch(options) {
       { ms: 0, startupMs: 0, stderr: '' },
     );
   }
-  // Only the engines that need side files get a scratch directory, and it is
-  // removed on every path out.
-  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-dispatch-io-'));
-  try {
-    return runEngine({
-      adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch,
-      liveFile: options.liveFile ?? null,
-      model: options.model ?? null,
-      effort: options.effort ?? null,
-      baseUrl: options.baseUrl ?? null,
-      native: options.native === true,
-    });
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
+  return runEngine({
+    role, prompt, tools, cwd, timeoutMs, engine, startedAtMs,
+    liveFile: options.liveFile ?? null,
+    model: options.model ?? null,
+    effort: options.effort ?? null,
+    baseUrl: options.baseUrl ?? null,
+    native: options.native === true,
+  });
 }
 
 // Engine stdout goes to disk as the engine emits it, so a running dispatch can
@@ -1107,10 +1086,10 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 }
 
 function runEngine({
-  adapter, role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, scratch, liveFile, model,
-  effort, baseUrl, native,
+  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl,
+  native,
 }) {
-  const argv = adapter.argv(role, tools, scratch, cwd, model ?? null, effort ?? null);
+  const argv = claudeArgv(role, tools, model ?? null, effort ?? null);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
@@ -1121,7 +1100,7 @@ function runEngine({
     result = spawnSync(engine, argv, {
       cwd,
       encoding: 'utf8',
-      env: dispatchEnvironment(adapter === ENGINES.claude ? baseUrl : null, native),
+      env: dispatchEnvironment(baseUrl, native),
       input: `${prompt}${reviewEnvelopeStamp(role)}${dispatchContextStamp(cwd, role)}`,
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: timeoutMs,
@@ -1167,7 +1146,7 @@ function runEngine({
       { ms, startupMs, exitCode: result.status, stderr, ...limited },
     );
   }
-  const payload = adapter.payload(role, result.stdout ?? '', scratch);
+  const payload = claudePayload(role, result.stdout ?? '');
   if (payload === null) {
     return failure(
       'result',
@@ -2385,7 +2364,6 @@ function selfTest() {
       'the limit detector reads failure reports, never the transcript body',
       usageLimitIn("You've reached your weekly limit", '')
       && usageLimitIn('', '{"type":"error","message":"429 rate_limit_error"}')
-      && usageLimitIn('', '{"type":"turn.failed","error":{"message":"usage limit"}}')
       && !usageLimitIn('', JSON.stringify({
         type: 'assistant', message: { content: 'the proxy returns 429 on rate limit' },
       }))

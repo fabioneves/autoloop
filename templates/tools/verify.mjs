@@ -126,22 +126,14 @@ function checkRetiredCiPolicy(root) {
     : { ok: true, detail: '' };
 }
 
-// The release contract reports pending live evidence as a typed note: it never
-// blocks contract verification and never passes `--release-mode`.
+// The release contract never passes `--release-mode` here.
 function checkReleaseContract(root) {
   const result = run(
     process.execPath,
     [resolve(root, 'templates', 'tools', 'release-verify.mjs'), '--check-root', root],
     root,
   );
-  if (!result.ok) return result;
-  const notes = result.detail
-    .split('\n')
-    .filter((line) => line.startsWith('note: '))
-    .map((line) => line.slice('note: '.length));
-  return notes.length === 0
-    ? { ok: true, detail: '' }
-    : { ok: true, note: true, detail: notes.join('; ') };
+  return result.ok ? { ok: true, detail: '' } : result;
 }
 
 function checkExists(path) {
@@ -1041,11 +1033,7 @@ function main() {
     // itself instead of the log stalling on the previous check's PASS line.
     const timing = elapsedMs >= 1000 ? ` (${(elapsedMs / 1000).toFixed(1)}s)` : '';
     if (result.ok) {
-      console.log(
-        result.note
-          ? `NOTE ${check.name}: ${result.detail}`
-          : `PASS ${check.name}${timing}`,
-      );
+      console.log(`PASS ${check.name}${timing}`);
       // A passing child's stdout is otherwise discarded, which swallowed the
       // self-tests' diagnostic attribution — surface every such line.
       for (const line of result.detail?.match(/^(?:slow checks|matrix phases): .+$/gmu) ?? []) {

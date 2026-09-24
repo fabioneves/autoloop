@@ -545,7 +545,7 @@ eligible issue through its read-only steps 1–3: premise-check and plan against
 then its plan-review dispatch. Read the committed tree (`git show`, `git grep`) and never the
 working tree, which the in-flight unit's writer owns.
 
-One idiom on every host:
+One idiom:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role implement --prompt-file <p> --issue <N> \
@@ -835,7 +835,7 @@ issue title still reaches the operator at the selection ribbon and the closing r
 defect.** Newer harnesses DEFER it: `ToolSearch("select:PushNotification")` loads it in one call.
 Run that load once at run open, beside the panel probe. The terminal notifications —
 `✔ #<N> PR #<P> ready for your merge · <elapsed>` on delivered, `✖ #<N> blocked — <reason gate>`
-on blocked — are due on every host that can load the tool; only a host that genuinely cannot may
+on blocked — are due whenever the tool loads; only a session that genuinely cannot load it may
 say so, once, on the unit's closing rail. A live run wrote "surfaces DO NOT EXIST in this
 session" into its own handoff summary and dropped every delivery notification while a working
 tool sat one ToolSearch away: the roster names what is LOADED, not what exists.
