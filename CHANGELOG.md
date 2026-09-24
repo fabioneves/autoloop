@@ -3,6 +3,29 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.50.1] - 2026-09-24
+
+Follow-ups from the 0.50.0 review.
+
+### Fixed
+
+- **A dispatch excuses only its own unit's unpushed work.** The Stop hook demoted every
+  stranded-commit block while any dispatch ran. Each running dispatch is now tied to a unit by its
+  `--issue`, else by its worktree's branch, and excuses only that unit's commits. The park check
+  still counts any in-flight dispatch.
+- **Proxy URLs are loopback only.** A route or `review-engine` URL receives the prompt and the
+  dispatch's credentials; `127.0.0.1`, `localhost` and `[::1]` are now the only accepted hosts, for
+  routes, fallbacks, the proxy preset and the legacy recording.
+- **A bare `429` in stderr is no longer a usage limit.** A stack frame's line number moved retries
+  onto the fallback model; only `429 Too Many Requests` (and the existing rate-limit phrases) count.
+- **`overlap-report.mjs` works from a linked worktree and can be imported.** It read the dispatch
+  log from the per-worktree path instead of the common Git directory, and ran its CLI on import;
+  `stats.mjs` now reuses its parser.
+
+### Changed
+
+- The command guard's header states that it is not a secrets boundary.
+
 ## [0.50.0] - 2026-09-23
 
 A loop that fixes itself and keeps going. Runs stopped too often: most stops were mechanical
