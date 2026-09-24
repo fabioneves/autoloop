@@ -97,6 +97,9 @@ export const RETIRED_HOST_FILES = Object.freeze(new Map([
     '6a31d52e7855dc3dbfc3c9d9bcc66552dd57701ce5e7db17739469f9b77a68ee',
   ])],
 ]));
+// Vendored tools a release deleted. Every tools/agentic copy is template-owned,
+// so a retired one is removed outright, like the non-manual set on a manual repo.
+const RETIRED_TOOL_FILES = Object.freeze(['adapter-contract.mjs']);
 const RETIRED_HOST_DIRECTORIES = Object.freeze([
   '.codex/agents', '.opencode/agent', '.opencode/plugins', '.codex', '.opencode',
 ]);
@@ -406,6 +409,13 @@ export function reconcile(root, templates, { audit = false } = {}) {
         if (!audit) unlinkSync(stale);
         results.push({ path: `tools/agentic/${name}`, action: 'removed' });
       }
+    }
+  }
+  for (const name of RETIRED_TOOL_FILES) {
+    const stale = resolve(root, 'tools', 'agentic', name);
+    if (existsSync(stale)) {
+      if (!audit) unlinkSync(stale);
+      results.push({ path: `tools/agentic/${name}`, action: 'removed' });
     }
   }
 
@@ -1895,6 +1905,19 @@ function selfTest() {
       'returning to manual removes the non-manual tooling',
       backToManual.results.some((entry) =>
         entry.path === 'tools/agentic/auto-merge.mjs' && entry.action === 'removed'),
+    );
+
+    const retiredTool = join(root, 'tools', 'agentic', 'adapter-contract.mjs');
+    writeFileSync(retiredTool, '// vendored by an earlier release\n');
+    const retiredAudit = reconcile(root, templates, { audit: true });
+    const auditKeptRetiredTool = existsSync(retiredTool);
+    const retiredRun = reconcile(root, templates);
+    expect(
+      'a reconcile removes a retired vendored tool, and an audit only reports it',
+      [retiredAudit, retiredRun].every((run) => run.results.some((entry) =>
+        entry.path === 'tools/agentic/adapter-contract.mjs' && entry.action === 'removed'))
+        && auditKeptRetiredTool
+        && !existsSync(retiredTool),
     );
 
     writeFileSync(

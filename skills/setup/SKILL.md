@@ -313,7 +313,6 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 | Repository path | Template | Contract |
 |---|---|---|
 | `docs/agentic/LESSONS.md` | `LESSONS.template.md` | Durable repository memory — seeded once, never overwritten, read on demand |
-| `tools/agentic/adapter-contract.mjs` | `tools/adapter-contract.mjs` | Static reviewer artifact validation |
 | `tools/agentic/attestation-contract.mjs` | `tools/attestation-contract.mjs` | Exact-head gate/policy/authorization records |
 | `tools/agentic/checkout-contract.mjs` | `tools/checkout-contract.mjs` | Stable checkout and GitHub repository identity |
 | `tools/agentic/claim-contract.mjs` | `tools/claim-contract.mjs` | Canonical branch/body ownership parser |
@@ -374,20 +373,8 @@ is correctly gone prints `No such file or directory`, so the SUCCESS case render
 the next reader debugs a passing check. This is the same rule the proxy preflight follows for the
 same reason — read the typed report, do not re-derive what it already states.
 
-Always reconcile the host artifacts:
-
-- `.codex/agents/autoloop-reviewer.toml` from `codex-reviewer-agent.template.toml`
-- `.opencode/agent/autoloop-reviewer.md` from `opencode-reviewer-agent.template.md`
-- `.opencode/opencode.json`, merged per key from `opencode-config.template.json`. opencode reads
-  project configuration from either the repository root or `.opencode/`; Autoloop keeps it in
-  `.opencode/` so the scaffold adds nothing loose to the project root. When a legacy root
-  `opencode.json` exists, merge it into `.opencode/opencode.json` and delete the root copy in the
-  same visible diff.
-
 Always reconcile `.claude/settings.json` from
-`settings-hooks.template.json`, `.codex/hooks.json` from `codex-hooks.template.json` unless the
-same project-layer hooks live in `.codex/config.toml`, and `.opencode/plugins/autoloop.js` from
-`opencode-plugin.template.js`. Never duplicate Codex hook representations. Doctor fails if any
+`settings-hooks.template.json`. Doctor fails if any
 enabled host entrypoint is absent, inactive, or cannot retain one-use best-effort transport. It validates
 every installed hook/plugin artifact; disabling one disables that host's Autoloop runtime and is
 a doctor failure when the host remains configured.
@@ -415,22 +402,6 @@ work.
 
 Preserve maintainer edits, show diffs, and ask before replacing edited vendored artifacts. New
 Codex agents and opencode agents/plugins require a fresh host session.
-
-The Codex reviewer contract is:
-
-- `name = "autoloop_reviewer"`
-- `default_permissions = ":read-only"`
-- `approval_policy = "never"`
-- no model/provider/effort override
-- no legacy `sandbox_mode`
-
-Validate it through `<templates>/tools/adapter-contract.mjs` before the reconcile lands and through
-the installed copy after; Setup and doctor must not reproduce it with grep.
-These artifacts define the read-only reviewer posture each host offers its own subagents; role
-dispatch itself does not use them.
-
-The opencode reviewer must pass the shared closed-world adapter contract: wildcard deny first,
-followed only by in-worktree read/glob/grep/list allows.
 
 ## One-call audit
 

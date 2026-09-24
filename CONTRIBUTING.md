@@ -46,8 +46,7 @@ plugin-root verify above fails while the committed manifest is stale:
 node templates/tools/verify.mjs --emit-self-test-manifest > templates/tools/self-test-manifest.json
 ```
 
-Run any additional live smoke protocol affected by the change. For opencode adapter changes, use
-[docs/opencode-smoke.md](docs/opencode-smoke.md) in a scratch repository.
+Run any additional live smoke protocol affected by the change.
 
 ## Pull requests
 
