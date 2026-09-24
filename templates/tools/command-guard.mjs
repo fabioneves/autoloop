@@ -28,6 +28,11 @@
 //   ALLOW other literal canonical commands (exit 0). An invalid hook payload fails
 //   closed because it cannot prove which command the host is about to execute.
 //
+//   NOT a secrets boundary: reading the environment or a credential file is
+//   allowed. Secrets are protected by scoping them (a repo-scoped token without
+//   admin rights, no API key in the loop's environment) and by loopback-only
+//   proxy routes in dispatch.mjs, not by this guard.
+//
 // Usage:  (hook) reads the PreToolUse payload on stdin
 //         node tools/agentic/command-guard.mjs --self-test
 
