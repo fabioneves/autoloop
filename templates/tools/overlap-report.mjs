@@ -30,12 +30,15 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveDispatchLogPath } from './dispatch.mjs';
 
 function gitPath(root, relative) {
   const result = spawnSync(
@@ -191,7 +194,9 @@ export function runStartedAtMs(root, ancestors = ancestorPids()) {
 }
 
 export function report(root, eligible = null) {
-  const logPath = gitPath(root, 'autoloop/dispatch-log.jsonl');
+  // The log's own resolver: it lives in the common Git directory, while the run
+  // marker above is per-worktree, like prime writes it.
+  const logPath = resolveDispatchLogPath(root);
   const text = logPath !== null && existsSync(logPath)
     ? readFileSync(logPath, 'utf8')
     : '';
@@ -312,8 +317,31 @@ function selfTest() {
     rmSync(scratch, { recursive: true, force: true });
   }
 
+  // dispatch.mjs appends to the COMMON Git directory's log, so every linked
+  // worktree shares one file. `--git-path` resolves per worktree
+  // (`.git/worktrees/<name>/autoloop/...`), so a report run from a linked
+  // worktree read a log that never exists and reported zero dispatches.
+  {
+    const scratch = mkdtempSync(join(tmpdir(), 'autoloop-overlap-'));
+    const git = (...args) => spawnSync('git', ['-C', scratch, ...args], { encoding: 'utf8', timeout: 10_000 });
+    git('init', '-q');
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x');
+    const linked = join(scratch, 'linked');
+    git('worktree', 'add', '-q', '--detach', linked);
+    mkdirSync(join(scratch, '.git', 'autoloop'), { recursive: true });
+    writeFileSync(
+      join(scratch, '.git', 'autoloop', 'dispatch-log.jsonl'),
+      `${JSON.stringify(at(1000, 500))}\n`,
+    );
+    check(
+      'a linked worktree reads the common dispatch log',
+      report(linked).dispatches === 1 && report(scratch).dispatches === 1,
+    );
+    rmSync(scratch, { recursive: true, force: true });
+  }
+
   for (const name of failures) console.error(`FAIL ${name}`);
-  const total = 14;
+  const total = 15;
   console.log(
     failures.length === 0
       ? `self-test OK (${total} cases)`
@@ -322,18 +350,28 @@ function selfTest() {
   return failures.length === 0;
 }
 
-const parsed = parseArgs(process.argv.slice(2));
-if (parsed === null) {
-  console.error('usage: overlap-report.mjs [--root <dir>] [--eligible <n>] [--json]');
-  process.exit(2);
+function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed === null) {
+    console.error('usage: overlap-report.mjs [--root <dir>] [--eligible <n>] [--json]');
+    process.exit(2);
+  }
+  if (parsed.mode === 'self-test') {
+    process.exit(selfTest() ? 0 : 1);
+  }
+  try {
+    const result = report(parsed.root, parsed.eligible);
+    console.log(parsed.json ? JSON.stringify(result, null, 1) : result.line);
+  } catch (error) {
+    // Read-only reporting must never wedge a run.
+    console.error(`overlap-report: unavailable (${error.message})`);
+  }
 }
-if (parsed.mode === 'self-test') {
-  process.exit(selfTest() ? 0 : 1);
-}
-try {
-  const result = report(parsed.root, parsed.eligible);
-  console.log(parsed.json ? JSON.stringify(result, null, 1) : result.line);
-} catch (error) {
-  // Read-only reporting must never wedge a run.
-  console.error(`overlap-report: unavailable (${error.message})`);
-}
+
+// Importable: stats.mjs reuses parseDispatchLog, and an import must not run the CLI.
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); }
+  catch { return false; }
+})();
+if (isMain) main();
