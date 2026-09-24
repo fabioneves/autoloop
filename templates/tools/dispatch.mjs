@@ -838,9 +838,11 @@ export function parseResultEvent(stdout) {
 // is refused again, and its fallback is the only useful next attempt. Read
 // only where an engine reports its own failure — stderr, and the error-bearing
 // final events of either stream — never the transcript body, which a reviewer
-// fills with the very code under review (and code mentions rate limits).
+// fills with the very code under review (and code mentions rate limits). A 429
+// counts only with its reason phrase: bare, it is a stack frame's line number
+// as often as a status.
 const USAGE_LIMIT_RE =
-  /usage limit|(?:hit|reached) your (?:[\w-]+ )*limit|rate[_ -]?limit|\b429\b|quota exceeded|insufficient_quota/iu;
+  /usage limit|(?:hit|reached) your (?:[\w-]+ )*limit|rate[_ -]?limit|\b429 Too Many Requests\b|quota exceeded|insufficient_quota/iu;
 
 export function usageLimitIn(stderr, stdout) {
   const reports = [String(stderr ?? '')];
@@ -2450,7 +2452,11 @@ function selfTest() {
         type: 'assistant', message: { content: 'the proxy returns 429 on rate limit' },
       }))
       && !usageLimitIn('', JSON.stringify({ type: 'result', subtype: 'success', result: 'rate limit' }))
-      && !usageLimitIn('engine blew up', 'not json'),
+      && !usageLimitIn('engine blew up', 'not json')
+      // A bare 429 is a line number as often as a status: a stack frame in
+      // stderr must not move the retry onto the fallback model.
+      && usageLimitIn('exceeded retry limit, last status: 429 Too Many Requests', '')
+      && !usageLimitIn('TypeError: x is undefined\n    at run (/srv/app.js:429:12)', ''),
     );
     check(
       'only reviewer-posture roles, transient codes, and the attempt bound allow a rerun',
