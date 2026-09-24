@@ -358,8 +358,9 @@ reviewer's job is to find the case the author did not consider.
   is a usage error, not a silently dropped entry.
 - Review roles return a structured verdict `{verdict,findings,rebuts}`, parsed and validated, or
   fail typed. `implement` returns the writer's terminal text.
-- Failure is always `{ok:false, step, error}` with the child's stderr preserved. There are no
-  retries and no fallback engine: a failed dispatch is a decision for the orchestrator.
+- Failure is always `{ok:false, step, error}` with the child's stderr preserved. A failure that
+  reaches you has already been through the tool's own retries and fallback (below); what is left
+  is a decision for the orchestrator.
 - `--json` prints the full typed result; without it you get a bounded human summary. `--output-file`
   writes the typed result to a path for later evidence.
 - **The payload field is named by the role, and there are exactly three.** A success is
@@ -404,10 +405,12 @@ reviewer's job is to find the case the author did not consider.
     writer's model costs the guarantee);
   - fix falls back to astra — accepted: astra then judges its own fixes on those rounds, and the
     collection line says so;
-  - diff/code/doubt review fall back to Fable, never Opus, which wrote the code;
+  - diff/code/doubt review fall back to Fable, never Opus, which wrote the code. Fable then
+    judges its own simplify edits on that run — accepted, and the stamp records it;
   - implement has no fallback: Opus at its limit parks the unit; so does a fallback at its limit.
     A park is recorded, never a close — see "Timed park" below.
-  Never fall back for any other failure class, and never onto the writer's model for a reviewer.
+  Never fall back for any other failure class, and never onto Opus for a reviewer of the code
+  Opus wrote.
   A proxy that does not answer the probe is not a usage limit: block the unit (probe rule).
 
   Premise, finding verification, and disposition are IN-SESSION work and carry no `--model`

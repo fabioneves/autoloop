@@ -862,7 +862,8 @@ function dispatchOnce(options, cwd) {
       model: resolvedModel,
       effort: resolvedEffort,
       baseUrl,
-      native: baseUrl === null && route.source === 'routes',
+      // A fallback is always native, whatever recording the route came from.
+      native: baseUrl === null && (route.source === 'routes' || options.fallback === true),
     });
   const engine = hostName(engineBinary);
   const model = resolvedModel;
@@ -2163,12 +2164,21 @@ function selfTest() {
       '--fallback on a route without one runs its default natively; on the default it fails typed',
       (() => {
         const review = routedEnv('code-review', { fallback: true });
+        // The legacy recording has no routes file; its default fallback must
+        // still run natively, not inherit the session-wide proxy.
+        const routesText = readFileSync(routesFile, 'utf8');
+        rmSync(routesFile);
+        writeFileSync(engineFile, 'claude gpt-6-astra @http://127.0.0.1:18765\n');
+        const legacy = routedEnv('code-review', { fallback: true });
+        rmSync(engineFile);
+        writeFileSync(routesFile, routesText);
         const refused = runDispatch({
           role: 'implement', prompt: 'x', tools: 'Read', cwd: repoScratch,
           engine: join(shimDirectory, 'claude'), fallback: true,
         });
         return review.result.fallback === true && review.result.model === 'claude-fable-5-1'
           && review.argv.includes('--model claude-fable-5-1') && review.url === null
+          && legacy.result.model === 'claude-fable-5-1' && legacy.url === null
           && refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING'
           && effectiveFallback('plan', { model: 'gpt-6-astra', fallback: null })?.model === 'claude-opus-5-5'
           && effectiveFallback('implement', { model: 'claude-opus-5-5', fallback: null }) === null

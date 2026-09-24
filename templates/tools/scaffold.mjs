@@ -126,7 +126,9 @@ export function removeRetiredHostFiles(root, results, audit, retired = RETIRED_H
   for (const [relativePath, fingerprints] of retired) {
     const target = resolve(root, relativePath);
     if (!existsSync(target)) continue;
-    const generated = fingerprints.has(hostFileFingerprint(relativePath, readFileSync(target, 'utf8')));
+    // A symlink is followed for the comparison and only the link is removed.
+    const generated = statSync(target).isFile()
+      && fingerprints.has(hostFileFingerprint(relativePath, readFileSync(target, 'utf8')));
     if (generated && !audit) unlinkSync(target);
     results.push({ path: relativePath, action: generated ? 'removed' : 'stale-left' });
   }
@@ -595,7 +597,7 @@ export function reconcile(root, templates, { audit = false } = {}) {
       });
     }
   }
-  const settled = new Set(['identical', 'kept', 'kept-modified', 'absent']);
+  const settled = new Set(['identical', 'kept', 'kept-modified', 'stale-left', 'absent']);
   const changing = sorted.filter((entry) => !settled.has(entry.action));
   return {
     version: 1,
@@ -2040,8 +2042,32 @@ function selfTest() {
         [...RETIRED_HOST_FILES.keys()].length === 5
           && [...RETIRED_HOST_FILES.values()].every((set) => set.size > 0),
       );
+      // A directory where a generated file used to be is not setup's to touch.
+      mkdirSync(join(host, '.codex', 'hooks.json'), { recursive: true });
+      const odd = [];
+      let threw = false;
+      try {
+        removeRetiredHostFiles(host, odd, false, retired);
+      } catch {
+        threw = true;
+      }
+      expect(
+        'a directory at a retired path is reported, never read or removed',
+        !threw && odd.find((entry) => entry.path === '.codex/hooks.json')?.action === 'stale-left'
+          && existsSync(join(host, '.codex', 'hooks.json')),
+      );
       rmSync(host, { recursive: true, force: true });
     }
+    // A kept, repository-owned copy is settled: reconcile can never change it,
+    // so it must not hold every later Dev run at "reconcile needed".
+    mkdirSync(join(root, '.codex'), { recursive: true });
+    writeFileSync(join(root, '.codex', 'hooks.json'), '{"hooks":{"Stop":[{"repo":"owned"}]}}\n');
+    const settledAudit = reconcile(root, templates, { audit: true });
+    expect(
+      'a stale-left retired file does not make reconcile needed',
+      settledAudit.results.find((entry) => entry.path === '.codex/hooks.json')?.action === 'stale-left'
+        && settledAudit.reconcileNeeded === false,
+    );
     mergeSelfTest(expect);
   } finally {
     rmSync(templates, { recursive: true, force: true });

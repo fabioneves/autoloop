@@ -62,7 +62,9 @@ loopback. The standing table:
 | 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` |
 | 08 fixes | `fix` | `claude-opus-5-5` | native | `gpt-6-astra` (proxy) |
 
-No artifact is judged by the model that wrote it. A route with no recorded fallback defaults to
+On the standing routes, no artifact is judged by the model that wrote it. A fallback can bend
+that for one run (for example, astra reviewing the simplify pass it covered for), and the run
+record says so. A route with no recorded fallback defaults to
 `claude-opus-5-5`, except the code reviewers, which default to `claude-fable-5-1` because Opus
 wrote the code they judge. `/autoloop:dev with host` runs every role on the host default.
 
