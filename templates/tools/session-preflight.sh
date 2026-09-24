@@ -54,15 +54,6 @@ else
   else
     echo 'FAIL  tools/agentic/dispatch.mjs missing — no role can be dispatched'
   fi
-  # A second review engine is opt-in per invocation (`/autoloop:dev with codex`),
-  # so its absence is a NOTE and never a FAIL: a plain run asked for nothing that
-  # needs it. Reported anyway, because "with codex" failing typed at the first
-  # review of a finished unit is a worse place to learn this.
-  if command -v codex >/dev/null 2>&1; then
-    echo "INFO  codex present ($(codex --version 2>/dev/null | head -1)) — \`/autoloop:dev with codex\` can run reviews off the writer's model"
-  else
-    echo 'NOTE  codex not installed — a plain run is unaffected; `/autoloop:dev with codex` would fail its first review dispatch typed'
-  fi
 fi
 
 # 2. Clean checkout (loop precondition; dirty is fine for interactive work)

@@ -952,7 +952,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'dispatch.mjs', anchor: 'function followsReviewChoice(' }),
       Object.freeze({
         file: 'dispatch.mjs',
-        anchor: 'codex refuses to author a plan, which is writing under a reading posture',
+        anchor: "// The plan is authored work: it never follows the review recording.",
       }),
     ]),
   }),
