@@ -920,16 +920,29 @@ async function fetchQueue(openIssues, repo) {
       section = await fetchIssueTimeline(repo, issue);
       provenance = labelProvenance(section.items);
     } else {
-      // A repair whose facts cannot be read is not queue work this scan: it
-      // drops out rather than making every other unit's queue incomplete.
+      // A repair whose parent GitHub definitively does not have is not queue
+      // work. A request that failed proves nothing, so the queue is incomplete,
+      // exactly as for an ordinary issue's timeline: absence is never concluded
+      // from missing data.
       const parentTimeline = await fetchIssueTimeline(repo, { number: marker.parent });
       let data = null;
+      let failure = null;
       try {
         data = await ghGraphql(REPAIR_FACTS_QUERY, { owner: repo.owner, name: repo.name, number: issue.number, parent: marker.parent });
-      } catch {
-        data = null;
+      } catch (error) {
+        failure = commandError(error);
       }
-      if (!parentTimeline.complete || !data?.repository?.parent || !data.repository.repair) {
+      if (failure !== null || !parentTimeline.complete) {
+        return {
+          item: null,
+          section: incompleteSection(
+            'REPAIR_FACTS_UNAVAILABLE',
+            `repair #${issue.number}: ${failure ?? parentTimeline.error?.message ?? 'parent timeline incomplete'}`,
+          ),
+          labelEvidence: null,
+        };
+      }
+      if (!data?.repository?.parent || !data.repository.repair) {
         return { item: null, section: completeSection([]), labelEvidence: null };
       }
       section = parentTimeline;

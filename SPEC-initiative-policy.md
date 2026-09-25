@@ -34,8 +34,7 @@ Replace "when unsure, block the unit" with a closed decision rule. A would-be bl
      - the carve happens at the closing round, because past it no round remains to review a reduction;
      - at the cap itself the decide is a re-plan, filed as a blocking repair. A re-plan cannot resume the unit, because the marker binds `planHash`, so the unit is closed `--obsolete` against the repair's PR once that merges.
 
-     The review contract names this state `cap-reached`, not `human-block`.
-     and deliver the rest; a human block only when the Critical is itself a `human`-class matter.
+     The review contract names this state `cap-reached`, not `human-block`. A human block applies only when the Critical is itself a `human`-class matter.
    - Handoff (`:1893-1901`): "anything phrased 'tell me when…'" → `fix`/`decide` unless `human`-class.
    - Autonomy section (`:2203-2231`): replace "most conservative action … label the unit" with the three-class rule.
    - Malformed/duplicate lifecycle marker (`:120-127`): stays a block (loop-machinery defect; trust-adjacent) — unchanged.

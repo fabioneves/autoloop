@@ -326,7 +326,7 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 | `tools/agentic/prime.mjs` | `tools/prime.mjs` | One-call config, base, and snapshot prime |
 | `tools/agentic/publish-verdict.mjs` | `tools/publish-verdict.mjs` | Universal exact-head terminal finalizer and CheckRun publisher |
 | `tools/agentic/release-verify.mjs` | `tools/release-verify.mjs` | Portable release/version helpers |
-| `tools/agentic/review-contract.mjs` | `tools/review-contract.mjs` | Convergence/human-block transition |
+| `tools/agentic/review-contract.mjs` | `tools/review-contract.mjs` | Convergence and cap transitions |
 | `tools/agentic/scan.mjs` | `tools/scan.mjs` | Complete typed startup snapshot |
 | `tools/agentic/snapshot-contract.mjs` | `tools/snapshot-contract.mjs` | Snapshot completeness and invalidation |
 | `tools/agentic/session-preflight.sh` | same name | Session injection |

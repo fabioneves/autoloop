@@ -177,7 +177,9 @@ Shapes to keep out of every command, sanctioned read or not:
 - **A body composed inline.** `--body "$(cat …)"` is command substitution and is refused whole.
   Write the body to a file and pass `--body-file <path>` (`gh pr create`, `gh issue comment`, and
   the run record all take one); commit messages use `git commit -F -` with a quoted heredoc or
-  `-F <path>`.
+  `-F <path>`. Write a comment's body file in its OWN step (the Write tool) before the `gh` call:
+  the guard must read it to prove it is not an `/answer`, so a body it cannot read yet — stdin, or
+  a file the same command creates — is refused.
 - **`$?` as decoration.** The guard judges it as `0`, so it is no longer refused — but it says
   nothing: the tool result already carries the exit status, and after `&&` the echo runs only when
   the command already succeeded. Leave it off.

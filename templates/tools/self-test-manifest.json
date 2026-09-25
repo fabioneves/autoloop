@@ -29,13 +29,13 @@
     "release-verify.mjs": "1ff059af3643249507b0ee3fb80c287106ed40e40f2e9123240c09ada1ab3e1c",
     "review-contract.mjs": "f67b6234ead833831a8cbeb72a8234630e6054c53d2fcd353528deeb155b0c10",
     "scaffold.mjs": "1d634f555749cd5900a1574a85d5e74e182c340629afe4804be92e1a58a10004",
-    "scan.mjs": "ceab445861af107a5d758e983e9767767943be23d6f5f1fa3ca2c74cbe0b1ed6",
+    "scan.mjs": "4a5df8b5027720a768be253ae6cb9b2299036dfa118a9e387338c7bf5fcd2480",
     "sizing-contract.mjs": "d37b91eec295a80886c406dbfea039b6dd76ed68cd466baf4c53145764e61f40",
     "snapshot-contract.mjs": "506fe39194fb90660ba747700efdb4c363314a03386ce54fabfcb6825cd28e40",
     "stats.mjs": "939775ca5d963cdfeb227428a17bc3d5e96f17c42e59f9b4e699b36e30b595e6",
     "step-subject.mjs": "ffe7d1dbb92030c5e794202235741fbdc5e83ee1ef430cdf61250c3456f4f4fd",
     "subagent-transcript.mjs": "77da4385fa5cd9df465985700907fff36fd246f5725738412b8c1cb0a8419d5e",
-    "unit.mjs": "625de7bef1d17bf4feb03074f5740dd29b9db90cfbb38adfa2c3744323b3ec6f",
+    "unit.mjs": "e11c76682a0ead2036a5f677031c0518b212fcdfa79e5c9ab7090da41874ae92",
     "writeback-check.mjs": "1eb1dd31d75db5b2648970295f5e6075d019073ed81d77eea0a786bd42c7ce41"
   }
 }
