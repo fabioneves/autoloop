@@ -2535,8 +2535,9 @@ export function backgroundDispatchProblem(command, runInBackground) {
 export function askUserQuestionProblem(runIsLive) {
   if (runIsLive !== true) return null;
   return 'autoloop guard — a live run never waits on a synchronous question: every other '
-    + 'queued unit would wait behind it. Record the question as a comment on the unit\'s '
-    + 'issue, label it `human:decide`, and take the next unit. If no unit can proceed, '
+    + 'queued unit would wait behind it. A judgment call is yours to make: take the recommended '
+    + 'option and record it with `unit.mjs --decide`. A genuine human decision is `unit.mjs '
+    + '--block`, which records the question on the issue. Then take the next unit. If no unit can proceed, '
     + 'close the run first (`node tools/agentic/prime.mjs --close-run`), then ask.';
 }
 
@@ -3001,7 +3002,8 @@ function selfTest() {
     const askCases =
       typeof asked === 'string'
       && asked.startsWith('autoloop guard — ')
-      && asked.includes('human:decide')
+      && asked.includes('unit.mjs --decide')
+      && asked.includes('unit.mjs --block')
       && asked.includes('--close-run')
       && asked.trimEnd().endsWith('.')
       && askUserQuestionProblem(false) === null;

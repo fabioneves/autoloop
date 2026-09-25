@@ -199,6 +199,17 @@ export function reminderFor(command, opts = {}) {
       + 'sentence.';
   }
 
+  // unit.mjs --block records the question and swaps the labels itself, so no
+  // gh edit fires the blocked riders on this path.
+  if (/\bunit\.mjs\b[^\n]*\s--block\b/.test(command)) {
+    const n = `#${command.match(/--issue[= ]+(\d+)/)?.[1] ?? '<N>'}`;
+    return `autoloop: \`unit.mjs --block\` just ran for ${n}. On an ok result the tool has already `
+      + 'posted the question with its `/answer` form and swapped the labels (loop-ready kept), so '
+      + `the TERMINAL riders are due NOW: ① the unit's closing rail \`[HH:MM][${n}] ❌ ∞ ══ BLOCKED `
+      + `─ <reason code> ══\`; ② PushNotification \`✖ ${n} blocked — <question>\`${PUSH_NOTE} `
+      + 'then take the next unit. A typed refusal instead: report it verbatim and follow its remedy.';
+  }
+
   if (!/gh\s+issue\s+edit\b/.test(command)) return null;
   const add = command.match(/--add-label[= ]+["']?([^"'\s]+)/);
   if (!add) return null;
@@ -300,6 +311,9 @@ function selfTest() {
     ['gh issue edit 4 --add-label loop-blocked', /KEEP `loop-ready`/],
     ['gh issue edit 4 --add-label loop-blocked', /reversed a human unblock/],
     ['gh issue edit 293 --add-label loop-blocked,human:decide', /unlabeled` events after the block comment/],
+    ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /BLOCKED ─ <reason code>/],
+    ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /PushNotification `✖ #12/],
+    ['node tools/agentic/unit.mjs --decide --issue 12 --choice c --why w', null],
     ['ls /cache | node /cache/0.47.0/templates/tools/release-verify.mjs --sort-versions | tail -3', /1\/5 RESOLVE/],
     ['node /cache/templates/tools/scaffold.mjs --audit .', /2\/5 AUDIT/],
     ['node /cache/templates/tools/scaffold.mjs --reconcile /repo', /4\/5 WRITE/],

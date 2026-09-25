@@ -329,7 +329,7 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   const comment = run('gh', ['issue', 'comment', String(issue), '--body', body]);
   if (!comment.ok) return refusal('GH_FAILED', `comment on #${issue} failed: ${comment.stderr}`);
   const stale = (facts.labels ?? []).map((label) => label?.name ?? label)
-    .filter((name) => name === 'loop-started' || name.startsWith('loop:'));
+    .filter((name) => name === 'loop-started' || name === 'loop-delivered' || name.startsWith('loop:'));
   const edit = ['issue', 'edit', String(issue), '--add-label', `loop-blocked,${gate}`,
     ...(stale.length > 0 ? ['--remove-label', stale.join(',')] : [])];
   const labelled = run('gh', edit);
@@ -766,6 +766,13 @@ function selfTest() {
     && blocking.calls.indexOf(labelEdit) > blocking.calls.findIndex((call) => call.startsWith('gh issue comment 7'))
     && labelEdit === 'gh issue edit 7 --add-label loop-blocked,human:decide --remove-label loop-started,loop:05-implement'
     && !blocking.calls.some((call) => call.includes('--body-file')));
+  const revising = fakeRun([
+    ['gh issue view 9', '{"state":"OPEN","labels":[{"name":"loop-ready"},{"name":"loop-delivered"},{"name":"loop:revising"}]}'],
+    ['gh issue comment 9', ''], ['gh issue edit 9', ''],
+  ]);
+  check('a block of a unit under revision drops loop-delivered and the revising label too',
+    markBlocked({ issue: 9, reason: 'REVISE_CAP_REACHED', question: 'q?', run: revising.run }).ok
+    && revising.calls.at(-1) === 'gh issue edit 9 --add-label loop-blocked,human:decide --remove-label loop-delivered,loop:revising');
   const authorizing = fakeRun([['gh issue view 8', '{"state":"OPEN","labels":[]}'], ['gh issue comment 8', ''], ['gh issue edit 8', '']]);
   check('a protected-path block carries human:authorize and removes nothing it did not find',
     markBlocked({ issue: 8, reason: 'PROTECTED_PATH', question: 'May this unit touch .github/workflows?', gate: 'human:authorize', run: authorizing.run }).ok

@@ -272,8 +272,9 @@ waits and any identity mismatch blocks.
 Under manual policy, stop after current-head delivery and the pre-merge record.
 
 If the revision cannot converge, requires protected judgment, exceeds caps, or has incomplete
-evidence that targeted fallback cannot repair: comment the reason, remove current loop step and
-terminal labels, add `loop-blocked` plus the appropriate reason gate, and stop that PR.
+evidence that targeted fallback cannot repair: block the unit's issue with `node <plugin-tools>/unit.mjs
+--block --issue <N> --reason <CODE> --question "<one line>"` — it records the question with its
+`/answer` form, removes the step and terminal labels, and keeps `loop-ready` — and stop that PR.
 
 ## Chat and record
 
