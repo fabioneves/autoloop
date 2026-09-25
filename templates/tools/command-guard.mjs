@@ -1220,24 +1220,36 @@ function startsWithAnswer(text) {
   return ANSWER_LINE_RE.test(String(text).replace(/^(?:[ \t]*\r?\n)+/u, ''));
 }
 
-export function postsHumanAnswer(words, read = (path) => readFileSync(path, 'utf8').slice(0, 4096)) {
-  const readable = (path) => {
+// The guard must be able to READ a comment's body to know it is not an
+// /answer, so a body it cannot read fails closed: stdin, a device, a file that
+// does not exist yet, a JSON --input, or a raw GraphQL comment mutation.
+const GRAPHQL_COMMENT_MUTATION_RE = /\b(?:addComment|addDiscussionComment|updateIssueComment|addPullRequestReviewComment)\b/u;
+
+export function commentBodyProblem(words, read = (path) => readFileSync(path, 'utf8').slice(0, 4096)) {
+  const body = (path) => {
+    if (path === '' || path === '-' || path.startsWith('/dev/')) return 'unverifiable';
     try {
-      return startsWithAnswer(read(path));
+      return startsWithAnswer(read(path)) ? 'answer' : null;
     } catch {
-      return false;
+      return 'unverifiable';
     }
   };
+  const worst = (problems) => problems.find((problem) => problem === 'answer')
+    ?? problems.find((problem) => problem === 'unverifiable') ?? null;
   const comment = hasGhScopedAction(words, 'issue', 'comment') || hasGhScopedAction(words, 'pr', 'comment');
-  if (comment && optionValues(words, '--body-file', '-F').some(readable)) return true;
+  if (comment) return worst(optionValues(words, '--body-file', '-F').map(body));
   const gh = executableIndex(words, 'gh');
-  if (gh === -1 || words[gh + 1] !== 'api') return false;
+  if (gh === -1 || words[gh + 1] !== 'api') return null;
+  if (words.includes('graphql') && words.some((word) => GRAPHQL_COMMENT_MUTATION_RE.test(word))) return 'unverifiable';
+  if (hasInputOption(words) && githubApiEndpoints(words).some((segments) => segments.includes('comments'))) {
+    return 'unverifiable';
+  }
   const fields = ['-f', '-F', '--field', '--raw-field'].flatMap((option) => optionValues(words, option));
-  return fields.some((field) => {
-    if (!field.startsWith('body=')) return false;
+  return worst(fields.filter((field) => field.startsWith('body=')).map((field) => {
     const value = field.slice('body='.length);
-    return value.startsWith('@') ? readable(value.slice(1)) : startsWithAnswer(value);
-  });
+    if (value.startsWith('@')) return body(value.slice(1));
+    return startsWithAnswer(value) ? 'answer' : null;
+  }));
 }
 
 function hasGhScopedAction(words, scope, action) {
@@ -1261,7 +1273,8 @@ function optionValues(words, option, shortOption) {
       && word.startsWith(shortOption)
       && word.length > shortOption.length
     ) {
-      values.push(word.slice(shortOption.length));
+      // pflag reads `-F=path` as `-F path`.
+      values.push(word.slice(shortOption.length).replace(/^=/u, ''));
     }
   }
   return values;
@@ -1277,11 +1290,15 @@ function protectedLifecycleLabel(value) {
 }
 
 function addsProtectedLifecycleLabel(words) {
+  const protectedIn = (values) => values.some((value) => value.split(',').some(protectedLifecycleLabel));
   const edit =
     hasGhScopedAction(words, 'issue', 'edit')
     || hasGhScopedAction(words, 'pr', 'edit');
-  return edit && optionValues(words, '--add-label').some((value) =>
-    value.split(',').some(protectedLifecycleLabel));
+  const create =
+    hasGhScopedAction(words, 'issue', 'create')
+    || hasGhScopedAction(words, 'pr', 'create');
+  return (edit && protectedIn(optionValues(words, '--add-label')))
+    || (create && protectedIn(optionValues(words, '--label', '-l')));
 }
 
 // The step ladder ends at 09-gate: steps 10 PUBLISH and 11 RECORD carry no
@@ -1368,7 +1385,8 @@ function appliesRepairLabel(words) {
   const edit = hasGhScopedAction(words, 'issue', 'edit') || hasGhScopedAction(words, 'pr', 'edit');
   if (edit && names(optionValues(words, '--add-label'))) return true;
   const create = hasGhScopedAction(words, 'issue', 'create') || hasGhScopedAction(words, 'pr', 'create');
-  return create && names(optionValues(words, '--label', '-l'));
+  if (create && names(optionValues(words, '--label', '-l'))) return true;
+  return hasGhScopedAction(words, 'label', 'edit') && names(optionValues(words, '--name', '-n'));
 }
 
 function renamesProtectedLifecycleLabel(words) {
@@ -1491,6 +1509,15 @@ function opaqueIssueLabelApiMutation(words) {
     && segments[2].length > 0
     && segments[3] === 'issues'
     && /^[1-9][0-9]*$/u.test(segments[4]));
+  const collection = githubApiEndpoints(words).some((segments) =>
+    segments.length === 4
+    && segments[0] === 'repos'
+    && segments[1].length > 0
+    && segments[2].length > 0
+    && segments[3] === 'issues');
+  if (collection && (hasInputOption(words) || githubApiFieldAssignments(words).some(
+    ({ name }) => name === 'labels' || name === 'labels[]',
+  ))) return true;
   if (!endpoint) return false;
   if (endpoint.length === 6 && endpoint[5] === 'labels') return true;
   if (endpoint.length !== 5) return false;
@@ -1590,7 +1617,13 @@ function terminalGraphqlMutation(command) {
           ),
       )
     );
-  return updateIssueLabels || updateLabelName || createReadyLabel;
+  const createIssueLabels = /\bcreateIssue\b/u.test(command)
+    && (
+      /\b(?:labels|labelIds)\s*:/u.test(command)
+      || /\$(?:labels|labelIds)\b/u.test(command)
+      || fields.some(({ name }) => name === 'labels' || name === 'labelIds')
+    );
+  return updateIssueLabels || updateLabelName || createReadyLabel || createIssueLabels;
 }
 
 function hasOpaqueGraphqlInput(words) {
@@ -2045,7 +2078,23 @@ export function evaluate(inputCmd, branch, options = {}) {
         + 'provenance marker that trust rests on. File the repair with that command.',
     };
   }
-  if (segments.some(({ command }) => postsHumanAnswer(shellWords(command)))) {
+  const readBody = (path) => readFileSync(
+    isAbsolute(path) ? path : resolve(options.cwd ?? process.cwd(), path),
+    'utf8',
+  ).slice(0, 4096);
+  const bodyProblems = segments.map(({ command }) => commentBodyProblem(shellWords(command), readBody));
+  if (bodyProblems.includes('unverifiable')) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — this comment\'s body cannot be read before it is posted (stdin, a '
+        + 'device, a file that does not exist yet, a JSON --input, or a raw GraphQL comment '
+        + 'mutation), so the guard cannot prove it is not an `/answer` — the reply that lifts a '
+        + 'loop block. Write the body to a file first, then post it in its own command: '
+        + '`gh issue comment <N> --body-file <path>`.',
+    };
+  }
+  if (bodyProblems.includes('answer')) {
     return {
       block: true,
       reason:
@@ -2870,6 +2919,25 @@ function selfTest() {
     ['gh issue edit 7 --remove-label loop-repair', 'main', false],
     ['gh issue list --label loop-repair --state open', 'main', false],
     ['node tools/agentic/unit.mjs --repair --parent 7 --title t --body-file /tmp/b.md', 'main', false],
+    // 2026-09-25 security review of the initiative branch: every shape below
+    // passed the guard. A comment body it cannot read, stdin, a JSON --input, or
+    // a GraphQL comment mutation could carry an /answer; an issue created with
+    // loop-ready or loop-delivered, or a label renamed to loop-repair, mints
+    // authorization the loop may never grant itself.
+    ['gh issue comment 7 -F=/nonexistent/answer.md', 'feat/gh-2-y', true],
+    ['gh issue comment 7 --body-file -', 'feat/gh-2-y', true],
+    ['gh pr comment 9 --body-file /dev/stdin', 'feat/gh-2-y', true],
+    ['gh issue comment 7 --body-file /nonexistent/later.md', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/issues/7/comments --input /tmp/c.json', 'feat/gh-2-y', true],
+    ["gh api graphql -f query='mutation{addComment(input:{subjectId:\"I_x\",body:\"x\"}){clientMutationId}}'", 'feat/gh-2-y', true],
+    ['gh issue create --title t --body-file /tmp/b.md --label loop-ready', 'main', true],
+    ['gh issue create --title t --body-file /tmp/b.md -l=loop-ready', 'main', true],
+    ['gh pr create --draft --title t --body-file /tmp/b.md --label loop-delivered', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/issues -f title=t -f "labels[]=loop-ready"', 'main', true],
+    ['gh api repos/o/r/issues --input /tmp/issue.json', 'main', true],
+    ["gh api graphql -f query='mutation{createIssue(input:{repositoryId:\"R\",title:\"t\",labelIds:[\"L\"]}){issue{number}}}'", 'main', true],
+    ['gh label edit bug --name loop-repair', 'main', true],
+    ['gh issue create --title t --body-file /tmp/b.md --label bug', 'main', false],
     ['gh issue edit 7 --add-label loop-ready', 'feat/gh-2-y', true],
     ['gh issue edit 7 --add-label=LOOP-READY', 'feat/gh-2-y', true],
     ['gh pr edit 42 --add-label=loop-delivered', 'feat/gh-2-y', true],
@@ -3083,11 +3151,12 @@ function selfTest() {
       return files[path];
     };
     const answerFileCases =
-      postsHumanAnswer(shellWords('gh issue comment 7 --body-file /s/answer.md'), read)
-      && postsHumanAnswer(shellWords('gh api repos/o/r/issues/7/comments -F body=@/s/answer.md'), read)
-      && !postsHumanAnswer(shellWords('gh issue comment 7 --body-file /s/plain.md'), read)
-      && !postsHumanAnswer(shellWords('gh issue comment 7 --body-file /s/missing.md'), read)
-      && !postsHumanAnswer(shellWords('gh issue view 7 --comments'), read);
+      commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/answer.md'), read) === 'answer'
+      && commentBodyProblem(shellWords('gh api repos/o/r/issues/7/comments -F body=@/s/answer.md'), read) === 'answer'
+      && commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/plain.md'), read) === null
+      && commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/missing.md'), read) === 'unverifiable'
+      && commentBodyProblem(shellWords('gh issue comment 7 -F=/s/answer.md'), read) === 'answer'
+      && commentBodyProblem(shellWords('gh issue view 7 --comments'), read) === null;
     if (!answerFileCases) {
       console.error('FAIL [a body file starting with /answer is refused]');
       ok = false;
@@ -3599,7 +3668,7 @@ function main() {
       + 'docs/agentic/STATE.md.',
     );
   }
-  const verdict = evaluate(cmd, currentBranch(), { baseBranch });
+  const verdict = evaluate(cmd, currentBranch(), { baseBranch, cwd: payload?.cwd });
   if (verdict.block) refuse(verdict.reason);
   process.exit(0);
 }
