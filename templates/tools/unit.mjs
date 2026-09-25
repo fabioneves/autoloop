@@ -155,6 +155,15 @@ function remoteBaseOid(run, base) {
   return result.ok && SHA_RE.test(result.stdout) ? result.stdout : null;
 }
 
+function issueFacts(run, number, fields) {
+  const view = run('gh', ['issue', 'view', String(number), '--json', fields]);
+  try {
+    return view.ok ? JSON.parse(view.stdout) : null;
+  } catch {
+    return null;
+  }
+}
+
 function issueState(run, number) {
   const result = run('gh', ['issue', 'view', String(number), '--json', 'state', '--jq', '.state']);
   return result.ok ? result.stdout : null;
@@ -257,22 +266,26 @@ export function decisionMarker(decision) {
   return `<!-- autoloop-decision-v1 ${JSON.stringify(decision)} -->`;
 }
 
-/** Pure: the newest well-formed decision in a comment body, or null. */
-export function parseDecision(body) {
+/** Pure: the newest marker payload in a body that `valid` accepts, or null.
+ *  An unparseable or invalid marker is skipped; an earlier valid one still stands. */
+function newestMarker(pattern, body, valid) {
   let newest = null;
-  for (const match of String(body ?? '').matchAll(DECISION_MARKER_RE)) {
+  for (const match of String(body ?? '').matchAll(pattern)) {
     try {
       const parsed = JSON.parse(match[1]);
-      if (
-        positive(parsed?.issue) && text(parsed.choice) && text(parsed.why)
-        && Array.isArray(parsed.alternatives) && parsed.alternatives.every((entry) => typeof entry === 'string')
-        && Number.isFinite(Date.parse(parsed.at))
-      ) newest = parsed;
+      if (valid(parsed)) newest = parsed;
     } catch {
-      // An unparseable marker is not a decision; an earlier valid one still stands.
+      // not a marker
     }
   }
   return newest;
+}
+
+export function parseDecision(body) {
+  return newestMarker(DECISION_MARKER_RE, body, (parsed) =>
+    positive(parsed?.issue) && text(parsed.choice) && text(parsed.why)
+    && Array.isArray(parsed.alternatives) && parsed.alternatives.every((entry) => typeof entry === 'string')
+    && Number.isFinite(Date.parse(parsed.at)));
 }
 
 export function markDecided({ issue, choice, alternatives = [], why, run, now = Date.now() }) {
@@ -306,21 +319,10 @@ export function blockMarker(block) {
   return `<!-- autoloop-block-v1 ${JSON.stringify(block)} -->`;
 }
 
-/** Pure: the newest well-formed block in a comment body, or null. */
 export function parseBlock(body) {
-  let newest = null;
-  for (const match of String(body ?? '').matchAll(BLOCK_MARKER_RE)) {
-    try {
-      const parsed = JSON.parse(match[1]);
-      if (
-        positive(parsed?.issue) && parsed.class === 'human' && REASON_RE.test(parsed.reason ?? '')
-        && text(parsed.question) && !parsed.question.includes('\n') && Number.isFinite(Date.parse(parsed.at))
-      ) newest = parsed;
-    } catch {
-      // An unparseable marker is not a block; an earlier valid one still stands.
-    }
-  }
-  return newest;
+  return newestMarker(BLOCK_MARKER_RE, body, (parsed) =>
+    positive(parsed?.issue) && parsed.class === 'human' && REASON_RE.test(parsed.reason ?? '')
+    && text(parsed.question) && !parsed.question.includes('\n') && Number.isFinite(Date.parse(parsed.at)));
 }
 
 export function markBlocked({ issue, reason, question, gate = 'human:decide', note = '', run, now = Date.now() }) {
@@ -328,9 +330,7 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   if (!REASON_RE.test(reason ?? '')) return refusal('INVALID_ARGS', '--reason: expected an UPPER_SNAKE reason code');
   if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
   if (!BLOCK_GATES.includes(gate)) return refusal('INVALID_ARGS', `--gate: expected one of ${BLOCK_GATES.join(', ')}`);
-  const view = run('gh', ['issue', 'view', String(issue), '--json', 'state,labels']);
-  let facts = null;
-  try { facts = view.ok ? JSON.parse(view.stdout) : null; } catch { facts = null; }
+  const facts = issueFacts(run, issue, 'state,labels');
   if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
   const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString() };
   const body = [
@@ -373,6 +373,11 @@ export function parseRepair(body) {
   }
 }
 
+// `gh api --paginate --jq` prints one result per page; the last page's answer is the newest.
+function lastLine(stdout) {
+  return String(stdout).split('\n').filter(Boolean).at(-1) ?? '';
+}
+
 function writePermission(run, login) {
   const answer = run('gh', ['api', `repos/{owner}/{repo}/collaborators/${encodeURIComponent(login)}/permission`, '--jq', '.permission']);
   return answer.ok && WRITE_PERMISSIONS.includes(answer.stdout);
@@ -381,9 +386,7 @@ function writePermission(run, login) {
 export function markRepair({ parent, title, body, blocksParent = false, run }) {
   if (!positive(parent)) return refusal('INVALID_ARGS', '--parent: expected a positive issue number');
   if (!text(title) || !text(body)) return refusal('INVALID_ARGS', 'expected a non-empty --title and --body-file');
-  const view = run('gh', ['issue', 'view', String(parent), '--json', 'state,labels,body']);
-  let facts = null;
-  try { facts = view.ok ? JSON.parse(view.stdout) : null; } catch { facts = null; }
+  const facts = issueFacts(run, parent, 'state,labels,body');
   const labels = (facts?.labels ?? []).map((label) => label?.name ?? label);
   if (parseRepair(facts?.body) !== null || labels.includes('loop-repair')) {
     return refusal('REPAIR_DEPTH_EXCEEDED', `#${parent} is itself a repair; file its follow-up as an ordinary issue`);
@@ -393,7 +396,7 @@ export function markRepair({ parent, title, body, blocksParent = false, run }) {
   }
   const events = run('gh', ['api', `repos/{owner}/{repo}/issues/${parent}/events?per_page=100`, '--paginate', '--jq', LAST_READY_LABEL_JQ]);
   let labeled = null;
-  try { labeled = events.ok ? JSON.parse(events.stdout.split('\n').filter(Boolean).at(-1)) : null; } catch { labeled = null; }
+  try { labeled = events.ok ? JSON.parse(lastLine(events.stdout)) : null; } catch { labeled = null; }
   if (!text(labeled?.by) || !Number.isFinite(Date.parse(labeled?.at)) || !writePermission(run, labeled.by)) {
     return refusal('REPAIR_PARENT_UNTRUSTED', `#${parent}'s loop-ready was not applied by a trusted actor`);
   }
@@ -486,10 +489,7 @@ export function triageBlocks({ run, now = Date.now() }) {
   const errors = [];
   const permissions = {};
   const trusted = (login) => {
-    if (!(login in permissions)) {
-      const answer = run('gh', ['api', `repos/{owner}/{repo}/collaborators/${encodeURIComponent(login)}/permission`, '--jq', '.permission']);
-      permissions[login] = answer.ok && WRITE_PERMISSIONS.includes(answer.stdout);
-    }
+    if (!(login in permissions)) permissions[login] = writePermission(run, login);
     return permissions[login];
   };
   for (const issue of issues) {
@@ -500,7 +500,7 @@ export function triageBlocks({ run, now = Date.now() }) {
       continue;
     }
     const events = run('gh', ['api', `repos/{owner}/{repo}/issues/${issue.number}/events?per_page=100`, '--paginate', '--jq', LAST_BLOCKED_LABEL_JQ]);
-    const labeledAt = events.ok ? Date.parse(events.stdout.split('\n').filter(Boolean).at(-1)) : Number.NaN;
+    const labeledAt = events.ok ? Date.parse(lastLine(events.stdout)) : Number.NaN;
     if (!Number.isFinite(labeledAt)) {
       held.push({ number: issue.number, reason: 'label history unreadable' });
       if (!events.ok) errors.push(`#${issue.number}: ${events.stderr}`);
