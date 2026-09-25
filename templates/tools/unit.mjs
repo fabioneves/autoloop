@@ -20,6 +20,13 @@
 //               plus the gate label in one edit, and loop-ready stays. A human
 //               answers with `/answer <decision>` on the issue.
 //
+//   --repair    Work a unit needs that is outside its own lane: an issue the loop
+//               files itself, labelled `loop-repair` (never `loop-ready`) with a
+//               body marker copying the parent's trusted `loop-ready` provenance,
+//               which is what makes it eligible. At most three open per parent,
+//               one level deep. `--blocks-parent` also puts the parent on
+//               `loop-waiting` until the repair closes.
+//
 //   --decide    A judgment call the loop made itself: the recommended option,
 //               its alternatives and why. A machine comment records it and the
 //               issue is labelled `loop-decided`; a human reverses it by replying
@@ -39,6 +46,7 @@
 //   node tools/agentic/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
 //   node tools/agentic/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720>) [--note <text>]
 //   node tools/agentic/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>]
+//   node tools/agentic/unit.mjs --repair --parent <N> --title <text> --body-file <path> [--blocks-parent]
 //   node tools/agentic/unit.mjs --decide --issue <N> --choice <text> --why <text> [--alternatives "<a>; <b>"]
 //   node tools/agentic/unit.mjs --lift
 //   node tools/agentic/unit.mjs --digest [--post]
@@ -56,6 +64,9 @@ const DECISION_MARKER_RE = /<!-- autoloop-decision-v1 (\{[^\n]*?\}) -->/gu;
 const BLOCK_MARKER_RE = /<!-- autoloop-block-v1 (\{[^\n]*?\}) -->/gu;
 const REASON_RE = /^[A-Z][A-Z0-9_]*$/u;
 const BLOCK_GATES = Object.freeze(['human:decide', 'human:authorize']);
+const REPAIR_MARKER_RE = /<!-- autoloop-repair-v1 (\{[^\n]*?\}) -->/gu;
+const REPAIRS_PER_PARENT = 3;
+const LAST_READY_LABEL_JQ = '[.[] | select(.event == "labeled" and .label.name == "loop-ready") | {by: .actor.login, at: .created_at}] | last // empty';
 const BLOCK_LABEL_WINDOW_MS = 5 * 60_000;
 const ANSWER_RE = /^\s*\/answer(?:\s+([\s\S]*))?$/u;
 const WRITE_PERMISSIONS = Object.freeze(['admin', 'maintain', 'write']);
@@ -66,6 +77,7 @@ const MAX_WAIT_MINUTES = 720;
 const LABELS = Object.freeze({
   'loop-waiting': { color: 'fbca04', description: 'autoloop: waits on a recorded condition; lifted automatically' },
   'loop-obsolete': { color: 'cfd3d7', description: 'autoloop: premise already delivered; closed with evidence' },
+  'loop-repair': { color: 'd4c5f9', description: 'autoloop: work the loop filed for a loop-ready parent; eligible through the parent' },
   'loop-decided': { color: 'c5def5', description: 'autoloop: took the recommended option on a judgment call; reversible with /answer' },
   'loop-digest': { color: '5319e7', description: 'autoloop: the decisions waiting on a human, rewritten at every close and park' },
 });
@@ -341,6 +353,73 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   return { ok: true, issue, disposition: 'blocked', block };
 }
 
+export function repairMarker(repair) {
+  return `<!-- autoloop-repair-v1 ${JSON.stringify(repair)} -->`;
+}
+
+/** Pure: the one well-formed repair marker in an issue body, or null. Two
+ *  markers are ambiguous provenance, and depth is always one. */
+export function parseRepair(body) {
+  const matches = [...String(body ?? '').matchAll(REPAIR_MARKER_RE)];
+  if (matches.length !== 1) return null;
+  try {
+    const parsed = JSON.parse(matches[0][1]);
+    return positive(parsed?.parent) && text(parsed.parentLabeledBy)
+      && Number.isFinite(Date.parse(parsed.parentLabeledAt)) && parsed.depth === 1
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePermission(run, login) {
+  const answer = run('gh', ['api', `repos/{owner}/{repo}/collaborators/${encodeURIComponent(login)}/permission`, '--jq', '.permission']);
+  return answer.ok && WRITE_PERMISSIONS.includes(answer.stdout);
+}
+
+export function markRepair({ parent, title, body, blocksParent = false, run }) {
+  if (!positive(parent)) return refusal('INVALID_ARGS', '--parent: expected a positive issue number');
+  if (!text(title) || !text(body)) return refusal('INVALID_ARGS', 'expected a non-empty --title and --body-file');
+  const view = run('gh', ['issue', 'view', String(parent), '--json', 'state,labels,body']);
+  let facts = null;
+  try { facts = view.ok ? JSON.parse(view.stdout) : null; } catch { facts = null; }
+  const labels = (facts?.labels ?? []).map((label) => label?.name ?? label);
+  if (parseRepair(facts?.body) !== null || labels.includes('loop-repair')) {
+    return refusal('REPAIR_DEPTH_EXCEEDED', `#${parent} is itself a repair; file its follow-up as an ordinary issue`);
+  }
+  if (facts?.state !== 'OPEN' || !labels.includes('loop-ready')) {
+    return refusal('REPAIR_PARENT_UNTRUSTED', `#${parent} is not an open loop-ready issue`);
+  }
+  const events = run('gh', ['api', `repos/{owner}/{repo}/issues/${parent}/events?per_page=100`, '--paginate', '--jq', LAST_READY_LABEL_JQ]);
+  let labeled = null;
+  try { labeled = events.ok ? JSON.parse(events.stdout.split('\n').filter(Boolean).at(-1)) : null; } catch { labeled = null; }
+  if (!text(labeled?.by) || !Number.isFinite(Date.parse(labeled?.at)) || !writePermission(run, labeled.by)) {
+    return refusal('REPAIR_PARENT_UNTRUSTED', `#${parent}'s loop-ready was not applied by a trusted actor`);
+  }
+  const open = run('gh', ['issue', 'list', '--label', 'loop-repair', '--state', 'open', '--limit', '100', '--json', 'number,body']);
+  let siblings;
+  try { siblings = open.ok ? JSON.parse(open.stdout) : null; } catch { siblings = null; }
+  if (siblings === null) return refusal('GH_FAILED', `listing open repairs failed: ${open.stderr}`);
+  if (siblings.filter((issue) => parseRepair(issue.body)?.parent === parent).length >= REPAIRS_PER_PARENT) {
+    return refusal('REPAIR_BUDGET_EXHAUSTED', `#${parent} already has ${REPAIRS_PER_PARENT} open repairs; fold this into one of them`);
+  }
+  const repair = { parent, parentLabeledBy: labeled.by, parentLabeledAt: labeled.at, depth: 1 };
+  const created = withLabel(run, 'loop-repair', () => run('gh', [
+    'issue', 'create', '--title', text(title), '--body', `${text(body)}\n\nRepair for #${parent}.\n\n${repairMarker(repair)}`, '--label', 'loop-repair',
+  ]));
+  const issue = created.ok ? positive(/\/issues\/([1-9][0-9]*)/u.exec(created.stdout)?.[1]) : null;
+  if (issue === null) return refusal('GH_FAILED', `issue create failed: ${created.stderr || created.stdout}`);
+  if (blocksParent) {
+    const condition = { on: 'issue', number: issue };
+    const comment = run('gh', ['issue', 'comment', String(parent), '--body',
+      `${waitMarker(condition)}\n**autoloop: waiting** — this unit waits on its repair #${issue}; the label is lifted when it closes.`]);
+    const label = comment.ok ? addLabel(run, parent, 'loop-waiting') : comment;
+    if (!label.ok) return { ok: false, code: 'GH_FAILED', message: `#${issue} filed, but the parent's wait failed: ${label.stderr}`, issue };
+  }
+  return { ok: true, issue, parent, disposition: 'repair', repair, blocksParent };
+}
+
 /** Lift every wait whose condition has cleared. Never throws: a failure is
  *  reported and the waiting issue stays waiting, which is the safe side. */
 export function liftWaits({ base, run, now = Date.now() }) {
@@ -566,25 +645,27 @@ export function postDigest({ run, now = Date.now() }) {
 }
 
 export function parseArgs(args) {
-  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', error: null };
+  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, error: null };
   const value = (index) => args[index + 1];
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
-    if (['--obsolete', '--wait', '--block', '--decide', '--lift', '--digest', '--self-test'].includes(flag)) {
+    if (['--obsolete', '--wait', '--block', '--repair', '--decide', '--lift', '--digest', '--self-test'].includes(flag)) {
       if (parsed.mode !== null) return { ...parsed, error: 'expected one mode' };
       parsed.mode = flag.slice(2);
     } else if (flag === '--on-base-red') {
       parsed.onBaseRed = true;
     } else if (flag === '--post') {
       parsed.post = true;
-    } else if (['--issue', '--pr', '--on-issue', '--minutes'].includes(flag)) {
+    } else if (flag === '--blocks-parent') {
+      parsed.blocksParent = true;
+    } else if (['--issue', '--pr', '--on-issue', '--minutes', '--parent'].includes(flag)) {
       const number = positive(value(index));
       if (number === null) return { ...parsed, error: `${flag}: expected a positive number` };
-      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes' }[flag]] = number;
+      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes', '--parent': 'parent' }[flag]] = number;
       index += 1;
-    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate'].includes(flag)) {
+    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate', '--title', '--body-file'].includes(flag)) {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
-      parsed[flag.slice(2)] = value(index);
+      parsed[flag === '--body-file' ? 'bodyFile' : flag.slice(2)] = value(index);
       index += 1;
     } else if (flag === '--alternatives') {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
@@ -594,7 +675,7 @@ export function parseArgs(args) {
       return { ...parsed, error: `unknown argument ${flag}` };
     }
   }
-  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --decide, --lift, --digest or --self-test' };
+  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --repair, --decide, --lift, --digest or --self-test' };
   return parsed;
 }
 
@@ -930,8 +1011,58 @@ function selfTest() {
     triageBlocks({ run: eventsFail.run }).resumed.length === 0
     && !eventsFail.calls.some((call) => call.startsWith('gh issue edit')));
 
+  const provenance = { by: 'owner', at: '2026-09-20T09:00:00Z' };
+  const repair = { parent: 248, parentLabeledBy: 'owner', parentLabeledAt: provenance.at, depth: 1 };
+  check('a repair marker round-trips and refuses depth 2 and junk',
+    JSON.stringify(parseRepair(`body\n\n${repairMarker(repair)}`)) === JSON.stringify(repair)
+    && parseRepair(repairMarker({ ...repair, depth: 2 })) === null
+    && parseRepair(`${repairMarker(repair)}\n${repairMarker({ ...repair, parent: 9 })}`) === null
+    && parseRepair('<!-- autoloop-repair-v1 {nope} -->') === null);
+  const parentView = JSON.stringify({ state: 'OPEN', labels: [{ name: 'loop-ready' }], body: 'parent body' });
+  const repairRuns = (overrides = []) => fakeRun([
+    ...overrides,
+    ['gh issue view 248', parentView],
+    ['gh api repos/{owner}/{repo}/issues/248/events', JSON.stringify(provenance)],
+    ['gh api repos/{owner}/{repo}/collaborators/owner/permission', 'admin'],
+    ['gh issue list --label loop-repair', '[]'],
+    ['gh issue create', 'https://github.com/o/r/issues/330'],
+    ['gh issue comment 248', ''],
+    ['gh issue edit 248 --add-label loop-waiting', ''],
+  ]);
+  const filing = repairRuns();
+  const filed = markRepair({ parent: 248, title: 'Patch the audit advisories', body: 'Fix the advisories.', blocksParent: true, run: filing.run });
+  const create = filing.calls.find((call) => call.startsWith('gh issue create'));
+  check('a repair is filed with the parent provenance, loop-repair and never loop-ready, then the parent waits on it',
+    filed.ok && filed.issue === 330 && filed.disposition === 'repair'
+    && JSON.stringify(parseRepair(create)) === JSON.stringify(repair)
+    && create.includes('--label loop-repair') && !create.includes('loop-ready')
+    && filing.calls.some((call) => call.startsWith('gh issue comment 248') && call.includes('"number":330'))
+    && filing.calls.includes('gh issue edit 248 --add-label loop-waiting'));
+  const independent = repairRuns();
+  check('a repair the parent does not need leaves the parent in the queue',
+    markRepair({ parent: 248, title: 't', body: 'b', run: independent.run }).ok
+    && !independent.calls.some((call) => call.includes('loop-waiting')));
+  const untrustedParent = repairRuns([['gh api repos/{owner}/{repo}/collaborators/owner/permission', 'read']]);
+  check('a parent whose loop-ready came from an untrusted actor refuses, filing nothing',
+    markRepair({ parent: 248, title: 't', body: 'b', run: untrustedParent.run }).code === 'REPAIR_PARENT_UNTRUSTED'
+    && !untrustedParent.calls.some((call) => call.startsWith('gh issue create')));
+  const unlabeledParent = repairRuns([['gh issue view 248', JSON.stringify({ state: 'OPEN', labels: [], body: '' })]]);
+  check('a parent without loop-ready refuses',
+    markRepair({ parent: 248, title: 't', body: 'b', run: unlabeledParent.run }).code === 'REPAIR_PARENT_UNTRUSTED');
+  const nestedParent = repairRuns([['gh issue view 248', JSON.stringify({ state: 'OPEN', labels: [{ name: 'loop-repair' }], body: repairMarker({ ...repair, parent: 1 }) })]]);
+  check('a repair of a repair refuses: depth is one',
+    markRepair({ parent: 248, title: 't', body: 'b', run: nestedParent.run }).code === 'REPAIR_DEPTH_EXCEEDED');
+  const fullBudget = repairRuns([['gh issue list --label loop-repair', JSON.stringify([1, 2, 3].map((number) => ({ number, body: repairMarker(repair) })))]]);
+  check('a fourth open repair of one parent refuses',
+    markRepair({ parent: 248, title: 't', body: 'b', run: fullBudget.run }).code === 'REPAIR_BUDGET_EXHAUSTED'
+    && !fullBudget.calls.some((call) => call.startsWith('gh issue create')));
+  check('a repair without a title or body refuses before any call',
+    markRepair({ parent: 248, title: '', body: 'b', run: fakeRun([]).run }).code === 'INVALID_ARGS'
+    && markRepair({ parent: 248, title: 't', body: ' ', run: fakeRun([]).run }).code === 'INVALID_ARGS');
+
   check('arguments parse and refuse',
-    parseArgs(['--block', '--issue', '7', '--reason', 'X', '--question', 'q?', '--gate', 'human:authorize']).gate === 'human:authorize'
+    parseArgs(['--repair', '--parent', '248', '--title', 't', '--body-file', 'b.md', '--blocks-parent']).blocksParent === true
+    && parseArgs(['--block', '--issue', '7', '--reason', 'X', '--question', 'q?', '--gate', 'human:authorize']).gate === 'human:authorize'
     && parseArgs(['--decide', '--issue', '5', '--choice', 'c', '--why', 'w', '--alternatives', 'a; b']).alternatives.join('|') === 'a|b'
     && parseArgs(['--wait', '--issue', '5', '--on-issue', '4']).onIssue === 4
     && parseArgs(['--obsolete', '--issue', '5', '--commit', 'abc1234']).commit === 'abc1234'
@@ -950,12 +1081,24 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`unit: ${parsed.error}`);
-    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --choice T --why T [--alternatives "A; B"] | --lift | --digest [--post] | --self-test');
+    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --choice T --why T [--alternatives "A; B"] | --lift | --digest [--post] | --self-test');
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
   const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
   const run = realRun(root);
+  if (parsed.mode === 'repair') {
+    let body;
+    try {
+      body = readFileSync(parsed.bodyFile ?? '', 'utf8');
+    } catch (error) {
+      console.log(JSON.stringify(refusal('INVALID_ARGS', `--body-file: ${error.message}`)));
+      process.exit(1);
+    }
+    const outcome = markRepair({ ...parsed, body, run });
+    console.log(JSON.stringify(outcome, null, 1));
+    process.exit(outcome.ok ? 0 : 1);
+  }
   if (parsed.mode === 'decide' || parsed.mode === 'block') {
     const outcome = parsed.mode === 'decide' ? markDecided({ ...parsed, run }) : markBlocked({ ...parsed, run });
     console.log(JSON.stringify(outcome, null, 1));
