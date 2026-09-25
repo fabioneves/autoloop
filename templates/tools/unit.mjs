@@ -493,12 +493,17 @@ export function triageBlocks({ run, now = Date.now() }) {
     return permissions[login];
   };
   for (const issue of issues) {
-    const block = (issue.comments ?? []).map((comment) => parseBlock(comment.body))
-      .findLast((entry) => entry !== null) ?? null;
-    if (block === null) {
+    // Only a marker the loop itself posted, for this issue, counts; its instant
+    // is GitHub's createdAt, never the runner's clock written into the marker.
+    const marked = (issue.comments ?? [])
+      .filter((comment) => comment.viewerDidAuthor === true)
+      .map((comment) => ({ block: parseBlock(comment.body), postedAt: comment.createdAt }))
+      .findLast(({ block: entry }) => entry !== null && entry.issue === issue.number) ?? null;
+    if (marked === null || !Number.isFinite(Date.parse(marked.postedAt))) {
       held.push({ number: issue.number, reason: 'no loop marker' });
       continue;
     }
+    const block = { ...marked.block, at: marked.postedAt };
     const events = run('gh', ['api', `repos/{owner}/{repo}/issues/${issue.number}/events?per_page=100`, '--paginate', '--jq', LAST_BLOCKED_LABEL_JQ]);
     const labeledAt = events.ok ? Date.parse(lastLine(events.stdout)) : Number.NaN;
     if (!Number.isFinite(labeledAt)) {
@@ -968,19 +973,28 @@ function selfTest() {
 
   const blockedList = JSON.stringify([
     { number: 7, title: 'Answered', labels: [{ name: 'loop-ready' }, { name: 'loop-blocked' }, { name: 'human:decide' }],
-      comments: [{ author: { login: 'owner' }, body: blockMarker(marked), createdAt: blockAt },
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker(marked), createdAt: blockAt },
         { author: { login: 'owner' }, body: '/answer 128', createdAt: later(30) }] },
     { number: 8, title: 'Unanswered', labels: [{ name: 'loop-blocked' }],
-      comments: [{ author: { login: 'owner' }, body: blockMarker({ ...marked, issue: 8 }), createdAt: blockAt },
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 8 }), createdAt: blockAt },
         { author: { login: 'owner' }, body: 'looking at it', createdAt: later(30) }] },
     { number: 9, title: 'Hand-blocked', labels: [{ name: 'loop-blocked' }],
       comments: [{ author: { login: 'owner' }, body: 'blocked by hand', createdAt: blockAt }] },
     { number: 10, title: 'Stale marker', labels: [{ name: 'loop-blocked' }],
-      comments: [{ author: { login: 'owner' }, body: blockMarker({ ...marked, issue: 10 }), createdAt: blockAt },
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 10 }), createdAt: blockAt },
         { author: { login: 'owner' }, body: '/answer go', createdAt: later(30) }] },
     { number: 11, title: 'Stranger', labels: [{ name: 'loop-blocked' }],
-      comments: [{ author: { login: 'owner' }, body: blockMarker({ ...marked, issue: 11 }), createdAt: blockAt },
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 11 }), createdAt: blockAt },
         { author: { login: 'stranger' }, body: '/answer go', createdAt: later(30) }] },
+    { number: 12, title: 'Forged', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'outsider' }, viewerDidAuthor: false, body: blockMarker({ ...marked, issue: 12 }), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer go', createdAt: later(30) }] },
+    { number: 13, title: 'Skewed clock', labels: [{ name: 'loop-blocked' }, { name: 'human:decide' }],
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 13, at: later(0.2) }), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer 64', createdAt: later(30) }] },
+    { number: 14, title: 'Quoted marker', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker(marked), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer go', createdAt: later(30) }] },
   ]);
   const triaging = fakeRun([
     ['gh issue list --label loop-blocked', blockedList],
@@ -988,6 +1002,11 @@ function selfTest() {
     ['gh api repos/{owner}/{repo}/issues/8/events', later(0.1)],
     ['gh api repos/{owner}/{repo}/issues/10/events', later(60 * 24)],
     ['gh api repos/{owner}/{repo}/issues/11/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/12/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/13/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/14/events', later(0.1)],
+    ['gh issue edit 13', ''],
+    ['gh issue comment 13', ''],
     ['gh api repos/{owner}/{repo}/collaborators/owner/permission', 'admin'],
     ['gh api repos/{owner}/{repo}/collaborators/stranger/permission', 'read'],
     ['gh issue edit 7', ''],
@@ -995,14 +1014,14 @@ function selfTest() {
   ]);
   const triage = triageBlocks({ run: triaging.run, now: Date.parse(later(60)) });
   check('prime resumes an answered loop block, and holds the rest with their reason',
-    triage.resumed.map((entry) => `${entry.number}:${entry.by}:${entry.answer}`).join(',') === '7:owner:128'
+    triage.resumed.map((entry) => `${entry.number}:${entry.by}:${entry.answer}`).join(',') === '7:owner:128,13:owner:64'
     && triage.waiting.map((entry) => `${entry.number}:${entry.question}`).join(',') === '8:What length?,11:What length?'
-    && triage.held.map((entry) => entry.number).join(',') === '9,10'
+    && triage.held.map((entry) => entry.number).join(',') === '9,10,12,14'
     && triage.errors.length === 0);
   check('a resume lifts the block and gate labels, then records the answer, touching nothing else',
     triaging.calls.includes('gh issue edit 7 --remove-label loop-blocked,human:decide')
     && triaging.calls.some((call) => call.startsWith('gh issue comment 7') && call.includes('autoloop-resumed-v1'))
-    && !triaging.calls.some((call) => /gh issue (edit|comment) (8|9|10|11)\b/u.test(call))
+    && !triaging.calls.some((call) => /gh issue (edit|comment) (8|9|10|11|12|14)\b/u.test(call))
     && !triaging.calls.some((call) => call.includes('loop-ready')));
   check('a failed listing resumes nothing and reports it',
     triageBlocks({ run: fakeRun([['gh issue list', false]]).run }).errors.length === 1);
