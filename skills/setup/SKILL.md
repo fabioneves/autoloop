@@ -618,8 +618,8 @@ no longer owns it and the merge would replace it. Curate LESSONS like `ARCH.md` 
 against a size budget — and delete any lesson a guard rule, contract, or hook now enforces: the
 mechanism is the memory at that point.
 
-Create lifecycle and step labels idempotently, including `loop-waiting`, `loop-obsolete` and
-`loop-decided` (`unit.mjs` also creates each one on first use). Do not create non-manual policy labels.
+Create lifecycle and step labels idempotently, including `loop-waiting`, `loop-obsolete`,
+`loop-decided` and `loop-repair` (`unit.mjs` also creates each one on first use). Do not create non-manual policy labels.
 
 Never mutate default/release branch protection, GitHub Apps, or credentials without explicit user
 authorization. Present the exact desired settings and verify after changes.

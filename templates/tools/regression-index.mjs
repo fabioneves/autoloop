@@ -1485,6 +1485,22 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'a-fix-outside-the-unit-had-no-way-into-the-queue',
+    date: '2026-09-25',
+    symptom: 'A manual session found a unit gate-red because the base failed a dependency '
+      + 'audit, fixed it in a separate PR first and then delivered the unit; the loop could '
+      + 'only file that fix without loop-ready, where no run could ever take it.',
+    cause: 'Only a human could make an issue eligible. Since 0.52.0 unit.mjs --repair files it '
+      + 'under the parent\'s loop-ready, the scan and contract re-check that provenance each '
+      + 'run, and the guard keeps loop-repair for unit.mjs alone.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'unit.mjs', anchor: 'export function markRepair(' }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: 'function repairAuthorized(repair) {' }),
+      Object.freeze({ file: 'scan.mjs', anchor: 'export function repairItemFacts(' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'function appliesRepairLabel(words) {' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'units-blocked-on-calls-the-loop-could-make',
     date: '2026-09-25',
     symptom: 'Two manual queue sessions resolved blocks the loop would have held for a human '
