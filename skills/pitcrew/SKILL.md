@@ -218,7 +218,8 @@ skipped.
 6. **Gate.** Run one full `cfg.gate.command` as a local preflight on a clean committed tree and
    bind the gated OID. The universal terminal finalizer later reruns that configured command on the
    exact clean remote head and is the only terminal gate CheckRun producer. Gate fixes receive a
-   fresh delta review and a new full gate. Respect the lifetime revise cap from durable PR markers.
+   fresh delta review and a new full gate. Revisions of a delivered PR are not capped: keep
+   answering review until it converges.
 7. **Publish exact head.** Use
    `git push origin HEAD:refs/heads/<captured-loop-branch>`. If and only if the branch was rebased,
    use
@@ -271,8 +272,8 @@ waits and any identity mismatch blocks.
 
 Under manual policy, stop after current-head delivery and the pre-merge record.
 
-If the revision cannot converge, requires protected judgment, exceeds caps, or has incomplete
-evidence that targeted fallback cannot repair: block the unit's issue with `node <plugin-tools>/unit.mjs
+If the revision requires protected judgment (a `human`-class matter, as in the dev skill's
+Autonomy section), or has incomplete evidence that targeted fallback cannot repair: block the unit's issue with `node <plugin-tools>/unit.mjs
 --block --issue <N> --reason <CODE> --question "<one line>"` — it records the question with its
 `/answer` form, removes the step and terminal labels, and keeps `loop-ready` — and stop that PR.
 

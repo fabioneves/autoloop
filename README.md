@@ -131,7 +131,7 @@ it installed from its own marketplace, keep either copy.
 
 ## Configuration and merge policy
 
-v0.51.0 uses schema `0.26.0`. Policy lives in the JSON block of `docs/agentic/STATE.md`:
+v0.51.0 uses schema `0.27.0`. Policy lives in the JSON block of `docs/agentic/STATE.md`:
 `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and `caps`. The repository owns it;
 plugin updates never overwrite it.
 

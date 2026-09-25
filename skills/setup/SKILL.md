@@ -35,9 +35,9 @@ Doctor mode replaces the ribbon with its own single line: `∞ doctor ─ <audit
 Setup is idempotent and has four modes:
 
 - Fresh install: `docs/agentic/STATE.md` is absent.
-- Migration: STATE contains a migratable schema older than `0.26.0` (`0.23.0`, `0.24.0`, or
-  `0.25.0`).
-- Reconfigure: STATE contains schema `0.26.0`.
+- Migration: STATE contains a migratable schema older than `0.27.0` (`0.23.0`, `0.24.0`,
+  `0.25.0`, or `0.26.0`).
+- Reconfigure: STATE contains schema `0.27.0`.
 - Doctor: the invocation contains `doctor`; read-only and never writes.
 
 Autoloop runs on Claude Code only. `tools/agentic/dispatch.mjs` spawns `claude -p` directly for
@@ -100,11 +100,11 @@ older installed contract to validate its own migration.
 
 ## Project configuration
 
-Schema `0.26.0` stores repository policy, never session intent:
+Schema `0.27.0` stores repository policy, never session intent:
 
 ```json autoloop-config
 {
-  "version": "0.26.0",
+  "version": "0.27.0",
   "baseBranch": "main",
   "gate": {
     "command": "npm test",
@@ -116,7 +116,6 @@ Schema `0.26.0` stores repository policy, never session intent:
   "review": { "checklistPath": "docs/agentic/checklist.md" },
   "caps": {
     "gateRetriesPerUnit": 2,
-    "reviseRoundsPerPr": 10,
     "codeReviewRoundsPerUnit": 20,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10
@@ -291,7 +290,6 @@ Global defaults contain only non-project preferences:
   "tracker": { "provider": "none" },
   "caps": {
     "gateRetriesPerUnit": 2,
-    "reviseRoundsPerPr": 10,
     "codeReviewRoundsPerUnit": 20,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10

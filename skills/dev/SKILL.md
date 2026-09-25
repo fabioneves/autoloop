@@ -1141,9 +1141,7 @@ each revision, and the step ladder read it as progress. The guard now blocks a b
 swap, and the plan-review dispatch anchor says so. A Critical or Major that the revised plan
 still carries is recorded as a disposition and rides into the code-review r1 prompt as context
 — the code reviewer sees real code against the plan, which is a better check than a third read
-of the plan. `caps.reviseRoundsPerPr` is the pitcrew budget for post-human-review revisions; it
-has never been a plan-review budget, and its 0.49.49 raise was a symptom of this defect, not a
-licence for it.
+of the plan.
 
 ### 4. Persist intent and claim
 
