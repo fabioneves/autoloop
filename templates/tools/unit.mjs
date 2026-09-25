@@ -1038,6 +1038,13 @@ function selfTest() {
     && create.includes('--label loop-repair') && !create.includes('loop-ready')
     && filing.calls.some((call) => call.startsWith('gh issue comment 248') && call.includes('"number":330'))
     && filing.calls.includes('gh issue edit 248 --add-label loop-waiting'));
+  const parentWait = filing.calls.find((call) => call.startsWith('gh issue comment 248')).slice('gh issue comment 248 --body '.length);
+  const chained = fakeRun([
+    ['gh issue list', JSON.stringify([{ number: 248, comments: [{ body: parentWait }] }])],
+    ['git rev-parse', oid], ['gh issue view 330', 'CLOSED'], ['gh issue edit 248', ''],
+  ]);
+  check('the parent a blocking repair filed comes back once the repair closes',
+    liftWaits({ base: 'main', run: chained.run }).lifted.map((entry) => `${entry.number}:${entry.reason}`).join(',') === '248:#330 is closed');
   const independent = repairRuns();
   check('a repair the parent does not need leaves the parent in the queue',
     markRepair({ parent: 248, title: 't', body: 'b', run: independent.run }).ok
