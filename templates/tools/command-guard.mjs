@@ -43,6 +43,8 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1225,11 +1227,21 @@ function startsWithAnswer(text) {
 // does not exist yet, a JSON --input, or a raw GraphQL comment mutation.
 const GRAPHQL_COMMENT_MUTATION_RE = /\b(?:addComment|addDiscussionComment|updateIssueComment|addPullRequestReviewComment)\b/u;
 
+function readsCommentBodyFile(words) {
+  const comment = hasGhScopedAction(words, 'issue', 'comment') || hasGhScopedAction(words, 'pr', 'comment');
+  if (comment && optionValues(words, '--body-file', '-F').length > 0) return true;
+  const gh = executableIndex(words, 'gh');
+  return gh !== -1 && words[gh + 1] === 'api'
+    && githubApiFieldAssignments(words).some(({ name, value }) => name === 'body' && value.startsWith('@'));
+}
+
 export function commentBodyProblem(words, read = (path) => readFileSync(path, 'utf8').slice(0, 4096)) {
   const body = (path) => {
     if (path === '' || path === '-' || path.startsWith('/dev/')) return 'unverifiable';
     try {
-      return startsWithAnswer(read(path)) ? 'answer' : null;
+      const text = read(path);
+      if (String(text).trim() === '') return 'unverifiable';
+      return startsWithAnswer(text) ? 'answer' : null;
     } catch {
       return 'unverifiable';
     }
@@ -1244,9 +1256,7 @@ export function commentBodyProblem(words, read = (path) => readFileSync(path, 'u
   if (hasInputOption(words) && githubApiEndpoints(words).some((segments) => segments.includes('comments'))) {
     return 'unverifiable';
   }
-  const fields = ['-f', '-F', '--field', '--raw-field'].flatMap((option) => optionValues(words, option));
-  return worst(fields.filter((field) => field.startsWith('body=')).map((field) => {
-    const value = field.slice('body='.length);
+  return worst(githubApiFieldAssignments(words).filter(({ name }) => name === 'body').map(({ value }) => {
     if (value.startsWith('@')) return body(value.slice(1));
     return startsWithAnswer(value) ? 'answer' : null;
   }));
@@ -1544,6 +1554,7 @@ function terminalLabelApiRename(words) {
       name === 'new_name'
       && (
         protectedLifecycleLabel(value)
+        || value.trim().toLowerCase() === 'loop-repair'
         || value.startsWith('@')
       ),
   );
@@ -1595,7 +1606,7 @@ function terminalGraphqlMutation(command) {
     );
   const updateLabelName = /\bupdateLabel\b/u.test(command)
     && (
-      /\bloop-(?:delivered|ready)\b/iu.test(decodedCommand)
+      /\bloop-(?:delivered|ready|repair)\b/iu.test(decodedCommand)
       || fields.some(
         ({ name, value }) =>
           name === 'name'
@@ -2078,11 +2089,18 @@ export function evaluate(inputCmd, branch, options = {}) {
         + 'provenance marker that trust rests on. File the repair with that command.',
     };
   }
-  const readBody = (path) => readFileSync(
-    isAbsolute(path) ? path : resolve(options.cwd ?? process.cwd(), path),
-    'utf8',
-  ).slice(0, 4096);
+  // Only a regular file the guard can read now proves what will be posted: not
+  // a device, a /proc or /sys entry, a FIFO (which would hang the read), or a
+  // file an earlier segment of the same command may rewrite.
+  const readBody = (path) => {
+    const real = realpathSync(isAbsolute(path) ? path : resolve(options.cwd ?? process.cwd(), path));
+    if (/^\/(?:dev|proc|sys)\//u.test(real) || !statSync(real).isFile()) throw new Error('not a regular file');
+    return readFileSync(real, 'utf8').slice(0, 4096);
+  };
   const bodyProblems = segments.map(({ command }) => commentBodyProblem(shellWords(command), readBody));
+  if (segments.length > 1 && segments.some(({ command }) => readsCommentBodyFile(shellWords(command)))) {
+    bodyProblems.push('unverifiable');
+  }
   if (bodyProblems.includes('unverifiable')) {
     return {
       block: true,
@@ -2937,6 +2955,12 @@ function selfTest() {
     ['gh api repos/o/r/issues --input /tmp/issue.json', 'main', true],
     ["gh api graphql -f query='mutation{createIssue(input:{repositoryId:\"R\",title:\"t\",labelIds:[\"L\"]}){issue{number}}}'", 'main', true],
     ['gh label edit bug --name loop-repair', 'main', true],
+    // 2026-09-25 security re-audit: the joined short field form, a body file the
+    // same command rewrites, a /proc fd, and a REST label rename.
+    ['gh api repos/o/r/issues/7/comments -fbody="/answer yes"', 'feat/gh-2-y', true],
+    ['cp /tmp/a.md /tmp/p2.md && gh issue comment 7 --body-file /tmp/p2.md', 'feat/gh-2-y', true],
+    ['gh issue comment 7 --body-file /proc/self/fd/0', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/labels/bug -X PATCH -f new_name=loop-repair', 'main', true],
     ['gh issue create --title t --body-file /tmp/b.md --label bug', 'main', false],
     ['gh issue edit 7 --add-label loop-ready', 'feat/gh-2-y', true],
     ['gh issue edit 7 --add-label=LOOP-READY', 'feat/gh-2-y', true],
@@ -3160,6 +3184,31 @@ function selfTest() {
     if (!answerFileCases) {
       console.error('FAIL [a body file starting with /answer is refused]');
       ok = false;
+    }
+  }
+  {
+    messageChecks += 1;
+    const dir = mkdtempSync(join(tmpdir(), 'guard-body-'));
+    try {
+      const plain = join(dir, 'plain.md');
+      const empty = join(dir, 'empty.md');
+      const device = join(dir, 'device.md');
+      const fifo = join(dir, 'fifo.md');
+      writeFileSync(plain, 'resumed\n');
+      writeFileSync(empty, '');
+      symlinkSync('/dev/null', device);
+      const fifoMade = spawnSync('mkfifo', [fifo]).status === 0;
+      const verdict = (path) => evaluate(`gh issue comment 7 --body-file ${path}`, 'feat/gh-2-y', { baseBranch: 'main', cwd: dir }).block;
+      const rewritten = evaluate(`cp ${empty} ${plain} && gh issue comment 7 --body-file ${plain}`, 'feat/gh-2-y', { baseBranch: 'main', cwd: dir }).block;
+      const bodyFileCases = !verdict(plain) && !verdict('plain.md')
+        && verdict(empty) && verdict(device) && verdict('/proc/self/fd/0') && rewritten
+        && (!fifoMade || verdict(fifo));
+      if (!bodyFileCases) {
+        console.error('FAIL [a body file must be a readable, non-empty regular file]');
+        ok = false;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   }
   {
