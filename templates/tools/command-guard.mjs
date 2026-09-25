@@ -47,7 +47,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -1227,6 +1227,11 @@ function startsWithAnswer(text) {
 // does not exist yet, a JSON --input, or a raw GraphQL comment mutation.
 const GRAPHQL_COMMENT_MUTATION_RE = /\b(?:addComment|addDiscussionComment|updateIssueComment|addPullRequestReviewComment)\b/u;
 
+export function expandHome(path) {
+  if (path === '~') return homedir();
+  return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
+}
+
 function readsCommentBodyFile(words) {
   const comment = hasGhScopedAction(words, 'issue', 'comment') || hasGhScopedAction(words, 'pr', 'comment');
   if (comment && optionValues(words, '--body-file', '-F').length > 0) return true;
@@ -2093,7 +2098,8 @@ export function evaluate(inputCmd, branch, options = {}) {
   // a device, a /proc or /sys entry, a FIFO (which would hang the read), or a
   // file an earlier segment of the same command may rewrite.
   const readBody = (path) => {
-    const real = realpathSync(isAbsolute(path) ? path : resolve(options.cwd ?? process.cwd(), path));
+    const expanded = expandHome(path);
+    const real = realpathSync(isAbsolute(expanded) ? expanded : resolve(options.cwd ?? process.cwd(), expanded));
     if (/^\/(?:dev|proc|sys)\//u.test(real) || !statSync(real).isFile()) throw new Error('not a regular file');
     return readFileSync(real, 'utf8').slice(0, 4096);
   };
@@ -3199,9 +3205,11 @@ function selfTest() {
       symlinkSync('/dev/null', device);
       const fifoMade = spawnSync('mkfifo', [fifo]).status === 0;
       const verdict = (path) => evaluate(`gh issue comment 7 --body-file ${path}`, 'feat/gh-2-y', { baseBranch: 'main', cwd: dir }).block;
+      const tildeExpanded = expandHome('~/notes/x.md') === join(homedir(), 'notes/x.md')
+        && expandHome('~') === homedir() && expandHome('a/~/b') === 'a/~/b';
       const rewritten = evaluate(`cp ${empty} ${plain} && gh issue comment 7 --body-file ${plain}`, 'feat/gh-2-y', { baseBranch: 'main', cwd: dir }).block;
       const bodyFileCases = !verdict(plain) && !verdict('plain.md')
-        && verdict(empty) && verdict(device) && verdict('/proc/self/fd/0') && rewritten
+        && verdict(empty) && verdict(device) && verdict('/proc/self/fd/0') && rewritten && tildeExpanded
         && (!fifoMade || verdict(fifo));
       if (!bodyFileCases) {
         console.error('FAIL [a body file must be a readable, non-empty regular file]');
