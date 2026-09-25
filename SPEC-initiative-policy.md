@@ -15,7 +15,7 @@ Replace "when unsure, block the unit" with a closed decision rule. A would-be bl
 ## Behaviour
 
 1. **`autoloop-decision-v1` marker** (new, `templates/tools/unit.mjs --decide`), one bare call:
-   `unit.mjs --decide --issue N --choice "<one line>" --alternatives "<a; b>" --why "<one line>" [--pr M]`.
+   `unit.mjs --decide --issue N --choice "<one line>" --alternatives "<a; b>" --why "<one line>"`.
    Posts a comment carrying `<!-- autoloop-decision-v1 {"issue":N,"choice":…,"alternatives":[…],"why":…,"at":…} -->` and labels
    the issue `loop-decided` (created on first use), plus a readable
    rendering. It never edits the issue body (an edit after `loop-ready` makes the issue ineligible, `snapshot-contract.mjs:1107-1108`).
@@ -27,10 +27,14 @@ Replace "when unsure, block the unit" with a closed decision rule. A would-be bl
    `SPEC-blocked-triage.md` — in a solo repository a plain comment cannot be told apart from the loop's own). The loop reads prior
    `autoloop-decision-v1` comments and later `/answer` comments as premise context for any re-attempt; an `/answer` postdating a
    decision overrides it. The loop never re-takes a decision a human reversed.
-4. **Classification is recorded, not inferred later:** every block and decision names its class in its marker.
+4. **Classification is recorded, not inferred later:** a block's marker names its class (`human`); a decision's marker is the `decide` class by its kind (`autoloop-decision-v1`), so it carries no separate field.
 5. **Dev skill rewrite** (`skills/dev/SKILL.md`):
    - Step 1 premise: "duplicate, ambiguous, outside autonomy … human block" → classify; `human` blocks, `fix`/`decide` proceed.
-   - `REVIEW_CAP_REACHED` (`:1406-1420`): Critical open → `decide`: one re-plan dispatch, or split the predicate into a repair unit
+   - `REVIEW_CAP_REACHED` (`:1406-1420`): Critical open → `decide`. As built, the choice is made in two places:
+     - the carve happens at the closing round, because past it no round remains to review a reduction;
+     - at the cap itself the decide is a re-plan, filed as a blocking repair. A re-plan cannot resume the unit, because the marker binds `planHash`, so the unit is closed `--obsolete` against the repair's PR once that merges.
+
+     The review contract names this state `cap-reached`, not `human-block`.
      and deliver the rest; a human block only when the Critical is itself a `human`-class matter.
    - Handoff (`:1893-1901`): "anything phrased 'tell me when…'" → `fix`/`decide` unless `human`-class.
    - Autonomy section (`:2203-2231`): replace "most conservative action … label the unit" with the three-class rule.

@@ -200,8 +200,9 @@ skipped.
    - verified Critical/Major in the delta is fixed or rebutted;
    - verified out-of-delta Critical/Major is fixed and the next round is full;
    - a gating cap round earns one closing full round. If only Majors gate there under manual policy,
-     the result is `REVIEW_CAP_HANDOFF`: file each Major as a follow-up and list it in the PR body.
-     A Critical, or a non-manual policy, blocks for a human.
+     the result is `REVIEW_CAP_HANDOFF`: file each Major as a repair and list it in the PR body.
+     A Critical, or a non-manual policy, is `REVIEW_CAP_REACHED`: the dev skill's re-plan decide
+     applies, not a human block.
 
    Invoke `node <plugin-tools>/review-contract.mjs` on stdin with
    `{round,scope,projectConfig,expected:{planFingerprint,repositoryFingerprint,configuredBaseOid,artifactVersion,artifactFingerprint,headOid},findingAnnotations:[{id,verified,inScope}],reviewRounds:[...]}`
@@ -256,7 +257,7 @@ The revise comment ends with:
 [loop revise-round <N> | reviews: <IDs or none> | head: <full gated OID>]
 ```
 
-Use a body file. The marker is the lifetime cap and handled-review dedupe source.
+Use a body file. The marker is the handled-review dedupe source.
 
 ## Terminal and merge path
 

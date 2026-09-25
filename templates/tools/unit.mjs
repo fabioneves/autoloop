@@ -575,11 +575,14 @@ export function digestRows(issues, prs) {
 export function decisionRows(issues, now) {
   return (issues ?? [])
     .map((item) => {
-      const decision = (item.comments ?? []).map((comment) => parseDecision(comment.body))
-        .findLast((entry) => entry !== null) ?? null;
-      return decision && now - Date.parse(decision.at) <= DECISION_WINDOW_MS
-        ? { number: item.number, title: item.title, choice: decision.choice, at: decision.at }
-        : null;
+      const comments = item.comments ?? [];
+      const index = comments.findLastIndex((comment) => parseDecision(comment.body) !== null);
+      if (index === -1) return null;
+      const decision = parseDecision(comments[index].body);
+      if (now - Date.parse(decision.at) > DECISION_WINDOW_MS) return null;
+      const answer = comments.slice(index + 1).map((comment) => ANSWER_RE.exec(String(comment.body ?? '')))
+        .findLast(Boolean);
+      return { number: item.number, title: item.title, choice: decision.choice, at: decision.at, answer: answer ? (answer[1] ?? '').trim() : null };
     })
     .filter(Boolean)
     .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
@@ -596,7 +599,9 @@ export function digestBody(rows, at, decided = []) {
     ...(decided.length === 0
       ? []
       : ['', '**Decided by the loop** — the recommended option, taken without waiting', '',
-        ...decided.map((row) => `- #${row.number} ${row.title} — decided, reversible: ${row.choice}`)]),
+        ...decided.map((row) => (row.answer === null
+          ? `- #${row.number} ${row.title} — decided, reversible: ${row.choice}`
+          : `- #${row.number} ${row.title} — decided: ${row.choice}; answered: ${row.answer}`))]),
     '',
     'The loop rewrites this at every close and park. Answer on each unit, not here.',
   ].join('\n');
@@ -898,6 +903,14 @@ function selfTest() {
     { number: 42, title: 'Unmarked', comments: [{ body: 'no marker' }] },
   ];
   const decidedRows = decisionRows(decidedIssues, Date.parse('2026-09-26T00:00:00Z'));
+  const answeredRows = decisionRows([{ number: 43, title: 'Reversed', comments: [
+    { body: decisionMarker({ ...decision, issue: 43 }), createdAt: decidedAt },
+    { body: '/answer use the whitelist instead', createdAt: '2026-09-25T11:00:00.000Z' },
+  ] }], Date.parse('2026-09-26T00:00:00Z'));
+  check('a decision answered afterwards shows the answer, not as still reversible',
+    answeredRows[0].answer === 'use the whitelist instead'
+    && digestBody([], 'T', answeredRows).includes('- #43 Reversed — decided: derive the bits from the locked construction; answered: use the whitelist instead')
+    && decidedRows[0].answer === null);
   check('decision rows keep the last seven days of marked decisions',
     decidedRows.map((row) => row.number).join(',') === '40'
     && decidedRows[0].choice === decision.choice);

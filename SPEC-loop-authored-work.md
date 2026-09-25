@@ -43,7 +43,7 @@ A repair issue inherits authorization from a trusted `loop-ready` parent instead
 
 6. **Revocation:** removing `loop-ready` from the parent revokes every repair still open under it, because eligibility re-checks the parent's provenance. Adding `loop-blocked` to a repair revokes that repair.
 
-6. **Priority:** a repair that `--blocks-parent` is selected before other queue work.
+7. **Priority:** a repair that `--blocks-parent` is selected before other queue work.
 
 ## Boundaries
 

@@ -17,8 +17,8 @@ with the known issues listed" or "try again later".
 | Model usage limits | fallback route in the tool, else a timed park (dispatch-resilience, run-continuity) | Already done |
 | Slice budgets | NOTE in the PR body, never block (`SKILL.md:1449-1452`). Dev has no plan-time slice stop; splitting is enforced in `autoloop:shape` (`sizing-contract.mjs:57`) before the queue | Already done. No change |
 | 3rd Major in one predicate → automatic re-plan | the SKILL's invariant escalation (`SKILL.md:1379-1389`) | **Dropped.** A re-plan cannot resume a unit, because the marker binds `planHash`/`issueBodyHash`, so it is a new issue. The case is already absorbed: the finding defers at 3 raisings (self-resolving-units), or it reaches the cap hand-off above |
-| Gate retries exhausted | block (`SKILL.md:1693`) | **Unchanged.** A red gate after the retries is a failing unit, not a limit artifact. A draft PR plus a different label would only rename the block. A red **base** is already a wait |
-| Pitcrew revise cap | block (`pitcrew/SKILL.md:272-274`) | **Unchanged.** Pitcrew runs on a PR a human is already reviewing, so the human is already there. Its review rounds inherit the cap hand-off through the same contract |
+| Gate retries exhausted | block (`SKILL.md:1693`) | **Superseded by SPEC-initiative.md (0.52.0):** a red outside the unit becomes a blocking repair; the unit's own red re-plans. Originally: **Unchanged.** A red gate after the retries is a failing unit, not a limit artifact. A draft PR plus a different label would only rename the block. A red **base** is already a wait |
+| Pitcrew revise cap | block (`pitcrew/SKILL.md:272-274`) | **Removed in schema 0.27.0** (operator decision 2026-09-25): pitcrew revisions are not capped. Originally: **Unchanged.** Pitcrew runs on a PR a human is already reviewing, so the human is already there. Its review rounds inherit the cap hand-off through the same contract |
 
 ## Behaviour
 

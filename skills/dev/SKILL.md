@@ -325,9 +325,10 @@ routes file exists.
 you chose it one command ago.** Do not read it back out of the routes file to probe it: a
 `"$(… routes …)"` substitution hides which host is being contacted, and a live run lost a
 round composing exactly that. The recording is for
-`dispatch.mjs`, which reads the routes file itself; the probe is for you, and you already know the value. If it does not answer, block
-THE UNIT with `needs-human` naming the URL and take the next unit — a dead proxy is a unit event
-until every remaining unit needs it, and only then a run-scoped guardrail (close the run with the
+`dispatch.mjs`, which reads the routes file itself; the probe is for you, and you already know the value. If it does not answer, put
+THE UNIT on a timed wait (`unit.mjs --wait --issue <N> --minutes 30 --note "<url> did not answer"`)
+and take the next unit — a dead proxy is infrastructure, not a human decision, and a unit event
+until every remaining unit needs it; only then is it a run-scoped guardrail (close the run with the
 URL as the stated remedy). NEVER start, install, restart, or background a proxy
 process, and never infer its absence from environment variables, PATH lookups, or the process
 name owning a port (a live run refused a healthy proxy after reading its listener as Docker
@@ -412,7 +413,7 @@ reviewer's job is to find the case the author did not consider.
     A park is recorded, never a close — see "Timed park" below.
   Never fall back for any other failure class, and never onto Opus for a reviewer of the code
   Opus wrote.
-  A proxy that does not answer the probe is not a usage limit: block the unit (probe rule).
+  A proxy that does not answer the probe is not a usage limit: a timed wait on the unit (probe rule).
 
   Premise, finding verification, and disposition are IN-SESSION work and carry no `--model`
   knob — they run on whatever model the operator's session is, and the loop does not pin it.
@@ -1013,6 +1014,10 @@ classes in **Autonomy** below, and only one of them stops the unit:
 
 Never redesign scope *silently*: a scope change is a recorded decision, not a quiet one.
 
+**Read the unit's own record first.** Its `autoloop-decision-v1` and `autoloop-resumed-v1` comments
+are earlier choices and answers about this very issue. A trusted `/answer` posted after a decision
+reverses it: plan from the answer, and never re-take a decision a human reversed.
+
 **Apply the run's first labels here — this is the mutation everything downstream swaps:**
 
 ```bash
@@ -1371,7 +1376,7 @@ Verify every Critical/Major against code or a cheap reproduction, then dispositi
 - fix with a `--role fix` dispatch carrying every verified finding (a one-line fix may be made
   directly);
 - propose an evidence-citing rebut for the next fresh reviewer;
-- block if out-of-boundary human judgment is required.
+- block with `unit.mjs --block` only if the finding needs a `human`-class decision (Autonomy).
 
 **Disposition every finding; NARRATE only the ones that are not "fix as written".** The ledger
 passed forward in `priorFindings` is the record, and it is the only one with authority — a
@@ -1416,46 +1421,45 @@ after an invariant-scoped fix is a planning failure, not a review failure — ne
 instance-scoped round on it.
 
 **A Major raised in three rounds is deferred, not blocked.** Once one finding id has been raised in
-three rounds, file it as a follow-up issue (`gh issue create`, the finding's summary, evidence and
-round history; NO `loop-ready` — queueing it is the human's grant) and dispose it `defer` with a
-rationale naming the issue (`Filed as follow-up #<N>`). The contract refuses a deferral before the
+three rounds, file it as a repair (`unit.mjs --repair --parent <N>`, the finding's summary,
+evidence and round history) and dispose it `defer` with a rationale naming the issue (`Filed as
+follow-up #<N>`); if the repair budget refuses, fold it into an open repair of the same unit. The contract refuses a deferral before the
 third raising, of a Critical, or without a `#<N>`; a later reviewer re-raising it is carried as the
 same deferral. The clean transition lists `deferredFindings`: put each in the PR body under
 `## Deferred findings`, so the human sees it at merge. A Critical never defers — it takes the cap
 path below.
 
-**At the cap: hand it off or label it, and move on. Do not ask, do not widen, do not stop.**
+**At the cap: hand it off, carve, or re-plan, and move on. Do not ask, do not widen, do not stop.**
 `caps.codeReviewRoundsPerUnit` is STATE policy on an escalate path. A cap round that still gates
 returns `REVIEW_CLOSING_ROUND_REQUIRED`: fix, commit, and run exactly one more round, `--scope
 full`, so no fix leaves the unit unreviewed. The contract refuses every round past that one; that
 refusal is the cap working, and a quiet ProjectConfig edit would make the loop its own policy
 author.
 
+**The closing round is the last chance to carve.** When the gating findings sit in one predicate and
+the carve-out is honest (*Carving out a predicate* below), carve it NOW instead of fixing it — record
+it with `unit.mjs --decide` — and the closing round reviews the reduced artifact. Past the closing
+round no round remains to review a reduction, so a carve is no longer possible there.
+
 **`REVIEW_CAP_HANDOFF` — only Majors remain, under manual merge policy.** The transition is clean
-and lists `handedOffFindings`. File each one as a follow-up issue (`gh issue create`, with the
-finding's summary, evidence and round history, and no `loop-ready`). Add `## Open findings at the
+and lists `handedOffFindings`. File each one as a repair (`unit.mjs --repair --parent <N>`, with the
+finding's summary, evidence and round history), folding the rest into one when the budget refuses. Add `## Open findings at the
 review cap` to the PR body, one line per finding with its follow-up number, and continue to the
 gate and publish as usual. The human decides at merge with the list in front of them. Merge stays
 theirs, so nothing unreviewed ships and no unit waits on a question.
 
-**`REVIEW_CAP_REACHED` — a Critical remains, or the policy is not manual.** A verified open
-finding is a reason not to ship the unit AS IT STANDS — never a reason to stop the RUN, and not a
-question for a human. It is a `decide`, complete in one turn:
-
-1. **Carve out the predicate** when the carve-out is honest (the three conditions under *Carving
-   out a predicate* below): ship the converged remainder and file the carved predicate as a repair
-   (`unit.mjs --repair --parent <N>`), carrying every open finding verbatim.
-2. **Otherwise re-plan.** File the re-plan as a repair with `--blocks-parent`, naming the invariant
-   that was enumerated wrongly and the domain it actually quantifies, with every open finding and
-   the round history. A re-plan cannot resume this unit — the marker binds `planHash` and
-   `issueBodyHash` — so leave the PR draft; the unit waits on the repair, and once the re-plan
-   delivers, this unit is `--obsolete` against its PR.
-
-Record which one and why with `unit.mjs --decide`, naming the other option and raising
-`caps.codeReviewRoundsPerUnit` as the alternatives — the cap is the operator's policy, and the
-loop never edits it. Block with `unit.mjs --block` only when the open Critical is itself a
-`human`-class matter (a secret, an irreversible act, a protected path, a product value no source
-states). Then print the unit's rail and **take the next eligible unit immediately**.
+**`REVIEW_CAP_REACHED` — a Critical remains, or the policy is not manual.** The cap is spent and the
+unit cannot ship as it stands — never a reason to stop the RUN, and not a question for a human. It
+is a `decide`: **re-plan.** File the re-plan as a repair with `--blocks-parent`, naming the
+invariant that was enumerated wrongly and the domain it actually quantifies, with every open
+finding and the round history. A re-plan cannot resume this unit — the marker binds `planHash` and
+`issueBodyHash` — so the unit waits on the repair; once the repair's PR merges, close this unit
+with `unit.mjs --obsolete --issue <N> --pr <repair PR>` and close its own draft PR as superseded.
+Record it with `unit.mjs --decide`, naming raising `caps.codeReviewRoundsPerUnit` as the
+alternative — the cap is the operator's policy, and the loop never edits it. Block with `unit.mjs
+--block` only when the open Critical is itself a `human`-class matter (a secret, an irreversible
+act, a protected path, a product value no source states). Then print the unit's rail and **take the
+next eligible unit immediately**.
 
 **Slice budgets are the exception: they NOTE, they never block.** `caps.sliceMaxLines` and
 `caps.sliceMaxFiles` are shaping budgets — `autoloop:shape` sizes issues against them before the
@@ -1707,7 +1711,10 @@ itself. The scaffold gate is:
 Any doubt or mixed diff runs the full app gate.
 
 After green, confirm the tree remains clean. Gate-red loads debugging guidance, fixes through the
-delta-review path, then runs a new full gate. Exhausted retries block.
+delta-review path, then runs a new full gate. Exhausted retries are a `decide`, not a block: when
+the red is outside the unit's change (a flaky test, a broken base, a dependency advisory), file it
+as a blocking repair (`unit.mjs --repair --parent <N> --blocks-parent`) and take it next; when it is
+the unit's own change, re-plan as at `REVIEW_CAP_REACHED`. Never weaken the gate to reach green.
 
 ### 10. Publish, finalize, and submit
 
