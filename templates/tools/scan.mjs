@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { CLAIM_CONTRACT_FIXTURES, parseLoopClaim } from './claim-contract.mjs';
+import { parseRepair } from './unit.mjs';
 import {
   lifecycleCommentNeverEdited,
   parseLifecycleComment,
@@ -56,6 +57,13 @@ query($id:ID!,$cursor:String){
   }
 }`;
 
+const ISSUE_VIEWER_AUTHOR_QUERY = `
+query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){
+    issue(number:$number){viewerDidAuthor}
+  }
+}`;
+
 const DEPENDENCY_ISSUE_QUERY = `
 query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
@@ -89,11 +97,16 @@ query($owner:String!,$name:String!,$number:Int!,$cursor:String){
       timelineItems(
         first:100
         after:$cursor
-        itemTypes:[LABELED_EVENT]
+        itemTypes:[LABELED_EVENT,UNLABELED_EVENT]
       ){
         nodes{
           __typename
           ... on LabeledEvent{
+            actor{login}
+            createdAt
+            label{name}
+          }
+          ... on UnlabeledEvent{
             actor{login}
             createdAt
             label{name}
@@ -807,6 +820,38 @@ function issueHasLabel(issue, label) {
   return issue.labels.some((name) => name.toLowerCase() === label);
 }
 
+/** Pure: the newest loop-ready label or unlabel event, or null. */
+export function lastLoopReadyEvent(timeline) {
+  const events = (Array.isArray(timeline) ? timeline : []).filter(
+    (event) => ['LabeledEvent', 'UnlabeledEvent'].includes(event?.__typename)
+      && event.label?.name?.toLowerCase() === 'loop-ready',
+  );
+  const last = events.at(-1);
+  return last
+    ? {
+      event: last.__typename === 'LabeledEvent' ? 'labeled' : 'unlabeled',
+      actor: last.actor?.login ?? null,
+      at: last.createdAt ?? null,
+    }
+    : null;
+}
+
+/** Pure: a loop repair's queue facts. Its provenance is the parent's loop-ready
+ *  event its marker copied; the snapshot contract checks that event is still the
+ *  parent's newest, and that the loop wrote the repair. */
+export function repairItemFacts(marker, parentTimeline, viewerDidAuthor) {
+  return {
+    provenance: { labeledBy: marker.parentLabeledBy, labeledAt: marker.parentLabeledAt },
+    repair: {
+      parent: marker.parent,
+      parentLabeledBy: marker.parentLabeledBy,
+      parentLabeledAt: marker.parentLabeledAt,
+      viewerDidAuthor: viewerDidAuthor === true,
+      parentLastReadyEvent: lastLoopReadyEvent(parentTimeline),
+    },
+  };
+}
+
 async function fetchIssueTimeline(repo, issue) {
   return collectPaginated(async (cursor) => {
     const data = await ghGraphql(ISSUE_TIMELINE_QUERY, {
@@ -823,7 +868,10 @@ async function fetchIssueTimeline(repo, issue) {
 }
 
 async function fetchQueue(openIssues, repo) {
-  const candidates = openIssues.items.filter((issue) => issueHasLabel(issue, 'loop-ready'));
+  // A loop repair without a parseable marker is not queue work, and must not
+  // make the queue incomplete either: it is simply never eligible.
+  const candidates = openIssues.items.filter((issue) => issueHasLabel(issue, 'loop-ready')
+    || (issueHasLabel(issue, 'loop-repair') && parseRepair(issue.body) !== null));
   const referenceNumbers = [...new Set(
     candidates.flatMap((issue) => blockedByIssueNumbers(issue.body)),
   )];
@@ -857,8 +905,26 @@ async function fetchQueue(openIssues, repo) {
       .filter(Boolean);
     const issueDependencySections = blockedBy
       .map((number) => dependenciesByNumber.get(number));
-    const section = await fetchIssueTimeline(repo, issue);
-    const provenance = labelProvenance(section.items);
+    const marker = issueHasLabel(issue, 'loop-ready') ? null : parseRepair(issue.body);
+    let section;
+    let provenance;
+    let repairFacts = {};
+    if (marker === null) {
+      section = await fetchIssueTimeline(repo, issue);
+      provenance = labelProvenance(section.items);
+    } else {
+      section = await fetchIssueTimeline(repo, { number: marker.parent });
+      let viewerDidAuthor = false;
+      try {
+        const data = await ghGraphql(ISSUE_VIEWER_AUTHOR_QUERY, { owner: repo.owner, name: repo.name, number: issue.number });
+        viewerDidAuthor = data.repository?.issue?.viewerDidAuthor === true;
+      } catch (error) {
+        section = incompleteSection('REPAIR_AUTHOR_UNAVAILABLE', `issue #${issue.number} author: ${commandError(error)}`);
+      }
+      const facts = repairItemFacts(marker, section.items, viewerDidAuthor);
+      provenance = facts.provenance;
+      repairFacts = { repair: facts.repair };
+    }
     const provenanceComplete =
       typeof provenance?.labeledBy === 'string'
       && provenance.labeledBy.length > 0
@@ -869,6 +935,7 @@ async function fetchQueue(openIssues, repo) {
       blockedBy,
       dependencies,
       provenance,
+      ...repairFacts,
     };
     const complete = section.complete
       && provenanceComplete
@@ -1790,6 +1857,32 @@ async function selfTest() {
       provenance.labeledBy === 'b'
         && provenance.labeledAt === 't3'
         && labelProvenance([]) === null,
+    ],
+    [
+      'the parent loop-ready event reads the newest label or unlabel',
+      JSON.stringify(lastLoopReadyEvent([
+        { __typename: 'LabeledEvent', label: { name: 'loop-ready' }, actor: { login: 'a' }, createdAt: 't1' },
+        { __typename: 'UnlabeledEvent', label: { name: 'loop-ready' }, actor: { login: 'a' }, createdAt: 't2' },
+        { __typename: 'LabeledEvent', label: { name: 'loop-blocked' }, actor: { login: 'x' }, createdAt: 't3' },
+      ])) === JSON.stringify({ event: 'unlabeled', actor: 'a', at: 't2' })
+        && lastLoopReadyEvent([]) === null,
+    ],
+    [
+      'repair facts copy the marker as provenance and carry the live parent event',
+      (() => {
+        const marker = { parent: 248, parentLabeledBy: 'a', parentLabeledAt: 't1', depth: 1 };
+        const facts = repairItemFacts(marker, [
+          { __typename: 'LabeledEvent', label: { name: 'loop-ready' }, actor: { login: 'a' }, createdAt: 't1' },
+        ], true);
+        return JSON.stringify(facts.provenance) === '{"labeledBy":"a","labeledAt":"t1"}'
+          && JSON.stringify(facts.repair) === JSON.stringify({
+            parent: 248,
+            parentLabeledBy: 'a',
+            parentLabeledAt: 't1',
+            viewerDidAuthor: true,
+            parentLastReadyEvent: { event: 'labeled', actor: 'a', at: 't1' },
+          });
+      })(),
     ],
     [
       'blocked-by section parsing',

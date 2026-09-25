@@ -507,7 +507,44 @@ function validProvenance(value) {
     && validDateTime(value.labeledAt);
 }
 
+const REPAIR_FACT_KEYS = ['parent', 'parentLabeledBy', 'parentLabeledAt', 'viewerDidAuthor', 'parentLastReadyEvent'];
+
+// A loop-filed repair (unit.mjs --repair) carries no loop-ready of its own. Its
+// authorization is the parent's: the provenance it copies, which must still be
+// the parent's newest loop-ready label event, re-read at every scan.
+function validRepairFacts(value) {
+  const last = value?.parentLastReadyEvent;
+  return hasExactKeys(value, REPAIR_FACT_KEYS)
+    && positiveInteger(value.parent)
+    && nonEmptyString(value.parentLabeledBy)
+    && validDateTime(value.parentLabeledAt)
+    && typeof value.viewerDidAuthor === 'boolean'
+    && (last === null || (
+      hasExactKeys(last, ['event', 'actor', 'at'])
+      && ['labeled', 'unlabeled'].includes(last.event)
+      && nullableString(last.actor)
+      && validDateTime(last.at)
+    ));
+}
+
+function repairAuthorized(repair) {
+  const last = repair.parentLastReadyEvent;
+  return repair.viewerDidAuthor === true
+    && last?.event === 'labeled'
+    && last.actor === repair.parentLabeledBy
+    && last.at === repair.parentLabeledAt;
+}
+
 function validQueueItem(item, complete) {
+  if (item !== null && typeof item === 'object' && 'repair' in item) {
+    const { repair, ...ordinary } = item;
+    return validRepairFacts(repair)
+      && (item.provenance === null || (
+        item.provenance?.labeledBy === repair.parentLabeledBy
+        && item.provenance?.labeledAt === repair.parentLabeledAt
+      ))
+      && validQueueItem(ordinary, complete);
+  }
   const expectedDependencies = blockedByIssueNumbers(item?.body);
   const dependencyNumbers = Array.isArray(item?.dependencies)
     ? item.dependencies.map((dependency) => dependency?.number)
@@ -1106,7 +1143,13 @@ function eligibleQueueIssueNumbers(snapshot) {
           && evidence.createdAt === labeledAt));
       const bodyUnchanged = issue.lastEditedAt === null
         || Date.parse(issue.lastEditedAt) <= Date.parse(labeledAt);
+      const authorized = issue.repair === undefined
+        ? issue.labels.includes('loop-ready')
+        : issue.labels.includes('loop-repair')
+          && !issue.labels.includes('loop-ready')
+          && repairAuthorized(issue.repair);
       return trusted
+        && authorized
         && bodyUnchanged
         && !blocked.has(issue.number)
         && !issue.labels.includes('loop-blocked')
@@ -1430,7 +1473,7 @@ async function selfTest() {
     url: 'https://example.test/issues/7#issuecomment-1',
     ...overrides,
   });
-  const queueSnapshot = ({ blocked = false, waiting = false, incomplete = null } = {}) => {
+  const queueSnapshot = ({ blocked = false, waiting = false, incomplete = null, repair = null, lastEditedAt = null, labels = null } = {}) => {
     const sections = Object.fromEntries(
       SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
     );
@@ -1439,8 +1482,8 @@ async function selfTest() {
       title: 'queued',
       body: 'body',
       updatedAt: '2026-01-01T00:00:00Z',
-      lastEditedAt: null,
-      labels: ['loop-ready', ...(blocked ? ['loop-blocked'] : []), ...(waiting ? ['loop-waiting'] : [])],
+      lastEditedAt,
+      labels: labels ?? [repair === null ? 'loop-ready' : 'loop-repair', ...(blocked ? ['loop-blocked'] : []), ...(waiting ? ['loop-waiting'] : [])],
     });
     sections.repo = completeSection([{
       owner: 'owner',
@@ -1462,6 +1505,7 @@ async function selfTest() {
         labeledBy: 'maintainer',
         labeledAt: '2026-01-01T00:00:01Z',
       },
+      ...(repair === null ? {} : { repair }),
     }]);
     sections.openIssues = completeSection([issue]);
     sections.blockedIssues = completeSection(blocked ? [issue] : []);
@@ -1617,6 +1661,39 @@ async function selfTest() {
         && snapshot.sections.queue.items.length === 1
         && verifyQueueEvidence(evidence, snapshot, queueRun);
     }));
+  const repairFacts = (overrides = {}) => ({
+    parent: 248,
+    parentLabeledBy: 'maintainer',
+    parentLabeledAt: '2026-01-01T00:00:01Z',
+    viewerDidAuthor: true,
+    parentLastReadyEvent: { event: 'labeled', actor: 'maintainer', at: '2026-01-01T00:00:01Z' },
+    ...overrides,
+  });
+  const eligibleWith = (options) => {
+    try {
+      return createQueueEvidence({
+        snapshot: queueSnapshot(options),
+        purpose: 'queueExhaustion',
+        runInstanceFingerprint: queueRun.instanceFingerprint,
+        configFingerprint: queueRun.configFingerprint,
+        configuredBaseBranch: queueRun.configuredBaseBranch,
+      }).eligibleIssueNumbers.join(',');
+    } catch {
+      return 'invalid';
+    }
+  };
+  await check('a loop repair is eligible through its parent\'s trusted loop-ready', () =>
+    eligibleWith({ repair: repairFacts() }) === '7');
+  await check('a repair is not eligible when the loop did not write it, it was edited, or its parent authorization moved', () =>
+    eligibleWith({ repair: repairFacts({ viewerDidAuthor: false }) }) === ''
+    && eligibleWith({ repair: repairFacts(), lastEditedAt: '2026-01-01T00:00:03Z' }) === ''
+    && eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'unlabeled', actor: 'maintainer', at: '2026-01-01T00:00:05Z' } }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'labeled', actor: 'stranger', at: '2026-01-01T00:00:05Z' } }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentLastReadyEvent: null }) }) === '');
+  await check('a queue item needs loop-ready, or loop-repair with repair facts that match its provenance', () =>
+    eligibleWith({ labels: ['loop-repair'] }) === ''
+    && eligibleWith({ repair: repairFacts(), labels: ['loop-ready'] }) === ''
+    && ['', 'invalid'].includes(eligibleWith({ repair: repairFacts({ parentLabeledBy: 'someone-else' }) })));
   await check('queue evidence rejects incomplete or invalidated snapshots', () => {
     const incomplete = queueSnapshot({ incomplete: 'openIssues' });
     const invalidated = invalidateSnapshot(queueSnapshot(), 'WAIT_BOUNDARY');
