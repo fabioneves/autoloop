@@ -14,6 +14,12 @@
 //               before every scan and removes the label once the condition has
 //               cleared, so the unit comes back without a human.
 //
+//   --block     A genuine human decision: trust, an irreversible act, or a product
+//               value no source states. A machine comment records the reason
+//               code and the one-line question; the labels swap to loop-blocked
+//               plus the gate label in one edit, and loop-ready stays. A human
+//               answers with `/answer <decision>` on the issue.
+//
 //   --decide    A judgment call the loop made itself: the recommended option,
 //               its alternatives and why. A machine comment records it and the
 //               issue is labelled `loop-decided`; a human reverses it by replying
@@ -32,6 +38,7 @@
 // Usage:
 //   node tools/agentic/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
 //   node tools/agentic/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720>) [--note <text>]
+//   node tools/agentic/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>]
 //   node tools/agentic/unit.mjs --decide --issue <N> --choice <text> --why <text> [--alternatives "<a>; <b>"]
 //   node tools/agentic/unit.mjs --lift
 //   node tools/agentic/unit.mjs --digest [--post]
@@ -46,6 +53,9 @@ import { extractConfig } from './config-contract.mjs';
 const TIMEOUT_MS = 30_000;
 const WAIT_MARKER_RE = /<!-- autoloop-waiting-v1 (\{[^\n]*?\}) -->/gu;
 const DECISION_MARKER_RE = /<!-- autoloop-decision-v1 (\{[^\n]*?\}) -->/gu;
+const BLOCK_MARKER_RE = /<!-- autoloop-block-v1 (\{[^\n]*?\}) -->/gu;
+const REASON_RE = /^[A-Z][A-Z0-9_]*$/u;
+const BLOCK_GATES = Object.freeze(['human:decide', 'human:authorize']);
 const DECISION_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const SHA_RE = /^[0-9a-f]{7,40}$/u;
 const MAX_WAIT_MINUTES = 720;
@@ -276,6 +286,57 @@ export function markDecided({ issue, choice, alternatives = [], why, run, now = 
   return { ok: true, issue, disposition: 'decided', decision };
 }
 
+export function blockMarker(block) {
+  return `<!-- autoloop-block-v1 ${JSON.stringify(block)} -->`;
+}
+
+/** Pure: the newest well-formed block in a comment body, or null. */
+export function parseBlock(body) {
+  let newest = null;
+  for (const match of String(body ?? '').matchAll(BLOCK_MARKER_RE)) {
+    try {
+      const parsed = JSON.parse(match[1]);
+      if (
+        positive(parsed?.issue) && parsed.class === 'human' && REASON_RE.test(parsed.reason ?? '')
+        && text(parsed.question) && !parsed.question.includes('\n') && Number.isFinite(Date.parse(parsed.at))
+      ) newest = parsed;
+    } catch {
+      // An unparseable marker is not a block; an earlier valid one still stands.
+    }
+  }
+  return newest;
+}
+
+export function markBlocked({ issue, reason, question, gate = 'human:decide', note = '', run, now = Date.now() }) {
+  if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
+  if (!REASON_RE.test(reason ?? '')) return refusal('INVALID_ARGS', '--reason: expected an UPPER_SNAKE reason code');
+  if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
+  if (!BLOCK_GATES.includes(gate)) return refusal('INVALID_ARGS', `--gate: expected one of ${BLOCK_GATES.join(', ')}`);
+  const view = run('gh', ['issue', 'view', String(issue), '--json', 'state,labels']);
+  let facts = null;
+  try { facts = view.ok ? JSON.parse(view.stdout) : null; } catch { facts = null; }
+  if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+  const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString() };
+  const body = [
+    blockMarker(block),
+    `**autoloop: blocked — needs a human decision** (\`${reason}\`)`,
+    '',
+    block.question,
+    ...(note ? ['', note] : []),
+    '',
+    'Reply `/answer <your decision>` on this issue. The loop resumes it first at its next start; nothing else needs changing.',
+  ].join('\n');
+  const comment = run('gh', ['issue', 'comment', String(issue), '--body', body]);
+  if (!comment.ok) return refusal('GH_FAILED', `comment on #${issue} failed: ${comment.stderr}`);
+  const stale = (facts.labels ?? []).map((label) => label?.name ?? label)
+    .filter((name) => name === 'loop-started' || name.startsWith('loop:'));
+  const edit = ['issue', 'edit', String(issue), '--add-label', `loop-blocked,${gate}`,
+    ...(stale.length > 0 ? ['--remove-label', stale.join(',')] : [])];
+  const labelled = run('gh', edit);
+  if (!labelled.ok) return refusal('GH_FAILED', `labels on #${issue} failed: ${labelled.stderr}`);
+  return { ok: true, issue, disposition: 'blocked', block };
+}
+
 /** Lift every wait whose condition has cleared. Never throws: a failure is
  *  reported and the waiting issue stays waiting, which is the safe side. */
 export function liftWaits({ base, run, now = Date.now() }) {
@@ -323,9 +384,11 @@ function questionLine(body) {
 export function digestRows(issues, prs) {
   return [...(issues ?? []), ...(prs ?? [])]
     .map((item) => {
+      const marked = (item.comments ?? []).map((comment) => parseBlock(comment.body))
+        .findLast((entry) => entry !== null)?.question ?? null;
       const comments = (item.comments ?? [])
         .filter((comment) => waitCondition([comment.body]) === null && parseDecision(comment.body) === null);
-      const question = comments.map((comment) => questionLine(comment.body))
+      const question = marked ?? comments.map((comment) => questionLine(comment.body))
         .findLast((line) => line !== null) ?? null;
       return {
         number: item.number,
@@ -419,11 +482,11 @@ export function postDigest({ run, now = Date.now() }) {
 }
 
 export function parseArgs(args) {
-  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', choice: null, why: null, alternatives: [], error: null };
+  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', error: null };
   const value = (index) => args[index + 1];
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
-    if (['--obsolete', '--wait', '--decide', '--lift', '--digest', '--self-test'].includes(flag)) {
+    if (['--obsolete', '--wait', '--block', '--decide', '--lift', '--digest', '--self-test'].includes(flag)) {
       if (parsed.mode !== null) return { ...parsed, error: 'expected one mode' };
       parsed.mode = flag.slice(2);
     } else if (flag === '--on-base-red') {
@@ -435,7 +498,7 @@ export function parseArgs(args) {
       if (number === null) return { ...parsed, error: `${flag}: expected a positive number` };
       parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes' }[flag]] = number;
       index += 1;
-    } else if (['--commit', '--note', '--choice', '--why'].includes(flag)) {
+    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate'].includes(flag)) {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
       parsed[flag.slice(2)] = value(index);
       index += 1;
@@ -447,7 +510,7 @@ export function parseArgs(args) {
       return { ...parsed, error: `unknown argument ${flag}` };
     }
   }
-  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --decide, --lift, --digest or --self-test' };
+  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --decide, --lift, --digest or --self-test' };
   return parsed;
 }
 
@@ -676,8 +739,50 @@ function selfTest() {
   check('a decision comment is never read as a blocked unit\'s question',
     blockedThenDecided[0].question === 'Blocked: what length?');
 
+  const block = { issue: 7, class: 'human', reason: 'UNSPECIFIED_VALUE', question: 'What maximum device-label length applies?', at: decidedAt };
+  check('a block marker round-trips, the newest wins, junk is skipped',
+    JSON.stringify(parseBlock(blockMarker(block))) === JSON.stringify(block)
+    && parseBlock(`${blockMarker(block)}\n${blockMarker({ ...block, question: 'later?' })}`).question === 'later?'
+    && parseBlock(blockMarker({ ...block, class: 'fix' })) === null
+    && parseBlock(blockMarker({ ...block, reason: 'lower case' })) === null
+    && parseBlock('<!-- autoloop-block-v1 {nope} -->') === null);
+  const unblockable = fakeRun([]);
+  check('a block without a reason code or a one-line question is refused before any call',
+    markBlocked({ issue: 7, reason: '', question: 'q?', run: unblockable.run }).code === 'INVALID_ARGS'
+    && markBlocked({ issue: 7, reason: 'X', question: 'two\nlines', run: unblockable.run }).code === 'INVALID_ARGS'
+    && markBlocked({ issue: 7, reason: 'X', question: 'q?', gate: 'loop-ready', run: unblockable.run }).code === 'INVALID_ARGS'
+    && unblockable.calls.length === 0);
+  const blocking = fakeRun([
+    ['gh issue view 7', JSON.stringify({ state: 'OPEN', labels: [{ name: 'loop-ready' }, { name: 'loop-started' }, { name: 'loop:05-implement' }] })],
+    ['gh issue comment 7', ''],
+    ['gh issue edit 7', ''],
+  ]);
+  const blocked = markBlocked({ issue: 7, reason: block.reason, question: block.question, run: blocking.run, now: Date.parse(decidedAt) });
+  const labelEdit = blocking.calls.find((call) => call.startsWith('gh issue edit 7'));
+  check('a block comments the marker with the /answer form, then swaps labels in one edit, keeping loop-ready',
+    blocked.ok && blocked.disposition === 'blocked'
+    && JSON.stringify(parseBlock(blocking.calls.find((call) => call.startsWith('gh issue comment 7')))) === JSON.stringify(block)
+    && blocking.calls.find((call) => call.startsWith('gh issue comment 7')).includes('/answer')
+    && blocking.calls.indexOf(labelEdit) > blocking.calls.findIndex((call) => call.startsWith('gh issue comment 7'))
+    && labelEdit === 'gh issue edit 7 --add-label loop-blocked,human:decide --remove-label loop-started,loop:05-implement'
+    && !blocking.calls.some((call) => call.includes('--body-file')));
+  const authorizing = fakeRun([['gh issue view 8', '{"state":"OPEN","labels":[]}'], ['gh issue comment 8', ''], ['gh issue edit 8', '']]);
+  check('a protected-path block carries human:authorize and removes nothing it did not find',
+    markBlocked({ issue: 8, reason: 'PROTECTED_PATH', question: 'May this unit touch .github/workflows?', gate: 'human:authorize', run: authorizing.run }).ok
+    && authorizing.calls.at(-1) === 'gh issue edit 8 --add-label loop-blocked,human:authorize');
+  const blockClosed = fakeRun([['gh issue view 7', '{"state":"CLOSED","labels":[]}']]);
+  check('a block on an issue that is not open is refused',
+    markBlocked({ issue: 7, reason: 'X', question: 'q?', run: blockClosed.run }).code === 'ISSUE_NOT_OPEN');
+  const markedRows = digestRows([{
+    number: 7, title: 'Labels', labels: [{ name: 'human:decide' }],
+    comments: [{ body: `${blockMarker(block)}\n**autoloop: blocked**` }, { body: 'a later note' }],
+  }], []);
+  check('the digest reads a marked block\'s own question first',
+    markedRows[0].question === block.question);
+
   check('arguments parse and refuse',
-    parseArgs(['--decide', '--issue', '5', '--choice', 'c', '--why', 'w', '--alternatives', 'a; b']).alternatives.join('|') === 'a|b'
+    parseArgs(['--block', '--issue', '7', '--reason', 'X', '--question', 'q?', '--gate', 'human:authorize']).gate === 'human:authorize'
+    && parseArgs(['--decide', '--issue', '5', '--choice', 'c', '--why', 'w', '--alternatives', 'a; b']).alternatives.join('|') === 'a|b'
     && parseArgs(['--wait', '--issue', '5', '--on-issue', '4']).onIssue === 4
     && parseArgs(['--obsolete', '--issue', '5', '--commit', 'abc1234']).commit === 'abc1234'
     && parseArgs(['--wait', '--issue', '5', '--minutes', '60']).minutes === 60
@@ -695,14 +800,14 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`unit: ${parsed.error}`);
-    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --decide --issue N --choice T --why T [--alternatives "A; B"] | --lift | --digest [--post] | --self-test');
+    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --choice T --why T [--alternatives "A; B"] | --lift | --digest [--post] | --self-test');
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
   const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
   const run = realRun(root);
-  if (parsed.mode === 'decide') {
-    const outcome = markDecided({ ...parsed, run });
+  if (parsed.mode === 'decide' || parsed.mode === 'block') {
+    const outcome = parsed.mode === 'decide' ? markDecided({ ...parsed, run }) : markBlocked({ ...parsed, run });
     console.log(JSON.stringify(outcome, null, 1));
     process.exit(outcome.ok ? 0 : 1);
   }
