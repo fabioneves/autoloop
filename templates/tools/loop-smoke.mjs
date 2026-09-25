@@ -76,7 +76,7 @@ const STRIPPED_ENV_KEYS = [
   'GH_CONFIG_DIR',
 ];
 const FIXTURE_CONFIG = {
-  version: '0.26.0',
+  version: '0.27.0',
   baseBranch: 'main',
   gate: { command: 'true', quickCommand: null, setupCommand: null },
   merge: { policy: 'manual' },
@@ -84,7 +84,6 @@ const FIXTURE_CONFIG = {
   review: { checklistPath: 'docs/agentic/checklist.md' },
   caps: {
     gateRetriesPerUnit: 2,
-    reviseRoundsPerPr: 3,
     codeReviewRoundsPerUnit: 5,
     sliceMaxLines: 700,
     sliceMaxFiles: 10,

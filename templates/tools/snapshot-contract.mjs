@@ -507,7 +507,78 @@ function validProvenance(value) {
     && validDateTime(value.labeledAt);
 }
 
+const REPAIR_FACT_KEYS = [
+  'parent', 'parentLabeledBy', 'parentLabeledAt', 'viewerDidAuthor', 'parentLastReadyEvent',
+  'parentState', 'parentStateReason', 'parentBlocked', 'parentDelivered', 'blocksParent',
+];
+const REPAIRS_PER_PARENT = 3;
+
+// A loop-filed repair (unit.mjs --repair) carries no loop-ready of its own. Its
+// authorization is the parent's: the provenance it copies, which must still be
+// the parent's newest loop-ready label event, re-read at every scan.
+function validRepairFacts(value) {
+  const last = value?.parentLastReadyEvent;
+  return hasExactKeys(value, REPAIR_FACT_KEYS)
+    && positiveInteger(value.parent)
+    && nonEmptyString(value.parentLabeledBy)
+    && validDateTime(value.parentLabeledAt)
+    && typeof value.viewerDidAuthor === 'boolean'
+    && ISSUE_STATES.has(value.parentState)
+    && nullableString(value.parentStateReason)
+    && typeof value.parentBlocked === 'boolean'
+    && typeof value.parentDelivered === 'boolean'
+    && typeof value.blocksParent === 'boolean'
+    && (last === null || (
+      hasExactKeys(last, ['event', 'actor', 'at'])
+      && ['labeled', 'unlabeled'].includes(last.event)
+      && nullableString(last.actor)
+      && validDateTime(last.at)
+    ));
+}
+
+// An open parent authorizes its repairs until a human blocks it; a delivered
+// one keeps authorizing them (a carve-out's remainder outlives its parent); a
+// parent a human closed any other way revokes them.
+function repairAuthorized(repair) {
+  const last = repair.parentLastReadyEvent;
+  const parentStanding = !repair.parentBlocked && (
+    repair.parentState === 'OPEN'
+    || (repair.parentStateReason === 'COMPLETED' && repair.parentDelivered)
+  );
+  return repair.viewerDidAuthor === true
+    && parentStanding
+    && last?.event === 'labeled'
+    && last.actor === repair.parentLabeledBy
+    && Date.parse(last.at) === Date.parse(repair.parentLabeledAt);
+}
+
+/** The queue numbers the repair budget allows: every ordinary item, and the
+ *  oldest REPAIRS_PER_PARENT repairs of each parent. */
+function repairBudgetAllows(items) {
+  const allowed = new Set();
+  const perParent = new Map();
+  for (const item of [...items].sort((left, right) => left.number - right.number)) {
+    if (item.repair === undefined) {
+      allowed.add(item.number);
+      continue;
+    }
+    const seen = perParent.get(item.repair.parent) ?? 0;
+    perParent.set(item.repair.parent, seen + 1);
+    if (seen < REPAIRS_PER_PARENT) allowed.add(item.number);
+  }
+  return allowed;
+}
+
 function validQueueItem(item, complete) {
+  if (item !== null && typeof item === 'object' && 'repair' in item) {
+    const { repair, ...ordinary } = item;
+    return validRepairFacts(repair)
+      && (item.provenance === null || (
+        item.provenance?.labeledBy === repair.parentLabeledBy
+        && item.provenance?.labeledAt === repair.parentLabeledAt
+      ))
+      && validQueueItem(ordinary, complete);
+  }
   const expectedDependencies = blockedByIssueNumbers(item?.body);
   const dependencyNumbers = Array.isArray(item?.dependencies)
     ? item.dependencies.map((dependency) => dependency?.number)
@@ -1092,6 +1163,7 @@ function eligibleQueueIssueNumbers(snapshot) {
   const recovering = new Set(
     snapshot.sections.lifecycleMarkers.items.map((marker) => marker.issueNumber),
   );
+  const withinBudget = repairBudgetAllows(snapshot.sections.queue.items);
   return snapshot.sections.queue.items
     .filter((issue) => {
       const labeledBy = issue.provenance?.labeledBy;
@@ -1106,7 +1178,14 @@ function eligibleQueueIssueNumbers(snapshot) {
           && evidence.createdAt === labeledAt));
       const bodyUnchanged = issue.lastEditedAt === null
         || Date.parse(issue.lastEditedAt) <= Date.parse(labeledAt);
+      const authorized = issue.repair === undefined
+        ? issue.labels.includes('loop-ready')
+        : issue.labels.includes('loop-repair')
+          && !issue.labels.includes('loop-ready')
+          && repairAuthorized(issue.repair);
       return trusted
+        && authorized
+        && withinBudget.has(issue.number)
         && bodyUnchanged
         && !blocked.has(issue.number)
         && !issue.labels.includes('loop-blocked')
@@ -1430,7 +1509,7 @@ async function selfTest() {
     url: 'https://example.test/issues/7#issuecomment-1',
     ...overrides,
   });
-  const queueSnapshot = ({ blocked = false, waiting = false, incomplete = null } = {}) => {
+  const queueSnapshot = ({ blocked = false, waiting = false, incomplete = null, repair = null, lastEditedAt = null, labels = null } = {}) => {
     const sections = Object.fromEntries(
       SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
     );
@@ -1439,8 +1518,8 @@ async function selfTest() {
       title: 'queued',
       body: 'body',
       updatedAt: '2026-01-01T00:00:00Z',
-      lastEditedAt: null,
-      labels: ['loop-ready', ...(blocked ? ['loop-blocked'] : []), ...(waiting ? ['loop-waiting'] : [])],
+      lastEditedAt,
+      labels: labels ?? [repair === null ? 'loop-ready' : 'loop-repair', ...(blocked ? ['loop-blocked'] : []), ...(waiting ? ['loop-waiting'] : [])],
     });
     sections.repo = completeSection([{
       owner: 'owner',
@@ -1462,6 +1541,7 @@ async function selfTest() {
         labeledBy: 'maintainer',
         labeledAt: '2026-01-01T00:00:01Z',
       },
+      ...(repair === null ? {} : { repair }),
     }]);
     sections.openIssues = completeSection([issue]);
     sections.blockedIssues = completeSection(blocked ? [issue] : []);
@@ -1617,6 +1697,57 @@ async function selfTest() {
         && snapshot.sections.queue.items.length === 1
         && verifyQueueEvidence(evidence, snapshot, queueRun);
     }));
+  const repairFacts = (overrides = {}) => ({
+    parent: 248,
+    parentLabeledBy: 'maintainer',
+    parentLabeledAt: '2026-01-01T00:00:01Z',
+    viewerDidAuthor: true,
+    parentLastReadyEvent: { event: 'labeled', actor: 'maintainer', at: '2026-01-01T00:00:01Z' },
+    parentState: 'OPEN',
+    parentStateReason: null,
+    parentBlocked: false,
+    parentDelivered: false,
+    blocksParent: false,
+    ...overrides,
+  });
+  const eligibleWith = (options) => {
+    try {
+      return createQueueEvidence({
+        snapshot: queueSnapshot(options),
+        purpose: 'queueExhaustion',
+        runInstanceFingerprint: queueRun.instanceFingerprint,
+        configFingerprint: queueRun.configFingerprint,
+        configuredBaseBranch: queueRun.configuredBaseBranch,
+      }).eligibleIssueNumbers.join(',');
+    } catch {
+      return 'invalid';
+    }
+  };
+  await check('a loop repair is eligible through its parent\'s trusted loop-ready', () =>
+    eligibleWith({ repair: repairFacts() }) === '7');
+  await check('a repair is not eligible when the loop did not write it, it was edited, or its parent authorization moved', () =>
+    eligibleWith({ repair: repairFacts({ viewerDidAuthor: false }) }) === ''
+    && eligibleWith({ repair: repairFacts(), lastEditedAt: '2026-01-01T00:00:03Z' }) === ''
+    && eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'unlabeled', actor: 'maintainer', at: '2026-01-01T00:00:05Z' } }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'labeled', actor: 'stranger', at: '2026-01-01T00:00:05Z' } }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentLastReadyEvent: null }) }) === '');
+  await check('a repair is revoked while its parent is blocked, or closed without delivery', () =>
+    eligibleWith({ repair: repairFacts({ parentBlocked: true }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'NOT_PLANNED' }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'COMPLETED' }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'COMPLETED', parentDelivered: true }) }) === '7');
+  await check('the parent event matches by instant, not by spelling', () =>
+    eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'labeled', actor: 'maintainer', at: '2026-01-01T00:00:01.000Z' } }) }) === '7');
+  await check('at most three repairs per parent are eligible, the oldest first', () => {
+    const repairItem = (number, parent) => ({ number, repair: { parent } });
+    return [...repairBudgetAllows([
+      repairItem(12, 248), repairItem(10, 248), repairItem(30, 9), repairItem(11, 248), repairItem(13, 248), { number: 5 },
+    ])].sort((left, right) => left - right).join(',') === '5,10,11,12,30';
+  });
+  await check('a queue item needs loop-ready, or loop-repair with repair facts that match its provenance', () =>
+    eligibleWith({ labels: ['loop-repair'] }) === ''
+    && eligibleWith({ repair: repairFacts(), labels: ['loop-ready'] }) === ''
+    && ['', 'invalid'].includes(eligibleWith({ repair: repairFacts({ parentLabeledBy: 'someone-else' }) })));
   await check('queue evidence rejects incomplete or invalidated snapshots', () => {
     const incomplete = queueSnapshot({ incomplete: 'openIssues' });
     const invalidated = invalidateSnapshot(queueSnapshot(), 'WAIT_BOUNDARY');

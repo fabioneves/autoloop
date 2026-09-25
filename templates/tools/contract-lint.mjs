@@ -162,6 +162,21 @@ const STALE_ROUTE_PATTERNS = Object.freeze([
     message: 'a missing executable is a capability failure, not a bounded-outage fallback trigger',
   },
   {
+    code: 'BLOCK_WHEN_UNSURE',
+    pattern:
+      /\bmost conservative action\b|\b(?:ambiguous|outside autonomy)\b(?:[^.\n]|\n(?!\s*\n)){0,160}\bhuman block\b/giu,
+    message: 'a judgment call is a recorded decision (unit.mjs --decide); only the closed '
+      + 'human classes block',
+  },
+  {
+    code: 'RAW_HUMAN_BLOCK',
+    pattern: /\bapply\s+`loop-blocked`\s*\+\s*`human:decide`|--add-label\s+[^`\n]*\bloop-blocked\b/giu,
+    message: 'a block goes through unit.mjs --block, which records the question and its /answer form',
+    // Instructions are the target. A tool that recognizes the raw command (the
+    // label-swap hook reacting to a human's or a legacy run's edit) is not one.
+    exemptMatch: ({ path }) => String(path).endsWith('.mjs'),
+  },
+  {
     code: 'ARCH_FRESHNESS_FIELD',
     pattern: /\bLast-verified\b/giu,
     message: 'ARCH freshness comes from Git history, not shared metadata',
@@ -217,7 +232,6 @@ export function lintClaimRegexDefinitions(files) {
 // silent by construction.
 const SCAFFOLDED_CAP_KEYS = Object.freeze([
   'gateRetriesPerUnit',
-  'reviseRoundsPerPr',
   'codeReviewRoundsPerUnit',
   'sliceMaxLines',
   'sliceMaxFiles',
@@ -417,24 +431,22 @@ function selfTest() {
   const scaffoldCaps = [
     'caps: {',
     '  gateRetriesPerUnit: 2,',
-    '  reviseRoundsPerPr: 10,',
     '  codeReviewRoundsPerUnit: 20,',
     '  sliceMaxLines: 700,',
     '  sliceMaxFiles: 10,',
     '}',
   ].join('\n');
-  const skillCaps = (reviseRounds) => [
+  const skillCaps = (reviewRounds) => [
     '"caps": {',
     '  "gateRetriesPerUnit": 2,',
-    `  "reviseRoundsPerPr": ${reviseRounds},`,
-    '  "codeReviewRoundsPerUnit": 20,',
+    `  "codeReviewRoundsPerUnit": ${reviewRounds},`,
     '  "sliceMaxLines": 700,',
     '  "sliceMaxFiles": 10',
     '}',
   ].join('\n');
   const capsAgree = lintScaffoldCapDrift({
     'templates/tools/scaffold.mjs': scaffoldCaps,
-    'skills/setup/SKILL.md': skillCaps(10),
+    'skills/setup/SKILL.md': skillCaps(20),
   });
   const capsDrifted = lintScaffoldCapDrift({
     'templates/tools/scaffold.mjs': scaffoldCaps,
@@ -442,7 +454,7 @@ function selfTest() {
   });
   const capsUnreadable = lintScaffoldCapDrift({
     'templates/tools/scaffold.mjs': 'caps: { gateRetriesPerUnit: 2 }',
-    'skills/setup/SKILL.md': skillCaps(10),
+    'skills/setup/SKILL.md': skillCaps(20),
   });
   const wrappedRefusal = lintRoutingText(
     '**A human merges.** v0.40 refuses\n  non-manual run open because prompt provenance is unverified.',
@@ -463,8 +475,8 @@ function selfTest() {
       'a skill cap literal the scaffold does not write is drift',
       capsDrifted.length === 1
         && capsDrifted[0].code === 'SCAFFOLD_CAP_DRIFT'
-        && capsDrifted[0].message.includes('caps.reviseRoundsPerPr is 3')
-        && capsDrifted[0].message.includes('scaffold.mjs writes 10'),
+        && capsDrifted[0].message.includes('caps.codeReviewRoundsPerUnit is 3')
+        && capsDrifted[0].message.includes('scaffold.mjs writes 20'),
     ],
     [
       'an unparseable scaffolded caps block fails rather than passing silently',
@@ -505,6 +517,20 @@ function selfTest() {
         && stale[4].code === 'LEGACY_ADAPTER_OPTION_PATH'
         && stale[5].code === 'CAPABILITY_FAILURE_AS_OUTAGE'
         && stale[6].code === 'ARCH_FRESHNESS_FIELD',
+    ],
+    [
+      'blocking when unsure, and a raw block, are stale; the recorded forms are not',
+      lintRoutingText('In those cases: take the most conservative action that keeps the run moving.')
+        .map((finding) => finding.code).join(',') === 'BLOCK_WHEN_UNSURE'
+        && lintRoutingText('If the issue is a duplicate, ambiguous, outside autonomy, or\nrequires a choice, transition to the appropriate human block.')
+          .map((finding) => finding.code).join(',') === 'BLOCK_WHEN_UNSURE'
+        && lintRoutingText('For a LIVE unit, apply `loop-blocked` + `human:decide` with the reason.')
+          .map((finding) => finding.code).join(',') === 'RAW_HUMAN_BLOCK'
+        && lintRoutingText('gh issue edit 7 --add-label loop-blocked,human:decide')
+          .map((finding) => finding.code).join(',') === 'RAW_HUMAN_BLOCK'
+        && lintRoutingText("['gh issue edit 4 --add-label loop-blocked', /BLOCKED/],", 'templates/tools/label-swap-reminder.mjs').length === 0
+        && lintRoutingText('Block it with `unit.mjs --block --reason X`; `loop-blocked` removes it from the queue.').length === 0
+        && lintRoutingText('An ambiguous premise is a `decide`: record it with `unit.mjs --decide`.').length === 0,
     ],
     [
       'claim grammar has one owner',

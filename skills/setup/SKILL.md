@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.51.0 · starting
+∞ setup · v0.52.0 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -35,9 +35,9 @@ Doctor mode replaces the ribbon with its own single line: `∞ doctor ─ <audit
 Setup is idempotent and has four modes:
 
 - Fresh install: `docs/agentic/STATE.md` is absent.
-- Migration: STATE contains a migratable schema older than `0.26.0` (`0.23.0`, `0.24.0`, or
-  `0.25.0`).
-- Reconfigure: STATE contains schema `0.26.0`.
+- Migration: STATE contains a migratable schema older than `0.27.0` (`0.23.0`, `0.24.0`,
+  `0.25.0`, or `0.26.0`).
+- Reconfigure: STATE contains schema `0.27.0`.
 - Doctor: the invocation contains `doctor`; read-only and never writes.
 
 Autoloop runs on Claude Code only. `tools/agentic/dispatch.mjs` spawns `claude -p` directly for
@@ -100,11 +100,11 @@ older installed contract to validate its own migration.
 
 ## Project configuration
 
-Schema `0.26.0` stores repository policy, never session intent:
+Schema `0.27.0` stores repository policy, never session intent:
 
 ```json autoloop-config
 {
-  "version": "0.26.0",
+  "version": "0.27.0",
   "baseBranch": "main",
   "gate": {
     "command": "npm test",
@@ -116,7 +116,6 @@ Schema `0.26.0` stores repository policy, never session intent:
   "review": { "checklistPath": "docs/agentic/checklist.md" },
   "caps": {
     "gateRetriesPerUnit": 2,
-    "reviseRoundsPerPr": 10,
     "codeReviewRoundsPerUnit": 20,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10
@@ -291,7 +290,6 @@ Global defaults contain only non-project preferences:
   "tracker": { "provider": "none" },
   "caps": {
     "gateRetriesPerUnit": 2,
-    "reviseRoundsPerPr": 10,
     "codeReviewRoundsPerUnit": 20,
     "sliceMaxLines": 700,
     "sliceMaxFiles": 10
@@ -328,7 +326,7 @@ Copy or reconcile all required tools. A tool importing another tool is not optio
 | `tools/agentic/prime.mjs` | `tools/prime.mjs` | One-call config, base, and snapshot prime |
 | `tools/agentic/publish-verdict.mjs` | `tools/publish-verdict.mjs` | Universal exact-head terminal finalizer and CheckRun publisher |
 | `tools/agentic/release-verify.mjs` | `tools/release-verify.mjs` | Portable release/version helpers |
-| `tools/agentic/review-contract.mjs` | `tools/review-contract.mjs` | Convergence/human-block transition |
+| `tools/agentic/review-contract.mjs` | `tools/review-contract.mjs` | Convergence and cap transitions |
 | `tools/agentic/scan.mjs` | `tools/scan.mjs` | Complete typed startup snapshot |
 | `tools/agentic/snapshot-contract.mjs` | `tools/snapshot-contract.mjs` | Snapshot completeness and invalidation |
 | `tools/agentic/session-preflight.sh` | same name | Session injection |
@@ -620,8 +618,8 @@ no longer owns it and the merge would replace it. Curate LESSONS like `ARCH.md` 
 against a size budget — and delete any lesson a guard rule, contract, or hook now enforces: the
 mechanism is the memory at that point.
 
-Create lifecycle and step labels idempotently, including `loop-waiting` and `loop-obsolete` (`unit.mjs`
-also creates either one on first use). Do not create non-manual policy labels.
+Create lifecycle and step labels idempotently, including `loop-waiting`, `loop-obsolete`,
+`loop-decided` and `loop-repair` (`unit.mjs` also creates each one on first use). Do not create non-manual policy labels.
 
 Never mutate default/release branch protection, GitHub Apps, or credentials without explicit user
 authorization. Present the exact desired settings and verify after changes.

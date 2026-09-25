@@ -1484,6 +1484,41 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'dispatch.mjs', anchor: "const CODE_REVIEW_ROLES = new Set(['diff-review', 'code-review', 'doubt-review']);" }),
     ]),
   }),
+  Object.freeze({
+    id: 'a-fix-outside-the-unit-had-no-way-into-the-queue',
+    date: '2026-09-25',
+    symptom: 'A manual session found a unit gate-red because the base failed a dependency '
+      + 'audit, fixed it in a separate PR first and then delivered the unit; the loop could '
+      + 'only file that fix without loop-ready, where no run could ever take it.',
+    cause: 'Only a human could make an issue eligible. Since 0.52.0 unit.mjs --repair files it '
+      + 'under the parent\'s loop-ready, the scan and contract re-check that provenance each '
+      + 'run, and the guard keeps loop-repair for unit.mjs alone.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'unit.mjs', anchor: 'export function markRepair(' }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: 'function repairAuthorized(repair) {' }),
+      Object.freeze({ file: 'scan.mjs', anchor: 'export function repairItemFacts(' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'function appliesRepairLabel(words) {' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'units-blocked-on-calls-the-loop-could-make',
+    date: '2026-09-25',
+    symptom: 'Two manual queue sessions resolved blocks the loop would have held for a human '
+      + '(a unit blocked only by inaccurate comment claims, a real defect in delivered work, a '
+      + 'provenance rule that rejected a correct value), each with a one-sentence recommendation, '
+      + 'and merged 15-20 PRs each in two days.',
+    cause: 'Ambiguity, scope and a Critical at the review cap were human blocks by rule, and a '
+      + 'block carried no machine-readable question. Since 0.52.0 only the closed human classes '
+      + 'block (unit.mjs --block), and a judgment call is a recorded, reversible decision '
+      + '(unit.mjs --decide).',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'unit.mjs', anchor: 'export function markDecided(' }),
+      Object.freeze({ file: 'unit.mjs', anchor: 'export function markBlocked(' }),
+      Object.freeze({ file: 'contract-lint.mjs', anchor: "code: 'BLOCK_WHEN_UNSURE'," }),
+      Object.freeze({ file: 'contract-lint.mjs', anchor: "code: 'RAW_HUMAN_BLOCK'," }),
+      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '## Autonomy: fix, decide, or block' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

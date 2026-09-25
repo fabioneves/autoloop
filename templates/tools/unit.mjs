@@ -14,10 +14,29 @@
 //               before every scan and removes the label once the condition has
 //               cleared, so the unit comes back without a human.
 //
+//   --block     A genuine human decision: trust, an irreversible act, or a product
+//               value no source states. A machine comment records the reason
+//               code and the one-line question; the labels swap to loop-blocked
+//               plus the gate label in one edit, and loop-ready stays. A human
+//               answers with `/answer <decision>` on the issue.
+//
+//   --repair    Work a unit needs that is outside its own lane: an issue the loop
+//               files itself, labelled `loop-repair` (never `loop-ready`) with a
+//               body marker copying the parent's trusted `loop-ready` provenance,
+//               which is what makes it eligible. At most three open per parent,
+//               one level deep. `--blocks-parent` also puts the parent on
+//               `loop-waiting` until the repair closes.
+//
+//   --decide    A judgment call the loop made itself: the recommended option,
+//               its alternatives and why. A machine comment records it and the
+//               issue is labelled `loop-decided`; a human reverses it by replying
+//               `/answer <what instead>`.
+//
 //   --digest    Every decision waiting on a human, one row each: open loop-blocked
-//               issues and human:authorize PRs. `--post` rewrites the body of the
-//               one open `loop-digest` issue (created and pinned when absent), so
-//               the list is always current. Prime posts it at every close and park.
+//               issues and human:authorize PRs, then the loop's own decisions of
+//               the last seven days. `--post` rewrites the body of the one open
+//               `loop-digest` issue (created and pinned when absent), so the list
+//               is always current. Prime posts it at every close and park.
 //
 // Neither disposition edits the issue body: an edit after `loop-ready` makes
 // the issue ineligible, which is the stop this tool exists to remove. Nor do
@@ -26,6 +45,9 @@
 // Usage:
 //   node tools/agentic/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
 //   node tools/agentic/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720>) [--note <text>]
+//   node tools/agentic/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>]
+//   node tools/agentic/unit.mjs --repair --parent <N> --title <text> --body-file <path> [--blocks-parent]
+//   node tools/agentic/unit.mjs --decide --issue <N> --choice <text> --why <text> [--alternatives "<a>; <b>"]
 //   node tools/agentic/unit.mjs --lift
 //   node tools/agentic/unit.mjs --digest [--post]
 //   node tools/agentic/unit.mjs --self-test
@@ -38,11 +60,25 @@ import { extractConfig } from './config-contract.mjs';
 
 const TIMEOUT_MS = 30_000;
 const WAIT_MARKER_RE = /<!-- autoloop-waiting-v1 (\{[^\n]*?\}) -->/gu;
+const DECISION_MARKER_RE = /<!-- autoloop-decision-v1 (\{[^\n]*?\}) -->/gu;
+const BLOCK_MARKER_RE = /<!-- autoloop-block-v1 (\{[^\n]*?\}) -->/gu;
+const REASON_RE = /^[A-Z][A-Z0-9_]*$/u;
+const BLOCK_GATES = Object.freeze(['human:decide', 'human:authorize']);
+const REPAIR_MARKER_RE = /<!-- autoloop-repair-v1 (\{[^\n]*?\}) -->/gu;
+const REPAIRS_PER_PARENT = 3;
+const LAST_READY_LABEL_JQ = '[.[] | select(.event == "labeled" and .label.name == "loop-ready") | {by: .actor.login, at: .created_at}] | last // empty';
+const BLOCK_LABEL_WINDOW_MS = 5 * 60_000;
+const ANSWER_RE = /^\s*\/answer(?:\s+([\s\S]*))?$/u;
+const WRITE_PERMISSIONS = Object.freeze(['admin', 'maintain', 'write']);
+const LAST_BLOCKED_LABEL_JQ = '[.[] | select(.event == "labeled" and .label.name == "loop-blocked") | .created_at] | last // empty';
+const DECISION_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const SHA_RE = /^[0-9a-f]{7,40}$/u;
 const MAX_WAIT_MINUTES = 720;
 const LABELS = Object.freeze({
   'loop-waiting': { color: 'fbca04', description: 'autoloop: waits on a recorded condition; lifted automatically' },
   'loop-obsolete': { color: 'cfd3d7', description: 'autoloop: premise already delivered; closed with evidence' },
+  'loop-repair': { color: 'd4c5f9', description: 'autoloop: work the loop filed for a loop-ready parent; eligible through the parent' },
+  'loop-decided': { color: 'c5def5', description: 'autoloop: took the recommended option on a judgment call; reversible with /answer' },
   'loop-digest': { color: '5319e7', description: 'autoloop: the decisions waiting on a human, rewritten at every close and park' },
 });
 const GATE_LABEL_RE = /^(?:human:|needs-)/u;
@@ -117,6 +153,15 @@ function baseBranch(root) {
 function remoteBaseOid(run, base) {
   const result = run('git', ['rev-parse', '--verify', `refs/remotes/origin/${base}^{commit}`]);
   return result.ok && SHA_RE.test(result.stdout) ? result.stdout : null;
+}
+
+function issueFacts(run, number, fields) {
+  const view = run('gh', ['issue', 'view', String(number), '--json', fields]);
+  try {
+    return view.ok ? JSON.parse(view.stdout) : null;
+  } catch {
+    return null;
+  }
 }
 
 function issueState(run, number) {
@@ -213,6 +258,174 @@ export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes 
   return { ok: true, issue, disposition: 'waiting', condition };
 }
 
+function text(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+export function decisionMarker(decision) {
+  return `<!-- autoloop-decision-v1 ${JSON.stringify(decision)} -->`;
+}
+
+/** Pure: the newest marker payload in a body that `valid` accepts, or null.
+ *  An unparseable or invalid marker is skipped; an earlier valid one still stands. */
+function newestMarker(pattern, body, valid) {
+  let newest = null;
+  for (const match of String(body ?? '').matchAll(pattern)) {
+    try {
+      const parsed = JSON.parse(match[1]);
+      if (valid(parsed)) newest = parsed;
+    } catch {
+      // not a marker
+    }
+  }
+  return newest;
+}
+
+export function parseDecision(body) {
+  return newestMarker(DECISION_MARKER_RE, body, (parsed) =>
+    positive(parsed?.issue) && text(parsed.choice) && text(parsed.why)
+    && Array.isArray(parsed.alternatives) && parsed.alternatives.every((entry) => typeof entry === 'string')
+    && Number.isFinite(Date.parse(parsed.at)));
+}
+
+export function markDecided({ issue, choice, alternatives = [], why, run, now = Date.now() }) {
+  if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
+  if (!text(choice) || !text(why)) return refusal('INVALID_ARGS', 'expected a non-empty --choice and --why');
+  if (issueState(run, issue) !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+  const decision = {
+    issue,
+    choice: text(choice),
+    alternatives: alternatives.map((entry) => entry.trim()).filter(Boolean),
+    why: text(why),
+    at: new Date(now).toISOString(),
+  };
+  const body = [
+    decisionMarker(decision),
+    `**autoloop: decided** — ${decision.choice}`,
+    '',
+    `Why: ${decision.why}`,
+    ...(decision.alternatives.length > 0 ? [`Alternatives: ${decision.alternatives.join('; ')}`] : []),
+    '',
+    'The loop took the recommended option and kept going. Reply `/answer <what instead>` to reverse it.',
+  ].join('\n');
+  const comment = run('gh', ['issue', 'comment', String(issue), '--body', body]);
+  if (!comment.ok) return refusal('GH_FAILED', `comment on #${issue} failed: ${comment.stderr}`);
+  const label = addLabel(run, issue, 'loop-decided');
+  if (!label.ok) return refusal('GH_FAILED', `label on #${issue} failed: ${label.stderr}`);
+  return { ok: true, issue, disposition: 'decided', decision };
+}
+
+export function blockMarker(block) {
+  return `<!-- autoloop-block-v1 ${JSON.stringify(block)} -->`;
+}
+
+export function parseBlock(body) {
+  return newestMarker(BLOCK_MARKER_RE, body, (parsed) =>
+    positive(parsed?.issue) && parsed.class === 'human' && REASON_RE.test(parsed.reason ?? '')
+    && text(parsed.question) && !parsed.question.includes('\n') && Number.isFinite(Date.parse(parsed.at)));
+}
+
+export function markBlocked({ issue, reason, question, gate = 'human:decide', note = '', run, now = Date.now() }) {
+  if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
+  if (!REASON_RE.test(reason ?? '')) return refusal('INVALID_ARGS', '--reason: expected an UPPER_SNAKE reason code');
+  if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
+  if (!BLOCK_GATES.includes(gate)) return refusal('INVALID_ARGS', `--gate: expected one of ${BLOCK_GATES.join(', ')}`);
+  const facts = issueFacts(run, issue, 'state,labels');
+  if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+  const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString() };
+  const body = [
+    blockMarker(block),
+    `**autoloop: blocked — needs a human decision** (\`${reason}\`)`,
+    '',
+    block.question,
+    ...(note ? ['', note] : []),
+    '',
+    'Reply `/answer <your decision>` on this issue. The loop resumes it first at its next start; nothing else needs changing.',
+  ].join('\n');
+  const comment = run('gh', ['issue', 'comment', String(issue), '--body', body]);
+  if (!comment.ok) return refusal('GH_FAILED', `comment on #${issue} failed: ${comment.stderr}`);
+  const stale = (facts.labels ?? []).map((label) => label?.name ?? label)
+    .filter((name) => name === 'loop-started' || name === 'loop-delivered' || name.startsWith('loop:'));
+  const edit = ['issue', 'edit', String(issue), '--add-label', `loop-blocked,${gate}`,
+    ...(stale.length > 0 ? ['--remove-label', stale.join(',')] : [])];
+  const labelled = run('gh', edit);
+  if (!labelled.ok) return refusal('GH_FAILED', `labels on #${issue} failed: ${labelled.stderr}`);
+  return { ok: true, issue, disposition: 'blocked', block };
+}
+
+export function repairMarker(repair) {
+  return `<!-- autoloop-repair-v1 ${JSON.stringify(repair)} -->`;
+}
+
+/** Pure: the one well-formed repair marker in an issue body, or null. Two
+ *  markers are ambiguous provenance, and depth is always one. */
+export function parseRepair(body) {
+  const matches = [...String(body ?? '').matchAll(REPAIR_MARKER_RE)];
+  if (matches.length !== 1) return null;
+  try {
+    const parsed = JSON.parse(matches[0][1]);
+    return positive(parsed?.parent) && text(parsed.parentLabeledBy)
+      && Number.isFinite(Date.parse(parsed.parentLabeledAt)) && parsed.depth === 1
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+// `gh api --paginate --jq` prints one result per page; the last page's answer is the newest.
+function lastLine(stdout) {
+  return String(stdout).split('\n').filter(Boolean).at(-1) ?? '';
+}
+
+function writePermission(run, login) {
+  const answer = run('gh', ['api', `repos/{owner}/{repo}/collaborators/${encodeURIComponent(login)}/permission`, '--jq', '.permission']);
+  return answer.ok && WRITE_PERMISSIONS.includes(answer.stdout);
+}
+
+export function markRepair({ parent, title, body, blocksParent = false, run }) {
+  if (!positive(parent)) return refusal('INVALID_ARGS', '--parent: expected a positive issue number');
+  if (!text(title) || !text(body)) return refusal('INVALID_ARGS', 'expected a non-empty --title and --body-file');
+  const facts = issueFacts(run, parent, 'state,labels,body');
+  const labels = (facts?.labels ?? []).map((label) => label?.name ?? label);
+  if (parseRepair(facts?.body) !== null || labels.includes('loop-repair')) {
+    return refusal('REPAIR_DEPTH_EXCEEDED', `#${parent} is itself a repair; file its follow-up as an ordinary issue`);
+  }
+  if (facts?.state !== 'OPEN' || !labels.includes('loop-ready')) {
+    return refusal('REPAIR_PARENT_UNTRUSTED', `#${parent} is not an open loop-ready issue`);
+  }
+  if (labels.includes('loop-blocked')) {
+    return refusal('REPAIR_PARENT_BLOCKED', `#${parent} is blocked for a human; its repairs wait for the answer`);
+  }
+  const events = run('gh', ['api', `repos/{owner}/{repo}/issues/${parent}/events?per_page=100`, '--paginate', '--jq', LAST_READY_LABEL_JQ]);
+  let labeled = null;
+  try { labeled = events.ok ? JSON.parse(lastLine(events.stdout)) : null; } catch { labeled = null; }
+  if (!text(labeled?.by) || !Number.isFinite(Date.parse(labeled?.at)) || !writePermission(run, labeled.by)) {
+    return refusal('REPAIR_PARENT_UNTRUSTED', `#${parent}'s loop-ready was not applied by a trusted actor`);
+  }
+  const open = run('gh', ['issue', 'list', '--label', 'loop-repair', '--state', 'open', '--limit', '100', '--json', 'number,body']);
+  let siblings;
+  try { siblings = open.ok ? JSON.parse(open.stdout) : null; } catch { siblings = null; }
+  if (siblings === null) return refusal('GH_FAILED', `listing open repairs failed: ${open.stderr}`);
+  if (siblings.filter((issue) => parseRepair(issue.body)?.parent === parent).length >= REPAIRS_PER_PARENT) {
+    return refusal('REPAIR_BUDGET_EXHAUSTED', `#${parent} already has ${REPAIRS_PER_PARENT} open repairs; fold this into one of them`);
+  }
+  const repair = { parent, parentLabeledBy: labeled.by, parentLabeledAt: labeled.at, depth: 1, blocksParent };
+  const created = withLabel(run, 'loop-repair', () => run('gh', [
+    'issue', 'create', '--title', text(title), '--body', `${text(body)}\n\nRepair for #${parent}.\n\n${repairMarker(repair)}`, '--label', 'loop-repair',
+  ]));
+  const issue = created.ok ? positive(/\/issues\/([1-9][0-9]*)/u.exec(created.stdout)?.[1]) : null;
+  if (issue === null) return refusal('GH_FAILED', `issue create failed: ${created.stderr || created.stdout}`);
+  if (blocksParent) {
+    const condition = { on: 'issue', number: issue };
+    const comment = run('gh', ['issue', 'comment', String(parent), '--body',
+      `${waitMarker(condition)}\n**autoloop: waiting** — this unit waits on its repair #${issue}; the label is lifted when it closes.`]);
+    const label = comment.ok ? addLabel(run, parent, 'loop-waiting') : comment;
+    if (!label.ok) return { ok: false, code: 'GH_FAILED', message: `#${issue} filed, but the parent's wait failed: ${label.stderr}`, issue };
+  }
+  return { ok: true, issue, parent, disposition: 'repair', repair, blocksParent };
+}
+
 /** Lift every wait whose condition has cleared. Never throws: a failure is
  *  reported and the waiting issue stays waiting, which is the safe side. */
 export function liftWaits({ base, run, now = Date.now() }) {
@@ -247,6 +460,88 @@ export function liftWaits({ base, run, now = Date.now() }) {
   return { lifted, waiting, errors };
 }
 
+/** Pure: the newest `/answer` a trusted actor posted after the block, or null. */
+export function answerAfter(block, comments, trusted) {
+  let newest = null;
+  for (const comment of comments ?? []) {
+    const match = ANSWER_RE.exec(String(comment?.body ?? ''));
+    const at = Date.parse(comment?.createdAt);
+    if (!match || !Number.isFinite(at) || at <= Date.parse(block.at)) continue;
+    const by = comment.author?.login;
+    if (typeof by !== 'string' || !trusted(by)) continue;
+    if (newest === null || at >= Date.parse(newest.at)) {
+      newest = { by, text: (match[1] ?? '').trim(), at: comment.createdAt };
+    }
+  }
+  return newest;
+}
+
+/** Resume every loop block a trusted human has answered with `/answer`.
+ *  Never throws: anything unreadable leaves the unit blocked, the safe side. A
+ *  block counts only when its marker was posted within five minutes before the
+ *  latest `loop-blocked` label event, so an old marker cannot reopen a block a
+ *  human applied later by hand. */
+export function triageBlocks({ run, now = Date.now() }) {
+  const listed = run('gh', ['issue', 'list', '--label', 'loop-blocked', '--state', 'open', '--limit', '100', '--json', 'number,title,labels,comments']);
+  if (!listed.ok) return { resumed: [], waiting: [], held: [], errors: [`list: ${listed.stderr}`] };
+  let issues;
+  try { issues = JSON.parse(listed.stdout); } catch { return { resumed: [], waiting: [], held: [], errors: ['list: unparseable'] }; }
+  const resumed = [];
+  const waiting = [];
+  const held = [];
+  const errors = [];
+  const permissions = {};
+  const trusted = (login) => {
+    if (!(login in permissions)) permissions[login] = writePermission(run, login);
+    return permissions[login];
+  };
+  for (const issue of issues) {
+    // Only a marker the loop itself posted, for this issue, counts; its instant
+    // is GitHub's createdAt, never the runner's clock written into the marker.
+    const marked = (issue.comments ?? [])
+      .filter((comment) => comment.viewerDidAuthor === true)
+      .map((comment) => ({ block: parseBlock(comment.body), postedAt: comment.createdAt }))
+      .findLast(({ block: entry }) => entry !== null && entry.issue === issue.number) ?? null;
+    if (marked === null || !Number.isFinite(Date.parse(marked.postedAt))) {
+      held.push({ number: issue.number, reason: 'no loop marker' });
+      continue;
+    }
+    const block = { ...marked.block, at: marked.postedAt };
+    const events = run('gh', ['api', `repos/{owner}/{repo}/issues/${issue.number}/events?per_page=100`, '--paginate', '--jq', LAST_BLOCKED_LABEL_JQ]);
+    const labeledAt = events.ok ? Date.parse(lastLine(events.stdout)) : Number.NaN;
+    if (!Number.isFinite(labeledAt)) {
+      held.push({ number: issue.number, reason: 'label history unreadable' });
+      if (!events.ok) errors.push(`#${issue.number}: ${events.stderr}`);
+      continue;
+    }
+    const gap = labeledAt - Date.parse(block.at);
+    if (gap < 0 || gap > BLOCK_LABEL_WINDOW_MS) {
+      held.push({ number: issue.number, reason: 'the marker predates the current block' });
+      continue;
+    }
+    const answer = answerAfter(block, issue.comments, trusted);
+    if (answer === null) {
+      waiting.push({ number: issue.number, question: block.question });
+      continue;
+    }
+    const gates = (issue.labels ?? []).map((label) => label?.name ?? label).filter((name) => BLOCK_GATES.includes(name));
+    const lifted = run('gh', ['issue', 'edit', String(issue.number), '--remove-label', ['loop-blocked', ...gates].join(',')]);
+    if (!lifted.ok) {
+      errors.push(`#${issue.number}: ${lifted.stderr}`);
+      continue;
+    }
+    const record = { issue: issue.number, by: answer.by, answer: answer.text, at: new Date(now).toISOString() };
+    const body = [
+      `<!-- autoloop-resumed-v1 ${JSON.stringify(record)} -->`,
+      `**autoloop: resumed** — @${answer.by} answered \`${block.reason}\`. The loop takes this unit first, with the answer as its premise.`,
+    ].join('\n');
+    const commented = run('gh', ['issue', 'comment', String(issue.number), '--body', body]);
+    if (!commented.ok) errors.push(`#${issue.number}: resumed, but the record failed: ${commented.stderr}`);
+    resumed.push({ number: issue.number, by: answer.by, answer: answer.text });
+  }
+  return { resumed, waiting, held, errors };
+}
+
 /** Pure: the first prose line of a comment, without markers or markdown decoration. */
 function questionLine(body) {
   for (const raw of String(body ?? '').split('\n')) {
@@ -260,8 +555,11 @@ function questionLine(body) {
 export function digestRows(issues, prs) {
   return [...(issues ?? []), ...(prs ?? [])]
     .map((item) => {
-      const comments = (item.comments ?? []).filter((comment) => waitCondition([comment.body]) === null);
-      const question = comments.map((comment) => questionLine(comment.body))
+      const marked = (item.comments ?? []).map((comment) => parseBlock(comment.body))
+        .findLast((entry) => entry !== null)?.question ?? null;
+      const comments = (item.comments ?? [])
+        .filter((comment) => waitCondition([comment.body]) === null && parseDecision(comment.body) === null);
+      const question = marked ?? comments.map((comment) => questionLine(comment.body))
         .findLast((line) => line !== null) ?? null;
       return {
         number: item.number,
@@ -273,7 +571,34 @@ export function digestRows(issues, prs) {
     .sort((left, right) => left.number - right.number);
 }
 
-export function digestBody(rows, at) {
+/** Pure: one row per decision the loop took in the last seven days, newest first. */
+export function decisionRows(issues, now) {
+  return (issues ?? [])
+    .map((item) => {
+      const comments = item.comments ?? [];
+      const index = comments.findLastIndex((comment) => parseDecision(comment.body) !== null);
+      if (index === -1) return null;
+      const decision = parseDecision(comments[index].body);
+      if (now - Date.parse(decision.at) > DECISION_WINDOW_MS) return null;
+      // The digest is informational and unverified here: it names who answered,
+      // and the premise applies the trust check before acting on it.
+      const answered = comments.slice(index + 1)
+        .map((comment) => ({ match: ANSWER_RE.exec(String(comment.body ?? '')), by: comment.author?.login ?? 'unknown' }))
+        .findLast(({ match }) => match !== null);
+      return {
+        number: item.number,
+        title: item.title,
+        choice: decision.choice,
+        at: decision.at,
+        answer: answered ? (answered.match[1] ?? '').trim() : null,
+        answeredBy: answered?.by ?? null,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
+}
+
+export function digestBody(rows, at, decided = []) {
   return [
     '<!-- autoloop-digest-v1 -->',
     `**Decisions waiting on a human** — updated ${at}`,
@@ -281,6 +606,12 @@ export function digestBody(rows, at) {
     ...(rows.length === 0
       ? ['Nothing waiting.']
       : rows.map((row) => `- #${row.number}${row.labels.length > 0 ? ` [${row.labels.join(', ')}]` : ''} ${row.title} — ${row.question}`)),
+    ...(decided.length === 0
+      ? []
+      : ['', '**Decided by the loop** — the recommended option, taken without waiting', '',
+        ...decided.map((row) => (row.answer === null
+          ? `- #${row.number} ${row.title} — decided, reversible: ${row.choice}`
+          : `- #${row.number} ${row.title} — decided: ${row.choice}; @${row.answeredBy} answered: ${row.answer}`))]),
     '',
     'The loop rewrites this at every close and park. Answer on each unit, not here.',
   ].join('\n');
@@ -300,11 +631,24 @@ export function collectDigest({ run }) {
   );
 }
 
+export function collectDecisions({ run, now = Date.now() }) {
+  return decisionRows(
+    readJson(run, ['issue', 'list', '--label', 'loop-decided', '--state', 'all', '--limit', '50', '--search', 'sort:updated-desc', '--json', 'number,title,comments']),
+    now,
+  );
+}
+
 /** Rewrite the tracking issue. Never throws: a digest must not fail a close. */
 export function postDigest({ run, now = Date.now() }) {
   try {
     const rows = collectDigest({ run });
-    const body = digestBody(rows, new Date(now).toISOString());
+    let decided = [];
+    try {
+      decided = collectDecisions({ run, now });
+    } catch {
+      // Recorded decisions are a courtesy list; the questions must still post.
+    }
+    const body = digestBody(rows, new Date(now).toISOString(), decided);
     let issue = readJson(run, ['issue', 'list', '--label', 'loop-digest', '--state', 'open', '--limit', '1', '--json', 'number'])[0]?.number ?? null;
     if (issue === null) {
       const created = withLabel(run, 'loop-digest', () => run('gh', [
@@ -317,38 +661,44 @@ export function postDigest({ run, now = Date.now() }) {
       const edited = run('gh', ['issue', 'edit', String(issue), '--body', body]);
       if (!edited.ok) throw new Error(`issue edit: ${edited.stderr}`);
     }
-    return { ok: true, issue, rows };
+    return { ok: true, issue, rows, decided };
   } catch (error) {
-    return { ok: false, issue: null, rows: [], error: String(error?.message ?? error) };
+    return { ok: false, issue: null, rows: [], decided: [], error: String(error?.message ?? error) };
   }
 }
 
 export function parseArgs(args) {
-  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', error: null };
+  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, error: null };
   const value = (index) => args[index + 1];
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
-    if (['--obsolete', '--wait', '--lift', '--digest', '--self-test'].includes(flag)) {
+    if (['--obsolete', '--wait', '--block', '--repair', '--decide', '--lift', '--digest', '--self-test'].includes(flag)) {
       if (parsed.mode !== null) return { ...parsed, error: 'expected one mode' };
       parsed.mode = flag.slice(2);
     } else if (flag === '--on-base-red') {
       parsed.onBaseRed = true;
     } else if (flag === '--post') {
       parsed.post = true;
-    } else if (['--issue', '--pr', '--on-issue', '--minutes'].includes(flag)) {
+    } else if (flag === '--blocks-parent') {
+      parsed.blocksParent = true;
+    } else if (['--issue', '--pr', '--on-issue', '--minutes', '--parent'].includes(flag)) {
       const number = positive(value(index));
       if (number === null) return { ...parsed, error: `${flag}: expected a positive number` };
-      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes' }[flag]] = number;
+      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes', '--parent': 'parent' }[flag]] = number;
       index += 1;
-    } else if (flag === '--commit' || flag === '--note') {
+    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate', '--title', '--body-file'].includes(flag)) {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
-      parsed[flag.slice(2)] = value(index);
+      parsed[flag === '--body-file' ? 'bodyFile' : flag.slice(2)] = value(index);
+      index += 1;
+    } else if (flag === '--alternatives') {
+      if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
+      parsed.alternatives = value(index).split(';').map((entry) => entry.trim()).filter(Boolean);
       index += 1;
     } else {
       return { ...parsed, error: `unknown argument ${flag}` };
     }
   }
-  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --lift, --digest or --self-test' };
+  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --repair, --decide, --lift, --digest or --self-test' };
   return parsed;
 }
 
@@ -519,11 +869,258 @@ function selfTest() {
     created.ok && created.issue === 101
     && absent.calls.some((call) => call.startsWith('gh issue create') && call.includes('--label loop-digest'))
     && !absent.calls.some((call) => call.includes('loop-ready')));
+  const withDecisions = fakeRun([
+    ...lists,
+    ['gh issue list --label loop-decided', JSON.stringify([{ number: 40, title: 'Recent', comments: [{ body: decisionMarker({ issue: 40, choice: 'c', alternatives: [], why: 'w', at: '2026-09-25T00:00:00.000Z' }) }] }])],
+    ['gh issue list --label loop-digest', '[{"number":99}]'],
+    ['gh issue edit 99', ''],
+  ]);
+  const postedDecisions = postDigest({ run: withDecisions.run, now: Date.parse('2026-09-26T00:00:00Z') });
+  check('--post lists recent decisions, and a failed decision read still posts the questions',
+    postedDecisions.ok && postedDecisions.decided.map((row) => row.number).join(',') === '40'
+    && withDecisions.calls.some((call) => call.startsWith('gh issue edit 99') && call.includes('decided, reversible: c'))
+    && posted.ok && posted.decided.length === 0);
   check('a failed digest read reports instead of throwing',
     postDigest({ run: fakeRun([]).run }).ok === false);
 
+  const decidedAt = '2026-09-25T10:00:00.000Z';
+  const decision = { issue: 5, choice: 'derive the bits from the locked construction', alternatives: ['whitelist the constant', 'block'], why: 'e_hypot.c:80-81 builds it', at: decidedAt };
+  check('a decision marker round-trips, the newest wins, junk is skipped',
+    JSON.stringify(parseDecision(decisionMarker(decision))) === JSON.stringify(decision)
+    && parseDecision(`${decisionMarker(decision)}\n${decisionMarker({ ...decision, choice: 'later' })}`).choice === 'later'
+    && parseDecision('<!-- autoloop-decision-v1 {nope} -->') === null
+    && parseDecision(decisionMarker({ ...decision, why: '' })) === null
+    && parseDecision('plain') === null);
+  const undecided = fakeRun([]);
+  check('a decision without a choice or a why is refused before any call',
+    markDecided({ issue: 5, choice: '', why: 'w', run: undecided.run }).code === 'INVALID_ARGS'
+    && markDecided({ issue: 5, choice: 'c', why: '  ', run: undecided.run }).code === 'INVALID_ARGS'
+    && undecided.calls.length === 0);
+  const decidedClosed = fakeRun([['gh issue view 5', 'CLOSED']]);
+  check('a decision on an issue that is not open is refused',
+    markDecided({ issue: 5, choice: 'c', why: 'w', run: decidedClosed.run }).code === 'ISSUE_NOT_OPEN');
+  const deciding = fakeRun([['gh issue view 5', 'OPEN'], ['gh issue comment 5', ''], ['gh issue edit 5 --add-label loop-decided', '']]);
+  const decided = markDecided({ issue: 5, choice: decision.choice, alternatives: decision.alternatives, why: decision.why, run: deciding.run, now: Date.parse(decidedAt) });
+  check('a decision comments the marker with the reversal form, labels, and never edits the body',
+    decided.ok && decided.disposition === 'decided'
+    && parseDecision(deciding.calls[1]).choice === decision.choice
+    && deciding.calls[1].includes('/answer')
+    && deciding.calls[2] === 'gh issue edit 5 --add-label loop-decided'
+    && !deciding.calls.some((call) => call.includes('--body-file') || call.includes('loop-ready')));
+  const decidedIssues = [
+    { number: 40, title: 'Recent', comments: [{ body: decisionMarker({ ...decision, issue: 40 }) }] },
+    { number: 41, title: 'Stale', comments: [{ body: decisionMarker({ ...decision, issue: 41, at: '2026-09-01T00:00:00.000Z' }) }] },
+    { number: 42, title: 'Unmarked', comments: [{ body: 'no marker' }] },
+  ];
+  const decidedRows = decisionRows(decidedIssues, Date.parse('2026-09-26T00:00:00Z'));
+  const answeredRows = decisionRows([{ number: 43, title: 'Reversed', comments: [
+    { body: decisionMarker({ ...decision, issue: 43 }), createdAt: decidedAt },
+    { author: { login: 'owner' }, body: '/answer use the whitelist instead', createdAt: '2026-09-25T11:00:00.000Z' },
+  ] }], Date.parse('2026-09-26T00:00:00Z'));
+  check('a decision answered afterwards shows the answer, not as still reversible',
+    answeredRows[0].answer === 'use the whitelist instead'
+    && digestBody([], 'T', answeredRows).includes('- #43 Reversed — decided: derive the bits from the locked construction; @owner answered: use the whitelist instead')
+    && decidedRows[0].answer === null);
+  check('decision rows keep the last seven days of marked decisions',
+    decidedRows.map((row) => row.number).join(',') === '40'
+    && decidedRows[0].choice === decision.choice);
+  check('the digest lists decisions apart from the questions, as reversible',
+    digestBody([], 'T', decidedRows).includes('Nothing waiting.')
+    && digestBody([], 'T', decidedRows).includes('- #40 Recent — decided, reversible: derive the bits')
+    && !digestBody([], 'T', []).includes('Decided by the loop'));
+  const blockedThenDecided = digestRows([{
+    number: 21, title: 'x', labels: [],
+    comments: [{ body: 'Blocked: what length?' }, { body: decisionMarker({ ...decision, issue: 21 }) }],
+  }], []);
+  check('a decision comment is never read as a blocked unit\'s question',
+    blockedThenDecided[0].question === 'Blocked: what length?');
+
+  const block = { issue: 7, class: 'human', reason: 'UNSPECIFIED_VALUE', question: 'What maximum device-label length applies?', at: decidedAt };
+  check('a block marker round-trips, the newest wins, junk is skipped',
+    JSON.stringify(parseBlock(blockMarker(block))) === JSON.stringify(block)
+    && parseBlock(`${blockMarker(block)}\n${blockMarker({ ...block, question: 'later?' })}`).question === 'later?'
+    && parseBlock(blockMarker({ ...block, class: 'fix' })) === null
+    && parseBlock(blockMarker({ ...block, reason: 'lower case' })) === null
+    && parseBlock('<!-- autoloop-block-v1 {nope} -->') === null);
+  const unblockable = fakeRun([]);
+  check('a block without a reason code or a one-line question is refused before any call',
+    markBlocked({ issue: 7, reason: '', question: 'q?', run: unblockable.run }).code === 'INVALID_ARGS'
+    && markBlocked({ issue: 7, reason: 'X', question: 'two\nlines', run: unblockable.run }).code === 'INVALID_ARGS'
+    && markBlocked({ issue: 7, reason: 'X', question: 'q?', gate: 'loop-ready', run: unblockable.run }).code === 'INVALID_ARGS'
+    && unblockable.calls.length === 0);
+  const blocking = fakeRun([
+    ['gh issue view 7', JSON.stringify({ state: 'OPEN', labels: [{ name: 'loop-ready' }, { name: 'loop-started' }, { name: 'loop:05-implement' }] })],
+    ['gh issue comment 7', ''],
+    ['gh issue edit 7', ''],
+  ]);
+  const blocked = markBlocked({ issue: 7, reason: block.reason, question: block.question, run: blocking.run, now: Date.parse(decidedAt) });
+  const labelEdit = blocking.calls.find((call) => call.startsWith('gh issue edit 7'));
+  check('a block comments the marker with the /answer form, then swaps labels in one edit, keeping loop-ready',
+    blocked.ok && blocked.disposition === 'blocked'
+    && JSON.stringify(parseBlock(blocking.calls.find((call) => call.startsWith('gh issue comment 7')))) === JSON.stringify(block)
+    && blocking.calls.find((call) => call.startsWith('gh issue comment 7')).includes('/answer')
+    && blocking.calls.indexOf(labelEdit) > blocking.calls.findIndex((call) => call.startsWith('gh issue comment 7'))
+    && labelEdit === 'gh issue edit 7 --add-label loop-blocked,human:decide --remove-label loop-started,loop:05-implement'
+    && !blocking.calls.some((call) => call.includes('--body-file')));
+  const revising = fakeRun([
+    ['gh issue view 9', '{"state":"OPEN","labels":[{"name":"loop-ready"},{"name":"loop-delivered"},{"name":"loop:revising"}]}'],
+    ['gh issue comment 9', ''], ['gh issue edit 9', ''],
+  ]);
+  check('a block of a unit under revision drops loop-delivered and the revising label too',
+    markBlocked({ issue: 9, reason: 'REVISE_CAP_REACHED', question: 'q?', run: revising.run }).ok
+    && revising.calls.at(-1) === 'gh issue edit 9 --add-label loop-blocked,human:decide --remove-label loop-delivered,loop:revising');
+  const authorizing = fakeRun([['gh issue view 8', '{"state":"OPEN","labels":[]}'], ['gh issue comment 8', ''], ['gh issue edit 8', '']]);
+  check('a protected-path block carries human:authorize and removes nothing it did not find',
+    markBlocked({ issue: 8, reason: 'PROTECTED_PATH', question: 'May this unit touch .github/workflows?', gate: 'human:authorize', run: authorizing.run }).ok
+    && authorizing.calls.at(-1) === 'gh issue edit 8 --add-label loop-blocked,human:authorize');
+  const blockClosed = fakeRun([['gh issue view 7', '{"state":"CLOSED","labels":[]}']]);
+  check('a block on an issue that is not open is refused',
+    markBlocked({ issue: 7, reason: 'X', question: 'q?', run: blockClosed.run }).code === 'ISSUE_NOT_OPEN');
+  const markedRows = digestRows([{
+    number: 7, title: 'Labels', labels: [{ name: 'human:decide' }],
+    comments: [{ body: `${blockMarker(block)}\n**autoloop: blocked**` }, { body: 'a later note' }],
+  }], []);
+  check('the digest reads a marked block\'s own question first',
+    markedRows[0].question === block.question);
+
+  const blockAt = '2026-09-25T10:00:00.000Z';
+  const later = (minutes) => new Date(Date.parse(blockAt) + minutes * 60_000).toISOString();
+  const marked = { issue: 7, class: 'human', reason: 'UNSPECIFIED_VALUE', question: 'What length?', at: blockAt };
+  const trustedOnly = (login) => login === 'owner';
+  check('an answer is a trusted /answer comment after the block, the newest winning',
+    answerAfter(marked, [
+      { author: { login: 'owner' }, body: '/answer 64', createdAt: later(1) },
+      { author: { login: 'owner' }, body: '/answer 128 chars\nand "Unnamed device"', createdAt: later(2) },
+    ], trustedOnly).text === '128 chars\nand "Unnamed device"'
+    && answerAfter(marked, [{ author: { login: 'owner' }, body: '/answer 64', createdAt: later(-1) }], trustedOnly) === null
+    && answerAfter(marked, [{ author: { login: 'stranger' }, body: '/answer 64', createdAt: later(1) }], trustedOnly) === null
+    && answerAfter(marked, [{ author: { login: 'owner' }, body: 'I think 64 /answer', createdAt: later(1) }], trustedOnly) === null
+    && answerAfter(marked, [{ author: { login: 'owner' }, body: '/answers are hard', createdAt: later(1) }], trustedOnly) === null);
+
+  const blockedList = JSON.stringify([
+    { number: 7, title: 'Answered', labels: [{ name: 'loop-ready' }, { name: 'loop-blocked' }, { name: 'human:decide' }],
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker(marked), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer 128', createdAt: later(30) }] },
+    { number: 8, title: 'Unanswered', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 8 }), createdAt: blockAt },
+        { author: { login: 'owner' }, body: 'looking at it', createdAt: later(30) }] },
+    { number: 9, title: 'Hand-blocked', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, body: 'blocked by hand', createdAt: blockAt }] },
+    { number: 10, title: 'Stale marker', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 10 }), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer go', createdAt: later(30) }] },
+    { number: 11, title: 'Stranger', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 11 }), createdAt: blockAt },
+        { author: { login: 'stranger' }, body: '/answer go', createdAt: later(30) }] },
+    { number: 12, title: 'Forged', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'outsider' }, viewerDidAuthor: false, body: blockMarker({ ...marked, issue: 12 }), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer go', createdAt: later(30) }] },
+    { number: 13, title: 'Skewed clock', labels: [{ name: 'loop-blocked' }, { name: 'human:decide' }],
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 13, at: later(0.2) }), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer 64', createdAt: later(30) }] },
+    { number: 14, title: 'Quoted marker', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker(marked), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer go', createdAt: later(30) }] },
+  ]);
+  const triaging = fakeRun([
+    ['gh issue list --label loop-blocked', blockedList],
+    ['gh api repos/{owner}/{repo}/issues/7/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/8/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/10/events', later(60 * 24)],
+    ['gh api repos/{owner}/{repo}/issues/11/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/12/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/13/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/14/events', later(0.1)],
+    ['gh issue edit 13', ''],
+    ['gh issue comment 13', ''],
+    ['gh api repos/{owner}/{repo}/collaborators/owner/permission', 'admin'],
+    ['gh api repos/{owner}/{repo}/collaborators/stranger/permission', 'read'],
+    ['gh issue edit 7', ''],
+    ['gh issue comment 7', ''],
+  ]);
+  const triage = triageBlocks({ run: triaging.run, now: Date.parse(later(60)) });
+  check('prime resumes an answered loop block, and holds the rest with their reason',
+    triage.resumed.map((entry) => `${entry.number}:${entry.by}:${entry.answer}`).join(',') === '7:owner:128,13:owner:64'
+    && triage.waiting.map((entry) => `${entry.number}:${entry.question}`).join(',') === '8:What length?,11:What length?'
+    && triage.held.map((entry) => entry.number).join(',') === '9,10,12,14'
+    && triage.errors.length === 0);
+  check('a resume lifts the block and gate labels, then records the answer, touching nothing else',
+    triaging.calls.includes('gh issue edit 7 --remove-label loop-blocked,human:decide')
+    && triaging.calls.some((call) => call.startsWith('gh issue comment 7') && call.includes('autoloop-resumed-v1'))
+    && !triaging.calls.some((call) => /gh issue (edit|comment) (8|9|10|11|12|14)\b/u.test(call))
+    && !triaging.calls.some((call) => call.includes('loop-ready')));
+  check('a failed listing resumes nothing and reports it',
+    triageBlocks({ run: fakeRun([['gh issue list', false]]).run }).errors.length === 1);
+  const eventsFail = fakeRun([['gh issue list --label loop-blocked', blockedList]]);
+  check('an unreadable label history holds the unit instead of resuming it',
+    triageBlocks({ run: eventsFail.run }).resumed.length === 0
+    && !eventsFail.calls.some((call) => call.startsWith('gh issue edit')));
+
+  const provenance = { by: 'owner', at: '2026-09-20T09:00:00Z' };
+  const repair = { parent: 248, parentLabeledBy: 'owner', parentLabeledAt: provenance.at, depth: 1 };
+  check('a repair marker round-trips and refuses depth 2 and junk',
+    JSON.stringify(parseRepair(`body\n\n${repairMarker(repair)}`)) === JSON.stringify(repair)
+    && parseRepair(repairMarker({ ...repair, depth: 2 })) === null
+    && parseRepair(`${repairMarker(repair)}\n${repairMarker({ ...repair, parent: 9 })}`) === null
+    && parseRepair('<!-- autoloop-repair-v1 {nope} -->') === null);
+  const parentView = JSON.stringify({ state: 'OPEN', labels: [{ name: 'loop-ready' }], body: 'parent body' });
+  const repairRuns = (overrides = []) => fakeRun([
+    ...overrides,
+    ['gh issue view 248', parentView],
+    ['gh api repos/{owner}/{repo}/issues/248/events', JSON.stringify(provenance)],
+    ['gh api repos/{owner}/{repo}/collaborators/owner/permission', 'admin'],
+    ['gh issue list --label loop-repair', '[]'],
+    ['gh issue create', 'https://github.com/o/r/issues/330'],
+    ['gh issue comment 248', ''],
+    ['gh issue edit 248 --add-label loop-waiting', ''],
+  ]);
+  const filing = repairRuns();
+  const filed = markRepair({ parent: 248, title: 'Patch the audit advisories', body: 'Fix the advisories.', blocksParent: true, run: filing.run });
+  const create = filing.calls.find((call) => call.startsWith('gh issue create'));
+  check('a repair is filed with the parent provenance, loop-repair and never loop-ready, then the parent waits on it',
+    filed.ok && filed.issue === 330 && filed.disposition === 'repair'
+    && JSON.stringify(parseRepair(create)) === JSON.stringify({ ...repair, blocksParent: true })
+    && create.includes('--label loop-repair') && !create.includes('loop-ready')
+    && filing.calls.some((call) => call.startsWith('gh issue comment 248') && call.includes('"number":330'))
+    && filing.calls.includes('gh issue edit 248 --add-label loop-waiting'));
+  const parentWait = filing.calls.find((call) => call.startsWith('gh issue comment 248')).slice('gh issue comment 248 --body '.length);
+  const chained = fakeRun([
+    ['gh issue list', JSON.stringify([{ number: 248, comments: [{ body: parentWait }] }])],
+    ['git rev-parse', oid], ['gh issue view 330', 'CLOSED'], ['gh issue edit 248', ''],
+  ]);
+  check('the parent a blocking repair filed comes back once the repair closes',
+    liftWaits({ base: 'main', run: chained.run }).lifted.map((entry) => `${entry.number}:${entry.reason}`).join(',') === '248:#330 is closed');
+  const independent = repairRuns();
+  check('a repair the parent does not need leaves the parent in the queue',
+    markRepair({ parent: 248, title: 't', body: 'b', run: independent.run }).ok
+    && !independent.calls.some((call) => call.includes('loop-waiting')));
+  const untrustedParent = repairRuns([['gh api repos/{owner}/{repo}/collaborators/owner/permission', 'read']]);
+  check('a parent whose loop-ready came from an untrusted actor refuses, filing nothing',
+    markRepair({ parent: 248, title: 't', body: 'b', run: untrustedParent.run }).code === 'REPAIR_PARENT_UNTRUSTED'
+    && !untrustedParent.calls.some((call) => call.startsWith('gh issue create')));
+  const blockedParent = repairRuns([['gh issue view 248', JSON.stringify({ state: 'OPEN', labels: [{ name: 'loop-ready' }, { name: 'loop-blocked' }], body: '' })]]);
+  check('a parent blocked for a human refuses a repair: the loop may not route around its block',
+    markRepair({ parent: 248, title: 't', body: 'b', run: blockedParent.run }).code === 'REPAIR_PARENT_BLOCKED'
+    && !blockedParent.calls.some((call) => call.startsWith('gh issue create')));
+  const unlabeledParent = repairRuns([['gh issue view 248', JSON.stringify({ state: 'OPEN', labels: [], body: '' })]]);
+  check('a parent without loop-ready refuses',
+    markRepair({ parent: 248, title: 't', body: 'b', run: unlabeledParent.run }).code === 'REPAIR_PARENT_UNTRUSTED');
+  const nestedParent = repairRuns([['gh issue view 248', JSON.stringify({ state: 'OPEN', labels: [{ name: 'loop-repair' }], body: repairMarker({ ...repair, parent: 1 }) })]]);
+  check('a repair of a repair refuses: depth is one',
+    markRepair({ parent: 248, title: 't', body: 'b', run: nestedParent.run }).code === 'REPAIR_DEPTH_EXCEEDED');
+  const fullBudget = repairRuns([['gh issue list --label loop-repair', JSON.stringify([1, 2, 3].map((number) => ({ number, body: repairMarker(repair) })))]]);
+  check('a fourth open repair of one parent refuses',
+    markRepair({ parent: 248, title: 't', body: 'b', run: fullBudget.run }).code === 'REPAIR_BUDGET_EXHAUSTED'
+    && !fullBudget.calls.some((call) => call.startsWith('gh issue create')));
+  check('a repair without a title or body refuses before any call',
+    markRepair({ parent: 248, title: '', body: 'b', run: fakeRun([]).run }).code === 'INVALID_ARGS'
+    && markRepair({ parent: 248, title: 't', body: ' ', run: fakeRun([]).run }).code === 'INVALID_ARGS');
+
   check('arguments parse and refuse',
-    parseArgs(['--wait', '--issue', '5', '--on-issue', '4']).onIssue === 4
+    parseArgs(['--repair', '--parent', '248', '--title', 't', '--body-file', 'b.md', '--blocks-parent']).blocksParent === true
+    && parseArgs(['--block', '--issue', '7', '--reason', 'X', '--question', 'q?', '--gate', 'human:authorize']).gate === 'human:authorize'
+    && parseArgs(['--decide', '--issue', '5', '--choice', 'c', '--why', 'w', '--alternatives', 'a; b']).alternatives.join('|') === 'a|b'
+    && parseArgs(['--wait', '--issue', '5', '--on-issue', '4']).onIssue === 4
     && parseArgs(['--obsolete', '--issue', '5', '--commit', 'abc1234']).commit === 'abc1234'
     && parseArgs(['--wait', '--issue', '5', '--minutes', '60']).minutes === 60
     && parseArgs(['--digest', '--post']).post === true
@@ -540,12 +1137,29 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`unit: ${parsed.error}`);
-    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --lift | --digest [--post] | --self-test');
+    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --choice T --why T [--alternatives "A; B"] | --lift | --digest [--post] | --self-test');
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
   const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
   const run = realRun(root);
+  if (parsed.mode === 'repair') {
+    let body;
+    try {
+      body = readFileSync(parsed.bodyFile ?? '', 'utf8');
+    } catch (error) {
+      console.log(JSON.stringify(refusal('INVALID_ARGS', `--body-file: ${error.message}`)));
+      process.exit(1);
+    }
+    const outcome = markRepair({ ...parsed, body, run });
+    console.log(JSON.stringify(outcome, null, 1));
+    process.exit(outcome.ok ? 0 : 1);
+  }
+  if (parsed.mode === 'decide' || parsed.mode === 'block') {
+    const outcome = parsed.mode === 'decide' ? markDecided({ ...parsed, run }) : markBlocked({ ...parsed, run });
+    console.log(JSON.stringify(outcome, null, 1));
+    process.exit(outcome.ok ? 0 : 1);
+  }
   if (parsed.mode === 'digest') {
     let outcome;
     try {

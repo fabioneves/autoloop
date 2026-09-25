@@ -3092,7 +3092,7 @@ function selfTest() {
     passed += 1;
   }
   const gateConfig = {
-    version: '0.26.0',
+    version: '0.27.0',
     baseBranch: 'main',
     gate: { command: 'npm test', quickCommand: null, setupCommand: null },
     merge: { policy: 'manual' },
@@ -3100,7 +3100,6 @@ function selfTest() {
     review: { checklistPath: 'docs/agentic/checklist.md' },
     caps: {
       gateRetriesPerUnit: 2,
-      reviseRoundsPerPr: 3,
       codeReviewRoundsPerUnit: 5,
       sliceMaxLines: 700,
       sliceMaxFiles: 10,

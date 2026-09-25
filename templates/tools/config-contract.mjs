@@ -4,7 +4,12 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const CONFIG_VERSION = '0.26.0';
+export const CONFIG_VERSION = '0.27.0';
+
+// 0.26.0 capped pitcrew's revisions of a delivered PR (`caps.reviseRoundsPerPr`).
+// A cap there only ever blocked a unit a human was already reviewing, so 0.27.0
+// retires it: the hop below removes the key, and nothing replaces it.
+const REVISE_CAP_CONFIG_VERSION = '0.26.0';
 
 // 0.25.0 carried route-scoped adapter tuning and a measurement capture switch.
 // Both named machinery that no longer exists (a closed route catalog; a
@@ -23,14 +28,17 @@ const PROJECT_KEYS = [
 ];
 const CAP_RANGES = {
   gateRetriesPerUnit: { min: 0, max: 20, integer: true },
-  reviseRoundsPerPr: { min: 0, max: 20, integer: true },
   codeReviewRoundsPerUnit: { min: 1, max: 20, integer: true },
   sliceMaxLines: { min: 1, max: 10000, integer: true },
   sliceMaxFiles: { min: 1, max: 1000, integer: true },
 };
+const PRIOR_CAP_RANGES = {
+  ...CAP_RANGES,
+  reviseRoundsPerPr: { min: 0, max: 20, integer: true },
+};
 const LEGACY_CAP_RANGES = {
   runWallClockHours: { min: 0.25, max: 168, integer: false },
-  ...CAP_RANGES,
+  ...PRIOR_CAP_RANGES,
 };
 const ADAPTER_OPTION_KEYS = {
   'claude.native': ['implementerModel', 'reviewerModel'],
@@ -305,10 +313,10 @@ function validateCapValues(value, ranges, keys, errors) {
   }
 }
 
-function validateCaps(value, errors) {
-  const keys = Object.keys(CAP_RANGES);
+function validateCaps(value, errors, ranges = CAP_RANGES) {
+  const keys = Object.keys(ranges);
   if (!validateObjectShape(value, 'caps', keys, [], errors)) return;
-  validateCapValues(value, CAP_RANGES, keys, errors);
+  validateCapValues(value, ranges, keys, errors);
 }
 
 function validateLegacyCaps(value, errors) {
@@ -376,7 +384,7 @@ function validateProjectValues(cfg, expectedVersion, errors) {
     if (expectedVersion === LEGACY_CONFIG_VERSION) {
       validateLegacyCaps(cfg.caps, errors);
     } else {
-      validateCaps(cfg.caps, errors);
+      validateCaps(cfg.caps, errors, expectedVersion === CONFIG_VERSION ? CAP_RANGES : PRIOR_CAP_RANGES);
     }
   }
 }
@@ -389,6 +397,13 @@ export function validateConfig(cfg) {
 }
 
 export const validateProjectConfig = validateConfig;
+
+function validateReviseCapConfig(cfg) {
+  const errors = [];
+  if (!validateObjectShape(cfg, '', PROJECT_KEYS, [], errors)) return errors;
+  validateProjectValues(cfg, REVISE_CAP_CONFIG_VERSION, errors);
+  return errors;
+}
 
 function validatePriorConfig(cfg) {
   const errors = [];
@@ -569,7 +584,7 @@ function copyProjectConfig(cfg, tracker) {
     if (hasOwn(cfg.gate, key)) gate[key] = cfg.gate[key];
   }
   const caps = {};
-  for (const key of Object.keys(CAP_RANGES)) {
+  for (const key of Object.keys(PRIOR_CAP_RANGES)) {
     caps[key] = key === 'codeReviewRoundsPerUnit'
       ? (cfg.caps[key] ?? 5)
       : cfg.caps[key];
@@ -643,6 +658,10 @@ const MIGRATION_STEPS = Object.freeze([
   Object.freeze({
     from: PRIOR_CONFIG_VERSION,
     apply: (cfg) => migrateConfig025To026(cfg),
+  }),
+  Object.freeze({
+    from: REVISE_CAP_CONFIG_VERSION,
+    apply: (cfg) => migrateConfig026To027(cfg),
   }),
 ]);
 
@@ -780,8 +799,8 @@ export function migrateConfig025To026(cfg) {
     delete config.measurement;
     warnings.push('measurement.capture: retired measurement ledger removed');
   }
-  config.version = CONFIG_VERSION;
-  const remaining = validateConfig(config);
+  config.version = REVISE_CAP_CONFIG_VERSION;
+  const remaining = validateReviseCapConfig(config);
   if (remaining.length > 0) {
     return {
       ok: false,
@@ -791,6 +810,27 @@ export function migrateConfig025To026(cfg) {
     };
   }
   return { ok: true, config, warnings };
+}
+
+// 0.26.0 -> 0.27.0 is a pure removal of the revise cap; every other value
+// carries across unchanged.
+export function migrateConfig026To027(cfg) {
+  const errors = validateReviseCapConfig(cfg);
+  if (errors.length > 0) {
+    return { ok: false, code: 'INVALID_LEGACY_CONFIG', errors, warnings: [] };
+  }
+  const config = structuredClone(cfg);
+  delete config.caps.reviseRoundsPerPr;
+  config.version = CONFIG_VERSION;
+  const remaining = validateConfig(config);
+  if (remaining.length > 0) {
+    return { ok: false, code: 'INVALID_LEGACY_CONFIG', errors: remaining, warnings: [] };
+  }
+  return {
+    ok: true,
+    config,
+    warnings: ['caps.reviseRoundsPerPr: retired; pitcrew revisions of a delivered PR are no longer capped'],
+  };
 }
 
 function projectFixture() {
@@ -807,7 +847,6 @@ function projectFixture() {
     review: { checklistPath: 'docs/agentic/checklist.md' },
     caps: {
       gateRetriesPerUnit: 2,
-      reviseRoundsPerPr: 3,
       codeReviewRoundsPerUnit: 5,
       sliceMaxLines: 700,
       sliceMaxFiles: 10,
@@ -815,9 +854,15 @@ function projectFixture() {
   };
 }
 
-function legacyFixture(hosts, profile) {
+function priorProjectFixture(version) {
   const cfg = projectFixture();
-  cfg.version = LEGACY_CONFIG_VERSION;
+  cfg.version = version;
+  cfg.caps.reviseRoundsPerPr = 3;
+  return cfg;
+}
+
+function legacyFixture(hosts, profile) {
+  const cfg = priorProjectFixture(LEGACY_CONFIG_VERSION);
   cfg.caps.runWallClockHours = 4;
   cfg.tracker = 'none';
   cfg.runtime = { supportedHosts: hosts };
@@ -877,7 +922,6 @@ function selfTest() {
     'bounded zero retry caps are valid',
     changed(base, (cfg) => {
       cfg.caps.gateRetriesPerUnit = 0;
-      cfg.caps.reviseRoundsPerPr = 0;
     }),
   );
   expectInvalid(
@@ -1168,7 +1212,6 @@ function selfTest() {
   }
   const invalidCaps = {
     gateRetriesPerUnit: [-1, 21, 1.5],
-    reviseRoundsPerPr: [-1, 21, 1.5],
     codeReviewRoundsPerUnit: [0, 21, 1.5],
     sliceMaxLines: [0, 10001, 1.5],
     sliceMaxFiles: [0, 1001, 1.5],
@@ -1720,8 +1763,7 @@ function selfTest() {
 
   {
     const prior = {
-      ...projectFixture(),
-      version: PRIOR_CONFIG_VERSION,
+      ...priorProjectFixture(PRIOR_CONFIG_VERSION),
       adapterOptions: { 'claude.native': { reviewerModel: 'opus' } },
       measurement: { capture: 'events' },
     };
@@ -1730,12 +1772,12 @@ function selfTest() {
     expect(
       'the 0.25.0 hop drops the retired keys and keeps every remaining value',
       migrated.ok
-        && migrated.config.version === CONFIG_VERSION
+        && migrated.config.version === REVISE_CAP_CONFIG_VERSION
         && !hasOwn(migrated.config, 'adapterOptions')
         && !hasOwn(migrated.config, 'measurement')
         && JSON.stringify(migrated.config.gate) === JSON.stringify(prior.gate)
         && JSON.stringify(migrated.config.caps) === JSON.stringify(prior.caps)
-        && validateConfig(migrated.config).length === 0,
+        && validateReviseCapConfig(migrated.config).length === 0,
     );
     expect(
       'the 0.25.0 hop names both removals and stays pure and deterministic',
@@ -1747,13 +1789,12 @@ function selfTest() {
         && JSON.stringify(migrated) === JSON.stringify(migrateConfig025To026(prior)),
     );
     const clean = migrateConfig025To026({
-      ...projectFixture(),
-      version: PRIOR_CONFIG_VERSION,
+      ...priorProjectFixture(PRIOR_CONFIG_VERSION),
     });
     expect(
       'a 0.25.0 configuration without the retired keys migrates without warnings',
       clean.ok && clean.warnings.length === 0
-        && validateConfig(clean.config).length === 0,
+        && validateReviseCapConfig(clean.config).length === 0,
     );
     expect(
       'the 0.25.0 hop refuses another version and an invalid prior configuration',
@@ -1765,8 +1806,7 @@ function selfTest() {
         }).code === 'INVALID_LEGACY_CONFIG',
     );
     const soloPreserved = migrateConfig025To026({
-      ...projectFixture(),
-      version: PRIOR_CONFIG_VERSION,
+      ...priorProjectFixture(PRIOR_CONFIG_VERSION),
       merge: {
         policy: 'auto',
         unverifiedInvocationAcknowledged: true,
@@ -1782,6 +1822,44 @@ function selfTest() {
           unverifiedInvocationAcknowledged: true,
           soloOperatorAcknowledged: true,
         }),
+    );
+  }
+
+  {
+    const withCap = priorProjectFixture(REVISE_CAP_CONFIG_VERSION);
+    const before = JSON.stringify(withCap);
+    const migrated = migrateConfig026To027(withCap);
+    expect(
+      'the 0.26.0 hop retires the revise cap and keeps every other value',
+      migrated.ok
+        && migrated.config.version === CONFIG_VERSION
+        && !hasOwn(migrated.config.caps, 'reviseRoundsPerPr')
+        && JSON.stringify(migrated.config.gate) === JSON.stringify(withCap.gate)
+        && JSON.stringify(migrated.config.merge) === JSON.stringify(withCap.merge)
+        && migrated.config.caps.codeReviewRoundsPerUnit === withCap.caps.codeReviewRoundsPerUnit
+        && validateConfig(migrated.config).length === 0,
+    );
+    expect(
+      'the 0.26.0 hop names the removal and stays pure and deterministic',
+      migrated.warnings.length === 1
+        && migrated.warnings[0].startsWith('caps.reviseRoundsPerPr: retired')
+        && JSON.stringify(withCap) === before
+        && JSON.stringify(migrated) === JSON.stringify(migrateConfig026To027(withCap)),
+    );
+    expect(
+      'the 0.26.0 hop refuses another version and an invalid 0.26.0 configuration',
+      migrateConfig026To027(projectFixture()).code === 'INVALID_LEGACY_CONFIG'
+        && migrateConfig026To027({
+          ...withCap,
+          caps: { ...withCap.caps, reviseRoundsPerPr: 21 },
+        }).code === 'INVALID_LEGACY_CONFIG',
+    );
+    expect(
+      'the current schema rejects a revise cap, and the chain reaches it from 0.25.0',
+      validateConfig({ ...projectFixture(), caps: { ...projectFixture().caps, reviseRoundsPerPr: 3 } })
+        .some((error) => error.includes('reviseRoundsPerPr'))
+        && MIGRATABLE_CONFIG_VERSIONS.includes(REVISE_CAP_CONFIG_VERSION)
+        && migrateProjectConfig(priorProjectFixture(PRIOR_CONFIG_VERSION)).config?.version === CONFIG_VERSION,
     );
   }
 

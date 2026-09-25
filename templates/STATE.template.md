@@ -30,7 +30,7 @@ names every error, so this list is orientation, not the schema.
 {{CONFIG_JSON}}
 ```
 
-- `version` — the config schema version; the current schema is `0.26.0`. Setup migrates older
+- `version` — the config schema version; the current schema is `0.27.0`. Setup migrates older
   blocks through a visible diff; missing, older, or unknown is invalid at runtime.
 - `baseBranch` — the short branch name every base-aware claim, lane, guard, delivery, and merge
   check resolves against.
@@ -47,8 +47,9 @@ names every error, so this list is orientation, not the schema.
 - `review.checklistPath` — the criteria both reviewers grade against.
 - `caps` — two kinds, both policy the loop reads and never edits; raising either is your decision,
   made here.
-  - **Run-time budgets** — `gateRetriesPerUnit`, `codeReviewRoundsPerUnit`, `reviseRoundsPerPr` —
-    bind during a unit: at a cap the loop blocks that unit and takes the next one.
+  - **Run-time budgets** — `gateRetriesPerUnit`, `codeReviewRoundsPerUnit` — bind during a unit:
+    at a cap the loop carves, re-plans, or hands off that unit and takes the next one. Pitcrew's
+    revisions of a delivered PR are not capped.
   - **Shaping budgets** — `sliceMaxLines`, `sliceMaxFiles` — bind BEFORE the loop sees a unit.
     `autoloop:shape` sizes issues against them while decomposing a spec. **They never block a
     unit at run time.** An over-budget slice that is complete, gated and reviewed gets a NOTE on

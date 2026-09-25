@@ -3,6 +3,72 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.52.0] - 2026-09-25
+
+The loop takes the initiative. It fixes what it can and decides the judgment calls itself,
+recording each decision on the issue. Only a genuine human decision stops a unit, and a human's
+answer resumes that unit on its own. The evidence is two manual queue sessions that resolved,
+unaided, most of the blocks the loop would have held for a human.
+
+### Added
+
+- **Fix, decide, or block.** The dev skill's Autonomy rule has three classes. The `human` class is
+  closed: trust and irreversible acts (merge, secrets, destructive operations, protected paths,
+  repository protection, `loop-ready`), and a product value no source states. Only that class
+  blocks a unit. Everything else is either:
+  - `fix`: correct it in the unit, or file it as a repair;
+  - `decide`: take the recommended option and record it.
+
+  Ambiguity, scope, a Critical at the review cap, exhausted gate retries, and a dead proxy no
+  longer block.
+- **`unit.mjs --decide`** records a judgment call: an `autoloop-decision-v1` comment with the
+  choice, alternatives and why, and the `loop-decided` label. The digest lists decisions from the
+  last seven days, and shows who answered when a later `/answer` reversed one.
+- **`unit.mjs --block`** records a genuine human decision with one call. It posts an
+  `autoloop-block-v1` comment with a reason code and a one-line question ending in the reply form
+  `/answer <decision>`. It then swaps the labels in one edit and keeps `loop-ready`.
+- **Answered blocks resume themselves.** Before its scan, prime lifts the block of an issue once a
+  collaborator with write access replies `/answer` after the loop's own block marker. The marker
+  must also belong to the current block, timed by GitHub. Prime prints `resumed: #N`, and the run
+  takes that unit first.
+- **Repairs.** `unit.mjs --repair --parent N` files a `loop-repair` issue (never `loop-ready`). A
+  body marker copies the parent's trusted `loop-ready` label event, so the repair is eligible
+  through its parent. It stays eligible only while all of these hold:
+  - the runner wrote it and nobody edited it;
+  - the parent's newest `loop-ready` event is still the one it copied;
+  - the parent is open and not `loop-blocked`, or was delivered.
+
+  At most three per parent at every scan, and one level deep. `--blocks-parent` makes the parent
+  wait on the repair. Carve-outs, re-plans, deferred and handed-off Majors, and out-of-lane fixes
+  are all filed as repairs.
+- **The review cap decides.** The carve happens at the closing round, which then reviews the
+  reduced artifact. At `REVIEW_CAP_REACHED`, whose contract state is now `cap-reached`, the loop
+  re-plans as a blocking repair.
+
+### Changed
+
+- **Schema 0.27.0 retires `caps.reviseRoundsPerPr`.** Pitcrew no longer blocks a delivered PR for
+  its revision count. The migration drops the key and carries every other value. **Run
+  `autoloop:setup` after updating**; until then the guard reports the pending migration.
+- The mid-run AskUserQuestion refusal points at `--decide` and `--block`. `label-swap-reminder`
+  fires the blocked riders on `unit.mjs --block`. Setup creates `loop-decided` and `loop-repair`.
+
+### Security
+
+The command guard (active while a loop run is open) now refuses:
+
+- **A loop-written `/answer`.** In a solo repository the loop shares the maintainer's login. The
+  guard refuses a comment whose body it cannot read before it is posted: stdin, a device, `/proc`,
+  a FIFO, a missing or empty file, a body file rewritten earlier in the same command, a JSON
+  `--input`, or a raw GraphQL comment mutation. It also refuses any body that starts with
+  `/answer`, including the joined `-fbody=` form.
+- **Minting authorization at creation.** Pre-existing on `main`: an issue created with
+  `loop-ready` or `loop-delivered` through `gh issue|pr create --label/-l`, the REST issues
+  collection, or GraphQL `createIssue`.
+- **Applying `loop-repair` anywhere but `unit.mjs --repair`.** This covers raw edits, creates and
+  label renames.
+- pflag's `-X=value` short form is read correctly.
+
 ## [0.51.0] - 2026-09-24
 
 Claude Code only. Autoloop no longer supports Codex CLI or opencode, as a host or as a dispatch

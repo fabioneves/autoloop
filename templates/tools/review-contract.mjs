@@ -4,9 +4,10 @@
 //
 // Every decision this file made under the broker survives unchanged — round 1
 // covers the complete artifact, rounds 2+ cover only the fix delta plus open
-// rebuts, a verified Critical/Major outside a later delta enters the human-block
-// path, an unresolved Major at the cap blocks, and a rebut closes only when a
-// fresh reviewer accepts that exact finding ID.
+// rebuts, a verified Critical/Major outside a later delta earns a full round,
+// Majors still open past the closing round are handed off at merge, a Critical
+// there reaches the cap, and a rebut closes only when a fresh reviewer accepts
+// that exact finding ID.
 //
 // What changed is the shape of the evidence. It used to be a chain of
 // broker-signed runtime receipts whose authenticity came from an in-process
@@ -719,7 +720,9 @@ export function reviewTransition(input) {
     });
   }
   if (input.round > input.projectConfig.caps.codeReviewRoundsPerUnit) {
-    return decision('human-block', 'REVIEW_CAP_REACHED', {
+    // The cap is spent, and the unit cannot ship as it stands. What happens next
+    // is the loop's decision (re-plan), not a human's by default.
+    return decision('cap-reached', 'REVIEW_CAP_REACHED', {
       unresolvedFindings: currentGating.length,
       rejectedRebuts: rejectedRebuts.length,
     });
@@ -1080,7 +1083,7 @@ export function authorizeReviewPublication(input, targetHeadOid, liveCheckout) {
 
 function fixtureProjectConfig(codeReviewRoundsPerUnit = 5) {
   return {
-    version: '0.26.0',
+    version: '0.27.0',
     baseBranch: 'main',
     gate: { command: 'npm test', quickCommand: null, setupCommand: null },
     merge: { policy: 'manual' },
@@ -1088,7 +1091,6 @@ function fixtureProjectConfig(codeReviewRoundsPerUnit = 5) {
     review: { checklistPath: 'docs/agentic/checklist.md' },
     caps: {
       gateRetriesPerUnit: 2,
-      reviseRoundsPerPr: 3,
       codeReviewRoundsPerUnit,
       sliceMaxLines: 700,
       sliceMaxFiles: 10,
@@ -1609,15 +1611,15 @@ function selfTest() {
       expectedCode: 'REVIEW_CAP_HANDOFF',
     },
     {
-      name: 'a closing round that still gates on a Critical blocks at the cap',
+      name: 'a closing round that still gates on a Critical reaches the cap',
       input: inputFor([closingCriticalFirst, closingCritical], configuredCap, { scope: 'full' }),
-      expected: ['human-block', false],
+      expected: ['cap-reached', false],
       expectedCode: 'REVIEW_CAP_REACHED',
     },
     {
-      name: 'a closing round under a non-manual merge policy blocks at the cap',
+      name: 'a closing round under a non-manual merge policy reaches the cap',
       input: inputFor([closingRatifiedFirst, closingRatified], ratifiedCap, { scope: 'full' }),
-      expected: ['human-block', false],
+      expected: ['cap-reached', false],
       expectedCode: 'REVIEW_CAP_REACHED',
     },
     {

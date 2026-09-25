@@ -43,9 +43,11 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -1209,6 +1211,62 @@ function isInlineGhBody(words) {
   );
 }
 
+// A comment whose first non-blank line starts with `/answer` is a human's
+// answer to a loop block (unit.mjs triageBlocks). Inline `--body` is already
+// refused (rule 5), so this reads the two shapes that remain: a comment body
+// file, and a `gh api` body field. An unreadable file is not proof of anything
+// and passes, as every other body file does.
+const ANSWER_LINE_RE = /^\s*\/answer(?:\s|$)/u;
+
+function startsWithAnswer(text) {
+  return ANSWER_LINE_RE.test(String(text).replace(/^(?:[ \t]*\r?\n)+/u, ''));
+}
+
+// The guard must be able to READ a comment's body to know it is not an
+// /answer, so a body it cannot read fails closed: stdin, a device, a file that
+// does not exist yet, a JSON --input, or a raw GraphQL comment mutation.
+const GRAPHQL_COMMENT_MUTATION_RE = /\b(?:addComment|addDiscussionComment|updateIssueComment|addPullRequestReviewComment)\b/u;
+
+export function expandHome(path) {
+  if (path === '~') return homedir();
+  return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
+}
+
+function readsCommentBodyFile(words) {
+  const comment = hasGhScopedAction(words, 'issue', 'comment') || hasGhScopedAction(words, 'pr', 'comment');
+  if (comment && optionValues(words, '--body-file', '-F').length > 0) return true;
+  const gh = executableIndex(words, 'gh');
+  return gh !== -1 && words[gh + 1] === 'api'
+    && githubApiFieldAssignments(words).some(({ name, value }) => name === 'body' && value.startsWith('@'));
+}
+
+export function commentBodyProblem(words, read = (path) => readFileSync(path, 'utf8').slice(0, 4096)) {
+  const body = (path) => {
+    if (path === '' || path === '-' || path.startsWith('/dev/')) return 'unverifiable';
+    try {
+      const text = read(path);
+      if (String(text).trim() === '') return 'unverifiable';
+      return startsWithAnswer(text) ? 'answer' : null;
+    } catch {
+      return 'unverifiable';
+    }
+  };
+  const worst = (problems) => problems.find((problem) => problem === 'answer')
+    ?? problems.find((problem) => problem === 'unverifiable') ?? null;
+  const comment = hasGhScopedAction(words, 'issue', 'comment') || hasGhScopedAction(words, 'pr', 'comment');
+  if (comment) return worst(optionValues(words, '--body-file', '-F').map(body));
+  const gh = executableIndex(words, 'gh');
+  if (gh === -1 || words[gh + 1] !== 'api') return null;
+  if (words.includes('graphql') && words.some((word) => GRAPHQL_COMMENT_MUTATION_RE.test(word))) return 'unverifiable';
+  if (hasInputOption(words) && githubApiEndpoints(words).some((segments) => segments.includes('comments'))) {
+    return 'unverifiable';
+  }
+  return worst(githubApiFieldAssignments(words).filter(({ name }) => name === 'body').map(({ value }) => {
+    if (value.startsWith('@')) return body(value.slice(1));
+    return startsWithAnswer(value) ? 'answer' : null;
+  }));
+}
+
 function hasGhScopedAction(words, scope, action) {
   const gh = executableIndex(words, 'gh');
   if (gh === -1) return false;
@@ -1230,7 +1288,8 @@ function optionValues(words, option, shortOption) {
       && word.startsWith(shortOption)
       && word.length > shortOption.length
     ) {
-      values.push(word.slice(shortOption.length));
+      // pflag reads `-F=path` as `-F path`.
+      values.push(word.slice(shortOption.length).replace(/^=/u, ''));
     }
   }
   return values;
@@ -1246,11 +1305,15 @@ function protectedLifecycleLabel(value) {
 }
 
 function addsProtectedLifecycleLabel(words) {
+  const protectedIn = (values) => values.some((value) => value.split(',').some(protectedLifecycleLabel));
   const edit =
     hasGhScopedAction(words, 'issue', 'edit')
     || hasGhScopedAction(words, 'pr', 'edit');
-  return edit && optionValues(words, '--add-label').some((value) =>
-    value.split(',').some(protectedLifecycleLabel));
+  const create =
+    hasGhScopedAction(words, 'issue', 'create')
+    || hasGhScopedAction(words, 'pr', 'create');
+  return (edit && protectedIn(optionValues(words, '--add-label')))
+    || (create && protectedIn(optionValues(words, '--label', '-l')));
 }
 
 // The step ladder ends at 09-gate: steps 10 PUBLISH and 11 RECORD carry no
@@ -1326,6 +1389,19 @@ function addsStepWithoutRetiringPredecessor(words) {
   const removed = numbers('--remove-label');
   return numbers('--add-label').some((add) =>
     add >= 2 && add !== 4 && !removed.includes(add - 1));
+}
+
+// loop-repair makes an issue eligible through its parent's loop-ready, and the
+// provenance marker unit.mjs --repair writes is what that trust rests on — so
+// the label is only ever applied there, never by a raw edit or create.
+function appliesRepairLabel(words) {
+  const names = (values) => values.flatMap((value) => value.split(','))
+    .some((name) => name.trim().toLowerCase() === 'loop-repair');
+  const edit = hasGhScopedAction(words, 'issue', 'edit') || hasGhScopedAction(words, 'pr', 'edit');
+  if (edit && names(optionValues(words, '--add-label'))) return true;
+  const create = hasGhScopedAction(words, 'issue', 'create') || hasGhScopedAction(words, 'pr', 'create');
+  if (create && names(optionValues(words, '--label', '-l'))) return true;
+  return hasGhScopedAction(words, 'label', 'edit') && names(optionValues(words, '--name', '-n'));
 }
 
 function renamesProtectedLifecycleLabel(words) {
@@ -1448,6 +1524,15 @@ function opaqueIssueLabelApiMutation(words) {
     && segments[2].length > 0
     && segments[3] === 'issues'
     && /^[1-9][0-9]*$/u.test(segments[4]));
+  const collection = githubApiEndpoints(words).some((segments) =>
+    segments.length === 4
+    && segments[0] === 'repos'
+    && segments[1].length > 0
+    && segments[2].length > 0
+    && segments[3] === 'issues');
+  if (collection && (hasInputOption(words) || githubApiFieldAssignments(words).some(
+    ({ name }) => name === 'labels' || name === 'labels[]',
+  ))) return true;
   if (!endpoint) return false;
   if (endpoint.length === 6 && endpoint[5] === 'labels') return true;
   if (endpoint.length !== 5) return false;
@@ -1474,6 +1559,7 @@ function terminalLabelApiRename(words) {
       name === 'new_name'
       && (
         protectedLifecycleLabel(value)
+        || value.trim().toLowerCase() === 'loop-repair'
         || value.startsWith('@')
       ),
   );
@@ -1525,7 +1611,7 @@ function terminalGraphqlMutation(command) {
     );
   const updateLabelName = /\bupdateLabel\b/u.test(command)
     && (
-      /\bloop-(?:delivered|ready)\b/iu.test(decodedCommand)
+      /\bloop-(?:delivered|ready|repair)\b/iu.test(decodedCommand)
       || fields.some(
         ({ name, value }) =>
           name === 'name'
@@ -1547,7 +1633,13 @@ function terminalGraphqlMutation(command) {
           ),
       )
     );
-  return updateIssueLabels || updateLabelName || createReadyLabel;
+  const createIssueLabels = /\bcreateIssue\b/u.test(command)
+    && (
+      /\b(?:labels|labelIds)\s*:/u.test(command)
+      || /\$(?:labels|labelIds)\b/u.test(command)
+      || fields.some(({ name }) => name === 'labels' || name === 'labelIds')
+    );
+  return updateIssueLabels || updateLabelName || createReadyLabel || createIssueLabels;
 }
 
 function hasOpaqueGraphqlInput(words) {
@@ -1991,6 +2083,49 @@ export function evaluate(inputCmd, branch, options = {}) {
         'autoloop guard — raw pull-request readiness mutation is outside loop authority. '
         + 'Use the exact-head Autoloop terminal finalizer. Returning a PR to draft is allowed '
         + '(`gh pr ready <N> --undo`) — it removes readiness rather than granting it.',
+    };
+  }
+  if (segments.some(({ command }) => appliesRepairLabel(shellWords(command)))) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — `loop-repair` makes an issue eligible through its parent\'s '
+        + '`loop-ready`, so only `unit.mjs --repair --parent <N>` applies it, together with the '
+        + 'provenance marker that trust rests on. File the repair with that command.',
+    };
+  }
+  // Only a regular file the guard can read now proves what will be posted: not
+  // a device, a /proc or /sys entry, a FIFO (which would hang the read), or a
+  // file an earlier segment of the same command may rewrite.
+  const readBody = (path) => {
+    const expanded = expandHome(path);
+    const real = realpathSync(isAbsolute(expanded) ? expanded : resolve(options.cwd ?? process.cwd(), expanded));
+    if (/^\/(?:dev|proc|sys)\//u.test(real) || !statSync(real).isFile()) throw new Error('not a regular file');
+    return readFileSync(real, 'utf8').slice(0, 4096);
+  };
+  const bodyProblems = segments.map(({ command }) => commentBodyProblem(shellWords(command), readBody));
+  if (segments.length > 1 && segments.some(({ command }) => readsCommentBodyFile(shellWords(command)))) {
+    bodyProblems.push('unverifiable');
+  }
+  if (bodyProblems.includes('unverifiable')) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — this comment\'s body cannot be read before it is posted (stdin, a '
+        + 'device, a file that does not exist yet, a JSON --input, or a raw GraphQL comment '
+        + 'mutation), so the guard cannot prove it is not an `/answer` — the reply that lifts a '
+        + 'loop block. Write the body to a file first, then post it in its own command: '
+        + '`gh issue comment <N> --body-file <path>`.',
+    };
+  }
+  if (bodyProblems.includes('answer')) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — a comment starting with `/answer` is how a human answers a loop '
+        + 'block, and in a solo repository the loop shares their login: writing one would '
+        + 'answer its own question. A judgment call is yours to record with `unit.mjs '
+        + '--decide`; a genuine human decision stays blocked until a human answers it.',
     };
   }
   if (segments.some(({ command }) =>
@@ -2535,8 +2670,9 @@ export function backgroundDispatchProblem(command, runInBackground) {
 export function askUserQuestionProblem(runIsLive) {
   if (runIsLive !== true) return null;
   return 'autoloop guard — a live run never waits on a synchronous question: every other '
-    + 'queued unit would wait behind it. Record the question as a comment on the unit\'s '
-    + 'issue, label it `human:decide`, and take the next unit. If no unit can proceed, '
+    + 'queued unit would wait behind it. A judgment call is yours to make: take the recommended '
+    + 'option and record it with `unit.mjs --decide`. A genuine human decision is `unit.mjs '
+    + '--block`, which records the question on the issue. Then take the next unit. If no unit can proceed, '
     + 'close the run first (`node tools/agentic/prime.mjs --close-run`), then ask.';
 }
 
@@ -2790,6 +2926,48 @@ function selfTest() {
     ['gh --repo o/r pr ready 42', 'feat/gh-2-y', true],
     ['gh issue edit 7 --add-label loop-delivered', 'feat/gh-2-y', true],
     ['gh issue edit 7 --add-label loop-ready,loop-delivered', 'feat/gh-2-y', true],
+    // 2026-09-25: `/answer` is how a human resumes a loop block, and in a solo
+    // repository the runner shares the human's login — the loop must never
+    // write one, or it answers its own question.
+    ['gh issue comment 7 --body "/answer 128 chars"', 'feat/gh-2-y', true],
+    ['gh issue comment 7 -b "  /answer go"', 'feat/gh-2-y', true],
+    ['gh pr comment 9 --body=/answer', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/issues/7/comments -f body="/answer yes"', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/issues/7/comments -f body="resumed; reply /answer to change it"', 'feat/gh-2-y', false],
+    // 2026-09-25: loop-repair makes an issue eligible through its parent's
+    // loop-ready; only unit.mjs --repair may apply it, with the provenance marker.
+    ['gh issue edit 7 --add-label loop-repair', 'feat/gh-2-y', true],
+    ['gh issue create --title t --body-file /tmp/b.md --label loop-repair', 'main', true],
+    ['gh issue create --title t --body-file /tmp/b.md -l bug,loop-repair', 'main', true],
+    ['gh api repos/o/r/issues/7/labels -f "labels[]=loop-repair"', 'main', true],
+    ['gh issue edit 7 --remove-label loop-repair', 'main', false],
+    ['gh issue list --label loop-repair --state open', 'main', false],
+    ['node tools/agentic/unit.mjs --repair --parent 7 --title t --body-file /tmp/b.md', 'main', false],
+    // 2026-09-25 security review of the initiative branch: every shape below
+    // passed the guard. A comment body it cannot read, stdin, a JSON --input, or
+    // a GraphQL comment mutation could carry an /answer; an issue created with
+    // loop-ready or loop-delivered, or a label renamed to loop-repair, mints
+    // authorization the loop may never grant itself.
+    ['gh issue comment 7 -F=/nonexistent/answer.md', 'feat/gh-2-y', true],
+    ['gh issue comment 7 --body-file -', 'feat/gh-2-y', true],
+    ['gh pr comment 9 --body-file /dev/stdin', 'feat/gh-2-y', true],
+    ['gh issue comment 7 --body-file /nonexistent/later.md', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/issues/7/comments --input /tmp/c.json', 'feat/gh-2-y', true],
+    ["gh api graphql -f query='mutation{addComment(input:{subjectId:\"I_x\",body:\"x\"}){clientMutationId}}'", 'feat/gh-2-y', true],
+    ['gh issue create --title t --body-file /tmp/b.md --label loop-ready', 'main', true],
+    ['gh issue create --title t --body-file /tmp/b.md -l=loop-ready', 'main', true],
+    ['gh pr create --draft --title t --body-file /tmp/b.md --label loop-delivered', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/issues -f title=t -f "labels[]=loop-ready"', 'main', true],
+    ['gh api repos/o/r/issues --input /tmp/issue.json', 'main', true],
+    ["gh api graphql -f query='mutation{createIssue(input:{repositoryId:\"R\",title:\"t\",labelIds:[\"L\"]}){issue{number}}}'", 'main', true],
+    ['gh label edit bug --name loop-repair', 'main', true],
+    // 2026-09-25 security re-audit: the joined short field form, a body file the
+    // same command rewrites, a /proc fd, and a REST label rename.
+    ['gh api repos/o/r/issues/7/comments -fbody="/answer yes"', 'feat/gh-2-y', true],
+    ['cp /tmp/a.md /tmp/p2.md && gh issue comment 7 --body-file /tmp/p2.md', 'feat/gh-2-y', true],
+    ['gh issue comment 7 --body-file /proc/self/fd/0', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/labels/bug -X PATCH -f new_name=loop-repair', 'main', true],
+    ['gh issue create --title t --body-file /tmp/b.md --label bug', 'main', false],
     ['gh issue edit 7 --add-label loop-ready', 'feat/gh-2-y', true],
     ['gh issue edit 7 --add-label=LOOP-READY', 'feat/gh-2-y', true],
     ['gh pr edit 42 --add-label=loop-delivered', 'feat/gh-2-y', true],
@@ -2997,11 +3175,58 @@ function selfTest() {
   }
   {
     messageChecks += 1;
+    const files = { '/s/answer.md': '\n  /answer yes\nmore', '/s/plain.md': 'resumed\n/answer later' };
+    const read = (path) => {
+      if (!(path in files)) throw new Error('ENOENT');
+      return files[path];
+    };
+    const answerFileCases =
+      commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/answer.md'), read) === 'answer'
+      && commentBodyProblem(shellWords('gh api repos/o/r/issues/7/comments -F body=@/s/answer.md'), read) === 'answer'
+      && commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/plain.md'), read) === null
+      && commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/missing.md'), read) === 'unverifiable'
+      && commentBodyProblem(shellWords('gh issue comment 7 -F=/s/answer.md'), read) === 'answer'
+      && commentBodyProblem(shellWords('gh issue view 7 --comments'), read) === null;
+    if (!answerFileCases) {
+      console.error('FAIL [a body file starting with /answer is refused]');
+      ok = false;
+    }
+  }
+  {
+    messageChecks += 1;
+    const dir = mkdtempSync(join(tmpdir(), 'guard-body-'));
+    try {
+      const plain = join(dir, 'plain.md');
+      const empty = join(dir, 'empty.md');
+      const device = join(dir, 'device.md');
+      const fifo = join(dir, 'fifo.md');
+      writeFileSync(plain, 'resumed\n');
+      writeFileSync(empty, '');
+      symlinkSync('/dev/null', device);
+      const fifoMade = spawnSync('mkfifo', [fifo]).status === 0;
+      const verdict = (path) => evaluate(`gh issue comment 7 --body-file ${path}`, 'feat/gh-2-y', { baseBranch: 'main', cwd: dir }).block;
+      const tildeExpanded = expandHome('~/notes/x.md') === join(homedir(), 'notes/x.md')
+        && expandHome('~') === homedir() && expandHome('a/~/b') === 'a/~/b';
+      const rewritten = evaluate(`cp ${empty} ${plain} && gh issue comment 7 --body-file ${plain}`, 'feat/gh-2-y', { baseBranch: 'main', cwd: dir }).block;
+      const bodyFileCases = !verdict(plain) && !verdict('plain.md')
+        && verdict(empty) && verdict(device) && verdict('/proc/self/fd/0') && rewritten && tildeExpanded
+        && (!fifoMade || verdict(fifo));
+      if (!bodyFileCases) {
+        console.error('FAIL [a body file must be a readable, non-empty regular file]');
+        ok = false;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  {
+    messageChecks += 1;
     const asked = askUserQuestionProblem(true);
     const askCases =
       typeof asked === 'string'
       && asked.startsWith('autoloop guard — ')
-      && asked.includes('human:decide')
+      && asked.includes('unit.mjs --decide')
+      && asked.includes('unit.mjs --block')
       && asked.includes('--close-run')
       && asked.trimEnd().endsWith('.')
       && askUserQuestionProblem(false) === null;
@@ -3500,7 +3725,7 @@ function main() {
       + 'docs/agentic/STATE.md.',
     );
   }
-  const verdict = evaluate(cmd, currentBranch(), { baseBranch });
+  const verdict = evaluate(cmd, currentBranch(), { baseBranch, cwd: payload?.cwd });
   if (verdict.block) refuse(verdict.reason);
   process.exit(0);
 }

@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.51.0" src="https://img.shields.io/badge/release-v0.51.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.52.0" src="https://img.shields.io/badge/release-v0.52.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -34,17 +34,25 @@ ready PR → you merge
 falls behind, it diagnoses, repairs with a fresh writer, re-reviews, re-gates, and hands the same PR
 back. Every cycle services Pitcrew work before new issues.
 
-**The loop keeps going.** A unit that can resolve itself does, and the run takes the next one:
+**The loop takes the initiative.** An obstacle is one of three things, and only the first stops
+a unit:
 
-- An issue already delivered is closed as `loop-obsolete`, with the merged PR or commit as evidence.
-- A unit waiting on another issue, on a red base, or on time gets `loop-waiting`. The next run
-  lifts the wait once the condition clears.
-- At the review cap under `manual` merge, open Major findings become follow-up issues listed in the
-  PR, and the PR still goes to you. An open Critical still stops the unit.
-- A usage limit moves a role to its fallback model, or parks the run until the limit resets.
+- **A genuine human decision** stops the unit: a trust or irreversible act (merge, secrets,
+  destructive operations, protected paths, `loop-ready`), or a product value no source states. The
+  loop blocks it with its question; you reply `/answer <decision>` on the issue, and the next run
+  resumes that unit first.
+- **Something the loop can fix**, it fixes. Work outside the unit's scope is filed as a `loop-repair`
+  issue under the unit's own `loop-ready`, and the loop takes it next.
+- **A judgment call** — ambiguous wording, a design choice, a scope correction, a Critical at the
+  review cap — it decides: it takes the recommended option, records the choice and why on the issue
+  (`loop-decided`), and keeps going. Reply `/answer <what instead>` to reverse it.
 
-What truly needs you is collected in one pinned `loop-digest` issue, rewritten at each close or
-park.
+Units that resolve themselves still do: an already delivered issue closes as `loop-obsolete`, a
+unit waiting on another issue or on time gets `loop-waiting` and comes back when the condition
+clears, and a usage limit moves a role to its fallback model or parks the run until it resets.
+
+Every open question and every recent decision is collected in one pinned `loop-digest` issue,
+rewritten at each close or park.
 
 ## Models and routes
 
@@ -131,7 +139,7 @@ it installed from its own marketplace, keep either copy.
 
 ## Configuration and merge policy
 
-v0.51.0 uses schema `0.26.0`. Policy lives in the JSON block of `docs/agentic/STATE.md`:
+v0.52.0 uses schema `0.27.0`. Policy lives in the JSON block of `docs/agentic/STATE.md`:
 `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and `caps`. The repository owns it;
 plugin updates never overwrite it.
 
@@ -158,11 +166,11 @@ kill switch stay enforced regardless.
 | `tools/agentic/` | Vendored runtime: guards, dispatch, lifecycle driver, verification. Setup reconciles it; re-run setup after a plugin update. |
 | `.claude/settings.json` | Claude Code hooks. |
 | `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch. Never committed. |
-| Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked` / `loop-waiting` / `loop-obsolete`, the `loop-digest` issue; lifecycle markers, the frozen plan, and the run record. |
+| Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked` / `loop-waiting` / `loop-obsolete` / `loop-decided` / `loop-repair`, the `loop-digest` issue; lifecycle markers, the frozen plan, and the run record. |
 
 ## How it stays safe
 
-v0.51.0 dispatches every role through one call:
+v0.52.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>

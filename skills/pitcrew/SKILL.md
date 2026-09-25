@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.51.0 · starting
+∞ pitcrew · v0.52.0 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -200,8 +200,9 @@ skipped.
    - verified Critical/Major in the delta is fixed or rebutted;
    - verified out-of-delta Critical/Major is fixed and the next round is full;
    - a gating cap round earns one closing full round. If only Majors gate there under manual policy,
-     the result is `REVIEW_CAP_HANDOFF`: file each Major as a follow-up and list it in the PR body.
-     A Critical, or a non-manual policy, blocks for a human.
+     the result is `REVIEW_CAP_HANDOFF`: file each Major as a repair and list it in the PR body.
+     A Critical, or a non-manual policy, is `REVIEW_CAP_REACHED`: the dev skill's re-plan decide
+     applies, not a human block.
 
    Invoke `node <plugin-tools>/review-contract.mjs` on stdin with
    `{round,scope,projectConfig,expected:{planFingerprint,repositoryFingerprint,configuredBaseOid,artifactVersion,artifactFingerprint,headOid},findingAnnotations:[{id,verified,inScope}],reviewRounds:[...]}`
@@ -218,7 +219,8 @@ skipped.
 6. **Gate.** Run one full `cfg.gate.command` as a local preflight on a clean committed tree and
    bind the gated OID. The universal terminal finalizer later reruns that configured command on the
    exact clean remote head and is the only terminal gate CheckRun producer. Gate fixes receive a
-   fresh delta review and a new full gate. Respect the lifetime revise cap from durable PR markers.
+   fresh delta review and a new full gate. Revisions of a delivered PR are not capped: keep
+   answering review until it converges.
 7. **Publish exact head.** Use
    `git push origin HEAD:refs/heads/<captured-loop-branch>`. If and only if the branch was rebased,
    use
@@ -255,7 +257,7 @@ The revise comment ends with:
 [loop revise-round <N> | reviews: <IDs or none> | head: <full gated OID>]
 ```
 
-Use a body file. The marker is the lifetime cap and handled-review dedupe source.
+Use a body file. The marker is the handled-review dedupe source.
 
 ## Terminal and merge path
 
@@ -271,9 +273,10 @@ waits and any identity mismatch blocks.
 
 Under manual policy, stop after current-head delivery and the pre-merge record.
 
-If the revision cannot converge, requires protected judgment, exceeds caps, or has incomplete
-evidence that targeted fallback cannot repair: comment the reason, remove current loop step and
-terminal labels, add `loop-blocked` plus the appropriate reason gate, and stop that PR.
+If the revision requires protected judgment (a `human`-class matter, as in the dev skill's
+Autonomy section), or has incomplete evidence that targeted fallback cannot repair: block the unit's issue with `node <plugin-tools>/unit.mjs
+--block --issue <N> --reason <CODE> --question "<one line>"` — it records the question with its
+`/answer` form, removes the step and terminal labels, and keeps `loop-ready` — and stop that PR.
 
 ## Chat and record
 
