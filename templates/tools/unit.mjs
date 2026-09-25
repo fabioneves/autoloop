@@ -14,10 +14,16 @@
 //               before every scan and removes the label once the condition has
 //               cleared, so the unit comes back without a human.
 //
+//   --decide    A judgment call the loop made itself: the recommended option,
+//               its alternatives and why. A machine comment records it and the
+//               issue is labelled `loop-decided`; a human reverses it by replying
+//               `/answer <what instead>`.
+//
 //   --digest    Every decision waiting on a human, one row each: open loop-blocked
-//               issues and human:authorize PRs. `--post` rewrites the body of the
-//               one open `loop-digest` issue (created and pinned when absent), so
-//               the list is always current. Prime posts it at every close and park.
+//               issues and human:authorize PRs, then the loop's own decisions of
+//               the last seven days. `--post` rewrites the body of the one open
+//               `loop-digest` issue (created and pinned when absent), so the list
+//               is always current. Prime posts it at every close and park.
 //
 // Neither disposition edits the issue body: an edit after `loop-ready` makes
 // the issue ineligible, which is the stop this tool exists to remove. Nor do
@@ -26,6 +32,7 @@
 // Usage:
 //   node tools/agentic/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
 //   node tools/agentic/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720>) [--note <text>]
+//   node tools/agentic/unit.mjs --decide --issue <N> --choice <text> --why <text> [--alternatives "<a>; <b>"]
 //   node tools/agentic/unit.mjs --lift
 //   node tools/agentic/unit.mjs --digest [--post]
 //   node tools/agentic/unit.mjs --self-test
@@ -38,11 +45,14 @@ import { extractConfig } from './config-contract.mjs';
 
 const TIMEOUT_MS = 30_000;
 const WAIT_MARKER_RE = /<!-- autoloop-waiting-v1 (\{[^\n]*?\}) -->/gu;
+const DECISION_MARKER_RE = /<!-- autoloop-decision-v1 (\{[^\n]*?\}) -->/gu;
+const DECISION_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const SHA_RE = /^[0-9a-f]{7,40}$/u;
 const MAX_WAIT_MINUTES = 720;
 const LABELS = Object.freeze({
   'loop-waiting': { color: 'fbca04', description: 'autoloop: waits on a recorded condition; lifted automatically' },
   'loop-obsolete': { color: 'cfd3d7', description: 'autoloop: premise already delivered; closed with evidence' },
+  'loop-decided': { color: 'c5def5', description: 'autoloop: took the recommended option on a judgment call; reversible with /answer' },
   'loop-digest': { color: '5319e7', description: 'autoloop: the decisions waiting on a human, rewritten at every close and park' },
 });
 const GATE_LABEL_RE = /^(?:human:|needs-)/u;
@@ -213,6 +223,59 @@ export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes 
   return { ok: true, issue, disposition: 'waiting', condition };
 }
 
+function text(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+export function decisionMarker(decision) {
+  return `<!-- autoloop-decision-v1 ${JSON.stringify(decision)} -->`;
+}
+
+/** Pure: the newest well-formed decision in a comment body, or null. */
+export function parseDecision(body) {
+  let newest = null;
+  for (const match of String(body ?? '').matchAll(DECISION_MARKER_RE)) {
+    try {
+      const parsed = JSON.parse(match[1]);
+      if (
+        positive(parsed?.issue) && text(parsed.choice) && text(parsed.why)
+        && Array.isArray(parsed.alternatives) && parsed.alternatives.every((entry) => typeof entry === 'string')
+        && Number.isFinite(Date.parse(parsed.at))
+      ) newest = parsed;
+    } catch {
+      // An unparseable marker is not a decision; an earlier valid one still stands.
+    }
+  }
+  return newest;
+}
+
+export function markDecided({ issue, choice, alternatives = [], why, run, now = Date.now() }) {
+  if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
+  if (!text(choice) || !text(why)) return refusal('INVALID_ARGS', 'expected a non-empty --choice and --why');
+  if (issueState(run, issue) !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+  const decision = {
+    issue,
+    choice: text(choice),
+    alternatives: alternatives.map((entry) => entry.trim()).filter(Boolean),
+    why: text(why),
+    at: new Date(now).toISOString(),
+  };
+  const body = [
+    decisionMarker(decision),
+    `**autoloop: decided** — ${decision.choice}`,
+    '',
+    `Why: ${decision.why}`,
+    ...(decision.alternatives.length > 0 ? [`Alternatives: ${decision.alternatives.join('; ')}`] : []),
+    '',
+    'The loop took the recommended option and kept going. Reply `/answer <what instead>` to reverse it.',
+  ].join('\n');
+  const comment = run('gh', ['issue', 'comment', String(issue), '--body', body]);
+  if (!comment.ok) return refusal('GH_FAILED', `comment on #${issue} failed: ${comment.stderr}`);
+  const label = addLabel(run, issue, 'loop-decided');
+  if (!label.ok) return refusal('GH_FAILED', `label on #${issue} failed: ${label.stderr}`);
+  return { ok: true, issue, disposition: 'decided', decision };
+}
+
 /** Lift every wait whose condition has cleared. Never throws: a failure is
  *  reported and the waiting issue stays waiting, which is the safe side. */
 export function liftWaits({ base, run, now = Date.now() }) {
@@ -260,7 +323,8 @@ function questionLine(body) {
 export function digestRows(issues, prs) {
   return [...(issues ?? []), ...(prs ?? [])]
     .map((item) => {
-      const comments = (item.comments ?? []).filter((comment) => waitCondition([comment.body]) === null);
+      const comments = (item.comments ?? [])
+        .filter((comment) => waitCondition([comment.body]) === null && parseDecision(comment.body) === null);
       const question = comments.map((comment) => questionLine(comment.body))
         .findLast((line) => line !== null) ?? null;
       return {
@@ -273,7 +337,21 @@ export function digestRows(issues, prs) {
     .sort((left, right) => left.number - right.number);
 }
 
-export function digestBody(rows, at) {
+/** Pure: one row per decision the loop took in the last seven days, newest first. */
+export function decisionRows(issues, now) {
+  return (issues ?? [])
+    .map((item) => {
+      const decision = (item.comments ?? []).map((comment) => parseDecision(comment.body))
+        .findLast((entry) => entry !== null) ?? null;
+      return decision && now - Date.parse(decision.at) <= DECISION_WINDOW_MS
+        ? { number: item.number, title: item.title, choice: decision.choice, at: decision.at }
+        : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
+}
+
+export function digestBody(rows, at, decided = []) {
   return [
     '<!-- autoloop-digest-v1 -->',
     `**Decisions waiting on a human** — updated ${at}`,
@@ -281,6 +359,10 @@ export function digestBody(rows, at) {
     ...(rows.length === 0
       ? ['Nothing waiting.']
       : rows.map((row) => `- #${row.number}${row.labels.length > 0 ? ` [${row.labels.join(', ')}]` : ''} ${row.title} — ${row.question}`)),
+    ...(decided.length === 0
+      ? []
+      : ['', '**Decided by the loop** — the recommended option, taken without waiting', '',
+        ...decided.map((row) => `- #${row.number} ${row.title} — decided, reversible: ${row.choice}`)]),
     '',
     'The loop rewrites this at every close and park. Answer on each unit, not here.',
   ].join('\n');
@@ -300,11 +382,24 @@ export function collectDigest({ run }) {
   );
 }
 
+export function collectDecisions({ run, now = Date.now() }) {
+  return decisionRows(
+    readJson(run, ['issue', 'list', '--label', 'loop-decided', '--state', 'all', '--limit', '50', '--search', 'sort:updated-desc', '--json', 'number,title,comments']),
+    now,
+  );
+}
+
 /** Rewrite the tracking issue. Never throws: a digest must not fail a close. */
 export function postDigest({ run, now = Date.now() }) {
   try {
     const rows = collectDigest({ run });
-    const body = digestBody(rows, new Date(now).toISOString());
+    let decided = [];
+    try {
+      decided = collectDecisions({ run, now });
+    } catch {
+      // Recorded decisions are a courtesy list; the questions must still post.
+    }
+    const body = digestBody(rows, new Date(now).toISOString(), decided);
     let issue = readJson(run, ['issue', 'list', '--label', 'loop-digest', '--state', 'open', '--limit', '1', '--json', 'number'])[0]?.number ?? null;
     if (issue === null) {
       const created = withLabel(run, 'loop-digest', () => run('gh', [
@@ -317,18 +412,18 @@ export function postDigest({ run, now = Date.now() }) {
       const edited = run('gh', ['issue', 'edit', String(issue), '--body', body]);
       if (!edited.ok) throw new Error(`issue edit: ${edited.stderr}`);
     }
-    return { ok: true, issue, rows };
+    return { ok: true, issue, rows, decided };
   } catch (error) {
-    return { ok: false, issue: null, rows: [], error: String(error?.message ?? error) };
+    return { ok: false, issue: null, rows: [], decided: [], error: String(error?.message ?? error) };
   }
 }
 
 export function parseArgs(args) {
-  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', error: null };
+  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', choice: null, why: null, alternatives: [], error: null };
   const value = (index) => args[index + 1];
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
-    if (['--obsolete', '--wait', '--lift', '--digest', '--self-test'].includes(flag)) {
+    if (['--obsolete', '--wait', '--decide', '--lift', '--digest', '--self-test'].includes(flag)) {
       if (parsed.mode !== null) return { ...parsed, error: 'expected one mode' };
       parsed.mode = flag.slice(2);
     } else if (flag === '--on-base-red') {
@@ -340,15 +435,19 @@ export function parseArgs(args) {
       if (number === null) return { ...parsed, error: `${flag}: expected a positive number` };
       parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes' }[flag]] = number;
       index += 1;
-    } else if (flag === '--commit' || flag === '--note') {
+    } else if (['--commit', '--note', '--choice', '--why'].includes(flag)) {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
       parsed[flag.slice(2)] = value(index);
+      index += 1;
+    } else if (flag === '--alternatives') {
+      if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
+      parsed.alternatives = value(index).split(';').map((entry) => entry.trim()).filter(Boolean);
       index += 1;
     } else {
       return { ...parsed, error: `unknown argument ${flag}` };
     }
   }
-  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --lift, --digest or --self-test' };
+  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --decide, --lift, --digest or --self-test' };
   return parsed;
 }
 
@@ -519,11 +618,67 @@ function selfTest() {
     created.ok && created.issue === 101
     && absent.calls.some((call) => call.startsWith('gh issue create') && call.includes('--label loop-digest'))
     && !absent.calls.some((call) => call.includes('loop-ready')));
+  const withDecisions = fakeRun([
+    ...lists,
+    ['gh issue list --label loop-decided', JSON.stringify([{ number: 40, title: 'Recent', comments: [{ body: decisionMarker({ issue: 40, choice: 'c', alternatives: [], why: 'w', at: '2026-09-25T00:00:00.000Z' }) }] }])],
+    ['gh issue list --label loop-digest', '[{"number":99}]'],
+    ['gh issue edit 99', ''],
+  ]);
+  const postedDecisions = postDigest({ run: withDecisions.run, now: Date.parse('2026-09-26T00:00:00Z') });
+  check('--post lists recent decisions, and a failed decision read still posts the questions',
+    postedDecisions.ok && postedDecisions.decided.map((row) => row.number).join(',') === '40'
+    && withDecisions.calls.some((call) => call.startsWith('gh issue edit 99') && call.includes('decided, reversible: c'))
+    && posted.ok && posted.decided.length === 0);
   check('a failed digest read reports instead of throwing',
     postDigest({ run: fakeRun([]).run }).ok === false);
 
+  const decidedAt = '2026-09-25T10:00:00.000Z';
+  const decision = { issue: 5, choice: 'derive the bits from the locked construction', alternatives: ['whitelist the constant', 'block'], why: 'e_hypot.c:80-81 builds it', at: decidedAt };
+  check('a decision marker round-trips, the newest wins, junk is skipped',
+    JSON.stringify(parseDecision(decisionMarker(decision))) === JSON.stringify(decision)
+    && parseDecision(`${decisionMarker(decision)}\n${decisionMarker({ ...decision, choice: 'later' })}`).choice === 'later'
+    && parseDecision('<!-- autoloop-decision-v1 {nope} -->') === null
+    && parseDecision(decisionMarker({ ...decision, why: '' })) === null
+    && parseDecision('plain') === null);
+  const undecided = fakeRun([]);
+  check('a decision without a choice or a why is refused before any call',
+    markDecided({ issue: 5, choice: '', why: 'w', run: undecided.run }).code === 'INVALID_ARGS'
+    && markDecided({ issue: 5, choice: 'c', why: '  ', run: undecided.run }).code === 'INVALID_ARGS'
+    && undecided.calls.length === 0);
+  const decidedClosed = fakeRun([['gh issue view 5', 'CLOSED']]);
+  check('a decision on an issue that is not open is refused',
+    markDecided({ issue: 5, choice: 'c', why: 'w', run: decidedClosed.run }).code === 'ISSUE_NOT_OPEN');
+  const deciding = fakeRun([['gh issue view 5', 'OPEN'], ['gh issue comment 5', ''], ['gh issue edit 5 --add-label loop-decided', '']]);
+  const decided = markDecided({ issue: 5, choice: decision.choice, alternatives: decision.alternatives, why: decision.why, run: deciding.run, now: Date.parse(decidedAt) });
+  check('a decision comments the marker with the reversal form, labels, and never edits the body',
+    decided.ok && decided.disposition === 'decided'
+    && parseDecision(deciding.calls[1]).choice === decision.choice
+    && deciding.calls[1].includes('/answer')
+    && deciding.calls[2] === 'gh issue edit 5 --add-label loop-decided'
+    && !deciding.calls.some((call) => call.includes('--body-file') || call.includes('loop-ready')));
+  const decidedIssues = [
+    { number: 40, title: 'Recent', comments: [{ body: decisionMarker({ ...decision, issue: 40 }) }] },
+    { number: 41, title: 'Stale', comments: [{ body: decisionMarker({ ...decision, issue: 41, at: '2026-09-01T00:00:00.000Z' }) }] },
+    { number: 42, title: 'Unmarked', comments: [{ body: 'no marker' }] },
+  ];
+  const decidedRows = decisionRows(decidedIssues, Date.parse('2026-09-26T00:00:00Z'));
+  check('decision rows keep the last seven days of marked decisions',
+    decidedRows.map((row) => row.number).join(',') === '40'
+    && decidedRows[0].choice === decision.choice);
+  check('the digest lists decisions apart from the questions, as reversible',
+    digestBody([], 'T', decidedRows).includes('Nothing waiting.')
+    && digestBody([], 'T', decidedRows).includes('- #40 Recent — decided, reversible: derive the bits')
+    && !digestBody([], 'T', []).includes('Decided by the loop'));
+  const blockedThenDecided = digestRows([{
+    number: 21, title: 'x', labels: [],
+    comments: [{ body: 'Blocked: what length?' }, { body: decisionMarker({ ...decision, issue: 21 }) }],
+  }], []);
+  check('a decision comment is never read as a blocked unit\'s question',
+    blockedThenDecided[0].question === 'Blocked: what length?');
+
   check('arguments parse and refuse',
-    parseArgs(['--wait', '--issue', '5', '--on-issue', '4']).onIssue === 4
+    parseArgs(['--decide', '--issue', '5', '--choice', 'c', '--why', 'w', '--alternatives', 'a; b']).alternatives.join('|') === 'a|b'
+    && parseArgs(['--wait', '--issue', '5', '--on-issue', '4']).onIssue === 4
     && parseArgs(['--obsolete', '--issue', '5', '--commit', 'abc1234']).commit === 'abc1234'
     && parseArgs(['--wait', '--issue', '5', '--minutes', '60']).minutes === 60
     && parseArgs(['--digest', '--post']).post === true
@@ -540,12 +695,17 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`unit: ${parsed.error}`);
-    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --lift | --digest [--post] | --self-test');
+    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --decide --issue N --choice T --why T [--alternatives "A; B"] | --lift | --digest [--post] | --self-test');
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
   const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
   const run = realRun(root);
+  if (parsed.mode === 'decide') {
+    const outcome = markDecided({ ...parsed, run });
+    console.log(JSON.stringify(outcome, null, 1));
+    process.exit(outcome.ok ? 0 : 1);
+  }
   if (parsed.mode === 'digest') {
     let outcome;
     try {

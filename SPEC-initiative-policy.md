@@ -16,11 +16,13 @@ Replace "when unsure, block the unit" with a closed decision rule. A would-be bl
 
 1. **`autoloop-decision-v1` marker** (new, `templates/tools/unit.mjs --decide`), one bare call:
    `unit.mjs --decide --issue N --choice "<one line>" --alternatives "<a; b>" --why "<one line>" [--pr M]`.
-   Posts a comment carrying `<!-- autoloop-decision-v1 {"issue":N,"choice":…,"alternatives":[…],"at":…} -->` plus a readable
+   Posts a comment carrying `<!-- autoloop-decision-v1 {"issue":N,"choice":…,"alternatives":[…],"why":…,"at":…} -->` and labels
+   the issue `loop-decided` (created on first use), plus a readable
    rendering. It never edits the issue body (an edit after `loop-ready` makes the issue ineligible, `snapshot-contract.mjs:1107-1108`).
    Exports the pure core `decisionMarker(input)` / `parseDecision(body)`.
-2. **Digest:** `collectDigest` (`unit.mjs:295`) adds the run's decisions as rows marked `decided — reversible`, beside the existing
-   blocked/authorize rows. The operator reviews decisions at the digest, not mid-run.
+2. **Digest:** the digest adds a "Decided by the loop" section: every `loop-decided` issue whose newest decision is at most seven
+   days old, marked `decided, reversible`, below the existing blocked/authorize rows (which stay "waiting on a human"). `unit.mjs`
+   has no run identity, so a time window stands in for "this run"; a failed decision read never stops the questions posting. The operator reviews decisions at the digest, not mid-run.
 3. **Reversal:** a human reverses a decision by replying `/answer <what instead>` on the issue (the same explicit form as
    `SPEC-blocked-triage.md` — in a solo repository a plain comment cannot be told apart from the loop's own). The loop reads prior
    `autoloop-decision-v1` comments and later `/answer` comments as premise context for any re-attempt; an `/answer` postdating a
