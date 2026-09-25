@@ -1209,6 +1209,37 @@ function isInlineGhBody(words) {
   );
 }
 
+// A comment whose first non-blank line starts with `/answer` is a human's
+// answer to a loop block (unit.mjs triageBlocks). Inline `--body` is already
+// refused (rule 5), so this reads the two shapes that remain: a comment body
+// file, and a `gh api` body field. An unreadable file is not proof of anything
+// and passes, as every other body file does.
+const ANSWER_LINE_RE = /^\s*\/answer(?:\s|$)/u;
+
+function startsWithAnswer(text) {
+  return ANSWER_LINE_RE.test(String(text).replace(/^(?:[ \t]*\r?\n)+/u, ''));
+}
+
+export function postsHumanAnswer(words, read = (path) => readFileSync(path, 'utf8').slice(0, 4096)) {
+  const readable = (path) => {
+    try {
+      return startsWithAnswer(read(path));
+    } catch {
+      return false;
+    }
+  };
+  const comment = hasGhScopedAction(words, 'issue', 'comment') || hasGhScopedAction(words, 'pr', 'comment');
+  if (comment && optionValues(words, '--body-file', '-F').some(readable)) return true;
+  const gh = executableIndex(words, 'gh');
+  if (gh === -1 || words[gh + 1] !== 'api') return false;
+  const fields = ['-f', '-F', '--field', '--raw-field'].flatMap((option) => optionValues(words, option));
+  return fields.some((field) => {
+    if (!field.startsWith('body=')) return false;
+    const value = field.slice('body='.length);
+    return value.startsWith('@') ? readable(value.slice(1)) : startsWithAnswer(value);
+  });
+}
+
 function hasGhScopedAction(words, scope, action) {
   const gh = executableIndex(words, 'gh');
   if (gh === -1) return false;
@@ -1991,6 +2022,16 @@ export function evaluate(inputCmd, branch, options = {}) {
         'autoloop guard — raw pull-request readiness mutation is outside loop authority. '
         + 'Use the exact-head Autoloop terminal finalizer. Returning a PR to draft is allowed '
         + '(`gh pr ready <N> --undo`) — it removes readiness rather than granting it.',
+    };
+  }
+  if (segments.some(({ command }) => postsHumanAnswer(shellWords(command)))) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — a comment starting with `/answer` is how a human answers a loop '
+        + 'block, and in a solo repository the loop shares their login: writing one would '
+        + 'answer its own question. A judgment call is yours to record with `unit.mjs '
+        + '--decide`; a genuine human decision stays blocked until a human answers it.',
     };
   }
   if (segments.some(({ command }) =>
@@ -2791,6 +2832,14 @@ function selfTest() {
     ['gh --repo o/r pr ready 42', 'feat/gh-2-y', true],
     ['gh issue edit 7 --add-label loop-delivered', 'feat/gh-2-y', true],
     ['gh issue edit 7 --add-label loop-ready,loop-delivered', 'feat/gh-2-y', true],
+    // 2026-09-25: `/answer` is how a human resumes a loop block, and in a solo
+    // repository the runner shares the human's login — the loop must never
+    // write one, or it answers its own question.
+    ['gh issue comment 7 --body "/answer 128 chars"', 'feat/gh-2-y', true],
+    ['gh issue comment 7 -b "  /answer go"', 'feat/gh-2-y', true],
+    ['gh pr comment 9 --body=/answer', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/issues/7/comments -f body="/answer yes"', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/issues/7/comments -f body="resumed; reply /answer to change it"', 'feat/gh-2-y', false],
     ['gh issue edit 7 --add-label loop-ready', 'feat/gh-2-y', true],
     ['gh issue edit 7 --add-label=LOOP-READY', 'feat/gh-2-y', true],
     ['gh pr edit 42 --add-label=loop-delivered', 'feat/gh-2-y', true],
@@ -2993,6 +3042,24 @@ function selfTest() {
       && backgroundDispatchProblem('node /x/tools/agentic/dispatch.mjs --self-test', true) === null;
     if (!launchCases) {
       console.error('FAIL [background dispatch launch rule]');
+      ok = false;
+    }
+  }
+  {
+    messageChecks += 1;
+    const files = { '/s/answer.md': '\n  /answer yes\nmore', '/s/plain.md': 'resumed\n/answer later' };
+    const read = (path) => {
+      if (!(path in files)) throw new Error('ENOENT');
+      return files[path];
+    };
+    const answerFileCases =
+      postsHumanAnswer(shellWords('gh issue comment 7 --body-file /s/answer.md'), read)
+      && postsHumanAnswer(shellWords('gh api repos/o/r/issues/7/comments -F body=@/s/answer.md'), read)
+      && !postsHumanAnswer(shellWords('gh issue comment 7 --body-file /s/plain.md'), read)
+      && !postsHumanAnswer(shellWords('gh issue comment 7 --body-file /s/missing.md'), read)
+      && !postsHumanAnswer(shellWords('gh issue view 7 --comments'), read);
+    if (!answerFileCases) {
+      console.error('FAIL [a body file starting with /answer is refused]');
       ok = false;
     }
   }
