@@ -1359,6 +1359,18 @@ function addsStepWithoutRetiringPredecessor(words) {
     add >= 2 && add !== 4 && !removed.includes(add - 1));
 }
 
+// loop-repair makes an issue eligible through its parent's loop-ready, and the
+// provenance marker unit.mjs --repair writes is what that trust rests on — so
+// the label is only ever applied there, never by a raw edit or create.
+function appliesRepairLabel(words) {
+  const names = (values) => values.flatMap((value) => value.split(','))
+    .some((name) => name.trim().toLowerCase() === 'loop-repair');
+  const edit = hasGhScopedAction(words, 'issue', 'edit') || hasGhScopedAction(words, 'pr', 'edit');
+  if (edit && names(optionValues(words, '--add-label'))) return true;
+  const create = hasGhScopedAction(words, 'issue', 'create') || hasGhScopedAction(words, 'pr', 'create');
+  return create && names(optionValues(words, '--label', '-l'));
+}
+
 function renamesProtectedLifecycleLabel(words) {
   return hasGhScopedAction(words, 'label', 'edit')
     && optionValues(words, '--name', '-n').some(
@@ -2022,6 +2034,15 @@ export function evaluate(inputCmd, branch, options = {}) {
         'autoloop guard — raw pull-request readiness mutation is outside loop authority. '
         + 'Use the exact-head Autoloop terminal finalizer. Returning a PR to draft is allowed '
         + '(`gh pr ready <N> --undo`) — it removes readiness rather than granting it.',
+    };
+  }
+  if (segments.some(({ command }) => appliesRepairLabel(shellWords(command)))) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — `loop-repair` makes an issue eligible through its parent\'s '
+        + '`loop-ready`, so only `unit.mjs --repair --parent <N>` applies it, together with the '
+        + 'provenance marker that trust rests on. File the repair with that command.',
     };
   }
   if (segments.some(({ command }) => postsHumanAnswer(shellWords(command)))) {
@@ -2840,6 +2861,15 @@ function selfTest() {
     ['gh pr comment 9 --body=/answer', 'feat/gh-2-y', true],
     ['gh api repos/o/r/issues/7/comments -f body="/answer yes"', 'feat/gh-2-y', true],
     ['gh api repos/o/r/issues/7/comments -f body="resumed; reply /answer to change it"', 'feat/gh-2-y', false],
+    // 2026-09-25: loop-repair makes an issue eligible through its parent's
+    // loop-ready; only unit.mjs --repair may apply it, with the provenance marker.
+    ['gh issue edit 7 --add-label loop-repair', 'feat/gh-2-y', true],
+    ['gh issue create --title t --body-file /tmp/b.md --label loop-repair', 'main', true],
+    ['gh issue create --title t --body-file /tmp/b.md -l bug,loop-repair', 'main', true],
+    ['gh api repos/o/r/issues/7/labels -f "labels[]=loop-repair"', 'main', true],
+    ['gh issue edit 7 --remove-label loop-repair', 'main', false],
+    ['gh issue list --label loop-repair --state open', 'main', false],
+    ['node tools/agentic/unit.mjs --repair --parent 7 --title t --body-file /tmp/b.md', 'main', false],
     ['gh issue edit 7 --add-label loop-ready', 'feat/gh-2-y', true],
     ['gh issue edit 7 --add-label=LOOP-READY', 'feat/gh-2-y', true],
     ['gh pr edit 42 --add-label=loop-delivered', 'feat/gh-2-y', true],
