@@ -56,6 +56,10 @@ const DECISION_MARKER_RE = /<!-- autoloop-decision-v1 (\{[^\n]*?\}) -->/gu;
 const BLOCK_MARKER_RE = /<!-- autoloop-block-v1 (\{[^\n]*?\}) -->/gu;
 const REASON_RE = /^[A-Z][A-Z0-9_]*$/u;
 const BLOCK_GATES = Object.freeze(['human:decide', 'human:authorize']);
+const BLOCK_LABEL_WINDOW_MS = 5 * 60_000;
+const ANSWER_RE = /^\s*\/answer(?:\s+([\s\S]*))?$/u;
+const WRITE_PERMISSIONS = Object.freeze(['admin', 'maintain', 'write']);
+const LAST_BLOCKED_LABEL_JQ = '[.[] | select(.event == "labeled" and .label.name == "loop-blocked") | .created_at] | last // empty';
 const DECISION_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const SHA_RE = /^[0-9a-f]{7,40}$/u;
 const MAX_WAIT_MINUTES = 720;
@@ -369,6 +373,86 @@ export function liftWaits({ base, run, now = Date.now() }) {
     else errors.push(`#${issue.number}: ${removed.stderr}`);
   }
   return { lifted, waiting, errors };
+}
+
+/** Pure: the newest `/answer` a trusted actor posted after the block, or null. */
+export function answerAfter(block, comments, trusted) {
+  let newest = null;
+  for (const comment of comments ?? []) {
+    const match = ANSWER_RE.exec(String(comment?.body ?? ''));
+    const at = Date.parse(comment?.createdAt);
+    if (!match || !Number.isFinite(at) || at <= Date.parse(block.at)) continue;
+    const by = comment.author?.login;
+    if (typeof by !== 'string' || !trusted(by)) continue;
+    if (newest === null || at >= Date.parse(newest.at)) {
+      newest = { by, text: (match[1] ?? '').trim(), at: comment.createdAt };
+    }
+  }
+  return newest;
+}
+
+/** Resume every loop block a trusted human has answered with `/answer`.
+ *  Never throws: anything unreadable leaves the unit blocked, the safe side. A
+ *  block counts only when its marker was posted within five minutes before the
+ *  latest `loop-blocked` label event, so an old marker cannot reopen a block a
+ *  human applied later by hand. */
+export function triageBlocks({ run, now = Date.now() }) {
+  const listed = run('gh', ['issue', 'list', '--label', 'loop-blocked', '--state', 'open', '--limit', '100', '--json', 'number,title,labels,comments']);
+  if (!listed.ok) return { resumed: [], waiting: [], held: [], errors: [`list: ${listed.stderr}`] };
+  let issues;
+  try { issues = JSON.parse(listed.stdout); } catch { return { resumed: [], waiting: [], held: [], errors: ['list: unparseable'] }; }
+  const resumed = [];
+  const waiting = [];
+  const held = [];
+  const errors = [];
+  const permissions = {};
+  const trusted = (login) => {
+    if (!(login in permissions)) {
+      const answer = run('gh', ['api', `repos/{owner}/{repo}/collaborators/${encodeURIComponent(login)}/permission`, '--jq', '.permission']);
+      permissions[login] = answer.ok && WRITE_PERMISSIONS.includes(answer.stdout);
+    }
+    return permissions[login];
+  };
+  for (const issue of issues) {
+    const block = (issue.comments ?? []).map((comment) => parseBlock(comment.body))
+      .findLast((entry) => entry !== null) ?? null;
+    if (block === null) {
+      held.push({ number: issue.number, reason: 'no loop marker' });
+      continue;
+    }
+    const events = run('gh', ['api', `repos/{owner}/{repo}/issues/${issue.number}/events?per_page=100`, '--paginate', '--jq', LAST_BLOCKED_LABEL_JQ]);
+    const labeledAt = events.ok ? Date.parse(events.stdout.split('\n').filter(Boolean).at(-1)) : Number.NaN;
+    if (!Number.isFinite(labeledAt)) {
+      held.push({ number: issue.number, reason: 'label history unreadable' });
+      if (!events.ok) errors.push(`#${issue.number}: ${events.stderr}`);
+      continue;
+    }
+    const gap = labeledAt - Date.parse(block.at);
+    if (gap < 0 || gap > BLOCK_LABEL_WINDOW_MS) {
+      held.push({ number: issue.number, reason: 'the marker predates the current block' });
+      continue;
+    }
+    const answer = answerAfter(block, issue.comments, trusted);
+    if (answer === null) {
+      waiting.push({ number: issue.number, question: block.question });
+      continue;
+    }
+    const gates = (issue.labels ?? []).map((label) => label?.name ?? label).filter((name) => BLOCK_GATES.includes(name));
+    const lifted = run('gh', ['issue', 'edit', String(issue.number), '--remove-label', ['loop-blocked', ...gates].join(',')]);
+    if (!lifted.ok) {
+      errors.push(`#${issue.number}: ${lifted.stderr}`);
+      continue;
+    }
+    const record = { issue: issue.number, by: answer.by, answer: answer.text, at: new Date(now).toISOString() };
+    const body = [
+      `<!-- autoloop-resumed-v1 ${JSON.stringify(record)} -->`,
+      `**autoloop: resumed** — @${answer.by} answered \`${block.reason}\`. The loop takes this unit first, with the answer as its premise.`,
+    ].join('\n');
+    const commented = run('gh', ['issue', 'comment', String(issue.number), '--body', body]);
+    if (!commented.ok) errors.push(`#${issue.number}: resumed, but the record failed: ${commented.stderr}`);
+    resumed.push({ number: issue.number, by: answer.by, answer: answer.text });
+  }
+  return { resumed, waiting, held, errors };
 }
 
 /** Pure: the first prose line of a comment, without markers or markdown decoration. */
@@ -786,6 +870,65 @@ function selfTest() {
   }], []);
   check('the digest reads a marked block\'s own question first',
     markedRows[0].question === block.question);
+
+  const blockAt = '2026-09-25T10:00:00.000Z';
+  const later = (minutes) => new Date(Date.parse(blockAt) + minutes * 60_000).toISOString();
+  const marked = { issue: 7, class: 'human', reason: 'UNSPECIFIED_VALUE', question: 'What length?', at: blockAt };
+  const trustedOnly = (login) => login === 'owner';
+  check('an answer is a trusted /answer comment after the block, the newest winning',
+    answerAfter(marked, [
+      { author: { login: 'owner' }, body: '/answer 64', createdAt: later(1) },
+      { author: { login: 'owner' }, body: '/answer 128 chars\nand "Unnamed device"', createdAt: later(2) },
+    ], trustedOnly).text === '128 chars\nand "Unnamed device"'
+    && answerAfter(marked, [{ author: { login: 'owner' }, body: '/answer 64', createdAt: later(-1) }], trustedOnly) === null
+    && answerAfter(marked, [{ author: { login: 'stranger' }, body: '/answer 64', createdAt: later(1) }], trustedOnly) === null
+    && answerAfter(marked, [{ author: { login: 'owner' }, body: 'I think 64 /answer', createdAt: later(1) }], trustedOnly) === null
+    && answerAfter(marked, [{ author: { login: 'owner' }, body: '/answers are hard', createdAt: later(1) }], trustedOnly) === null);
+
+  const blockedList = JSON.stringify([
+    { number: 7, title: 'Answered', labels: [{ name: 'loop-ready' }, { name: 'loop-blocked' }, { name: 'human:decide' }],
+      comments: [{ author: { login: 'owner' }, body: blockMarker(marked), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer 128', createdAt: later(30) }] },
+    { number: 8, title: 'Unanswered', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, body: blockMarker({ ...marked, issue: 8 }), createdAt: blockAt },
+        { author: { login: 'owner' }, body: 'looking at it', createdAt: later(30) }] },
+    { number: 9, title: 'Hand-blocked', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, body: 'blocked by hand', createdAt: blockAt }] },
+    { number: 10, title: 'Stale marker', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, body: blockMarker({ ...marked, issue: 10 }), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer go', createdAt: later(30) }] },
+    { number: 11, title: 'Stranger', labels: [{ name: 'loop-blocked' }],
+      comments: [{ author: { login: 'owner' }, body: blockMarker({ ...marked, issue: 11 }), createdAt: blockAt },
+        { author: { login: 'stranger' }, body: '/answer go', createdAt: later(30) }] },
+  ]);
+  const triaging = fakeRun([
+    ['gh issue list --label loop-blocked', blockedList],
+    ['gh api repos/{owner}/{repo}/issues/7/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/8/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/10/events', later(60 * 24)],
+    ['gh api repos/{owner}/{repo}/issues/11/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/collaborators/owner/permission', 'admin'],
+    ['gh api repos/{owner}/{repo}/collaborators/stranger/permission', 'read'],
+    ['gh issue edit 7', ''],
+    ['gh issue comment 7', ''],
+  ]);
+  const triage = triageBlocks({ run: triaging.run, now: Date.parse(later(60)) });
+  check('prime resumes an answered loop block, and holds the rest with their reason',
+    triage.resumed.map((entry) => `${entry.number}:${entry.by}:${entry.answer}`).join(',') === '7:owner:128'
+    && triage.waiting.map((entry) => `${entry.number}:${entry.question}`).join(',') === '8:What length?,11:What length?'
+    && triage.held.map((entry) => entry.number).join(',') === '9,10'
+    && triage.errors.length === 0);
+  check('a resume lifts the block and gate labels, then records the answer, touching nothing else',
+    triaging.calls.includes('gh issue edit 7 --remove-label loop-blocked,human:decide')
+    && triaging.calls.some((call) => call.startsWith('gh issue comment 7') && call.includes('autoloop-resumed-v1'))
+    && !triaging.calls.some((call) => /gh issue (edit|comment) (8|9|10|11)\b/u.test(call))
+    && !triaging.calls.some((call) => call.includes('loop-ready')));
+  check('a failed listing resumes nothing and reports it',
+    triageBlocks({ run: fakeRun([['gh issue list', false]]).run }).errors.length === 1);
+  const eventsFail = fakeRun([['gh issue list --label loop-blocked', blockedList]]);
+  check('an unreadable label history holds the unit instead of resuming it',
+    triageBlocks({ run: eventsFail.run }).resumed.length === 0
+    && !eventsFail.calls.some((call) => call.startsWith('gh issue edit')));
 
   check('arguments parse and refuse',
     parseArgs(['--block', '--issue', '7', '--reason', 'X', '--question', 'q?', '--gate', 'human:authorize']).gate === 'human:authorize'

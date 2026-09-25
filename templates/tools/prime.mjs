@@ -44,7 +44,7 @@ import { extractConfig, validateProjectConfig } from './config-contract.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import { SNAPSHOT_SECTIONS, writeStdoutSync } from './snapshot-contract.mjs';
-import { liftWaits, postDigest, realRun } from './unit.mjs';
+import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
@@ -145,7 +145,7 @@ export function baseSyncFacts(root, baseBranch) {
   };
 }
 
-export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits } = {}) {
+export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits, triage = triageBlocks } = {}) {
   if (!validateScanArgs(scanArgs)) {
     return failure(
       'input',
@@ -187,6 +187,8 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits 
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });
+  // Same reasoning: a unit a human just answered is eligible in this snapshot.
+  const blocks = triage({ run: realRun(root) });
 
   const scanStartedAt = Date.now();
   const scan = spawnSync(process.execPath, [SCAN_TOOL, ...scanArgs], {
@@ -236,6 +238,7 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits 
     base,
     runMarker,
     waits,
+    blocks,
     timings: { scanMs, primeMs: Date.now() - PROCESS_START_MS },
     snapshot,
   };
@@ -395,6 +398,15 @@ export function waitLines(waits) {
   ];
 }
 
+export function blockLines(blocks) {
+  return [
+    ...(blocks?.resumed ?? []).map((entry) => `resumed: #${entry.number} (@${entry.by}: ${entry.answer}) — take it first`),
+    ...(blocks?.waiting ?? []).map((entry) => `blocked: #${entry.number} — ${entry.question}`),
+    ...(blocks?.held ?? []).map((entry) => `held: #${entry.number} (${entry.reason})`),
+    ...(blocks?.errors ?? []).map((error) => `block-triage error: ${error}`),
+  ];
+}
+
 function report(summary) {
   if (summary.ok !== true) {
     return `prime ${summary.step} FAILED  ${summary.error.code}\n${summary.error.message}`;
@@ -411,6 +423,7 @@ function report(summary) {
     `scan   ${summary.timings.scanMs}ms  prime ${summary.timings.primeMs}ms`
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
     ...waitLines(summary.waits),
+    ...blockLines(summary.blocks),
     'section                    items  complete',
   ];
   for (const [name, section] of Object.entries(summary.sections)) {
@@ -605,6 +618,18 @@ function selfTest() {
       errors: ['list: offline'],
     }).join('|') === 'lifted: #10 (#4 is closed)|waiting: #13 (no parseable waiting marker)|wait-lift error: list: offline'
     && waitLines(undefined).length === 0,
+  );
+
+  check(
+    'resumed, still-blocked and held units are printed, one line each',
+    blockLines({
+      resumed: [{ number: 7, by: 'owner', answer: '128 chars, "Unnamed device"' }],
+      waiting: [{ number: 8, question: 'What length?' }],
+      held: [{ number: 9, reason: 'no loop marker' }],
+      errors: ['list: offline'],
+    }).join('|') === 'resumed: #7 (@owner: 128 chars, "Unnamed device") — take it first'
+      + '|blocked: #8 — What length?|held: #9 (no loop marker)|block-triage error: list: offline'
+    && blockLines(undefined).length === 0,
   );
 
   check(

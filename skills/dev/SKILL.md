@@ -926,7 +926,9 @@ Maintenance uses the full workflow. STATE is protected; ARCH remains ordinary ma
 
 ### 1. Select and premise-check
 
-Invalidate/refetch queue sections affected by Pitcrew. Choose highest priority, then oldest.
+Invalidate/refetch queue sections affected by Pitcrew. A unit prime printed as `resumed:` goes
+first — a human answered its block, and it is the work they are waiting on. Otherwise choose
+highest priority, then oldest.
 Record issue number, body hash, label event, dependencies, planned base OID, and selection
 snapshot fingerprint.
 
@@ -964,6 +966,15 @@ unit five hours after its human unblocked it and costing them a second unblock. 
 comment is history: context worth reading before the fresh attempt (its round table and open
 findings), never authority over labels. The only legitimate `loop-blocked` apply is the terminal
 act of a unit THIS run is blocking, with its new reason comment.
+
+**An answered block resumes itself.** Every block `unit.mjs --block` writes asks its question and
+ends with the reply form `/answer <decision>`. Before its scan, prime lifts the block of every
+issue where a trusted actor (write, maintain or admin) posted an `/answer` after the marker, and
+prints it `resumed: #N (@login: <answer>)`. It holds a block with no loop marker, and one whose
+marker predates the current block. In a solo repository the runner and the human share a login,
+so only the `/answer` prefix marks a human's reply, and the loop never writes one. The answer is
+the decision the block asked for: it settles that question in the premise and the plan, and a
+later plan that contradicts it is wrong. It is authority over that one question, nothing else.
 
 Challenge premises against current code and STATE. Two outcomes dispose of themselves, with no
 human and no block:

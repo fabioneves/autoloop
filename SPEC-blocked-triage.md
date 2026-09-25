@@ -14,8 +14,9 @@ In the manual sessions an answer resumed the work immediately. Blocked issues ar
 
 3. **Triage at prime.** Prime runs this before its scan, next to `liftWaits`. For each open `loop-blocked` issue:
    - **No `autoloop-block-v1` marker** (a human block, or one from a pre-marker run): held, reported as `held: #N (no loop marker)`.
-   - **Marker, no later `/answer`**: held, reported as `waiting: #N — <question>`.
-   - **Marker plus a later `/answer`**: the loop removes `loop-blocked` and `human:decide`, then posts an `autoloop-decision-v1` comment ("resumed on /answer by @login"). It prints `resumed: #N`. The `/answer` text becomes premise context and overrides anything it conflicts with.
+   - **Marker, no later `/answer`**: held, reported as `blocked: #N — <question>`.
+   - **Marker plus a later `/answer`**: the loop removes `loop-blocked` and the gate label, then posts an `autoloop-resumed-v1` comment recording who answered and what. It deliberately does not post a decision marker, because the answer is the human's decision and not the loop's, and a decision marker would list it in the digest as the loop's own. It prints `resumed: #N`. The `/answer` text becomes premise context and overrides anything it conflicts with.
+   - The marker must also match the current block: it must have been posted within 5 minutes before the latest `loop-blocked` label event (read from the issue's events). Otherwise the block is held.
 
 4. **Priority.** Resumed issues are selected before other queue work in the same run.
 
