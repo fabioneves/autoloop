@@ -57,10 +57,11 @@ query($id:ID!,$cursor:String){
   }
 }`;
 
-const ISSUE_VIEWER_AUTHOR_QUERY = `
-query($owner:String!,$name:String!,$number:Int!){
+const REPAIR_FACTS_QUERY = `
+query($owner:String!,$name:String!,$number:Int!,$parent:Int!){
   repository(owner:$owner,name:$name){
-    issue(number:$number){viewerDidAuthor}
+    repair: issue(number:$number){viewerDidAuthor}
+    parent: issue(number:$parent){state stateReason labels(first:100){nodes{name}}}
   }
 }`;
 
@@ -839,15 +840,21 @@ export function lastLoopReadyEvent(timeline) {
 /** Pure: a loop repair's queue facts. Its provenance is the parent's loop-ready
  *  event its marker copied; the snapshot contract checks that event is still the
  *  parent's newest, and that the loop wrote the repair. */
-export function repairItemFacts(marker, parentTimeline, viewerDidAuthor) {
+export function repairItemFacts(marker, parentTimeline, facts) {
+  const parentLabels = (facts?.parent?.labels?.nodes ?? []).map((label) => label?.name);
   return {
     provenance: { labeledBy: marker.parentLabeledBy, labeledAt: marker.parentLabeledAt },
     repair: {
       parent: marker.parent,
       parentLabeledBy: marker.parentLabeledBy,
       parentLabeledAt: marker.parentLabeledAt,
-      viewerDidAuthor: viewerDidAuthor === true,
+      viewerDidAuthor: facts?.repair?.viewerDidAuthor === true,
       parentLastReadyEvent: lastLoopReadyEvent(parentTimeline),
+      parentState: facts?.parent?.state === 'OPEN' ? 'OPEN' : 'CLOSED',
+      parentStateReason: facts?.parent?.stateReason ?? null,
+      parentBlocked: parentLabels.includes('loop-blocked'),
+      parentDelivered: parentLabels.includes('loop-delivered'),
+      blocksParent: marker.blocksParent === true,
     },
   };
 }
@@ -913,15 +920,20 @@ async function fetchQueue(openIssues, repo) {
       section = await fetchIssueTimeline(repo, issue);
       provenance = labelProvenance(section.items);
     } else {
-      section = await fetchIssueTimeline(repo, { number: marker.parent });
-      let viewerDidAuthor = false;
+      // A repair whose facts cannot be read is not queue work this scan: it
+      // drops out rather than making every other unit's queue incomplete.
+      const parentTimeline = await fetchIssueTimeline(repo, { number: marker.parent });
+      let data = null;
       try {
-        const data = await ghGraphql(ISSUE_VIEWER_AUTHOR_QUERY, { owner: repo.owner, name: repo.name, number: issue.number });
-        viewerDidAuthor = data.repository?.issue?.viewerDidAuthor === true;
-      } catch (error) {
-        section = incompleteSection('REPAIR_AUTHOR_UNAVAILABLE', `issue #${issue.number} author: ${commandError(error)}`);
+        data = await ghGraphql(REPAIR_FACTS_QUERY, { owner: repo.owner, name: repo.name, number: issue.number, parent: marker.parent });
+      } catch {
+        data = null;
       }
-      const facts = repairItemFacts(marker, section.items, viewerDidAuthor);
+      if (!parentTimeline.complete || !data?.repository?.parent || !data.repository.repair) {
+        return { item: null, section: completeSection([]), labelEvidence: null };
+      }
+      section = parentTimeline;
+      const facts = repairItemFacts(marker, parentTimeline.items, data.repository);
       provenance = facts.provenance;
       repairFacts = { repair: facts.repair };
     }
@@ -975,6 +987,7 @@ async function fetchQueue(openIssues, repo) {
     };
   });
   const items = timelines.map(({ item }) => item)
+    .filter(Boolean)
     .sort((left, right) => left.number - right.number);
   const dependent = [
     openIssues,
@@ -1871,9 +1884,12 @@ async function selfTest() {
       'repair facts copy the marker as provenance and carry the live parent event',
       (() => {
         const marker = { parent: 248, parentLabeledBy: 'a', parentLabeledAt: 't1', depth: 1 };
-        const facts = repairItemFacts(marker, [
+        const facts = repairItemFacts({ ...marker, blocksParent: true }, [
           { __typename: 'LabeledEvent', label: { name: 'loop-ready' }, actor: { login: 'a' }, createdAt: 't1' },
-        ], true);
+        ], {
+          repair: { viewerDidAuthor: true },
+          parent: { state: 'CLOSED', stateReason: 'COMPLETED', labels: { nodes: [{ name: 'loop-ready' }, { name: 'loop-delivered' }] } },
+        });
         return JSON.stringify(facts.provenance) === '{"labeledBy":"a","labeledAt":"t1"}'
           && JSON.stringify(facts.repair) === JSON.stringify({
             parent: 248,
@@ -1881,6 +1897,11 @@ async function selfTest() {
             parentLabeledAt: 't1',
             viewerDidAuthor: true,
             parentLastReadyEvent: { event: 'labeled', actor: 'a', at: 't1' },
+            parentState: 'CLOSED',
+            parentStateReason: 'COMPLETED',
+            parentBlocked: false,
+            parentDelivered: true,
+            blocksParent: true,
           });
       })(),
     ],

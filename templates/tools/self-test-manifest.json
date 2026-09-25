@@ -29,13 +29,13 @@
     "release-verify.mjs": "1ff059af3643249507b0ee3fb80c287106ed40e40f2e9123240c09ada1ab3e1c",
     "review-contract.mjs": "56a6b6c3348e6b3f9dc7a63b1eee3609d5e3d9a79c99a46b72c0b750a894eb15",
     "scaffold.mjs": "1d634f555749cd5900a1574a85d5e74e182c340629afe4804be92e1a58a10004",
-    "scan.mjs": "e75eb7dbf9cc13ca721fe41b5909eac4493dc38558192b9c8476dc078da27aa2",
+    "scan.mjs": "ceab445861af107a5d758e983e9767767943be23d6f5f1fa3ca2c74cbe0b1ed6",
     "sizing-contract.mjs": "d37b91eec295a80886c406dbfea039b6dd76ed68cd466baf4c53145764e61f40",
-    "snapshot-contract.mjs": "43278e05d267ee611ba9c64137ebb14c0ee6be15c0e0286f4a3ec06b464c17fe",
+    "snapshot-contract.mjs": "506fe39194fb90660ba747700efdb4c363314a03386ce54fabfcb6825cd28e40",
     "stats.mjs": "939775ca5d963cdfeb227428a17bc3d5e96f17c42e59f9b4e699b36e30b595e6",
     "step-subject.mjs": "ffe7d1dbb92030c5e794202235741fbdc5e83ee1ef430cdf61250c3456f4f4fd",
     "subagent-transcript.mjs": "77da4385fa5cd9df465985700907fff36fd246f5725738412b8c1cb0a8419d5e",
-    "unit.mjs": "4df323bfd5c2473398a9d1771b2ae6166345debe0b445d124b46911c33b18c56",
+    "unit.mjs": "04eeaaac74373a20b9988635727a74f05fa75b49da5acaa76815e692ae6f6054",
     "writeback-check.mjs": "1eb1dd31d75db5b2648970295f5e6075d019073ed81d77eea0a786bd42c7ce41"
   }
 }

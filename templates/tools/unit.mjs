@@ -394,6 +394,9 @@ export function markRepair({ parent, title, body, blocksParent = false, run }) {
   if (facts?.state !== 'OPEN' || !labels.includes('loop-ready')) {
     return refusal('REPAIR_PARENT_UNTRUSTED', `#${parent} is not an open loop-ready issue`);
   }
+  if (labels.includes('loop-blocked')) {
+    return refusal('REPAIR_PARENT_BLOCKED', `#${parent} is blocked for a human; its repairs wait for the answer`);
+  }
   const events = run('gh', ['api', `repos/{owner}/{repo}/issues/${parent}/events?per_page=100`, '--paginate', '--jq', LAST_READY_LABEL_JQ]);
   let labeled = null;
   try { labeled = events.ok ? JSON.parse(lastLine(events.stdout)) : null; } catch { labeled = null; }
@@ -407,7 +410,7 @@ export function markRepair({ parent, title, body, blocksParent = false, run }) {
   if (siblings.filter((issue) => parseRepair(issue.body)?.parent === parent).length >= REPAIRS_PER_PARENT) {
     return refusal('REPAIR_BUDGET_EXHAUSTED', `#${parent} already has ${REPAIRS_PER_PARENT} open repairs; fold this into one of them`);
   }
-  const repair = { parent, parentLabeledBy: labeled.by, parentLabeledAt: labeled.at, depth: 1 };
+  const repair = { parent, parentLabeledBy: labeled.by, parentLabeledAt: labeled.at, depth: 1, blocksParent };
   const created = withLabel(run, 'loop-repair', () => run('gh', [
     'issue', 'create', '--title', text(title), '--body', `${text(body)}\n\nRepair for #${parent}.\n\n${repairMarker(repair)}`, '--label', 'loop-repair',
   ]));
@@ -1053,7 +1056,7 @@ function selfTest() {
   const create = filing.calls.find((call) => call.startsWith('gh issue create'));
   check('a repair is filed with the parent provenance, loop-repair and never loop-ready, then the parent waits on it',
     filed.ok && filed.issue === 330 && filed.disposition === 'repair'
-    && JSON.stringify(parseRepair(create)) === JSON.stringify(repair)
+    && JSON.stringify(parseRepair(create)) === JSON.stringify({ ...repair, blocksParent: true })
     && create.includes('--label loop-repair') && !create.includes('loop-ready')
     && filing.calls.some((call) => call.startsWith('gh issue comment 248') && call.includes('"number":330'))
     && filing.calls.includes('gh issue edit 248 --add-label loop-waiting'));
@@ -1072,6 +1075,10 @@ function selfTest() {
   check('a parent whose loop-ready came from an untrusted actor refuses, filing nothing',
     markRepair({ parent: 248, title: 't', body: 'b', run: untrustedParent.run }).code === 'REPAIR_PARENT_UNTRUSTED'
     && !untrustedParent.calls.some((call) => call.startsWith('gh issue create')));
+  const blockedParent = repairRuns([['gh issue view 248', JSON.stringify({ state: 'OPEN', labels: [{ name: 'loop-ready' }, { name: 'loop-blocked' }], body: '' })]]);
+  check('a parent blocked for a human refuses a repair: the loop may not route around its block',
+    markRepair({ parent: 248, title: 't', body: 'b', run: blockedParent.run }).code === 'REPAIR_PARENT_BLOCKED'
+    && !blockedParent.calls.some((call) => call.startsWith('gh issue create')));
   const unlabeledParent = repairRuns([['gh issue view 248', JSON.stringify({ state: 'OPEN', labels: [], body: '' })]]);
   check('a parent without loop-ready refuses',
     markRepair({ parent: 248, title: 't', body: 'b', run: unlabeledParent.run }).code === 'REPAIR_PARENT_UNTRUSTED');

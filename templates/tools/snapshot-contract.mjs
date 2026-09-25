@@ -507,7 +507,11 @@ function validProvenance(value) {
     && validDateTime(value.labeledAt);
 }
 
-const REPAIR_FACT_KEYS = ['parent', 'parentLabeledBy', 'parentLabeledAt', 'viewerDidAuthor', 'parentLastReadyEvent'];
+const REPAIR_FACT_KEYS = [
+  'parent', 'parentLabeledBy', 'parentLabeledAt', 'viewerDidAuthor', 'parentLastReadyEvent',
+  'parentState', 'parentStateReason', 'parentBlocked', 'parentDelivered', 'blocksParent',
+];
+const REPAIRS_PER_PARENT = 3;
 
 // A loop-filed repair (unit.mjs --repair) carries no loop-ready of its own. Its
 // authorization is the parent's: the provenance it copies, which must still be
@@ -519,6 +523,11 @@ function validRepairFacts(value) {
     && nonEmptyString(value.parentLabeledBy)
     && validDateTime(value.parentLabeledAt)
     && typeof value.viewerDidAuthor === 'boolean'
+    && ISSUE_STATES.has(value.parentState)
+    && nullableString(value.parentStateReason)
+    && typeof value.parentBlocked === 'boolean'
+    && typeof value.parentDelivered === 'boolean'
+    && typeof value.blocksParent === 'boolean'
     && (last === null || (
       hasExactKeys(last, ['event', 'actor', 'at'])
       && ['labeled', 'unlabeled'].includes(last.event)
@@ -527,12 +536,37 @@ function validRepairFacts(value) {
     ));
 }
 
+// An open parent authorizes its repairs until a human blocks it; a delivered
+// one keeps authorizing them (a carve-out's remainder outlives its parent); a
+// parent a human closed any other way revokes them.
 function repairAuthorized(repair) {
   const last = repair.parentLastReadyEvent;
+  const parentStanding = !repair.parentBlocked && (
+    repair.parentState === 'OPEN'
+    || (repair.parentStateReason === 'COMPLETED' && repair.parentDelivered)
+  );
   return repair.viewerDidAuthor === true
+    && parentStanding
     && last?.event === 'labeled'
     && last.actor === repair.parentLabeledBy
-    && last.at === repair.parentLabeledAt;
+    && Date.parse(last.at) === Date.parse(repair.parentLabeledAt);
+}
+
+/** The queue numbers the repair budget allows: every ordinary item, and the
+ *  oldest REPAIRS_PER_PARENT repairs of each parent. */
+function repairBudgetAllows(items) {
+  const allowed = new Set();
+  const perParent = new Map();
+  for (const item of [...items].sort((left, right) => left.number - right.number)) {
+    if (item.repair === undefined) {
+      allowed.add(item.number);
+      continue;
+    }
+    const seen = perParent.get(item.repair.parent) ?? 0;
+    perParent.set(item.repair.parent, seen + 1);
+    if (seen < REPAIRS_PER_PARENT) allowed.add(item.number);
+  }
+  return allowed;
 }
 
 function validQueueItem(item, complete) {
@@ -1129,6 +1163,7 @@ function eligibleQueueIssueNumbers(snapshot) {
   const recovering = new Set(
     snapshot.sections.lifecycleMarkers.items.map((marker) => marker.issueNumber),
   );
+  const withinBudget = repairBudgetAllows(snapshot.sections.queue.items);
   return snapshot.sections.queue.items
     .filter((issue) => {
       const labeledBy = issue.provenance?.labeledBy;
@@ -1150,6 +1185,7 @@ function eligibleQueueIssueNumbers(snapshot) {
           && repairAuthorized(issue.repair);
       return trusted
         && authorized
+        && withinBudget.has(issue.number)
         && bodyUnchanged
         && !blocked.has(issue.number)
         && !issue.labels.includes('loop-blocked')
@@ -1667,6 +1703,11 @@ async function selfTest() {
     parentLabeledAt: '2026-01-01T00:00:01Z',
     viewerDidAuthor: true,
     parentLastReadyEvent: { event: 'labeled', actor: 'maintainer', at: '2026-01-01T00:00:01Z' },
+    parentState: 'OPEN',
+    parentStateReason: null,
+    parentBlocked: false,
+    parentDelivered: false,
+    blocksParent: false,
     ...overrides,
   });
   const eligibleWith = (options) => {
@@ -1690,6 +1731,19 @@ async function selfTest() {
     && eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'unlabeled', actor: 'maintainer', at: '2026-01-01T00:00:05Z' } }) }) === ''
     && eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'labeled', actor: 'stranger', at: '2026-01-01T00:00:05Z' } }) }) === ''
     && eligibleWith({ repair: repairFacts({ parentLastReadyEvent: null }) }) === '');
+  await check('a repair is revoked while its parent is blocked, or closed without delivery', () =>
+    eligibleWith({ repair: repairFacts({ parentBlocked: true }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'NOT_PLANNED' }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'COMPLETED' }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'COMPLETED', parentDelivered: true }) }) === '7');
+  await check('the parent event matches by instant, not by spelling', () =>
+    eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'labeled', actor: 'maintainer', at: '2026-01-01T00:00:01.000Z' } }) }) === '7');
+  await check('at most three repairs per parent are eligible, the oldest first', () => {
+    const repairItem = (number, parent) => ({ number, repair: { parent } });
+    return [...repairBudgetAllows([
+      repairItem(12, 248), repairItem(10, 248), repairItem(30, 9), repairItem(11, 248), repairItem(13, 248), { number: 5 },
+    ])].sort((left, right) => left - right).join(',') === '5,10,11,12,30';
+  });
   await check('a queue item needs loop-ready, or loop-repair with repair facts that match its provenance', () =>
     eligibleWith({ labels: ['loop-repair'] }) === ''
     && eligibleWith({ repair: repairFacts(), labels: ['loop-ready'] }) === ''

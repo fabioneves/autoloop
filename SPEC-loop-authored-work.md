@@ -35,7 +35,13 @@ A repair issue inherits authorization from a trusted `loop-ready` parent instead
    - At most 3 open repair issues per parent. A fourth `--repair` is refused (`REPAIR_BUDGET_EXHAUSTED`), and the loop treats that as `decide`: it folds the work into an existing repair or defers it.
    - Depth is 1. A repair unit's own repairs are filed as plain follow-ups (no `loop-repair`), and it is a human's call whether to queue them.
 
-5. **Revocation:** removing `loop-ready` from the parent revokes every repair still open under it, because eligibility re-checks the parent's provenance. Adding `loop-blocked` to a repair revokes that repair.
+5. **Parent standing** (review fix, 2026-09-25). A repair is eligible only while one of these holds:
+   - its parent is open and not `loop-blocked`, so the loop cannot route around its own human gate;
+   - its parent was delivered: closed as completed and carrying `loop-delivered`, so a carve-out's remainder outlives the parent.
+
+   A parent a human closed any other way revokes its repairs. The budget of three per parent is enforced at scan time, taking the oldest three, as well as at filing. A repair whose facts cannot be read drops out of that scan and does not make the queue incomplete. `--blocks-parent` is recorded in the marker, so the snapshot can put that repair first.
+
+6. **Revocation:** removing `loop-ready` from the parent revokes every repair still open under it, because eligibility re-checks the parent's provenance. Adding `loop-blocked` to a repair revokes that repair.
 
 6. **Priority:** a repair that `--blocks-parent` is selected before other queue work.
 
