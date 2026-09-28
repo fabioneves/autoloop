@@ -25,7 +25,7 @@
     "overlap-report.mjs": "68aa353623aecf2ca291c71bfc70e9b12eba53684bdf1597328ddb0f6cbd7ea0",
     "prime.mjs": "9fdb8156e6a9d2476f512e7664176b85832bced771531b2e09c38732cd7e59fb",
     "publish-verdict.mjs": "1f77522bb9326de792cdfdcd67fe5f91a62cf749e888cb336a2b94238a10bea8",
-    "regression-index.mjs": "d998516086e94ed046637836574a978a15e06f8b9bae844105fa4b7fe2c678a1",
+    "regression-index.mjs": "df5711716827428e8e84da17d8d992db63c8bcdc4bd3b0c03348389e9f69af61",
     "release-verify.mjs": "1ff059af3643249507b0ee3fb80c287106ed40e40f2e9123240c09ada1ab3e1c",
     "review-contract.mjs": "f67b6234ead833831a8cbeb72a8234630e6054c53d2fcd353528deeb155b0c10",
     "scaffold.mjs": "253c2f19bf2f0cbe251c826adbce5368247fd5ec6ea87bd6e8abd42e61dcee82",
@@ -33,7 +33,7 @@
     "sizing-contract.mjs": "7bc0bf94e9103bba3fd7d6100aa0a27f2d028789ffba281a64945c07de3ddf14",
     "snapshot-contract.mjs": "59cf25e97f3c9dd92fd9d54c45bc97c8483eae0a4fdb905fdf0ee91a8402bfc4",
     "stats.mjs": "41622973c6aae6395461d4fde362837063714c935cb8507ffd9a7188c15d42ee",
-    "step.mjs": "ba88d1b2eb706e7f8bd378a4bfea8db3371e0214a4947f15936b2e8bebad83dd",
+    "step.mjs": "f6fd5de64a2f3183d9f3e42286f3fd5015c06b686d83e24ac30e3b7273620c83",
     "subagent-transcript.mjs": "77da4385fa5cd9df465985700907fff36fd246f5725738412b8c1cb0a8419d5e",
     "unit.mjs": "e11c76682a0ead2036a5f677031c0518b212fcdfa79e5c9ab7090da41874ae92",
     "writeback-check.mjs": "ab199d13c919ef86f51309da25804a29bee4cefddb0ec7bb0545230212ee4d86"

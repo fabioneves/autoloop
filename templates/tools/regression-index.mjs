@@ -627,6 +627,14 @@ export const INCIDENTS = Object.freeze([
         file: 'step.mjs',
         anchor: 'the predecessor is named even when an earlier swap already lost it',
       }),
+      Object.freeze({
+        file: 'step.mjs',
+        anchor: 'export function skippedSteps(',
+      }),
+      Object.freeze({
+        file: 'step.mjs',
+        anchor: "'a skipped step is printed under the ribbon and recorded'",
+      }),
     ]),
   }),
   Object.freeze({

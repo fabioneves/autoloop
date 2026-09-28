@@ -51,6 +51,25 @@ export function swapPlan(current, to) {
   return { remove, add };
 }
 
+// Pure: the ladder steps a transition jumps over. The guard cannot see them:
+// swapPlan always names the predecessor, so a 03→09 swap reads as a proper
+// one. A fix round sits at 08; 10 and 11 come after 09. No ladder label yet
+// (a fresh or staged unit) skips nothing. A skip is noted, never refused:
+// step 06 is skipped by rule when no simplify engine is available.
+export function skippedSteps(current, to) {
+  const position = (step) => {
+    if (step === '08-fix') return LADDER.indexOf('08-code-review');
+    if (/^1\d-/u.test(step)) return LADDER.length;
+    return LADDER.indexOf(step);
+  };
+  const highest = Math.max(-1, ...current
+    .map((label) => /^loop:(0\d-[a-z-]+)$/u.exec(label)?.[1])
+    .filter((step) => step !== undefined)
+    .map(position));
+  const target = position(to);
+  return highest < 0 || target <= highest + 1 ? [] : LADDER.slice(highest + 1, target);
+}
+
 function readJson(path, fallback) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
@@ -136,7 +155,10 @@ export function transition({
   const { dir, error } = autoloopDir(root, run);
   if (dir === null) return refuse(`step: not inside a git repository: ${error}`);
   const stepsPath = join(dir, 'steps', `${issue}.json`);
-  const record = readJson(stepsPath, { issue, steps: [] });
+  // A closed record is a finished run: a unit worked again starts afresh, so
+  // "already on" and the card only ever see the current run.
+  const stored = readJson(stepsPath, null);
+  const record = stored === null || stored.closed ? { issue, steps: [] } : stored;
   const last = record.steps.at(-1);
   if (last && last.step === to && (last.round ?? null) === (round ?? null)) {
     return { ok: true, lines: [`already on ${to}`] };
@@ -146,7 +168,9 @@ export function transition({
   const labels = staged ? { ok: true, stdout: '[]' }
     : run('gh', ['issue', 'view', String(issue), '--json', 'labels', '--jq', '[.labels[].name]']);
   if (!labels.ok) return refuse(`step: could not read #${issue}'s labels: ${labels.stderr}`);
-  const plan = staged ? null : swapPlan(readJsonText(labels.stdout), to);
+  const current = readJsonText(labels.stdout);
+  const plan = staged ? null : swapPlan(current, to);
+  const skipped = staged ? [] : skippedSteps(current, to);
   if (plan !== null) {
     const argv = ['issue', 'edit', String(issue),
       ...(plan.remove.length ? ['--remove-label', plan.remove.join(',')] : []),
@@ -158,11 +182,14 @@ export function transition({
     if (!swapped.ok) return refuse(`step: label swap on #${issue} failed: ${swapped.stderr}`);
   }
   const warning = plan === null ? null : invalidateRetainedSnapshot(dir);
-  record.steps.push({ step: to, round, model, fallback, staged, startedAtMs: nowMs });
+  record.steps.push({
+    step: to, round, model, fallback, staged, startedAtMs: nowMs, ...(skipped.length ? { skipped } : {}),
+  });
   writeAtomically(stepsPath, record);
   return {
     ok: true,
     lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note }),
+      ...(skipped.length ? [`⚠️ #${issue} skipped ${skipped.join(', ')}`] : []),
       ...(warning ? [warning] : [])],
   };
 }
@@ -593,6 +620,26 @@ function transitionChecks(at) {
         null,
         { remove: ['loop:03-plan-review', 'loop:04-claim'], add: ['loop:05-implement'] },
       ])]);
+    const skips = (() => {
+      try {
+        return [
+          skippedSteps(['loop:03-plan-review'], '09-gate'),
+          skippedSteps(['loop:07-diff-review'], '10-publish'),
+          skippedSteps(['loop:09-gate'], '10-publish'),
+          skippedSteps(['loop:08-code-review'], '08-fix'),
+          skippedSteps(['loop-ready'], '05-implement'),
+          skippedSteps(['loop:05-implement'], '06-simplify'),
+        ];
+      } catch {
+        return null;
+      }
+    })();
+    results.push(['the steps a transition jumps over are named; a first label or the next step skips nothing',
+      JSON.stringify(skips) === JSON.stringify([
+        ['04-claim', '05-implement', '06-simplify', '07-diff-review', '08-code-review'],
+        ['08-code-review', '09-gate'],
+        [], [], [], [],
+      ])]);
     const first = go({ to: '06-simplify', model: 'claude-fable-5-1', note: '393 lines' });
     const snapshot = JSON.parse(readFileSync(join(prime, 'a.snapshot.json'), 'utf8'));
     const steps = (() => {
@@ -622,6 +669,11 @@ function transitionChecks(at) {
     const fix = go({ to: '08-fix', round: '1/5', model: 'claude-opus-5-5' });
     results.push(['review and fix rounds are separate announcements under one label',
       round.ok === true && fix.ok === true && fix.lines[0].includes('🔧 FIX') && labels.includes('loop:08-code-review')]);
+    results.push(['a skipped step is printed under the ribbon and recorded',
+      round.lines[1] === '⚠️ #350 skipped 07-diff-review'
+        && readJson(join(root, '.git', 'autoloop', 'steps', '350.json'), { steps: [] })
+          .steps.find((entry) => entry.step === '08-code-review')?.skipped?.join() === '07-diff-review'
+        && fix.lines.length === 1]);
     const refused = transition.length === undefined ? null : go({ to: '09-gate', run: () => ({ ok: false, stdout: '', stderr: 'HTTP 502' }) });
     results.push(['a failed gh call is loud', refused.ok === false && refused.lines.join(' ').includes('HTTP 502')]);
     results.push(['an unknown step is refused before anything moves', go({ to: '12-ship' }).ok === false]);
@@ -657,6 +709,27 @@ function transitionChecks(at) {
     })();
     results.push(['closing a unit prints its card and drops it from the parked view',
       closed.ok === true && closed.lines[0].startsWith('╭─ ⚠️ #350 DELIVERED') && !afterClose.includes('#350')]);
+    // Review of feat/status-first: a unit blocked at 01 and unblocked by a
+    // human re-ran 01 as "already on", so loop-started never came back and
+    // the unit was invisible to --parked and --card-run.
+    const rerun = (() => {
+      try {
+        labels = ['loop-ready'];
+        go({ issue: 360, to: '01-premise' });
+        closeUnit({ root, run, nowMs: at(10, 40), issue: 360, outcome: 'blocked' });
+        labels = ['loop-ready'];
+        const again = go({ issue: 360, to: '01-premise' });
+        return { again, labels: [...labels], record: readJson(join(root, '.git', 'autoloop', 'steps', '360.json'), null),
+          parked: parkedView({ root, run, nowMs: at(10, 45) }) };
+      } catch (error) {
+        return { again: { ok: false, lines: [`THREW ${error.message}`] } };
+      }
+    })();
+    results.push(['a unit that runs again after its card starts a fresh run',
+      rerun.again.ok === true && rerun.again.lines[0].includes('#360')
+        && rerun.labels.includes('loop-started') && rerun.labels.includes('loop:01-premise')
+        && rerun.record?.closed === undefined && rerun.record?.steps?.length === 1
+        && rerun.parked.includes('#360')]);
     results.push(['a card for a unit with no steps is refused',
       (() => {
         try {
