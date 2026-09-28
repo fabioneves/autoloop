@@ -121,23 +121,20 @@ Then, in order:
    and replace the invalidated snapshot before actionability, absence, selection, or stop
    decisions. Never read items from an invalidated section as authority.
 5. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
-   durable issue-comment marker before selecting work, including an intent that crashed before a
-   draft PR existed. A marker has authority only when its author currently has admin/maintain, or
-   when it is the authenticated current runner's own marker and that runner still has write.
+   marker it surfaces before selecting work, including an intent that crashed before a draft PR
+   existed. A finished unit's marker — a terminal phase on a closed issue — is not surfaced. A
+   marker has authority only when its author currently has admin/maintain, or when it is the
+   authenticated current runner's own marker and that runner still has write.
    Ignore marker-shaped comments from other identities, and fail closed when role evidence is
    incomplete. A malformed, mismatched, or duplicate trusted marker blocks selection **of the unit
    it belongs to — never of the run**: for a LIVE unit, `unit.mjs --block --reason
    LIFECYCLE_MARKER_INVALID` with the driver's typed refusal verbatim as `--note`, then select from
-   the rest of the queue. For a
-   unit that is already TERMINAL (issue closed, pull request merged) apply NO label — it is not
-   blocked, it is done, and a blocking label on a delivered issue is a false signal that outlives
-   the run. Post one comment carrying the refusal verbatim so the trail is complete, name it in
-   the run record as a loop defect, and move on: such a marker cannot be duplicated, abandoned, or
-   re-run, so it endangers nothing. Never hand-append the terminal outcome to close the gap —
-   marker edits and human-merge outcome appends go through the driver or not at all. A live run met an unexplained
-   `ARTIFACT_IDENTITY_MISMATCH` on a merged, delivered unit and stopped to ask, leaving three
-   eligible issues idle over a missing bookkeeping comment. Run each
-   authoritative marker through `lifecycle-driver.mjs --reconcile-json` with its captured comment
+   the rest of the queue. A MERGED unit's identity mismatch is done, not blocked: the driver
+   records it once as `terminal-refused` and the scan stops surfacing it. Apply no label, post
+   nothing, name it in the run record as a loop defect, and move on. Never hand-append the
+   terminal outcome to close the gap — marker edits and human-merge outcome appends go through
+   the driver or not at all. Run each authoritative marker through
+   `lifecycle-driver.mjs --reconcile-json` with its captured comment
    ID and exact frozen artifacts. The driver independently performs stable Git/GitHub reads,
    invokes `reconcileLifecycle()`, and applies only its typed action with marker compare-and-swap
    and postcondition readback in a bounded loop. Never execute lifecycle action JSON in prose.

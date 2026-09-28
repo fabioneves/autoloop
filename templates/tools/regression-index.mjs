@@ -33,6 +33,23 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'finished-units-were-re-reconciled-before-every-selection',
+    date: '2026-09-28',
+    symptom: 'A run started by reconciling 45 lifecycle markers, all on closed '
+      + 'issues with merged PRs, one serial driver call each, while 39 eligible '
+      + 'units waited; 7 of them could never finish and would be refused again '
+      + 'on every run.',
+    cause: 'The scan surfaced the marker of every merged PR\'s issue, and a '
+      + 'merged unit whose marker never bound a head had no terminal phase. '
+      + 'The driver now records it as terminal-refused, and the scan drops '
+      + 'terminal tips on closed issues.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'lifecycle-contract.mjs', anchor: "name: 'a merged unit whose marker can never bind is refused terminally'" }),
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: "'an unrepairable merged unit is refused terminally once, then reconciles to nothing'" }),
+      Object.freeze({ file: 'scan.mjs', anchor: "'finished markers on closed issues are not surfaced; the rest are'" }),
+    ]),
+  }),
+  Object.freeze({
     id: 'a-rejected-tool-call-closed-the-run',
     date: '2026-09-28',
     symptom: 'A prime call went to a permission prompt that was answered "no" '
