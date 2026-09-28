@@ -132,7 +132,7 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
 
 export function transition({
   root, run = realRun(root), evaluateCommand = evaluate, nowMs = Date.now(),
-  issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '',
+  issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false,
 }) {
   const refuse = (message) => ({ ok: false, lines: [message] });
   if (!Number.isSafeInteger(issue) || issue < 1) return refuse('step: --issue must be a positive issue number');
@@ -146,9 +146,12 @@ export function transition({
   if (last && last.step === to && (last.round ?? null) === (round ?? null)) {
     return { ok: true, lines: [`already on ${to}`] };
   }
-  const labels = run('gh', ['issue', 'view', String(issue), '--json', 'labels', '--jq', '[.labels[].name]']);
+  // A staged unit runs its read-only steps 1-3 unlabelled, so the worked
+  // unit keeps the only label mutations; it is announced and recorded only.
+  const labels = staged ? { ok: true, stdout: '[]' }
+    : run('gh', ['issue', 'view', String(issue), '--json', 'labels', '--jq', '[.labels[].name]']);
   if (!labels.ok) return refuse(`step: could not read #${issue}'s labels: ${labels.stderr}`);
-  const plan = swapPlan(readJsonText(labels.stdout), to);
+  const plan = staged ? null : swapPlan(readJsonText(labels.stdout), to);
   if (plan !== null) {
     const argv = ['issue', 'edit', String(issue),
       ...(plan.remove.length ? ['--remove-label', plan.remove.join(',')] : []),
@@ -159,8 +162,8 @@ export function transition({
     const swapped = run('gh', argv);
     if (!swapped.ok) return refuse(`step: label swap on #${issue} failed: ${swapped.stderr}`);
   }
-  const warning = invalidateRetainedSnapshot(gitDir);
-  record.steps.push({ step: to, round, model, fallback, startedAtMs: nowMs });
+  const warning = plan === null ? null : invalidateRetainedSnapshot(gitDir);
+  record.steps.push({ step: to, round, model, fallback, staged, startedAtMs: nowMs });
   writeAtomically(stepsPath, record);
   return {
     ok: true,
@@ -444,7 +447,7 @@ function selfTest() {
     ['a transition call parses', JSON.stringify(parsed(['--issue', '350', '--to', '08-code-review', '--round', '2/5',
       '--model', 'gpt-6-astra', '--badge', '🚧', '--note', '2 Major open', '--fallback']))
       === JSON.stringify({ mode: 'to', issue: 350, to: '08-code-review', round: '2/5', model: 'gpt-6-astra',
-        badge: '🚧', note: '2 Major open', fallback: true, what: null, ms: null, error: null })],
+        badge: '🚧', note: '2 Major open', fallback: true, staged: false, what: null, ms: null, error: null })],
     ['card and parked calls parse', parsed(['--card', '--issue', '350', '--outcome', 'delivered', '--pr', '550']).mode === 'card'
       && parsed(['--parked']).mode === 'parked'
       && parsed(['--card', '--issue', '350', '--outcome', 'finished']).error !== null],
@@ -624,6 +627,12 @@ function transitionChecks(at) {
     const refused = transition.length === undefined ? null : go({ to: '09-gate', run: () => ({ ok: false, stdout: '', stderr: 'HTTP 502' }) });
     results.push(['a failed gh call is loud', refused.ok === false && refused.lines.join(' ').includes('HTTP 502')]);
     results.push(['an unknown step is refused before anything moves', go({ to: '12-ship' }).ok === false]);
+    const editsBefore = calls.filter((call) => call.startsWith('gh issue edit')).length;
+    const staged = go({ issue: 356, to: '02-plan', staged: true, model: 'gpt-6-astra' });
+    results.push(['a staged unit is announced and recorded, never labelled',
+      staged.ok === true && staged.lines[0].includes('📐 PLAN')
+        && calls.filter((call) => call.startsWith('gh issue edit')).length === editsBefore
+        && !calls.some((call) => call.startsWith('gh issue view 356'))]);
     const view = (() => {
       try {
         return parkedView({ root, run, nowMs: at(10, 30) });
@@ -664,7 +673,7 @@ function transitionChecks(at) {
   return results;
 }
 
-const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round <r>/<cap>] [--model <id>] [--fallback] '
+const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round <r>/<cap>] [--model <id>] [--fallback] [--staged] '
   + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--ms <n>]\n       step.mjs --self-test';
 
 export function parseArgs(argv) {
@@ -672,7 +681,7 @@ export function parseArgs(argv) {
   if (argv.length === 1 && argv[0] === '--card-run') return { mode: 'card-run', error: null };
   const out = {
     mode: null, issue: null, to: null, round: null, model: null, badge: '⏳', note: '',
-    fallback: false, what: null, ms: null, error: null,
+    fallback: false, staged: false, what: null, ms: null, error: null,
   };
   const valued = { '--issue': 'issue', '--to': 'to', '--round': 'round', '--model': 'model', '--badge': 'badge',
     '--note': 'note', '--resumed': 'what', '--ms': 'ms', '--outcome': 'outcome', '--title': 'title',
@@ -680,6 +689,7 @@ export function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === '--fallback') { out.fallback = true; continue; }
+    if (flag === '--staged') { out.staged = true; continue; }
     if (flag === '--card') { out.card = true; continue; }
     if (valued[flag] === undefined) return { ...out, error: `unknown argument ${flag}` };
     const value = argv[index + 1];
