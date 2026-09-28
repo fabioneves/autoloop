@@ -361,11 +361,15 @@ export function dispatchArgv(role, tools) {
 // fixture shim on a path and an installed binary resolve the same way. Other
 // models are reached through a proxied route, never a second CLI. Codex was a
 // second engine until 0.51.0 and is refused by name.
-function claudeArgv(role, tools, model, effort) {
+// A headless engine asks before its first read outside its working directory,
+// and with nobody to answer, the read is denied (LFE #356: every input of a
+// writer's brief under /tmp). The brief's own directory is granted up front.
+function claudeArgv(role, tools, model, effort, addDirs = []) {
   return [
     ...dispatchArgv(role, tools),
     ...(model === null ? [] : ['--model', model]),
     ...(effort === null ? [] : ['--effort', effort]),
+    ...addDirs.flatMap((dir) => ['--add-dir', dir]),
   ];
 }
 
@@ -1046,6 +1050,7 @@ function executeDispatch(options) {
     model: options.model ?? null,
     effort: options.effort ?? null,
     baseUrl: options.baseUrl ?? null,
+    addDirs: options.addDirs ?? [],
   });
 }
 
@@ -1082,9 +1087,9 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 }
 
 function runEngine({
-  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl,
+  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl, addDirs,
 }) {
-  const argv = claudeArgv(role, tools, model ?? null, effort ?? null);
+  const argv = claudeArgv(role, tools, model ?? null, effort ?? null, addDirs ?? []);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
@@ -1522,6 +1527,19 @@ function selfTest() {
       && ['plan', 'implement'].every((role) => reviewEnvelopeStamp(role) === '')
       && readFileSync(stdinPath, 'utf8').includes('autoloop-review-envelope-v1'),
     );
+    // LFE, 2026-09-28: #356's headless writer was denied every read of its
+    // /tmp inputs ("requested permissions to read … you haven't granted it").
+    runDispatch({
+      role: 'implement',
+      prompt: 'implement',
+      tools: resolveTools('implement'),
+      cwd: scratch,
+      engine,
+      addDirs: ['/tmp/unit-356'],
+    });
+    const writerArgv = readFileSync(argvPath, 'utf8');
+    check('a dispatch grants its brief\'s directory to the engine',
+      writerArgv.includes('--add-dir /tmp/unit-356') && !launchedArgv.includes('--add-dir'));
     check(
       'a live reviewer spawn never receives a write tool',
       !/--tools \S*(?:Write|Edit|Bash)/.test(launchedArgv),
@@ -1691,6 +1709,7 @@ function selfTest() {
         }
         return run.status === 0
           && argvSeen.includes('--model gpt-test-model')
+          && argvSeen.includes(`--add-dir ${cliDir}`)
           && existsSync(chosen)
           && cliResult.engine === 'claude'
           && cliResult.model === 'gpt-test-model';
@@ -2701,6 +2720,7 @@ function main() {
     ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
     ...(parsed.fallback ? { fallback: true } : {}),
     ...(parsed.issue === null ? {} : { issue: parsed.issue }),
+    addDirs: [dirname(resolve(parsed.promptFile))],
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
   if (parsed.outputFile !== null) {
