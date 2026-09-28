@@ -634,12 +634,10 @@ export function recordRoutes(cwd, { preset, proxyUrl = null, overrides = [] }) {
 // the self-test pins: the child ignores `--permission-mode`, the checkout gains
 // seventeen zero-byte stubs nobody removes, and every Bash call dies at sandbox
 // start on `/home/.mcp.json`.
-// Under explicit routes a native route also drops a session-wide
-// ANTHROPIC_BASE_URL: the proxy never serves Claude models, so a native Opus
-// writer inheriting it would fail on every call.
-function dispatchEnvironment(baseUrl = null, native = false) {
+// A native route runs where the session runs: a session started on a gateway
+// reaches Claude through it. Only a proxied route's own @url replaces it.
+function dispatchEnvironment(baseUrl = null) {
   const env = { ...process.env };
-  if (native) delete env.ANTHROPIC_BASE_URL;
   if (baseUrl !== null) env.ANTHROPIC_BASE_URL = baseUrl;
   return env;
 }
@@ -862,8 +860,6 @@ function dispatchOnce(options, cwd) {
       model: resolvedModel,
       effort: resolvedEffort,
       baseUrl,
-      // A fallback is always native, whatever recording the route came from.
-      native: baseUrl === null && (route.source === 'routes' || options.fallback === true),
     });
   const engine = hostName(engineBinary);
   const model = resolvedModel;
@@ -1050,7 +1046,6 @@ function executeDispatch(options) {
     model: options.model ?? null,
     effort: options.effort ?? null,
     baseUrl: options.baseUrl ?? null,
-    native: options.native === true,
   });
 }
 
@@ -1088,7 +1083,6 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 
 function runEngine({
   role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl,
-  native,
 }) {
   const argv = claudeArgv(role, tools, model ?? null, effort ?? null);
   const checkoutBefore =
@@ -1101,7 +1095,7 @@ function runEngine({
     result = spawnSync(engine, argv, {
       cwd,
       encoding: 'utf8',
-      env: dispatchEnvironment(baseUrl, native),
+      env: dispatchEnvironment(baseUrl),
       input: `${prompt}${reviewEnvelopeStamp(role)}${dispatchContextStamp(cwd, role)}`,
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: timeoutMs,
@@ -2127,16 +2121,17 @@ function selfTest() {
       }
     };
     check(
-      'a proxied route injects exactly its URL; a native route injects none',
+      'a proxied route injects exactly its URL; a native route inherits the session\'s',
       (() => {
         const plan = routedEnv('plan');
         const review = routedEnv('code-review');
         const write = routedEnv('implement');
         return plan.url === proxyUrl && plan.argv.includes('--model gpt-6-astra')
           && review.url === proxyUrl
-          // The session's own variable must not reach a native Claude route:
-          // the proxy never serves Claude models.
-          && write.url === null && write.argv.includes('--model claude-opus-5-5')
+          // A session started on a gateway reaches Claude through it: a Fable
+          // plan review once bypassed the operator's gateway because this
+          // variable was stripped.
+          && write.url === 'http://session-wide.invalid' && write.argv.includes('--model claude-opus-5-5')
           && write.result.route === 'native' && review.result.route === 'proxy';
       })(),
     );
@@ -2144,7 +2139,8 @@ function selfTest() {
       'a --model override never borrows the route URL of a different model',
       (() => {
         const overridden = routedEnv('code-review', { model: 'claude-opus-5-5' });
-        return overridden.url === null && overridden.argv.includes('--model claude-opus-5-5');
+        return overridden.url === 'http://session-wide.invalid'
+          && overridden.argv.includes('--model claude-opus-5-5');
       })(),
     );
     check(
@@ -2155,7 +2151,8 @@ function selfTest() {
         return simplify.result.ok === true
           && simplify.argv.includes('--model gpt-6-astra') && simplify.url === proxyUrl
           && simplify.result.fallback === true && simplify.result.model === 'gpt-6-astra'
-          && planReview.argv.includes('--model claude-opus-5-5') && planReview.url === null;
+          && planReview.argv.includes('--model claude-opus-5-5')
+          && planReview.url === 'http://session-wide.invalid';
       })(),
     );
     // Every model is assumed available; one that is not falls back to Opus
@@ -2164,8 +2161,8 @@ function selfTest() {
       '--fallback on a route without one runs its default natively; on the default it fails typed',
       (() => {
         const review = routedEnv('code-review', { fallback: true });
-        // The legacy recording has no routes file; its default fallback must
-        // still run natively, not inherit the session-wide proxy.
+        // The legacy recording has no routes file; its default fallback runs
+        // natively, on whatever the session itself runs on.
         const routesText = readFileSync(routesFile, 'utf8');
         rmSync(routesFile);
         writeFileSync(engineFile, 'claude gpt-6-astra @http://127.0.0.1:18765\n');
@@ -2177,8 +2174,8 @@ function selfTest() {
           engine: join(shimDirectory, 'claude'), fallback: true,
         });
         return review.result.fallback === true && review.result.model === 'claude-fable-5-1'
-          && review.argv.includes('--model claude-fable-5-1') && review.url === null
-          && legacy.result.model === 'claude-fable-5-1' && legacy.url === null
+          && review.argv.includes('--model claude-fable-5-1') && review.url === 'http://session-wide.invalid'
+          && legacy.result.model === 'claude-fable-5-1' && legacy.url === 'http://session-wide.invalid'
           && refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING'
           && effectiveFallback('plan', { model: 'gpt-6-astra', fallback: null })?.model === 'claude-opus-5-5'
           && effectiveFallback('implement', { model: 'claude-opus-5-5', fallback: null }) === null

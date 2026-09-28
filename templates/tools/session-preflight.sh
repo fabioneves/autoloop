@@ -115,7 +115,7 @@ elif [ -n "$review_engine_file" ] && [ -f "$review_engine_file" ]; then
       case "$recorded" in
         *@http://*|*@https://*)
           if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-            echo "NOTE  review-engine is self-contained ($recorded) AND ANTHROPIC_BASE_URL is set session-wide — every dispatch child inherits it, so writers are proxied too; unset it and let the recording route verdict roles alone"
+            echo "NOTE  review-engine is self-contained ($recorded) AND ANTHROPIC_BASE_URL is set session-wide — every dispatch child inherits it, so writers are proxied too — right when that gateway passes Claude models through, otherwise unset it and let the recording route verdict roles alone"
           else
             echo "INFO  proxied reviews are self-contained: $recorded (dispatch injects the url; this session's environment is not used)"
           fi

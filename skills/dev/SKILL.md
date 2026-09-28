@@ -326,9 +326,9 @@ they judge. A route already on its default has none.
 **No artifact is judged by the model that wrote it** — that is the invariant the table carries:
 astra plans and Fable reviews the plan; Opus writes and fixes and Fable simplifies, and astra
 reviews both at 07 and 08. A proxied route gets its own `@<url>` injected as
-`ANTHROPIC_BASE_URL`; a native route gets none, and a session-wide one is stripped from it (the
-proxy never serves Claude models):
-the session's own environment is not a prerequisite and not evidence.
+`ANTHROPIC_BASE_URL`. A native route runs where the session runs: it inherits a session-wide
+`ANTHROPIC_BASE_URL`, so a session started on a gateway reaches Claude models through it too. For
+a proxied route, the session's own environment is not a prerequisite and not evidence.
 `with host` records an empty table, so every role runs on the host default and a previous
 session's routes cannot leak forward. The legacy `review-engine` recording is read only when no
 routes file exists.
