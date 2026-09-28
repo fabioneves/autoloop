@@ -88,6 +88,16 @@ every role; other models run on proxied routes.
 
    A dirty tree or an in-flight loop unit is human work: stop with the remedy and never stash,
    discard, or relocate it. Finish or park the unit first, then run Setup from the base.
+
+   **A parked run in this session is closed, not worked around.** A unit parked on its PR with the
+   tree clean on the base is not in flight, but its run marker is still live, and the command guard
+   refuses every interview question while it is — a live Setup stopped there with its whole
+   reconcile pending and told the operator to finish a unit that was already parked. Invoking Setup
+   is the operator taking the session back: before the interview, run
+   `node tools/agentic/prime.mjs --close-run`. It closes only this session's own run markers,
+   prints `"closed": []` when there are none, and changes no unit — the parked unit's lifecycle
+   marker and PR carry it, and the next run's prime reconciles it. Never close a run to get past a
+   dirty tree or a dispatch still running; that is the stop above.
 5. Run the one-call audit below. Follow up only on failed or incomplete sections.
 
 Every contract call names the copy it runs. Before the scaffold reconciliation lands, run contracts

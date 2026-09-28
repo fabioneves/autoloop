@@ -33,6 +33,23 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'setup-refused-by-its-own-sessions-parked-run',
+    date: '2026-09-28',
+    symptom: 'LFE: /autoloop:setup for v0.54.0 audited 26 scaffold changes, then '
+      + 'the guard refused its interview (a live run never waits on a '
+      + 'synchronous question). Setup told the operator to finish or park a '
+      + 'unit that was already parked on its PR, with the tree clean on main.',
+    cause: 'The session had run the loop and parked it; the run marker stayed '
+      + 'live. Setup had no rule for its own session\'s parked run, so the '
+      + 'guard\'s remedy (--close-run) read as bypassing it.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/setup/SKILL.md',
+        anchor: '**A parked run in this session is closed, not worked around.**',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'every-session-under-one-tmux-server-owned-the-loop-run',
     date: '2026-09-28',
     symptom: 'A run marker recorded the prime process\'s whole ancestry up to the tmux '

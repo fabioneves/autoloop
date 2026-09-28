@@ -25,7 +25,7 @@
     "overlap-report.mjs": "68aa353623aecf2ca291c71bfc70e9b12eba53684bdf1597328ddb0f6cbd7ea0",
     "prime.mjs": "55907a89b6cad6f569c883837b0d31578738743ad53f6226a04901367029dade",
     "publish-verdict.mjs": "e1e33a6359edc3bc966a78dda2a9e30baf3f52a8cfc047232551bd12a20d356e",
-    "regression-index.mjs": "895e73ec73b2b4382039152256598d1dad853ef09e7ae9a6297a396d4c7814c8",
+    "regression-index.mjs": "e1ed56e665f9ccefb268f0202716cc7d6fe182727b3436f4c1a2d3b83e5f4d4c",
     "release-verify.mjs": "1ff059af3643249507b0ee3fb80c287106ed40e40f2e9123240c09ada1ab3e1c",
     "review-contract.mjs": "1be2a28fff052b51c2a5c6c8c9d09128f696b4d39d8735f913c7e622f1d3bc27",
     "scaffold.mjs": "3c110a17e480307d7bdf40d6f56c00c921a8edd5ce839f5f0d49a0301c6cd417",
