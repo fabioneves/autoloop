@@ -9,10 +9,12 @@ Three fixes found in a live run, one of which stopped it.
 
 ### Fixed
 
-- **A dispatched engine can read its brief's inputs.** A headless `claude -p` asks before its first
-  read outside its working directory, and with nobody to answer, the read is denied. A writer whose
-  brief lived in `/tmp` was refused every input and stopped the run. `dispatch.mjs` now passes the
-  prompt file's directory as `--add-dir`.
+- **A dispatched engine can read its brief's inputs and the skills it names.** A headless `claude -p`
+  asks before its first read outside its working directory, and with nobody to answer, the read is
+  denied. A writer whose brief lived in `/tmp` was refused every input and stopped the run.
+  `dispatch.mjs` now grants the engine read-only access to the prompt file's directory and to the
+  plugins directory (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `plugins`). It does not use
+  `--add-dir`, which would also have let a writer edit those directories.
 - **Run ownership ends at the session's own `claude` process.** Run markers recorded every
   ancestor up to the tmux server, so every session under the same tmux server, working in a loop
   repo, counted as the loop. Its Stop hook could report a dark run and refuse AskUserQuestion.
