@@ -386,7 +386,10 @@ function validateProjectValues(cfg, expectedVersion, errors) {
     }
   }
   if (hasOwn(cfg, 'review')) validateReview(cfg.review, errors);
-  if (hasOwn(cfg, 'caps')) {
+  // The current schema has no caps: the shape check already names the block,
+  // and validating its values against an older range set would demand keys
+  // that version retired.
+  if (hasOwn(cfg, 'caps') && expectedVersion !== CONFIG_VERSION) {
     if (expectedVersion === LEGACY_CONFIG_VERSION) {
       validateLegacyCaps(cfg.caps, errors);
     } else {
@@ -403,6 +406,21 @@ export function validateConfig(cfg) {
 }
 
 export const validateProjectConfig = validateConfig;
+
+// The config a reader acts on. Setup migrates the base's STATE, but a unit
+// branch forked before that commit still carries the old one; readers of such
+// a checkout take the in-memory migration (the base is the authority, and the
+// newest hops only remove keys). Anything else is refused with its errors.
+export function currentProjectConfig(cfg) {
+  if (isRecord(cfg) && cfg.version === CONFIG_VERSION) {
+    const errors = validateConfig(cfg);
+    return errors.length === 0 ? { ok: true, config: cfg, errors: [] } : { ok: false, errors };
+  }
+  const migrated = migrateProjectConfig(cfg, undefined);
+  return migrated.ok
+    ? { ok: true, config: migrated.config, errors: [] }
+    : { ok: false, errors: migrated.errors ?? [migrated.code] };
+}
 
 function validateCapsConfig(cfg) {
   const errors = [];
@@ -851,9 +869,12 @@ export function migrateConfig026To027(cfg) {
 }
 
 // 0.27.0 -> 0.28.0 removes the caps block and names each key it held; every
-// other value carries across unchanged.
+// other value carries across unchanged. The block is deleted, so its values
+// are not validated: a limit out of range must not block removing the limits.
 export function migrateConfig027To028(cfg) {
-  const errors = validateCapsConfig(cfg);
+  const errors = !isRecord(cfg) || cfg.version !== CAPS_CONFIG_VERSION || !isRecord(cfg.caps)
+    ? [`version: must equal "${CAPS_CONFIG_VERSION}" with a caps object`]
+    : [];
   if (errors.length > 0) {
     return { ok: false, code: 'INVALID_LEGACY_CONFIG', errors, warnings: [] };
   }
@@ -1941,10 +1962,41 @@ function selfTest() {
         && migrateProjectConfig(withCaps).config?.version === CONFIG_VERSION
         && migrateProjectConfig(priorProjectFixture(PRIOR_CONFIG_VERSION)).config?.version === CONFIG_VERSION,
     );
+    // The hop deletes the block, so an out-of-range cap never blocks it; the
+    // rest of the configuration is still validated.
+    const outOfRange = migrateConfig027To028({ ...withCaps, caps: { ...withCaps.caps, sliceMaxLines: 50000 } });
     expect(
-      'the 0.27.0 hop refuses an invalid 0.27.0 configuration',
-      migrateConfig027To028({ ...withCaps, caps: { ...withCaps.caps, sliceMaxLines: 0 } }).code
-        === 'INVALID_LEGACY_CONFIG',
+      'the 0.27.0 hop removes even an out-of-range caps block, and refuses an invalid rest',
+      outOfRange.ok && !hasOwn(outOfRange.config, 'caps')
+        && migrateConfig027To028({ ...withCaps, gate: {} }).code === 'INVALID_LEGACY_CONFIG'
+        && migrateConfig027To028({ ...withCaps, version: '0.26.0' }).code === 'INVALID_LEGACY_CONFIG',
+    );
+  }
+
+  {
+    // v0.55.0 review: a host still on 0.27.0 was told
+    // "caps.reviseRoundsPerPr: is required", a key 0.27.0 itself retired,
+    // because the current validator fell into the 0.26.0 cap ranges.
+    const errors = validateConfig(capsProjectFixture());
+    expect(
+      'a 0.27.0 config against the current schema names the version and the unknown block, nothing retired',
+      errors.some((error) => error.startsWith('caps: unknown key'))
+        && errors.some((error) => error.startsWith('version:'))
+        && !errors.some((error) => error.includes('reviseRoundsPerPr')),
+    );
+    // A unit branch forked before setup's migration commit still carries the
+    // old STATE; its readers take the in-memory migration, since the base's
+    // migrated STATE is the authority and the hop only removes keys.
+    const fromCaps = currentProjectConfig(capsProjectFixture());
+    const fromCurrent = currentProjectConfig(projectFixture());
+    const invalid = currentProjectConfig({ ...projectFixture(), gate: {} });
+    const jiraLegacy = currentProjectConfig({ ...legacyFixture(['claude'], 'claude'), tracker: 'jira' });
+    expect(
+      'a current or migratable config reads as the current schema; anything else is refused with errors',
+      fromCaps.ok && fromCaps.config.version === CONFIG_VERSION && !hasOwn(fromCaps.config, 'caps')
+        && fromCurrent.ok && JSON.stringify(fromCurrent.config) === JSON.stringify(projectFixture())
+        && !invalid.ok && invalid.errors.length > 0
+        && !jiraLegacy.ok && jiraLegacy.errors.length > 0,
     );
   }
 

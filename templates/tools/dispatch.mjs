@@ -58,7 +58,7 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 //
 // Raising the flat number would buy that back by making every wedged reviewer
 // cost four times as much to notice. A writer legitimately grinds: it reads,
-// edits, runs tests, and commits, bounded by the slice caps rather than the
+// edits, runs tests, and commits, bounded by its plan's tasks rather than the
 // clock. A reviewer reads and returns one typed verdict; the longest healthy
 // one observed took 13 minutes, so a reviewer still running at 45
 // minutes is not thinking, it is stuck.
@@ -2652,8 +2652,8 @@ function selfTest() {
     );
     // 2026-07-28: a writer grinding a Go task landed two commits and was killed
     // at a flat 30-minute ceiling. The bound exists for WEDGED children, and the
-    // two postures wedge differently — a writer legitimately grinds against the
-    // slice caps, a reviewer returns one verdict and is stuck if it has not.
+    // two postures wedge differently — a writer legitimately grinds through its
+    // plan's tasks, a reviewer returns one verdict and is stuck if it has not.
     check(
       'the ceiling is per posture: a writer grinds, a reviewer should not',
       timeoutMsFor('implement') === 120 * 60 * 1000
