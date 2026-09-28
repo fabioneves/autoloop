@@ -65,9 +65,11 @@ node <plugin-tools>/prime.mjs --json
 ```
 
 The typed summary is
-`{ok,version,repository,checkout,config,base,runMarker,waits,timings,snapshotPath,snapshotBytes,eligible,sections}`:
+`{ok,version,repository,checkout,config,base,runMarker,waits,timings,snapshotPath,snapshotBytes,eligible,markers,sections}`:
 
 - `checkout` — root, repository fingerprint, branch, HEAD, and whether the tree is clean.
+- `markers` — surfaced lifecycle markers by issue: `gating` (issue open) and `deferred` (issue
+  closed). `null` when marker or open-issue evidence is incomplete — re-prime.
 - `eligible` — the queue issues selection may take, in issue order: the rule under "Queue and
   trust", computed from the snapshot. `null` when selection evidence is incomplete or the snapshot
   was invalidated — re-prime before choosing.
@@ -120,9 +122,12 @@ Then, in order:
    decision intervenes. Then rerun `node <plugin-tools>/prime.mjs --json` (or `scan.mjs` directly)
    and replace the invalidated snapshot before actionability, absence, selection, or stop
    decisions. Never read items from an invalidated section as authority.
-5. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
-   marker it surfaces before selecting work, including an intent that crashed before a draft PR
-   existed. A finished unit's marker — a terminal phase on a closed issue — is not surfaced. A
+5. Require the paginated `lifecycleMarkers` section to be complete. Reconcile the summary's
+   `markers.gating` before selecting work, including an intent that crashed before a draft PR
+   existed. `markers.deferred` never gate: a closed issue's marker cannot change what is eligible,
+   so reconcile those while a dispatch is in flight, or before `--close-run` — a live run once
+   left 39 eligible units idle for 40 minutes behind them. A finished unit's marker — a terminal
+   phase on a closed issue — is not surfaced at all. A
    marker has authority only when its author currently has admin/maintain, or when it is the
    authenticated current runner's own marker and that runner still has write.
    Ignore marker-shaped comments from other identities, and fail closed when role evidence is
@@ -554,8 +559,9 @@ it waits is not.
 
 **Overlap (depth one).** Any background dispatch is the trigger — not a named list of steps,
 which goes stale the moment a role is added. While a dispatch is in flight, stage the NEXT
-issue from the current `eligible` through its read-only steps 1–3: premise-check and plan against `origin/<base>`,
-then its plan-review dispatch. Read the committed tree (`git show`, `git grep`) and never the
+issue from the current `eligible` through its read-only steps 1–3: premise-check and plan against
+`origin/<base>`, then its plan-review dispatch. The same window reconciles `markers.deferred`, one
+`--reconcile-issue` call at a time. Read the committed tree (`git show`, `git grep`) and never the
 working tree, which the in-flight unit's writer owns.
 
 One idiom:

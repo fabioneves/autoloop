@@ -59,6 +59,36 @@ Evidence: the first LFE run on v0.53.0 (2026-09-28, session 0bf7f2f2).
      `premergeRecordDraft`.
    - The pitcrew recovery line says the same.
 
+4. **Markers of finished units never gate selection.**
+   - Evidence: the first 0.53.0 run on LFE sat 40 minutes with 39+ eligible units while it
+     reconciled 33 markers, all on closed issues with merged PRs. Such a marker cannot affect
+     eligibility: its issue is closed, and `eligibleQueueIssueNumbers` already excludes marker
+     issues. `SPEC-historical-markers.md` open question 2 recommended keeping it before selection,
+     and the run proved that wrong.
+   - `prime --json` and `snapshot-contract --summary` gain
+     `markers: {gating: [<issue>], deferred: [<issue>]}`:
+     - `gating`: surfaced markers whose issue is in the complete `openIssues`;
+     - `deferred`: the rest (closed issues);
+     - `null` when `lifecycleMarkers` or `openIssues` is incomplete.
+   - Dev step 5 and pitcrew step 4: reconcile `gating` markers before selection. Reconcile
+     `deferred` markers while a dispatch is in flight (the overlap windows), or before
+     `--close-run`, never ahead of the queue.
+   - The same run also left 8 markers that fail on every attempt: 7 with
+     `PREMERGE_CI_COMPONENT_MISMATCH`, where the pre-merge CI evidence no longer matches live CI
+     for merges a month old, plus #314. Deferring keeps them off the critical path. Whether the
+     terminal-outcome append should re-verify CI evidence on an already-merged PR is a separate
+     contract decision.
+5. **The Stop hook reads every open issue.** `writeback-check.mjs:873` read
+   `issue list --state open --limit 100`, and LFE has 139 open issues. The hook counted 39 eligible
+   units against prime's 59, and treated any dependency outside the first 100 as closed. With a
+   large backlog it can miss a stalled run. The limit becomes 1000, matching the scan's own bound
+   of ten 100-item pages.
+6. **A park that waits on anything but a dispatch is recorded before its ribbon prints.** In both
+   the 0.52.0 and 0.53.0 runs the orchestrator printed `🅿️ PARKED` while waiting on a background
+   subagent, and the Stop hook hard-blocked the turn. The hook recognises dispatch processes,
+   live streams and recorded parks; a subagent is none of those. The ribbon section of the dev
+   skill says to run `prime.mjs --park` first in that case.
+
 ## Boundaries
 
 - Never:

@@ -1198,6 +1198,21 @@ function eligibleQueueIssueNumbers(snapshot) {
     .sort((left, right) => left - right);
 }
 
+// A surfaced marker gates selection only while its issue is open; a closed
+// issue's marker cannot change what is eligible, so it is reconciled later.
+export function markerSchedule(snapshot) {
+  const markers = snapshot?.sections?.lifecycleMarkers;
+  const openIssues = snapshot?.sections?.openIssues;
+  if (markers?.complete !== true || openIssues?.complete !== true) return null;
+  const open = new Set(openIssues.items.map((issue) => issue?.number));
+  const numbers = [...new Set(markers.items.map((marker) => marker?.issueNumber))]
+    .sort((left, right) => left - right);
+  return {
+    gating: numbers.filter((number) => open.has(number)),
+    deferred: numbers.filter((number) => !open.has(number)),
+  };
+}
+
 export function eligibleIssueNumbers(snapshot) {
   if (
     !verifySnapshot(snapshot)
@@ -1407,6 +1422,7 @@ export function summarizeSnapshot(snapshot) {
       kind: 'autoloop-snapshot-summary',
       scannedAt: validTimestamp(snapshot.scannedAt) ? snapshot.scannedAt : null,
       eligible: eligibleIssueNumbers(snapshot),
+      markers: markerSchedule(snapshot),
       sections: Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => {
         const section = snapshot.sections[name];
         if (!isRecord(section)) {
@@ -2383,6 +2399,26 @@ async function selfTest() {
   });
   // A live run staged #356 for 5.5 minutes before finding its body edited after
   // loop-ready: the summary never said which units were eligible.
+  // LFE, 2026-09-28: 39+ eligible units waited 40 minutes behind 33 markers of
+  // closed, merged units that could not affect selection.
+  await check('summary splits surfaced markers into gating (open issue) and deferred', () => {
+    const base = queueSnapshot();
+    const closedMarker = lifecycleMarkerItem({
+      issueNumber: 9,
+      id: 'IC_nine',
+      tipId: 'IC_nine',
+      body: lifecycleMarkerItem().body.replace('"issue":7', '"issue":9').replace('gh-7-', 'gh-9-'),
+      url: 'https://example.test/issues/9#issuecomment-1',
+    });
+    const withMarkers = (lifecycleMarkers) => createSnapshot({
+      scannedAt: '2026-01-01T00:00:02.000Z',
+      sections: { ...base.sections, lifecycleMarkers },
+    });
+    const split = summarizeSnapshot(withMarkers(completeSection([lifecycleMarkerItem(), closedMarker])));
+    const unknown = summarizeSnapshot(withMarkers(incompleteSection('PAGE_FETCH_FAILED', 'offline')));
+    return stableJson(split.summary.markers) === stableJson({ gating: [7], deferred: [9] })
+      && unknown.summary.markers === null;
+  });
   await check('summary names the eligible units, and null when selection evidence is incomplete', () => {
     const complete = summarizeSnapshot(queueSnapshot());
     const edited = summarizeSnapshot(queueSnapshot({ lastEditedAt: '2026-01-01T00:00:03Z' }));
