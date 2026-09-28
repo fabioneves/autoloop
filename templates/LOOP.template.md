@@ -12,14 +12,14 @@ prompt the steps.
 
 **Source of truth is git/GitHub:** queue = open `loop-ready` issues · in-progress = open PRs whose
 body `Closes #N` · done = merged PRs · blocked = `loop-blocked` issues. `STATE.md` is standing
-config (mission, config block, caps, lessons), **not** the queue.
+config (mission, config block, lessons), **not** the queue.
 
 ## The pieces
 
 | Asset | Role |
 |---|---|
 | GitHub issues (`loop-ready`) | **the queue** — the loop's input |
-| `docs/agentic/STATE.md` | standing config — mission, config block, autonomy, caps, lessons |
+| `docs/agentic/STATE.md` | standing config — mission, config block, autonomy, lessons |
 | `autoloop:dev` (plugin skill) | **forward path** — issue → ready PR |
 | `autoloop:pitcrew` (plugin skill) | **return path** — revises the loop's PRs from review / CI / conflicts |
 | `tools/agentic/dispatch.mjs` | **one-call role dispatch** — a fresh process with a fixed tool posture per role |
@@ -30,10 +30,9 @@ config (mission, config block, caps, lessons), **not** the queue.
 
 ## How to feed the queue
 
-The queue is **GitHub issues**. Three ways in, all ending in git. The loop may file an unlabelled
-`loop-maintenance` issue when `STATE.md`/`ARCH.md` exceeds its size budget, but cannot apply,
-create, or rename `loop-ready`; a trusted maintainer must review and label that issue before it can
-enter the queue:
+The queue is **GitHub issues**. Three ways in, all ending in git. The loop cannot apply, create, or
+rename `loop-ready`; a trusted maintainer must review and label an issue before it can enter the
+queue:
 
 1. **File an issue** and label it **`loop-ready`** (a trusted maintainer applies the label — see
    the injection guardrail in `STATE.md`). One issue = one PR-sized unit; state acceptance criteria
