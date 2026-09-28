@@ -110,11 +110,14 @@ refused once, gets `terminal-refused`, and drops out.
 
 ## Success criteria
 
-- Replaying the LFE shape (45 closed markers: 12 `terminal-record`, 26 `premerge-record`, 6
-  `draft-pr`, 1 head-mismatched `premerge-record`) gives this:
-  - The first run reconciles the 33 non-terminal ones. 26 backfill to `terminal-record` and 7 become
-    `terminal-refused`.
-  - The second prime surfaces 0 markers.
+- Read-only replay of the 33 markers LFE still surfaces, done after the change with the driver's
+  production read and the pure contract:
+  - 25 `premerge-record` → `append-merge-outcome` (the one-time backfill), then `terminal-record`.
+  - 7 → `terminal-refused`: 6 `draft-pr` (`terminal-marker`) and #294 (`merge`).
+  - 1 (#314, merged at `ready-head` without a pre-merge record draft) →
+    `PREMERGE_RECORD_DRAFT_INVALID`. This is recoverable when a draft is supplied, so it stays
+    surfaced by design.
+  - The next prime surfaces 1 marker, down from 45.
 - No refusal comment is posted by prose, and a second run adds none.
 - `verify.mjs` is green.
 

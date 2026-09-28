@@ -3,6 +3,46 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.53.0] - 2026-09-28
+
+A faster, steadier start. The first live run on 0.52.0 spent its opening quarter hour
+reconciling the bookkeeping of units merged weeks earlier, re-read the whole repository one
+issue at a time after every mutation, and closed itself over a permission prompt nobody
+answered.
+
+### Changed
+
+- **Prime reads the repository in batches.** Comments, label timelines and dependency facts
+  come in one aliased GraphQL query per 25 issues, instead of one `gh` call per issue.
+  - On living-football-engine a scan went from 478 calls and 75 s to 19 calls and 14 s, with
+    byte-identical sections.
+  - An error on one issue fails only that issue.
+  - A batch that fails as a whole falls back to the single-issue reads.
+- **Finished units stop surfacing.** A lifecycle marker at `terminal-record` or
+  `terminal-refused` on a closed issue no longer reaches the orchestrator, so a run no longer
+  re-reconciles every merged unit before taking work.
+- **Prime names the eligible units.** `prime.mjs --json` and `snapshot-contract --summary`
+  carry `eligible`: the issue numbers the selection rule admits, or `null` when selection
+  evidence is incomplete. Selection and overlap staging choose only from it.
+- **A rejected tool call parks the run.** A call answered "no" at a permission prompt, or
+  interrupted, with no operator message no longer counts as the operator taking the session
+  back. The Stop hook and the dev skill both name the park.
+
+### Added
+
+- **`terminal-refused` lifecycle phase.** A merged unit whose marker never bound a claim or head,
+  or bound a head the merge did not use, can never be finished by the driver. It is now
+  recorded once as `terminal-refused`, carrying the refusal and the merge commit, and
+  reconciles to nothing after that. Every other mismatch stays reachable, so a later contract
+  fix can still backfill it.
+
+### Fixed
+
+- `stats.mjs` measured a resumed unit's later steps against its first terminal label, which
+  printed negative durations (`-357600s`).
+- The lifecycle-contract case runner never called a fixture's `verify()`, so those assertions
+  never ran.
+
 ## [0.52.0] - 2026-09-25
 
 The loop takes the initiative. It fixes what it can and decides the judgment calls itself,
