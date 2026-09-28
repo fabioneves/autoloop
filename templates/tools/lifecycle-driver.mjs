@@ -404,6 +404,14 @@ function branchPullsEndpoint(repository, branch) {
     + `&head=${encodeURIComponent(`${repository.owner}:${branch}`)}`;
 }
 
+// GitHub redirects a transferred or renamed repository's API path, so the issue
+// still reads; a head filter on the stale owner would then find no PR at all.
+function issueRepositoryMatches(issue, repository) {
+  return typeof issue?.repository_url === 'string'
+    && issue.repository_url.toLowerCase()
+      .endsWith(`/repos/${repository.owner}/${repository.repo}`.toLowerCase());
+}
+
 function memoizedRoles(lookup) {
   const roles = new Map();
   return (login) => {
@@ -596,20 +604,25 @@ export function issueReconcileRequest({ issueNumber, comments, roleOf, viewer, p
     throw new Error(`issue #${issueNumber} has no authoritative lifecycle marker`);
   }
   const marker = markerChain.tip.marker;
+  const intent = Object.fromEntries(INTENT_KEYS.map((key) => [key, marker[key]]));
   if (!Number.isSafeInteger(marker.pr)) {
     throw new Error(`issue #${issueNumber}'s marker has no pull request yet; recover it with `
-      + '--reconcile-json and the frozen plan\'s title and PR body');
+      + `--reconcile-json, lifecycleCommentId ${markerRootEntry.id}, intent ${JSON.stringify(intent)} `
+      + 'and the frozen plan\'s title and PR body');
   }
   const pullRequest = pullRequestOf(marker.pr);
   if (pullRequest?.number !== marker.pr) {
     throw new Error(`issue #${issueNumber}'s pull request #${marker.pr} could not be read`);
+  }
+  if (pullRequest.head?.ref !== marker.branch) {
+    throw new Error(`pull request #${marker.pr}'s head ${pullRequest.head?.ref} is not the marker's branch ${marker.branch}`);
   }
   const plans = authorizedPlanComments(comments, marker.planHash, roleOf, viewer);
   if (plans.length === 0) throw new Error(`issue #${issueNumber} has no frozen plan comment`);
   if (plans.length > 1) throw new Error('frozen plan comment is ambiguous');
   return {
     schemaVersion: 1,
-    intent: Object.fromEntries(INTENT_KEYS.map((key) => [key, marker[key]])),
+    intent,
     baseBranch,
     lifecycleCommentId: markerRootEntry.id,
     plan: { body: plans[0].body, title: pullRequest.title, prBody: pullRequest.body ?? '' },
@@ -617,7 +630,8 @@ export function issueReconcileRequest({ issueNumber, comments, roleOf, viewer, p
   };
 }
 
-function reconcileIssueRequest(root, issueNumber) {
+function reconcileIssueRequest(cwd, issueNumber) {
+  const root = command('git', ['rev-parse', '--show-toplevel'], { cwd }).trim();
   const config = extractConfig(readFileSync(join(root, 'docs', 'agentic', 'STATE.md'), 'utf8'));
   const configErrors = validateProjectConfig(config);
   if (configErrors.length > 0) throw new Error(`project config is invalid: ${configErrors.join('; ')}`);
@@ -651,6 +665,10 @@ function readOperationalState(request, root) {
   );
   if (!liveIssueMatchesIntent(issue, request.intent)) {
     throw new Error('live issue does not match the lifecycle intent');
+  }
+  if (!issueRepositoryMatches(issue, repository)) {
+    throw new Error(`issue #${request.intent.issue} lives in ${issue?.repository_url ?? 'an unknown repository'}, `
+      + `not ${repository.owner}/${repository.repo}: update origin to the repository's current owner`);
   }
   const viewer = api(repository, 'user')?.login;
   if (typeof viewer !== 'string' || viewer.length === 0) {
@@ -1708,7 +1726,9 @@ function selfTest() {
     comments: recoveryComments,
     roleOf: (login) => (login === 'maint' ? 'maintain' : 'read'),
     viewer: 'bot',
-    pullRequestOf: (number) => (number === 12 ? { number: 12, title: 'Recovery', body: 'Closes #7' } : null),
+    pullRequestOf: (number) => (number === 12
+      ? { number: 12, title: 'Recovery', body: 'Closes #7', head: { ref: 'feat/gh-7-contract' } }
+      : null),
     baseBranch: 'main',
     ...overrides,
   });
@@ -1976,7 +1996,11 @@ function selfTest() {
           comments: [...recoveryComments, recoveryComment('IC_plan_2', 'maint', recoveryPlan)],
         }) ?? '')
         && /--reconcile-json/u.test(recoveryRefusal({ comments: recoveryComments.filter(({ id }) => id !== 'IC_tip') }) ?? '')
-        && /pull request #12/u.test(recoveryRefusal({ pullRequestOf: () => null }) ?? ''),
+        && /pull request #12/u.test(recoveryRefusal({ pullRequestOf: () => null }) ?? '')
+        && /head/u.test(recoveryRefusal({
+          pullRequestOf: () => ({ number: 12, title: 'x', body: 'Closes #7', head: { ref: 'feat/gh-7-other' } }),
+        }) ?? '')
+        && /IC_root/u.test(recoveryRefusal({ comments: recoveryComments.filter(({ id }) => id !== 'IC_tip') }) ?? ''),
     ],
     [
       '--reconcile-issue takes exactly one positive issue number',
@@ -1985,6 +2009,14 @@ function selfTest() {
           cliMode(['--reconcile-issue', value]) === null)
         && cliMode(['--reconcile-issue']) === null
         && cliMode(['--reconcile-issue', '12', '--extra']) === null,
+    ],
+    // Review of 0.53.1: origin naming a repository's former owner still reaches
+    // it through GitHub's redirect, but a head filter on that owner finds nothing.
+    [
+      'a read refuses an issue that lives in a different repository than origin names',
+      issueRepositoryMatches({ repository_url: 'https://api.github.com/repos/O/R' }, { owner: 'o', repo: 'r' })
+        && !issueRepositoryMatches({ repository_url: 'https://api.github.com/repos/new/r' }, { owner: 'old', repo: 'r' })
+        && !issueRepositoryMatches({}, { owner: 'o', repo: 'r' }),
     ],
     // One read on LFE paged all 210+ PRs (3 calls, 2.6 s) to find one branch's.
     [

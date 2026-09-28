@@ -33,11 +33,16 @@ Evidence: the first LFE run on v0.53.0 (2026-09-28, session 0bf7f2f2).
    - **Title and PR body:** from the marker's `pr`, via `pulls/<pr>`.
    - **Base branch:** `baseBranch` from the validated ProjectConfig in `docs/agentic/STATE.md`.
    - **`premergeRecordDraft`:** `null`.
-   - **Typed refusals, with no GitHub mutation:**
+   - **Refusals** (errors on stderr, exit 1, the same as `--reconcile-json`), with no GitHub
+     mutation:
      - no authoritative marker;
      - no plan comment, or more than one;
      - no `pr` on the marker (an intent that crashed before its draft PR). This keeps
        `--reconcile-json`, because only the frozen plan knows the title and PR body.
+       The refusal prints the root ID and the intent to use;
+     - a PR whose head is not the marker's branch.
+   - The read refuses an issue whose `repository_url` is not the repository `origin` names. GitHub
+     redirects a transferred repository's API path, but a head filter on the stale owner finds no PR.
    - The request is built by a pure function from the fetched facts, so it can be self-tested.
    - The CLI mode stays a closed list, and `<N>` must be a positive safe integer.
 2. **A cheaper read. The guarantees don't change.**
