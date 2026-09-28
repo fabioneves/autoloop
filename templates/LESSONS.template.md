@@ -8,7 +8,7 @@
 > **Prune when a lesson becomes a mechanism.** Once a guard rule, a contract check, a hook, or a
 > tool enforces the lesson, the mechanism IS the memory — delete the prose and cite the enforcer
 > instead. A lessons file that only grows stops being read, and an unread lesson prevents nothing.
-> Curate it like an architecture map: periodically, against a size budget, in its own maintenance
+> Curate it like an architecture map: periodically, in its own maintenance
 > unit.
 
 Each entry states the rule first, then the evidence that earned it — a date, a run, a defect. A
