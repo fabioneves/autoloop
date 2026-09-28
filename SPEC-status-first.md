@@ -167,6 +167,28 @@ things that hand composition could not keep.
    It is rendered by `step.mjs --parked` from the run marker, the live dispatch pids and the prime
    summary. It never prints before `prime --park` succeeded (the rule from 0.53.1).
 
+### M6. A run card after compaction (operator approval, 2026-09-28)
+
+- **Evidence.** In LFE session 0bf7f2f2 auto-compaction took 5 minutes (10:14:40 → 10:19:50),
+  in the middle of step 10. The resumed orchestrator then rebuilt its working state by reading
+  files, including an 87 KB skill search, and refilled the fresh context.
+- **Mechanism (confirmed in code.claude.com/docs/en/hooks).**
+  - `SessionStart` fires with source `compact` after both manual and automatic compaction, and a
+    hook's stdout is added to the context.
+  - LFE's scaffolded `SessionStart` hook has no matcher, so it already re-runs after compaction:
+    `session-preflight.sh` plus a full `STATE.md`.
+- **The change.** `step.mjs --card-run` prints a run-state card, and scaffold adds it to the
+  existing `SessionStart` hook. It prints only when `loopRunIsLive()` holds and is capped at
+  1.5 KB. It carries facts, never instructions:
+  - each unit in flight with its current step, model and start time (from
+    `.git/autoloop/steps/*.json`);
+  - running dispatches (pids and result paths);
+  - the park, if any;
+  - the retained snapshot path with its age;
+  - a closing line: "facts as of HH:MM — re-prime before deciding".
+- **Not stated in the docs, so verified live, never assumed:** a size limit on injected context,
+  and whether `SessionStart` fires for subagents.
+
 ## Boundaries
 
 - Always:
