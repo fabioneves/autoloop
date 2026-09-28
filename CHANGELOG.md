@@ -3,6 +3,26 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.53.2] - 2026-09-28
+
+Three fixes found in a live run, one of which stopped it.
+
+### Fixed
+
+- **A dispatched engine can read its brief's inputs and the skills it names.** A headless `claude -p`
+  asks before its first read outside its working directory, and with nobody to answer, the read is
+  denied. A writer whose brief lived in `/tmp` was refused every input and stopped the run.
+  `dispatch.mjs` now grants the engine read-only access to the prompt file's directory and to the
+  plugins directory (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `plugins`). It does not use
+  `--add-dir`, which would also have let a writer edit those directories.
+- **Run ownership ends at the session's own `claude` process.** Run markers recorded every
+  ancestor up to the tmux server, so every session under the same tmux server, working in a loop
+  repo, counted as the loop. Its Stop hook could report a dark run and refuse AskUserQuestion.
+- **The guard accepts a comment body file posted before a sequential command.** Before, any
+  compound command carrying a body file was refused as unverifiable, e.g.
+  `gh issue comment N --body-file f && date`. It still refuses a body file when a segment runs
+  earlier, through a pipe, or in the background.
+
 ## [0.53.1] - 2026-09-28
 
 The first run on 0.53.0 spent about 100k tokens hand-building 33 lifecycle reconcile requests,

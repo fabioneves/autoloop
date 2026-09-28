@@ -37,7 +37,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -302,10 +302,21 @@ export function reviewVerdictProblem(value) {
   return 'structured output is not a valid review verdict';
 }
 
-function processSettings(tools) {
+// A headless engine asks before its first read outside its working directory,
+// and with nobody to answer, the read is denied (LFE #356: every input of a
+// writer's brief under /tmp, and the skills it names under the plugin cache).
+// Each root is granted read-only: `--add-dir` would also let a writer edit it.
+export function pluginsDir(env = process.env) {
+  return join(env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'plugins');
+}
+
+function processSettings(tools, readRoots = []) {
   return {
     permissions: {
-      allow: tools.filter((tool) => TOOLS_REQUIRING_GRANT.includes(tool)),
+      allow: [
+        ...tools.filter((tool) => TOOLS_REQUIRING_GRANT.includes(tool)),
+        ...readRoots.map((root) => `Read(/${root}/**)`),
+      ],
       deny: [
         'Read(~/.config/gh/**)',
         'Read(~/.git-credentials)',
@@ -334,7 +345,7 @@ export function resolveTools(role, requested = null) {
 
 // Pure: the exact argv a dispatch launches, so the self-test can pin the
 // posture without spawning anything.
-export function dispatchArgv(role, tools) {
+export function dispatchArgv(role, tools, readRoots = []) {
   const { posture, result } = ROLES[role];
   return [
     '--print',
@@ -349,7 +360,7 @@ export function dispatchArgv(role, tools) {
     '--strict-mcp-config',
     '--disable-slash-commands',
     '--settings',
-    JSON.stringify(processSettings(tools)),
+    JSON.stringify(processSettings(tools, readRoots)),
     '--permission-mode',
     POSTURES[posture].permissionMode,
     '--tools',
@@ -361,9 +372,9 @@ export function dispatchArgv(role, tools) {
 // fixture shim on a path and an installed binary resolve the same way. Other
 // models are reached through a proxied route, never a second CLI. Codex was a
 // second engine until 0.51.0 and is refused by name.
-function claudeArgv(role, tools, model, effort) {
+function claudeArgv(role, tools, model, effort, readRoots = []) {
   return [
-    ...dispatchArgv(role, tools),
+    ...dispatchArgv(role, tools, readRoots),
     ...(model === null ? [] : ['--model', model]),
     ...(effort === null ? [] : ['--effort', effort]),
   ];
@@ -1046,6 +1057,7 @@ function executeDispatch(options) {
     model: options.model ?? null,
     effort: options.effort ?? null,
     baseUrl: options.baseUrl ?? null,
+    readRoots: options.readRoots ?? [],
   });
 }
 
@@ -1082,9 +1094,9 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 }
 
 function runEngine({
-  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl,
+  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl, readRoots,
 }) {
-  const argv = claudeArgv(role, tools, model ?? null, effort ?? null);
+  const argv = claudeArgv(role, tools, model ?? null, effort ?? null, readRoots ?? []);
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
@@ -1522,6 +1534,27 @@ function selfTest() {
       && ['plan', 'implement'].every((role) => reviewEnvelopeStamp(role) === '')
       && readFileSync(stdinPath, 'utf8').includes('autoloop-review-envelope-v1'),
     );
+    // LFE, 2026-09-28: #356's headless writer was denied every read of its
+    // /tmp inputs ("requested permissions to read … you haven't granted it")
+    // and of the skills its brief names under the plugin cache. The grant is
+    // read-only: `--add-dir` would also have let a writer edit all of /tmp.
+    runDispatch({
+      role: 'implement',
+      prompt: 'implement',
+      tools: resolveTools('implement'),
+      cwd: scratch,
+      engine,
+      readRoots: ['/tmp/unit-356', '/home/op/.claude/plugins'],
+    });
+    const writerArgv = readFileSync(argvPath, 'utf8');
+    check('a dispatch grants read-only access to its brief\'s directory and the plugin skills',
+      writerArgv.includes('Read(//tmp/unit-356/**)')
+      && writerArgv.includes('Read(//home/op/.claude/plugins/**)')
+      && !writerArgv.includes('--add-dir')
+      && !launchedArgv.includes('unit-356'));
+    check('the plugin skills root defaults to ~/.claude/plugins and follows CLAUDE_CONFIG_DIR',
+      pluginsDir({}) === join(homedir(), '.claude', 'plugins')
+      && pluginsDir({ CLAUDE_CONFIG_DIR: '/cfg' }) === '/cfg/plugins');
     check(
       'a live reviewer spawn never receives a write tool',
       !/--tools \S*(?:Write|Edit|Bash)/.test(launchedArgv),
@@ -1669,6 +1702,7 @@ function selfTest() {
         const promptPath = join(cliDir, 'p.md');
         writeFileSync(promptPath, 'review');
         const chosen = join(cliDir, 'cli-live.jsonl');
+        const configDir = join(cliDir, 'config');
         const run = spawnSync(process.execPath, [
           fileURLToPath(import.meta.url),
           '--role', 'plan-review',
@@ -1680,7 +1714,7 @@ function selfTest() {
         ], {
           cwd: repoScratch,
           encoding: 'utf8',
-          env: { ...process.env, PATH: dirname(process.execPath) },
+          env: { ...process.env, PATH: dirname(process.execPath), CLAUDE_CONFIG_DIR: configDir },
         });
         const argvSeen = readFileSync(argvPath, 'utf8');
         let cliResult;
@@ -1691,6 +1725,8 @@ function selfTest() {
         }
         return run.status === 0
           && argvSeen.includes('--model gpt-test-model')
+          && argvSeen.includes(`Read(/${cliDir}/**)`)
+          && argvSeen.includes(`Read(/${join(configDir, 'plugins')}/**)`)
           && existsSync(chosen)
           && cliResult.engine === 'claude'
           && cliResult.model === 'gpt-test-model';
@@ -2701,6 +2737,7 @@ function main() {
     ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
     ...(parsed.fallback ? { fallback: true } : {}),
     ...(parsed.issue === null ? {} : { issue: parsed.issue }),
+    readRoots: [dirname(resolve(parsed.promptFile)), pluginsDir()],
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
   if (parsed.outputFile !== null) {

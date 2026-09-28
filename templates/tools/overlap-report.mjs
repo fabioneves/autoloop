@@ -38,6 +38,7 @@ import {
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ancestorPids } from './command-guard.mjs';
 import { resolveDispatchLogPath } from './dispatch.mjs';
 
 function gitPath(root, relative) {
@@ -143,23 +144,6 @@ export function formatOverlapLine(summary) {
 // Falling back to the newest marker would reintroduce the bug on the exact
 // input that produced it, so an unresolvable ancestry means "no boundary": every
 // entry is in scope and `runScoped` says so.
-function ancestorPids(limit = 64) {
-  const pids = new Set();
-  let pid = process.ppid;
-  for (let depth = 0; depth < limit && pid > 1; depth += 1) {
-    pids.add(pid);
-    try {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-      const parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-      if (!Number.isSafeInteger(parent) || parent <= 0) return pids;
-      pid = parent;
-    } catch {
-      return pids;
-    }
-  }
-  return pids;
-}
-
 function processAlive(pid) {
   try {
     process.kill(pid, 0);

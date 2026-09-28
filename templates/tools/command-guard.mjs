@@ -41,6 +41,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -860,11 +861,11 @@ function shellSegments(cmd) {
         ? ';'
         : null;
     if (!separator) continue;
-    segments.push({ command: cmd.slice(start, i).trim(), next: separator });
+    segments.push({ command: cmd.slice(start, i).trim(), next: separator, raw: separator === ';' ? char : pair });
     i += separator.length - 1;
     start = i + 1;
   }
-  segments.push({ command: cmd.slice(start).trim(), next: null });
+  segments.push({ command: cmd.slice(start).trim(), next: null, raw: null });
   return segments.filter((segment) => segment.command);
 }
 
@@ -2104,7 +2105,11 @@ export function evaluate(inputCmd, branch, options = {}) {
     return readFileSync(real, 'utf8').slice(0, 4096);
   };
   const bodyProblems = segments.map(({ command }) => commentBodyProblem(shellWords(command), readBody));
-  if (segments.length > 1 && segments.some(({ command }) => readsCommentBodyFile(shellWords(command)))) {
+  // A body file can be rewritten only by a segment that runs before or beside
+  // the post: an earlier segment, or a pipe or background `&` after it.
+  // Whatever follows a sequential operator runs after the post and cannot.
+  if (segments.length > 1 && segments.some(({ command, raw }, index) =>
+    readsCommentBodyFile(shellWords(command)) && (index > 0 || raw === '|' || raw === '&'))) {
     bodyProblems.push('unverifiable');
   }
   if (bodyProblems.includes('unverifiable')) {
@@ -2494,22 +2499,54 @@ export function runMarkerDirectory(cwd = process.cwd()) {
   return isAbsolute(path) ? path : resolve(cwd, path);
 }
 
-export function ancestorPids(limit = 64) {
+function procEntry(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+    const name = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
+    let exe = '';
+    try {
+      exe = readlinkSync(`/proc/${pid}/exe`);
+    } catch {
+      exe = ''; // another user's process: comm alone decides
+    }
+    return Number.isSafeInteger(parent) ? [parent, name, exe] : null;
+  } catch {
+    return null;
+  }
+}
+
+// A session's ancestry ends at its own Claude Code process. Above it sit the
+// shell, the terminal multiplexer and the init chain that every other session
+// on the machine shares; recording those let any session in the repo pass for
+// the loop's own run. With no `claude` ancestor (another host) the whole chain
+// is kept, as before.
+//
+// comm is the name the binary was launched under, since it never retitles
+// itself (measured, 2.1.283): `claude` through the installer's symlink,
+// `claude.exe` for the npm package's copy, the bare version for a versioned
+// path launched directly. The executable's path names the install in all three.
+function isClaudeProcess(name, exe = '') {
+  return /^claude(?:\.exe)?$/u.test(name) || /\/claude\/versions\/[^/]+$|\/claude(?:\.exe)?$/u.test(exe);
+}
+
+export function ancestorChain(start, readEntry = procEntry, limit = 64) {
   const pids = new Set();
-  let pid = process.ppid;
+  let pid = start;
   for (let depth = 0; depth < limit && pid > 1; depth += 1) {
     pids.add(pid);
-    let parent;
-    try {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-      parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-    } catch {
-      return pids;
-    }
+    const entry = readEntry(pid);
+    if (entry === null) return pids;
+    const [parent, name, exe] = entry;
+    if (isClaudeProcess(name, exe)) return pids;
     if (!Number.isSafeInteger(parent) || parent <= 0) return pids;
     pid = parent;
   }
   return pids;
+}
+
+export function ancestorPids(limit = 64) {
+  return ancestorChain(process.ppid, procEntry, limit);
 }
 
 function processAlive(pid) {
@@ -3612,6 +3649,50 @@ function selfTest() {
         writeFileSync(marker, JSON.stringify({ version: 1, pids: [process.ppid], closedAt: null }));
         if (process.platform === 'linux' && loopRunIsLive(scratch) !== false) {
           console.error('FAIL [an unrecognised closedAt counts as closed]');
+          ok = false;
+        }
+        // LFE, 2026-09-28: `gh issue comment N --body-file <record> && date`
+        // was refused as unverifiable although nothing after a post can change
+        // what it posted. Only a segment that can run before or alongside the
+        // post (an earlier segment, a pipe, a background &) can.
+        const bodyDir = mkdtempSync(join(tmpdir(), 'guard-body-'));
+        const bodyFile = join(bodyDir, 'record.md');
+        writeFileSync(bodyFile, '## record\n');
+        const bodyVerdicts = [
+          [`gh issue comment 350 --body-file ${bodyFile} && date +%H:%M`, false],
+          [`gh issue comment 350 --body-file ${bodyFile}; echo done`, false],
+          [`date +%H:%M && gh issue comment 350 --body-file ${bodyFile}`, true],
+          [`echo /answer > ${bodyFile} && gh issue comment 350 --body-file ${bodyFile}`, true],
+          [`gh issue comment 350 --body-file ${bodyFile} | tee /tmp/x`, true],
+          [`gh issue comment 350 --body-file ${bodyFile} & date`, true],
+        ].map(([command, expected]) => evaluate(command, 'main').block === expected);
+        rmSync(bodyDir, { recursive: true, force: true });
+        if (!bodyVerdicts.every(Boolean)) {
+          console.error(`FAIL [a post can only be rewritten by what runs before or beside it]: ${bodyVerdicts.join(',')}`);
+          ok = false;
+        }
+        // LFE, 2026-09-28: markers carried the tmux server's pid, so every
+        // session under that server read as the loop's own run in that repo.
+        const tree = {
+          110: [95, 'node'], 95: [80, 'bash'], 80: [70, 'claude'], 70: [60, 'zsh'], 60: [1, 'tmux: server'],
+          210: [180, 'node'], 180: [170, 'claude'], 170: [60, 'zsh'],
+          310: [305, 'node'], 305: [60, 'bash'],
+          // The binary never retitles itself (measured, 2.1.283): comm is
+          // the name it was launched under. The npm package copies it to
+          // bin/claude.exe; a versioned path launched directly is its version.
+          410: [405, 'bash'], 405: [60, 'claude.exe'],
+          510: [505, 'bash'], 505: [60, '2.1.283', '/home/u/.local/share/claude/versions/2.1.283'],
+        };
+        const chain = (start) => {
+          try {
+            return [...ancestorChain(start, (pid) => tree[pid] ?? null)].join(',');
+          } catch (error) {
+            return `THREW ${error.message}`;
+          }
+        };
+        const chains = [chain(95), chain(180), chain(305), chain(410), chain(510)];
+        if (chains.join(' | ') !== '95,80 | 180 | 305,60 | 410,405 | 510,505') {
+          console.error(`FAIL [an ancestry stops at its own claude process]: ${chains.join(' | ')}`);
           ok = false;
         }
       }

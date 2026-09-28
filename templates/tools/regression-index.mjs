@@ -33,6 +33,21 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'every-session-under-one-tmux-server-owned-the-loop-run',
+    date: '2026-09-28',
+    symptom: 'A run marker recorded the prime process\'s whole ancestry up to the tmux '
+      + 'server, so any other session under that server, working in the same repo, '
+      + 'matched it: its Stop hook could see a dark run and its AskUserQuestion was '
+      + 'refused as if it were the loop.',
+    cause: 'Ownership is "a marker pid is one of my ancestors", and the shell, '
+      + 'multiplexer and init chain above Claude Code are shared by every session. '
+      + 'The ancestry now ends at the session\'s own claude process.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function ancestorChain(start, readEntry = procEntry, limit = 64) {' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'FAIL [an ancestry stops at its own claude process]' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'a-native-route-bypassed-the-sessions-gateway',
     date: '2026-09-28',
     symptom: 'A Fable plan review on LFE never reached the operator\'s gateway: '
