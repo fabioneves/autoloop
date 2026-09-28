@@ -18,7 +18,7 @@
 // records are what could eventually make it a measurement.
 //
 // Both are composed HERE rather than hand-written into a body, for the reason
-// `step-subject.mjs` exists: a format recalled under load decays, and a field
+// step.mjs renders status: a format recalled under load decays, and a field
 // that drifts across runs makes the whole series unqueryable. A marker nobody
 // validates is worse than no marker, because it looks like data.
 //

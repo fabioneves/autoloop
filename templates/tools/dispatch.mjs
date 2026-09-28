@@ -21,6 +21,7 @@
 // Exit 0 on a typed success, 1 on a typed failure, 2 on a usage error.
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   chmodSync,
@@ -999,6 +1000,59 @@ export function runDispatch(options) {
 const SHELL_FENCE_RE =
   /^[ \t]*(?:`{3,}|~{3,})[ \t]*(bash|sh|shell|zsh|console|shell-session|shellsession)\b/gimu;
 
+// Each role's standing instructions are a plugin file, put ahead of the unit
+// facts the orchestrator writes. Dispatch always runs from the plugin's tools,
+// so the templates resolve beside this file.
+const BRIEFS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'briefs');
+
+// A dispatched process has no Skill tool, so a template names skill FILES.
+// Their paths come from Claude Code's installed-plugin record: the install it
+// loads in this repo (a local or project pin) first, then the user-scope one,
+// then any other. A vendored dispatch sits in <repo>/tools/agentic, so a path
+// relative to this file is only a fallback for running from the plugin itself.
+function installedSkills(installed, prefix, cwd) {
+  const rank = (entry) => (entry.projectPath === cwd ? 0 : entry.scope === 'user' ? 1 : 2);
+  return Object.entries(installed.plugins ?? {})
+    .filter(([name]) => name.startsWith(prefix))
+    .flatMap(([, entries]) => entries)
+    .filter((entry) => typeof entry.installPath === 'string')
+    .sort((left, right) => rank(left) - rank(right))
+    .map((entry) => join(entry.installPath, 'skills'))
+    .find((path) => existsSync(path)) ?? null;
+}
+
+export function skillRoots(plugins = pluginsDir(), cwd = process.cwd()) {
+  let installed = {};
+  try {
+    installed = JSON.parse(readFileSync(join(plugins, 'installed_plugins.json'), 'utf8'));
+  } catch {
+    installed = {};
+  }
+  const own = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills');
+  return {
+    'agent-skills': installedSkills(installed, 'agent-skills@', cwd),
+    'autoloop-skills': installedSkills(installed, 'autoloop@', cwd)
+      ?? (existsSync(join(own, 'dev', 'SKILL.md')) ? own : null),
+  };
+}
+
+export function composeBrief(role, prompt, briefsDir = BRIEFS_DIR, roots = skillRoots()) {
+  const path = join(briefsDir, `${role}.md`);
+  let template;
+  try {
+    template = readFileSync(path, 'utf8');
+  } catch {
+    return { ok: false, code: 'BRIEF_TEMPLATE_MISSING', message: `${role}: no role brief template at ${path}` };
+  }
+  const resolved = template.replace(/\{(agent-skills|autoloop-skills)\}/gu, (token, name) =>
+    roots[name] ?? `the ${name.replace('-skills', '')}${name === 'agent-skills' ? '-skills' : ''} plugin's skills directory`);
+  return {
+    ok: true,
+    prompt: `${resolved.trimEnd()}\n\n---\n\n${prompt}`,
+    sha256: createHash('sha256').update(template).digest('hex'),
+  };
+}
+
 export function reviewerPromptProblem(role, prompt) {
   if (ROLES[role]?.posture !== 'reviewer') return null;
   const text = String(prompt);
@@ -1023,7 +1077,12 @@ function executeDispatch(options) {
     engine = 'claude',
     startedAtMs = PROCESS_START_MS,
   } = options;
-  const promptProblem = reviewerPromptProblem(role, prompt);
+  const brief = ROLES[role] === undefined ? { ok: true, prompt, sha256: null }
+    : composeBrief(role, prompt, options.briefsDir ?? BRIEFS_DIR, skillRoots(pluginsDir(), options.cwd));
+  if (!brief.ok) {
+    return failure('prompt', brief.code, brief.message, { ms: 0, startupMs: 0, stderr: '' });
+  }
+  const promptProblem = reviewerPromptProblem(role, brief.prompt);
   if (promptProblem !== null) {
     return failure(
       'prompt',
@@ -1051,14 +1110,15 @@ function executeDispatch(options) {
       { ms: 0, startupMs: 0, stderr: '' },
     );
   }
-  return runEngine({
-    role, prompt, tools, cwd, timeoutMs, engine, startedAtMs,
+  const result = runEngine({
+    role, prompt: brief.prompt, tools, cwd, timeoutMs, engine, startedAtMs,
     liveFile: options.liveFile ?? null,
     model: options.model ?? null,
     effort: options.effort ?? null,
     baseUrl: options.baseUrl ?? null,
     readRoots: options.readRoots ?? [],
   });
+  return brief.sha256 === null ? result : { ...result, briefSha256: brief.sha256 };
 }
 
 // Engine stdout goes to disk as the engine emits it, so a running dispatch can
@@ -1371,6 +1431,95 @@ function selfTest() {
       .every((role) => ROLES[role].posture === 'reviewer'),
   );
 
+  // #350's briefs were about half standing role text the orchestrator rewrote
+  // from memory each time; the template carries it now.
+  {
+    const briefs = mkdtempSync(join(tmpdir(), 'dispatch-briefs-'));
+    writeFileSync(join(briefs, 'plan-review.md'), 'Adversarial plan review.\n');
+    const composed = (() => {
+      try {
+        return composeBrief('plan-review', 'Plan: /tmp/p.md', briefs);
+      } catch (error) {
+        return { ok: false, message: `THREW ${error.message}` };
+      }
+    })();
+    const missing = (() => {
+      try {
+        return composeBrief('implement', 'x', briefs);
+      } catch (error) {
+        return { ok: true, message: `THREW ${error.message}` };
+      }
+    })();
+    rmSync(briefs, { recursive: true, force: true });
+    check(
+      'a role brief template comes first, then the unit facts, and its hash is stamped',
+      composed.ok === true
+        && composed.prompt === 'Adversarial plan review.\n\n---\n\nPlan: /tmp/p.md'
+        && /^[0-9a-f]{64}$/u.test(composed.sha256),
+    );
+    const tokened = (() => {
+      const dir = mkdtempSync(join(tmpdir(), 'dispatch-briefs-'));
+      writeFileSync(join(dir, 'fix.md'), 'Read {agent-skills}/tdd/SKILL.md and {autoloop-skills}/lean-code/SKILL.md.');
+      try {
+        return [
+          composeBrief('fix', 'x', dir, { 'agent-skills': '/p/agent/skills', 'autoloop-skills': '/p/auto/skills' }).prompt,
+          composeBrief('fix', 'x', dir, { 'agent-skills': null, 'autoloop-skills': null }).prompt,
+        ];
+      } catch (error) {
+        return [`THREW ${error.message}`, ''];
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })();
+    check('skill paths in a template resolve to the installed plugins, or say where to look',
+      tokened[0].startsWith('Read /p/agent/skills/tdd/SKILL.md and /p/auto/skills/lean-code/SKILL.md.')
+        && tokened[1].includes('the agent-skills plugin\'s skills directory/tdd/SKILL.md'));
+    // A repo can pin its own plugin versions (LFE runs a local-scope autoloop
+    // 0.53.0 install), so the copy Claude Code loads in that repo wins over
+    // the user-scope one. A vendored dispatch sits in <repo>/tools/agentic,
+    // where a path relative to this file is the host's, not the plugin's.
+    const roots = (() => {
+      const dir = mkdtempSync(join(tmpdir(), 'dispatch-roots-'));
+      const install = (name) => {
+        mkdirSync(join(dir, name, 'skills'), { recursive: true });
+        return join(dir, name);
+      };
+      writeFileSync(join(dir, 'installed_plugins.json'), JSON.stringify({ plugins: {
+        'agent-skills@m': [
+          { scope: 'local', projectPath: '/elsewhere', installPath: install('agent-other') },
+          { scope: 'user', projectPath: null, installPath: install('agent-user') },
+          { scope: 'local', projectPath: '/repo', installPath: install('agent-repo') },
+        ],
+        'autoloop@m': [{ scope: 'user', projectPath: null, installPath: install('auto-user') }],
+      } }));
+      try {
+        return [skillRoots(dir, '/repo'), skillRoots(dir, '/other-repo'), skillRoots(join(dir, 'none'), '/repo')];
+      } catch (error) {
+        return [{ threw: error.message }, {}, {}];
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })();
+    check('skill roots come from the install Claude Code loads in the repo, then the user-scope one',
+      roots[0]['agent-skills']?.endsWith('/agent-repo/skills')
+        && roots[0]['autoloop-skills']?.endsWith('/auto-user/skills')
+        && roots[1]['agent-skills']?.endsWith('/agent-user/skills')
+        && roots[2]['agent-skills'] === null);
+    check('a missing role brief template is a typed refusal', missing.ok === false
+      && missing.code === 'BRIEF_TEMPLATE_MISSING' && missing.message.includes('implement'));
+    check('every role has a template in the plugin, and no reviewer template carries a shell fence',
+      ROLE_NAMES.every((role) => {
+        const brief = (() => {
+          try {
+            return composeBrief(role, 'x');
+          } catch {
+            return { ok: false };
+          }
+        })();
+        return brief.ok === true && reviewerPromptProblem(role, brief.prompt) === null;
+      }));
+  }
+
   const writerTools = resolveTools('implement');
   const reviewerTools = resolveTools('code-review');
   check(
@@ -1522,7 +1671,8 @@ function selfTest() {
       && reviewed.role === 'code-review'
       && reviewed.verdict.verdict === 'pass'
       && readFileSync(stdinPath, 'utf8')
-        === `review the delta${reviewEnvelopeStamp('code-review')}`
+        === `${composeBrief('code-review', 'review the delta').prompt}${reviewEnvelopeStamp('code-review')}`
+      && reviewed.briefSha256 === composeBrief('code-review', 'x').sha256
       && launchedArgv.includes('--permission-mode plan')
       && launchedArgv.includes('--tools Glob,Grep,Read'),
     );
@@ -1919,7 +2069,7 @@ function selfTest() {
           && delivered.includes('autoloop-dispatch-context-v1')
           && delivered.includes(`revision: ${head}`)
           && /checkout: (?:clean|dirty)\n/u.test(delivered)
-          && delivered.startsWith('review the artifact at revision deadbeef');
+          && delivered.startsWith(composeBrief('code-review', 'review the artifact at revision deadbeef').prompt);
       })(),
     );
     check(

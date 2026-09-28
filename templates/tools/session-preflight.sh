@@ -152,4 +152,11 @@ fi
 # 5. Every role dispatch spawns a fresh engine process; there is nothing here to select.
 echo 'INFO  role dispatch is one call — tools/agentic/dispatch.mjs --role <role>'
 
+# 6. After a compaction a live run resumes from this card instead of re-reading
+# its state (LFE, 2026-09-28: a 5-minute compaction mid step 10, then an 87 KB
+# skill search to find its place). Silent unless this session's run is live.
+if [ -f "$REPO_DIR/tools/agentic/step.mjs" ]; then
+  run_timed 10 node "$REPO_DIR/tools/agentic/step.mjs" --card-run 2>/dev/null || true
+fi
+
 exit 0

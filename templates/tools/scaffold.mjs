@@ -28,6 +28,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_VERSION, extractConfig, validateConfig } from './config-contract.mjs';
 import {
+  BRIEF_FILES,
   NON_MANUAL_TOOL_FILES,
   UNIVERSAL_TOOL_FILES,
 } from './verify.mjs';
@@ -99,7 +100,7 @@ export const RETIRED_HOST_FILES = Object.freeze(new Map([
 ]));
 // Vendored tools a release deleted. Every tools/agentic copy is template-owned,
 // so a retired one is removed outright, like the non-manual set on a manual repo.
-const RETIRED_TOOL_FILES = Object.freeze(['adapter-contract.mjs']);
+const RETIRED_TOOL_FILES = Object.freeze(['adapter-contract.mjs', 'step-subject.mjs']);
 const RETIRED_HOST_DIRECTORIES = Object.freeze([
   '.codex/agents', '.opencode/agent', '.opencode/plugins', '.codex', '.opencode',
 ]);
@@ -360,6 +361,7 @@ export function reconcile(root, templates, { audit = false } = {}) {
 
   const tools = [
     ...UNIVERSAL_TOOL_FILES,
+    ...BRIEF_FILES,
     'session-preflight.sh',
     'dispatch-stream.sh',
     // The release-proven self-test manifest rides beside the vendored tools so
@@ -1248,12 +1250,14 @@ function fixtureTemplates() {
   const names = new Set([
     ...UNIVERSAL_TOOL_FILES.map((name) => TOOL_SOURCE_NAMES[name] ?? name),
     ...NON_MANUAL_TOOL_FILES.map((name) => TOOL_SOURCE_NAMES[name] ?? name),
+    ...BRIEF_FILES,
     'session-preflight.sh',
     'dispatch-stream.sh',
     'self-test-manifest.json',
     'guard-corpus.json',
   ]);
   for (const name of names) {
+    mkdirSync(dirname(join(templates, 'tools', name)), { recursive: true });
     writeFileSync(join(templates, 'tools', name), `// fixture ${name}\n`);
   }
   return templates;

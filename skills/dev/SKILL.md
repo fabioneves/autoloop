@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.53.2 · starting
+∞ dev · v0.54.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -81,7 +81,9 @@ The typed summary is
   `origin/<base>` HEAD is. Prime never fetches, switches, or resets; it reports.
 - `sections` — per-section `{complete,items,error}` counts, never item bodies. A full snapshot
   exceeds what a tool result can carry.
-- `snapshotPath` — the durable file holding every byte. Read it only through the typed accessors.
+- `snapshotPath` — the durable file holding every byte. Read it only through the typed accessors;
+  one unit's facts (eligibility with the failing reason, provenance, marker, PR) come from
+  `node <plugin-tools>/snapshot-contract.mjs --unit <N> <snapshotPath>` in one call.
 - `waits` — `{lifted,waiting,errors}`. Before the scan, prime removes `loop-waiting` from every
   unit whose recorded condition has cleared, so that unit is already eligible in this snapshot
   (`lifted: #N (reason)` in the text report). A lift error leaves the unit waiting; it never fails
@@ -505,9 +507,11 @@ with a dispatch that predated `--engine` and failed usage-typed; another ran a f
 the unit lands, and never "fix" that by committing tool refreshes into the unit branch, because
 scaffold changes are Setup's work on base and would land in a diff the plan never mentioned.
 
-Write prompts to a file; never inline untrusted issue or review text into a shell command. Give a
-dispatch only what it needs: the frozen plan, the relevant STATE invariants, the evidence, and the
-named skills.
+Write prompts to a file; never inline untrusted issue or review text into a shell command. The
+dispatch puts the role's standing brief (`templates/tools/briefs/<role>.md`: stance, posture, the
+skill files, governance docs, writer rules) ahead of your prompt, so the prompt file carries only
+the unit's facts: artifact paths, the 🧊 frozen plan, rulings, accepted findings and dispositions,
+what changed on base, and focus. Never restate a standing rule — it is already there, versioned.
 
 A writer that reports partial or unknown effects enters lifecycle reconciliation. Never blind-retry
 it. A review dispatch that mutated the repository is invalid.
@@ -595,10 +599,12 @@ failure. Waiting itself has one sanctioned shape per situation:
 
 - **Parked wait (preferred).** Every in-flight dispatch is backgrounded with `--output-file`, a
   Monitor (or the background task's own completion signal) is armed on each result file, all
-  commits are pushed, **on a host with a task panel its completed rows are pruned to the four most
-  recent** (see the panel section — park is when the panel is read, so it is when it must be
-  readable), and the LAST
-  thing before the turn ends is the parked block naming what it waits for, with the clock:
+  commits are pushed, and the LAST thing before the turn ends is the parked block, printed by
+  `node <plugin-tools>/step.mjs --parked` and repeated verbatim: every unit in flight with its step,
+  model and age, then the queue.
+
+  A background dispatch's Bash `description` is the row a human reads under "↓ to manage", so
+  write it in the ribbon's grammar: `#291 05 IMPLEMENT · OPUS 5.5`, not `Dispatch writer for 291`.
 
   **A wait on anything but a dispatch is recorded before the block prints.** The Stop hook
   recognises a dispatch process, a live stream and a recorded park. A background subagent or
@@ -642,19 +648,18 @@ failure. Waiting itself has one sanctioned shape per situation:
   glyph whose advance width is not agreed on cannot be padded correctly, because there is no
   correct number — every value is right somewhere and wrong somewhere else. So the badge is
   followed only by the dotted rule, whose whole job is to be decorative: if it starts one column
-  over, nothing reads differently. The `∞` is already on every ribbon in the run and the block is
-  unmistakably the loop's without it. Removing the dependency beats tuning it, and the two tuning
+  over, nothing reads differently. The block is unmistakably the loop's without it. Removing the dependency beats tuning it, and the two tuning
   attempts are the evidence for that rather than an argument against the badge.
 
-  **The clock rides in the rule, and there is no `[HH:MM][#N]` prefix at all.** A park routinely
-  waits on two units at once, so a `[#N]` would name one of them and silently misfile the rest;
+  **The clock rides in the rule, and there is no `HH:MM #N` prefix at all.** A park routinely
+  waits on two units at once, so a `#N` prefix would name one of them and silently misfile the rest;
   the unit belongs on the branch that actually has one, and each `├` leads with its own `#N`,
   which is the discriminator a reader is scanning for anyway. With the unit gone the prefix was
   carrying a bare time in brackets in front of a titled rule — two frames around one line — so the
   time moves into the title it was already sitting next to. A titled rule states what this is and
   when it started in one stroke. This is the only wait shape that spans units, so it is the only
   one that leaves the prefix behind; `▶️ resumed` concerns exactly one thing firing and keeps the
-  full `[HH:MM][#N]`.
+  full `HH:MM #N` (`step.mjs --resumed`).
 
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
   the printed block make parked and dead distinguishable at a glance. The resume stays a single
@@ -727,152 +732,6 @@ rules, none of which trades away evidence:
   bug wearing a new coat. Anything hash- or OID-shaped comes from GitHub or from disk after
   compaction — the same rule Prime already applies to STATE. Prefer handing off at a unit boundary
   over compacting mid-unit: a terminal unit resumes from its marker with no context at all.
-
-### The host task panel — activity while parked
-
-**Probe the surface before mirroring into it, and state what the probe found.** The panel is
-where a parked wait stops looking like a stop: it keeps an in-progress spinner on exactly the
-work that is in flight, and it is the only surface carrying a finished step's cost at a glance.
-Claude Code 2.1.233 made its task tools MODEL-GATED — `TaskCreate`/`TaskUpdate`/`TaskList` are
-off on Opus 4.8, Sonnet 5, Fable 5, Mythos 5 and newer — and because the rule for hosts without
-them was "skip this silently", the mirror died without a line of output: two full runs across
-four context windows mirrored nothing and said nothing, and the operator learned it from the
-missing rows. Silence about an absent surface reads exactly like a forgotten one.
-
-So the skip is no longer silent, and it names its own remedy. Directly under the run frame print
-one line stating the panel's fate:
-
-```text
-🗒 task panel: mirroring
-🗒 task panel: off — `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` + restart restores it; dispatch descriptions carry the view
-```
-
-The flag is the operator's environment (shell export or the `env` block of their settings), read
-once at CLI startup, so a run **states it and never sets it**: writing another process's
-configuration mid-run is out of scope, and the value could not take effect in the session that
-wrote it anyway. Report the fate, take the fallback, move on.
-
-**Everything below applies whenever the probe says `mirroring`.** It is not dead prose for a
-surface nobody has — one environment variable separates the two worlds, and a run that finds the
-tools and has no instructions for them half-mirrors, which reads worse than not mirroring.
-
-- **One run row, retitled at every phase change**: subject `∞ autoloop — <phase>`
-  (`selecting`, `syncing base`, `parked on 2 dispatches`, `draining queue`, `posting digest`),
-  in-progress for the whole run, completed at the closing rail. It exists because the panel would
-  otherwise be EMPTY in the gaps between units — prime, queue scan, base sync, digest — which is
-  exactly when a live run looks stopped, since no dispatch is producing output either. **Its
-  subject must change as the phase changes.** A row that reads the same from start to finish
-  asserts only that something is running, which is the always-green-status failure; the phase text
-  is the entire reason it earns a row.
-
-  **It is never completed, deleted, or tidied before the closing rail, and it is recreated the
-  moment it is missing.** This row is the one deliberately long-lived entry in a panel of
-  short-lived ones, which makes it the row most likely to be mistaken for a leftover: hosts
-  periodically nudge toward pruning a stale task list, and a run row that has been in-progress for
-  an hour looks exactly like the thing that nudge is describing. It is not stale — its longevity is
-  its function. A live run lost it mid-flight and left a panel showing two dispatch rows and
-  nothing saying the RUN was alive or what phase it was in, which is the failure this row exists to
-  prevent, arrived at by housekeeping instead of by silence. Re-assert it whenever a phase changes:
-  if the retitle finds no row, create one rather than skipping the update.
-- **One task per step**, created in-progress when the step's ribbon prints, completed when the
-  step ends. The subject starts with the unit prefix `∞ #<N> — ` so a unit's rows read as one
-  visual group, then the ribbon core with the executor
-  slot — MODEL-ONLY in task subjects: `[CLAUDE-OPUS-5-5]`, not `[CLAUDE:OPUS]` (the panel is narrow; the
-  engine still rides the ribbon and the stamped result, and a dispatch with no pinned model
-  falls back to the engine name, `[CLAUDE]`). So: `∞ #149 — 05 IMPLEMENT [CLAUDE-OPUS-5-5]`; `activeForm`
-  says what the spinner should read while it runs (`Implementing #149 on CLAUDE-OPUS-5-5`,
-  `Reviewing #149 r1 on GPT-6-ASTRA`). Round-scoped steps use one task per round, and EVERY
-  dispatched sub-step — fix rounds, doubt reviews, plan revisions — carries the same prefix
-  shape (`∞ #149 — 08 CODE-REVIEW r1/5 [GPT-6-ASTRA]`, `∞ #78 — 08 FIX r3/5 [CLAUDE-OPUS-5-5]`); the named
-  examples are not an exhaustive list.
-- **A completed step keeps its cost in the subject**: `[<elapsed>] [<HH:MM ended>]` —
-  `∞ #123 — 03 PLAN-REVIEW [GPT-6-ASTRA] [11min] [14:35]`. **Compose it, never compute it**, from
-  the `ms` the typed result already carries:
-
-  ```bash
-  node <plugin-tools>/step-subject.mjs --subject '∞ #123 — 03 PLAN-REVIEW [GPT-6-ASTRA]' --ms 660000
-  ```
-
-  **Then complete the task and set the subject in ONE call** —
-  `TaskUpdate({taskId, status: "completed", subject: <the composed line>})`. Both fields, one call.
-  This is where the stamp is actually lost: completing a task is `status: "completed"`, the subject
-  is a separate field, and a turn that reaches for the obvious call flips the status and leaves the
-  subject exactly as it was created — bare. A live panel showed
-  `✔ ∞ #220 — 08 FIX r3/7 [CLAUDE-OPUS-5-5]` with no cost on it for that reason, with the composer available
-  and the rule followed right up to the last step. Composing a subject and not passing it is the
-  same as not composing it.
-
-  It prints the finished subject — elapsed formatted, clock read, executor slot upper-cased — and
-  re-running it on an already-completed subject returns it unchanged, so a resumed unit cannot grow
-  a second pair of brackets. In-session steps have no dispatch `ms`: pass `--started-at-ms <epoch>`
-  instead. This is a command and not a formatting rule because it used to be a formatting rule and
-  the rows shipped bare: obeying it asked for millisecond division and a clock read in the same turn
-  as collecting a result, disposing findings and swapping labels, and recall-plus-arithmetic under
-  load is the shape that decays.
-
-  The panel is where a finished step's numbers are read AT A GLANCE — the collection line that
-  stated them scrolls away and the closing rail carries only the unit total. It is not the only
-  place they survive: `stats.mjs` derives cross-unit step timings from the label timeline, so the
-  durable record is GitHub's and a pruned row loses convenience, not evidence. Together the rows
-  become a cost profile you can read without leaving the panel — which step ate the run, and
-  whether a model was slow or merely queued. Elapsed is wall time from the step's ribbon to its
-  collection, `<n>min` under an hour and `<n>h<mm>m` over it; the timestamp is the local 24-hour
-  clock, the same one the ribbon prefix uses.
-- **Parked = step tasks stay in-progress.** When the orchestrator parks, every in-flight
-  dispatch's step task is the visible activity; completing them happens at collection, in the
-  same turn that states the duration. A staged unit's steps get their own tasks, so two units in
-  flight read as two spinners, not one ambiguous row, and the run row names the wait
-  (`parked on 2 dispatches`).
-- Never batch-create the whole 11-step list up front: a wall of pending steps is noise and the
-  no-op steps would need deleting. Create each task when its step actually begins.
-- **Completed rows read newest-first, and that takes a deliberate rewrite.** The panel groups by
-  status and orders within a group by task ID, which is assigned at creation and never changes; no
-  task field sets position. Left alone, completed rows therefore sit oldest-first and the panel
-  truncates the tail — so the rows it hides are always the most recent ones, which is exactly
-  backwards. A live 16-row panel hid eleven completed rows, all of them newer than the three shown.
-
-  **Prune instead of sorting: at each park and at a unit's closing rail, delete completed rows
-  beyond the four most recent.** Four fit without truncation, so the newest work is always visible —
-  which is the harm. Re-sorting to put newest on top would take a delete-and-recreate of the whole
-  window on a panel that orders by an ID nothing can set, about ten tool calls in a bookkeeping
-  turn, and it buys only reading order on rows that each already carry `[<elapsed>] [<HH:MM>]`. A
-  reader can order four timestamped rows by eye; a reader cannot see a row the panel is hiding. Buy
-  the visibility, skip the ordering.
-
-  Park is where the prune belongs. It is already a bookkeeping moment (push, arm the monitor, print
-  the block), it happens a handful of times per unit rather than at every step, and it is exactly
-  when a human reads the panel — the run has gone quiet and that list is what says it is alive. A
-  per-completion version of this rule shipped in v0.49.30 and a live run on that version did not
-  follow it, which is the answer to whether the per-step cost was affordable.
-
-  A deleted row loses nothing durable: `stats.mjs` derives step timings from the label timeline, so
-  the record is GitHub's and the panel is a view of it. A shipped unit's rows go at its closing rail
-  for the same reason.
-
-There is deliberately **no per-unit umbrella row**. It carried the issue title, but it duplicated
-the `∞ #<N> — ` prefix its own step rows already showed, doubled every unit's row count in a narrow
-panel, and — being in-progress from selection to close — was itself a row that never changed. It
-also needed creating at a moment nothing else depended on, so a live run shipped `#82` with a step
-row and no umbrella while `#87` had both: half-mirrored, which reads worse than not mirroring. The
-issue title still reaches the operator at the selection ribbon and the closing rail.
-
-**`PushNotification` is not gone, and concluding otherwise from the visible roster is the
-defect.** Newer harnesses DEFER it: `ToolSearch("select:PushNotification")` loads it in one call.
-Run that load once at run open, beside the panel probe. The terminal notifications —
-`✔ #<N> PR #<P> ready for your merge · <elapsed>` on delivered, `✖ #<N> blocked — <reason gate>`
-on blocked — are due whenever the tool loads; only a session that genuinely cannot load it may
-say so, once, on the unit's closing rail. A live run wrote "surfaces DO NOT EXIST in this
-session" into its own handoff summary and dropped every delivery notification while a working
-tool sat one ToolSearch away: the roster names what is LOADED, not what exists.
-
-**Where the panel is off, the background dispatches are the in-flight view**, and the host lists
-each running background command under its Bash `description`. That field is therefore written as
-the row a human reads while the run is parked, in the panel's own grammar so one format serves
-both worlds: `∞ #291 — 05 IMPLEMENT [CLAUDE-OPUS-5-5]`, not `Dispatch writer for issue 291 in background`.
-It costs nothing — the description is written either way — and it is the whole difference between
-a parked run that shows which unit, step and model are burning time and one that shows a sentence.
-The parked block, the heartbeat line, and the ribbons carry everything else; none of them gained a
-new job when the panel lost its.
 
 ## Lane and convergence policy
 
@@ -1039,38 +898,23 @@ Never redesign scope *silently*: a scope change is a recorded decision, not a qu
 are earlier choices and answers about this very issue. A trusted `/answer` posted after a decision
 reverses it: plan from the answer, and never re-take a decision a human reversed.
 
-**Apply the run's first labels here — this is the mutation everything downstream swaps:**
+**Open the unit with its first step — this applies the labels everything downstream swaps:**
 
 ```bash
-gh issue edit <N> --add-label loop-started,loop:01-premise
+node <plugin-tools>/step.mjs --issue <N> --to 01-premise --note "<priority> · <safe title>"
 ```
 
-Every later step says "Move to `loop:0N`", which is a SWAP and presumes the pair already exists;
-blocking likewise "removes `loop-started` and the `loop:*` step label". Nothing stated what put them
-there. A live run reached step 2 on both a worked and a staged unit with the issues still showing
-`loop-ready` and nothing else — an in-progress unit indistinguishable on GitHub from an untouched
-queued one, and `stats.mjs`, which derives every cross-unit step timing from this label timeline, had
-no events to derive from. The step labels existed in the repository and the swap reminder knew the
-exact command; only the instruction to run it was missing.
+It adds `loop-started` and `loop:01-premise`; without them an in-progress unit is
+indistinguishable on GitHub from an untouched queued one, and `stats.mjs` has no timeline to
+derive from.
 
-**The staged unit is the one exception, and it is deliberate.** Overlap keeps label mutations
-serialized to the worked unit, so a unit staged through read-only steps 1–3 carries no labels at all:
-it gets `loop-started` with `loop:04-claim` directly when it is claimed. Its 01–03 steps are
-therefore absent from `stats.mjs` — the known price of staging ahead, not a gap to fill by labelling
-a unit two writers might still abandon.
-
-Print the unit banner beside that first mutation:
-
-```text
-╭──────────────────────────────────────────────────╮
-│ ∞ #<N> — <safe composed title>                   │
-│   <priority> · <planned lane>                    │
-╰──────────────────────────────────────────────────╯
-```
+**A staged unit is the one exception, and it is deliberate.** Overlap keeps label mutations
+serialized to the worked unit, so a unit staged through read-only steps 1–3 is announced with
+`--staged` and carries no labels: it gets `loop-started` with `loop:04-claim` when it is claimed.
 
 ### 2. Plan
 
-Move to `loop:02-plan`. **The plan is a dispatch** — `--role plan`, read-only postured, returning
+Move to step 02 (`step.mjs --to 02-plan`). **The plan is a dispatch** — `--role plan`, read-only postured, returning
 the typed `{title, prBody, body}` the driver's request wants, no markdown parsing:
 
 ```bash
@@ -1153,7 +997,7 @@ implement **concurrently**: on a Critical plan finding, stop the implement dispa
 the plan-revision path before continuing; Minors fold into the code-review round-1 prompt as
 context. Concurrency never skips the review — it moves the wait, not the gate.
 
-Move to `loop:03-plan-review`. Dispatch exactly one fresh reviewer:
+Move to step 03 (`step.mjs --to 03-plan-review`). Dispatch exactly one fresh reviewer:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role plan-review --prompt-file /tmp/autoloop-plan-review.md --issue <N> --json
@@ -1190,6 +1034,9 @@ still carries is recorded as a disposition and rides into the code-review r1 pro
 of the plan.
 
 ### 4. Persist intent and claim
+
+Announce the step with `step.mjs --to 04-claim`; the driver's own claim swap then finds the labels
+already in place.
 
 Before the first external mutation, serialize and durably post the lifecycle intent marker binding:
 
@@ -1245,7 +1092,7 @@ append a second marker or perform one of these effects outside the driver.
 
 ### 5. Implement
 
-Move to `loop:05-implement`. Dispatch the writer:
+Move to step 05 (`step.mjs --to 05-implement`). Dispatch the writer:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role implement --prompt-file /tmp/autoloop-implement.md --issue <N> --json
@@ -1270,7 +1117,7 @@ blindly: it would redo committed work against a tree that already has it.
 
 ### 6. Simplify
 
-Move to `loop:06-simplify` and **dispatch one behavior-preserving simplification pass over the
+Move to step 06 (`step.mjs --to 06-simplify`) and **dispatch one behavior-preserving simplification pass over the
 implemented artifact, before any review round sees it.** Every line the reviewer reads is surface
 it can find something in, and a live unit spent three of its four rounds re-reporting
 `artifact-line-budget-exceeded` — a number the orchestrator can measure in one command instead of
@@ -1306,7 +1153,7 @@ merge-friendly: no shared freshness line, derived count prose, or table re-paddi
 
 ### 7. Orchestrator diff review
 
-Move to `loop:07-diff-review`.
+Move to step 07 (`step.mjs --to 07-diff-review`).
 
 **Plain run: step 7 is a dispatch.** Brief a `diff-review` reviewer (astra on the standing table)
 with the simplified diff, `cfg.review.checklistPath`, the frozen plan, invariants, boundary, and
@@ -1366,7 +1213,7 @@ no such invariant section skips this step entirely.
 
 ### 8. Independent code review
 
-Move to `loop:08-code-review`. Reclassify the complete final diff and bind its exact HEAD.
+Move to step 08 (`step.mjs --to 08-code-review`). Reclassify the complete final diff and bind its exact HEAD.
 Dispatch round 1:
 
 ```bash
@@ -1680,7 +1527,7 @@ unblock the gate"), and PARK on the base going green — a timed park
 (see "Timed park" in step 11) whose wake re-checks `origin/<base>` — resuming the queue when it
 does. `run complete` is for an empty or exhausted queue, not for a red baseline with a known fix.
 
-Move to `loop:09-gate`. Require a clean committed tree. Push the head (`git push origin
+Move to step 09 (`step.mjs --to 09-gate`). Require a clean committed tree. Push the head (`git push origin
 HEAD:refs/heads/<captured-loop-branch>`), then run the ONE full gate through the publisher:
 `node <plugin-tools>/publish-verdict.mjs gate <head> > <log> 2>&1`. It runs `cfg.gate.command` on the
 exact clean head and publishes `agentic/gate` only when the gate is green. `terminal-finalize`
@@ -1739,11 +1586,9 @@ the unit's own change, re-plan as at `REVIEW_CAP_REACHED`. Never weaken the gate
 
 ### 10. Publish, finalize, and submit
 
-**No label swap opens this step, or step 11.** The step ladder ends at `loop:09-gate`; it stays on
-the issue until the terminal finalizer swaps it to `loop-delivered` itself. A live run invented
-`loop:10-publish` here: `gh issue edit` removed `09-gate`, failed on the unknown label behind a
-`2>/dev/null`, and left the unit wearing only `loop-ready` + `loop-started` — indistinguishable
-from a freshly selected issue. The guard now blocks any `--add-label loop:*` outside the ladder.
+**No label moves at this step, or step 11.** Announce each with `step.mjs --to 10-publish` (and
+`11-record`); `loop:09-gate` stays on the issue until the terminal finalizer swaps it to
+`loop-delivered` itself.
 
 Publish with `git push origin HEAD:refs/heads/<captured-loop-branch>` and verify the remote PR head
 equals the gated OID. If and only if the branch was rebased, use
@@ -1970,15 +1815,12 @@ branch. If dirty, do not switch; report it.
 
 ## Chat markers
 
-One visual language end to end: the `∞` motif from the start banner, a state badge, a step
-ribbon, one rounded frame, and symmetric `══` terminators. The frame is drawn ONCE, for the unit
-banner, where all four corners exist. A terminal line uses `══ … ══` instead: a half-box (`╰─ … ─╯`)
-promises a left edge that no earlier line ever drew, so on a screen full of prose it read as
-debris rather than a closing statement. Values in every marker are safe composed text, never raw
-issue/review bytes.
+One visual language: the `∞` motif, a state badge, one status line per step, and open-right
+frames. **Tools render the per-unit status; repeat their output verbatim as your message and add
+nothing to it.** `step.mjs` reads the clock, aligns the columns and names the model, so none of that
+is recalled or recomposed. Values are safe composed text, never raw issue or review bytes.
 
-Every banner opens with one state badge, so a scrollback can be scanned for outcomes without
-reading any words:
+Every status line opens with one state badge:
 
 | badge | state |
 |---|---|
@@ -1988,258 +1830,123 @@ reading any words:
 | ❌ | blocked — a guardrail refused or the unit failed |
 | ⚠️ | needs a human — a human-block path, a decision, a Major the loop may not dispose |
 
-**`⚠️` means STOP AND ASK, and nothing else.** A failing review with Majors on it is not that: the
-loop dispositions every finding and fixes them in its own rounds, without a human touching
-anything. Badging that work `⚠️` cried for help four times a unit on a run that needed no help at
-all, and a badge that fires when nothing is wanted stops being read on the run where something is
-— the reader has been trained that it means "carry on". `🚧` is the honest state: work in the road,
-the crew is on it, no one needs to be called. The moment a finding genuinely cannot be disposed
-without a human, the badge flips to `⚠️` and it means what it says.
+**`⚠️` means stop and ask, and nothing else.** A failing review the loop disposes itself is `🚧`;
+a badge that fires when nothing is wanted stops being read on the run where something is. Badges
+are ordered — `⚠️` over `❌` over `🚧` over `⏳` — and a line takes the most specific one.
 
-Badges are ordered, and a line takes the most specific one that applies: `⚠️` over `❌` over `🚧`
-over `⏳`. So a first review round announces `⏳` because nothing is known yet, and every round
-that carries open findings — the review that found them and the fix round working them — announces
-`🚧`. Two badges for one line is the ambiguity this table exists to remove.
-
-After prime succeeds, open the run frame. It is the outermost thing in the session and prints
-**exactly once**, so it is the one place drawn art earns its width — every unit banner and ribbon
-below nests visually inside it:
+After prime succeeds, open the run frame once, never again on resume:
 
 ```text
 ┏━━ ∞ RUN OPEN · <HH:MM> ━━━━━━━━━━━━━━━━━━━━━━
 ┃  ⏳ queue <e> eligible · <policy>
-┃  🔭 reviews <ENGINE-OR-MODEL>
+┃  🔭 reviews <MODEL>
 ┃  🔧 pitcrew: <no open PRs | <n> serviced>
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-**Open on the right, and that is not a shortcut.** A closed box has to pad every row to one exact
-width, which means getting it right for a queue count that changes, a model name that varies in
-length, and a pitcrew state that is sometimes four words. Miss by one column and the frame renders
-visibly broken — a drawn frame that draws wrong is worse than no frame, because the reader now
-distrusts the whole surface. Ragged right has nothing to align, so it cannot fail that way. Weight
-carries the rank instead: heavy `━` outranks the unit banner's single round `╭─╮`, which outranks a
-ribbon's bare line, and the nesting reads correctly without anything having to say so.
+It is open on the right on purpose: a closed box must pad every row exactly, and a frame that
+draws wrong is worse than none. The eligible count is prime's `eligible`.
 
-**It carries no wordmark, deliberately.** This skill's first output already draws the `AUTOLOOP`
-mark, a few lines up; a second one here would be the same name twice in one screen, and drawing it
-in a different letterform would make the product look like two products. One mark per session, at
-the top. What this frame needs is RANK, not identity.
+**A step begins with one call — every step, no-ops included, exactly once:**
 
-The title carries the clock — `RUN OPEN · 15:04` — the same titled-rule idiom the parked block
-uses, so opening a run and suspending one read as one family of thing rather than two unrelated
-decorations. Print it once, after prime succeeds and before the first unit banner, and never
-reprint it on resume: a resumed run continues an open frame, it does not open a second one. The
-task-panel fate line (panel section) prints directly beneath it, in the same turn.
-
-The `🔧` deliberately echoes the FIX step glyph rather than colliding with it: pitcrew is repair
-work on already-open PRs, so the glyph carries the same meaning on both surfaces, which is what the
-closed set below actually requires. `🔭` is not in that set and means "who will be watching" — the
-review engine, named in UPPER-CASE like every other model name (`reviews GPT-6-ASTRA (proxy)`), so the run states who judges before it judges anything.
-
-Print one ribbon line per step — `▰` for done-or-current cells, `▱` for remaining, always
-eleven cells. **Every step prints one, including the ones that turn out to be no-ops**: a step
-that decides nothing is due still happened, and a missing ribbon reads as a skipped step. A unit
-that runs steps 1–11 prints eleven ribbons; orphan reconciliation before selection prints its own
-`00/11 🔁 RECONCILE` ribbon the moment Prime surfaces the orphan, before any fetch or driver call.
-Never withhold a ribbon to reduce output, and never re-print one: a step's ribbon appears
-**exactly once, when the step begins**. A ribbon is an announcement, not a status display —
-"still in flight" is heartbeat news and uses the heartbeat line, never a second copy of the
-ribbon with a different suffix. On resuming from a parked wait, print one `▶️ resumed —
-<what fired>` line and continue; the ribbon for a step already announced is never printed again.
-
-```text
-[14:07][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN ─ <lane> · <actor>
-[14:41][#78] ⏳ ∞ ▰▰▰▰▰▰▱▱▱▱▱ 06/11 🧹 SIMPLIFY ─ 41 lines removed · fresh simplifier
+```bash
+node <plugin-tools>/step.mjs --issue <N> --to <step> [--model <id>] [--round <r>/<cap>] \
+  [--fallback] [--badge <b>] [--note "<short detail>"] [--staged]
 ```
 
-**Each step carries its own glyph**, between the counter and the name, so the eye finds a kind of
-work without reading the word. The set is closed — a step always draws the same glyph, and a glyph
-never means two things:
-
-| Step | Glyph | Step | Glyph |
-|---|---|---|---|
-| 00 RECONCILE | 🔁 | 06 SIMPLIFY | 🧹 |
-| 01 PREMISE | 🧭 | 07 DIFF-REVIEW | 👓 |
-| 02 PLAN | 📐 | 08 CODE-REVIEW | 🔍 |
-| 03 PLAN-REVIEW | 🔬 | 08 FIX | 🔧 |
-| 04 CLAIM | 📌 | 09 GATE | 🚦 |
-| 05 IMPLEMENT | 🔨 | 10 PUBLISH | 📦 |
-| | | 11 RECORD | 📝 |
-
-Steps 10 and 11 have ribbons but no `loop:*` label — `loop:09-gate` is the last step label.
-
-A swap is one command with both halves: `--remove-label loop:<N-1>-… --add-label loop:<N>-…`. A
-live run's first swap after the driver's claim was add-only, so `loop:04-claim` rode beside
-`05`, `06` and `08` to code review, and its next swap went 06→08 with no `07-diff-review` on the
-timeline. The guard refuses an add that does not retire its predecessor; removing a label that is
-not present is a no-op, so name the predecessor even when an earlier swap already lost it.
-
-Reading them apart is the point: 🔬 scrutinises a plan and 🔍 scrutinises code, 👓 is the
-orchestrator's own read, 🔨 builds and 🔧 repairs. The state badge stays where it is — the glyph
-says WHAT the step is, the badge says HOW IT IS GOING.
-
-Step glyphs deliberately avoid variation-selector emoji, because a ribbon is a column-aligned
-line and those render at inconsistent widths. 🅿️ / ▶️ / 💤 stay usable on the wait lines because
-nothing on those lines is measured FROM the badge: `▶️ resumed` and `💤 idle` are prose, the
-`🅿️ parked` block aligns its branches flush at column zero rather than indenting under the badge,
-and the only thing following that badge is a decorative rule. An unstable glyph is a hazard exactly
-when something has to line up beside it — so put nothing there, rather than choosing a width. There
-is no width to choose: the same badge measured wide in one surface and zero-width in another,
-in one environment, on one day.
-
-**Every timeline line starts with `[HH:MM][#N]`** — the wall clock from `date +%H:%M` in the same
-turn (one cheap read; never guessed from memory), then the unit it belongs to. Leading, not
-trailing: a run interleaves two units and a dozen steps, and the reader scans the left edge for
-"when" and "which", not the tail of each line. The issue number therefore appears once, in the
-prefix — do not repeat it in the body. Ribbons, `▶️ resumed` lines, and closing rails all carry it.
-
-**One shape belongs to no single issue and drops the prefix entirely**: the `🅿️ parked` block,
-which routinely waits on two units at once — a `[#N]` there would name one and silently misfile
-the rest. Its clock rides in the titled rule instead (`PARKED · 15:04`), each `├` branch leads
-with its own `#N` where the number is actually true, and the branches are continuations that take
-no prefix of their own. The run's own `🏁 run complete` rail keeps its prefix shape but carries the
-clock without a unit, for the same reason. Everything else keeps the full `[HH:MM][#N]`.
-
-The wait pair reads as a pair: **🅿️ parked** when the turn ends on a wait,
-**▶️ resumed** when what it waited for fires, **💤 idle** on the line that reports a run with
-nothing eligible to take, and **🏁 run complete** on the closing rail of the run itself — swapped
-for **🎉** only on a clean sweep, where every unit shipped and none blocked, deferred or wanted a
-human. `🎉` also rides a unit's SHIPPED rail. Those two places are its whole domain: it marks the
-loop completing the thing it exists to do, never a step completing the job it was given.
-
-The prefix time is the START time; end and duration belong to the lines that already mark
-completion, never to a re-printed ribbon:
-
-- collecting a dispatched step's typed result, state the duration from the result's own `ms`
-  field — `[14:14][#78] ▶️ resumed — plan returned · 6m41s`, computed from `ms`, never hand-timed;
-- the closing rail carries the unit's total (from the run record's per-step timings).
-
-Code review converges over rounds, so its ribbons keep the same grammar and add the round after
-the step name — `<step>/11 CODE-REVIEW r<n>/<cap>` — with the cells counting ROUNDS against the
-configured cap, which is what makes an approaching cap visible before it blocks. The step number
-never disappears: one format for every line in the run, whatever it counts.
+Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-simplify
+07-diff-review 08-code-review 08-fix 09-gate 10-publish 11-record`. The call swaps the step label
+(both halves, checked by the command guard; `01-premise` also adds `loop-started`; 10 and 11
+carry none), marks the retained snapshot stale, records the step, and prints the line:
 
 ```text
-[15:02][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [GPT-6-ASTRA] ─ fix-delta · 2 Major open
-[15:19][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔧 FIX r2/5 [CLAUDE-OPUS-5-5] ─ 2 Major · invariant-scoped
-[15:26][#78] ✅ ∞ ▰▰▰▱▱ 08/11 🔍 CODE-REVIEW r3/5 [GPT-6-ASTRA] ─ fix-delta · clean · converged
+09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      11 files planned
+10:02 #350 🚧 🔍 CODE-REVIEW  ▰▰▱▱▱ r2/5         🟢 ASTRA 6       2 Major open
+10:31 #356 ⏳ 🔬 PLAN-REVIEW  ▰▰▰▱▱▱▱▱▱▱▱ 03/11  🟠 OPUS 5.5    ↪ FABLE timed out
 ```
 
-Fix rounds belong to step 08 too — they are how the step converges, not a step of their own.
+- `--model` is the model the step runs on — the route's model, or the typed result's `model`
+  when it differs. Omit it for a step you run yourself (`⚪ ORCHESTRATOR`); a dispatched step whose
+  model is unknown shows `⚪ ENGINE`. `--fallback` when the
+  result reports the fallback ran.
+- Code review and its fix rounds pass `--round <r>/<cap>`: the cells count rounds against the
+  configured cap, so an approaching cap is visible. A fix round is `08-fix` under step 08's label.
+  Plan review is one dispatch and takes no round.
+- `--staged` announces a unit staged ahead: it records the step and swaps no label, so the worked
+  unit keeps the only label mutations.
+- The dot is the model's colour (🟣 Fable, 🟠 Opus, 🟢 Astra, 🔵 Sonnet, 🟡 Haiku, ⚪ other).
+  Colour comes from emoji because no ANSI escape survives the markdown renderer.
+- Every step is announced once, when it begins, including a no-op; orphan reconciliation
+  announces `00-reconcile` the moment Prime surfaces the orphan, before any fetch or driver call.
+  A jump over a ladder step prints `⚠️ #N skipped <steps>` under the line — only the rule-bound
+  skip of 06 is expected; any other is a defect to fix before going on.
+- The same step again prints `already on <step>` and changes nothing. A refused or failed swap
+  prints its reason and exits 1: read it, never retry blindly. **Never swap a step label by hand**
+  — the command guard refuses it and names this call.
 
-Plan review is one dispatch and carries no round: `03/11 🔬 PLAN-REVIEW [<executor>]`.
+**Collecting a dispatched result** prints one line, its duration from the result's `ms`:
+`node <plugin-tools>/step.mjs --issue <N> --resumed "<what returned>" --ms <ms>` →
+`14:14 #78  ▶️ resumed — plan returned · 6m 41s`.
 
-Every dispatched step names its **executor** in a fixed slot immediately after the step name —
-upper-case and bracketed so it reads as a label. **The slot is the MODEL: `[CLAUDE-OPUS-5-5]`, `[CLAUDE-FABLE-5-1]`,
-`[GPT-6-ASTRA]`** (from the `model` field on the dispatch result, never composed by hand; drop a
-trailing `[context]` suffix for display). Model names identify their engine on sight, so carrying
-both spent width on a word the model already implies — and the engine still rides the stamped
-result and the dispatch log, which is where an engine mismatch is proven anyway. This matches the
-task panel, so one name means one thing in both places. **`[ENGINE]` is the fallback for the one
-case where no model is knowable** — an unpinned writer role, where `resolveDefaultModel` returns
-null because only review roles follow the recorded choice, so the host CLI picks a default the loop
-never sees. Who judged or wrote is a property of the evidence, so the line says as much of it as
-the result actually carries:
+**Waits:** 🅿️ parked (`step.mjs --parked`, after `prime --park` when the wait is not a dispatch),
+▶️ resumed, 💤 idle (`HH:MM 💤 ∞ idle ─ no eligible units`, then close cleanly rather than poll),
+🏁 run complete. **🎉 marks the loop completing what it exists to do** — a SHIPPED card and a
+clean-sweep run close — and nothing else: not a step, not a round, not a blocked unit.
+
+**A unit ends with its card**, printed by one call and repeated verbatim:
+
+```bash
+node <plugin-tools>/step.mjs --card --issue <N> --outcome <shipped|delivered|blocked|human> \
+  [--title "<safe title>"] [--pr <P>] [--lines <n>] [--question "<one line>"]
+```
 
 ```text
-[14:03][#78] ⏳ ∞ ▰▰▱▱▱▱▱▱▱▱▱ 02/11 📐 PLAN [GPT-6-ASTRA] ─ full · fresh planner
-[14:19][#78] ⏳ ∞ ▰▰▰▰▱▱▱▱▱▱▱ 05/11 🔨 IMPLEMENT [CLAUDE] ─ full · fresh writer · engine default
-[14:11][#87] ⏳ ∞ ▰▰▰▱▱▱▱▱▱▱▱ 03/11 🔬 PLAN-REVIEW [GPT-6-ASTRA] ─ full · fresh reviewer · staged
-[15:02][#78] 🚧 ∞ ▰▰▱▱▱ 08/11 🔍 CODE-REVIEW r2/5 [GPT-6-ASTRA] ─ fix-delta · 1 Major open · proxy
+╭─ ⚠️ #350 DELIVERED · awaits human merge · Axis B playback state machine
+│  🔬 plan-review     8m  ▰▰▰
+│  🔨 implement      11m  ▰▰▰▰
+│  🔍 code-review    42m  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰  r2/5
+╰─ 1h 17m · 393 lines · 2 rounds · PR #550
 ```
 
-Two units in flight read as two prefixes, which is the point.
+`shipped` is merged; `delivered` is a ready PR a human merges; `human` needs a decision and carries
+its question as a `❓` line. Time only — no cost. The card closes the unit, and `--parked` stops
+listing it. A delivered or blocked card is followed by its PushNotification (the hook's rider names
+the text). `PushNotification` is DEFERRED on newer hosts, not absent: load it with
+`ToolSearch("select:PushNotification")` at run open.
 
-Steps the orchestrator runs itself take no executor slot — there was no dispatch, and an absent
-slot is the honest statement that the session (its model on the startup banner) did the work.
-
-**Every model name is UPPER-CASE everywhere it appears** — executor slots, parked lines, collection
-lines, task subjects, `activeForm`, and the digest. `CLAUDE-OPUS-5-5`, `CLAUDE-FABLE-5-1`, `GPT-6-ASTRA`. Who
-judged or wrote is the fact an operator scans for, and one casing rule makes it findable in a wall
-of lower-case prose. In task subjects the rule is mechanical rather than remembered —
-`step-subject.mjs` upper-cases the executor slot as it composes the completed row — because a rule
-that holds "everywhere at once" is precisely the kind a long run applies unevenly. Outside fenced
-ribbon blocks, wrap the name in backticks — `` `CLAUDE-OPUS-5-5` `` — so the host renders it as a distinct span
-rather than as another word in the sentence. Colour itself is the host's to choose, not ours to set:
-no ANSI escape survives a markdown renderer and a task subject is plain text, so CAPS plus a code
-span is the whole mechanism — asking for a yellow model name is asking the host theme, not the loop. So: `parked — implement dispatch on `CLAUDE-OPUS-5-5` in flight`, and
-`plan returned · `CLAUDE-OPUS-5-5`, `GPT-6-ASTRA` at limit`.
-
-End a unit with one closing rail:
-
-```text
-[16:12][#78] ✅ ∞ ══ SHIPPED 🎉 ─ PR #<P> · <delivered|awaiting-ci|merged> · <short OID> · 2h09m ══
-```
-
-or:
-
-```text
-[16:12][#78] ❌ ∞ ══ BLOCKED ─ <safe composed reason> ══
-```
-
-The `🎉` rides the SHIPPED rail and nowhere else — not on a step, not on a round, not on a blocked
-unit. A unit reaching `delivered` is the loop doing the whole thing it exists to do, which is worth
-one mark; a step finishing is the loop doing its job, which is not. Confetti on every completion
-is the `⚠️`-on-every-review failure wearing a party hat: fire it when nothing is special and it
-stops being read on the run where something is.
-
-**A unit's closing rail is not the run's.** Blocking, deferring, or carving a unit ends THAT unit;
-the run then invalidates the affected queue sections, re-primes, and takes the next eligible unit
-without asking. The run closes on exactly three conditions: the queue is drained of eligible work,
-a configured bound is reached, or the context needs handing off. "One unit needed a human" is
-never one of them — a human-gated unit is a row in the digest, not a reason to stop working.
-When the last eligible unit is gone, print the idle line
-(`[HH:MM] 💤 ∞ idle ─ no eligible units`) and close cleanly rather than polling.
-
-Closing is an action, not a sentence: `prime.mjs --close-run` before the closing rail. A run that
-just stops writing is indistinguishable from a run that went dark, and the Stop hook treats it as
-the latter.
-
-The run's own close bookends the `┏━━ ∞ RUN OPEN` frame it started with — same open-right block,
-same titled rule with the clock, so a scrollback shows the run's two ends in one shape:
+**A unit's card is not the run's close.** Blocking, deferring or carving a unit ends THAT unit; the
+run re-primes and takes the next eligible unit without asking. The run closes on exactly three
+conditions: no eligible work, a configured bound, or a context handoff. Closing is an action:
+`prime.mjs --close-run`, then the run frame's other end:
 
 ```text
 ┏━━ ∞ RUN COMPLETE · 21:14 ━━━━━━━━━━━━━━━━━━━━
-┃  🏁 4 shipped · 0 blocked · 0 deferred
+┃  🏁 4 shipped · 1 blocked · 0 deferred
 ┃  ⏱ 6h12m · 11 dispatches · 2h41m overlapped
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-**A clean sweep — every unit shipped, nothing blocked, deferred or left for a human — earns the
-flourish.** Nothing else does:
+A clean sweep — every unit shipped, nothing blocked, deferred or left for a human — takes `🎉`
+instead of `🏁` and the flourish; anything less is the plain form:
 
 ```text
-┏━━ ∞ RUN COMPLETE · 21:14 ━━━━━━━━━━━━━━━━━━━━
-┃  🎉 4 shipped · 0 blocked · 0 deferred
-┃  ⏱ 6h12m · 11 dispatches · 2h41m overlapped
 ┃
 ┃      · ˚ ✦ .    ∞    . ✦ ˚ ·
 ┃     a l l   u n i t s   g r e e n
 ┃      · ˚ ✦ .    ∞    . ✦ ˚ ·
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-One blocked unit and it is the plain form — no confetti, no stars, `🏁` instead of `🎉`. That is
-the whole point: a run that ends with a human gated out is not a clean sweep, and saying so in the
-same breath as a celebration would teach the reader to skim both. The flourish is ragged-right and
-padded by nothing, so no terminal can misalign it, and the glyphs are plain ASCII beside two
-non-variation-selector emoji — the width lesson the parked header paid for twice.
-
-Close the run with the badge matching its outcome — ✅ when something shipped and nothing
-blocked, ❌ when anything blocked:
-
-```text
-[17:41] ✅ ∞ ══ 🏁 RUN COMPLETE ─ <s> shipped · <b> blocked · <queue drained|bound reached|context handoff> ══
-```
-
-Never paste raw issue/review text into chat banners.
+In prose, write the 🧊 frozen plan with its ice cube — `step.mjs` adds it to any line it renders —
+and every model name is UPPER-CASE in a code span — `` `CLAUDE-OPUS-5-5` `` — so it reads as a
+distinct span rather than another word.
 
 ## Tool surface
 
 Dev invokes exactly these entry points: `prime.mjs` (`--json` to open a run, `--close-run` to
-close it, `--park` to sleep it), `unit.mjs` (`--obsolete`/`--wait`), `dispatch.mjs`, `scan.mjs`,
-`snapshot-contract.mjs` (invalidate/summary/section), `review-contract.mjs`, `publish-verdict.mjs`,
+close it, `--park` to sleep it), `step.mjs` (`--to`, `--resumed`, `--card`, `--parked`; the
+SessionStart hook runs `--card-run`), `unit.mjs` (`--obsolete`/`--wait`), `dispatch.mjs`,
+`scan.mjs`, `snapshot-contract.mjs` (invalidate/summary/section/`--unit`), `review-contract.mjs`,
+`publish-verdict.mjs`,
 `lifecycle-driver.mjs`, `escalate-paths.mjs`, and the vendored `auto-merge.mjs` terminal exception.
 Every other file in `tools/agentic/` is a library those entry points own — never invoke a contract
 module directly.

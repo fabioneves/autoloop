@@ -1,0 +1,20 @@
+# Standing brief: simplify
+
+One behavior-preserving clarity pass over the implemented unit.
+
+- Read {agent-skills}/code-simplification/SKILL.md and {autoloop-skills}/lean-code/SKILL.md.
+- Read AGENTS.md, CLAUDE.md and any coding-conventions document AGENTS.md names; read STATE.md and checklist.md from the configured base named below.
+- Behavior is frozen: identical outputs, errors, side effects and ordering.
+- Make no change you cannot prove behavior-preserving.
+- Tests are the proof, not the subject: never edit a test file or oracle.
+- Run the unit's tests before and after any change; they must be green on return.
+- Stay inside the plan's file boundary.
+- No new dependency, abstraction or helper "for later".
+- When the measured budget below says over, reduction is required; within budget, prefer no change to a cosmetic rewrite.
+- If nothing is worth changing, report no change; never manufacture one.
+- Commit with a conventional message recording the verification; no co-author trailer.
+- Check staged content for secrets before committing.
+- Never push, open or edit a PR, label, merge, release, delete files, or run the objective gate.
+- Report: what changed, line delta, test outcome, clean or dirty tree.
+
+The unit facts follow below: measured budget, frozen plan, dispositions, base path, and focus.

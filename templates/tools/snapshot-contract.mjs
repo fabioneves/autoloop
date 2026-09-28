@@ -1152,50 +1152,101 @@ export function repositoryAbsenceDecision(snapshot, purpose, matches) {
   return absenceDecision(snapshot, sections, matches);
 }
 
+function queueContext(snapshot) {
+  return {
+    blocked: new Set(snapshot.sections.blockedIssues.items.map((issue) => issue.number)),
+    owned: new Set([
+      ...snapshot.sections.openPrs.items,
+      ...snapshot.sections.mergedPrs.items,
+    ]
+      .filter((pr) => pr.ownership === 'loop' && positiveInteger(pr.issue))
+      .map((pr) => pr.issue)),
+    recovering: new Set(
+      snapshot.sections.lifecycleMarkers.items.map((marker) => marker.issueNumber),
+    ),
+    withinBudget: repairBudgetAllows(snapshot.sections.queue.items),
+  };
+}
+
+// Every reason a queued issue is not eligible; none means eligible.
+function queueIneligibility(snapshot, issue, context) {
+  const labeledBy = issue.provenance?.labeledBy;
+  const labeledAt = issue.provenance?.labeledAt;
+  const trusted = snapshot.sections.authorVerification.items.some((author) =>
+    author.login === labeledBy
+    && ['admin', 'write'].includes(author.permission)
+    && author.evidence.some((evidence) =>
+      evidence.kind === 'queue-label'
+      && evidence.issueNumber === issue.number
+      && evidence.author === labeledBy
+      && evidence.createdAt === labeledAt));
+  const bodyUnchanged = issue.lastEditedAt === null
+    || Date.parse(issue.lastEditedAt) <= Date.parse(labeledAt);
+  const authorized = issue.repair === undefined
+    ? issue.labels.includes('loop-ready')
+    : issue.labels.includes('loop-repair')
+      && !issue.labels.includes('loop-ready')
+      && repairAuthorized(issue.repair);
+  return [
+    ...(trusted ? [] : ['label-not-trusted']),
+    ...(authorized ? [] : ['not-authorized']),
+    ...(context.withinBudget.has(issue.number) ? [] : ['over-repair-budget']),
+    ...(bodyUnchanged ? [] : ['body-edited-after-approval']),
+    ...(context.blocked.has(issue.number) || issue.labels.includes('loop-blocked') ? ['blocked'] : []),
+    ...(issue.labels.includes('loop-waiting') ? ['waiting'] : []),
+    ...(context.owned.has(issue.number) ? ['owned-by-loop-pr'] : []),
+    ...(context.recovering.has(issue.number) ? ['lifecycle-marker'] : []),
+    ...(issue.dependencies.every((dependency) => dependency.state === 'CLOSED') ? [] : ['open-dependency']),
+  ];
+}
+
 function eligibleQueueIssueNumbers(snapshot) {
-  const blocked = new Set(snapshot.sections.blockedIssues.items.map((issue) => issue.number));
-  const owned = new Set([
-    ...snapshot.sections.openPrs.items,
-    ...snapshot.sections.mergedPrs.items,
-  ]
-    .filter((pr) => pr.ownership === 'loop' && positiveInteger(pr.issue))
-    .map((pr) => pr.issue));
-  const recovering = new Set(
-    snapshot.sections.lifecycleMarkers.items.map((marker) => marker.issueNumber),
-  );
-  const withinBudget = repairBudgetAllows(snapshot.sections.queue.items);
+  const context = queueContext(snapshot);
   return snapshot.sections.queue.items
-    .filter((issue) => {
-      const labeledBy = issue.provenance?.labeledBy;
-      const labeledAt = issue.provenance?.labeledAt;
-      const trusted = snapshot.sections.authorVerification.items.some((author) =>
-        author.login === labeledBy
-        && ['admin', 'write'].includes(author.permission)
-        && author.evidence.some((evidence) =>
-          evidence.kind === 'queue-label'
-          && evidence.issueNumber === issue.number
-          && evidence.author === labeledBy
-          && evidence.createdAt === labeledAt));
-      const bodyUnchanged = issue.lastEditedAt === null
-        || Date.parse(issue.lastEditedAt) <= Date.parse(labeledAt);
-      const authorized = issue.repair === undefined
-        ? issue.labels.includes('loop-ready')
-        : issue.labels.includes('loop-repair')
-          && !issue.labels.includes('loop-ready')
-          && repairAuthorized(issue.repair);
-      return trusted
-        && authorized
-        && withinBudget.has(issue.number)
-        && bodyUnchanged
-        && !blocked.has(issue.number)
-        && !issue.labels.includes('loop-blocked')
-        && !issue.labels.includes('loop-waiting')
-        && !owned.has(issue.number)
-        && !recovering.has(issue.number)
-        && issue.dependencies.every((dependency) => dependency.state === 'CLOSED');
-    })
+    .filter((issue) => queueIneligibility(snapshot, issue, context).length === 0)
     .map((issue) => issue.number)
     .sort((left, right) => left - right);
+}
+
+function markerFacts(marker) {
+  const match = /<!-- autoloop-lifecycle-v1\r?\n([\s\S]*?)\r?\n-->/u.exec(String(marker?.body ?? ''));
+  let value = null;
+  try {
+    value = match ? JSON.parse(match[1]) : null;
+  } catch {
+    value = null;
+  }
+  return { phase: value?.phase ?? null, pr: value?.pr ?? null, root: marker?.id ?? null };
+}
+
+// Everything one unit decision needs, from the retained snapshot, in one read.
+export function unitCard(snapshot, number) {
+  const sections = snapshot?.sections ?? {};
+  const selectionKnown = verifySnapshot(snapshot)
+    && snapshot.invalidation.reasonCodes.length === 0
+    && SNAPSHOT_ABSENCE_REQUIREMENTS.selection.every((name) => sections[name]?.complete === true);
+  const queued = sections.queue?.items?.find((issue) => issue.number === number) ?? null;
+  const open = sections.openIssues?.items?.find((issue) => issue.number === number) ?? null;
+  const reasons = !selectionKnown ? null
+    : queued === null ? ['not-in-queue']
+      : queueIneligibility(snapshot, queued, queueContext(snapshot));
+  const marker = sections.lifecycleMarkers?.items?.find((item) => item.issueNumber === number) ?? null;
+  const pr = sections.openPrs?.items?.find((item) => item.issue === number) ?? null;
+  const labeledAt = queued?.provenance?.labeledAt ?? null;
+  return {
+    issue: number,
+    open: open === null ? (sections.openIssues?.complete === true ? false : null) : true,
+    labels: (queued ?? open)?.labels ?? null,
+    provenance: queued?.provenance ?? null,
+    bodyEditedAfterApproval: queued && labeledAt
+      ? queued.lastEditedAt !== null && Date.parse(queued.lastEditedAt) > Date.parse(labeledAt)
+      : null,
+    dependencies: queued?.dependencies ?? null,
+    eligible: reasons === null ? null : reasons.length === 0,
+    ineligibleBecause: reasons,
+    marker: marker === null ? null : markerFacts(marker),
+    pullRequest: pr === null ? null : { number: pr.number, draft: pr.isDraft === true, head: pr.headRefName ?? null },
+  };
 }
 
 // A surfaced marker gates selection only while its issue is open; a closed
@@ -1356,6 +1407,11 @@ function parseArgs(args) {
   if (args.length === 2 && args[0] === '--summary' && args[1]) {
     return { mode: 'summary', path: args[1], error: null };
   }
+  if (args.length === 3 && args[0] === '--unit') {
+    return /^[1-9]\d{0,8}$/u.test(args[1]) && args[2]
+      ? { mode: 'unit', unit: Number(args[1]), path: args[2], error: null }
+      : { mode: null, error: '--unit needs a positive issue number and a snapshot path (or -)' };
+  }
   if (args.length === 3 && args[0] === '--section') {
     if (!SNAPSHOT_SECTIONS.includes(args[1])) {
       return {
@@ -1387,7 +1443,7 @@ function parseArgs(args) {
     error:
       'expected --self-test, --invalidate '
       + `<${SNAPSHOT_INVALIDATION_REASONS.join('|')}>, `
-      + '--summary <path|->, --section <name> <path|->, or '
+      + '--summary <path|->, --section <name> <path|->, --unit <N> <path|->, or '
       + '--queue-evidence <queueExhaustion|relaunch> <run hash> <config hash> <base>',
   };
 }
@@ -2401,6 +2457,30 @@ async function selfTest() {
   // loop-ready: the summary never said which units were eligible.
   // LFE, 2026-09-28: 39+ eligible units waited 40 minutes behind 33 markers of
   // closed, merged units that could not affect selection.
+  // LFE, 2026-09-28: 33 hand jq/rg/Read digs into the snapshot in one unit, and
+  // a staged unit picked without the edited-body check.
+  await check('a unit card names why a unit is not eligible, one reason per predicate', () => {
+    const card = (snapshot, issue = 7) => {
+      try {
+        return unitCard(snapshot, issue);
+      } catch (error) {
+        return { error: error.message };
+      }
+    };
+    const eligible = card(queueSnapshot());
+    const edited = card(queueSnapshot({ lastEditedAt: '2026-01-01T00:00:03Z' }));
+    const blocked = card(queueSnapshot({ blocked: true }));
+    const waiting = card(queueSnapshot({ waiting: true }));
+    const unqueued = card(queueSnapshot(), 99);
+    const unknown = card(queueSnapshot({ incomplete: 'openIssues' }));
+    return eligible.eligible === true && stableJson(eligible.ineligibleBecause) === stableJson([])
+      && eligible.provenance.labeledBy === 'maintainer' && eligible.bodyEditedAfterApproval === false
+      && edited.eligible === false && edited.ineligibleBecause.includes('body-edited-after-approval')
+      && blocked.ineligibleBecause.includes('blocked')
+      && waiting.ineligibleBecause.includes('waiting')
+      && unqueued.eligible === false && stableJson(unqueued.ineligibleBecause) === stableJson(['not-in-queue'])
+      && unknown.eligible === null;
+  });
   await check('summary splits surfaced markers into gating (open issue) and deferred', () => {
     const base = queueSnapshot();
     const closedMarker = lifecycleMarkerItem({
@@ -2446,13 +2526,17 @@ async function selfTest() {
     const cliRefused = parseArgs(['--section', 'bogus', '-']);
     const cliSummary = parseArgs(['--summary', '-']);
     const cliSection = parseArgs(['--section', 'queue', '-']);
+    const cliUnit = parseArgs(['--unit', '350', '-']);
+    const cliUnitRefused = parseArgs(['--unit', 'x', '-']);
     return refused.ok === false
       && SNAPSHOT_SECTIONS.every((name) => refused.error.includes(name))
       && cliRefused.mode === null
       && SNAPSHOT_SECTIONS.every((name) => cliRefused.error.includes(name))
       && cliSummary.mode === 'summary'
       && cliSection.mode === 'section'
-      && cliSection.section === 'queue';
+      && cliSection.section === 'queue'
+      && cliUnit.mode === 'unit' && cliUnit.unit === 350
+      && cliUnitRefused.mode === null;
   });
   await check('summary CLI prints the bounded summary for stdin snapshots', () => {
     const result = spawnSync(
@@ -2508,6 +2592,15 @@ async function main() {
     return 2;
   }
   if (parsed.mode === 'self-test') return await selfTest() ? 0 : 1;
+  if (parsed.mode === 'unit') {
+    try {
+      writeStdoutSync(`${JSON.stringify(unitCard(readSnapshotInput(parsed.path), parsed.unit), null, 1)}\n`);
+      return 0;
+    } catch (error) {
+      console.error(`snapshot-contract: ${error.message}`);
+      return 1;
+    }
+  }
   if (parsed.mode === 'summary' || parsed.mode === 'section') {
     try {
       const snapshot = readSnapshotInput(parsed.path);

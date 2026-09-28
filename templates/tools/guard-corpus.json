@@ -171,6 +171,12 @@
    "why": "the native watcher wrapper"
   },
   {
+   "cmd": "node tools/agentic/step.mjs --issue 350 --to 06-simplify --model claude-fable-5-1 --note '393 lines'",
+   "branch": "main",
+   "expect": "allow",
+   "why": "0.54: one call per step transition; the swap inside is checked by this guard's own evaluate()"
+  },
+  {
    "cmd": "node tools/agentic/lifecycle-driver.mjs --reconcile-issue 219",
    "branch": "main",
    "expect": "allow",

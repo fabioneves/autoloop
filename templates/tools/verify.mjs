@@ -34,6 +34,11 @@ const SELF_TEST_PATTERN = /(?:async\s+)?function\s+selfTest\s*\(/;
 const TOOL_INSTALL_NAMES = Object.freeze({
   'auto-merge.reference.mjs': 'auto-merge.mjs',
 });
+// Every dispatch role's standing brief, vendored beside the tools so a
+// vendored dispatch.mjs finds them where the plugin's copy does.
+export const BRIEF_FILES = Object.freeze([
+  'plan', 'plan-review', 'implement', 'simplify', 'diff-review', 'code-review', 'doubt-review', 'fix',
+].map((role) => `briefs/${role}.md`));
 export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'attestation-contract.mjs',
   'checkout-contract.mjs',
@@ -62,7 +67,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'sizing-contract.mjs',
   'snapshot-contract.mjs',
   'stats.mjs',
-  'step-subject.mjs',
+  'step.mjs',
   'subagent-transcript.mjs',
   'unit.mjs',
   'verify.mjs',

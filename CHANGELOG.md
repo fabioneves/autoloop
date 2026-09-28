@@ -3,6 +3,56 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.54.0] - 2026-09-28
+
+A status-first orchestrator. The run window now shows status rather than the work behind it, in
+fewer turns and fewer tokens. On LFE (#350), the Claude Code task list took 43 of 169 orchestrator
+turns and about a quarter of the weighted tokens. Each step also needed a clock read, a hand label
+swap, a snapshot invalidation and a hand-drawn ribbon.
+
+### Added
+
+- **`step.mjs`: one call per step transition.**
+  - `--to <step>` swaps the label (checked by the command guard's own `evaluate()`), invalidates the
+    retained snapshot, records the step in `.git/autoloop/steps/<N>.json`, and prints one ribbon
+    with fixed columns and a colour-dot model column (🟣 Fable, 🟠 Opus, 🟢 Astra, 🔵 Sonnet,
+    🟡 Haiku, ⚪ other). A dispatched step with no known model reads `⚪ ENGINE`; the orchestrator's
+    own steps read `⚪ ORCHESTRATOR`.
+  - Repeating a step prints `already on <step>`. A jump over a ladder step prints
+    `⚠️ #N skipped …` and is recorded. A unit worked again after its card starts a fresh run.
+  - `--staged` announces a staged unit without labels. `--resumed` prints the collection line.
+  - `--card` closes a unit with a time-only card (per-step bars, rounds, total).
+  - `--parked` lists the units in flight with their model and age. It also shows the queue count,
+    kept from just before the last invalidation.
+  - `--card-run` gives a post-compaction run card, at most 1.5 KB of facts, printed by the
+    SessionStart hook while a run is live.
+  - The views list only units the current run touched: `prime` now stamps `openedAtMs` on run
+    markers.
+- **Role brief templates** (`templates/tools/briefs/<role>.md`). `dispatch.mjs` prepends the standing
+  half of every brief and stamps its sha256 on the result; the orchestrator's prompt carries unit
+  facts only.
+  - Skill paths resolve from the install Claude Code loads in the repo (a local or project pin
+    first, then user scope).
+  - A missing template is refused as `BRIEF_TEMPLATE_MISSING`.
+- **`snapshot-contract.mjs --unit <N> <snapshot>`**: a typed unit card with labels, provenance,
+  dependencies, marker phase and the failing eligibility predicate, in place of hand queries.
+- 🧊 marks the frozen plan wherever a status line names it.
+
+### Changed
+
+- **The Claude Code task list is retired** (operator decision: token cost). Status is ribbons, the
+  parked block and cards; durable time lives in the steps file, the dispatch log and the label
+  timeline. The task-panel section, its riders and `step-subject.mjs` are removed. The dev skill
+  drops from 160 KB to 138 KB.
+- **The guard refuses a hand step swap** (`gh issue|pr edit … --add-label loop:0N-…`) and names
+  `step.mjs --to`. Only `step.mjs` holds the in-process exemption.
+- The PostToolUse riders point at `step.mjs`.
+
+### Upgrading
+
+Run `autoloop:setup` so the repository vendors `step.mjs` and `briefs/`, then restart the session so
+the SessionStart hook's run card takes effect.
+
 ## [0.53.2] - 2026-09-28
 
 Three fixes found in a live run, one of which stopped it.
