@@ -3,6 +3,52 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.53.1] - 2026-09-28
+
+The first run on 0.53.0 spent about 100k tokens hand-building 33 lifecycle reconcile requests,
+and each driver call took about 37 s.
+
+### Added
+
+- **`lifecycle-driver.mjs --reconcile-issue <N>`.** One bare call recovers a surfaced marker. It
+  builds the request from the issue's own authoritative marker chain (root ID), its frozen plan
+  comment and its pull request, then runs the driver.
+  - Nothing is inferred. A marker with no pull request yet is refused toward `--reconcile-json`,
+    and the refusal prints the root ID and the intent to use.
+  - The dev and pitcrew skills recover markers with it.
+
+### Changed
+
+- **A dispatch pane you can read.** Tool calls render as short verbs: `read <path> :range`,
+  `grep /pattern/ in <path>`, `$ command`. Paths are shown relative to whichever git checkout
+  holds them, and tool-result bodies are dropped (errors still show). The pane announces the
+  verdict and closes with duration, turns and cost.
+  - `dispatch-render.mjs --follow <live-file>` shows the same stream at full size in any
+    terminal. The dispatch pane prints that command first.
+- **Markers of closed issues no longer hold up selection.** `prime --json` and
+  `snapshot-contract --summary` split surfaced markers into
+  `markers: {gating, deferred}`.
+  - Only gating markers (issue still open) are reconciled before selection.
+  - Deferred ones are reconciled while dispatches run, or before `--close-run`.
+  - On living-football-engine this removes a 40-minute idle start.
+- **A driver read makes 8 calls instead of 17** (4.4 s instead of 9.4 s on living-football-engine).
+  - A collaborator's role is read once per login within a read.
+  - The branch's pull request comes from an owner-qualified head filter, not from paging every PR.
+  - A fork PR reusing the branch name can no longer make the lookup ambiguous.
+
+### Fixed
+
+- **A native dispatch route runs where the session runs.** `dispatch.mjs` stripped a
+  session-wide `ANTHROPIC_BASE_URL` from every Claude-model route, including Fable plan review,
+  Opus implement and all fallbacks. A session started on a gateway therefore sent those
+  dispatches around it. They now inherit it; a proxied route's own `@url` still replaces it.
+- The Stop hook read only the 100 most recently updated open issues. It undercounted eligible
+  units (39 against 59 on a 139-issue backlog) and treated later dependencies as closed.
+- The dev skill now tells the run to record `prime --park` before printing the parked block when it
+  waits on a subagent rather than a dispatch. Two live runs were hard-blocked as dark over this.
+- The driver refuses an issue that lives in a different repository than `origin` names. A
+  transferred repository's stale owner would otherwise find no pull request.
+
 ## [0.53.0] - 2026-09-28
 
 A faster, steadier start. The first live run on 0.52.0 spent its opening quarter hour

@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.53.0 · starting
+∞ pitcrew · v0.53.1 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -30,7 +30,7 @@ node <plugin-tools>/prime.mjs --json
 
 It validates ProjectConfig, reports the checkout against the configured base, runs one `scan.mjs`,
 persists the snapshot, and prints the decision-sized summary
-`{ok,version,repository,checkout,config,base,runMarker,timings,snapshotPath,snapshotBytes,eligible,sections}`.
+`{ok,version,repository,checkout,config,base,runMarker,timings,snapshotPath,snapshotBytes,eligible,markers,sections}`.
 It fails closed with `{ok:false, step, error}`; do not continue past a failure.
 
 Then, in order:
@@ -47,9 +47,10 @@ Then, in order:
    `scan.mjs` and replace the invalidated snapshot before actionability, absence, selection, or
    stop decisions. Never read items from an invalidated section as authority, and never infer
    "none actionable" from an incomplete PR, thread, review, role, check, issue, or comment section.
-4. Require the paginated `lifecycleMarkers` section to be complete and reconcile every marker it
-   surfaces before selecting work, including an intent that crashed before draft-PR creation. A
-   finished unit's marker (a terminal phase on a closed issue) is not surfaced. Accept marker
+4. Require the paginated `lifecycleMarkers` section to be complete and reconcile the summary's
+   `markers.gating` before selecting work, including an intent that crashed before draft-PR
+   creation. `markers.deferred` (closed issues) never gate; Dev reconciles them in its overlap
+   windows. A finished unit's marker (a terminal phase on a closed issue) is not surfaced. Accept marker
    authority only from a current admin/maintainer, or from the authenticated current runner's own
    marker while that runner still has write. Ignore untrusted lookalikes, and fail closed when
    role evidence is incomplete. A malformed, mismatched, or duplicate trusted marker blocks
@@ -268,7 +269,7 @@ pre-merge record. It publishes and verifies the trusted exact-head gate and revi
 leaves the ready PR for a human. Pitcrew never invokes `auto-merge.mjs`, submits a merge-queue
 entry, publishes a tag, or creates a release. Later recovery may observe a human-performed merge
 and reconcile the existing loop-owned lifecycle record by running
-`lifecycle-driver.mjs --reconcile-json`; the driver appends the missing terminal outcome before
+`lifecycle-driver.mjs --reconcile-issue <N>`; the driver appends the missing terminal outcome before
 advancing the marker to `terminal-record`. An explicitly absent local or remote claim after that
 proven human merge is a terminal artifact and is never recreated; incomplete absence evidence
 waits and any identity mismatch blocks.

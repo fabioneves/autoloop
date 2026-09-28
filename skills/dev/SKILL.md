@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.53.0 · starting
+∞ dev · v0.53.1 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -65,9 +65,11 @@ node <plugin-tools>/prime.mjs --json
 ```
 
 The typed summary is
-`{ok,version,repository,checkout,config,base,runMarker,waits,timings,snapshotPath,snapshotBytes,eligible,sections}`:
+`{ok,version,repository,checkout,config,base,runMarker,waits,timings,snapshotPath,snapshotBytes,eligible,markers,sections}`:
 
 - `checkout` — root, repository fingerprint, branch, HEAD, and whether the tree is clean.
+- `markers` — surfaced lifecycle markers by issue: `gating` (issue open) and `deferred` (issue
+  closed). `null` when marker or open-issue evidence is incomplete — re-prime.
 - `eligible` — the queue issues selection may take, in issue order: the rule under "Queue and
   trust", computed from the snapshot. `null` when selection evidence is incomplete or the snapshot
   was invalidated — re-prime before choosing.
@@ -120,9 +122,12 @@ Then, in order:
    decision intervenes. Then rerun `node <plugin-tools>/prime.mjs --json` (or `scan.mjs` directly)
    and replace the invalidated snapshot before actionability, absence, selection, or stop
    decisions. Never read items from an invalidated section as authority.
-5. Require the paginated `lifecycleMarkers` section to be complete. Parse and reconcile every
-   marker it surfaces before selecting work, including an intent that crashed before a draft PR
-   existed. A finished unit's marker — a terminal phase on a closed issue — is not surfaced. A
+5. Require the paginated `lifecycleMarkers` section to be complete. Reconcile the summary's
+   `markers.gating` before selecting work, including an intent that crashed before a draft PR
+   existed. `markers.deferred` never gate: a closed issue's marker cannot change what is eligible,
+   so reconcile those while a dispatch is in flight, or before `--close-run` — a live run once
+   left 39 eligible units idle for 40 minutes behind them. A finished unit's marker — a terminal
+   phase on a closed issue — is not surfaced at all. A
    marker has authority only when its author currently has admin/maintain, or when it is the
    authenticated current runner's own marker and that runner still has write.
    Ignore marker-shaped comments from other identities, and fail closed when role evidence is
@@ -136,11 +141,14 @@ Then, in order:
    a head, or bound one the merge did not use) the driver records itself as `terminal-refused`,
    and the scan stops surfacing them. Never hand-append the
    terminal outcome to close the gap — marker edits and human-merge outcome appends go through
-   the driver or not at all. Run each authoritative marker through
-   `lifecycle-driver.mjs --reconcile-json` with its captured comment
-   ID and exact frozen artifacts. The driver independently performs stable Git/GitHub reads,
-   invokes `reconcileLifecycle()`, and applies only its typed action with marker compare-and-swap
-   and postcondition readback in a bounded loop. Never execute lifecycle action JSON in prose.
+   the driver or not at all. Recover each surfaced marker with one bare call from the repository
+   root, `node <plugin-tools>/lifecycle-driver.mjs --reconcile-issue <N>`: it builds the request
+   from the issue's own authoritative marker chain (root ID), frozen plan comment and pull
+   request, so never assemble one by hand. A marker with no pull request yet (an intent that
+   crashed before its draft) is refused toward step 4's `--reconcile-json` request, because only
+   the frozen plan knows its title and PR body. The driver independently performs stable
+   Git/GitHub reads, invokes `reconcileLifecycle()`, and applies only its typed action with marker
+   compare-and-swap and postcondition readback in a bounded loop. Never execute lifecycle action JSON in prose.
    A proven human merge missing its terminal outcome is backfilled through this same driver before
    its marker reaches `terminal-record`. Git/GitHub facts are lifecycle authority.
 
@@ -318,9 +326,9 @@ they judge. A route already on its default has none.
 **No artifact is judged by the model that wrote it** — that is the invariant the table carries:
 astra plans and Fable reviews the plan; Opus writes and fixes and Fable simplifies, and astra
 reviews both at 07 and 08. A proxied route gets its own `@<url>` injected as
-`ANTHROPIC_BASE_URL`; a native route gets none, and a session-wide one is stripped from it (the
-proxy never serves Claude models):
-the session's own environment is not a prerequisite and not evidence.
+`ANTHROPIC_BASE_URL`. A native route runs where the session runs: it inherits a session-wide
+`ANTHROPIC_BASE_URL`, so a session started on a gateway reaches Claude models through it too. For
+a proxied route, the session's own environment is not a prerequisite and not evidence.
 `with host` records an empty table, so every role runs on the host default and a previous
 session's routes cannot leak forward. The legacy `review-engine` recording is read only when no
 routes file exists.
@@ -551,8 +559,9 @@ it waits is not.
 
 **Overlap (depth one).** Any background dispatch is the trigger — not a named list of steps,
 which goes stale the moment a role is added. While a dispatch is in flight, stage the NEXT
-issue from the current `eligible` through its read-only steps 1–3: premise-check and plan against `origin/<base>`,
-then its plan-review dispatch. Read the committed tree (`git show`, `git grep`) and never the
+issue from the current `eligible` through its read-only steps 1–3: premise-check and plan against
+`origin/<base>`, then its plan-review dispatch. The same window reconciles `markers.deferred`, one
+`--reconcile-issue` call at a time. Read the committed tree (`git show`, `git grep`) and never the
 working tree, which the in-flight unit's writer owns.
 
 One idiom:
@@ -590,6 +599,12 @@ failure. Waiting itself has one sanctioned shape per situation:
   recent** (see the panel section — park is when the panel is read, so it is when it must be
   readable), and the LAST
   thing before the turn ends is the parked block naming what it waits for, with the clock:
+
+  **A wait on anything but a dispatch is recorded before the block prints.** The Stop hook
+  recognises a dispatch process, a live stream and a recorded park. A background subagent or
+  shell is none of these, so first run `node <plugin-tools>/prime.mjs --park "<what it waits on>"
+  --minutes <N>` in the same turn. Two live runs printed the parked block over a subagent without
+  it, and each turn was hard-blocked as dark.
 
   **The park push is not step 10, and step 10 does not own the push.** A live run parked at step 5
   with EIGHT local commits, reasoning "the push happens at step 10, per the flow" — the same

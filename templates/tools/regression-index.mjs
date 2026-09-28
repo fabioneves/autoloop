@@ -33,6 +33,35 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'a-native-route-bypassed-the-sessions-gateway',
+    date: '2026-09-28',
+    symptom: 'A Fable plan review on LFE never reached the operator\'s gateway: '
+      + 'the session ran with ANTHROPIC_BASE_URL on a proxy that passes Claude '
+      + 'models through, but the dispatch child ran direct (apiKeySource none).',
+    cause: 'dispatchEnvironment deleted a session-wide ANTHROPIC_BASE_URL from '
+      + 'every native route on the premise that the proxy never serves Claude '
+      + 'models. A native route now inherits the session environment; only a '
+      + 'proxied route\'s own @url replaces it.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'a proxied route injects exactly its URL; a native route inherits the session\\'s'" }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'closed-unit-markers-held-the-queue-for-40-minutes',
+    date: '2026-09-28',
+    symptom: 'The first run on 0.53.0 reconciled 33 markers of closed, merged '
+      + 'units one by one before selecting anything, with 39+ eligible units '
+      + 'idle for 40 minutes; 8 of them fail on every run.',
+    cause: 'Every surfaced marker gated selection, though a closed issue\'s '
+      + 'marker cannot change eligibility. The summary now splits markers into '
+      + 'gating (issue open) and deferred, and deferred ones are reconciled in '
+      + 'overlap windows.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "'summary splits surfaced markers into gating (open issue) and deferred'" }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: 'export function markerSchedule(snapshot) {' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'finished-units-were-re-reconciled-before-every-selection',
     date: '2026-09-28',
     symptom: 'A run started by reconciling 45 lifecycle markers, all on closed '
@@ -1331,7 +1360,7 @@ export const INCIDENTS = Object.freeze([
       + 'invariant is carried by the standing table instead of the code.',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'dispatch.mjs', anchor: 'every role resolves its own recorded route and nothing else' }),
-      Object.freeze({ file: 'dispatch.mjs', anchor: 'a proxied route injects exactly its URL; a native route injects none' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'a proxied route injects exactly its URL; a native route inherits the session' }),
       Object.freeze({ file: 'dispatch.mjs', anchor: 'export function standingRoutes(' }),
       Object.freeze({ file: 'session-preflight.sh', anchor: 'review-engine is ignored while they exist' }),
     ]),

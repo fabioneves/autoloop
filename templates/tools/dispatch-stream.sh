@@ -50,6 +50,10 @@ rm -f "$out" "$out.pid"
   echo "$!" > "$out.pid" )
 dispatch_pid="$(cat "$out.pid")"
 
+# The task pane is small; this names the command that shows the same stream at
+# full size in any terminal.
+echo "▸ full view: node $self_dir/dispatch-render.mjs --follow $live"
+
 # --pid ends the tail when the dispatch exits, so the task closes itself. The
 # renderer turns raw engine JSONL into pane-readable lines (reasoning ticks,
 # tool calls, output text); it is written never to crash, and a missing copy
