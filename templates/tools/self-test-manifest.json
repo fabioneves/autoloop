@@ -11,7 +11,7 @@
     "config-contract.mjs": "b0ff6f0106df9c2df8e3f01f36c5ef77f263d1de106c4e5d2b470cdab1badfaa",
     "contract-lint.mjs": "463223e0a3cfbafa67ce727995e232310e5e1a0393aab0caff3937af8f2418f7",
     "delivery-contract.mjs": "d071252667f6143672b0a9e38aa2849f033299db60eb385fb81c7fdd2ef14b01",
-    "dispatch-render.mjs": "7a1c18919a8e15ad569cff7be6a15ee39f83bee33b7c2e09fbd0ca50bd557292",
+    "dispatch-render.mjs": "cccacbd7c3cac794493af318655849f8360aab458d1cb35478afdab5e1cc70b8",
     "dispatch.mjs": "51163031b872cd44b62e3b7eb5f00955263bbdaa0ddbf7c5fc5b89644f9389ec",
     "escalate-paths.mjs": "d5703b6cb870904d45450e62ffe1089795fbf61ec2c687bd6545acc981917635",
     "hook-relay.mjs": "611f18a3349966907a7f506cd6fab1375179918d548add4d75c7401d7149c28f",
