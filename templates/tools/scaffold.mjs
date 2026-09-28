@@ -1272,18 +1272,12 @@ function fixtureState(policy) {
     '',
     '```json autoloop-config',
     JSON.stringify({
-      version: '0.27.0',
+      version: '0.28.0',
       baseBranch: 'main',
       gate: { command: 'npm test', quickCommand: null, setupCommand: null },
       merge,
       tracker: { provider: 'none' },
       review: { checklistPath: 'docs/agentic/checklist.md' },
-      caps: {
-        gateRetriesPerUnit: 2,
-        codeReviewRoundsPerUnit: 20,
-        sliceMaxLines: 700,
-        sliceMaxFiles: 10,
-      },
     }, null, 2),
     '```',
     '',
@@ -1927,7 +1921,7 @@ function selfTest() {
 
     writeFileSync(
       join(root, 'docs', 'agentic', 'STATE.md'),
-      fixtureState('manual').replace('"0.27.0"', '"0.24.0"'),
+      fixtureState('manual').replace('"0.28.0"', '"0.24.0"'),
     );
     const legacy = reconcile(root, templates);
     expect(

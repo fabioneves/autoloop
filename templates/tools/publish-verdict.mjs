@@ -3092,18 +3092,12 @@ function selfTest() {
     passed += 1;
   }
   const gateConfig = {
-    version: '0.27.0',
+    version: '0.28.0',
     baseBranch: 'main',
     gate: { command: 'npm test', quickCommand: null, setupCommand: null },
     merge: { policy: 'manual' },
     tracker: { provider: 'none' },
     review: { checklistPath: 'docs/agentic/checklist.md' },
-    caps: {
-      gateRetriesPerUnit: 2,
-      codeReviewRoundsPerUnit: 5,
-      sliceMaxLines: 700,
-      sliceMaxFiles: 10,
-    },
   };
   const gateSnapshot = {
     checkout: {
