@@ -282,11 +282,11 @@ async function ghGraphqlResponse(query, variables) {
   try {
     return await ghJson(['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables }));
   } catch (error) {
-    let body = null;
+    let body;
     try {
       body = JSON.parse(error?.stdout ?? '');
     } catch {
-      body = null;
+      throw error;
     }
     if (Array.isArray(body?.errors)) return body;
     throw error;
@@ -635,19 +635,18 @@ function splitIssueBatch(response, chunk) {
   const errors = Array.isArray(response?.errors) ? response.errors : [];
   const aliasOf = (error) => (Array.isArray(error?.path) && error.path[0] === 'repository'
     && typeof error.path[1] === 'string' ? error.path[1] : null);
-  const batchErrors = errors.filter((error) => aliasOf(error) === null);
+  const messagesFor = (alias) => {
+    const matching = errors.filter((error) => aliasOf(error) === alias);
+    return matching.length ? matching.map(({ message }) => message).join('; ') : null;
+  };
   const repository = response?.data?.repository;
-  const batchError = batchErrors.length
-    ? batchErrors.map(({ message }) => message).join('; ')
-    : repository ? null : 'GraphQL response omitted data';
-  return chunk.map(({ number }) => {
-    const aliasErrors = errors.filter((error) => aliasOf(error) === `i${number}`);
-    return {
-      number,
-      node: repository?.[`i${number}`] ?? null,
-      error: batchError ?? (aliasErrors.length ? aliasErrors.map(({ message }) => message).join('; ') : null),
-    };
-  });
+  let batchError = messagesFor(null);
+  if (batchError === null && !repository) batchError = 'GraphQL response omitted data';
+  return chunk.map(({ number }) => ({
+    number,
+    node: repository?.[`i${number}`] ?? null,
+    error: batchError ?? messagesFor(`i${number}`),
+  }));
 }
 
 export async function fetchIssueBatches(repo, requests, { graphql = ghGraphqlResponse } = {}) {
@@ -990,7 +989,10 @@ function queueReferenceNumbers(candidates) {
 // an open issue's comments and its label timeline together.
 export function issueBatchRequests(openPrs, openIssues, mergedPrs) {
   const parts = new Map();
-  const add = (number, part) => parts.set(number, new Set([...(parts.get(number) ?? []), part]));
+  const add = (number, part) => {
+    if (!parts.has(number)) parts.set(number, new Set());
+    parts.get(number).add(part);
+  };
   for (const number of lifecycleIssueNumbers(openPrs, openIssues, mergedPrs)) add(number, 'comments');
   const candidates = queueCandidates(openIssues);
   for (const issue of candidates) {

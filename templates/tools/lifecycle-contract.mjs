@@ -1035,18 +1035,6 @@ function expectedPremergeRecord(input, ciBinding, requireCiBinding) {
 export function reconcileLifecycle(input, context = {}) {
   const facts = input?.observed;
   const merged = facts?.merge?.complete === true && facts.merge.merged === true;
-  if (
-    input?.marker?.phase === 'terminal-refused'
-    && validIntent(input.intent)
-    && validateMarker(input.marker).length === 0
-    && sameIdentity(input.intent, input.marker)
-  ) {
-    return merged
-      ? transition('complete', null, 'LIFECYCLE_TERMINAL_REFUSED', {
-        refusal: input.marker.refusal,
-      })
-      : artifactMismatch('terminal-refused', 'a terminal refusal on an unmerged unit');
-  }
   const result = reconcileUnit(input, context);
   if (!merged || result.code !== 'ARTIFACT_IDENTITY_MISMATCH' || result.markerPatch) {
     return result;
@@ -1085,6 +1073,11 @@ function reconcileUnit(input, context = {}) {
     return artifactMismatch('merge', 'merge evidence is complete but carries no merged boolean');
   }
   const merged = facts.merge?.complete === true && facts.merge.merged === true;
+  if (input.marker.phase === 'terminal-refused') {
+    return merged
+      ? transition('complete', null, 'LIFECYCLE_TERMINAL_REFUSED', { refusal: input.marker.refusal })
+      : artifactMismatch('terminal-refused', 'a terminal refusal on an unmerged unit');
+  }
   const readyIdentityComplete = (
     SHA_RE.test(input.marker.claimCommit ?? '')
     && Number.isInteger(input.marker.pr)
