@@ -23,7 +23,7 @@
     "loop-smoke.mjs": "034e8064d794a0754af734b3d1053d30cdbe20b88212a77741fbeb62abd537b3",
     "merge-authorization-contract.mjs": "ee02a4728755b483b81126aa387febbed73d8d80c82a7aba306815e32fd78250",
     "overlap-report.mjs": "68aa353623aecf2ca291c71bfc70e9b12eba53684bdf1597328ddb0f6cbd7ea0",
-    "prime.mjs": "55907a89b6cad6f569c883837b0d31578738743ad53f6226a04901367029dade",
+    "prime.mjs": "c2cd796d8477050c663e46f60489102394e07823fb7b70c3015d959b50888e18",
     "publish-verdict.mjs": "e1e33a6359edc3bc966a78dda2a9e30baf3f52a8cfc047232551bd12a20d356e",
     "regression-index.mjs": "e1ed56e665f9ccefb268f0202716cc7d6fe182727b3436f4c1a2d3b83e5f4d4c",
     "release-verify.mjs": "1ff059af3643249507b0ee3fb80c287106ed40e40f2e9123240c09ada1ab3e1c",
