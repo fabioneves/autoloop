@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.55.1] - 2026-09-28
+
+Follow-ups from the independent review of 0.55.0, which finished after the merge.
+
+### Fixed
+
+- **A host still on schema `0.27.0` gets an accurate error.** Validation against `0.28.0` fell into
+  the `0.26.0` cap ranges and demanded `caps.reviseRoundsPerPr`, a key `0.27.0` retired. It now
+  names the version and the unknown `caps` block, which setup migrates.
+- **A unit forked before setup's migration keeps working.** Its branch still carries `0.27.0` STATE,
+  and gate publication, lifecycle reconcile and a review chain started before the migration read
+  that copy and refused it. `currentProjectConfig` reads a migratable config as the current schema,
+  migrating in memory. The base's migrated STATE is the authority, and the newest hops only remove
+  keys.
+- **Migrating to `0.28.0` never fails on a limit value.** The hop deletes the `caps` block, so an
+  out-of-range cap no longer blocks it. The rest of the config is still validated.
+- The host `LOOP.md` template, the setup skill and dispatch comments no longer mention size budgets
+  or caps. Setup's parked-run close never runs in doctor.
+
 ## [0.55.0] - 2026-09-28
 
 No configured limits. Schema `0.28.0` drops the `caps` block, and setup stops asking about limits.
