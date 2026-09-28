@@ -19,6 +19,12 @@ and each driver call took about 37 s.
 
 ### Changed
 
+- **Markers of closed issues no longer hold up selection.** `prime --json` and
+  `snapshot-contract --summary` split surfaced markers into
+  `markers: {gating, deferred}`.
+  - Only gating markers (issue still open) are reconciled before selection.
+  - Deferred ones are reconciled while dispatches run, or before `--close-run`.
+  - On living-football-engine this removes a 40-minute idle start.
 - **A driver read makes 8 calls instead of 17** (4.4 s instead of 9.4 s on living-football-engine).
   - A collaborator's role is read once per login within a read.
   - The branch's pull request comes from an owner-qualified head filter, not from paging every PR.
@@ -26,6 +32,10 @@ and each driver call took about 37 s.
 
 ### Fixed
 
+- The Stop hook read only the 100 most recently updated open issues. It undercounted eligible
+  units (39 against 59 on a 139-issue backlog) and treated later dependencies as closed.
+- The dev skill now tells the run to record `prime --park` before printing the parked block when it
+  waits on a subagent rather than a dispatch. Two live runs were hard-blocked as dark over this.
 - The driver refuses an issue that lives in a different repository than `origin` names. A
   transferred repository's stale owner would otherwise find no pull request.
 
