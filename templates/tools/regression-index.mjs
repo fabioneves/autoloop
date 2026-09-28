@@ -1430,7 +1430,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'unit.mjs', anchor: 'export function markObsolete(' }),
       Object.freeze({ file: 'unit.mjs', anchor: 'export function liftWaits(' }),
-      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "&& !issue.labels.includes('loop-waiting')" }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "...(issue.labels.includes('loop-waiting') ? ['waiting'] : [])" }),
       Object.freeze({ file: 'review-contract.mjs', anchor: 'const DEFER_AFTER_RAISINGS = 3;' }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "decision('continue', 'REVIEW_CLOSING_ROUND_REQUIRED'" }),
       Object.freeze({ file: 'lifecycle-contract.mjs', anchor: 'export function issueBodyIdentity(' }),
