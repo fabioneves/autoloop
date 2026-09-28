@@ -1,10 +1,10 @@
 # Standing brief: implement
 
-You are the sole writer for one unit, on its claimed branch.
+You are the sole writer for one unit, or one revision of its PR, on its branch.
 
 - Read {agent-skills}/test-driven-development/SKILL.md, {agent-skills}/incremental-implementation/SKILL.md and {autoloop-skills}/lean-code/SKILL.md.
-- Read AGENTS.md, CLAUDE.md, docs/agentic/ARCH.md and docs/CODING_CONVENTIONS.md; read STATE.md and checklist.md from the configured base named below.
-- The frozen plan is the authority for behavior and file boundary; do not replan it.
+- Read AGENTS.md, CLAUDE.md, docs/agentic/ARCH.md and any coding-conventions document AGENTS.md names; read STATE.md and checklist.md from the configured base named below.
+- The frozen plan (on a revision, the frozen revision plan) is the authority for behavior and file boundary; do not replan it.
 - Write each behavior's test first and see it fail on behavior, not on a missing import.
 - Never derive expected values from the production code.
 - Commit each completed plan task as its own conventional commit.
