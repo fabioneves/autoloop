@@ -41,6 +41,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -2503,7 +2504,13 @@ function procEntry(pid) {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     const parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
     const name = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
-    return Number.isSafeInteger(parent) ? [parent, name] : null;
+    let exe = '';
+    try {
+      exe = readlinkSync(`/proc/${pid}/exe`);
+    } catch {
+      exe = ''; // another user's process: comm alone decides
+    }
+    return Number.isSafeInteger(parent) ? [parent, name, exe] : null;
   } catch {
     return null;
   }
@@ -2514,6 +2521,15 @@ function procEntry(pid) {
 // on the machine shares; recording those let any session in the repo pass for
 // the loop's own run. With no `claude` ancestor (another host) the whole chain
 // is kept, as before.
+//
+// comm is the name the binary was launched under, since it never retitles
+// itself (measured, 2.1.283): `claude` through the installer's symlink,
+// `claude.exe` for the npm package's copy, the bare version for a versioned
+// path launched directly. The executable's path names the install in all three.
+function isClaudeProcess(name, exe = '') {
+  return /^claude(?:\.exe)?$/u.test(name) || /\/claude\/versions\/[^/]+$|\/claude(?:\.exe)?$/u.test(exe);
+}
+
 export function ancestorChain(start, readEntry = procEntry, limit = 64) {
   const pids = new Set();
   let pid = start;
@@ -2521,8 +2537,8 @@ export function ancestorChain(start, readEntry = procEntry, limit = 64) {
     pids.add(pid);
     const entry = readEntry(pid);
     if (entry === null) return pids;
-    const [parent, name] = entry;
-    if (name === 'claude') return pids;
+    const [parent, name, exe] = entry;
+    if (isClaudeProcess(name, exe)) return pids;
     if (!Number.isSafeInteger(parent) || parent <= 0) return pids;
     pid = parent;
   }
@@ -3661,6 +3677,11 @@ function selfTest() {
           110: [95, 'node'], 95: [80, 'bash'], 80: [70, 'claude'], 70: [60, 'zsh'], 60: [1, 'tmux: server'],
           210: [180, 'node'], 180: [170, 'claude'], 170: [60, 'zsh'],
           310: [305, 'node'], 305: [60, 'bash'],
+          // The binary never retitles itself (measured, 2.1.283): comm is
+          // the name it was launched under. The npm package copies it to
+          // bin/claude.exe; a versioned path launched directly is its version.
+          410: [405, 'bash'], 405: [60, 'claude.exe'],
+          510: [505, 'bash'], 505: [60, '2.1.283', '/home/u/.local/share/claude/versions/2.1.283'],
         };
         const chain = (start) => {
           try {
@@ -3669,8 +3690,9 @@ function selfTest() {
             return `THREW ${error.message}`;
           }
         };
-        if (chain(95) !== '95,80' || chain(180) !== '180' || chain(305) !== '305,60') {
-          console.error(`FAIL [an ancestry stops at its own claude process]: ${chain(95)} | ${chain(180)} | ${chain(305)}`);
+        const chains = [chain(95), chain(180), chain(305), chain(410), chain(510)];
+        if (chains.join(' | ') !== '95,80 | 180 | 305,60 | 410,405 | 510,505') {
+          console.error(`FAIL [an ancestry stops at its own claude process]: ${chains.join(' | ')}`);
           ok = false;
         }
       }
