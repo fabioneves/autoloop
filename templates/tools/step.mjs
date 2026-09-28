@@ -102,11 +102,19 @@ function retainedSnapshotPath(dir) {
 
 // A mutation marks the retained snapshot stale, so no later decision reads a
 // label state that has moved.
+// Invalidation clears the queue, so its eligible count is kept first for the
+// parked view.
+const QUEUE_COUNT = 'queue-count.json';
+
 function invalidateRetainedSnapshot(dir) {
   const path = retainedSnapshotPath(dir);
   if (path === null) return null;
   const snapshot = readJson(path, null);
   if (!verifySnapshot(snapshot)) return `! retained snapshot ${path} is unreadable; re-prime before deciding`;
+  const eligible = eligibleIssueNumbers(snapshot);
+  if (eligible !== null) {
+    writeAtomically(join(dir, QUEUE_COUNT), { eligible: eligible.length, scannedAtMs: Date.parse(snapshot.scannedAt) });
+  }
   writeAtomically(path, invalidateSnapshot(snapshot, 'ISSUE_MUTATION'));
   return null;
 }
@@ -128,10 +136,17 @@ export function parkedView({ root, run = realRun(root), nowMs = Date.now() }) {
   if (dir === null) return renderParked({ nowMs, units: [], eligible: null });
   const snapshotPath = retainedSnapshotPath(dir);
   const snapshot = snapshotPath === null ? null : readJson(snapshotPath, null);
+  // Every step swap marks the snapshot stale, so a parked view nearly always
+  // reads one; the count recorded just before that swap is shown with its time.
   const eligible = eligibleIssueNumbers(snapshot);
+  const last = eligible === null ? readJson(join(dir, QUEUE_COUNT), null) : null;
   const blocked = snapshot?.sections?.blockedIssues;
   const waiting = blocked?.complete === true ? blocked.items.map((issue) => issue.number).slice(0, 3) : [];
-  return renderParked({ nowMs, units: openUnits(dir), eligible: eligible === null ? null : eligible.length, waiting });
+  return renderParked({
+    nowMs, units: openUnits(dir), waiting,
+    eligible: eligible !== null ? eligible.length : last?.eligible ?? null,
+    asOfMs: eligible === null ? last?.scannedAtMs ?? null : null,
+  });
 }
 
 export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '' }) {
@@ -181,11 +196,19 @@ export function transition({
     const swapped = run('gh', argv);
     if (!swapped.ok) return refuse(`step: label swap on #${issue} failed: ${swapped.stderr}`);
   }
-  const warning = plan === null ? null : invalidateRetainedSnapshot(dir);
-  record.steps.push({
-    step: to, round, model, fallback, staged, startedAtMs: nowMs, ...(skipped.length ? { skipped } : {}),
-  });
-  writeAtomically(stepsPath, record);
+  // A labelled step not yet recorded moved its labels now or in a retry's
+  // failed first attempt; either way the retained snapshot is stale. Once the
+  // labels have moved, a bookkeeping fault is reported, never thrown.
+  let warning = null;
+  try {
+    if (!staged && LADDER.includes(to)) warning = invalidateRetainedSnapshot(dir);
+    record.steps.push({
+      step: to, round, model, fallback, staged, startedAtMs: nowMs, ...(skipped.length ? { skipped } : {}),
+    });
+    writeAtomically(stepsPath, record);
+  } catch (error) {
+    warning = `! step: #${issue} moved to ${to} but its record failed: ${error.message}; re-prime before deciding`;
+  }
   return {
     ok: true,
     lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note }),
@@ -252,9 +275,10 @@ export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null
 }
 
 // The parked block: every wait with its model and age, then the queue.
-export function renderParked({ nowMs, units, eligible, waiting = [] }) {
+export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = null }) {
   const rule = '┄'.repeat(12);
-  const queue = Number.isFinite(eligible) ? `queue ${eligible} eligible` : 'queue unknown (re-prime)';
+  const asOf = Number.isFinite(asOfMs) ? ` as of ${clock(asOfMs)}` : '';
+  const queue = Number.isFinite(eligible) ? `queue ${eligible} eligible${asOf}` : 'queue unknown (re-prime)';
   const human = waiting.map((issue) => ` · #${issue} ⚠️ awaits /answer`).join('');
   return [
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
@@ -273,18 +297,20 @@ const RUN_CARD_LIMIT = 1500;
 export function renderRunCard({ nowMs, units, park, snapshot }) {
   const lines = [
     `## autoloop run state after compaction — facts as of ${clock(nowMs)}, re-prime before deciding`,
+    ...(park?.until ? [`- parked until ${clock(Date.parse(park.until))}: ${oneLine(park.reason, 120)}`] : []),
+    ...(snapshot ? [`- retained snapshot ${snapshot.path}, ${minutes(snapshot.ageMs)} old`] : []),
     ...units.map(({ issue, step, model, round, startedAtMs }) => {
       const [name] = STEPS[step] ?? [step];
       return `- #${issue} at ${step.slice(0, 2)} ${name.toLowerCase()}${round ? ` r${round}` : ''} on ${modelChip(model)} since ${clock(startedAtMs)}`;
     }),
     ...(units.length === 0 ? ['- no unit in flight'] : []),
-    ...(park?.until ? [`- parked until ${clock(Date.parse(park.until))}: ${oneLine(park.reason, 120)}`] : []),
-    ...(snapshot ? [`- retained snapshot ${snapshot.path}, ${minutes(snapshot.ageMs)} old`] : []),
   ];
+  // The hook's budget is bytes; the ellipsis line costs four.
   let card = '';
   for (const line of lines) {
-    if (card.length + line.length + 1 > RUN_CARD_LIMIT - 2) return `${card}…`;
-    card += `${card ? '\n' : ''}${line}`;
+    const next = `${card}${card ? '\n' : ''}${line}`;
+    if (Buffer.byteLength(next) > RUN_CARD_LIMIT - 4) return `${card}\n…`;
+    card = next;
   }
   return card;
 }
@@ -363,7 +389,8 @@ function clock(atMs) {
 function oneLine(text, limit = 90) {
   const flat = String(text ?? '').replace(/\s+/gu, ' ').trim()
     .replace(/(?<!🧊 )\b(frozen plan)\b/giu, '🧊 $1');
-  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
+  const points = [...flat];
+  return points.length > limit ? `${points.slice(0, limit - 1).join('')}…` : flat;
 }
 
 export function duration(ms) {
@@ -547,11 +574,19 @@ function selfTest() {
         && card.includes('- parked until 10:45: plan revision in flight')
         && card.includes('- retained snapshot /r/.git/autoloop/prime/a.snapshot.json, 12m old');
     })()],
-    ['the run card is bounded', safely(() => renderRunCard({
-      nowMs: at(10, 20),
-      units: Array.from({ length: 80 }, (unused, index) => ({ issue: index + 1, step: '02-plan', model: 'gpt-6-astra', startedAtMs: at(9, 0) })),
-      park: null, snapshot: null,
-    })).length <= 1500],
+    // The hook's budget is bytes, and every model dot is four of them; the
+    // park is the fact a resumed orchestrator needs first, so units give way.
+    ['the run card is bounded in bytes and keeps the park when units overflow', (() => {
+      const card = safely(() => renderRunCard({
+        nowMs: at(10, 20),
+        units: Array.from({ length: 80 }, (unused, index) => ({ issue: index + 1, step: '02-plan', model: 'claude-fable-5-1', startedAtMs: at(9, 0) })),
+        park: { reason: 'operator message', until: new Date(at(22, 49)).toISOString() },
+        snapshot: null,
+      }));
+      return Buffer.byteLength(card) <= 1500 && card.includes('- parked until 22:49: operator message');
+    })()],
+    ['a shortened line never splits an emoji', !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u.test(
+      safely(() => renderResumed({ atMs: at(9, 0), issue: 1, what: `xx${'🟣'.repeat(100)}` })))],
     ['no live run, no card', safely(() => runCard({ root: '/nowhere', live: () => false })) === ''],
     ['a parked block with unknown queue evidence says so', safely(() => renderParked({
       nowMs: at(9, 53), units: [], eligible: null, waiting: [],
@@ -677,6 +712,35 @@ function transitionChecks(at) {
     const refused = transition.length === undefined ? null : go({ to: '09-gate', run: () => ({ ok: false, stdout: '', stderr: 'HTTP 502' }) });
     results.push(['a failed gh call is loud', refused.ok === false && refused.lines.join(' ').includes('HTTP 502')]);
     results.push(['an unknown step is refused before anything moves', go({ to: '12-ship' }).ok === false]);
+    // A throw after the swap (a racing file, a full disk) must not hide that
+    // the labels moved: the ribbon prints and the fault is a warning line.
+    const faulted = (() => {
+      mkdirSync(join(root, '.git', 'autoloop', 'steps', '361.json', 'blocker'), { recursive: true });
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:05-implement'];
+      const result = go({ issue: 361, to: '06-simplify', model: 'claude-fable-5-1' });
+      const moved = labels.includes('loop:06-simplify');
+      labels = saved;
+      return { result, moved };
+    })();
+    results.push(['a bookkeeping fault after the swap is a warning, not a crash',
+      faulted.result.ok === true && faulted.moved
+        && faulted.result.lines[0].includes('🧹 SIMPLIFY')
+        && faulted.result.lines.some((line) => line.startsWith('! step: #361 moved to 06-simplify but'))]);
+    // A retry after that fault finds the labels already moved: nothing to
+    // swap, but the snapshot is still stale and is invalidated again.
+    const retried = (() => {
+      writeFileSync(join(prime, 'a.snapshot.json'), JSON.stringify(createSnapshot({
+        scannedAt: '2026-09-28T09:00:00.000Z', sections,
+      })));
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:07-diff-review'];
+      go({ issue: 362, to: '07-diff-review', model: 'gpt-6-astra' });
+      labels = saved;
+      return JSON.parse(readFileSync(join(prime, 'a.snapshot.json'), 'utf8'));
+    })();
+    results.push(['a labelled step already in place still invalidates the snapshot',
+      retried.invalidation?.reasonCodes?.includes('ISSUE_MUTATION') === true]);
     const editsBefore = calls.filter((call) => call.startsWith('gh issue edit')).length;
     const staged = go({ issue: 356, to: '02-plan', staged: true, model: 'gpt-6-astra' });
     results.push(['a staged unit is announced and recorded, never labelled',
@@ -692,7 +756,7 @@ function transitionChecks(at) {
     })();
     results.push(['the parked view lists open units from the steps files',
       typeof view === 'string' && view.includes('├ #350 · 08 fix on 🟠 OPUS 5.5')
-        && view.includes('queue unknown (re-prime)')]);
+        && view.includes(`queue 0 eligible as of ${clock(Date.parse('2026-09-28T09:00:00.000Z'))}`)]);
     const closed = (() => {
       try {
         return closeUnit({ root, run, nowMs: at(10, 30), issue: 350, outcome: 'delivered', pr: 550 });
