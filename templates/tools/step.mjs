@@ -12,8 +12,123 @@
 // Usage:
 //   node step.mjs --self-test
 
-import { realpathSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
+  statSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { evaluate } from './command-guard.mjs';
+import {
+  completeSection, createSnapshot, invalidateSnapshot, SNAPSHOT_SECTIONS, verifySnapshot,
+} from './snapshot-contract.mjs';
+import { realRun } from './unit.mjs';
+
+const LADDER = Object.freeze([
+  '01-premise', '02-plan', '03-plan-review', '04-claim', '05-implement',
+  '06-simplify', '07-diff-review', '08-code-review', '09-gate',
+]);
+
+// Pure: the label change a step needs, or null when none. Both halves, always:
+// the predecessor is named even when an earlier swap already lost it, because
+// the guard refuses an add that does not retire it. A fix round rides step
+// 08's label; 00, 10 and 11 carry none.
+export function swapPlan(current, to) {
+  if (!LADDER.includes(to)) return null;
+  const target = `loop:${to}`;
+  const index = LADDER.indexOf(to);
+  const predecessor = index > 0 ? [`loop:${LADDER[index - 1]}`] : [];
+  const remove = [...new Set([
+    ...current.filter((label) => /^loop:0\d-/u.test(label) && label !== target),
+    ...predecessor,
+  ])];
+  const add = [
+    ...(to === '01-premise' && !current.includes('loop-started') ? ['loop-started'] : []),
+    ...(current.includes(target) ? [] : [target]),
+  ];
+  if (add.length === 0 && remove.every((label) => !current.includes(label))) return null;
+  return { remove, add };
+}
+
+function readJson(path, fallback) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeAtomically(path, value) {
+  mkdirSync(join(path, '..'), { recursive: true });
+  const staged = `${path}.${process.pid}.tmp`;
+  writeFileSync(staged, `${JSON.stringify(value, null, 1)}\n`);
+  renameSync(staged, path);
+}
+
+// The retained prime snapshot is the newest one; a mutation marks it stale so
+// no later decision reads a label state that has moved.
+function invalidateRetainedSnapshot(gitDir) {
+  const directory = join(gitDir, 'autoloop', 'prime');
+  if (!existsSync(directory)) return null;
+  const newest = readdirSync(directory)
+    .filter((name) => name.endsWith('.snapshot.json'))
+    .map((name) => join(directory, name))
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0];
+  if (!newest) return null;
+  const snapshot = readJson(newest, null);
+  if (!verifySnapshot(snapshot)) return `! retained snapshot ${newest} is unreadable; re-prime before deciding`;
+  writeAtomically(newest, invalidateSnapshot(snapshot, 'ISSUE_MUTATION'));
+  return null;
+}
+
+export function transition({
+  root, run = realRun(root), evaluateCommand = evaluate, nowMs = Date.now(),
+  issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '',
+}) {
+  const refuse = (message) => ({ ok: false, lines: [message] });
+  if (!Number.isSafeInteger(issue) || issue < 1) return refuse('step: --issue must be a positive issue number');
+  if (STEPS[to] === undefined) return refuse(`step: unknown step ${to}; one of ${Object.keys(STEPS).join(', ')}`);
+  const common = run('git', ['rev-parse', '--git-common-dir']);
+  if (!common.ok) return refuse(`step: not inside a git repository: ${common.stderr}`);
+  const gitDir = resolve(root, common.stdout);
+  const stepsPath = join(gitDir, 'autoloop', 'steps', `${issue}.json`);
+  const record = readJson(stepsPath, { issue, steps: [] });
+  const last = record.steps.at(-1);
+  if (last && last.step === to && (last.round ?? null) === (round ?? null)) {
+    return { ok: true, lines: [`already on ${to}`] };
+  }
+  const labels = run('gh', ['issue', 'view', String(issue), '--json', 'labels', '--jq', '[.labels[].name]']);
+  if (!labels.ok) return refuse(`step: could not read #${issue}'s labels: ${labels.stderr}`);
+  const plan = swapPlan(readJsonText(labels.stdout), to);
+  if (plan !== null) {
+    const argv = ['issue', 'edit', String(issue),
+      ...(plan.remove.length ? ['--remove-label', plan.remove.join(',')] : []),
+      ...(plan.add.length ? ['--add-label', plan.add.join(',')] : [])];
+    const branch = run('git', ['branch', '--show-current']).stdout || 'main';
+    const verdict = evaluateCommand(`gh ${argv.join(' ')}`, branch);
+    if (verdict.block) return refuse(verdict.reason);
+    const swapped = run('gh', argv);
+    if (!swapped.ok) return refuse(`step: label swap on #${issue} failed: ${swapped.stderr}`);
+  }
+  const warning = invalidateRetainedSnapshot(gitDir);
+  record.steps.push({ step: to, round, model, fallback, startedAtMs: nowMs });
+  writeAtomically(stepsPath, record);
+  return {
+    ok: true,
+    lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note }),
+      ...(warning ? [warning] : [])],
+  };
+}
+
+function readJsonText(text) {
+  try {
+    const value = JSON.parse(text);
+    return Array.isArray(value) ? value.map(String) : [];
+  } catch {
+    return [];
+  }
+}
 
 // step id → [name, glyph]. The glyph set is the dev skill's closed set.
 export const STEPS = Object.freeze({
@@ -160,6 +275,24 @@ function selfTest() {
       safely(() => renderResumed({ atMs: at(14, 14), issue: 78, what: 'plan returned', ms: 401_000 }))
         === '14:14 #78  ▶️ resumed — plan returned · 6m 41s'],
   ];
+  const parsed = (argv) => {
+    try {
+      return parseArgs(argv);
+    } catch (error) {
+      return { error: `THREW ${error.message}` };
+    }
+  };
+  checks.push(
+    ['a transition call parses', JSON.stringify(parsed(['--issue', '350', '--to', '08-code-review', '--round', '2/5',
+      '--model', 'gpt-6-astra', '--badge', '🚧', '--note', '2 Major open', '--fallback']))
+      === JSON.stringify({ mode: 'to', issue: 350, to: '08-code-review', round: '2/5', model: 'gpt-6-astra',
+        badge: '🚧', note: '2 Major open', fallback: true, what: null, ms: null, error: null })],
+    ['a resumed call parses', parsed(['--issue', '78', '--resumed', 'plan returned', '--ms', '401000']).mode === 'resumed'],
+    ['bad calls are refused', ['--issue x --to 02-plan', '--to 02-plan', '--issue 7', '--issue 7 --to 02-plan --round 9',
+      '--issue 7 --to 02-plan --colour red', '--issue 7 --resumed x --ms soon']
+      .every((call) => parsed(call.split(' ')).error !== null)],
+  );
+  checks.push(...transitionChecks(at));
   const failures = checks.filter(([, ok]) => !ok);
   for (const [name] of failures) console.error(`FAIL ${name}`);
   console.log(failures.length === 0
@@ -168,11 +301,147 @@ function selfTest() {
   return failures.length === 0;
 }
 
+// A fake repository state directory and gh, with the real command guard.
+function transitionChecks(at) {
+  const root = mkdtempSync(join(tmpdir(), 'step-'));
+  const prime = join(root, '.git', 'autoloop', 'prime');
+  mkdirSync(prime, { recursive: true });
+  const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+  writeFileSync(join(prime, 'a.snapshot.json'), JSON.stringify(createSnapshot({
+    scannedAt: '2026-09-28T09:00:00.000Z', sections,
+  })));
+  let labels = ['loop-ready', 'loop-started', 'loop:05-implement'];
+  const calls = [];
+  const run = (command, args) => {
+    calls.push([command, ...args].join(' '));
+    if (command === 'git') {
+      return { ok: true, stdout: args.includes('--git-common-dir') ? join(root, '.git') : 'main', stderr: '' };
+    }
+    if (args[0] === 'issue' && args[1] === 'view') return { ok: true, stdout: JSON.stringify(labels), stderr: '' };
+    if (args[0] === 'issue' && args[1] === 'edit') {
+      const removed = args.flatMap((arg, index) => (args[index - 1] === '--remove-label' ? arg.split(',') : []));
+      const added = args.flatMap((arg, index) => (args[index - 1] === '--add-label' ? arg.split(',') : []));
+      labels = [...labels.filter((label) => !removed.includes(label)), ...added];
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    return { ok: false, stdout: '', stderr: `unexpected ${command}` };
+  };
+  const go = (options) => {
+    try {
+      return transition({ root, run, nowMs: at(9, 51), issue: 350, ...options });
+    } catch (error) {
+      return { ok: false, lines: [`THREW ${error.message}`] };
+    }
+  };
+  const results = [];
+  try {
+    const plan = (() => {
+      try {
+        return [
+          swapPlan(['loop-ready', 'loop:05-implement'], '06-simplify'),
+          swapPlan(['loop-ready'], '01-premise'),
+          swapPlan(['loop-ready', 'loop:08-code-review'], '08-fix'),
+          swapPlan(['loop-ready', 'loop:09-gate'], '10-publish'),
+          swapPlan(['loop-ready', 'loop:03-plan-review'], '05-implement'),
+        ];
+      } catch {
+        return null;
+      }
+    })();
+    results.push(['a swap names both halves; 01 also starts the unit; 08-fix, 10 and 11 move nothing',
+      JSON.stringify(plan) === JSON.stringify([
+        { remove: ['loop:05-implement'], add: ['loop:06-simplify'] },
+        { remove: [], add: ['loop-started', 'loop:01-premise'] },
+        null,
+        null,
+        { remove: ['loop:03-plan-review', 'loop:04-claim'], add: ['loop:05-implement'] },
+      ])]);
+    const first = go({ to: '06-simplify', model: 'claude-fable-5-1', note: '393 lines' });
+    const snapshot = JSON.parse(readFileSync(join(prime, 'a.snapshot.json'), 'utf8'));
+    const steps = (() => {
+      try {
+        return JSON.parse(readFileSync(join(root, '.git', 'autoloop', 'steps', '350.json'), 'utf8'));
+      } catch {
+        return null;
+      }
+    })();
+    results.push(['a transition swaps the labels, invalidates the snapshot, records the step and prints the ribbon',
+      first.ok === true
+        && calls.some((call) => call === 'gh issue edit 350 --remove-label loop:05-implement --add-label loop:06-simplify')
+        && labels.includes('loop:06-simplify') && !labels.includes('loop:05-implement')
+        && snapshot.invalidation?.reasonCodes?.includes('ISSUE_MUTATION')
+        && steps?.steps?.at(-1)?.step === '06-simplify' && steps.steps.at(-1).model === 'claude-fable-5-1'
+        && first.lines.length === 1 && first.lines[0].startsWith('09:51 #350 ⏳ 🧹 SIMPLIFY')]);
+    const edits = calls.filter((call) => call.startsWith('gh issue edit')).length;
+    const again = go({ to: '06-simplify', model: 'claude-fable-5-1' });
+    results.push(['the same step twice swaps nothing and says so',
+      again.ok === true && again.lines.join('') === 'already on 06-simplify'
+        && calls.filter((call) => call.startsWith('gh issue edit')).length === edits]);
+    const backward = go({ to: '05-implement', model: 'claude-opus-5-5' });
+    results.push(['a swap the guard refuses is printed and changes nothing',
+      backward.ok === false && /step labels only climb/u.test(backward.lines.join(' '))
+        && labels.includes('loop:06-simplify')]);
+    const round = go({ to: '08-code-review', round: '1/5', model: 'gpt-6-astra' });
+    const fix = go({ to: '08-fix', round: '1/5', model: 'claude-opus-5-5' });
+    results.push(['review and fix rounds are separate announcements under one label',
+      round.ok === true && fix.ok === true && fix.lines[0].includes('🔧 FIX') && labels.includes('loop:08-code-review')]);
+    const refused = transition.length === undefined ? null : go({ to: '09-gate', run: () => ({ ok: false, stdout: '', stderr: 'HTTP 502' }) });
+    results.push(['a failed gh call is loud', refused.ok === false && refused.lines.join(' ').includes('HTTP 502')]);
+    results.push(['an unknown step is refused before anything moves', go({ to: '12-ship' }).ok === false]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  return results;
+}
+
+const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round <r>/<cap>] [--model <id>] [--fallback] '
+  + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--ms <n>]\n       step.mjs --self-test';
+
+export function parseArgs(argv) {
+  const out = {
+    mode: null, issue: null, to: null, round: null, model: null, badge: '⏳', note: '',
+    fallback: false, what: null, ms: null, error: null,
+  };
+  const valued = { '--issue': 'issue', '--to': 'to', '--round': 'round', '--model': 'model', '--badge': 'badge',
+    '--note': 'note', '--resumed': 'what', '--ms': 'ms' };
+  for (let index = 0; index < argv.length; index += 1) {
+    const flag = argv[index];
+    if (flag === '--fallback') { out.fallback = true; continue; }
+    if (valued[flag] === undefined) return { ...out, error: `unknown argument ${flag}` };
+    const value = argv[index + 1];
+    if (value === undefined) return { ...out, error: `${flag} needs a value` };
+    out[valued[flag]] = value;
+    index += 1;
+  }
+  out.issue = /^[1-9]\d{0,8}$/u.test(String(out.issue)) ? Number(out.issue) : null;
+  if (out.issue === null) return { ...out, error: '--issue must be a positive issue number' };
+  if (out.round !== null && !/^\d+\/\d+$/u.test(out.round)) return { ...out, error: '--round must look like 2/5' };
+  if (out.ms !== null) {
+    out.ms = Number(out.ms);
+    if (!Number.isFinite(out.ms)) return { ...out, error: '--ms needs a number' };
+  }
+  if (out.to !== null && out.what === null) out.mode = 'to';
+  else if (out.what !== null && out.to === null) out.mode = 'resumed';
+  else return { ...out, error: 'give exactly one of --to or --resumed' };
+  return out;
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  console.error('usage: step.mjs --self-test');
-  process.exit(2);
+  const parsed = parseArgs(args);
+  if (parsed.error) {
+    console.error(`step: ${parsed.error}\n${USAGE}`);
+    process.exit(2);
+  }
+  if (parsed.mode === 'resumed') {
+    process.stdout.write(`${renderResumed({ atMs: Date.now(), issue: parsed.issue, what: parsed.what, ms: parsed.ms })}\n`);
+    return;
+  }
+  const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
+  const result = transition({ root, ...parsed });
+  process.stdout.write(`${result.lines.join('\n')}\n`);
+  process.exit(result.ok ? 0 : 1);
 }
 
 const isMain = (() => {
