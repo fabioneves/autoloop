@@ -19,7 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { evaluate } from './command-guard.mjs';
+import { evaluate, loopRunIsLive, ownRunMarkers } from './command-guard.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, SNAPSHOT_SECTIONS, verifySnapshot,
 } from './snapshot-contract.mjs';
@@ -239,6 +239,44 @@ export function renderParked({ nowMs, units, eligible, waiting = [] }) {
     }),
     `└ ${queue}${human} · resumes on results`,
   ].join('\n');
+}
+
+const RUN_CARD_LIMIT = 1500;
+
+// What a compacted orchestrator needs to resume without re-reading its state:
+// facts with their times, never instructions.
+export function renderRunCard({ nowMs, units, park, snapshot }) {
+  const lines = [
+    `## autoloop run state after compaction — facts as of ${clock(nowMs)}, re-prime before deciding`,
+    ...units.map(({ issue, step, model, round, startedAtMs }) => {
+      const [name] = STEPS[step] ?? [step];
+      return `- #${issue} at ${step.slice(0, 2)} ${name.toLowerCase()}${round ? ` r${round}` : ''} on ${modelChip(model)} since ${clock(startedAtMs)}`;
+    }),
+    ...(units.length === 0 ? ['- no unit in flight'] : []),
+    ...(park?.until ? [`- parked until ${clock(Date.parse(park.until))}: ${oneLine(park.reason, 120)}`] : []),
+    ...(snapshot ? [`- retained snapshot ${snapshot.path}, ${minutes(snapshot.ageMs)} old`] : []),
+  ];
+  let card = '';
+  for (const line of lines) {
+    if (card.length + line.length + 1 > RUN_CARD_LIMIT - 2) return `${card}…`;
+    card += `${card ? '\n' : ''}${line}`;
+  }
+  return card;
+}
+
+export function runCard({ root, run = realRun(root), nowMs = Date.now(), live = loopRunIsLive, markers = ownRunMarkers }) {
+  if (!live(root)) return '';
+  const dir = autoloopDir(root, run);
+  if (dir === null) return '';
+  const park = markers(root).map(({ marker }) => marker.park).find((value) => value?.until) ?? null;
+  const directory = join(dir, 'prime');
+  const newest = existsSync(directory)
+    ? readdirSync(directory).filter((name) => name.endsWith('.snapshot.json'))
+      .map((name) => join(directory, name))
+      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0]
+    : undefined;
+  const snapshot = newest ? { path: newest, ageMs: nowMs - statSync(newest).mtimeMs } : null;
+  return renderRunCard({ nowMs, units: openUnits(dir), park, snapshot });
 }
 
 function readJsonText(text) {
@@ -467,6 +505,26 @@ function selfTest() {
       '├ #356 · 03 plan-review on 🟣 FABLE 5.1 · 1m',
       '└ queue 57 eligible · #349 ⚠️ awaits /answer · resumes on results',
     ].join('\n')],
+    ['the post-compaction run card carries facts only, and says to re-prime', (() => {
+      const card = safely(() => renderRunCard({
+        nowMs: at(10, 20),
+        units: [{ issue: 350, step: '10-publish', model: null, startedAtMs: at(10, 10) },
+          { issue: 356, step: '03-plan-review', model: 'gpt-6-astra', round: null, startedAtMs: at(10, 1) }],
+        park: { reason: 'plan revision in flight', until: new Date(at(10, 45)).toISOString() },
+        snapshot: { path: '/r/.git/autoloop/prime/a.snapshot.json', ageMs: 12 * 60_000 },
+      }));
+      return card.startsWith('## autoloop run state after compaction — facts as of 10:20, re-prime before deciding')
+        && card.includes('- #350 at 10 publish on ⚪ ORCHESTRATOR since 10:10')
+        && card.includes('- #356 at 03 plan-review on 🟢 ASTRA 6 since 10:01')
+        && card.includes('- parked until 10:45: plan revision in flight')
+        && card.includes('- retained snapshot /r/.git/autoloop/prime/a.snapshot.json, 12m old');
+    })()],
+    ['the run card is bounded', safely(() => renderRunCard({
+      nowMs: at(10, 20),
+      units: Array.from({ length: 80 }, (unused, index) => ({ issue: index + 1, step: '02-plan', model: 'gpt-6-astra', startedAtMs: at(9, 0) })),
+      park: null, snapshot: null,
+    })).length <= 1500],
+    ['no live run, no card', safely(() => runCard({ root: '/nowhere', live: () => false })) === ''],
     ['a parked block with unknown queue evidence says so', safely(() => renderParked({
       nowMs: at(9, 53), units: [], eligible: null, waiting: [],
     })).endsWith('└ queue unknown (re-prime) · resumes on results')],
@@ -664,6 +722,15 @@ function main() {
     process.exit(2);
   }
   const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
+  if (parsed.mode === 'card-run') {
+    try {
+      const card = runCard({ root });
+      if (card) process.stdout.write(`${card}\n`);
+    } catch {
+      // A hook must never break the session it serves.
+    }
+    return;
+  }
   if (parsed.mode === 'parked') {
     process.stdout.write(`${parkedView({ root })}\n`);
     return;
