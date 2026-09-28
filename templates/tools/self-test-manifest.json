@@ -34,6 +34,7 @@
     "snapshot-contract.mjs": "8caedd600dab478829098d06cb82eacb2f7ecd30d30ca5366b3158833ab11aa6",
     "stats.mjs": "41622973c6aae6395461d4fde362837063714c935cb8507ffd9a7188c15d42ee",
     "step-subject.mjs": "ffe7d1dbb92030c5e794202235741fbdc5e83ee1ef430cdf61250c3456f4f4fd",
+    "step.mjs": "e310664f4eaeaecc722407f761cf6f761d04a14f12c243661e8c5db7b348b6ff",
     "subagent-transcript.mjs": "77da4385fa5cd9df465985700907fff36fd246f5725738412b8c1cb0a8419d5e",
     "unit.mjs": "e11c76682a0ead2036a5f677031c0518b212fcdfa79e5c9ab7090da41874ae92",
     "writeback-check.mjs": "ab199d13c919ef86f51309da25804a29bee4cefddb0ec7bb0545230212ee4d86"
