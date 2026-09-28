@@ -3,6 +3,32 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.53.1] - 2026-09-28
+
+The first run on 0.53.0 spent about 100k tokens hand-building 33 lifecycle reconcile requests,
+and each driver call took about 37 s.
+
+### Added
+
+- **`lifecycle-driver.mjs --reconcile-issue <N>`.** One bare call recovers a surfaced marker. It
+  builds the request from the issue's own authoritative marker chain (root ID), its frozen plan
+  comment and its pull request, then runs the driver.
+  - Nothing is inferred. A marker with no pull request yet is refused toward `--reconcile-json`,
+    and the refusal prints the root ID and the intent to use.
+  - The dev and pitcrew skills recover markers with it.
+
+### Changed
+
+- **A driver read makes 8 calls instead of 17** (4.4 s instead of 9.4 s on living-football-engine).
+  - A collaborator's role is read once per login within a read.
+  - The branch's pull request comes from an owner-qualified head filter, not from paging every PR.
+  - A fork PR reusing the branch name can no longer make the lookup ambiguous.
+
+### Fixed
+
+- The driver refuses an issue that lives in a different repository than `origin` names. A
+  transferred repository's stale owner would otherwise find no pull request.
+
 ## [0.53.0] - 2026-09-28
 
 A faster, steadier start. The first live run on 0.52.0 spent its opening quarter hour
