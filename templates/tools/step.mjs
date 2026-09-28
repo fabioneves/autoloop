@@ -66,35 +66,30 @@ function writeAtomically(path, value) {
   renameSync(staged, path);
 }
 
-// The retained prime snapshot is the newest one; a mutation marks it stale so
-// no later decision reads a label state that has moved.
-function invalidateRetainedSnapshot(gitDir) {
-  const directory = join(gitDir, 'autoloop', 'prime');
-  if (!existsSync(directory)) return null;
-  const newest = readdirSync(directory)
-    .filter((name) => name.endsWith('.snapshot.json'))
-    .map((name) => join(directory, name))
-    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0];
-  if (!newest) return null;
-  const snapshot = readJson(newest, null);
-  if (!verifySnapshot(snapshot)) return `! retained snapshot ${newest} is unreadable; re-prime before deciding`;
-  writeAtomically(newest, invalidateSnapshot(snapshot, 'ISSUE_MUTATION'));
-  return null;
-}
-
 function autoloopDir(root, run) {
   const common = run('git', ['rev-parse', '--git-common-dir']);
-  return common.ok ? join(resolve(root, common.stdout), 'autoloop') : null;
+  return common.ok ? { dir: join(resolve(root, common.stdout), 'autoloop') } : { dir: null, error: common.stderr };
 }
 
-function newestSnapshot(dir) {
+// The retained prime snapshot is the newest one prime wrote.
+function retainedSnapshotPath(dir) {
   const directory = join(dir, 'prime');
   if (!existsSync(directory)) return null;
-  const newest = readdirSync(directory)
+  return readdirSync(directory)
     .filter((name) => name.endsWith('.snapshot.json'))
     .map((name) => join(directory, name))
-    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0];
-  return newest ? readJson(newest, null) : null;
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0] ?? null;
+}
+
+// A mutation marks the retained snapshot stale, so no later decision reads a
+// label state that has moved.
+function invalidateRetainedSnapshot(dir) {
+  const path = retainedSnapshotPath(dir);
+  if (path === null) return null;
+  const snapshot = readJson(path, null);
+  if (!verifySnapshot(snapshot)) return `! retained snapshot ${path} is unreadable; re-prime before deciding`;
+  writeAtomically(path, invalidateSnapshot(snapshot, 'ISSUE_MUTATION'));
+  return null;
 }
 
 function openUnits(dir) {
@@ -110,9 +105,10 @@ function openUnits(dir) {
 }
 
 export function parkedView({ root, run = realRun(root), nowMs = Date.now() }) {
-  const dir = autoloopDir(root, run);
+  const { dir } = autoloopDir(root, run);
   if (dir === null) return renderParked({ nowMs, units: [], eligible: null });
-  const snapshot = newestSnapshot(dir);
+  const snapshotPath = retainedSnapshotPath(dir);
+  const snapshot = snapshotPath === null ? null : readJson(snapshotPath, null);
   const eligible = eligibleIssueNumbers(snapshot);
   const blocked = snapshot?.sections?.blockedIssues;
   const waiting = blocked?.complete === true ? blocked.items.map((issue) => issue.number).slice(0, 3) : [];
@@ -120,7 +116,7 @@ export function parkedView({ root, run = realRun(root), nowMs = Date.now() }) {
 }
 
 export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '' }) {
-  const dir = autoloopDir(root, run);
+  const { dir } = autoloopDir(root, run);
   const path = dir === null ? null : join(dir, 'steps', `${issue}.json`);
   const record = path === null ? null : readJson(path, null);
   if (!record?.steps?.length) return { ok: false, lines: [`step: no steps recorded for #${issue}`] };
@@ -137,10 +133,9 @@ export function transition({
   const refuse = (message) => ({ ok: false, lines: [message] });
   if (!Number.isSafeInteger(issue) || issue < 1) return refuse('step: --issue must be a positive issue number');
   if (STEPS[to] === undefined) return refuse(`step: unknown step ${to}; one of ${Object.keys(STEPS).join(', ')}`);
-  const common = run('git', ['rev-parse', '--git-common-dir']);
-  if (!common.ok) return refuse(`step: not inside a git repository: ${common.stderr}`);
-  const gitDir = resolve(root, common.stdout);
-  const stepsPath = join(gitDir, 'autoloop', 'steps', `${issue}.json`);
+  const { dir, error } = autoloopDir(root, run);
+  if (dir === null) return refuse(`step: not inside a git repository: ${error}`);
+  const stepsPath = join(dir, 'steps', `${issue}.json`);
   const record = readJson(stepsPath, { issue, steps: [] });
   const last = record.steps.at(-1);
   if (last && last.step === to && (last.round ?? null) === (round ?? null)) {
@@ -162,7 +157,7 @@ export function transition({
     const swapped = run('gh', argv);
     if (!swapped.ok) return refuse(`step: label swap on #${issue} failed: ${swapped.stderr}`);
   }
-  const warning = plan === null ? null : invalidateRetainedSnapshot(gitDir);
+  const warning = plan === null ? null : invalidateRetainedSnapshot(dir);
   record.steps.push({ step: to, round, model, fallback, staged, startedAtMs: nowMs });
   writeAtomically(stepsPath, record);
   return {
@@ -269,15 +264,10 @@ export function renderRunCard({ nowMs, units, park, snapshot }) {
 
 export function runCard({ root, run = realRun(root), nowMs = Date.now(), live = loopRunIsLive, markers = ownRunMarkers }) {
   if (!live(root)) return '';
-  const dir = autoloopDir(root, run);
+  const { dir } = autoloopDir(root, run);
   if (dir === null) return '';
   const park = markers(root).map(({ marker }) => marker.park).find((value) => value?.until) ?? null;
-  const directory = join(dir, 'prime');
-  const newest = existsSync(directory)
-    ? readdirSync(directory).filter((name) => name.endsWith('.snapshot.json'))
-      .map((name) => join(directory, name))
-      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0]
-    : undefined;
+  const newest = retainedSnapshotPath(dir);
   const snapshot = newest ? { path: newest, ageMs: nowMs - statSync(newest).mtimeMs } : null;
   return renderRunCard({ nowMs, units: openUnits(dir), park, snapshot });
 }
