@@ -29,7 +29,7 @@
     "release-verify.mjs": "1ff059af3643249507b0ee3fb80c287106ed40e40f2e9123240c09ada1ab3e1c",
     "review-contract.mjs": "f67b6234ead833831a8cbeb72a8234630e6054c53d2fcd353528deeb155b0c10",
     "scaffold.mjs": "1d634f555749cd5900a1574a85d5e74e182c340629afe4804be92e1a58a10004",
-    "scan.mjs": "395795987df1b8f140d8653556da86a2ef61fa8ebb50b1b51b0a4c0065f39717",
+    "scan.mjs": "f9582f6bef6a84faab54a4baa29288e13337fd70bba3cb274e2b127fef28ebb8",
     "sizing-contract.mjs": "d37b91eec295a80886c406dbfea039b6dd76ed68cd466baf4c53145764e61f40",
     "snapshot-contract.mjs": "cc6a16a42bb835c0187e1a9996dde11af485f41e7497d7ccd241021567ebe3a4",
     "stats.mjs": "41622973c6aae6395461d4fde362837063714c935cb8507ffd9a7188c15d42ee",

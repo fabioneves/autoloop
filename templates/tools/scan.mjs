@@ -629,8 +629,9 @@ export function issueBatchChunks(requests, size = ISSUE_BATCH_SIZE) {
   return chunks;
 }
 
-// An error whose path names an alias fails that issue alone; any other error,
-// or a response without data, fails the whole batch. Absence is never inferred.
+// An error whose path names an alias fails that issue alone. Any other error,
+// or a response without data, fails the whole batch: its issues are left out,
+// so each falls back to its single-issue read. Absence is never inferred.
 function splitIssueBatch(response, chunk) {
   const errors = Array.isArray(response?.errors) ? response.errors : [];
   const aliasOf = (error) => (Array.isArray(error?.path) && error.path[0] === 'repository'
@@ -640,12 +641,11 @@ function splitIssueBatch(response, chunk) {
     return matching.length ? matching.map(({ message }) => message).join('; ') : null;
   };
   const repository = response?.data?.repository;
-  let batchError = messagesFor(null);
-  if (batchError === null && !repository) batchError = 'GraphQL response omitted data';
+  if (messagesFor(null) !== null || !repository) return [];
   return chunk.map(({ number }) => ({
     number,
-    node: repository?.[`i${number}`] ?? null,
-    error: batchError ?? messagesFor(`i${number}`),
+    node: repository[`i${number}`] ?? null,
+    error: messagesFor(`i${number}`),
   }));
 }
 
@@ -1000,7 +1000,9 @@ export function issueBatchRequests(openPrs, openIssues, mergedPrs) {
   }
   const references = queueReferenceNumbers(candidates);
   if (references.length <= MAX_ITEMS) {
-    for (const number of references) add(number, 'dependency');
+    for (const number of references.filter((value) => Number.isSafeInteger(value) && value > 0)) {
+      add(number, 'dependency');
+    }
   }
   return [...parts]
     .sort(([left], [right]) => left - right)
@@ -2328,7 +2330,7 @@ async function selfTest() {
       JSON.stringify(issueBatchRequests(
         completeSection([]),
         completeSection([
-          { number: 7, labels: ['loop-ready'], body: '## Blocked by\n- #3' },
+          { number: 7, labels: ['loop-ready'], body: '## Blocked by\n- #3\n- #100000000000000000000' },
           { number: 9, labels: [], body: '' },
         ]),
         completeSection([{ issue: 5 }]),
@@ -2367,13 +2369,11 @@ async function selfTest() {
         && batched.get(231).dependency.error.message.includes('Could not resolve')
         && batched.get(12).dependency.complete === true,
     ],
+    // A batch that keeps failing (a timeout on a comment-heavy chunk) must not
+    // blank its 25 issues every prime: its issues fall back to single reads.
     [
-      'a failed batch fails each of its issues and no other batch',
-      [...Array(25).keys()].every((index) => {
-        const section = failedBatch.get(index + 42).comments;
-        return section.complete === false && section.error.code === 'PAGE_FETCH_FAILED'
-          && section.error.message.includes('HTTP 502');
-      })
+      'a failed batch leaves its issues to the per-issue path, and no other batch',
+      [...Array(25).keys()].every((index) => !failedBatch.has(index + 42))
         && failedBatch.get(100).comments.complete === true,
     ],
     ['snapshot envelope verifies', verifySnapshot(snapshot)],
