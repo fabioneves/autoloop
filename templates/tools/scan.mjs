@@ -731,6 +731,17 @@ function lifecycleTrustedAuthors(roleSections, viewerAuthoredLogins) {
   );
 }
 
+const TERMINAL_LIFECYCLE_PHASES = new Set(['terminal-record', 'terminal-refused']);
+
+// A terminal tip on an issue the complete open-issue inventory does not list is
+// a finished unit: reconciling it again can only return what it already says.
+export function surfacedLifecycleMarkers(items, openIssues) {
+  if (openIssues.complete !== true) return items;
+  const open = new Set(openIssues.items.map((issue) => issue.number));
+  return items.filter((item) => open.has(item.issueNumber)
+    || !TERMINAL_LIFECYCLE_PHASES.has(parseLifecycleComment(item.body).marker?.phase));
+}
+
 async function fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo) {
   const issueNumbers = lifecycleIssueNumbers(openPrs, openIssues, mergedPrs);
   const commentsByIssue = await mapBounded(
@@ -770,8 +781,7 @@ async function fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo) {
     ...roleSections,
     ...perIssue,
   ];
-  const items = perIssue
-    .flatMap((section) => section.items)
+  const items = surfacedLifecycleMarkers(perIssue.flatMap((section) => section.items), openIssues)
     .sort((left, right) => compareText(
       `${left.issueNumber}\0${left.createdAt ?? ''}\0${left.id ?? ''}`,
       `${right.issueNumber}\0${right.createdAt ?? ''}\0${right.id ?? ''}`,
@@ -1670,6 +1680,32 @@ async function selfTest() {
     completeSection([lifecycleComment, lifecycleSuccessor]),
     new Set(['autoloop']),
   );
+  const lifecycleTip = (issueNumber, phase, extra = {}) => normalizeLifecycleMarkerComment({
+    ...lifecycleSuccessor,
+    body: serializeLifecycleSuccessor({
+      ...parseLifecycleComment(lifecycleBody).marker,
+      claimCommit: 'a'.repeat(40),
+      pr: 12,
+      phase,
+      ...extra,
+    }, lifecycleSuccessorLink),
+  }, issueNumber);
+  const historicalTips = [
+    lifecycleTip(7, 'terminal-record', { mergeOid: 'e'.repeat(40) }),
+    lifecycleTip(8, 'terminal-refused', {
+      refusal: { code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'terminal-marker' },
+    }),
+    lifecycleTip(9, 'terminal-record', { mergeOid: 'e'.repeat(40) }),
+    lifecycleTip(10, 'draft-pr'),
+  ];
+  const surfacedWhenOpenKnown = surfacedLifecycleMarkers(
+    historicalTips,
+    completeSection([{ number: 9 }]),
+  ).map((item) => item.issueNumber);
+  const surfacedWhenOpenUnknown = surfacedLifecycleMarkers(
+    historicalTips,
+    incompleteSection('PAGE_FETCH_FAILED', 'offline', [{ number: 9 }]),
+  ).map((item) => item.issueNumber);
   const duplicateLifecycleSuccessor = normalizeLifecycleMarkerSection(
     7,
     completeSection([
@@ -2069,6 +2105,14 @@ async function selfTest() {
         && boundRoleResponse?.roleName === 'maintain'
         && mismatchedRoleResponse === null
         && incompleteRoleResponse === null,
+    ],
+    // LFE, 2026-09-28: 45 markers of finished units were reconciled before every
+    // selection. A terminal tip on a closed issue is done; one on an open issue,
+    // or any non-terminal tip (a human-merge backfill), still surfaces.
+    [
+      'finished markers on closed issues are not surfaced; the rest are',
+      surfacedWhenOpenKnown.join(',') === '9,10'
+        && surfacedWhenOpenUnknown.join(',') === '7,8,9,10',
     ],
     [
       'merged loop PR issues remain discoverable after their issues close',
