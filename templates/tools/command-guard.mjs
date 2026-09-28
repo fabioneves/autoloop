@@ -860,11 +860,11 @@ function shellSegments(cmd) {
         ? ';'
         : null;
     if (!separator) continue;
-    segments.push({ command: cmd.slice(start, i).trim(), next: separator });
+    segments.push({ command: cmd.slice(start, i).trim(), next: separator, raw: separator === ';' ? char : pair });
     i += separator.length - 1;
     start = i + 1;
   }
-  segments.push({ command: cmd.slice(start).trim(), next: null });
+  segments.push({ command: cmd.slice(start).trim(), next: null, raw: null });
   return segments.filter((segment) => segment.command);
 }
 
@@ -2116,7 +2116,11 @@ export function evaluate(inputCmd, branch, options = {}) {
     return readFileSync(real, 'utf8').slice(0, 4096);
   };
   const bodyProblems = segments.map(({ command }) => commentBodyProblem(shellWords(command), readBody));
-  if (segments.length > 1 && segments.some(({ command }) => readsCommentBodyFile(shellWords(command)))) {
+  // A body file can be rewritten only by a segment that runs before or beside
+  // the post: an earlier segment, or a pipe or background `&` after it.
+  // Whatever follows a sequential operator runs after the post and cannot.
+  if (segments.length > 1 && segments.some(({ command, raw }, index) =>
+    readsCommentBodyFile(shellWords(command)) && (index > 0 || raw === '|' || raw === '&'))) {
     bodyProblems.push('unverifiable');
   }
   if (bodyProblems.includes('unverifiable')) {
@@ -3657,6 +3661,26 @@ function selfTest() {
         writeFileSync(marker, JSON.stringify({ version: 1, pids: [process.ppid], closedAt: null }));
         if (process.platform === 'linux' && loopRunIsLive(scratch) !== false) {
           console.error('FAIL [an unrecognised closedAt counts as closed]');
+          ok = false;
+        }
+        // LFE, 2026-09-28: `gh issue comment N --body-file <record> && date`
+        // was refused as unverifiable although nothing after a post can change
+        // what it posted. Only a segment that can run before or alongside the
+        // post (an earlier segment, a pipe, a background &) can.
+        const bodyDir = mkdtempSync(join(tmpdir(), 'guard-body-'));
+        const bodyFile = join(bodyDir, 'record.md');
+        writeFileSync(bodyFile, '## record\n');
+        const bodyVerdicts = [
+          [`gh issue comment 350 --body-file ${bodyFile} && date +%H:%M`, false],
+          [`gh issue comment 350 --body-file ${bodyFile}; echo done`, false],
+          [`date +%H:%M && gh issue comment 350 --body-file ${bodyFile}`, true],
+          [`echo /answer > ${bodyFile} && gh issue comment 350 --body-file ${bodyFile}`, true],
+          [`gh issue comment 350 --body-file ${bodyFile} | tee /tmp/x`, true],
+          [`gh issue comment 350 --body-file ${bodyFile} & date`, true],
+        ].map(([command, expected]) => evaluate(command, 'main').block === expected);
+        rmSync(bodyDir, { recursive: true, force: true });
+        if (!bodyVerdicts.every(Boolean)) {
+          console.error(`FAIL [a post can only be rewritten by what runs before or beside it]: ${bodyVerdicts.join(',')}`);
           ok = false;
         }
         // LFE, 2026-09-28: markers carried the tmux server's pid, so every
