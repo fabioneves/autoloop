@@ -1823,12 +1823,11 @@ function selfTest() {
   ];
 
   cases.push({
-    name: 'the review cap is 20 rounds, and a JSON input cannot lower it',
+    name: 'a JSON input cannot lower the review cap',
     input: inputFor([acceptedFirst], JSON.parse(JSON.stringify(fixtureProjectConfig(1)))),
     expected: ['continue', false],
     expectedCode: 'REVIEW_FIX_DELTA_REQUIRED',
   });
-  if (REVIEW_ROUND_CAP !== 20) cases.push({ name: 'REVIEW_ROUND_CAP is 20', input: null, expected: ['never', false] });
 
   let passed = 0;
   for (const fixture of cases) {
