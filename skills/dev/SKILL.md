@@ -1941,6 +1941,13 @@ Record it, then arm the wake:
 Never `--close-run` for a usage limit or a red base: the close tells the Stop hook the run is over,
 and a closed run does not resume.
 
+**A rejected tool call is a park, not a close.** A call answered "no" at a permission prompt, or
+interrupted, with no operator message in the session is not a request for the session back — a
+live run closed with 39 eligible units over a prompt the operator never answered. Do not retry
+that call. Record `node <plugin-tools>/prime.mjs --park "tool call rejected; resumes on operator
+message" --minutes 720`, arm no wake, and end the turn: the operator's next message resumes the
+run, and its fresh prime clears the park. Only the operator's own words close the run.
+
 The last Git action is switching a clean tree to `cfg.baseBranch`. Never end parked on a unit
 branch. If dirty, do not switch; report it.
 

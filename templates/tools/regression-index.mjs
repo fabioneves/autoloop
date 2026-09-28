@@ -33,6 +33,20 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'a-rejected-tool-call-closed-the-run',
+    date: '2026-09-28',
+    symptom: 'A prime call went to a permission prompt that was answered "no" '
+      + 'with no operator message; when a dispatch woke the turn, the Stop hook '
+      + 'offered "a human asked for the session back" as the way out and the '
+      + 'run closed with 39 eligible units queued.',
+    cause: 'The hook named only take-a-unit or close. It now says the request '
+      + 'must come in a message, and that a rejected or interrupted call parks.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'not that request: park instead with' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: "dark.hard[0].includes('asked for the session back in a message')" }),
+    ]),
+  }),
+  Object.freeze({
     id: 'improvised-review-evidence-drew-the-permission-classifier',
     date: '2026-09-23',
     symptom: '9 of 29 permission-classifier blocks on one repository were '

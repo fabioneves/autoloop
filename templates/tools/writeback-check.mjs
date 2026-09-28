@@ -541,9 +541,11 @@ export function checkDarkRun(runIsLive, issues, prs, inFlight = null) {
       `The run is still open and ${eligible.length} eligible unit(s) are queued (${named}${rest}) `
       + '— this turn ended without taking one. A unit that needs a human is a row in the digest, '
       + 'not a reason to stop: take the next unit. If the queue is genuinely not why this run is '
-      + 'stopping — a human asked for the session back, the context needs handing off, an '
-      + 'invocation bound was reached — then close the run on the record instead, and stop: '
-      + '`node tools/agentic/prime.mjs --close-run`',
+      + 'stopping — a human asked for the session back in a message, the context needs handing '
+      + 'off, an invocation bound was reached — then close the run on the record instead, and '
+      + 'stop: `node tools/agentic/prime.mjs --close-run`. A rejected or interrupted tool call is '
+      + 'not that request: park instead with `node tools/agentic/prime.mjs --park "tool call '
+      + 'rejected; resumes on operator message" --minutes 720`',
     ],
     reminders: [],
   };
@@ -810,6 +812,10 @@ function selfTest() {
     dark.hard.length === 1 && dark.reminders.length === 0 &&
     dark.hard[0].includes('#40') && dark.hard[0].includes('#45') &&
     dark.hard[0].includes('2 eligible') && dark.hard[0].includes('--close-run') &&
+    // A live run read a rejected tool call as "a human asked for the session
+    // back" and closed with 39 eligible units queued.
+    dark.hard[0].includes('asked for the session back in a message') &&
+    dark.hard[0].includes('--park "tool call rejected; resumes on operator message" --minutes 720') &&
     !dark.hard[0].includes('#41') && !dark.hard[0].includes('#42') && !dark.hard[0].includes('#43') &&
     !dark.hard[0].includes('#44') && !dark.hard[0].includes('#46') && !dark.hard[0].includes('#47') &&
     !dark.hard[0].includes('#48') &&
