@@ -1354,14 +1354,16 @@ function stepNumber(label) {
 }
 
 function handStepSwap(words) {
-  if (!hasGhScopedAction(words, 'issue', 'edit')) return null;
+  const onIssue = hasGhScopedAction(words, 'issue', 'edit');
+  if (!onIssue && !hasGhScopedAction(words, 'pr', 'edit')) return null;
   const step = optionValues(words, '--add-label')
     .flatMap((value) => value.split(','))
     .map((label) => label.trim().toLowerCase())
     .find((label) => /^loop:0\d-/u.test(label));
   if (!step) return null;
   const edit = words.indexOf('edit');
-  const issue = /^\d+$/u.test(words[edit + 1] ?? '') ? words[edit + 1] : '<N>';
+  // A PR number is not the issue step.mjs swaps, so it is never offered as one.
+  const issue = onIssue && /^\d+$/u.test(words[edit + 1] ?? '') ? words[edit + 1] : '<N>';
   return { issue, step: step.slice('loop:'.length) };
 }
 
@@ -3035,6 +3037,8 @@ function selfTest() {
     ['gh issue edit 298 --remove-label loop:02-plan --add-label loop:03-plan-review', 'main', false, undefined, { stepTool: true }],
     // 0.54: by hand, even a correct swap is refused — step.mjs is the path.
     ['gh issue edit 298 --remove-label loop:02-plan --add-label loop:03-plan-review', 'main', true],
+    // The step labels live on the issue; a PR carrying one is the same hand swap.
+    ['gh pr edit 551 --remove-label loop:04-claim --add-label loop:05-implement', 'feat/gh-356-x', true],
     ['gh issue edit 298 --remove-label loop:09-gate,loop-started', 'main', false],
     ['gh issue edit 298 --remove-label loop-delivered --add-label loop:revising', 'main', false],
     // A swap is add AND remove: the live 04→05 add-only stranded 04-claim, and 06→08 skipped 07.
