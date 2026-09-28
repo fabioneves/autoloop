@@ -348,11 +348,11 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'label-swap-reminder.mjs',
-        anchor: 'A fix answering review findings runs under the CURRENT ',
+        anchor: 'findings is announced as `step.mjs --to 08-fix --round <r>/<cap>` under the current ',
       }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
-        anchor: 'The fix-round case rides the same reminder.',
+        anchor: 'dispatched nine implement-role fix',
       }),
     ]),
   }),
@@ -624,8 +624,8 @@ export const INCIDENTS = Object.freeze([
         anchor: "['gh issue edit 298 --add-label loop:05-implement', 'feat/gh-298-x', true]",
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
-        anchor: 'A swap is one command with both halves',
+        file: 'step.mjs',
+        anchor: 'the predecessor is named even when an earlier swap already lost it',
       }),
     ]),
   }),
@@ -713,12 +713,8 @@ export const INCIDENTS = Object.freeze([
         anchor: '--add-label loop:10-publish 2>/dev/null',
       }),
       Object.freeze({
-        file: 'label-swap-reminder.mjs',
-        anchor: 'carry NO label',
-      }),
-      Object.freeze({
         file: '../../skills/dev/SKILL.md',
-        anchor: 'No label swap opens this step, or step 11',
+        anchor: 'No label moves at this step, or step 11',
       }),
     ]),
   }),
@@ -769,28 +765,6 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
-    id: 'panel-choreography-deleted-for-a-surface-one-flag-away',
-    date: '2026-08-20',
-    symptom: 'v0.49.45 compressed the task-panel choreography out of the dev '
-      + 'skill as "instructions for a surface no current host exposes", '
-      + 'leaving a probe that can print `mirroring` and no instructions for '
-      + 'what to do when it does — a run finding the tools would half-mirror.',
-    cause: 'The removal was diagnosed from the visible roster: Claude Code '
-      + '2.1.233 gated the task tools by MODEL, and the operator restores '
-      + 'them with CLAUDE_CODE_ENABLE_TODO_TOOLS. Absent-for-this-session was '
-      + 'read as gone-for-good, and load-bearing prose was deleted on it.',
-    enforcedBy: Object.freeze([
-      Object.freeze({
-        file: '../../skills/dev/SKILL.md',
-        anchor: 'Everything below applies whenever the probe says',
-      }),
-      Object.freeze({
-        file: 'label-swap-reminder.mjs',
-        anchor: 'demands a task row unconditionally',
-      }),
-    ]),
-  }),
-  Object.freeze({
     id: 'ready-transition-invalidated-the-frozen-delivery-evidence',
     date: '2026-08-20',
     symptom: 'Six consecutive delivered units on a Copilot-review repository '
@@ -826,10 +800,6 @@ export const INCIDENTS = Object.freeze([
       + 'of asking ToolSearch.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
-        anchor: 'the skip is no longer silent',
-      }),
-      Object.freeze({
         file: 'label-swap-reminder.mjs',
         anchor: 'ToolSearch("select:PushNotification")',
       }),
@@ -853,8 +823,8 @@ export const INCIDENTS = Object.freeze([
         anchor: 'A step is announced ONCE, by its ribbon',
       }),
       Object.freeze({
-        file: 'label-swap-reminder.mjs',
-        anchor: 'never reprint a ribbon already announced',
+        file: 'step.mjs',
+        anchor: "'the same step twice swaps nothing and says so'",
       }),
     ]),
   }),
@@ -993,23 +963,6 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({
         file: 'scaffold.mjs',
         anchor: 'a fresh scaffold never creates the retired CI policy, and says so',
-      }),
-    ]),
-  }),
-  Object.freeze({
-    id: 'completed-step-rows-shipped-without-their-cost',
-    date: '2026-07-28',
-    symptom: 'Live panels showed bare completed rows (`∞ #123 — 02 PLAN '
-      + '[OPUS]`) with no `[elapsed] [HH:MM]`, losing the per-step cost '
-      + 'profile the panel is the only surviving record of.',
-    cause: 'The rule shipped in v0.49.21 as prose only. Obeying it required '
-      + 'millisecond arithmetic and a clock read in the same turn as '
-      + 'collecting a result, disposing findings and swapping labels.',
-    enforcedBy: Object.freeze([
-      Object.freeze({ file: 'step-subject.mjs', anchor: 'export function completedSubject(' }),
-      Object.freeze({
-        file: 'step-subject.mjs',
-        anchor: 'The live defect: a bare completed row, now composed rather than recalled.',
       }),
     ]),
   }),

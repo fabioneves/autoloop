@@ -340,8 +340,12 @@ function clock(atMs) {
   return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
 }
 
+// The 🧊 frozen plan is named the same way on every line (operator ask,
+// 2026-09-28). Ice cube, not snowflake: ❄️ carries a variation selector and
+// would break the aligned columns.
 function oneLine(text, limit = 90) {
-  const flat = String(text ?? '').replace(/\s+/gu, ' ').trim();
+  const flat = String(text ?? '').replace(/\s+/gu, ' ').trim()
+    .replace(/(?<!🧊 )\b(frozen plan)\b/giu, '🧊 $1');
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
 }
 
@@ -430,6 +434,10 @@ function selfTest() {
       const line = ribbon({ atMs: at(9, 0), issue: 7, step: '02-plan', model: 'gpt-6-astra', note: 'a\n\nb   c'.padEnd(300, 'x') });
       return !line.includes('\n') && line.includes('a b c') && line.length < 200;
     })()],
+    ['the frozen plan wears its ice cube, once', [
+      ribbon({ atMs: at(9, 0), issue: 7, step: '04-claim', note: 'Frozen plan posted' }),
+      safely(() => renderResumed({ atMs: at(9, 0), issue: 7, what: 'implement read the 🧊 frozen plan' })),
+    ].every((line) => /🧊 (?:F|f)rozen plan/u.test(line) && (line.match(/🧊/gu) ?? []).length === 1)],
     ['an unknown step still renders a plain line, never throws',
       ribbon({ atMs: at(9, 0), issue: 7, step: '99-invented' }).includes('99-invented')],
     ['a resumed line carries the duration from ms',

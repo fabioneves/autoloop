@@ -100,7 +100,7 @@ export const RETIRED_HOST_FILES = Object.freeze(new Map([
 ]));
 // Vendored tools a release deleted. Every tools/agentic copy is template-owned,
 // so a retired one is removed outright, like the non-manual set on a manual repo.
-const RETIRED_TOOL_FILES = Object.freeze(['adapter-contract.mjs']);
+const RETIRED_TOOL_FILES = Object.freeze(['adapter-contract.mjs', 'step-subject.mjs']);
 const RETIRED_HOST_DIRECTORIES = Object.freeze([
   '.codex/agents', '.opencode/agent', '.opencode/plugins', '.codex', '.opencode',
 ]);
