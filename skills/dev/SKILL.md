@@ -1866,7 +1866,8 @@ carry none), marks the retained snapshot stale, records the step, and prints the
 ```
 
 - `--model` is the model the step runs on — the route's model, or the typed result's `model`
-  when it differs. Omit it for a step you run yourself (`⚪ ORCHESTRATOR`). `--fallback` when the
+  when it differs. Omit it for a step you run yourself (`⚪ ORCHESTRATOR`); a dispatched step whose
+  model is unknown shows `⚪ ENGINE`. `--fallback` when the
   result reports the fallback ran.
 - Code review and its fix rounds pass `--round <r>/<cap>`: the cells count rounds against the
   configured cap, so an approaching cap is visible. A fix round is `08-fix` under step 08's label.

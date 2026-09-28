@@ -284,7 +284,7 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
     ...units.map(({ issue, step, model, startedAtMs }) => {
       const [name] = STEPS[step] ?? [step];
-      return `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()} on ${modelChip(model)} · ${minutes(nowMs - startedAtMs)}`;
+      return `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()} on ${modelChip(model, step)} · ${minutes(nowMs - startedAtMs)}`;
     }),
     `└ ${queue}${human} · resumes on results`,
   ].join('\n');
@@ -301,7 +301,7 @@ export function renderRunCard({ nowMs, units, park, snapshot }) {
     ...(snapshot ? [`- retained snapshot ${snapshot.path}, ${minutes(snapshot.ageMs)} old`] : []),
     ...units.map(({ issue, step, model, round, startedAtMs }) => {
       const [name] = STEPS[step] ?? [step];
-      return `- #${issue} at ${step.slice(0, 2)} ${name.toLowerCase()}${round ? ` r${round}` : ''} on ${modelChip(model)} since ${clock(startedAtMs)}`;
+      return `- #${issue} at ${step.slice(0, 2)} ${name.toLowerCase()}${round ? ` r${round}` : ''} on ${modelChip(model, step)} since ${clock(startedAtMs)}`;
     }),
     ...(units.length === 0 ? ['- no unit in flight'] : []),
   ];
@@ -371,8 +371,14 @@ export function shortModel(id) {
   return model.toUpperCase();
 }
 
-export function modelChip(id) {
-  if (id === null || id === undefined || id === '') return '⚪ ORCHESTRATOR';
+// The steps whose work is a dispatch (the dev skill's role table). With no
+// model known, such a step ran the engine's default, never the orchestrator.
+const DISPATCHED = new Set([
+  '02-plan', '03-plan-review', '05-implement', '06-simplify', '07-diff-review', '08-code-review', '08-fix',
+]);
+
+export function modelChip(id, step = null) {
+  if (id === null || id === undefined || id === '') return DISPATCHED.has(step) ? '⚪ ENGINE' : '⚪ ORCHESTRATOR';
   const model = String(id).toLowerCase();
   const dot = MODEL_DOTS.find(([pattern]) => pattern.test(model))?.[1] ?? '⚪';
   return `${dot} ${shortModel(id)}`;
@@ -417,7 +423,7 @@ export function renderRibbon({ atMs, issue, step, round = null, badge = '⏳', m
   const unit = `#${issue}`.padEnd(4);
   try {
     const [name, glyph] = STEPS[step];
-    const chip = modelChip(model);
+    const chip = modelChip(model, step);
     const [dot, ...modelName] = chip.split(' ');
     return `${clock(atMs)} ${unit} ${badge} ${glyph} ${name.padEnd(12)} ${progress(step, round).padEnd(17)}  `
       + `${dot} ${modelName.join(' ').padEnd(12)}${fallback ? '↪' : ' '} ${oneLine(note)}`.trimEnd();
@@ -451,6 +457,13 @@ function selfTest() {
       modelChip('claude-fable-5-1'), modelChip('claude-opus-5-5'), modelChip('gpt-6-astra'),
       modelChip('claude-sonnet-5'), modelChip(null), modelChip('mystery'),
     ].join('|')) === '🟣 FABLE 5.1|🟠 OPUS 5.5|🟢 ASTRA 6|🔵 SONNET 5|⚪ ORCHESTRATOR|⚪ MYSTERY'],
+    // A dispatch with no pinned model runs the engine's default, not the
+    // orchestrator; only the steps the orchestrator runs itself say so.
+    ['a dispatched step with no known model is the engine, not the orchestrator', safely(() => [
+      modelChip(null, '05-implement'), modelChip(null, '08-fix'), modelChip(null, '02-plan'),
+      modelChip(null, '10-publish'), modelChip(null, '01-premise'),
+      ribbon({ atMs: at(9, 40), issue: 350, step: '06-simplify' }).includes('⚪ ENGINE'),
+    ].join('|')) === '⚪ ENGINE|⚪ ENGINE|⚪ ENGINE|⚪ ORCHESTRATOR|⚪ ORCHESTRATOR|true'],
     ['a step ribbon has fixed columns: time, unit, badge, step, bar, model, note',
       ribbon({ atMs: at(9, 40), issue: 350, step: '05-implement', model: 'claude-opus-5-5', note: '11 files planned' })
         === '09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      11 files planned'],
