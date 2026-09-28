@@ -38,6 +38,7 @@ import {
   policyAttestationForRecord,
 } from './publish-verdict.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
+import { extractConfig, validateProjectConfig } from './config-contract.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/u;
 const HASH_RE = /^[0-9a-f]{64}$/u;
@@ -513,25 +514,9 @@ export function liveIssueMatchesIntent(issue, intent) {
   return issueBodyMatches(intent.issueBodyHash, issue.body ?? '');
 }
 
-function readOperationalState(request, root) {
-  const repository = repositoryTarget(root);
-  const issue = api(
-    repository,
-    `repos/${repository.owner}/${repository.repo}/issues/${request.intent.issue}`,
-  );
-  if (!liveIssueMatchesIntent(issue, request.intent)) {
-    throw new Error('live issue does not match the lifecycle intent');
-  }
-  const viewer = api(repository, 'user')?.login;
-  if (typeof viewer !== 'string' || viewer.length === 0) {
-    throw new Error('authenticated GitHub viewer is unavailable');
-  }
-  const rawComments = paginated(
-    repository,
-    `repos/${repository.owner}/${repository.repo}/issues/${request.intent.issue}/comments`,
-  );
-  const comments = rawComments.map(commentValue);
-  const roleOf = memoizedRoles((login) => permission(repository, login));
+// The trusted marker chain on an issue: authorized authors only, one root
+// author for the whole chain, and a malformed authoritative marker is fatal.
+function authoritativeMarkerChain(comments, roleOf, viewer, issueNumber, lifecycleCommentId) {
   const markerCandidates = comments
     .filter((comment) => comment.body.includes('<!-- autoloop-lifecycle-v'))
     .map((comment) => ({
@@ -543,7 +528,7 @@ function readOperationalState(request, root) {
       authorizedRole(role, comment.author, viewer)
       && (() => {
         const parsed = parseLifecycleComment(comment.body);
-        return !parsed.ok || parsed.marker.issue !== request.intent.issue;
+        return !parsed.ok || parsed.marker.issue !== issueNumber;
       })(),
   );
   if (malformedAuthoritative) {
@@ -554,7 +539,7 @@ function readOperationalState(request, root) {
   );
   let markerChain = resolveLifecycleCommentChain(
     authorizedMarkerCandidates.map(({ comment }) => lifecycleChainInput(comment)),
-    request.lifecycleCommentId,
+    lifecycleCommentId,
   );
   if (markerChain !== null) {
     const rootAuthor = authorizedMarkerCandidates.find(
@@ -576,7 +561,7 @@ function readOperationalState(request, root) {
       authorizedMarkerCandidates
         .filter(({ comment }) => comment.author === rootAuthor)
         .map(({ comment }) => lifecycleChainInput(comment)),
-      request.lifecycleCommentId,
+      lifecycleCommentId,
     );
   }
   const markerRootEntry = markerChain === null
@@ -588,6 +573,92 @@ function readOperationalState(request, root) {
   if (markerChain !== null && (!markerRootEntry || !markerEntry)) {
     throw new Error('lifecycle comment chain readback is incomplete');
   }
+  return { markerChain, markerRootEntry, markerEntry };
+}
+
+const INTENT_KEYS = Object.freeze([
+  'issue', 'issueBodyHash', 'planHash', 'branch', 'plannedBaseOid',
+  'selector', 'runIntentHash', 'intentSource', 'mergePolicy',
+]);
+
+// Pure: the reconcile request an issue's own facts determine. Nothing is
+// inferred — a title and PR body exist only once the draft PR does.
+export function issueReconcileRequest({ issueNumber, comments, roleOf, viewer, pullRequest, baseBranch }) {
+  const { markerChain, markerRootEntry } = authoritativeMarkerChain(
+    comments, roleOf, viewer, issueNumber, null,
+  );
+  if (markerChain === null) {
+    throw new Error(`issue #${issueNumber} has no authoritative lifecycle marker`);
+  }
+  const marker = markerChain.tip.marker;
+  if (!Number.isSafeInteger(marker.pr)) {
+    throw new Error(`issue #${issueNumber}'s marker has no pull request yet; recover it with `
+      + '--reconcile-json and the frozen plan\'s title and PR body');
+  }
+  if (pullRequest?.number !== marker.pr) {
+    throw new Error(`issue #${issueNumber}'s pull request #${marker.pr} could not be read`);
+  }
+  const plans = comments.filter((comment) => sha256(comment.body) === marker.planHash
+    && authorizedRole(roleOf(comment.author), comment.author, viewer));
+  if (plans.length === 0) throw new Error(`issue #${issueNumber} has no frozen plan comment`);
+  if (plans.length > 1) throw new Error('frozen plan comment is ambiguous');
+  return {
+    schemaVersion: 1,
+    intent: Object.fromEntries(INTENT_KEYS.map((key) => [key, marker[key]])),
+    baseBranch,
+    lifecycleCommentId: markerRootEntry.id,
+    plan: { body: plans[0].body, title: pullRequest.title, prBody: pullRequest.body ?? '' },
+    premergeRecordDraft: null,
+  };
+}
+
+function reconcileIssueRequest(root, issueNumber) {
+  const config = extractConfig(readFileSync(join(root, 'docs', 'agentic', 'STATE.md'), 'utf8'));
+  const configErrors = validateProjectConfig(config);
+  if (configErrors.length > 0) throw new Error(`project config is invalid: ${configErrors.join('; ')}`);
+  const repository = repositoryTarget(root);
+  const viewer = api(repository, 'user')?.login;
+  const comments = paginated(
+    repository,
+    `repos/${repository.owner}/${repository.repo}/issues/${issueNumber}/comments`,
+  ).map(commentValue);
+  const roleOf = memoizedRoles((login) => permission(repository, login));
+  const tipPr = authoritativeMarkerChain(comments, roleOf, viewer, issueNumber, null)
+    .markerChain?.tip.marker.pr;
+  const pullRequest = Number.isSafeInteger(tipPr)
+    ? apiOptional(repository, `repos/${repository.owner}/${repository.repo}/pulls/${tipPr}`)
+    : null;
+  return issueReconcileRequest({
+    issueNumber, comments, roleOf, viewer, pullRequest, baseBranch: config.baseBranch,
+  });
+}
+
+function readOperationalState(request, root) {
+  const repository = repositoryTarget(root);
+  const issue = api(
+    repository,
+    `repos/${repository.owner}/${repository.repo}/issues/${request.intent.issue}`,
+  );
+  if (!liveIssueMatchesIntent(issue, request.intent)) {
+    throw new Error('live issue does not match the lifecycle intent');
+  }
+  const viewer = api(repository, 'user')?.login;
+  if (typeof viewer !== 'string' || viewer.length === 0) {
+    throw new Error('authenticated GitHub viewer is unavailable');
+  }
+  const rawComments = paginated(
+    repository,
+    `repos/${repository.owner}/${repository.repo}/issues/${request.intent.issue}/comments`,
+  );
+  const comments = rawComments.map(commentValue);
+  const roleOf = memoizedRoles((login) => permission(repository, login));
+  const { markerChain, markerRootEntry, markerEntry } = authoritativeMarkerChain(
+    comments,
+    roleOf,
+    viewer,
+    request.intent.issue,
+    request.lifecycleCommentId,
+  );
   const marker = markerChain?.tip.marker ?? null;
   const localClaim = findClaimCommit(
     root,
@@ -1607,6 +1678,41 @@ function selfTest() {
       mergedMarker = value;
     },
   };
+  // The first 0.53.0 run spent ~100k tokens rebuilding 33 requests by hand.
+  const recoveryPlan = 'frozen plan for recovery';
+  const recoveryIntent = { ...fakeIntent(), planHash: sha256(recoveryPlan) };
+  const recoveryRoot = { v: 1, ...recoveryIntent, epoch: 1, phase: 'intent-recorded' };
+  const recoveryRootBody = serializeLifecycleMarker(recoveryRoot);
+  const recoveryComment = (id, author, body) => ({ id, restId: 1, author, body, neverEdited: true });
+  const recoveryTip = recoveryComment('IC_tip', 'maint', serializeLifecycleSuccessor(
+    { ...recoveryRoot, phase: 'draft-pr', claimCommit: '1'.repeat(40), pr: 12, planCommentId: 'IC_plan' },
+    { v: 1, rootCommentId: 'IC_root', previousCommentId: 'IC_root', previousBodyHash: sha256(recoveryRootBody), sequence: 1 },
+  ));
+  const recoveryComments = [
+    recoveryComment('IC_root', 'maint', recoveryRootBody),
+    recoveryComment('IC_plan', 'maint', recoveryPlan),
+    recoveryTip,
+    recoveryComment('IC_stranger_marker', 'stranger', serializeLifecycleMarker({ ...recoveryRoot, pr: 99 })),
+    recoveryComment('IC_stranger_plan', 'stranger', recoveryPlan),
+  ];
+  const recoveryFacts = (overrides = {}) => ({
+    issueNumber: 7,
+    comments: recoveryComments,
+    roleOf: (login) => (login === 'maint' ? 'maintain' : 'read'),
+    viewer: 'bot',
+    pullRequest: { number: 12, title: 'Recovery', body: 'Closes #7' },
+    baseBranch: 'main',
+    ...overrides,
+  });
+  const recoveryRefusal = (overrides) => {
+    try {
+      issueReconcileRequest(recoveryFacts(overrides));
+      return null;
+    } catch (error) {
+      return error.message;
+    }
+  };
+  const issueRequest = issueReconcileRequest(recoveryFacts());
   const mergedRecovery = driveLifecycle(mergedRequest, {
     adapters: mergedAdapters,
   });
@@ -1841,6 +1947,37 @@ function selfTest() {
         && unboundSecond.code === 'LIFECYCLE_TERMINAL_REFUSED'
         && unboundWrites === 1,
     ],
+    [
+      'an issue\'s own marker, frozen plan and pull request build its reconcile request',
+      reconcileRequestGaps(issueRequest).length === 0
+        && issueRequest.lifecycleCommentId === 'IC_root'
+        && stableJson(issueRequest.intent) === stableJson(recoveryIntent)
+        && issueRequest.plan.body === recoveryPlan
+        && issueRequest.plan.title === 'Recovery'
+        && issueRequest.plan.prBody === 'Closes #7'
+        && issueRequest.baseBranch === 'main'
+        && issueRequest.premergeRecordDraft === null,
+    ],
+    [
+      'a request is refused, never guessed, without a marker, a single plan, or a pull request',
+      /no authoritative lifecycle marker/u.test(recoveryRefusal({ comments: recoveryComments.slice(1, 2) }) ?? '')
+        && /no frozen plan comment/u.test(recoveryRefusal({
+          comments: recoveryComments.filter(({ id }) => id !== 'IC_plan' && id !== 'IC_stranger_plan'),
+        }) ?? '')
+        && /ambiguous/u.test(recoveryRefusal({
+          comments: [...recoveryComments, recoveryComment('IC_plan_2', 'maint', recoveryPlan)],
+        }) ?? '')
+        && /--reconcile-json/u.test(recoveryRefusal({ comments: recoveryComments.filter(({ id }) => id !== 'IC_tip') }) ?? '')
+        && /pull request #12/u.test(recoveryRefusal({ pullRequest: null }) ?? ''),
+    ],
+    [
+      '--reconcile-issue takes exactly one positive issue number',
+      cliMode(['--reconcile-issue', '12']) === '--reconcile-issue'
+        && ['0', 'x', '12x', '-3', '99999999999999999999'].every((value) =>
+          cliMode(['--reconcile-issue', value]) === null)
+        && cliMode(['--reconcile-issue']) === null
+        && cliMode(['--reconcile-issue', '12', '--extra']) === null,
+    ],
     // One read on LFE paged all 210+ PRs (3 calls, 2.6 s) to find one branch's.
     [
       'the branch pull request is looked up by head, never by paging every PR',
@@ -1961,12 +2098,18 @@ function selfTest() {
 }
 
 const CLI_MODES = Object.freeze(['--reconcile-json', '--begin-revision-json']);
+const ISSUE_NUMBER_RE = /^[1-9][0-9]{0,15}$/u;
 
 // The mode is validated BEFORE stdin is read. It used to be validated after, so
 // an unrecognised flag fell through to `JSON.parse` on an empty stdin and
 // reported "Unexpected end of JSON input" — a data error for what is actually a
 // usage error. A live session ran `--help` and was told its JSON was corrupt.
 export function cliMode(args) {
+  if (args.length === 2 && args[0] === '--reconcile-issue') {
+    return ISSUE_NUMBER_RE.test(args[1]) && Number.isSafeInteger(Number(args[1]))
+      ? '--reconcile-issue'
+      : null;
+  }
   if (args.length !== 1) return null;
   return CLI_MODES.includes(args[0]) ? args[0] : null;
 }
@@ -1986,8 +2129,14 @@ function main() {
   }
   if (cliMode(args) === null) {
     throw new Error(
-      `expected one lifecycle driver mode: ${CLI_MODES.join(' | ')} | --example-request | --self-test`,
+      `expected one lifecycle driver mode: ${CLI_MODES.join(' | ')} | --reconcile-issue <N> `
+      + '| --example-request | --self-test',
     );
+  }
+  if (args[0] === '--reconcile-issue') {
+    const request = reconcileIssueRequest(process.cwd(), Number(args[1]));
+    process.stdout.write(`${JSON.stringify(driveLifecycle(request))}\n`);
+    return;
   }
   const input = readCliInput();
   if (args[0] === '--reconcile-json') {

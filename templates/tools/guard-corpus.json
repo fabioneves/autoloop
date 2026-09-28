@@ -171,6 +171,12 @@
    "why": "the native watcher wrapper"
   },
   {
+   "cmd": "node tools/agentic/lifecycle-driver.mjs --reconcile-issue 219",
+   "branch": "main",
+   "expect": "allow",
+   "why": "0.53.1: one bare call recovers a surfaced marker; the first 0.53.0 run hand-built 33 requests"
+  },
+  {
    "cmd": "node tools/agentic/lifecycle-driver.mjs --reconcile-json < /tmp/request.json",
    "branch": "feat/gh-1-x",
    "expect": "allow",
