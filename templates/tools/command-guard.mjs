@@ -2494,22 +2494,39 @@ export function runMarkerDirectory(cwd = process.cwd()) {
   return isAbsolute(path) ? path : resolve(cwd, path);
 }
 
-export function ancestorPids(limit = 64) {
+function procEntry(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+    const name = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
+    return Number.isSafeInteger(parent) ? [parent, name] : null;
+  } catch {
+    return null;
+  }
+}
+
+// A session's ancestry ends at its own Claude Code process. Above it sit the
+// shell, the terminal multiplexer and the init chain that every other session
+// on the machine shares; recording those let any session in the repo pass for
+// the loop's own run. With no `claude` ancestor (another host) the whole chain
+// is kept, as before.
+export function ancestorChain(start, readEntry = procEntry, limit = 64) {
   const pids = new Set();
-  let pid = process.ppid;
+  let pid = start;
   for (let depth = 0; depth < limit && pid > 1; depth += 1) {
     pids.add(pid);
-    let parent;
-    try {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-      parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-    } catch {
-      return pids;
-    }
+    const entry = readEntry(pid);
+    if (entry === null) return pids;
+    const [parent, name] = entry;
+    if (name === 'claude') return pids;
     if (!Number.isSafeInteger(parent) || parent <= 0) return pids;
     pid = parent;
   }
   return pids;
+}
+
+export function ancestorPids(limit = 64) {
+  return ancestorChain(process.ppid, procEntry, limit);
 }
 
 function processAlive(pid) {
@@ -3612,6 +3629,24 @@ function selfTest() {
         writeFileSync(marker, JSON.stringify({ version: 1, pids: [process.ppid], closedAt: null }));
         if (process.platform === 'linux' && loopRunIsLive(scratch) !== false) {
           console.error('FAIL [an unrecognised closedAt counts as closed]');
+          ok = false;
+        }
+        // LFE, 2026-09-28: markers carried the tmux server's pid, so every
+        // session under that server read as the loop's own run in that repo.
+        const tree = {
+          110: [95, 'node'], 95: [80, 'bash'], 80: [70, 'claude'], 70: [60, 'zsh'], 60: [1, 'tmux: server'],
+          210: [180, 'node'], 180: [170, 'claude'], 170: [60, 'zsh'],
+          310: [305, 'node'], 305: [60, 'bash'],
+        };
+        const chain = (start) => {
+          try {
+            return [...ancestorChain(start, (pid) => tree[pid] ?? null)].join(',');
+          } catch (error) {
+            return `THREW ${error.message}`;
+          }
+        };
+        if (chain(95) !== '95,80' || chain(180) !== '180' || chain(305) !== '305,60') {
+          console.error(`FAIL [an ancestry stops at its own claude process]: ${chain(95)} | ${chain(180)} | ${chain(305)}`);
           ok = false;
         }
       }
