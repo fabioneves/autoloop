@@ -1562,13 +1562,10 @@ export function decide(pr, config = engineConfig()) {
   const pathBFiles = entries.length > 0 && paths.length > 0 && paths.every(pathBAllowed);
   // No size gate. Path B is defined by WHAT changed, never by how much: the
   // reversibility of a docs-only diff does not depend on its line count, and the
-  // rest of the system already refuses to treat a line budget as a control —
-  // `autoloop:dev` NOTES a slice overage on the pull request and ships anyway,
-  // because "by the time lines are countable the work is done and blocking spends
-  // a human decision to learn nothing" (autoloop:shape). A cap the run declines to
-  // enforce, re-applied at the merge, is that same spent decision at the moment it
-  // costs the most: the work exists, it is reviewed and green, and the number
-  // changes nothing about whether reverting it is cheap.
+  // loop has no line budget anywhere (retired with schema 0.28.0). A size cap
+  // applied only at the merge would be a decision spent at the moment it costs
+  // the most: the work exists, it is reviewed and green, and the number changes
+  // nothing about whether reverting it is cheap.
   const pathB = pathBFiles && pr.filePaginationComplete === true && !malformed && pr.changedFiles === entries.length;
   // 'all-green' authorizes any complete, well-formed changed-file set; every other
   // check in this function (protected paths, hard-block labels, evidence, threads,

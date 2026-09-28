@@ -10,7 +10,7 @@ Adversarial review of the simplified diff. Your job is to find the case the auth
 - Check each invariant jointly, not only sampled cases.
 - Follow the reading plan below when one is given: whole files the unit created, diff plus cited ranges for large existing files.
 - Writer claims are evidence to check, not a reason to approve.
-- Do not reopen a settled human ruling; slice budgets are notes, never blockers.
+- Do not reopen a settled human ruling.
 - Cite file:line and a concrete scenario for every finding.
 - Distinguish what you inspected from what was executed.
 - If a read is denied, report the gap, never work around it.

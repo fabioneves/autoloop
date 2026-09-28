@@ -35,9 +35,9 @@ Doctor mode replaces the ribbon with its own single line: `∞ doctor ─ <audit
 Setup is idempotent and has four modes:
 
 - Fresh install: `docs/agentic/STATE.md` is absent.
-- Migration: STATE contains a migratable schema older than `0.27.0` (`0.23.0`, `0.24.0`,
-  `0.25.0`, or `0.26.0`).
-- Reconfigure: STATE contains schema `0.27.0`.
+- Migration: STATE contains a migratable schema older than `0.28.0` (`0.23.0`, `0.24.0`,
+  `0.25.0`, `0.26.0`, or `0.27.0`).
+- Reconfigure: STATE contains schema `0.28.0`.
 - Doctor: the invocation contains `doctor`; read-only and never writes.
 
 Autoloop runs on Claude Code only. `tools/agentic/dispatch.mjs` spawns `claude -p` directly for
@@ -100,11 +100,11 @@ older installed contract to validate its own migration.
 
 ## Project configuration
 
-Schema `0.27.0` stores repository policy, never session intent:
+Schema `0.28.0` stores repository policy, never session intent:
 
 ```json autoloop-config
 {
-  "version": "0.27.0",
+  "version": "0.28.0",
   "baseBranch": "main",
   "gate": {
     "command": "npm test",
@@ -113,21 +113,16 @@ Schema `0.27.0` stores repository policy, never session intent:
   },
   "merge": { "policy": "manual" },
   "tracker": { "provider": "none" },
-  "review": { "checklistPath": "docs/agentic/checklist.md" },
-  "caps": {
-    "gateRetriesPerUnit": 2,
-    "codeReviewRoundsPerUnit": 20,
-    "sliceMaxLines": 700,
-    "sliceMaxFiles": 10
-  }
+  "review": { "checklistPath": "docs/agentic/checklist.md" }
 }
 ```
 
-There are no other keys. `runtime`, `engine`, `adapterOptions`, and `measurement` were retired
-with the machinery they configured; the schema rejects them outright.
+There are no other keys. `runtime`, `engine`, `adapterOptions`, `measurement`, and `caps` were
+retired with the machinery they configured; the schema rejects them outright. The loop has no
+configured limits: review convergence is a fixed 20-round bound inside the plugin.
 
 Validate configuration only through `config-contract.mjs`. Unknown keys, invalid enums, unsafe
-paths/model identifiers, commands with control characters, or out-of-range caps fail. Doctor also
+paths/model identifiers, or commands with control characters fail. Doctor also
 checks that each configured command's executable is discoverable — `config-contract.mjs --resolve`,
 which examines the first word against PATH and executes nothing — and that the checklist exists at
 the audited base ref.
@@ -155,6 +150,9 @@ From `0.23.0` it first adds the fields that version predates — `gate.quickComm
 - Report dormant or unmappable tuning rather than activating it.
 - For Jira, ask for and confirm `epicKey` and Atlassian `cloudId`; pass them as
   `migrationFacts.tracker`. Missing facts are `MIGRATION_INPUT_REQUIRED`, not values to infer.
+- From `0.27.0`, drop the `caps` block (`gateRetriesPerUnit`, `codeReviewRoundsPerUnit`,
+  `sliceMaxLines`, `sliceMaxFiles`). A pure removal: the warnings name each key, and nothing
+  replaces them — there is no limit left to ask about.
 - From `0.25.0`, drop `adapterOptions` and `measurement`. Both are pure removals: the migration
   names each removed key in its warnings and carries every remaining value across unchanged,
   including `merge.policy` and both acknowledgements.
@@ -176,8 +174,8 @@ time. Global defaults may pre-fill answers but never skip confirmation.
 Scale the interview to the mode. A fresh install walks every item. Migration and reconfigure
 collapse to one summary table — every current value beside its default or migrated value — and a
 single accept-all confirmation, expanding an item into its own question only where it carries a
-real decision: drift, **the gate**, **every `needs-human-review` STATE section**, a cap the human
-may want to change, or the merge policy. Fewer questions, never fewer disclosures: everything still
+real decision: drift, **the gate**, **every `needs-human-review` STATE section**, or the merge
+policy. Fewer questions, never fewer disclosures: everything still
 appears in the summary and the visible diff.
 
 An accept-all that silently swallows a decision is not a shorter interview, it is a missing one —
@@ -199,11 +197,10 @@ Ask only:
    **Ask in EVERY mode, including reconfigure and migration, and show the configured commands
    verbatim beside what they resolve to.** The gate is the one setting that decides whether code
    ships, and the only one whose value is an executable that can rot without changing: a script
-   the repository deleted, a compose service that got renamed, a package script that moved. A cap
-   preserved across a migration is merely unexamined; a gate command preserved across a migration
-   can be pointing at nothing, and the run finds out at step 09 on a converged artifact. Same
-   reasoning the caps item gives — a preserved value the human never saw is indistinguishable from
-   a silent one — applied to the value where being wrong costs the most.
+   the repository deleted, a compose service that got renamed, a package script that moved. A gate
+   command preserved across a migration can be pointing at nothing, and the run finds out at step
+   09 on a converged artifact. A preserved value the human never saw is indistinguishable from a
+   silent one, and this is the value where being wrong costs the most.
 
    State whether each configured command **resolves right now** — with the tool, never a shell probe:
 
@@ -220,14 +217,9 @@ Ask only:
    gap for Setup to fill.
 4. Tracker: none or Jira; Jira requires epic key and cloud ID.
 5. Review checklist path/content.
-6. Numeric caps. Show every cap with its current value and the scaffold default side by side, and
-   offer to change any of them; accepting all is one keystroke. Call out `sliceMaxLines` and
-   `codeReviewRoundsPerUnit` explicitly — they set slice size and review convergence, so they shape
-   cost and cycle time more than the rest. A migrated repository keeps its own values, which is why
-   they must be shown: a preserved value the human never saw is indistinguishable from a silent one.
-7. Extra human-authorization/protected paths.
-8. Optional agent-skills dependency.
-9. Merge policy. Default `manual`. Show the current policy in every interview and offer to change
+6. Extra human-authorization/protected paths.
+7. Optional agent-skills dependency.
+8. Merge policy. Default `manual`. Show the current policy in every interview and offer to change
     it — migration history is not a reliable trigger, because an earlier migration may already have
     reset a non-manual policy before this question existed. When the repository is on, or is
     migrating from, `ratified` or `auto`, ask explicitly whether to restore it rather than
@@ -288,12 +280,6 @@ Global defaults contain only non-project preferences:
 {
   "merge": { "policy": "manual" },
   "tracker": { "provider": "none" },
-  "caps": {
-    "gateRetriesPerUnit": 2,
-    "codeReviewRoundsPerUnit": 20,
-    "sliceMaxLines": 700,
-    "sliceMaxFiles": 10
-  },
   "hooks": true
 }
 ```
@@ -443,8 +429,7 @@ when nothing had failed. If you want a pass/fail signal, run `verify.mjs --insta
 own and read ITS status.
 
 A scan or audit section that fails is incomplete, not an empty success. Follow it with one targeted
-check. `docs/agentic/LESSONS.md` over 6000 bytes and ARCH over 8000 bytes are compaction NOTEs,
-not failures; the reconcile battery raises both as warnings naming the curation rule.
+check.
 
 ### No improvised inspection
 
