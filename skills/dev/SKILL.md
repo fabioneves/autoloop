@@ -600,6 +600,12 @@ failure. Waiting itself has one sanctioned shape per situation:
   readable), and the LAST
   thing before the turn ends is the parked block naming what it waits for, with the clock:
 
+  **A wait on anything but a dispatch is recorded before the block prints.** The Stop hook
+  recognises a dispatch process, a live stream and a recorded park. A background subagent or
+  shell is none of these, so first run `node <plugin-tools>/prime.mjs --park "<what it waits on>"
+  --minutes <N>` in the same turn. Two live runs printed the parked block over a subagent without
+  it, and each turn was hard-blocked as dark.
+
   **The park push is not step 10, and step 10 does not own the push.** A live run parked at step 5
   with EIGHT local commits, reasoning "the push happens at step 10, per the flow" — the same
   failure as the four-commit one above, re-derived from the step list rather than from this rule.
