@@ -480,6 +480,10 @@ export function runInFlightEvidence(prs, streamAgeMs, nowMs) {
   return null;
 }
 
+// Every open issue, not the most recently updated page: the dark-run count and
+// its dependency check both read this list. Ten gh pages, the scan's own bound.
+const OPEN_ISSUES_QUERY = 'issue list --state open --json number,labels,body --limit 1000';
+
 /** Pure: a live run ending its turn while the queue still holds work it could take.
  *
  *  Eligibility is deliberately narrower than the loop's own selection rule. A
@@ -815,6 +819,9 @@ function selfTest() {
     // A live run read a rejected tool call as "a human asked for the session
     // back" and closed with 39 eligible units queued.
     dark.hard[0].includes('asked for the session back in a message') &&
+    // LFE has 139 open issues; a 100-issue page counted 39 eligible units
+    // against prime's 59 and read every dependency past it as closed.
+    OPEN_ISSUES_QUERY.includes('--limit 1000') &&
     dark.hard[0].includes('--park "tool call rejected; resumes on operator message" --minutes 720') &&
     !dark.hard[0].includes('#41') && !dark.hard[0].includes('#42') && !dark.hard[0].includes('#43') &&
     !dark.hard[0].includes('#44') && !dark.hard[0].includes('#46') && !dark.hard[0].includes('#47') &&
@@ -870,7 +877,7 @@ function main() {
   }
 
   const merged = ghJson('pr list --state merged --json number,headRefName,body --limit 20');
-  const openIssues = ghJson('issue list --state open --json number,labels,body --limit 100');
+  const openIssues = ghJson(OPEN_ISSUES_QUERY);
 
   const { hard, reminders } = checkPrs(prs);
   const nowMs = Date.now();
