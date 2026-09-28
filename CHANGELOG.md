@@ -19,6 +19,12 @@ and each driver call took about 37 s.
 
 ### Changed
 
+- **A dispatch pane you can read.** Tool calls render as short verbs: `read <path> :range`,
+  `grep /pattern/ in <path>`, `$ command`. Paths are shown relative to whichever git checkout
+  holds them, and tool-result bodies are dropped (errors still show). The pane announces the
+  verdict and closes with duration, turns and cost.
+  - `dispatch-render.mjs --follow <live-file>` shows the same stream at full size in any
+    terminal. The dispatch pane prints that command first.
 - **Markers of closed issues no longer hold up selection.** `prime --json` and
   `snapshot-contract --summary` split surfaced markers into
   `markers: {gating, deferred}`.
