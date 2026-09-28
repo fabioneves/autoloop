@@ -65,9 +65,12 @@ node <plugin-tools>/prime.mjs --json
 ```
 
 The typed summary is
-`{ok,version,repository,checkout,config,base,runMarker,waits,timings,snapshotPath,snapshotBytes,sections}`:
+`{ok,version,repository,checkout,config,base,runMarker,waits,timings,snapshotPath,snapshotBytes,eligible,sections}`:
 
 - `checkout` — root, repository fingerprint, branch, HEAD, and whether the tree is clean.
+- `eligible` — the queue issues selection may take, in issue order: the rule under "Queue and
+  trust", computed from the snapshot. `null` when selection evidence is incomplete or the snapshot
+  was invalidated — re-prime before choosing.
 - `config` — the five decision fields (`version`, `baseBranch`, `mergePolicy`, `gateCommand`,
   `checklistPath`) plus `projectConfig`, the whole validated config, and `fingerprint`, its
   canonical SHA-256. Those last two are the review contract's `projectConfig` and
@@ -548,7 +551,7 @@ it waits is not.
 
 **Overlap (depth one).** Any background dispatch is the trigger — not a named list of steps,
 which goes stale the moment a role is added. While a dispatch is in flight, stage the NEXT
-eligible issue through its read-only steps 1–3: premise-check and plan against `origin/<base>`,
+issue from the current `eligible` through its read-only steps 1–3: premise-check and plan against `origin/<base>`,
 then its plan-review dispatch. Read the committed tree (`git show`, `git grep`) and never the
 working tree, which the in-flight unit's writer owns.
 
@@ -885,7 +888,8 @@ pushes, and lifecycle writes remain serialized.
 ## Queue and trust
 
 Eligible work is an open issue with `loop-ready` (or a loop repair, below), a complete provenance
-section, and no open dependency:
+section, and no open dependency. Prime's `eligible` is this rule applied — select and stage only
+from it, never from a hand-derived reading of the queue:
 
 - the label event must pre-exist this run, and the command guard forbids every loop/orchestrator/
   dispatch path from applying, creating, or renaming `loop-ready`;
@@ -940,7 +944,7 @@ Maintenance uses the full workflow. STATE is protected; ARCH remains ordinary ma
 
 Invalidate/refetch queue sections affected by Pitcrew. A unit prime printed as `resumed:` goes
 first — a human answered its block, and it is the work they are waiting on. Otherwise choose
-highest priority, then oldest.
+from the current summary's `eligible`: highest priority, then oldest.
 Record issue number, body hash, label event, dependencies, planned base OID, and selection
 snapshot fingerprint.
 

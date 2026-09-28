@@ -43,7 +43,11 @@ import {
 import { extractConfig, validateProjectConfig } from './config-contract.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
-import { SNAPSHOT_SECTIONS, writeStdoutSync } from './snapshot-contract.mjs';
+import {
+  SNAPSHOT_SECTIONS,
+  eligibleIssueNumbers,
+  writeStdoutSync,
+} from './snapshot-contract.mjs';
 import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 
 // Bumped by every release together with the other version literals; the
@@ -386,6 +390,7 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
     ...compact,
     snapshotPath,
     snapshotBytes: Buffer.byteLength(bytes, 'utf8'),
+    eligible: eligibleIssueNumbers(snapshot),
     sections: sectionSummary(snapshot),
   };
 }
@@ -762,6 +767,7 @@ function selfTest() {
     check(
       'stdout stays decision-sized while the persisted snapshot keeps every byte',
       persisted.snapshot === undefined
+      && persisted.eligible === null
       && persisted.sections.queue.items === 60
       && persisted.sections.queue.complete === true
       && persisted.sections.openIssues.error.code === 'SCAN_FAILED'

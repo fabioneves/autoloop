@@ -30,7 +30,7 @@ node <plugin-tools>/prime.mjs --json
 
 It validates ProjectConfig, reports the checkout against the configured base, runs one `scan.mjs`,
 persists the snapshot, and prints the decision-sized summary
-`{ok,version,repository,checkout,config,base,runMarker,timings,snapshotPath,snapshotBytes,sections}`.
+`{ok,version,repository,checkout,config,base,runMarker,timings,snapshotPath,snapshotBytes,eligible,sections}`.
 It fails closed with `{ok:false, step, error}`; do not continue past a failure.
 
 Then, in order:
