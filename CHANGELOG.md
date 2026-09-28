@@ -17,6 +17,11 @@ Follow-ups from the independent review of 0.55.0, which finished after the merge
   that copy and refused it. `currentProjectConfig` reads a migratable config as the current schema,
   migrating in memory. The base's migrated STATE is the authority, and the newest hops only remove
   keys.
+- **Setup no longer locks itself out mid-reconcile.** `hook-relay` handed every hook to the base
+  branch's copy whenever the local copy differed, assuming the base is always newer. During setup
+  the working tree (or its delivery branch) is the newer one. So the relay ran the old guard
+  against the migrated STATE, and every command was refused ("version: must equal 0.27.0"). It now
+  relays only when the base has changed its tools since the branch forked.
 - **Migrating to `0.28.0` never fails on a limit value.** The hop deletes the `caps` block, so an
   out-of-range cap no longer blocks it. The rest of the config is still validated.
 - The host `LOOP.md` template, the setup skill and dispatch comments no longer mention size budgets

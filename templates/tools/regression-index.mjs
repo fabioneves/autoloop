@@ -33,6 +33,27 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'hook-relay-ran-the-old-guard-during-setup-reconcile',
+    date: '2026-09-28',
+    symptom: 'LFE: setup migrated STATE to 0.28.0 and reconciled tools/agentic '
+      + 'to 0.55.0 in the working tree, then every Bash command was refused: '
+      + '"invalid ProjectConfig: caps: is required; version: must equal 0.27.0".',
+    cause: 'hook-relay delegated whenever the local copy differed from the '
+      + 'base copy, assuming the base is always newer. During a reconcile the '
+      + 'working tree is the newer one, so the relay ran origin/main\'s 0.53.0 '
+      + 'guard against the migrated STATE.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: 'hook-relay.mjs',
+        anchor: "'an uncommitted reconcile on the base runs its own newer copy'",
+      }),
+      Object.freeze({
+        file: 'hook-relay.mjs',
+        anchor: "'a committed reconcile branch the base has not overtaken runs its own copy'",
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'setup-refused-by-its-own-sessions-parked-run',
     date: '2026-09-28',
     symptom: 'LFE: /autoloop:setup for v0.54.0 audited 26 scaffold changes, then '

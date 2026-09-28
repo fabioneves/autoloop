@@ -8,7 +8,8 @@
 // to refuse it, while the repo's base branch had carried the current hook for
 // hours. The wiring cannot fix this (the hook command has to name a stable
 // path), so the TOOL does: at startup it compares itself against the base
-// branch's copy and, when the branch is behind, re-executes the base copy.
+// branch's copy and, when the base has moved its tools since the branch forked
+// and the copies differ, re-executes the base copy.
 //
 // The trust rule the hook templates state — vendored, never the plugin, "so
 // guard behavior stays under the repo's own review" — is preserved: the base
@@ -145,6 +146,15 @@ export function relayHookToBase(importMetaUrl, argv = process.argv) {
       (spec) => git(root, ['rev-parse', spec]),
     );
     if (base === null) return;
+    // Relay only when the BASE moved its tools since this branch forked: that
+    // is the fossil case. When it has not, a differing local copy is NEWER — a
+    // reconcile in the working tree or on a delivery branch — and handing the
+    // process to the older base copy runs yesterday's guard against today's
+    // STATE (LFE, 2026-09-28: every command refused mid-setup).
+    const forkPoint = git(root, ['merge-base', 'HEAD', base.ref]);
+    if (forkPoint === null) return;
+    const forkTree = git(root, ['rev-parse', `${forkPoint.trim()}:${VENDOR_DIR}`]);
+    if (forkTree === null || forkTree.trim() === base.tree) return;
     const baseBlob = git(root, ['rev-parse', `${base.ref}:${VENDOR_DIR}/${name}`]);
     if (baseBlob === null) return;
     const ownBlob = git(root, ['hash-object', '--', ownPath]);
@@ -217,14 +227,9 @@ function selfTest() {
       + 'relayHookToBase(import.meta.url);\n'
       + `console.log('probe:${tag} relayed=' + (process.env.AUTOLOOP_HOOK_RELAY ?? '0')\n`
       + "  + ' root=' + (process.env.AUTOLOOP_HOOK_ROOT ?? 'none'));\n";
-    writeFileSync(join(tools, 'probe.mjs'), probe('BASE'));
-    writeFileSync(join(tools, 'equal.mjs'), probe('EQUAL'));
-    // A pre-relay base copy: same tool name, no relay marker anywhere.
-    writeFileSync(join(tools, 'fossil.mjs'), "console.log('fossil:BASE');\n");
-    gitc('add', '.');
-    gitc('commit', '-q', '-m', 'base');
-    gitc('checkout', '-q', '-b', 'unit');
+    // The fork point: a unit branch starts here, carrying these copies.
     writeFileSync(join(tools, 'probe.mjs'), probe('BRANCH'));
+    writeFileSync(join(tools, 'equal.mjs'), probe('EQUAL'));
     writeFileSync(
       join(tools, 'fossil.mjs'),
       "import { relayHookToBase } from './hook-relay.mjs';\n"
@@ -232,7 +237,35 @@ function selfTest() {
       + "console.log('fossil:BRANCH');\n",
     );
     gitc('add', '.');
-    gitc('commit', '-q', '-m', 'unit drift');
+    gitc('commit', '-q', '-m', 'fork point');
+    gitc('branch', 'unit');
+    // The base moves on: a reconcile lands newer copies (and, for the fossil
+    // case, a copy without the relay marker).
+    writeFileSync(join(tools, 'probe.mjs'), probe('BASE'));
+    writeFileSync(join(tools, 'fossil.mjs'), "console.log('fossil:BASE');\n");
+    gitc('add', '.');
+    gitc('commit', '-q', '-m', 'base reconcile');
+
+    // LFE, 2026-09-28: setup's reconcile writes the NEW tools into main's
+    // working tree before they are committed, and a delivery branch commits
+    // them before they merge. The base has not moved its tools since either
+    // forked, so the local copy is the newer one; relaying to the base ran the
+    // old guard against the migrated STATE and refused every command.
+    writeFileSync(join(tools, 'probe.mjs'), probe('RECONCILE'));
+    const reconciling = run(repo, process.execPath, [join(tools, 'probe.mjs')]);
+    check(
+      'an uncommitted reconcile on the base runs its own newer copy',
+      reconciling.status === 0 && reconciling.stdout.includes('probe:RECONCILE relayed=0'),
+    );
+    gitc('checkout', '-q', '-b', 'setup-delivery');
+    gitc('add', '.');
+    gitc('commit', '-q', '-m', 'reconcile delivery');
+    const delivering = run(repo, process.execPath, [join(tools, 'probe.mjs')]);
+    check(
+      'a committed reconcile branch the base has not overtaken runs its own copy',
+      delivering.status === 0 && delivering.stdout.includes('probe:RECONCILE relayed=0'),
+    );
+    gitc('checkout', '-q', 'unit');
 
     const drifted = run(repo, process.execPath, [join(tools, 'probe.mjs')]);
     check(
