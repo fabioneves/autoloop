@@ -1353,6 +1353,18 @@ function stepNumber(label) {
   return match ? Number(match[1]) : null;
 }
 
+function handStepSwap(words) {
+  if (!hasGhScopedAction(words, 'issue', 'edit')) return null;
+  const step = optionValues(words, '--add-label')
+    .flatMap((value) => value.split(','))
+    .map((label) => label.trim().toLowerCase())
+    .find((label) => /^loop:0\d-/u.test(label));
+  if (!step) return null;
+  const edit = words.indexOf('edit');
+  const issue = /^\d+$/u.test(words[edit + 1] ?? '') ? words[edit + 1] : '<N>';
+  return { issue, step: step.slice('loop:'.length) };
+}
+
 function swapsStepLabelBackward(words) {
   const edit =
     hasGhScopedAction(words, 'issue', 'edit')
@@ -2182,6 +2194,20 @@ export function evaluate(inputCmd, branch, options = {}) {
         + 'Removing a label that is not present is a no-op, so always name the predecessor.',
     };
   }
+  // 0.54: one call per step — the swap, the snapshot invalidation, the timing
+  // and the ribbon — so a hand swap is the one path that skips all but the
+  // first. step.mjs asks this same function about its own swap, with
+  // `stepTool`, and so still meets every ladder rule above.
+  const handStep = segments.map(({ command }) => handStepSwap(shellWords(command))).find(Boolean);
+  if (handStep && options.stepTool !== true) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — step labels move through step.mjs, which also invalidates the '
+        + 'retained snapshot, records the step and prints its status line: '
+        + `\`node <plugin-tools>/step.mjs --issue ${handStep.issue} --to ${handStep.step}\`.`,
+    };
+  }
   if (segments.some(({ command }) =>
     hasGhScopedAction(shellWords(command), 'release', 'create')
     || hasGhScopedAction(shellWords(command), 'release', 'delete')
@@ -2996,25 +3022,27 @@ function selfTest() {
     ['gh issue edit 296 --remove-label loop:09-gate --add-label loop:10-publish 2>/dev/null', 'feat/gh-296-x', true],
     ['gh issue edit 296 --add-label loop:11-record', 'feat/gh-296-x', true],
     ['gh issue edit 296 --add-label=loop-started,loop:10-publish', 'feat/gh-296-x', true],
-    ['gh issue edit 296 --remove-label loop:08-code-review --add-label loop:09-gate', 'feat/gh-296-x', false],
+    ['gh issue edit 296 --remove-label loop:08-code-review --add-label loop:09-gate', 'feat/gh-296-x', false, undefined, { stepTool: true }],
     ['gh issue edit 296 --remove-label loop-delivered --add-label loop:revising', 'feat/gh-296-x', false],
     ['gh issue edit 296 --remove-label loop:10-publish', 'feat/gh-296-x', false],
     // The ladder only climbs: a live run swapped 03 back to 02 to re-review a plan.
     ['gh issue edit 298 --add-label "loop:02-plan" --remove-label "loop:03-plan-review" 2>&1 | tail -1', 'main', true],
     ['gh issue edit 298 --remove-label loop:08-code-review --add-label loop:05-implement', 'feat/gh-298-x', true],
-    ['gh issue edit 298 --remove-label loop:02-plan --add-label loop:03-plan-review', 'main', false],
+    ['gh issue edit 298 --remove-label loop:02-plan --add-label loop:03-plan-review', 'main', false, undefined, { stepTool: true }],
+    // 0.54: by hand, even a correct swap is refused — step.mjs is the path.
+    ['gh issue edit 298 --remove-label loop:02-plan --add-label loop:03-plan-review', 'main', true],
     ['gh issue edit 298 --remove-label loop:09-gate,loop-started', 'main', false],
     ['gh issue edit 298 --remove-label loop-delivered --add-label loop:revising', 'main', false],
     // A swap is add AND remove: the live 04→05 add-only stranded 04-claim, and 06→08 skipped 07.
     ['gh issue edit 298 --add-label loop:05-implement', 'feat/gh-298-x', true],
     ['gh issue edit 298 --remove-label loop:06-simplify --add-label loop:08-code-review', 'feat/gh-298-x', true],
-    ['gh issue edit 298 --remove-label loop:04-claim --add-label loop:05-implement', 'feat/gh-298-x', false],
-    ['gh issue edit 298 --remove-label loop:06-simplify --add-label loop:07-diff-review', 'feat/gh-298-x', false],
-    ['gh issue edit 298 --remove-label=loop:07-diff-review --add-label=loop:08-code-review', 'feat/gh-298-x', false],
-    ['gh issue edit 298 --remove-label loop:03-plan-review --add-label loop:04-claim', 'main', false],
-    ['gh issue edit 298 --add-label loop-started,loop:01-premise', 'main', false],
+    ['gh issue edit 298 --remove-label loop:04-claim --add-label loop:05-implement', 'feat/gh-298-x', false, undefined, { stepTool: true }],
+    ['gh issue edit 298 --remove-label loop:06-simplify --add-label loop:07-diff-review', 'feat/gh-298-x', false, undefined, { stepTool: true }],
+    ['gh issue edit 298 --remove-label=loop:07-diff-review --add-label=loop:08-code-review', 'feat/gh-298-x', false, undefined, { stepTool: true }],
+    ['gh issue edit 298 --remove-label loop:03-plan-review --add-label loop:04-claim', 'main', false, undefined, { stepTool: true }],
+    ['gh issue edit 298 --add-label loop-started,loop:01-premise', 'main', false, undefined, { stepTool: true }],
     ['gh issue edit 298 --add-label loop:02-plan', 'main', true],
-    ['gh issue edit 298 --remove-label loop:01-premise --add-label loop:02-plan', 'main', false],
+    ['gh issue edit 298 --remove-label loop:01-premise --add-label loop:02-plan', 'main', false, undefined, { stepTool: true }],
     ['gh label edit old-name --name loop-delivered', 'feat/gh-2-y', true],
     ['gh label edit old-name --name loop-ready', 'feat/gh-2-y', true],
     ['gh label edit old-name -nloop-delivered', 'feat/gh-2-y', true],
@@ -3152,8 +3180,8 @@ function selfTest() {
     ["awk 'BEGIN { system(\"true\") }'", 'feat/gh-1-x', true],
   ];
   let ok = true;
-  for (const [cmd, branch, expect, baseBranch] of cases) {
-    const got = evaluate(cmd, branch, { baseBranch }).block;
+  for (const [cmd, branch, expect, baseBranch, extra] of cases) {
+    const got = evaluate(cmd, branch, { baseBranch, ...(extra ?? {}) }).block;
     if (got !== expect) {
       console.error(`FAIL [expect block=${expect}, got ${got}]: ${cmd.split('\n')[0]}`);
       ok = false;

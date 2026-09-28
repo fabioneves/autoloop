@@ -154,7 +154,7 @@ export function transition({
       ...(plan.remove.length ? ['--remove-label', plan.remove.join(',')] : []),
       ...(plan.add.length ? ['--add-label', plan.add.join(',')] : [])];
     const branch = run('git', ['branch', '--show-current']).stdout || 'main';
-    const verdict = evaluateCommand(`gh ${argv.join(' ')}`, branch);
+    const verdict = evaluateCommand(`gh ${argv.join(' ')}`, branch, { stepTool: true });
     if (verdict.block) return refuse(verdict.reason);
     const swapped = run('gh', argv);
     if (!swapped.ok) return refuse(`step: label swap on #${issue} failed: ${swapped.stderr}`);

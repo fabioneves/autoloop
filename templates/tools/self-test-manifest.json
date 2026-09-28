@@ -7,7 +7,7 @@
     "auto-merge.mjs": "187f49d97abcffc8d3c4c0c79a0e0c93ae07e6ba870d773c76cca918c28b199c",
     "checkout-contract.mjs": "3c9e7708f27ce0fc808488bcc44361b8c7d8e18086fc4449dcb1abaa58c5a52b",
     "claim-contract.mjs": "5db0b31ad846bf2b1f14ef03ebd28515e61a5aba82f6de1fcfa67ea95670af0e",
-    "command-guard.mjs": "d97d0f9297ef69f255c58a6e19435c2d95ee69e1dbcf97540884859d4e51f6cd",
+    "command-guard.mjs": "501b340fccdd7c024adb42174adcca58a0bf51d2e4c9048a4a0bc19c3dba3cd8",
     "config-contract.mjs": "b0ff6f0106df9c2df8e3f01f36c5ef77f263d1de106c4e5d2b470cdab1badfaa",
     "contract-lint.mjs": "463223e0a3cfbafa67ce727995e232310e5e1a0393aab0caff3937af8f2418f7",
     "delivery-contract.mjs": "d071252667f6143672b0a9e38aa2849f033299db60eb385fb81c7fdd2ef14b01",
@@ -34,7 +34,7 @@
     "snapshot-contract.mjs": "59cf25e97f3c9dd92fd9d54c45bc97c8483eae0a4fdb905fdf0ee91a8402bfc4",
     "stats.mjs": "41622973c6aae6395461d4fde362837063714c935cb8507ffd9a7188c15d42ee",
     "step-subject.mjs": "ffe7d1dbb92030c5e794202235741fbdc5e83ee1ef430cdf61250c3456f4f4fd",
-    "step.mjs": "be0eff8bdb75646f14e4e80148d87808faa68c3889c696c3dfcc606badd999b7",
+    "step.mjs": "ee77fc10f173bd83fd8980c044150841d1a229621937049c7497574898424a2f",
     "subagent-transcript.mjs": "77da4385fa5cd9df465985700907fff36fd246f5725738412b8c1cb0a8419d5e",
     "unit.mjs": "e11c76682a0ead2036a5f677031c0518b212fcdfa79e5c9ab7090da41874ae92",
     "writeback-check.mjs": "ab199d13c919ef86f51309da25804a29bee4cefddb0ec7bb0545230212ee4d86"
