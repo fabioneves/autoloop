@@ -32,6 +32,10 @@ and each driver call took about 37 s.
 
 ### Fixed
 
+- **A native dispatch route runs where the session runs.** `dispatch.mjs` stripped a
+  session-wide `ANTHROPIC_BASE_URL` from every Claude-model route, including Fable plan review,
+  Opus implement and all fallbacks. A session started on a gateway therefore sent those
+  dispatches around it. They now inherit it; a proxied route's own `@url` still replaces it.
 - The Stop hook read only the 100 most recently updated open issues. It undercounted eligible
   units (39 against 59 on a 139-issue backlog) and treated later dependencies as closed.
 - The dev skill now tells the run to record `prime --park` before printing the parked block when it
