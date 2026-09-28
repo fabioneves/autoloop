@@ -309,7 +309,7 @@ between the counter and the name. Round-scoped steps keep their counter and add 
 (`05/8 🔍 REVIEW r2/3`), cells counting rounds against the cap.
 
 Every timeline line leads with `[HH:MM][#<N>]` — the wall clock at step start
-(`date +%H:%M`, 24-hour) and the unit it serves, same rule as Dev's ribbons — so a reader scans
+(`date +%H:%M`, 24-hour) and the unit it serves — so a reader scans
 the left edge for when and which. End and duration ride the completion lines, never a re-printed
 ribbon.
 

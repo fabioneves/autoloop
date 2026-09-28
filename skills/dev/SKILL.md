@@ -648,19 +648,18 @@ failure. Waiting itself has one sanctioned shape per situation:
   glyph whose advance width is not agreed on cannot be padded correctly, because there is no
   correct number — every value is right somewhere and wrong somewhere else. So the badge is
   followed only by the dotted rule, whose whole job is to be decorative: if it starts one column
-  over, nothing reads differently. The `∞` is already on every ribbon in the run and the block is
-  unmistakably the loop's without it. Removing the dependency beats tuning it, and the two tuning
+  over, nothing reads differently. The block is unmistakably the loop's without it. Removing the dependency beats tuning it, and the two tuning
   attempts are the evidence for that rather than an argument against the badge.
 
-  **The clock rides in the rule, and there is no `[HH:MM][#N]` prefix at all.** A park routinely
-  waits on two units at once, so a `[#N]` would name one of them and silently misfile the rest;
+  **The clock rides in the rule, and there is no `HH:MM #N` prefix at all.** A park routinely
+  waits on two units at once, so a `#N` prefix would name one of them and silently misfile the rest;
   the unit belongs on the branch that actually has one, and each `├` leads with its own `#N`,
   which is the discriminator a reader is scanning for anyway. With the unit gone the prefix was
   carrying a bare time in brackets in front of a titled rule — two frames around one line — so the
   time moves into the title it was already sitting next to. A titled rule states what this is and
   when it started in one stroke. This is the only wait shape that spans units, so it is the only
   one that leaves the prefix behind; `▶️ resumed` concerns exactly one thing firing and keeps the
-  full `[HH:MM][#N]`.
+  full `HH:MM #N` (`step.mjs --resumed`).
 
   Ending the turn then IS the wait — the monitor fire resumes the run, and the pushed work plus
   the printed block make parked and dead distinguishable at a glance. The resume stays a single
@@ -1876,6 +1875,10 @@ carry none), marks the retained snapshot stale, records the step, and prints the
   unit keeps the only label mutations.
 - The dot is the model's colour (🟣 Fable, 🟠 Opus, 🟢 Astra, 🔵 Sonnet, 🟡 Haiku, ⚪ other).
   Colour comes from emoji because no ANSI escape survives the markdown renderer.
+- Every step is announced once, when it begins, including a no-op; orphan reconciliation
+  announces `00-reconcile` the moment Prime surfaces the orphan, before any fetch or driver call.
+  A jump over a ladder step prints `⚠️ #N skipped <steps>` under the line — only the rule-bound
+  skip of 06 is expected; any other is a defect to fix before going on.
 - The same step again prints `already on <step>` and changes nothing. A refused or failed swap
   prints its reason and exits 1: read it, never retry blindly. **Never swap a step label by hand**
   — the command guard refuses it and names this call.
@@ -1906,7 +1909,9 @@ node <plugin-tools>/step.mjs --card --issue <N> --outcome <shipped|delivered|blo
 
 `shipped` is merged; `delivered` is a ready PR a human merges; `human` needs a decision and carries
 its question as a `❓` line. Time only — no cost. The card closes the unit, and `--parked` stops
-listing it.
+listing it. A delivered or blocked card is followed by its PushNotification (the hook's rider names
+the text). `PushNotification` is DEFERRED on newer hosts, not absent: load it with
+`ToolSearch("select:PushNotification")` at run open.
 
 **A unit's card is not the run's close.** Blocking, deferring or carving a unit ends THAT unit; the
 run re-primes and takes the next eligible unit without asking. The run closes on exactly three
@@ -1937,8 +1942,10 @@ distinct span rather than another word.
 ## Tool surface
 
 Dev invokes exactly these entry points: `prime.mjs` (`--json` to open a run, `--close-run` to
-close it, `--park` to sleep it), `unit.mjs` (`--obsolete`/`--wait`), `dispatch.mjs`, `scan.mjs`,
-`snapshot-contract.mjs` (invalidate/summary/section), `review-contract.mjs`, `publish-verdict.mjs`,
+close it, `--park` to sleep it), `step.mjs` (`--to`, `--resumed`, `--card`, `--parked`; the
+SessionStart hook runs `--card-run`), `unit.mjs` (`--obsolete`/`--wait`), `dispatch.mjs`,
+`scan.mjs`, `snapshot-contract.mjs` (invalidate/summary/section/`--unit`), `review-contract.mjs`,
+`publish-verdict.mjs`,
 `lifecycle-driver.mjs`, `escalate-paths.mjs`, and the vendored `auto-merge.mjs` terminal exception.
 Every other file in `tools/agentic/` is a library those entry points own — never invoke a contract
 module directly.
