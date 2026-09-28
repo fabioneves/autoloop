@@ -21,7 +21,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { evaluate } from './command-guard.mjs';
 import {
-  completeSection, createSnapshot, invalidateSnapshot, SNAPSHOT_SECTIONS, verifySnapshot,
+  completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, SNAPSHOT_SECTIONS, verifySnapshot,
 } from './snapshot-contract.mjs';
 import { realRun } from './unit.mjs';
 
@@ -82,6 +82,54 @@ function invalidateRetainedSnapshot(gitDir) {
   return null;
 }
 
+function autoloopDir(root, run) {
+  const common = run('git', ['rev-parse', '--git-common-dir']);
+  return common.ok ? join(resolve(root, common.stdout), 'autoloop') : null;
+}
+
+function newestSnapshot(dir) {
+  const directory = join(dir, 'prime');
+  if (!existsSync(directory)) return null;
+  const newest = readdirSync(directory)
+    .filter((name) => name.endsWith('.snapshot.json'))
+    .map((name) => join(directory, name))
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0];
+  return newest ? readJson(newest, null) : null;
+}
+
+function openUnits(dir) {
+  const directory = join(dir, 'steps');
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory)
+    .filter((name) => /^\d+\.json$/u.test(name))
+    .map((name) => readJson(join(directory, name), null))
+    .filter((record) => record && !record.closed && record.steps?.length
+      && record.steps.at(-1).step !== '11-record')
+    .map((record) => ({ issue: record.issue, ...record.steps.at(-1) }))
+    .sort((left, right) => left.issue - right.issue);
+}
+
+export function parkedView({ root, run = realRun(root), nowMs = Date.now() }) {
+  const dir = autoloopDir(root, run);
+  if (dir === null) return renderParked({ nowMs, units: [], eligible: null });
+  const snapshot = newestSnapshot(dir);
+  const eligible = eligibleIssueNumbers(snapshot);
+  const blocked = snapshot?.sections?.blockedIssues;
+  const waiting = blocked?.complete === true ? blocked.items.map((issue) => issue.number).slice(0, 3) : [];
+  return renderParked({ nowMs, units: openUnits(dir), eligible: eligible === null ? null : eligible.length, waiting });
+}
+
+export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '' }) {
+  const dir = autoloopDir(root, run);
+  const path = dir === null ? null : join(dir, 'steps', `${issue}.json`);
+  const record = path === null ? null : readJson(path, null);
+  if (!record?.steps?.length) return { ok: false, lines: [`step: no steps recorded for #${issue}`] };
+  const card = renderCard({ issue, title, outcome, steps: record.steps, nowMs, pr, lines, question });
+  record.closed = { outcome, atMs: nowMs };
+  writeAtomically(path, record);
+  return { ok: true, lines: [card] };
+}
+
 export function transition({
   root, run = realRun(root), evaluateCommand = evaluate, nowMs = Date.now(),
   issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '',
@@ -119,6 +167,78 @@ export function transition({
     lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note }),
       ...(warning ? [warning] : [])],
   };
+}
+
+const OUTCOMES = Object.freeze({
+  shipped: '✅ #{n} SHIPPED',
+  delivered: '⚠️ #{n} DELIVERED · awaits human merge',
+  blocked: '❌ #{n} BLOCKED',
+  human: '⚠️ #{n} NEEDS A HUMAN',
+});
+const BAR_CELLS = 15;
+
+function minutes(ms) {
+  const total = Math.round(Math.max(0, ms) / 60_000);
+  if (total < 1) return '<1m';
+  return total < 60 ? `${total}m` : `${Math.floor(total / 60)}h ${String(total % 60).padStart(2, '0')}m`;
+}
+
+// Time per step from a unit's step history. Fix rounds fold into code
+// review: they are how step 08 converges, not a step of their own.
+function stepTimes(steps, nowMs) {
+  const times = new Map();
+  let rounds = 0;
+  let round = null;
+  steps.forEach((entry, index) => {
+    const key = entry.step === '08-fix' ? '08-code-review' : entry.step;
+    const end = steps[index + 1]?.startedAtMs ?? nowMs;
+    times.set(key, (times.get(key) ?? 0) + Math.max(0, end - entry.startedAtMs));
+    const match = /^(\d+)\/(\d+)$/u.exec(String(entry.round ?? ''));
+    if (match && key === '08-code-review') {
+      rounds = Math.max(rounds, Number(match[1]));
+      round = `r${match[1]}/${match[2]}`;
+    }
+  });
+  return { times, rounds, round };
+}
+
+// The time-only closing card, one per unit.
+export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null, lines = null, question = '' }) {
+  const head = (OUTCOMES[outcome] ?? `${outcome} #{n}`).replace('{n}', String(issue));
+  const { times, rounds, round } = stepTimes(steps, nowMs);
+  const longest = Math.max(1, ...times.values());
+  const rows = [...times.entries()].map(([key, ms]) => {
+    const [name, glyph] = STEPS[key] ?? [key, '·'];
+    const cells = Math.max(1, Math.round((ms / longest) * BAR_CELLS));
+    const suffix = key === '08-code-review' && round ? `  ${round}` : '';
+    return `│  ${glyph} ${name.toLowerCase().padEnd(12)} ${minutes(ms).padStart(5)}  ${'▰'.repeat(cells)}${suffix}`;
+  });
+  const total = minutes(nowMs - (steps[0]?.startedAtMs ?? nowMs));
+  const facts = [total,
+    ...(Number.isFinite(lines) ? [`${lines} lines`] : []),
+    ...(rounds > 0 ? [`${rounds} round${rounds === 1 ? '' : 's'}`] : []),
+    ...(Number.isFinite(pr) ? [`PR #${pr}`] : [])];
+  return [
+    `╭─ ${head}${title ? ` · ${oneLine(title, 70)}` : ''}`,
+    ...rows,
+    ...(question ? [`│  ❓ ${oneLine(question, 140)}`] : []),
+    `╰─ ${facts.join(' · ')}`,
+  ].join('\n');
+}
+
+// The parked block: every wait with its model and age, then the queue.
+export function renderParked({ nowMs, units, eligible, waiting = [] }) {
+  const rule = '┄'.repeat(12);
+  const queue = Number.isFinite(eligible) ? `queue ${eligible} eligible` : 'queue unknown (re-prime)';
+  const human = waiting.map((issue) => ` · #${issue} ⚠️ awaits /answer`).join('');
+  return [
+    `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
+    ...units.map(({ issue, step, model, startedAtMs }) => {
+      const [name] = STEPS[step] ?? [step];
+      return `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()} on ${modelChip(model)} · ${minutes(nowMs - startedAtMs)}`;
+    }),
+    `└ ${queue}${human} · resumes on results`,
+  ].join('\n');
 }
 
 function readJsonText(text) {
@@ -287,12 +407,70 @@ function selfTest() {
       '--model', 'gpt-6-astra', '--badge', '🚧', '--note', '2 Major open', '--fallback']))
       === JSON.stringify({ mode: 'to', issue: 350, to: '08-code-review', round: '2/5', model: 'gpt-6-astra',
         badge: '🚧', note: '2 Major open', fallback: true, what: null, ms: null, error: null })],
+    ['card and parked calls parse', parsed(['--card', '--issue', '350', '--outcome', 'delivered', '--pr', '550']).mode === 'card'
+      && parsed(['--parked']).mode === 'parked'
+      && parsed(['--card', '--issue', '350', '--outcome', 'finished']).error !== null],
     ['a resumed call parses', parsed(['--issue', '78', '--resumed', 'plan returned', '--ms', '401000']).mode === 'resumed'],
     ['bad calls are refused', ['--issue x --to 02-plan', '--to 02-plan', '--issue 7', '--issue 7 --to 02-plan --round 9',
       '--issue 7 --to 02-plan --colour red', '--issue 7 --resumed x --ms soon']
       .every((call) => parsed(call.split(' ')).error !== null)],
   );
   checks.push(...transitionChecks(at));
+  const minute = 60_000;
+  const start = at(9, 9);
+  const history = [
+    { step: '01-premise', startedAtMs: start },
+    { step: '03-plan-review', model: 'claude-fable-5-1', startedAtMs: start + 1 * minute },
+    { step: '05-implement', model: 'claude-opus-5-5', startedAtMs: start + 9 * minute },
+    { step: '06-simplify', model: 'claude-fable-5-1', startedAtMs: start + 20 * minute },
+    { step: '08-code-review', round: '1/5', model: 'gpt-6-astra', startedAtMs: start + 26 * minute },
+    { step: '08-fix', round: '1/5', model: 'claude-opus-5-5', startedAtMs: start + 40 * minute },
+    { step: '08-code-review', round: '2/5', model: 'gpt-6-astra', startedAtMs: start + 52 * minute },
+    { step: '09-gate', startedAtMs: start + 68 * minute },
+  ];
+  const card = safely(() => renderCard({
+    issue: 350, title: 'Axis B playback state machine', outcome: 'delivered', steps: history,
+    nowMs: start + 77 * minute, pr: 550, lines: 393,
+  }));
+  checks.push(
+    ['a closing card shows each step\'s time with bars scaled to the longest, rounds folded into review',
+      card === [
+        '╭─ ⚠️ #350 DELIVERED · awaits human merge · Axis B playback state machine',
+        '│  🧭 premise         1m  ▰',
+        '│  🔬 plan-review     8m  ▰▰▰',
+        '│  🔨 implement      11m  ▰▰▰▰',
+        '│  🧹 simplify        6m  ▰▰',
+        '│  🔍 code-review    42m  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰  r2/5',
+        '│  🚦 gate            9m  ▰▰▰',
+        '╰─ 1h 17m · 393 lines · 2 rounds · PR #550',
+      ].join('\n')],
+    ['a blocked card ends on its question', (() => {
+      const blocked = safely(() => renderCard({
+        issue: 349, outcome: 'human', steps: history.slice(0, 1), nowMs: start + minute,
+        question: 'May the stateless Axis A contract supersede the 1 Sept ruling?',
+      }));
+      return blocked.startsWith('╭─ ⚠️ #349 NEEDS A HUMAN')
+        && blocked.includes('│  ❓ May the stateless Axis A contract supersede the 1 Sept ruling?')
+        && blocked.endsWith('╰─ 1m');
+    })()],
+    ['the parked block names every wait with its model and age, and the queue', safely(() => renderParked({
+      nowMs: at(9, 53),
+      units: [
+        { issue: 350, step: '06-simplify', model: 'claude-fable-5-1', startedAtMs: at(9, 51) },
+        { issue: 356, step: '03-plan-review', model: 'claude-fable-5-1', startedAtMs: at(9, 52) },
+      ],
+      eligible: 57,
+      waiting: [349],
+    })) === [
+      '🅿️ ┄┄┄┄┄┄┄┄┄┄┄┄ PARKED · 09:53 ┄┄┄┄┄┄┄┄┄┄┄┄',
+      '├ #350 · 06 simplify on 🟣 FABLE 5.1 · 2m',
+      '├ #356 · 03 plan-review on 🟣 FABLE 5.1 · 1m',
+      '└ queue 57 eligible · #349 ⚠️ awaits /answer · resumes on results',
+    ].join('\n')],
+    ['a parked block with unknown queue evidence says so', safely(() => renderParked({
+      nowMs: at(9, 53), units: [], eligible: null, waiting: [],
+    })).endsWith('└ queue unknown (re-prime) · resumes on results')],
+  );
   const failures = checks.filter(([, ok]) => !ok);
   for (const [name] of failures) console.error(`FAIL ${name}`);
   console.log(failures.length === 0
@@ -388,6 +566,40 @@ function transitionChecks(at) {
     const refused = transition.length === undefined ? null : go({ to: '09-gate', run: () => ({ ok: false, stdout: '', stderr: 'HTTP 502' }) });
     results.push(['a failed gh call is loud', refused.ok === false && refused.lines.join(' ').includes('HTTP 502')]);
     results.push(['an unknown step is refused before anything moves', go({ to: '12-ship' }).ok === false]);
+    const view = (() => {
+      try {
+        return parkedView({ root, run, nowMs: at(10, 30) });
+      } catch (error) {
+        return `THREW ${error.message}`;
+      }
+    })();
+    results.push(['the parked view lists open units from the steps files',
+      typeof view === 'string' && view.includes('├ #350 · 08 fix on 🟠 OPUS 5.5')
+        && view.includes('queue unknown (re-prime)')]);
+    const closed = (() => {
+      try {
+        return closeUnit({ root, run, nowMs: at(10, 30), issue: 350, outcome: 'delivered', pr: 550 });
+      } catch (error) {
+        return { ok: false, lines: [`THREW ${error.message}`] };
+      }
+    })();
+    const afterClose = (() => {
+      try {
+        return parkedView({ root, run, nowMs: at(10, 31) });
+      } catch (error) {
+        return `THREW ${error.message}`;
+      }
+    })();
+    results.push(['closing a unit prints its card and drops it from the parked view',
+      closed.ok === true && closed.lines[0].startsWith('╭─ ⚠️ #350 DELIVERED') && !afterClose.includes('#350')]);
+    results.push(['a card for a unit with no steps is refused',
+      (() => {
+        try {
+          return closeUnit({ root, run, nowMs: at(10, 30), issue: 999, outcome: 'shipped' }).ok === false;
+        } catch {
+          return false;
+        }
+      })()]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -398,15 +610,19 @@ const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round <r>/<cap>] [--mo
   + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--ms <n>]\n       step.mjs --self-test';
 
 export function parseArgs(argv) {
+  if (argv.length === 1 && argv[0] === '--parked') return { mode: 'parked', error: null };
+  if (argv.length === 1 && argv[0] === '--card-run') return { mode: 'card-run', error: null };
   const out = {
     mode: null, issue: null, to: null, round: null, model: null, badge: '⏳', note: '',
     fallback: false, what: null, ms: null, error: null,
   };
   const valued = { '--issue': 'issue', '--to': 'to', '--round': 'round', '--model': 'model', '--badge': 'badge',
-    '--note': 'note', '--resumed': 'what', '--ms': 'ms' };
+    '--note': 'note', '--resumed': 'what', '--ms': 'ms', '--outcome': 'outcome', '--title': 'title',
+    '--pr': 'pr', '--lines': 'lines', '--question': 'question' };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === '--fallback') { out.fallback = true; continue; }
+    if (flag === '--card') { out.card = true; continue; }
     if (valued[flag] === undefined) return { ...out, error: `unknown argument ${flag}` };
     const value = argv[index + 1];
     if (value === undefined) return { ...out, error: `${flag} needs a value` };
@@ -419,6 +635,19 @@ export function parseArgs(argv) {
   if (out.ms !== null) {
     out.ms = Number(out.ms);
     if (!Number.isFinite(out.ms)) return { ...out, error: '--ms needs a number' };
+  }
+  for (const key of ['pr', 'lines']) {
+    if (out[key] === undefined) continue;
+    if (!/^\d{1,9}$/u.test(String(out[key]))) return { ...out, error: `--${key} needs a number` };
+    out[key] = Number(out[key]);
+  }
+  if (out.card) {
+    if (OUTCOMES[out.outcome] === undefined) {
+      return { ...out, error: `--outcome must be one of ${Object.keys(OUTCOMES).join(', ')}` };
+    }
+    if (out.to !== null || out.what !== null) return { ...out, error: '--card takes no --to or --resumed' };
+    const { card, ...rest } = out;
+    return { ...rest, mode: 'card' };
   }
   if (out.to !== null && out.what === null) out.mode = 'to';
   else if (out.what !== null && out.to === null) out.mode = 'resumed';
@@ -434,11 +663,20 @@ function main() {
     console.error(`step: ${parsed.error}\n${USAGE}`);
     process.exit(2);
   }
+  const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
+  if (parsed.mode === 'parked') {
+    process.stdout.write(`${parkedView({ root })}\n`);
+    return;
+  }
+  if (parsed.mode === 'card') {
+    const closed = closeUnit({ root, ...parsed });
+    process.stdout.write(`${closed.lines.join('\n')}\n`);
+    process.exit(closed.ok ? 0 : 1);
+  }
   if (parsed.mode === 'resumed') {
     process.stdout.write(`${renderResumed({ atMs: Date.now(), issue: parsed.issue, what: parsed.what, ms: parsed.ms })}\n`);
     return;
   }
-  const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
   const result = transition({ root, ...parsed });
   process.stdout.write(`${result.lines.join('\n')}\n`);
   process.exit(result.ok ? 0 : 1);
