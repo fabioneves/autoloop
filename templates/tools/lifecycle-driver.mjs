@@ -396,6 +396,21 @@ function remoteClaim(repository, branch, claimCommit) {
   };
 }
 
+// Loop pull requests are same-repository by contract, so the owner-qualified
+// head filter finds the branch's PR in one call — deleted branches included.
+function branchPullsEndpoint(repository, branch) {
+  return `repos/${repository.owner}/${repository.repo}/pulls?state=all`
+    + `&head=${encodeURIComponent(`${repository.owner}:${branch}`)}`;
+}
+
+function memoizedRoles(lookup) {
+  const roles = new Map();
+  return (login) => {
+    if (!roles.has(login)) roles.set(login, lookup(login));
+    return roles.get(login);
+  };
+}
+
 function exactPullRequest(pullRequests, branch, issue) {
   const matches = pullRequests.filter((pullRequest) => {
     const claim = parseLoopClaim({
@@ -516,11 +531,12 @@ function readOperationalState(request, root) {
     `repos/${repository.owner}/${repository.repo}/issues/${request.intent.issue}/comments`,
   );
   const comments = rawComments.map(commentValue);
+  const roleOf = memoizedRoles((login) => permission(repository, login));
   const markerCandidates = comments
     .filter((comment) => comment.body.includes('<!-- autoloop-lifecycle-v'))
     .map((comment) => ({
       comment,
-      role: permission(repository, comment.author),
+      role: roleOf(comment.author),
     }));
   const malformedAuthoritative = markerCandidates.some(
     ({ comment, role }) =>
@@ -585,13 +601,10 @@ function readOperationalState(request, root) {
   );
   const planCandidates = comments.filter((comment) =>
     sha256(comment.body) === request.intent.planHash
-    && authorizedRole(permission(repository, comment.author), comment.author, viewer));
+    && authorizedRole(roleOf(comment.author), comment.author, viewer));
   if (planCandidates.length > 1) throw new Error('frozen plan comment is ambiguous');
   const planComment = planCandidates[0] ?? null;
-  const pullRequests = paginated(
-    repository,
-    `repos/${repository.owner}/${repository.repo}/pulls?state=all`,
-  );
+  const pullRequests = paginated(repository, branchPullsEndpoint(repository, request.intent.branch));
   const pullRequest = exactPullRequest(
     pullRequests,
     request.intent.branch,
@@ -666,7 +679,7 @@ function readOperationalState(request, root) {
   return {
     repository,
     viewer,
-    viewerRole: permission(repository, viewer),
+    viewerRole: roleOf(viewer),
     issue: {
       number: issue.number,
       labels,
@@ -1827,6 +1840,22 @@ function selfTest() {
         && unboundMarker.phase === 'terminal-refused'
         && unboundSecond.code === 'LIFECYCLE_TERMINAL_REFUSED'
         && unboundWrites === 1,
+    ],
+    // One read on LFE paged all 210+ PRs (3 calls, 2.6 s) to find one branch's.
+    [
+      'the branch pull request is looked up by head, never by paging every PR',
+      branchPullsEndpoint({ owner: 'o', repo: 'r' }, 'feat/gh-7-a b')
+        === 'repos/o/r/pulls?state=all&head=o%3Afeat%2Fgh-7-a%20b',
+    ],
+    // The same read asked GitHub for one login's role seven times.
+    [
+      'a read asks for each login\'s role once',
+      (() => {
+        let calls = 0;
+        const roleOf = memoizedRoles((login) => { calls += 1; return `${login}-role`; });
+        return roleOf('a') === 'a-role' && roleOf('a') === 'a-role' && roleOf('b') === 'b-role'
+          && calls === 2;
+      })(),
     ],
     [
       'driver requests reject caller-authored repository and evidence fields',
