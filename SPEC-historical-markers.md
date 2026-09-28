@@ -30,17 +30,24 @@ Root cause:
 
 1. **New terminal phase `terminal-refused`.**
    - Add it to `PHASES` in `lifecycle-contract.mjs:41-56`. The marker carries
-     `refusal: {code, artifact, detail}`.
+     `refusal: {code, artifact, mismatch?}` and the merge commit `mergeOid`.
    - `reconcileLifecycle` returns it as a marker patch only when both are true:
      - the unit's PR is merged (`facts.merge.complete && facts.merge.merged`). The contract has no
        issue-state fact, and the driver already refuses an unmerged unit whose issue is not open
        (`lifecycle-driver.mjs:602-604`). A merge is irreversible, so it is the terminal fact; the
        scan filter (behaviour 3) adds the closed-issue condition for surfacing;
-     - the refusal is `ARTIFACT_IDENTITY_MISMATCH`.
+     - the refusal is one of the two shapes no driver path can ever finish after a merge: the
+       marker never bound a claim or head (`terminal-marker`), or it bound a head the merge did
+       not use (`merge`, "merged head vs marker head"). Every other `ARTIFACT_IDENTITY_MISMATCH`
+       on a merged unit may be a contract defect a later release repairs (the #149 history in
+       `lifecycle-contract.mjs`), so it stays reachable;
+     - the observed merge commit is a commit OID. A missing one is an observation defect, and
+       writing it would serialize `"mergeOid":undefined`, an unparseable marker.
    - In every other case, including every open issue and unmerged PR and every other block code, the
      result is the same as today.
-   - A tip already at `terminal-refused` whose facts still match reconciles to a no-op typed result,
-     `LIFECYCLE_TERMINAL_REFUSED`.
+   - A tip already at `terminal-refused` whose merge commit still matches reconciles to a no-op
+     typed result, `LIFECYCLE_TERMINAL_REFUSED`. Incomplete merge evidence waits
+     (`inspect-merge`), and a changed merge commit is itself a mismatch.
 2. **The driver writes it, never the prose.**
    - The existing marker compare-and-swap successor path writes the patch (`lifecycle-driver.mjs:1106-1112`).
    - The driver's result still carries the refusal code and detail verbatim, so the run record can

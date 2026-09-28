@@ -129,9 +129,12 @@ Then, in order:
    incomplete. A malformed, mismatched, or duplicate trusted marker blocks selection **of the unit
    it belongs to — never of the run**: for a LIVE unit, `unit.mjs --block --reason
    LIFECYCLE_MARKER_INVALID` with the driver's typed refusal verbatim as `--note`, then select from
-   the rest of the queue. A MERGED unit's identity mismatch is done, not blocked: the driver
-   records it once as `terminal-refused` and the scan stops surfacing it. Apply no label, post
-   nothing, name it in the run record as a loop defect, and move on. Never hand-append the
+   the rest of the queue. A unit that is already TERMINAL (issue closed, PR merged) is done, not
+   blocked, whatever the refusal: apply NO label — a blocking label on a delivered issue is a
+   false signal that outlives the run — post nothing, name it in the run record as a loop
+   defect, and move on. The two refusals no release can ever repair (a marker that never bound
+   a head, or bound one the merge did not use) the driver records itself as `terminal-refused`,
+   and the scan stops surfacing them. Never hand-append the
    terminal outcome to close the gap — marker edits and human-merge outcome appends go through
    the driver or not at all. Run each authoritative marker through
    `lifecycle-driver.mjs --reconcile-json` with its captured comment
@@ -1943,7 +1946,9 @@ interrupted, with no operator message in the session is not a request for the se
 live run closed with 39 eligible units over a prompt the operator never answered. Do not retry
 that call. Record `node <plugin-tools>/prime.mjs --park "tool call rejected; resumes on operator
 message" --minutes 720`, arm no wake, and end the turn: the operator's next message resumes the
-run, and its fresh prime clears the park. Only the operator's own words close the run.
+run, and its fresh prime clears the park. If the park call is rejected too, end the turn anyway.
+A dispatch that lands while parked is collected into its unit's record, and the run stays
+parked. Only the operator's own words close the run.
 
 The last Git action is switching a clean tree to `cfg.baseBranch`. Never end parked on a unit
 branch. If dirty, do not switch; report it.
