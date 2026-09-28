@@ -12,7 +12,7 @@
     "contract-lint.mjs": "463223e0a3cfbafa67ce727995e232310e5e1a0393aab0caff3937af8f2418f7",
     "delivery-contract.mjs": "d071252667f6143672b0a9e38aa2849f033299db60eb385fb81c7fdd2ef14b01",
     "dispatch-render.mjs": "cccacbd7c3cac794493af318655849f8360aab458d1cb35478afdab5e1cc70b8",
-    "dispatch.mjs": "5bbb639dc32cdcc067db7beb5c75c37c890fbad310c97924602676b116bbcee2",
+    "dispatch.mjs": "6eafa638b404c7f34eb0ff461ce82ef107f0f371d9a29fe131ecdce152d0580e",
     "escalate-paths.mjs": "d5703b6cb870904d45450e62ffe1089795fbf61ec2c687bd6545acc981917635",
     "hook-relay.mjs": "611f18a3349966907a7f506cd6fab1375179918d548add4d75c7401d7149c28f",
     "label-swap-reminder.mjs": "a04ad495342c9a797acbffb2a12ec5d866a97419c05f7eb40eb8b48a78bc674e",
