@@ -1597,6 +1597,43 @@ function selfTest() {
   const mergedRecovery = driveLifecycle(mergedRequest, {
     adapters: mergedAdapters,
   });
+  // LFE #219: merged while its marker still said draft-pr, so no head was ever
+  // bound. The first reconcile records the refusal once; the next writes nothing.
+  let unboundMarker = {
+    v: 1,
+    ...mergedIntent,
+    epoch: 1,
+    phase: 'draft-pr',
+    claimCommit: '1'.repeat(40),
+    pr: 12,
+    planCommentId: 'IC_plan',
+  };
+  let unboundWrites = 0;
+  const unboundAdapters = {
+    read: () => {
+      const observed = structuredClone(mergedAdapters.read().observed);
+      observed.premergeRecord = { complete: true, exists: false };
+      observed.finalRecord = { complete: true, exists: false };
+      return {
+        marker: structuredClone(unboundMarker),
+        markerComment: {
+          id: 'IC_lifecycle',
+          restId: 1,
+          body: serializeLifecycleMarker(unboundMarker),
+        },
+        observed,
+        premergeRecordDraft: null,
+      };
+    },
+    updateMarker: (_state, value) => {
+      unboundWrites += 1;
+      unboundMarker = value;
+    },
+  };
+  const unboundRequest = { ...mergedRequest, premergeRecordDraft: null };
+  const unboundFirst = driveLifecycle(unboundRequest, { adapters: unboundAdapters });
+  const writesAfterFirst = unboundWrites;
+  const unboundSecond = driveLifecycle(unboundRequest, { adapters: unboundAdapters });
   const originalOverrides = {
     GIT_DIR: process.env.GIT_DIR,
     GH_HOST: process.env.GH_HOST,
@@ -1780,6 +1817,16 @@ function selfTest() {
         && mergedMarker.phase === 'terminal-record'
         && mergedMarker.mergeOid === 'd'.repeat(40)
         && terminalAppends === 1,
+    ],
+    [
+      'an unrepairable merged unit is refused terminally once, then reconciles to nothing',
+      unboundFirst.state === 'complete'
+        && unboundFirst.code === 'LIFECYCLE_TERMINAL_REFUSED'
+        && unboundFirst.refusal?.artifact === 'terminal-marker'
+        && writesAfterFirst === 1
+        && unboundMarker.phase === 'terminal-refused'
+        && unboundSecond.code === 'LIFECYCLE_TERMINAL_REFUSED'
+        && unboundWrites === 1,
     ],
     [
       'driver requests reject caller-authored repository and evidence fields',

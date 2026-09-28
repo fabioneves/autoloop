@@ -53,6 +53,7 @@ const PHASES = new Set([
   'merge-unknown',
   'merge-submitted',
   'terminal-record',
+  'terminal-refused',
 ]);
 const MERGE_OPERATION_STATES = new Set([
   'intent',
@@ -119,6 +120,13 @@ function artifactMismatch(artifact, mismatch = null) {
   });
 }
 
+// The two refusals no driver path can ever finish once the PR merged: the
+// marker never bound a head (or a claim), or it bound a head the merge did not
+// use. Every other mismatch may be a contract defect a later release repairs.
+function unrepairableMismatch(artifact, mismatch = null) {
+  return { ...artifactMismatch(artifact, mismatch), unrepairable: true };
+}
+
 function compared(field, observed, expected) {
   const show = (value) => (typeof value === 'string' && /^[0-9a-f]{40}$/u.test(value)
     ? `${value.slice(0, 12)}…`
@@ -128,6 +136,7 @@ function compared(field, observed, expected) {
 
 const MARKER_KEYS = new Set([
   'v',
+  'refusal',
   'issue',
   'issueBodyHash',
   'planHash',
@@ -545,6 +554,23 @@ function validMergeOperation(value) {
   );
 }
 
+const TERMINAL_PHASES = new Set(['terminal-record', 'terminal-refused']);
+
+function validTerminalRefusal(value) {
+  return (
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).every((key) => ['code', 'artifact', 'mismatch'].includes(key))
+    && value.code === 'ARTIFACT_IDENTITY_MISMATCH'
+    && typeof value.artifact === 'string'
+    && value.artifact.length > 0
+    && value.artifact.length <= 64
+    && (value.mismatch === undefined
+      || (typeof value.mismatch === 'string' && value.mismatch.length <= 1000))
+  );
+}
+
 function validateMarker(markerValue) {
   const errors = [];
   if (!markerValue || typeof markerValue !== 'object' || Array.isArray(markerValue)) {
@@ -602,7 +628,7 @@ function validateMarker(markerValue) {
     markerValue.revisionIntent !== undefined
     && (
       !validRevisionIntent(markerValue.revisionIntent)
-      || markerValue.phase !== 'premerge-record'
+      || !['premerge-record', 'terminal-refused'].includes(markerValue.phase)
       || markerValue.revisionIntent.fromEpoch !== (markerValue.epoch ?? 1)
       || markerValue.revisionIntent.fromHeadOid !== markerValue.headOid
       || markerValue.revisionIntent.fromIdentityHash
@@ -657,7 +683,7 @@ function validateMarker(markerValue) {
       || markerValue.mergeOperation.premergeRecord !== markerValue.premergeRecord
       || (
         markerValue.phase !== `merge-${markerValue.mergeOperation.state}`
-        && markerValue.phase !== 'terminal-record'
+        && !TERMINAL_PHASES.has(markerValue.phase)
       )
     )
   ) {
@@ -681,12 +707,17 @@ function validateMarker(markerValue) {
     markerValue.mergeSubmitted
     && (
       markerValue.mergePolicy === 'manual'
-      || !['merge-submitted', 'terminal-record'].includes(markerValue.phase)
+      || !['merge-submitted', ...TERMINAL_PHASES].includes(markerValue.phase)
       || !markerValue.headOid
       || !markerValue.premergeRecord
     )
   ) {
     errors.push('mergeSubmitted: invalid legacy submission state');
+  }
+  if ((markerValue.phase === 'terminal-refused') !== (markerValue.refusal !== undefined)) {
+    errors.push('refusal: required exactly on a terminal-refused marker');
+  } else if (markerValue.refusal !== undefined && !validTerminalRefusal(markerValue.refusal)) {
+    errors.push('refusal: expected {code, artifact, mismatch?} for an identity mismatch');
   }
   if (markerValue.phase === 'merge-submitted' && !markerValue.mergeSubmitted) {
     errors.push('phase: legacy merge submission requires mergeSubmitted');
@@ -1004,7 +1035,32 @@ function expectedPremergeRecord(input, ciBinding, requireCiBinding) {
   return record;
 }
 
+// A merge is irreversible, so an identity mismatch on a merged unit can never be
+// repaired: no driver path binds a head after the merge. Recording it as a
+// terminal phase is what lets the next run stop reconciling it — LFE re-ran 45
+// historical markers, 7 of them unfixable, before every selection.
 export function reconcileLifecycle(input, context = {}) {
+  const facts = input?.observed;
+  const merged = facts?.merge?.complete === true && facts.merge.merged === true;
+  const { unrepairable, ...result } = reconcileUnit(input, context);
+  if (!merged || unrepairable !== true || !SHA_RE.test(facts.merge.mergeOid ?? '')) {
+    return result;
+  }
+  return {
+    ...result,
+    markerPatch: {
+      phase: 'terminal-refused',
+      mergeOid: facts.merge.mergeOid,
+      refusal: {
+        code: result.code,
+        artifact: result.artifact,
+        ...(result.mismatch === undefined ? {} : { mismatch: result.mismatch }),
+      },
+    },
+  };
+}
+
+function reconcileUnit(input, context = {}) {
   const intentValue = input?.intent;
   if (!validIntent(intentValue)) return transition('block', 'invalid-intent', 'INVALID_LIFECYCLE_INTENT');
   if (input.marker == null) {
@@ -1024,6 +1080,17 @@ export function reconcileLifecycle(input, context = {}) {
     return artifactMismatch('merge', 'merge evidence is complete but carries no merged boolean');
   }
   const merged = facts.merge?.complete === true && facts.merge.merged === true;
+  if (input.marker.phase === 'terminal-refused') {
+    if (facts.merge?.complete !== true) return inspect('merge');
+    if (!merged) return artifactMismatch('terminal-refused', 'a terminal refusal on an unmerged unit');
+    if (facts.merge.mergeOid !== input.marker.mergeOid) {
+      return artifactMismatch(
+        'terminal-refused',
+        compared('merge commit vs refused marker', facts.merge.mergeOid, input.marker.mergeOid),
+      );
+    }
+    return transition('complete', null, 'LIFECYCLE_TERMINAL_REFUSED', { refusal: input.marker.refusal });
+  }
   const readyIdentityComplete = (
     SHA_RE.test(input.marker.claimCommit ?? '')
     && Number.isInteger(input.marker.pr)
@@ -1038,7 +1105,7 @@ export function reconcileLifecycle(input, context = {}) {
       return artifactMismatch('merge', `merge commit is not a commit OID (${facts.merge.mergeOid})`);
     }
     if (input.marker.headOid && facts.merge.headOid !== input.marker.headOid) {
-      return artifactMismatch(
+      return unrepairableMismatch(
         'merge',
         compared('merged head vs marker head', facts.merge.headOid, input.marker.headOid),
       );
@@ -1061,7 +1128,7 @@ export function reconcileLifecycle(input, context = {}) {
   // The absent-and-merged case was already handled here; presence was the gap.
   // Live units keep the full comparison, which is where it does its job.
   if (merged) {
-    if (!input.marker.claimCommit) return artifactMismatch('terminal-marker');
+    if (!input.marker.claimCommit) return unrepairableMismatch('terminal-marker');
   } else if (facts.localClaim.exists !== true) {
     return transition('act', 'ensure-local-claim', 'LOCAL_CLAIM_MISSING');
   } else {
@@ -1294,7 +1361,7 @@ export function reconcileLifecycle(input, context = {}) {
       }
     }
   } else if (!input.marker.headOid) {
-    return artifactMismatch('terminal-marker');
+    return unrepairableMismatch('terminal-marker');
   }
 
   const record = expectedPremergeRecord(input, deliveryBinding, !merged);
@@ -1369,7 +1436,7 @@ export function reconcileLifecycle(input, context = {}) {
   if (facts.merge?.complete !== true) return inspect('merge');
   if (facts.merge.merged === true) {
     if (facts.merge.headOid !== input.marker.headOid) {
-      return artifactMismatch(
+      return unrepairableMismatch(
         'merge',
         compared('merged head vs marker head', facts.merge.headOid, input.marker.headOid),
       );
@@ -1914,6 +1981,10 @@ function crashMarker(phase) {
     value.mergeOperation = mergeOperation(value, phase.slice('merge-'.length));
   }
   if (phase === 'terminal-record') value.mergeOid = 'e'.repeat(40);
+  if (phase === 'terminal-refused') {
+    value.mergeOid = 'e'.repeat(40);
+    value.refusal = { code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'terminal-marker' };
+  }
   return value;
 }
 
@@ -1978,7 +2049,7 @@ function crashWorld(phase) {
       testPremergeRecord(durableMarker),
     );
   }
-  if (phase === 'merge-result' || phase === 'terminal-record') {
+  if (phase === 'merge-result' || TERMINAL_PHASES.has(phase)) {
     facts.merge = {
       complete: true,
       merged: true,
@@ -2492,7 +2563,146 @@ function selfTest() {
         && typeof outcome.mismatch === 'string'
         && outcome.mismatch.includes('merged head vs marker head')
         && outcome.mismatch.includes(OTHER_SHA.slice(0, 12))
-        && outcome.mismatch.includes(SHA.slice(0, 12)),
+        && outcome.mismatch.includes(SHA.slice(0, 12))
+        && outcome.markerPatch?.phase === 'terminal-refused'
+        && outcome.markerPatch.refusal.artifact === 'merge'
+        && outcome.markerPatch.refusal.mismatch === outcome.mismatch,
+    },
+    // LFE, 2026-09-28: six merged units kept `draft-pr` markers no driver path
+    // can finish, and every run re-reconciled them before taking work.
+    {
+      name: 'a merged unit whose marker can never bind is refused terminally',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({ mergePolicy: 'auto', claimCommit: SHA, pr: 12, phase: 'draft-pr' }),
+        observed: observed({
+          merge: { complete: true, merged: true, headOid: SHA, mergeOid: '9'.repeat(40) },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
+      verify: (outcome) => outcome.artifact === 'terminal-marker'
+        && outcome.markerPatch?.phase === 'terminal-refused'
+        && outcome.markerPatch.mergeOid === '9'.repeat(40)
+        && stableJson(outcome.markerPatch.refusal)
+          === stableJson({ code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'terminal-marker' })
+        && validateMarker({
+          ...marker({ mergePolicy: 'auto', claimCommit: SHA, pr: 12, phase: 'draft-pr' }),
+          ...outcome.markerPatch,
+        }).length === 0,
+    },
+    // Review of 0.53: a merge commit GraphQL did not report became
+    // `"mergeOid":undefined` in the successor, an unparseable marker that blocks
+    // every selection. An observation defect is not an identity fact.
+    {
+      name: 'a merged unit without a merge commit OID is never refused terminally',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({ mergePolicy: 'auto', claimCommit: SHA, pr: 12, phase: 'draft-pr' }),
+        observed: observed({
+          merge: { complete: true, merged: true, headOid: SHA, mergeOid: undefined },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
+      verify: (outcome) => outcome.markerPatch === undefined && outcome.unrepairable === undefined,
+    },
+    // Only the two shapes no driver path can ever finish are frozen; any other
+    // mismatch on a merged unit may be a contract bug a later release fixes
+    // (the #149 history above), so it must stay reachable.
+    {
+      name: 'a merged unit refused on any other artifact is never refused terminally',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({ mergePolicy: 'auto', claimCommit: SHA, pr: 12, headOid: SHA, phase: 'ready-head' }),
+        observed: observed({
+          planComment: { complete: true, exists: false },
+          merge: { complete: true, merged: true, headOid: SHA, mergeOid: '9'.repeat(40) },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
+      verify: (outcome) => outcome.artifact !== 'terminal-marker'
+        && outcome.artifact !== 'merge'
+        && outcome.markerPatch === undefined,
+    },
+    {
+      name: 'a terminal refusal waits on incomplete merge evidence',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({
+          mergePolicy: 'auto', claimCommit: SHA, pr: 12, phase: 'terminal-refused',
+          mergeOid: '9'.repeat(40),
+          refusal: { code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'terminal-marker' },
+        }),
+        observed: observed({ merge: { complete: false } }),
+      },
+      expected: ['wait', 'inspect-merge'],
+    },
+    {
+      name: 'a terminal refusal whose merge commit changed is a mismatch',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({
+          mergePolicy: 'auto', claimCommit: SHA, pr: 12, phase: 'terminal-refused',
+          mergeOid: '9'.repeat(40),
+          refusal: { code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'terminal-marker' },
+        }),
+        observed: observed({
+          merge: { complete: true, merged: true, headOid: SHA, mergeOid: '8'.repeat(40) },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
+      verify: (outcome) => outcome.artifact === 'terminal-refused' && outcome.markerPatch === undefined,
+    },
+    {
+      name: 'an unmerged identity mismatch is never refused terminally',
+      input: {
+        intent: intent(),
+        marker: marker({ claimCommit: SHA, pr: 12, phase: 'draft-pr' }),
+        observed: observed({
+          draftPr: { complete: true, exists: true, number: 13, issue: 7, branch: 'feat/gh-7-contract' },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
+      verify: (outcome) => outcome.code === 'ARTIFACT_IDENTITY_MISMATCH'
+        && outcome.markerPatch === undefined,
+    },
+    {
+      name: 'a terminal refusal on a merged unit reconciles to nothing',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({
+          mergePolicy: 'auto',
+          claimCommit: SHA,
+          pr: 12,
+          phase: 'terminal-refused',
+          mergeOid: '9'.repeat(40),
+          refusal: { code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'terminal-marker' },
+        }),
+        observed: observed({
+          merge: { complete: true, merged: true, headOid: SHA, mergeOid: '9'.repeat(40) },
+        }),
+      },
+      expected: ['complete', null],
+      verify: (outcome) => outcome.code === 'LIFECYCLE_TERMINAL_REFUSED'
+        && outcome.markerPatch === undefined
+        && outcome.refusal?.artifact === 'terminal-marker',
+    },
+    {
+      name: 'a terminal refusal on an unmerged unit is itself a mismatch',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({
+          mergePolicy: 'auto',
+          claimCommit: SHA,
+          pr: 12,
+          phase: 'terminal-refused',
+          mergeOid: '9'.repeat(40),
+          refusal: { code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'terminal-marker' },
+        }),
+        observed: observed(),
+      },
+      expected: ['block', 'identity-mismatch'],
+      verify: (outcome) => outcome.artifact === 'terminal-refused'
+        && outcome.markerPatch === undefined,
     },
     {
       name: 'a superseded ready-head unbinds to draft-pr instead of wedging',
@@ -3343,6 +3553,10 @@ function selfTest() {
       console.error(`FAIL ${fixture.name}: expected ${fixture.expected.join('/')}, got ${actual.state}/${actual.action}`);
       continue;
     }
+    if (fixture.verify !== undefined && fixture.verify(actual) !== true) {
+      console.error(`FAIL ${fixture.name}: verify rejected ${JSON.stringify(actual).slice(0, 400)}`);
+      continue;
+    }
     passed += 1;
   }
   const serialized = serializeLifecycleMarker(marker({ claimCommit: SHA, pr: 12 }));
@@ -3368,8 +3582,23 @@ function selfTest() {
     pr: 12,
     headOid: SHA,
   })).recordId;
+  const refusal = { code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'merge', mismatch: 'm' };
   const markerCases = [
     ['lifecycle marker round trips', parsed.ok === true && parsed.marker.pr === 12],
+    ['a terminal refusal carries its refusal, and only it does', (() => {
+      const refused = marker({ claimCommit: SHA, pr: 12, phase: 'terminal-refused', refusal });
+      return validateMarker(refused).length === 0
+        && parseLifecycleMarker(serializeLifecycleMarker(refused)).ok
+        && validateMarker({ ...refused, refusal: undefined }).length > 0
+        && validateMarker({ ...refused, refusal: { ...refusal, code: 'OTHER' } }).length > 0
+        && validateMarker({ ...refused, refusal: { ...refusal, extra: 1 } }).length > 0
+        && validateMarker(marker({ claimCommit: SHA, pr: 12, phase: 'draft-pr', refusal })).length > 0;
+    })()],
+    ['a merge-phase marker may end terminally refused', (() => {
+      const attempted = crashMarker('merge-result');
+      return validateMarker(attempted).length === 0
+        && validateMarker({ ...attempted, phase: 'terminal-refused', refusal }).length === 0;
+    })()],
     // Marker comments rendered as blank cards — the whole body was an HTML
     // comment — so the canonical form gained one visible caption line. The
     // caption is derived, hashed, and version-gated: pre-caption bodies stay

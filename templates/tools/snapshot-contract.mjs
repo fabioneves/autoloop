@@ -1198,6 +1198,18 @@ function eligibleQueueIssueNumbers(snapshot) {
     .sort((left, right) => left - right);
 }
 
+export function eligibleIssueNumbers(snapshot) {
+  if (
+    !verifySnapshot(snapshot)
+    || snapshot.invalidation.reasonCodes.length !== 0
+    || SNAPSHOT_ABSENCE_REQUIREMENTS.selection
+      .some((name) => snapshot.sections[name].complete !== true)
+  ) {
+    return null;
+  }
+  return eligibleQueueIssueNumbers(snapshot);
+}
+
 function queueEvidenceFingerprint(evidence) {
   const { fingerprint: ignoredFingerprint, ...content } = evidence;
   return sha256(content);
@@ -1394,6 +1406,7 @@ export function summarizeSnapshot(snapshot) {
     summary: {
       kind: 'autoloop-snapshot-summary',
       scannedAt: validTimestamp(snapshot.scannedAt) ? snapshot.scannedAt : null,
+      eligible: eligibleIssueNumbers(snapshot),
       sections: Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => {
         const section = snapshot.sections[name];
         if (!isRecord(section)) {
@@ -2367,6 +2380,22 @@ async function selfTest() {
       && incomplete.summary.sections.openIssues.complete === false
       && incomplete.summary.sections.openIssues.error.code === 'PAGE_FETCH_FAILED'
       && refused.ok === false;
+  });
+  // A live run staged #356 for 5.5 minutes before finding its body edited after
+  // loop-ready: the summary never said which units were eligible.
+  await check('summary names the eligible units, and null when selection evidence is incomplete', () => {
+    const complete = summarizeSnapshot(queueSnapshot());
+    const edited = summarizeSnapshot(queueSnapshot({ lastEditedAt: '2026-01-01T00:00:03Z' }));
+    const incomplete = summarizeSnapshot(queueSnapshot({ incomplete: 'openIssues' }));
+    const invalidated = summarizeSnapshot(
+      invalidateSnapshot(queueSnapshot(), 'ISSUE_MUTATION'),
+    );
+    return stableJson(complete.summary.eligible) === stableJson([7])
+      && stableJson(edited.summary.eligible) === stableJson([])
+      && incomplete.summary.eligible === null
+      && invalidated.summary.eligible === null
+      && stableJson(eligibleIssueNumbers(queueSnapshot())) === stableJson([7])
+      && eligibleIssueNumbers({}) === null;
   });
   await check('section accessor returns one section exactly as persisted', () => {
     const snapshot = queueSnapshot();

@@ -44,6 +44,8 @@ export function computeUnitStats(events) {
   const started = firstLabeled('loop-started');
   const terminalLabel = ['loop-delivered', 'loop-blocked'].find((l) => firstLabeled(l) != null) ?? null;
   const terminal = terminalLabel ? firstLabeled(terminalLabel) : null;
+  const terminalAfter = (t0) => ev.find((e) => e.event === 'labeled'
+    && ['loop-delivered', 'loop-blocked'].includes(e.label) && e.t >= t0)?.t ?? null;
 
   const steps = {};
   for (let i = 0; i < STEP_KEYS.length; i++) {
@@ -56,11 +58,12 @@ export function computeUnitStats(events) {
       .find((t) => t != null && t >= start) ?? null;
     // A stranded label's unlabel is post-terminal cleanup, not the step's end — prefer the
     // next present step's start (or terminal) for duration in that case.
-    const cleanUnlabeled = unlabeled != null && (terminal == null || unlabeled <= terminal) ? unlabeled : null;
-    const end = cleanUnlabeled ?? nextStart ?? terminal ?? unlabeled;
+    const stepTerminal = terminalAfter(start);
+    const cleanUnlabeled = unlabeled != null && (stepTerminal == null || unlabeled <= stepTerminal) ? unlabeled : null;
+    const end = cleanUnlabeled ?? nextStart ?? stepTerminal ?? unlabeled;
     steps[key] = {
       ms: end != null ? end - start : null,
-      stranded: terminal != null && (unlabeled == null || unlabeled > terminal),
+      stranded: stepTerminal != null && (unlabeled == null || unlabeled > stepTerminal),
     };
   }
   const presentIdx = STEP_KEYS.map((k, i) => (steps[k] ? i : -1)).filter((i) => i >= 0);
@@ -463,6 +466,28 @@ function selfTest() {
     ['canonical claim cohort', cohort.join(',') === '5,7,9,12'],
     ['fmt', fmtMs(2117000) === '35m 17s' && fmtMs(44000) === '44s' && fmtMs(null) === '—'],
     ['empty unit', computeUnitStats([]).totalMs === null],
+    // #334 (LFE): blocked in implement, resumed four days later, stranded at gate. The
+    // first loop-blocked predates the gate, so it cannot be the gate's end.
+    ['a resumed unit never measures a step to a terminal before its start', (() => {
+      const r = computeUnitStats([
+        { event: 'labeled', label: 'loop-started', at: '2026-08-28T09:29:23Z' },
+        { event: 'labeled', label: 'loop:05-implement', at: '2026-08-28T10:12:15Z' },
+        { event: 'labeled', label: 'loop-blocked', at: '2026-08-28T10:52:04Z' },
+        { event: 'unlabeled', label: 'loop:05-implement', at: '2026-08-28T10:52:04Z' },
+        { event: 'unlabeled', label: 'loop-blocked', at: '2026-09-01T10:51:35Z' },
+        { event: 'labeled', label: 'loop:09-gate', at: '2026-09-01T14:12:04Z' },
+      ]).steps['09-gate'];
+      return r.ms === null && r.stranded === false;
+    })()],
+    ['a resumed unit\'s step ends at the first terminal after its start', (() => {
+      const r = computeUnitStats([
+        { event: 'labeled', label: 'loop-started', at: '2026-08-28T09:00:00Z' },
+        { event: 'labeled', label: 'loop-blocked', at: '2026-08-28T10:00:00Z' },
+        { event: 'labeled', label: 'loop:09-gate', at: '2026-09-01T14:00:00Z' },
+        { event: 'labeled', label: 'loop-blocked', at: '2026-09-01T15:00:00Z' },
+      ]).steps['09-gate'];
+      return r.ms === 3600000 && r.stranded === true;
+    })()],
     // The run record's timing block: posted in step 11, often before the terminal
     // label, so an open unit is measured up to `now`.
     ...(() => {

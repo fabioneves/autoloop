@@ -65,59 +65,41 @@ query($owner:String!,$name:String!,$number:Int!,$parent:Int!){
   }
 }`;
 
+// The single-issue queries and the batched aliases share these selections, so a
+// batched first page and a continuation page can never disagree on shape.
+const DEPENDENCY_FIELDS = '__typename number state';
+const COMMENT_CONNECTION = 'nodes{id author{login} authorAssociation body createdAt '
+  + 'lastEditedAt updatedAt url viewerDidAuthor} pageInfo{hasNextPage endCursor}';
+const LABEL_EVENT_FIELDS = 'actor{login} createdAt label{name}';
+const TIMELINE_CONNECTION = `nodes{__typename ... on LabeledEvent{${LABEL_EVENT_FIELDS}} `
+  + `... on UnlabeledEvent{${LABEL_EVENT_FIELDS}}} pageInfo{hasNextPage endCursor}`;
+const TIMELINE_TYPES = 'itemTypes:[LABELED_EVENT,UNLABELED_EVENT]';
+
 const DEPENDENCY_ISSUE_QUERY = `
 query($owner:String!,$name:String!,$number:Int!){
-  repository(owner:$owner,name:$name){
-    issue(number:$number){
-      __typename
-      number
-      state
-    }
-  }
+  repository(owner:$owner,name:$name){issue(number:$number){${DEPENDENCY_FIELDS}}}
 }`;
 
 const ISSUE_COMMENTS_QUERY = `
 query($owner:String!,$name:String!,$number:Int!,$cursor:String){
   repository(owner:$owner,name:$name){
-    issue(number:$number){
-      comments(first:100,after:$cursor){
-        nodes{
-          id author{login} authorAssociation body createdAt lastEditedAt updatedAt url
-          viewerDidAuthor
-        }
-        pageInfo{hasNextPage endCursor}
-      }
-    }
+    issue(number:$number){comments(first:100,after:$cursor){${COMMENT_CONNECTION}}}
   }
 }`;
 
 const ISSUE_TIMELINE_QUERY = `
 query($owner:String!,$name:String!,$number:Int!,$cursor:String){
   repository(owner:$owner,name:$name){
-    issue(number:$number){
-      timelineItems(
-        first:100
-        after:$cursor
-        itemTypes:[LABELED_EVENT,UNLABELED_EVENT]
-      ){
-        nodes{
-          __typename
-          ... on LabeledEvent{
-            actor{login}
-            createdAt
-            label{name}
-          }
-          ... on UnlabeledEvent{
-            actor{login}
-            createdAt
-            label{name}
-          }
-        }
-        pageInfo{hasNextPage endCursor}
-      }
-    }
+    issue(number:$number){timelineItems(first:100,after:$cursor,${TIMELINE_TYPES}){${TIMELINE_CONNECTION}}}
   }
 }`;
+
+const ISSUE_BATCH_SIZE = 25;
+const ISSUE_BATCH_FIELDS = Object.freeze({
+  comments: `comments(first:100){${COMMENT_CONNECTION}}`,
+  timeline: `timelineItems(first:100,${TIMELINE_TYPES}){${TIMELINE_CONNECTION}}`,
+  dependency: DEPENDENCY_FIELDS,
+});
 
 const PULL_REQUESTS_QUERY = `
 query($owner:String!,$name:String!,$states:[PullRequestState!],$cursor:String){
@@ -292,6 +274,34 @@ async function jsonCommand(file, args, input = undefined) {
 
 async function ghJson(args, input = undefined) {
   return jsonCommand('gh', args, input);
+}
+
+// gh exits non-zero on ANY GraphQL error, but still prints the body: a batch
+// needs that body, because an error on one alias leaves the others' data intact.
+async function ghGraphqlResponse(query, variables) {
+  try {
+    return await ghJson(['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables }));
+  } catch (error) {
+    let body;
+    try {
+      body = JSON.parse(error?.stdout ?? '');
+    } catch {
+      throw error;
+    }
+    if (Array.isArray(body?.errors)) return body;
+    throw error;
+  }
+}
+
+function checkedGraphql(graphqlResponse) {
+  return async (query, variables) => {
+    const response = await graphqlResponse(query, variables);
+    if (Array.isArray(response.errors) && response.errors.length) {
+      throw new Error(response.errors.map(({ message }) => message).join('; '));
+    }
+    if (!response.data) throw new Error('GraphQL response omitted data');
+    return response.data;
+  };
 }
 
 async function ghGraphql(query, variables) {
@@ -598,9 +608,88 @@ async function fetchDependencyIssue(repo, issueNumber) {
   }
 }
 
-async function fetchIssueComments(repo, issueNumber) {
-  return collectPaginated(async (cursor) => {
-    const data = await ghGraphql(ISSUE_COMMENTS_QUERY, {
+export function issueBatchQuery(requests) {
+  const aliases = requests.map(({ number, parts }) => {
+    if (!Number.isSafeInteger(number) || number < 1) {
+      throw new TypeError(`issue batch number must be a positive integer, got ${String(number).slice(0, 40)}`);
+    }
+    if (!parts.length || parts.some((part) => !Object.hasOwn(ISSUE_BATCH_FIELDS, part))) {
+      throw new TypeError(`issue batch parts are invalid for #${number}`);
+    }
+    return `i${number}:issue(number:${number}){${parts.map((part) => ISSUE_BATCH_FIELDS[part]).join(' ')}}`;
+  });
+  return `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${aliases.join(' ')}}}`;
+}
+
+export function issueBatchChunks(requests, size = ISSUE_BATCH_SIZE) {
+  const chunks = [];
+  for (let start = 0; start < requests.length; start += size) {
+    chunks.push(requests.slice(start, start + size));
+  }
+  return chunks;
+}
+
+// An error whose path names an alias fails that issue alone. Any other error,
+// or a response without data, fails the whole batch: its issues are left out,
+// so each falls back to its single-issue read. Absence is never inferred.
+function splitIssueBatch(response, chunk) {
+  const errors = Array.isArray(response?.errors) ? response.errors : [];
+  const aliasOf = (error) => (Array.isArray(error?.path) && error.path[0] === 'repository'
+    && typeof error.path[1] === 'string' ? error.path[1] : null);
+  const messagesFor = (alias) => {
+    const matching = errors.filter((error) => aliasOf(error) === alias);
+    return matching.length ? matching.map(({ message }) => message).join('; ') : null;
+  };
+  const repository = response?.data?.repository;
+  if (messagesFor(null) !== null || !repository) return [];
+  return chunk.map(({ number }) => ({
+    number,
+    node: repository[`i${number}`] ?? null,
+    error: messagesFor(`i${number}`),
+  }));
+}
+
+export async function fetchIssueBatches(repo, requests, { graphql = ghGraphqlResponse } = {}) {
+  const continuation = checkedGraphql(graphql);
+  const chunks = await mapBounded(issueBatchChunks(requests), MAX_CONCURRENCY, async (chunk) => {
+    let response;
+    try {
+      response = await graphql(issueBatchQuery(chunk), { owner: repo.owner, name: repo.name });
+    } catch (error) {
+      response = { errors: [{ message: commandError(error) }] };
+    }
+    return splitIssueBatch(response, chunk);
+  });
+  const partsOf = new Map(requests.map(({ number, parts }) => [number, parts]));
+  const entries = await Promise.all(chunks.flat().map(async ({ number, node, error }) => {
+    const parts = partsOf.get(number);
+    const firstPage = (connection, label) => () => {
+      if (error !== null) throw new Error(error);
+      return connectionPage(connection, label);
+    };
+    const result = {};
+    if (parts.includes('comments')) {
+      result.comments = await fetchIssueComments(repo, number,
+        firstPage(node?.comments, `issue #${number} comments`), continuation);
+    }
+    if (parts.includes('timeline')) {
+      result.timeline = await fetchIssueTimeline(repo, { number },
+        firstPage(node?.timelineItems, `issue #${number} timeline`), continuation);
+    }
+    if (parts.includes('dependency')) {
+      result.dependency = error === null
+        ? normalizeDependencyIssueSection(number, node)
+        : incompleteSection('DEPENDENCY_ISSUE_FETCH_FAILED', `dependency #${number}: ${error}`);
+    }
+    return [number, result];
+  }));
+  return new Map(entries);
+}
+
+async function fetchIssueComments(repo, issueNumber, firstPage = null, graphql = ghGraphql) {
+  return collectPaginated(async (cursor, page) => {
+    if (page === 1 && firstPage !== null) return firstPage();
+    const data = await graphql(ISSUE_COMMENTS_QUERY, {
       owner: repo.owner,
       name: repo.name,
       number: issueNumber,
@@ -731,14 +820,25 @@ function lifecycleTrustedAuthors(roleSections, viewerAuthoredLogins) {
   );
 }
 
-async function fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo) {
+const TERMINAL_LIFECYCLE_PHASES = new Set(['terminal-record', 'terminal-refused']);
+
+// A terminal tip on an issue the complete open-issue inventory does not list is
+// a finished unit: reconciling it again can only return what it already says.
+export function surfacedLifecycleMarkers(items, openIssues) {
+  if (openIssues.complete !== true) return items;
+  const open = new Set(openIssues.items.map((issue) => issue.number));
+  return items.filter((item) => open.has(item.issueNumber)
+    || !TERMINAL_LIFECYCLE_PHASES.has(parseLifecycleComment(item.body).marker?.phase));
+}
+
+async function fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo, issueData = new Map()) {
   const issueNumbers = lifecycleIssueNumbers(openPrs, openIssues, mergedPrs);
   const commentsByIssue = await mapBounded(
     issueNumbers,
     MAX_CONCURRENCY,
     async (issueNumber) => ({
       issueNumber,
-      section: await fetchIssueComments(repo, issueNumber),
+      section: issueData.get(issueNumber)?.comments ?? await fetchIssueComments(repo, issueNumber),
     }),
   );
   const authors = [...new Set(
@@ -770,8 +870,7 @@ async function fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo) {
     ...roleSections,
     ...perIssue,
   ];
-  const items = perIssue
-    .flatMap((section) => section.items)
+  const items = surfacedLifecycleMarkers(perIssue.flatMap((section) => section.items), openIssues)
     .sort((left, right) => compareText(
       `${left.issueNumber}\0${left.createdAt ?? ''}\0${left.id ?? ''}`,
       `${right.issueNumber}\0${right.createdAt ?? ''}\0${right.id ?? ''}`,
@@ -859,9 +958,10 @@ export function repairItemFacts(marker, parentTimeline, facts) {
   };
 }
 
-async function fetchIssueTimeline(repo, issue) {
-  return collectPaginated(async (cursor) => {
-    const data = await ghGraphql(ISSUE_TIMELINE_QUERY, {
+async function fetchIssueTimeline(repo, issue, firstPage = null, graphql = ghGraphql) {
+  return collectPaginated(async (cursor, page) => {
+    if (page === 1 && firstPage !== null) return firstPage();
+    const data = await graphql(ISSUE_TIMELINE_QUERY, {
       owner: repo.owner,
       name: repo.name,
       number: issue.number,
@@ -874,14 +974,44 @@ async function fetchIssueTimeline(repo, issue) {
   }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
 }
 
-async function fetchQueue(openIssues, repo) {
-  // A loop repair without a parseable marker is not queue work, and must not
-  // make the queue incomplete either: it is simply never eligible.
-  const candidates = openIssues.items.filter((issue) => issueHasLabel(issue, 'loop-ready')
+// A loop repair without a parseable marker is not queue work, and must not
+// make the queue incomplete either: it is simply never eligible.
+function queueCandidates(openIssues) {
+  return openIssues.items.filter((issue) => issueHasLabel(issue, 'loop-ready')
     || (issueHasLabel(issue, 'loop-repair') && parseRepair(issue.body) !== null));
-  const referenceNumbers = [...new Set(
-    candidates.flatMap((issue) => blockedByIssueNumbers(issue.body)),
-  )];
+}
+
+function queueReferenceNumbers(candidates) {
+  return [...new Set(candidates.flatMap((issue) => blockedByIssueNumbers(issue.body)))];
+}
+
+// Every per-issue read the snapshot needs, merged per issue so one alias carries
+// an open issue's comments and its label timeline together.
+export function issueBatchRequests(openPrs, openIssues, mergedPrs) {
+  const parts = new Map();
+  const add = (number, part) => {
+    if (!parts.has(number)) parts.set(number, new Set());
+    parts.get(number).add(part);
+  };
+  for (const number of lifecycleIssueNumbers(openPrs, openIssues, mergedPrs)) add(number, 'comments');
+  const candidates = queueCandidates(openIssues);
+  for (const issue of candidates) {
+    if (issueHasLabel(issue, 'loop-ready')) add(issue.number, 'timeline');
+  }
+  const references = queueReferenceNumbers(candidates);
+  if (references.length <= MAX_ITEMS) {
+    for (const number of references.filter((value) => Number.isSafeInteger(value) && value > 0)) {
+      add(number, 'dependency');
+    }
+  }
+  return [...parts]
+    .sort(([left], [right]) => left - right)
+    .map(([number, set]) => ({ number, parts: [...set].sort() }));
+}
+
+async function fetchQueue(openIssues, repo, issueData = new Map()) {
+  const candidates = queueCandidates(openIssues);
+  const referenceNumbers = queueReferenceNumbers(candidates);
   const referenceLimit = referenceNumbers.length <= MAX_ITEMS
     ? completeSection([])
     : incompleteSection(
@@ -892,7 +1022,7 @@ async function fetchQueue(openIssues, repo) {
     ? await mapBounded(
       referenceNumbers,
       MAX_CONCURRENCY,
-      (issueNumber) => fetchDependencyIssue(repo, issueNumber),
+      (issueNumber) => issueData.get(issueNumber)?.dependency ?? fetchDependencyIssue(repo, issueNumber),
     )
     : [];
   const dependenciesByNumber = new Map(
@@ -917,7 +1047,7 @@ async function fetchQueue(openIssues, repo) {
     let provenance;
     let repairFacts = {};
     if (marker === null) {
-      section = await fetchIssueTimeline(repo, issue);
+      section = issueData.get(issue.number)?.timeline ?? await fetchIssueTimeline(repo, issue);
       provenance = labelProvenance(section.items);
     } else {
       // A repair whose parent GitHub definitively does not have is not queue
@@ -1340,9 +1470,13 @@ export async function repositorySnapshot({ now = () => new Date().toISOString() 
     fetchOpenIssues(repo),
     fetchPullRequests(repo, ['MERGED']),
   ]);
+  const issueData = await fetchIssueBatches(
+    repo,
+    issueBatchRequests(openPrs, openIssues, mergedPrs),
+  );
   const [queue, lifecycleMarkers] = await Promise.all([
-    fetchQueue(openIssues, repo),
-    fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo),
+    fetchQueue(openIssues, repo, issueData),
+    fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo, issueData),
   ]);
   const blockedIssues = derivedIssueSection(openIssues, 'loop-blocked');
   const [unresolvedReviewThreads, reviewEvidence] = await Promise.all([
@@ -1670,6 +1804,32 @@ async function selfTest() {
     completeSection([lifecycleComment, lifecycleSuccessor]),
     new Set(['autoloop']),
   );
+  const lifecycleTip = (issueNumber, phase, extra = {}) => normalizeLifecycleMarkerComment({
+    ...lifecycleSuccessor,
+    body: serializeLifecycleSuccessor({
+      ...parseLifecycleComment(lifecycleBody).marker,
+      claimCommit: 'a'.repeat(40),
+      pr: 12,
+      phase,
+      ...extra,
+    }, lifecycleSuccessorLink),
+  }, issueNumber);
+  const historicalTips = [
+    lifecycleTip(7, 'terminal-record', { mergeOid: 'e'.repeat(40) }),
+    lifecycleTip(8, 'terminal-refused', {
+      refusal: { code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'terminal-marker' },
+    }),
+    lifecycleTip(9, 'terminal-record', { mergeOid: 'e'.repeat(40) }),
+    lifecycleTip(10, 'draft-pr'),
+  ];
+  const surfacedWhenOpenKnown = surfacedLifecycleMarkers(
+    historicalTips,
+    completeSection([{ number: 9 }]),
+  ).map((item) => item.issueNumber);
+  const surfacedWhenOpenUnknown = surfacedLifecycleMarkers(
+    historicalTips,
+    incompleteSection('PAGE_FETCH_FAILED', 'offline', [{ number: 9 }]),
+  ).map((item) => item.issueNumber);
   const duplicateLifecycleSuccessor = normalizeLifecycleMarkerSection(
     7,
     completeSection([
@@ -1860,6 +2020,60 @@ async function selfTest() {
   const denied = await flaky(1, Object.assign(new Error('gh: HTTP 401: Bad credentials'), {
     stderr: 'HTTP 401',
   }));
+  // One aliased query per 25 issues replaced 469 single-issue reads (LFE,
+  // 2026-09-28: 478 gh calls, 75 s per prime). Sections must not change.
+  const batchRepo = { owner: 'o', name: 'r' };
+  const commentNode = (id) => ({
+    id, author: { login: 'autoloop' }, authorAssociation: 'OWNER', body: id,
+    createdAt: 't', lastEditedAt: null, updatedAt: 't', url: 'u', viewerDidAuthor: true,
+  });
+  const labelEvent = { __typename: 'LabeledEvent', actor: { login: 'a' }, createdAt: 't', label: { name: 'loop-ready' } };
+  const page = (nodes, next = null) => ({
+    nodes, pageInfo: { hasNextPage: next !== null, endCursor: next },
+  });
+  const batchCalls = [];
+  const fakeGraphql = async (query, variables) => {
+    batchCalls.push({ query, variables });
+    if (query.includes('i66:')) throw new Error('HTTP 502 after retries');
+    if (variables.cursor === 'c1') {
+      return { data: { repository: { issue: { comments: page([commentNode('c-101')]) } } } };
+    }
+    const repository = {};
+    for (const [, alias, number] of query.matchAll(/(i(\d+)):issue/gu)) {
+      const n = Number(number);
+      if (n === 231) continue;
+      repository[alias] = {
+        ...(query.includes('comments(') ? { comments: page([commentNode(`c-${n}`)], n === 7 ? 'c1' : null) } : {}),
+        ...(query.includes('timelineItems(') ? { timelineItems: page([labelEvent]) } : {}),
+        ...(query.includes('state') ? { __typename: 'Issue', number: n, state: 'CLOSED' } : {}),
+      };
+    }
+    return {
+      data: { repository: { ...repository, ...(query.includes('i231:') ? { i231: null } : {}) } },
+      errors: query.includes('i231:')
+        ? [{ path: ['repository', 'i231'], message: 'Could not resolve to an Issue with the number of 231.' }]
+        : undefined,
+    };
+  };
+  let rejectedNumber = false;
+  try { issueBatchQuery([{ number: '7) { x }', parts: ['comments'] }]); } catch { rejectedNumber = true; }
+  const builtQuery = issueBatchQuery([
+    { number: 7, parts: ['comments', 'timeline'] },
+    { number: 12, parts: ['dependency'] },
+  ]);
+  const chunks = issueBatchChunks(Array.from({ length: 60 }, (unused, index) => ({
+    number: index + 1, parts: ['comments'],
+  })));
+  const batched = await fetchIssueBatches(batchRepo, [
+    { number: 7, parts: ['comments', 'timeline'] },
+    { number: 8, parts: ['comments'] },
+    { number: 12, parts: ['dependency'] },
+    { number: 231, parts: ['dependency'] },
+  ], { graphql: fakeGraphql });
+  const failedBatch = await fetchIssueBatches(batchRepo, [
+    ...Array.from({ length: 25 }, (unused, index) => ({ number: index + 42, parts: ['comments'] })),
+    { number: 100, parts: ['comments'] },
+  ], { graphql: fakeGraphql });
   const checks = [
     [
       // A single 502 during prime used to end the run before any unit started.
@@ -2070,6 +2284,14 @@ async function selfTest() {
         && mismatchedRoleResponse === null
         && incompleteRoleResponse === null,
     ],
+    // LFE, 2026-09-28: 45 markers of finished units were reconciled before every
+    // selection. A terminal tip on a closed issue is done; one on an open issue,
+    // or any non-terminal tip (a human-merge backfill), still surfaces.
+    [
+      'finished markers on closed issues are not surfaced; the rest are',
+      surfacedWhenOpenKnown.join(',') === '9,10'
+        && surfacedWhenOpenUnknown.join(',') === '7,8,9,10',
+    ],
     [
       'merged loop PR issues remain discoverable after their issues close',
       lifecycleIssues.join(',') === '7,8,9',
@@ -2102,6 +2324,57 @@ async function selfTest() {
     [
       'partial combinations remain incomplete',
       partial.complete === false && partial.items.length === 2,
+    ],
+    [
+      'batch requests merge an open issue\'s comments and timeline into one alias',
+      JSON.stringify(issueBatchRequests(
+        completeSection([]),
+        completeSection([
+          { number: 7, labels: ['loop-ready'], body: '## Blocked by\n- #3\n- #100000000000000000000' },
+          { number: 9, labels: [], body: '' },
+        ]),
+        completeSection([{ issue: 5 }]),
+      )) === JSON.stringify([
+        { number: 3, parts: ['dependency'] },
+        { number: 5, parts: ['comments'] },
+        { number: 7, parts: ['comments', 'timeline'] },
+        { number: 9, parts: ['comments'] },
+      ]),
+    ],
+    [
+      'a batch query aliases each issue with only its parts, and admits only integers',
+      rejectedNumber
+        && /i7:issue\(number:7\)\{comments\(first:100\)/u.test(builtQuery)
+        && builtQuery.includes('timelineItems(first:100')
+        && /i12:issue\(number:12\)\{__typename number state\}/u.test(builtQuery)
+        && chunks.map((chunk) => chunk.length).join(',') === '25,25,10',
+    ],
+    [
+      'batched first pages become the sections the per-issue path returns',
+      JSON.stringify(batched.get(8).comments) === JSON.stringify(completeSection([commentNode('c-8')]))
+        && JSON.stringify(batched.get(7).timeline) === JSON.stringify(completeSection([labelEvent]))
+        && JSON.stringify(batched.get(12).dependency)
+          === JSON.stringify(normalizeDependencyIssueSection(12, { __typename: 'Issue', number: 12, state: 'CLOSED' })),
+    ],
+    [
+      'a next page continues per issue from the batched cursor',
+      JSON.stringify(batched.get(7).comments)
+        === JSON.stringify(completeSection([commentNode('c-7'), commentNode('c-101')]))
+        && batchCalls.some(({ variables }) => variables.number === 7 && variables.cursor === 'c1'),
+    ],
+    [
+      'an error on one alias fails only that issue',
+      batched.get(231).dependency.complete === false
+        && batched.get(231).dependency.error.code === 'DEPENDENCY_ISSUE_FETCH_FAILED'
+        && batched.get(231).dependency.error.message.includes('Could not resolve')
+        && batched.get(12).dependency.complete === true,
+    ],
+    // A batch that keeps failing (a timeout on a comment-heavy chunk) must not
+    // blank its 25 issues every prime: its issues fall back to single reads.
+    [
+      'a failed batch leaves its issues to the per-issue path, and no other batch',
+      [...Array(25).keys()].every((index) => !failedBatch.has(index + 42))
+        && failedBatch.get(100).comments.complete === true,
     ],
     ['snapshot envelope verifies', verifySnapshot(snapshot)],
     [

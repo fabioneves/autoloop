@@ -33,6 +33,37 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'finished-units-were-re-reconciled-before-every-selection',
+    date: '2026-09-28',
+    symptom: 'A run started by reconciling 45 lifecycle markers, all on closed '
+      + 'issues with merged PRs, one serial driver call each, while 39 eligible '
+      + 'units waited; 7 of them could never finish and would be refused again '
+      + 'on every run.',
+    cause: 'The scan surfaced the marker of every merged PR\'s issue, and a '
+      + 'merged unit whose marker never bound a head had no terminal phase. '
+      + 'The driver now records it as terminal-refused, and the scan drops '
+      + 'terminal tips on closed issues.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'lifecycle-contract.mjs', anchor: "name: 'a merged unit whose marker can never bind is refused terminally'" }),
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: "'an unrepairable merged unit is refused terminally once, then reconciles to nothing'" }),
+      Object.freeze({ file: 'scan.mjs', anchor: "'finished markers on closed issues are not surfaced; the rest are'" }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'a-rejected-tool-call-closed-the-run',
+    date: '2026-09-28',
+    symptom: 'A prime call went to a permission prompt that was answered "no" '
+      + 'with no operator message; when a dispatch woke the turn, the Stop hook '
+      + 'offered "a human asked for the session back" as the way out and the '
+      + 'run closed with 39 eligible units queued.',
+    cause: 'The hook named only take-a-unit or close. It now says the request '
+      + 'must come in a message, and that a rejected or interrupted call parks.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'not that request: park instead with' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: "dark.hard[0].includes('asked for the session back in a message')" }),
+    ]),
+  }),
+  Object.freeze({
     id: 'improvised-review-evidence-drew-the-permission-classifier',
     date: '2026-09-23',
     symptom: '9 of 29 permission-classifier blocks on one repository were '
