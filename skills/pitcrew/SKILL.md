@@ -268,7 +268,7 @@ pre-merge record. It publishes and verifies the trusted exact-head gate and revi
 leaves the ready PR for a human. Pitcrew never invokes `auto-merge.mjs`, submits a merge-queue
 entry, publishes a tag, or creates a release. Later recovery may observe a human-performed merge
 and reconcile the existing loop-owned lifecycle record by running
-`lifecycle-driver.mjs --reconcile-json`; the driver appends the missing terminal outcome before
+`lifecycle-driver.mjs --reconcile-issue <N>`; the driver appends the missing terminal outcome before
 advancing the marker to `terminal-record`. An explicitly absent local or remote claim after that
 proven human merge is a terminal artifact and is never recreated; incomplete absence evidence
 waits and any identity mismatch blocks.

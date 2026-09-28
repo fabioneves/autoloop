@@ -136,11 +136,14 @@ Then, in order:
    a head, or bound one the merge did not use) the driver records itself as `terminal-refused`,
    and the scan stops surfacing them. Never hand-append the
    terminal outcome to close the gap — marker edits and human-merge outcome appends go through
-   the driver or not at all. Run each authoritative marker through
-   `lifecycle-driver.mjs --reconcile-json` with its captured comment
-   ID and exact frozen artifacts. The driver independently performs stable Git/GitHub reads,
-   invokes `reconcileLifecycle()`, and applies only its typed action with marker compare-and-swap
-   and postcondition readback in a bounded loop. Never execute lifecycle action JSON in prose.
+   the driver or not at all. Recover each surfaced marker with one bare call from the repository
+   root, `node <plugin-tools>/lifecycle-driver.mjs --reconcile-issue <N>`: it builds the request
+   from the issue's own authoritative marker chain (root ID), frozen plan comment and pull
+   request, so never assemble one by hand. A marker with no pull request yet (an intent that
+   crashed before its draft) is refused toward step 4's `--reconcile-json` request, because only
+   the frozen plan knows its title and PR body. The driver independently performs stable
+   Git/GitHub reads, invokes `reconcileLifecycle()`, and applies only its typed action with marker
+   compare-and-swap and postcondition readback in a bounded loop. Never execute lifecycle action JSON in prose.
    A proven human merge missing its terminal outcome is backfilled through this same driver before
    its marker reaches `terminal-record`. Git/GitHub facts are lifecycle authority.
 
