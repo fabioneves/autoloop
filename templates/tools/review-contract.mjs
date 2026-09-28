@@ -31,7 +31,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { snapshotExecutionCheckout } from './checkout-contract.mjs';
-import { extractConfig, validateProjectConfig } from './config-contract.mjs';
+import { currentProjectConfig, extractConfig } from './config-contract.mjs';
 import { validReviewVerdict } from './dispatch.mjs';
 
 const GATING_SEVERITIES = new Set(['Critical', 'Major']);
@@ -566,7 +566,9 @@ export function reviewTransition(input) {
     // a full-artifact round" the rule, and this line kept refusing it, so the
     // optimistic close was prose a live session could not execute.
     || (input.round === 1 && input.scope !== 'full')
-    || validateProjectConfig(input.projectConfig).length > 0
+    // A chain started before setup migrated STATE keeps its config (every
+    // round's fingerprint binds it); valid at a migratable schema is enough.
+    || !currentProjectConfig(input.projectConfig).ok
     || (input.round > roundCap(input)
       && !(input.round === roundCap(input) + 1
         && (closesByScopeEscalation(input.reviewRounds)
@@ -921,7 +923,7 @@ export function appendRound(evidence, result, options = {}) {
     const first = options.first;
     if (
       !isPlainObject(first)
-      || validateProjectConfig(first.projectConfig).length > 0
+      || !currentProjectConfig(first.projectConfig).ok
       || !HASH_RE.test(first.planFingerprint ?? '')
       || !IDENTITY_RE.test(first.authorIdentity ?? '')
       || !OID_RE.test(first.configuredBaseOid ?? '')
@@ -1822,6 +1824,21 @@ function selfTest() {
     },
   ];
 
+  // v0.55.0 review: a review chain started before setup migrated STATE
+  // carries its 0.27.0 config in every round's fingerprint. It continues on
+  // that config (valid at a migratable version) instead of failing input
+  // validation mid-unit.
+  const chainConfig027 = {
+    ...fixtureProjectConfig(),
+    version: '0.27.0',
+    caps: { gateRetriesPerUnit: 2, codeReviewRoundsPerUnit: 5, sliceMaxLines: 700, sliceMaxFiles: 10 },
+  };
+  cases.push({
+    name: 'a review chain started under a migratable schema continues',
+    input: inputFor([roundFactory(chainConfig027, { seed: 'schema-027' })(1, failWith([finding]))], chainConfig027),
+    expected: ['continue', false],
+    expectedCode: 'REVIEW_FIX_DELTA_REQUIRED',
+  });
   cases.push({
     name: 'a JSON input cannot lower the review cap',
     input: inputFor([acceptedFirst], JSON.parse(JSON.stringify(fixtureProjectConfig(1)))),

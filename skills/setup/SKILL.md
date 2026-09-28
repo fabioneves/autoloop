@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.55.0 · starting
+∞ setup · v0.55.1 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -93,7 +93,8 @@ every role; other models run on proxied routes.
    tree clean on the base is not in flight, but its run marker is still live, and the command guard
    refuses every interview question while it is — a live Setup stopped there with its whole
    reconcile pending and told the operator to finish a unit that was already parked. Invoking Setup
-   is the operator taking the session back: before the interview, run
+   is the operator taking the session back: before the interview (never in doctor, which writes
+   nothing and asks nothing), run
    `node tools/agentic/prime.mjs --close-run`. It closes only this session's own run markers,
    prints `"closed": []` when there are none, and changes no unit — the parked unit's lifecycle
    marker and PR carry it, and the next run's prime reconciles it. Never close a run to get past a
@@ -609,9 +610,9 @@ ground, security. Reconcile runs ordered upgrade jobs (`REPO_MIGRATIONS`) before
 the first moves a legacy `Lessons learned` section out of STATE into LESSONS.md: it writes the new
 home before clearing the old one, is idempotent, and reports itself so the move lands in the
 visible diff. `--merge-state` refuses outright while such a section remains, because the template
-no longer owns it and the merge would replace it. Curate LESSONS like `ARCH.md` — periodically,
-against a size budget — and delete any lesson a guard rule, contract, or hook now enforces: the
-mechanism is the memory at that point.
+no longer owns it and the merge would replace it. Curate LESSONS like `ARCH.md` — periodically —
+and delete any lesson a guard rule, contract, or hook now enforces: the mechanism is the memory at
+that point.
 
 Create lifecycle and step labels idempotently, including `loop-waiting`, `loop-obsolete`,
 `loop-decided` and `loop-repair` (`unit.mjs` also creates each one on first use). Do not create non-manual policy labels.

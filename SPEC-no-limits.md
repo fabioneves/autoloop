@@ -22,8 +22,9 @@ Outcome:
   instruction (checked with `rg`), so it disappears with the block (operator: "if there's no
   enforcement, just leave it").
 - **M4. Slice budgets are gone.**
-  - Removed from the dev skill (the NOTE-and-ship rule and its git-measurement block), the shape
-    skill, the setup interview and the STATE template.
+  - Removed from the dev skill (the NOTE-and-ship rule), the shape skill, the setup interview and
+    the STATE template. The dev skill keeps its git-measurement block as generic guidance: the
+    simplify step's plan-relative measured budget and the guard's `--shortstat` hints use it.
   - Shape keeps its case-count sizing and ~300-line tripwire. Those are shaping guidance, not
     configured caps.
   - The regression incident `slice-budget-blocked-a-finished-unit` retires with its enforcers.

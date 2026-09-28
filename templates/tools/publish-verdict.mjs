@@ -33,10 +33,15 @@ import {
   closeSync,
   constants,
   fstatSync,
+  mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   realpathSync,
+  rmSync,
+  writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import {
@@ -53,6 +58,7 @@ import {
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
 import {
+  currentProjectConfig,
   extractConfig,
   validateConfig,
 } from './config-contract.mjs';
@@ -1246,11 +1252,11 @@ function loadPublicationConfig(repositoryRoot) {
       MAX_AUXILIARY_EVIDENCE_BYTES,
     ).toString('utf8'),
   );
-  const errors = validateConfig(config);
-  if (errors.length > 0) {
-    throw new Error(`ProjectConfig is invalid: ${errors.join('; ')}`);
+  const current = currentProjectConfig(config);
+  if (!current.ok) {
+    throw new Error(`ProjectConfig is invalid: ${current.errors.join('; ')}`);
   }
-  return config;
+  return current.config;
 }
 
 function executeGateSummary(snapshot, config) {
@@ -3892,7 +3898,35 @@ function selfTest() {
   } else {
     console.error('FAIL acknowledged solo delivery posts exactly the two verdict statuses');
   }
-  const total = cases.length + 53;
+  // v0.55.0 review: a unit branch forked before setup migrated the base
+  // still carries 0.27.0 STATE, and gate publication reads the checkout's
+  // copy. It reads as the current schema, migrated in memory.
+  const branchState = (() => {
+    const dir = mkdtempSync(resolve(tmpdir(), 'publish-verdict-state-'));
+    try {
+      mkdirSync(resolve(dir, 'docs', 'agentic'), { recursive: true });
+      writeFileSync(resolve(dir, 'docs', 'agentic', 'STATE.md'), [
+        '```json autoloop-config',
+        JSON.stringify({ ...gateConfig, version: '0.27.0', caps: {
+          gateRetriesPerUnit: 2, codeReviewRoundsPerUnit: 5, sliceMaxLines: 700, sliceMaxFiles: 10,
+        } }),
+        '```',
+        '',
+      ].join('\n'));
+      return loadPublicationConfig(dir);
+    } catch (error) {
+      return { error: error.message };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  })();
+  if (branchState.version === '0.28.0' && branchState.caps === undefined
+    && branchState.gate?.command === gateConfig.gate.command) {
+    passed += 1;
+  } else {
+    console.error(`FAIL a pre-migration branch STATE reads as the current schema: ${JSON.stringify(branchState)}`);
+  }
+  const total = cases.length + 54;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }
@@ -4009,22 +4043,7 @@ function main() {
       throw new Error('publication requires the exact clean live checkout at the requested SHA');
     }
     if (parsed.ctx === 'gate') {
-      const statePath = resolve(
-        publicationSnapshot.checkout.root,
-        'docs',
-        'agentic',
-        'STATE.md',
-      );
-      const config = extractConfig(
-        readBoundedNoFollow(
-          statePath,
-          MAX_AUXILIARY_EVIDENCE_BYTES,
-        ).toString('utf8'),
-      );
-      const configErrors = validateConfig(config);
-      if (configErrors.length > 0) {
-        throw new Error(`ProjectConfig is invalid: ${configErrors.join('; ')}`);
-      }
+      const config = loadPublicationConfig(publicationSnapshot.checkout.root);
       const gateResult = runGate(
         config.gate.command,
         publicationSnapshot.checkout.root,

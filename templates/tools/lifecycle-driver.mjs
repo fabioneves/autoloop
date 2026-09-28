@@ -38,7 +38,7 @@ import {
   policyAttestationForRecord,
 } from './publish-verdict.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
-import { extractConfig, validateProjectConfig } from './config-contract.mjs';
+import { currentProjectConfig, extractConfig } from './config-contract.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/u;
 const HASH_RE = /^[0-9a-f]{64}$/u;
@@ -632,9 +632,11 @@ export function issueReconcileRequest({ issueNumber, comments, roleOf, viewer, p
 
 function reconcileIssueRequest(cwd, issueNumber) {
   const root = command('git', ['rev-parse', '--show-toplevel'], { cwd }).trim();
-  const config = extractConfig(readFileSync(join(root, 'docs', 'agentic', 'STATE.md'), 'utf8'));
-  const configErrors = validateProjectConfig(config);
-  if (configErrors.length > 0) throw new Error(`project config is invalid: ${configErrors.join('; ')}`);
+  const current = currentProjectConfig(
+    extractConfig(readFileSync(join(root, 'docs', 'agentic', 'STATE.md'), 'utf8')),
+  );
+  if (!current.ok) throw new Error(`project config is invalid: ${current.errors.join('; ')}`);
+  const config = current.config;
   const repository = repositoryTarget(root);
   const viewer = api(repository, 'user')?.login;
   if (typeof viewer !== 'string' || viewer.length === 0) {
