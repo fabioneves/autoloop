@@ -307,6 +307,10 @@ export function reviewVerdictProblem(value) {
 // and with nobody to answer, the read is denied (LFE #356: every input of a
 // writer's brief under /tmp, and the skills it names under the plugin cache).
 // Each root is granted read-only: `--add-dir` would also let a writer edit it.
+export function pluginsDir(env = process.env) {
+  return join(env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'plugins');
+}
+
 function processSettings(tools, readRoots = []) {
   return {
     permissions: {
@@ -1002,23 +1006,34 @@ const SHELL_FENCE_RE =
 const BRIEFS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'briefs');
 
 // A dispatched process has no Skill tool, so a template names skill FILES.
-// Their paths are resolved here: this plugin's own skills beside these tools,
-// and the agent-skills plugin from Claude Code's installed-plugin record.
-export function skillRoots(home = homedir()) {
-  const own = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills');
-  let agent = null;
+// Their paths come from Claude Code's installed-plugin record: the install it
+// loads in this repo (a local or project pin) first, then the user-scope one,
+// then any other. A vendored dispatch sits in <repo>/tools/agentic, so a path
+// relative to this file is only a fallback for running from the plugin itself.
+function installedSkills(installed, prefix, cwd) {
+  const rank = (entry) => (entry.projectPath === cwd ? 0 : entry.scope === 'user' ? 1 : 2);
+  return Object.entries(installed.plugins ?? {})
+    .filter(([name]) => name.startsWith(prefix))
+    .flatMap(([, entries]) => entries)
+    .filter((entry) => typeof entry.installPath === 'string')
+    .sort((left, right) => rank(left) - rank(right))
+    .map((entry) => join(entry.installPath, 'skills'))
+    .find((path) => existsSync(path)) ?? null;
+}
+
+export function skillRoots(plugins = pluginsDir(), cwd = process.cwd()) {
+  let installed = {};
   try {
-    const installed = JSON.parse(readFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
-    agent = Object.entries(installed.plugins ?? {})
-      .filter(([name]) => name.startsWith('agent-skills@'))
-      .flatMap(([, entries]) => entries)
-      .sort((left, right) => Number(right.scope === 'user') - Number(left.scope === 'user'))
-      .map((entry) => (entry.installPath ? join(entry.installPath, 'skills') : null))
-      .find((path) => path !== null && existsSync(path)) ?? null;
+    installed = JSON.parse(readFileSync(join(plugins, 'installed_plugins.json'), 'utf8'));
   } catch {
-    agent = null;
+    installed = {};
   }
-  return { 'agent-skills': agent, 'autoloop-skills': existsSync(own) ? own : null };
+  const own = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills');
+  return {
+    'agent-skills': installedSkills(installed, 'agent-skills@', cwd),
+    'autoloop-skills': installedSkills(installed, 'autoloop@', cwd)
+      ?? (existsSync(join(own, 'dev', 'SKILL.md')) ? own : null),
+  };
 }
 
 export function composeBrief(role, prompt, briefsDir = BRIEFS_DIR, roots = skillRoots()) {
@@ -1063,7 +1078,7 @@ function executeDispatch(options) {
     startedAtMs = PROCESS_START_MS,
   } = options;
   const brief = ROLES[role] === undefined ? { ok: true, prompt, sha256: null }
-    : composeBrief(role, prompt, options.briefsDir ?? BRIEFS_DIR);
+    : composeBrief(role, prompt, options.briefsDir ?? BRIEFS_DIR, skillRoots(pluginsDir(), options.cwd));
   if (!brief.ok) {
     return failure('prompt', brief.code, brief.message, { ms: 0, startupMs: 0, stderr: '' });
   }
@@ -1459,6 +1474,37 @@ function selfTest() {
     check('skill paths in a template resolve to the installed plugins, or say where to look',
       tokened[0].startsWith('Read /p/agent/skills/tdd/SKILL.md and /p/auto/skills/lean-code/SKILL.md.')
         && tokened[1].includes('the agent-skills plugin\'s skills directory/tdd/SKILL.md'));
+    // A repo can pin its own plugin versions (LFE runs a local-scope autoloop
+    // 0.53.0 install), so the copy Claude Code loads in that repo wins over
+    // the user-scope one. A vendored dispatch sits in <repo>/tools/agentic,
+    // where a path relative to this file is the host's, not the plugin's.
+    const roots = (() => {
+      const dir = mkdtempSync(join(tmpdir(), 'dispatch-roots-'));
+      const install = (name) => {
+        mkdirSync(join(dir, name, 'skills'), { recursive: true });
+        return join(dir, name);
+      };
+      writeFileSync(join(dir, 'installed_plugins.json'), JSON.stringify({ plugins: {
+        'agent-skills@m': [
+          { scope: 'local', projectPath: '/elsewhere', installPath: install('agent-other') },
+          { scope: 'user', projectPath: null, installPath: install('agent-user') },
+          { scope: 'local', projectPath: '/repo', installPath: install('agent-repo') },
+        ],
+        'autoloop@m': [{ scope: 'user', projectPath: null, installPath: install('auto-user') }],
+      } }));
+      try {
+        return [skillRoots(dir, '/repo'), skillRoots(dir, '/other-repo'), skillRoots(join(dir, 'none'), '/repo')];
+      } catch (error) {
+        return [{ threw: error.message }, {}, {}];
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })();
+    check('skill roots come from the install Claude Code loads in the repo, then the user-scope one',
+      roots[0]['agent-skills']?.endsWith('/agent-repo/skills')
+        && roots[0]['autoloop-skills']?.endsWith('/auto-user/skills')
+        && roots[1]['agent-skills']?.endsWith('/agent-user/skills')
+        && roots[2]['agent-skills'] === null);
     check('a missing role brief template is a typed refusal', missing.ok === false
       && missing.code === 'BRIEF_TEMPLATE_MISSING' && missing.message.includes('implement'));
     check('every role has a template in the plugin, and no reviewer template carries a shell fence',
@@ -1656,6 +1702,9 @@ function selfTest() {
       && writerArgv.includes('Read(//home/op/.claude/plugins/**)')
       && !writerArgv.includes('--add-dir')
       && !launchedArgv.includes('unit-356'));
+    check('the plugin skills root defaults to ~/.claude/plugins and follows CLAUDE_CONFIG_DIR',
+      pluginsDir({}) === join(homedir(), '.claude', 'plugins')
+      && pluginsDir({ CLAUDE_CONFIG_DIR: '/cfg' }) === '/cfg/plugins');
     check(
       'a live reviewer spawn never receives a write tool',
       !/--tools \S*(?:Write|Edit|Bash)/.test(launchedArgv),
@@ -2838,10 +2887,7 @@ function main() {
     ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
     ...(parsed.fallback ? { fallback: true } : {}),
     ...(parsed.issue === null ? {} : { issue: parsed.issue }),
-    readRoots: [
-      dirname(resolve(parsed.promptFile)),
-      join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'plugins'),
-    ],
+    readRoots: [dirname(resolve(parsed.promptFile)), pluginsDir()],
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
   if (parsed.outputFile !== null) {
