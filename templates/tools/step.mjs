@@ -119,19 +119,32 @@ function invalidateRetainedSnapshot(dir) {
   return null;
 }
 
-function openUnits(dir) {
+// The current run began at its earliest open marker (every prime writes one;
+// a close stamps them all). Markers from before the stamp give no bound.
+function runStartMs(markers) {
+  const starts = markers
+    .map(({ marker }) => marker)
+    .filter((marker) => marker.closedAt === undefined && Number.isSafeInteger(marker.openedAtMs))
+    .map((marker) => marker.openedAtMs);
+  return starts.length ? Math.min(...starts) : null;
+}
+
+// A unit is in flight when its record is open and this run touched it: an
+// abandoned run's unit stays open in its steps file indefinitely.
+function openUnits(dir, sinceMs = null) {
   const directory = join(dir, 'steps');
   if (!existsSync(directory)) return [];
   return readdirSync(directory)
     .filter((name) => /^\d+\.json$/u.test(name))
     .map((name) => readJson(join(directory, name), null))
     .filter((record) => record && !record.closed && record.steps?.length
-      && record.steps.at(-1).step !== '11-record')
+      && record.steps.at(-1).step !== '11-record'
+      && (sinceMs === null || record.steps.at(-1).startedAtMs >= sinceMs))
     .map((record) => ({ issue: record.issue, ...record.steps.at(-1) }))
     .sort((left, right) => left.issue - right.issue);
 }
 
-export function parkedView({ root, run = realRun(root), nowMs = Date.now() }) {
+export function parkedView({ root, run = realRun(root), nowMs = Date.now(), markers = ownRunMarkers }) {
   const { dir } = autoloopDir(root, run);
   if (dir === null) return renderParked({ nowMs, units: [], eligible: null });
   const snapshotPath = retainedSnapshotPath(dir);
@@ -143,7 +156,7 @@ export function parkedView({ root, run = realRun(root), nowMs = Date.now() }) {
   const blocked = snapshot?.sections?.blockedIssues;
   const waiting = blocked?.complete === true ? blocked.items.map((issue) => issue.number).slice(0, 3) : [];
   return renderParked({
-    nowMs, units: openUnits(dir), waiting,
+    nowMs, units: openUnits(dir, runStartMs(markers(root))), waiting,
     eligible: eligible !== null ? eligible.length : last?.eligible ?? null,
     asOfMs: eligible === null ? last?.scannedAtMs ?? null : null,
   });
@@ -319,10 +332,11 @@ export function runCard({ root, run = realRun(root), nowMs = Date.now(), live = 
   if (!live(root)) return '';
   const { dir } = autoloopDir(root, run);
   if (dir === null) return '';
-  const park = markers(root).map(({ marker }) => marker.park).find((value) => value?.until) ?? null;
+  const own = markers(root);
+  const park = own.map(({ marker }) => marker.park).find((value) => value?.until) ?? null;
   const newest = retainedSnapshotPath(dir);
   const snapshot = newest ? { path: newest, ageMs: nowMs - statSync(newest).mtimeMs } : null;
-  return renderRunCard({ nowMs, units: openUnits(dir), park, snapshot });
+  return renderRunCard({ nowMs, units: openUnits(dir, runStartMs(own)), park, snapshot });
 }
 
 function readJsonText(text) {
@@ -770,6 +784,23 @@ function transitionChecks(at) {
     results.push(['the parked view lists open units from the steps files',
       typeof view === 'string' && view.includes('├ #350 · 08 fix on 🟠 OPUS 5.5')
         && view.includes(`queue 0 eligible as of ${clock(Date.parse('2026-09-28T09:00:00.000Z'))}`)]);
+    // An abandoned run's unit stays open in its steps file; only this run's
+    // units are in flight. Markers from before the stamp filter nothing.
+    const scoped = (() => {
+      try {
+        const since = (openedAtMs) => () => [{ marker: { version: 1, pids: [1], openedAtMs } }];
+        return [
+          parkedView({ root, run, nowMs: at(10, 30), markers: since(at(10, 0)) }),
+          parkedView({ root, run, nowMs: at(10, 30), markers: () => [{ marker: { version: 1, pids: [1] } }] }),
+          runCard({ root, run, nowMs: at(10, 30), live: () => true, markers: since(at(10, 0)) }),
+        ];
+      } catch (error) {
+        return [`THREW ${error.message}`, '', ''];
+      }
+    })();
+    results.push(['status views list only the units the current run touched',
+      !scoped[0].includes('#350') && scoped[1].includes('#350')
+        && !scoped[2].includes('#350') && scoped[2].includes('- no unit in flight')]);
     const closed = (() => {
       try {
         return closeUnit({ root, run, nowMs: at(10, 30), issue: 350, outcome: 'delivered', pr: 550 });

@@ -275,7 +275,7 @@ export function configSummary(config) {
 // evidence: the ancestry prime observed, written durably, matched against the
 // guard hook's own ancestry. It needs no revocation — a run whose orchestrator
 // has exited leaves no live PID to match.
-export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()]) {
+export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now()) {
   const directory = runMarkerDirectory(root);
   if (directory === null) return null;
   const live = [...new Set(pids)].filter(
@@ -284,7 +284,8 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()]) {
   if (live.length === 0) return null;
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, `${process.pid}.json`);
-  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live })}\n`);
+  // openedAtMs: status views (step.mjs) list only units this run touched.
+  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, openedAtMs: nowMs })}\n`);
   return path;
 }
 
@@ -707,6 +708,8 @@ function selfTest() {
       'prime writes a run marker that opens the command guard for this ancestry',
       typeof markerPath === 'string'
       && JSON.parse(readFileSync(markerPath, 'utf8')).version === 1
+      // The run's start, so status views drop units an earlier run left open.
+      && Number.isSafeInteger(JSON.parse(readFileSync(markerPath, 'utf8')).openedAtMs)
       && (process.platform !== 'linux' || loopRunIsOpen(root) === true),
     );
 
