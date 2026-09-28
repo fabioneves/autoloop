@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.54.0 · starting
+∞ dev · v0.55.0 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -109,7 +109,7 @@ Then, in order:
    closing that finding cost a review round plus a rebuttal a fresh reviewer then had to accept.
    This is the same trap as `tools/agentic/**` running from the branch it forked with, and as a
    planner reading base premises out of whatever checkout it was launched in — three instances of
-   one rule, so state it once: **anything that governs the run (caps, invariants, escalate paths,
+   one rule, so state it once: **anything that governs the run (invariants, escalate paths,
    hard-defers, protected paths) comes from `origin/<base>`; only the unit's own code comes from
    the unit's tree.** When a step needs both, materialize the base (`git worktree add --detach
    <scratchpad>/base origin/<base>`) rather than reading policy out of the branch under review.
@@ -678,7 +678,7 @@ concurrency from the dispatch log's own timestamps. `concurrent 0s` beside `elig
 that serialized work it could have overlapped, and it is visible without anyone choosing to
 mention it.
 
-### Context economy — the window is a budget, spent like the caps
+### Context economy — the window is a budget
 
 Context spends like wall clock: silently, and mostly on bytes that were never needed. The run
 closes on "context budget spent", so every avoidable byte in the window is a unit not worked. Four
@@ -797,20 +797,8 @@ still be recoverable through its local claim, remote branch, frozen-plan comment
 Reconcile trusted markers, never duplicate them. A unit wearing `loop-blocked` or `loop-waiting` is
 not adopted, whatever its marker says: the first is a human's to lift, the second prime's.
 
-Maintenance issues are selected only after product work. File at most one open
-`loop-maintenance` issue per target when:
-
-- `docs/agentic/LESSONS.md` exceeds 6000 bytes: delete every lesson a guard rule, contract, or
-  hook now enforces — the mechanism is the memory — and keep the rest rule-first, evidence-second.
-  It is budgeted tighter than ARCH because it is meant to SHRINK: each lesson that becomes a
-  mechanism leaves.
-- ARCH exceeds 8000 bytes: re-curate the map without imperative policy, shared freshness lines,
-  restated counts, or width-aligned tables.
-
-Both budgets are enforced by `scaffold.mjs --reconcile`/`--audit`, which names the file, its size,
-and the curation rule in its warnings. Don't re-measure by hand — read the battery.
-
-Maintenance uses the full workflow. STATE is protected; ARCH remains ordinary map data.
+Maintenance issues (`loop-maintenance`) are selected only after product work and use the full
+workflow. STATE is protected; ARCH remains ordinary map data.
 
 ## One unit
 
@@ -833,7 +821,7 @@ authorization was missing at the last step; this check costs one field of a snap
 already has.
 
 **A resume at the review cap is decided, not claimed.** Same shape, one field further on: if the
-unit's recorded rounds already include the closing full round past `caps.codeReviewRoundsPerUnit`,
+unit's recorded rounds already include the closing full round past the 20-round review cap,
 the contract refuses the next one, so claiming it spends a premise, a plan and a writer to arrive
 at a refusal the queue read could have predicted. Take the `REVIEW_CAP_REACHED` decision instead —
 carve or re-plan (step 8) — without claiming another round. A human who removed `loop-blocked`
@@ -924,7 +912,7 @@ bash <plugin-tools>/dispatch-stream.sh \
 ```
 
 The prompt carries the FULL issue (body, context, acceptance criteria — never an excerpt), the
-lane and caps constraints, and the paths to STATE, the checklist, and the relevant spec — the
+lane constraints, and the paths to STATE, the checklist, and the relevant spec — the
 planner reads those itself with its own tools. The orchestrator keeps premise, selection,
 `planHash` computation, intent composition, and claim.
 
@@ -1298,11 +1286,10 @@ same deferral. The clean transition lists `deferredFindings`: put each in the PR
 path below.
 
 **At the cap: hand it off, carve, or re-plan, and move on. Do not ask, do not widen, do not stop.**
-`caps.codeReviewRoundsPerUnit` is STATE policy on an escalate path. A cap round that still gates
-returns `REVIEW_CLOSING_ROUND_REQUIRED`: fix, commit, and run exactly one more round, `--scope
-full`, so no fix leaves the unit unreviewed. The contract refuses every round past that one; that
-refusal is the cap working, and a quiet ProjectConfig edit would make the loop its own policy
-author.
+The cap is 20 rounds, fixed in the plugin (`review-contract.mjs`'s `REVIEW_ROUND_CAP`); no config
+raises it. A cap round that still gates returns `REVIEW_CLOSING_ROUND_REQUIRED`: fix, commit, and
+run exactly one more round, `--scope full`, so no fix leaves the unit unreviewed. The contract
+refuses every round past that one; that refusal is the cap working.
 
 **The closing round is the last chance to carve.** When the gating findings sit in one predicate and
 the carve-out is honest (*Carving out a predicate* below), carve it NOW instead of fixing it — record
@@ -1323,20 +1310,15 @@ invariant that was enumerated wrongly and the domain it actually quantifies, wit
 finding and the round history. A re-plan cannot resume this unit — the marker binds `planHash` and
 `issueBodyHash` — so the unit waits on the repair; once the repair's PR merges, close this unit
 with `unit.mjs --obsolete --issue <N> --pr <repair PR>` and close its own draft PR as superseded.
-Record it with `unit.mjs --decide`, naming raising `caps.codeReviewRoundsPerUnit` as the
-alternative — the cap is the operator's policy, and the loop never edits it. Block with `unit.mjs
+Record it with `unit.mjs --decide`, naming more review rounds as the rejected alternative — twenty
+rounds that did not converge are evidence against the plan, not a shortage of rounds. Block with `unit.mjs
 --block` only when the open Critical is itself a `human`-class matter (a secret, an irreversible
 act, a protected path, a product value no source states). Then print the unit's rail and **take the
 next eligible unit immediately**.
 
-**Slice budgets are the exception: they NOTE, they never block.** `caps.sliceMaxLines` and
-`caps.sliceMaxFiles` are shaping budgets — `autoloop:shape` sizes issues against them before the
-queue. A finished slice that lands over one still goes ready: state the overage in the pull-request
-body (`slice: 722 lines vs 700 budget`) and continue to step 09.
-
-**Measure it with git, never with a summing script.** Git prints every number this note needs, and
-composing `--numstat | awk '{a+=$1}'` is a second program to get right — four live runs lost a
-round to it while measuring exactly this (the guard refused it before 0.50.0):
+**Measure diff size with git, never with a summing script.** Git prints every number a size
+check needs, and composing `--numstat | awk '{a+=$1}'` is a second program to get right (the guard
+refused it before 0.50.0):
 
 ```bash
 git diff --shortstat <base>...<head>                                  # files, insertions, deletions
@@ -1344,15 +1326,8 @@ git diff --shortstat <base>...<head> -- . ':(exclude)<glob>'          # …exclu
 git diff --name-only <base>...<head> -- . ':(exclude)<glob>' | wc -l  # file count only
 ```
 
-A pathspec exclusion is how "production lines" and "reviewable surface" are measured — exclude the
-test and vendored globs rather than filtering a file list through a script. The numbers are the
-same; only the shape the guard has to read is different. Do not block, do not ask, and do
-not shave code to clear the number — a diff edited to satisfy a count is worse than the honest
-overage. A live unit was blocked at 722/700 with both suites green, committed and pushed, one
-decision short of shipping; the human raised the cap, which is the only answer that block can ever
-produce, because by the time lines are countable the work is done and the budget knows nothing it
-did not know at shaping time. Unlike the round caps above, an over-budget slice is not a reason not
-to ship — so it is not a reason to stop.
+A pathspec exclusion is how "production lines" are measured — exclude the test and vendored globs
+rather than filtering a file list through a script.
 
 ### Carving out a predicate
 
@@ -1460,8 +1435,8 @@ Each entry in `reviewRounds` is the record of one dispatched round:
   artifact, so it carries the previous round's `headOid`, `artifactVersion` and
   `artifactFingerprint` unchanged, with a new `dispatchId` and `scope: full-artifact`; its
   `deltaBaseOid` is the previous head, which makes its delta empty by construction. That is the
-  ONLY shape allowed to repeat a fingerprint, and it is allowed one round past
-  `caps.codeReviewRoundsPerUnit` so the rule is always executable. Commit nothing before it —
+  ONLY shape allowed to repeat a fingerprint, and it is allowed one round past the review cap so
+  the rule is always executable. Commit nothing before it —
   a commit makes it an ordinary full round with a real new fingerprint, which is also fine, just
   more expensive.
 - **Do not assemble that round by hand.** Every field except its number, scope, dispatch and
@@ -1490,8 +1465,8 @@ Each entry in `reviewRounds` is the record of one dispatched round:
 - `verdict` is the exact object `dispatch.mjs` parsed. Do not edit it.
 - `configFingerprint` and `projectConfig` both come from **prime**, which returns the validated
   config and its fingerprint together (`.config.projectConfig`, `.config.fingerprint`). Pass them
-  as a pair and derive neither by hand. The contract compares the two, and takes the review cap
-  from `projectConfig.caps.codeReviewRoundsPerUnit` — never a separate cap.
+  as a pair and derive neither by hand. The contract compares the two and applies its own fixed
+  review cap; the input carries none.
   Should you ever need to compute it outside prime, **canonical means `jq -S -c -j`** — keys
   sorted recursively, compact, no trailing newline, exactly what the contract's `hashValue` hashes
   (`JSON.stringify` over a key-sorted clone). "Canonical" alone does not determine the bytes: a

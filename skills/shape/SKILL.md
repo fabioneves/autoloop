@@ -9,9 +9,8 @@ Issue quality is the loop's main input constraint: a vague issue burns a whole u
 an oversized one lands a pull request too big to review well. This skill front-loads the checks
 `autoloop:dev` step 1 would fail a unit on — so issues are born eligible.
 
-**Sizing here is the only sizing there is.** `caps.sliceMaxLines` / `caps.sliceMaxFiles` are shaping
-budgets: `autoloop:dev` NOTES an overage on the pull request and ships anyway, because by the time
-lines are countable the work is done and blocking spends a human decision to learn nothing. So an
+**Sizing here is the only sizing there is.** The loop has no configured slice cap, and nothing
+later measures a unit's size, because by the time lines are countable the work is done. So an
 oversized unit filed here is not caught later — it is simply reviewed at a size where cross-model
 review thins out silently.
 
@@ -48,11 +47,6 @@ well-sized because of its line estimate, only because its cases enumerate. That 
 whole point, because the failure being fixed here was a number granting permission: 858 lines read
 as "comfortably inside a 1000/20 cap" and the unit shipped nothing. A 300 tripwire read as a budget
 would fail exactly the same way, just sooner.
-
-The number is stated as its own rather than derived from `sliceMaxLines`, because a cap raised for
-an unrelated reason — a verbose language, a generated file — must not drag it up. And the cap is an
-attractor: under a 700-line cap units reliably landed at 800–1000, so raising the cap to 1000 moves
-the overshoot rather than buying headroom.
 
 Both blocked on the same-predicate escalation — the loop noticing an invariant too large to
 enumerate. That is a SHAPING failure surfacing three hours late, and it is the failure this rule
@@ -101,7 +95,7 @@ adapted from the `to-tickets` skill in `github.com/mattpocock/skills`, which sta
 applies `loop-ready` or any state label: the label is the maintainer's trust act (STATE →
 guardrail), and shape output is a proposal until a human reads and labels it.
 
-Read `docs/agentic/STATE.md` first (caps, invariants, escalate-list, hard-defers), then every
+Read `docs/agentic/STATE.md` first (invariants, escalate-list, hard-defers), then every
 applicable repo guidance file (`AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md`) and the module map they identify. If
 STATE is missing, stop — run `/autoloop:setup`.
 
@@ -184,10 +178,9 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    to `STATE → playbooks`, a section the STATE template does not contain — a dangling citation of
    exactly the kind step 3 now refuses.)
 
-   Each unit still must be estimated within `caps.sliceMaxLines` / `caps.sliceMaxFiles` (production
-   code), have acceptance achievable as written, and contain no hard-defer (a needed new dependency
-   or secret becomes its own explicitly-flagged human task, never buried in a unit). Order units by
-   dependency; express ordering as `## Blocked by` links, not prose.
+   Each unit must have acceptance achievable as written and contain no hard-defer (a needed new
+   dependency or secret becomes its own explicitly-flagged human task, never buried in a unit).
+   Order units by dependency; express ordering as `## Blocked by` links, not prose.
 
    **Prefactor first, as its own slice.** Where the change would be awkward against the current
    shape of the code, the behaviour-preserving move that makes it easy is the first unit and blocks

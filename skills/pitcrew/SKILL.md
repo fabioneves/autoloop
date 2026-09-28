@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.54.0 · starting
+∞ pitcrew · v0.55.0 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -213,8 +213,7 @@ skipped.
    records one dispatched round: its unique `dispatchId`, differing `authorIdentity` and
    `reviewerIdentity`, scope, delta base, the complete prior gating ledger with `fix`/`rebut`
    dispositions and `state: closed` for resolved entries, the open rebuttals, and the exact verdict
-   `dispatch.mjs` parsed. The contract derives the cap only from
-   `projectConfig.caps.codeReviewRoundsPerUnit`.
+   `dispatch.mjs` parsed. The contract applies its own fixed 20-round cap; the input carries none.
    Treat the returned `reviewedHead` and checkout as artifact-attested, not live-worktree
    authority; re-read HEAD, let the live delivery contract enforce committed = reviewed = gated =
    the independently fetched PR head, and require the exact clean live checkout when publishing

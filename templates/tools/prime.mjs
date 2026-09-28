@@ -53,7 +53,7 @@ import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.54.0';
+const AUTOLOOP_VERSION = '0.55.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -481,18 +481,12 @@ export function parseArgs(args) {
 
 function fixtureConfig() {
   return {
-    version: '0.27.0',
+    version: '0.28.0',
     baseBranch: 'main',
     gate: { command: 'true', quickCommand: null, setupCommand: null },
     merge: { policy: 'manual' },
     tracker: { provider: 'none' },
     review: { checklistPath: 'docs/agentic/checklist.md' },
-    caps: {
-      gateRetriesPerUnit: 2,
-      codeReviewRoundsPerUnit: 5,
-      sliceMaxLines: 700,
-      sliceMaxFiles: 10,
-    },
   };
 }
 
@@ -608,7 +602,7 @@ function selfTest() {
     'the config block carries the validated ProjectConfig and its review fingerprint',
     summary.fingerprint === hashValue(fixtureConfig())
     && /^[0-9a-f]{64}$/.test(summary.fingerprint)
-    && summary.projectConfig.caps.codeReviewRoundsPerUnit === 5
+    && summary.projectConfig.review.checklistPath === 'docs/agentic/checklist.md'
     && summary.mergePolicy === 'manual'
     // Key ORDER must not change the fingerprint: canonicalization sorts
     // recursively, which is the whole reason a hash taken over raw STATE text

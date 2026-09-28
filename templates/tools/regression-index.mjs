@@ -33,6 +33,23 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'setup-refused-by-its-own-sessions-parked-run',
+    date: '2026-09-28',
+    symptom: 'LFE: /autoloop:setup for v0.54.0 audited 26 scaffold changes, then '
+      + 'the guard refused its interview (a live run never waits on a '
+      + 'synchronous question). Setup told the operator to finish or park a '
+      + 'unit that was already parked on its PR, with the tree clean on main.',
+    cause: 'The session had run the loop and parked it; the run marker stayed '
+      + 'live. Setup had no rule for its own session\'s parked run, so the '
+      + 'guard\'s remedy (--close-run) read as bypassing it.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/setup/SKILL.md',
+        anchor: '**A parked run in this session is closed, not worked around.**',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'every-session-under-one-tmux-server-owned-the-loop-run',
     date: '2026-09-28',
     symptom: 'A run marker recorded the prime process\'s whole ancestry up to the tmux '
@@ -1133,45 +1150,6 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({
         file: '../../skills/dev/SKILL.md',
         anchor: 'Never hand-query a unit',
-      }),
-    ]),
-  }),
-  Object.freeze({
-    id: 'lessons-budget-orphaned-by-its-own-migration',
-    date: '2026-07-28',
-    symptom: 'LESSONS.md reached 8010 bytes with nothing reporting it, while '
-      + 'ARCH had a working budget.',
-    cause: 'The lessons budget was dev-skill prose naming "STATE Lessons" — a '
-      + 'section the v0.49.14 diet had moved into its own file — so it pointed '
-      + 'at nothing and silently never fired. A migration retargeted the '
-      + 'document and left its maintenance rule behind.',
-    enforcedBy: Object.freeze([
-      Object.freeze({ file: 'scaffold.mjs', anchor: 'const CURATED_DOCUMENTS' }),
-      Object.freeze({
-        file: 'scaffold.mjs',
-        anchor: 'a curated document over its budget is reported with the curation rule',
-      }),
-    ]),
-  }),
-  Object.freeze({
-    id: 'slice-budget-blocked-a-finished-unit',
-    date: '2026-07-28',
-    symptom: 'A unit with both suites green, committed and pushed was blocked '
-      + 'at 722 lines against a 700-line budget, one decision short of '
-      + 'shipping. The human raised the cap — the only answer that block can '
-      + 'produce.',
-    cause: 'STATE described all caps as blocking, so a run treated a SHAPING '
-      + 'budget as a run-time gate. By the time lines are countable the work is '
-      + 'done and the budget knows nothing it did not know at shaping time; a '
-      + 'cap whose verdict is always the same is not a gate.',
-    enforcedBy: Object.freeze([
-      Object.freeze({
-        file: '../../skills/dev/SKILL.md',
-        anchor: 'Slice budgets are the exception: they NOTE, they never block',
-      }),
-      Object.freeze({
-        file: '../../templates/STATE.template.md',
-        anchor: 'They never block a\n    unit at run time',
       }),
     ]),
   }),

@@ -534,6 +534,20 @@ function authenticatedFindings(rounds, gaps = []) {
   return history;
 }
 
+// Review convergence is a fixed plugin bound since 0.28.0 (operator,
+// 2026-09-28: "bump code reviews limit to 20"). Repository config no longer
+// carries it, so no caller can raise it.
+export const REVIEW_ROUND_CAP = 20;
+
+// In-process test seam: fixtures exercise the cap with one- and two-round
+// histories. A Symbol key survives spreading but never JSON, so the stdin
+// contract cannot set it.
+const ROUND_CAP_FOR_TESTS = Symbol('roundCapForTests');
+
+function roundCap(input) {
+  return input?.projectConfig?.[ROUND_CAP_FOR_TESTS] ?? REVIEW_ROUND_CAP;
+}
+
 export function reviewTransition(input) {
   if (
     !hasExactKeys(input, [
@@ -553,8 +567,8 @@ export function reviewTransition(input) {
     // optimistic close was prose a live session could not execute.
     || (input.round === 1 && input.scope !== 'full')
     || validateProjectConfig(input.projectConfig).length > 0
-    || (input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
-      && !(input.round === input.projectConfig.caps.codeReviewRoundsPerUnit + 1
+    || (input.round > roundCap(input)
+      && !(input.round === roundCap(input) + 1
         && (closesByScopeEscalation(input.reviewRounds)
           || closesCappedFindings(input))))
     || !validExpected(input.expected)
@@ -699,7 +713,7 @@ export function reviewTransition(input) {
     }
     return decision('clean', 'REVIEW_CLEAN', closedEvidence());
   }
-  if (input.round === input.projectConfig.caps.codeReviewRoundsPerUnit) {
+  if (input.round === roundCap(input)) {
     return decision('continue', 'REVIEW_CLOSING_ROUND_REQUIRED', {
       unresolvedFindings: currentGating.length,
       rejectedRebuts: rejectedRebuts.length,
@@ -710,7 +724,7 @@ export function reviewTransition(input) {
   // body. Only under manual policy, so a hand-off can never reach auto-merge,
   // and never with a Critical open.
   if (
-    input.round > input.projectConfig.caps.codeReviewRoundsPerUnit
+    input.round > roundCap(input)
     && input.projectConfig.merge?.policy === 'manual'
     && currentGating.every(({ severity }) => severity === 'Major')
   ) {
@@ -719,7 +733,7 @@ export function reviewTransition(input) {
       ...closedEvidence(),
     });
   }
-  if (input.round > input.projectConfig.caps.codeReviewRoundsPerUnit) {
+  if (input.round > roundCap(input)) {
     // The cap is spent, and the unit cannot ship as it stands. What happens next
     // is the loop's decision (re-plan), not a human's by default.
     return decision('cap-reached', 'REVIEW_CAP_REACHED', {
@@ -1081,20 +1095,15 @@ export function authorizeReviewPublication(input, targetHeadOid, liveCheckout) {
   };
 }
 
-function fixtureProjectConfig(codeReviewRoundsPerUnit = 5) {
+function fixtureProjectConfig(testRoundCap = null) {
   return {
-    version: '0.27.0',
+    version: '0.28.0',
     baseBranch: 'main',
     gate: { command: 'npm test', quickCommand: null, setupCommand: null },
     merge: { policy: 'manual' },
     tracker: { provider: 'none' },
     review: { checklistPath: 'docs/agentic/checklist.md' },
-    caps: {
-      gateRetriesPerUnit: 2,
-      codeReviewRoundsPerUnit,
-      sliceMaxLines: 700,
-      sliceMaxFiles: 10,
-    },
+    ...(testRoundCap === null ? {} : { [ROUND_CAP_FOR_TESTS]: testRoundCap }),
   };
 }
 
@@ -1661,12 +1670,12 @@ function selfTest() {
       expected: ['error', false],
     },
     {
-      name: 'the caller cannot inflate the configured review cap',
+      name: 'the caller cannot configure the review cap',
       input: {
         ...inputFor([acceptedFirst]),
         projectConfig: {
           ...fixtureProjectConfig(),
-          caps: { ...fixtureProjectConfig().caps, codeReviewRoundsPerUnit: 20 },
+          caps: { codeReviewRoundsPerUnit: 50 },
         },
       },
       expected: ['error', false],
@@ -1812,6 +1821,13 @@ function selfTest() {
       expected: ['clean', true],
     },
   ];
+
+  cases.push({
+    name: 'a JSON input cannot lower the review cap',
+    input: inputFor([acceptedFirst], JSON.parse(JSON.stringify(fixtureProjectConfig(1)))),
+    expected: ['continue', false],
+    expectedCode: 'REVIEW_FIX_DELTA_REQUIRED',
+  });
 
   let passed = 0;
   for (const fixture of cases) {

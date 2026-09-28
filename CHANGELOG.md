@@ -3,6 +3,41 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.55.0] - 2026-09-28
+
+No configured limits. Schema `0.28.0` drops the `caps` block, and setup stops asking about limits.
+
+### Removed
+
+- **`caps`** (`gateRetriesPerUnit`, `codeReviewRoundsPerUnit`, `sliceMaxLines`, `sliceMaxFiles`).
+  Setup migrates a `0.27.0` STATE automatically, and the warnings name each removed key.
+  - `gateRetriesPerUnit` was never read by any tool or skill instruction, so it has no
+    replacement.
+  - The slice budgets only ever produced a note on the pull request. They are gone from the dev,
+    shape and setup skills, the role briefs and the STATE template.
+- **Curated-document byte budgets** (ARCH 8000 bytes, LESSONS 6000 bytes): the reconcile warnings,
+  the maintenance-issue triggers and the template wording. Each document keeps its curation rule.
+- The contract-lint check that kept the scaffolded cap literals consistent. No cap literals are
+  left to drift.
+
+### Changed
+
+- **Review convergence is a fixed 20 rounds** (`REVIEW_ROUND_CAP` in `review-contract.mjs`), and no
+  config can raise it. The closing full round, `REVIEW_CAP_HANDOFF` and `REVIEW_CAP_REACHED`
+  behave as before. The re-plan decide no longer offers "raise the cap".
+
+### Fixed
+
+- **Setup is no longer refused by its own session's parked run.** The command guard refuses
+  interview questions while a loop run is live, and a session that had parked the loop kept its
+  run live. Setup now closes this session's run first (`prime.mjs --close-run`) when the unit is
+  parked on its PR and the tree is clean on the base. Units are untouched, and the next run
+  reconciles them.
+
+### Upgrading
+
+Update the plugin, run `autoloop:setup` (it migrates STATE to `0.28.0`), and restart the session.
+
 ## [0.54.0] - 2026-09-28
 
 A status-first orchestrator. The run window now shows status rather than the work behind it, in
