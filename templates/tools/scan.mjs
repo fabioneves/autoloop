@@ -832,14 +832,14 @@ export function surfacedLifecycleMarkers(items, openIssues) {
     || !TERMINAL_LIFECYCLE_PHASES.has(parseLifecycleComment(item.body).marker?.phase));
 }
 
-async function fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo) {
+async function fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo, issueData = new Map()) {
   const issueNumbers = lifecycleIssueNumbers(openPrs, openIssues, mergedPrs);
   const commentsByIssue = await mapBounded(
     issueNumbers,
     MAX_CONCURRENCY,
     async (issueNumber) => ({
       issueNumber,
-      section: await fetchIssueComments(repo, issueNumber),
+      section: issueData.get(issueNumber)?.comments ?? await fetchIssueComments(repo, issueNumber),
     }),
   );
   const authors = [...new Set(
@@ -975,14 +975,39 @@ async function fetchIssueTimeline(repo, issue, firstPage = null, graphql = ghGra
   }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
 }
 
-async function fetchQueue(openIssues, repo) {
-  // A loop repair without a parseable marker is not queue work, and must not
-  // make the queue incomplete either: it is simply never eligible.
-  const candidates = openIssues.items.filter((issue) => issueHasLabel(issue, 'loop-ready')
+// A loop repair without a parseable marker is not queue work, and must not
+// make the queue incomplete either: it is simply never eligible.
+function queueCandidates(openIssues) {
+  return openIssues.items.filter((issue) => issueHasLabel(issue, 'loop-ready')
     || (issueHasLabel(issue, 'loop-repair') && parseRepair(issue.body) !== null));
-  const referenceNumbers = [...new Set(
-    candidates.flatMap((issue) => blockedByIssueNumbers(issue.body)),
-  )];
+}
+
+function queueReferenceNumbers(candidates) {
+  return [...new Set(candidates.flatMap((issue) => blockedByIssueNumbers(issue.body)))];
+}
+
+// Every per-issue read the snapshot needs, merged per issue so one alias carries
+// an open issue's comments and its label timeline together.
+export function issueBatchRequests(openPrs, openIssues, mergedPrs) {
+  const parts = new Map();
+  const add = (number, part) => parts.set(number, new Set([...(parts.get(number) ?? []), part]));
+  for (const number of lifecycleIssueNumbers(openPrs, openIssues, mergedPrs)) add(number, 'comments');
+  const candidates = queueCandidates(openIssues);
+  for (const issue of candidates) {
+    if (issueHasLabel(issue, 'loop-ready')) add(issue.number, 'timeline');
+  }
+  const references = queueReferenceNumbers(candidates);
+  if (references.length <= MAX_ITEMS) {
+    for (const number of references) add(number, 'dependency');
+  }
+  return [...parts]
+    .sort(([left], [right]) => left - right)
+    .map(([number, set]) => ({ number, parts: [...set].sort() }));
+}
+
+async function fetchQueue(openIssues, repo, issueData = new Map()) {
+  const candidates = queueCandidates(openIssues);
+  const referenceNumbers = queueReferenceNumbers(candidates);
   const referenceLimit = referenceNumbers.length <= MAX_ITEMS
     ? completeSection([])
     : incompleteSection(
@@ -993,7 +1018,7 @@ async function fetchQueue(openIssues, repo) {
     ? await mapBounded(
       referenceNumbers,
       MAX_CONCURRENCY,
-      (issueNumber) => fetchDependencyIssue(repo, issueNumber),
+      (issueNumber) => issueData.get(issueNumber)?.dependency ?? fetchDependencyIssue(repo, issueNumber),
     )
     : [];
   const dependenciesByNumber = new Map(
@@ -1018,7 +1043,7 @@ async function fetchQueue(openIssues, repo) {
     let provenance;
     let repairFacts = {};
     if (marker === null) {
-      section = await fetchIssueTimeline(repo, issue);
+      section = issueData.get(issue.number)?.timeline ?? await fetchIssueTimeline(repo, issue);
       provenance = labelProvenance(section.items);
     } else {
       // A repair whose parent GitHub definitively does not have is not queue
@@ -1441,9 +1466,13 @@ export async function repositorySnapshot({ now = () => new Date().toISOString() 
     fetchOpenIssues(repo),
     fetchPullRequests(repo, ['MERGED']),
   ]);
+  const issueData = await fetchIssueBatches(
+    repo,
+    issueBatchRequests(openPrs, openIssues, mergedPrs),
+  );
   const [queue, lifecycleMarkers] = await Promise.all([
-    fetchQueue(openIssues, repo),
-    fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo),
+    fetchQueue(openIssues, repo, issueData),
+    fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo, issueData),
   ]);
   const blockedIssues = derivedIssueSection(openIssues, 'loop-blocked');
   const [unresolvedReviewThreads, reviewEvidence] = await Promise.all([
@@ -2291,6 +2320,22 @@ async function selfTest() {
     [
       'partial combinations remain incomplete',
       partial.complete === false && partial.items.length === 2,
+    ],
+    [
+      'batch requests merge an open issue\'s comments and timeline into one alias',
+      JSON.stringify(issueBatchRequests(
+        completeSection([]),
+        completeSection([
+          { number: 7, labels: ['loop-ready'], body: '## Blocked by\n- #3' },
+          { number: 9, labels: [], body: '' },
+        ]),
+        completeSection([{ issue: 5 }]),
+      )) === JSON.stringify([
+        { number: 3, parts: ['dependency'] },
+        { number: 5, parts: ['comments'] },
+        { number: 7, parts: ['comments', 'timeline'] },
+        { number: 9, parts: ['comments'] },
+      ]),
     ],
     [
       'a batch query aliases each issue with only its parts, and admits only integers',
