@@ -576,6 +576,11 @@ function authoritativeMarkerChain(comments, roleOf, viewer, issueNumber, lifecyc
   return { markerChain, markerRootEntry, markerEntry };
 }
 
+function authorizedPlanComments(comments, planHash, roleOf, viewer) {
+  return comments.filter((comment) => sha256(comment.body) === planHash
+    && authorizedRole(roleOf(comment.author), comment.author, viewer));
+}
+
 const INTENT_KEYS = Object.freeze([
   'issue', 'issueBodyHash', 'planHash', 'branch', 'plannedBaseOid',
   'selector', 'runIntentHash', 'intentSource', 'mergePolicy',
@@ -583,7 +588,7 @@ const INTENT_KEYS = Object.freeze([
 
 // Pure: the reconcile request an issue's own facts determine. Nothing is
 // inferred — a title and PR body exist only once the draft PR does.
-export function issueReconcileRequest({ issueNumber, comments, roleOf, viewer, pullRequest, baseBranch }) {
+export function issueReconcileRequest({ issueNumber, comments, roleOf, viewer, pullRequestOf, baseBranch }) {
   const { markerChain, markerRootEntry } = authoritativeMarkerChain(
     comments, roleOf, viewer, issueNumber, null,
   );
@@ -595,11 +600,11 @@ export function issueReconcileRequest({ issueNumber, comments, roleOf, viewer, p
     throw new Error(`issue #${issueNumber}'s marker has no pull request yet; recover it with `
       + '--reconcile-json and the frozen plan\'s title and PR body');
   }
+  const pullRequest = pullRequestOf(marker.pr);
   if (pullRequest?.number !== marker.pr) {
     throw new Error(`issue #${issueNumber}'s pull request #${marker.pr} could not be read`);
   }
-  const plans = comments.filter((comment) => sha256(comment.body) === marker.planHash
-    && authorizedRole(roleOf(comment.author), comment.author, viewer));
+  const plans = authorizedPlanComments(comments, marker.planHash, roleOf, viewer);
   if (plans.length === 0) throw new Error(`issue #${issueNumber} has no frozen plan comment`);
   if (plans.length > 1) throw new Error('frozen plan comment is ambiguous');
   return {
@@ -618,18 +623,23 @@ function reconcileIssueRequest(root, issueNumber) {
   if (configErrors.length > 0) throw new Error(`project config is invalid: ${configErrors.join('; ')}`);
   const repository = repositoryTarget(root);
   const viewer = api(repository, 'user')?.login;
+  if (typeof viewer !== 'string' || viewer.length === 0) {
+    throw new Error('authenticated GitHub viewer is unavailable');
+  }
   const comments = paginated(
     repository,
     `repos/${repository.owner}/${repository.repo}/issues/${issueNumber}/comments`,
   ).map(commentValue);
-  const roleOf = memoizedRoles((login) => permission(repository, login));
-  const tipPr = authoritativeMarkerChain(comments, roleOf, viewer, issueNumber, null)
-    .markerChain?.tip.marker.pr;
-  const pullRequest = Number.isSafeInteger(tipPr)
-    ? apiOptional(repository, `repos/${repository.owner}/${repository.repo}/pulls/${tipPr}`)
-    : null;
   return issueReconcileRequest({
-    issueNumber, comments, roleOf, viewer, pullRequest, baseBranch: config.baseBranch,
+    issueNumber,
+    comments,
+    roleOf: memoizedRoles((login) => permission(repository, login)),
+    viewer,
+    pullRequestOf: (number) => apiOptional(
+      repository,
+      `repos/${repository.owner}/${repository.repo}/pulls/${number}`,
+    ),
+    baseBranch: config.baseBranch,
   });
 }
 
@@ -670,9 +680,7 @@ function readOperationalState(request, root) {
     request.intent.branch,
     marker?.claimCommit ?? localClaim.claimCommit,
   );
-  const planCandidates = comments.filter((comment) =>
-    sha256(comment.body) === request.intent.planHash
-    && authorizedRole(roleOf(comment.author), comment.author, viewer));
+  const planCandidates = authorizedPlanComments(comments, request.intent.planHash, roleOf, viewer);
   if (planCandidates.length > 1) throw new Error('frozen plan comment is ambiguous');
   const planComment = planCandidates[0] ?? null;
   const pullRequests = paginated(repository, branchPullsEndpoint(repository, request.intent.branch));
@@ -1700,7 +1708,7 @@ function selfTest() {
     comments: recoveryComments,
     roleOf: (login) => (login === 'maint' ? 'maintain' : 'read'),
     viewer: 'bot',
-    pullRequest: { number: 12, title: 'Recovery', body: 'Closes #7' },
+    pullRequestOf: (number) => (number === 12 ? { number: 12, title: 'Recovery', body: 'Closes #7' } : null),
     baseBranch: 'main',
     ...overrides,
   });
@@ -1968,7 +1976,7 @@ function selfTest() {
           comments: [...recoveryComments, recoveryComment('IC_plan_2', 'maint', recoveryPlan)],
         }) ?? '')
         && /--reconcile-json/u.test(recoveryRefusal({ comments: recoveryComments.filter(({ id }) => id !== 'IC_tip') }) ?? '')
-        && /pull request #12/u.test(recoveryRefusal({ pullRequest: null }) ?? ''),
+        && /pull request #12/u.test(recoveryRefusal({ pullRequestOf: () => null }) ?? ''),
     ],
     [
       '--reconcile-issue takes exactly one positive issue number',
