@@ -33,6 +33,20 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'dispatched-children-got-a-200k-window-behind-the-gateway',
+    date: '2026-09-29',
+    symptom: 'LFE #352: the astra plan failed after compacting, and its Opus '
+      + 'fallback auto-compacted at 172,375 tokens, though both models have 1M.',
+    cause: 'Behind a gateway (ANTHROPIC_BASE_URL) Claude Code cannot look a model '
+      + 'up, so a bare id gets a 200k window: measured through the proxy, '
+      + 'claude-opus-5-5 200,000 and claude-opus-5-5[1m] 1,000,000; the same for '
+      + 'Fable and astra. The routes and fallbacks carried bare ids.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'fallbacks carry [1m] and a suffixed route on its default has nowhere further to go'" }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "    'implement claude claude-opus-5-5[1m]'," }),
+    ]),
+  }),
+  Object.freeze({
     id: 'unreconcilable-markers-retried-every-run',
     date: '2026-09-29',
     symptom: 'LFE: seven closed-issue markers were re-reconciled every run and '

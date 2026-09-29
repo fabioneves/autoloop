@@ -619,17 +619,21 @@ export function resolveDefaultEffort(role, cwd) {
 // Fallbacks are usage-limit retries only, and never move a reviewer onto the
 // writer's model: plan-review falls back to Opus, not astra, because astra
 // wrote the plan. `implement` has none — Opus at its limit parks.
+// Every id carries `[1m]`: behind a gateway Claude Code cannot look a model up,
+// so a bare id gets a 200k window (measured 2026-09-29 through the proxy:
+// claude-opus-5-5 200,000, claude-opus-5-5[1m] 1,000,000), and a dispatched
+// child compacted at 172k.
 export function standingRoutes(proxyUrl) {
   const proxy = `@${proxyUrl}`;
   return [
-    `plan claude gpt-6-astra ${proxy} !xhigh >claude-opus-5-5`,
-    'plan-review claude claude-fable-5-1 !xhigh >claude-opus-5-5',
-    'implement claude claude-opus-5-5',
-    `fix claude claude-opus-5-5 >gpt-6-astra${proxy}`,
-    `simplify claude claude-fable-5-1 >gpt-6-astra${proxy}`,
-    `diff-review claude gpt-6-astra ${proxy} !xhigh`,
-    `code-review claude gpt-6-astra ${proxy} !xhigh`,
-    `doubt-review claude gpt-6-astra ${proxy} !xhigh`,
+    `plan claude gpt-6-astra[1m] ${proxy} !xhigh >claude-opus-5-5[1m]`,
+    'plan-review claude claude-fable-5-1[1m] !xhigh >claude-opus-5-5[1m]',
+    'implement claude claude-opus-5-5[1m]',
+    `fix claude claude-opus-5-5[1m] >gpt-6-astra[1m]${proxy}`,
+    `simplify claude claude-fable-5-1[1m] >gpt-6-astra[1m]${proxy}`,
+    `diff-review claude gpt-6-astra[1m] ${proxy} !xhigh`,
+    `code-review claude gpt-6-astra[1m] ${proxy} !xhigh`,
+    `doubt-review claude gpt-6-astra[1m] ${proxy} !xhigh`,
   ].join('\n');
 }
 
@@ -855,14 +859,19 @@ function hostName(engine) {
 // its route records, else to Opus on the native route. Code reviewers default
 // to Fable instead: Opus writes the code they judge. A route already on its
 // default has nowhere further to go.
-const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5';
-const CODE_REVIEW_FALLBACK_MODEL = 'claude-fable-5-1';
+const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5[1m]';
+const CODE_REVIEW_FALLBACK_MODEL = 'claude-fable-5-1[1m]';
+
+// The same model with or without its context-window suffix.
+function baseModel(id) {
+  return String(id ?? '').replace(/\[1m\]$/iu, '');
+}
 const CODE_REVIEW_ROLES = new Set(['diff-review', 'code-review', 'doubt-review']);
 
 export function effectiveFallback(role, route) {
   if (route.fallback !== null) return route.fallback;
   const model = CODE_REVIEW_ROLES.has(role) ? CODE_REVIEW_FALLBACK_MODEL : DEFAULT_FALLBACK_MODEL;
-  if (route.model === model) return null;
+  if (baseModel(route.model) === baseModel(model)) return null;
   return Object.freeze({ model, baseUrl: null });
 }
 
@@ -2320,14 +2329,14 @@ function selfTest() {
       'every role resolves its own recorded route and nothing else',
       (() => {
         const want = {
-          plan: ['gpt-6-astra', proxyUrl, 'claude-opus-5-5'],
-          'plan-review': ['claude-fable-5-1', null, 'claude-opus-5-5'],
-          implement: ['claude-opus-5-5', null, null],
-          fix: ['claude-opus-5-5', null, 'gpt-6-astra'],
-          simplify: ['claude-fable-5-1', null, 'gpt-6-astra'],
-          'diff-review': ['gpt-6-astra', proxyUrl, null],
-          'code-review': ['gpt-6-astra', proxyUrl, null],
-          'doubt-review': ['gpt-6-astra', proxyUrl, null],
+          plan: ['gpt-6-astra[1m]', proxyUrl, 'claude-opus-5-5[1m]'],
+          'plan-review': ['claude-fable-5-1[1m]', null, 'claude-opus-5-5[1m]'],
+          implement: ['claude-opus-5-5[1m]', null, null],
+          fix: ['claude-opus-5-5[1m]', null, 'gpt-6-astra[1m]'],
+          simplify: ['claude-fable-5-1[1m]', null, 'gpt-6-astra[1m]'],
+          'diff-review': ['gpt-6-astra[1m]', proxyUrl, null],
+          'code-review': ['gpt-6-astra[1m]', proxyUrl, null],
+          'doubt-review': ['gpt-6-astra[1m]', proxyUrl, null],
         };
         return ROLE_NAMES.length === 8 && ROLE_NAMES.every((role) => {
           const route = resolveRoute(role, repoScratch);
@@ -2340,6 +2349,16 @@ function selfTest() {
         });
       })(),
     );
+    // LFE, 2026-09-29: behind a gateway Claude Code cannot look a model up, so
+    // a bare id gets a 200k window (measured: claude-opus-5-5 → 200,000,
+    // claude-opus-5-5[1m] → 1,000,000 through the proxy); a child compacted at
+    // 172k. The standing ids carry [1m]; comparisons ignore the suffix.
+    check('fallbacks carry [1m] and a suffixed route on its default has nowhere further to go',
+      effectiveFallback('implement', { model: 'gpt-6-astra[1m]', fallback: null })?.model === 'claude-opus-5-5[1m]'
+        && effectiveFallback('code-review', { model: 'gpt-6-astra[1m]', fallback: null })?.model === 'claude-fable-5-1[1m]'
+        && effectiveFallback('code-review', { model: 'claude-fable-5-1[1m]', fallback: null }) === null
+        && effectiveFallback('code-review', { model: 'claude-fable-5-1', fallback: null }) === null
+        && effectiveFallback('implement', { model: 'claude-opus-5-5', fallback: null }) === null);
     const routedEnv = (role, extra = {}) => {
       writeEngineShim(shimDirectory, shimBody(ROLES[role].result === 'text'
         ? `printf x > "routed-$$.txt"\n${resultEvent({ result: 'done' })}`
@@ -2395,7 +2414,7 @@ function selfTest() {
         const planReview = routedEnv('plan-review', { fallback: true });
         return simplify.result.ok === true
           && simplify.argv.includes('--model gpt-6-astra') && simplify.url === proxyUrl
-          && simplify.result.fallback === true && simplify.result.model === 'gpt-6-astra'
+          && simplify.result.fallback === true && simplify.result.model === 'gpt-6-astra[1m]'
           && planReview.argv.includes('--model claude-opus-5-5')
           && planReview.url === 'http://session-wide.invalid';
       })(),
@@ -2418,15 +2437,15 @@ function selfTest() {
           role: 'implement', prompt: 'x', tools: 'Read', cwd: repoScratch,
           engine: join(shimDirectory, 'claude'), fallback: true,
         });
-        return review.result.fallback === true && review.result.model === 'claude-fable-5-1'
+        return review.result.fallback === true && review.result.model === 'claude-fable-5-1[1m]'
           && review.argv.includes('--model claude-fable-5-1') && review.url === 'http://session-wide.invalid'
-          && legacy.result.model === 'claude-fable-5-1' && legacy.url === 'http://session-wide.invalid'
+          && legacy.result.model === 'claude-fable-5-1[1m]' && legacy.url === 'http://session-wide.invalid'
           && refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING'
-          && effectiveFallback('plan', { model: 'gpt-6-astra', fallback: null })?.model === 'claude-opus-5-5'
+          && effectiveFallback('plan', { model: 'gpt-6-astra', fallback: null })?.model === 'claude-opus-5-5[1m]'
           && effectiveFallback('implement', { model: 'claude-opus-5-5', fallback: null }) === null
           // Opus wrote the code a code reviewer judges: it never reviews it.
           && ['diff-review', 'code-review', 'doubt-review'].every((role) =>
-            effectiveFallback(role, { model: 'gpt-6-astra', fallback: null })?.model === 'claude-fable-5-1')
+            effectiveFallback(role, { model: 'gpt-6-astra', fallback: null })?.model === 'claude-fable-5-1[1m]')
           && effectiveFallback('code-review', { model: 'claude-fable-5-1', fallback: null }) === null
           && effectiveFallback('x', { model: 'x', fallback: { model: 'y', baseUrl: null } }).model === 'y';
       })(),
@@ -2482,11 +2501,11 @@ function selfTest() {
         const host = recordRoutes(repoScratch, { preset: 'host' });
         return recorded.ok === true
           && doubt.model === 'claude-fable-5-1' && doubt.baseUrl === null
-          && plan.model === 'gpt-6-astra'
+          && plan.model === 'gpt-6-astra[1m]'
           && codex.ok === false && codex.error.code === 'ROUTES_INVALID'
           && bad.ok === false && bad.error.code === 'ROUTES_INVALID'
           // A refused recording leaves the previous one in place.
-          && afterBad === 'gpt-6-astra'
+          && afterBad === 'gpt-6-astra[1m]'
           && host.ok === true && resolveRoute('code-review', repoScratch).model === null;
       })(),
     );
@@ -2527,7 +2546,7 @@ function selfTest() {
         const tail = readFileSync(logPath, 'utf8').trim().split('\n').slice(-2)
           .map((line) => JSON.parse(line));
         return result.ok === true && spawns === 2
-          && result.earlierAttempts?.[0] === 'ENGINE_EXIT_NONZERO on gpt-6-astra'
+          && result.earlierAttempts?.[0] === 'ENGINE_EXIT_NONZERO on gpt-6-astra[1m]'
           && tail[0].ok === false && tail[0].code === 'ENGINE_EXIT_NONZERO'
           && tail[1].ok === true && tail[1].code === undefined;
       })(),
@@ -2557,8 +2576,8 @@ function selfTest() {
         const { result, spawns } = spawnsOf('plan', limitedOnAstra);
         const last = JSON.parse(readFileSync(logPath, 'utf8').trim().split('\n').at(-1));
         return result.ok === true && spawns === 2
-          && result.fallback === true && result.model === 'claude-opus-5-5'
-          && result.earlierAttempts[0] === 'ENGINE_EXIT_NONZERO (usage limit) on gpt-6-astra'
+          && result.fallback === true && result.model === 'claude-opus-5-5[1m]'
+          && result.earlierAttempts[0] === 'ENGINE_EXIT_NONZERO (usage limit) on gpt-6-astra[1m]'
           && last.fallback === true;
       })(),
     );
@@ -2571,7 +2590,7 @@ function selfTest() {
         const review = spawnsOf('code-review', limitedReview);
         const pinned = spawnsOf('plan', limitedOnAstra, { model: 'gpt-6-astra' });
         return review.result.ok === true && review.spawns === 2
-          && review.result.model === 'claude-fable-5-1' && review.result.fallback === true
+          && review.result.model === 'claude-fable-5-1[1m]' && review.result.fallback === true
           // An explicit --model is the caller's choice; the tool does not reroute it.
           && pinned.result.ok === false && pinned.spawns === 1;
       })(),
@@ -2580,7 +2599,7 @@ function selfTest() {
       'a writer at its limit is flagged for the orchestrator, not rerouted',
       (() => {
         writeFileSync(routesFile, `${standingRoutes(proxyUrl)}\n`
-          .replace('fix claude claude-opus-5-5', 'fix claude gpt-6-astra @http://127.0.0.1:1'));
+          .replace('fix claude claude-opus-5-5[1m]', 'fix claude gpt-6-astra @http://127.0.0.1:1'));
         const { result, spawns } = spawnsOf('fix', limitedOnAstra);
         writeFileSync(routesFile, `${standingRoutes(proxyUrl)}\n`);
         return result.ok === false && spawns === 1 && result.error.usageLimit === true
@@ -2595,7 +2614,7 @@ function selfTest() {
         const moved = spawnsOf('plan-review', failsOnFable);
         const nowhere = spawnsOf('plan-review', 'exit 7');
         return moved.result.ok === true && moved.spawns === 3
-          && moved.result.model === 'claude-opus-5-5' && moved.result.fallback === true
+          && moved.result.model === 'claude-opus-5-5[1m]' && moved.result.fallback === true
           && nowhere.result.ok === false && nowhere.spawns === 3
           && nowhere.result.error.fallback === true;
       })(),
