@@ -7,8 +7,10 @@
 // self-test exercises it.
 
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readdirSync, readFileSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 // The guard is defense-in-depth for commands a run issues; repository rules are
 // the enforcement boundary. Applying it to every Bash call in the project turns
@@ -18,9 +20,10 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 // An open run is evidenced by a durable run marker that `prime.mjs` writes and
 // binds to the ancestry it observed. The marker names live PIDs; a run whose
 // orchestrator has exited leaves nothing alive to match, so the evidence
-// disappears with the run without needing a daemon to revoke it. Anything
-// unreadable or ambiguous means "no run": a guard that cannot establish an open
-// run must not block a human.
+// disappears with the run without needing a daemon to revoke it. An unreadable
+// marker means "no run": a guard that cannot establish an open run must not
+// block a human. The session latch below is the exception — it exists only
+// because this session already had a run, so an unreadable one refuses.
 // The common git dir, not `--git-path` (which is per-worktree for this path):
 // a command issued from a linked worktree must see the repository's run.
 export function runMarkerDirectory(cwd = process.cwd()) {
@@ -81,16 +84,115 @@ export function loopRunIsLive(cwd = process.cwd()) {
   return ownRunMarkers(cwd).some(({ marker }) => marker.closedAt === undefined);
 }
 
-// The base of an open run the plugin's prime opened (its marker records the
-// base; a legacy install's own prime writes markers without one — that run is
-// the vendored guard's, never this one's). Looked up from the hook's cwd and
-// from the project root, since either may be where the session works. null
-// when no such run is open.
-export function pluginRunBase(dirs = [process.cwd()]) {
-  const newest = dirs.flatMap((dir) => ownRunMarkers(dir))
-    .filter(({ marker }) => typeof marker.baseBranch === 'string')
-    .sort((left, right) => (right.marker.openedAtMs ?? 0) - (left.marker.openedAtMs ?? 0))[0];
-  return newest?.marker.baseBranch ?? null;
+// The open runs the plugin's prime opened (each marker records its base; a
+// legacy install's own prime writes markers without one — that run is the
+// vendored guard's, never this one's). Looked up from the hook's cwd and from
+// the project root, since either may be where the session works; oldest first.
+export function pluginRunMarkers(dirs = [process.cwd()]) {
+  const seen = new Set();
+  return dirs.flatMap((dir) => ownRunMarkers(dir))
+    .filter(({ path, marker }) => typeof marker.baseBranch === 'string' && !seen.has(path) && seen.add(path))
+    .sort((left, right) => (left.marker.openedAtMs ?? 0) - (right.marker.openedAtMs ?? 0));
+}
+
+// Every base an open plugin run names. A second marker can only add a base:
+// the guard enforces each, so a forged one never relaxes the rules.
+export function pluginRunBases(dirs = [process.cwd()]) {
+  return [...new Set(pluginRunMarkers(dirs).map(({ marker }) => marker.baseBranch))];
+}
+
+// The session latch: the run's second record, outside the repository. The
+// markers live in the git dir, which the run can reach, and a run that
+// deleted them switched its own guard off (security audit after 0.60.0). The
+// command guard writes a latch the first time it sees an open plugin run in a
+// session — once, never updated, so the first base is pinned — and honours it
+// for as long as a latched process is alive in the hook's ancestry, whatever
+// happened to the markers. Keyed by session and repository (its common dir).
+const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+
+export function latchDirectory(home = homedir()) {
+  return join(home, '.claude', 'autoloop', 'run-latches');
+}
+
+export function commonDirOf(cwd = process.cwd()) {
+  const markers = runMarkerDirectory(cwd);
+  return markers === null ? null : dirname(dirname(markers));
+}
+
+function latchPath(sessionId, commonDir, directory) {
+  return join(directory, `${createHash('sha256').update(`${sessionId}\0${commonDir}`).digest('hex')}.json`);
+}
+
+const livePid = (pid) => Number.isSafeInteger(pid) && pid > 1 && processAlive(pid);
+
+export function recordLatch({ sessionId, commonDir, markers, directory = latchDirectory(), nowMs = Date.now() }) {
+  if (!SESSION_ID.test(String(sessionId ?? '')) || typeof commonDir !== 'string') return null;
+  const plugin = markers.filter(({ marker }) => typeof marker.baseBranch === 'string');
+  if (plugin.length === 0) return null;
+  const path = latchPath(sessionId, commonDir, directory);
+  const latch = {
+    version: 1,
+    sessionId,
+    commonDir,
+    baseBranch: plugin[0].marker.baseBranch,
+    pids: [...new Set(plugin.flatMap(({ marker }) => marker.pids))].filter((pid) => Number.isSafeInteger(pid) && pid > 1),
+    latchedAtMs: nowMs,
+  };
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(path, `${JSON.stringify(latch)}\n`, { flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    if (error?.code !== 'EEXIST') return null;
+  }
+  return path;
+}
+
+// { latch } while it binds this session's live ancestry; { unreadable } for a
+// latch that exists but cannot be trusted (the guard then refuses); null when
+// there is none, or its processes have all exited (the file is pruned).
+export function sessionLatch({ sessionId, commonDir, directory = latchDirectory(), ancestors = ancestorPids() }) {
+  if (!SESSION_ID.test(String(sessionId ?? '')) || typeof commonDir !== 'string') return null;
+  const path = latchPath(sessionId, commonDir, directory);
+  let latch;
+  try {
+    latch = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    return error?.code === 'ENOENT' ? null : { unreadable: true, path };
+  }
+  if (latch?.version !== 1 || latch.sessionId !== sessionId || latch.commonDir !== commonDir
+    || typeof latch.baseBranch !== 'string' || !Array.isArray(latch.pids)) {
+    return { unreadable: true, path };
+  }
+  const live = latch.pids.filter(livePid);
+  if (live.length === 0) {
+    try {
+      unlinkSync(path);
+    } catch { /* already gone */ }
+    return null;
+  }
+  return live.some((pid) => ancestors.has(pid)) ? { latch, path } : null;
+}
+
+// Latches whose processes have all exited: their sessions are over.
+export function pruneLatches(directory = latchDirectory()) {
+  let names;
+  try {
+    names = readdirSync(directory).filter((name) => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const pruned = [];
+  for (const name of names) {
+    const path = join(directory, name);
+    try {
+      const { pids } = JSON.parse(readFileSync(path, 'utf8'));
+      if (Array.isArray(pids) && !pids.some(livePid)) {
+        unlinkSync(path);
+        pruned.push(path);
+      }
+    } catch { /* unreadable: left for the session that owns it to refuse on */ }
+  }
+  return pruned;
 }
 
 export function processAlive(pid) {

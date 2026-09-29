@@ -38,8 +38,13 @@ fixing all three (2026-09-29).
   - Refused: a recursive delete, recursive `chmod`/`chown`/`chgrp`, `mv`, or `find
     -delete/-exec` whose operand is an ancestor of a protected path (`rm -rf .git`, `find .
     -delete`).
-  - Globs are matched segment by segment. Literal `cd`/`pushd` steps are followed.
+  - Globs are matched segment by segment. Literal `cd`/`pushd` steps (with subshell scope) and
+    literal assignments are followed. Command substitutions are judged as the commands they run.
+  - An `xargs` consumer, or an unresolved operand (`rm "$f"` in a loop), makes the paths the
+    other segments name into candidates.
   - The edit guard refuses Write/Edit targets inside the protected paths.
+  - Replayed over 22,635 recorded Bash commands from every local project: one false positive, a
+    `for` loop over `$f` in the same command as an unrelated `find .`.
 - **Residual risk (accepted).** The guard runs as the same uid as the session. A script file the
   run writes and then executes can still reach both records; inline interpreter source is already
   refused. The enforcement boundary stays the repository's server-side rules.

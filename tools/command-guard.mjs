@@ -37,8 +37,10 @@
 //         node <plugin-tools>/command-guard.mjs --self-test
 
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -57,8 +59,10 @@ import {
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import {
-  runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunBase, ancestorChain, isClaudeProcess, procEntry, psEntry,
+  runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunBases, pluginRunMarkers, ancestorChain, isClaudeProcess,
+  procEntry, psEntry, commonDirOf, latchDirectory, pruneLatches, recordLatch, sessionLatch,
 } from './run-markers.mjs';
+import { runStateProblem } from './run-state-guard.mjs';
 
 const BRANCH_CREATION_FLAGS = new Set([
   '-c',
@@ -3775,21 +3779,21 @@ function selfTest() {
         ok = false;
       }
       rmSync(other, { recursive: true, force: true });
-      // A session that primed twice holds two plugin markers: the newest base wins.
-      // Both name assignments, so directory order cannot pass it by accident.
-      const newestOf = (first, second) => {
+      // A session that primed twice holds two plugin markers: every base is
+      // enforced (a forged marker can only add one), oldest first whatever the
+      // directory order.
+      const basesOf = (first, second) => {
         writeFileSync(join(markers, 'm1.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...first }));
         writeFileSync(join(markers, 'm2.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...second }));
-        const base = pluginRunBase([scratch]);
+        const bases = pluginRunBases([scratch, scratch]);
         rmSync(join(markers, 'm1.json'));
         rmSync(join(markers, 'm2.json'));
-        return base;
+        return JSON.stringify(bases);
       };
       const older = { openedAtMs: 1, baseBranch: 'old' };
       const newer = { openedAtMs: 2, baseBranch: 'new' };
-      const newest = newestOf(older, newer) === 'new' && newestOf(newer, older) === 'new' ? 'new' : 'old';
-      if (newest !== 'new') {
-        console.error(`FAIL [the newest plugin marker's base wins]: ${newest}`);
+      if (basesOf(older, newer) !== '["old","new"]' || basesOf(newer, older) !== '["old","new"]') {
+        console.error(`FAIL [every plugin marker's base is enforced, oldest first]: ${basesOf(older, newer)}`);
         ok = false;
       }
       // The hook's cwd is not the only place to look: the project root's run counts.
@@ -3813,6 +3817,56 @@ function selfTest() {
       rmSync(linked, { recursive: true, force: true });
       if (fromLinked.status !== 2) {
         console.error('FAIL [a linked worktree sees the repository\'s open run]');
+        ok = false;
+      }
+      // Security audit after 0.60.0: the markers were the guard's only record
+      // of an open run, and the run could delete or forge them. The run's own
+      // state is refused to it, a session latch outside the repository keeps
+      // the run open once seen, and every base any record names is enforced.
+      const home = join(scratch, 'home');
+      const latches = join(home, '.claude', 'autoloop', 'run-latches');
+      const latchHook = (command, sessionId = 'session-a') => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', session_id: sessionId, cwd: scratch, tool_input: { command } }),
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: scratch },
+      });
+      const stateCommands = ['rm -rf .git/autoloop/run', `rm -rf ${latches}`, 'rm -rf .git', 'echo {} > .git/autoloop/run/f.json',
+        'echo $(rm -rf .git/autoloop/run)', 'echo `rm -rf .git`', 'D=.git/autoloop; rm -rf $D'];
+      const stateVerdicts = stateCommands.map((command) => latchHook(command).status);
+      const readVerdict = latchHook(`cat ${join(markers, 'run.json')}`).status;
+      const latched = existsSync(latches) && readdirSync(latches).length === 1;
+      rmSync(join(markers, 'run.json'));
+      const afterDelete = latchHook('gh pr merge 5 --squash').status;
+      const otherSession = latchHook('gh pr merge 5 --squash', 'session-b').status;
+      const [latchFile] = readdirSync(latches);
+      const latchText = readFileSync(join(latches, latchFile), 'utf8');
+      writeFileSync(join(latches, latchFile), '{ corrupt');
+      const corrupt = latchHook('ls');
+      writeFileSync(join(latches, latchFile), latchText);
+      if (stateVerdicts.some((status) => status !== 2) || readVerdict !== 0 || !latched
+        || afterDelete !== 2 || otherSession !== 0 || corrupt.status !== 2 || !corrupt.stderr.includes('latch')) {
+        console.error(`FAIL [the run's own state is refused to it, and the session latch outlives its markers]: `
+          + `${JSON.stringify({ stateVerdicts, readVerdict, latched, afterDelete, otherSession, corrupt: corrupt.status })}`);
+        ok = false;
+      }
+      // A latch whose processes have all exited is a finished session's: pruned.
+      const exited = spawnSync(process.execPath, ['-e', '0']).pid;
+      mkdirSync(latches, { recursive: true });
+      writeFileSync(join(latches, 'ended.json'), JSON.stringify({ version: 1, pids: [exited], baseBranch: 'main' }));
+      const pruned = pruneLatches(latches);
+      if (pruned.length !== 1 || existsSync(join(latches, 'ended.json')) || !existsSync(join(latches, latchFile))) {
+        console.error(`FAIL [only latches whose processes have exited are pruned]: ${JSON.stringify(pruned)}`);
+        ok = false;
+      }
+      // A forged, newer marker naming another base cannot relax the rules the
+      // run's own base imposes: every base is enforced.
+      const base = execFileSync('git', ['-C', scratch, 'branch', '--show-current'], { encoding: 'utf8' }).trim();
+      rmSync(latches, { recursive: true, force: true });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: 1, baseBranch: base }));
+      writeFileSync(join(markers, 'forged.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'elsewhere' }));
+      const forged = latchHook('git commit --allow-empty -m x', 'session-c');
+      rmSync(join(markers, 'forged.json'));
+      if (forged.status !== 2) {
+        console.error(`FAIL [a forged marker naming another base cannot relax the base rules]: ${forged.status} ${forged.stderr}`);
         ok = false;
       }
     } finally {
@@ -3973,6 +4027,60 @@ function selfTest() {
 // keeps the refusal failing CLOSED if the host ever stops parsing this shape —
 // JSON with exit 0 would then fail OPEN, a security regression rather than a
 // cosmetic change. stderr keeps the reason visible in that case too.
+// The run's own state: the marker directories (the project's and the
+// command's, by real path too) and the session latches.
+function runStateDirs(projectRoot, cwd) {
+  const dirs = [runMarkerDirectory(projectRoot), runMarkerDirectory(cwd), latchDirectory()]
+    .filter((dir) => dir !== null);
+  return [...new Set([...dirs, ...dirs.map(realOrSelf)])];
+}
+
+// The command as the run-state rule reads it: each shell segment's words, and
+// the subshell parentheses that open before it and close after it.
+export function guardSegments(cmd, depth = 0) {
+  const text = stripHeredocs(cmd);
+  const segments = shellSegments(text).map(({ command }) => {
+    // Linear scans, like trimSubshell: an anchored-at-end pattern backtracks
+    // quadratically on a padded command.
+    let opens = 0;
+    for (let index = 0; index < command.length && (command[index] === '(' || /\s/u.test(command[index])); index += 1) {
+      if (command[index] === '(') opens += 1;
+    }
+    let closes = 0;
+    for (let index = command.length - 1; index >= 0 && (command[index] === ')' || /\s/u.test(command[index])); index -= 1) {
+      if (command[index] === ')') closes += 1;
+    }
+    let words = shellWords(trimSubshell(command));
+    const comment = words.findIndex((word) => word.startsWith('#'));
+    if (comment !== -1) words = words.slice(0, comment);
+    return { words, opens, closes };
+  });
+  // Command substitutions run commands of their own, in a subshell:
+  // `echo $(rm -rf …)` is judged as the rm it runs.
+  if (depth >= MAX_SUBSTITUTION_DEPTH) return segments;
+  const bodies = [];
+  for (let index = text.indexOf('$('); index !== -1 && bodies.length < 64;) {
+    const end = substitutionEnd(text, index + 2);
+    if (end === -1) break;
+    bodies.push(text.slice(index + 2, end));
+    index = text.indexOf('$(', end);
+  }
+  for (let index = text.indexOf('`'); index !== -1 && bodies.length < 64;) {
+    const end = text.indexOf('`', index + 1);
+    if (end === -1) break;
+    bodies.push(text.slice(index + 1, end));
+    index = text.indexOf('`', end + 1);
+  }
+  for (const body of bodies) {
+    const inner = guardSegments(body, depth + 1);
+    if (inner.length === 0) continue;
+    inner[0].opens += 1;
+    inner.at(-1).closes += 1;
+    segments.push(...inner);
+  }
+  return segments;
+}
+
 function refuse(reason) {
   process.stdout.write(`${JSON.stringify({
     hookSpecificOutput: {
@@ -4005,11 +4113,12 @@ function main() {
   if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
   // Plugin hooks fire in every repository; outside an open run this one guards
   // only a devendored autoloop repository (hook-root.mjs), before reading
-  // anything. Inside an open run it never stands down: the run's marker is the
-  // authority, whatever the checkout now says.
+  // anything. Inside an open run it never stands down: the run's markers — and,
+  // once seen, the session latch that outlives them — are the authority,
+  // whatever the checkout now says.
   const projectRoot = parsed.root ?? hookRoot();
   const root = activeAutoloopRoot(projectRoot);
-  const runBase = pluginRunBase([process.cwd(), projectRoot]);
+  const markers = pluginRunMarkers([process.cwd(), projectRoot]);
 
   let payload;
   let payloadError = null;
@@ -4024,7 +4133,17 @@ function main() {
   // CLAUDE_PROJECT_DIR.
   const foreign = foreignPrimeProblem(payload?.tool_input?.command, payload?.cwd ?? process.cwd(), projectRoot, undefined, deadline);
   if (foreign !== null) refuse(foreign);
-  if (root === null && runBase === null) process.exit(0);
+  const sessionId = payload?.session_id;
+  const commonDir = commonDirOf(projectRoot);
+  if (markers.length > 0) recordLatch({ sessionId, commonDir, markers });
+  const latched = sessionLatch({ sessionId, commonDir });
+  if (latched?.unreadable) {
+    refuse(
+      `autoloop guard — this session's run latch (${latched.path}) is unreadable, so whether a `
+      + 'run is open cannot be proven and every command is refused. Start a new session.',
+    );
+  }
+  if (root === null && markers.length === 0 && latched === null) process.exit(0);
   if (payloadError !== null) {
     const error = payloadError;
     refuse(
@@ -4049,7 +4168,8 @@ function main() {
 
   // Ordered before configuration loading: with no run open there is nothing to
   // guard, so a configuration problem must not block a human's command either.
-  if (!loopRunIsOpen() && !loopRunIsOpen(projectRoot)) process.exit(0);
+  if (!loopRunIsOpen() && !loopRunIsOpen(projectRoot) && latched === null) process.exit(0);
+  pruneLatches();
 
   const launchProblem = backgroundDispatchProblem(
     cmd,
@@ -4057,21 +4177,32 @@ function main() {
   );
   if (launchProblem !== null) refuse(launchProblem);
 
-  let baseBranch;
-  try {
-    // While a plugin run is open its recorded base is the authority, whatever
-    // the checkout now says (a missing, unreadable or different config);
-    // otherwise the checkout's config decides.
-    baseBranch = runBase ?? loadConfiguredBase(root ?? projectRoot);
-  } catch (error) {
-    refuse(
-      `autoloop guard — the configured base branch cannot be resolved (${error.message}), `
-      + 'so branch-sensitive rules cannot be proven. Run autoloop:setup to repair '
-      + '.autoloop/config.json.',
-    );
+  const cwd = typeof payload?.cwd === 'string' ? payload.cwd : process.cwd();
+  const stateProblem = runStateProblem(guardSegments(cmd), { cwd, protectedDirs: runStateDirs(projectRoot, cwd) });
+  if (stateProblem !== null) refuse(stateProblem);
+
+  // While a plugin run is open its recorded bases are the authority, whatever
+  // the checkout now says (a missing, unreadable or different config): the
+  // latch's pinned one and every open marker's, each enforced, so a forged
+  // marker can only add rules. Otherwise the checkout's config decides.
+  let bases = [...new Set([latched?.latch.baseBranch, ...pluginRunBases([process.cwd(), projectRoot])]
+    .filter((base) => typeof base === 'string'))];
+  if (bases.length === 0) {
+    try {
+      bases = [loadConfiguredBase(root ?? projectRoot)];
+    } catch (error) {
+      refuse(
+        `autoloop guard — the configured base branch cannot be resolved (${error.message}), `
+        + 'so branch-sensitive rules cannot be proven. Run autoloop:setup to repair '
+        + '.autoloop/config.json.',
+      );
+    }
   }
-  const verdict = evaluate(cmd, currentBranch(), { baseBranch, cwd: payload?.cwd });
-  if (verdict.block) refuse(verdict.reason);
+  const branch = currentBranch();
+  for (const baseBranch of bases) {
+    const verdict = evaluate(cmd, branch, { baseBranch, cwd: payload?.cwd });
+    if (verdict.block) refuse(verdict.reason);
+  }
   process.exit(0);
 }
 

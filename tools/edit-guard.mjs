@@ -11,6 +11,10 @@
 // queue and flagged `human:authorize` at merge, which is STATE's standing
 // policy (operator, 2026-09-29).
 //
+// It also refuses edits to the run's own state — the run markers and the
+// session latches (run-state-guard.mjs says why) — the Write-tool twin of the
+// command guard's rule.
+//
 // A separate file from command-guard because the payload differs (an Edit
 // carries no Bash command).
 //
@@ -21,8 +25,10 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loopRunIsOpen } from './run-markers.mjs';
-import { guardedRoot } from './hook-root.mjs';
+import {
+  commonDirOf, latchDirectory, loopRunIsOpen, runMarkerDirectory, sessionLatch,
+} from './run-markers.mjs';
+import { guardedRoot, hookRoot } from './hook-root.mjs';
 
 const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);
@@ -52,6 +58,16 @@ export function hookWiringEditProblem(filePath, repoRoot, live) {
     + 'human\'s, or autoloop:setup\'s in a new session.';
 }
 
+export function runStateEditProblem(filePath, repoRoot, protectedDirs, live) {
+  if (!live || typeof filePath !== 'string' || filePath.length === 0) return null;
+  const target = canonical(resolve(repoRoot, filePath));
+  const hit = protectedDirs.filter((dir) => typeof dir === 'string')
+    .find((dir) => [dir, canonical(dir)].some((form) => target === form || target.startsWith(`${form}${sep}`)));
+  if (hit === undefined) return null;
+  return `autoloop guard — ${target} is this run's own state (${hit}): the run markers and the session `
+    + 'latch are how the guard knows a run is open, so a run never writes them.';
+}
+
 function selfTest() {
   const failures = [];
   const cases = [];
@@ -72,6 +88,13 @@ function selfTest() {
       && !blocked('/elsewhere/.claude/settings.json'));
   check('nothing is refused without a live run, or without a path',
     !blocked('/r/.claude/settings.json', false) && !blocked(undefined) && !blocked(''));
+  const stateDirs = ['/r/.git/autoloop/run', '/h/.claude/autoloop/run-latches'];
+  const stateBlocked = (path, live = true) => runStateEditProblem(path, '/r', stateDirs, live) !== null;
+  check('the run state is refused during a run, the rest of the git dir and the repository are not',
+    stateBlocked('/r/.git/autoloop/run/1.json') && stateBlocked('.git/autoloop/run/new.json')
+      && stateBlocked('/h/.claude/autoloop/run-latches/x.json')
+      && !stateBlocked('/r/.git/autoloop/steps/1.json') && !stateBlocked('/r/src/run.ts')
+      && !stateBlocked('/r/.git/autoloop/run/1.json', false));
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'edit-guard-')));
   try {
     mkdirSync(join(scratch, 'real', '.claude'), { recursive: true });
@@ -98,12 +121,6 @@ function selfTest() {
 
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  // Plugin hooks fire in every repository; outside an open run this one guards
-  // only a devendored autoloop repository, found from CLAUDE_PROJECT_DIR
-  // (hook-root.mjs). Inside an open run it never stands down.
-  const repoRoot = guardedRoot();
-  if (repoRoot === null) process.exit(0);
-  const open = loopRunIsOpen() || loopRunIsOpen(repoRoot);
   let payload;
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
@@ -111,11 +128,18 @@ function main() {
     process.exit(0); // not an edit this guard can read; the command guard still gates the shell
   }
   if (!EDIT_TOOLS.includes(payload?.tool_name)) process.exit(0);
-  const problem = hookWiringEditProblem(
-    payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path,
-    repoRoot,
-    open,
-  );
+  // Plugin hooks fire in every repository; outside an open run this one guards
+  // only a devendored autoloop repository, found from CLAUDE_PROJECT_DIR
+  // (hook-root.mjs). Inside an open run — its markers, or the session latch
+  // the command guard keeps once it has seen them — it never stands down.
+  const projectRoot = hookRoot();
+  const latched = sessionLatch({ sessionId: payload?.session_id, commonDir: commonDirOf(projectRoot) });
+  const repoRoot = guardedRoot(projectRoot) ?? (latched === null ? null : projectRoot);
+  if (repoRoot === null) process.exit(0);
+  const open = loopRunIsOpen() || loopRunIsOpen(repoRoot) || latched !== null;
+  const filePath = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
+  const problem = hookWiringEditProblem(filePath, repoRoot, open)
+    ?? runStateEditProblem(filePath, repoRoot, [runMarkerDirectory(repoRoot), latchDirectory()], open);
   if (problem !== null) {
     console.error(problem);
     process.exit(2);
