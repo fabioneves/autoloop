@@ -306,7 +306,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'command-guard.mjs', anchor: 'export function askUserQuestionProblem(runIsLive) {' }),
       Object.freeze({ file: 'command-guard.mjs', anchor: "payload?.tool_name === 'AskUserQuestion'" }),
-      Object.freeze({ file: 'scaffold.mjs', anchor: 'a widened matcher on an unchanged autoloop command reaches existing installs' }),
+      Object.freeze({ file: 'verify.mjs', anchor: "matcher: 'Bash|AskUserQuestion'," }),
     ]),
   }),
   Object.freeze({
@@ -1136,8 +1136,8 @@ export const INCIDENTS = Object.freeze([
       + 'unperformed check, so a reader re-derives it with a shell probe.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: 'scaffold.mjs',
-        anchor: 'a fresh scaffold never creates the retired CI policy, and says so',
+        file: 'verify.mjs',
+        anchor: "{ name: 'retired CI policy absent', execute: () => checkRetiredCiPolicy(root) },",
       }),
     ]),
   }),
@@ -1419,9 +1419,11 @@ export const INCIDENTS = Object.freeze([
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '
       + 'session; a template change alone could not reach them.',
     cause: 'Setup merged documents but had no way to relocate a section, so '
-      + 'template restructuring stranded every installed repo.',
+      + 'template restructuring stranded every installed repo. Closed '
+      + 'structurally by the global cutover: STATE is the repository\'s own '
+      + 'prose, which no plugin change has to reach; devendor moves it once.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'scaffold.mjs', anchor: 'lessons-out-of-state' }),
+      Object.freeze({ file: 'setup.mjs', anchor: 'export function stateProse(markdown) {' }),
     ]),
   }),
   Object.freeze({

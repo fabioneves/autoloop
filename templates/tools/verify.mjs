@@ -26,11 +26,6 @@ import { CONFIG_VERSION, effectiveChecklistPath, resolveProjectConfig } from './
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const SELF_TEST_MANIFEST_NAME = 'self-test-manifest.json';
 const SELF_TEST_PATTERN = /(?:async\s+)?function\s+selfTest\s*\(/;
-// Every dispatch role's standing brief, vendored beside the tools so a
-// vendored dispatch.mjs finds them where the plugin's copy does.
-export const BRIEF_FILES = Object.freeze([
-  'plan', 'plan-review', 'implement', 'simplify', 'diff-review', 'code-review', 'doubt-review', 'fix',
-].map((role) => `briefs/${role}.md`));
 export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'attestation-contract.mjs',
   'checkout-contract.mjs',
@@ -43,7 +38,6 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'dispatch-render.mjs',
   'dispatch.mjs',
   'escalate-paths.mjs',
-  'hook-relay.mjs',
   'hook-root.mjs',
   'label-swap-reminder.mjs',
   'lane-contract.mjs',
@@ -56,7 +50,6 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'publish-verdict.mjs',
   'release-verify.mjs',
   'review-contract.mjs',
-  'scaffold.mjs',
   'scan.mjs',
   'setup.mjs',
   'sizing-contract.mjs',
@@ -71,10 +64,6 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
 const PLUGIN_TOOL_FILES = Object.freeze([
   ...UNIVERSAL_TOOL_FILES,
   'auto-merge.reference.mjs',
-  'merge-authorization-contract.mjs',
-]);
-export const NON_MANUAL_TOOL_FILES = Object.freeze([
-  'auto-merge.mjs',
   'merge-authorization-contract.mjs',
 ]);
 // Global install: the plugin ships these hooks in hooks/hooks.json, each
