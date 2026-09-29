@@ -41,7 +41,6 @@
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -53,7 +52,6 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BRIEF_FILES, UNIVERSAL_TOOL_FILES } from './verify.mjs';
 
 const TOOL_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const SMOKE_BUDGET_MS = 60_000;
@@ -197,48 +195,17 @@ function runToolJson(name, args, options) {
   return { ok: true, status: result.status, value: parsed };
 }
 
-function writeFixtureState(root) {
-  const statePath = join(root, 'docs', 'agentic', 'STATE.md');
-  mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, [
+// A devendored repository carries only its own data: `.autoloop/config.json`
+// and the STATE prose. Every tool runs from the plugin.
+function writeFixtureProject(root) {
+  mkdirSync(join(root, '.autoloop'), { recursive: true });
+  writeFileSync(join(root, '.autoloop', 'config.json'), `${JSON.stringify(FIXTURE_CONFIG, null, 2)}\n`);
+  writeFileSync(join(root, '.autoloop', 'STATE.md'), [
     '# STATE — autoloop loop-smoke fixture',
     '',
     'Scratch fixture repository for the no-model end-to-end loop smoke.',
     '',
-    '```json autoloop-config',
-    JSON.stringify(FIXTURE_CONFIG, null, 2),
-    '```',
-    '',
   ].join('\n'));
-}
-
-// Vendors the tool set the way an installed repository carries it. From the
-// plugin checkout (templates/tools) this is scaffold's own reconciliation —
-// the exact layout logic Setup uses, auto-merge rename included. From an
-// installed copy (tools/agentic) the sibling tools already carry their
-// installed names, so they are copied directly.
-async function vendorFixtureTools(root) {
-  const templatesDirectory = dirname(TOOL_DIRECTORY);
-  if (existsSync(join(templatesDirectory, 'STATE.template.md'))) {
-    const { reconcile } = await import('./scaffold.mjs');
-    reconcile(root, templatesDirectory);
-    return 'scaffold-reconcile';
-  }
-  const toolsTarget = join(root, 'tools', 'agentic');
-  mkdirSync(toolsTarget, { recursive: true });
-  for (const name of [
-    ...UNIVERSAL_TOOL_FILES,
-    ...BRIEF_FILES,
-    'session-preflight.sh',
-    'self-test-manifest.json',
-  ]) {
-    const source = join(TOOL_DIRECTORY, name);
-    if (!existsSync(source)) continue;
-    mkdirSync(dirname(join(toolsTarget, name)), { recursive: true });
-    copyFileSync(source, join(toolsTarget, name));
-    if (name.endsWith('.sh')) chmodSync(join(toolsTarget, name), 0o755);
-  }
-  return 'installed-sibling-copy';
 }
 
 async function buildFixtureRepository(scratch) {
@@ -247,8 +214,7 @@ async function buildFixtureRepository(scratch) {
   runGit(root, ['init', '--quiet', root]);
   runGit(root, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
   runGit(root, ['remote', 'add', 'origin', FIXTURE_ORIGIN_URL]);
-  writeFixtureState(root);
-  const vendoring = await vendorFixtureTools(root);
+  writeFixtureProject(root);
   runGit(root, ['add', '--all']);
   runGit(root, [
     '-c', 'user.name=autoloop-smoke',
@@ -256,7 +222,7 @@ async function buildFixtureRepository(scratch) {
     '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '-m', 'chore: loop smoke fixture',
   ]);
-  return { root: realpathSync(root), vendoring };
+  return { root: realpathSync(root) };
 }
 
 // The mechanical steps of a live /autoloop:dev session, each a separate child
@@ -275,7 +241,9 @@ export function runSmokeSteps({
     steps.push({ ...result, name, ms: Date.now() - startedAt });
     return result.ok;
   };
-  const tool = (name) => join(root, 'tools', 'agentic', name);
+  // The fixture carries no tools/agentic: every step runs the plugin's copy
+  // with the fixture as its working directory, as a devendored repo does.
+  const tool = (name) => join(TOOL_DIRECTORY, name);
   const outcome = { steps, runMarker: null, dispatches: [] };
 
   const primed = timed('prime', () => {
@@ -427,7 +395,7 @@ export function runSmokeSteps({
     };
     const blocked = runTool(
       'command-guard.mjs (run open)',
-      [guard, '--config', join(root, 'docs', 'agentic', 'STATE.md')],
+      [guard, '--root', root],
       guardOptions,
     );
     if (!blocked.ok) return blocked;
@@ -440,7 +408,7 @@ export function runSmokeSteps({
     rmSync(outcome.runMarker, { force: true });
     const standDown = runTool(
       'command-guard.mjs (run closed)',
-      [guard, '--config', join(root, 'docs', 'agentic', 'STATE.md')],
+      [guard, '--root', root],
       guardOptions,
     );
     if (!standDown.ok) return standDown;
@@ -494,35 +462,11 @@ async function selfTest({ realEngine = false } = {}) {
     const setup = await timedPhase('fixture-setup', async () => {
       try {
         fixture = await buildFixtureRepository(scratch);
-        return { ok: true, detail: `layout via ${fixture.vendoring}` };
+        return { ok: true, detail: 'devendored: .autoloop/ only, tools from the plugin' };
       } catch (error) {
         return { ok: false, detail: error.message };
       }
     });
-
-    // LFE, 2026-09-29: setup ran the INSTALLED copy's smoke after a reconcile
-    // and it failed (BRIEF_TEMPLATE_MISSING): the installed-sibling path
-    // copied the tool list but not the role briefs. From the plugin checkout,
-    // prove the installed copy's own smoke too; the installed copy skips this.
-    if (!realEngine && existsSync(join(dirname(TOOL_DIRECTORY), 'STATE.template.md'))) {
-      await timedPhase('installed-copy', async () => {
-        try {
-          const installed = join(scratch, 'installed');
-          mkdirSync(installed, { recursive: true });
-          const { reconcile } = await import('./scaffold.mjs');
-          reconcile(installed, dirname(TOOL_DIRECTORY));
-          const run = spawnSync(process.execPath,
-            [join(installed, 'tools', 'agentic', 'loop-smoke.mjs'), '--self-test'],
-            { encoding: 'utf8', timeout: SMOKE_BUDGET_MS, env: environment });
-          const failed = `${run.stdout ?? ''}`.split('\n').find((line) => /\bFAIL\b/u.test(line));
-          return run.status === 0
-            ? { ok: true, detail: 'installed tools/agentic smoke passes' }
-            : { ok: false, detail: (failed ?? run.stderr ?? `exit ${run.status}`).trim().slice(0, 300) };
-        } catch (error) {
-          return { ok: false, detail: error.message };
-        }
-      });
-    }
 
     let outcome = null;
     if (setup.ok) {

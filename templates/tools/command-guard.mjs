@@ -34,7 +34,7 @@
 //   proxy routes in dispatch.mjs, not by this guard.
 //
 // Usage:  (hook) reads the PreToolUse payload on stdin
-//         node tools/agentic/command-guard.mjs --self-test
+//         node <plugin-tools>/command-guard.mjs --self-test
 
 import {
   mkdirSync,
@@ -57,7 +57,7 @@ import {
   resolveProjectConfig,
 } from './config-contract.mjs';
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
-import { relayHookToBase } from './hook-relay.mjs';
+import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 
 const BRANCH_CREATION_FLAGS = new Set([
   '-c',
@@ -2086,8 +2086,8 @@ export function evaluate(inputCmd, branch, options = {}) {
       block: true,
       reason:
         'autoloop guard — `gh pr merge` is outside loop authority: the loop/agent never '
-        + 'merges directly (docs/agentic/STATE.md → Autonomy). Leave the merge to a human, or '
-        + 'to the repo-ratified tools/agentic/auto-merge.mjs policy gate.',
+        + 'merges directly (STATE.md → Autonomy). Leave the merge to a human, or '
+        + 'to the auto-merge.mjs policy gate the repository config enables.',
     };
   }
 
@@ -2405,7 +2405,7 @@ export function evaluate(inputCmd, branch, options = {}) {
         block: true,
         reason:
           'autoloop guard — the `gh api` merge endpoint is outside loop authority: the '
-          + 'loop/agent never merges directly, via any raw surface (docs/agentic/STATE.md → '
+          + 'loop/agent never merges directly, via any raw surface (STATE.md → '
           + 'Autonomy). Leave the merge to a human or the repo-ratified policy gate.',
       };
     }
@@ -2420,7 +2420,7 @@ export function evaluate(inputCmd, branch, options = {}) {
         block: true,
         reason:
           'autoloop guard — posting a commit status by hand forges verdict evidence: '
-          + 'agentic statuses come only from tools/agentic/publish-verdict.mjs, which binds '
+          + 'agentic statuses come only from publish-verdict.mjs, which binds '
           + 'them to the gate/review it actually executed on the exact clean head.',
       };
     }
@@ -2432,7 +2432,7 @@ export function evaluate(inputCmd, branch, options = {}) {
         block: true,
         reason:
           'autoloop guard — GraphQL merge mutations are outside loop authority: the '
-          + 'loop/agent never merges directly, via any raw surface (docs/agentic/STATE.md → '
+          + 'loop/agent never merges directly, via any raw surface (STATE.md → '
           + 'Autonomy). Leave the merge to a human or the repo-ratified policy gate.',
       };
     }
@@ -2495,7 +2495,7 @@ export function evaluate(inputCmd, branch, options = {}) {
         block: true,
         reason:
           'autoloop guard — the branch/ruleset protection baseline is the human\'s control; '
-          + 'the loop only reads it (docs/agentic/STATE.md → Autonomy). Report the mismatch '
+          + 'the loop only reads it (STATE.md → Autonomy). Report the mismatch '
           + 'instead of mutating protection.',
       };
     }
@@ -2655,41 +2655,28 @@ export function loopRunIsLive(cwd = process.cwd()) {
   return ownRunMarkers(cwd).some(({ marker }) => marker.closedAt === undefined);
 }
 
-// The hook passes the legacy STATE path; its repository root is two levels up.
 // The config comes from the one resolver: .autoloop/config.json over plugin
 // defaults, else the legacy STATE block migrated in memory (an older schema no
 // longer switches the guard off — it enforces the migrated config).
-export function loadConfiguredBase(statePath) {
-  const resolved = resolveProjectConfig(resolve(dirname(statePath), '..', '..'));
+export function loadConfiguredBase(root) {
+  const resolved = resolveProjectConfig(root);
   if (resolved === null) throw new Error('no autoloop configuration in this repository');
   if (!resolved.ok) throw new Error(`invalid ProjectConfig (${resolved.source}): ${resolved.errors.join('; ')}`);
   return resolved.config.baseBranch;
 }
 
+// The plugin hook passes nothing (the root is CLAUDE_PROJECT_DIR); `--root`
+// names one explicitly (tests, smoke). A STATE path is never accepted: its
+// repository would have to be guessed from where the file sits.
 export function parseArgs(args) {
   if (args.length === 1 && args[0] === '--self-test') {
-    return { selfTest: true, statePath: null, error: null };
+    return { selfTest: true, root: undefined, error: null };
   }
-  if (args.length === 0) {
-    return {
-      selfTest: false,
-      statePath: 'docs/agentic/STATE.md',
-      error: null,
-    };
+  if (args.length === 0) return { selfTest: false, root: undefined, error: null };
+  if (args.length === 2 && args[0] === '--root' && typeof args[1] === 'string' && args[1].length > 0) {
+    return { selfTest: false, root: args[1], error: null };
   }
-  if (
-    args.length === 2
-    && args[0] === '--config'
-    && typeof args[1] === 'string'
-    && args[1].length > 0
-  ) {
-    return { selfTest: false, statePath: args[1], error: null };
-  }
-  return {
-    selfTest: false,
-    statePath: null,
-    error: 'expected --config <STATE path> or --self-test',
-  };
+  return { selfTest: false, root: undefined, error: 'expected --root <repository> or --self-test' };
 }
 
 // Corpus replay: real command shapes from live sessions, each tagged with the
@@ -2752,7 +2739,7 @@ export function askUserQuestionProblem(runIsLive) {
     + 'queued unit would wait behind it. A judgment call is yours to make: take the recommended '
     + 'option and record it with `unit.mjs --decide`. A genuine human decision is `unit.mjs '
     + '--block`, which records the question on the issue. Then take the next unit. If no unit can proceed, '
-    + 'close the run first (`node tools/agentic/prime.mjs --close-run`), then ask.';
+    + 'close the run first (`node <plugin-tools>/prime.mjs --close-run`), then ask.';
 }
 
 function selfTest() {
@@ -3240,10 +3227,9 @@ function selfTest() {
   // (over plugin defaults), else the legacy STATE block, else nothing.
   const baseCases = (() => {
     const root = mkdtempSync(join(tmpdir(), 'guard-base-'));
-    const statePath = join(root, 'docs', 'agentic', 'STATE.md');
     const attempt = () => {
       try {
-        return loadConfiguredBase(statePath);
+        return loadConfiguredBase(root);
       } catch (error) {
         return `THREW ${error.message}`;
       }
@@ -3651,20 +3637,47 @@ function selfTest() {
     for (const line of corpusResult.failures) console.error(line);
   }
 
+  // From the plugin the guard takes its repository root, never a STATE path
+  // whose parent it would have to guess (`.autoloop/STATE.md` two levels up
+  // is the repository's parent).
   const argCases = [
-    ['default config path', [], 'docs/agentic/STATE.md'],
-    ['explicit config path', ['--config', '/repo/STATE.md'], '/repo/STATE.md'],
-    ['missing config value', ['--config'], null],
+    ['no arguments: the hook root', [], undefined],
+    ['explicit root', ['--root', '/repo'], '/repo'],
+    ['missing root value', ['--root'], null],
+    ['a STATE path is no longer accepted', ['--config', '/repo/docs/agentic/STATE.md'], null],
     ['legacy base injection rejected', ['--base', 'main'], null],
   ];
-  for (const [name, args, expectedPath] of argCases) {
+  for (const [name, args, expectedRoot] of argCases) {
     const parsed = parseArgs(args);
-    const passed = expectedPath === null
+    const passed = expectedRoot === null
       ? parsed.error !== null
-      : parsed.error === null && parsed.statePath === expectedPath;
+      : parsed.error === null && parsed.root === expectedRoot;
     if (!passed) {
       console.error(`FAIL [${name}]`);
       ok = false;
+    }
+  }
+  // Plugin hooks fire in every repository: outside a devendored autoloop
+  // repository the guard stands down before reading anything, while inside
+  // one an unreadable payload is still refused.
+  {
+    const scratch = mkdtempSync(join(tmpdir(), 'guard-gate-'));
+    try {
+      const hook = (root) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: 'not json', encoding: 'utf8', cwd: scratch,
+        env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+      }).status;
+      const unrelated = hook(scratch);
+      mkdirSync(join(scratch, '.autoloop'));
+      writeFileSync(join(scratch, '.autoloop', 'config.json'),
+        JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } }));
+      const active = hook(scratch);
+      if (!(unrelated === 0 && active === 2)) {
+        console.error(`FAIL [the guard stands down outside an autoloop repository and acts inside one]: ${unrelated} ${active}`);
+        ok = false;
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
   for (const [name, payload, accepted] of [
@@ -3824,11 +3837,6 @@ function refuse(reason) {
 }
 
 function main() {
-  // A unit branch forked before a reconcile carries a fossil copy of this
-  // guard; the base branch's copy decides instead. Must run before stdin is
-  // consumed — the relayed child inherits and reads it. Self-test and corpus
-  // invocations are exempt inside the relay: they exercise THIS file.
-  relayHookToBase(import.meta.url);
   if (process.argv.includes('--corpus')) {
     const { total, failures } = replayCorpus();
     for (const line of failures) console.error(line);
@@ -3845,6 +3853,10 @@ function main() {
     );
   }
   if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
+  // Plugin hooks fire in every repository; this one guards only a devendored
+  // autoloop repository (hook-root.mjs), before reading anything.
+  const root = activeAutoloopRoot(parsed.root ?? hookRoot());
+  if (root === null) process.exit(0);
 
   let payload;
   try {
@@ -3882,7 +3894,7 @@ function main() {
 
   let baseBranch;
   try {
-    baseBranch = loadConfiguredBase(parsed.statePath);
+    baseBranch = loadConfiguredBase(root);
   } catch (error) {
     refuse(
       `autoloop guard — the configured base branch cannot be resolved (${error.message}), `

@@ -156,9 +156,11 @@ export const INCIDENTS = Object.freeze([
     cause: 'From an installed copy the smoke builds its fixture by copying '
       + 'UNIVERSAL_TOOL_FILES; 0.54.0 added briefs/ to what scaffold vendors but '
       + 'not to that list. The plugin run builds its fixture through scaffold, '
-      + 'so only the installed path ever lacked the briefs, and nothing ran it.',
+      + 'so only the installed path ever lacked the briefs, and nothing ran it. '
+      + 'Closed structurally by the global cutover: nothing is installed, and the '
+      + 'smoke runs every step from the plugin against a devendored fixture.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'loop-smoke.mjs', anchor: "timedPhase('installed-copy'" }),
+      Object.freeze({ file: 'loop-smoke.mjs', anchor: 'const tool = (name) => join(TOOL_DIRECTORY, name);' }),
     ]),
   }),
   Object.freeze({
@@ -414,7 +416,9 @@ export const INCIDENTS = Object.freeze([
       + 'review — which makes them branch-local: a branch forked before a '
       + 'scaffold reconcile carries fossil guards until it merges. The wiring '
       + 'cannot fix it (the hook command must name a stable path), so the '
-      + 'tools relay themselves to the base branch\'s copy.',
+      + 'tools relay themselves to the base branch\'s copy. Closed structurally '
+      + 'by the global cutover: hooks run the plugin\'s copy, which no branch '
+      + 'carries, and find the repository from CLAUDE_PROJECT_DIR.',
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'hook-relay.mjs',
@@ -434,7 +438,11 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'command-guard.mjs',
-        anchor: 'relayHookToBase(import.meta.url);',
+        anchor: 'const root = activeAutoloopRoot(parsed.root ?? hookRoot());',
+      }),
+      Object.freeze({
+        file: 'hook-root.mjs',
+        anchor: "'CLAUDE_PROJECT_DIR is the root, whatever the cwd'",
       }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
