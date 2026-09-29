@@ -204,7 +204,14 @@ function dispatchProcesses(root) {
 }
 
 /** Pure: classify PRs → { hard: string[], reminders: string[] } */
-export function checkPrs(prs) {
+// The step a unit's issue is on (`loop:NN-…`), or null.
+function unitStep(issues, number) {
+  const labels = (issues ?? []).find((issue) => issue.number === number)?.labels ?? [];
+  const steps = labels.map((label) => /^loop:(\d{2})-/u.exec(label?.name ?? label)?.[1]).filter(Boolean).map(Number);
+  return steps.length === 0 ? null : Math.max(...steps);
+}
+
+export function checkPrs(prs, issues = null) {
   const hard = [];
   const reminders = [];
   for (const pr of prs ?? []) {
@@ -214,7 +221,9 @@ export function checkPrs(prs) {
       hard.push(
         `PR #${pr.number} (${pr.headRefName}) has invalid loop ownership (${claim.reasonCode}) — make its single closing claim match the branch issue`,
       );
-    } else if (pr.isDraft) {
+    } else if (pr.isDraft && !((unitStep(issues, claim.issue) ?? 10) < 10)) {
+      // Draft is expected until step 10 publishes it; only a draft past that
+      // (or with no step at all) may be a forgotten `gh pr ready`.
       reminders.push(`PR #${pr.number} (${pr.headRefName}) is claimed but still draft — mid-unit, or a forgotten \`gh pr ready\` (autoloop:dev step 10)?`);
     }
   }
@@ -529,16 +538,9 @@ export function checkDarkRun(runIsLive, issues, prs, inFlight = null) {
   if (eligible.length === 0) return silent;
   const named = eligible.slice(0, 8).map((number) => `#${number}`).join(', ');
   const rest = eligible.length > 8 ? `, +${eligible.length - 8} more` : '';
-  if (inFlight !== null) {
-    return {
-      hard: [],
-      reminders: [
-        `${eligible.length} eligible unit(s) are queued (${named}${rest}) and the run is `
-        + `mid-flight (${inFlight}) — parking is fine; take the next unit when the in-flight `
-        + 'work lands',
-      ],
-    };
-  }
+  // Work in flight: parking on it is correct, and saying so on every stop is
+  // noise (LFE, 2026-09-29).
+  if (inFlight !== null) return silent;
   return {
     hard: [
       `The run is still open and ${eligible.length} eligible unit(s) are queued (${named}${rest}) `
@@ -830,9 +832,14 @@ function selfTest() {
     checkDarkRun(true, [], []).reminders.length === 0 &&
     inFlightCases &&
     worktreeScope &&
-    parked.hard.length === 0 && parked.reminders.length === 1 &&
-    parked.reminders[0].includes('#40') && parked.reminders[0].includes('a dispatch stream is live') &&
-    parked.reminders[0].includes('take the next unit') &&
+    // LFE, 2026-09-29: a parked run with work in flight heard "parking is
+    // fine" on every stop; a gap that is not a gap says nothing.
+    parked.hard.length === 0 && parked.reminders.length === 0 &&
+    // A draft PR whose unit is still mid-flight (a step label before
+    // 10-publish) is expected, not a forgotten `gh pr ready`.
+    checkPrs([prs[2]], [{ number: 3, labels: [{ name: 'loop-started' }, { name: 'loop:08-code-review' }] }]).reminders.length === 0 &&
+    checkPrs([prs[2]], [{ number: 3, labels: [{ name: 'loop:10-publish' }] }]).reminders.length === 1 &&
+    checkPrs([prs[2]], [{ number: 3, labels: [] }]).reminders.length === 1 &&
     stranded.length === 1 && stranded[0].includes('#7') && stranded[0].includes('loop:04-claim') &&
     stranded[0].includes('--remove-label loop:07-diff-review') &&
     reminderWire.exitCode === 0 && reminderWire.stderr === '' &&
@@ -908,7 +915,7 @@ function main() {
   const merged = ghJson('pr list --state merged --json number,headRefName,body --limit 20');
   const openIssues = ghJson(OPEN_ISSUES_QUERY);
 
-  const { hard, reminders } = checkPrs(prs);
+  const { hard, reminders } = checkPrs(prs, openIssues);
   const nowMs = Date.now();
   const streamLive = runInFlightEvidence([], dispatchStreamAgeMs(ROOT), nowMs);
   const processes = dispatchProcesses(ROOT);
