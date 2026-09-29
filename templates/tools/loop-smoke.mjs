@@ -53,7 +53,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { UNIVERSAL_TOOL_FILES } from './verify.mjs';
+import { BRIEF_FILES, UNIVERSAL_TOOL_FILES } from './verify.mjs';
 
 const TOOL_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const SMOKE_BUDGET_MS = 60_000;
@@ -228,11 +228,13 @@ async function vendorFixtureTools(root) {
   mkdirSync(toolsTarget, { recursive: true });
   for (const name of [
     ...UNIVERSAL_TOOL_FILES,
+    ...BRIEF_FILES,
     'session-preflight.sh',
     'self-test-manifest.json',
   ]) {
     const source = join(TOOL_DIRECTORY, name);
     if (!existsSync(source)) continue;
+    mkdirSync(dirname(join(toolsTarget, name)), { recursive: true });
     copyFileSync(source, join(toolsTarget, name));
     if (name.endsWith('.sh')) chmodSync(join(toolsTarget, name), 0o755);
   }
@@ -497,6 +499,30 @@ async function selfTest({ realEngine = false } = {}) {
         return { ok: false, detail: error.message };
       }
     });
+
+    // LFE, 2026-09-29: setup ran the INSTALLED copy's smoke after a reconcile
+    // and it failed (BRIEF_TEMPLATE_MISSING): the installed-sibling path
+    // copied the tool list but not the role briefs. From the plugin checkout,
+    // prove the installed copy's own smoke too; the installed copy skips this.
+    if (!realEngine && existsSync(join(dirname(TOOL_DIRECTORY), 'STATE.template.md'))) {
+      await timedPhase('installed-copy', async () => {
+        try {
+          const installed = join(scratch, 'installed');
+          mkdirSync(installed, { recursive: true });
+          const { reconcile } = await import('./scaffold.mjs');
+          reconcile(installed, dirname(TOOL_DIRECTORY));
+          const run = spawnSync(process.execPath,
+            [join(installed, 'tools', 'agentic', 'loop-smoke.mjs'), '--self-test'],
+            { encoding: 'utf8', timeout: SMOKE_BUDGET_MS, env: environment });
+          const failed = `${run.stdout ?? ''}`.split('\n').find((line) => /\bFAIL\b/u.test(line));
+          return run.status === 0
+            ? { ok: true, detail: 'installed tools/agentic smoke passes' }
+            : { ok: false, detail: (failed ?? run.stderr ?? `exit ${run.status}`).trim().slice(0, 300) };
+        } catch (error) {
+          return { ok: false, detail: error.message };
+        }
+      });
+    }
 
     let outcome = null;
     if (setup.ok) {
