@@ -4,7 +4,7 @@
   "tools": {
     "api-shape.mjs": "1f3cb7851f4c10ea344a688930a22d5b7aec9405bf74cc4d71c7b2b1327a94b8",
     "attestation-contract.mjs": "07932a317cae83aba72e5513cf8b8a7147ca67d3bf18cf33ec460dc197119711",
-    "auto-merge.mjs": "1e2d71d00b4776bd18d60ebe0cbf589107438c25e9e1b6eae709f823c9a159b0",
+    "auto-merge.mjs": "2d7c023eb65af7f7511906752049ceab9b6855178947d36c13650a93d60e3101",
     "checkout-contract.mjs": "3c9e7708f27ce0fc808488bcc44361b8c7d8e18086fc4449dcb1abaa58c5a52b",
     "claim-contract.mjs": "5db0b31ad846bf2b1f14ef03ebd28515e61a5aba82f6de1fcfa67ea95670af0e",
     "command-guard.mjs": "e39213e201143bb7d8d07a534d6cf82d3926bd9772ee9c61ab8fecc8bf7acd1f",

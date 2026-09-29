@@ -2024,8 +2024,18 @@ function makeInput({
   };
 }
 
+// The refusal must be the protected-path one for this file, not an unrelated
+// refusal that would pass the fixture without testing the path. The family may
+// be structural: a configured glob a structural family already covers (LFE's
+// compose globs) is redundant, not broken.
 function protectedFixture(name, path) {
-  return { name, input: makeInput({ files: [path], labels: ['risk:pure-deletion'] }), expectExit: 1, expectCalls: 0 };
+  return {
+    name,
+    input: makeInput({ files: [path], labels: ['risk:pure-deletion'] }),
+    expectExit: 1,
+    expectCalls: 0,
+    expectReason: (reason) => reason.startsWith('protected path (') && reason.endsWith(`): ${path}`),
+  };
 }
 
 function invalidClaimFixture(name, mutate) {
@@ -3126,15 +3136,19 @@ function configSettingsCases() {
   // An ambient GH_REPO or GH_HOST must never choose the merge target.
   const ambient = { GH_REPO: process.env.GH_REPO, GH_HOST: process.env.GH_HOST };
   let ghEnv = null;
-  process.env.GH_REPO = 'someone-else/target';
-  process.env.GH_HOST = 'elsewhere.example';
-  const viewed = ghRepository('/r', (command, args, options) => {
-    ghEnv = options.env === undefined ? null : { ...options.env };
-    return JSON.stringify({ owner: { login: 'o' }, name: 'r' });
-  });
-  for (const [key, value] of Object.entries(ambient)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
+  let viewed;
+  try {
+    process.env.GH_REPO = 'someone-else/target';
+    process.env.GH_HOST = 'elsewhere.example';
+    viewed = ghRepository('/r', (command, args, options) => {
+      ghEnv = options.env === undefined ? null : { ...options.env };
+      return JSON.stringify({ owner: { login: 'o' }, name: 'r' });
+    });
+  } finally {
+    for (const [key, value] of Object.entries(ambient)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
   const scratch = mkdtempSync(join(tmpdir(), 'auto-merge-config-'));
   try {
@@ -3297,7 +3311,8 @@ function selfTest() {
     const expectedCalls = fixture.expectCalls ?? 0;
     const argsOkay = fixture.expectArgs ? JSON.stringify(calls[0]) === JSON.stringify(fixture.expectArgs) : true;
     const confirmOkay = fixture.expectConfirmCalls === undefined || confirmCalls === fixture.expectConfirmCalls;
-    const ok = result.exitCode === fixture.expectExit && calls.length === expectedCalls && argsOkay && confirmOkay;
+    const reasonOkay = fixture.expectReason === undefined || result.reasons.some(fixture.expectReason);
+    const ok = result.exitCode === fixture.expectExit && calls.length === expectedCalls && argsOkay && confirmOkay && reasonOkay;
     if (ok) passed += 1;
     else failed += 1;
     console.log(`${ok ? 'PASS' : 'FAIL'} ${fixture.name}`);
