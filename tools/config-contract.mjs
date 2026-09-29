@@ -569,16 +569,22 @@ export function resolveProjectConfig(root, read = (path) => readFileSync(path, '
     } catch (error) {
       return { ok: false, unreadable: true, source, errors: [`${PROJECT_CONFIG_FILE}: unreadable (${error.message})`] };
     }
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch (error) {
-      return { ok: false, unreadable: true, source, errors: [`${PROJECT_CONFIG_FILE}: not valid JSON (${error.message})`] };
-    }
-    if (!isRecord(parsed)) return { ok: false, unreadable: false, source, errors: ['config: must be an object'] };
-    return resolved(source, parsed.version, currentProjectConfig(withDefaults(parsed)));
+    return resolveConfigText(text, source);
   }
   return null;
+}
+
+// A config's text resolved over plugin defaults, wherever it was read from
+// (the merge executor reads the base branch's committed copy from GitHub).
+export function resolveConfigText(text, source = PROJECT_CONFIG_FILE) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    return { ok: false, unreadable: true, source, errors: [`${source}: not valid JSON (${error.message})`] };
+  }
+  if (!isRecord(parsed)) return { ok: false, unreadable: false, source, errors: ['config: must be an object'] };
+  return resolved(source, parsed.version, currentProjectConfig(withDefaults(parsed)));
 }
 
 // A vendored install's config block in docs/agentic/STATE.md, migrated in

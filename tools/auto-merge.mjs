@@ -6,6 +6,8 @@
 // and merge.soloOperatorAcknowledged, taking its settings from that config
 // (merge.loopLogin, merge.reversiblePaths, protectedPaths); anything missing is
 // a typed refusal before any GitHub read. With no config, nothing auto-merges.
+// The checkout's config only names the base: the settings that apply are the
+// base branch's committed config, read from GitHub.
 //
 // The policy ENGINE (independently fetched, SHA-bound evidence; AND-gate;
 // kill-switch; CAS merge + confirmation) is identical in every mode.
@@ -58,6 +60,7 @@ import {
   POLICY_TO_MODE,
   PROJECT_CONFIG_FILE,
   repositoryRoot,
+  resolveConfigText,
   resolveProjectConfig,
 } from './config-contract.mjs';
 import { finalizeHead } from './delivery-contract.mjs';
@@ -128,13 +131,19 @@ export function settingsFromConfig(config, repository) {
   };
 }
 
-// The repository the checkout's remotes name. GH_REPO and GH_HOST are dropped
-// so an ambient override can never choose the merge target.
-function ghRepository(root, run = execFileSync) {
+// Every gh call runs without GH_REPO and GH_HOST, so an ambient override can
+// never choose the repository (or host) that evidence is read from and the
+// merge is made in.
+function ghEnv() {
   const { GH_REPO: ignoredRepo, GH_HOST: ignoredHost, ...env } = process.env;
+  return env;
+}
+
+// The repository the checkout's remotes name.
+function ghRepository(root, run = execFileSync) {
   try {
     const view = JSON.parse(run('gh', ['repo', 'view', '--json', 'owner,name'], {
-      cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000,
+      cwd: root, env: ghEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000,
     }));
     const owner = view?.owner?.login;
     return typeof owner === 'string' && typeof view?.name === 'string' ? { owner, name: view.name } : null;
@@ -143,7 +152,23 @@ function ghRepository(root, run = execFileSync) {
   }
 }
 
-export function repoSettings(root, lookupRepository = ghRepository) {
+// The base branch's committed config, as GitHub serves it: the run can edit
+// the working tree's copy (and the local remote-tracking ref), never the base.
+function committedConfigText(repository, base, run = execFileSync) {
+  try {
+    return run('gh', ['api', '-H', 'Accept: application/vnd.github.raw+json',
+      `repos/${repository.owner}/${repository.name}/contents/${PROJECT_CONFIG_FILE}?ref=${encodeURIComponent(base)}`], {
+      env: ghEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000, maxBuffer: 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
+}
+
+// The working tree only names the base; the policy is the base's committed
+// config, in the repository the merge is made in (security audit after
+// 0.60.0: a working-tree `manual` flipped to `auto` merged).
+export function repoSettings(root, lookupRepository = ghRepository, readCommitted = committedConfigText) {
   const resolved = resolveProjectConfig(root);
   if (resolved === null) {
     return { source: null, ...UNCONFIGURED, error: `no ${PROJECT_CONFIG_FILE}: nothing auto-merges in this repository` };
@@ -152,7 +177,20 @@ export function repoSettings(root, lookupRepository = ghRepository) {
     return { source: PROJECT_CONFIG_FILE, ...UNCONFIGURED, error: `${PROJECT_CONFIG_FILE}: ${resolved.errors.join('; ')}` };
   }
   const preflight = settingsFromConfig(resolved.config, undefined);
-  return preflight.error === null ? settingsFromConfig(resolved.config, lookupRepository(root)) : preflight;
+  if (preflight.error !== null) return preflight;
+  const repository = lookupRepository(root);
+  const local = settingsFromConfig(resolved.config, repository);
+  if (repository === null) return local;
+  const base = resolved.config.baseBranch;
+  const source = `${repository.owner}/${repository.name}@${base}:${PROJECT_CONFIG_FILE}`;
+  const text = readCommitted(repository, base);
+  const committed = text === null ? null : resolveConfigText(text, source);
+  const problem = committed === null ? `${source} could not be read, so nothing auto-merges`
+    : !committed.ok ? `${source}: ${committed.errors.join('; ')}`
+      : committed.config.baseBranch !== base
+        ? `${source} names base ${committed.config.baseBranch}, not the checkout's ${base}` : null;
+  if (problem !== null) return { ...local, error: problem };
+  return { ...settingsFromConfig(committed.config, repository), source };
 }
 
 export const REPO = repoSettings(repositoryRoot());
@@ -368,6 +406,7 @@ function ghJson(args, input) {
   }
   const output = execFileSync('gh', args, {
     input,
+    env: ghEnv(),
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
     timeout: 15000,
@@ -442,6 +481,7 @@ function fetchRestPage(endpoint) {
     'gh',
     ['api', '--include', ...args.slice(1)],
     {
+      env: ghEnv(),
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15000,
@@ -1187,7 +1227,7 @@ function fetchKillSwitch() {
         '--limit',
         '1000',
       ],
-      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 },
+      { env: ghEnv(), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 },
     );
     const issues = JSON.parse(output);
     if (!Array.isArray(issues)) throw new Error('issue list response was not an array');
@@ -3038,10 +3078,36 @@ function configSettingsCases() {
       lookups.push(1);
       return repository;
     };
-    const unconfigured = repoSettings(scratch, lookup);
+    const reads = [];
+    const committedAs = (text) => (repo, base) => {
+      reads.push(`${repo.owner}/${repo.name}@${base}`);
+      return text;
+    };
+    const unconfigured = repoSettings(scratch, lookup, committedAs(null));
     mkdirSync(join(scratch, '.autoloop'));
     writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify(config({ policy: 'auto' })));
-    const configured = repoSettings(scratch, lookup);
+    const configured = repoSettings(scratch, lookup, committedAs(JSON.stringify(config({ policy: 'auto' }))));
+    // The run can edit the working tree, never the base: the committed
+    // config governs, and one that cannot be read or names another base refuses.
+    const flipped = repoSettings(scratch, () => repository, committedAs(JSON.stringify({ ...config({}), merge: { policy: 'manual' } })));
+    const unreadableBase = repoSettings(scratch, () => repository, committedAs(null));
+    const otherBase = repoSettings(scratch, () => repository, committedAs(JSON.stringify({ ...config({ policy: 'auto' }), baseBranch: 'main' })));
+    let committedCall = null;
+    const ambientNow = { GH_REPO: process.env.GH_REPO, GH_HOST: process.env.GH_HOST };
+    let committedText;
+    try {
+      process.env.GH_REPO = 'someone-else/target';
+      process.env.GH_HOST = 'elsewhere.example';
+      committedText = committedConfigText(repository, 'trunk', (command, args, options) => {
+        committedCall = { args, env: options.env };
+        return '{}';
+      });
+    } finally {
+      for (const [key, value] of Object.entries(ambientNow)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
     // A legacy STATE block is never the executor's config: without
     // config.json nothing auto-merges.
     const legacy = mkdtempSync(join(tmpdir(), 'auto-merge-legacy-'));
@@ -3090,8 +3156,22 @@ function configSettingsCases() {
       {
         name: 'config: without config.json nothing auto-merges, and gh is never asked',
         ok: unconfigured.source === null && unconfigured.error?.includes('nothing auto-merges')
-          && configured.source === '.autoloop/config.json' && configured.error === null
-          && configured.LOOP_LOGIN === 'loop-user' && lookups.length === 1,
+          && configured.source === `${repository.owner}/${repository.name}@trunk:.autoloop/config.json`
+          && configured.error === null && configured.LOOP_LOGIN === 'loop-user' && lookups.length === 1,
+      },
+      {
+        name: 'config: the base\'s committed config governs; a flipped working tree, an unreadable base or another base refuses',
+        ok: flipped.error?.includes('merge.policy') === true && flipped.AUTOMERGE_MODE !== 'all-green'
+          && unreadableBase.error?.includes('could not be read') === true
+          && otherBase.error?.includes('names base main') === true
+          && reads.every((read) => read === `${repository.owner}/${repository.name}@trunk`),
+      },
+      {
+        name: 'config: the committed config is read from GitHub at the base, without GH_REPO or GH_HOST',
+        ok: committedText === '{}' && committedCall !== null
+          && committedCall.args.includes(`repos/${repository.owner}/${repository.name}/contents/.autoloop/config.json?ref=trunk`)
+          && Object.hasOwn(committedCall.env, 'PATH')
+          && !Object.hasOwn(committedCall.env, 'GH_REPO') && !Object.hasOwn(committedCall.env, 'GH_HOST'),
       },
       {
         name: 'config: without both acknowledgements the settings are non-solo, refused before any read and by the gate',
