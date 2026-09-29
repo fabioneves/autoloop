@@ -3,6 +3,15 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.56.1] - 2026-09-29
+
+### Fixed
+
+- **A reconcile that refuses with a typed block result is also remembered.** 0.56.0 recorded
+  refusals thrown as errors. A marker whose refusal comes back as a `state: "block"` result (for
+  example `PREMERGE_RECORD_DRAFT_INVALID`) was still re-checked every run. It is now recorded the
+  same way and listed under `known-refused` until the marker or the driver changes.
+
 ## [0.56.0] - 2026-09-29
 
 Token economy. On a measured LFE session, 69 orchestrator API calls averaged 158k tokens of context
