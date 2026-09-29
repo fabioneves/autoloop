@@ -58,15 +58,17 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
-    id: 'nothing-kept-edits-off-the-loop-control-files',
+    id: 'nothing-kept-edits-off-the-hook-wiring',
     date: '2026-09-29',
     symptom: 'Found comparing with a sibling loop project: a dispatched writer '
       + '(hooks off, Edit/Write allowed) and a live-run orchestrator (guard '
-      + 'matched Bash only) could both edit tools/agentic, .claude or STATE.',
-    cause: 'The control surface was protected against shell commands only.',
+      + 'matched Bash only) could both edit the hook wiring that runs the guard.',
+    cause: 'Hook wiring was protected against shell commands only. Scope is the '
+      + 'wiring alone (operator, 2026-09-29): other loop infrastructure is built '
+      + 'through the queue and flagged human:authorize at merge.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function controlFileEditProblem(' }),
-      Object.freeze({ file: 'dispatch.mjs', anchor: "'a dispatch denies edits to the loop control files under its repository'" }),
+      Object.freeze({ file: 'edit-guard.mjs', anchor: 'export function hookWiringEditProblem(' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'a dispatch denies edits to the hook wiring of its worktree and its main checkout'" }),
     ]),
   }),
   Object.freeze({

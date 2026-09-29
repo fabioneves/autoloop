@@ -19,7 +19,17 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/tools/agentic/edit-guard.mjs\"",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|AskUserQuestion",
         "hooks": [
           {
             "type": "command",

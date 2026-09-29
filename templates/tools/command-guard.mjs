@@ -49,9 +49,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import {
-  dirname, isAbsolute, join, relative, resolve, sep,
-} from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
@@ -1431,7 +1429,9 @@ function liftsHaltLabel(words) {
   if (hasGhScopedAction(words, 'label', 'delete') || hasGhScopedAction(words, 'label', 'edit')) {
     return words.some((word) => word.toLowerCase() === 'loop-halt');
   }
-  return false;
+  // The REST forms: removing it from an issue, deleting or renaming the label.
+  return mutatingGhApi(words) && githubApiEndpoints(words)
+    .some((segments) => segments.some((segment) => segment.toLowerCase() === 'loop-halt'));
 }
 
 function renamesProtectedLifecycleLabel(words) {
@@ -3031,6 +3031,11 @@ function selfTest() {
     ['gh label delete loop-halt --yes', 'main', true],
     ['gh label edit loop-halt --name loop-paused', 'main', true],
     ['gh issue edit 40 --add-label loop-halt', 'main', false],
+    // Review of 0.55.5: the REST forms lift it too.
+    ['gh api -X DELETE repos/o/r/issues/40/labels/loop-halt', 'main', true],
+    ['gh api --method DELETE repos/o/r/labels/loop-halt', 'main', true],
+    ['gh api -X PATCH repos/o/r/labels/Loop-Halt -f new_name=x', 'main', true],
+    ['gh api repos/o/r/labels/loop-halt', 'main', false],
     ['gh issue edit 7 --add-label loop-repair', 'feat/gh-2-y', true],
     ['gh issue create --title t --body-file /tmp/b.md --label loop-repair', 'main', true],
     ['gh issue create --title t --body-file /tmp/b.md -l bug,loop-repair', 'main', true],
@@ -3733,30 +3738,6 @@ function selfTest() {
           console.error(`FAIL [a post can only be rewritten by what runs before or beside it]: ${bodyVerdicts.join(',')}`);
           ok = false;
         }
-        // sibling loop project comparison, 2026-09-29: the guard matched only Bash, so a
-        // live run's orchestrator could Edit/Write the loop's own controls.
-        const editCases = [
-          ['/r/tools/agentic/command-guard.mjs', true, true],
-          ['/r/.claude/settings.json', true, true],
-          ['/r/docs/agentic/STATE.md', true, true],
-          ['/r/docs/agentic/ARCH.md', true, false],
-          ['/r/src/tools/agentic.ts', true, false],
-          ['tools/agentic/prime.mjs', true, true],
-          ['/elsewhere/tools/agentic/x.mjs', true, false],
-          ['/r/tools/agentic/command-guard.mjs', false, false],
-          [undefined, true, false],
-        ];
-        const editVerdicts = editCases.map(([path, live, blocked]) => {
-          try {
-            return (controlFileEditProblem(path, '/r', live) !== null) === blocked;
-          } catch {
-            return false;
-          }
-        });
-        if (!editVerdicts.every(Boolean)) {
-          console.error(`FAIL [a live run refuses Edit/Write of the loop control files]: ${editVerdicts.join(',')}`);
-          ok = false;
-        }
         // LFE, 2026-09-28: markers carried the tmux server's pid, so every
         // session under that server read as the loop's own run in that repo.
         const tree = {
@@ -3821,25 +3802,6 @@ function refuse(reason) {
   process.exit(2);
 }
 
-// The loop's own control surface: vendored tools, hook wiring, policy. While a
-// run is live nothing in the session edits them — the orchestrator's work is
-// the unit's code; setup closes the run before it writes these (a sibling loop project
-// comparison, 2026-09-29: the guard matched only Bash, so Edit/Write slipped
-// past). Dispatched writers get the same paths as deny rules (dispatch.mjs).
-const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
-const CONTROL_FILE_PATTERNS = Object.freeze([/^tools\/agentic\//u, /^\.claude\//u, /^docs\/agentic\/STATE\.md$/u]);
-
-export function controlFileEditProblem(filePath, repoRoot, live) {
-  if (!live || typeof filePath !== 'string' || filePath.length === 0) return null;
-  const relativePath = relative(repoRoot, resolve(repoRoot, filePath)).split(sep).join('/');
-  if (relativePath.startsWith('..') || !CONTROL_FILE_PATTERNS.some((pattern) => pattern.test(relativePath))) {
-    return null;
-  }
-  return `autoloop guard — ${relativePath} is loop control surface (vendored tools, hook wiring, `
-    + 'or STATE policy), and a live run never edits it. A change there is autoloop:setup\'s, run '
-    + 'after the loop closes (`prime.mjs --close-run`), or a human\'s.';
-}
-
 function main() {
   // A unit branch forked before a reconcile carries a fossil copy of this
   // guard; the base branch's copy decides instead. Must run before stdin is
@@ -3872,16 +3834,6 @@ function main() {
       + 'cannot be proven safe. Re-run the command; if this repeats, re-run autoloop:setup '
       + 'to repair the hook wiring.',
     );
-  }
-  if (EDIT_TOOLS.includes(payload?.tool_name)) {
-    const repoRoot = resolve(dirname(parsed.statePath), '..', '..');
-    const problem = controlFileEditProblem(
-      payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path,
-      repoRoot,
-      loopRunIsLive(),
-    );
-    if (problem !== null) refuse(problem);
-    process.exit(0);
   }
   if (payload?.tool_name === 'AskUserQuestion') {
     const problem = askUserQuestionProblem(loopRunIsLive());

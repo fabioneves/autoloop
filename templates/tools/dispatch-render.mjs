@@ -217,7 +217,7 @@ export function createCompactRenderer() {
         continue;
       }
       const kind = /^▸ (\S+)/u.exec(line)?.[1];
-      if (kind !== undefined) count(kind);
+      if (kind !== undefined) count(kind === '$' ? 'bash' : kind);
       if (FOLDED.includes(kind)) {
         folded.set(kind, (folded.get(kind) ?? 0) + 1);
         continue;
@@ -330,7 +330,7 @@ function selfTest() {
         '▸ $ pnpm test',
         '  ✖ exit 1',
         '■ done · success · 1m 1s · 9 turns',
-        '■ totals · read 5 · grep 1 · edit 1 · $ 1 · error 1',
+        '■ totals · read 5 · grep 1 · edit 1 · bash 1 · error 1',
       ].join('\n');
     })()],
     ['the compact pane is bounded however long the dispatch runs', (() => {
