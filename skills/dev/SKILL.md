@@ -804,6 +804,11 @@ workflow. STATE is protected; ARCH remains ordinary map data.
 
 ### 1. Select and premise-check
 
+**An open issue labelled `loop-halt` is the whole-run kill switch.** Every candidate then shows
+`loop-halted` among its reasons (`snapshot-contract.mjs --unit`): finish the unit already in flight,
+take no new one, and close the run. Only a human lifts it; the guard refuses the loop removing,
+deleting or renaming the label.
+
 Invalidate/refetch queue sections affected by Pitcrew. A unit prime printed as `resumed:` goes
 first — a human answered its block, and it is the work they are waiting on. Otherwise choose
 from the current summary's `eligible`: highest priority, then oldest.

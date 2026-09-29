@@ -33,6 +33,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'no-whole-run-kill-switch',
+    date: '2026-09-29',
+    symptom: 'Found comparing with a sibling loop project: a human could pause '
+      + 'auto-merge (automerge:halt) but had no way to stop the loop taking '
+      + 'new units short of killing the session.',
+    cause: 'Selection had no run-wide stop predicate.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "...(context.halted ? ['loop-halted'] : [])," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'function liftsHaltLabel(' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'nothing-kept-edits-off-the-loop-control-files',
     date: '2026-09-29',
     symptom: 'Found comparing with a sibling loop project: a dispatched writer '
