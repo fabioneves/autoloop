@@ -2565,8 +2565,19 @@ function procEntry(pid) {
     }
     return Number.isSafeInteger(parent) ? [parent, name, exe] : null;
   } catch {
-    return null;
+    return process.platform === 'linux' ? null : psEntry(pid);
   }
+}
+
+// Where /proc is absent (macOS), ps gives the parent and the command; the
+// command is often the executable's full path there, which also names a
+// Claude install the way /proc/<pid>/exe does.
+function psEntry(pid, run = (args) => spawnSync('ps', args, { encoding: 'utf8', timeout: 5000 })) {
+  const result = run(['-o', 'ppid=', '-o', 'comm=', '-p', String(pid)]);
+  const match = /^\s*(\d+)\s+(.+?)\s*$/u.exec(String(result?.stdout ?? '').split('\n')[0] ?? '');
+  if (result?.status !== 0 || match === null) return null;
+  const command = match[2];
+  return [Number(match[1]), basename(command), command.startsWith('/') ? command : ''];
 }
 
 // A session's ancestry ends at its own Claude Code process. Above it sit the
@@ -4046,6 +4057,16 @@ function selfTest() {
         const chains = [chain(95), chain(180), chain(305), chain(410), chain(510)];
         if (chains.join(' | ') !== '95,80 | 180 | 305,60 | 410,405 | 510,505') {
           console.error(`FAIL [an ancestry stops at its own claude process]: ${chains.join(' | ')}`);
+          ok = false;
+        }
+        // macOS has no /proc (CI, 0.59.0): ps supplies the same parent and
+        // name, or every hook behind a shell wrapper lost sight of the run.
+        const viaPs = psEntry(process.pid);
+        const viaProc = procEntry(process.pid);
+        const stubbed = psEntry(505, () => ({ status: 0, stdout: '   60 /home/u/.local/share/claude/versions/2.1.283\n' }));
+        if (!(viaPs !== null && (viaProc === null || (viaPs[0] === viaProc[0] && viaPs[1] === viaProc[1]))
+          && stubbed?.[0] === 60 && isClaudeProcess(stubbed[1], stubbed[2]))) {
+          console.error(`FAIL [ps reads the same ancestry /proc does]: ${JSON.stringify({ viaPs, viaProc, stubbed })}`);
           ok = false;
         }
       }
