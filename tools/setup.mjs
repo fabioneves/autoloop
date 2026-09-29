@@ -7,7 +7,7 @@
 // runs from the plugin.
 //
 //   node <plugin-tools>/setup.mjs --init --root <repo> --base <branch> --gate <command>
-//   node <plugin-tools>/setup.mjs --devendor --root <linked worktree>
+//   node <plugin-tools>/setup.mjs --devendor --root <linked worktree> [--move-checklist]
 //   node <plugin-tools>/setup.mjs --self-test
 //
 // The doctor is `verify.mjs --project-root <repo>`.
@@ -19,7 +19,7 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -242,7 +242,10 @@ function removeEmptyDirectories(root, path) {
   }
 }
 
-export function devendor(root, { cwd = process.cwd(), projectDir = process.env.CLAUDE_PROJECT_DIR } = {}) {
+const LEGACY_CHECKLIST = 'docs/agentic/checklist.md';
+const CHECKLIST = '.autoloop/checklist.md';
+
+export function devendor(root, { cwd = process.cwd(), projectDir = process.env.CLAUDE_PROJECT_DIR, moveChecklist = false } = {}) {
   const place = worktreeProblem(root, cwd, projectDir);
   if (place !== null) return place;
   if (existsSync(join(root, PROJECT_CONFIG_FILE))) {
@@ -253,7 +256,7 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
     return refusal('NOT_LEGACY', `no ${LEGACY_STATE_FILE} config block to convert`);
   }
   if (!legacy.ok) return refusal('LEGACY_CONFIG_INVALID', legacy.errors.join('; '));
-  for (const path of [VENDORED_DIR, LEGACY_STATE_FILE, LEGACY_LOOP_FILE, ...SETTINGS_FILES, PROJECT_CONFIG_FILE, '.autoloop/STATE.md']) {
+  for (const path of [VENDORED_DIR, LEGACY_STATE_FILE, LEGACY_LOOP_FILE, ...SETTINGS_FILES, PROJECT_CONFIG_FILE, '.autoloop/STATE.md', LEGACY_CHECKLIST, CHECKLIST]) {
     const link = symlinkedComponent(root, path);
     if (link !== null) return refusal('SYMLINKED_PATH', `${link} is a symlink; devendor writes only real paths under the root`);
   }
@@ -276,6 +279,11 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
       config.merge.reversiblePaths = executor.reversiblePaths;
     }
   }
+  // Offered (the human decides): the legacy checklist joins .autoloop/, where
+  // the default path already points, so config no longer names it.
+  const movingChecklist = moveChecklist && config.review.checklistPath === LEGACY_CHECKLIST
+    && existsSync(join(root, LEGACY_CHECKLIST)) && !existsSync(join(root, CHECKLIST));
+  if (movingChecklist) config.review.checklistPath = CHECKLIST;
   const errors = validateConfig(config);
   if (errors.length > 0) return refusal('DEVENDOR_CONFIG_INVALID', errors.join('; '));
   const gateOnVendoredTool = ['command', 'quickCommand', 'setupCommand']
@@ -308,6 +316,7 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
     rmSync(join(root, '.autoloop'), { recursive: true, force: true });
     return refusal('DEVENDOR_ROUNDTRIP', 'the written overrides do not resolve to the converted config');
   }
+  if (movingChecklist) renameSync(join(root, LEGACY_CHECKLIST), join(root, CHECKLIST));
   const prose = stateProse(readFileSync(join(root, LEGACY_STATE_FILE), 'utf8'));
   writeFileSync(join(root, '.autoloop', 'STATE.md'), prose);
 
@@ -341,6 +350,7 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
     ok: true,
     config,
     removed,
+    movedChecklist: movingChecklist,
     // The repository's own files under tools/agentic/ (a gate script): kept.
     kept,
     settings: settingsActions,
@@ -511,6 +521,17 @@ async function selfTest() {
         && executorSettings.SOLO_OPERATOR === true);
     check('devendor runs once', devendor(worktree, away).code === 'ALREADY_DEVENDORED');
 
+    // Offered at devendor: the legacy checklist joins the rest of the
+    // repository's autoloop data, and config stops naming its path.
+    const { worktree: moved } = legacyWorktree('moved');
+    const movedResult = devendor(moved, { ...away, moveChecklist: true });
+    const movedConfig = JSON.parse(readIfPresent(join(moved, PROJECT_CONFIG_FILE)) ?? 'null');
+    check('--move-checklist moves the checklist into .autoloop and drops the path override',
+      movedResult.ok === true && movedResult.movedChecklist === true
+        && existsSync(join(moved, '.autoloop', 'checklist.md')) && !existsSync(join(moved, 'docs/agentic/checklist.md'))
+        && movedConfig?.review === undefined && resolveProjectConfig(moved)?.config.review.checklistPath === '.autoloop/checklist.md'
+        && doctor(moved).status === 0 && result.movedChecklist === false);
+
     const { worktree: manual } = legacyWorktree('manual', {
       executor: false,
       config: { ...legacyConfig, merge: { policy: 'manual' }, protectedPaths: undefined },
@@ -597,11 +618,11 @@ async function main() {
   if (args.includes('--self-test')) process.exit((await selfTest()) ? 0 : 1);
   const root = flag(args, '--root');
   let result;
-  if (args.includes('--devendor') && root) result = devendor(resolve(root));
+  if (args.includes('--devendor') && root) result = devendor(resolve(root), { moveChecklist: args.includes('--move-checklist') });
   else if (args.includes('--init') && root && flag(args, '--base') && flag(args, '--gate')) {
     result = init(resolve(root), { base: flag(args, '--base'), gate: flag(args, '--gate') });
   } else {
-    console.error('usage: setup.mjs --init --root <repo> --base <branch> --gate <command> | --devendor --root <worktree> | --self-test');
+    console.error('usage: setup.mjs --init --root <repo> --base <branch> --gate <command> | --devendor --root <worktree> [--move-checklist] | --self-test');
     process.exit(2);
   }
   console.log(JSON.stringify(result, null, 2));

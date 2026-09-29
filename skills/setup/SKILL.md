@@ -164,13 +164,14 @@ this session's hooks and refuses the devendor commit while a run marker exists.
 1. **Confirm with the human first**, naming what the PR deletes: the plugin's files under
    `tools/agentic/` (the repository's own files there stay), `docs/agentic/LOOP.md`,
    `docs/agentic/STATE.md` (its prose moves), and the autoloop hook entries — and that devendor
-   runs the base's vendored escalate/merge modules to read their policy.
+   runs the base's vendored escalate/merge modules to read their policy. Also offer to move
+   `docs/agentic/checklist.md` to `.autoloop/checklist.md` (`--move-checklist` below).
 2. **Work in a linked worktree, never this checkout** — deleting the vendored guard here makes it
    refuse every command. `setup.mjs` refuses anything but a linked worktree it is not running in.
 
    ```bash
    git worktree add -b autoloop/devendor <scratch>/devendor origin/<base>
-   node <plugin-tools>/setup.mjs --devendor --root <scratch>/devendor
+   node <plugin-tools>/setup.mjs --devendor --root <scratch>/devendor [--move-checklist]
    ```
 
    Refusals, each with its remedy: `NOT_A_WORKTREE`/`LIVE_CHECKOUT` — use the worktree above;

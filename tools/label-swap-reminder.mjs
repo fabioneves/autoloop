@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { guardedRoot } from './hook-root.mjs';
+import { guardedRoot, hookRoot } from './hook-root.mjs';
 
 // Claude Code 2.1.234 removed the task tools outright but only DEFERRED
 // PushNotification; a live run read the visible roster as the whole roster,
@@ -84,13 +84,16 @@ const SETUP_PHASE_ANCHORS = [
 
 // Returns null when the command is not a loop-label swap on an issue.
 // opts.archMap: docs/agentic/ARCH.md exists → step 6 also reminds the map update.
+export function setupPhaseReminder(command) {
+  if (typeof command !== 'string') return null;
+  return SETUP_PHASE_ANCHORS.find(([pattern]) => pattern.test(command))?.[1] ?? null;
+}
+
 export function reminderFor(command, opts = {}) {
   if (typeof command !== 'string') return null;
   if (/\bstep\.mjs\b/.test(command)) return stepReminder(command, opts);
-
-  for (const [pattern, message] of SETUP_PHASE_ANCHORS) {
-    if (pattern.test(command)) return message;
-  }
+  const setup = setupPhaseReminder(command);
+  if (setup !== null) return setup;
 
   // The run frame and the panel probe have no label to ride; prime is the
   // command every run inevitably starts with, so they ride prime.
@@ -291,11 +294,21 @@ function selfTest() {
   {
     const scratch = mkdtempSync(join(tmpdir(), 'label-swap-gate-'));
     try {
-      const hook = () => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
-        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh issue edit 4 --add-label loop-blocked' } }),
+      const hook = (command = 'gh issue edit 4 --add-label loop-blocked') => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }),
         encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
       }).stdout;
       const unrelated = hook();
+      // A legacy install being devendored hears setup's ribbons, and nothing
+      // else: its own vendored reminder hook still handles the loop.
+      mkdirSync(join(scratch, 'docs', 'agentic'), { recursive: true });
+      writeFileSync(join(scratch, 'docs', 'agentic', 'STATE.md'), '# STATE\n');
+      const legacySetup = hook('node /p/tools/setup.mjs --devendor --root /tmp/w');
+      const legacyLoop = hook();
+      if (!/4\/5 WRITE/.test(legacySetup) || legacyLoop !== '') {
+        fail++;
+        console.error('FAIL: a legacy install hears setup\'s ribbons and no loop reminders');
+      }
       mkdirSync(join(scratch, '.autoloop'));
       writeFileSync(join(scratch, '.autoloop', 'config.json'), '{}');
       const active = hook();
@@ -322,10 +335,13 @@ if (entry) {
         const input = JSON.parse(raw);
         if (input.tool_name !== 'Bash') process.exit(0);
         const root = guardedRoot();
-        if (root === null) process.exit(0);
-        const msg = reminderFor(input.tool_input?.command, {
-          archMap: existsSync(join(root, 'docs/agentic/ARCH.md')),
-        });
+        // A legacy install (being devendored) hears setup's ribbons only; its
+        // vendored reminder hook still handles the loop.
+        const legacy = root === null && existsSync(join(hookRoot(), 'docs/agentic/STATE.md'));
+        if (root === null && !legacy) process.exit(0);
+        const msg = legacy
+          ? setupPhaseReminder(input.tool_input?.command)
+          : reminderFor(input.tool_input?.command, { archMap: existsSync(join(root, 'docs/agentic/ARCH.md')) });
         if (msg) {
           console.log(JSON.stringify({
             hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: msg },
