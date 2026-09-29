@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CONFIG_VERSION, repositoryRoot, resolveProjectConfig } from './config-contract.mjs';
 import {
   HUMAN_AUTHORIZATION_GLOBS,
   PATH_POLICY_FIXTURES,
@@ -21,8 +24,19 @@ export const ESCALATE_PATHS = [
 
 export { globToRe };
 
-export function matchEscalate(files) {
-  return matchHumanAuthorization(files, ESCALATE_PATHS);
+export function matchEscalate(files, paths = ESCALATE_PATHS) {
+  return matchHumanAuthorization(files, paths);
+}
+
+// The escalate paths for one repository: the structural families plus the
+// `protectedPaths` its config names. A config that cannot be resolved leaves
+// the repository's own paths unknown, so the caller fails closed on `error`.
+export function escalatePathsFor(root) {
+  const resolved = resolveProjectConfig(root);
+  if (resolved !== null && !resolved.ok) {
+    return { paths: ESCALATE_PATHS, error: `${resolved.source}: ${resolved.errors.join('; ')}` };
+  }
+  return { paths: [...ESCALATE_PATHS, ...(resolved?.config.protectedPaths ?? [])], error: null };
 }
 
 function positiveInteger(value) {
@@ -371,6 +385,52 @@ function selfTest() {
           && text.includes('--artifact-fingerprint was passed and REJECTED');
       })()],
   );
+  // policy-as-data: the repository's own protected paths come from
+  // `.autoloop/config.json`, and a config that cannot be read fails closed.
+  const scratch = mkdtempSync(join(tmpdir(), 'escalate-paths-'));
+  try {
+    const run = (...extra) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...extra], {
+      cwd: scratch, encoding: 'utf8',
+    });
+    gitText(['init', '-q', scratch]);
+    // --working-tree diffs against HEAD, so the scratch repository needs one.
+    gitText(['-C', scratch, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init']);
+    mkdirSync(join(scratch, '.autoloop'));
+    mkdirSync(join(scratch, 'spec'));
+    writeFileSync(join(scratch, 'spec', 'rules.md'), 'x\n');
+    const configFile = join(scratch, '.autoloop', 'config.json');
+    const config = { version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'x' } };
+    writeFileSync(configFile, JSON.stringify({ ...config, protectedPaths: ['spec/**'] }));
+    const configured = escalatePathsFor(scratch);
+    diffChecks.push(['configured protectedPaths join the escalate paths',
+      configured.error === null && matchEscalate(['spec/rules.md'], configured.paths).length === 1
+        && matchEscalate(['src/a.ts'], configured.paths).length === 0]);
+    const working = run('--working-tree');
+    diffChecks.push(['--working-tree escalates a configured protected path',
+      working.status === 1 && working.stdout.includes('spec/rules.md')]);
+    const proof = run('--base', 'HEAD', '--artifact-version', '1', '--artifact-fingerprint', 'a'.repeat(64),
+      '--estimated-lines', '1', '--planned-path', 'spec/rules.md', '--content-read-all', '--json');
+    let proven = null;
+    try {
+      proven = JSON.parse(proof.stdout);
+    } catch {
+      proven = null;
+    }
+    diffChecks.push(['a configured protected path escalates the lane proof and the reported hits',
+      proof.status === 1 && proven?.laneProof?.lane === 'full'
+        && proven.laneProof.reasonCodes.includes('HUMAN_AUTHORIZATION_PATH')
+        && proven.escalationHits.some(({ file, glob }) => file === 'spec/rules.md' && glob === 'spec/**')]);
+    writeFileSync(configFile, JSON.stringify(config));
+    diffChecks.push(['no protectedPaths adds nothing',
+      matchEscalate(['spec/rules.md'], escalatePathsFor(scratch).paths).length === 0]);
+    writeFileSync(configFile, JSON.stringify({ ...config, protectedPaths: 'spec/**' }));
+    const broken = run('--working-tree');
+    diffChecks.push(['an invalid config fails closed with exit 2 and names the key',
+      escalatePathsFor(scratch).error !== null && broken.status === 2
+        && broken.stderr.includes('protectedPaths')]);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
   for (const [name, passed] of diffChecks) {
     if (!passed) {
       console.error(`FAIL: ${name}`);
@@ -487,8 +547,8 @@ function incompleteInputGuidance(mode, reasonCodes, args = []) {
   return `${mode} evidence is incomplete; ${parts.join('; ')}`;
 }
 
-function outputResult(files, laneProof, args, sourceComplete, error = null) {
-  const hits = matchEscalate(files);
+function outputResult(files, laneProof, args, sourceComplete, escalatePaths, error = null) {
+  const hits = matchEscalate(files, escalatePaths);
   if (args.includes('--json')) {
     console.log(JSON.stringify({ laneProof, escalationHits: hits, sourceComplete, error }, null, 2));
   } else {
@@ -519,12 +579,17 @@ function main() {
     console.log(usage());
     process.exit(args.length === 0 ? 2 : 0);
   }
+  const escalate = escalatePathsFor(repositoryRoot());
+  if (escalate.error) {
+    console.error(`escalate-paths: project config unreadable, so its protected paths are unknown: ${escalate.error}`);
+    process.exit(2);
+  }
   if (args.includes('--working-tree')) {
     try {
       const tracked = gitText(['diff', '--name-only', '-z', 'HEAD']).split('\0').filter(Boolean);
       const untracked = gitText(['ls-files', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean);
       const files = [...new Set([...tracked, ...untracked])];
-      const hits = matchEscalate(files);
+      const hits = matchEscalate(files, escalate.paths);
       for (const { file, glob } of hits) console.log(`ESCALATE  ${file}  (matched ${glob})`);
       if (hits.length) console.log('→ apply `human:authorize` and record the matched path');
       else console.log('no escalate paths touched');
@@ -565,11 +630,11 @@ function main() {
       subject,
       [mode]: evidence,
     },
-    { extraHumanAuthorizationGlobs: ESCALATE_PATHS },
+    { extraHumanAuthorizationGlobs: escalate.paths },
   );
   const files = proofPaths(laneProof);
   const sourceComplete = laneProof.decisionEvidence.sourceComplete;
-  process.exit(outputResult(files, laneProof, args, sourceComplete, evidenceError));
+  process.exit(outputResult(files, laneProof, args, sourceComplete, escalate.paths, evidenceError));
 }
 
 const isMain = (() => {

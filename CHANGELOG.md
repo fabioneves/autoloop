@@ -3,6 +3,45 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.58.0] - 2026-09-29
+
+Global install, module 2 (`policy-as-data`, spec `SPEC-global-install.md`). The repository's own
+merge and escalation policy is now config, not a hand-edited vendored file.
+
+### Added
+
+- **`protectedPaths` in the project config:** the repository's own human-authorization globs (for
+  example `["spec/**", "**/compose.y*ml"]`), added to the built-in families. `escalate-paths.mjs`
+  uses them for `--working-tree`, the lane proof and its reported hits; a config it cannot read
+  exits 2 rather than dropping them.
+- **Merge executor settings from `.autoloop/config.json`.** With that file present, the executor
+  reads `baseBranch`, `merge.policy` (`auto` → all-green, `ratified` → classified),
+  `merge.loopLogin`, `merge.reversiblePaths` (default `["docs/**"]`), `protectedPaths` and
+  `merge.soloOperatorAcknowledged` from config. The repository comes from `gh repo view`, with
+  `GH_REPO`/`GH_HOST` ignored. Without `config.json`, the setup-filled block still decides.
+
+### Changed
+
+- The executor refuses before any GitHub read when `config.json` holds a manual policy, no solo
+  acknowledgement, no `merge.loopLogin`, or an unreadable repository. It also refuses while config
+  would drop a filled block's protected paths or change its reversible class, so moving to
+  `config.json` never widens what auto-merges.
+- Config globs use only `*` and `**`, the only wildcards the matchers support. `spec` names a
+  file; `spec/**` names the directory.
+- An inaccessible `.autoloop/` now refuses instead of reading as "no config".
+
+### Fixed
+
+- The executor self-test failed for a block or config with a leading `**` glob (such as
+  `**/compose.y*ml`), and for a classified policy with Path B declined (no reversible paths). Both
+  now pass; the self-test fills a copy of itself both ways to keep it so.
+
+### Upgrading
+
+Nothing to do. The schema stays `0.28.0`: every new key is optional, and an unset key changes
+nothing. A repository moving to `config.json` sets `merge.loopLogin` and carries its block's
+protected and reversible paths over; the executor names anything missing.
+
 ## [0.57.0] - 2026-09-29
 
 The first step toward autoloop as a global tool, with nothing of it committed to a project (spec:

@@ -66,8 +66,8 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
 - **Defaults.** Plugin defaults (`DEFAULT_CONFIG`) are deep-merged under the project file. The
   project states only what differs. Validation runs on the merged result, and unknown keys are
   refused.
-- **Schema.** It stays 0.28.0 in this module; the 0.29.0 bump comes with the policy keys in
-  policy-as-data. Everything except `version`, `baseBranch` and `gate.command` has a default.
+- **Schema.** It stays 0.28.0. Everything except `version`, `baseBranch` and `gate.command` has a
+  default.
 - **STATE prose.** It moves to `.autoloop/STATE.md`, with the legacy path as fallback. SessionStart
   injects whichever exists.
 - **Checklist.** `review.checklistPath` defaults to `.autoloop/checklist.md` if present, else the
@@ -80,11 +80,25 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
 
 ### policy-as-data
 
+- **Schema.** The keys are additive and optional, so the schema stays 0.28.0. A key with no
+  default is simply absent, so a repository that never sets one resolves exactly the config it
+  resolved before, and a review chain's config fingerprint holds.
 - **New config keys:**
-  - `protectedPaths` replaces `escalate-paths.mjs` `ESCALATE_PATHS` and `auto-merge`
-    `EXTRA_PROTECTED_PATHS`; the structural families stay in the plugin;
-  - `merge.reversiblePaths` (default `["docs/**"]`);
-  - `merge.loopLogin`, `merge.trustedHumans`;
+  - `protectedPaths` (no default) replaces the repo entries of `escalate-paths.mjs`
+    `ESCALATE_PATHS` and `auto-merge` `EXTRA_PROTECTED_PATHS`; the structural families stay in the
+    plugin. A config that cannot be resolved leaves them unknown, so `escalate-paths` exits 2;
+  - `merge.reversiblePaths` (default `["docs/**"]`) and `merge.loopLogin`, both valid only under a
+    non-manual policy. There is no `merge.trustedHumans`: non-solo is retired, so the one trusted
+    human is the loop login;
+  - the executor refuses (exit 1, before any GitHub read) when `config.json` is present but its
+    policy is manual, it lacks `soloOperatorAcknowledged`, `loopLogin` is unset, or the repository
+    can't be read; it never falls back to the filled block;
+  - moving from a filled block to `config.json` must carry the block's policy over: the executor
+    refuses while `protectedPaths` lacks any of the block's `EXTRA_PROTECTED_PATHS`, or
+    `merge.reversiblePaths` (default `["docs/**"]`) differs from its `REVERSIBLE_PATHS`;
+  - globs use only `*` and `**`, the only metacharacters the matchers support; `spec` names a file,
+    `spec/**` the directory;
+  - the repository comes from `gh repo view` with `GH_REPO` and `GH_HOST` dropped;
   - `AUTOMERGE_MODE` stays derived from `merge.policy` (`auto` → `all-green`, `ratified` →
     `classified`), never stored;
   - `REPOSITORY` comes from `git remote` / `gh repo view`, never stored.
@@ -92,7 +106,7 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
   executor runs from the plugin with its settings from config, and no filled copy exists.
 - **LFE today maps to:**
   `protectedPaths: ["spec/**", "compose.y*ml", "**/compose.y*ml"]`,
-  `merge.loopLogin: "fabioneves"`, `merge.trustedHumans: ["fabioneves"]`.
+  `merge.loopLogin: "fabioneves"`.
 - **Success:** the auto-merge self-test derives its fixtures from config; lane and escalate
   matching read `protectedPaths`; a repo's old files are ignored once `config.json` exists.
 
@@ -159,6 +173,10 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
 - Never: write a project's config during a normal run; commit anything of the tool to a project.
 
 ## Open questions
+
+- `escalate-paths` reads the worktree's config, so a unit branch forked before a `protectedPaths`
+  change resolves the older list (staleness only: editing `.autoloop/**` escalates). Reading the
+  base's config there follows the "base is the authority" rule; decided with plugin-tools.
 
 - Whether the guard's corpus and regression incidents that anchor vendored-layout behaviour retire
   or re-anchor; decided per incident in plugin-tools.

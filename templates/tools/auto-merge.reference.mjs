@@ -6,12 +6,15 @@
 // merge.unverifiedInvocationAcknowledged: true; Runtime opens such runs on that
 // recorded acceptance and still rejects every unacknowledged non-manual run
 // before probing or mutation. With the placeholder REPO CONFIG block below,
-// every invocation refuses fail-closed; only autoloop:setup fills it.
+// every invocation refuses fail-closed; only autoloop:setup fills it. A
+// repository with .autoloop/config.json takes these settings from config
+// instead (merge.loopLogin, merge.reversiblePaths, protectedPaths).
 //
 // The policy ENGINE (independently fetched, SHA-bound evidence; AND-gate;
 // kill-switch; CAS merge + confirmation) is identical in every mode.
-// The self-test fixtures DERIVE from the config block, so `--self-test` stays
-// meaningful for any filled config — run it after every config change.
+// The self-test fixtures DERIVE from the resolved settings (config.json, else
+// the block), so `--self-test` stays meaningful for any config — run it after
+// every config change.
 //
 // SOLO_OPERATOR transcribes the additional merge.soloOperatorAcknowledged: true
 // consent for a single-identity repository: the one human IS the loop login,
@@ -38,9 +41,13 @@
 // Exit 1 = normal refusal, ambiguous merge outcome, or self-test failure.
 // Exit 2 = usage error.
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import {
+  mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createPremergeRecord,
@@ -49,6 +56,13 @@ import {
   validPremergeRecordId,
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
+import {
+  CONFIG_VERSION,
+  POLICY_TO_MODE,
+  PROJECT_CONFIG_FILE,
+  repositoryRoot,
+  resolveProjectConfig,
+} from './config-contract.mjs';
 import { finalizeHead } from './delivery-contract.mjs';
 import {
   lifecycleCommentNeverEdited,
@@ -123,6 +137,93 @@ export const REQUIRE_CODE_OWNER_REVIEWS = false;
 export const BASE_FRESHNESS_STRATEGY = 'direct-strict';
 // ── end repo config — everything below is the generic engine ──
 
+// policy-as-data (global install): a repository with `.autoloop/config.json`
+// takes these settings from config and ignores the block above, which decides
+// only for a legacy STATE repository. The repository comes from `gh repo view`
+// and the mode from merge.policy, so neither is stored; anything missing is a
+// refusal, never a fallback to the block.
+const BLOCK = Object.freeze({
+  REPOSITORY, BASE_BRANCH, REVERSIBLE_PATHS, EXTRA_PROTECTED_PATHS,
+  AUTOMERGE_MODE, LOOP_LOGIN, TRUSTED_HUMAN_LOGINS, SOLO_OPERATOR,
+});
+
+const PLACEHOLDER_REPOSITORY = Object.freeze({ owner: 'your-org', name: 'your-repo' });
+function isPlaceholder(block) {
+  return block.REPOSITORY.owner === PLACEHOLDER_REPOSITORY.owner && block.REPOSITORY.name === PLACEHOLDER_REPOSITORY.name;
+}
+
+// A block setup filled (not the placeholder) is policy a human chose. When
+// config.json takes over, every protected path must survive and the
+// reversible class must not change, or the move silently widens auto-merge.
+function blockConflicts(block, protectedPaths, reversiblePaths) {
+  if (isPlaceholder(block)) return [];
+  const problems = [];
+  const lost = block.EXTRA_PROTECTED_PATHS.filter((glob) => !protectedPaths.includes(glob));
+  if (lost.length > 0) problems.push(`protectedPaths is missing the filled block's ${lost.join(', ')}`);
+  if (JSON.stringify(block.REVERSIBLE_PATHS) !== JSON.stringify(reversiblePaths)) {
+    problems.push(`merge.reversiblePaths must equal the filled block's ${JSON.stringify(block.REVERSIBLE_PATHS)}`);
+  }
+  return problems;
+}
+
+// `repository` null means the lookup failed; undefined means it was never
+// made because the config already refuses.
+export function settingsFromConfig(config, repository, block = BLOCK) {
+  const merge = config.merge ?? {};
+  const loopLogin = typeof merge.loopLogin === 'string' ? merge.loopLogin : null;
+  const protectedPaths = config.protectedPaths ?? [];
+  const reversiblePaths = merge.reversiblePaths ?? ['docs/**'];
+  const problems = [];
+  if (POLICY_TO_MODE[merge.policy] === undefined) problems.push(`merge.policy is "${merge.policy}", so nothing auto-merges`);
+  // authorizeMerge refuses non-solo too, but only after the GitHub read.
+  if (merge.soloOperatorAcknowledged !== true) problems.push('merge.soloOperatorAcknowledged is not true, and non-solo is retired');
+  if (loopLogin === null) problems.push('merge.loopLogin is not set, so loop ownership cannot be proven');
+  problems.push(...blockConflicts(block, protectedPaths, reversiblePaths));
+  if (repository === null) problems.push('the repository could not be read from `gh repo view`');
+  return {
+    source: PROJECT_CONFIG_FILE,
+    REPOSITORY: repository ?? block.REPOSITORY,
+    BASE_BRANCH: config.baseBranch,
+    REVERSIBLE_PATHS: reversiblePaths,
+    EXTRA_PROTECTED_PATHS: protectedPaths,
+    AUTOMERGE_MODE: POLICY_TO_MODE[merge.policy] ?? block.AUTOMERGE_MODE,
+    LOOP_LOGIN: loopLogin ?? block.LOOP_LOGIN,
+    // Non-solo is retired: the one trusted human is the loop login.
+    TRUSTED_HUMAN_LOGINS: loopLogin === null ? [] : [loopLogin],
+    SOLO_OPERATOR: merge.soloOperatorAcknowledged === true,
+    error: problems.length === 0 ? null : `${PROJECT_CONFIG_FILE}: ${problems.join('; ')}`,
+  };
+}
+
+// The repository the checkout's remotes name. GH_REPO and GH_HOST are dropped
+// so an ambient override can never choose the merge target.
+function ghRepository(root, run = execFileSync) {
+  const { GH_REPO: ignoredRepo, GH_HOST: ignoredHost, ...env } = process.env;
+  try {
+    const view = JSON.parse(run('gh', ['repo', 'view', '--json', 'owner,name'], {
+      cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000,
+    }));
+    const owner = view?.owner?.login;
+    return typeof owner === 'string' && typeof view?.name === 'string' ? { owner, name: view.name } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function repoSettings(root, lookupRepository = ghRepository, block = BLOCK) {
+  const resolved = resolveProjectConfig(root);
+  if (resolved?.source !== PROJECT_CONFIG_FILE) return { source: 'block', ...block, error: null };
+  if (!resolved.ok) {
+    return { source: PROJECT_CONFIG_FILE, ...block, error: `${PROJECT_CONFIG_FILE}: ${resolved.errors.join('; ')}` };
+  }
+  const preflight = settingsFromConfig(resolved.config, undefined, block);
+  return preflight.error === null ? settingsFromConfig(resolved.config, lookupRepository(root), block) : preflight;
+}
+
+export const REPO = repoSettings(repositoryRoot());
+// A self-test run by another self-test skips the cases that spawn one.
+const NESTED_SELF_TEST = process.argv.includes('--nested');
+
 // The two verdict COMMIT STATUSES the finalizer posts (success-only,
 // SHA-bound, description carries the summary-hash prefix).
 export const REQUIRED_VERDICTS = ['agentic/gate', 'agentic/review'];
@@ -141,9 +242,9 @@ export function globToRe(glob) {
   return new RegExp(`^${re}$`, 'i');
 }
 
-const REVERSIBLE_RES = REVERSIBLE_PATHS.map(globToRe);
+const REVERSIBLE_RES = REPO.REVERSIBLE_PATHS.map(globToRe);
 
-const REPO_SLUG = `${REPOSITORY.owner}/${REPOSITORY.name}`;
+const REPO_SLUG = `${REPO.REPOSITORY.owner}/${REPO.REPOSITORY.name}`;
 const SHA_RE = /^[0-9a-f]{40}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const HEAD_SHA = 'a'.repeat(40);
@@ -454,8 +555,8 @@ function reviewerName(reviewer) {
 
 function fetchPullRequestCore(number) {
   const data = ghGraphql(CORE_QUERY, {
-    owner: REPOSITORY.owner,
-    name: REPOSITORY.name,
+    owner: REPO.REPOSITORY.owner,
+    name: REPO.REPOSITORY.name,
     number: Number(number),
   });
   const pr = data.repository?.pullRequest;
@@ -470,8 +571,8 @@ function fetchPullRequestCore(number) {
   while (labelsPage.hasNextPage) {
     if (!labelsPage.endCursor) throw new Error('labels pagination had no endCursor');
     const next = ghGraphql(LABELS_QUERY, {
-      owner: REPOSITORY.owner,
-      name: REPOSITORY.name,
+      owner: REPO.REPOSITORY.owner,
+      name: REPO.REPOSITORY.name,
       number: Number(number),
       cursor: labelsPage.endCursor,
     }).repository?.pullRequest?.labels;
@@ -484,8 +585,8 @@ function fetchPullRequestCore(number) {
   while (requestsPage.hasNextPage) {
     if (!requestsPage.endCursor) throw new Error('review request pagination had no endCursor');
     const next = ghGraphql(REVIEW_REQUESTS_QUERY, {
-      owner: REPOSITORY.owner,
-      name: REPOSITORY.name,
+      owner: REPO.REPOSITORY.owner,
+      name: REPO.REPOSITORY.name,
       number: Number(number),
       cursor: requestsPage.endCursor,
     }).repository?.pullRequest?.reviewRequests;
@@ -541,8 +642,8 @@ function fetchReviewThreads(number) {
   let cursor = null;
   while (true) {
     const connection = ghGraphql(THREADS_QUERY, {
-      owner: REPOSITORY.owner,
-      name: REPOSITORY.name,
+      owner: REPO.REPOSITORY.owner,
+      name: REPO.REPOSITORY.name,
       number: Number(number),
       cursor,
     }).repository?.pullRequest?.reviewThreads;
@@ -932,8 +1033,8 @@ function fetchPermission(login) {
 
 function fetchIssueRecord(number) {
   const data = ghGraphql(ISSUE_QUERY, {
-    owner: REPOSITORY.owner,
-    name: REPOSITORY.name,
+    owner: REPO.REPOSITORY.owner,
+    name: REPO.REPOSITORY.name,
     number: Number(number),
   });
   const issue = data.repository?.issue;
@@ -1004,8 +1105,8 @@ function fetchTimeline(number) {
 function fetchDependencies(body) {
   const items = blockedBy(body).map((number) => {
     const issue = ghGraphql(DEPENDENCY_QUERY, {
-      owner: REPOSITORY.owner,
-      name: REPOSITORY.name,
+      owner: REPO.REPOSITORY.owner,
+      name: REPO.REPOSITORY.name,
       number,
     }).repository?.issue;
     if (!issue || issue.number !== number) {
@@ -1037,7 +1138,7 @@ function fetchLinkedIssueEvidence(number, policyLive) {
   const loopReadyPermission = readyEvent?.actor?.login
     ? fetchPermission(readyEvent.actor.login)
     : { complete: false, login: null, roleName: null };
-  const marker = finalizedDeliveryMarker(record.comments, LOOP_LOGIN, policyLive.pullRequest?.headOid);
+  const marker = finalizedDeliveryMarker(record.comments, REPO.LOOP_LOGIN, policyLive.pullRequest?.headOid);
   return deriveLiveIssueEvidence({
     ...record,
     timeline,
@@ -1045,7 +1146,7 @@ function fetchLinkedIssueEvidence(number, policyLive) {
     loopReadyPermission,
     plannedBaseComparison: fetchPlannedBaseComparison(marker?.plannedBaseOid, policyLive.pullRequest?.baseOid),
     ...policyLive,
-    loopLogin: LOOP_LOGIN,
+    loopLogin: REPO.LOOP_LOGIN,
   });
 }
 
@@ -1249,8 +1350,8 @@ function fetchInputs(number) {
       try {
         verdictStatuses = fetchPublicationStatuses({
           host: 'github.com',
-          owner: REPOSITORY.owner,
-          repo: REPOSITORY.name,
+          owner: REPO.REPOSITORY.owner,
+          repo: REPO.REPOSITORY.name,
         }, inputs.headRefOid);
       } catch (error) {
         inputs.fetchReasons.push(`verdict status fetch failed: ${errorMessage(error)}`);
@@ -1258,7 +1359,7 @@ function fetchInputs(number) {
       try {
         delivery = finalizeHead({
           schemaVersion: 1,
-          repository: `${REPOSITORY.owner}/${REPOSITORY.name}`,
+          repository: `${REPO.REPOSITORY.owner}/${REPO.REPOSITORY.name}`,
           pullRequest: inputs.prNumber,
           committedHead: inputs.headRefOid,
           reviewedHead: inputs.headRefOid,
@@ -1368,18 +1469,18 @@ function normalizedCheckRun(checkRun) {
   };
 }
 
-// The vendored REPO CONFIG block transcribed into the gate's config shape.
-// Self-test fixtures override toward the solo shape (the only one the gate
-// accepts); the live path always uses the vendored constants.
+// The resolved repository settings (REPO) transcribed into the gate's config
+// shape. Self-test fixtures override toward the solo shape (the only one the
+// gate accepts); the live path always uses REPO unchanged.
 export function engineConfig(overrides = {}) {
   return {
-    repository: REPOSITORY,
-    baseBranch: BASE_BRANCH,
-    mergePolicy: AUTOMERGE_MODE === 'all-green' ? 'auto' : 'ratified',
+    repository: REPO.REPOSITORY,
+    baseBranch: REPO.BASE_BRANCH,
+    mergePolicy: REPO.AUTOMERGE_MODE === 'all-green' ? 'auto' : 'ratified',
     baseFreshnessStrategy: BASE_FRESHNESS_STRATEGY,
-    loopLogin: LOOP_LOGIN,
-    trustedHumanLogins: TRUSTED_HUMAN_LOGINS,
-    soloOperator: SOLO_OPERATOR,
+    loopLogin: REPO.LOOP_LOGIN,
+    trustedHumanLogins: REPO.TRUSTED_HUMAN_LOGINS,
+    soloOperator: REPO.SOLO_OPERATOR,
     requiredApprovingReviewCount: REQUIRED_APPROVING_REVIEW_COUNT,
     requireCodeOwnerReviews: REQUIRE_CODE_OWNER_REVIEWS,
     ...overrides,
@@ -1477,11 +1578,11 @@ export function decide(pr, config = engineConfig()) {
 
   if (upper(pr.state) !== 'OPEN') reasons.push(`PR is not OPEN (state=${pr.state ?? 'unknown'})`);
   if (pr.isDraft !== false) reasons.push(pr.isDraft === true ? 'PR is still a draft' : 'draft state is unknown');
-  if (pr.baseRefName !== BASE_BRANCH) reasons.push(`base branch is not ${BASE_BRANCH} (base=${pr.baseRefName ?? 'unknown'})`);
+  if (pr.baseRefName !== REPO.BASE_BRANCH) reasons.push(`base branch is not ${REPO.BASE_BRANCH} (base=${pr.baseRefName ?? 'unknown'})`);
 
   const headOwner = pr.headRepository?.owner?.login ?? pr.headRepository?.owner;
   const headName = pr.headRepository?.name;
-  if (headOwner !== REPOSITORY.owner || headName !== REPOSITORY.name) {
+  if (headOwner !== REPO.REPOSITORY.owner || headName !== REPO.REPOSITORY.name) {
     reasons.push(`head repository is not ${REPO_SLUG} (head=${headOwner ?? 'unknown'}/${headName ?? 'unknown'})`);
   }
 
@@ -1554,7 +1655,7 @@ export function decide(pr, config = engineConfig()) {
   if (killSwitch?.known !== true) reasons.push('automerge:halt kill-switch state is unknown');
   else if (killSwitch.active === true) reasons.push('automerge:halt kill-switch is active; all automerges are paused');
 
-  for (const hit of matchMergeProtected(paths, EXTRA_PROTECTED_PATHS)) {
+  for (const hit of matchMergeProtected(paths, REPO.EXTRA_PROTECTED_PATHS)) {
     reasons.push(`protected path (${hit.family}): ${hit.file}`);
   }
 
@@ -1571,7 +1672,7 @@ export function decide(pr, config = engineConfig()) {
   // check in this function (protected paths, hard-block labels, evidence, threads,
   // kill-switch) still applies — the mode widens the CLASS, never the floor.
   const allGreen =
-    AUTOMERGE_MODE === 'all-green' &&
+    REPO.AUTOMERGE_MODE === 'all-green' &&
     entries.length > 0 &&
     pr.filePaginationComplete === true &&
     !malformed &&
@@ -1579,10 +1680,10 @@ export function decide(pr, config = engineConfig()) {
   const path = pathA ? 'A' : pathB ? 'B' : allGreen ? 'all-green' : 'none';
 
   if (path === 'none') {
-    if (AUTOMERGE_MODE === 'all-green') {
+    if (REPO.AUTOMERGE_MODE === 'all-green') {
       reasons.push('not authorized: changed-file evidence incomplete or empty');
     } else {
-      if (!pathBFiles) reasons.push(`not authorized: Path B requires every current and previous file path to match the reversible allowlist (${REVERSIBLE_PATHS.join(', ') || 'empty'})`);
+      if (!pathBFiles) reasons.push(`not authorized: Path B requires every current and previous file path to match the reversible allowlist (${REPO.REVERSIBLE_PATHS.join(', ') || 'empty'})`);
       // Names the escape hatch, because the refusal that started this listed
       // everything that failed and never the one label that would have passed.
       if (!pathA) reasons.push(`not authorized: no Path A risk label (${SAFE_LABELS.join(' or ')})`);
@@ -1634,7 +1735,7 @@ function defaultMergeExecutor(number, expectedExecutor) {
     const actualExecutor = fetchExecutorIdentity();
     if (
       actualExecutor.complete !== true
-      || actualExecutor.login !== LOOP_LOGIN
+      || actualExecutor.login !== REPO.LOOP_LOGIN
       || actualExecutor.login !== expectedExecutor?.login
       || actualExecutor.id !== expectedExecutor?.id
     ) {
@@ -1747,25 +1848,36 @@ export function run(inputs, {
   }
 }
 
-// ── Self-test fixtures DERIVE from the config block so they stay valid for any
+// ── Self-test fixtures DERIVE from the resolved settings so they stay valid for any
 // filled config, with one forced override: authorizeMerge accepts only the solo
 // shape, so fixture runs use SELF_TEST_CONFIG (solo over the vendored block) and
 // a dedicated fixture pins the non-solo refusal.
 // pathFromGlob turns the first glob of a list into a concrete path.
+// Per segment, so a leading or inner `**` keeps the rest of the glob: a
+// trailing `**` becomes the leaf, any other `**` one directory, `*` an `x`.
 function pathFromGlob(glob, leaf) {
   if (!glob.includes('*')) return glob;
-  return glob.replace(/\*\*.*$/, leaf).replace(/\*/g, 'x');
+  const segments = glob.split('/');
+  return segments
+    .map((segment, index) => (segment === '**'
+      ? (index === segments.length - 1 ? leaf : 'x')
+      : segment.replace(/\*/g, 'x')))
+    .join('/');
 }
-const ALLOWED_PATH = pathFromGlob(REVERSIBLE_PATHS[0] ?? 'docs/**', 'autoloop-selftest.md');
-const allowedPathN = (index) => pathFromGlob(REVERSIBLE_PATHS[0] ?? 'docs/**', `selftest-${index}.md`);
+const ALLOWED_PATH = pathFromGlob(REPO.REVERSIBLE_PATHS[0] ?? 'docs/**', 'autoloop-selftest.md');
+const allowedPathN = (index) => pathFromGlob(REPO.REVERSIBLE_PATHS[0] ?? 'docs/**', `selftest-${index}.md`);
 // A path matching no generic family; Path A carries no path-class requirement, so this
 // exercises the label route. (If your EXTRA_PROTECTED_PATHS happens to cover it, the
 // self-test will fail loudly — pick config that leaves at least one neutral path.)
 const NEUTRAL_PATH = 'zz-selftest/neutral-change.txt';
-const ALLOW_ALL = AUTOMERGE_MODE === 'all-green';
+const ALLOW_ALL = REPO.AUTOMERGE_MODE === 'all-green';
+// Path B declined (a classified mode with no reversible class, which setup
+// offers): the generic merge fixtures take Path A instead, and the Path B
+// fixture expects its refusal.
+const PATH_B_DECLINED = !ALLOW_ALL && REPO.REVERSIBLE_PATHS.length === 0;
 const SELF_TEST_CONFIG = engineConfig({
   soloOperator: true,
-  trustedHumanLogins: [LOOP_LOGIN],
+  trustedHumanLogins: [REPO.LOOP_LOGIN],
   requiredApprovingReviewCount: 0,
 });
 
@@ -1789,7 +1901,7 @@ function makeVerdictStatuses() {
 function makeInput({
   files = [ALLOWED_PATH],
   fileEntries,
-  labels = [],
+  labels = PATH_B_DECLINED ? ['risk:mechanical-refactor'] : [],
   headRefName = `feat/gh-${LOOP_ISSUE}-safe-change`,
   body = `Closes #${LOOP_ISSUE}`,
   ...overrides
@@ -1800,12 +1912,12 @@ function makeInput({
     coreComplete: true,
     state: 'OPEN',
     isDraft: false,
-    baseRefName: BASE_BRANCH,
+    baseRefName: REPO.BASE_BRANCH,
     baseRefOid: BASE_SHA,
     headRefName,
     body,
     headRefOid: HEAD_SHA,
-    headRepository: { owner: REPOSITORY.owner, name: REPOSITORY.name },
+    headRepository: { owner: REPO.REPOSITORY.owner, name: REPO.REPOSITORY.name },
     labels: [...new Set(labels)],
     changedFiles: entries.length,
     additions: 10,
@@ -1839,7 +1951,7 @@ function makeInput({
         complete: true,
         eventId: 7001,
         // Solo semantics: the loop-ready actor is the one (loop) login.
-        actor: LOOP_LOGIN,
+        actor: REPO.LOOP_LOGIN,
         labeledAt: '2026-07-24T00:02:00Z',
         roleName: 'maintain',
       },
@@ -1872,7 +1984,7 @@ function makeInput({
       frozenPlanPresent: true,
       frozenPlanHash: FROZEN_PLAN_HASH,
       frozenPlanCommentId: 'IC_kwDOAutoloop7',
-      frozenPlanAuthor: LOOP_LOGIN,
+      frozenPlanAuthor: REPO.LOOP_LOGIN,
       frozenPlanCommentVerified: true,
     },
     lifecycle: {
@@ -1882,7 +1994,7 @@ function makeInput({
       premergeRecord: true,
       premergeRecordId: `pmr_${'9'.repeat(64)}`,
       premergeRecordHash: '8'.repeat(64),
-      premergeRecordAuthor: LOOP_LOGIN,
+      premergeRecordAuthor: REPO.LOOP_LOGIN,
       premergeRecordCommentId: 'IC_premerge',
       premergeRecordIssue: LOOP_ISSUE,
       premergeRecordPullRequest: 138,
@@ -1893,7 +2005,7 @@ function makeInput({
     authorization: {
       complete: true,
       pullRequest: 138,
-      actor: LOOP_LOGIN,
+      actor: REPO.LOOP_LOGIN,
       headOid: HEAD_SHA,
       label: labels.find((label) => SAFE_LABELS.includes(label)) ?? SAFE_LABELS[0],
       labelEventId: 12001,
@@ -1904,7 +2016,7 @@ function makeInput({
     },
     executorIdentity: {
       complete: true,
-      login: LOOP_LOGIN,
+      login: REPO.LOOP_LOGIN,
       id: 9001,
     },
     fetchReasons: [],
@@ -1912,8 +2024,18 @@ function makeInput({
   };
 }
 
+// The refusal must be the protected-path one for this file, not an unrelated
+// refusal that would pass the fixture without testing the path. The family may
+// be structural: a configured glob a structural family already covers (LFE's
+// compose globs) is redundant, not broken.
 function protectedFixture(name, path) {
-  return { name, input: makeInput({ files: [path], labels: ['risk:pure-deletion'] }), expectExit: 1, expectCalls: 0 };
+  return {
+    name,
+    input: makeInput({ files: [path], labels: ['risk:pure-deletion'] }),
+    expectExit: 1,
+    expectCalls: 0,
+    expectReason: (reason) => reason.startsWith('protected path (') && reason.endsWith(`): ${path}`),
+  };
 }
 
 function invalidClaimFixture(name, mutate) {
@@ -1932,11 +2054,13 @@ export const FIXTURES = [
     expectArgs: { sha: HEAD_SHA, squash: true },
   },
   {
-    name: 'Path B allow → mock merge called exactly once with {sha, squash}',
-    input: makeInput({ files: [ALLOWED_PATH] }),
-    expectExit: 0,
-    expectCalls: 1,
-    expectArgs: { sha: HEAD_SHA, squash: true },
+    name: PATH_B_DECLINED
+      ? 'Path B declined → an unlabeled reversible-looking path is refused'
+      : 'Path B allow → mock merge called exactly once with {sha, squash}',
+    input: makeInput({ files: [ALLOWED_PATH], labels: [] }),
+    expectExit: PATH_B_DECLINED ? 1 : 0,
+    expectCalls: PATH_B_DECLINED ? 0 : 1,
+    ...(PATH_B_DECLINED ? {} : { expectArgs: { sha: HEAD_SHA, squash: true } }),
   },
   {
     name: '--dry-run on an allow → zero merge calls',
@@ -1946,8 +2070,8 @@ export const FIXTURES = [
     expectCalls: 0,
   },
   {
-    name: `unclassified path without a risk label (mode: ${AUTOMERGE_MODE})`,
-    input: makeInput({ files: [NEUTRAL_PATH] }),
+    name: `unclassified path without a risk label (mode: ${REPO.AUTOMERGE_MODE})`,
+    input: makeInput({ files: [NEUTRAL_PATH], labels: [] }),
     expectExit: ALLOW_ALL ? 0 : 1,
     expectCalls: ALLOW_ALL ? 1 : 0,
   },
@@ -2108,7 +2232,7 @@ export const FIXTURES = [
   },
   { name: 'draft PR', input: makeInput({ isDraft: true }), expectExit: 1, expectCalls: 0 },
   { name: 'wrong base branch', input: makeInput({ baseRefName: 'some-feature-branch' }), expectExit: 1, expectCalls: 0 },
-  { name: 'fork head', input: makeInput({ headRepository: { owner: 'someone-else', name: REPOSITORY.name } }), expectExit: 1, expectCalls: 0 },
+  { name: 'fork head', input: makeInput({ headRepository: { owner: 'someone-else', name: REPO.REPOSITORY.name } }), expectExit: 1, expectCalls: 0 },
   { name: 'CHANGES_REQUESTED', input: makeInput({ reviewDecision: 'CHANGES_REQUESTED' }), expectExit: 1, expectCalls: 0 },
   { name: 'REVIEW_REQUIRED', input: makeInput({ reviewDecision: 'REVIEW_REQUIRED' }), expectExit: 1, expectCalls: 0 },
   { name: 'pending review request', input: makeInput({ reviewRequests: [{ reviewer: 'user:reviewer' }] }), expectExit: 1, expectCalls: 0 },
@@ -2165,7 +2289,7 @@ export const FIXTURES = [
   protectedFixture('protected .codex/**', '.codex/hooks.json'),
   protectedFixture('protected .agents/**', '.agents/plugins/marketplace.json'),
   // Crown-jewel fixtures derive from the config; absent config = no fixtures (loudly generic).
-  ...EXTRA_PROTECTED_PATHS.map((glob) =>
+  ...REPO.EXTRA_PROTECTED_PATHS.map((glob) =>
     protectedFixture(`extra-protected ${glob}`, pathFromGlob(glob, 'selftest-jewel.ts')),
   ),
   protectedFixture('protected root dot-directory (.codex/x)', '.codex/x'),
@@ -2365,7 +2489,7 @@ function statusStampCases() {
       repository: REPO_SLUG,
       pullRequest: 138,
       remoteHead: HEAD_SHA,
-      baseRefName: BASE_BRANCH,
+      baseRefName: REPO.BASE_BRANCH,
       draft: false,
       checks: [],
       statuses: [],
@@ -2392,9 +2516,9 @@ function statusStampCases() {
   const comments = {
     complete: true,
     items: [
-      { id: 'IC_kwDOAutoloop7', author: { login: LOOP_LOGIN }, body: planBody, neverEdited: true },
-      { id: 'IC_lifecycle', author: { login: LOOP_LOGIN }, body: lifecycleBody, neverEdited: true },
-      { id: 'IC_premerge', author: { login: LOOP_LOGIN }, body: serializePremergeRecord(record), neverEdited: true },
+      { id: 'IC_kwDOAutoloop7', author: { login: REPO.LOOP_LOGIN }, body: planBody, neverEdited: true },
+      { id: 'IC_lifecycle', author: { login: REPO.LOOP_LOGIN }, body: lifecycleBody, neverEdited: true },
+      { id: 'IC_premerge', author: { login: REPO.LOOP_LOGIN }, body: serializePremergeRecord(record), neverEdited: true },
     ],
   };
   const policyLiveInput = {
@@ -2414,7 +2538,7 @@ function statusStampCases() {
     statuses: publicationStatuses,
     delivery,
     plannedBaseComparison: { status: 'ahead' },
-    loopLogin: LOOP_LOGIN,
+    loopLogin: REPO.LOOP_LOGIN,
   };
   const hydrated = deriveLiveIssueEvidence(policyLiveInput);
   cases.push({
@@ -2639,12 +2763,12 @@ function liveEvidenceCases() {
     items: [
       {
         id: 'IC_kwDOAutoloop7',
-        author: { login: LOOP_LOGIN },
+        author: { login: REPO.LOOP_LOGIN },
         body: planBody,
       },
       {
         id: 'IC_live_marker',
-        author: { login: LOOP_LOGIN },
+        author: { login: REPO.LOOP_LOGIN },
         body: serializeLifecycleMarker(liveMarker(planHash)),
         neverEdited: true,
       },
@@ -2694,7 +2818,7 @@ function liveEvidenceCases() {
       { oid: CLAIM_SHA, message: `chore: claim #${LOOP_ISSUE}`, parentOids: [BASE_SHA] },
       { oid: HEAD_SHA, message: 'feat: implement safe change', parentOids: [CLAIM_SHA] },
     ],
-    loopLogin: LOOP_LOGIN,
+    loopLogin: REPO.LOOP_LOGIN,
   };
   const issueEvidence = deriveLiveIssueEvidence(issueInput);
   const hardLabelEvidence = deriveLiveIssueEvidence({
@@ -2812,7 +2936,7 @@ function liveEvidenceCases() {
           id: 12003,
           event: 'labeled',
           label: { name: SAFE_LABELS[0] },
-          actor: { login: LOOP_LOGIN },
+          actor: { login: REPO.LOOP_LOGIN },
           created_at: '2026-07-24T00:05:00Z',
         },
       ],
@@ -2921,8 +3045,8 @@ function soloTranscriptionCases() {
         && header.includes('merge.soloOperatorAcknowledged'),
     },
     {
-      name: 'gate config transcribes SOLO_OPERATOR from the repo block',
-      ok: engineConfig().soloOperator === SOLO_OPERATOR,
+      name: 'gate config transcribes SOLO_OPERATOR from the resolved settings',
+      ok: engineConfig().soloOperator === REPO.SOLO_OPERATOR,
     },
     {
       name: 'non-solo authorization is a typed refusal naming the spec',
@@ -2932,19 +3056,231 @@ function soloTranscriptionCases() {
   ];
 }
 
+// policy-as-data: with `.autoloop/config.json` present the repository's
+// settings come from config and the block above is ignored; without it the
+// Setup-filled block stays authoritative (legacy STATE repositories).
+// A copy of this file with its block filled the way Setup fills it, run
+// beside symlinks to the real sibling modules.
+const LFE_LIKE_FILL = Object.freeze({
+  EXTRA_PROTECTED_PATHS: "['spec/**', 'compose.y*ml', '**/compose.y*ml']",
+  AUTOMERGE_MODE: "'all-green'",
+  REVERSIBLE_PATHS: "['docs/**']",
+});
+const PATH_B_DECLINED_FILL = Object.freeze({
+  EXTRA_PROTECTED_PATHS: "['spec/**']",
+  AUTOMERGE_MODE: "'classified'",
+  REVERSIBLE_PATHS: '[]',
+});
+
+function filledCopySelfTest(fill) {
+  const self = fileURLToPath(import.meta.url);
+  const dir = mkdtempSync(join(tmpdir(), 'auto-merge-filled-'));
+  try {
+    for (const name of readdirSync(dirname(self))) {
+      if (name.endsWith('.mjs') && name !== basename(self)) symlinkSync(join(dirname(self), name), join(dir, name));
+    }
+    const fills = [
+      [/^export const REPOSITORY = .*$/mu, "export const REPOSITORY = { owner: 'acme', name: 'app' };"],
+      [/^export const EXTRA_PROTECTED_PATHS = .*$/mu, `export const EXTRA_PROTECTED_PATHS = ${fill.EXTRA_PROTECTED_PATHS};`],
+      [/^export const AUTOMERGE_MODE = .*$/mu, `export const AUTOMERGE_MODE = ${fill.AUTOMERGE_MODE};`],
+      [/^export const REVERSIBLE_PATHS = .*$/mu, `export const REVERSIBLE_PATHS = ${fill.REVERSIBLE_PATHS};`],
+      [/^export const LOOP_LOGIN = .*$/mu, "export const LOOP_LOGIN = 'loop-user';"],
+      [/^export const TRUSTED_HUMAN_LOGINS = .*$/mu, 'export const TRUSTED_HUMAN_LOGINS = [LOOP_LOGIN];'],
+      [/^export const SOLO_OPERATOR = .*$/mu, 'export const SOLO_OPERATOR = true;'],
+    ];
+    const source = readFileSync(self, 'utf8');
+    // A fill that misses would test nothing, and an unfilled REPOSITORY would
+    // make the copy spawn a filled copy of its own.
+    const missed = fills.filter(([line]) => (source.match(new RegExp(line.source, 'gmu')) ?? []).length !== 1);
+    if (missed.length > 0) return { status: null, stdout: `FAIL fills matched no single line: ${missed.map(([line]) => line.source).join(', ')}` };
+    const copy = fills.reduce((text, [line, filled]) => text.replace(line, filled), source);
+    writeFileSync(join(dir, 'auto-merge.mjs'), copy);
+    return spawnSync(process.execPath, [join(dir, 'auto-merge.mjs'), '--self-test'], { cwd: dir, encoding: 'utf8' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function configSettingsCases() {
+  const repository = { owner: 'o', name: 'r' };
+  const config = (merge, extra = {}) => ({
+    version: CONFIG_VERSION,
+    baseBranch: 'trunk',
+    gate: { command: 'x' },
+    merge: { unverifiedInvocationAcknowledged: true, soloOperatorAcknowledged: true, loopLogin: 'loop-user', ...merge },
+    ...extra,
+  });
+  // The plugin's own placeholder block, passed explicitly: in a Setup-filled
+  // copy BLOCK is filled, and these cases are not about the move from it.
+  const placeholder = Object.freeze({
+    ...BLOCK, REPOSITORY: PLACEHOLDER_REPOSITORY, REVERSIBLE_PATHS: ['docs/**'], EXTRA_PROTECTED_PATHS: [],
+  });
+  const settings = (cfg, repo = repository) => settingsFromConfig(cfg, repo, placeholder);
+  const auto = settings(config({ policy: 'auto' }, { protectedPaths: ['spec/**'] }));
+  const ratified = settings(config({ policy: 'ratified', reversiblePaths: ['guides/**'] }));
+  const refusal = (cfg, repo = repository) => settings(cfg, repo).error ?? '';
+  const unacknowledged = settings({ ...config({}), merge: { policy: 'auto', loopLogin: 'loop-user' } });
+  const nonSolo = authorizeMerge({
+    config: engineConfig({
+      repository, loopLogin: 'loop-user', trustedHumanLogins: unacknowledged.TRUSTED_HUMAN_LOGINS,
+      soloOperator: unacknowledged.SOLO_OPERATOR, mergePolicy: 'auto',
+    }),
+    pr: makeInput(),
+  });
+  // A repository moving from a filled block to config.json must carry the
+  // block's policy over, or the move silently widens what auto-merges.
+  const filled = { ...placeholder, REPOSITORY: { owner: 'acme', name: 'app' }, EXTRA_PROTECTED_PATHS: ['spec/**'], REVERSIBLE_PATHS: [] };
+  const dropped = settingsFromConfig(config({ policy: 'auto' }), repository, filled).error ?? '';
+  const carried = settingsFromConfig(
+    config({ policy: 'auto', reversiblePaths: [] }, { protectedPaths: ['spec/**', 'infra/**'] }), repository, filled);
+  // An ambient GH_REPO or GH_HOST must never choose the merge target.
+  const ambient = { GH_REPO: process.env.GH_REPO, GH_HOST: process.env.GH_HOST };
+  let ghEnv = null;
+  let viewed;
+  try {
+    process.env.GH_REPO = 'someone-else/target';
+    process.env.GH_HOST = 'elsewhere.example';
+    viewed = ghRepository('/r', (command, args, options) => {
+      ghEnv = options.env === undefined ? null : { ...options.env };
+      return JSON.stringify({ owner: { login: 'o' }, name: 'r' });
+    });
+  } finally {
+    for (const [key, value] of Object.entries(ambient)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'auto-merge-config-'));
+  try {
+    execFileSync('git', ['init', '-q', scratch]);
+    const lookups = [];
+    const lookup = () => {
+      lookups.push(1);
+      return repository;
+    };
+    const unconfigured = repoSettings(scratch, lookup, placeholder);
+    mkdirSync(join(scratch, '.autoloop'));
+    writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify(config({ policy: 'auto' })));
+    const configured = repoSettings(scratch, lookup, placeholder);
+    // A legacy STATE block is never the executor's config: the filled block decides.
+    const legacy = mkdtempSync(join(tmpdir(), 'auto-merge-legacy-'));
+    mkdirSync(join(legacy, 'docs', 'agentic'), { recursive: true });
+    writeFileSync(join(legacy, 'docs', 'agentic', 'STATE.md'),
+      `\`\`\`json autoloop-config\n${JSON.stringify(config({ policy: 'auto' }))}\n\`\`\`\n`);
+    const fromState = repoSettings(legacy, lookup, placeholder);
+    rmSync(legacy, { recursive: true, force: true });
+    // The engine's own fixtures, run under a config's protectedPaths: the
+    // configured jewel must veto an all-green merge like a block one did.
+    const child = NESTED_SELF_TEST ? null : (() => {
+      // It runs on this file's own BLOCK, so the config carries that block's
+      // policy over (as a real move must) and adds its own jewel.
+      writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify(config(
+        { policy: 'auto', reversiblePaths: BLOCK.REVERSIBLE_PATHS },
+        { protectedPaths: [...new Set([...BLOCK.EXTRA_PROTECTED_PATHS, 'jewel-config/**'])] },
+      )));
+      return spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--self-test', '--nested'], {
+        cwd: scratch, encoding: 'utf8',
+      });
+    })();
+    // Setup fills the block and then runs this self-test (verify does too, for
+    // every copy that differs from the manifest), so a filled copy must pass it.
+    const filledCopies = NESTED_SELF_TEST || !isPlaceholder(BLOCK)
+      ? []
+      : [LFE_LIKE_FILL, PATH_B_DECLINED_FILL].map(filledCopySelfTest);
+    writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify({ ...config({}), merge: { policy: 'manual' } }));
+    const manual = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '5', '--dry-run'], {
+      cwd: scratch, encoding: 'utf8',
+    });
+    return [
+      {
+        name: 'config: auto maps to all-green, solo, protectedPaths and the default reversible class',
+        ok: auto.error === null && auto.AUTOMERGE_MODE === 'all-green' && auto.SOLO_OPERATOR === true
+          && auto.BASE_BRANCH === 'trunk' && auto.REPOSITORY === repository
+          && JSON.stringify(auto.EXTRA_PROTECTED_PATHS) === '["spec/**"]'
+          && JSON.stringify(auto.REVERSIBLE_PATHS) === '["docs/**"]'
+          && auto.LOOP_LOGIN === 'loop-user' && JSON.stringify(auto.TRUSTED_HUMAN_LOGINS) === '["loop-user"]',
+      },
+      {
+        name: 'config: ratified maps to classified with the configured reversible class',
+        ok: ratified.error === null && ratified.AUTOMERGE_MODE === 'classified'
+          && JSON.stringify(ratified.REVERSIBLE_PATHS) === '["guides/**"]'
+          && JSON.stringify(ratified.EXTRA_PROTECTED_PATHS) === '[]',
+      },
+      {
+        name: 'config: a manual policy, a missing login or an unknown repository refuses',
+        ok: refusal({ ...config({}), merge: { policy: 'manual' } }).includes('merge.policy')
+          && refusal(config({ policy: 'auto', loopLogin: undefined })).includes('merge.loopLogin')
+          && refusal(config({ policy: 'auto' }), null).includes('repository'),
+      },
+      {
+        name: 'config: without config.json the filled block decides, and gh is never asked',
+        ok: unconfigured.source === 'block' && unconfigured.REPOSITORY === PLACEHOLDER_REPOSITORY
+          && unconfigured.LOOP_LOGIN === placeholder.LOOP_LOGIN && configured.source === '.autoloop/config.json'
+          && configured.LOOP_LOGIN === 'loop-user' && lookups.length === 1,
+      },
+      {
+        name: 'config: without both acknowledgements the settings are non-solo, refused before any read and by the gate',
+        ok: unacknowledged.SOLO_OPERATOR === false && unacknowledged.error?.includes('merge.soloOperatorAcknowledged')
+          && nonSolo.allow === false,
+      },
+      {
+        name: 'config: a filled block\'s protected or reversible paths missing from config refuse',
+        ok: dropped.includes('spec/**') && dropped.includes('merge.reversiblePaths') && carried.error === null
+          && settings(config({ policy: 'auto' })).error === null,
+      },
+      {
+        name: 'config: a legacy STATE block leaves the filled block deciding',
+        ok: fromState.source === 'block' && fromState.REPOSITORY === PLACEHOLDER_REPOSITORY,
+      },
+      {
+        name: 'config: the engine fixtures pass under a configured protectedPaths, including its veto',
+        ok: child === null || (child.status === 0 && child.stdout.includes('PASS extra-protected jewel-config/**')),
+      },
+      {
+        // The fixtures turn every protected and reversible glob into a path;
+        // a path its own glob does not match tests nothing and fails.
+        name: 'config: a fixture path from any glob matches that glob',
+        ok: ['**/compose.y*ml', 'spec/**', 'a/**/b.ts', '*.md', 'compose.y*ml', 'docs/**']
+          .every((glob) => globToRe(glob).test(pathFromGlob(glob, 'leaf.md'))),
+      },
+      {
+        name: 'config: gh repo view runs without GH_REPO or GH_HOST',
+        // An omitted env would inherit process.env, GH_REPO included.
+        ok: viewed?.owner === 'o' && ghEnv !== null && Object.hasOwn(ghEnv, 'PATH')
+          && !Object.hasOwn(ghEnv, 'GH_REPO') && !Object.hasOwn(ghEnv, 'GH_HOST'),
+      },
+      {
+        name: 'config: Setup-filled copies (all-green with jewels; Path B declined) pass their own self-test',
+        ok: filledCopies.every((copy) => copy.status === 0),
+        detail: filledCopies.flatMap((copy) => copy.stdout.split('\n').filter((line) => line.startsWith('FAIL'))).join('; '),
+      },
+      {
+        name: 'config: a refused config exits 1 naming the reason before any GitHub read',
+        ok: manual.status === 1 && manual.stdout.includes('merge.policy'),
+      },
+    ];
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 function selfTest() {
   let passed = 0;
   let failed = 0;
+  // The fixtures run on the resolved settings either way; a live merge would refuse.
+  if (REPO.error !== null) console.log(`NOTE live merges refuse: ${REPO.error}`);
   for (const check of [
     ...statusStampCases(),
     ...prCommitMetadataCases(),
     ...restPaginationCases(),
     ...liveEvidenceCases(),
     ...soloTranscriptionCases(),
+    ...configSettingsCases(),
   ]) {
     if (check.ok) passed += 1;
     else failed += 1;
     console.log(`${check.ok ? 'PASS' : 'FAIL'} ${check.name}`);
+    if (!check.ok && check.detail) console.log(`  ${check.detail}`);
   }
   for (const fixture of FIXTURES) {
     const calls = [];
@@ -2975,7 +3311,8 @@ function selfTest() {
     const expectedCalls = fixture.expectCalls ?? 0;
     const argsOkay = fixture.expectArgs ? JSON.stringify(calls[0]) === JSON.stringify(fixture.expectArgs) : true;
     const confirmOkay = fixture.expectConfirmCalls === undefined || confirmCalls === fixture.expectConfirmCalls;
-    const ok = result.exitCode === fixture.expectExit && calls.length === expectedCalls && argsOkay && confirmOkay;
+    const reasonOkay = fixture.expectReason === undefined || result.reasons.some(fixture.expectReason);
+    const ok = result.exitCode === fixture.expectExit && calls.length === expectedCalls && argsOkay && confirmOkay && reasonOkay;
     if (ok) passed += 1;
     else failed += 1;
     console.log(`${ok ? 'PASS' : 'FAIL'} ${fixture.name}`);
@@ -2994,7 +3331,9 @@ function usage() {
 
 function main() {
   const args = process.argv.slice(2);
-  if (args.length === 1 && args[0] === '--self-test') process.exit(selfTest() ? 0 : 1);
+  if (args[0] === '--self-test' && (args.length === 1 || (args.length === 2 && args[1] === '--nested'))) {
+    process.exit(selfTest() ? 0 : 1);
+  }
 
   const number = args.find((arg) => /^\d+$/.test(arg));
   const dryRun = args.includes('--dry-run');
@@ -3004,6 +3343,11 @@ function main() {
     process.exit(2);
   }
 
+  if (REPO.error !== null) {
+    console.log(`REFUSE #${number} — leave for human merge:`);
+    console.log(`  - ${REPO.error}`);
+    process.exit(1);
+  }
   const inputs = fetchInputs(Number(number));
   inputs.prNumber = Number(number);
   const result = run(inputs, { dryRun });

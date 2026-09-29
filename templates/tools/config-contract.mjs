@@ -188,6 +188,30 @@ function validateGate(value, errors) {
   }
 }
 
+// The merge executor's repository settings (policy-as-data), read from config
+// instead of a Setup-filled block. The repository comes from git and the
+// executor's mode from merge.policy, so neither is stored.
+const MERGE_SETTING_KEYS = ['loopLogin', 'reversiblePaths'];
+// The merge executor's authorization mode each non-manual policy means.
+export const POLICY_TO_MODE = Object.freeze({
+  auto: 'all-green',
+  ratified: 'classified',
+});
+const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
+
+function validateMergeSettings(value, errors) {
+  const nonManual = value.policy === 'ratified' || value.policy === 'auto';
+  for (const key of MERGE_SETTING_KEYS) {
+    if (hasOwn(value, key) && !nonManual) {
+      errors.push(`merge.${key}: only valid with a non-manual merge.policy`);
+    }
+  }
+  if (hasOwn(value, 'loopLogin') && !(typeof value.loopLogin === 'string' && GITHUB_LOGIN_RE.test(value.loopLogin))) {
+    errors.push('merge.loopLogin: must be a GitHub login');
+  }
+  if (hasOwn(value, 'reversiblePaths')) validateGlobList(value.reversiblePaths, 'merge.reversiblePaths', errors);
+}
+
 function validateMerge(value, expectedVersion, errors) {
   // Schema 0.24.0 predates the acknowledgement, so migration must be able to read
   // a legacy non-manual policy without demanding a field that could not exist.
@@ -196,7 +220,10 @@ function validateMerge(value, expectedVersion, errors) {
     value,
     'merge',
     ['policy'],
-    legacy ? [] : ['unverifiedInvocationAcknowledged', 'soloOperatorAcknowledged'],
+    [
+      ...(legacy ? [] : ['unverifiedInvocationAcknowledged', 'soloOperatorAcknowledged']),
+      ...(expectedVersion === CONFIG_VERSION ? MERGE_SETTING_KEYS : []),
+    ],
     errors,
   )) return;
   if (hasOwn(value, 'policy') && !['manual', 'ratified', 'auto'].includes(value.policy)) {
@@ -206,6 +233,7 @@ function validateMerge(value, expectedVersion, errors) {
   // is a deliberate, recorded acceptance of that risk rather than a default. The
   // acknowledgement is meaningless under manual, and a dead option is a defect.
   if (legacy) return;
+  validateMergeSettings(value, errors);
   // Whether a non-manual policy *requires* the acknowledgement is Runtime's
   // decision, so the failure names the real remedy instead of surfacing as a
   // migration error. The schema only rejects a meaningless value here.
@@ -283,7 +311,7 @@ function validateLegacyTracker(value, errors) {
   }
 }
 
-function validChecklistPath(value) {
+function validRepoRelativePath(value) {
   if (
     typeof value !== 'string'
     || value.length === 0
@@ -299,9 +327,26 @@ function validChecklistPath(value) {
   return value.split('/').every((part) => part && part !== '.' && part !== '..');
 }
 
+// The repository's own human-authorization paths (policy-as-data): globs
+// escalate-paths and the lane classifier add to the structural families.
+// Optional with no default, so the key's absence changes nothing.
+function validateGlobList(value, path, errors) {
+  if (!Array.isArray(value)) {
+    errors.push(`${path}: must be an array of repository-relative globs`);
+    return;
+  }
+  // The glob matchers (lane-contract, the merge executor) know only `*` and
+  // `**`; any other metacharacter would match literally and protect nothing.
+  value.forEach((glob, index) => {
+    if (!validRepoRelativePath(glob) || /[?[\]{}!]/u.test(glob)) {
+      errors.push(`${path}[${index}]: must be a normalized repository-relative glob using only * and **`);
+    }
+  });
+}
+
 function validateReview(value, errors) {
   if (!validateObjectShape(value, 'review', ['checklistPath'], [], errors)) return;
-  if (hasOwn(value, 'checklistPath') && !validChecklistPath(value.checklistPath)) {
+  if (hasOwn(value, 'checklistPath') && !validRepoRelativePath(value.checklistPath)) {
     errors.push('review.checklistPath: must be a normalized repository-relative path');
   }
 }
@@ -405,8 +450,9 @@ function validateProjectValues(cfg, expectedVersion, errors) {
 
 export function validateConfig(cfg) {
   const errors = [];
-  if (!validateObjectShape(cfg, '', PROJECT_KEYS, [], errors)) return errors;
+  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['protectedPaths'], errors)) return errors;
   validateProjectValues(cfg, CONFIG_VERSION, errors);
+  if (hasOwn(cfg, 'protectedPaths')) validateGlobList(cfg.protectedPaths, 'protectedPaths', errors);
   return errors;
 }
 
@@ -477,16 +523,26 @@ function withDefaults(overrides, defaults = DEFAULT_CONFIG) {
   return merged;
 }
 
+// The repository a tool runs in: the git top level, else the working directory.
+export function repositoryRoot() {
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 20000 });
+  return top.status === 0 ? top.stdout.trim() : process.cwd();
+}
+
 // The one config reader every tool uses: `.autoloop/config.json` completed
 // from the plugin defaults, else the legacy STATE block (migrated in memory,
 // so a release never requires a write), else null — not an autoloop repo.
 export function resolveProjectConfig(root, read = (path) => readFileSync(path, 'utf8')) {
   const jsonPath = join(root, PROJECT_CONFIG_FILE);
   // lstat, not exists: a dangling symlink must refuse, never fall back to STATE.
+  // Only ENOENT is absent; an inaccessible path (EACCES, ENOTDIR) refuses too.
   let present = true;
   try {
     lstatSync(jsonPath);
-  } catch {
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      return { ok: false, unreadable: true, source: PROJECT_CONFIG_FILE, errors: [`${PROJECT_CONFIG_FILE}: unreadable (${error.message})`] };
+    }
     present = false;
   }
   if (present) {
@@ -2132,6 +2188,61 @@ function selfTest() {
       expect('a config.json that cannot be read says so, and a dangling symlink never falls back to STATE',
         directory?.ok === false && directory.errors.some((error) => /unreadable/u.test(error))
           && dangling?.ok === false && dangling.source === '.autoloop/config.json');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  {
+    // policy-as-data: the repository's own protected paths are config, not a
+    // vendored escalate-paths.mjs. Optional and additive, so 0.28.0 stays.
+    expect('protectedPaths holds repository-relative globs',
+      validateConfig({ ...projectFixture(), protectedPaths: ['spec/**', 'compose.y*ml', '**/compose.y*ml'] }).length === 0
+        && validateConfig({ ...projectFixture(), protectedPaths: [] }).length === 0);
+    expect('protectedPaths refuses anything that is not a list of safe relative globs',
+      ['spec/**', [1], ['/etc/**'], ['../up/**'], [''], ['a\\b']].every((value) =>
+        validateConfig({ ...projectFixture(), protectedPaths: value })
+          .some((error) => error.startsWith('protectedPaths'))));
+    // The merge executor's repository settings: optional, and meaningful only
+    // under a non-manual policy (a dead option is a defect).
+    const soloAuto = { policy: 'auto', unverifiedInvocationAcknowledged: true, soloOperatorAcknowledged: true };
+    const withMerge = (merge) => validateConfig({ ...projectFixture(), merge });
+    expect('merge.loopLogin and merge.reversiblePaths are valid under a non-manual policy',
+      withMerge({ ...soloAuto, loopLogin: 'loop-user', reversiblePaths: ['docs/**', 'guides/**'] }).length === 0
+        && withMerge({ ...soloAuto, loopLogin: 'autoloop[bot]' }).length === 0);
+    expect('merge settings are refused under a manual policy',
+      withMerge({ policy: 'manual', loopLogin: 'loop-user' }).includes('merge.loopLogin: only valid with a non-manual merge.policy')
+        && withMerge({ policy: 'manual', reversiblePaths: ['docs/**'] }).includes('merge.reversiblePaths: only valid with a non-manual merge.policy'));
+    expect('a malformed login or reversible glob is refused',
+      withMerge({ ...soloAuto, loopLogin: 'no spaces' }).includes('merge.loopLogin: must be a GitHub login')
+        && withMerge({ ...soloAuto, reversiblePaths: ['/abs/**'] }).includes('merge.reversiblePaths[0]: must be a normalized repository-relative glob using only * and **'));
+    // The glob engines know only `*` and `**`; anything else would match
+    // literally, so a protected path would silently protect nothing.
+    expect('a glob metacharacter the matchers do not support is refused',
+      ['src/{auth,billing}/**', 'secret?.yml', 'src/[ab]/**', '!docs/**'].every((glob) =>
+        validateConfig({ ...projectFixture(), protectedPaths: [glob] })
+          .includes('protectedPaths[0]: must be a normalized repository-relative glob using only * and **')));
+    const root = mkdtempSync(join(tmpdir(), 'config-protected-'));
+    try {
+      mkdirSync(join(root, '.autoloop'));
+      const file = join(root, '.autoloop', 'config.json');
+      const minimal = { version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'x' } };
+      writeFileSync(file, JSON.stringify({ ...minimal, protectedPaths: ['spec/**'] }));
+      const set = resolveProjectConfig(root);
+      writeFileSync(file, JSON.stringify(minimal));
+      // No default: a repository that never sets the key resolves exactly the
+      // config it resolved before, so a review chain's fingerprint holds.
+      const unset = resolveProjectConfig(root);
+      expect('protectedPaths resolves when set, and is absent when not',
+        set?.ok === true && JSON.stringify(set.config.protectedPaths) === '["spec/**"]'
+          && unset?.ok === true && !Object.hasOwn(unset.config, 'protectedPaths'));
+      // Only a missing file is absent: an inaccessible .autoloop/ must refuse,
+      // never read as "no config" and drop the repository's protected paths.
+      rmSync(join(root, '.autoloop'), { recursive: true, force: true });
+      writeFileSync(join(root, '.autoloop'), 'not a directory');
+      const blocked = resolveProjectConfig(root);
+      expect('an inaccessible config path refuses instead of reading as absent',
+        blocked?.ok === false && blocked.unreadable === true && blocked.source === '.autoloop/config.json');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
