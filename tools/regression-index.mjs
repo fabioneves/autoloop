@@ -471,7 +471,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
-        anchor: 'parked.hard.length === 0 && parked.reminders.length === 1',
+        anchor: 'parked.hard.length === 0 && parked.reminders.length === 0',
       }),
       Object.freeze({
         file: '../skills/dev/SKILL.md',
