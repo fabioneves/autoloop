@@ -53,7 +53,12 @@ import {
   validPremergeRecordId,
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
-import { CONFIG_VERSION, PROJECT_CONFIG_FILE, resolveProjectConfig } from './config-contract.mjs';
+import {
+  CONFIG_VERSION,
+  POLICY_TO_MODE,
+  PROJECT_CONFIG_FILE,
+  resolveProjectConfig,
+} from './config-contract.mjs';
 import { finalizeHead } from './delivery-contract.mjs';
 import {
   lifecycleCommentNeverEdited,
@@ -137,7 +142,6 @@ const BLOCK = Object.freeze({
   REPOSITORY, BASE_BRANCH, REVERSIBLE_PATHS, EXTRA_PROTECTED_PATHS,
   AUTOMERGE_MODE, LOOP_LOGIN, TRUSTED_HUMAN_LOGINS, SOLO_OPERATOR,
 });
-const POLICY_TO_MODE = Object.freeze({ auto: 'all-green', ratified: 'classified' });
 
 // `repository` null means the lookup failed; undefined means it was never
 // made because the config already refuses.

@@ -192,6 +192,11 @@ function validateGate(value, errors) {
 // instead of a Setup-filled block. The repository comes from git and the
 // executor's mode from merge.policy, so neither is stored.
 const MERGE_SETTING_KEYS = ['loopLogin', 'reversiblePaths'];
+// The merge executor's authorization mode each non-manual policy means.
+export const POLICY_TO_MODE = Object.freeze({
+  auto: 'all-green',
+  ratified: 'classified',
+});
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
 
 function validateMergeSettings(value, errors) {

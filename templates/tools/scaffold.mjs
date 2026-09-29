@@ -27,7 +27,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CONFIG_VERSION, resolveProjectConfig,
+  CONFIG_VERSION, POLICY_TO_MODE, resolveProjectConfig,
 } from './config-contract.mjs';
 import {
   BRIEF_FILES,
@@ -285,10 +285,7 @@ export function mergeHookDocuments(existing, template) {
 // Prose asking setup to derive one from the other is not a fix; that is what was
 // already implied and it is how this shipped. This is the mechanical check, and
 // it is a CONFLICT rather than a warning so a caller cannot read past it.
-export const POLICY_TO_MODE = Object.freeze({
-  auto: 'all-green',
-  ratified: 'classified',
-});
+// The policy → mode map is config-contract's POLICY_TO_MODE.
 
 /**
  * Pure. Rewrites ONLY the AUTOMERGE_MODE line, so a repo-owned policy file keeps
