@@ -540,7 +540,7 @@ function selfTest() {
       '⏳ ∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base',
       '⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT ─ one-call battery',
       '⏳ ∞ ▰▰▰▱▱ 3/5 INTERVIEW ─ decisions only',
-      '⏳ ∞ ▰▰▰▰▱ 4/5 WRITE ─ reconcile · visible diff',
+      '⏳ ∞ ▰▰▰▰▱ 4/5 WRITE ─ config · visible diff',
       '⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery',
       '❌ ∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery',
     ].join('\n')],
@@ -877,7 +877,7 @@ export const SETUP_PHASES = Object.freeze([
   ['resolve', 'RESOLVE', 'version · mode · base'],
   ['audit', 'AUDIT', 'one-call battery'],
   ['interview', 'INTERVIEW', 'decisions only'],
-  ['write', 'WRITE', 'reconcile · visible diff'],
+  ['write', 'WRITE', 'config · visible diff'],
   ['verify', 'VERIFY', 'evidence · delivery'],
 ]);
 const SETUP_BADGES = Object.freeze(['⏳', '❌', '⚠️']);

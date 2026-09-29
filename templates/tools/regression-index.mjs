@@ -135,16 +135,16 @@ export const INCIDENTS = Object.freeze([
       + '0.27.0"); it reverted STATE to recover.',
     cause: 'The setup skill named no write order, and scaffold --reconcile told a '
       + 'pre-migration STATE to "migrate the configuration first", which is the '
-      + 'order the old guard cannot survive.',
+      + 'order the old guard cannot survive. Closed structurally by the global '
+      + 'cutover: the running guard is the plugin\'s, never a repository copy '
+      + 'older than the config beside it, and devendor works in its own '
+      + 'worktree while the session keeps its vendored hooks.',
     enforcedBy: Object.freeze([
       Object.freeze({
         file: '../../skills/setup/SKILL.md',
-        anchor: '**Write order in a migration: tools first, then STATE.**',
+        anchor: '**Work in a separate worktree, never this checkout.**',
       }),
-      Object.freeze({
-        file: 'scaffold.mjs',
-        anchor: "'a migratable STATE reconciles its policy tool set and names the migration still to land'",
-      }),
+      Object.freeze({ file: 'setup.mjs', anchor: "return refusal('LIVE_CHECKOUT'," }),
     ]),
   }),
   Object.freeze({
@@ -1265,9 +1265,9 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: '../../skills/setup/SKILL.md',
-        anchor: 'Read that from the report, never from `$?`',
+        anchor: 'Never write `$?` in any form: the tool result already carries the exit status.',
       }),
-      Object.freeze({ file: 'scaffold.mjs', anchor: 'return report.ok ? 0 : 3;' }),
+      Object.freeze({ file: 'setup.mjs', anchor: 'console.log(JSON.stringify(result, null, 2));' }),
     ]),
   }),
   Object.freeze({
@@ -1382,7 +1382,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: '../../skills/setup/SKILL.md',
-        anchor: 'ONE\n   complete pipeline',
+        anchor: 'Version currency, one pipeline',
       }),
     ]),
   }),

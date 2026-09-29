@@ -42,7 +42,10 @@ import {
   ownRunMarkers,
   runMarkerDirectory,
 } from './command-guard.mjs';
-import { effectiveChecklistPath, PLUGIN_CHECKLIST, resolveProjectConfig } from './config-contract.mjs';
+import {
+  effectiveChecklistPath, PLUGIN_CHECKLIST, PROJECT_CONFIG_FILE, resolveProjectConfig,
+} from './config-contract.mjs';
+import { activeAutoloopRoot } from './hook-root.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
@@ -379,6 +382,14 @@ export function readPrimeConfig(root) {
     return resolved.unreadable
       ? failure('config', 'PROJECT_CONFIG_UNREADABLE', resolved.errors.join('; '))
       : failure('config', 'PROJECT_CONFIG_INVALID', resolved.errors.join('; '), { errors: resolved.errors });
+  }
+  // A run opens only where the plugin's hooks guard the repository: a legacy
+  // install, or one whose vendored guard is still wired, runs another guard.
+  if (activeAutoloopRoot(root) === null) {
+    return failure('config', 'NOT_DEVENDORED', resolved.source === PROJECT_CONFIG_FILE
+      ? 'vendored hooks are still wired in .claude/settings*.json, so the plugin\'s guard is off: '
+        + 'finish the devendor with autoloop:setup'
+      : 'a vendored install (docs/agentic/STATE.md): run autoloop:setup to devendor it first');
   }
   return { config: resolved.config };
 }
@@ -762,9 +773,23 @@ function selfTest() {
         writeFileSync(join(root, '.autoloop', 'config.json'),
           JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'true' } }));
         const good = readPrimeConfig(root);
+        // A run opens only where the plugin's hooks guard the repository.
+        mkdirSync(join(root, '.claude'));
+        writeFileSync(join(root, '.claude', 'settings.json'),
+          '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node tools/agentic/command-guard.mjs"}]}]}}');
+        const wired = readPrimeConfig(root);
+        rmSync(join(root, '.claude'), { recursive: true, force: true });
+        rmSync(join(root, '.autoloop'), { recursive: true, force: true });
+        mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
+        writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'),
+          '```json autoloop-config\n{"version":"0.28.0","baseBranch":"trunk","gate":{"command":"true"},'
+          + '"merge":{"policy":"manual"},"tracker":{"provider":"none"},"review":{"checklistPath":"c.md"}}\n```\n');
+        const legacy = readPrimeConfig(root);
         return none.error?.code === 'PROJECT_CONFIG_UNREADABLE'
           && unreadable.error?.code === 'PROJECT_CONFIG_UNREADABLE'
-          && good.config?.baseBranch === 'trunk' && good.config?.merge?.policy === 'manual';
+          && good.config?.baseBranch === 'trunk' && good.config?.merge?.policy === 'manual'
+          && wired.error?.code === 'NOT_DEVENDORED' && legacy.error?.code === 'NOT_DEVENDORED'
+          && legacy.error.message.includes('autoloop:setup');
       } catch {
         return false;
       } finally {

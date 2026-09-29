@@ -35,7 +35,7 @@ It fails closed with `{ok:false, step, error}`; do not continue past a failure.
 
 Then, in order:
 
-1. Read `docs/agentic/STATE.md` in full when no un-compacted injection is present.
+1. Read `.autoloop/STATE.md` in full when no un-compacted injection is present.
 2. Check GitHub authentication and repository access. A dirty worktree belonging to an unknown
    actor is a hard stop; never stash, discard, or overwrite it.
 3. Use the retained snapshot file. Every collection is `{items,complete,error}`. Follow up only
@@ -68,13 +68,10 @@ filter) on the exact file the prime summary names, which the guard sanctions.
 
 ## Dispatch
 
-**Contract tools run from the installed plugin, not the serviced branch.** Pitcrew works the
-branches most likely to have fossilised — a PR open across a dozen plugin releases carries the
-`tools/agentic/**` it forked with, and every invocation runs the working tree's copy. Resolve this
-skill's real path, then `<skill dir>/../../templates/tools/`; every `<plugin-tools>` below is that
-resolved directory, written as a literal absolute path in the command you actually run. The
-repository's own policy tools stay vendored: `auto-merge.mjs`, `gate.mjs`, `escalate-paths.mjs`,
-and the hooks.
+**Every tool runs from the plugin.** Resolve this skill's real path, then
+`<skill dir>/../../templates/tools/` (the SessionStart preflight prints it); every `<plugin-tools>`
+below is that directory, written as a literal absolute path in the command you actually run.
+Repository policy is data in the base's `.autoloop/config.json`.
 
 Every role runs in a fresh process through one call:
 

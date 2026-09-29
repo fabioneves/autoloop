@@ -69,10 +69,10 @@ const SETUP_PHASE_ANCHORS = [
     'autoloop: RESOLVE is running — its ribbon `⏳ ∞ ▰▱▱▱▱ 1/5 RESOLVE` must already be printed; '
     + 'print it NOW if missing (late beats never). Next: `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` before the audit '
     + 'battery.'],
-  [/scaffold\.mjs\s+--audit\b/,
+  [/config-contract\.mjs\s+--root\b/,
     'autoloop: the AUDIT battery just ran — `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` must already be printed; print '
     + 'it NOW if missing. Next: `⏳ ∞ ▰▰▰▱▱ 3/5 INTERVIEW` BEFORE the first question to the human.'],
-  [/scaffold\.mjs\s+--(?:reconcile|merge-state|merge-loop)\b/,
+  [/setup\.mjs\s+--(?:init|devendor)\b/,
     'autoloop: WRITE is running — `⏳ ∞ ▰▰▰▰▱ 4/5 WRITE` must already be printed (and 3/5 '
     + 'INTERVIEW before it); print any missing ribbon NOW. Next: `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` when '
     + 'evidence collection starts.'],
@@ -230,9 +230,9 @@ function selfTest() {
     ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /PushNotification `✖ #12/],
     ['node tools/agentic/unit.mjs --decide --issue 12 --choice c --why w', null],
     ['ls /cache | node /cache/0.47.0/templates/tools/release-verify.mjs --sort-versions | tail -3', /1\/5 RESOLVE/],
-    ['node /cache/templates/tools/scaffold.mjs --audit .', /2\/5 AUDIT/],
-    ['node /cache/templates/tools/scaffold.mjs --reconcile /repo', /4\/5 WRITE/],
-    ['node /cache/templates/tools/scaffold.mjs --merge-state . > /tmp/s.md', /4\/5 WRITE/],
+    ['node /cache/templates/tools/config-contract.mjs --root . --resolve', /2\/5 AUDIT/],
+    ['node /cache/templates/tools/setup.mjs --init --root /repo --base main --gate x', /4\/5 WRITE/],
+    ['node /cache/templates/tools/setup.mjs --devendor --root /tmp/w', /4\/5 WRITE/],
     ['node /p/templates/tools/verify.mjs --project-root . 2>&1 | tee /tmp/v.txt', /5\/5 VERIFY/],
     // The run frame rides prime; the terminal riders ride terminal-finalize,
     // whose label mutations never pass through gh edit.

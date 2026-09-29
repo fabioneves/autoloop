@@ -20,23 +20,19 @@ reviewer identities never collide. Run Pitcrew first in the same run, then take 
 
 ## Prime
 
-**Base first, then prime** (hooks and prime run the working tree's tool copies). Before prime:
+**Base first, then prime.** Before prime:
 
 1. Dirty tree: only a lifecycle-bound, same-issue orphan with every dirty path in the plan boundary
    and no human-authorization path may resume on its own branch. Anything else is human work —
-   stop; never stash, discard, or relocate it. Uncommitted scaffold/migration artifacts
-   (`tools/agentic/**`, host artifacts, a STATE config edit) are Setup's: stop with the Setup
-   remedy; never commit them to the base or into a PR inside a Dev run.
-2. Clean tree: fetch, switch to the configured base (`cfg.baseBranch` from the STATE config block;
-   the remote default branch until STATE is readable), pull fast-forward. A non-fast-forward pull
-   is human divergence — stop and report. Use the base's STATE, not a session injection.
-3. Every run: `node <plugin-tools>/scaffold.mjs --audit .` — `reconcileNeeded: false` → proceed;
-   `true` (`reconcileSummary` says why) → **stop and report the Setup remedy; never reconcile
-   inside a Dev run** (Setup asks human questions; a reconcile is loop-infrastructure code that
-   STATE routes through the queue).
+   stop; never stash, discard, or relocate it. Uncommitted setup artifacts (`.autoloop/**`) are
+   Setup's: stop with the Setup remedy; never commit them inside a Dev run.
+2. Clean tree: fetch, switch to the configured base (`baseBranch` from `.autoloop/config.json`;
+   the remote default branch until it is readable), pull fast-forward. A non-fast-forward pull is
+   human divergence — stop and report. Use the base's STATE, not a session injection.
 
 Then one call (validates ProjectConfig, runs one `scan.mjs`, persists the snapshot, prints a
-decision-sized summary):
+decision-sized summary). It refuses `NOT_DEVENDORED` in a vendored install, or while a vendored
+guard is still wired: stop with the Setup remedy; never devendor inside a Dev run.
 
 ```bash
 node <plugin-tools>/prime.mjs --json
@@ -49,7 +45,8 @@ node <plugin-tools>/prime.mjs --json
   `null` when evidence is incomplete — re-prime.
 - `eligible` — issues selection may take ("Queue and trust" applied). `null` when evidence is
   incomplete or the snapshot was invalidated — re-prime before choosing.
-- `config` — `version`, `baseBranch`, `mergePolicy`, `gateCommand`, `checklistPath`, plus
+- `config` — `version`, `baseBranch`, `mergePolicy`, `gateCommand`, `checklistPath`,
+  `checklistFile` (the file reviewers read — the repository's or the plugin's), plus
   `projectConfig` and its canonical SHA-256 `fingerprint`: the review contract's `projectConfig`
   and `configFingerprint`. Pass them as a pair; never hand-derive either.
 - `snapshotPath` — the durable snapshot; read it only through typed accessors. One unit's facts
@@ -63,9 +60,9 @@ node <plugin-tools>/prime.mjs --json
 Prime fails closed with `{ok:false, step, error}` (an older schema is a typed migration failure
 with the Setup remedy). Never continue past a failure. Then:
 
-1. Read `docs/agentic/STATE.md` in full from the base checkout; absent → stop and run Setup.
-   **Policy comes from `origin/<base>`, never the working tree, every time**: invariants, caps,
-   escalate paths, hard-defers, protected paths. Only the unit's own code comes from the unit's
+1. Read `.autoloop/STATE.md` in full from the base checkout.
+   **Policy comes from `origin/<base>`, never the working tree, every time**: invariants,
+   hard-defers, `protectedPaths`. Only the unit's own code comes from the unit's
    tree. Needing both, materialize the base: `git worktree add --detach <scratchpad>/base
    origin/<base>`.
 2. Verify GitHub authentication and repository access.
@@ -127,26 +124,16 @@ Never in any command:
   review prompt never states one.
 - `<(…)`: byte-compare with `cmp -l a b | head`, or diff files.
 
-## The tools a unit branch runs
+## The tools
 
-A unit branch's `tools/agentic/**` is frozen at fork, and hooks and invocations run the working
-tree's copy. So contract tools run from the installed plugin: `<plugin-tools>` =
-`<this skill's real dir>/../../templates/tools/`, written as a literal absolute path, never a shell
-variable. That covers `dispatch.mjs`, `dispatch-stream.sh`, `lifecycle-driver.mjs`,
-`publish-verdict.mjs`, `review-contract.mjs`, `delivery-contract.mjs`, `attestation-contract.mjs`,
-`snapshot-contract.mjs`, `prime.mjs`, `scan.mjs`, and `scaffold.mjs` (the vendored copy of which
-cannot work; no `--templates` flag needed).
+Every tool, brief and hook runs from the plugin: `<plugin-tools>` =
+`<this skill's real dir>/../../templates/tools/` (the SessionStart preflight prints it), written as
+a literal absolute path, never a shell variable. A unit branch therefore runs the same guard as the
+base. Repository policy is data — `.autoloop/config.json`, read from the base; the gate is the
+repository's own `gate.command`, run on the unit's tree; the merge executor is
+`<plugin-tools>/auto-merge.reference.mjs`, run from the base checkout.
 
-Repository policy stays vendored — `auto-merge.mjs`, `gate.mjs`, `escalate-paths.mjs`, hooks — and
-runs from the BASE checkout, never a unit branch, except `gate.mjs`, which runs on the unit's tree.
-The merge executor runs after the switch back to base. Hooks run the checkout's copy: expect a
-fossil branch's older behaviour; never commit tool refreshes into a unit branch.
-
-At claim and before the terminal flow, run `git diff --stat origin/<base>...HEAD --
-tools/agentic/`. Non-empty is a run-record NOTE, not a block; if it is the unit's own work, it is a
-protected path and its own review.
-
-### Behind base: merge for code, never for tooling
+### Behind base
 
 Behind base is not a defect. Pre-review and behind: merge freely. A real conflict
 (`mergeStateStatus` DIRTY): merge — Pitcrew's revision path. Post-review, no conflict: do NOT
@@ -520,7 +507,7 @@ count prose, or table re-padding).
 ### 7. Orchestrator diff review
 
 `step.mjs --to 07-diff-review`, then a `--role diff-review` dispatch briefed with the simplified
-diff, `cfg.review.checklistPath`, frozen plan, invariants, boundary, and untrusted-input model (no
+diff, `config.checklistFile`, frozen plan, invariants, boundary, and untrusted-input model (no
 commands), plus code-review, security, and domain guidance. Disposition like step 8; fixes go to one
 `--role implement` dispatch carrying every verified finding. The orchestrator never edits the
 checkout here; step 8 covers the fixes.
@@ -618,7 +605,7 @@ tool, never by hand** (no `jq` program, skeleton, or script):
 node <plugin-tools>/review-contract.mjs --append-round --first-round \
   --result-file <round-1-result.json> --plan-fingerprint <frozen-plan-contentHash> \
   --author <writer engine:model, e.g. claude:claude-opus-5-5> \
-  --state <base checkout>/docs/agentic/STATE.md \
+  --state <base checkout>/.autoloop/config.json \
   [--annotations-file <annotations.json>] --out <evidence-1.json>
 # round n
 node <plugin-tools>/review-contract.mjs --append-round --evidence-file <evidence-(n-1).json> \
@@ -692,11 +679,10 @@ finding disposition).
 The terminal finalizer alone produces the terminal `agentic/gate`, re-running the command on the
 exact remote head; never ask it to trust this result.
 
-A non-empty scaffold-only diff under manual policy may use the scaffold gate only when every path is
-inside `tools/agentic/**`, `docs/agentic/**`, `.codex/**`, `.claude/**`, `.opencode/**`,
-`.agents/**`, or `.githooks/**`, none app-affecting or the gate wrapper. Scaffold gate: every tool
-self-test; ProjectConfig, adapter, claim, lane, lifecycle, and release contracts; shell syntax;
-JSON/TOML parsing; stale-instruction lint. Doubt or a mixed diff → full app gate.
+A non-empty diff under manual policy whose every path is inside `docs/agentic/**`, `.claude/**`,
+`.agents/**` or `.githooks/**`, none app-affecting or the gate wrapper, may use the project gate
+instead of the app gate: `verify.mjs --project-root <unit tree>`. Doubt or a mixed diff → full app
+gate.
 
 After green, confirm the tree is clean. Red: load debugging guidance, fix via the delta-review path,
 re-gate. Exhausted retries are a `decide`: red outside the unit → blocking repair
@@ -751,8 +737,8 @@ delivery booleans are forbidden.
 finalizer is not an outcome — only its typed refusal is.
 
 `merge.policy: manual`: stop after the terminal result; the ready PR is the human's. Acknowledged
-solo non-manual: **switch to the base checkout first**, run `tools/agentic/auto-merge.mjs` there
-once for the PR, and treat its typed verdict as final. A refusal goes to the human-block path —
+solo non-manual: **switch to the base checkout first**, run
+`<plugin-tools>/auto-merge.reference.mjs <PR>` there once, and treat its typed verdict as final. A refusal goes to the human-block path —
 never retry blindly, weaken a predicate, or merge another way. No run submits a merge queue entry,
 publishes a tag, or creates a release.
 
@@ -908,9 +894,9 @@ close it, `--park` to sleep it), `step.mjs` (`--to`, `--resumed`, `--card`, `--p
 SessionStart hook runs `--card-run`), `unit.mjs` (`--obsolete`/`--wait`), `dispatch.mjs`,
 `scan.mjs`, `snapshot-contract.mjs` (invalidate/summary/section/`--unit`), `review-contract.mjs`,
 `publish-verdict.mjs`,
-`lifecycle-driver.mjs`, `escalate-paths.mjs`, and the vendored `auto-merge.mjs` terminal exception.
-Every other file in `tools/agentic/` is a library those entry points own — never invoke a contract
-module directly.
+`lifecycle-driver.mjs`, `escalate-paths.mjs`, and `auto-merge.reference.mjs`, the terminal merge
+exception. Every other file in `<plugin-tools>` is a library those entry points own — never invoke
+a contract module directly.
 
 ## Autonomy: fix, decide, or block
 
