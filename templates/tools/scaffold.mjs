@@ -26,7 +26,9 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CONFIG_VERSION, extractConfig, validateConfig } from './config-contract.mjs';
+import {
+  CONFIG_VERSION, currentProjectConfig, extractConfig,
+} from './config-contract.mjs';
 import {
   BRIEF_FILES,
   NON_MANUAL_TOOL_FILES,
@@ -332,15 +334,24 @@ function readProjectConfig(root, warnings) {
   }
   try {
     const config = extractConfig(text);
-    const errors = validateConfig(config);
-    if (errors.length > 0) {
+    // A migratable STATE reconciles as its migrated form: Setup reconciles the
+    // tools BEFORE writing the migrated STATE, because the working tree's guard
+    // runs on every command and a pre-reconcile guard rejects the new schema.
+    const current = currentProjectConfig(config);
+    if (!current.ok) {
       warnings.push(
         'ProjectConfig is not schema-current; reconciling the universal tool set '
         + 'only — migrate the configuration first',
       );
       return null;
     }
-    return config;
+    if (config.version !== CONFIG_VERSION) {
+      warnings.push(
+        `ProjectConfig is schema ${config.version}; reconciled for its migrated form — `
+        + `write the migrated ${CONFIG_VERSION} block to STATE in the same commit`,
+      );
+    }
+    return current.config;
   } catch (error) {
     warnings.push(`ProjectConfig is unreadable (${error.message}); reconciling the universal tool set only`);
     return null;
@@ -406,7 +417,9 @@ export function reconcile(root, templates, { audit = false } = {}) {
       `templates/tools/${TOOL_SOURCE_NAMES[name] ?? name}`,
     );
   }
-  if (!nonManual) {
+  // Only a readable `manual` policy removes them: an unreadable config says
+  // nothing about the policy, and a Setup-filled executor is not regenerable.
+  if (config !== null && !nonManual) {
     for (const name of NON_MANUAL_TOOL_FILES) {
       const stale = resolve(root, 'tools', 'agentic', name);
       if (existsSync(stale)) {
@@ -1833,6 +1846,34 @@ function selfTest() {
         && nonManual.results.find((entry) => entry.path === 'tools/agentic/verify.mjs')
           ?.source === 'templates/tools/verify.mjs',
     );
+
+    // LFE, 2026-09-29: setup must reconcile the tools BEFORE writing the
+    // migrated STATE (the working tree's guard runs on every command and an
+    // old guard rejects the new schema). So reconcile has to vendor the right
+    // set from a STATE that is still at the previous, migratable schema.
+    const state027 = fixtureState('auto')
+      .replace('"version": "0.28.0"', '"version": "0.27.0"')
+      .replace('"docs/agentic/checklist.md"\n  }\n}', '"docs/agentic/checklist.md"\n  },\n  "caps": '
+        + '{ "gateRetriesPerUnit": 2, "codeReviewRoundsPerUnit": 20, "sliceMaxLines": 700, "sliceMaxFiles": 10 }\n}');
+    writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'), state027);
+    const toolsFirst = reconcile(root, templates, { audit: true });
+    expect(
+      'a migratable STATE reconciles its policy tool set and names the migration still to land',
+      state027.includes('"caps"') && state027.includes('"0.27.0"')
+        && toolsFirst.nonManualTooling === true
+        && !toolsFirst.warnings.some((warning) => warning.includes('not schema-current'))
+        && toolsFirst.warnings.some((warning) => warning.includes('0.27.0') && warning.includes('same commit')),
+    );
+    // An unreadable config is not a return to `manual`: it says nothing about
+    // the policy, so the non-manual tools (and a Setup-filled executor) stay.
+    writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'), '# STATE\n\nno config block\n');
+    const unreadable = reconcile(root, templates, { audit: true });
+    expect(
+      'an unreadable config never removes the non-manual merge tools',
+      !unreadable.results.some((entry) =>
+        entry.path === 'tools/agentic/auto-merge.mjs' && entry.action === 'removed'),
+    );
+    writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'), fixtureState('auto'));
 
     const vendoredMerge = join(root, 'tools', 'agentic', 'auto-merge.mjs');
     writeFileSync(

@@ -168,8 +168,8 @@ From `0.23.0` it first adds the fields that version predates — `gate.quickComm
   names each removed key in its warnings and carries every remaining value across unchanged,
   including `merge.policy` and both acknowledgements.
 - Reconcile every template-derived operational section and universal host artifact in the same
-  migration (`--reconcile` plus the STATE/LOOP merge under Write and delivery). A version-only
-  migration is forbidden.
+  migration (`--reconcile` plus the STATE/LOOP merge under Write and delivery, `--reconcile`
+  first — see the write order there). A version-only migration is forbidden.
 - Validate the migrated configuration with `<templates>/tools/config-contract.mjs`, never
   `tools/agentic/config-contract.mjs`, because the validator that accepts the new schema only
   arrives with the reconcile — the installed one rejects the migrated block on its version
@@ -544,6 +544,15 @@ explicit authorization.
 
 Fresh install starts from the templates: `--reconcile` writes `LOOP.md`, and Setup fills the STATE
 template's placeholders from the interview answers.
+
+**Write order in a migration: tools first, then STATE.** The hooks run the working tree's
+`tools/agentic/command-guard.mjs` on every Bash call, and a pre-reconcile guard knows only the
+schema it shipped with. Write the migrated STATE first and every later command is refused
+(`version: must equal "<old>"`) — a live migration locked itself out exactly that way, twice. So
+run `scaffold.mjs --reconcile` FIRST, while STATE is still at the old schema: it vendors the tool
+set for the migrated config and warns that the migrated block must land in the same commit, and
+the new guard reads the old STATE as migration pending. Only then write the migrated
+`autoloop-config` block and the STATE/LOOP merges, and commit it all together.
 
 Reconfigure and migration **merge** instead — one call per document. Never read the template in
 fragments and splice its prose by hand; that cost over half of a measured 11.2-minute migration and
