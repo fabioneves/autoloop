@@ -3,6 +3,39 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.55.5] - 2026-09-29
+
+Three ideas from a comparison with a sibling loop project, plus a fix for foreground dispatch cost.
+
+### Added
+
+- **`loop-halt`, a whole-run kill switch.** Any open issue labelled `loop-halt` stops new units:
+  every candidate shows `loop-halted`, prime prints `halted: #N`, and a resumed unit waits behind
+  it. An unreadable open-issue list also stops selection, so an unknown switch reads as halted. The
+  unit in flight finishes, and Pitcrew keeps servicing PRs. Only a human lifts it: the guard refuses
+  the loop removing, deleting or renaming the label, REST forms included.
+- **`edit-guard.mjs`: a live run never edits its own hook wiring.**
+  - A new PreToolUse hook (`Edit|Write|MultiEdit|NotebookEdit`) refuses edits to
+    `.claude/settings.json` and `.claude/settings.local.json` while a run is live.
+  - Dispatched writers, which run with hooks off, get the same paths as deny rules, for both their
+    worktree and the main checkout.
+  - Other loop infrastructure stays buildable through the queue and is flagged `human:authorize` at
+    merge.
+
+### Changed
+
+- **Foreground dispatches stream a compact pane.** The dispatch's whole stdout becomes the
+  orchestrator's tool result, so `dispatch-stream.sh` now renders it compactly.
+  - It keeps milestones, errors, edits and commands, folds reads and searches into counts, and ends
+    with a totals line.
+  - On a real implement dispatch: 314 lines / 30.7 KB became 33 lines / 3.1 KB.
+  - The `▸ full view:` command still shows everything.
+  - Edits and writes now show as `▸ edit <path>` in both views.
+
+### Upgrading
+
+Run `autoloop:setup` to vendor `edit-guard.mjs` and merge its hook entry, then restart the session.
+
 ## [0.55.4] - 2026-09-29
 
 ### Changed
