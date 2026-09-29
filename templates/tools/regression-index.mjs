@@ -33,6 +33,45 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'dispatched-children-got-a-200k-window-behind-the-gateway',
+    date: '2026-09-29',
+    symptom: 'LFE #352: the astra plan failed after compacting, and its Opus '
+      + 'fallback auto-compacted at 172,375 tokens, though both models have 1M.',
+    cause: 'Behind a gateway (ANTHROPIC_BASE_URL) Claude Code cannot look a model '
+      + 'up, so a bare id gets a 200k window: measured through the proxy, '
+      + 'claude-opus-5-5 200,000 and claude-opus-5-5[1m] 1,000,000; the same for '
+      + 'Fable and astra. The routes and fallbacks carried bare ids.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'fallbacks carry [1m] and a suffixed route on its default has nowhere further to go'" }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "    'implement claude claude-opus-5-5[1m]'," }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'unreconcilable-markers-retried-every-run',
+    date: '2026-09-29',
+    symptom: 'LFE: seven closed-issue markers were re-reconciled every run and '
+      + 'refused identically (PREMERGE_CI_COMPONENT_MISMATCH): 7 of 69 API calls, '
+      + 'about 1.1M cache-read tokens and 2 minutes per session.',
+    cause: 'Nothing remembered a deterministic refusal, so every run spent a call '
+      + 'per marker to learn the same answer.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'export function markerRefusalRecord(' }),
+      Object.freeze({ file: 'prime.mjs', anchor: 'export function splitKnownRefused(' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'foreground-dispatches-blocked-the-orchestrator',
+    date: '2026-09-29',
+    symptom: 'LFE: three of four dispatches held the orchestrator for the host\'s '
+      + '600 s foreground ceiling; nothing else could run meanwhile.',
+    cause: 'Background dispatches were refused (0.49.65) because host kills took '
+      + 'the dispatch down with its task. dispatch-stream.sh has since detached '
+      + 'the dispatch, so a killed watcher no longer loses it (verified live).',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: "if (/dispatch-stream\\.sh/u.test(text)) return null;" }),
+    ]),
+  }),
+  Object.freeze({
     id: 'foreground-dispatch-stream-flooded-the-orchestrator',
     date: '2026-09-29',
     symptom: 'LFE: one implement dispatch streamed ~196 lines / 21.9 KB into the '
@@ -336,9 +375,11 @@ export const INCIDENTS = Object.freeze([
       + 'millisecond; the host documentation says an explicitly backgrounded '
       + 'task persists.',
     cause: 'An undocumented host-side sweep of run_in_background tasks — a '
-      + 'harness defect, reported upstream. The auto-background handoff is '
-      + 'the documented path that demonstrably survives it, so the skill '
-      + 'launches dispatches foreground until the sweep stops being observed.',
+      + 'harness defect, reported upstream — killed the dispatch with its task. '
+      + '0.56.0: dispatch-stream.sh detaches the dispatch, so a swept watcher '
+      + 'no longer loses it (verified live 2026-09-29); dispatches launch in '
+      + 'the background again and a killed watcher\'s result is collected with '
+      + '--wait-file. Only a bare backgrounded dispatch.mjs is refused.',
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'command-guard.mjs',
@@ -350,15 +391,11 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: '../../skills/dev/SKILL.md',
-        anchor: 'launch dispatches FOREGROUND and let the host background them',
+        anchor: '**Launch every dispatch in the background**',
       }),
       Object.freeze({
         file: '../../skills/dev/SKILL.md',
-        anchor: 'foreground on Claude Code (host backgrounds it — see the sweep note)',
-      }),
-      Object.freeze({
-        file: '../../skills/dev/SKILL.md',
-        anchor: 'A gate\nkilled with only `[killed]` and no log tail is the same sweep',
+        anchor: '**A killed stream task is not a killed dispatch.**',
       }),
     ]),
   }),

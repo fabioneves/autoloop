@@ -377,7 +377,7 @@ const MODEL_DOTS = Object.freeze([
 ]);
 
 export function shortModel(id) {
-  const model = String(id ?? '').toLowerCase().replace(/^[a-z]+-gateway-/u, '');
+  const model = String(id ?? '').toLowerCase().replace(/^[a-z]+-gateway-/u, '').replace(/\[1m\]$/u, '');
   const claude = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/u.exec(model);
   if (claude) return `${claude[1].toUpperCase()} ${claude[3] ? `${claude[2]}.${claude[3]}` : claude[2]}`;
   const gpt = /^gpt-(\d+(?:\.\d+)?)-([a-z]+)$/u.exec(model);
@@ -465,8 +465,8 @@ function selfTest() {
     ['model ids read as short names', safely(() => [
       shortModel('claude-fable-5-1'), shortModel('claude-opus-5-5'), shortModel('gpt-6-astra'),
       shortModel('claude-haiku-4-5-20251001'), shortModel('anthropic-gateway-gpt-6-astra'),
-      shortModel('mystery-model'),
-    ].join('|')) === 'FABLE 5.1|OPUS 5.5|ASTRA 6|HAIKU 4.5|ASTRA 6|MYSTERY-MODEL'],
+      shortModel('mystery-model'), shortModel('claude-opus-5-5[1m]'), shortModel('anthropic-gateway-gpt-6-astra[1m]'),
+    ].join('|')) === 'FABLE 5.1|OPUS 5.5|ASTRA 6|HAIKU 4.5|ASTRA 6|MYSTERY-MODEL|OPUS 5.5|ASTRA 6'],
     ['each model family has its colour dot; the orchestrator and unknowns are white', safely(() => [
       modelChip('claude-fable-5-1'), modelChip('claude-opus-5-5'), modelChip('gpt-6-astra'),
       modelChip('claude-sonnet-5'), modelChip(null), modelChip('mystery'),

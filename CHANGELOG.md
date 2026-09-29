@@ -3,6 +3,49 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.56.0] - 2026-09-29
+
+Token economy. On a measured LFE session, 69 orchestrator API calls averaged 158k tokens of context
+each (10.8M cache-read tokens against 27k output). The cost is context size × call count, so this
+release shrinks both. Spec: `SPEC-token-economy.md`.
+
+### Changed
+
+- **The dev skill is 59,905 bytes, down from 136,861** (about 20k fewer tokens re-read on every
+  call).
+  - Every instruction is kept. Rationale and incident history live in the regression index and git
+    history.
+  - An independent old-vs-new audit found one inverted rule (a held `/answer` block) and a few
+    drops, all fixed.
+- **Skill byte budgets.** `verify.mjs` fails when any skill grows past its recorded budget
+  (`SKILL_OVER_BUDGET`) or has none. Budgets only ratchet down.
+- **Dispatches launch in the background again.**
+  - `dispatch-stream.sh` detaches the dispatch, so a killed watcher no longer loses it. Verified
+    live: the watcher was killed mid-run, the dispatch finished, and `dispatch.mjs --wait-file`
+    collected it.
+  - The guard refuses only a bare `dispatch.mjs --role` in the background.
+  - Before this, three of four dispatches held the orchestrator for the host's 600 s foreground
+    ceiling.
+- **Model IDs carry `[1m]`.**
+  - Behind a gateway, Claude Code gives a bare ID a 200k window. Measured through a proxy:
+    `claude-opus-5-5` 200,000, `claude-opus-5-5[1m]` 1,000,000, and the same for Fable and astra.
+  - Dispatched children had been compacting at 172k.
+  - The standing routes and fallbacks now use `[1m]` IDs, fallback comparisons ignore the suffix,
+    and the status chip hides it.
+
+### Fixed
+
+- **Known marker refusals are no longer retried every run.**
+  - `lifecycle-driver --reconcile-issue` records a typed refusal with the driver's hash.
+  - Prime moves that deferred marker to `markers.knownRefused` (`known-refused: #N (CODE)`) until
+    the marker or the driver changes.
+  - On LFE this was 7 of 69 calls per session.
+
+### Upgrading
+
+Update the plugin and run `autoloop:setup` to reconcile `tools/agentic`, then restart the session.
+Routes are re-recorded at the next run's start, which picks up the `[1m]` IDs.
+
 ## [0.55.5] - 2026-09-29
 
 Three ideas from a comparison with a sibling loop project, plus a fix for foreground dispatch cost.
