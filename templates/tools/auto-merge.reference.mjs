@@ -1853,9 +1853,16 @@ export function run(inputs, {
 // shape, so fixture runs use SELF_TEST_CONFIG (solo over the vendored block) and
 // a dedicated fixture pins the non-solo refusal.
 // pathFromGlob turns the first glob of a list into a concrete path.
+// Per segment, so a leading or inner `**` keeps the rest of the glob: a
+// trailing `**` becomes the leaf, any other `**` one directory, `*` an `x`.
 function pathFromGlob(glob, leaf) {
   if (!glob.includes('*')) return glob;
-  return glob.replace(/\*\*.*$/, leaf).replace(/\*/g, 'x');
+  const segments = glob.split('/');
+  return segments
+    .map((segment, index) => (segment === '**'
+      ? (index === segments.length - 1 ? leaf : 'x')
+      : segment.replace(/\*/g, 'x')))
+    .join('/');
 }
 const ALLOWED_PATH = pathFromGlob(REPO.REVERSIBLE_PATHS[0] ?? 'docs/**', 'autoloop-selftest.md');
 const allowedPathN = (index) => pathFromGlob(REPO.REVERSIBLE_PATHS[0] ?? 'docs/**', `selftest-${index}.md`);
@@ -1864,6 +1871,10 @@ const allowedPathN = (index) => pathFromGlob(REPO.REVERSIBLE_PATHS[0] ?? 'docs/*
 // self-test will fail loudly — pick config that leaves at least one neutral path.)
 const NEUTRAL_PATH = 'zz-selftest/neutral-change.txt';
 const ALLOW_ALL = REPO.AUTOMERGE_MODE === 'all-green';
+// Path B declined (a classified mode with no reversible class, which setup
+// offers): the generic merge fixtures take Path A instead, and the Path B
+// fixture expects its refusal.
+const PATH_B_DECLINED = !ALLOW_ALL && REPO.REVERSIBLE_PATHS.length === 0;
 const SELF_TEST_CONFIG = engineConfig({
   soloOperator: true,
   trustedHumanLogins: [REPO.LOOP_LOGIN],
@@ -1890,7 +1901,7 @@ function makeVerdictStatuses() {
 function makeInput({
   files = [ALLOWED_PATH],
   fileEntries,
-  labels = [],
+  labels = PATH_B_DECLINED ? ['risk:mechanical-refactor'] : [],
   headRefName = `feat/gh-${LOOP_ISSUE}-safe-change`,
   body = `Closes #${LOOP_ISSUE}`,
   ...overrides
@@ -2033,11 +2044,13 @@ export const FIXTURES = [
     expectArgs: { sha: HEAD_SHA, squash: true },
   },
   {
-    name: 'Path B allow → mock merge called exactly once with {sha, squash}',
-    input: makeInput({ files: [ALLOWED_PATH] }),
-    expectExit: 0,
-    expectCalls: 1,
-    expectArgs: { sha: HEAD_SHA, squash: true },
+    name: PATH_B_DECLINED
+      ? 'Path B declined → an unlabeled reversible-looking path is refused'
+      : 'Path B allow → mock merge called exactly once with {sha, squash}',
+    input: makeInput({ files: [ALLOWED_PATH], labels: [] }),
+    expectExit: PATH_B_DECLINED ? 1 : 0,
+    expectCalls: PATH_B_DECLINED ? 0 : 1,
+    ...(PATH_B_DECLINED ? {} : { expectArgs: { sha: HEAD_SHA, squash: true } }),
   },
   {
     name: '--dry-run on an allow → zero merge calls',
@@ -2048,7 +2061,7 @@ export const FIXTURES = [
   },
   {
     name: `unclassified path without a risk label (mode: ${REPO.AUTOMERGE_MODE})`,
-    input: makeInput({ files: [NEUTRAL_PATH] }),
+    input: makeInput({ files: [NEUTRAL_PATH], labels: [] }),
     expectExit: ALLOW_ALL ? 0 : 1,
     expectCalls: ALLOW_ALL ? 1 : 0,
   },
@@ -3038,7 +3051,18 @@ function soloTranscriptionCases() {
 // Setup-filled block stays authoritative (legacy STATE repositories).
 // A copy of this file with its block filled the way Setup fills it, run
 // beside symlinks to the real sibling modules.
-function filledCopySelfTest() {
+const LFE_LIKE_FILL = Object.freeze({
+  EXTRA_PROTECTED_PATHS: "['spec/**', 'compose.y*ml', '**/compose.y*ml']",
+  AUTOMERGE_MODE: "'all-green'",
+  REVERSIBLE_PATHS: "['docs/**']",
+});
+const PATH_B_DECLINED_FILL = Object.freeze({
+  EXTRA_PROTECTED_PATHS: "['spec/**']",
+  AUTOMERGE_MODE: "'classified'",
+  REVERSIBLE_PATHS: '[]',
+});
+
+function filledCopySelfTest(fill) {
   const self = fileURLToPath(import.meta.url);
   const dir = mkdtempSync(join(tmpdir(), 'auto-merge-filled-'));
   try {
@@ -3047,13 +3071,19 @@ function filledCopySelfTest() {
     }
     const fills = [
       [/^export const REPOSITORY = .*$/mu, "export const REPOSITORY = { owner: 'acme', name: 'app' };"],
-      [/^export const EXTRA_PROTECTED_PATHS = .*$/mu, "export const EXTRA_PROTECTED_PATHS = ['spec/**', 'compose.y*ml'];"],
-      [/^export const AUTOMERGE_MODE = .*$/mu, "export const AUTOMERGE_MODE = 'all-green';"],
+      [/^export const EXTRA_PROTECTED_PATHS = .*$/mu, `export const EXTRA_PROTECTED_PATHS = ${fill.EXTRA_PROTECTED_PATHS};`],
+      [/^export const AUTOMERGE_MODE = .*$/mu, `export const AUTOMERGE_MODE = ${fill.AUTOMERGE_MODE};`],
+      [/^export const REVERSIBLE_PATHS = .*$/mu, `export const REVERSIBLE_PATHS = ${fill.REVERSIBLE_PATHS};`],
       [/^export const LOOP_LOGIN = .*$/mu, "export const LOOP_LOGIN = 'loop-user';"],
       [/^export const TRUSTED_HUMAN_LOGINS = .*$/mu, 'export const TRUSTED_HUMAN_LOGINS = [LOOP_LOGIN];'],
       [/^export const SOLO_OPERATOR = .*$/mu, 'export const SOLO_OPERATOR = true;'],
     ];
-    const copy = fills.reduce((text, [line, filled]) => text.replace(line, filled), readFileSync(self, 'utf8'));
+    const source = readFileSync(self, 'utf8');
+    // A fill that misses would test nothing, and an unfilled REPOSITORY would
+    // make the copy spawn a filled copy of its own.
+    const missed = fills.filter(([line]) => (source.match(new RegExp(line.source, 'gmu')) ?? []).length !== 1);
+    if (missed.length > 0) return { status: null, stdout: `FAIL fills matched no single line: ${missed.map(([line]) => line.source).join(', ')}` };
+    const copy = fills.reduce((text, [line, filled]) => text.replace(line, filled), source);
     writeFileSync(join(dir, 'auto-merge.mjs'), copy);
     return spawnSync(process.execPath, [join(dir, 'auto-merge.mjs'), '--self-test'], { cwd: dir, encoding: 'utf8' });
   } finally {
@@ -3099,7 +3129,7 @@ function configSettingsCases() {
   process.env.GH_REPO = 'someone-else/target';
   process.env.GH_HOST = 'elsewhere.example';
   const viewed = ghRepository('/r', (command, args, options) => {
-    ghEnv = { ...options.env };
+    ghEnv = options.env === undefined ? null : { ...options.env };
     return JSON.stringify({ owner: { login: 'o' }, name: 'r' });
   });
   for (const [key, value] of Object.entries(ambient)) {
@@ -3140,7 +3170,9 @@ function configSettingsCases() {
     })();
     // Setup fills the block and then runs this self-test (verify does too, for
     // every copy that differs from the manifest), so a filled copy must pass it.
-    const filledCopy = NESTED_SELF_TEST || !isPlaceholder(BLOCK) ? null : filledCopySelfTest();
+    const filledCopies = NESTED_SELF_TEST || !isPlaceholder(BLOCK)
+      ? []
+      : [LFE_LIKE_FILL, PATH_B_DECLINED_FILL].map(filledCopySelfTest);
     writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify({ ...config({}), merge: { policy: 'manual' } }));
     const manual = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '5', '--dry-run'], {
       cwd: scratch, encoding: 'utf8',
@@ -3191,13 +3223,22 @@ function configSettingsCases() {
         ok: child === null || (child.status === 0 && child.stdout.includes('PASS extra-protected jewel-config/**')),
       },
       {
-        name: 'config: gh repo view runs without GH_REPO or GH_HOST',
-        ok: viewed?.owner === 'o' && ghEnv !== null && !Object.hasOwn(ghEnv, 'GH_REPO') && !Object.hasOwn(ghEnv, 'GH_HOST'),
+        // The fixtures turn every protected and reversible glob into a path;
+        // a path its own glob does not match tests nothing and fails.
+        name: 'config: a fixture path from any glob matches that glob',
+        ok: ['**/compose.y*ml', 'spec/**', 'a/**/b.ts', '*.md', 'compose.y*ml', 'docs/**']
+          .every((glob) => globToRe(glob).test(pathFromGlob(glob, 'leaf.md'))),
       },
       {
-        name: 'config: a Setup-filled copy passes its own self-test',
-        ok: filledCopy === null || filledCopy.status === 0,
-        detail: filledCopy?.stdout?.split('\n').filter((line) => line.startsWith('FAIL')).join('; '),
+        name: 'config: gh repo view runs without GH_REPO or GH_HOST',
+        // An omitted env would inherit process.env, GH_REPO included.
+        ok: viewed?.owner === 'o' && ghEnv !== null && Object.hasOwn(ghEnv, 'PATH')
+          && !Object.hasOwn(ghEnv, 'GH_REPO') && !Object.hasOwn(ghEnv, 'GH_HOST'),
+      },
+      {
+        name: 'config: Setup-filled copies (all-green with jewels; Path B declined) pass their own self-test',
+        ok: filledCopies.every((copy) => copy.status === 0),
+        detail: filledCopies.flatMap((copy) => copy.stdout.split('\n').filter((line) => line.startsWith('FAIL'))).join('; '),
       },
       {
         name: 'config: a refused config exits 1 naming the reason before any GitHub read',
