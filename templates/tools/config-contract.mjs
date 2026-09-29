@@ -335,9 +335,11 @@ function validateGlobList(value, path, errors) {
     errors.push(`${path}: must be an array of repository-relative globs`);
     return;
   }
+  // The glob matchers (lane-contract, the merge executor) know only `*` and
+  // `**`; any other metacharacter would match literally and protect nothing.
   value.forEach((glob, index) => {
-    if (!validRepoRelativePath(glob)) {
-      errors.push(`${path}[${index}]: must be a normalized repository-relative glob`);
+    if (!validRepoRelativePath(glob) || /[?[\]{}!]/u.test(glob)) {
+      errors.push(`${path}[${index}]: must be a normalized repository-relative glob using only * and **`);
     }
   });
 }
@@ -521,16 +523,26 @@ function withDefaults(overrides, defaults = DEFAULT_CONFIG) {
   return merged;
 }
 
+// The repository a tool runs in: the git top level, else the working directory.
+export function repositoryRoot() {
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 20000 });
+  return top.status === 0 ? top.stdout.trim() : process.cwd();
+}
+
 // The one config reader every tool uses: `.autoloop/config.json` completed
 // from the plugin defaults, else the legacy STATE block (migrated in memory,
 // so a release never requires a write), else null — not an autoloop repo.
 export function resolveProjectConfig(root, read = (path) => readFileSync(path, 'utf8')) {
   const jsonPath = join(root, PROJECT_CONFIG_FILE);
   // lstat, not exists: a dangling symlink must refuse, never fall back to STATE.
+  // Only ENOENT is absent; an inaccessible path (EACCES, ENOTDIR) refuses too.
   let present = true;
   try {
     lstatSync(jsonPath);
-  } catch {
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      return { ok: false, unreadable: true, source: PROJECT_CONFIG_FILE, errors: [`${PROJECT_CONFIG_FILE}: unreadable (${error.message})`] };
+    }
     present = false;
   }
   if (present) {
@@ -2203,7 +2215,13 @@ function selfTest() {
         && withMerge({ policy: 'manual', reversiblePaths: ['docs/**'] }).includes('merge.reversiblePaths: only valid with a non-manual merge.policy'));
     expect('a malformed login or reversible glob is refused',
       withMerge({ ...soloAuto, loopLogin: 'no spaces' }).includes('merge.loopLogin: must be a GitHub login')
-        && withMerge({ ...soloAuto, reversiblePaths: ['/abs/**'] }).includes('merge.reversiblePaths[0]: must be a normalized repository-relative glob'));
+        && withMerge({ ...soloAuto, reversiblePaths: ['/abs/**'] }).includes('merge.reversiblePaths[0]: must be a normalized repository-relative glob using only * and **'));
+    // The glob engines know only `*` and `**`; anything else would match
+    // literally, so a protected path would silently protect nothing.
+    expect('a glob metacharacter the matchers do not support is refused',
+      ['src/{auth,billing}/**', 'secret?.yml', 'src/[ab]/**', '!docs/**'].every((glob) =>
+        validateConfig({ ...projectFixture(), protectedPaths: [glob] })
+          .includes('protectedPaths[0]: must be a normalized repository-relative glob using only * and **')));
     const root = mkdtempSync(join(tmpdir(), 'config-protected-'));
     try {
       mkdirSync(join(root, '.autoloop'));
@@ -2218,6 +2236,13 @@ function selfTest() {
       expect('protectedPaths resolves when set, and is absent when not',
         set?.ok === true && JSON.stringify(set.config.protectedPaths) === '["spec/**"]'
           && unset?.ok === true && !Object.hasOwn(unset.config, 'protectedPaths'));
+      // Only a missing file is absent: an inaccessible .autoloop/ must refuse,
+      // never read as "no config" and drop the repository's protected paths.
+      rmSync(join(root, '.autoloop'), { recursive: true, force: true });
+      writeFileSync(join(root, '.autoloop'), 'not a directory');
+      const blocked = resolveProjectConfig(root);
+      expect('an inaccessible config path refuses instead of reading as absent',
+        blocked?.ok === false && blocked.unreadable === true && blocked.source === '.autoloop/config.json');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

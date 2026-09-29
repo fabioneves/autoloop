@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CONFIG_VERSION, resolveProjectConfig } from './config-contract.mjs';
+import { CONFIG_VERSION, repositoryRoot, resolveProjectConfig } from './config-contract.mjs';
 import {
   HUMAN_AUTHORIZATION_GLOBS,
   PATH_POLICY_FIXTURES,
@@ -37,14 +37,6 @@ export function escalatePathsFor(root) {
     return { paths: ESCALATE_PATHS, error: `${resolved.source}: ${resolved.errors.join('; ')}` };
   }
   return { paths: [...ESCALATE_PATHS, ...(resolved?.config.protectedPaths ?? [])], error: null };
-}
-
-function repositoryRoot() {
-  try {
-    return gitText(['rev-parse', '--show-toplevel']).trim();
-  } catch {
-    return process.cwd();
-  }
 }
 
 function positiveInteger(value) {
@@ -416,6 +408,18 @@ function selfTest() {
     const working = run('--working-tree');
     diffChecks.push(['--working-tree escalates a configured protected path',
       working.status === 1 && working.stdout.includes('spec/rules.md')]);
+    const proof = run('--base', 'HEAD', '--artifact-version', '1', '--artifact-fingerprint', 'a'.repeat(64),
+      '--estimated-lines', '1', '--planned-path', 'spec/rules.md', '--content-read-all', '--json');
+    let proven = null;
+    try {
+      proven = JSON.parse(proof.stdout);
+    } catch {
+      proven = null;
+    }
+    diffChecks.push(['a configured protected path escalates the lane proof and the reported hits',
+      proof.status === 1 && proven?.laneProof?.lane === 'full'
+        && proven.laneProof.reasonCodes.includes('HUMAN_AUTHORIZATION_PATH')
+        && proven.escalationHits.some(({ file, glob }) => file === 'spec/rules.md' && glob === 'spec/**')]);
     writeFileSync(configFile, JSON.stringify(config));
     diffChecks.push(['no protectedPaths adds nothing',
       matchEscalate(['spec/rules.md'], escalatePathsFor(scratch).paths).length === 0]);

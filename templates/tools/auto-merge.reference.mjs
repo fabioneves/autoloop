@@ -12,8 +12,9 @@
 //
 // The policy ENGINE (independently fetched, SHA-bound evidence; AND-gate;
 // kill-switch; CAS merge + confirmation) is identical in every mode.
-// The self-test fixtures DERIVE from the config block, so `--self-test` stays
-// meaningful for any filled config — run it after every config change.
+// The self-test fixtures DERIVE from the resolved settings (config.json, else
+// the block), so `--self-test` stays meaningful for any config — run it after
+// every config change.
 //
 // SOLO_OPERATOR transcribes the additional merge.soloOperatorAcknowledged: true
 // consent for a single-identity repository: the one human IS the loop login,
@@ -57,6 +58,7 @@ import {
   CONFIG_VERSION,
   POLICY_TO_MODE,
   PROJECT_CONFIG_FILE,
+  repositoryRoot,
   resolveProjectConfig,
 } from './config-contract.mjs';
 import { finalizeHead } from './delivery-contract.mjs';
@@ -143,23 +145,42 @@ const BLOCK = Object.freeze({
   AUTOMERGE_MODE, LOOP_LOGIN, TRUSTED_HUMAN_LOGINS, SOLO_OPERATOR,
 });
 
+// A block setup filled (not the placeholder) is policy a human chose. When
+// config.json takes over, every protected path must survive and the
+// reversible class must not change, or the move silently widens auto-merge.
+function blockConflicts(block, protectedPaths, reversiblePaths) {
+  if (block.REPOSITORY.owner === 'your-org') return [];
+  const problems = [];
+  const lost = block.EXTRA_PROTECTED_PATHS.filter((glob) => !protectedPaths.includes(glob));
+  if (lost.length > 0) problems.push(`protectedPaths is missing the filled block's ${lost.join(', ')}`);
+  if (JSON.stringify(block.REVERSIBLE_PATHS) !== JSON.stringify(reversiblePaths)) {
+    problems.push(`merge.reversiblePaths must equal the filled block's ${JSON.stringify(block.REVERSIBLE_PATHS)}`);
+  }
+  return problems;
+}
+
 // `repository` null means the lookup failed; undefined means it was never
 // made because the config already refuses.
-export function settingsFromConfig(config, repository) {
+export function settingsFromConfig(config, repository, block = BLOCK) {
   const merge = config.merge ?? {};
   const loopLogin = typeof merge.loopLogin === 'string' ? merge.loopLogin : null;
+  const protectedPaths = config.protectedPaths ?? [];
+  const reversiblePaths = merge.reversiblePaths ?? ['docs/**'];
   const problems = [];
   if (POLICY_TO_MODE[merge.policy] === undefined) problems.push(`merge.policy is "${merge.policy}", so nothing auto-merges`);
+  // authorizeMerge refuses non-solo too, but only after the GitHub read.
+  if (merge.soloOperatorAcknowledged !== true) problems.push('merge.soloOperatorAcknowledged is not true, and non-solo is retired');
   if (loopLogin === null) problems.push('merge.loopLogin is not set, so loop ownership cannot be proven');
+  problems.push(...blockConflicts(block, protectedPaths, reversiblePaths));
   if (repository === null) problems.push('the repository could not be read from `gh repo view`');
   return {
     source: PROJECT_CONFIG_FILE,
-    REPOSITORY: repository ?? BLOCK.REPOSITORY,
+    REPOSITORY: repository ?? block.REPOSITORY,
     BASE_BRANCH: config.baseBranch,
-    REVERSIBLE_PATHS: merge.reversiblePaths ?? ['docs/**'],
-    EXTRA_PROTECTED_PATHS: config.protectedPaths ?? [],
-    AUTOMERGE_MODE: POLICY_TO_MODE[merge.policy] ?? BLOCK.AUTOMERGE_MODE,
-    LOOP_LOGIN: loopLogin ?? BLOCK.LOOP_LOGIN,
+    REVERSIBLE_PATHS: reversiblePaths,
+    EXTRA_PROTECTED_PATHS: protectedPaths,
+    AUTOMERGE_MODE: POLICY_TO_MODE[merge.policy] ?? block.AUTOMERGE_MODE,
+    LOOP_LOGIN: loopLogin ?? block.LOOP_LOGIN,
     // Non-solo is retired: the one trusted human is the loop login.
     TRUSTED_HUMAN_LOGINS: loopLogin === null ? [] : [loopLogin],
     SOLO_OPERATOR: merge.soloOperatorAcknowledged === true,
@@ -167,10 +188,13 @@ export function settingsFromConfig(config, repository) {
   };
 }
 
+// The repository the checkout's remotes name. GH_REPO and GH_HOST are dropped
+// so an ambient override can never choose the merge target.
 function ghRepository(root) {
+  const { GH_REPO: ignoredRepo, GH_HOST: ignoredHost, ...env } = process.env;
   try {
     const view = JSON.parse(execFileSync('gh', ['repo', 'view', '--json', 'owner,name'], {
-      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000,
+      cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000,
     }));
     const owner = view?.owner?.login;
     return typeof owner === 'string' && typeof view?.name === 'string' ? { owner, name: view.name } : null;
@@ -187,16 +211,6 @@ export function repoSettings(root, lookupRepository = ghRepository) {
   }
   const preflight = settingsFromConfig(resolved.config, undefined);
   return preflight.error === null ? settingsFromConfig(resolved.config, lookupRepository(root)) : preflight;
-}
-
-function repositoryRoot() {
-  try {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000,
-    }).trim();
-  } catch {
-    return process.cwd();
-  }
 }
 
 export const REPO = repoSettings(repositoryRoot());
@@ -1446,9 +1460,9 @@ function normalizedCheckRun(checkRun) {
   };
 }
 
-// The vendored REPO CONFIG block transcribed into the gate's config shape.
-// Self-test fixtures override toward the solo shape (the only one the gate
-// accepts); the live path always uses the vendored constants.
+// The resolved repository settings (REPO) transcribed into the gate's config
+// shape. Self-test fixtures override toward the solo shape (the only one the
+// gate accepts); the live path always uses REPO unchanged.
 export function engineConfig(overrides = {}) {
   return {
     repository: REPO.REPOSITORY,
@@ -1825,7 +1839,7 @@ export function run(inputs, {
   }
 }
 
-// ── Self-test fixtures DERIVE from the config block so they stay valid for any
+// ── Self-test fixtures DERIVE from the resolved settings so they stay valid for any
 // filled config, with one forced override: authorizeMerge accepts only the solo
 // shape, so fixture runs use SELF_TEST_CONFIG (solo over the vendored block) and
 // a dedicated fixture pins the non-solo refusal.
@@ -3025,6 +3039,20 @@ function configSettingsCases() {
   const auto = settingsFromConfig(config({ policy: 'auto' }, { protectedPaths: ['spec/**'] }), repository);
   const ratified = settingsFromConfig(config({ policy: 'ratified', reversiblePaths: ['guides/**'] }), repository);
   const refusal = (cfg, repo = repository) => settingsFromConfig(cfg, repo).error ?? '';
+  const unacknowledged = settingsFromConfig({ ...config({}), merge: { policy: 'auto', loopLogin: 'loop-user' } }, repository);
+  const nonSolo = authorizeMerge({
+    config: engineConfig({
+      repository, loopLogin: 'loop-user', trustedHumanLogins: unacknowledged.TRUSTED_HUMAN_LOGINS,
+      soloOperator: unacknowledged.SOLO_OPERATOR, mergePolicy: 'auto',
+    }),
+    pr: makeInput(),
+  });
+  // A repository moving from a filled block to config.json must carry the
+  // block's policy over, or the move silently widens what auto-merges.
+  const filled = { ...BLOCK, REPOSITORY: { owner: 'acme', name: 'app' }, EXTRA_PROTECTED_PATHS: ['spec/**'], REVERSIBLE_PATHS: [] };
+  const dropped = settingsFromConfig(config({ policy: 'auto' }), repository, filled).error ?? '';
+  const carried = settingsFromConfig(
+    config({ policy: 'auto', reversiblePaths: [] }, { protectedPaths: ['spec/**', 'infra/**'] }), repository, filled);
   const scratch = mkdtempSync(join(tmpdir(), 'auto-merge-config-'));
   try {
     execFileSync('git', ['init', '-q', scratch]);
@@ -3037,6 +3065,22 @@ function configSettingsCases() {
     mkdirSync(join(scratch, '.autoloop'));
     writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify(config({ policy: 'auto' })));
     const configured = repoSettings(scratch, lookup);
+    // A legacy STATE block is never the executor's config: the filled block decides.
+    const legacy = mkdtempSync(join(tmpdir(), 'auto-merge-legacy-'));
+    mkdirSync(join(legacy, 'docs', 'agentic'), { recursive: true });
+    writeFileSync(join(legacy, 'docs', 'agentic', 'STATE.md'),
+      `\`\`\`json autoloop-config\n${JSON.stringify(config({ policy: 'auto' }))}\n\`\`\`\n`);
+    const fromState = repoSettings(legacy, lookup);
+    rmSync(legacy, { recursive: true, force: true });
+    // The engine's own fixtures, run under a config's protectedPaths: the
+    // configured jewel must veto an all-green merge like a block one did.
+    const child = process.env.AUTOLOOP_MERGE_CONFIG_CHILD === '1' ? null : (() => {
+      writeFileSync(join(scratch, '.autoloop', 'config.json'),
+        JSON.stringify(config({ policy: 'auto' }, { protectedPaths: ['spec/**'] })));
+      return spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--self-test'], {
+        cwd: scratch, encoding: 'utf8', env: { ...process.env, AUTOLOOP_MERGE_CONFIG_CHILD: '1' },
+      });
+    })();
     writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify({ ...config({}), merge: { policy: 'manual' } }));
     const manual = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '5', '--dry-run'], {
       cwd: scratch, encoding: 'utf8',
@@ -3063,10 +3107,28 @@ function configSettingsCases() {
           && refusal(config({ policy: 'auto' }), null).includes('repository'),
       },
       {
-        name: 'config: without config.json the filled block decides, and git is never asked',
+        name: 'config: without config.json the filled block decides, and gh is never asked',
         ok: unconfigured.source === 'block' && unconfigured.LOOP_LOGIN === BLOCK.LOOP_LOGIN
           && unconfigured.AUTOMERGE_MODE === BLOCK.AUTOMERGE_MODE && configured.source === '.autoloop/config.json'
           && configured.LOOP_LOGIN === 'loop-user' && lookups.length === 1,
+      },
+      {
+        name: 'config: without both acknowledgements the settings are non-solo, refused before any read and by the gate',
+        ok: unacknowledged.SOLO_OPERATOR === false && unacknowledged.error?.includes('merge.soloOperatorAcknowledged')
+          && nonSolo.allow === false,
+      },
+      {
+        name: 'config: a filled block\'s protected or reversible paths missing from config refuse',
+        ok: dropped.includes('spec/**') && dropped.includes('merge.reversiblePaths') && carried.error === null
+          && settingsFromConfig(config({ policy: 'auto' }), repository).error === null,
+      },
+      {
+        name: 'config: a legacy STATE block leaves the filled block deciding',
+        ok: fromState.source === 'block' && fromState.LOOP_LOGIN === BLOCK.LOOP_LOGIN,
+      },
+      {
+        name: 'config: the engine fixtures pass under a configured protectedPaths, including its veto',
+        ok: child === null || (child.status === 0 && child.stdout.includes('PASS extra-protected spec/**')),
       },
       {
         name: 'config: a refused config exits 1 naming the reason before any GitHub read',
@@ -3081,6 +3143,8 @@ function configSettingsCases() {
 function selfTest() {
   let passed = 0;
   let failed = 0;
+  // The fixtures run on the resolved settings either way; a live merge would refuse.
+  if (REPO.error !== null) console.log(`NOTE live merges refuse: ${REPO.error}`);
   for (const check of [
     ...statusStampCases(),
     ...prCommitMetadataCases(),

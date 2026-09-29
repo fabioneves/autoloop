@@ -91,8 +91,14 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
     non-manual policy. There is no `merge.trustedHumans`: non-solo is retired, so the one trusted
     human is the loop login;
   - the executor refuses (exit 1, before any GitHub read) when `config.json` is present but its
-    policy is manual, `loopLogin` is unset, or the repository can't be read; it never falls back to
-    the filled block;
+    policy is manual, it lacks `soloOperatorAcknowledged`, `loopLogin` is unset, or the repository
+    can't be read; it never falls back to the filled block;
+  - moving from a filled block to `config.json` must carry the block's policy over: the executor
+    refuses while `protectedPaths` lacks any of the block's `EXTRA_PROTECTED_PATHS`, or
+    `merge.reversiblePaths` (default `["docs/**"]`) differs from its `REVERSIBLE_PATHS`;
+  - globs use only `*` and `**`, the only metacharacters the matchers support; `spec` names a file,
+    `spec/**` the directory;
+  - the repository comes from `gh repo view` with `GH_REPO` and `GH_HOST` dropped;
   - `AUTOMERGE_MODE` stays derived from `merge.policy` (`auto` → `all-green`, `ratified` →
     `classified`), never stored;
   - `REPOSITORY` comes from `git remote` / `gh repo view`, never stored.
@@ -167,6 +173,10 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
 - Never: write a project's config during a normal run; commit anything of the tool to a project.
 
 ## Open questions
+
+- `escalate-paths` reads the worktree's config, so a unit branch forked before a `protectedPaths`
+  change resolves the older list (staleness only: editing `.autoloop/**` escalates). Reading the
+  base's config there follows the "base is the authority" rule; decided with plugin-tools.
 
 - Whether the guard's corpus and regression incidents that anchor vendored-layout behaviour retire
   or re-anchor; decided per incident in plugin-tools.
