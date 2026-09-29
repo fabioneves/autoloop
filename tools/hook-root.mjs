@@ -7,11 +7,9 @@
 // location, which is the plugin directory — and stands down unless the
 // project is a devendored autoloop repository:
 //
-//   - `.autoloop/config.json` is present (or unreadable: the resolver then
-//     refuses, which is the fail-closed outcome), and
-//   - no vendored guard is wired in `.claude/settings.json`. A legacy
-//     repository keeps its vendored hooks until devendor; a second, newer
-//     guard beside them would judge the old layout.
+//   `.autoloop/config.json` is present (or unreadable: the resolver then
+//   refuses, which is the fail-closed outcome). A legacy repository has none,
+//   so its vendored hooks run alone until devendor.
 //
 // This decides only whether a hook acts OUTSIDE an open run. Once prime opened
 // a run (it refuses unless this repository is active), the guards act for the
@@ -22,7 +20,7 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -31,7 +29,6 @@ import { PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
 import { pluginRunBase } from './run-markers.mjs';
 
 const VENDORED_DIR = 'tools/agentic';
-const VENDORED_GUARD = `${VENDORED_DIR}/command-guard.mjs`;
 
 // Every file the plugin ever vendored into tools/agentic/: each name ever under
 // templates/tools (now tools) in this repository's history, plus the executor's installed
@@ -157,17 +154,8 @@ function configPresent(root) {
   }
 }
 
-// A legacy install's wiring: a hook command in the tracked settings running a
-// vendored guard that still exists. Nothing weaker counts — a permission entry,
-// an untracked local settings file or unreadable settings leave the plugin
-// guard on, since two guards are safer than none.
-function vendoredGuardWired(root) {
-  return existsSync(join(root, VENDORED_GUARD))
-    && hookCommands(root, '.claude/settings.json').some((command) => command.includes(VENDORED_GUARD));
-}
-
 export function activeAutoloopRoot(root = hookRoot()) {
-  return configPresent(root) && !vendoredGuardWired(root) ? root : null;
+  return configPresent(root) ? root : null;
 }
 
 // Where a plugin hook acts: the devendored autoloop repository at the project
@@ -203,24 +191,6 @@ function selfTest() {
     writeFileSync(join(repo, '.autoloop', 'config.json'), '{}');
     check('a devendored autoloop repository is active', activeAutoloopRoot(repo) === repo);
     mkdirSync(join(repo, '.claude'));
-    mkdirSync(join(repo, 'tools', 'agentic'), { recursive: true });
-    writeFileSync(join(repo, 'tools', 'agentic', 'command-guard.mjs'), '// vendored');
-    const wiring = { hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: `node "$CLAUDE_PROJECT_DIR/${VENDORED_GUARD}"` }] }] } };
-    writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify(wiring));
-    check('a repository whose vendored guard is still wired is inactive', activeAutoloopRoot(repo) === null);
-    // Only a real hook in the tracked settings, running a guard that exists,
-    // counts: a stray string (a permission entry, a local settings file, a
-    // symlink to notes) must not switch the plugin guard off.
-    writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: [`Bash(node ${VENDORED_GUARD} --self-test)`] } }));
-    writeFileSync(join(repo, '.claude', 'settings.local.json'), JSON.stringify(wiring));
-    check('a permission entry or local settings naming the vendored guard leave the plugin guard active',
-      activeAutoloopRoot(repo) === repo);
-    writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify(wiring));
-    rmSync(join(repo, 'tools'), { recursive: true, force: true });
-    check('wiring whose vendored guard file is gone leaves the plugin guard active',
-      activeAutoloopRoot(repo) === repo);
-    writeFileSync(join(repo, '.claude', 'settings.json'), '{"hooks":{}}');
-    rmSync(join(repo, '.claude', 'settings.local.json'));
     // The one definition of what is left of the vendored layout: shipped
     // files and hooks running them — never a repository's own gate script.
     mkdirSync(join(repo, 'tools', 'agentic', 'briefs'), { recursive: true });

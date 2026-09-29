@@ -31,8 +31,8 @@ reviewer identities never collide. Run Pitcrew first in the same run, then take 
    human divergence — stop and report. Use the base's STATE, not a session injection.
 
 Then one call (validates ProjectConfig, runs one `scan.mjs`, persists the snapshot, prints a
-decision-sized summary). It refuses `NOT_DEVENDORED` in a vendored install, or while a vendored
-guard is still wired: stop with the Setup remedy; never devendor inside a Dev run.
+decision-sized summary). It refuses `NOT_DEVENDORED` in a vendored install: stop with the Setup
+remedy; never devendor inside a Dev run.
 
 ```bash
 node <plugin-tools>/prime.mjs --json

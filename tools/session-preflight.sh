@@ -141,12 +141,9 @@ fi
 run_timed 10 node "$TOOLS_DIR/step.mjs" --card-run 2>/dev/null || true
 
 # 6. The repository's loop policy prose, injected every session.
-for state in "$REPO_DIR/.autoloop/STATE.md" "$REPO_DIR/docs/agentic/STATE.md"; do
-  if [ -f "$state" ]; then
-    echo
-    cat "$state"
-    break
-  fi
-done
+if [ -f "$REPO_DIR/.autoloop/STATE.md" ]; then
+  echo
+  cat "$REPO_DIR/.autoloop/STATE.md"
+fi
 
 exit 0

@@ -15,12 +15,9 @@ import {
   matchHumanAuthorization,
 } from './lane-contract.mjs';
 
-export const ESCALATE_PATHS = [
-  ...HUMAN_AUTHORIZATION_GLOBS,
-  // 'src/auth/**',
-  // 'src/db/schema/**',
-  // 'src/payments/**',
-];
+// The structural families; a repository adds its own through the config's
+// protectedPaths (escalatePathsFor).
+export const ESCALATE_PATHS = HUMAN_AUTHORIZATION_GLOBS;
 
 export { globToRe };
 

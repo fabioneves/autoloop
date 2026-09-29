@@ -545,8 +545,7 @@ export function projectConfigForReview(path) {
   const tail = (count) => segments.slice(-count).join('/');
   let root;
   if (String(path) !== '' && tail(2) === '.autoloop/config.json') root = resolve(path, '..', '..');
-  else if (String(path) !== '' && tail(3) === 'docs/agentic/STATE.md') root = resolve(path, '..', '..', '..');
-  else throw new Error('--state must name <base>/.autoloop/config.json or <base>/docs/agentic/STATE.md');
+  else throw new Error('--state must name <base>/.autoloop/config.json');
   const resolved = resolveProjectConfig(root);
   if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
   return resolved.config;
@@ -1862,20 +1861,18 @@ function selfTest() {
   const reviewConfigCheck = (() => {
     const root = mkdtempSync(join(tmpdir(), 'review-config-'));
     try {
-      mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
-      const statePath = join(root, 'docs', 'agentic', 'STATE.md');
-      writeFileSync(statePath, `\`\`\`json autoloop-config\n${JSON.stringify({ ...chainConfig027 })}\n\`\`\`\n`);
-      const legacy = projectConfigForReview(statePath);
       mkdirSync(join(root, '.autoloop'));
       const jsonPath = join(root, '.autoloop', 'config.json');
+      writeFileSync(jsonPath, JSON.stringify({ ...chainConfig027 }));
+      const migrated = projectConfigForReview(jsonPath);
       writeFileSync(jsonPath, JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'x' } }));
-      return legacy.version === '0.28.0' && legacy.caps === undefined
-        && projectConfigForReview(statePath).baseBranch === 'trunk'
+      mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
+      return migrated.version === '0.28.0' && migrated.caps === undefined
         && projectConfigForReview(jsonPath).baseBranch === 'trunk'
         && projectConfigForReview(jsonPath).merge.policy === 'manual'
         // Beside the real STATE, so a root derived from it WOULD find config.
         // `.autoloop/STATE.md` is prose, and three levels up is the parent.
-        && ['', join(root, 'docs', 'agentic', 'STATE.txt'), join(root, '.autoloop', 'STATE.md'),
+        && ['', join(root, 'docs', 'agentic', 'STATE.md'), join(root, '.autoloop', 'STATE.md'),
           join(root, 'elsewhere', 'config.json')].every((bad) => {
           try {
             projectConfigForReview(bad);

@@ -26,8 +26,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CONFIG_VERSION, DEFAULT_CONFIG, LEGACY_STATE_FILE, PROJECT_CONFIG_FILE, repositoryRoot, resolveProjectConfig,
-  validateConfig,
+  CONFIG_VERSION, DEFAULT_CONFIG, LEGACY_STATE_FILE, PROJECT_CONFIG_FILE, repositoryRoot, resolveLegacyConfig,
+  resolveProjectConfig, validateConfig,
 } from './config-contract.mjs';
 import { runsVendoredTool, vendoredLeftovers } from './hook-root.mjs';
 import { hashValue } from './review-contract.mjs';
@@ -248,8 +248,8 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
   if (existsSync(join(root, PROJECT_CONFIG_FILE))) {
     return refusal('ALREADY_DEVENDORED', `${PROJECT_CONFIG_FILE} already exists`);
   }
-  const legacy = resolveProjectConfig(root);
-  if (legacy === null || legacy.source !== LEGACY_STATE_FILE) {
+  const legacy = resolveLegacyConfig(root);
+  if (legacy === null) {
     return refusal('NOT_LEGACY', `no ${LEGACY_STATE_FILE} config block to convert`);
   }
   if (!legacy.ok) return refusal('LEGACY_CONFIG_INVALID', legacy.errors.join('; '));

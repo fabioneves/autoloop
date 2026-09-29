@@ -446,32 +446,14 @@ export function runSmokeSteps({
       };
     }
     // The edit guard, run from the plugin, finds the repository from
-    // CLAUDE_PROJECT_DIR. Once a run is open it never stands down: wiring a
-    // vendored guard mid-run (which would otherwise hand the repository to
-    // that guard) must not switch it off.
+    // CLAUDE_PROJECT_DIR and refuses a hook-wiring edit while the run is open.
     const editGuard = tool('edit-guard.mjs');
     const wiringEdit = JSON.stringify({ tool_name: 'Edit', tool_input: { file_path: join(root, '.claude', 'settings.json') } });
     const editOptions = { root, stepTimeoutMs, input: wiringEdit, environment: { ...environment, CLAUDE_PROJECT_DIR: root } };
     const editBlocked = runTool('edit-guard.mjs (run open)', [editGuard], editOptions);
-    // A legacy install's wiring: a tracked hook running a vendored guard that
-    // exists. Outside a run that hands the repository to the vendored guard.
-    const legacyWiring = join(root, '.claude', 'settings.json');
-    const legacyGuard = join(root, 'tools', 'agentic', 'command-guard.mjs');
-    mkdirSync(dirname(legacyWiring), { recursive: true });
-    mkdirSync(dirname(legacyGuard), { recursive: true });
-    writeFileSync(legacyGuard, '// vendored\n');
-    writeFileSync(legacyWiring, '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node tools/agentic/command-guard.mjs"}]}]}}');
-    const editWired = runTool('edit-guard.mjs (vendored guard wired mid-run)', [editGuard], editOptions);
-    rmSync(legacyWiring, { force: true });
-    rmSync(join(root, 'tools'), { recursive: true, force: true });
     if (!editBlocked.ok) return editBlocked;
-    if (!editWired.ok) return editWired;
-    if (editBlocked.status !== 2 || editWired.status !== 2) {
-      return {
-        ok: false,
-        detail: `edit guard exited ${editBlocked.status} in the repository and ${editWired.status} `
-          + 'with a vendored guard wired mid-run, expected 2 and 2',
-      };
+    if (editBlocked.status !== 2) {
+      return { ok: false, detail: `edit guard exited ${editBlocked.status} on a hook-wiring edit while the run was open, expected 2` };
     }
     rmSync(outcome.runMarker, { force: true });
     const standDown = runTool(
@@ -486,7 +468,7 @@ export function runSmokeSteps({
         detail: `guard exited ${standDown.status} after the run closed, expected 0`,
       };
     }
-    return { ok: true, detail: 'merge and hook-wiring edit blocked while open; guards stand down when closed or not devendored' };
+    return { ok: true, detail: 'merge and hook-wiring edit blocked while open; guards stand down when closed' };
   });
 
   return outcome;
