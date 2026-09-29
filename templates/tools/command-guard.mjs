@@ -2641,6 +2641,14 @@ export function ownRunMarkers(cwd = process.cwd()) {
   return markers;
 }
 
+// The base the open run was primed against, for a checkout that no longer
+// resolves its own config (prime records it in the marker).
+export function runBaseBranch(cwd = process.cwd()) {
+  const base = ownRunMarkers(cwd).map(({ marker }) => marker.baseBranch).find((value) => typeof value === 'string');
+  if (base === undefined) throw new Error('the open run recorded no base branch and this checkout has no autoloop config');
+  return base;
+}
+
 export function loopRunIsOpen(cwd = process.cwd()) {
   return ownRunMarkers(cwd).length > 0;
 }
@@ -3676,6 +3684,22 @@ function selfTest() {
         console.error(`FAIL [the guard stands down outside an autoloop repository and acts inside one]: ${unrelated} ${active}`);
         ok = false;
       }
+      // Security review of the cutover: once a run is open the guard never
+      // stands down. Deleting the config (or checking out a branch forked
+      // before devendor) leaves the run's own marker, and its base, in charge.
+      execFileSync('git', ['init', '-q', scratch]);
+      const markers = runMarkerDirectory(scratch);
+      mkdirSync(markers, { recursive: true });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
+      const merge = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      if (merge.status !== 2 || !merge.stderr.includes('autoloop guard')) {
+        console.error(`FAIL [an open run keeps the guard on after its config is removed]: ${merge.status} ${merge.stderr}`);
+        ok = false;
+      }
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -3853,10 +3877,12 @@ function main() {
     );
   }
   if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
-  // Plugin hooks fire in every repository; this one guards only a devendored
-  // autoloop repository (hook-root.mjs), before reading anything.
+  // Plugin hooks fire in every repository; outside an open run this one guards
+  // only a devendored autoloop repository (hook-root.mjs), before reading
+  // anything. Inside an open run it never stands down: the run's marker is the
+  // authority, whatever the checkout now says.
   const root = activeAutoloopRoot(parsed.root ?? hookRoot());
-  if (root === null) process.exit(0);
+  if (root === null && !loopRunIsOpen()) process.exit(0);
 
   let payload;
   try {
@@ -3894,7 +3920,7 @@ function main() {
 
   let baseBranch;
   try {
-    baseBranch = loadConfiguredBase(root);
+    baseBranch = root !== null ? loadConfiguredBase(root) : runBaseBranch();
   } catch (error) {
     refuse(
       `autoloop guard — the configured base branch cannot be resolved (${error.message}), `

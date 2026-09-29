@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\" || { [ -e \"$CLAUDE_PROJECT_DIR/.autoloop/config.json\" ] && exit 2; exit 0; }",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; r=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --show-toplevel 2>/dev/null || printf %s \"$CLAUDE_PROJECT_DIR\"); { [ -e \"$r/.autoloop\" ] || [ -L \"$r/.autoloop\" ]; } && exit 2; exit 0",
             "timeout": 15
           }
         ]

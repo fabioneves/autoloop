@@ -20,8 +20,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loopRunIsLive } from './command-guard.mjs';
-import { activeAutoloopRoot } from './hook-root.mjs';
+import { loopRunIsOpen } from './command-guard.mjs';
+import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 
 const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);
@@ -97,9 +97,11 @@ function selfTest() {
 
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  // Plugin hooks fire in every repository; this one guards only a devendored
-  // autoloop repository, found from CLAUDE_PROJECT_DIR (hook-root.mjs).
-  const repoRoot = activeAutoloopRoot();
+  // Plugin hooks fire in every repository; outside an open run this one guards
+  // only a devendored autoloop repository, found from CLAUDE_PROJECT_DIR
+  // (hook-root.mjs). Inside an open run it never stands down.
+  const open = loopRunIsOpen();
+  const repoRoot = activeAutoloopRoot() ?? (open ? hookRoot() : null);
   if (repoRoot === null) process.exit(0);
   let payload;
   try {
@@ -111,7 +113,7 @@ function main() {
   const problem = hookWiringEditProblem(
     payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path,
     repoRoot,
-    loopRunIsLive(),
+    open,
   );
   if (problem !== null) {
     console.error(problem);

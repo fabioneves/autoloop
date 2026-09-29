@@ -9,6 +9,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -79,7 +80,12 @@ export const PLUGIN_HOOKS = Object.freeze([
     name: 'command-guard.mjs',
     event: 'PreToolUse',
     matcher: 'Bash|AskUserQuestion',
-    command: `node "${PLUGIN_TOOLS}/command-guard.mjs" || { [ -e "$CLAUDE_PROJECT_DIR/.autoloop/config.json" ] && exit 2; exit 0; }`,
+    // The guard's own verdict (0 or 2) is final. Anything else is a crash: it
+    // refuses where the project's top level has any .autoloop entry (a
+    // symlink or unreadable directory included, as the resolver treats them).
+    command: `node "${PLUGIN_TOOLS}/command-guard.mjs"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; `
+      + 'r=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || printf %s "$CLAUDE_PROJECT_DIR"); '
+      + '{ [ -e "$r/.autoloop" ] || [ -L "$r/.autoloop" ]; } && exit 2; exit 0',
   },
   { name: 'label-swap-reminder.mjs', event: 'PostToolUse', matcher: 'Bash', command: `node "${PLUGIN_TOOLS}/label-swap-reminder.mjs"` },
   { name: 'subagent-transcript.mjs', event: 'SubagentStop', matcher: null, command: `node "${PLUGIN_TOOLS}/subagent-transcript.mjs"` },
@@ -496,17 +502,32 @@ function selfTest() {
   const crashRoot = mkdtempSync(join(tmpdir(), 'autoloop-hook-crash-'));
   let crashInside;
   let crashOutside;
+  let refusalKept;
+  let crashBesideDanglingConfig;
+  let crashInSubdirectory;
   try {
-    mkdirSync(join(crashRoot, 'plugin', 'templates', 'tools'), { recursive: true });
-    writeFileSync(join(crashRoot, 'plugin', 'templates', 'tools', 'command-guard.mjs'), 'process.exit(1);\n');
+    const stub = join(crashRoot, 'plugin', 'templates', 'tools', 'command-guard.mjs');
+    mkdirSync(dirname(stub), { recursive: true });
     mkdirSync(join(crashRoot, 'project', '.autoloop'), { recursive: true });
     writeFileSync(join(crashRoot, 'project', '.autoloop', 'config.json'), '{}');
+    mkdirSync(join(crashRoot, 'project', 'sub'));
+    spawnSync('git', ['init', '-q', join(crashRoot, 'project')]);
     mkdirSync(join(crashRoot, 'elsewhere'));
-    const crash = (project) => spawnSync('bash', ['-c', guardEntry.command], {
-      env: { ...process.env, CLAUDE_PLUGIN_ROOT: join(crashRoot, 'plugin'), CLAUDE_PROJECT_DIR: join(crashRoot, project) },
-    }).status;
-    crashInside = crash('project');
-    crashOutside = crash('elsewhere');
+    mkdirSync(join(crashRoot, 'dangling'));
+    symlinkSync(join(crashRoot, 'nowhere'), join(crashRoot, 'dangling', '.autoloop'));
+    const guardExits = (code, project) => {
+      writeFileSync(stub, `process.exit(${code});\n`);
+      return spawnSync('sh', ['-c', guardEntry.command], {
+        env: { ...process.env, CLAUDE_PLUGIN_ROOT: join(crashRoot, 'plugin'), CLAUDE_PROJECT_DIR: join(crashRoot, project) },
+      }).status;
+    };
+    crashInside = guardExits(1, 'project');
+    crashOutside = guardExits(1, 'elsewhere');
+    // The guard's own refusal is final wherever it happens; a crash beside a
+    // config the shell cannot follow (a dangling symlink) still refuses.
+    refusalKept = guardExits(2, 'elsewhere') === 2 && guardExits(0, 'project') === 0;
+    crashBesideDanglingConfig = guardExits(1, 'dangling');
+    crashInSubdirectory = guardExits(1, 'project/sub');
   } finally {
     rmSync(crashRoot, { recursive: true, force: true });
   }
@@ -527,6 +548,9 @@ function selfTest() {
       pluginProblems(pluginHookDocument(withGuard('node "$CLAUDE_PROJECT_DIR/tools/agentic/command-guard.mjs" || exit 2'))).length > 0],
     ['a crashed plugin guard refuses in an autoloop repository and allows elsewhere',
       crashInside === 2 && crashOutside === 0],
+    ['the guard\'s own refusal is never turned into an allow', refusalKept],
+    ['a crash beside an unfollowable .autoloop still refuses', crashBesideDanglingConfig === 2],
+    ['a crash in a session started in a subdirectory still refuses', crashInSubdirectory === 2],
     // 0.56.0: a skill loads whole into the session that invokes it and again
     // after every compaction (LFE: the dev skill added ~50k tokens to a 70k
     // floor, re-read on every one of 69 calls). A skill never grows silently.

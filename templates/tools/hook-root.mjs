@@ -13,23 +13,29 @@
 //     repository keeps its vendored hooks until devendor; a second, newer
 //     guard beside them would judge the old layout.
 //
+// This decides only whether a hook acts OUTSIDE an open run. Once prime opened
+// a run (it refuses unless this repository is active), the guards act for the
+// rest of the run whatever the checkout later says: a deleted config or a
+// checked-out pre-devendor branch must not switch them off.
+//
 //   node <plugin-tools>/hook-root.mjs --active     (shell hooks: root, or exit 1)
 //   node <plugin-tools>/hook-root.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
 
 const VENDORED_GUARD = 'tools/agentic/command-guard.mjs';
-const SETTINGS_FILES = ['.claude/settings.json', '.claude/settings.local.json'];
 
 export function hookRoot(env = process.env, cwd = process.cwd()) {
-  return typeof env.CLAUDE_PROJECT_DIR === 'string' && env.CLAUDE_PROJECT_DIR !== ''
+  return repositoryRoot(typeof env.CLAUDE_PROJECT_DIR === 'string' && env.CLAUDE_PROJECT_DIR !== ''
     ? resolve(env.CLAUDE_PROJECT_DIR)
-    : repositoryRoot(cwd);
+    : cwd);
 }
 
 // Only a missing file is absent (the resolver's rule): an inaccessible
@@ -43,16 +49,21 @@ function configPresent(root) {
   }
 }
 
-// A settings file that cannot be read is not a wired guard: two guards are
-// safer than none.
+// A legacy install's wiring: a hook command in the tracked settings running a
+// vendored guard that still exists. Nothing weaker counts — a permission entry,
+// an untracked local settings file or unreadable settings leave the plugin
+// guard on, since two guards are safer than none.
 function vendoredGuardWired(root) {
-  return SETTINGS_FILES.some((file) => {
-    try {
-      return readFileSync(join(root, file), 'utf8').includes(VENDORED_GUARD);
-    } catch {
-      return false;
-    }
-  });
+  if (!existsSync(join(root, VENDORED_GUARD))) return false;
+  let document;
+  try {
+    document = JSON.parse(readFileSync(join(root, '.claude', 'settings.json'), 'utf8'));
+  } catch {
+    return false;
+  }
+  return Object.values(document?.hooks ?? {}).some((groups) => (Array.isArray(groups) ? groups : [])
+    .some((group) => (Array.isArray(group?.hooks) ? group.hooks : [])
+      .some((handler) => String(handler?.command ?? '').includes(VENDORED_GUARD))));
 }
 
 export function activeAutoloopRoot(root = hookRoot()) {
@@ -73,6 +84,10 @@ function selfTest() {
     spawnSync('git', ['init', '-q', repo]);
     check('CLAUDE_PROJECT_DIR is the root, whatever the cwd',
       hookRoot({ CLAUDE_PROJECT_DIR: repo }, join(repo, 'src', 'deep')) === repo);
+    // A session started in a subdirectory still guards the repository prime
+    // opened its run in.
+    check('CLAUDE_PROJECT_DIR in a subdirectory resolves to its git top level',
+      hookRoot({ CLAUDE_PROJECT_DIR: join(repo, 'src', 'deep') }, scratch) === repo);
     check('without CLAUDE_PROJECT_DIR, a subdirectory cwd resolves to the git top level',
       hookRoot({}, join(repo, 'src', 'deep')) === repo);
     check('an unrelated repository is inactive', activeAutoloopRoot(repo) === null);
@@ -80,14 +95,24 @@ function selfTest() {
     writeFileSync(join(repo, '.autoloop', 'config.json'), '{}');
     check('a devendored autoloop repository is active', activeAutoloopRoot(repo) === repo);
     mkdirSync(join(repo, '.claude'));
-    writeFileSync(join(repo, '.claude', 'settings.json'),
-      JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: `node "$CLAUDE_PROJECT_DIR/${VENDORED_GUARD}"` }] }] } }));
-    check('a repository whose vendored guard is still wired is inactive', activeAutoloopRoot(repo) === null);
-    writeFileSync(join(repo, '.claude', 'settings.json'), '{"hooks":{}}');
     mkdirSync(join(repo, 'tools', 'agentic'), { recursive: true });
-    writeFileSync(join(repo, 'tools', 'agentic', 'command-guard.mjs'), '// leftover');
-    check('a leftover vendored file without its wiring leaves the plugin guard active',
+    writeFileSync(join(repo, 'tools', 'agentic', 'command-guard.mjs'), '// vendored');
+    const wiring = { hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: `node "$CLAUDE_PROJECT_DIR/${VENDORED_GUARD}"` }] }] } };
+    writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify(wiring));
+    check('a repository whose vendored guard is still wired is inactive', activeAutoloopRoot(repo) === null);
+    // Only a real hook in the tracked settings, running a guard that exists,
+    // counts: a stray string (a permission entry, a local settings file, a
+    // symlink to notes) must not switch the plugin guard off.
+    writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: [`Bash(node ${VENDORED_GUARD} --self-test)`] } }));
+    writeFileSync(join(repo, '.claude', 'settings.local.json'), JSON.stringify(wiring));
+    check('a permission entry or local settings naming the vendored guard leave the plugin guard active',
       activeAutoloopRoot(repo) === repo);
+    writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify(wiring));
+    rmSync(join(repo, 'tools'), { recursive: true, force: true });
+    check('wiring whose vendored guard file is gone leaves the plugin guard active',
+      activeAutoloopRoot(repo) === repo);
+    writeFileSync(join(repo, '.claude', 'settings.json'), '{"hooks":{}}');
+    rmSync(join(repo, '.claude', 'settings.local.json'));
     // The shell hooks ask the same question through the CLI.
     const cli = (dir) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--active'], {
       encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: dir },

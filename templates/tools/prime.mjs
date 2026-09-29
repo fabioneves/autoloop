@@ -180,7 +180,7 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
 
   const base = baseSyncFacts(root, config.baseBranch);
   clearRunParks(root);
-  const runMarker = writeRunMarker(root);
+  const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });
@@ -270,7 +270,10 @@ export function configSummary(config, root = null) {
 // evidence: the ancestry prime observed, written durably, matched against the
 // guard hook's own ancestry. It needs no revocation — a run whose orchestrator
 // has exited leaves no live PID to match.
-export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now()) {
+// `baseBranch` lets the guards keep enforcing the run's base even if the
+// checkout later stops resolving its own config (a deleted .autoloop, a
+// branch forked before devendor): the open run, not the checkout, decides.
+export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now(), baseBranch = null) {
   const directory = runMarkerDirectory(root);
   if (directory === null) return null;
   const live = [...new Set(pids)].filter(
@@ -280,7 +283,7 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, `${process.pid}.json`);
   // openedAtMs: status views (step.mjs) list only units this run touched.
-  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, openedAtMs: nowMs })}\n`);
+  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, openedAtMs: nowMs, baseBranch })}\n`);
   return path;
 }
 
@@ -775,10 +778,13 @@ function selfTest() {
         const good = readPrimeConfig(root);
         // A run opens only where the plugin's hooks guard the repository.
         mkdirSync(join(root, '.claude'));
+        mkdirSync(join(root, 'tools', 'agentic'), { recursive: true });
+        writeFileSync(join(root, 'tools', 'agentic', 'command-guard.mjs'), '// vendored\n');
         writeFileSync(join(root, '.claude', 'settings.json'),
           '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node tools/agentic/command-guard.mjs"}]}]}}');
         const wired = readPrimeConfig(root);
         rmSync(join(root, '.claude'), { recursive: true, force: true });
+        rmSync(join(root, 'tools'), { recursive: true, force: true });
         rmSync(join(root, '.autoloop'), { recursive: true, force: true });
         mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
         writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'),
@@ -871,11 +877,13 @@ function selfTest() {
       && missingConfig.error.code === 'PROJECT_CONFIG_UNREADABLE',
     );
 
-    const markerPath = writeRunMarker(root, [process.ppid]);
+    const markerPath = writeRunMarker(root, [process.ppid], Date.now(), 'trunk');
     check(
       'prime writes a run marker that opens the command guard for this ancestry',
       typeof markerPath === 'string'
       && JSON.parse(readFileSync(markerPath, 'utf8')).version === 1
+      // The guards enforce the run's base even if the checkout stops resolving its config.
+      && JSON.parse(readFileSync(markerPath, 'utf8')).baseBranch === 'trunk'
       // The run's start, so status views drop units an earlier run left open.
       && Number.isSafeInteger(JSON.parse(readFileSync(markerPath, 'utf8')).openedAtMs)
       && (process.platform !== 'linux' || loopRunIsOpen(root) === true),

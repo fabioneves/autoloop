@@ -879,7 +879,9 @@ function gateCases() {
 
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  if (activeAutoloopRoot(ROOT) === null) process.exit(0);
+  // Outside an open run only a devendored autoloop repository is checked;
+  // inside one the Stop hook never stands down.
+  if (activeAutoloopRoot(ROOT) === null && !loopRunIsOpen(ROOT)) process.exit(0);
 
   // Never re-block a Stop that a previous block already continued.
   try {
