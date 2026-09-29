@@ -42,7 +42,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CONFIG_VERSION, effectiveChecklistPath, PLUGIN_CHECKLIST, resolveProjectConfig,
+  CONFIG_VERSION, effectiveChecklistPath, PLUGIN_CHECKLIST, repositoryRoot, resolveProjectConfig,
 } from './config-contract.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
@@ -803,8 +803,7 @@ export function dispatchContextStamp(cwd, role, readCheckout = checkoutFingerpri
 // prompt author: the repository's own (repository-relative), or the plugin's
 // when the repository keeps none. No readable config → no line.
 function checklistLine(cwd) {
-  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' });
-  const root = top.status === 0 ? top.stdout.trim() : cwd;
+  const root = repositoryRoot(cwd);
   const resolved = resolveProjectConfig(root);
   if (!resolved?.ok) return '';
   const file = effectiveChecklistPath(root, resolved.config);

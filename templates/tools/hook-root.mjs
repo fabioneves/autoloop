@@ -21,17 +21,15 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROJECT_CONFIG_FILE } from './config-contract.mjs';
+import { PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
 
 const VENDORED_GUARD = 'tools/agentic/command-guard.mjs';
 const SETTINGS_FILES = ['.claude/settings.json', '.claude/settings.local.json'];
 
 export function hookRoot(env = process.env, cwd = process.cwd()) {
-  if (typeof env.CLAUDE_PROJECT_DIR === 'string' && env.CLAUDE_PROJECT_DIR !== '') {
-    return resolve(env.CLAUDE_PROJECT_DIR);
-  }
-  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', timeout: 20000 });
-  return top.status === 0 ? top.stdout.trim() : resolve(cwd);
+  return typeof env.CLAUDE_PROJECT_DIR === 'string' && env.CLAUDE_PROJECT_DIR !== ''
+    ? resolve(env.CLAUDE_PROJECT_DIR)
+    : repositoryRoot(cwd);
 }
 
 // Only a missing file is absent (the resolver's rule): an inaccessible

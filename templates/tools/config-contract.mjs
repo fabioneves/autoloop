@@ -535,10 +535,10 @@ function withDefaults(overrides, defaults = DEFAULT_CONFIG) {
   return merged;
 }
 
-// The repository a tool runs in: the git top level, else the working directory.
-export function repositoryRoot() {
-  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 20000 });
-  return top.status === 0 ? top.stdout.trim() : process.cwd();
+// The repository a tool runs in: the git top level, else the directory itself.
+export function repositoryRoot(cwd = process.cwd()) {
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', timeout: 20000 });
+  return top.status === 0 ? top.stdout.trim() : resolve(cwd);
 }
 
 // The one config reader every tool uses: `.autoloop/config.json` completed
