@@ -84,12 +84,13 @@ export const PLUGIN_HOOKS = Object.freeze([
     // The guard's own verdict (0 or 2) is final. Anything else is a crash: it
     // refuses where the project's top level has any .autoloop entry (a
     // symlink or unreadable directory included, as the resolver treats them)
-    // or the repository has a run marker (a pre-devendor branch mid-run).
+    // or the repository has a plugin run marker (one that records its base: a
+    // pre-devendor branch mid-run), never a legacy install's own marker.
     command: `node "${PLUGIN_TOOLS}/command-guard.mjs"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; `
       + 'r=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || printf %s "$CLAUDE_PROJECT_DIR"); '
       + '{ [ -e "$r/.autoloop" ] || [ -L "$r/.autoloop" ]; } && exit 2; '
       + 'c=$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) '
-      + '&& ls "$c"/autoloop/run/*.json >/dev/null 2>&1 && exit 2; exit 0',
+      + '&& grep -qs \'"baseBranch":"\' "$c"/autoloop/run/*.json && exit 2; exit 0',
   },
   { name: 'label-swap-reminder.mjs', event: 'PostToolUse', matcher: 'Bash', command: `node "${PLUGIN_TOOLS}/label-swap-reminder.mjs"` },
   { name: 'subagent-transcript.mjs', event: 'SubagentStop', matcher: null, command: `node "${PLUGIN_TOOLS}/subagent-transcript.mjs"` },
@@ -349,7 +350,7 @@ export const SKILL_BUDGETS = Object.freeze({
   'lean-code': 3909,
   pitcrew: 19813,
   'queue-trace': 6933,
-  setup: 13693,
+  setup: 13888,
   shape: 26690,
 });
 
@@ -543,6 +544,7 @@ function selfTest() {
   let crashBesideDanglingConfig;
   let crashInSubdirectory;
   let crashMidRun;
+  let crashBesideLegacyRun;
   try {
     const stub = join(crashRoot, 'plugin', 'templates', 'tools', 'command-guard.mjs');
     mkdirSync(dirname(stub), { recursive: true });
@@ -570,8 +572,12 @@ function selfTest() {
     // the repository has a run open still refuses.
     mkdirSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run'), { recursive: true });
     spawnSync('git', ['init', '-q', join(crashRoot, 'midrun')]);
-    writeFileSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run', 'run.json'), '{}');
+    writeFileSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run', 'run.json'), '{"version":1,"pids":[1],"baseBranch":"main"}');
     crashMidRun = guardExits(1, 'midrun');
+    // A legacy install's own markers carry no base: a crashing plugin guard
+    // must not refuse commands its vendored guard is still judging.
+    writeFileSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run', 'run.json'), '{"version":1,"pids":[1]}');
+    crashBesideLegacyRun = guardExits(1, 'midrun');
   } finally {
     rmSync(crashRoot, { recursive: true, force: true });
   }
@@ -595,7 +601,8 @@ function selfTest() {
     ['the guard\'s own refusal is never turned into an allow', refusalKept],
     ['a crash beside an unfollowable .autoloop still refuses', crashBesideDanglingConfig === 2],
     ['a crash in a session started in a subdirectory still refuses', crashInSubdirectory === 2],
-    ['a crash while the repository has a run open still refuses', crashMidRun === 2],
+    ['a crash while the repository has a plugin run open still refuses', crashMidRun === 2],
+    ['a crash beside a legacy install\'s own run does not refuse', crashBesideLegacyRun === 0],
     // 0.56.0: a skill loads whole into the session that invokes it and again
     // after every compaction (LFE: the dev skill added ~50k tokens to a 70k
     // floor, re-read on every one of 69 calls). A skill never grows silently.

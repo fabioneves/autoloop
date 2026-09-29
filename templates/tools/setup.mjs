@@ -138,12 +138,16 @@ function vendoredPolicyProblem(root, baseBranch) {
   const base = [`origin/${baseBranch}`, baseBranch]
     .find((ref) => git('rev-parse', '--verify', '--quiet', `${ref}^{commit}`).status === 0);
   if (base === undefined) return refusal('VENDORED_POLICY_NOT_BASE', `the base ${baseBranch} does not resolve here`);
-  return git('diff', '--quiet', base, '--', VENDORED_DIR).status === 0 ? null : refusal('VENDORED_POLICY_NOT_BASE',
-    `${VENDORED_DIR} differs from ${base}: devendor runs only the base's reviewed vendored policy`);
+  const extra = git('status', '--porcelain', '--ignored', '--untracked-files=all', '--', VENDORED_DIR).stdout.trim();
+  const hidden = git('ls-files', '-v', '--', VENDORED_DIR).stdout.split('\n').some((line) => /^(?:S|[a-z]) /u.test(line));
+  return git('diff', '--quiet', base, '--', VENDORED_DIR).status === 0 && extra === '' && !hidden ? null
+    : refusal('VENDORED_POLICY_NOT_BASE', `${VENDORED_DIR} differs from ${base} (changed, untracked or hidden files): `
+      + `devendor runs only the base's reviewed vendored policy — recreate the worktree from ${base}`);
 }
 
 export function readVendoredPolicy(root) {
-  // A minimal environment: the vendored modules need no credentials.
+  // A minimal environment: no tokens or agent sockets. HOME stays (a module
+  // may resolve paths from it), so this narrows exposure rather than removing it.
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', READ_POLICY, join(root, VENDORED_DIR)], {
     cwd: root, encoding: 'utf8', timeout: 30000, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
   });
@@ -552,6 +556,12 @@ async function selfTest() {
     writeFileSync(join(drifted, VENDORED_DIR, 'escalate-paths.mjs'), "export const ESCALATE_PATHS = ['**'];\n");
     check('a worktree whose vendored policy differs from the base refuses before running it',
       devendor(drifted, away).code === 'VENDORED_POLICY_NOT_BASE' && !existsSync(join(drifted, PROJECT_CONFIG_FILE)));
+    const { worktree: untracked } = legacyWorktree('untracked');
+    writeFileSync(join(untracked, VENDORED_DIR, 'auto-merge.extra.mjs'), 'export {};\n');
+    const { worktree: hidden } = legacyWorktree('hidden');
+    git(hidden, 'update-index', '--skip-worktree', `${VENDORED_DIR}/escalate-paths.mjs`);
+    check('an untracked or skip-worktree file under tools/agentic refuses too',
+      devendor(untracked, away).code === 'VENDORED_POLICY_NOT_BASE' && devendor(hidden, away).code === 'VENDORED_POLICY_NOT_BASE');
 
     const fresh = join(scratch, 'fresh');
     mkdirSync(fresh);

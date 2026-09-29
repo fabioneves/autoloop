@@ -173,9 +173,11 @@ this session's hooks and refuses the devendor commit while a run marker exists.
    node <plugin-tools>/setup.mjs --devendor --root <scratch>/devendor
    ```
 
-   Typed refusals name their remedy: `NOT_A_WORKTREE`/`LIVE_CHECKOUT` (use the worktree above),
-   `VENDORED_POLICY_NOT_BASE` (the worktree's `tools/agentic/` differs from the base),
-   `GATE_USES_VENDORED_TOOL` (point the gate at a repository script first).
+   Refusals, each with its remedy: `NOT_A_WORKTREE`/`LIVE_CHECKOUT` — use the worktree above;
+   `VENDORED_POLICY_NOT_BASE` — recreate it from `origin/<base>`; `GATE_USES_VENDORED_TOOL` —
+   point the gate at a repository script first; `SYMLINKED_PATH`, `SETTINGS_UNREADABLE` — the human
+   fixes the named path; `ALREADY_DEVENDORED` — run the doctor instead; `VENDORED_POLICY_UNREADABLE`,
+   `DEVENDOR_ROUNDTRIP` — stop and report verbatim.
 
    It writes `.autoloop/config.json` (overrides only) from the legacy config, the vendored
    escalate paths and the filled merge executor, read as JavaScript; moves the STATE prose to

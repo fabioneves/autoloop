@@ -24,12 +24,14 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -40,12 +42,13 @@ import {
   loopRunIsLive,
   loopRunIsOpen,
   ownRunMarkers,
+  processAlive,
   runMarkerDirectory,
 } from './command-guard.mjs';
 import {
   effectiveChecklistPath, PLUGIN_CHECKLIST, PROJECT_CONFIG_FILE, resolveProjectConfig,
 } from './config-contract.mjs';
-import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
+import { activeAutoloopRoot } from './hook-root.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
@@ -177,10 +180,9 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   const read = readPrimeConfig(root);
   if (read.error !== undefined) return read;
   const { config } = read;
-  const session = sessionProblem(root);
-  if (session !== null) return session;
 
   const base = baseSyncFacts(root, config.baseBranch);
+  pruneDeadRunMarkers(root);
   clearRunParks(root);
   const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
   // Before the scan, so a unit whose wait just cleared is already eligible in
@@ -340,6 +342,30 @@ export function parkRunMarkers(root = process.cwd(), reason, minutes, now = new 
 // A re-prime is the run waking up: whatever park an earlier marker of this
 // session carries is spent, and leaving it would let a run that parks for 12h,
 // wakes early, and then goes dark read as parked.
+// Markers outlive their sessions; one whose every process is gone evidences
+// nothing, so prime removes it. Without this they accumulate (hundreds in a
+// long-lived repository) and a reused PID could revive a stale one.
+export function pruneDeadRunMarkers(root = process.cwd()) {
+  const directory = runMarkerDirectory(root);
+  if (directory === null || !existsSync(directory)) return [];
+  const pruned = [];
+  for (const name of readdirSync(directory).filter((entry) => entry.endsWith('.json'))) {
+    const path = join(directory, name);
+    let pids;
+    try {
+      pids = JSON.parse(readFileSync(path, 'utf8')).pids;
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(pids) || pids.some((pid) => Number.isSafeInteger(pid) && pid > 1 && processAlive(pid))) continue;
+    try {
+      unlinkSync(path);
+      pruned.push(path);
+    } catch { /* another session's cleanup got there first */ }
+  }
+  return pruned;
+}
+
 export function clearRunParks(root = process.cwd()) {
   for (const { path, marker } of ownRunMarkers(root)) {
     if (marker.park === undefined) continue;
@@ -397,23 +423,6 @@ export function readPrimeConfig(root) {
       : 'a vendored install (docs/agentic/STATE.md): run autoloop:setup to devendor it first');
   }
   return { config: resolved.config };
-}
-
-// The session's project (CLAUDE_PROJECT_DIR, where its hooks act) must be the
-// repository the run opens in: a session started elsewhere would run the
-// loop in one repository while its hooks guard another.
-export function sessionProblem(root, env = process.env) {
-  const project = realpathOrSelf(hookRoot(env, root));
-  return project === realpathOrSelf(root) ? null : failure('config', 'SESSION_NOT_IN_REPOSITORY',
-    `this session's project is ${project}, not ${root}: start the session in the repository`);
-}
-
-function realpathOrSelf(path) {
-  try {
-    return realpathSync(path);
-  } catch {
-    return resolve(path);
-  }
 }
 
 // A full snapshot is hundreds of kilobytes; a model-facing tool result is
@@ -823,13 +832,6 @@ function selfTest() {
     })(),
   );
 
-  check(
-    'a session whose project is another repository never opens a run here',
-    sessionProblem('/r', { CLAUDE_PROJECT_DIR: '/elsewhere' })?.error?.code === 'SESSION_NOT_IN_REPOSITORY'
-      && sessionProblem('/r', { CLAUDE_PROJECT_DIR: '/r' }) === null
-      && sessionProblem('/r', {}) === null,
-  );
-
   // Review of 0.55.5: with `eligible: []` a halt read as a drained queue, and
   // a resumed unit still said "take it first".
   check(
@@ -903,6 +905,15 @@ function selfTest() {
       && missingConfig.error.code === 'PROJECT_CONFIG_UNREADABLE',
     );
 
+    // A marker whose every process is gone is pruned; a live one stays.
+    const markerDir = runMarkerDirectory(root);
+    mkdirSync(markerDir, { recursive: true });
+    writeFileSync(join(markerDir, 'dead.json'), JSON.stringify({ version: 1, pids: [2 ** 30], baseBranch: 'trunk' }));
+    writeFileSync(join(markerDir, 'alive.json'), JSON.stringify({ version: 1, pids: [process.pid] }));
+    const pruned = pruneDeadRunMarkers(root);
+    check('prime prunes markers whose processes are all gone, and only those',
+      pruned.length === 1 && pruned[0].endsWith('dead.json') && existsSync(join(markerDir, 'alive.json')));
+    rmSync(join(markerDir, 'alive.json'));
     const markerPath = writeRunMarker(root, [process.ppid], Date.now(), 'trunk');
     check(
       'prime writes a run marker that opens the command guard for this ancestry',

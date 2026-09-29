@@ -2602,7 +2602,7 @@ export function ancestorPids(limit = 64) {
   return ancestorChain(process.ppid, procEntry, limit);
 }
 
-function processAlive(pid) {
+export function processAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -2652,6 +2652,33 @@ export function pluginRunBase(dirs = [process.cwd()]) {
   const base = dirs.flatMap((dir) => ownRunMarkers(dir))
     .map(({ marker }) => marker.baseBranch).find((value) => typeof value === 'string');
   return base ?? null;
+}
+
+// A command that opens a run with prime (not --close-run, --park or
+// --self-test) in a repository other than the session's project. Compared by
+// common git dir, so a linked worktree of the project is the project.
+export function foreignPrimeProblem(command, cwd, projectRoot) {
+  if (typeof command !== 'string' || !/\bprime\.mjs\b/u.test(command)
+    || /--(?:close-run|park|self-test)\b/u.test(command)) return null;
+  const lead = /^\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)\s*&&/u.exec(command);
+  const target = lead === null ? cwd : resolve(cwd, lead[1].replace(/^["']|["']$/gu, ''));
+  const commonDir = (dir) => {
+    const result = spawnSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      encoding: 'utf8', timeout: 10_000,
+    });
+    if (result.status !== 0) return null;
+    try {
+      return realpathSync(result.stdout.trim());
+    } catch {
+      return result.stdout.trim();
+    }
+  };
+  const here = commonDir(target);
+  const project = commonDir(projectRoot);
+  if (here === null || project === null || here === project) return null;
+  return `autoloop guard — this session's project is ${projectRoot}, but prime would open the run in `
+    + `${target}, a different repository: the session's hooks would guard the wrong one. Start a `
+    + 'session in that repository and run the loop there.';
 }
 
 // Where a plugin hook acts: the devendored autoloop repository at the project
@@ -3754,6 +3781,24 @@ function selfTest() {
         console.error(`FAIL [a plugin run keeps every hook acting; a vendored run does not]: ${guarded.status} ${guarded.stdout} ${vendoredRun.status}`);
         ok = false;
       }
+      // Security re-audit (M1): opening a run in a repository other than the
+      // session's project would leave its hooks guarding the wrong one. The
+      // guard (which, unlike Bash, sees CLAUDE_PROJECT_DIR) refuses it —
+      // comparing common git dirs, so a linked worktree of the project passes.
+      const other = mkdtempSync(join(tmpdir(), 'guard-other-'));
+      execFileSync('git', ['init', '-q', other]);
+      const primeFrom = (cwd, command) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', cwd, tool_input: { command } }),
+        encoding: 'utf8', cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: other },
+      });
+      const foreign = primeFrom(scratch, 'node /p/templates/tools/prime.mjs --json');
+      const foreignCd = primeFrom(other, `cd ${scratch} && node /p/templates/tools/prime.mjs --json`);
+      const own = primeFrom(other, 'node /p/templates/tools/prime.mjs --json');
+      rmSync(other, { recursive: true, force: true });
+      if (foreign.status !== 2 || !foreign.stderr.includes('project') || foreignCd.status !== 2 || own.status !== 0) {
+        console.error(`FAIL [prime never opens a run outside the session's project]: ${foreign.status} ${foreignCd.status} ${own.status}`);
+        ok = false;
+      }
       // The hook's cwd is not the only place to look: the project root's run counts.
       const fromTmp = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
         input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
@@ -3967,12 +4012,23 @@ function main() {
   const projectRoot = parsed.root ?? hookRoot();
   const root = activeAutoloopRoot(projectRoot);
   const runBase = pluginRunBase([process.cwd(), projectRoot]);
-  if (root === null && runBase === null) process.exit(0);
 
   let payload;
+  let payloadError = null;
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
   } catch (error) {
+    payloadError = error;
+  }
+  // Checked in every repository, before the stand-down: prime opening a run
+  // anywhere but the session's project would leave the hooks guarding the
+  // wrong repository. Only a hook can check it — Bash never sees
+  // CLAUDE_PROJECT_DIR.
+  const foreign = foreignPrimeProblem(payload?.tool_input?.command, payload?.cwd ?? process.cwd(), projectRoot);
+  if (foreign !== null) refuse(foreign);
+  if (root === null && runBase === null) process.exit(0);
+  if (payloadError !== null) {
+    const error = payloadError;
     refuse(
       `autoloop guard — the hook payload was unreadable (${error.message}), so the command `
       + 'cannot be proven safe. Re-run the command; if this repeats, re-run autoloop:setup '
@@ -4005,14 +4061,10 @@ function main() {
 
   let baseBranch;
   try {
-    // The checkout's config decides; while a plugin run is open, its recorded
-    // base stands in for a config the checkout lacks or cannot read.
-    try {
-      baseBranch = loadConfiguredBase(root ?? projectRoot);
-    } catch (error) {
-      if (runBase === null) throw error;
-      baseBranch = runBase;
-    }
+    // While a plugin run is open its recorded base is the authority, whatever
+    // the checkout now says (a missing, unreadable or different config);
+    // otherwise the checkout's config decides.
+    baseBranch = runBase ?? loadConfiguredBase(root ?? projectRoot);
   } catch (error) {
     refuse(
       `autoloop guard — the configured base branch cannot be resolved (${error.message}), `
