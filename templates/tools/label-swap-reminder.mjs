@@ -13,10 +13,12 @@
 // riders per swap taught a live run to ignore the possible one too.
 // A hook must never break the loop: any parse problem exits 0 with no output.
 
-import { existsSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { relayHookToBase } from './hook-relay.mjs';
+import { activeAutoloopRoot } from './hook-root.mjs';
 
 // Claude Code 2.1.234 removed the task tools outright but only DEFERRED
 // PushNotification; a live run read the visible roster as the whole roster,
@@ -284,16 +286,33 @@ function selfTest() {
     console.error('FAIL: ARCH nudge contradicts the no-freshness-metadata contract');
   }
   if (/ARCH\.md/.test(withoutMap)) { fail++; console.error('FAIL: archMap:false leaked ARCH.md nudge'); }
+  // A plugin hook fires in every repository: it reminds only inside a
+  // devendored autoloop repository, read from CLAUDE_PROJECT_DIR.
+  {
+    const scratch = mkdtempSync(join(tmpdir(), 'label-swap-gate-'));
+    try {
+      const hook = () => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh issue edit 4 --add-label loop-blocked' } }),
+        encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      }).stdout;
+      const unrelated = hook();
+      mkdirSync(join(scratch, '.autoloop'));
+      writeFileSync(join(scratch, '.autoloop', 'config.json'), '{}');
+      const active = hook();
+      if (unrelated !== '' || !/PushNotification/.test(active)) {
+        fail++;
+        console.error('FAIL: the reminder is silent outside an autoloop repository and speaks inside one');
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
   console.log(fail === 0 ? `self-test OK (${cases.length} cases)` : `self-test: ${fail} FAILED`);
   process.exit(fail === 0 ? 0 : 1);
 }
 
 const entry = process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (entry) {
-  // A unit branch forked before a reconcile carries a fossil copy of this
-  // hook; the base branch's copy decides instead. Runs before stdin is
-  // consumed; self-test invocations are exempt inside the relay.
-  relayHookToBase(import.meta.url);
   if (process.argv.includes('--self-test')) selfTest();
   else {
     let raw = '';
@@ -302,7 +321,8 @@ if (entry) {
       try {
         const input = JSON.parse(raw);
         if (input.tool_name !== 'Bash') process.exit(0);
-        const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+        const root = activeAutoloopRoot();
+        if (root === null) process.exit(0);
         const msg = reminderFor(input.tool_input?.command, {
           archMap: existsSync(join(root, 'docs/agentic/ARCH.md')),
         });

@@ -434,7 +434,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
-        anchor: 'const ROOT = process.env.AUTOLOOP_HOOK_ROOT',
+        anchor: 'const ROOT = hookRoot();',
       }),
       Object.freeze({
         file: 'command-guard.mjs',
@@ -446,7 +446,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
-        anchor: 'relayHookToBase(import.meta.url);',
+        anchor: 'const root = activeAutoloopRoot();',
       }),
     ]),
   }),
