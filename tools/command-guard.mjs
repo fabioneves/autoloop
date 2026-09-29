@@ -59,7 +59,7 @@ import {
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import {
-  runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunBases, pluginRunMarkers, ancestorChain, isClaudeProcess,
+  runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
   procEntry, psEntry, commonDirOf, latchDirectory, pruneLatches, recordLatch, sessionLatch,
 } from './run-markers.mjs';
 import { runStateProblem } from './run-state-guard.mjs';
@@ -3785,7 +3785,7 @@ function selfTest() {
       const basesOf = (first, second) => {
         writeFileSync(join(markers, 'm1.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...first }));
         writeFileSync(join(markers, 'm2.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...second }));
-        const bases = pluginRunBases([scratch, scratch]);
+        const bases = [...new Set(pluginRunMarkers([scratch, scratch]).map(({ marker }) => marker.baseBranch))];
         rmSync(join(markers, 'm1.json'));
         rmSync(join(markers, 'm2.json'));
         return JSON.stringify(bases);
@@ -4185,7 +4185,7 @@ function main() {
   // the checkout now says (a missing, unreadable or different config): the
   // latch's pinned one and every open marker's, each enforced, so a forged
   // marker can only add rules. Otherwise the checkout's config decides.
-  let bases = [...new Set([latched?.latch.baseBranch, ...pluginRunBases([process.cwd(), projectRoot])]
+  let bases = [...new Set([latched?.latch.baseBranch, ...markers.map(({ marker }) => marker.baseBranch)]
     .filter((base) => typeof base === 'string'))];
   if (bases.length === 0) {
     try {

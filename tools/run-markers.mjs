@@ -95,12 +95,6 @@ export function pluginRunMarkers(dirs = [process.cwd()]) {
     .sort((left, right) => (left.marker.openedAtMs ?? 0) - (right.marker.openedAtMs ?? 0));
 }
 
-// Every base an open plugin run names. A second marker can only add a base:
-// the guard enforces each, so a forged one never relaxes the rules.
-export function pluginRunBases(dirs = [process.cwd()]) {
-  return [...new Set(pluginRunMarkers(dirs).map(({ marker }) => marker.baseBranch))];
-}
-
 // The session latch: the run's second record, outside the repository. The
 // markers live in the git dir, which the run can reach, and a run that
 // deleted them switched its own guard off (security audit after 0.60.0). The

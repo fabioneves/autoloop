@@ -14,8 +14,9 @@
 //     chmod -R, a copy that lands the same name) may not name an ancestor —
 //     `rm -rf .git` deletes the markers without naming them.
 //
-// Globs are matched segment by segment, literal cd/pushd steps (and subshell
-// scope) are followed, and `~`/$HOME are expanded. Reading the state (cat, jq,
+// Globs are matched segment by segment; literal cd/pushd steps (with subshell
+// scope), `~`/$HOME and literal assignments are followed; command
+// substitutions arrive as segments of their own. Reading the state (cat, jq,
 // ls) stays allowed. The guard runs as the session's own user, so a script
 // file the run writes and then executes can still reach both records; inline
 // interpreter source is refused elsewhere, and the enforcement boundary stays
@@ -47,7 +48,7 @@ const REDIRECT = /^(?:\d*|&)(?:>>?|>\||<>)(.*)$/u;
 // Input redirections, here-docs and here-strings read: `< file` is no operand.
 const INPUT = /^\d*<(?!>)(?:<<|<-?)?(.*)$/u;
 
-export const MAX_TRACKED_WORDS = 20_000;
+const MAX_TRACKED_WORDS = 20_000;
 
 function isAssignment(word) {
   return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word);
@@ -212,9 +213,9 @@ export function runStateProblem(segments, { cwd, protectedDirs, home = homedir()
     if (head === -1 || ['cd', 'pushd', 'popd'].includes(name)) continue;
     const treatment = kind(argv, head);
     if (treatment === 'read') continue;
-    const list = name === 'find' ? findStarts(argv, head + 1) : operands(argv, head + 1);
+    const named = name === 'find' ? findStarts(argv, head + 1) : operands(argv, head + 1);
     const allowed = treatment === 'write' ? ['inside'] : ['inside', 'ancestor'];
-    const candidates = treatment === 'placing' ? list.slice(0, -1) : list;
+    const candidates = treatment === 'placing' ? named.slice(0, -1) : named;
     // A copy or link only reads its sources; a move relocates them.
     const sourceAllowed = treatment !== 'placing' ? allowed
       : name === 'mv' || argv.includes('--remove-source-files') ? ['inside', 'ancestor'] : [];
@@ -222,8 +223,8 @@ export function runStateProblem(segments, { cwd, protectedDirs, home = homedir()
       const hit = judge(word, at, sourceAllowed);
       if (hit !== null) return refusal(hit.path, hit.protectedDir);
     }
-    if (treatment === 'placing' && list.length > 0) {
-      const destination = list.at(-1);
+    if (treatment === 'placing' && named.length > 0) {
+      const destination = named.at(-1);
       const inside = judge(destination, at, ['inside']);
       if (inside !== null) return refusal(inside.path, inside.protectedDir);
       const above = judge(destination, at, ['ancestor']);
@@ -311,9 +312,8 @@ function placeSegments(segments, cwd, home) {
       dir = null;
     }
     // A close with no open seen is a substitution's `)`, not a subshell's.
-    const placedSegment = { argv, head, writes, dir: segmentDir, vars: scope };
     for (let close = 0; close < segment.closes && stack.length > 0; close += 1) dir = stack.pop();
-    return placedSegment;
+    return { argv, head, writes, dir: segmentDir, vars: scope };
   });
 }
 

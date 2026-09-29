@@ -184,12 +184,12 @@ export function repoSettings(root, lookupRepository = ghRepository, readCommitte
   const base = resolved.config.baseBranch;
   const source = `${repository.owner}/${repository.name}@${base}:${PROJECT_CONFIG_FILE}`;
   const text = readCommitted(repository, base);
-  const committed = text === null ? null : resolveConfigText(text, source);
-  const problem = committed === null ? `${source} could not be read, so nothing auto-merges`
-    : !committed.ok ? `${source}: ${committed.errors.join('; ')}`
-      : committed.config.baseBranch !== base
-        ? `${source} names base ${committed.config.baseBranch}, not the checkout's ${base}` : null;
-  if (problem !== null) return { ...local, error: problem };
+  if (text === null) return { ...local, error: `${source} could not be read, so nothing auto-merges` };
+  const committed = resolveConfigText(text, source);
+  if (!committed.ok) return { ...local, error: `${source}: ${committed.errors.join('; ')}` };
+  if (committed.config.baseBranch !== base) {
+    return { ...local, error: `${source} names base ${committed.config.baseBranch}, not the checkout's ${base}` };
+  }
   return { ...settingsFromConfig(committed.config, repository), source };
 }
 
