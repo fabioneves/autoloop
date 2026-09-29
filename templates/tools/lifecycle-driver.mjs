@@ -642,6 +642,13 @@ export function markerRefusalRecord(message, nowMs, driver) {
   return code === undefined ? null : { code, atMs: nowMs, driver };
 }
 
+// A refusal can also come back as a typed BLOCK result rather than a thrown
+// error (LFE #314: PREMERGE_RECORD_DRAFT_INVALID); it is recorded the same way.
+export function blockRefusalRecord(result, nowMs, driver) {
+  if (result?.state !== 'block' || typeof result.code !== 'string') return null;
+  return markerRefusalRecord(`(${result.code})`, nowMs, driver);
+}
+
 // This file's content hash: a plugin update that changes the driver retries
 // every recorded refusal.
 export function driverIdentity() {
@@ -650,8 +657,7 @@ export function driverIdentity() {
 
 // LFE, 2026-09-29: closed-issue markers refused identically every run. Prime
 // skips a deferred marker whose refusal is newer than the marker (prime.mjs).
-function recordMarkerRefusal(cwd, issueNumber, message) {
-  const record = markerRefusalRecord(message, Date.now(), driverIdentity());
+function recordMarkerRefusal(cwd, issueNumber, record) {
   if (record === null) return;
   try {
     const common = command('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }).trim();
@@ -2048,6 +2054,17 @@ function selfTest() {
         && markerRefusalRecord('authenticated GitHub viewer is unavailable', 5000, 'abc') === null
         && markerRefusalRecord('fetch failed (ECONNRESET)', 5000, 'abc') === null,
     ],
+    // LFE, 2026-09-29: #314 refuses as a typed BLOCK result
+    // (PREMERGE_RECORD_DRAFT_INVALID), not a thrown error, so it was re-checked
+    // every run while the seven thrown refusals were skipped.
+    [
+      'a typed block result is recorded like a thrown refusal; other states are not',
+      JSON.stringify(blockRefusalRecord({ schemaVersion: 1, state: 'block', code: 'PREMERGE_RECORD_DRAFT_INVALID' }, 7000, 'abc'))
+        === JSON.stringify({ code: 'PREMERGE_RECORD_DRAFT_INVALID', atMs: 7000, driver: 'abc' })
+        && blockRefusalRecord({ state: 'act', code: 'PREMERGE_RECORD_MISSING' }, 7000, 'abc') === null
+        && blockRefusalRecord({ state: 'block', code: 'lowercase' }, 7000, 'abc') === null
+        && blockRefusalRecord(null, 7000, 'abc') === null,
+    ],
     [
       '--reconcile-issue takes exactly one positive issue number',
       cliMode(['--reconcile-issue', '12']) === '--reconcile-issue'
@@ -2222,9 +2239,11 @@ function main() {
   if (args[0] === '--reconcile-issue') {
     try {
       const request = reconcileIssueRequest(process.cwd(), Number(args[1]));
-      process.stdout.write(`${JSON.stringify(driveLifecycle(request))}\n`);
+      const result = driveLifecycle(request);
+      recordMarkerRefusal(process.cwd(), Number(args[1]), blockRefusalRecord(result, Date.now(), driverIdentity()));
+      process.stdout.write(`${JSON.stringify(result)}\n`);
     } catch (error) {
-      recordMarkerRefusal(process.cwd(), Number(args[1]), error.message);
+      recordMarkerRefusal(process.cwd(), Number(args[1]), markerRefusalRecord(error.message, Date.now(), driverIdentity()));
       throw error;
     }
     return;

@@ -56,6 +56,7 @@ export const INCIDENTS = Object.freeze([
       + 'per marker to learn the same answer.',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'export function markerRefusalRecord(' }),
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'export function blockRefusalRecord(' }),
       Object.freeze({ file: 'prime.mjs', anchor: 'export function splitKnownRefused(' }),
     ]),
   }),
