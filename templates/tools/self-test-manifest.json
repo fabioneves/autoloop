@@ -16,6 +16,7 @@
     "edit-guard.mjs": "47b99cefb978e2dc60c45753449118a12fea26fdd64970bc8cadef77da548f2a",
     "escalate-paths.mjs": "650ec532bba18e2e6022eae53cd61cfea68d2fa06e49d2852e3f0681c4a1a43d",
     "hook-relay.mjs": "12072efcc355effd8f5c8c1b6222724621a619afaa015dc90b0569814ffcbfc2",
+    "hook-root.mjs": "0123818e7a7109adc62c3f4878c2fd1f3fb5632971b5db90d6750c33074ab0d6",
     "label-swap-reminder.mjs": "a04ad495342c9a797acbffb2a12ec5d866a97419c05f7eb40eb8b48a78bc674e",
     "lane-contract.mjs": "3098af3a5a043ff6eff55876a24c24e71479a06247342205b987bd34061437fb",
     "lifecycle-contract.mjs": "76f8001a076fa4e015eb7422ede6ea95120945416d7b9360ae3bfde94509321a",
