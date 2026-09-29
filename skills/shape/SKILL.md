@@ -95,7 +95,7 @@ adapted from the `to-tickets` skill in `github.com/mattpocock/skills`, which sta
 applies `loop-ready` or any state label: the label is the maintainer's trust act (STATE →
 guardrail), and shape output is a proposal until a human reads and labels it.
 
-Read `docs/agentic/STATE.md` first (invariants, escalate-list, hard-defers), then every
+Read `.autoloop/STATE.md` first (invariants, hard-defers, `protectedPaths`), then every
 applicable repo guidance file (`AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md`) and the module map they identify. If
 STATE is missing, stop — run `/autoloop:setup`.
 

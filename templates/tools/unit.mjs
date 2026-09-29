@@ -43,14 +43,14 @@
 // they touch `loop-ready`, so the queue provenance is unchanged.
 //
 // Usage:
-//   node tools/agentic/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
-//   node tools/agentic/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720>) [--note <text>]
-//   node tools/agentic/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>]
-//   node tools/agentic/unit.mjs --repair --parent <N> --title <text> --body-file <path> [--blocks-parent]
-//   node tools/agentic/unit.mjs --decide --issue <N> --choice <text> --why <text> [--alternatives "<a>; <b>"]
-//   node tools/agentic/unit.mjs --lift
-//   node tools/agentic/unit.mjs --digest [--post]
-//   node tools/agentic/unit.mjs --self-test
+//   node <plugin-tools>/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
+//   node <plugin-tools>/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720>) [--note <text>]
+//   node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>]
+//   node <plugin-tools>/unit.mjs --repair --parent <N> --title <text> --body-file <path> [--blocks-parent]
+//   node <plugin-tools>/unit.mjs --decide --issue <N> --choice <text> --why <text> [--alternatives "<a>; <b>"]
+//   node <plugin-tools>/unit.mjs --lift
+//   node <plugin-tools>/unit.mjs --digest [--post]
+//   node <plugin-tools>/unit.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';

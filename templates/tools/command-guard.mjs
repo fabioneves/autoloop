@@ -34,7 +34,7 @@
 //   proxy routes in dispatch.mjs, not by this guard.
 //
 // Usage:  (hook) reads the PreToolUse payload on stdin
-//         node tools/agentic/command-guard.mjs --self-test
+//         node <plugin-tools>/command-guard.mjs --self-test
 
 import {
   mkdirSync,
@@ -49,7 +49,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
@@ -57,7 +57,7 @@ import {
   resolveProjectConfig,
 } from './config-contract.mjs';
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
-import { relayHookToBase } from './hook-relay.mjs';
+import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 
 const BRANCH_CREATION_FLAGS = new Set([
   '-c',
@@ -2086,8 +2086,8 @@ export function evaluate(inputCmd, branch, options = {}) {
       block: true,
       reason:
         'autoloop guard — `gh pr merge` is outside loop authority: the loop/agent never '
-        + 'merges directly (docs/agentic/STATE.md → Autonomy). Leave the merge to a human, or '
-        + 'to the repo-ratified tools/agentic/auto-merge.mjs policy gate.',
+        + 'merges directly (STATE.md → Autonomy). Leave the merge to a human, or '
+        + 'to the auto-merge.mjs policy gate the repository config enables.',
     };
   }
 
@@ -2405,7 +2405,7 @@ export function evaluate(inputCmd, branch, options = {}) {
         block: true,
         reason:
           'autoloop guard — the `gh api` merge endpoint is outside loop authority: the '
-          + 'loop/agent never merges directly, via any raw surface (docs/agentic/STATE.md → '
+          + 'loop/agent never merges directly, via any raw surface (STATE.md → '
           + 'Autonomy). Leave the merge to a human or the repo-ratified policy gate.',
       };
     }
@@ -2420,7 +2420,7 @@ export function evaluate(inputCmd, branch, options = {}) {
         block: true,
         reason:
           'autoloop guard — posting a commit status by hand forges verdict evidence: '
-          + 'agentic statuses come only from tools/agentic/publish-verdict.mjs, which binds '
+          + 'agentic statuses come only from publish-verdict.mjs, which binds '
           + 'them to the gate/review it actually executed on the exact clean head.',
       };
     }
@@ -2432,7 +2432,7 @@ export function evaluate(inputCmd, branch, options = {}) {
         block: true,
         reason:
           'autoloop guard — GraphQL merge mutations are outside loop authority: the '
-          + 'loop/agent never merges directly, via any raw surface (docs/agentic/STATE.md → '
+          + 'loop/agent never merges directly, via any raw surface (STATE.md → '
           + 'Autonomy). Leave the merge to a human or the repo-ratified policy gate.',
       };
     }
@@ -2495,7 +2495,7 @@ export function evaluate(inputCmd, branch, options = {}) {
         block: true,
         reason:
           'autoloop guard — the branch/ruleset protection baseline is the human\'s control; '
-          + 'the loop only reads it (docs/agentic/STATE.md → Autonomy). Report the mismatch '
+          + 'the loop only reads it (STATE.md → Autonomy). Report the mismatch '
           + 'instead of mutating protection.',
       };
     }
@@ -2538,16 +2538,18 @@ function currentBranch() {
 // disappears with the run without needing a daemon to revoke it. Anything
 // unreadable or ambiguous means "no run": a guard that cannot establish an open
 // run must not block a human.
+// The common git dir, not `--git-path` (which is per-worktree for this path):
+// a command issued from a linked worktree must see the repository's run.
 export function runMarkerDirectory(cwd = process.cwd()) {
   const result = spawnSync(
     'git',
-    ['-C', cwd, 'rev-parse', '--git-path', 'autoloop/run'],
+    ['-C', cwd, 'rev-parse', '--git-common-dir'],
     { encoding: 'utf8', timeout: 10_000, windowsHide: true },
   );
   if (result.status !== 0 || result.error) return null;
-  const path = String(result.stdout ?? '').trim();
-  if (!path) return null;
-  return isAbsolute(path) ? path : resolve(cwd, path);
+  const common = String(result.stdout ?? '').trim();
+  if (!common) return null;
+  return join(isAbsolute(common) ? common : resolve(cwd, common), 'autoloop', 'run');
 }
 
 function procEntry(pid) {
@@ -2563,8 +2565,19 @@ function procEntry(pid) {
     }
     return Number.isSafeInteger(parent) ? [parent, name, exe] : null;
   } catch {
-    return null;
+    return process.platform === 'linux' ? null : psEntry(pid);
   }
+}
+
+// Where /proc is absent (macOS), ps gives the parent and the command; the
+// command is often the executable's full path there, which also names a
+// Claude install the way /proc/<pid>/exe does.
+function psEntry(pid, run = (args) => spawnSync('ps', args, { encoding: 'utf8', timeout: 5000 })) {
+  const result = run(['-o', 'ppid=', '-o', 'comm=', '-p', String(pid)]);
+  const match = /^\s*(\d+)\s+(.+?)\s*$/u.exec(String(result?.stdout ?? '').split('\n')[0] ?? '');
+  if (result?.status !== 0 || match === null) return null;
+  const command = match[2];
+  return [Number(match[1]), basename(command), command.startsWith('/') ? command : ''];
 }
 
 // A session's ancestry ends at its own Claude Code process. Above it sit the
@@ -2600,7 +2613,7 @@ export function ancestorPids(limit = 64) {
   return ancestorChain(process.ppid, procEntry, limit);
 }
 
-function processAlive(pid) {
+export function processAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -2641,6 +2654,106 @@ export function ownRunMarkers(cwd = process.cwd()) {
   return markers;
 }
 
+// The base of an open run the plugin's prime opened (its marker records the
+// base; a legacy install's own prime writes markers without one — that run is
+// the vendored guard's, never this one's). Looked up from the hook's cwd and
+// from the project root, since either may be where the session works. null
+// when no such run is open.
+export function pluginRunBase(dirs = [process.cwd()]) {
+  const newest = dirs.flatMap((dir) => ownRunMarkers(dir))
+    .filter(({ marker }) => typeof marker.baseBranch === 'string')
+    .sort((left, right) => (right.marker.openedAtMs ?? 0) - (left.marker.openedAtMs ?? 0))[0];
+  return newest?.marker.baseBranch ?? null;
+}
+
+// A command that runs the plugin's own prime to open a run (not --close-run,
+// --park or --self-test) in a repository other than the session's project.
+// It follows the command's own directory changes (cd, pushd, env -C, in
+// subshells too) and matches the invocation, never a mention: `rg prime.mjs`
+// or another repository's prime.mjs is none of its business. Compared by
+// common git dir, so a linked worktree of the project is the project.
+const PLUGIN_PRIME = realOrSelf(join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs'));
+const PRIME_EXEMPT = new Set(['--close-run', '--park', '--self-test']);
+
+function realOrSelf(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+function commonGitDir(dir) {
+  const result = spawnSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    encoding: 'utf8', timeout: 10_000,
+  });
+  return result.status === 0 ? realOrSelf(result.stdout.trim()) : null;
+}
+
+// Where a segment runs node, if it does: node in executable position (behind
+// passthrough wrappers, their options and assignments only), with the
+// directory an `env -C`/`--chdir` moves it to.
+function nodeInvocation(words, dir) {
+  let target = dir;
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i];
+    if (basename(word) === 'node') return { index: i, target };
+    if (word === '-C' || word === '--chdir') {
+      if (words[i + 1] !== undefined) target = resolve(dir, expandHome(words[i + 1]));
+      i += 1;
+    } else if (word.startsWith('--chdir=')) {
+      target = resolve(dir, expandHome(word.slice('--chdir='.length)));
+    } else if (!(EXEC_WRAPPERS.has(basename(word)) || isAssignmentWord(word) || word.startsWith('-') || /^\d+[smhd]?$/u.test(word))) {
+      return null;
+    }
+  }
+  return null;
+}
+
+// Drops subshell parentheses and whitespace from a segment's ends. Linear on
+// purpose: a backtracking pattern here let a padded command outrun the hook
+// timeout (security re-audit, round 5).
+function trimSubshell(segment) {
+  let start = 0;
+  let end = segment.length;
+  while (start < end && (segment[start] === '(' || /\s/u.test(segment[start]))) start += 1;
+  while (end > start && (segment[end - 1] === ')' || /\s/u.test(segment[end - 1]))) end -= 1;
+  return segment.slice(start, end);
+}
+
+export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PRIME) {
+  if (typeof command !== 'string' || !/\bnode\b/u.test(command)) return null;
+  let dir = cwd;
+  for (const { command: segment } of shellSegments(command)) {
+    let words = shellWords(trimSubshell(segment));
+    const comment = words.findIndex((word) => word.startsWith('#'));
+    if (comment !== -1) words = words.slice(0, comment);
+    if ((words[0] === 'cd' || words[0] === 'pushd') && words[1] !== undefined) {
+      dir = resolve(dir, expandHome(words[1]));
+      continue;
+    }
+    const node = nodeInvocation(words, dir);
+    if (node === null) continue;
+    const scriptIndex = words.findIndex((word, index) => index > node.index && !word.startsWith('-'));
+    if (scriptIndex === -1 || realOrSelf(resolve(node.target, expandHome(words[scriptIndex]))) !== prime) continue;
+    if (words.slice(scriptIndex + 1).some((word) => PRIME_EXEMPT.has(word))) continue;
+    const project = commonGitDir(projectRoot);
+    if (project === null || commonGitDir(node.target) === project) continue;
+    return `autoloop guard — this session's project is ${projectRoot}, but prime would open the run in `
+      + `${node.target}, outside it: the session's hooks would guard the wrong repository. Start a `
+      + 'session in that repository and run the loop there.';
+  }
+  return null;
+}
+
+// Where a plugin hook acts: the devendored autoloop repository at the project
+// root, or — while a plugin run is open — that root whatever the checkout now
+// says, so no file the run can change switches the hooks off mid-run.
+export function guardedRoot(projectRoot = hookRoot()) {
+  return activeAutoloopRoot(projectRoot)
+    ?? (pluginRunBase([process.cwd(), projectRoot]) === null ? null : projectRoot);
+}
+
 export function loopRunIsOpen(cwd = process.cwd()) {
   return ownRunMarkers(cwd).length > 0;
 }
@@ -2655,41 +2768,28 @@ export function loopRunIsLive(cwd = process.cwd()) {
   return ownRunMarkers(cwd).some(({ marker }) => marker.closedAt === undefined);
 }
 
-// The hook passes the legacy STATE path; its repository root is two levels up.
 // The config comes from the one resolver: .autoloop/config.json over plugin
 // defaults, else the legacy STATE block migrated in memory (an older schema no
 // longer switches the guard off — it enforces the migrated config).
-export function loadConfiguredBase(statePath) {
-  const resolved = resolveProjectConfig(resolve(dirname(statePath), '..', '..'));
+export function loadConfiguredBase(root) {
+  const resolved = resolveProjectConfig(root);
   if (resolved === null) throw new Error('no autoloop configuration in this repository');
   if (!resolved.ok) throw new Error(`invalid ProjectConfig (${resolved.source}): ${resolved.errors.join('; ')}`);
   return resolved.config.baseBranch;
 }
 
+// The plugin hook passes nothing (the root is CLAUDE_PROJECT_DIR); `--root`
+// names one explicitly (tests, smoke). A STATE path is never accepted: its
+// repository would have to be guessed from where the file sits.
 export function parseArgs(args) {
   if (args.length === 1 && args[0] === '--self-test') {
-    return { selfTest: true, statePath: null, error: null };
+    return { selfTest: true, root: undefined, error: null };
   }
-  if (args.length === 0) {
-    return {
-      selfTest: false,
-      statePath: 'docs/agentic/STATE.md',
-      error: null,
-    };
+  if (args.length === 0) return { selfTest: false, root: undefined, error: null };
+  if (args.length === 2 && args[0] === '--root' && typeof args[1] === 'string' && args[1].length > 0) {
+    return { selfTest: false, root: args[1], error: null };
   }
-  if (
-    args.length === 2
-    && args[0] === '--config'
-    && typeof args[1] === 'string'
-    && args[1].length > 0
-  ) {
-    return { selfTest: false, statePath: args[1], error: null };
-  }
-  return {
-    selfTest: false,
-    statePath: null,
-    error: 'expected --config <STATE path> or --self-test',
-  };
+  return { selfTest: false, root: undefined, error: 'expected --root <repository> or --self-test' };
 }
 
 // Corpus replay: real command shapes from live sessions, each tagged with the
@@ -2752,7 +2852,7 @@ export function askUserQuestionProblem(runIsLive) {
     + 'queued unit would wait behind it. A judgment call is yours to make: take the recommended '
     + 'option and record it with `unit.mjs --decide`. A genuine human decision is `unit.mjs '
     + '--block`, which records the question on the issue. Then take the next unit. If no unit can proceed, '
-    + 'close the run first (`node tools/agentic/prime.mjs --close-run`), then ask.';
+    + 'close the run first (`node <plugin-tools>/prime.mjs --close-run`), then ask.';
 }
 
 function selfTest() {
@@ -3240,10 +3340,9 @@ function selfTest() {
   // (over plugin defaults), else the legacy STATE block, else nothing.
   const baseCases = (() => {
     const root = mkdtempSync(join(tmpdir(), 'guard-base-'));
-    const statePath = join(root, 'docs', 'agentic', 'STATE.md');
     const attempt = () => {
       try {
-        return loadConfiguredBase(statePath);
+        return loadConfiguredBase(root);
       } catch (error) {
         return `THREW ${error.message}`;
       }
@@ -3651,20 +3750,197 @@ function selfTest() {
     for (const line of corpusResult.failures) console.error(line);
   }
 
+  // From the plugin the guard takes its repository root, never a STATE path
+  // whose parent it would have to guess (`.autoloop/STATE.md` two levels up
+  // is the repository's parent).
   const argCases = [
-    ['default config path', [], 'docs/agentic/STATE.md'],
-    ['explicit config path', ['--config', '/repo/STATE.md'], '/repo/STATE.md'],
-    ['missing config value', ['--config'], null],
+    ['no arguments: the hook root', [], undefined],
+    ['explicit root', ['--root', '/repo'], '/repo'],
+    ['missing root value', ['--root'], null],
+    ['a STATE path is no longer accepted', ['--config', '/repo/docs/agentic/STATE.md'], null],
     ['legacy base injection rejected', ['--base', 'main'], null],
   ];
-  for (const [name, args, expectedPath] of argCases) {
+  for (const [name, args, expectedRoot] of argCases) {
     const parsed = parseArgs(args);
-    const passed = expectedPath === null
+    const passed = expectedRoot === null
       ? parsed.error !== null
-      : parsed.error === null && parsed.statePath === expectedPath;
+      : parsed.error === null && parsed.root === expectedRoot;
     if (!passed) {
       console.error(`FAIL [${name}]`);
       ok = false;
+    }
+  }
+  // Plugin hooks fire in every repository: outside a devendored autoloop
+  // repository the guard stands down before reading anything, while inside
+  // one an unreadable payload is still refused.
+  {
+    const scratch = mkdtempSync(join(tmpdir(), 'guard-gate-'));
+    try {
+      const hook = (root) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: 'not json', encoding: 'utf8', cwd: scratch,
+        env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+      }).status;
+      const unrelated = hook(scratch);
+      mkdirSync(join(scratch, '.autoloop'));
+      writeFileSync(join(scratch, '.autoloop', 'config.json'),
+        JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } }));
+      const active = hook(scratch);
+      if (!(unrelated === 0 && active === 2)) {
+        console.error(`FAIL [the guard stands down outside an autoloop repository and acts inside one]: ${unrelated} ${active}`);
+        ok = false;
+      }
+      // Security review of the cutover: once a run is open the guard never
+      // stands down. Deleting the config (or checking out a branch forked
+      // before devendor) leaves the run's own marker, and its base, in charge.
+      execFileSync('git', ['init', '-q', scratch]);
+      const markers = runMarkerDirectory(scratch);
+      mkdirSync(markers, { recursive: true });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
+      const merge = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      if (merge.status !== 2 || !merge.stderr.includes('autoloop guard')) {
+        console.error(`FAIL [an open run keeps the guard on after its config is removed]: ${merge.status} ${merge.stderr}`);
+        ok = false;
+      }
+      // Security re-audit: a legacy install's own prime writes markers with no
+      // baseBranch into the same directory. That is the vendored guard's run,
+      // never the plugin's: the plugin guard stands down, it does not lock the
+      // repository out.
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now() }));
+      const legacyRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }),
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      if (legacyRun.status !== 0) {
+        console.error(`FAIL [a vendored-era marker never makes the plugin guard refuse]: ${legacyRun.status} ${legacyRun.stderr}`);
+        ok = false;
+      }
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      // An unreadable config mid-run falls back to the run's own base rather
+      // than refusing every command.
+      mkdirSync(join(scratch, '.autoloop'));
+      writeFileSync(join(scratch, '.autoloop', 'config.json'), '{ typo');
+      const typo = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git status' } }),
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
+      if (typo.status !== 0) {
+        console.error(`FAIL [a config typo mid-run falls back to the run's base]: ${typo.status} ${typo.stderr}`);
+        ok = false;
+      }
+      // Every hook (reminders, transcripts, the preflight) acts where the guard
+      // does: a plugin run keeps the project guarded on a checkout without config.
+      const guarded = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now() }));
+      const vendoredRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      if (guarded.status !== 0 || guarded.stdout.trim() !== realpathSync(scratch) || vendoredRun.status !== 1) {
+        console.error(`FAIL [a plugin run keeps every hook acting; a vendored run does not]: ${guarded.status} ${guarded.stdout} ${vendoredRun.status}`);
+        ok = false;
+      }
+      // Security re-audit (M1): opening a run in a repository other than the
+      // session's project would leave its hooks guarding the wrong one. The
+      // guard (which, unlike Bash, sees CLAUDE_PROJECT_DIR) refuses it —
+      // comparing common git dirs, so a linked worktree of the project passes.
+      const other = mkdtempSync(join(tmpdir(), 'guard-other-'));
+      execFileSync('git', ['init', '-q', other]);
+      const primeFrom = (cwd, command) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', cwd, tool_input: { command } }),
+        encoding: 'utf8', cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: other },
+      });
+      const prime = join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs');
+      const refused = (cwd, command) => primeFrom(cwd, command).status === 2;
+      // Security re-audit round 4: every shape that runs the plugin's prime
+      // somewhere else is refused, and nothing that merely mentions a
+      // prime.mjs (or runs another one) is.
+      const evasions = [
+        [scratch, `node ${prime} --json`],
+        [other, `cd ${scratch} && node ${prime} --json`],
+        [other, `cd ${scratch}; node ${prime} --json`],
+        [other, `(cd ${scratch} && node ${prime} --json)`],
+        [other, `cd . && cd ${scratch} && node ${prime} --json`],
+        [other, `pushd ${scratch} && node ${prime} --json`],
+        [other, `env -C ${scratch} node ${prime} --json`],
+        [scratch, `node ${prime} --json # --close-run`],
+        [scratch, `node ${dirname(prime)}/"pri""me.mjs" --json`],
+      ].filter(([cwd, command]) => !refused(cwd, command));
+      mkdirSync(join(other, 'scripts'));
+      writeFileSync(join(other, 'scripts', 'prime.mjs'), '');
+      const falsePositives = [
+        [other, `cd ${scratch} && rg -n foo templates/tools/prime.mjs`],
+        [other, `cd ${scratch} && git log --oneline -- templates/tools/prime.mjs`],
+        [scratch, 'node scripts/prime.mjs'],
+        [other, `node ${prime} --json`],
+        [scratch, `node ${prime} --close-run`],
+      ].filter(([cwd, command]) => refused(cwd, command));
+      if (evasions.length + falsePositives.length > 0) {
+        console.error(`FAIL [prime never opens a run outside the session's project, and only prime is judged] `
+          + `evaded: ${JSON.stringify(evasions.map(([, c]) => c))}; `
+          + `false positives: ${JSON.stringify(falsePositives.map(([, c]) => c))}`);
+        ok = false;
+      }
+      // Security re-audit round 5: the check runs on any command naming node,
+      // in every repository, so it must stay linear — a padded command that
+      // outran the hook timeout would skip every rule.
+      const padded = ['gh pr merge 5 # node' + ' '.repeat(300_000) + 'x', 'node x' + ' )'.repeat(100_000) + 'y'];
+      const startedAt = Date.now();
+      for (const command of padded) foreignPrimeProblem(command, scratch, other);
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > 1000) {
+        console.error(`FAIL [the foreign-prime check stays linear on padded input]: ${elapsed} ms`);
+        ok = false;
+      }
+      rmSync(other, { recursive: true, force: true });
+      // A session that primed twice holds two plugin markers: the newest base wins.
+      // Both name assignments, so directory order cannot pass it by accident.
+      const newestOf = (first, second) => {
+        writeFileSync(join(markers, 'm1.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...first }));
+        writeFileSync(join(markers, 'm2.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...second }));
+        const base = pluginRunBase([scratch]);
+        rmSync(join(markers, 'm1.json'));
+        rmSync(join(markers, 'm2.json'));
+        return base;
+      };
+      const older = { openedAtMs: 1, baseBranch: 'old' };
+      const newer = { openedAtMs: 2, baseBranch: 'new' };
+      const newest = newestOf(older, newer) === 'new' && newestOf(newer, older) === 'new' ? 'new' : 'old';
+      if (newest !== 'new') {
+        console.error(`FAIL [the newest plugin marker's base wins]: ${newest}`);
+        ok = false;
+      }
+      // The hook's cwd is not the only place to look: the project root's run counts.
+      const fromTmp = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
+        encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      if (fromTmp.status !== 2) {
+        console.error(`FAIL [a hook whose cwd is outside the repository still sees the project's run]: ${fromTmp.status}`);
+        ok = false;
+      }
+      // Review of the cutover (I7): markers live in the common git dir, so a
+      // command issued from a linked worktree of the repository sees the run.
+      execFileSync('git', ['-C', scratch, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x']);
+      const linked = join(scratch, '..', `${basename(scratch)}-linked`);
+      execFileSync('git', ['-C', scratch, 'worktree', 'add', '-q', '--detach', linked]);
+      const fromLinked = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
+        encoding: 'utf8', cwd: linked, env: { ...process.env, CLAUDE_PROJECT_DIR: linked },
+      });
+      rmSync(linked, { recursive: true, force: true });
+      if (fromLinked.status !== 2) {
+        console.error('FAIL [a linked worktree sees the repository\'s open run]');
+        ok = false;
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
   for (const [name, payload, accepted] of [
@@ -3783,6 +4059,16 @@ function selfTest() {
           console.error(`FAIL [an ancestry stops at its own claude process]: ${chains.join(' | ')}`);
           ok = false;
         }
+        // macOS has no /proc (CI, 0.59.0): ps supplies the same parent and
+        // name, or every hook behind a shell wrapper lost sight of the run.
+        const viaPs = psEntry(process.pid);
+        const viaProc = procEntry(process.pid);
+        const stubbed = psEntry(505, () => ({ status: 0, stdout: '   60 /home/u/.local/share/claude/versions/2.1.283\n' }));
+        if (!(viaPs !== null && (viaProc === null || (viaPs[0] === viaProc[0] && viaPs[1] === viaProc[1]))
+          && stubbed?.[0] === 60 && isClaudeProcess(stubbed[1], stubbed[2]))) {
+          console.error(`FAIL [ps reads the same ancestry /proc does]: ${JSON.stringify({ viaPs, viaProc, stubbed })}`);
+          ok = false;
+        }
       }
     } catch {
       // An unwritable scratch directory is not a guard defect.
@@ -3824,11 +4110,12 @@ function refuse(reason) {
 }
 
 function main() {
-  // A unit branch forked before a reconcile carries a fossil copy of this
-  // guard; the base branch's copy decides instead. Must run before stdin is
-  // consumed — the relayed child inherits and reads it. Self-test and corpus
-  // invocations are exempt inside the relay: they exercise THIS file.
-  relayHookToBase(import.meta.url);
+  // For the shell hooks (session-preflight): the root a hook acts in, or exit 1.
+  if (process.argv[2] === '--guarded-root') {
+    const root = guardedRoot();
+    if (root !== null) console.log(root);
+    process.exit(root === null ? 1 : 0);
+  }
   if (process.argv.includes('--corpus')) {
     const { total, failures } = replayCorpus();
     for (const line of failures) console.error(line);
@@ -3845,11 +4132,30 @@ function main() {
     );
   }
   if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
+  // Plugin hooks fire in every repository; outside an open run this one guards
+  // only a devendored autoloop repository (hook-root.mjs), before reading
+  // anything. Inside an open run it never stands down: the run's marker is the
+  // authority, whatever the checkout now says.
+  const projectRoot = parsed.root ?? hookRoot();
+  const root = activeAutoloopRoot(projectRoot);
+  const runBase = pluginRunBase([process.cwd(), projectRoot]);
 
   let payload;
+  let payloadError = null;
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
   } catch (error) {
+    payloadError = error;
+  }
+  // Checked in every repository, before the stand-down: prime opening a run
+  // anywhere but the session's project would leave the hooks guarding the
+  // wrong repository. Only a hook can check it — Bash never sees
+  // CLAUDE_PROJECT_DIR.
+  const foreign = foreignPrimeProblem(payload?.tool_input?.command, payload?.cwd ?? process.cwd(), projectRoot);
+  if (foreign !== null) refuse(foreign);
+  if (root === null && runBase === null) process.exit(0);
+  if (payloadError !== null) {
+    const error = payloadError;
     refuse(
       `autoloop guard — the hook payload was unreadable (${error.message}), so the command `
       + 'cannot be proven safe. Re-run the command; if this repeats, re-run autoloop:setup '
@@ -3857,7 +4163,7 @@ function main() {
     );
   }
   if (payload?.tool_name === 'AskUserQuestion') {
-    const problem = askUserQuestionProblem(loopRunIsLive());
+    const problem = askUserQuestionProblem(loopRunIsLive() || loopRunIsLive(projectRoot));
     if (problem !== null) refuse(problem);
     process.exit(0);
   }
@@ -3872,7 +4178,7 @@ function main() {
 
   // Ordered before configuration loading: with no run open there is nothing to
   // guard, so a configuration problem must not block a human's command either.
-  if (!loopRunIsOpen()) process.exit(0);
+  if (!loopRunIsOpen() && !loopRunIsOpen(projectRoot)) process.exit(0);
 
   const launchProblem = backgroundDispatchProblem(
     cmd,
@@ -3882,7 +4188,10 @@ function main() {
 
   let baseBranch;
   try {
-    baseBranch = loadConfiguredBase(parsed.statePath);
+    // While a plugin run is open its recorded base is the authority, whatever
+    // the checkout now says (a missing, unreadable or different config);
+    // otherwise the checkout's config decides.
+    baseBranch = runBase ?? loadConfiguredBase(root ?? projectRoot);
   } catch (error) {
     refuse(
       `autoloop guard — the configured base branch cannot be resolved (${error.message}), `

@@ -3,6 +3,54 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.59.0] - 2026-09-29
+
+Autoloop is now a global plugin: nothing of the tool lives in a repository, and a plugin update
+reaches every repository at its next session with no setup step (spec `SPEC-global-install.md`,
+modules `plugin-tools`, `plugin-hooks` and `setup-v2`, landed together).
+
+### Breaking
+
+- **Every existing install converts once with `autoloop:setup` (devendor)** before its next loop
+  run: prime refuses `NOT_DEVENDORED` in a vendored install. Devendor runs in a linked worktree from
+  a fresh session and delivers one PR; after it merges, remove the worktree, pull, and restart the
+  session.
+- The vendoring machinery is gone: `scaffold.mjs`, `hook-relay.mjs`,
+  `templates/settings-hooks.template.json`, `templates/LOOP.template.md`, `verify.mjs
+  --install-root` and `contract-lint.mjs --check-install-root`.
+
+### Added
+
+- **Plugin hooks** (`hooks/hooks.json`): the command and edit guards, preflight, label reminders,
+  transcript capture and the Stop check all run the plugin's copy. Each finds the repository from
+  `CLAUDE_PROJECT_DIR` and acts only in a devendored autoloop repository (`.autoloop/config.json`,
+  no vendored guard wired). Once the plugin's prime opens a run they never stand down for the rest
+  of it, whatever the checkout later says; a legacy install's own runs are left to its vendored
+  guard. A crashing guard refuses only in an autoloop repository or during a plugin run.
+- **`setup.mjs`**: `--init` (overrides-only config, `.autoloop/STATE.md`, ARCH/LESSONS seeds) and
+  `--devendor` (config from the legacy block plus the vendored escalate and merge policy, read as
+  JavaScript; STATE prose with the current template's preamble and Config section; only the
+  plugin's files removed — a repository's own files in `tools/agentic/` stay; stale references
+  reported).
+- **`verify.mjs --project-root`** is the doctor: config, effective checklist, gate scripts present,
+  no retired CI policy, no vendored layout left.
+- The review checklist is `.autoloop/checklist.md` when a repository keeps one, else the plugin's;
+  dispatch names it in every prompt's context stamp.
+
+### Changed
+
+- The command guard refuses prime opening a run outside the session's project.
+- Run markers live in the common git dir (linked worktrees see the run), record the run's base, and
+  prime prunes dead ones.
+- The setup skill is rewritten around init / devendor / config / doctor (44 KB → 14 KB); dev,
+  pitcrew, shape and queue-trace read `.autoloop/`.
+
+### Upgrading
+
+Install 0.59.0, then in each repository start a fresh session and run `/autoloop:setup`: it
+devendors in its own PR. Until then, a vendored repository keeps running its vendored hooks, but
+prime refuses to start a run there.
+
 ## [0.58.0] - 2026-09-29
 
 Global install, module 2 (`policy-as-data`, spec `SPEC-global-install.md`). The repository's own

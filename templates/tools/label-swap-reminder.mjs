@@ -13,10 +13,12 @@
 // riders per swap taught a live run to ignore the possible one too.
 // A hook must never break the loop: any parse problem exits 0 with no output.
 
-import { existsSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { relayHookToBase } from './hook-relay.mjs';
+import { guardedRoot } from './command-guard.mjs';
 
 // Claude Code 2.1.234 removed the task tools outright but only DEFERRED
 // PushNotification; a live run read the visible roster as the whole roster,
@@ -67,15 +69,15 @@ const SETUP_PHASE_ANCHORS = [
     'autoloop: RESOLVE is running — its ribbon `⏳ ∞ ▰▱▱▱▱ 1/5 RESOLVE` must already be printed; '
     + 'print it NOW if missing (late beats never). Next: `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` before the audit '
     + 'battery.'],
-  [/scaffold\.mjs\s+--audit\b/,
+  [/config-contract\.mjs\s+--root\b/,
     'autoloop: the AUDIT battery just ran — `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` must already be printed; print '
     + 'it NOW if missing. Next: `⏳ ∞ ▰▰▰▱▱ 3/5 INTERVIEW` BEFORE the first question to the human.'],
-  [/scaffold\.mjs\s+--(?:reconcile|merge-state|merge-loop)\b/,
+  [/setup\.mjs\s+--(?:init|devendor)\b/,
     'autoloop: WRITE is running — `⏳ ∞ ▰▰▰▰▱ 4/5 WRITE` must already be printed (and 3/5 '
     + 'INTERVIEW before it); print any missing ribbon NOW. Next: `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` when '
     + 'evidence collection starts.'],
-  [/verify\.mjs\s+--install-root\b/,
-    'autoloop: install-root verify just ran — in a setup session `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` must '
+  [/verify\.mjs\s+--project-root\b/,
+    'autoloop: project verify just ran — in a setup session `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` must '
     + 'already be printed; print it NOW if missing. The closing rail `✅ ╰─ ∞ setup · complete …` '
     + 'is the only green line.'],
 ];
@@ -228,10 +230,10 @@ function selfTest() {
     ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /PushNotification `✖ #12/],
     ['node tools/agentic/unit.mjs --decide --issue 12 --choice c --why w', null],
     ['ls /cache | node /cache/0.47.0/templates/tools/release-verify.mjs --sort-versions | tail -3', /1\/5 RESOLVE/],
-    ['node /cache/templates/tools/scaffold.mjs --audit .', /2\/5 AUDIT/],
-    ['node /cache/templates/tools/scaffold.mjs --reconcile /repo', /4\/5 WRITE/],
-    ['node /cache/templates/tools/scaffold.mjs --merge-state . > /tmp/s.md', /4\/5 WRITE/],
-    ['node tools/agentic/verify.mjs --install-root . 2>&1 | tee /tmp/v.txt', /5\/5 VERIFY/],
+    ['node /cache/templates/tools/config-contract.mjs --root . --resolve', /2\/5 AUDIT/],
+    ['node /cache/templates/tools/setup.mjs --init --root /repo --base main --gate x', /4\/5 WRITE/],
+    ['node /cache/templates/tools/setup.mjs --devendor --root /tmp/w', /4\/5 WRITE/],
+    ['node /p/templates/tools/verify.mjs --project-root . 2>&1 | tee /tmp/v.txt', /5\/5 VERIFY/],
     // The run frame rides prime; the terminal riders ride terminal-finalize,
     // whose label mutations never pass through gh edit.
     ['node /cache/0.49.45/templates/tools/prime.mjs --json > /tmp/prime.json', /RUN OPEN/],
@@ -284,16 +286,33 @@ function selfTest() {
     console.error('FAIL: ARCH nudge contradicts the no-freshness-metadata contract');
   }
   if (/ARCH\.md/.test(withoutMap)) { fail++; console.error('FAIL: archMap:false leaked ARCH.md nudge'); }
+  // A plugin hook fires in every repository: it reminds only inside a
+  // devendored autoloop repository, read from CLAUDE_PROJECT_DIR.
+  {
+    const scratch = mkdtempSync(join(tmpdir(), 'label-swap-gate-'));
+    try {
+      const hook = () => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh issue edit 4 --add-label loop-blocked' } }),
+        encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      }).stdout;
+      const unrelated = hook();
+      mkdirSync(join(scratch, '.autoloop'));
+      writeFileSync(join(scratch, '.autoloop', 'config.json'), '{}');
+      const active = hook();
+      if (unrelated !== '' || !/PushNotification/.test(active)) {
+        fail++;
+        console.error('FAIL: the reminder is silent outside an autoloop repository and speaks inside one');
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
   console.log(fail === 0 ? `self-test OK (${cases.length} cases)` : `self-test: ${fail} FAILED`);
   process.exit(fail === 0 ? 0 : 1);
 }
 
 const entry = process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (entry) {
-  // A unit branch forked before a reconcile carries a fossil copy of this
-  // hook; the base branch's copy decides instead. Runs before stdin is
-  // consumed; self-test invocations are exempt inside the relay.
-  relayHookToBase(import.meta.url);
   if (process.argv.includes('--self-test')) selfTest();
   else {
     let raw = '';
@@ -302,7 +321,8 @@ if (entry) {
       try {
         const input = JSON.parse(raw);
         if (input.tool_name !== 'Bash') process.exit(0);
-        const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+        const root = guardedRoot();
+        if (root === null) process.exit(0);
         const msg = reminderFor(input.tool_input?.command, {
           archMap: existsSync(join(root, 'docs/agentic/ARCH.md')),
         });

@@ -49,20 +49,19 @@
 // Host contract: the wire shape (stdin `stop_hook_active`, stdout `{systemMessage}`) is Claude
 // Code's Stop-hook contract.
 
-import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
-import { loopRunIsLive, loopRunIsOpen, ownRunMarkers } from './command-guard.mjs';
-import { relayHookToBase } from './hook-relay.mjs';
+import { guardedRoot, loopRunIsLive, loopRunIsOpen, ownRunMarkers } from './command-guard.mjs';
+import { hookRoot } from './hook-root.mjs';
 import { blockedByIssueNumbers } from './snapshot-contract.mjs';
 
-// When relayed, this file executes from a cache under the git common dir, so
-// its own location no longer names the repository — the relay hands the real
-// root over on the environment instead.
-const ROOT = process.env.AUTOLOOP_HOOK_ROOT
-  ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+// The hook runs from the plugin, so its own location never names the
+// repository: CLAUDE_PROJECT_DIR does.
+const ROOT = hookRoot();
 
 function ghJson(cmd) {
   try {
@@ -547,8 +546,8 @@ export function checkDarkRun(runIsLive, issues, prs, inFlight = null) {
       + 'not a reason to stop: take the next unit. If the queue is genuinely not why this run is '
       + 'stopping — a human asked for the session back in a message, the context needs handing '
       + 'off, an invocation bound was reached — then close the run on the record instead, and '
-      + 'stop: `node tools/agentic/prime.mjs --close-run`. A rejected or interrupted tool call is '
-      + 'not that request: park instead with `node tools/agentic/prime.mjs --park "tool call '
+      + 'stop: `node <plugin-tools>/prime.mjs --close-run`. A rejected or interrupted tool call is '
+      + 'not that request: park instead with `node <plugin-tools>/prime.mjs --park "tool call '
       + 'rejected; resumes on operator message" --minutes 720`',
     ],
     reminders: [],
@@ -782,7 +781,7 @@ function selfTest() {
   } catch {
     reminderJson = null;
   }
-  const ok =
+  let ok =
     childPrimitiveDefined &&
     hard.length === 2 && hard[0].includes('#2') && hard[1].includes('#6') &&
     reminders.length === 1 && reminders[0].includes('#3') &&
@@ -843,16 +842,46 @@ function selfTest() {
     hardWire.stderr.includes('Write-back contract gaps') &&
     hardWire.stderr.includes('PR #3') &&
     renderHookResult(['gap'], []).stderr.includes('reminders') === false;
+  const gate = gateCases();
+  for (const { name, ok: passed } of gate) if (!passed) console.error(`FAIL ${name}`);
+  ok = ok && gate.every(({ ok: passed }) => passed);
   console.log(ok ? 'self-test OK' : `self-test FAILED: ${JSON.stringify({ hard, reminders, blocked, dark, reminderWire, hardWire })}`);
   return ok;
 }
 
+// Plugin hooks fire in every repository: the Stop hook checks only a
+// devendored autoloop repository, found from CLAUDE_PROJECT_DIR.
+function gateCases() {
+  const scratch = mkdtempSync(join(tmpdir(), 'writeback-gate-'));
+  try {
+    const shim = join(scratch, 'bin');
+    mkdirSync(shim);
+    writeFileSync(join(shim, 'gh'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const project = join(scratch, 'project');
+    mkdirSync(project);
+    const hook = () => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+      input: '{}', encoding: 'utf8', cwd: tmpdir(),
+      env: { ...process.env, CLAUDE_PROJECT_DIR: project, PATH: `${shim}:${process.env.PATH}` },
+    });
+    const unrelated = hook();
+    mkdirSync(join(project, '.autoloop'));
+    writeFileSync(join(project, '.autoloop', 'config.json'), '{}');
+    const active = hook();
+    return [{
+      name: 'the Stop hook is silent outside an autoloop repository and checks inside one',
+      ok: unrelated.status === 0 && unrelated.stdout === ''
+        && active.status === 0 && active.stdout.includes('no GitHub data was reachable'),
+    }];
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 function main() {
-  // A unit branch forked before a reconcile carries a fossil copy of this
-  // hook; the base branch's copy decides instead. Must run before stdin is
-  // consumed — the relayed child inherits and reads it.
-  relayHookToBase(import.meta.url);
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
+  // Outside an open run only a devendored autoloop repository is checked;
+  // inside one the Stop hook never stands down.
+  if (guardedRoot(ROOT) === null) process.exit(0);
 
   // Never re-block a Stop that a previous block already continued.
   try {

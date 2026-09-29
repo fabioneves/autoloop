@@ -4,7 +4,7 @@ Adversarial review of one plan. Your job is to find the case the author did not 
 
 - Read {agent-skills}/doubt-driven-development/SKILL.md for the adversarial stance and {agent-skills}/code-review-and-quality/SKILL.md for the review axes; you are the fresh reviewer, so skip their orchestrator steps.
 - Read the repository only under the materialized base named below.
-- Read AGENTS.md, docs/agentic/ARCH.md, STATE.md, checklist.md and the relevant spec there.
+- Read AGENTS.md, docs/agentic/ARCH.md, `.autoloop/STATE.md`, the checklist file named below and the relevant spec there.
 - Treat plan citations as premises to verify, not authority.
 - Check issue fitness, premises, scope and file boundary, interface depth, tests, invariants and risk.
 - For each rule: is it quantified over its whole domain with every case enumerated and tested, or an example standing in for a rule? An incomplete invariant is a Major.

@@ -6,9 +6,9 @@
 // aggregates them ACROSS units so pipeline tuning runs on data, not feel: per-step
 // duration distributions, totals, and the hygiene flags (skipped swaps, stranded
 // labels). Usage:
-//   node tools/agentic/stats.mjs                 # all loop-owned PR issues (open+merged)
-//   node tools/agentic/stats.mjs --issues 5,7    # explicit issue list
-//   node tools/agentic/stats.mjs --json          # machine output
+//   node <plugin-tools>/stats.mjs                 # all loop-owned PR issues (open+merged)
+//   node <plugin-tools>/stats.mjs --issues 5,7    # explicit issue list
+//   node <plugin-tools>/stats.mjs --json          # machine output
 // Limitations (v1, deliberate): label telemetry only — review-round counts live in the
 // per-issue run records; units re-entered via adoption measure first-label → first-unlabel.
 

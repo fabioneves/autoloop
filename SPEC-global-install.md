@@ -35,9 +35,12 @@ Operator decision, 2026-09-29: autoloop is a **global tool**.
   migration. Exit 2 blocks.
 - **Loading.** Hooks load at session start (or `/reload-plugins`); SessionStart stdout is injected
   into context.
-- **Undocumented, to verify with a throwaway plugin in `plugin-hooks`:**
-  - whether plugin hooks fire in headless `claude -p --safe-mode` children;
-  - whether a project can disable a user-scope plugin.
+- **Headless children run no hooks** (verified 2026-09-29, Claude Code 2.1.284, throwaway plugin
+  with marker files): under `claude -p --safe-mode`, neither a `--plugin-dir` plugin's hooks nor
+  `--settings` hooks fire; without `--safe-mode` both do. Dispatched children already run
+  `--safe-mode`, so they run no project hooks today either: their guard is the permission rules
+  dispatch passes in `--settings`. Moving hooks into the plugin changes nothing for children.
+- **Undocumented, still open:** whether a project can disable a user-scope plugin.
 
 ## Capability map
 
@@ -49,9 +52,15 @@ Operator decision, 2026-09-29: autoloop is a **global tool**.
 | plugin-hooks | the plugin ships its hooks; project `.claude/settings.json` carries no autoloop entries | plugin-tools |
 | setup-v2 | `init` / `config` / `doctor`, plus a one-time `devendor` per existing repo | all of the above |
 
-Build order: config-file → policy-as-data → plugin-tools → plugin-hooks → setup-v2. Each module
-ships as its own release. LFE keeps working at every step: the legacy sources are read until
-`devendor` runs.
+Build order: config-file → policy-as-data → plugin-tools → plugin-hooks → setup-v2.
+config-file (0.57.0) and policy-as-data (0.58.0) shipped as their own releases.
+
+**Operator, 2026-09-29: "I'll only update when we finish everything."** No project installs an
+intermediate release, so plugin-tools, plugin-hooks and setup-v2 land together as one cutover
+release, with no dual-mode code for a vendored repository on a newer plugin. A legacy repository
+(STATE block, `tools/agentic/`) keeps running its vendored copies on the plugin it has; after the
+update, its first session runs `devendor` once. The legacy *config* fallback (reading the STATE
+block) stays until every known repository has devendored.
 
 ## Module specs
 
@@ -136,9 +145,16 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
   - SessionStart → preflight, STATE injection and `--card-run`;
   - Stop → writeback-check;
   - SubagentStop → subagent-transcript.
-- **Every hook is a no-op outside an autoloop repo:** it checks `resolveProjectConfig` (or just the
-  existence of `.autoloop/config.json` or the legacy STATE) and exits 0 in under 50 ms. The guard
-  still enforces only while this session's loop run is live.
+- **Every hook is a no-op outside an autoloop repo** (`hook-root.mjs`): outside an open run a hook
+  acts only where `$CLAUDE_PROJECT_DIR`'s top level has `.autoloop/config.json` and no vendored
+  guard wired (a tracked hook running an existing `tools/agentic/command-guard.mjs`); elsewhere it
+  exits 0 in tens of milliseconds. **Inside an open run the guards never stand down**: prime refuses
+  to open one unless the repository is active (and the guard, which alone sees
+  `CLAUDE_PROJECT_DIR`, refuses prime opening a run outside the session's project), and records the
+  run's base in its marker, so a deleted config or a checked-out pre-devendor branch
+  cannot switch them off mid-run. Only such a marker counts: a legacy install's own prime writes
+  markers without a base, and that run belongs to its vendored guard. Markers live in the common
+  git dir, so linked worktrees see the run.
 - **Before building:** verify with a throwaway plugin whether plugin hooks fire in
   `claude -p --safe-mode`. The edit-guard's writer coverage stays in dispatch's deny rules either
   way.
@@ -152,16 +168,19 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
   PR.
 - **`config`**: change a setting in `config.json`, with no other writes.
 - **`doctor`**: read-only; config validity, gate resolution, labels, plugin version.
-- **`devendor`** (one-time, per existing repo, one PR):
+- **`devendor`** (one-time, per existing repo, one PR, from a linked worktree only):
   - convert the STATE JSON block and the repo-specific parts of `escalate-paths.mjs` and
-    `auto-merge.mjs` into `.autoloop/config.json`;
-  - move STATE prose to `.autoloop/STATE.md`;
-  - delete `tools/agentic/`, `docs/agentic/LOOP.md`, and the autoloop entries in
-    `.claude/settings.json`.
+    `auto-merge.mjs` (read by importing them, so JavaScript decides their values) into
+    `.autoloop/config.json`, overrides only, verified to resolve to exactly the converted config;
+  - move STATE prose to `.autoloop/STATE.md`, replacing the template-owned preamble and Config
+    section; report repository lines that still name the vendored layout;
+  - delete the plugin's files under `tools/agentic/` (a repository's own files there stay),
+    `docs/agentic/LOOP.md`, and the autoloop entries in `.claude/settings.json`.
 
   `devendor` never touches ARCH, LESSONS or a repo-authored checklist.
-- `devendor` writes exactly the config the legacy block resolved to, so the config fingerprint of a
-  review chain in flight is unchanged.
+- The converted config adds the protected paths and merge settings the vendored files held, so its
+  fingerprint differs from the legacy block's: an open loop PR reviewed before devendor lands needs
+  its review re-run, and devendor reports it (`fingerprintChanged`).
 - **Success:** LFE devendors in one PR with `verify`, the guard and a full unit green afterwards; a
   plugin release after that needs no setup at all.
 

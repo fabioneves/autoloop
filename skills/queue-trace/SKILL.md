@@ -15,7 +15,7 @@ accounting from GitHub + the spec, and files/labels/edits **nothing**.
 the spec, or any store. It complements `autoloop:shape` (spec → issues) and `autoloop:dev`
 (issues → PRs); the loop never invokes it.
 
-Read `docs/agentic/STATE.md` first — the Mission section lists the **authoritative spec, in
+Read `.autoloop/STATE.md` first — the Mission section lists the **authoritative spec, in
 order** (that is where the task packets and milestones live) plus the repo guidance files. If
 STATE is missing, stop — run `/autoloop:setup`. Ask any question with `AskUserQuestion`; plain text is fine.
 

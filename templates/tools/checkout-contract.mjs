@@ -14,8 +14,8 @@
 // `lifecycle-driver.mjs` bind their mutations to.
 //
 // Usage:
-//   node tools/agentic/checkout-contract.mjs [--json] [<cwd>]
-//   node tools/agentic/checkout-contract.mjs --self-test
+//   node <plugin-tools>/checkout-contract.mjs [--json] [<cwd>]
+//   node <plugin-tools>/checkout-contract.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';

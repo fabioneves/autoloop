@@ -9,6 +9,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,24 +22,12 @@ import {
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { resolveProjectConfig } from './config-contract.mjs';
+import { CONFIG_VERSION, effectiveChecklistPath, resolveProjectConfig } from './config-contract.mjs';
+import { vendoredLeftovers } from './hook-root.mjs';
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const SELF_TEST_MANIFEST_NAME = 'self-test-manifest.json';
 const SELF_TEST_PATTERN = /(?:async\s+)?function\s+selfTest\s*\(/;
-// Mirrors scaffold's TOOL_SOURCE_NAMES: the reference-named merge executor
-// installs under the name the runtime dispatches, so its manifest entry is
-// keyed by the installed name while hashing the reference template's bytes.
-// (The installed copy is Setup-filled, so it normally differs and self-tests
-// live — the mapping only keeps the manifest keyed by installed names.)
-const TOOL_INSTALL_NAMES = Object.freeze({
-  'auto-merge.reference.mjs': 'auto-merge.mjs',
-});
-// Every dispatch role's standing brief, vendored beside the tools so a
-// vendored dispatch.mjs finds them where the plugin's copy does.
-export const BRIEF_FILES = Object.freeze([
-  'plan', 'plan-review', 'implement', 'simplify', 'diff-review', 'code-review', 'doubt-review', 'fix',
-].map((role) => `briefs/${role}.md`));
 export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'attestation-contract.mjs',
   'checkout-contract.mjs',
@@ -51,7 +40,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'dispatch-render.mjs',
   'dispatch.mjs',
   'escalate-paths.mjs',
-  'hook-relay.mjs',
+  'hook-root.mjs',
   'label-swap-reminder.mjs',
   'lane-contract.mjs',
   'lifecycle-contract.mjs',
@@ -63,8 +52,8 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'publish-verdict.mjs',
   'release-verify.mjs',
   'review-contract.mjs',
-  'scaffold.mjs',
   'scan.mjs',
+  'setup.mjs',
   'sizing-contract.mjs',
   'snapshot-contract.mjs',
   'stats.mjs',
@@ -79,20 +68,77 @@ const PLUGIN_TOOL_FILES = Object.freeze([
   'auto-merge.reference.mjs',
   'merge-authorization-contract.mjs',
 ]);
-export const NON_MANUAL_TOOL_FILES = Object.freeze([
-  'auto-merge.mjs',
-  'merge-authorization-contract.mjs',
-]);
-const CLAUDE_HOOK_CONTRACT = Object.freeze({
-  // The guard also refuses a synchronous question while a run is live (0.50.0).
-  'command-guard.mjs': Object.freeze({ event: 'PreToolUse', matcher: 'Bash|AskUserQuestion' }),
-  // A live run never edits its own hook wiring (0.55.5).
-  'edit-guard.mjs': Object.freeze({ event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|NotebookEdit' }),
-  'label-swap-reminder.mjs': Object.freeze({ event: 'PostToolUse', matcher: 'Bash' }),
-  'session-preflight.sh': Object.freeze({ event: 'SessionStart', matcher: null }),
-  'subagent-transcript.mjs': Object.freeze({ event: 'SubagentStop', matcher: null }),
-  'writeback-check.mjs': Object.freeze({ event: 'Stop', matcher: null }),
-});
+// Global install: the plugin ships these hooks in hooks/hooks.json, each
+// running the plugin's own copy. Exactly one handler per tool, on its event
+// and matcher, with exactly this command. The command guard fails closed only
+// inside an autoloop repository: a crashed guard refuses there, while a broken
+// plugin never refuses commands in every other repository.
+const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/templates/tools';
+export const PLUGIN_HOOKS = Object.freeze([
+  { name: 'session-preflight.sh', event: 'SessionStart', matcher: null, command: `bash "${PLUGIN_TOOLS}/session-preflight.sh"` },
+  { name: 'edit-guard.mjs', event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|NotebookEdit', command: `node "${PLUGIN_TOOLS}/edit-guard.mjs"` },
+  {
+    name: 'command-guard.mjs',
+    event: 'PreToolUse',
+    matcher: 'Bash|AskUserQuestion',
+    // The guard's own verdict (0 or 2) is final. Anything else is a crash: it
+    // refuses where the project's top level has any .autoloop entry (a
+    // symlink or unreadable directory included, as the resolver treats them)
+    // or the repository has a plugin run marker (one that records its base: a
+    // pre-devendor branch mid-run), never a legacy install's own marker.
+    command: `node "${PLUGIN_TOOLS}/command-guard.mjs"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; `
+      + 'r=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || printf %s "$CLAUDE_PROJECT_DIR"); '
+      + '{ [ -e "$r/.autoloop" ] || [ -L "$r/.autoloop" ]; } && exit 2; '
+      + 'c=$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) '
+      + '&& grep -qs \'"baseBranch":"\' "$c"/autoloop/run/*.json && exit 2; exit 0',
+  },
+  { name: 'label-swap-reminder.mjs', event: 'PostToolUse', matcher: 'Bash', command: `node "${PLUGIN_TOOLS}/label-swap-reminder.mjs"` },
+  { name: 'subagent-transcript.mjs', event: 'SubagentStop', matcher: null, command: `node "${PLUGIN_TOOLS}/subagent-transcript.mjs"` },
+  { name: 'writeback-check.mjs', event: 'Stop', matcher: null, command: `node "${PLUGIN_TOOLS}/writeback-check.mjs"` },
+].map((entry) => Object.freeze(entry)));
+
+export function pluginHookProblems(document, toolsDir) {
+  const problems = [];
+  const handlers = [];
+  for (const [event, groups] of Object.entries(document?.hooks ?? {})) {
+    for (const group of Array.isArray(groups) ? groups : []) {
+      for (const handler of Array.isArray(group?.hooks) ? group.hooks : []) {
+        if (handler?.type !== 'command' || typeof handler.command !== 'string') {
+          problems.push(`hooks.${event}: expected command handlers only`);
+          continue;
+        }
+        handlers.push({ event, matcher: group.matcher ?? null, command: handler.command });
+      }
+    }
+  }
+  for (const entry of PLUGIN_HOOKS) {
+    const matches = handlers.filter((handler) => handler.command === entry.command);
+    if (matches.length !== 1) {
+      problems.push(`${entry.name}: expected exactly one handler running \`${entry.command}\`, found ${matches.length}`);
+    } else if (matches[0].event !== entry.event || matches[0].matcher !== entry.matcher) {
+      problems.push(`${entry.name}: expected ${entry.event}${entry.matcher === null ? '' : ` matcher ${entry.matcher}`}`);
+    }
+    if (!existsSync(resolve(toolsDir, entry.name))) problems.push(`${entry.name}: not in the plugin tools`);
+  }
+  for (const handler of handlers) {
+    if (!PLUGIN_HOOKS.some((entry) => entry.command === handler.command)) {
+      problems.push(`unexpected hook \`${handler.command}\` on ${handler.event}`);
+    }
+  }
+  return problems;
+}
+
+function checkPluginHooks(root) {
+  try {
+    const problems = pluginHookProblems(
+      JSON.parse(readFileSync(resolve(root, 'hooks', 'hooks.json'), 'utf8')),
+      resolve(root, 'templates', 'tools'),
+    );
+    return { ok: problems.length === 0, detail: problems.join('; ') };
+  } catch (error) {
+    return { ok: false, detail: error.message };
+  }
+}
 
 function run(executable, args, cwd) {
   const result = spawnSync(executable, args, {
@@ -155,242 +201,8 @@ function checkExists(path) {
   }
 }
 
-function referencedVendoredTools(text) {
-  const names = new Set();
-  for (const match of String(text).matchAll(/tools\/agentic\/([A-Za-z0-9][A-Za-z0-9._-]*)/gu)) {
-    names.add(match[1]);
-  }
-  return names;
-}
-
-function validHookArguments(name, args = '') {
-  const value = args.trim();
-  if (name === 'command-guard.mjs') {
-    return value.length === 0
-      || /^--config\s+(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|\r\n]+)$/u.test(value);
-  }
-  return value.length === 0;
-}
-
-// `node <tool> || exit 2` — the suffix that turns a CRASHED guard into a refusal.
-// Without it node's exit 1 propagates and the host lets the command through: a
-// partly vendored or syntax-broken guard then permits everything, silently. The
-// missing-file branch already exits 2; this is the branch that did not.
-const FAIL_CLOSED_SUFFIX = /\s*\|\|\s*exit\s+2\s*$/u;
-
-export function stripFailClosed(branch) {
-  return String(branch).replace(FAIL_CLOSED_SUFFIX, '');
-}
-
-// Presence, not position: the strip above is anchored to the end of the guard
-// BRANCH, while a whole hook command continues `; else ...; fi` past it.
-export function failsClosed(command) {
-  return /\|\|\s*exit\s+2/u.test(String(command));
-}
-
-function invokesVendoredTool(command, name) {
-  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const interpreter = name.endsWith('.sh') ? 'bash' : 'node';
-  const direct = new RegExp(
-    `^\\s*${interpreter}\\s+(?:"[^"\\r\\n]*tools/agentic/${escapedName}"|'[^'\\r\\n]*tools/agentic/${escapedName}'|[^\\s;&|\\r\\n]*tools/agentic/${escapedName})(?:\\s+([^;&|\\r\\n]+))?\\s*$`,
-    'u',
-  );
-  const directMatch = String(command).match(direct);
-  if (directMatch && validHookArguments(name, directMatch[1])) return true;
-  for (const match of String(command).matchAll(
-    /(?:^|[;\s])([A-Za-z_][A-Za-z0-9_]*)=(["'])([^"']+)\2/gu,
-  )) {
-    const [, variable, , value] = match;
-    if (!value.endsWith(`tools/agentic/${name}`)) continue;
-    const escapedVariable = variable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const conditional = new RegExp(
-      `^([\\s\\S]*?)if\\s+\\[\\s+-f\\s+["']?\\$\\{?${escapedVariable}\\}?["']?\\s+\\]\\s*;\\s*then\\s+([\\s\\S]*?)\\s*;\\s*else\\s+([\\s\\S]*?)\\s*;\\s*fi\\s*$`,
-      'u',
-    );
-    const branches = String(command).match(conditional);
-    if (!branches) continue;
-    const prefix = branches[1];
-    const assignments = prefix.split(';').map((part) => part.trim()).filter(Boolean);
-    if (
-      assignments.length === 0
-      || assignments.some((part) =>
-        !/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;\r\n]+)$/u
-          .test(part))
-    ) {
-      continue;
-    }
-    const invocation = new RegExp(
-      `^${interpreter}\\s+["']?\\$\\{?${escapedVariable}\\}?["']?(?:\\s+([^;&|\\r\\n]+))?\\s*$`,
-      'u',
-    );
-    // A `|| exit 2` suffix hardens the binding rather than changing what it
-    // executes, so it is stripped before the shape is matched and required
-    // separately below.
-    const invocationMatch = stripFailClosed(branches[2]).match(invocation);
-    if (
-      !invocationMatch
-      || !validHookArguments(name, invocationMatch[1])
-    ) {
-      continue;
-    }
-    if (
-      name === 'command-guard.mjs'
-      && !/(?:^|;)\s*exit\s+[1-9][0-9]*\s*$/u.test(branches[3])
-    ) {
-      continue;
-    }
-    return true;
-  }
-  return false;
-}
-
 function plainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function validateHookBindings(
-  bindings,
-  source,
-  toolsDir,
-  contract,
-  requireConfigured,
-  parseErrors = [],
-) {
-  const errors = [...parseErrors];
-  const configured = new Map();
-  const handlerReferences = new Set();
-  for (const binding of bindings) {
-    const references = referencedVendoredTools(binding.command);
-    for (const name of references) {
-      handlerReferences.add(name);
-      if (!existsSync(resolve(toolsDir, name))) {
-        errors.push(`configured tool reference does not resolve: ${name}`);
-      }
-      const expected = contract[name];
-      if (!expected) continue;
-      if (name === 'command-guard.mjs' && !failsClosed(binding.command)) {
-        errors.push(
-          `${name}: hook command must end the guard branch with \`|| exit 2\` so a crashed `
-          + 'guard refuses instead of letting the command through',
-        );
-      }
-      if (!invokesVendoredTool(binding.command, name)) {
-        errors.push(`${name}: hook command references the tool without executing it`);
-        continue;
-      }
-      if (
-        binding.event !== expected.event
-        || binding.matcher !== expected.matcher
-      ) {
-        errors.push(
-          `${name}: expected ${expected.event}`
-          + (expected.matcher === null ? '' : ` matcher ${expected.matcher}`),
-        );
-      }
-      if (configured.has(name)) errors.push(`${name}: configured more than once`);
-      configured.set(name, binding);
-    }
-  }
-  for (const name of referencedVendoredTools(source)) {
-    if (!handlerReferences.has(name)) {
-      errors.push(`${name}: reference is outside a valid command-hook handler`);
-    }
-  }
-  if (requireConfigured || configured.size > 0) {
-    for (const name of Object.keys(contract)) {
-      if (!configured.has(name)) errors.push(`missing configured tool reference ${name}`);
-    }
-  }
-  return { ok: errors.length === 0, detail: errors.join('; ') };
-}
-
-function inspectHookJson(source, toolsDir, contract, requireConfigured = false) {
-  let value;
-  try {
-    value = JSON.parse(source);
-  } catch (error) {
-    return { ok: false, detail: error.message };
-  }
-  const errors = [];
-  const bindings = [];
-  if (value?.hooks !== undefined && !plainObject(value.hooks)) {
-    errors.push('hooks: expected an object');
-  }
-  for (const [event, groups] of Object.entries(value?.hooks ?? {})) {
-    if (!Array.isArray(groups)) {
-      errors.push(`hooks.${event}: expected an array`);
-      continue;
-    }
-    groups.forEach((group, groupIndex) => {
-      const path = `hooks.${event}[${groupIndex}]`;
-      if (!plainObject(group) || !Array.isArray(group.hooks)) {
-        errors.push(`${path}: expected a matcher group with hooks array`);
-        return;
-      }
-      const matcher = group.matcher ?? null;
-      if (matcher !== null && typeof matcher !== 'string') {
-        errors.push(`${path}.matcher: expected a string`);
-      }
-      group.hooks.forEach((handler, handlerIndex) => {
-        const handlerPath = `${path}.hooks[${handlerIndex}]`;
-        if (!plainObject(handler) || handler.type !== 'command') {
-          errors.push(`${handlerPath}: expected a command handler`);
-          return;
-        }
-        const commands = [
-          ['command', handler.command],
-          ['commandWindows', handler.commandWindows],
-          ['command_windows', handler.command_windows],
-        ].filter(([, command]) => command !== undefined);
-        if (
-          commands.length === 0
-          || commands.some(([, command]) =>
-            typeof command !== 'string' || command.length === 0)
-        ) {
-          errors.push(`${handlerPath}: expected non-empty command text`);
-          return;
-        }
-        commands.forEach(([, command]) => {
-          bindings.push({ event, matcher, command });
-        });
-      });
-    });
-  }
-  return validateHookBindings(
-    bindings,
-    source,
-    toolsDir,
-    contract,
-    requireConfigured,
-    errors,
-  );
-}
-
-function checkHookJson(path, toolsDir, contract, requireConfigured = false) {
-  try {
-    return inspectHookJson(
-      readFileSync(path, 'utf8'),
-      toolsDir,
-      contract,
-      requireConfigured,
-    );
-  } catch (error) {
-    return { ok: false, detail: error.message };
-  }
-}
-
-function installedEntrypointChecks(root, toolsDir) {
-  return [
-    {
-      name: 'required Claude prompt entrypoint',
-      execute: () => checkHookJson(
-        resolve(root, '.claude', 'settings.json'),
-        toolsDir,
-        CLAUDE_HOOK_CONTRACT,
-        true,
-      ),
-    },
-  ];
 }
 
 function checkConfiguredChecklist(root) {
@@ -402,15 +214,14 @@ function checkConfiguredChecklist(root) {
         detail: `ProjectConfig is invalid: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`,
       };
     }
-    return checkExists(resolve(root, resolved.config.review.checklistPath));
+    return checkExists(effectiveChecklistPath(root, resolved.config));
   } catch (error) {
     return { ok: false, detail: `cannot resolve configured checklist: ${error.message}` };
   }
 }
 
-// The release-proven manifest hashes exactly the template tools this file
-// would spawn a self-test for, keyed by their installed names. Deterministic:
-// it reads bytes, never runs anything.
+// The manifest hashes exactly the template tools this file would spawn a
+// self-test for. Deterministic: it reads bytes, never runs anything.
 function selfTestManifestTools(toolsDir) {
   const ownName = basename(fileURLToPath(import.meta.url));
   const tools = {};
@@ -418,7 +229,7 @@ function selfTestManifestTools(toolsDir) {
     if (name === ownName) continue;
     const source = readFileSync(join(toolsDir, name));
     if (!SELF_TEST_PATTERN.test(source.toString('utf8'))) continue;
-    tools[TOOL_INSTALL_NAMES[name] ?? name] = createHash('sha256').update(source).digest('hex');
+    tools[name] = createHash('sha256').update(source).digest('hex');
   }
   return Object.fromEntries(
     Object.entries(tools).sort(([left], [right]) => left.localeCompare(right)),
@@ -434,9 +245,8 @@ function renderSelfTestManifest(toolsDir) {
 }
 
 // Plugin-root freshness: a stale committed manifest must not ship. The node
-// field is NOT compared against the running process here — CI regenerates on
-// more than one Node line, so freshness binds the hashed template bytes; the
-// recorded major only gates the install-side fast path.
+// field is NOT compared against the running process — CI regenerates on more
+// than one Node line, so freshness binds the hashed template bytes.
 function checkSelfTestManifest(toolsDir) {
   let committed;
   try {
@@ -469,33 +279,9 @@ function checkSelfTestManifest(toolsDir) {
     };
 }
 
-// Install-side manifest load. Fail-open by design: a missing, unreadable, or
-// malformed manifest only disables the fast path, so every self-test spawns
-// exactly as it always has. The recorded Node major must match the running
-// process — release CI only proved the manifest for the majors it ran.
-function loadSelfTestManifest(toolsDir) {
-  try {
-    const manifest = JSON.parse(readFileSync(resolve(toolsDir, SELF_TEST_MANIFEST_NAME), 'utf8'));
-    if (
-      manifest?.version !== 1
-      || !plainObject(manifest.tools)
-      || String(manifest.node) !== nodeMajor()
-    ) {
-      return null;
-    }
-    const tools = {};
-    for (const [name, hash] of Object.entries(manifest.tools)) {
-      if (typeof hash === 'string' && /^[0-9a-f]{64}$/u.test(hash)) tools[name] = hash;
-    }
-    return tools;
-  } catch {
-    return null;
-  }
-}
-
 function pluginChecks(root) {
   const toolsDir = resolve(root, 'templates', 'tools');
-  const checks = toolChecks(root, toolsDir, PLUGIN_TOOL_FILES, 'template');
+  const checks = toolChecks(root, toolsDir, PLUGIN_TOOL_FILES);
 
   for (const relativePath of [
     '.claude-plugin/marketplace.json',
@@ -506,19 +292,7 @@ function pluginChecks(root) {
       execute: () => checkJson(resolve(root, relativePath)),
     });
   }
-  for (const [relativePath, contract] of [
-    ['templates/settings-hooks.template.json', CLAUDE_HOOK_CONTRACT],
-  ]) {
-    checks.push({
-      name: `hook contract ${relativePath}`,
-      execute: () => checkHookJson(
-        resolve(root, relativePath),
-        toolsDir,
-        contract,
-        true,
-      ),
-    });
-  }
+  checks.push({ name: 'plugin hooks hooks/hooks.json', execute: () => checkPluginHooks(root) });
   checks.push({
     name: 'shell session-preflight',
     execute: () => run(
@@ -572,11 +346,11 @@ function pluginChecks(root) {
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
   'codebase-design': 6489,
-  dev: 59905,
+  dev: 58717,
   'lean-code': 3909,
-  pitcrew: 20076,
-  'queue-trace': 6936,
-  setup: 43935,
+  pitcrew: 19813,
+  'queue-trace': 6933,
+  setup: 13888,
   shape: 26690,
 });
 
@@ -598,7 +372,7 @@ function checkSkillBudgets(root) {
   return problems.length === 0 ? { ok: true, detail: '' } : { ok: false, detail: problems.join('\n') };
 }
 
-function toolChecks(root, toolsDir, requiredFiles, artifactMode, { full = false } = {}) {
+function toolChecks(root, toolsDir, requiredFiles) {
   const checks = [];
   for (const name of requiredFiles) {
     checks.push({
@@ -606,16 +380,6 @@ function toolChecks(root, toolsDir, requiredFiles, artifactMode, { full = false 
       execute: () => checkExists(resolve(toolsDir, name)),
     });
   }
-  // Release CI already self-tested every template tool on the release commit,
-  // so an installed copy whose bytes match the shipped manifest re-proves
-  // nothing by spawning again: it passes as release-proven. Anything else —
-  // differing bytes (the Setup-filled auto-merge.mjs, a repo-owned
-  // escalate-paths.mjs), a missing manifest entry, another Node major, or
-  // --full — runs the live self-test exactly as before. Syntax and every
-  // non-self-test check are never skipped.
-  const manifest = artifactMode === 'install' && !full
-    ? loadSelfTestManifest(toolsDir)
-    : null;
   const ownName = basename(fileURLToPath(import.meta.url));
   const toolNames = existsSync(toolsDir) ? readdirSync(toolsDir)
     .filter((name) => name.endsWith('.mjs'))
@@ -627,24 +391,7 @@ function toolChecks(root, toolsDir, requiredFiles, artifactMode, { full = false 
       execute: () => run(process.execPath, ['--check', path], root),
     });
     if (name === ownName) continue;
-    const source = readFileSync(path);
-    if (!SELF_TEST_PATTERN.test(source.toString('utf8'))) continue;
-    let proven = false;
-    if (manifest !== null) {
-      try {
-        proven = manifest[name] !== undefined
-          && createHash('sha256').update(source).digest('hex') === manifest[name];
-      } catch {
-        proven = false; // fail-open: any doubt runs the real self-test
-      }
-    }
-    if (proven) {
-      checks.push({
-        name: `self-test ${name} (release-proven)`,
-        execute: () => ({ ok: true, detail: '' }),
-      });
-      continue;
-    }
+    if (!SELF_TEST_PATTERN.test(readFileSync(path, 'utf8'))) continue;
     checks.push({
       name: `self-test ${name}`,
       execute: () => run(process.execPath, [path, '--self-test'], root),
@@ -653,83 +400,54 @@ function toolChecks(root, toolsDir, requiredFiles, artifactMode, { full = false 
   return checks;
 }
 
-function installedToolFiles(config) {
-  return [
-    ...UNIVERSAL_TOOL_FILES,
-    ...(config?.merge?.policy && config.merge.policy !== 'manual'
-      ? NON_MANUAL_TOOL_FILES
-      : []),
+// A devendored repository carries none of the tool (hook-root's one
+// definition): no shipped file under tools/agentic/ and no hook running one.
+// A repository's own file there — a gate script — is not a leftover.
+function checkNoVendoredLayout(root) {
+  const { files, hooks } = vendoredLeftovers(root);
+  const leftovers = [
+    ...files.map((name) => `tools/agentic/${name}`),
+    ...hooks.map(({ file, command }) => `${file} hook \`${command}\``),
   ];
+  return leftovers.length === 0
+    ? { ok: true, detail: '' }
+    : {
+      ok: false,
+      detail: `vendored layout remains: ${leftovers.join(', ')} — remove it (tracked files in a PR; `
+        + '.claude/settings.local.json by hand)',
+    };
 }
 
-function installChecks(root, { full = false } = {}) {
-  const toolsDir = resolve(root, 'tools', 'agentic');
+// A gate command naming a repository script (a relative path with an
+// extension) that is not there fails every gate; say so before a run does.
+function checkGateScripts(root) {
   const resolved = resolveProjectConfig(root);
-  const config = resolved?.ok ? resolved.config : null;
-  const requiredFiles = installedToolFiles(config);
-  const checks = toolChecks(root, toolsDir, requiredFiles, 'install', { full });
-  checks.push({
-    name: 'required artifact docs/agentic/LOOP.md',
-    execute: () => checkExists(resolve(root, 'docs', 'agentic', 'LOOP.md')),
-  });
-  checks.push({
-    name: 'retired CI policy absent',
-    execute: () => checkRetiredCiPolicy(root),
-  });
-  checks.push({
-    name: 'configured review checklist',
-    execute: () => checkConfiguredChecklist(root),
-  });
-  checks.push({
-    name: 'ProjectConfig',
-    execute: () => run(
-      process.execPath,
-      [
-        resolve(toolsDir, 'config-contract.mjs'),
-        '--root',
-        root,
-      ],
-      root,
-    ),
-  });
-  checks.push({
-    name: 'installed forward contract lint',
-    execute: () => run(
-      process.execPath,
-      [
-        resolve(toolsDir, 'contract-lint.mjs'),
-        '--check-install-root',
-        root,
-      ],
-      root,
-    ),
-  });
-  checks.push({
-    name: 'shell dispatch-stream',
-    execute: () => run(
-      'bash',
-      ['-n', resolve(toolsDir, 'dispatch-stream.sh')],
-      root,
-    ),
-  });
-  checks.push({
-    name: 'guard corpus replay',
-    execute: () => run(
-      process.execPath,
-      [resolve(toolsDir, 'command-guard.mjs'), '--corpus'],
-      root,
-    ),
-  });
-  checks.push({
-    name: 'shell session-preflight',
-    execute: () => run(
-      'bash',
-      ['-n', resolve(toolsDir, 'session-preflight.sh')],
-      root,
-    ),
-  });
-  checks.push(...installedEntrypointChecks(root, toolsDir));
-  return checks;
+  if (!resolved?.ok) return { ok: false, detail: 'ProjectConfig is invalid' };
+  const commands = ['command', 'quickCommand', 'setupCommand']
+    .map((key) => resolved.config.gate[key]).filter((value) => typeof value === 'string');
+  const scripts = commands.flatMap((command) => command.split(/[\s;&|()]+/u))
+    .map((token) => token.replace(/^\.\//u, ''))
+    .filter((token) => /^[A-Za-z0-9_.][^:$~]*\/[^:$]*\.[A-Za-z0-9]{1,5}$/u.test(token));
+  const missing = [...new Set(scripts)].filter((path) => !existsSync(resolve(root, path)));
+  return missing.length === 0
+    ? { ok: true, detail: '' }
+    : { ok: false, detail: `gate scripts missing: ${missing.join(', ')}` };
+}
+
+// The project doctor: the repository's own data, checked against the plugin
+// that runs it. Every tool lives in the plugin, so nothing here self-tests.
+function projectChecks(root) {
+  const toolsDir = resolve(fileURLToPath(new URL('.', import.meta.url)));
+  return [
+    {
+      name: 'ProjectConfig',
+      execute: () => run(process.execPath, [resolve(toolsDir, 'config-contract.mjs'), '--root', root], root),
+    },
+    { name: 'configured review checklist', execute: () => checkConfiguredChecklist(root) },
+    { name: 'retired CI policy absent', execute: () => checkRetiredCiPolicy(root) },
+    { name: 'gate scripts present', execute: () => checkGateScripts(root) },
+    { name: 'no vendored layout', execute: () => checkNoVendoredLayout(root) },
+  ];
 }
 
 function nodeMajor() {
@@ -740,237 +458,151 @@ function selfTest() {
   const success = run(process.execPath, ['--version'], process.cwd());
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
   const toolsDir = resolve(fileURLToPath(new URL('.', import.meta.url)));
-  // The guard binding must fail closed, which only the shipped conditional
-  // shape expresses; a bare invocation of it is correctly rejected.
-  const hookInvocation = (name, path) => (name === 'command-guard.mjs'
-    ? `s="${path}/${name}"; if [ -f "$s" ]; then node "$s" || exit 2; else exit 2; fi`
-    : `${name.endsWith('.sh') ? 'bash' : 'node'} "${path}/${name}"`);
-  const hookDocument = (contract) => {
-    const hooks = {};
-    for (const [name, binding] of Object.entries(contract)) {
-      if (!hooks[binding.event]) hooks[binding.event] = [];
-      hooks[binding.event].push({
-        ...(binding.matcher === null ? {} : { matcher: binding.matcher }),
-        hooks: [{
-          type: 'command',
-          command: hookInvocation(name, '$ROOT/tools/agentic'),
-        }],
-      });
-    }
-    return JSON.stringify({ hooks });
-  };
-  const hookDocumentWithCommand = (contract, name, command) => {
-    const document = JSON.parse(hookDocument(contract));
-    for (const bindings of Object.values(document.hooks)) {
-      for (const binding of bindings) {
-        for (const hook of binding.hooks) {
-          if (hook.command.includes(`/tools/agentic/${name}`)) {
-            hook.command = command;
-          }
-        }
-      }
-    }
-    return JSON.stringify(document);
-  };
-  const partialHook = inspectHookJson(JSON.stringify({
-    hooks: {
-      PreToolUse: [{
-        matcher: 'Bash',
-        hooks: [{
-          type: 'command',
-          command: 'node "$ROOT/tools/agentic/command-guard.mjs"',
-        }],
-      }],
-    },
-  }), toolsDir, CLAUDE_HOOK_CONTRACT, true);
-  const completeHook = inspectHookJson(
-    hookDocument(CLAUDE_HOOK_CONTRACT),
-    toolsDir,
-    CLAUDE_HOOK_CONTRACT,
-    true,
-  );
-  const swappedEvent = inspectHookJson(JSON.stringify({
-    hooks: {
-      Stop: [{
-        hooks: [{
-          type: 'command',
-          command: 'node "$ROOT/tools/agentic/command-guard.mjs"',
-        }],
-      }],
-    },
-  }), toolsDir, CLAUDE_HOOK_CONTRACT, false);
-  const matcherOnUnmatchedEvent = inspectHookJson(JSON.stringify({
-    hooks: {
-      Stop: [{
-        matcher: 'Bash',
-        hooks: [{
-          type: 'command',
-          command: 'node "$ROOT/tools/agentic/writeback-check.mjs"',
-        }],
-      }],
-    },
-  }), toolsDir, CLAUDE_HOOK_CONTRACT, false);
-  const bogusNesting = inspectHookJson(JSON.stringify({
-    hooks: {
-      PreToolUse: [{
-        matcher: 'Bash',
-        hooks: [],
-        ignored: {
-          command: 'node "$ROOT/tools/agentic/command-guard.mjs"',
-        },
-      }],
-    },
-  }), toolsDir, CLAUDE_HOOK_CONTRACT, false);
-  const emptyRequiredHooks = inspectHookJson(
-    '{"hooks":{}}',
-    toolsDir,
-    CLAUDE_HOOK_CONTRACT,
-    true,
-  );
-  const missingReference = inspectHookJson(JSON.stringify({
-    hooks: {
-      Stop: [{
-        hooks: [{
-          type: 'command',
-          command: 'node "$ROOT/tools/agentic/not-installed.mjs"',
-        }],
-      }],
-    },
-  }), toolsDir, CLAUDE_HOOK_CONTRACT, false);
-  const invalidClaudeHook = (name, command) => inspectHookJson(
-    hookDocumentWithCommand(CLAUDE_HOOK_CONTRACT, name, command),
-    toolsDir,
-    CLAUDE_HOOK_CONTRACT,
-    true,
-  );
-  const inertEchoHook = invalidClaudeHook(
-    'command-guard.mjs',
-    'echo tools/agentic/command-guard.mjs',
-  );
-  const shortCircuitedHook = invalidClaudeHook(
-    'command-guard.mjs',
-    'false && node tools/agentic/command-guard.mjs',
-  );
-  const maskedGuardHook = invalidClaudeHook(
-    'command-guard.mjs',
-    'node tools/agentic/command-guard.mjs || true',
-  );
-  const exitedGuardHook = invalidClaudeHook(
-    'command-guard.mjs',
-    'exit 0; node tools/agentic/command-guard.mjs',
-  );
-  const wrongGuardInterpreter = invalidClaudeHook(
-    'command-guard.mjs',
-    'bash tools/agentic/command-guard.mjs',
-  );
-  const wrongPreflightInterpreter = invalidClaudeHook(
-    'session-preflight.sh',
-    'node tools/agentic/session-preflight.sh',
-  );
-  const selfTestGuardHook = invalidClaudeHook(
-    'command-guard.mjs',
-    'node tools/agentic/command-guard.mjs --self-test',
-  );
-  const selfTestWritebackHook = invalidClaudeHook(
-    'writeback-check.mjs',
-    'node tools/agentic/writeback-check.mjs --self-test',
-  );
-  const manualTools = installedToolFiles({ merge: { policy: 'manual' } });
-  const ratifiedTools = installedToolFiles({ merge: { policy: 'ratified' } });
-  const entrypointRoot = mkdtempSync(join(tmpdir(), 'autoloop-entrypoints-'));
-  let completeEntrypoints;
-  let disabledClaudeEntrypoint;
-  try {
-    mkdirSync(resolve(entrypointRoot, '.claude'), { recursive: true });
-    writeFileSync(
-      resolve(entrypointRoot, '.claude', 'settings.json'),
-      hookDocument(CLAUDE_HOOK_CONTRACT),
-    );
-    completeEntrypoints = installedEntrypointChecks(
-      entrypointRoot,
-      toolsDir,
-    ).every((check) => check.execute().ok);
-    writeFileSync(
-      resolve(entrypointRoot, '.claude', 'settings.json'),
-      '{"hooks":{}}\n',
-    );
-    disabledClaudeEntrypoint = installedEntrypointChecks(
-      entrypointRoot,
-      toolsDir,
-    ).some((check) =>
-      check.name === 'required Claude prompt entrypoint'
-      && !check.execute().ok);
-  } finally {
-    rmSync(entrypointRoot, { recursive: true, force: true });
-  }
-  const fastPathRoot = mkdtempSync(join(tmpdir(), 'autoloop-fastpath-'));
-  let provenSkips;
-  let provenSyntaxKept;
-  let fullFlagSpawns;
-  let mismatchedNodeSpawns;
-  let modifiedToolSpawns;
-  let missingManifestSpawns;
+  // The committed manifest must match the template bytes it hashes.
+  const manifestRoot = mkdtempSync(join(tmpdir(), 'autoloop-manifest-'));
   let freshManifestPasses;
   let staleManifestFails;
-  let referenceNameMapped;
   try {
-    const fixtureToolsDir = join(fastPathRoot, 'tools', 'agentic');
-    mkdirSync(fixtureToolsDir, { recursive: true });
-    // The fixture tool FAILS its live self-test on purpose: a passing check
-    // is proof the fast path skipped the spawn, and a failing check is proof
-    // the self-test really executed.
-    const fixtureTool = [
-      'function selfTest() { return false; }',
-      "if (process.argv.includes('--self-test')) process.exit(1);",
-      '',
-    ].join('\n');
-    const fixtureToolPath = join(fixtureToolsDir, 'fixture-tool.mjs');
-    writeFileSync(fixtureToolPath, fixtureTool);
-    const fixtureDigest = createHash('sha256').update(fixtureTool).digest('hex');
-    const manifestPath = join(fixtureToolsDir, SELF_TEST_MANIFEST_NAME);
-    const writeManifest = (node, hash) => writeFileSync(manifestPath, `${JSON.stringify({
-      version: 1,
-      node,
-      tools: { 'fixture-tool.mjs': hash },
-    }, null, 2)}\n`);
-    const fixtureSelfTestCheck = (options) =>
-      toolChecks(fastPathRoot, fixtureToolsDir, [], 'install', options)
-        .find((check) => check.name.startsWith('self-test fixture-tool.mjs'));
-    writeManifest(nodeMajor(), fixtureDigest);
-    const proven = fixtureSelfTestCheck();
-    provenSkips = proven.name === 'self-test fixture-tool.mjs (release-proven)'
-      && proven.execute().ok;
-    provenSyntaxKept = toolChecks(fastPathRoot, fixtureToolsDir, [], 'install')
-      .some((check) => check.name === 'syntax fixture-tool.mjs');
-    const fullFlag = fixtureSelfTestCheck({ full: true });
-    fullFlagSpawns = fullFlag.name === 'self-test fixture-tool.mjs'
-      && !fullFlag.execute().ok;
-    writeManifest(String(Number(nodeMajor()) + 1), fixtureDigest);
-    const mismatchedNode = fixtureSelfTestCheck();
-    mismatchedNodeSpawns = mismatchedNode.name === 'self-test fixture-tool.mjs'
-      && !mismatchedNode.execute().ok;
-    writeManifest(nodeMajor(), fixtureDigest);
-    writeFileSync(fixtureToolPath, `${fixtureTool}// drifted\n`);
-    const modifiedTool = fixtureSelfTestCheck();
-    modifiedToolSpawns = modifiedTool.name === 'self-test fixture-tool.mjs'
-      && !modifiedTool.execute().ok;
-    writeFileSync(fixtureToolPath, fixtureTool);
-    rmSync(manifestPath);
-    const unproven = fixtureSelfTestCheck();
-    missingManifestSpawns = unproven.name === 'self-test fixture-tool.mjs'
-      && !unproven.execute().ok;
-    writeFileSync(manifestPath, renderSelfTestManifest(fixtureToolsDir));
-    freshManifestPasses = checkSelfTestManifest(fixtureToolsDir).ok;
-    writeManifest(nodeMajor(), fixtureDigest.split('').reverse().join(''));
-    staleManifestFails = !checkSelfTestManifest(fixtureToolsDir).ok;
-    writeFileSync(join(fixtureToolsDir, 'auto-merge.reference.mjs'), fixtureTool);
-    const manifestTools = selfTestManifestTools(fixtureToolsDir);
-    referenceNameMapped = manifestTools['auto-merge.mjs'] === fixtureDigest
-      && manifestTools['auto-merge.reference.mjs'] === undefined;
+    const fixtureTool = 'function selfTest() { return true; }\n';
+    writeFileSync(join(manifestRoot, 'fixture-tool.mjs'), fixtureTool);
+    writeFileSync(join(manifestRoot, SELF_TEST_MANIFEST_NAME), renderSelfTestManifest(manifestRoot));
+    freshManifestPasses = checkSelfTestManifest(manifestRoot).ok;
+    writeFileSync(join(manifestRoot, 'fixture-tool.mjs'), `${fixtureTool}// drifted\n`);
+    staleManifestFails = !checkSelfTestManifest(manifestRoot).ok;
   } finally {
-    rmSync(fastPathRoot, { recursive: true, force: true });
+    rmSync(manifestRoot, { recursive: true, force: true });
+  }
+  // The project doctor: a devendored repository passes; any vendored layout
+  // left behind fails and names devendor.
+  const projectRoot = mkdtempSync(join(tmpdir(), 'autoloop-project-'));
+  let devendoredPasses;
+  let vendoredToolsFail;
+  let vendoredWiringFails;
+  let missingChecklistFails;
+  let repositoryFilePasses;
+  let missingGateScriptFails;
+  try {
+    mkdirSync(join(projectRoot, '.autoloop'));
+    writeFileSync(join(projectRoot, '.autoloop', 'config.json'), JSON.stringify({
+      version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' },
+    }));
+    const doctor = () => projectChecks(projectRoot).map((check) => ({ name: check.name, ...check.execute() }));
+    devendoredPasses = doctor().every((result) => result.ok);
+    mkdirSync(join(projectRoot, '.claude'));
+    writeFileSync(join(projectRoot, '.claude', 'settings.json'), '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node tools/agentic/writeback-check.mjs"}]}]}}');
+    vendoredWiringFails = doctor().some((result) => result.name === 'no vendored layout' && !result.ok
+      && result.detail.includes('node tools/agentic/writeback-check.mjs'));
+    rmSync(join(projectRoot, '.claude'), { recursive: true, force: true });
+    // A repository's own file under tools/agentic (a gate script) is not the
+    // vendored layout; a shipped tool left behind is.
+    mkdirSync(join(projectRoot, 'tools', 'agentic'), { recursive: true });
+    writeFileSync(join(projectRoot, 'tools', 'agentic', 'gate.mjs'), '// the repository\'s own\n');
+    repositoryFilePasses = doctor().every((result) => result.ok);
+    writeFileSync(join(projectRoot, 'tools', 'agentic', 'prime.mjs'), '// shipped\n');
+    vendoredToolsFail = doctor().some((result) => result.name === 'no vendored layout' && !result.ok
+      && result.detail.includes('tools/agentic/prime.mjs'));
+    rmSync(join(projectRoot, 'tools'), { recursive: true, force: true });
+    // A gate whose repository script is missing fails before a run finds out.
+    writeFileSync(join(projectRoot, '.autoloop', 'config.json'), JSON.stringify({
+      version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'node tools/agentic/gate.mjs && ./scripts/lint.sh' },
+    }));
+    const missingGate = doctor().find((result) => result.name === 'gate scripts present');
+    missingGateScriptFails = missingGate?.ok === false && missingGate.detail.includes('tools/agentic/gate.mjs')
+      && missingGate.detail.includes('scripts/lint.sh');
+    // No checklist of its own: the plugin's is used. A path the repository
+    // configured explicitly must exist.
+    writeFileSync(join(projectRoot, '.autoloop', 'config.json'), JSON.stringify({
+      version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' },
+      review: { checklistPath: 'docs/review-checklist.md' },
+    }));
+    missingChecklistFails = doctor().some((result) => result.name === 'configured review checklist' && !result.ok);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+  // Global install: the plugin's own hooks.json. Each tool has exactly one
+  // handler, on its event and matcher, running the plugin's copy.
+  const pluginHookDocument = (entries = PLUGIN_HOOKS) => {
+    const hooks = {};
+    for (const entry of entries) {
+      (hooks[entry.event] ??= []).push({
+        ...(entry.matcher === null ? {} : { matcher: entry.matcher }),
+        hooks: [{ type: 'command', command: entry.command }],
+      });
+    }
+    return { hooks };
+  };
+  const pluginProblems = (document) => pluginHookProblems(document, toolsDir);
+  const withGuard = (command) => PLUGIN_HOOKS.map((entry) =>
+    (entry.name === 'command-guard.mjs' ? { ...entry, command } : entry));
+  const guardEntry = PLUGIN_HOOKS.find((entry) => entry.name === 'command-guard.mjs');
+  // A crashed guard refuses inside an autoloop repository and nowhere else:
+  // a broken plugin must not refuse every command in every repository.
+  const crashRoot = mkdtempSync(join(tmpdir(), 'autoloop-hook-crash-'));
+  let crashInside;
+  let crashOutside;
+  let refusalKept;
+  let crashBesideDanglingConfig;
+  let crashInSubdirectory;
+  let crashMidRun;
+  let crashBesideLegacyRun;
+  try {
+    const stub = join(crashRoot, 'plugin', 'templates', 'tools', 'command-guard.mjs');
+    mkdirSync(dirname(stub), { recursive: true });
+    mkdirSync(join(crashRoot, 'project', '.autoloop'), { recursive: true });
+    writeFileSync(join(crashRoot, 'project', '.autoloop', 'config.json'), '{}');
+    mkdirSync(join(crashRoot, 'project', 'sub'));
+    spawnSync('git', ['init', '-q', join(crashRoot, 'project')]);
+    mkdirSync(join(crashRoot, 'elsewhere'));
+    mkdirSync(join(crashRoot, 'dangling'));
+    symlinkSync(join(crashRoot, 'nowhere'), join(crashRoot, 'dangling', '.autoloop'));
+    const guardExits = (code, project) => {
+      writeFileSync(stub, `process.exit(${code});\n`);
+      return spawnSync('sh', ['-c', guardEntry.command], {
+        env: { ...process.env, CLAUDE_PLUGIN_ROOT: join(crashRoot, 'plugin'), CLAUDE_PROJECT_DIR: join(crashRoot, project) },
+      }).status;
+    };
+    crashInside = guardExits(1, 'project');
+    crashOutside = guardExits(1, 'elsewhere');
+    // The guard's own refusal is final wherever it happens; a crash beside a
+    // config the shell cannot follow (a dangling symlink) still refuses.
+    refusalKept = guardExits(2, 'elsewhere') === 2 && guardExits(0, 'project') === 0;
+    crashBesideDanglingConfig = guardExits(1, 'dangling');
+    crashInSubdirectory = guardExits(1, 'project/sub');
+    // A crash on a checkout without .autoloop (a pre-devendor branch) while
+    // the repository has a run open still refuses.
+    mkdirSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run'), { recursive: true });
+    spawnSync('git', ['init', '-q', join(crashRoot, 'midrun')]);
+    writeFileSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run', 'run.json'), '{"version":1,"pids":[1],"baseBranch":"main"}');
+    crashMidRun = guardExits(1, 'midrun');
+    // A legacy install's own markers carry no base: a crashing plugin guard
+    // must not refuse commands its vendored guard is still judging.
+    writeFileSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run', 'run.json'), '{"version":1,"pids":[1]}');
+    crashBesideLegacyRun = guardExits(1, 'midrun');
+  } finally {
+    rmSync(crashRoot, { recursive: true, force: true });
   }
   const cases = [
+    ['the plugin hook document passes its contract', pluginProblems(pluginHookDocument()).length === 0],
+    ['a missing plugin hook is named',
+      pluginProblems(pluginHookDocument(PLUGIN_HOOKS.slice(1))).some((problem) => problem.includes(PLUGIN_HOOKS[0].name))],
+    ['a plugin hook on the wrong matcher is refused',
+      pluginProblems(pluginHookDocument(PLUGIN_HOOKS.map((entry) =>
+        (entry.name === 'command-guard.mjs' ? { ...entry, matcher: 'Bash' } : entry)))).length > 0],
+    ['a command guard without its fail-closed branch is refused',
+      pluginProblems(pluginHookDocument(withGuard('node "${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs"')))
+        .some((problem) => problem.includes('command-guard.mjs'))],
+    ['a hook outside the contract is refused',
+      pluginProblems(pluginHookDocument([...PLUGIN_HOOKS,
+        { name: 'x', event: 'Stop', matcher: null, command: 'echo hi' }])).some((problem) => problem.includes('echo hi'))],
+    ['a vendored tool path is refused',
+      pluginProblems(pluginHookDocument(withGuard('node "$CLAUDE_PROJECT_DIR/tools/agentic/command-guard.mjs" || exit 2'))).length > 0],
+    ['a crashed plugin guard refuses in an autoloop repository and allows elsewhere',
+      crashInside === 2 && crashOutside === 0],
+    ['the guard\'s own refusal is never turned into an allow', refusalKept],
+    ['a crash beside an unfollowable .autoloop still refuses', crashBesideDanglingConfig === 2],
+    ['a crash in a session started in a subdirectory still refuses', crashInSubdirectory === 2],
+    ['a crash while the repository has a plugin run open still refuses', crashMidRun === 2],
+    ['a crash beside a legacy install\'s own run does not refuse', crashBesideLegacyRun === 0],
     // 0.56.0: a skill loads whole into the session that invokes it and again
     // after every compaction (LFE: the dev skill added ~50k tokens to a 70k
     // floor, re-read on every one of 69 calls). A skill never grows silently.
@@ -981,39 +613,14 @@ function selfTest() {
     ['structured command success', success.ok && success.detail.length > 0],
     ['structured command failure', !failure.ok && failure.detail.length > 0],
     ['invalid JSON is rejected', checkJson(fileURLToPath(import.meta.url)).ok === false],
-    ['complete JSON hook wiring resolves', completeHook.ok],
-    ['partial hook wiring is rejected', !partialHook.ok],
-    ['swapped hook event is rejected', !swappedEvent.ok],
-    ['matcher on an unfiltered event is rejected', !matcherOnUnmatchedEvent.ok],
-    ['references outside hook handlers are rejected', !bogusNesting.ok],
-    ['empty required hook artifact is rejected', !emptyRequiredHooks.ok],
-    ['missing vendored hook target is rejected', !missingReference.ok],
-    ['text-only hook references are rejected', !inertEchoHook.ok],
-    ['short-circuited hook commands are rejected', !shortCircuitedHook.ok],
-    ['masked command guards are rejected', !maskedGuardHook.ok],
-    ['commands after exit are rejected', !exitedGuardHook.ok],
-    ['command guards require node', !wrongGuardInterpreter.ok],
-    ['session preflight requires bash', !wrongPreflightInterpreter.ok],
-    ['command-guard self-test mode is not a production hook', !selfTestGuardHook.ok],
-    ['writeback self-test mode is not a production hook', !selfTestWritebackHook.ok],
-    [
-      'non-manual installs require merge-authority tools',
-      !manualTools.includes('auto-merge.mjs')
-        && NON_MANUAL_TOOL_FILES.every((name) => ratifiedTools.includes(name)),
-    ],
-    ['manual installs include the terminal finalizer', manualTools.includes('publish-verdict.mjs')],
-    ['manual installs include the lifecycle driver', manualTools.includes('lifecycle-driver.mjs')],
-    ['complete host prompt entrypoints pass', completeEntrypoints],
-    ['disabled Claude prompt entrypoint fails closed', disabledClaudeEntrypoint],
-    ['release-proven identical tool skips its spawn', provenSkips],
-    ['release-proven fast path keeps the syntax check', provenSyntaxKept],
-    ['--full forces a release-proven tool to self-test live', fullFlagSpawns],
-    ['a foreign node major disables the fast path', mismatchedNodeSpawns],
-    ['a modified installed tool still self-tests live', modifiedToolSpawns],
-    ['a missing manifest disables the fast path', missingManifestSpawns],
     ['a fresh committed manifest passes the plugin check', freshManifestPasses],
     ['a stale committed manifest fails the plugin check', staleManifestFails],
-    ['the merge executor manifest entry uses the installed name', referenceNameMapped],
+    ['a devendored project passes the doctor', devendoredPasses],
+    ['vendored hook wiring left behind fails the doctor and names the hook', vendoredWiringFails],
+    ['a shipped tool left in tools/agentic fails the doctor, naming it', vendoredToolsFail],
+    ['a repository\'s own file in tools/agentic passes the doctor', repositoryFilePasses],
+    ['a gate command whose repository script is missing fails the doctor', missingGateScriptFails],
+    ['a missing explicitly configured checklist fails the doctor', missingChecklistFails],
   ];
   const failures = cases.filter(([, passed]) => !passed);
   for (const [name] of failures) console.error(`FAIL ${name}`);
@@ -1035,18 +642,15 @@ function parseArgs(args) {
   if (args.length === 2 && args[0] === '--plugin-root' && args[1]) {
     return { mode: 'plugin', root: args[1], full: false, error: null };
   }
-  const full = args.includes('--full');
-  const rest = full ? args.filter((arg) => arg !== '--full') : args;
-  if (rest.length === 2 && rest[0] === '--install-root' && rest[1]) {
-    return { mode: 'install', root: rest[1], full, error: null };
+  if (args.length === 2 && args[0] === '--project-root' && args[1]) {
+    return { mode: 'project', root: args[1], full: false, error: null };
   }
   return {
     mode: null,
     root: null,
     full: false,
-    error: 'expected --plugin-root <path>, --install-root <path> [--full], '
-      + '--emit-self-test-manifest, or --self-test; --full disables the '
-      + 'release-proven fast path so every installed self-test spawns',
+    error: 'expected --plugin-root <path>, --project-root <path>, '
+      + '--emit-self-test-manifest, or --self-test',
   };
 }
 
@@ -1067,7 +671,7 @@ function main() {
   const root = resolve(parsed.root);
   const checks = parsed.mode === 'plugin'
     ? pluginChecks(root)
-    : installChecks(root, { full: parsed.full });
+    : projectChecks(root);
   const failures = [];
   for (const check of checks) {
     const startedAt = process.hrtime.bigint();

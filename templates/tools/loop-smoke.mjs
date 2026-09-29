@@ -35,13 +35,12 @@
 // before a release.
 //
 // Usage:
-//   node tools/agentic/loop-smoke.mjs --self-test
-//   node tools/agentic/loop-smoke.mjs --real-engine-smoke   # manual, costs money
+//   node <plugin-tools>/loop-smoke.mjs --self-test
+//   node <plugin-tools>/loop-smoke.mjs --real-engine-smoke   # manual, costs money
 
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -53,7 +52,6 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BRIEF_FILES, UNIVERSAL_TOOL_FILES } from './verify.mjs';
 
 const TOOL_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const SMOKE_BUDGET_MS = 60_000;
@@ -81,7 +79,6 @@ const FIXTURE_CONFIG = {
   gate: { command: 'true', quickCommand: null, setupCommand: null },
   merge: { policy: 'manual' },
   tracker: { provider: 'none' },
-  review: { checklistPath: 'docs/agentic/checklist.md' },
 };
 const PASSING_VERDICT = { verdict: 'pass', findings: [], rebuts: [] };
 
@@ -130,6 +127,8 @@ function smokeEnvironment(ghConfigDir, shimDirectory) {
       && !STRIPPED_ENV_KEYS.includes(key)),
   );
   environment.GH_CONFIG_DIR = ghConfigDir;
+  // The session under test is the fixture's; the smoke's own host session is not.
+  delete environment.CLAUDE_PROJECT_DIR;
   if (shimDirectory !== null) {
     environment.PATH = [shimDirectory, environment.PATH ?? '']
       .filter(Boolean)
@@ -197,48 +196,17 @@ function runToolJson(name, args, options) {
   return { ok: true, status: result.status, value: parsed };
 }
 
-function writeFixtureState(root) {
-  const statePath = join(root, 'docs', 'agentic', 'STATE.md');
-  mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, [
+// A devendored repository carries only its own data: `.autoloop/config.json`
+// and the STATE prose. Every tool runs from the plugin.
+function writeFixtureProject(root) {
+  mkdirSync(join(root, '.autoloop'), { recursive: true });
+  writeFileSync(join(root, '.autoloop', 'config.json'), `${JSON.stringify(FIXTURE_CONFIG, null, 2)}\n`);
+  writeFileSync(join(root, '.autoloop', 'STATE.md'), [
     '# STATE — autoloop loop-smoke fixture',
     '',
     'Scratch fixture repository for the no-model end-to-end loop smoke.',
     '',
-    '```json autoloop-config',
-    JSON.stringify(FIXTURE_CONFIG, null, 2),
-    '```',
-    '',
   ].join('\n'));
-}
-
-// Vendors the tool set the way an installed repository carries it. From the
-// plugin checkout (templates/tools) this is scaffold's own reconciliation —
-// the exact layout logic Setup uses, auto-merge rename included. From an
-// installed copy (tools/agentic) the sibling tools already carry their
-// installed names, so they are copied directly.
-async function vendorFixtureTools(root) {
-  const templatesDirectory = dirname(TOOL_DIRECTORY);
-  if (existsSync(join(templatesDirectory, 'STATE.template.md'))) {
-    const { reconcile } = await import('./scaffold.mjs');
-    reconcile(root, templatesDirectory);
-    return 'scaffold-reconcile';
-  }
-  const toolsTarget = join(root, 'tools', 'agentic');
-  mkdirSync(toolsTarget, { recursive: true });
-  for (const name of [
-    ...UNIVERSAL_TOOL_FILES,
-    ...BRIEF_FILES,
-    'session-preflight.sh',
-    'self-test-manifest.json',
-  ]) {
-    const source = join(TOOL_DIRECTORY, name);
-    if (!existsSync(source)) continue;
-    mkdirSync(dirname(join(toolsTarget, name)), { recursive: true });
-    copyFileSync(source, join(toolsTarget, name));
-    if (name.endsWith('.sh')) chmodSync(join(toolsTarget, name), 0o755);
-  }
-  return 'installed-sibling-copy';
 }
 
 async function buildFixtureRepository(scratch) {
@@ -247,8 +215,7 @@ async function buildFixtureRepository(scratch) {
   runGit(root, ['init', '--quiet', root]);
   runGit(root, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
   runGit(root, ['remote', 'add', 'origin', FIXTURE_ORIGIN_URL]);
-  writeFixtureState(root);
-  const vendoring = await vendorFixtureTools(root);
+  writeFixtureProject(root);
   runGit(root, ['add', '--all']);
   runGit(root, [
     '-c', 'user.name=autoloop-smoke',
@@ -256,7 +223,7 @@ async function buildFixtureRepository(scratch) {
     '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '-m', 'chore: loop smoke fixture',
   ]);
-  return { root: realpathSync(root), vendoring };
+  return { root: realpathSync(root) };
 }
 
 // The mechanical steps of a live /autoloop:dev session, each a separate child
@@ -275,8 +242,32 @@ export function runSmokeSteps({
     steps.push({ ...result, name, ms: Date.now() - startedAt });
     return result.ok;
   };
-  const tool = (name) => join(root, 'tools', 'agentic', name);
+  // The fixture carries no tools/agentic: every step runs the plugin's copy
+  // with the fixture as its working directory, as a devendored repo does.
+  const tool = (name) => join(TOOL_DIRECTORY, name);
   const outcome = { steps, runMarker: null, dispatches: [] };
+
+  // SessionStart from the plugin: the preflight speaks only in a devendored
+  // repository, names the plugin tools, and injects the STATE prose.
+  timed('session-start', () => {
+    const preflight = (projectDir) => spawnSync('bash', [join(TOOL_DIRECTORY, 'session-preflight.sh')], {
+      cwd: root, encoding: 'utf8', timeout: stepTimeoutMs, env: { ...environment, CLAUDE_PROJECT_DIR: projectDir },
+    });
+    const unrelated = mkdtempSync(join(tmpdir(), 'autoloop-smoke-unrelated-'));
+    const elsewhere = preflight(unrelated);
+    rmSync(unrelated, { recursive: true, force: true });
+    const here = preflight(root);
+    const missing = [
+      elsewhere.stdout !== '' && 'output in an unrelated repository',
+      !here.stdout.includes('PASS  autoloop config') && 'the config verdict',
+      !here.stdout.includes(`INFO  plugin tools: ${TOOL_DIRECTORY}`) && 'the plugin tools path',
+      !here.stdout.includes('Scratch fixture repository for the no-model end-to-end loop smoke.') && 'the STATE prose',
+      /tools\/agentic/u.test(here.stdout) && 'a vendored path',
+    ].filter(Boolean);
+    return missing.length === 0
+      ? { ok: true, detail: 'silent elsewhere; config, plugin tools and STATE prose here' }
+      : { ok: false, detail: `preflight: ${missing.join(', ')}` };
+  });
 
   const primed = timed('prime', () => {
     const result = runToolJson(
@@ -427,7 +418,7 @@ export function runSmokeSteps({
     };
     const blocked = runTool(
       'command-guard.mjs (run open)',
-      [guard, '--config', join(root, 'docs', 'agentic', 'STATE.md')],
+      [guard, '--root', root],
       guardOptions,
     );
     if (!blocked.ok) return blocked;
@@ -437,10 +428,55 @@ export function runSmokeSteps({
         detail: `guard exited ${blocked.status} while the run was open, expected 2`,
       };
     }
+    // The same refusal through the plugin's own wiring: the hooks.json
+    // command, with CLAUDE_PLUGIN_ROOT and CLAUDE_PROJECT_DIR as the host sets them.
+    const pluginRoot = dirname(dirname(TOOL_DIRECTORY));
+    const wired = JSON.parse(readFileSync(join(pluginRoot, 'hooks', 'hooks.json'), 'utf8'))
+      .hooks.PreToolUse.find((group) => group.matcher === 'Bash|AskUserQuestion').hooks[0].command;
+    const viaHooks = spawnSync('bash', ['-c', wired], {
+      cwd: root, encoding: 'utf8', timeout: stepTimeoutMs, input: guardOptions.input,
+      env: { ...environment, CLAUDE_PLUGIN_ROOT: pluginRoot, CLAUDE_PROJECT_DIR: root },
+    });
+    // Exit 2 alone would also be the fail-closed branch of a guard that never
+    // ran (a wrong path); the guard's own refusal proves it ran.
+    if (viaHooks.status !== 2 || !viaHooks.stderr.includes('autoloop guard')) {
+      return {
+        ok: false,
+        detail: `the hooks.json guard command exited ${viaHooks.status} while the run was open, expected the guard's own refusal: ${bounded(viaHooks.stderr)}`,
+      };
+    }
+    // The edit guard, run from the plugin, finds the repository from
+    // CLAUDE_PROJECT_DIR. Once a run is open it never stands down: wiring a
+    // vendored guard mid-run (which would otherwise hand the repository to
+    // that guard) must not switch it off.
+    const editGuard = tool('edit-guard.mjs');
+    const wiringEdit = JSON.stringify({ tool_name: 'Edit', tool_input: { file_path: join(root, '.claude', 'settings.json') } });
+    const editOptions = { root, stepTimeoutMs, input: wiringEdit, environment: { ...environment, CLAUDE_PROJECT_DIR: root } };
+    const editBlocked = runTool('edit-guard.mjs (run open)', [editGuard], editOptions);
+    // A legacy install's wiring: a tracked hook running a vendored guard that
+    // exists. Outside a run that hands the repository to the vendored guard.
+    const legacyWiring = join(root, '.claude', 'settings.json');
+    const legacyGuard = join(root, 'tools', 'agentic', 'command-guard.mjs');
+    mkdirSync(dirname(legacyWiring), { recursive: true });
+    mkdirSync(dirname(legacyGuard), { recursive: true });
+    writeFileSync(legacyGuard, '// vendored\n');
+    writeFileSync(legacyWiring, '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node tools/agentic/command-guard.mjs"}]}]}}');
+    const editWired = runTool('edit-guard.mjs (vendored guard wired mid-run)', [editGuard], editOptions);
+    rmSync(legacyWiring, { force: true });
+    rmSync(join(root, 'tools'), { recursive: true, force: true });
+    if (!editBlocked.ok) return editBlocked;
+    if (!editWired.ok) return editWired;
+    if (editBlocked.status !== 2 || editWired.status !== 2) {
+      return {
+        ok: false,
+        detail: `edit guard exited ${editBlocked.status} in the repository and ${editWired.status} `
+          + 'with a vendored guard wired mid-run, expected 2 and 2',
+      };
+    }
     rmSync(outcome.runMarker, { force: true });
     const standDown = runTool(
       'command-guard.mjs (run closed)',
-      [guard, '--config', join(root, 'docs', 'agentic', 'STATE.md')],
+      [guard, '--root', root],
       guardOptions,
     );
     if (!standDown.ok) return standDown;
@@ -450,7 +486,7 @@ export function runSmokeSteps({
         detail: `guard exited ${standDown.status} after the run closed, expected 0`,
       };
     }
-    return { ok: true, detail: 'merge blocked while open; guard stands down when closed' };
+    return { ok: true, detail: 'merge and hook-wiring edit blocked while open; guards stand down when closed or not devendored' };
   });
 
   return outcome;
@@ -494,35 +530,11 @@ async function selfTest({ realEngine = false } = {}) {
     const setup = await timedPhase('fixture-setup', async () => {
       try {
         fixture = await buildFixtureRepository(scratch);
-        return { ok: true, detail: `layout via ${fixture.vendoring}` };
+        return { ok: true, detail: 'devendored: .autoloop/ only, tools from the plugin' };
       } catch (error) {
         return { ok: false, detail: error.message };
       }
     });
-
-    // LFE, 2026-09-29: setup ran the INSTALLED copy's smoke after a reconcile
-    // and it failed (BRIEF_TEMPLATE_MISSING): the installed-sibling path
-    // copied the tool list but not the role briefs. From the plugin checkout,
-    // prove the installed copy's own smoke too; the installed copy skips this.
-    if (!realEngine && existsSync(join(dirname(TOOL_DIRECTORY), 'STATE.template.md'))) {
-      await timedPhase('installed-copy', async () => {
-        try {
-          const installed = join(scratch, 'installed');
-          mkdirSync(installed, { recursive: true });
-          const { reconcile } = await import('./scaffold.mjs');
-          reconcile(installed, dirname(TOOL_DIRECTORY));
-          const run = spawnSync(process.execPath,
-            [join(installed, 'tools', 'agentic', 'loop-smoke.mjs'), '--self-test'],
-            { encoding: 'utf8', timeout: SMOKE_BUDGET_MS, env: environment });
-          const failed = `${run.stdout ?? ''}`.split('\n').find((line) => /\bFAIL\b/u.test(line));
-          return run.status === 0
-            ? { ok: true, detail: 'installed tools/agentic smoke passes' }
-            : { ok: false, detail: (failed ?? run.stderr ?? `exit ${run.status}`).trim().slice(0, 300) };
-        } catch (error) {
-          return { ok: false, detail: error.message };
-        }
-      });
-    }
 
     let outcome = null;
     if (setup.ok) {

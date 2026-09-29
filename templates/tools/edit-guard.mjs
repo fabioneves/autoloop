@@ -1,28 +1,27 @@
 #!/usr/bin/env node
 // autoloop — edit-guard.mjs
 //
-// PreToolUse hook for Edit|Write|MultiEdit|NotebookEdit. While a loop run is
-// live, it refuses edits to the repository's hook wiring —
+// PreToolUse hook for Edit|Write|MultiEdit|NotebookEdit. For as long as a loop
+// run is open in this session (closing it does not end the session), it
+// refuses edits to the repository's hook wiring —
 // `.claude/settings.json` and `.claude/settings.local.json` — the one edit
-// that can switch the session's own guard off mid-run. Everything else stays
-// editable: loop-infrastructure changes (tools/agentic, .claude/skills, STATE)
-// are built through the queue and flagged `human:authorize` at merge, which is
-// STATE's standing policy (operator, 2026-09-29).
+// that can switch the session's own guard off mid-run (repository settings can
+// still disable plugin hooks). Everything else stays editable: loop
+// configuration and prose (.autoloop/, .claude/skills) are built through the
+// queue and flagged `human:authorize` at merge, which is STATE's standing
+// policy (operator, 2026-09-29).
 //
-// A separate file on purpose: an older command-guard handed an Edit payload
-// refuses it ("payload omitted the Bash command"), and hook-relay can hand the
-// process to an older base copy. A base branch without this file has no copy
-// to relay to, so the local one always runs.
+// A separate file from command-guard because the payload differs (an Edit
+// carries no Bash command).
 //
-//   node tools/agentic/edit-guard.mjs --self-test
+//   node <plugin-tools>/edit-guard.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loopRunIsLive } from './command-guard.mjs';
-import { relayHookToBase, ROOT_ENV } from './hook-relay.mjs';
+import { guardedRoot, loopRunIsOpen } from './command-guard.mjs';
 
 const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);
@@ -47,9 +46,9 @@ export function hookWiringEditProblem(filePath, repoRoot, live) {
   const target = canonical(resolve(repoRoot, filePath));
   const relativePath = relative(root, target).split(sep).join('/');
   if (!HOOK_WIRING.includes(relativePath.toLowerCase())) return null;
-  return `autoloop guard — ${relativePath} is this session's hook wiring, and a live run never `
-    + 'edits it: the edit could switch the guard itself off. A change there is autoloop:setup\'s, '
-    + 'run after the loop closes (`prime.mjs --close-run`), or a human\'s.';
+  return `autoloop guard — ${relativePath} is this session's hook wiring, and a session that ran `
+    + 'the loop never edits it: the edit could switch the guard itself off. A change there is a '
+    + 'human\'s, or autoloop:setup\'s in a new session.';
 }
 
 function selfTest() {
@@ -97,8 +96,13 @@ function selfTest() {
 }
 
 function main() {
-  relayHookToBase(import.meta.url);
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
+  // Plugin hooks fire in every repository; outside an open run this one guards
+  // only a devendored autoloop repository, found from CLAUDE_PROJECT_DIR
+  // (hook-root.mjs). Inside an open run it never stands down.
+  const repoRoot = guardedRoot();
+  if (repoRoot === null) process.exit(0);
+  const open = loopRunIsOpen() || loopRunIsOpen(repoRoot);
   let payload;
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
@@ -106,11 +110,10 @@ function main() {
     process.exit(0); // not an edit this guard can read; the command guard still gates the shell
   }
   if (!EDIT_TOOLS.includes(payload?.tool_name)) process.exit(0);
-  const repoRoot = process.env[ROOT_ENV] ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   const problem = hookWiringEditProblem(
     payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path,
     repoRoot,
-    loopRunIsLive(),
+    open,
   );
   if (problem !== null) {
     console.error(problem);

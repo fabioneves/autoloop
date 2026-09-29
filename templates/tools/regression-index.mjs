@@ -135,16 +135,16 @@ export const INCIDENTS = Object.freeze([
       + '0.27.0"); it reverted STATE to recover.',
     cause: 'The setup skill named no write order, and scaffold --reconcile told a '
       + 'pre-migration STATE to "migrate the configuration first", which is the '
-      + 'order the old guard cannot survive.',
+      + 'order the old guard cannot survive. Closed structurally by the global '
+      + 'cutover: the running guard is the plugin\'s, never a repository copy '
+      + 'older than the config beside it, and devendor works in its own '
+      + 'worktree while the session keeps its vendored hooks.',
     enforcedBy: Object.freeze([
       Object.freeze({
         file: '../../skills/setup/SKILL.md',
-        anchor: '**Write order in a migration: tools first, then STATE.**',
+        anchor: '**Work in a linked worktree, never this checkout**',
       }),
-      Object.freeze({
-        file: 'scaffold.mjs',
-        anchor: "'a migratable STATE reconciles its policy tool set and names the migration still to land'",
-      }),
+      Object.freeze({ file: 'setup.mjs', anchor: "return refusal('LIVE_CHECKOUT'," }),
     ]),
   }),
   Object.freeze({
@@ -156,9 +156,11 @@ export const INCIDENTS = Object.freeze([
     cause: 'From an installed copy the smoke builds its fixture by copying '
       + 'UNIVERSAL_TOOL_FILES; 0.54.0 added briefs/ to what scaffold vendors but '
       + 'not to that list. The plugin run builds its fixture through scaffold, '
-      + 'so only the installed path ever lacked the briefs, and nothing ran it.',
+      + 'so only the installed path ever lacked the briefs, and nothing ran it. '
+      + 'Closed structurally by the global cutover: nothing is installed, and the '
+      + 'smoke runs every step from the plugin against a devendored fixture.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'loop-smoke.mjs', anchor: "timedPhase('installed-copy'" }),
+      Object.freeze({ file: 'loop-smoke.mjs', anchor: 'const tool = (name) => join(TOOL_DIRECTORY, name);' }),
     ]),
   }),
   Object.freeze({
@@ -170,15 +172,17 @@ export const INCIDENTS = Object.freeze([
     cause: 'hook-relay delegated whenever the local copy differed from the '
       + 'base copy, assuming the base is always newer. During a reconcile the '
       + 'working tree is the newer one, so the relay ran origin/main\'s 0.53.0 '
-      + 'guard against the migrated STATE.',
+      + 'guard against the migrated STATE. Closed structurally by the global '
+      + 'cutover: nothing is reconciled into a repository and nothing relays; '
+      + 'the one guard is the plugin\'s, wired by the plugin.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: "'an uncommitted reconcile on the base runs its own newer copy'",
+        file: '../../hooks/hooks.json',
+        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\\"',
       }),
       Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: "'a committed reconcile branch the base has not overtaken runs its own copy'",
+        file: 'verify.mjs',
+        anchor: "'the plugin hook document passes its contract'",
       }),
     ]),
   }),
@@ -302,7 +306,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'command-guard.mjs', anchor: 'export function askUserQuestionProblem(runIsLive) {' }),
       Object.freeze({ file: 'command-guard.mjs', anchor: "payload?.tool_name === 'AskUserQuestion'" }),
-      Object.freeze({ file: 'scaffold.mjs', anchor: 'a widened matcher on an unchanged autoloop command reaches existing installs' }),
+      Object.freeze({ file: 'verify.mjs', anchor: "matcher: 'Bash|AskUserQuestion'," }),
     ]),
   }),
   Object.freeze({
@@ -414,31 +418,33 @@ export const INCIDENTS = Object.freeze([
       + 'review — which makes them branch-local: a branch forked before a '
       + 'scaffold reconcile carries fossil guards until it merges. The wiring '
       + 'cannot fix it (the hook command must name a stable path), so the '
-      + 'tools relay themselves to the base branch\'s copy.',
+      + 'tools relay themselves to the base branch\'s copy. Closed structurally '
+      + 'by the global cutover: hooks run the plugin\'s copy, which no branch '
+      + 'carries, and find the repository from CLAUDE_PROJECT_DIR.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: 'export function relayHookToBase(importMetaUrl, argv = process.argv) {',
-      }),
-      Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: 'a drifted branch copy delegates to the base copy with the repo root on the wire',
-      }),
-      Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: 'a base copy that predates the relay contract is never handed the process',
+        file: '../../hooks/hooks.json',
+        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\\"',
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
-        anchor: 'const ROOT = process.env.AUTOLOOP_HOOK_ROOT',
+        anchor: 'const ROOT = hookRoot();',
       }),
       Object.freeze({
         file: 'command-guard.mjs',
-        anchor: 'relayHookToBase(import.meta.url);',
+        anchor: 'export function guardedRoot(projectRoot = hookRoot()) {',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'a plugin run keeps every hook acting; a vendored run does not',
+      }),
+      Object.freeze({
+        file: 'hook-root.mjs',
+        anchor: "'CLAUDE_PROJECT_DIR is the root, whatever the cwd'",
       }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
-        anchor: 'relayHookToBase(import.meta.url);',
+        anchor: 'const root = guardedRoot();',
       }),
     ]),
   }),
@@ -1134,8 +1140,8 @@ export const INCIDENTS = Object.freeze([
       + 'unperformed check, so a reader re-derives it with a shell probe.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: 'scaffold.mjs',
-        anchor: 'a fresh scaffold never creates the retired CI policy, and says so',
+        file: 'verify.mjs',
+        anchor: "{ name: 'retired CI policy absent', execute: () => checkRetiredCiPolicy(root) },",
       }),
     ]),
   }),
@@ -1263,9 +1269,9 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: '../../skills/setup/SKILL.md',
-        anchor: 'Read that from the report, never from `$?`',
+        anchor: 'Never write `$?` in any form: the tool result already carries the exit status.',
       }),
-      Object.freeze({ file: 'scaffold.mjs', anchor: 'return report.ok ? 0 : 3;' }),
+      Object.freeze({ file: 'setup.mjs', anchor: 'console.log(JSON.stringify(result, null, 2));' }),
     ]),
   }),
   Object.freeze({
@@ -1380,7 +1386,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: '../../skills/setup/SKILL.md',
-        anchor: 'ONE\n   complete pipeline',
+        anchor: 'Version currency, one pipeline',
       }),
     ]),
   }),
@@ -1417,9 +1423,11 @@ export const INCIDENTS = Object.freeze([
     symptom: 'Existing repos kept a 29 KB STATE.md injected into every '
       + 'session; a template change alone could not reach them.',
     cause: 'Setup merged documents but had no way to relocate a section, so '
-      + 'template restructuring stranded every installed repo.',
+      + 'template restructuring stranded every installed repo. Closed '
+      + 'structurally by the global cutover: STATE is the repository\'s own '
+      + 'prose, which no plugin change has to reach; devendor moves it once.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'scaffold.mjs', anchor: 'lessons-out-of-state' }),
+      Object.freeze({ file: 'setup.mjs', anchor: 'export function stateProse(markdown, template' }),
     ]),
   }),
   Object.freeze({

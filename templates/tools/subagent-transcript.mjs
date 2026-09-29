@@ -17,10 +17,10 @@
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { guardedRoot } from './command-guard.mjs';
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const KEEP_FILES = 40; // ISO-stamped names sort chronologically; oldest pruned first
 
 export function resolveCaptureDirectory(root, readCommonDir = (cwd) => execFileSync(
@@ -74,7 +74,11 @@ export function normalizedMetadata(payload) {
 }
 
 function capture() {
-  const captureDir = resolveCaptureDirectory(ROOT);
+  // Runs from the plugin: the repository is CLAUDE_PROJECT_DIR, and only a
+  // devendored autoloop repository keeps transcripts.
+  const root = guardedRoot();
+  if (root === null) return;
+  const captureDir = resolveCaptureDirectory(root);
   let raw = '';
   try {
     raw = readFileSync(0, 'utf8');
@@ -154,11 +158,14 @@ function selfTest() {
   }
   // Git reports realpaths, so a macOS TMPDIR reached through /var -> /private/var
   // would make the fixture root and the CLI's resolved root disagree.
+  // The hook runs from the plugin and captures into the repository named by
+  // CLAUDE_PROJECT_DIR — only a devendored autoloop repository.
   const cliRoot = mkdtempSync(join(realpathSync(tmpdir()), 'autoloop-subagent-cli-'));
-  const cliToolDirectory = join(cliRoot, 'tools', 'agentic');
-  mkdirSync(cliToolDirectory, { recursive: true });
-  const cliEntrypoint = join(cliToolDirectory, 'subagent-transcript.mjs');
-  copyFileSync(fileURLToPath(import.meta.url), cliEntrypoint);
+  const cliEntrypoint = fileURLToPath(import.meta.url);
+  const unrelatedRoot = mkdtempSync(join(realpathSync(tmpdir()), 'autoloop-subagent-unrelated-'));
+  execFileSync('git', ['init', '-q', unrelatedRoot], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 10000 });
+  mkdirSync(join(cliRoot, '.autoloop'));
+  writeFileSync(join(cliRoot, '.autoloop', 'config.json'), '{}');
   execFileSync('git', ['init', '-q', cliRoot], {
     stdio: ['ignore', 'ignore', 'pipe'],
     timeout: 10000,
@@ -171,13 +178,28 @@ function selfTest() {
   const transcriptSource = join(cliRoot, 'child.jsonl');
   writeFileSync(transcriptSource, transcriptLines.map((line) => JSON.stringify(line)).join('\n') + '\n');
   try {
+    const stopPayload = JSON.stringify({
+      hook_event_name: 'SubagentStop',
+      agent_type: 'autoloop-reviewer',
+      transcript_path: transcriptSource,
+    });
     execFileSync(process.execPath, [cliEntrypoint], {
-      input: JSON.stringify({
-        hook_event_name: 'SubagentStop',
-        agent_type: 'autoloop-reviewer',
-        transcript_path: transcriptSource,
-      }),
+      input: stopPayload,
       encoding: 'utf8',
+      cwd: tmpdir(),
+      env: { ...process.env, CLAUDE_PROJECT_DIR: unrelatedRoot },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 15000,
+    });
+    if (existsSync(resolveCaptureDirectory(unrelatedRoot))) {
+      ok = false;
+      console.log('self-test case failed: an unrelated repository captured a transcript');
+    }
+    execFileSync(process.execPath, [cliEntrypoint], {
+      input: stopPayload,
+      encoding: 'utf8',
+      cwd: tmpdir(),
+      env: { ...process.env, CLAUDE_PROJECT_DIR: cliRoot },
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15000,
     });
@@ -205,6 +227,7 @@ function selfTest() {
     console.log('self-test case failed: transcript-path CLI capture');
   } finally {
     rmSync(cliRoot, { recursive: true, force: true });
+    rmSync(unrelatedRoot, { recursive: true, force: true });
   }
   console.log(ok ? 'self-test OK' : 'self-test FAILED');
   return ok;

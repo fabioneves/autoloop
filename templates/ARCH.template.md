@@ -9,7 +9,7 @@
 ## Components
 
 {{COMPONENTS — one line each: name · path · responsibility. Include loop-relevant tooling
-(e.g. tools/agentic) so plans know where the guardrails live.}}
+(e.g. .autoloop/, CI) so plans know where the guardrails live.}}
 
 ## Key paths & conventions
 

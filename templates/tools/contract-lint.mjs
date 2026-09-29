@@ -1,15 +1,7 @@
 #!/usr/bin/env node
 
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // The tools a stale routing instruction would most plausibly land in.
@@ -64,21 +56,12 @@ const FORWARD_ARTIFACTS = Object.freeze([
   'skills/shape/SKILL.md',
   'skills/queue-trace/SKILL.md',
   'templates/STATE.template.md',
-  'templates/LOOP.template.md',
   'templates/ARCH.template.md',
-  'templates/settings-hooks.template.json',
+  'hooks/hooks.json',
   'templates/tools/label-swap-reminder.mjs',
   'templates/tools/session-preflight.sh',
   ...DISPATCH_CONSUMERS.map((name) => `templates/tools/${name}`),
 ]);
-const INSTALLED_FORWARD_ARTIFACTS = Object.freeze([
-  'docs/agentic/STATE.md',
-  'docs/agentic/LOOP.md',
-  '.claude/settings.json',
-  'tools/agentic/session-preflight.sh',
-  ...DISPATCH_CONSUMERS.map((name) => `tools/agentic/${name}`),
-]);
-
 const STALE_ROUTE_PATTERNS = Object.freeze([
   {
     code: 'UNCONDITIONAL_NON_MANUAL_REFUSAL',
@@ -138,7 +121,7 @@ const STALE_ROUTE_PATTERNS = Object.freeze([
   {
     code: 'RETIRED_MACHINERY_TOOL',
     pattern: new RegExp(
-      `\\btools/agentic/(?:${RETIRED_TOOLS.map((name) =>
+      `(?:\\btools/agentic|\\btemplates/tools|<plugin-tools>)/(?:${RETIRED_TOOLS.map((name) =>
         name.replace('.', '\\.')).join('|')})`,
       'gu',
     ),
@@ -286,50 +269,6 @@ function lintRoot(root) {
   ];
 }
 
-function lintInstallRoot(root) {
-  return [
-    ...lintArtifactPaths(
-      root,
-      INSTALLED_FORWARD_ARTIFACTS,
-      ['docs/agentic/STATE.md', 'docs/agentic/LOOP.md'],
-    ),
-    ...lintClaimConsumers(root, 'tools/agentic'),
-  ];
-}
-
-function installedRoutingRegression() {
-  const root = mkdtempSync(join(tmpdir(), 'autoloop-contract-lint-'));
-  try {
-    const files = [
-      'docs/agentic/STATE.md',
-      'docs/agentic/LOOP.md',
-      'tools/agentic/claim-contract.mjs',
-      'tools/agentic/scan.mjs',
-      'tools/agentic/loop-scope.mjs',
-      'tools/agentic/stats.mjs',
-      'tools/agentic/writeback-check.mjs',
-      'tools/agentic/dispatch.mjs',
-      'tools/agentic/prime.mjs',
-      'tools/agentic/review-contract.mjs',
-    ];
-    for (const relativePath of files) {
-      const path = resolve(root, relativePath);
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(
-        path,
-        relativePath.endsWith('dispatch.mjs')
-          ? 'const route = cfg.runtime.supportedHosts;'
-          : '',
-      );
-    }
-    return lintInstallRoot(root).some((finding) =>
-      finding.path === 'tools/agentic/dispatch.mjs'
-      && finding.code === 'PERSISTED_HOST_AUTHORITY');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
 function selfTest() {
   const clean = lintRoutingText(
     'Migration removes runtime.supportedHosts and engine.profile.',
@@ -418,22 +357,17 @@ function selfTest() {
       claim.length === 1 && claim[0].path === 'scan.mjs',
     ],
     [
-      'installed forward surfaces include durable state and hook injection',
-      INSTALLED_FORWARD_ARTIFACTS.includes('docs/agentic/STATE.md')
-        && INSTALLED_FORWARD_ARTIFACTS.includes('docs/agentic/LOOP.md')
-        && INSTALLED_FORWARD_ARTIFACTS.includes(
-          'tools/agentic/session-preflight.sh',
-        ),
-    ],
-    [
-      'installed dispatch consumers are linted',
-      installedRoutingRegression(),
-    ],
-    [
       'a deleted tool named in an instruction is a dangling reference',
       lintRoutingText('Run node tools/agentic/run-scope.mjs --probe-json.')
         .map(({ code }) => code).sort().join(',')
         === 'RETIRED_MACHINERY_SEAM,RETIRED_MACHINERY_TOOL',
+    ],
+    [
+      'a deleted tool named by its plugin path is a dangling reference too',
+      lintRoutingText('Run node <plugin-tools>/run-scope.mjs --probe-json.')
+        .some(({ code }) => code === 'RETIRED_MACHINERY_TOOL')
+        && lintRoutingText('Run node templates/tools/run-scope.mjs.')
+          .some(({ code }) => code === 'RETIRED_MACHINERY_TOOL'),
     ],
     [
       'retired broker and measurement vocabulary is rejected',
@@ -467,15 +401,10 @@ function parseArgs(args) {
   if (args.length === 2 && args[0] === '--check-root' && args[1]) {
     return { mode: 'check', root: args[1], error: null };
   }
-  if (args.length === 2 && args[0] === '--check-install-root' && args[1]) {
-    return { mode: 'check-install', root: args[1], error: null };
-  }
   return {
     mode: null,
     root: null,
-    error:
-      'expected --check-root <plugin root>, --check-install-root <repository root>, '
-      + 'or --self-test',
+    error: 'expected --check-root <plugin root> or --self-test',
   };
 }
 
@@ -486,9 +415,7 @@ function main() {
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
-  const findings = parsed.mode === 'check'
-    ? lintRoot(parsed.root)
-    : lintInstallRoot(parsed.root);
+  const findings = lintRoot(parsed.root);
   for (const finding of findings) {
     console.error(
       `${finding.path}:${finding.line}: ${finding.code}: ${finding.message}`,

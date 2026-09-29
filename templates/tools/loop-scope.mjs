@@ -8,9 +8,9 @@
 // A loop branch that forgot its claim is a bug the pitcrew should NOT auto-act on.
 //
 // Usage:
-//   node tools/agentic/loop-scope.mjs <prNumber>      # exit 0 = loop-owned, 1 = not
-//   node tools/agentic/loop-scope.mjs --check-branch <branch> --body-file <path>
-//   node tools/agentic/loop-scope.mjs --self-test
+//   node <plugin-tools>/loop-scope.mjs <prNumber>      # exit 0 = loop-owned, 1 = not
+//   node <plugin-tools>/loop-scope.mjs --check-branch <branch> --body-file <path>
+//   node <plugin-tools>/loop-scope.mjs --self-test
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';

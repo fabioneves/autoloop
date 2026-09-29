@@ -21,7 +21,7 @@
 // reporting tool must never wedge a run. `--self-test` runs the pure fixtures.
 //
 // Usage:
-//   node tools/agentic/overlap-report.mjs [--root <dir>] [--eligible <n>] [--json]
+//   node <plugin-tools>/overlap-report.mjs [--root <dir>] [--eligible <n>] [--json]
 
 import { spawnSync } from 'node:child_process';
 import {
@@ -38,7 +38,7 @@ import {
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ancestorPids } from './command-guard.mjs';
+import { ancestorPids, processAlive, runMarkerDirectory } from './command-guard.mjs';
 import { resolveDispatchLogPath } from './dispatch.mjs';
 
 function gitPath(root, relative) {
@@ -144,18 +144,9 @@ export function formatOverlapLine(summary) {
 // Falling back to the newest marker would reintroduce the bug on the exact
 // input that produced it, so an unresolvable ancestry means "no boundary": every
 // entry is in scope and `runScoped` says so.
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
-}
-
 export function runStartedAtMs(root, ancestors = ancestorPids()) {
   try {
-    const directory = gitPath(root, 'autoloop/run');
+    const directory = runMarkerDirectory(root);
     if (directory === null || !existsSync(directory)) return null;
     for (const name of readdirSync(directory)) {
       if (!name.endsWith('.json')) continue;

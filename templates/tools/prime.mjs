@@ -16,20 +16,22 @@
 // scan's output is read once and written once.
 //
 // Usage:
-//   node tools/agentic/prime.mjs [--json] [--scan-arg <value>]...
-//   node tools/agentic/prime.mjs --close-run
-//   node tools/agentic/prime.mjs --park <reason> --minutes <1..720>
-//   node tools/agentic/prime.mjs --self-test
+//   node <plugin-tools>/prime.mjs [--json] [--scan-arg <value>]...
+//   node <plugin-tools>/prime.mjs --close-run
+//   node <plugin-tools>/prime.mjs --park <reason> --minutes <1..720>
+//   node <plugin-tools>/prime.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -40,9 +42,13 @@ import {
   loopRunIsLive,
   loopRunIsOpen,
   ownRunMarkers,
+  processAlive,
   runMarkerDirectory,
 } from './command-guard.mjs';
-import { resolveProjectConfig } from './config-contract.mjs';
+import {
+  effectiveChecklistPath, PLUGIN_CHECKLIST, PROJECT_CONFIG_FILE, resolveProjectConfig,
+} from './config-contract.mjs';
+import { activeAutoloopRoot } from './hook-root.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
@@ -56,7 +62,7 @@ import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.58.0';
+const AUTOLOOP_VERSION = '0.59.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -176,8 +182,9 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   const { config } = read;
 
   const base = baseSyncFacts(root, config.baseBranch);
+  pruneDeadRunMarkers(root);
   clearRunParks(root);
-  const runMarker = writeRunMarker(root);
+  const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });
@@ -228,7 +235,7 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
     version: AUTOLOOP_VERSION,
     repository: `${repository.owner}/${repository.repo}`,
     checkout,
-    config: configSummary(config),
+    config: configSummary(config, root),
     base,
     runMarker,
     waits,
@@ -248,13 +255,16 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
 // summary did not carry the config at all. Both are prime's answer to give.
 //
 // `hashValue` is imported from the contract that compares it, never copied.
-export function configSummary(config) {
+// `checklistFile` is the file reviewers read: the repository's, or the
+// plugin's own when the repository keeps none (config-contract decides).
+export function configSummary(config, root = null) {
   return {
     version: config.version,
     baseBranch: config.baseBranch,
     mergePolicy: config.merge.policy,
     gateCommand: config.gate.command,
     checklistPath: config.review.checklistPath,
+    checklistFile: root === null ? null : effectiveChecklistPath(root, config),
     fingerprint: hashValue(config),
     projectConfig: config,
   };
@@ -264,7 +274,10 @@ export function configSummary(config) {
 // evidence: the ancestry prime observed, written durably, matched against the
 // guard hook's own ancestry. It needs no revocation — a run whose orchestrator
 // has exited leaves no live PID to match.
-export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now()) {
+// `baseBranch` lets the guards keep enforcing the run's base even if the
+// checkout later stops resolving its own config (a deleted .autoloop, a
+// branch forked before devendor): the open run, not the checkout, decides.
+export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now(), baseBranch = null) {
   const directory = runMarkerDirectory(root);
   if (directory === null) return null;
   const live = [...new Set(pids)].filter(
@@ -274,7 +287,7 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, `${process.pid}.json`);
   // openedAtMs: status views (step.mjs) list only units this run touched.
-  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, openedAtMs: nowMs })}\n`);
+  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, openedAtMs: nowMs, baseBranch })}\n`);
   return path;
 }
 
@@ -329,6 +342,30 @@ export function parkRunMarkers(root = process.cwd(), reason, minutes, now = new 
 // A re-prime is the run waking up: whatever park an earlier marker of this
 // session carries is spent, and leaving it would let a run that parks for 12h,
 // wakes early, and then goes dark read as parked.
+// Markers outlive their sessions; one whose every process is gone evidences
+// nothing, so prime removes it. Without this they accumulate (hundreds in a
+// long-lived repository) and a reused PID could revive a stale one.
+export function pruneDeadRunMarkers(root = process.cwd()) {
+  const directory = runMarkerDirectory(root);
+  if (directory === null || !existsSync(directory)) return [];
+  const pruned = [];
+  for (const name of readdirSync(directory).filter((entry) => entry.endsWith('.json'))) {
+    const path = join(directory, name);
+    let pids;
+    try {
+      pids = JSON.parse(readFileSync(path, 'utf8')).pids;
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(pids) || pids.some((pid) => Number.isSafeInteger(pid) && pid > 1 && processAlive(pid))) continue;
+    try {
+      unlinkSync(path);
+      pruned.push(path);
+    } catch { /* another session's cleanup got there first */ }
+  }
+  return pruned;
+}
+
 export function clearRunParks(root = process.cwd()) {
   for (const { path, marker } of ownRunMarkers(root)) {
     if (marker.park === undefined) continue;
@@ -376,6 +413,14 @@ export function readPrimeConfig(root) {
     return resolved.unreadable
       ? failure('config', 'PROJECT_CONFIG_UNREADABLE', resolved.errors.join('; '))
       : failure('config', 'PROJECT_CONFIG_INVALID', resolved.errors.join('; '), { errors: resolved.errors });
+  }
+  // A run opens only where the plugin's hooks guard the repository: a legacy
+  // install, or one whose vendored guard is still wired, runs another guard.
+  if (activeAutoloopRoot(root) === null) {
+    return failure('config', 'NOT_DEVENDORED', resolved.source === PROJECT_CONFIG_FILE
+      ? 'vendored hooks are still wired in .claude/settings*.json, so the plugin\'s guard is off: '
+        + 'finish the devendor with autoloop:setup'
+      : 'a vendored install (docs/agentic/STATE.md): run autoloop:setup to devendor it first');
   }
   return { config: resolved.config };
 }
@@ -686,6 +731,12 @@ function selfTest() {
       Object.entries(fixtureConfig()).reverse(),
     )).fingerprint === summary.fingerprint,
   );
+  check(
+    'the summary names the checklist file reviewers read, outside the fingerprinted config',
+    configSummary({ ...fixtureConfig(), review: { checklistPath: '.autoloop/checklist.md' } }, '/nowhere')
+      .checklistFile === PLUGIN_CHECKLIST
+      && configSummary(fixtureConfig(), '/r').checklistFile === '/r/docs/agentic/checklist.md',
+  );
 
   check(
     'lifted and still-waiting units are printed, one line each',
@@ -753,9 +804,26 @@ function selfTest() {
         writeFileSync(join(root, '.autoloop', 'config.json'),
           JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'true' } }));
         const good = readPrimeConfig(root);
+        // A run opens only where the plugin's hooks guard the repository.
+        mkdirSync(join(root, '.claude'));
+        mkdirSync(join(root, 'tools', 'agentic'), { recursive: true });
+        writeFileSync(join(root, 'tools', 'agentic', 'command-guard.mjs'), '// vendored\n');
+        writeFileSync(join(root, '.claude', 'settings.json'),
+          '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node tools/agentic/command-guard.mjs"}]}]}}');
+        const wired = readPrimeConfig(root);
+        rmSync(join(root, '.claude'), { recursive: true, force: true });
+        rmSync(join(root, 'tools'), { recursive: true, force: true });
+        rmSync(join(root, '.autoloop'), { recursive: true, force: true });
+        mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
+        writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'),
+          '```json autoloop-config\n{"version":"0.28.0","baseBranch":"trunk","gate":{"command":"true"},'
+          + '"merge":{"policy":"manual"},"tracker":{"provider":"none"},"review":{"checklistPath":"c.md"}}\n```\n');
+        const legacy = readPrimeConfig(root);
         return none.error?.code === 'PROJECT_CONFIG_UNREADABLE'
           && unreadable.error?.code === 'PROJECT_CONFIG_UNREADABLE'
-          && good.config?.baseBranch === 'trunk' && good.config?.merge?.policy === 'manual';
+          && good.config?.baseBranch === 'trunk' && good.config?.merge?.policy === 'manual'
+          && wired.error?.code === 'NOT_DEVENDORED' && legacy.error?.code === 'NOT_DEVENDORED'
+          && legacy.error.message.includes('autoloop:setup');
       } catch {
         return false;
       } finally {
@@ -837,11 +905,22 @@ function selfTest() {
       && missingConfig.error.code === 'PROJECT_CONFIG_UNREADABLE',
     );
 
-    const markerPath = writeRunMarker(root, [process.ppid]);
+    // A marker whose every process is gone is pruned; a live one stays.
+    const markerDir = runMarkerDirectory(root);
+    mkdirSync(markerDir, { recursive: true });
+    writeFileSync(join(markerDir, 'dead.json'), JSON.stringify({ version: 1, pids: [2 ** 30], baseBranch: 'trunk' }));
+    writeFileSync(join(markerDir, 'alive.json'), JSON.stringify({ version: 1, pids: [process.pid] }));
+    const pruned = pruneDeadRunMarkers(root);
+    check('prime prunes markers whose processes are all gone, and only those',
+      pruned.length === 1 && pruned[0].endsWith('dead.json') && existsSync(join(markerDir, 'alive.json')));
+    rmSync(join(markerDir, 'alive.json'));
+    const markerPath = writeRunMarker(root, [process.ppid], Date.now(), 'trunk');
     check(
       'prime writes a run marker that opens the command guard for this ancestry',
       typeof markerPath === 'string'
       && JSON.parse(readFileSync(markerPath, 'utf8')).version === 1
+      // The guards enforce the run's base even if the checkout stops resolving its config.
+      && JSON.parse(readFileSync(markerPath, 'utf8')).baseBranch === 'trunk'
       // The run's start, so status views drop units an earlier run left open.
       && Number.isSafeInteger(JSON.parse(readFileSync(markerPath, 'utf8')).openedAtMs)
       && (process.platform !== 'linux' || loopRunIsOpen(root) === true),

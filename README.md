@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.58.0" src="https://img.shields.io/badge/release-v0.58.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.59.0" src="https://img.shields.io/badge/release-v0.59.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -109,8 +109,11 @@ it installed from its own marketplace, keep either copy.
 
 ## First run
 
-1. Run setup. It writes `docs/agentic/STATE.md` (your policy), `docs/agentic/LOOP.md` (the
-   runbook), `tools/agentic/` (vendored runtime), and the host hooks. Commit them.
+1. Run setup. It writes `.autoloop/config.json` (settings, overrides only) and
+   `.autoloop/STATE.md` (your policy prose), and seeds `docs/agentic/ARCH.md` and `LESSONS.md`.
+   That is all a repository carries: every tool and hook runs from the plugin, so a plugin update
+   reaches every repository at its next session with no setup step. A repository set up by an
+   earlier version converts once with setup's `devendor`, in its own PR.
 2. Write one small issue with objective acceptance criteria — by hand, or from a spec with the
    `shape` skill.
 3. Read it, finish it, then apply `loop-ready` **last**.
@@ -120,7 +123,7 @@ it installed from its own marketplace, keep either copy.
 6. Then pick a cadence. Claude Code self-prompts:
 
    ```text
-   /loop 30m /goal <the stop condition in docs/agentic/STATE.md>
+   /loop 30m /goal <the stop condition in .autoloop/STATE.md>
    ```
 
    A bare `/autoloop:dev` drains the whole eligible queue.
@@ -129,7 +132,7 @@ it installed from its own marketplace, keep either copy.
 
 | Skill | Purpose |
 |---|---|
-| [`setup`](skills/setup/SKILL.md) | Install, migrate, reconfigure, or run read-only doctor checks. |
+| [`setup`](skills/setup/SKILL.md) | Init, devendor an earlier install, change config, or run the read-only doctor. |
 | [`shape`](skills/shape/SKILL.md) | Turn a spec or description into PR-sized issues, or lint one. Never labels. |
 | [`queue-trace`](skills/queue-trace/SKILL.md) | Reconcile a spec against the issue queue. Read-only. |
 | [`dev`](skills/dev/SKILL.md) | One `loop-ready` issue → one ready PR. |
@@ -139,15 +142,14 @@ it installed from its own marketplace, keep either copy.
 
 ## Configuration and merge policy
 
-v0.58.0 uses schema `0.28.0`. Policy lives in `.autoloop/config.json` (overrides only; plugin
-defaults fill the rest), or in the JSON block of `docs/agentic/STATE.md` for a repository that has
-not moved yet: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the optional
-`protectedPaths`. The repository owns it; plugin updates never overwrite it.
+v0.59.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
+defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
+optional `protectedPaths`. The repository owns it; plugin updates never overwrite it.
 
 `protectedPaths` lists the repository's own human-authorization globs (`*` and `**` only), added to
-the built-in families. With `.autoloop/config.json`, the merge executor also reads
-`merge.loopLogin` and `merge.reversiblePaths` (default `["docs/**"]`) from config instead of its
-setup-filled block.
+the built-in families. A non-manual policy also sets `merge.loopLogin`, and `ratified` may set
+`merge.reversiblePaths` (default `["docs/**"]`). The review checklist is `.autoloop/checklist.md`
+when the repository keeps one, else the plugin's.
 
 | `merge.policy` | Behavior |
 |---|---|
@@ -165,18 +167,17 @@ kill switch stay enforced regardless.
 
 | Where | What |
 |---|---|
-| `docs/agentic/STATE.md` | Policy and config. Injected into every session. |
-| `docs/agentic/LOOP.md` | Generated runbook for humans. |
-| `docs/agentic/LESSONS.md` | Durable memory, seeded once, yours to edit. |
-| `docs/agentic/checklist.md` | Your review criteria. |
-| `tools/agentic/` | Vendored runtime: guards, dispatch, lifecycle driver, verification. Setup reconciles it; re-run setup after a plugin update. |
-| `.claude/settings.json` | Claude Code hooks. |
+| `.autoloop/config.json` | Settings, overrides only. |
+| `.autoloop/STATE.md` | Policy prose: mission, invariants, protected ground. Injected into every session. |
+| `.autoloop/checklist.md` | Optional review criteria; the plugin's checklist when absent. |
+| `docs/agentic/ARCH.md`, `docs/agentic/LESSONS.md` | Architecture map and durable memory, yours to edit. |
+| The plugin | Every tool, role brief and hook (`hooks/hooks.json`); they act only in a repository with `.autoloop/config.json`. |
 | `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch. Never committed. |
 | Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked` / `loop-waiting` / `loop-obsolete` / `loop-decided` / `loop-repair`, the `loop-digest` issue; lifecycle markers, the frozen plan, and the run record. |
 
 ## How it stays safe
 
-v0.58.0 dispatches every role through one call:
+v0.59.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>
