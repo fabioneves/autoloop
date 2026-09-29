@@ -515,7 +515,7 @@ export const DEFAULT_CONFIG = Object.freeze({
 });
 
 // The plugin's own review checklist, for a repository that keeps none.
-export const PLUGIN_CHECKLIST = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'checklist.template.md');
+export const PLUGIN_CHECKLIST = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'templates', 'checklist.template.md');
 
 // The file reviewers read. The resolved config (and so a review chain's
 // fingerprint) holds only the stable relative path; whether the repository

@@ -32,7 +32,7 @@ import {
 import { runsVendoredTool, vendoredLeftovers } from './hook-root.mjs';
 import { hashValue } from './review-contract.mjs';
 
-const TEMPLATES = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const TEMPLATES = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'templates');
 const VENDORED_DIR = 'tools/agentic';
 const SETTINGS_FILES = ['.claude/settings.json', '.claude/settings.local.json'];
 const LEGACY_LOOP_FILE = 'docs/agentic/LOOP.md';
@@ -390,10 +390,10 @@ async function selfTest() {
     if (!passed) failures.push(name);
   };
   const { activeAutoloopRoot } = await import('./hook-root.mjs');
-  const { settingsFromConfig } = await import('./auto-merge.reference.mjs');
+  const { settingsFromConfig } = await import('./auto-merge.mjs');
   const { escalatePathsFor, matchEscalate } = await import('./escalate-paths.mjs');
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'autoloop-setup-')));
-  const doctor = (root) => spawnSync(process.execPath, [join(TEMPLATES, 'tools', 'verify.mjs'), '--project-root', root], {
+  const doctor = (root) => spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'verify.mjs'), '--project-root', root], {
     encoding: 'utf8',
   });
   const write = (root, path, text) => {

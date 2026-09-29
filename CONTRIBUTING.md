@@ -34,7 +34,7 @@ clearly outweighs the added supply-chain and setup cost.
 The canonical verification command is the same one CI runs on Linux and macOS:
 
 ```bash
-node templates/tools/verify.mjs --plugin-root .
+node tools/verify.mjs --plugin-root .
 git diff --check
 ```
 

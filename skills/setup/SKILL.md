@@ -58,8 +58,8 @@ Nothing else: no `tools/agentic/`, no autoloop entries in `.claude/settings.json
 
 ## Prime
 
-1. `<plugin-tools>` is `<this skill's real dir>/../../templates/tools` — the plugin root's
-   `templates/tools/`, a sibling of `skills/`. In a devendored repository the SessionStart preflight
+1. `<plugin-tools>` is `<this skill's real dir>/../../tools` — the plugin root's
+   `tools/`, a sibling of `skills/`. In a devendored repository the SessionStart preflight
    prints it (`INFO  plugin tools: …`). Write it as a literal absolute path, never a shell variable:
    the guard refuses a command it cannot resolve statically, `$CLAUDE_PLUGIN_ROOT` included.
 2. Print the banner.

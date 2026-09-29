@@ -1083,7 +1083,7 @@ export function skillRoots(plugins = pluginsDir(), cwd = process.cwd()) {
   } catch {
     installed = {};
   }
-  const own = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills');
+  const own = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'skills');
   return {
     'agent-skills': installedSkills(installed, 'agent-skills@', cwd),
     'autoloop-skills': installedSkills(installed, 'autoloop@', cwd)

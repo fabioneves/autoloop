@@ -199,7 +199,7 @@ remain your server-side rules; give the loop a repository-scoped token without a
 ## Releases
 
 Root [`VERSION`](VERSION) is canonical; manifests, the badge, the changelog heading, skill banners,
-and the annotated `v<VERSION>` tag must agree — `node templates/tools/release-verify.mjs` checks
+and the annotated `v<VERSION>` tag must agree — `node tools/release-verify.mjs` checks
 that, and CI enforces it on tags.
 
 See the [contribution guide](CONTRIBUTING.md), [security policy](SECURITY.md),

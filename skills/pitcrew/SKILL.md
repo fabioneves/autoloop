@@ -69,7 +69,7 @@ filter) on the exact file the prime summary names, which the guard sanctions.
 ## Dispatch
 
 **Every tool runs from the plugin.** Resolve this skill's real path, then
-`<skill dir>/../../templates/tools/` (the SessionStart preflight prints it); every `<plugin-tools>`
+`<skill dir>/../../tools/` (the SessionStart preflight prints it); every `<plugin-tools>`
 below is that directory, written as a literal absolute path in the command you actually run.
 Repository policy is data in the base's `.autoloop/config.json`.
 

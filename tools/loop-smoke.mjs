@@ -430,7 +430,7 @@ export function runSmokeSteps({
     }
     // The same refusal through the plugin's own wiring: the hooks.json
     // command, with CLAUDE_PLUGIN_ROOT and CLAUDE_PROJECT_DIR as the host sets them.
-    const pluginRoot = dirname(dirname(TOOL_DIRECTORY));
+    const pluginRoot = dirname(TOOL_DIRECTORY);
     const wired = JSON.parse(readFileSync(join(pluginRoot, 'hooks', 'hooks.json'), 'utf8'))
       .hooks.PreToolUse.find((group) => group.matcher === 'Bash|AskUserQuestion').hooks[0].command;
     const viaHooks = spawnSync('bash', ['-c', wired], {

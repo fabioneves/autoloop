@@ -33,8 +33,8 @@
 // file. These properties are verified as dormant reference behavior only.
 //
 // Usage:
-//   node <plugin-tools>/auto-merge.reference.mjs <prNumber> [--dry-run]
-//   node <plugin-tools>/auto-merge.reference.mjs --self-test
+//   node <plugin-tools>/auto-merge.mjs <prNumber> [--dry-run]
+//   node <plugin-tools>/auto-merge.mjs --self-test
 //
 // Exit 0 = merged, would-merge in dry-run, or all self-tests passed.
 // Exit 1 = normal refusal, ambiguous merge outcome, or self-test failure.
@@ -3325,7 +3325,7 @@ function selfTest() {
 }
 
 function usage() {
-  console.error('usage: node <plugin-tools>/auto-merge.reference.mjs <prNumber> [--dry-run] | --self-test');
+  console.error('usage: node <plugin-tools>/auto-merge.mjs <prNumber> [--dry-run] | --self-test');
 }
 
 function main() {

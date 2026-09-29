@@ -109,7 +109,7 @@ function readConfigVersion(text, errors) {
     : [];
   if (matches.length !== 1 || !STABLE_SEMVER.test(matches[0][1])) {
     errors.push(
-      'templates/tools/config-contract.mjs: expected exactly one stable CONFIG_VERSION declaration',
+      'tools/config-contract.mjs: expected exactly one stable CONFIG_VERSION declaration',
     );
     return null;
   }
@@ -131,7 +131,7 @@ function requirePrimeVersion(text, version, errors) {
     : [];
   if (matches.length !== 1 || matches[0][1] !== version) {
     errors.push(
-      `templates/tools/prime.mjs: expected exactly one AUTOLOOP_VERSION literal equal to ${version}`,
+      `tools/prime.mjs: expected exactly one AUTOLOOP_VERSION literal equal to ${version}`,
     );
   }
 }
@@ -311,7 +311,7 @@ function fixtureFiles(version = '0.40.0') {
     verifyWorkflow: [
       '      - name: Verify release tag',
       '        run: >-',
-      '          node templates/tools/release-verify.mjs',
+      '          node tools/release-verify.mjs',
       '          --release-mode',
       '          --check-root .',
       '          --repository "$GITHUB_REPOSITORY"',
@@ -347,7 +347,7 @@ async function selfTest() {
           verifyWorkflow: `${files.verifyWorkflow}`
             + '      - name: Verify GitHub API shape\n'
             + '        run: >-\n'
-            + '          node templates/tools/api-shape.mjs\n'
+            + '          node tools/api-shape.mjs\n'
             + '          --repository "$GITHUB_REPOSITORY"\n',
         };
       })(),
@@ -360,7 +360,7 @@ async function selfTest() {
         verifyWorkflow: [
           '      - name: Verify release tag',
           '        run: >-',
-          '          node templates/tools/release-verify.mjs',
+          '          node tools/release-verify.mjs',
           '          --release-mode',
           '          --repository "$GITHUB_REPOSITORY"',
           '          --main-ref refs/remotes/origin/main',
@@ -428,7 +428,7 @@ async function selfTest() {
         primeTool: "const AUTOLOOP_VERSION = '0.39.9';\n",
       },
       expected: [
-        'templates/tools/prime.mjs: expected exactly one AUTOLOOP_VERSION literal equal to 0.40.0',
+        'tools/prime.mjs: expected exactly one AUTOLOOP_VERSION literal equal to 0.40.0',
       ],
     },
     {
@@ -475,7 +475,7 @@ async function selfTest() {
         verifyWorkflow: [
           '      - name: Verify release tag',
           '        run: >-',
-          '          node templates/tools/release-verify.mjs',
+          '          node tools/release-verify.mjs',
           '          --release-mode',
           '          --repository "$GITHUB_REPOSITORY"',
           '',
@@ -645,8 +645,8 @@ function loadRepository(root) {
     setupSkill: readText(root, 'skills/setup/SKILL.md'),
     devSkill: readText(root, 'skills/dev/SKILL.md'),
     pitcrewSkill: readText(root, 'skills/pitcrew/SKILL.md'),
-    configContract: readText(root, 'templates/tools/config-contract.mjs'),
-    primeTool: readText(root, 'templates/tools/prime.mjs'),
+    configContract: readText(root, 'tools/config-contract.mjs'),
+    primeTool: readText(root, 'tools/prime.mjs'),
     verifyWorkflow: readText(root, '.github/workflows/verify.yml'),
     portabilitySurfaces: Object.fromEntries(
       portabilityPaths.map((path) => [path, readText(root, path)]),

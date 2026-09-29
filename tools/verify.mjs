@@ -63,7 +63,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
 ]);
 const PLUGIN_TOOL_FILES = Object.freeze([
   ...UNIVERSAL_TOOL_FILES,
-  'auto-merge.reference.mjs',
+  'auto-merge.mjs',
   'merge-authorization-contract.mjs',
 ]);
 // Global install: the plugin ships these hooks in hooks/hooks.json, each
@@ -71,7 +71,7 @@ const PLUGIN_TOOL_FILES = Object.freeze([
 // and matcher, with exactly this command. The command guard fails closed only
 // inside an autoloop repository: a crashed guard refuses there, while a broken
 // plugin never refuses commands in every other repository.
-const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/templates/tools';
+const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/tools';
 export const PLUGIN_HOOKS = Object.freeze([
   { name: 'session-preflight.sh', event: 'SessionStart', matcher: null, command: `bash "${PLUGIN_TOOLS}/session-preflight.sh"` },
   { name: 'edit-guard.mjs', event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|NotebookEdit', command: `node "${PLUGIN_TOOLS}/edit-guard.mjs"` },
@@ -130,7 +130,7 @@ function checkPluginHooks(root) {
   try {
     const problems = pluginHookProblems(
       JSON.parse(readFileSync(resolve(root, 'hooks', 'hooks.json'), 'utf8')),
-      resolve(root, 'templates', 'tools'),
+      resolve(root, 'tools'),
     );
     return { ok: problems.length === 0, detail: problems.join('; ') };
   } catch (error) {
@@ -182,7 +182,7 @@ function checkRetiredCiPolicy(root) {
 function checkReleaseContract(root) {
   const result = run(
     process.execPath,
-    [resolve(root, 'templates', 'tools', 'release-verify.mjs'), '--check-root', root],
+    [resolve(root, 'tools', 'release-verify.mjs'), '--check-root', root],
     root,
   );
   return result.ok ? { ok: true, detail: '' } : result;
@@ -215,7 +215,7 @@ function checkConfiguredChecklist(root) {
 }
 
 function pluginChecks(root) {
-  const toolsDir = resolve(root, 'templates', 'tools');
+  const toolsDir = resolve(root, 'tools');
   const checks = toolChecks(root, toolsDir, PLUGIN_TOOL_FILES);
 
   for (const relativePath of [
@@ -232,7 +232,7 @@ function pluginChecks(root) {
     name: 'shell session-preflight',
     execute: () => run(
       'bash',
-      ['-n', resolve(root, 'templates', 'tools', 'session-preflight.sh')],
+      ['-n', resolve(root, 'tools', 'session-preflight.sh')],
       root,
     ),
   });
@@ -240,7 +240,7 @@ function pluginChecks(root) {
     name: 'shell dispatch-stream',
     execute: () => run(
       'bash',
-      ['-n', resolve(root, 'templates', 'tools', 'dispatch-stream.sh')],
+      ['-n', resolve(root, 'tools', 'dispatch-stream.sh')],
       root,
     ),
   });
@@ -248,7 +248,7 @@ function pluginChecks(root) {
     name: 'guard corpus replay',
     execute: () => run(
       process.execPath,
-      [resolve(root, 'templates', 'tools', 'command-guard.mjs'), '--corpus'],
+      [resolve(root, 'tools', 'command-guard.mjs'), '--corpus'],
       root,
     ),
   });
@@ -260,7 +260,7 @@ function pluginChecks(root) {
     name: 'forward contract lint',
     execute: () => run(
       process.execPath,
-      [resolve(root, 'templates', 'tools', 'contract-lint.mjs'), '--check-root', root],
+      [resolve(root, 'tools', 'contract-lint.mjs'), '--check-root', root],
       root,
     ),
   });
@@ -277,11 +277,11 @@ function pluginChecks(root) {
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
   'codebase-design': 6489,
-  dev: 58717,
+  dev: 58667,
   'lean-code': 3909,
-  pitcrew: 19813,
+  pitcrew: 19803,
   'queue-trace': 6933,
-  setup: 13888,
+  setup: 13868,
   shape: 26690,
 });
 
@@ -459,7 +459,7 @@ function selfTest() {
   let crashMidRun;
   let crashBesideLegacyRun;
   try {
-    const stub = join(crashRoot, 'plugin', 'templates', 'tools', 'command-guard.mjs');
+    const stub = join(crashRoot, 'plugin', 'tools', 'command-guard.mjs');
     mkdirSync(dirname(stub), { recursive: true });
     mkdirSync(join(crashRoot, 'project', '.autoloop'), { recursive: true });
     writeFileSync(join(crashRoot, 'project', '.autoloop', 'config.json'), '{}');
@@ -502,7 +502,7 @@ function selfTest() {
       pluginProblems(pluginHookDocument(PLUGIN_HOOKS.map((entry) =>
         (entry.name === 'command-guard.mjs' ? { ...entry, matcher: 'Bash' } : entry)))).length > 0],
     ['a command guard without its fail-closed branch is refused',
-      pluginProblems(pluginHookDocument(withGuard('node "${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs"')))
+      pluginProblems(pluginHookDocument(withGuard('node "${CLAUDE_PLUGIN_ROOT}/tools/command-guard.mjs"')))
         .some((problem) => problem.includes('command-guard.mjs'))],
     ['a hook outside the contract is refused',
       pluginProblems(pluginHookDocument([...PLUGIN_HOOKS,

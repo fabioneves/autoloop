@@ -33,7 +33,7 @@ const VENDORED_DIR = 'tools/agentic';
 const VENDORED_GUARD = `${VENDORED_DIR}/command-guard.mjs`;
 
 // Every file the plugin ever vendored into tools/agentic/: each name ever under
-// templates/tools in this repository's history, plus the executor's installed
+// templates/tools (now tools) in this repository's history, plus the executor's installed
 // name. A repository's own files there (a gate script) are not in it, and
 // nothing outside it is ever treated as the tool's.
 export const VENDORED_TOOL_NAMES = Object.freeze([
