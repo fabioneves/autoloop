@@ -84,7 +84,7 @@ export const NON_MANUAL_TOOL_FILES = Object.freeze([
 ]);
 const CLAUDE_HOOK_CONTRACT = Object.freeze({
   // The guard also refuses a synchronous question while a run is live (0.50.0).
-  'command-guard.mjs': Object.freeze({ event: 'PreToolUse', matcher: 'Bash|AskUserQuestion' }),
+  'command-guard.mjs': Object.freeze({ event: 'PreToolUse', matcher: 'Bash|AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit' }),
   'label-swap-reminder.mjs': Object.freeze({ event: 'PostToolUse', matcher: 'Bash' }),
   'session-preflight.sh': Object.freeze({ event: 'SessionStart', matcher: null }),
   'subagent-transcript.mjs': Object.freeze({ event: 'SubagentStop', matcher: null }),

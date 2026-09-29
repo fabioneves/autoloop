@@ -311,7 +311,18 @@ export function pluginsDir(env = process.env) {
   return join(env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'plugins');
 }
 
-function processSettings(tools, readRoots = []) {
+// The loop's control surface in the dispatch's repository: its vendored tools,
+// its hook wiring and its policy. A writer child runs with hooks off and Edit
+// allowed, so these deny rules are what keep it off them (an Edit deny also
+// refuses Write; verified live). A Bash write is not covered here.
+const CONTROL_PATHS = Object.freeze(['tools/agentic/**', '.claude/**', 'docs/agentic/STATE.md']);
+
+export function repoRootOf(cwd) {
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' });
+  return top.status === 0 && top.stdout.trim() ? top.stdout.trim() : resolve(cwd);
+}
+
+function processSettings(tools, readRoots = [], controlRoot = null) {
   return {
     permissions: {
       allow: [
@@ -324,6 +335,7 @@ function processSettings(tools, readRoots = []) {
         'Read(~/.gitconfig)',
         'Read(~/.netrc)',
         'Read(~/.ssh/**)',
+        ...(controlRoot === null ? [] : CONTROL_PATHS.map((path) => `Edit(/${controlRoot}/${path})`)),
       ],
     },
   };
@@ -346,7 +358,7 @@ export function resolveTools(role, requested = null) {
 
 // Pure: the exact argv a dispatch launches, so the self-test can pin the
 // posture without spawning anything.
-export function dispatchArgv(role, tools, readRoots = []) {
+export function dispatchArgv(role, tools, readRoots = [], controlRoot = null) {
   const { posture, result } = ROLES[role];
   return [
     '--print',
@@ -361,7 +373,7 @@ export function dispatchArgv(role, tools, readRoots = []) {
     '--strict-mcp-config',
     '--disable-slash-commands',
     '--settings',
-    JSON.stringify(processSettings(tools, readRoots)),
+    JSON.stringify(processSettings(tools, readRoots, controlRoot)),
     '--permission-mode',
     POSTURES[posture].permissionMode,
     '--tools',
@@ -373,9 +385,9 @@ export function dispatchArgv(role, tools, readRoots = []) {
 // fixture shim on a path and an installed binary resolve the same way. Other
 // models are reached through a proxied route, never a second CLI. Codex was a
 // second engine until 0.51.0 and is refused by name.
-function claudeArgv(role, tools, model, effort, readRoots = []) {
+function claudeArgv(role, tools, model, effort, readRoots = [], controlRoot = null) {
   return [
-    ...dispatchArgv(role, tools, readRoots),
+    ...dispatchArgv(role, tools, readRoots, controlRoot),
     ...(model === null ? [] : ['--model', model]),
     ...(effort === null ? [] : ['--effort', effort]),
   ];
@@ -1156,7 +1168,7 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 function runEngine({
   role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl, readRoots,
 }) {
-  const argv = claudeArgv(role, tools, model ?? null, effort ?? null, readRoots ?? []);
+  const argv = claudeArgv(role, tools, model ?? null, effort ?? null, readRoots ?? [], repoRootOf(cwd));
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
@@ -1702,6 +1714,14 @@ function selfTest() {
       && writerArgv.includes('Read(//home/op/.claude/plugins/**)')
       && !writerArgv.includes('--add-dir')
       && !launchedArgv.includes('unit-356'));
+    // sibling loop project comparison, 2026-09-29: a writer child runs with hooks off
+    // (--safe-mode) and Edit/Write allowed, so nothing kept it off the loop's
+    // own control files. Deny rules beat the allow list (verified live: an
+    // Edit(...) deny also refuses Write, "File is in a directory that is
+    // denied by your permission settings").
+    check('a dispatch denies edits to the loop control files under its repository',
+      ['tools/agentic/**', '.claude/**', 'docs/agentic/STATE.md']
+        .every((path) => writerArgv.includes(`Edit(/${repoRootOf(scratch)}/${path})`)));
     check('the plugin skills root defaults to ~/.claude/plugins and follows CLAUDE_CONFIG_DIR',
       pluginsDir({}) === join(homedir(), '.claude', 'plugins')
       && pluginsDir({ CLAUDE_CONFIG_DIR: '/cfg' }) === '/cfg/plugins');

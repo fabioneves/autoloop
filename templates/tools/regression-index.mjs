@@ -33,6 +33,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'nothing-kept-edits-off-the-loop-control-files',
+    date: '2026-09-29',
+    symptom: 'Found comparing with a sibling loop project: a dispatched writer '
+      + '(hooks off, Edit/Write allowed) and a live-run orchestrator (guard '
+      + 'matched Bash only) could both edit tools/agentic, .claude or STATE.',
+    cause: 'The control surface was protected against shell commands only.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function controlFileEditProblem(' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'a dispatch denies edits to the loop control files under its repository'" }),
+    ]),
+  }),
+  Object.freeze({
     id: 'setup-ran-five-phases-and-printed-three-ribbons',
     date: '2026-09-29',
     symptom: 'LFE: a 0.55.3 setup ran resolve, audit, interview, write and verify '
