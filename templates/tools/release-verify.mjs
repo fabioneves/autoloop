@@ -261,14 +261,13 @@ export function verifyRelease(files, options = {}) {
       `v${version} uses schema \`${configVersion}\`.`,
       errors,
     );
-    // Schema-only on purpose: STATE prose is vendored into every configured
-    // repository, and a plugin-version literal there turns each patch release
-    // into per-repository prose drift.
+    // The setup skill's config example is where a repository learns the
+    // schema to write into .autoloop/config.json (STATE is prose only now).
     requireReleaseReference(
-      files.stateTemplate,
-      'templates/STATE.template.md',
+      files.setupSkill,
+      'skills/setup/SKILL.md',
       `schema ${configVersion} reference`,
-      `the current schema is \`${configVersion}\`.`,
+      `{ "version": "${configVersion}",`,
       errors,
     );
   }
@@ -302,13 +301,12 @@ function fixtureFiles(version = '0.40.0') {
     claudeManifest: JSON.stringify({ name: 'autoloop', version }),
     claudeMarketplace: JSON.stringify({ name: 'autoloop', plugins: [] }),
     changelog: `# Changelog\n\n## [${version}] - 2026-07-24\n`,
-    setupSkill: `∞ setup · v${version} · starting\n`,
+    setupSkill: `∞ setup · v${version} · starting\n{ "version": "0.25.0", "baseBranch": "main" }\n`,
     devSkill: `∞ dev · v${version} · starting\n`,
     pitcrewSkill: `∞ pitcrew · v${version} · starting\n`,
     configContract: "export const CONFIG_VERSION = '0.25.0';\n",
     primeTool: `const AUTOLOOP_VERSION = '${version}';\n`,
-    stateTemplate: 'the current schema is `0.25.0`.\n',
-    // Shaped like the real workflow, because the release requirements are
+        // Shaped like the real workflow, because the release requirements are
     // counted inside the release-verify step rather than across the file.
     verifyWorkflow: [
       '      - name: Verify release tag',
@@ -417,8 +415,7 @@ async function selfTest() {
           'v0.40.0 uses schema `0.25.0`.',
           '',
         ].join('\n'),
-        stateTemplate: 'the current schema is `0.25.0`.\n',
-      },
+              },
       expected: [
         'README.md: expected exactly one v0.40.1 dispatch-surface release reference',
         'README.md: expected exactly one v0.40.1/schema 0.25.0 reference',
@@ -442,7 +439,7 @@ async function selfTest() {
       },
       expected: [
         'README.md: expected exactly one v0.40.0/schema 0.26.0 reference',
-        'templates/STATE.template.md: expected exactly one schema 0.26.0 reference',
+        'skills/setup/SKILL.md: expected exactly one schema 0.26.0 reference',
       ],
     },
     {
@@ -650,7 +647,6 @@ function loadRepository(root) {
     pitcrewSkill: readText(root, 'skills/pitcrew/SKILL.md'),
     configContract: readText(root, 'templates/tools/config-contract.mjs'),
     primeTool: readText(root, 'templates/tools/prime.mjs'),
-    stateTemplate: readText(root, 'templates/STATE.template.md'),
     verifyWorkflow: readText(root, '.github/workflows/verify.yml'),
     portabilitySurfaces: Object.fromEntries(
       portabilityPaths.map((path) => [path, readText(root, path)]),

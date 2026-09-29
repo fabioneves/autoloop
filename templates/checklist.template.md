@@ -31,14 +31,11 @@ surfaces can't drift.
 - [ ] Appropriate abstractions used
 - [ ] Consistent with existing codebase style
 
-### 4. Project Invariants (EDIT ME — transcribe STATE → Mission invariants)
+### 4. Project Invariants
 
-<!-- Replace these examples with YOUR project's load-bearing invariants, one checkbox each.
-     These are the rules whose violation is a defect by definition — data-safety boundaries,
-     idempotency contracts, never-throws contracts, external API payload rules, … -->
-- [ ] (example) External writes are idempotent under retry
-- [ ] (example) Read-only datasources stay read-only
-- [ ] (example) No database writes without explicit human permission
+- [ ] Every invariant in `.autoloop/STATE.md` → Mission holds; a violation is a defect by definition
+<!-- A repository that keeps its own checklist (.autoloop/checklist.md) may list them here, one
+     checkbox each: data-safety boundaries, idempotency contracts, external API payload rules, … -->
 
 ### 5. Error Handling & Resilience
 

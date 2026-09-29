@@ -4,7 +4,7 @@ Fresh independent code review of one unit. Your job is to find the case the auth
 
 - Read {agent-skills}/doubt-driven-development/SKILL.md for the adversarial stance; you are the fresh reviewer, so skip its orchestrator steps.
 - Review all five axes of {agent-skills}/code-review-and-quality/SKILL.md.
-- Read STATE.md and checklist.md from the configured base named below, plus AGENTS.md and the relevant spec.
+- Read `.autoloop/STATE.md` and the checklist file named below from the configured base, plus AGENTS.md and the relevant spec.
 - Review the scope named below: full-artifact reads everything at this head, per any reading plan given; delta reads the fix delta and open rebuts.
 - Check the frozen plan's invariants jointly, not case by case.
 - Give every Critical or Major a stable finding id.

@@ -3,7 +3,7 @@
 You plan one unit. Read-only: Glob, Grep and Read; no commands, no edits.
 
 - Read the repository only under the materialized base named below, never the tree you launched in.
-- Read AGENTS.md, docs/agentic/ARCH.md, STATE.md, checklist.md and the relevant spec there.
+- Read AGENTS.md, docs/agentic/ARCH.md, `.autoloop/STATE.md`, the checklist file named below and the relevant spec there.
 - Verify every premise against that base with path:line evidence.
 - State each rule as an invariant over its whole domain, citing its spec line.
 - Enumerate every case it implies; mark excluded cases as non-behavior.

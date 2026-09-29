@@ -1,7 +1,7 @@
 # LESSONS — durable rules learned in this repository
 
 > Field-learned rules for the autoloop here. Read on demand, not injected every session — that is
-> the whole point of the split from [`STATE.md`](./STATE.md), which stays small because it is
+> the whole point of the split from [`STATE.md`](../../.autoloop/STATE.md), which stays small because it is
 > injected. A lesson belongs here when it changed how a run should behave and a future run would
 > otherwise repeat the mistake.
 >

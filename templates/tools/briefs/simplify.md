@@ -3,7 +3,7 @@
 One behavior-preserving clarity pass over the implemented unit.
 
 - Read {agent-skills}/code-simplification/SKILL.md and {autoloop-skills}/lean-code/SKILL.md.
-- Read AGENTS.md, CLAUDE.md and any coding-conventions document AGENTS.md names; read STATE.md and checklist.md from the configured base named below.
+- Read AGENTS.md, CLAUDE.md and any coding-conventions document AGENTS.md names; read `.autoloop/STATE.md` and the checklist file named below from the configured base.
 - Behavior is frozen: identical outputs, errors, side effects and ordering.
 - Make no change you cannot prove behavior-preserving.
 - Tests are the proof, not the subject: never edit a test file or oracle.

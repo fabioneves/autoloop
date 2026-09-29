@@ -3,7 +3,7 @@
 You fix the verified review findings listed below, on the unit's branch. You are the sole writer.
 
 - Read {agent-skills}/test-driven-development/SKILL.md and {autoloop-skills}/lean-code/SKILL.md.
-- Read AGENTS.md, CLAUDE.md and any coding-conventions document AGENTS.md names; read STATE.md and checklist.md from the configured base named below.
+- Read AGENTS.md, CLAUDE.md and any coding-conventions document AGENTS.md names; read `.autoloop/STATE.md` and the checklist file named below from the configured base.
 - Fix every finding listed; each one's disposition below is binding.
 - For a behavior defect, write a test that fails on it first, then make it pass.
 - When the facts mark a fix invariant-scoped, derive the complete invariant from the cited spec, test every case it implies, and satisfy it jointly.

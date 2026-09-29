@@ -5,7 +5,7 @@ Adversarial review of the simplified diff. Your job is to find the case the auth
 - Read {agent-skills}/doubt-driven-development/SKILL.md for the adversarial stance; you are the fresh reviewer, so skip its orchestrator steps.
 - Review all five axes of {agent-skills}/code-review-and-quality/SKILL.md: correctness, readability and simplicity, architecture, security, performance.
 - Apply {agent-skills}/security-and-hardening/SKILL.md wherever the diff touches untrusted input.
-- Read STATE.md and checklist.md from the configured base named below, plus AGENTS.md and the relevant spec.
+- Read `.autoloop/STATE.md` and the checklist file named below from the configured base, plus AGENTS.md and the relevant spec.
 - Check the diff against the frozen plan's invariants, file boundary and untrusted-input model.
 - Check each invariant jointly, not only sampled cases.
 - Follow the reading plan below when one is given: whole files the unit created, diff plus cited ranges for large existing files.

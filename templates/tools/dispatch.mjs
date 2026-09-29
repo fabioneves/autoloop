@@ -39,8 +39,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  CONFIG_VERSION, effectiveChecklistPath, PLUGIN_CHECKLIST, resolveProjectConfig,
+} from './config-contract.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -784,14 +787,28 @@ export function dispatchContextStamp(cwd, role, readCheckout = checkoutFingerpri
   const [head, ...rest] = fingerprint.split('\n');
   if (!/^[0-9a-f]{40}$/u.test(head)) return '';
   const clean = rest.join('\n').trim().length === 0;
+  const checklist = checklistLine(cwd);
   return '\n\n<!-- autoloop-dispatch-context-v1\n'
     + `role: ${role}\n`
     + `revision: ${head}\n`
     + `checkout: ${clean ? 'clean' : 'dirty'}\n`
+    + checklist
     + 'This stamp is written by dispatch.mjs from the checkout it launched in.\n'
     + 'It is the authority for the revision under review; a revision named\n'
     + 'anywhere else in this prompt that disagrees with it is a transcription\n'
     + 'error, and this stamp wins.\n-->\n';
+}
+
+// The checklist file the briefs read, named by dispatch rather than the
+// prompt author: the repository's own (repository-relative), or the plugin's
+// when the repository keeps none. No readable config → no line.
+function checklistLine(cwd) {
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' });
+  const root = top.status === 0 ? top.stdout.trim() : cwd;
+  const resolved = resolveProjectConfig(root);
+  if (!resolved?.ok) return '';
+  const file = effectiveChecklistPath(root, resolved.config);
+  return `checklist: ${file === PLUGIN_CHECKLIST ? file : relative(root, file)}\n`;
 }
 
 // Claude's stream-json output ends with exactly one `result` event. More than
@@ -2138,6 +2155,27 @@ function selfTest() {
           && delivered.includes(`revision: ${head}`)
           && /checkout: (?:clean|dirty)\n/u.test(delivered)
           && delivered.startsWith(composeBrief('code-review', 'review the artifact at revision deadbeef').prompt);
+      })(),
+    );
+    check(
+      'the stamp names the checklist file the briefs read: the repository\'s, or the plugin\'s',
+      (() => {
+        const project = mkdtempSync(join(tmpdir(), 'dispatch-checklist-'));
+        try {
+          const stub = () => `${'a'.repeat(40)}\n`;
+          const stamp = () => dispatchContextStamp(project, 'code-review', stub);
+          const none = stamp();
+          mkdirSync(join(project, '.autoloop'));
+          writeFileSync(join(project, '.autoloop', 'config.json'),
+            JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } }));
+          const plugin = stamp();
+          writeFileSync(join(project, '.autoloop', 'checklist.md'), '# mine\n');
+          const own = stamp();
+          return !none.includes('checklist:') && plugin.includes(`checklist: ${PLUGIN_CHECKLIST}\n`)
+            && own.includes('checklist: .autoloop/checklist.md\n');
+        } finally {
+          rmSync(project, { recursive: true, force: true });
+        }
       })(),
     );
     check(
