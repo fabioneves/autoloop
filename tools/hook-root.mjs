@@ -23,7 +23,7 @@ import {
   lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
 import { pluginRunBase } from './run-markers.mjs';

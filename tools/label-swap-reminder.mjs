@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // autoloop — label-swap-reminder.mjs (PostToolUse hook, Bash matcher)
-// Vendored into the host repo by autoloop:setup; runs from the repo, never the plugin.
+// Ships in the plugin (hooks/hooks.json) and acts in the project CLAUDE_PROJECT_DIR names.
 //
 // The dev/pitcrew skills anchor chat markers — the unit banner, the step ribbon,
 // the closing rail — and the terminal push notification to label swaps ("riders
@@ -82,13 +82,14 @@ const SETUP_PHASE_ANCHORS = [
     + 'is the only green line.'],
 ];
 
-// Returns null when the command is not a loop-label swap on an issue.
-// opts.archMap: docs/agentic/ARCH.md exists → step 6 also reminds the map update.
+// The setup ribbon a command earns, or null.
 export function setupPhaseReminder(command) {
   if (typeof command !== 'string') return null;
   return SETUP_PHASE_ANCHORS.find(([pattern]) => pattern.test(command))?.[1] ?? null;
 }
 
+// Returns null when the command is not a loop-label swap on an issue.
+// opts.archMap: docs/agentic/ARCH.md exists → step 6 also reminds the map update.
 export function reminderFor(command, opts = {}) {
   if (typeof command !== 'string') return null;
   if (/\bstep\.mjs\b/.test(command)) return stepReminder(command, opts);

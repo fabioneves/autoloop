@@ -40,8 +40,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
-  readlinkSync,
   realpathSync,
   rmSync,
   statSync,

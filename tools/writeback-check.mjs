@@ -203,7 +203,6 @@ function dispatchProcesses(root) {
   }
 }
 
-/** Pure: classify PRs → { hard: string[], reminders: string[] } */
 // The step a unit's issue is on (`loop:NN-…`), or null.
 function unitStep(issues, number) {
   const labels = (issues ?? []).find((issue) => issue.number === number)?.labels ?? [];
@@ -211,6 +210,7 @@ function unitStep(issues, number) {
   return steps.length === 0 ? null : Math.max(...steps);
 }
 
+/** Pure: classify PRs → { hard: string[], reminders: string[] } */
 export function checkPrs(prs, issues = null) {
   const hard = [];
   const reminders = [];
@@ -221,7 +221,7 @@ export function checkPrs(prs, issues = null) {
       hard.push(
         `PR #${pr.number} (${pr.headRefName}) has invalid loop ownership (${claim.reasonCode}) — make its single closing claim match the branch issue`,
       );
-    } else if (pr.isDraft && !((unitStep(issues, claim.issue) ?? 10) < 10)) {
+    } else if (pr.isDraft && (unitStep(issues, claim.issue) ?? 10) >= 10) {
       // Draft is expected until step 10 publishes it; only a draft past that
       // (or with no step at all) may be a forgotten `gh pr ready`.
       reminders.push(`PR #${pr.number} (${pr.headRefName}) is claimed but still draft — mid-unit, or a forgotten \`gh pr ready\` (autoloop:dev step 10)?`);
