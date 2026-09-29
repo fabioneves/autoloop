@@ -361,9 +361,11 @@ export const INCIDENTS = Object.freeze([
       + 'millisecond; the host documentation says an explicitly backgrounded '
       + 'task persists.',
     cause: 'An undocumented host-side sweep of run_in_background tasks — a '
-      + 'harness defect, reported upstream. The auto-background handoff is '
-      + 'the documented path that demonstrably survives it, so the skill '
-      + 'launches dispatches foreground until the sweep stops being observed.',
+      + 'harness defect, reported upstream — killed the dispatch with its task. '
+      + '0.56.0: dispatch-stream.sh detaches the dispatch, so a swept watcher '
+      + 'no longer loses it (verified live 2026-09-29); dispatches launch in '
+      + 'the background again and a killed watcher\'s result is collected with '
+      + '--wait-file. Only a bare backgrounded dispatch.mjs is refused.',
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'command-guard.mjs',
@@ -375,15 +377,11 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: '../../skills/dev/SKILL.md',
-        anchor: 'launch dispatches FOREGROUND and let the host background them',
+        anchor: '**Launch every dispatch in the background**',
       }),
       Object.freeze({
         file: '../../skills/dev/SKILL.md',
-        anchor: 'foreground on Claude Code (host backgrounds it — see the sweep note)',
-      }),
-      Object.freeze({
-        file: '../../skills/dev/SKILL.md',
-        anchor: 'A gate\nkilled with only `[killed]` and no log tail is the same sweep',
+        anchor: '**A killed stream task is not a killed dispatch.**',
       }),
     ]),
   }),
