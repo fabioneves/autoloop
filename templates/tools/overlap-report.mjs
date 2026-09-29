@@ -38,7 +38,7 @@ import {
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ancestorPids, runMarkerDirectory } from './command-guard.mjs';
+import { ancestorPids, processAlive, runMarkerDirectory } from './command-guard.mjs';
 import { resolveDispatchLogPath } from './dispatch.mjs';
 
 function gitPath(root, relative) {
@@ -144,15 +144,6 @@ export function formatOverlapLine(summary) {
 // Falling back to the newest marker would reintroduce the bug on the exact
 // input that produced it, so an unresolvable ancestry means "no boundary": every
 // entry is in scope and `runScoped` says so.
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
-}
-
 export function runStartedAtMs(root, ancestors = ancestorPids()) {
   try {
     const directory = runMarkerDirectory(root);

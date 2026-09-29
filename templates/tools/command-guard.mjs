@@ -2649,36 +2649,79 @@ export function ownRunMarkers(cwd = process.cwd()) {
 // from the project root, since either may be where the session works. null
 // when no such run is open.
 export function pluginRunBase(dirs = [process.cwd()]) {
-  const base = dirs.flatMap((dir) => ownRunMarkers(dir))
-    .map(({ marker }) => marker.baseBranch).find((value) => typeof value === 'string');
-  return base ?? null;
+  const newest = dirs.flatMap((dir) => ownRunMarkers(dir))
+    .filter(({ marker }) => typeof marker.baseBranch === 'string')
+    .sort((left, right) => (right.marker.openedAtMs ?? 0) - (left.marker.openedAtMs ?? 0))[0];
+  return newest?.marker.baseBranch ?? null;
 }
 
-// A command that opens a run with prime (not --close-run, --park or
-// --self-test) in a repository other than the session's project. Compared by
+// A command that runs the plugin's own prime to open a run (not --close-run,
+// --park or --self-test) in a repository other than the session's project.
+// It follows the command's own directory changes (cd, pushd, env -C, in
+// subshells too) and matches the invocation, never a mention: `rg prime.mjs`
+// or another repository's prime.mjs is none of its business. Compared by
 // common git dir, so a linked worktree of the project is the project.
-export function foreignPrimeProblem(command, cwd, projectRoot) {
-  if (typeof command !== 'string' || !/\bprime\.mjs\b/u.test(command)
-    || /--(?:close-run|park|self-test)\b/u.test(command)) return null;
-  const lead = /^\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)\s*&&/u.exec(command);
-  const target = lead === null ? cwd : resolve(cwd, lead[1].replace(/^["']|["']$/gu, ''));
-  const commonDir = (dir) => {
-    const result = spawnSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
-      encoding: 'utf8', timeout: 10_000,
-    });
-    if (result.status !== 0) return null;
-    try {
-      return realpathSync(result.stdout.trim());
-    } catch {
-      return result.stdout.trim();
+const PLUGIN_PRIME = realOrSelf(join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs'));
+const PRIME_EXEMPT = new Set(['--close-run', '--park', '--self-test']);
+
+function realOrSelf(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+function commonGitDir(dir) {
+  const result = spawnSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    encoding: 'utf8', timeout: 10_000,
+  });
+  return result.status === 0 ? realOrSelf(result.stdout.trim()) : null;
+}
+
+// Where a segment runs node, if it does: node in executable position (behind
+// passthrough wrappers, their options and assignments only), with the
+// directory an `env -C`/`--chdir` moves it to.
+function nodeInvocation(words, dir) {
+  let target = dir;
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i];
+    if (basename(word) === 'node') return { index: i, target };
+    if (word === '-C' || word === '--chdir') {
+      if (words[i + 1] !== undefined) target = resolve(dir, expandHome(words[i + 1]));
+      i += 1;
+    } else if (word.startsWith('--chdir=')) {
+      target = resolve(dir, expandHome(word.slice('--chdir='.length)));
+    } else if (!(EXEC_WRAPPERS.has(basename(word)) || isAssignmentWord(word) || word.startsWith('-') || /^\d+[smhd]?$/u.test(word))) {
+      return null;
     }
-  };
-  const here = commonDir(target);
-  const project = commonDir(projectRoot);
-  if (here === null || project === null || here === project) return null;
-  return `autoloop guard — this session's project is ${projectRoot}, but prime would open the run in `
-    + `${target}, a different repository: the session's hooks would guard the wrong one. Start a `
-    + 'session in that repository and run the loop there.';
+  }
+  return null;
+}
+
+export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PRIME) {
+  if (typeof command !== 'string' || !/\bnode\b/u.test(command)) return null;
+  let dir = cwd;
+  for (const { command: segment } of shellSegments(command)) {
+    let words = shellWords(segment.replace(/^[\s(]+|[\s)]+$/gu, ''));
+    const comment = words.findIndex((word) => word.startsWith('#'));
+    if (comment !== -1) words = words.slice(0, comment);
+    if ((words[0] === 'cd' || words[0] === 'pushd') && words[1] !== undefined) {
+      dir = resolve(dir, expandHome(words[1]));
+      continue;
+    }
+    const node = nodeInvocation(words, dir);
+    if (node === null) continue;
+    const scriptIndex = words.findIndex((word, index) => index > node.index && !word.startsWith('-'));
+    if (scriptIndex === -1 || realOrSelf(resolve(node.target, expandHome(words[scriptIndex]))) !== prime) continue;
+    if (words.slice(scriptIndex + 1).some((word) => PRIME_EXEMPT.has(word))) continue;
+    const project = commonGitDir(projectRoot);
+    if (project === null || commonGitDir(node.target) === project) continue;
+    return `autoloop guard — this session's project is ${projectRoot}, but prime would open the run in `
+      + `${node.target}, outside it: the session's hooks would guard the wrong repository. Start a `
+      + 'session in that repository and run the loop there.';
+  }
+  return null;
 }
 
 // Where a plugin hook acts: the devendored autoloop repository at the project
@@ -3791,12 +3834,53 @@ function selfTest() {
         input: JSON.stringify({ tool_name: 'Bash', cwd, tool_input: { command } }),
         encoding: 'utf8', cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: other },
       });
-      const foreign = primeFrom(scratch, 'node /p/templates/tools/prime.mjs --json');
-      const foreignCd = primeFrom(other, `cd ${scratch} && node /p/templates/tools/prime.mjs --json`);
-      const own = primeFrom(other, 'node /p/templates/tools/prime.mjs --json');
+      const prime = join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs');
+      const refused = (cwd, command) => primeFrom(cwd, command).status === 2;
+      // Security re-audit round 4: every shape that runs the plugin's prime
+      // somewhere else is refused, and nothing that merely mentions a
+      // prime.mjs (or runs another one) is.
+      const evasions = [
+        [scratch, `node ${prime} --json`],
+        [other, `cd ${scratch} && node ${prime} --json`],
+        [other, `cd ${scratch}; node ${prime} --json`],
+        [other, `(cd ${scratch} && node ${prime} --json)`],
+        [other, `cd . && cd ${scratch} && node ${prime} --json`],
+        [other, `pushd ${scratch} && node ${prime} --json`],
+        [other, `env -C ${scratch} node ${prime} --json`],
+        [scratch, `node ${prime} --json # --close-run`],
+        [scratch, `node ${dirname(prime)}/"pri""me.mjs" --json`],
+      ].filter(([cwd, command]) => !refused(cwd, command));
+      mkdirSync(join(other, 'scripts'));
+      writeFileSync(join(other, 'scripts', 'prime.mjs'), '');
+      const falsePositives = [
+        [other, `cd ${scratch} && rg -n foo templates/tools/prime.mjs`],
+        [other, `cd ${scratch} && git log --oneline -- templates/tools/prime.mjs`],
+        [scratch, 'node scripts/prime.mjs'],
+        [other, `node ${prime} --json`],
+        [scratch, `node ${prime} --close-run`],
+      ].filter(([cwd, command]) => refused(cwd, command));
+      if (evasions.length + falsePositives.length > 0) {
+        console.error(`FAIL [prime never opens a run outside the session's project, and only prime is judged] `
+          + `evaded: ${JSON.stringify(evasions.map(([, c]) => c))}; `
+          + `false positives: ${JSON.stringify(falsePositives.map(([, c]) => c))}`);
+        ok = false;
+      }
       rmSync(other, { recursive: true, force: true });
-      if (foreign.status !== 2 || !foreign.stderr.includes('project') || foreignCd.status !== 2 || own.status !== 0) {
-        console.error(`FAIL [prime never opens a run outside the session's project]: ${foreign.status} ${foreignCd.status} ${own.status}`);
+      // A session that primed twice holds two plugin markers: the newest base wins.
+      // Both name assignments, so directory order cannot pass it by accident.
+      const newestOf = (first, second) => {
+        writeFileSync(join(markers, 'm1.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...first }));
+        writeFileSync(join(markers, 'm2.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...second }));
+        const base = pluginRunBase([scratch]);
+        rmSync(join(markers, 'm1.json'));
+        rmSync(join(markers, 'm2.json'));
+        return base;
+      };
+      const older = { openedAtMs: 1, baseBranch: 'old' };
+      const newer = { openedAtMs: 2, baseBranch: 'new' };
+      const newest = newestOf(older, newer) === 'new' && newestOf(newer, older) === 'new' ? 'new' : 'old';
+      if (newest !== 'new') {
+        console.error(`FAIL [the newest plugin marker's base wins]: ${newest}`);
         ok = false;
       }
       // The hook's cwd is not the only place to look: the project root's run counts.
