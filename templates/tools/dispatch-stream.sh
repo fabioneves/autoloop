@@ -14,7 +14,7 @@
 #   dispatch-stream.sh <live-file> <output-file> <dispatch args...>
 #
 # Example (background this whole command; watch its task view):
-#   bash tools/agentic/dispatch-stream.sh \
+#   bash <plugin-tools>/dispatch-stream.sh \
 #     /tmp/s/live/78-code-review-r1.jsonl /tmp/s/code-review-1-result.json \
 #     --role code-review --prompt-file /tmp/s/p.md
 #

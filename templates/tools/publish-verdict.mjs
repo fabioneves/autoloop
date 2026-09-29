@@ -17,14 +17,14 @@
 //   - review requires authenticated convergence plus the exact clean live checkout
 //   - details arrive through a file, never shell arguments
 //
-// Usage: node tools/agentic/publish-verdict.mjs <gate|review> <40-hex sha>
+// Usage: node <plugin-tools>/publish-verdict.mjs <gate|review> <40-hex sha>
 //        [--review-evidence-file <path>]
-//        node tools/agentic/publish-verdict.mjs premerge-create --record-file <path>
-//        node tools/agentic/publish-verdict.mjs premerge-observe --attestation-file <path>
-//        node tools/agentic/publish-verdict.mjs premerge-append
+//        node <plugin-tools>/publish-verdict.mjs premerge-create --record-file <path>
+//        node <plugin-tools>/publish-verdict.mjs premerge-observe --attestation-file <path>
+//        node <plugin-tools>/publish-verdict.mjs premerge-append
 //          --attestation-file <path> --merge-oid <40-hex sha>
 //          --expected-body-hash <64-hex sha256>
-//        node tools/agentic/publish-verdict.mjs terminal-finalize
+//        node <plugin-tools>/publish-verdict.mjs terminal-finalize
 //          --request-file <path> --review-evidence-file <path>
 
 import { execFileSync, spawnSync } from 'node:child_process';

@@ -19,8 +19,8 @@
 // ids per round, and a reviewer identity that is never the author's.
 //
 // Usage:
-//   node tools/agentic/review-contract.mjs < review-input.json
-//   node tools/agentic/review-contract.mjs --self-test
+//   node <plugin-tools>/review-contract.mjs < review-input.json
+//   node <plugin-tools>/review-contract.mjs --self-test
 
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';

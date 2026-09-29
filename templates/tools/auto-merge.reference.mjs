@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 // ============================================================================
-// NON-MANUAL MERGE REFERENCE — dormant by default, enabled only by recorded
-// consent. Setup vendors this file as tools/agentic/auto-merge.mjs solely for a
-// repository whose committed config carries merge.policy: ratified|auto WITH
-// merge.unverifiedInvocationAcknowledged: true; Runtime opens such runs on that
-// recorded acceptance and still rejects every unacknowledged non-manual run
-// before probing or mutation. With the placeholder REPO CONFIG block below,
-// every invocation refuses fail-closed; only autoloop:setup fills it. A
-// repository with .autoloop/config.json takes these settings from config
-// instead (merge.loopLogin, merge.reversiblePaths, protectedPaths).
+// NON-MANUAL MERGE EXECUTOR — dormant by default, enabled only by recorded
+// consent. It runs from the plugin for a repository whose .autoloop/config.json
+// carries merge.policy: ratified|auto WITH merge.unverifiedInvocationAcknowledged
+// and merge.soloOperatorAcknowledged, taking its settings from that config
+// (merge.loopLogin, merge.reversiblePaths, protectedPaths); anything missing is
+// a typed refusal before any GitHub read. The REPO CONFIG block below is the
+// placeholder every such repository leaves alone: it refuses fail-closed, and
+// decides only for a legacy install's vendored, Setup-filled copy.
 //
 // The policy ENGINE (independently fetched, SHA-bound evidence; AND-gate;
 // kill-switch; CAS merge + confirmation) is identical in every mode.
@@ -34,8 +33,8 @@
 // file. These properties are verified as dormant reference behavior only.
 //
 // Usage:
-//   node tools/agentic/auto-merge.mjs <prNumber> [--dry-run]
-//   node tools/agentic/auto-merge.mjs --self-test
+//   node <plugin-tools>/auto-merge.reference.mjs <prNumber> [--dry-run]
+//   node <plugin-tools>/auto-merge.reference.mjs --self-test
 //
 // Exit 0 = merged, would-merge in dry-run, or all self-tests passed.
 // Exit 1 = normal refusal, ambiguous merge outcome, or self-test failure.
@@ -3326,7 +3325,7 @@ function selfTest() {
 }
 
 function usage() {
-  console.error('usage: node tools/agentic/auto-merge.mjs <prNumber> [--dry-run] | --self-test');
+  console.error('usage: node <plugin-tools>/auto-merge.reference.mjs <prNumber> [--dry-run] | --self-test');
 }
 
 function main() {

@@ -21,7 +21,7 @@
 // reporting tool must never wedge a run. `--self-test` runs the pure fixtures.
 //
 // Usage:
-//   node tools/agentic/overlap-report.mjs [--root <dir>] [--eligible <n>] [--json]
+//   node <plugin-tools>/overlap-report.mjs [--root <dir>] [--eligible <n>] [--json]
 
 import { spawnSync } from 'node:child_process';
 import {

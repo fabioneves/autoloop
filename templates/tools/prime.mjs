@@ -16,10 +16,10 @@
 // scan's output is read once and written once.
 //
 // Usage:
-//   node tools/agentic/prime.mjs [--json] [--scan-arg <value>]...
-//   node tools/agentic/prime.mjs --close-run
-//   node tools/agentic/prime.mjs --park <reason> --minutes <1..720>
-//   node tools/agentic/prime.mjs --self-test
+//   node <plugin-tools>/prime.mjs [--json] [--scan-arg <value>]...
+//   node <plugin-tools>/prime.mjs --close-run
+//   node <plugin-tools>/prime.mjs --park <reason> --minutes <1..720>
+//   node <plugin-tools>/prime.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';

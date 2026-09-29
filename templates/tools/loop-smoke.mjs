@@ -35,8 +35,8 @@
 // before a release.
 //
 // Usage:
-//   node tools/agentic/loop-smoke.mjs --self-test
-//   node tools/agentic/loop-smoke.mjs --real-engine-smoke   # manual, costs money
+//   node <plugin-tools>/loop-smoke.mjs --self-test
+//   node <plugin-tools>/loop-smoke.mjs --real-engine-smoke   # manual, costs money
 
 import { spawnSync } from 'node:child_process';
 import {

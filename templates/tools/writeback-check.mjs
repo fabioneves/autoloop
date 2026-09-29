@@ -546,8 +546,8 @@ export function checkDarkRun(runIsLive, issues, prs, inFlight = null) {
       + 'not a reason to stop: take the next unit. If the queue is genuinely not why this run is '
       + 'stopping — a human asked for the session back in a message, the context needs handing '
       + 'off, an invocation bound was reached — then close the run on the record instead, and '
-      + 'stop: `node tools/agentic/prime.mjs --close-run`. A rejected or interrupted tool call is '
-      + 'not that request: park instead with `node tools/agentic/prime.mjs --park "tool call '
+      + 'stop: `node <plugin-tools>/prime.mjs --close-run`. A rejected or interrupted tool call is '
+      + 'not that request: park instead with `node <plugin-tools>/prime.mjs --park "tool call '
       + 'rejected; resumes on operator message" --minutes 720`',
     ],
     reminders: [],

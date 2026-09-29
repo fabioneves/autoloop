@@ -14,9 +14,9 @@
 // operator on their own machine, so it spawns the engine directly.
 //
 // Usage:
-//   node tools/agentic/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> \
+//   node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|code-review|doubt-review> \
 //     --prompt-file <path> [--tools <csv>] [--output-file <path>] [--json]
-//   node tools/agentic/dispatch.mjs --self-test
+//   node <plugin-tools>/dispatch.mjs --self-test
 //
 // Exit 0 on a typed success, 1 on a typed failure, 2 on a usage error.
 
