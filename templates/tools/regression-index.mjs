@@ -142,7 +142,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: '../../skills/setup/SKILL.md',
-        anchor: '**Work in a separate worktree, never this checkout.**',
+        anchor: '**Work in a linked worktree, never this checkout**',
       }),
       Object.freeze({ file: 'setup.mjs', anchor: "return refusal('LIVE_CHECKOUT'," }),
     ]),

@@ -23,14 +23,122 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
 
-const VENDORED_GUARD = 'tools/agentic/command-guard.mjs';
+const VENDORED_DIR = 'tools/agentic';
+const VENDORED_GUARD = `${VENDORED_DIR}/command-guard.mjs`;
+
+// Every file the plugin ever vendored into tools/agentic/: each name ever under
+// templates/tools in this repository's history, plus the executor's installed
+// name. A repository's own files there (a gate script) are not in it, and
+// nothing outside it is ever treated as the tool's.
+export const VENDORED_TOOL_NAMES = Object.freeze([
+  'adapter-contract.mjs',
+  'api-shape.mjs',
+  'attestation-contract.mjs',
+  'auto-merge.mjs',
+  'auto-merge.reference.mjs',
+  'briefs/code-review.md',
+  'briefs/diff-review.md',
+  'briefs/doubt-review.md',
+  'briefs/fix.md',
+  'briefs/implement.md',
+  'briefs/plan-review.md',
+  'briefs/plan.md',
+  'briefs/simplify.md',
+  'checkout-contract.mjs',
+  'claim-contract.mjs',
+  'command-guard.mjs',
+  'config-contract.mjs',
+  'continuation-store.mjs',
+  'contract-lint.mjs',
+  'delivery-contract.mjs',
+  'dispatch-render.mjs',
+  'dispatch-stream.sh',
+  'dispatch.mjs',
+  'edit-guard.mjs',
+  'escalate-paths.mjs',
+  'guard-corpus.json',
+  'hook-relay.mjs',
+  'hook-root.mjs',
+  'intent-contract.mjs',
+  'label-swap-reminder.mjs',
+  'lane-contract.mjs',
+  'lifecycle-contract.mjs',
+  'lifecycle-driver.mjs',
+  'loop-scope.mjs',
+  'loop-smoke.mjs',
+  'measurement-contract.mjs',
+  'merge-authorization-contract.mjs',
+  'overlap-report.mjs',
+  'prime.mjs',
+  'publish-verdict.mjs',
+  'regression-index.mjs',
+  'release-verify.mjs',
+  'review-contract.mjs',
+  'route-adapter-contract.mjs',
+  'run-scope.mjs',
+  'runtime-contract.mjs',
+  'scaffold.mjs',
+  'scan.mjs',
+  'self-test-manifest.json',
+  'session-preflight.sh',
+  'setup.mjs',
+  'sizing-contract.mjs',
+  'snapshot-contract.mjs',
+  'stats.mjs',
+  'step-subject.mjs',
+  'step.mjs',
+  'subagent-transcript.mjs',
+  'unit.mjs',
+  'verify.mjs',
+  'writeback-check.mjs',
+]);
+
+// A hook command that runs a vendored tool.
+export function runsVendoredTool(command) {
+  const text = String(command ?? '');
+  return VENDORED_TOOL_NAMES.some((name) => text.includes(`${VENDORED_DIR}/${name}`));
+}
+
+function hookCommands(root, file) {
+  let document;
+  try {
+    document = JSON.parse(readFileSync(join(root, file), 'utf8'));
+  } catch {
+    return [];
+  }
+  return Object.values(document?.hooks ?? {}).flatMap((groups) => (Array.isArray(groups) ? groups : [])
+    .flatMap((group) => (Array.isArray(group?.hooks) ? group.hooks : []))
+    .map((handler) => String(handler?.command ?? '')));
+}
+
+function filesUnder(directory, prefix = '') {
+  let entries;
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.flatMap((entry) => (entry.isDirectory()
+    ? filesUnder(join(directory, entry.name), `${prefix}${entry.name}/`)
+    : [`${prefix}${entry.name}`]));
+}
+
+// What of the vendored layout is still in a repository: shipped files under
+// tools/agentic/ and hook commands running them, in either settings file.
+export function vendoredLeftovers(root) {
+  return {
+    files: filesUnder(join(root, VENDORED_DIR)).filter((name) => VENDORED_TOOL_NAMES.includes(name)),
+    hooks: ['.claude/settings.json', '.claude/settings.local.json'].flatMap((file) =>
+      hookCommands(root, file).filter(runsVendoredTool).map((command) => ({ file, command }))),
+  };
+}
 
 export function hookRoot(env = process.env, cwd = process.cwd()) {
   return repositoryRoot(typeof env.CLAUDE_PROJECT_DIR === 'string' && env.CLAUDE_PROJECT_DIR !== ''
@@ -54,16 +162,8 @@ function configPresent(root) {
 // an untracked local settings file or unreadable settings leave the plugin
 // guard on, since two guards are safer than none.
 function vendoredGuardWired(root) {
-  if (!existsSync(join(root, VENDORED_GUARD))) return false;
-  let document;
-  try {
-    document = JSON.parse(readFileSync(join(root, '.claude', 'settings.json'), 'utf8'));
-  } catch {
-    return false;
-  }
-  return Object.values(document?.hooks ?? {}).some((groups) => (Array.isArray(groups) ? groups : [])
-    .some((group) => (Array.isArray(group?.hooks) ? group.hooks : [])
-      .some((handler) => String(handler?.command ?? '').includes(VENDORED_GUARD))));
+  return existsSync(join(root, VENDORED_GUARD))
+    && hookCommands(root, '.claude/settings.json').some((command) => command.includes(VENDORED_GUARD));
 }
 
 export function activeAutoloopRoot(root = hookRoot()) {
@@ -112,6 +212,22 @@ function selfTest() {
     check('wiring whose vendored guard file is gone leaves the plugin guard active',
       activeAutoloopRoot(repo) === repo);
     writeFileSync(join(repo, '.claude', 'settings.json'), '{"hooks":{}}');
+    rmSync(join(repo, '.claude', 'settings.local.json'));
+    // The one definition of what is left of the vendored layout: shipped
+    // files and hooks running them — never a repository's own gate script.
+    mkdirSync(join(repo, 'tools', 'agentic', 'briefs'), { recursive: true });
+    writeFileSync(join(repo, 'tools', 'agentic', 'gate.mjs'), '// the repository\'s own\n');
+    writeFileSync(join(repo, 'tools', 'agentic', 'briefs', 'plan.md'), '# plan\n');
+    writeFileSync(join(repo, '.claude', 'settings.local.json'), JSON.stringify({
+      permissions: { allow: ['Bash(node tools/agentic/prime.mjs --json)'] },
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node tools/agentic/writeback-check.mjs' },
+        { type: 'command', command: 'node tools/agentic/gate.mjs' }] }] },
+    }));
+    const leftovers = vendoredLeftovers(repo);
+    check('vendored leftovers are the shipped files and the hooks that run them, nothing of the repository\'s own',
+      JSON.stringify(leftovers.files) === '["briefs/plan.md"]'
+        && JSON.stringify(leftovers.hooks.map(({ command }) => command)) === '["node tools/agentic/writeback-check.mjs"]');
+    rmSync(join(repo, 'tools'), { recursive: true, force: true });
     rmSync(join(repo, '.claude', 'settings.local.json'));
     // The shell hooks ask the same question through the CLI.
     const cli = (dir) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--active'], {

@@ -157,34 +157,38 @@ interview, add any other answers to `config.json` by a direct edit, validate wit
 
 A vendored install carries a copy of the tool (`tools/agentic/`, hook entries in
 `.claude/settings.json`, `docs/agentic/STATE.md` with a config block, `LOOP.md`). It is converted
-once, in one PR:
+once, in one PR, **from a fresh session that has not run a loop**: the vendored guard still runs
+this session's hooks and refuses the devendor commit while a run marker exists.
 
-1. **Confirm with the human first**, naming what the PR deletes: `tools/agentic/`,
-   `docs/agentic/LOOP.md`, `docs/agentic/STATE.md` (its prose moves), and the autoloop hook entries.
-2. **Work in a separate worktree, never this checkout.** The session's own hooks still run the
-   vendored guard; deleting `tools/agentic/` here makes it refuse every command. `setup.mjs` refuses
-   the session's checkout itself.
+1. **Confirm with the human first**, naming what the PR deletes: the plugin's files under
+   `tools/agentic/` (the repository's own files there stay), `docs/agentic/LOOP.md`,
+   `docs/agentic/STATE.md` (its prose moves), and the autoloop hook entries.
+2. **Work in a linked worktree, never this checkout** — deleting the vendored guard here makes it
+   refuse every command. `setup.mjs` refuses anything but a linked worktree it is not running in.
 
    ```bash
    git worktree add -b autoloop/devendor <scratch>/devendor origin/<base>
    node <plugin-tools>/setup.mjs --devendor --root <scratch>/devendor
    ```
 
-   It writes `.autoloop/config.json` — the resolved legacy config, plus `protectedPaths` from the
-   vendored `escalate-paths.mjs` entries and the filled merge executor, plus the executor's
-   `merge.loopLogin` and a non-default reversible class — moves the STATE prose to
-   `.autoloop/STATE.md`, removes the vendored files, and strips only autoloop's handlers from
-   `.claude/settings*.json`. ARCH, LESSONS and the checklist stay where they are.
+   It writes `.autoloop/config.json` (overrides only) from the legacy config, the vendored
+   escalate paths and the filled merge executor, read as JavaScript; moves the STATE prose to
+   `.autoloop/STATE.md` with the current template's preamble and Config section; removes the
+   plugin's files and strips only autoloop's hook handlers. ARCH, LESSONS and the checklist stay.
 3. Show the typed report and `git -C <scratch>/devendor diff --stat`, then run the doctor against
-   the worktree (`verify.mjs --project-root <scratch>/devendor`). `staleProse` lists the
-   repository's own STATE lines that still name the vendored layout (the template-owned preamble
-   and Config section were already replaced): ask whether to edit each in this PR.
+   the worktree (`verify.mjs --project-root <scratch>/devendor`). From the report: `kept` names
+   the repository's own files left in `tools/agentic/`; `staleProse` and `staleReferences` name
+   lines in STATE, CLAUDE.md, AGENTS.md, ARCH, LESSONS and the checklist that still name the
+   vendored layout — ask whether to edit each in this PR.
 4. `fingerprintChanged: true` means every open loop PR reviewed before this lands needs its review
    re-run (the chain binds the config's fingerprint): list them for the human.
 5. Commit in the worktree (`git -C … commit -F <file>`), push, open the PR with `--body-file`.
    Never merge it yourself.
-6. After the human merges: pull the base, remove the worktree, and **restart the session** — hooks
-   load at session start, and until then this session still runs the vendored ones.
+6. After the human merges, in this order: `git worktree remove <scratch>/devendor`; have every other
+   session on this checkout exit; pull the base **as the last command** (it deletes the vendored
+   guard this session still runs, which then refuses everything); restart the session. Then the
+   human removes any autoloop entries from their untracked `.claude/settings.local.json` (the doctor
+   names them).
 
 ## Config
 

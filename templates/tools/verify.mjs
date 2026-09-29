@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_VERSION, effectiveChecklistPath, resolveProjectConfig } from './config-contract.mjs';
+import { vendoredLeftovers } from './hook-root.mjs';
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const SELF_TEST_MANIFEST_NAME = 'self-test-manifest.json';
@@ -345,7 +346,7 @@ export const SKILL_BUDGETS = Object.freeze({
   'lean-code': 3909,
   pitcrew: 19813,
   'queue-trace': 6933,
-  setup: 12725,
+  setup: 13146,
   shape: 26690,
 });
 
@@ -395,22 +396,38 @@ function toolChecks(root, toolsDir, requiredFiles) {
   return checks;
 }
 
-// A devendored repository carries none of the tool: no tools/agentic/ and no
-// vendored hook wiring. Either one left behind means devendor is unfinished
-// (or undone), and a wired vendored guard would switch the plugin's off.
+// A devendored repository carries none of the tool (hook-root's one
+// definition): no shipped file under tools/agentic/ and no hook running one.
+// A repository's own file there — a gate script — is not a leftover.
 function checkNoVendoredLayout(root) {
-  const leftovers = [];
-  if (existsSync(resolve(root, 'tools', 'agentic'))) leftovers.push('tools/agentic/');
-  for (const file of ['.claude/settings.json', '.claude/settings.local.json']) {
-    try {
-      if (readFileSync(resolve(root, file), 'utf8').includes('tools/agentic/')) leftovers.push(`${file} (vendored hooks)`);
-    } catch {
-      // absent or unreadable: nothing vendored wired there
-    }
-  }
+  const { files, hooks } = vendoredLeftovers(root);
+  const leftovers = [
+    ...files.map((name) => `tools/agentic/${name}`),
+    ...hooks.map(({ file, command }) => `${file} hook \`${command}\``),
+  ];
   return leftovers.length === 0
     ? { ok: true, detail: '' }
-    : { ok: false, detail: `vendored layout remains: ${leftovers.join(', ')} — run autoloop:setup (devendor)` };
+    : {
+      ok: false,
+      detail: `vendored layout remains: ${leftovers.join(', ')} — remove it (tracked files in a PR; `
+        + '.claude/settings.local.json by hand)',
+    };
+}
+
+// A gate command naming a repository script (a relative path with an
+// extension) that is not there fails every gate; say so before a run does.
+function checkGateScripts(root) {
+  const resolved = resolveProjectConfig(root);
+  if (!resolved?.ok) return { ok: false, detail: 'ProjectConfig is invalid' };
+  const commands = ['command', 'quickCommand', 'setupCommand']
+    .map((key) => resolved.config.gate[key]).filter((value) => typeof value === 'string');
+  const scripts = commands.flatMap((command) => command.split(/[\s;&|()]+/u))
+    .map((token) => token.replace(/^\.\//u, ''))
+    .filter((token) => /^[A-Za-z0-9_.][^:$~]*\/[^:$]*\.[A-Za-z0-9]{1,5}$/u.test(token));
+  const missing = [...new Set(scripts)].filter((path) => !existsSync(resolve(root, path)));
+  return missing.length === 0
+    ? { ok: true, detail: '' }
+    : { ok: false, detail: `gate scripts missing: ${missing.join(', ')}` };
 }
 
 // The project doctor: the repository's own data, checked against the plugin
@@ -424,6 +441,7 @@ function projectChecks(root) {
     },
     { name: 'configured review checklist', execute: () => checkConfiguredChecklist(root) },
     { name: 'retired CI policy absent', execute: () => checkRetiredCiPolicy(root) },
+    { name: 'gate scripts present', execute: () => checkGateScripts(root) },
     { name: 'no vendored layout', execute: () => checkNoVendoredLayout(root) },
   ];
 }
@@ -457,6 +475,8 @@ function selfTest() {
   let vendoredToolsFail;
   let vendoredWiringFails;
   let missingChecklistFails;
+  let repositoryFilePasses;
+  let missingGateScriptFails;
   try {
     mkdirSync(join(projectRoot, '.autoloop'));
     writeFileSync(join(projectRoot, '.autoloop', 'config.json'), JSON.stringify({
@@ -466,11 +486,25 @@ function selfTest() {
     devendoredPasses = doctor().every((result) => result.ok);
     mkdirSync(join(projectRoot, '.claude'));
     writeFileSync(join(projectRoot, '.claude', 'settings.json'), '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node tools/agentic/writeback-check.mjs"}]}]}}');
-    vendoredWiringFails = doctor().some((result) => result.name === 'no vendored layout' && !result.ok && result.detail.includes('devendor'));
+    vendoredWiringFails = doctor().some((result) => result.name === 'no vendored layout' && !result.ok
+      && result.detail.includes('node tools/agentic/writeback-check.mjs'));
     rmSync(join(projectRoot, '.claude'), { recursive: true, force: true });
+    // A repository's own file under tools/agentic (a gate script) is not the
+    // vendored layout; a shipped tool left behind is.
     mkdirSync(join(projectRoot, 'tools', 'agentic'), { recursive: true });
-    vendoredToolsFail = doctor().some((result) => result.name === 'no vendored layout' && !result.ok);
+    writeFileSync(join(projectRoot, 'tools', 'agentic', 'gate.mjs'), '// the repository\'s own\n');
+    repositoryFilePasses = doctor().every((result) => result.ok);
+    writeFileSync(join(projectRoot, 'tools', 'agentic', 'prime.mjs'), '// shipped\n');
+    vendoredToolsFail = doctor().some((result) => result.name === 'no vendored layout' && !result.ok
+      && result.detail.includes('tools/agentic/prime.mjs'));
     rmSync(join(projectRoot, 'tools'), { recursive: true, force: true });
+    // A gate whose repository script is missing fails before a run finds out.
+    writeFileSync(join(projectRoot, '.autoloop', 'config.json'), JSON.stringify({
+      version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'node tools/agentic/gate.mjs && ./scripts/lint.sh' },
+    }));
+    const missingGate = doctor().find((result) => result.name === 'gate scripts present');
+    missingGateScriptFails = missingGate?.ok === false && missingGate.detail.includes('tools/agentic/gate.mjs')
+      && missingGate.detail.includes('scripts/lint.sh');
     // No checklist of its own: the plugin's is used. A path the repository
     // configured explicitly must exist.
     writeFileSync(join(projectRoot, '.autoloop', 'config.json'), JSON.stringify({
@@ -564,8 +598,10 @@ function selfTest() {
     ['a fresh committed manifest passes the plugin check', freshManifestPasses],
     ['a stale committed manifest fails the plugin check', staleManifestFails],
     ['a devendored project passes the doctor', devendoredPasses],
-    ['vendored hook wiring left behind fails the doctor and names devendor', vendoredWiringFails],
-    ['a tools/agentic directory left behind fails the doctor', vendoredToolsFail],
+    ['vendored hook wiring left behind fails the doctor and names the hook', vendoredWiringFails],
+    ['a shipped tool left in tools/agentic fails the doctor, naming it', vendoredToolsFail],
+    ['a repository\'s own file in tools/agentic passes the doctor', repositoryFilePasses],
+    ['a gate command whose repository script is missing fails the doctor', missingGateScriptFails],
     ['a missing explicitly configured checklist fails the doctor', missingChecklistFails],
   ];
   const failures = cases.filter(([, passed]) => !passed);

@@ -145,9 +145,13 @@ block) stays until every known repository has devendored.
   - SessionStart → preflight, STATE injection and `--card-run`;
   - Stop → writeback-check;
   - SubagentStop → subagent-transcript.
-- **Every hook is a no-op outside an autoloop repo:** it checks `resolveProjectConfig` (or just the
-  existence of `.autoloop/config.json` or the legacy STATE) and exits 0 in under 50 ms. The guard
-  still enforces only while this session's loop run is live.
+- **Every hook is a no-op outside an autoloop repo** (`hook-root.mjs`): outside an open run a hook
+  acts only where `$CLAUDE_PROJECT_DIR`'s top level has `.autoloop/config.json` and no vendored
+  guard wired (a tracked hook running an existing `tools/agentic/command-guard.mjs`); elsewhere it
+  exits 0 in tens of milliseconds. **Inside an open run the guards never stand down**: prime refuses
+  to open one unless the repository is active and records the run's base in its marker, so a
+  deleted config or a checked-out pre-devendor branch cannot switch them off mid-run. Markers live
+  in the common git dir, so linked worktrees see the run.
 - **Before building:** verify with a throwaway plugin whether plugin hooks fire in
   `claude -p --safe-mode`. The edit-guard's writer coverage stays in dispatch's deny rules either
   way.
@@ -161,16 +165,19 @@ block) stays until every known repository has devendored.
   PR.
 - **`config`**: change a setting in `config.json`, with no other writes.
 - **`doctor`**: read-only; config validity, gate resolution, labels, plugin version.
-- **`devendor`** (one-time, per existing repo, one PR):
+- **`devendor`** (one-time, per existing repo, one PR, from a linked worktree only):
   - convert the STATE JSON block and the repo-specific parts of `escalate-paths.mjs` and
-    `auto-merge.mjs` into `.autoloop/config.json`;
-  - move STATE prose to `.autoloop/STATE.md`;
-  - delete `tools/agentic/`, `docs/agentic/LOOP.md`, and the autoloop entries in
-    `.claude/settings.json`.
+    `auto-merge.mjs` (read by importing them, so JavaScript decides their values) into
+    `.autoloop/config.json`, overrides only, verified to resolve to exactly the converted config;
+  - move STATE prose to `.autoloop/STATE.md`, replacing the template-owned preamble and Config
+    section; report repository lines that still name the vendored layout;
+  - delete the plugin's files under `tools/agentic/` (a repository's own files there stay),
+    `docs/agentic/LOOP.md`, and the autoloop entries in `.claude/settings.json`.
 
   `devendor` never touches ARCH, LESSONS or a repo-authored checklist.
-- `devendor` writes exactly the config the legacy block resolved to, so the config fingerprint of a
-  review chain in flight is unchanged.
+- The converted config adds the protected paths and merge settings the vendored files held, so its
+  fingerprint differs from the legacy block's: an open loop PR reviewed before devendor lands needs
+  its review re-run, and devendor reports it (`fingerprintChanged`).
 - **Success:** LFE devendors in one PR with `verify`, the guard and a full unit green afterwards; a
   plugin release after that needs no setup at all.
 

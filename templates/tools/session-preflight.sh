@@ -10,7 +10,8 @@
 # devendored autoloop repository (hook-root.mjs decides, for every hook alike).
 
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+PROJECT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+REPO_DIR="$(git -C "$PROJECT" rev-parse --show-toplevel 2>/dev/null || printf %s "$PROJECT")"
 cd "$REPO_DIR" || exit 0
 if ! command -v node >/dev/null 2>&1; then
   if [ -e "$REPO_DIR/.autoloop/config.json" ]; then
@@ -19,7 +20,17 @@ if ! command -v node >/dev/null 2>&1; then
   fi
   exit 0
 fi
-node "$TOOLS_DIR/hook-root.mjs" --active >/dev/null 2>&1 || exit 0
+# Exit 1 is "not a devendored autoloop repository": stay silent. Anything else
+# is the plugin failing, which an autoloop repository must hear about.
+node "$TOOLS_DIR/hook-root.mjs" --active >/dev/null 2>&1
+active=$?
+if [ "$active" -ne 0 ]; then
+  if [ "$active" -ne 1 ] && [ -e "$REPO_DIR/.autoloop/config.json" ]; then
+    echo '## autoloop preflight'
+    echo "FAIL  hook-root.mjs exited $active — the plugin cannot tell whether it guards this repository; reinstall it and restart the session"
+  fi
+  exit 0
+fi
 
 echo '## autoloop preflight'
 
