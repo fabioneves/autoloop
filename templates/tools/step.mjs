@@ -531,6 +531,25 @@ function selfTest() {
       && parsed(['--parked']).mode === 'parked'
       && parsed(['--card', '--issue', '350', '--outcome', 'finished']).error !== null],
     ['a resumed call parses', parsed(['--issue', '78', '--resumed', 'plan returned', '--ms', '401000']).mode === 'resumed'],
+    // LFE, 2026-09-29: a 0.55.3 setup ran all five phases and printed only
+    // ribbons 1, 2 and 4 by hand. The call prints the skill's exact lines.
+    ['each setup phase prints its ribbon, with a blocked or human badge when given', safely(() => [
+      renderSetupPhase('resolve'), renderSetupPhase('audit'), renderSetupPhase('interview'),
+      renderSetupPhase('write'), renderSetupPhase('verify'), renderSetupPhase('verify', '❌'),
+    ].join('\n')) === [
+      '⏳ ∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base',
+      '⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT ─ one-call battery',
+      '⏳ ∞ ▰▰▰▱▱ 3/5 INTERVIEW ─ decisions only',
+      '⏳ ∞ ▰▰▰▰▱ 4/5 WRITE ─ reconcile · visible diff',
+      '⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery',
+      '❌ ∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery',
+    ].join('\n')],
+    ['a setup call parses and refuses an unknown phase or badge',
+      JSON.stringify(parsed(['--setup', 'verify'])) === JSON.stringify({ mode: 'setup', phase: 'verify', badge: '⏳', error: null })
+        && parsed(['--setup', 'audit', '--badge', '⚠️']).badge === '⚠️'
+        && parsed(['--setup', 'deploy']).error !== null
+        && parsed(['--setup', 'audit', '--badge', '🎉']).error !== null
+        && parsed(['--setup']).error !== null],
     ['bad calls are refused', ['--issue x --to 02-plan', '--to 02-plan', '--issue 7', '--issue 7 --to 02-plan --round 9',
       '--issue 7 --to 02-plan --colour red', '--issue 7 --resumed x --ms soon']
       .every((call) => parsed(call.split(' ')).error !== null)],
@@ -852,12 +871,39 @@ function transitionChecks(at) {
   return results;
 }
 
+// Setup's five phases, printed by a call as each begins (LFE, 2026-09-29: a
+// setup that ran all five printed ribbons 1, 2 and 4 by hand).
+export const SETUP_PHASES = Object.freeze([
+  ['resolve', 'RESOLVE', 'version · mode · base'],
+  ['audit', 'AUDIT', 'one-call battery'],
+  ['interview', 'INTERVIEW', 'decisions only'],
+  ['write', 'WRITE', 'reconcile · visible diff'],
+  ['verify', 'VERIFY', 'evidence · delivery'],
+]);
+const SETUP_BADGES = Object.freeze(['⏳', '❌', '⚠️']);
+
+export function renderSetupPhase(phase, badge = '⏳') {
+  const index = SETUP_PHASES.findIndex(([id]) => id === phase);
+  if (index < 0 || !SETUP_BADGES.includes(badge)) return null;
+  const [, name, detail] = SETUP_PHASES[index];
+  const cells = `${'▰'.repeat(index + 1)}${'▱'.repeat(SETUP_PHASES.length - index - 1)}`;
+  return `${badge} ∞ ${cells} ${index + 1}/${SETUP_PHASES.length} ${name} ─ ${detail}`;
+}
+
 const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round <r>/<cap>] [--model <id>] [--fallback] [--staged] '
-  + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--ms <n>]\n       step.mjs --self-test';
+  + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--ms <n>]\n'
+  + '       step.mjs --setup <resolve|audit|interview|write|verify> [--badge ⏳|❌|⚠️]\n       step.mjs --self-test';
 
 export function parseArgs(argv) {
   if (argv.length === 1 && argv[0] === '--parked') return { mode: 'parked', error: null };
   if (argv.length === 1 && argv[0] === '--card-run') return { mode: 'card-run', error: null };
+  if (argv[0] === '--setup') {
+    const [, phase, flag, badge = '⏳'] = argv;
+    const shapeOk = argv.length === 2 || (argv.length === 4 && flag === '--badge');
+    return shapeOk && renderSetupPhase(phase, badge) !== null
+      ? { mode: 'setup', phase, badge, error: null }
+      : { mode: 'setup', phase, badge, error: 'expected --setup <resolve|audit|interview|write|verify> [--badge ⏳|❌|⚠️]' };
+  }
   const out = {
     mode: null, issue: null, to: null, round: null, model: null, badge: '⏳', note: '',
     fallback: false, staged: false, what: null, ms: null, error: null,
@@ -909,6 +955,10 @@ function main() {
   if (parsed.error) {
     console.error(`step: ${parsed.error}\n${USAGE}`);
     process.exit(2);
+  }
+  if (parsed.mode === 'setup') {
+    process.stdout.write(`${renderSetupPhase(parsed.phase, parsed.badge)}\n`);
+    return;
   }
   const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
   if (parsed.mode === 'card-run') {

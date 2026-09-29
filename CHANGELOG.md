@@ -3,6 +3,15 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.55.4] - 2026-09-29
+
+### Changed
+
+- **Setup's phase ribbons come from a call.** `step.mjs --setup <resolve|audit|interview|write|verify>`
+  prints each phase's ribbon, and the setup skill runs it as every phase begins. A live setup ran
+  all five phases but printed only ribbons 1, 2 and 4 by hand, so verification and delivery looked
+  skipped.
+
 ## [0.55.3] - 2026-09-29
 
 ### Fixed
