@@ -2583,10 +2583,22 @@ function trimSubshell(segment) {
   return segment.slice(start, end);
 }
 
-export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PRIME) {
+// The hook's own budget: the host kills a hook at 15 s and then lets the
+// command run, so a guard that cannot finish must refuse before that. Every
+// prime segment cost two git spawns, and a padded command outran the timeout
+// (security audit after 0.60.0); common dirs are now resolved once each.
+export const GUARD_DEADLINE_MS = 10_000;
+const MAX_PRIME_TARGETS = 64;
+const OVER_BUDGET = 'autoloop guard — this command is too large to check within the guard\'s time '
+  + 'budget, so it cannot be proven safe. Split it into smaller commands.';
+
+export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PRIME, deadline = Date.now() + GUARD_DEADLINE_MS) {
   if (typeof command !== 'string' || !/\bnode\b/u.test(command)) return null;
   let dir = cwd;
+  let project;
+  const targets = new Map();
   for (const { command: segment } of shellSegments(command)) {
+    if (Date.now() > deadline) return OVER_BUDGET;
     let words = shellWords(trimSubshell(segment));
     const comment = words.findIndex((word) => word.startsWith('#'));
     if (comment !== -1) words = words.slice(0, comment);
@@ -2599,8 +2611,12 @@ export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PR
     const scriptIndex = words.findIndex((word, index) => index > node.index && !word.startsWith('-'));
     if (scriptIndex === -1 || realOrSelf(resolve(node.target, expandHome(words[scriptIndex]))) !== prime) continue;
     if (words.slice(scriptIndex + 1).some((word) => PRIME_EXEMPT.has(word))) continue;
-    const project = commonGitDir(projectRoot);
-    if (project === null || commonGitDir(node.target) === project) continue;
+    if (project === undefined) project = commonGitDir(projectRoot);
+    if (!targets.has(node.target)) {
+      if (targets.size === MAX_PRIME_TARGETS) return OVER_BUDGET;
+      targets.set(node.target, commonGitDir(node.target));
+    }
+    if (project === null || targets.get(node.target) === project) continue;
     return `autoloop guard — this session's project is ${projectRoot}, but prime would open the run in `
       + `${node.target}, outside it: the session's hooks would guard the wrong repository. Start a `
       + 'session in that repository and run the loop there.';
@@ -3736,6 +3752,28 @@ function selfTest() {
         console.error(`FAIL [the foreign-prime check stays linear on padded input]: ${elapsed} ms`);
         ok = false;
       }
+      // Audit after 0.60.0: every prime segment spawned git twice, so a few
+      // thousand of them outran the host's 15 s timeout, which lets the
+      // command run. Common dirs resolve once each; too many distinct targets,
+      // or a spent budget, refuses.
+      const primes = Array(5000).fill(`node ${prime} --json`).join('; ');
+      const primesAt = Date.now();
+      const primesVerdict = foreignPrimeProblem(primes, scratch, scratch);
+      const primesElapsed = Date.now() - primesAt;
+      const targets = Array.from({ length: 65 }, (_, index) => {
+        mkdirSync(join(scratch, 'targets', String(index)), { recursive: true });
+        return `cd ${join(scratch, 'targets', String(index))} && node ${prime} --json`;
+      }).join('; ');
+      const budgetVerdicts = [
+        primesVerdict === null && primesElapsed < 2000,
+        foreignPrimeProblem(targets, scratch, scratch)?.includes('time budget') === true,
+        foreignPrimeProblem(`node ${prime} --json`, scratch, scratch, undefined, Date.now() - 1)?.includes('time budget') === true,
+      ];
+      rmSync(join(scratch, 'targets'), { recursive: true, force: true });
+      if (budgetVerdicts.includes(false)) {
+        console.error(`FAIL [the foreign-prime check fits the hook budget or refuses]: ${JSON.stringify(budgetVerdicts)} ${primesElapsed} ms`);
+        ok = false;
+      }
       rmSync(other, { recursive: true, force: true });
       // A session that primed twice holds two plugin markers: the newest base wins.
       // Both name assignments, so directory order cannot pass it by accident.
@@ -3948,6 +3986,7 @@ function refuse(reason) {
 }
 
 function main() {
+  const deadline = Date.now() + GUARD_DEADLINE_MS;
   if (process.argv.includes('--corpus')) {
     const { total, failures } = replayCorpus();
     for (const line of failures) console.error(line);
@@ -3983,7 +4022,7 @@ function main() {
   // anywhere but the session's project would leave the hooks guarding the
   // wrong repository. Only a hook can check it — Bash never sees
   // CLAUDE_PROJECT_DIR.
-  const foreign = foreignPrimeProblem(payload?.tool_input?.command, payload?.cwd ?? process.cwd(), projectRoot);
+  const foreign = foreignPrimeProblem(payload?.tool_input?.command, payload?.cwd ?? process.cwd(), projectRoot, undefined, deadline);
   if (foreign !== null) refuse(foreign);
   if (root === null && runBase === null) process.exit(0);
   if (payloadError !== null) {
