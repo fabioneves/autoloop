@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // autoloop — edit-guard.mjs
 //
-// PreToolUse hook for Edit|Write|MultiEdit|NotebookEdit. While a loop run is
-// live, it refuses edits to the repository's hook wiring —
+// PreToolUse hook for Edit|Write|MultiEdit|NotebookEdit. For as long as a loop
+// run is open in this session (closing it does not end the session), it
+// refuses edits to the repository's hook wiring —
 // `.claude/settings.json` and `.claude/settings.local.json` — the one edit
 // that can switch the session's own guard off mid-run (repository settings can
 // still disable plugin hooks). Everything else stays editable: loop
@@ -20,8 +21,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loopRunIsOpen } from './command-guard.mjs';
-import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
+import { guardedRoot, loopRunIsOpen } from './command-guard.mjs';
 
 const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);
@@ -46,9 +46,9 @@ export function hookWiringEditProblem(filePath, repoRoot, live) {
   const target = canonical(resolve(repoRoot, filePath));
   const relativePath = relative(root, target).split(sep).join('/');
   if (!HOOK_WIRING.includes(relativePath.toLowerCase())) return null;
-  return `autoloop guard — ${relativePath} is this session's hook wiring, and a live run never `
-    + 'edits it: the edit could switch the guard itself off. A change there is autoloop:setup\'s, '
-    + 'run after the loop closes (`prime.mjs --close-run`), or a human\'s.';
+  return `autoloop guard — ${relativePath} is this session's hook wiring, and a session that ran `
+    + 'the loop never edits it: the edit could switch the guard itself off. A change there is a '
+    + 'human\'s, or autoloop:setup\'s in a new session.';
 }
 
 function selfTest() {
@@ -100,9 +100,9 @@ function main() {
   // Plugin hooks fire in every repository; outside an open run this one guards
   // only a devendored autoloop repository, found from CLAUDE_PROJECT_DIR
   // (hook-root.mjs). Inside an open run it never stands down.
-  const open = loopRunIsOpen();
-  const repoRoot = activeAutoloopRoot() ?? (open ? hookRoot() : null);
+  const repoRoot = guardedRoot();
   if (repoRoot === null) process.exit(0);
+  const open = loopRunIsOpen() || loopRunIsOpen(repoRoot);
   let payload;
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));

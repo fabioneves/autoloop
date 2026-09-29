@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { activeAutoloopRoot } from './hook-root.mjs';
+import { guardedRoot } from './command-guard.mjs';
 
 // Claude Code 2.1.234 removed the task tools outright but only DEFERRED
 // PushNotification; a live run read the visible roster as the whole roster,
@@ -321,7 +321,7 @@ if (entry) {
       try {
         const input = JSON.parse(raw);
         if (input.tool_name !== 'Bash') process.exit(0);
-        const root = activeAutoloopRoot();
+        const root = guardedRoot();
         if (root === null) process.exit(0);
         const msg = reminderFor(input.tool_input?.command, {
           archMap: existsSync(join(root, 'docs/agentic/ARCH.md')),

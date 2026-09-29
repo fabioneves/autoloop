@@ -130,9 +130,22 @@ process.stdout.write(JSON.stringify({
 }));
 `;
 
+// Devendor runs the vendored policy code, so only the base's reviewed copy of
+// it: tools/agentic must match the configured base (origin/<base>, else
+// <base>) exactly, working tree included.
+function vendoredPolicyProblem(root, baseBranch) {
+  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+  const base = [`origin/${baseBranch}`, baseBranch]
+    .find((ref) => git('rev-parse', '--verify', '--quiet', `${ref}^{commit}`).status === 0);
+  if (base === undefined) return refusal('VENDORED_POLICY_NOT_BASE', `the base ${baseBranch} does not resolve here`);
+  return git('diff', '--quiet', base, '--', VENDORED_DIR).status === 0 ? null : refusal('VENDORED_POLICY_NOT_BASE',
+    `${VENDORED_DIR} differs from ${base}: devendor runs only the base's reviewed vendored policy`);
+}
+
 export function readVendoredPolicy(root) {
+  // A minimal environment: the vendored modules need no credentials.
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', READ_POLICY, join(root, VENDORED_DIR)], {
-    cwd: root, encoding: 'utf8', timeout: 30000,
+    cwd: root, encoding: 'utf8', timeout: 30000, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
   });
   try {
     if (run.status !== 0) throw new Error((run.stderr || run.error?.message || `exit ${run.status}`).trim().split('\n')[0]);
@@ -240,6 +253,8 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
     const link = symlinkedComponent(root, path);
     if (link !== null) return refusal('SYMLINKED_PATH', `${link} is a symlink; devendor writes only real paths under the root`);
   }
+  const drift = vendoredPolicyProblem(root, legacy.config.baseBranch);
+  if (drift !== null) return drift;
   const policy = readVendoredPolicy(root);
   if (!policy.ok) return policy;
 
@@ -530,6 +545,13 @@ async function selfTest() {
     });
     check('a vendored policy that cannot be read refuses instead of guessing',
       devendor(unreadablePolicy, away).code === 'VENDORED_POLICY_UNREADABLE');
+
+    // Devendor runs the vendored policy code, so only the base's reviewed copy:
+    // a worktree whose tools/agentic differs from the base refuses.
+    const { worktree: drifted } = legacyWorktree('drifted');
+    writeFileSync(join(drifted, VENDORED_DIR, 'escalate-paths.mjs'), "export const ESCALATE_PATHS = ['**'];\n");
+    check('a worktree whose vendored policy differs from the base refuses before running it',
+      devendor(drifted, away).code === 'VENDORED_POLICY_NOT_BASE' && !existsSync(join(drifted, PROJECT_CONFIG_FILE)));
 
     const fresh = join(scratch, 'fresh');
     mkdirSync(fresh);

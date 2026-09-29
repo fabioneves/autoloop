@@ -45,8 +45,9 @@ Nothing else: no `tools/agentic/`, no autoloop entries in `.claude/settings.json
 ## Modes
 
 - **Init** — no `.autoloop/config.json` and no `docs/agentic/STATE.md`: a fresh repository.
-- **Devendor** — `docs/agentic/STATE.md` or `tools/agentic/` exists: a vendored install from before
-  the global plugin. Converted once, in its own PR.
+- **Devendor** — `docs/agentic/STATE.md` carries a config block and there is no
+  `.autoloop/config.json`: a vendored install from before the global plugin. Converted once, in its
+  own PR. (A repository's own files may stay in `tools/agentic/` afterwards.)
 - **Config** — `.autoloop/config.json` exists: change a setting.
 - **Doctor** — the invocation contains `doctor`: read-only, writes and asks nothing.
 
@@ -162,7 +163,8 @@ this session's hooks and refuses the devendor commit while a run marker exists.
 
 1. **Confirm with the human first**, naming what the PR deletes: the plugin's files under
    `tools/agentic/` (the repository's own files there stay), `docs/agentic/LOOP.md`,
-   `docs/agentic/STATE.md` (its prose moves), and the autoloop hook entries.
+   `docs/agentic/STATE.md` (its prose moves), and the autoloop hook entries — and that devendor
+   runs the base's vendored escalate/merge modules to read their policy.
 2. **Work in a linked worktree, never this checkout** — deleting the vendored guard here makes it
    refuse every command. `setup.mjs` refuses anything but a linked worktree it is not running in.
 
@@ -170,6 +172,10 @@ this session's hooks and refuses the devendor commit while a run marker exists.
    git worktree add -b autoloop/devendor <scratch>/devendor origin/<base>
    node <plugin-tools>/setup.mjs --devendor --root <scratch>/devendor
    ```
+
+   Typed refusals name their remedy: `NOT_A_WORKTREE`/`LIVE_CHECKOUT` (use the worktree above),
+   `VENDORED_POLICY_NOT_BASE` (the worktree's `tools/agentic/` differs from the base),
+   `GATE_USES_VENDORED_TOOL` (point the gate at a repository script first).
 
    It writes `.autoloop/config.json` (overrides only) from the legacy config, the vendored
    escalate paths and the filled merge executor, read as JavaScript; moves the STATE prose to
@@ -205,9 +211,10 @@ node <plugin-tools>/verify.mjs --project-root <repo>
 node <plugin-tools>/config-contract.mjs --root <repo> --resolve
 ```
 
-The first checks ProjectConfig, the effective review checklist, no retired CI policy, and **no
-vendored layout left** (`tools/agentic/` or vendored hook wiring: devendor is unfinished, and a
-wired vendored guard switches the plugin's off). Also report the session's plugin version against
+The first checks ProjectConfig, the effective review checklist, that every repository script a gate
+command names exists, no retired CI policy, and **no vendored layout left** — a plugin file under
+`tools/agentic/` or a hook running one (a repository's own files there are fine); it names each
+leftover and how to remove it. Also report the session's plugin version against
 the newest installed (Prime step 3), the lifecycle labels, and open duplicate setup PRs. Doctor
 never dispatches an engine, merges, or reads server-side protection.
 

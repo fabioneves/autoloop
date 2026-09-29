@@ -127,6 +127,8 @@ function smokeEnvironment(ghConfigDir, shimDirectory) {
       && !STRIPPED_ENV_KEYS.includes(key)),
   );
   environment.GH_CONFIG_DIR = ghConfigDir;
+  // The session under test is the fixture's; the smoke's own host session is not.
+  delete environment.CLAUDE_PROJECT_DIR;
   if (shimDirectory !== null) {
     environment.PATH = [shimDirectory, environment.PATH ?? '']
       .filter(Boolean)

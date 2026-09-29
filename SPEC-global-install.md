@@ -149,9 +149,11 @@ block) stays until every known repository has devendored.
   acts only where `$CLAUDE_PROJECT_DIR`'s top level has `.autoloop/config.json` and no vendored
   guard wired (a tracked hook running an existing `tools/agentic/command-guard.mjs`); elsewhere it
   exits 0 in tens of milliseconds. **Inside an open run the guards never stand down**: prime refuses
-  to open one unless the repository is active and records the run's base in its marker, so a
-  deleted config or a checked-out pre-devendor branch cannot switch them off mid-run. Markers live
-  in the common git dir, so linked worktrees see the run.
+  to open one unless the repository is active and the session's project is that repository, and
+  records the run's base in its marker, so a deleted config or a checked-out pre-devendor branch
+  cannot switch them off mid-run. Only such a marker counts: a legacy install's own prime writes
+  markers without a base, and that run belongs to its vendored guard. Markers live in the common
+  git dir, so linked worktrees see the run.
 - **Before building:** verify with a throwaway plugin whether plugin hooks fire in
   `claude -p --safe-mode`. The edit-guard's writer coverage stays in dispatch's deny rules either
   way.

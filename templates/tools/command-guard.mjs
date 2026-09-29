@@ -2643,12 +2643,23 @@ export function ownRunMarkers(cwd = process.cwd()) {
   return markers;
 }
 
-// The base the open run was primed against, for a checkout that no longer
-// resolves its own config (prime records it in the marker).
-export function runBaseBranch(cwd = process.cwd()) {
-  const base = ownRunMarkers(cwd).map(({ marker }) => marker.baseBranch).find((value) => typeof value === 'string');
-  if (base === undefined) throw new Error('the open run recorded no base branch and this checkout has no autoloop config');
-  return base;
+// The base of an open run the plugin's prime opened (its marker records the
+// base; a legacy install's own prime writes markers without one — that run is
+// the vendored guard's, never this one's). Looked up from the hook's cwd and
+// from the project root, since either may be where the session works. null
+// when no such run is open.
+export function pluginRunBase(dirs = [process.cwd()]) {
+  const base = dirs.flatMap((dir) => ownRunMarkers(dir))
+    .map(({ marker }) => marker.baseBranch).find((value) => typeof value === 'string');
+  return base ?? null;
+}
+
+// Where a plugin hook acts: the devendored autoloop repository at the project
+// root, or — while a plugin run is open — that root whatever the checkout now
+// says, so no file the run can change switches the hooks off mid-run.
+export function guardedRoot(projectRoot = hookRoot()) {
+  return activeAutoloopRoot(projectRoot)
+    ?? (pluginRunBase([process.cwd(), projectRoot]) === null ? null : projectRoot);
 }
 
 export function loopRunIsOpen(cwd = process.cwd()) {
@@ -3702,6 +3713,56 @@ function selfTest() {
         console.error(`FAIL [an open run keeps the guard on after its config is removed]: ${merge.status} ${merge.stderr}`);
         ok = false;
       }
+      // Security re-audit: a legacy install's own prime writes markers with no
+      // baseBranch into the same directory. That is the vendored guard's run,
+      // never the plugin's: the plugin guard stands down, it does not lock the
+      // repository out.
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now() }));
+      const legacyRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }),
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      if (legacyRun.status !== 0) {
+        console.error(`FAIL [a vendored-era marker never makes the plugin guard refuse]: ${legacyRun.status} ${legacyRun.stderr}`);
+        ok = false;
+      }
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      // An unreadable config mid-run falls back to the run's own base rather
+      // than refusing every command.
+      mkdirSync(join(scratch, '.autoloop'));
+      writeFileSync(join(scratch, '.autoloop', 'config.json'), '{ typo');
+      const typo = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git status' } }),
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
+      if (typo.status !== 0) {
+        console.error(`FAIL [a config typo mid-run falls back to the run's base]: ${typo.status} ${typo.stderr}`);
+        ok = false;
+      }
+      // Every hook (reminders, transcripts, the preflight) acts where the guard
+      // does: a plugin run keeps the project guarded on a checkout without config.
+      const guarded = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now() }));
+      const vendoredRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      if (guarded.status !== 0 || guarded.stdout.trim() !== realpathSync(scratch) || vendoredRun.status !== 1) {
+        console.error(`FAIL [a plugin run keeps every hook acting; a vendored run does not]: ${guarded.status} ${guarded.stdout} ${vendoredRun.status}`);
+        ok = false;
+      }
+      // The hook's cwd is not the only place to look: the project root's run counts.
+      const fromTmp = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
+        encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      });
+      if (fromTmp.status !== 2) {
+        console.error(`FAIL [a hook whose cwd is outside the repository still sees the project's run]: ${fromTmp.status}`);
+        ok = false;
+      }
       // Review of the cutover (I7): markers live in the common git dir, so a
       // command issued from a linked worktree of the repository sees the run.
       execFileSync('git', ['-C', scratch, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x']);
@@ -3877,6 +3938,12 @@ function refuse(reason) {
 }
 
 function main() {
+  // For the shell hooks (session-preflight): the root a hook acts in, or exit 1.
+  if (process.argv[2] === '--guarded-root') {
+    const root = guardedRoot();
+    if (root !== null) console.log(root);
+    process.exit(root === null ? 1 : 0);
+  }
   if (process.argv.includes('--corpus')) {
     const { total, failures } = replayCorpus();
     for (const line of failures) console.error(line);
@@ -3897,8 +3964,10 @@ function main() {
   // only a devendored autoloop repository (hook-root.mjs), before reading
   // anything. Inside an open run it never stands down: the run's marker is the
   // authority, whatever the checkout now says.
-  const root = activeAutoloopRoot(parsed.root ?? hookRoot());
-  if (root === null && !loopRunIsOpen()) process.exit(0);
+  const projectRoot = parsed.root ?? hookRoot();
+  const root = activeAutoloopRoot(projectRoot);
+  const runBase = pluginRunBase([process.cwd(), projectRoot]);
+  if (root === null && runBase === null) process.exit(0);
 
   let payload;
   try {
@@ -3911,7 +3980,7 @@ function main() {
     );
   }
   if (payload?.tool_name === 'AskUserQuestion') {
-    const problem = askUserQuestionProblem(loopRunIsLive());
+    const problem = askUserQuestionProblem(loopRunIsLive() || loopRunIsLive(projectRoot));
     if (problem !== null) refuse(problem);
     process.exit(0);
   }
@@ -3926,7 +3995,7 @@ function main() {
 
   // Ordered before configuration loading: with no run open there is nothing to
   // guard, so a configuration problem must not block a human's command either.
-  if (!loopRunIsOpen()) process.exit(0);
+  if (!loopRunIsOpen() && !loopRunIsOpen(projectRoot)) process.exit(0);
 
   const launchProblem = backgroundDispatchProblem(
     cmd,
@@ -3936,7 +4005,14 @@ function main() {
 
   let baseBranch;
   try {
-    baseBranch = root !== null ? loadConfiguredBase(root) : runBaseBranch();
+    // The checkout's config decides; while a plugin run is open, its recorded
+    // base stands in for a config the checkout lacks or cannot read.
+    try {
+      baseBranch = loadConfiguredBase(root ?? projectRoot);
+    } catch (error) {
+      if (runBase === null) throw error;
+      baseBranch = runBase;
+    }
   } catch (error) {
     refuse(
       `autoloop guard — the configured base branch cannot be resolved (${error.message}), `

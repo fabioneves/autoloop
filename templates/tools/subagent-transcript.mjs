@@ -19,7 +19,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { fileURLToPath } from 'node:url';
 import { isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { activeAutoloopRoot } from './hook-root.mjs';
+import { guardedRoot } from './command-guard.mjs';
 
 const KEEP_FILES = 40; // ISO-stamped names sort chronologically; oldest pruned first
 
@@ -76,7 +76,7 @@ export function normalizedMetadata(payload) {
 function capture() {
   // Runs from the plugin: the repository is CLAUDE_PROJECT_DIR, and only a
   // devendored autoloop repository keeps transcripts.
-  const root = activeAutoloopRoot();
+  const root = guardedRoot();
   if (root === null) return;
   const captureDir = resolveCaptureDirectory(root);
   let raw = '';

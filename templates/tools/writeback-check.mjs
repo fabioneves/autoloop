@@ -55,8 +55,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
-import { loopRunIsLive, loopRunIsOpen, ownRunMarkers } from './command-guard.mjs';
-import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
+import { guardedRoot, loopRunIsLive, loopRunIsOpen, ownRunMarkers } from './command-guard.mjs';
+import { hookRoot } from './hook-root.mjs';
 import { blockedByIssueNumbers } from './snapshot-contract.mjs';
 
 // The hook runs from the plugin, so its own location never names the
@@ -881,7 +881,7 @@ function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
   // Outside an open run only a devendored autoloop repository is checked;
   // inside one the Stop hook never stands down.
-  if (activeAutoloopRoot(ROOT) === null && !loopRunIsOpen(ROOT)) process.exit(0);
+  if (guardedRoot(ROOT) === null) process.exit(0);
 
   // Never re-block a Stop that a previous block already continued.
   try {

@@ -45,7 +45,7 @@ import {
 import {
   effectiveChecklistPath, PLUGIN_CHECKLIST, PROJECT_CONFIG_FILE, resolveProjectConfig,
 } from './config-contract.mjs';
-import { activeAutoloopRoot } from './hook-root.mjs';
+import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
@@ -177,6 +177,8 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   const read = readPrimeConfig(root);
   if (read.error !== undefined) return read;
   const { config } = read;
+  const session = sessionProblem(root);
+  if (session !== null) return session;
 
   const base = baseSyncFacts(root, config.baseBranch);
   clearRunParks(root);
@@ -395,6 +397,23 @@ export function readPrimeConfig(root) {
       : 'a vendored install (docs/agentic/STATE.md): run autoloop:setup to devendor it first');
   }
   return { config: resolved.config };
+}
+
+// The session's project (CLAUDE_PROJECT_DIR, where its hooks act) must be the
+// repository the run opens in: a session started elsewhere would run the
+// loop in one repository while its hooks guard another.
+export function sessionProblem(root, env = process.env) {
+  const project = realpathOrSelf(hookRoot(env, root));
+  return project === realpathOrSelf(root) ? null : failure('config', 'SESSION_NOT_IN_REPOSITORY',
+    `this session's project is ${project}, not ${root}: start the session in the repository`);
+}
+
+function realpathOrSelf(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 // A full snapshot is hundreds of kilobytes; a model-facing tool result is
@@ -802,6 +821,13 @@ function selfTest() {
         rmSync(root, { recursive: true, force: true });
       }
     })(),
+  );
+
+  check(
+    'a session whose project is another repository never opens a run here',
+    sessionProblem('/r', { CLAUDE_PROJECT_DIR: '/elsewhere' })?.error?.code === 'SESSION_NOT_IN_REPOSITORY'
+      && sessionProblem('/r', { CLAUDE_PROJECT_DIR: '/r' }) === null
+      && sessionProblem('/r', {}) === null,
   );
 
   // Review of 0.55.5: with `eligible: []` a halt read as a drained queue, and

@@ -20,14 +20,14 @@ if ! command -v node >/dev/null 2>&1; then
   fi
   exit 0
 fi
-# Exit 1 is "not a devendored autoloop repository": stay silent. Anything else
+# Exit 1 is "not a guarded autoloop repository": stay silent. Anything else
 # is the plugin failing, which an autoloop repository must hear about.
-node "$TOOLS_DIR/hook-root.mjs" --active >/dev/null 2>&1
+node "$TOOLS_DIR/command-guard.mjs" --guarded-root >/dev/null 2>&1
 active=$?
 if [ "$active" -ne 0 ]; then
   if [ "$active" -ne 1 ] && [ -e "$REPO_DIR/.autoloop/config.json" ]; then
     echo '## autoloop preflight'
-    echo "FAIL  hook-root.mjs exited $active — the plugin cannot tell whether it guards this repository; reinstall it and restart the session"
+    echo "FAIL  command-guard.mjs --guarded-root exited $active — the plugin cannot tell whether it guards this repository; reinstall it and restart the session"
   fi
   exit 0
 fi

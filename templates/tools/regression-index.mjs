@@ -432,7 +432,11 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'command-guard.mjs',
-        anchor: 'const root = activeAutoloopRoot(parsed.root ?? hookRoot());',
+        anchor: 'export function guardedRoot(projectRoot = hookRoot()) {',
+      }),
+      Object.freeze({
+        file: 'command-guard.mjs',
+        anchor: 'a plugin run keeps every hook acting; a vendored run does not',
       }),
       Object.freeze({
         file: 'hook-root.mjs',
@@ -440,7 +444,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
-        anchor: 'const root = activeAutoloopRoot();',
+        anchor: 'const root = guardedRoot();',
       }),
     ]),
   }),
