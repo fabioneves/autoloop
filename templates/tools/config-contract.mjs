@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -449,6 +453,55 @@ function validatePriorConfig(cfg) {
   if (hasOwn(cfg, 'adapterOptions')) validateAdapterOptions(cfg.adapterOptions, errors);
   if (hasOwn(cfg, 'measurement')) validateMeasurementCapture(cfg.measurement, errors);
   return errors;
+}
+
+// Global install (SPEC-global-install.md): a project commits
+// `.autoloop/config.json` holding only what differs from these plugin
+// defaults. `version`, `baseBranch` and `gate.command` have no default.
+export const PROJECT_CONFIG_FILE = '.autoloop/config.json';
+export const LEGACY_STATE_FILE = 'docs/agentic/STATE.md';
+export const DEFAULT_CONFIG = Object.freeze({
+  gate: Object.freeze({ quickCommand: null, setupCommand: null }),
+  merge: Object.freeze({ policy: 'manual' }),
+  tracker: Object.freeze({ provider: 'none' }),
+  review: Object.freeze({ checklistPath: 'docs/agentic/checklist.md' }),
+});
+
+function withDefaults(overrides, defaults = DEFAULT_CONFIG) {
+  const merged = structuredClone(overrides);
+  for (const [key, value] of Object.entries(defaults)) {
+    if (!hasOwn(merged, key)) merged[key] = structuredClone(value);
+    else if (isRecord(value) && isRecord(merged[key])) merged[key] = withDefaults(merged[key], value);
+  }
+  return merged;
+}
+
+// The one config reader every tool uses: `.autoloop/config.json` completed
+// from the plugin defaults, else the legacy STATE block (migrated in memory,
+// so a release never requires a write), else null — not an autoloop repo.
+export function resolveProjectConfig(root, read = (path) => readFileSync(path, 'utf8')) {
+  const jsonPath = join(root, PROJECT_CONFIG_FILE);
+  if (existsSync(jsonPath)) {
+    const source = PROJECT_CONFIG_FILE;
+    let parsed;
+    try {
+      parsed = JSON.parse(read(jsonPath));
+    } catch (error) {
+      return { ok: false, source, errors: [`${PROJECT_CONFIG_FILE}: not valid JSON (${error.message})`] };
+    }
+    if (!isRecord(parsed)) return { ok: false, source, errors: ['config: must be an object'] };
+    const current = currentProjectConfig(withDefaults(parsed));
+    return current.ok ? { ok: true, source, config: current.config } : { ok: false, source, errors: current.errors };
+  }
+  const statePath = join(root, LEGACY_STATE_FILE);
+  if (!existsSync(statePath)) return null;
+  const source = LEGACY_STATE_FILE;
+  try {
+    const current = currentProjectConfig(extractConfig(read(statePath)));
+    return current.ok ? { ok: true, source, config: current.config } : { ok: false, source, errors: current.errors };
+  } catch (error) {
+    return { ok: false, source, errors: [error.message] };
+  }
 }
 
 export function extractConfig(markdown) {
@@ -2000,6 +2053,53 @@ function selfTest() {
     );
   }
 
+  {
+    // Global install (SPEC-global-install.md, config-file): a project commits
+    // `.autoloop/config.json` with overrides only; plugin defaults fill the
+    // rest. The legacy STATE block is read (and migrated) in memory until the
+    // repo devendors; a repo with neither is not an autoloop repo.
+    const root = mkdtempSync(join(tmpdir(), 'config-resolve-'));
+    const write = (path, text) => {
+      mkdirSync(join(root, path, '..'), { recursive: true });
+      writeFileSync(join(root, path), text);
+    };
+    try {
+      const none = resolveProjectConfig(root);
+      write('docs/agentic/STATE.md', `# STATE\n\n\`\`\`json autoloop-config\n${JSON.stringify(capsProjectFixture())}\n\`\`\`\n`);
+      const legacy = resolveProjectConfig(root);
+      write('.autoloop/config.json', JSON.stringify({
+        version: CONFIG_VERSION, baseBranch: 'develop', gate: { command: 'make check' },
+      }));
+      const json = resolveProjectConfig(root);
+      write('.autoloop/config.json', JSON.stringify({ version: CONFIG_VERSION, gate: { command: 'x' } }));
+      const missing = resolveProjectConfig(root);
+      write('.autoloop/config.json', '{ not json');
+      const broken = resolveProjectConfig(root);
+      write('.autoloop/config.json', JSON.stringify({
+        version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'x' }, merge: { policy: 'nope' },
+      }));
+      const invalid = resolveProjectConfig(root);
+      expect('no config file and no legacy STATE is not an autoloop repo', none === null);
+      expect('a legacy STATE block resolves, migrated in memory',
+        legacy?.ok === true && legacy.source === 'docs/agentic/STATE.md'
+          && legacy.config.version === CONFIG_VERSION && !hasOwn(legacy.config, 'caps'));
+      expect('config.json wins over the legacy STATE and is completed from plugin defaults',
+        json?.ok === true && json.source === '.autoloop/config.json'
+          && json.config.baseBranch === 'develop' && json.config.gate.command === 'make check'
+          && json.config.gate.quickCommand === null && json.config.gate.setupCommand === null
+          && json.config.merge.policy === 'manual' && json.config.tracker.provider === 'none'
+          && json.config.review.checklistPath === 'docs/agentic/checklist.md'
+          && validateConfig(json.config).length === 0);
+      expect('a required key without a default is refused with its path',
+        missing?.ok === false && missing.errors.some((error) => error.startsWith('baseBranch')));
+      expect('unreadable JSON and invalid values are refused, never defaulted over',
+        broken?.ok === false && broken.errors.some((error) => /JSON/u.test(error))
+          && invalid?.ok === false && invalid.errors.some((error) => error.startsWith('merge.policy')));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
   const extracted = extractConfig(
     `before\n\n\`\`\`json autoloop-config\n${JSON.stringify(base)}\n\`\`\`\n`,
   );
@@ -2048,6 +2148,26 @@ function selfTest() {
     expect(`parseArgs ${name}`, pass);
   }
   expect('parseArgs resolve flag', parseArgs(['--resolve']).resolve === true);
+  expect('parseArgs --root takes the repository root and no STATE path',
+    parseArgs(['--root', '/repo']).root === '/repo' && parseArgs(['--root', '/repo']).error === null
+      && parseArgs(['--root']).error !== null && parseArgs(['--root', '/repo', 'STATE.md']).error !== null);
+  {
+    const root = mkdtempSync(join(tmpdir(), 'config-cli-'));
+    try {
+      mkdirSync(join(root, '.autoloop'));
+      writeFileSync(join(root, '.autoloop', 'config.json'),
+        JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } }));
+      const cli = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--root', root], { encoding: 'utf8' });
+      const bare = mkdtempSync(join(tmpdir(), 'config-cli-none-'));
+      const none = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--root', bare], { encoding: 'utf8' });
+      rmSync(bare, { recursive: true, force: true });
+      expect('the CLI validates a repository by root, naming the source it read',
+        cli.status === 0 && cli.stdout.includes(`PASS  autoloop config v${CONFIG_VERSION} (.autoloop/config.json)`)
+          && none.status === 1 && none.stdout.includes('not an autoloop repository'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
   expect('parseArgs resolve defaults off', parseArgs([]).resolve === false);
 
   // 2026-07-29: setup's own audit probed `command -v <exe>` and was refused by
@@ -2145,6 +2265,7 @@ export function parseArgs(args) {
     statePath: 'docs/agentic/STATE.md',
     selfTest: false,
     resolve: false,
+    root: null,
     error: null,
   };
   const positionals = [];
@@ -2158,6 +2279,14 @@ export function parseArgs(args) {
       parsed.selfTest = true;
     } else if (arg === '--resolve') {
       parsed.resolve = true;
+    } else if (arg === '--root') {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith('-')) {
+        parsed.error = '--root needs a directory';
+        return parsed;
+      }
+      parsed.root = value;
+      index += 1;
     } else if (arg.startsWith('-')) {
       parsed.error = 'unknown flag';
       return parsed;
@@ -2167,6 +2296,10 @@ export function parseArgs(args) {
   }
   if (positionals.length > 1) {
     parsed.error = 'expected at most one STATE path';
+    return parsed;
+  }
+  if (parsed.root !== null && positionals.length > 0) {
+    parsed.error = '--root does not take a STATE path';
     return parsed;
   }
   if (parsed.selfTest && positionals.length > 0) {
@@ -2181,18 +2314,33 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.log(
-      `FAIL  autoloop config: ${parsed.error} — usage: config-contract.mjs [STATE path] | --self-test`,
+      `FAIL  autoloop config: ${parsed.error} — usage: config-contract.mjs [STATE path] | --root <dir> [--resolve] | --self-test`,
     );
     process.exit(2);
   }
   if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
 
   let cfg;
-  try {
-    cfg = extractConfig(readFileSync(parsed.statePath, 'utf8'));
-  } catch (error) {
-    console.log(`FAIL  autoloop config: ${error.message}`);
-    process.exit(1);
+  let source = '';
+  if (parsed.root !== null) {
+    const resolved = resolveProjectConfig(parsed.root);
+    if (resolved === null) {
+      console.log(`FAIL  autoloop config: not an autoloop repository (no ${PROJECT_CONFIG_FILE} or ${LEGACY_STATE_FILE})`);
+      process.exit(1);
+    }
+    if (!resolved.ok) {
+      for (const error of resolved.errors) console.log(`FAIL  autoloop config (${resolved.source}): ${error}`);
+      process.exit(1);
+    }
+    cfg = resolved.config;
+    source = ` (${resolved.source})`;
+  } else {
+    try {
+      cfg = extractConfig(readFileSync(parsed.statePath, 'utf8'));
+    } catch (error) {
+      console.log(`FAIL  autoloop config: ${error.message}`);
+      process.exit(1);
+    }
   }
 
   const errors = validateConfig(cfg);
@@ -2213,7 +2361,7 @@ function main() {
     // repair: Setup reports it and never substitutes a command nobody chose.
     if (rows.some((row) => !row.resolved)) process.exit(1);
   }
-  console.log(`PASS  autoloop config v${cfg.version}`);
+  console.log(`PASS  autoloop config v${cfg.version}${source}`);
 }
 
 function isMainModule() {
