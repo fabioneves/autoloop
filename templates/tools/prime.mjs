@@ -56,7 +56,7 @@ import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.56.0';
+const AUTOLOOP_VERSION = '0.56.1';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -736,7 +736,7 @@ function selfTest() {
     })(),
   );
 
-  // Review of 0.56.0: with `eligible: []` a halt read as a drained queue, and
+  // Review of 0.56.1: with `eligible: []` a halt read as a drained queue, and
   // a resumed unit still said "take it first".
   check(
     'a halt is named, and a resumed unit is not pointed past it',
