@@ -35,9 +35,12 @@ Operator decision, 2026-09-29: autoloop is a **global tool**.
   migration. Exit 2 blocks.
 - **Loading.** Hooks load at session start (or `/reload-plugins`); SessionStart stdout is injected
   into context.
-- **Undocumented, to verify with a throwaway plugin in `plugin-hooks`:**
-  - whether plugin hooks fire in headless `claude -p --safe-mode` children;
-  - whether a project can disable a user-scope plugin.
+- **Headless children run no hooks** (verified 2026-09-29, Claude Code 2.1.284, throwaway plugin
+  with marker files): under `claude -p --safe-mode`, neither a `--plugin-dir` plugin's hooks nor
+  `--settings` hooks fire; without `--safe-mode` both do. Dispatched children already run
+  `--safe-mode`, so they run no project hooks today either: their guard is the permission rules
+  dispatch passes in `--settings`. Moving hooks into the plugin changes nothing for children.
+- **Undocumented, still open:** whether a project can disable a user-scope plugin.
 
 ## Capability map
 
@@ -49,9 +52,15 @@ Operator decision, 2026-09-29: autoloop is a **global tool**.
 | plugin-hooks | the plugin ships its hooks; project `.claude/settings.json` carries no autoloop entries | plugin-tools |
 | setup-v2 | `init` / `config` / `doctor`, plus a one-time `devendor` per existing repo | all of the above |
 
-Build order: config-file → policy-as-data → plugin-tools → plugin-hooks → setup-v2. Each module
-ships as its own release. LFE keeps working at every step: the legacy sources are read until
-`devendor` runs.
+Build order: config-file → policy-as-data → plugin-tools → plugin-hooks → setup-v2.
+config-file (0.57.0) and policy-as-data (0.58.0) shipped as their own releases.
+
+**Operator, 2026-09-29: "I'll only update when we finish everything."** No project installs an
+intermediate release, so plugin-tools, plugin-hooks and setup-v2 land together as one cutover
+release, with no dual-mode code for a vendored repository on a newer plugin. A legacy repository
+(STATE block, `tools/agentic/`) keeps running its vendored copies on the plugin it has; after the
+update, its first session runs `devendor` once. The legacy *config* fallback (reading the STATE
+block) stays until every known repository has devendored.
 
 ## Module specs
 
