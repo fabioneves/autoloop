@@ -37,14 +37,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  ancestorPids,
-  loopRunIsLive,
-  loopRunIsOpen,
-  ownRunMarkers,
-  processAlive,
-  runMarkerDirectory,
-} from './command-guard.mjs';
+import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, PLUGIN_CHECKLIST, PROJECT_CONFIG_FILE, resolveProjectConfig,
 } from './config-contract.mjs';

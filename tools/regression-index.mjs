@@ -214,7 +214,7 @@ export const INCIDENTS = Object.freeze([
       + 'multiplexer and init chain above Claude Code are shared by every session. '
       + 'The ancestry now ends at the session\'s own claude process.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function ancestorChain(start, readEntry = procEntry, limit = 64) {' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'export function ancestorChain(start, readEntry = procEntry, limit = 64) {' }),
       Object.freeze({ file: 'command-guard.mjs', anchor: 'FAIL [an ancestry stops at its own claude process]' }),
     ]),
   }),
@@ -431,7 +431,7 @@ export const INCIDENTS = Object.freeze([
         anchor: 'const ROOT = hookRoot();',
       }),
       Object.freeze({
-        file: 'command-guard.mjs',
+        file: 'hook-root.mjs',
         anchor: 'export function guardedRoot(projectRoot = hookRoot()) {',
       }),
       Object.freeze({

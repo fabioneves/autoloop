@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
+import { pluginRunBase } from './run-markers.mjs';
 
 const VENDORED_DIR = 'tools/agentic';
 const VENDORED_GUARD = `${VENDORED_DIR}/command-guard.mjs`;
@@ -169,6 +170,14 @@ export function activeAutoloopRoot(root = hookRoot()) {
   return configPresent(root) && !vendoredGuardWired(root) ? root : null;
 }
 
+// Where a plugin hook acts: the devendored autoloop repository at the project
+// root, or — while a plugin run is open — that root whatever the checkout now
+// says, so no file the run can change switches the hooks off mid-run.
+export function guardedRoot(projectRoot = hookRoot()) {
+  return activeAutoloopRoot(projectRoot)
+    ?? (pluginRunBase([process.cwd(), projectRoot]) === null ? null : projectRoot);
+}
+
 function selfTest() {
   const failures = [];
   const cases = [];
@@ -228,14 +237,13 @@ function selfTest() {
         && JSON.stringify(leftovers.hooks.map(({ command }) => command)) === '["node tools/agentic/writeback-check.mjs"]');
     rmSync(join(repo, 'tools'), { recursive: true, force: true });
     rmSync(join(repo, '.claude', 'settings.local.json'));
-    // The shell hooks ask the same question (plus the open-run rule) through
-    // the command guard's CLI.
-    const cli = (dir) => spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'command-guard.mjs'), '--guarded-root'], {
+    // The shell hooks ask the same question (plus the open-run rule) through the CLI.
+    const cli = (dir) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
       encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: dir },
     });
     const activeCli = cli(repo);
     const inactiveCli = cli(scratch);
-    check('command-guard --guarded-root prints an active root and exits 0, else exits 1 silently',
+    check('--guarded-root prints an active root and exits 0, else exits 1 silently',
       activeCli.status === 0 && activeCli.stdout.trim() === repo
         && inactiveCli.status === 1 && inactiveCli.stdout === '');
     rmSync(join(repo, '.autoloop'), { recursive: true, force: true });
@@ -262,6 +270,12 @@ const isMain = (() => {
 })();
 if (isMain) {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  console.error('usage: hook-root.mjs --self-test (shell hooks ask command-guard.mjs --guarded-root)');
+  // For the shell hooks (session-preflight): the root a hook acts in, or exit 1.
+  if (process.argv.includes('--guarded-root')) {
+    const root = guardedRoot();
+    if (root !== null) console.log(root);
+    process.exit(root === null ? 1 : 0);
+  }
+  console.error('usage: hook-root.mjs --guarded-root | --self-test');
   process.exit(2);
 }

@@ -19,7 +19,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { evaluate, loopRunIsLive, ownRunMarkers } from './command-guard.mjs';
+import { evaluate } from './command-guard.mjs';
+import { loopRunIsLive, ownRunMarkers } from './run-markers.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, SNAPSHOT_SECTIONS, verifySnapshot,
 } from './snapshot-contract.mjs';

@@ -55,8 +55,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
-import { guardedRoot, loopRunIsLive, loopRunIsOpen, ownRunMarkers } from './command-guard.mjs';
-import { hookRoot } from './hook-root.mjs';
+import { loopRunIsLive, loopRunIsOpen, ownRunMarkers } from './run-markers.mjs';
+import { guardedRoot, hookRoot } from './hook-root.mjs';
 import { blockedByIssueNumbers } from './snapshot-contract.mjs';
 
 // The hook runs from the plugin, so its own location never names the

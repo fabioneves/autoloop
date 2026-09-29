@@ -38,7 +38,7 @@ import {
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ancestorPids, processAlive, runMarkerDirectory } from './command-guard.mjs';
+import { ancestorPids, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import { resolveDispatchLogPath } from './dispatch.mjs';
 
 function gitPath(root, relative) {

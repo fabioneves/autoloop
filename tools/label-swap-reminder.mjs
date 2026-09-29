@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { guardedRoot } from './command-guard.mjs';
+import { guardedRoot } from './hook-root.mjs';
 
 // Claude Code 2.1.234 removed the task tools outright but only DEFERRED
 // PushNotification; a live run read the visible roster as the whole roster,
