@@ -1,0 +1,74 @@
+{
+  "description": "autoloop hooks. Every hook runs the plugin's own copy, finds the project from CLAUDE_PROJECT_DIR, and stands down unless it is a devendored autoloop repository (.autoloop/config.json, no vendored guard wired).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/templates/tools/session-preflight.sh\"",
+            "timeout": 30,
+            "statusMessage": "autoloop preflight (read-only checks)"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/edit-guard.mjs\"",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\" || { [ -e \"$CLAUDE_PROJECT_DIR/.autoloop/config.json\" ] && exit 2; exit 0; }",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/label-swap-reminder.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/subagent-transcript.mjs\"",
+            "timeout": 20,
+            "statusMessage": "capturing subagent transcript"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/writeback-check.mjs\"",
+            "timeout": 45
+          }
+        ]
+      }
+    ]
+  }
+}

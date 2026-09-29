@@ -95,6 +95,69 @@ const CLAUDE_HOOK_CONTRACT = Object.freeze({
   'writeback-check.mjs': Object.freeze({ event: 'Stop', matcher: null }),
 });
 
+// Global install: the plugin ships these hooks in hooks/hooks.json, each
+// running the plugin's own copy. Exactly one handler per tool, on its event
+// and matcher, with exactly this command. The command guard fails closed only
+// inside an autoloop repository: a crashed guard refuses there, while a broken
+// plugin never refuses commands in every other repository.
+const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/templates/tools';
+export const PLUGIN_HOOKS = Object.freeze([
+  { name: 'session-preflight.sh', event: 'SessionStart', matcher: null, command: `bash "${PLUGIN_TOOLS}/session-preflight.sh"` },
+  { name: 'edit-guard.mjs', event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|NotebookEdit', command: `node "${PLUGIN_TOOLS}/edit-guard.mjs"` },
+  {
+    name: 'command-guard.mjs',
+    event: 'PreToolUse',
+    matcher: 'Bash|AskUserQuestion',
+    command: `node "${PLUGIN_TOOLS}/command-guard.mjs" || { [ -e "$CLAUDE_PROJECT_DIR/.autoloop/config.json" ] && exit 2; exit 0; }`,
+  },
+  { name: 'label-swap-reminder.mjs', event: 'PostToolUse', matcher: 'Bash', command: `node "${PLUGIN_TOOLS}/label-swap-reminder.mjs"` },
+  { name: 'subagent-transcript.mjs', event: 'SubagentStop', matcher: null, command: `node "${PLUGIN_TOOLS}/subagent-transcript.mjs"` },
+  { name: 'writeback-check.mjs', event: 'Stop', matcher: null, command: `node "${PLUGIN_TOOLS}/writeback-check.mjs"` },
+].map((entry) => Object.freeze(entry)));
+
+export function pluginHookProblems(document, toolsDir) {
+  const problems = [];
+  const handlers = [];
+  for (const [event, groups] of Object.entries(document?.hooks ?? {})) {
+    for (const group of Array.isArray(groups) ? groups : []) {
+      for (const handler of Array.isArray(group?.hooks) ? group.hooks : []) {
+        if (handler?.type !== 'command' || typeof handler.command !== 'string') {
+          problems.push(`hooks.${event}: expected command handlers only`);
+          continue;
+        }
+        handlers.push({ event, matcher: group.matcher ?? null, command: handler.command });
+      }
+    }
+  }
+  for (const entry of PLUGIN_HOOKS) {
+    const matches = handlers.filter((handler) => handler.command === entry.command);
+    if (matches.length !== 1) {
+      problems.push(`${entry.name}: expected exactly one handler running \`${entry.command}\`, found ${matches.length}`);
+    } else if (matches[0].event !== entry.event || matches[0].matcher !== entry.matcher) {
+      problems.push(`${entry.name}: expected ${entry.event}${entry.matcher === null ? '' : ` matcher ${entry.matcher}`}`);
+    }
+    if (!existsSync(resolve(toolsDir, entry.name))) problems.push(`${entry.name}: not in the plugin tools`);
+  }
+  for (const handler of handlers) {
+    if (!PLUGIN_HOOKS.some((entry) => entry.command === handler.command)) {
+      problems.push(`unexpected hook \`${handler.command}\` on ${handler.event}`);
+    }
+  }
+  return problems;
+}
+
+function checkPluginHooks(root) {
+  try {
+    const problems = pluginHookProblems(
+      JSON.parse(readFileSync(resolve(root, 'hooks', 'hooks.json'), 'utf8')),
+      resolve(root, 'templates', 'tools'),
+    );
+    return { ok: problems.length === 0, detail: problems.join('; ') };
+  } catch (error) {
+    return { ok: false, detail: error.message };
+  }
+}
+
 function run(executable, args, cwd) {
   const result = spawnSync(executable, args, {
     cwd,
@@ -520,6 +583,7 @@ function pluginChecks(root) {
       ),
     });
   }
+  checks.push({ name: 'plugin hooks hooks/hooks.json', execute: () => checkPluginHooks(root) });
   checks.push({
     name: 'shell session-preflight',
     execute: () => run(
@@ -971,7 +1035,58 @@ function selfTest() {
   } finally {
     rmSync(fastPathRoot, { recursive: true, force: true });
   }
+  // Global install: the plugin's own hooks.json. Each tool has exactly one
+  // handler, on its event and matcher, running the plugin's copy.
+  const pluginHookDocument = (entries = PLUGIN_HOOKS) => {
+    const hooks = {};
+    for (const entry of entries) {
+      (hooks[entry.event] ??= []).push({
+        ...(entry.matcher === null ? {} : { matcher: entry.matcher }),
+        hooks: [{ type: 'command', command: entry.command }],
+      });
+    }
+    return { hooks };
+  };
+  const pluginProblems = (document) => pluginHookProblems(document, toolsDir);
+  const withGuard = (command) => PLUGIN_HOOKS.map((entry) =>
+    (entry.name === 'command-guard.mjs' ? { ...entry, command } : entry));
+  const guardEntry = PLUGIN_HOOKS.find((entry) => entry.name === 'command-guard.mjs');
+  // A crashed guard refuses inside an autoloop repository and nowhere else:
+  // a broken plugin must not refuse every command in every repository.
+  const crashRoot = mkdtempSync(join(tmpdir(), 'autoloop-hook-crash-'));
+  let crashInside;
+  let crashOutside;
+  try {
+    mkdirSync(join(crashRoot, 'plugin', 'templates', 'tools'), { recursive: true });
+    writeFileSync(join(crashRoot, 'plugin', 'templates', 'tools', 'command-guard.mjs'), 'process.exit(1);\n');
+    mkdirSync(join(crashRoot, 'project', '.autoloop'), { recursive: true });
+    writeFileSync(join(crashRoot, 'project', '.autoloop', 'config.json'), '{}');
+    mkdirSync(join(crashRoot, 'elsewhere'));
+    const crash = (project) => spawnSync('bash', ['-c', guardEntry.command], {
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: join(crashRoot, 'plugin'), CLAUDE_PROJECT_DIR: join(crashRoot, project) },
+    }).status;
+    crashInside = crash('project');
+    crashOutside = crash('elsewhere');
+  } finally {
+    rmSync(crashRoot, { recursive: true, force: true });
+  }
   const cases = [
+    ['the plugin hook document passes its contract', pluginProblems(pluginHookDocument()).length === 0],
+    ['a missing plugin hook is named',
+      pluginProblems(pluginHookDocument(PLUGIN_HOOKS.slice(1))).some((problem) => problem.includes(PLUGIN_HOOKS[0].name))],
+    ['a plugin hook on the wrong matcher is refused',
+      pluginProblems(pluginHookDocument(PLUGIN_HOOKS.map((entry) =>
+        (entry.name === 'command-guard.mjs' ? { ...entry, matcher: 'Bash' } : entry)))).length > 0],
+    ['a command guard without its fail-closed branch is refused',
+      pluginProblems(pluginHookDocument(withGuard('node "${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs"')))
+        .some((problem) => problem.includes('command-guard.mjs'))],
+    ['a hook outside the contract is refused',
+      pluginProblems(pluginHookDocument([...PLUGIN_HOOKS,
+        { name: 'x', event: 'Stop', matcher: null, command: 'echo hi' }])).some((problem) => problem.includes('echo hi'))],
+    ['a vendored tool path is refused',
+      pluginProblems(pluginHookDocument(withGuard('node "$CLAUDE_PROJECT_DIR/tools/agentic/command-guard.mjs" || exit 2'))).length > 0],
+    ['a crashed plugin guard refuses in an autoloop repository and allows elsewhere',
+      crashInside === 2 && crashOutside === 0],
     // 0.56.0: a skill loads whole into the session that invokes it and again
     // after every compaction (LFE: the dev skill added ~50k tokens to a 70k
     // floor, re-read on every one of 69 calls). A skill never grows silently.

@@ -67,6 +67,7 @@ const FORWARD_ARTIFACTS = Object.freeze([
   'templates/LOOP.template.md',
   'templates/ARCH.template.md',
   'templates/settings-hooks.template.json',
+  'hooks/hooks.json',
   'templates/tools/label-swap-reminder.mjs',
   'templates/tools/session-preflight.sh',
   ...DISPATCH_CONSUMERS.map((name) => `templates/tools/${name}`),

@@ -172,15 +172,17 @@ export const INCIDENTS = Object.freeze([
     cause: 'hook-relay delegated whenever the local copy differed from the '
       + 'base copy, assuming the base is always newer. During a reconcile the '
       + 'working tree is the newer one, so the relay ran origin/main\'s 0.53.0 '
-      + 'guard against the migrated STATE.',
+      + 'guard against the migrated STATE. Closed structurally by the global '
+      + 'cutover: nothing is reconciled into a repository and nothing relays; '
+      + 'the one guard is the plugin\'s, wired by the plugin.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: "'an uncommitted reconcile on the base runs its own newer copy'",
+        file: '../../hooks/hooks.json',
+        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\\"',
       }),
       Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: "'a committed reconcile branch the base has not overtaken runs its own copy'",
+        file: 'verify.mjs',
+        anchor: "'the plugin hook document passes its contract'",
       }),
     ]),
   }),
@@ -421,16 +423,8 @@ export const INCIDENTS = Object.freeze([
       + 'carries, and find the repository from CLAUDE_PROJECT_DIR.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: 'export function relayHookToBase(importMetaUrl, argv = process.argv) {',
-      }),
-      Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: 'a drifted branch copy delegates to the base copy with the repo root on the wire',
-      }),
-      Object.freeze({
-        file: 'hook-relay.mjs',
-        anchor: 'a base copy that predates the relay contract is never handed the process',
+        file: '../../hooks/hooks.json',
+        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\\"',
       }),
       Object.freeze({
         file: 'writeback-check.mjs',

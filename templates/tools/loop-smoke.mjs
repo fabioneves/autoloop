@@ -427,6 +427,23 @@ export function runSmokeSteps({
         detail: `guard exited ${blocked.status} while the run was open, expected 2`,
       };
     }
+    // The same refusal through the plugin's own wiring: the hooks.json
+    // command, with CLAUDE_PLUGIN_ROOT and CLAUDE_PROJECT_DIR as the host sets them.
+    const pluginRoot = dirname(dirname(TOOL_DIRECTORY));
+    const wired = JSON.parse(readFileSync(join(pluginRoot, 'hooks', 'hooks.json'), 'utf8'))
+      .hooks.PreToolUse.find((group) => group.matcher === 'Bash|AskUserQuestion').hooks[0].command;
+    const viaHooks = spawnSync('bash', ['-c', wired], {
+      cwd: root, encoding: 'utf8', timeout: stepTimeoutMs, input: guardOptions.input,
+      env: { ...environment, CLAUDE_PLUGIN_ROOT: pluginRoot, CLAUDE_PROJECT_DIR: root },
+    });
+    // Exit 2 alone would also be the fail-closed branch of a guard that never
+    // ran (a wrong path); the guard's own refusal proves it ran.
+    if (viaHooks.status !== 2 || !viaHooks.stderr.includes('autoloop guard')) {
+      return {
+        ok: false,
+        detail: `the hooks.json guard command exited ${viaHooks.status} while the run was open, expected the guard's own refusal: ${bounded(viaHooks.stderr)}`,
+      };
+    }
     // The edit guard, run from the plugin, finds the repository from
     // CLAUDE_PROJECT_DIR and acts only in a devendored autoloop repository: a
     // repository whose vendored guard is still wired is left to that guard.
