@@ -3,6 +3,16 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.55.2] - 2026-09-29
+
+### Fixed
+
+- **The installed loop smoke carries the role briefs.** Setup runs
+  `tools/agentic/loop-smoke.mjs --self-test` from the installed copy, which builds its fixture by
+  copying the tool list. Since 0.54.0 that list lacked `briefs/`, so every dispatch in the fixture
+  failed with `BRIEF_TEMPLATE_MISSING`, and setup stopped before delivery. The plugin's own smoke
+  now also scaffolds an install and runs that copy's smoke.
+
 ## [0.55.1] - 2026-09-28
 
 Follow-ups from the independent review of 0.55.0, which finished after the merge.
