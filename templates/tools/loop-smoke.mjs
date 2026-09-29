@@ -246,6 +246,28 @@ export function runSmokeSteps({
   const tool = (name) => join(TOOL_DIRECTORY, name);
   const outcome = { steps, runMarker: null, dispatches: [] };
 
+  // SessionStart from the plugin: the preflight speaks only in a devendored
+  // repository, names the plugin tools, and injects the STATE prose.
+  timed('session-start', () => {
+    const preflight = (projectDir) => spawnSync('bash', [join(TOOL_DIRECTORY, 'session-preflight.sh')], {
+      cwd: root, encoding: 'utf8', timeout: stepTimeoutMs, env: { ...environment, CLAUDE_PROJECT_DIR: projectDir },
+    });
+    const unrelated = mkdtempSync(join(tmpdir(), 'autoloop-smoke-unrelated-'));
+    const elsewhere = preflight(unrelated);
+    rmSync(unrelated, { recursive: true, force: true });
+    const here = preflight(root);
+    const missing = [
+      elsewhere.stdout !== '' && 'output in an unrelated repository',
+      !here.stdout.includes('PASS  autoloop config') && 'the config verdict',
+      !here.stdout.includes(`INFO  plugin tools: ${TOOL_DIRECTORY}`) && 'the plugin tools path',
+      !here.stdout.includes('Scratch fixture repository for the no-model end-to-end loop smoke.') && 'the STATE prose',
+      /tools\/agentic/u.test(here.stdout) && 'a vendored path',
+    ].filter(Boolean);
+    return missing.length === 0
+      ? { ok: true, detail: 'silent elsewhere; config, plugin tools and STATE prose here' }
+      : { ok: false, detail: `preflight: ${missing.join(', ')}` };
+  });
+
   const primed = timed('prime', () => {
     const result = runToolJson(
       'prime.mjs --json',

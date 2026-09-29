@@ -13,6 +13,7 @@
 //     repository keeps its vendored hooks until devendor; a second, newer
 //     guard beside them would judge the old layout.
 //
+//   node <plugin-tools>/hook-root.mjs --active     (shell hooks: root, or exit 1)
 //   node <plugin-tools>/hook-root.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
@@ -89,6 +90,15 @@ function selfTest() {
     writeFileSync(join(repo, 'tools', 'agentic', 'command-guard.mjs'), '// leftover');
     check('a leftover vendored file without its wiring leaves the plugin guard active',
       activeAutoloopRoot(repo) === repo);
+    // The shell hooks ask the same question through the CLI.
+    const cli = (dir) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--active'], {
+      encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: dir },
+    });
+    const activeCli = cli(repo);
+    const inactiveCli = cli(scratch);
+    check('--active prints an active root and exits 0, else exits 1 silently',
+      activeCli.status === 0 && activeCli.stdout.trim() === repo
+        && inactiveCli.status === 1 && inactiveCli.stdout === '');
     rmSync(join(repo, '.autoloop'), { recursive: true, force: true });
     writeFileSync(join(repo, '.autoloop'), 'not a directory');
     check('an inaccessible config path keeps the hooks active (the resolver refuses)',
@@ -113,6 +123,12 @@ const isMain = (() => {
 })();
 if (isMain) {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  console.error('usage: hook-root.mjs --self-test');
+  // For the shell hooks: prints the active root and exits 0, else exits 1.
+  if (process.argv.includes('--active')) {
+    const root = activeAutoloopRoot();
+    if (root !== null) console.log(root);
+    process.exit(root === null ? 1 : 0);
+  }
+  console.error('usage: hook-root.mjs --active | --self-test');
   process.exit(2);
 }
