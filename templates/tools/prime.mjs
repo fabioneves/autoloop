@@ -22,10 +22,12 @@
 //   node tools/agentic/prime.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -395,9 +397,69 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
     snapshotBytes: Buffer.byteLength(bytes, 'utf8'),
     eligible: eligibleIssueNumbers(snapshot),
     halted: haltIssueNumbers(snapshot),
-    markers: markerSchedule(snapshot),
+    markers: splitKnownRefused(
+      markerSchedule(snapshot),
+      snapshot.sections.lifecycleMarkers?.items ?? [],
+      readMarkerRefusals(dirname(directory)),
+      lifecycleDriverIdentity(),
+    ),
     sections: sectionSummary(snapshot),
   };
+}
+
+// A deferred (closed-issue) marker the same driver already refused since the
+// marker last changed is skipped, not retried: LFE re-reconciled seven such
+// markers every run, ~10% of a session's calls, with the same refusal each
+// time. A changed marker or a changed driver (plugin update) retries it. A
+// gating marker is always attempted.
+export function splitKnownRefused(schedule, markers, refusals, driver) {
+  if (schedule === null || schedule === undefined) return null;
+  const changedAt = (issue) => Math.max(0, ...markers
+    .filter((marker) => marker.issueNumber === issue)
+    .map((marker) => Date.parse(marker.updatedAt ?? marker.createdAt) || 0));
+  const known = (issue) => {
+    const refusal = refusals[issue];
+    return refusal?.driver === driver && Number.isFinite(refusal.atMs) && refusal.atMs >= changedAt(issue);
+  };
+  return {
+    gating: schedule.gating,
+    deferred: schedule.deferred.filter((issue) => !known(issue)),
+    knownRefused: schedule.deferred.filter(known).map((issue) => ({ issue, code: refusals[issue].code })),
+  };
+}
+
+export function knownRefusedLines(schedule) {
+  return (schedule?.knownRefused ?? []).map(({ issue, code }) =>
+    `known-refused: #${issue} (${code}) — skipped until its marker or the driver changes`);
+}
+
+function readMarkerRefusals(autoloopDirectory) {
+  const directory = join(autoloopDirectory, 'marker-refusals');
+  const refusals = {};
+  try {
+    for (const name of readdirSync(directory)) {
+      const issue = /^(\d+)\.json$/u.exec(name)?.[1];
+      if (issue === undefined) continue;
+      try {
+        refusals[Number(issue)] = JSON.parse(readFileSync(join(directory, name), 'utf8'));
+      } catch {
+        // An unreadable record only means the marker is retried.
+      }
+    }
+  } catch {
+    // No records yet.
+  }
+  return refusals;
+}
+
+function lifecycleDriverIdentity() {
+  try {
+    return createHash('sha256')
+      .update(readFileSync(fileURLToPath(new URL('./lifecycle-driver.mjs', import.meta.url))))
+      .digest('hex');
+  } catch {
+    return null;
+  }
 }
 
 export function waitLines(waits) {
@@ -439,6 +501,7 @@ function report(summary) {
     `scan   ${summary.timings.scanMs}ms  prime ${summary.timings.primeMs}ms`
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
     ...haltLines(summary.halted),
+    ...knownRefusedLines(summary.markers),
     ...waitLines(summary.waits),
     ...blockLines(summary.blocks, summary.halted),
     'section                    items  complete',
@@ -641,6 +704,36 @@ function selfTest() {
     }).join('|') === 'resumed: #7 (@owner: 128 chars, "Unnamed device") — take it first'
       + '|blocked: #8 — What length?|held: #9 (no loop marker)|block-triage error: list: offline'
     && blockLines(undefined).length === 0,
+  );
+
+  // LFE, 2026-09-29: seven closed-issue markers were re-reconciled and refused
+  // identically every run. A recorded refusal newer than the marker, from the
+  // same driver, is skipped; a changed marker or driver is retried.
+  check(
+    'a deferred marker the same driver already refused since its last change is skipped',
+    (() => {
+      const schedule = { gating: [5], deferred: [270, 272, 274, 276] };
+      const markers = [
+        { issueNumber: 5, updatedAt: '2026-01-01T00:00:00Z', createdAt: '2026-01-01T00:00:00Z' },
+        { issueNumber: 270, updatedAt: null, createdAt: '2026-01-01T00:00:01Z' },
+        { issueNumber: 272, updatedAt: '2026-01-01T00:00:01Z', createdAt: '2026-01-01T00:00:00Z' },
+        { issueNumber: 274, updatedAt: '2026-01-02T00:00:00Z', createdAt: '2026-01-01T00:00:00Z' },
+      ];
+      const later = Date.parse('2026-01-01T12:00:00Z');
+      const refusals = {
+        5: { code: 'X', atMs: later, driver: 'd' },
+        270: { code: 'PREMERGE_CI_COMPONENT_MISMATCH', atMs: later, driver: 'd' },
+        272: { code: 'X', atMs: later, driver: 'older-driver' },
+        274: { code: 'X', atMs: later, driver: 'd' },
+      };
+      const split = splitKnownRefused(schedule, markers, refusals, 'd');
+      return JSON.stringify(split) === JSON.stringify({
+        gating: [5],
+        deferred: [272, 274, 276],
+        knownRefused: [{ issue: 270, code: 'PREMERGE_CI_COMPONENT_MISMATCH' }],
+      }) && splitKnownRefused(null, markers, refusals, 'd') === null
+        && knownRefusedLines(split).join('') === 'known-refused: #270 (PREMERGE_CI_COMPONENT_MISMATCH) — skipped until its marker or the driver changes';
+    })(),
   );
 
   // Review of 0.55.5: with `eligible: []` a halt read as a drained queue, and

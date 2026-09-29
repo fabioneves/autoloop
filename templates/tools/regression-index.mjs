@@ -33,6 +33,31 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'unreconcilable-markers-retried-every-run',
+    date: '2026-09-29',
+    symptom: 'LFE: seven closed-issue markers were re-reconciled every run and '
+      + 'refused identically (PREMERGE_CI_COMPONENT_MISMATCH): 7 of 69 API calls, '
+      + 'about 1.1M cache-read tokens and 2 minutes per session.',
+    cause: 'Nothing remembered a deterministic refusal, so every run spent a call '
+      + 'per marker to learn the same answer.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'export function markerRefusalRecord(' }),
+      Object.freeze({ file: 'prime.mjs', anchor: 'export function splitKnownRefused(' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'foreground-dispatches-blocked-the-orchestrator',
+    date: '2026-09-29',
+    symptom: 'LFE: three of four dispatches held the orchestrator for the host\'s '
+      + '600 s foreground ceiling; nothing else could run meanwhile.',
+    cause: 'Background dispatches were refused (0.49.65) because host kills took '
+      + 'the dispatch down with its task. dispatch-stream.sh has since detached '
+      + 'the dispatch, so a killed watcher no longer loses it (verified live).',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: "if (/dispatch-stream\\.sh/u.test(text)) return null;" }),
+    ]),
+  }),
+  Object.freeze({
     id: 'foreground-dispatch-stream-flooded-the-orchestrator',
     date: '2026-09-29',
     symptom: 'LFE: one implement dispatch streamed ~196 lines / 21.9 KB into the '

@@ -3,10 +3,12 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -628,6 +630,37 @@ export function issueReconcileRequest({ issueNumber, comments, roleOf, viewer, p
     plan: { body: plans[0].body, title: pullRequest.title, prBody: pullRequest.body ?? '' },
     premergeRecordDraft: null,
   };
+}
+
+// A typed refusal ends in a parenthesised UPPER_SNAKE code; errno-style codes
+// (ECONNRESET, ETIMEDOUT) carry no underscore and are never recorded, so a
+// transient failure is always retried.
+const TYPED_REFUSAL = /\(([A-Z][A-Z0-9]*_[A-Z0-9_]+)\)\s*$/u;
+
+export function markerRefusalRecord(message, nowMs, driver) {
+  const code = TYPED_REFUSAL.exec(String(message))?.[1];
+  return code === undefined ? null : { code, atMs: nowMs, driver };
+}
+
+// This file's content hash: a plugin update that changes the driver retries
+// every recorded refusal.
+export function driverIdentity() {
+  return createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
+}
+
+// LFE, 2026-09-29: closed-issue markers refused identically every run. Prime
+// skips a deferred marker whose refusal is newer than the marker (prime.mjs).
+function recordMarkerRefusal(cwd, issueNumber, message) {
+  const record = markerRefusalRecord(message, Date.now(), driverIdentity());
+  if (record === null) return;
+  try {
+    const common = command('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }).trim();
+    const directory = join(common, 'autoloop', 'marker-refusals');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `${issueNumber}.json`), `${JSON.stringify(record)}\n`);
+  } catch {
+    // A record that cannot be written only means prime retries next run.
+  }
 }
 
 function reconcileIssueRequest(cwd, issueNumber) {
@@ -2004,6 +2037,17 @@ function selfTest() {
         }) ?? '')
         && /IC_root/u.test(recoveryRefusal({ comments: recoveryComments.filter(({ id }) => id !== 'IC_tip') }) ?? ''),
     ],
+    // LFE, 2026-09-29: seven merged units refuse reconcile the same way every
+    // run (PREMERGE_CI_COMPONENT_MISMATCH), ~10% of a session's API calls.
+    // A typed refusal is recorded so prime can skip it until something changes;
+    // an untyped failure (network, auth) never is.
+    [
+      'a typed reconcile refusal is recorded with the driver identity; an untyped failure is not',
+      JSON.stringify(markerRefusalRecord('premerge record is unverified (PREMERGE_CI_COMPONENT_MISMATCH)', 5000, 'abc'))
+        === JSON.stringify({ code: 'PREMERGE_CI_COMPONENT_MISMATCH', atMs: 5000, driver: 'abc' })
+        && markerRefusalRecord('authenticated GitHub viewer is unavailable', 5000, 'abc') === null
+        && markerRefusalRecord('fetch failed (ECONNRESET)', 5000, 'abc') === null,
+    ],
     [
       '--reconcile-issue takes exactly one positive issue number',
       cliMode(['--reconcile-issue', '12']) === '--reconcile-issue'
@@ -2176,8 +2220,13 @@ function main() {
     );
   }
   if (args[0] === '--reconcile-issue') {
-    const request = reconcileIssueRequest(process.cwd(), Number(args[1]));
-    process.stdout.write(`${JSON.stringify(driveLifecycle(request))}\n`);
+    try {
+      const request = reconcileIssueRequest(process.cwd(), Number(args[1]));
+      process.stdout.write(`${JSON.stringify(driveLifecycle(request))}\n`);
+    } catch (error) {
+      recordMarkerRefusal(process.cwd(), Number(args[1]), error.message);
+      throw error;
+    }
     return;
   }
   const input = readCliInput();

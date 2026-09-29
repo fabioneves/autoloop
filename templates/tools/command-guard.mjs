@@ -2743,13 +2743,16 @@ export function replayCorpus() {
 // pollers, and every other background use are untouched.
 export function backgroundDispatchProblem(command, runInBackground) {
   if (runInBackground !== true) return null;
-  if (!/dispatch(?:-stream\.sh|\.mjs\b[^\n]*--role)/u.test(String(command))) return null;
-  return 'autoloop guard — a dispatch may not launch with `run_in_background` while the '
-    + 'host\'s background-task sweep stands: explicitly backgrounded dispatches are killed '
-    + 'mid-stream (`[killed]`, no result, no stderr), while a plain foreground launch is '
-    + 'handed to the background by the host itself and survives. Re-run the SAME command as '
-    + 'an ordinary foreground Bash call — no `run_in_background`, no host `timeout` — and '
-    + 'collect the result from `--output-file` as usual.';
+  const text = String(command);
+  // 0.56.0: dispatch-stream.sh double-forks the dispatch into its own session,
+  // so a host kill of the background task leaves it running and its result
+  // still lands (verified live 2026-09-29). Only a bare dispatch dies with it.
+  if (/dispatch-stream\.sh/u.test(text)) return null;
+  if (!/dispatch\.mjs\b[^\n]*--role/u.test(text)) return null;
+  return 'autoloop guard — a bare dispatch launched with `run_in_background` dies with its task '
+    + 'when the host kills it (`[killed]`, no result). Launch it through `dispatch-stream.sh '
+    + '<live-file> <output-file> <dispatch args>`, which detaches the dispatch so it survives, and '
+    + 'collect a killed watcher\'s result with `dispatch.mjs --wait-file <output-file>`.';
 }
 
 // A question asked mid-run waits on a human who is, by design, not there:
@@ -3251,19 +3254,24 @@ function selfTest() {
   let messageChecks = 0;
   {
     messageChecks += 1;
+    // 0.56.0: dispatch-stream.sh double-forks the dispatch into its own
+    // session, so a killed background task leaves it running and its result
+    // lands (verified live 2026-09-29: TaskStop mid-run, the Haiku dispatch
+    // finished ok in 36 s, --wait-file collected it). Only a bare dispatch.mjs
+    // dies with its task.
     const dispatchBg = backgroundDispatchProblem(
-      'bash /x/templates/tools/dispatch-stream.sh /tmp/l.jsonl /tmp/r.json --role code-review --prompt-file /tmp/p.md',
+      'node /x/tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json',
       true,
     );
     const launchCases =
       typeof dispatchBg === 'string'
       && dispatchBg.startsWith('autoloop guard — ')
-      && dispatchBg.includes('foreground')
+      && dispatchBg.includes('dispatch-stream.sh')
       && dispatchBg.trimEnd().endsWith('.')
       && backgroundDispatchProblem(
-        'node /x/tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json',
+        'bash /x/templates/tools/dispatch-stream.sh /tmp/l.jsonl /tmp/r.json --role code-review --prompt-file /tmp/p.md',
         true,
-      ) !== null
+      ) === null
       // The same command foreground is the remedy, never a refusal.
       && backgroundDispatchProblem(
         'bash /x/templates/tools/dispatch-stream.sh /tmp/l.jsonl /tmp/r.json --role plan --prompt-file /tmp/p.md',
