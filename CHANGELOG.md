@@ -3,6 +3,22 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.55.3] - 2026-09-29
+
+### Fixed
+
+- **A migration reconciles the tools before it writes the new schema.** The hooks run the working
+  tree's command guard on every Bash call, and a guard from before the reconcile knows only its own
+  schema. Setup wrote STATE `0.28.0` first, and every later command was refused
+  (`version: must equal "0.27.0"`). The setup skill now requires `--reconcile` first, then the
+  migrated STATE, all in one commit.
+  - `scaffold.mjs --reconcile` reads a migratable STATE as its migrated form, so it installs the
+    policy tool set (non-manual merge tools included) and warns that the migrated block must land
+    in the same commit.
+- **An unreadable config no longer deletes the non-manual merge tools.** Only a readable `manual`
+  policy removes them. Before, a pre-migration STATE (or any unreadable one) removed a Setup-filled
+  `auto-merge.mjs`.
+
 ## [0.55.2] - 2026-09-29
 
 ### Fixed

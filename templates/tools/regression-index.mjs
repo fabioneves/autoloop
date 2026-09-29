@@ -33,6 +33,26 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'setup-wrote-the-new-schema-before-the-new-guard',
+    date: '2026-09-29',
+    symptom: 'LFE: setup to 0.55.2 wrote STATE 0.28.0, then every Bash command '
+      + 'was refused by the working tree\'s 0.53.0 guard ("version: must equal '
+      + '0.27.0"); it reverted STATE to recover.',
+    cause: 'The setup skill named no write order, and scaffold --reconcile told a '
+      + 'pre-migration STATE to "migrate the configuration first", which is the '
+      + 'order the old guard cannot survive.',
+    enforcedBy: Object.freeze([
+      Object.freeze({
+        file: '../../skills/setup/SKILL.md',
+        anchor: '**Write order in a migration: tools first, then STATE.**',
+      }),
+      Object.freeze({
+        file: 'scaffold.mjs',
+        anchor: "'a migratable STATE reconciles its policy tool set and names the migration still to land'",
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'installed-loop-smoke-omitted-the-role-briefs',
     date: '2026-09-29',
     symptom: 'LFE: setup to 0.55.1 ran the installed tools/agentic/loop-smoke.mjs '
