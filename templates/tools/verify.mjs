@@ -686,7 +686,8 @@ function installChecks(root, { full = false } = {}) {
       process.execPath,
       [
         resolve(toolsDir, 'config-contract.mjs'),
-        resolve(root, 'docs', 'agentic', 'STATE.md'),
+        '--root',
+        root,
       ],
       root,
     ),

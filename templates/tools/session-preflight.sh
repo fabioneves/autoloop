@@ -138,8 +138,12 @@ fi
 # session audits against. A parked unit branch therefore runs the tools it forked
 # with: observed three times in one day, where a fix that had shipped, installed
 # and reconciled onto the base was still inert because the checkout predated it.
+# config.json when present (never falling back to STATE's value if it lacks
+# baseBranch — the config line above already reports that FAIL), else STATE.
+config_source="$REPO_DIR/.autoloop/config.json"
+[ -e "$config_source" ] || config_source="$REPO_DIR/docs/agentic/STATE.md"
 configured_base=$(sed -n 's/.*"baseBranch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-  "$REPO_DIR/.autoloop/config.json" "$REPO_DIR/docs/agentic/STATE.md" 2>/dev/null | head -1)
+  "$config_source" 2>/dev/null | head -1)
 current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 if [ -n "$configured_base" ] && [ -n "$current_branch" ]; then
   if [ "$current_branch" = "$configured_base" ]; then

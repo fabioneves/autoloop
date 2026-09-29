@@ -538,7 +538,11 @@ function authenticatedFindings(rounds, gaps = []) {
 // `--state` names the base checkout's legacy STATE.md or .autoloop/config.json,
 // and the repository root is derived from it.
 export function projectConfigForReview(path) {
-  const root = basename(path) === 'config.json' ? resolve(path, '..', '..') : resolve(path, '..', '..', '..');
+  const name = basename(String(path));
+  if (name !== 'config.json' && name !== 'STATE.md') {
+    throw new Error('--state must name <base>/docs/agentic/STATE.md or <base>/.autoloop/config.json');
+  }
+  const root = name === 'config.json' ? resolve(path, '..', '..') : resolve(path, '..', '..', '..');
   const resolved = resolveProjectConfig(root);
   if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
   return resolved.config;
@@ -1864,7 +1868,16 @@ function selfTest() {
       return legacy.version === '0.28.0' && legacy.caps === undefined
         && projectConfigForReview(statePath).baseBranch === 'trunk'
         && projectConfigForReview(jsonPath).baseBranch === 'trunk'
-        && projectConfigForReview(jsonPath).merge.policy === 'manual';
+        && projectConfigForReview(jsonPath).merge.policy === 'manual'
+        // Beside the real STATE, so a root derived from it WOULD find config.
+        && ['', join(root, 'docs', 'agentic', 'STATE.txt')].every((bad) => {
+          try {
+            projectConfigForReview(bad);
+            return false;
+          } catch {
+            return true;
+          }
+        });
     } catch (error) {
       console.error(`round-1 config check threw: ${error.message}`);
       return false;

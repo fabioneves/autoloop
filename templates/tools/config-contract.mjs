@@ -2,7 +2,8 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -481,19 +482,29 @@ function withDefaults(overrides, defaults = DEFAULT_CONFIG) {
 // so a release never requires a write), else null — not an autoloop repo.
 export function resolveProjectConfig(root, read = (path) => readFileSync(path, 'utf8')) {
   const jsonPath = join(root, PROJECT_CONFIG_FILE);
-  if (existsSync(jsonPath)) {
+  // lstat, not exists: a dangling symlink must refuse, never fall back to STATE.
+  let present = true;
+  try {
+    lstatSync(jsonPath);
+  } catch {
+    present = false;
+  }
+  if (present) {
     const source = PROJECT_CONFIG_FILE;
+    let text;
+    try {
+      text = read(jsonPath);
+    } catch (error) {
+      return { ok: false, unreadable: true, source, errors: [`${PROJECT_CONFIG_FILE}: unreadable (${error.message})`] };
+    }
     let parsed;
     try {
-      parsed = JSON.parse(read(jsonPath));
+      parsed = JSON.parse(text);
     } catch (error) {
       return { ok: false, unreadable: true, source, errors: [`${PROJECT_CONFIG_FILE}: not valid JSON (${error.message})`] };
     }
     if (!isRecord(parsed)) return { ok: false, unreadable: false, source, errors: ['config: must be an object'] };
-    const current = currentProjectConfig(withDefaults(parsed));
-    return current.ok
-      ? { ok: true, source, config: current.config }
-      : { ok: false, unreadable: false, source, errors: current.errors };
+    return resolved(source, parsed.version, currentProjectConfig(withDefaults(parsed)));
   }
   const statePath = join(root, LEGACY_STATE_FILE);
   if (!existsSync(statePath)) return null;
@@ -504,10 +515,19 @@ export function resolveProjectConfig(root, read = (path) => readFileSync(path, '
   } catch (error) {
     return { ok: false, unreadable: true, source, errors: [error.message] };
   }
-  const current = currentProjectConfig(legacy);
-  return current.ok
-    ? { ok: true, source, config: current.config }
-    : { ok: false, unreadable: false, source, errors: current.errors };
+  return resolved(source, legacy?.version, currentProjectConfig(legacy));
+}
+
+// `migratedFrom` names the schema the file actually holds when it was migrated
+// in memory, so a pending migration is visible (a release never forces it).
+function resolved(source, storedVersion, current) {
+  if (!current.ok) return { ok: false, unreadable: false, source, errors: current.errors };
+  return {
+    ok: true,
+    source,
+    config: current.config,
+    migratedFrom: storedVersion === current.config.version ? null : storedVersion ?? null,
+  };
 }
 
 export function extractConfig(markdown) {
@@ -2085,23 +2105,33 @@ function selfTest() {
         version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'x' }, merge: { policy: 'nope' },
       }));
       const invalid = resolveProjectConfig(root);
+      rmSync(join(root, '.autoloop', 'config.json'));
+      mkdirSync(join(root, '.autoloop', 'config.json'));
+      const directory = resolveProjectConfig(root);
+      rmSync(join(root, '.autoloop', 'config.json'), { recursive: true });
+      symlinkSync(join(root, 'nowhere.json'), join(root, '.autoloop', 'config.json'));
+      const dangling = resolveProjectConfig(root);
       expect('no config file and no legacy STATE is not an autoloop repo', none === null);
-      expect('a legacy STATE block resolves, migrated in memory',
+      expect('a legacy STATE block resolves, migrated in memory, and says from which schema',
         legacy?.ok === true && legacy.source === 'docs/agentic/STATE.md'
-          && legacy.config.version === CONFIG_VERSION && !hasOwn(legacy.config, 'caps'));
+          && legacy.config.version === CONFIG_VERSION && !hasOwn(legacy.config, 'caps')
+          && legacy.migratedFrom === '0.27.0');
       expect('config.json wins over the legacy STATE and is completed from plugin defaults',
         json?.ok === true && json.source === '.autoloop/config.json'
           && json.config.baseBranch === 'develop' && json.config.gate.command === 'make check'
           && json.config.gate.quickCommand === null && json.config.gate.setupCommand === null
           && json.config.merge.policy === 'manual' && json.config.tracker.provider === 'none'
           && json.config.review.checklistPath === 'docs/agentic/checklist.md'
-          && validateConfig(json.config).length === 0);
+          && validateConfig(json.config).length === 0 && json.migratedFrom === null);
       expect('a required key without a default is refused with its path',
         missing?.ok === false && missing.errors.some((error) => error.startsWith('baseBranch')));
       expect('unreadable JSON and invalid values are refused, never defaulted over, and say which',
         broken?.ok === false && broken.unreadable === true && broken.errors.some((error) => /JSON/u.test(error))
           && invalid?.ok === false && invalid.unreadable === false
           && invalid.errors.some((error) => error.startsWith('merge.policy')));
+      expect('a config.json that cannot be read says so, and a dangling symlink never falls back to STATE',
+        directory?.ok === false && directory.errors.some((error) => /unreadable/u.test(error))
+          && dangling?.ok === false && dangling.source === '.autoloop/config.json');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -2170,6 +2200,7 @@ function selfTest() {
       rmSync(bare, { recursive: true, force: true });
       expect('the CLI validates a repository by root, naming the source it read',
         cli.status === 0 && cli.stdout.includes(`PASS  autoloop config v${CONFIG_VERSION} (.autoloop/config.json)`)
+          && !cli.stdout.includes('NOTE')
           && none.status === 1 && none.stdout.includes('not an autoloop repository'));
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -2341,6 +2372,9 @@ function main() {
     }
     cfg = resolved.config;
     source = ` (${resolved.source})`;
+    if (resolved.migratedFrom !== null) {
+      console.log(`NOTE  ${resolved.source} holds schema ${resolved.migratedFrom}; read as ${cfg.version} in memory — autoloop:setup writes the migration`);
+    }
   } else {
     try {
       cfg = extractConfig(readFileSync(parsed.statePath, 'utf8'));

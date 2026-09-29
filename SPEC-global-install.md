@@ -66,14 +66,17 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
 - **Defaults.** Plugin defaults (`DEFAULT_CONFIG`) are deep-merged under the project file. The
   project states only what differs. Validation runs on the merged result, and unknown keys are
   refused.
-- **Schema 0.29.0.** Same keys as 0.28.0, plus the policy keys below. Everything except `version`,
-  `baseBranch` and `gate.command` has a default.
+- **Schema.** It stays 0.28.0 in this module; the 0.29.0 bump comes with the policy keys in
+  policy-as-data. Everything except `version`, `baseBranch` and `gate.command` has a default.
 - **STATE prose.** It moves to `.autoloop/STATE.md`, with the legacy path as fallback. SessionStart
   injects whichever exists.
 - **Checklist.** `review.checklistPath` defaults to `.autoloop/checklist.md` if present, else the
   plugin's default checklist.
+- **Protection.** `.autoloop/**` joins the human-authorization families, because `config.json`
+  outranks STATE and a writer changing it would reconfigure the gate.
 - **Success:** every tool that reads config today (15, per `rg`) goes through the resolver; a
-  0.28.0 STATE block and a 0.29.0 `config.json` both resolve; a repo with neither reads `null`.
+  legacy STATE block and a `config.json` both resolve; a repo with neither reads `null`. A pending
+  migration is reported (`migratedFrom`, a CLI `NOTE`) but never forced.
 
 ### policy-as-data
 
@@ -143,6 +146,8 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
     `.claude/settings.json`.
 
   `devendor` never touches ARCH, LESSONS or a repo-authored checklist.
+- `devendor` writes exactly the config the legacy block resolved to, so the config fingerprint of a
+  review chain in flight is unchanged.
 - **Success:** LFE devendors in one PR with `verify`, the guard and a full unit green afterwards; a
   plugin release after that needs no setup at all.
 
