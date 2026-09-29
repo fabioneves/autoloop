@@ -79,7 +79,6 @@ const FIXTURE_CONFIG = {
   gate: { command: 'true', quickCommand: null, setupCommand: null },
   merge: { policy: 'manual' },
   tracker: { provider: 'none' },
-  review: { checklistPath: 'docs/agentic/checklist.md' },
 };
 const PASSING_VERDICT = { verdict: 'pass', findings: [], rebuts: [] };
 

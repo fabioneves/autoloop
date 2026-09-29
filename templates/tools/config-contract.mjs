@@ -6,7 +6,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const CONFIG_VERSION = '0.28.0';
@@ -511,8 +511,20 @@ export const DEFAULT_CONFIG = Object.freeze({
   gate: Object.freeze({ quickCommand: null, setupCommand: null }),
   merge: Object.freeze({ policy: 'manual' }),
   tracker: Object.freeze({ provider: 'none' }),
-  review: Object.freeze({ checklistPath: 'docs/agentic/checklist.md' }),
+  review: Object.freeze({ checklistPath: '.autoloop/checklist.md' }),
 });
+
+// The plugin's own review checklist, for a repository that keeps none.
+export const PLUGIN_CHECKLIST = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'checklist.template.md');
+
+// The file reviewers read. The resolved config (and so a review chain's
+// fingerprint) holds only the stable relative path; whether the repository
+// or the plugin supplies the file is decided here, per checkout.
+export function effectiveChecklistPath(root, config) {
+  const configured = config.review.checklistPath;
+  const file = join(root, configured);
+  return configured === DEFAULT_CONFIG.review.checklistPath && !existsSync(file) ? PLUGIN_CHECKLIST : file;
+}
 
 function withDefaults(overrides, defaults = DEFAULT_CONFIG) {
   const merged = structuredClone(overrides);
@@ -2177,7 +2189,7 @@ function selfTest() {
           && json.config.baseBranch === 'develop' && json.config.gate.command === 'make check'
           && json.config.gate.quickCommand === null && json.config.gate.setupCommand === null
           && json.config.merge.policy === 'manual' && json.config.tracker.provider === 'none'
-          && json.config.review.checklistPath === 'docs/agentic/checklist.md'
+          && json.config.review.checklistPath === '.autoloop/checklist.md'
           && validateConfig(json.config).length === 0 && json.migratedFrom === null);
       expect('a required key without a default is refused with its path',
         missing?.ok === false && missing.errors.some((error) => error.startsWith('baseBranch')));
@@ -2222,6 +2234,26 @@ function selfTest() {
       ['src/{auth,billing}/**', 'secret?.yml', 'src/[ab]/**', '!docs/**'].every((glob) =>
         validateConfig({ ...projectFixture(), protectedPaths: [glob] })
           .includes('protectedPaths[0]: must be a normalized repository-relative glob using only * and **')));
+    // The checklist: the configured file, or — while the path is still the
+    // default and no repository file exists — the plugin's own checklist.
+    {
+      const checklistRoot = mkdtempSync(join(tmpdir(), 'config-checklist-'));
+      try {
+        const effective = (checklistPath) => effectiveChecklistPath(checklistRoot, { review: { checklistPath } });
+        const pluginDefault = effective(DEFAULT_CONFIG.review.checklistPath);
+        mkdirSync(join(checklistRoot, '.autoloop'));
+        writeFileSync(join(checklistRoot, '.autoloop', 'checklist.md'), '# repo checklist\n');
+        expect('the default checklist path is .autoloop/checklist.md',
+          DEFAULT_CONFIG.review.checklistPath === '.autoloop/checklist.md');
+        expect('an absent default checklist falls back to the plugin checklist; a present one wins',
+          pluginDefault === PLUGIN_CHECKLIST && existsSync(PLUGIN_CHECKLIST)
+            && effective('.autoloop/checklist.md') === join(checklistRoot, '.autoloop', 'checklist.md'));
+        expect('an explicitly configured checklist is the configured file, present or not',
+          effective('docs/agentic/checklist.md') === join(checklistRoot, 'docs', 'agentic', 'checklist.md'));
+      } finally {
+        rmSync(checklistRoot, { recursive: true, force: true });
+      }
+    }
     const root = mkdtempSync(join(tmpdir(), 'config-protected-'));
     try {
       mkdirSync(join(root, '.autoloop'));

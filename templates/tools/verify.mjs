@@ -21,7 +21,7 @@ import {
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { CONFIG_VERSION, resolveProjectConfig } from './config-contract.mjs';
+import { CONFIG_VERSION, effectiveChecklistPath, resolveProjectConfig } from './config-contract.mjs';
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const SELF_TEST_MANIFEST_NAME = 'self-test-manifest.json';
@@ -213,7 +213,7 @@ function checkConfiguredChecklist(root) {
         detail: `ProjectConfig is invalid: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`,
       };
     }
-    return checkExists(resolve(root, resolved.config.review.checklistPath));
+    return checkExists(effectiveChecklistPath(root, resolved.config));
   } catch (error) {
     return { ok: false, detail: `cannot resolve configured checklist: ${error.message}` };
   }
@@ -465,9 +465,7 @@ function selfTest() {
     mkdirSync(join(projectRoot, '.autoloop'));
     writeFileSync(join(projectRoot, '.autoloop', 'config.json'), JSON.stringify({
       version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' },
-      review: { checklistPath: '.autoloop/checklist.md' },
     }));
-    writeFileSync(join(projectRoot, '.autoloop', 'checklist.md'), '# checklist\n');
     const doctor = () => projectChecks(projectRoot).map((check) => ({ name: check.name, ...check.execute() }));
     devendoredPasses = doctor().every((result) => result.ok);
     mkdirSync(join(projectRoot, '.claude'));
@@ -477,7 +475,12 @@ function selfTest() {
     mkdirSync(join(projectRoot, 'tools', 'agentic'), { recursive: true });
     vendoredToolsFail = doctor().some((result) => result.name === 'no vendored layout' && !result.ok);
     rmSync(join(projectRoot, 'tools'), { recursive: true, force: true });
-    rmSync(join(projectRoot, '.autoloop', 'checklist.md'));
+    // No checklist of its own: the plugin's is used. A path the repository
+    // configured explicitly must exist.
+    writeFileSync(join(projectRoot, '.autoloop', 'config.json'), JSON.stringify({
+      version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' },
+      review: { checklistPath: 'docs/review-checklist.md' },
+    }));
     missingChecklistFails = doctor().some((result) => result.name === 'configured review checklist' && !result.ok);
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
@@ -549,7 +552,7 @@ function selfTest() {
     ['a devendored project passes the doctor', devendoredPasses],
     ['vendored hook wiring left behind fails the doctor and names devendor', vendoredWiringFails],
     ['a tools/agentic directory left behind fails the doctor', vendoredToolsFail],
-    ['a missing configured checklist fails the doctor', missingChecklistFails],
+    ['a missing explicitly configured checklist fails the doctor', missingChecklistFails],
   ];
   const failures = cases.filter(([, passed]) => !passed);
   for (const [name] of failures) console.error(`FAIL ${name}`);

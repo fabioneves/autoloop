@@ -42,7 +42,7 @@ import {
   ownRunMarkers,
   runMarkerDirectory,
 } from './command-guard.mjs';
-import { resolveProjectConfig } from './config-contract.mjs';
+import { effectiveChecklistPath, PLUGIN_CHECKLIST, resolveProjectConfig } from './config-contract.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
@@ -228,7 +228,7 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
     version: AUTOLOOP_VERSION,
     repository: `${repository.owner}/${repository.repo}`,
     checkout,
-    config: configSummary(config),
+    config: configSummary(config, root),
     base,
     runMarker,
     waits,
@@ -248,13 +248,16 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
 // summary did not carry the config at all. Both are prime's answer to give.
 //
 // `hashValue` is imported from the contract that compares it, never copied.
-export function configSummary(config) {
+// `checklistFile` is the file reviewers read: the repository's, or the
+// plugin's own when the repository keeps none (config-contract decides).
+export function configSummary(config, root = null) {
   return {
     version: config.version,
     baseBranch: config.baseBranch,
     mergePolicy: config.merge.policy,
     gateCommand: config.gate.command,
     checklistPath: config.review.checklistPath,
+    checklistFile: root === null ? null : effectiveChecklistPath(root, config),
     fingerprint: hashValue(config),
     projectConfig: config,
   };
@@ -685,6 +688,12 @@ function selfTest() {
     && configSummary(Object.fromEntries(
       Object.entries(fixtureConfig()).reverse(),
     )).fingerprint === summary.fingerprint,
+  );
+  check(
+    'the summary names the checklist file reviewers read, outside the fingerprinted config',
+    configSummary({ ...fixtureConfig(), review: { checklistPath: '.autoloop/checklist.md' } }, '/nowhere')
+      .checklistFile === PLUGIN_CHECKLIST
+      && configSummary(fixtureConfig(), '/r').checklistFile === '/r/docs/agentic/checklist.md',
   );
 
   check(
