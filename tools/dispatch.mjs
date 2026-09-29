@@ -1929,7 +1929,10 @@ function selfTest() {
         writeEngineShim(onlyHere, [
           '#!/bin/sh',
           'printf \'%s\' "$*" > "$AUTOLOOP_SHIM_ARGV"',
-          'cat > /dev/null',
+          // Builtins only: PATH holds just node's directory here, and a shim
+          // that cannot drain stdin (\`cat\` is not on it) exits before the
+          // prompt is written — an intermittent EPIPE under load.
+          'while IFS= read -r line || [ -n "$line" ]; do :; done',
           `printf '%s\\n' '${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '', structured_output: PASSING_VERDICT })}'`,
           '',
         ].join('\n'));
@@ -1959,7 +1962,9 @@ function selfTest() {
           console.error(`  cli seam: exit ${run.status} ${run.signal ?? ''} stderr ${String(run.stderr).slice(0, 400)}`);
           return false;
         }
-        if (run.status !== 0) console.error(`  cli seam: exit ${run.status} stderr ${String(run.stderr).slice(0, 400)}`);
+        if (run.status !== 0) {
+          console.error(`  cli seam: exit ${run.status} error ${JSON.stringify(cliResult.error ?? cliResult).slice(0, 600)}`);
+        }
         return run.status === 0
           && argvSeen.includes('--model gpt-test-model')
           && argvSeen.includes(`Read(/${cliDir}/**)`)
