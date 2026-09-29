@@ -1955,8 +1955,11 @@ function selfTest() {
         try {
           cliResult = JSON.parse(run.stdout);
         } catch {
-          return false; // usage error: empty stdout is a failed check, not a crash
+          // usage error: empty stdout is a failed check, not a crash — say why
+          console.error(`  cli seam: exit ${run.status} ${run.signal ?? ''} stderr ${String(run.stderr).slice(0, 400)}`);
+          return false;
         }
+        if (run.status !== 0) console.error(`  cli seam: exit ${run.status} stderr ${String(run.stderr).slice(0, 400)}`);
         return run.status === 0
           && argvSeen.includes('--model gpt-test-model')
           && argvSeen.includes(`Read(/${cliDir}/**)`)

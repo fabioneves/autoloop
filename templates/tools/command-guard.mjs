@@ -2699,11 +2699,22 @@ function nodeInvocation(words, dir) {
   return null;
 }
 
+// Drops subshell parentheses and whitespace from a segment's ends. Linear on
+// purpose: a backtracking pattern here let a padded command outrun the hook
+// timeout (security re-audit, round 5).
+function trimSubshell(segment) {
+  let start = 0;
+  let end = segment.length;
+  while (start < end && (segment[start] === '(' || /\s/u.test(segment[start]))) start += 1;
+  while (end > start && (segment[end - 1] === ')' || /\s/u.test(segment[end - 1]))) end -= 1;
+  return segment.slice(start, end);
+}
+
 export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PRIME) {
   if (typeof command !== 'string' || !/\bnode\b/u.test(command)) return null;
   let dir = cwd;
   for (const { command: segment } of shellSegments(command)) {
-    let words = shellWords(segment.replace(/^[\s(]+|[\s)]+$/gu, ''));
+    let words = shellWords(trimSubshell(segment));
     const comment = words.findIndex((word) => word.startsWith('#'));
     if (comment !== -1) words = words.slice(0, comment);
     if ((words[0] === 'cd' || words[0] === 'pushd') && words[1] !== undefined) {
@@ -3863,6 +3874,17 @@ function selfTest() {
         console.error(`FAIL [prime never opens a run outside the session's project, and only prime is judged] `
           + `evaded: ${JSON.stringify(evasions.map(([, c]) => c))}; `
           + `false positives: ${JSON.stringify(falsePositives.map(([, c]) => c))}`);
+        ok = false;
+      }
+      // Security re-audit round 5: the check runs on any command naming node,
+      // in every repository, so it must stay linear — a padded command that
+      // outran the hook timeout would skip every rule.
+      const padded = ['gh pr merge 5 # node' + ' '.repeat(300_000) + 'x', 'node x' + ' )'.repeat(100_000) + 'y'];
+      const startedAt = Date.now();
+      for (const command of padded) foreignPrimeProblem(command, scratch, other);
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > 1000) {
+        console.error(`FAIL [the foreign-prime check stays linear on padded input]: ${elapsed} ms`);
         ok = false;
       }
       rmSync(other, { recursive: true, force: true });
