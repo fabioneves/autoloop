@@ -561,7 +561,43 @@ function pluginChecks(root) {
       root,
     ),
   });
+  checks.push({
+    name: 'skill byte budgets',
+    execute: () => checkSkillBudgets(root),
+  });
   return checks;
+}
+
+// Every skill loads whole into the session that invokes it, and again after
+// every compaction: on LFE the dev skill added ~50k tokens to a 70k floor, re-
+// read on each of 69 calls. Budgets are bytes and only ratchet down — shrink a
+// skill and lower its budget in the same commit; raising one is a visible edit.
+export const SKILL_BUDGETS = Object.freeze({
+  'codebase-design': 6489,
+  dev: 136861,
+  'lean-code': 3909,
+  pitcrew: 20076,
+  'queue-trace': 6936,
+  setup: 43935,
+  shape: 26690,
+});
+
+export function skillBudgetProblems(sizes, budgets = SKILL_BUDGETS) {
+  return Object.entries(sizes).sort(([left], [right]) => left.localeCompare(right)).flatMap(([skill, bytes]) => {
+    if (!Object.hasOwn(budgets, skill)) return [`SKILL_BUDGET_MISSING ${skill}`];
+    return bytes > budgets[skill] ? [`SKILL_OVER_BUDGET ${skill} ${bytes}/${budgets[skill]} bytes`] : [];
+  });
+}
+
+function checkSkillBudgets(root) {
+  const skills = resolve(root, 'skills');
+  const sizes = {};
+  for (const name of existsSync(skills) ? readdirSync(skills) : []) {
+    const path = join(skills, name, 'SKILL.md');
+    if (existsSync(path)) sizes[name] = lstatSync(path).size;
+  }
+  const problems = skillBudgetProblems(sizes);
+  return problems.length === 0 ? { ok: true, detail: '' } : { ok: false, detail: problems.join('\n') };
 }
 
 function toolChecks(root, toolsDir, requiredFiles, artifactMode, { full = false } = {}) {
@@ -942,6 +978,13 @@ function selfTest() {
     rmSync(fastPathRoot, { recursive: true, force: true });
   }
   const cases = [
+    // 0.56.0: a skill loads whole into the session that invokes it and again
+    // after every compaction (LFE: the dev skill added ~50k tokens to a 70k
+    // floor, re-read on every one of 69 calls). A skill never grows silently.
+    ['a skill over its byte budget, or with none, fails; within budget passes',
+      JSON.stringify(skillBudgetProblems({ dev: 60001, setup: 100, novel: 5 }, { dev: 60000, setup: 100 }))
+        === JSON.stringify(['SKILL_OVER_BUDGET dev 60001/60000 bytes', 'SKILL_BUDGET_MISSING novel'])
+        && skillBudgetProblems({ dev: 60000 }, { dev: 60000 }).length === 0],
     ['structured command success', success.ok && success.detail.length > 0],
     ['structured command failure', !failure.ok && failure.detail.length > 0],
     ['invalid JSON is rejected', checkJson(fileURLToPath(import.meta.url)).ok === false],
