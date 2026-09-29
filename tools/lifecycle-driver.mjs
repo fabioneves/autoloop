@@ -40,7 +40,7 @@ import {
   policyAttestationForRecord,
 } from './publish-verdict.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
-import { resolveProjectConfig } from './config-contract.mjs';
+import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/u;
 const HASH_RE = /^[0-9a-f]{64}$/u;
@@ -672,7 +672,7 @@ function recordMarkerRefusal(cwd, issueNumber, record) {
 function reconcileIssueRequest(cwd, issueNumber) {
   const root = command('git', ['rev-parse', '--show-toplevel'], { cwd }).trim();
   const current = resolveProjectConfig(root);
-  if (!current?.ok) throw new Error(`project config is invalid: ${current?.errors?.join('; ') ?? 'no autoloop configuration'}`);
+  if (!current?.ok) throw new Error(`project config is invalid: ${current?.errors?.join('; ') ?? NO_CONFIG}`);
   const config = current.config;
   const repository = repositoryTarget(root);
   const viewer = api(repository, 'user')?.login;

@@ -282,7 +282,7 @@ export const SKILL_BUDGETS = Object.freeze({
   'lean-code': 3909,
   pitcrew: 19803,
   'queue-trace': 6933,
-  setup: 13993,
+  setup: 14026,
   shape: 26690,
 });
 

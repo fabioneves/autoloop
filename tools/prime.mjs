@@ -37,6 +37,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { vendoredLeftovers } from './hook-root.mjs';
 import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig,
@@ -393,8 +394,8 @@ export function sectionSummary(snapshot) {
 }
 
 // The project config through the one resolver (.autoloop/config.json over
-// plugin defaults, else the legacy STATE block migrated in memory), keeping
-// prime's two typed failures: nothing readable vs. a config that fails.
+// plugin defaults), keeping prime's typed failures: a vendored install not yet
+// devendored, nothing readable, or a config that fails.
 export function readPrimeConfig(root) {
   const resolved = resolveProjectConfig(root);
   if (resolved === null) {
@@ -406,6 +407,11 @@ export function readPrimeConfig(root) {
     return resolved.unreadable
       ? failure('config', 'PROJECT_CONFIG_UNREADABLE', resolved.errors.join('; '))
       : failure('config', 'PROJECT_CONFIG_INVALID', resolved.errors.join('; '), { errors: resolved.errors });
+  }
+  // A half-finished devendor runs two guards and two sets of reminders.
+  if (vendoredLeftovers(root).hooks.length > 0) {
+    return failure('config', 'NOT_DEVENDORED',
+      'vendored hooks are still wired in .claude/settings*.json: finish the devendor with autoloop:setup');
   }
   return { config: resolved.config };
 }
@@ -768,8 +774,8 @@ function selfTest() {
     })(),
   );
 
-  // Global install: prime reads .autoloop/config.json over plugin defaults,
-  // the legacy STATE block in memory, and refuses typed when neither exists.
+  // Global install: prime reads .autoloop/config.json over plugin defaults
+  // and refuses typed without it, or while vendored hooks are still wired.
   check(
     'prime reads the project config through the resolver and keeps its typed failures',
     (() => {
@@ -782,6 +788,11 @@ function selfTest() {
         writeFileSync(join(root, '.autoloop', 'config.json'),
           JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'true' } }));
         const good = readPrimeConfig(root);
+        mkdirSync(join(root, '.claude'));
+        writeFileSync(join(root, '.claude', 'settings.json'),
+          '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node tools/agentic/command-guard.mjs"}]}]}}');
+        const wired = readPrimeConfig(root);
+        rmSync(join(root, '.claude'), { recursive: true, force: true });
         rmSync(join(root, '.autoloop'), { recursive: true, force: true });
         mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
         writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'),
@@ -791,7 +802,7 @@ function selfTest() {
         return none.error?.code === 'PROJECT_CONFIG_UNREADABLE'
           && unreadable.error?.code === 'PROJECT_CONFIG_UNREADABLE'
           && good.config?.baseBranch === 'trunk' && good.config?.merge?.policy === 'manual'
-          && legacy.error?.code === 'NOT_DEVENDORED'
+          && wired.error?.code === 'NOT_DEVENDORED' && legacy.error?.code === 'NOT_DEVENDORED'
           && legacy.error.message.includes('autoloop:setup');
       } catch {
         return false;

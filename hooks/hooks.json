@@ -1,5 +1,5 @@
 {
-  "description": "autoloop hooks. Every hook runs the plugin's own copy, finds the project from CLAUDE_PROJECT_DIR, and stands down unless it is a devendored autoloop repository (.autoloop/config.json, no vendored guard wired).",
+  "description": "autoloop hooks. Every hook runs the plugin's own copy, finds the project from CLAUDE_PROJECT_DIR, and stands down unless it is a devendored autoloop repository (.autoloop/config.json present) or a plugin run is open there.",
   "hooks": {
     "SessionStart": [
       {

@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CONFIG_VERSION, repositoryRoot, resolveProjectConfig } from './config-contract.mjs';
+import { CONFIG_VERSION, NO_CONFIG, repositoryRoot, resolveProjectConfig } from './config-contract.mjs';
 import {
   HUMAN_AUTHORIZATION_GLOBS,
   PATH_POLICY_FIXTURES,
@@ -17,7 +17,7 @@ import {
 
 // The structural families; a repository adds its own through the config's
 // protectedPaths (escalatePathsFor).
-export const ESCALATE_PATHS = HUMAN_AUTHORIZATION_GLOBS;
+export const ESCALATE_PATHS = Object.freeze([...HUMAN_AUTHORIZATION_GLOBS]);
 
 export { globToRe };
 
@@ -27,13 +27,18 @@ export function matchEscalate(files, paths = ESCALATE_PATHS) {
 
 // The escalate paths for one repository: the structural families plus the
 // `protectedPaths` its config names. A config that cannot be resolved leaves
-// the repository's own paths unknown, so the caller fails closed on `error`.
+// the repository's own paths unknown, so the caller fails closed on `error` —
+// and so does a missing one: a branch opened before devendor has no config,
+// and its protected paths must not silently disappear.
 export function escalatePathsFor(root) {
   const resolved = resolveProjectConfig(root);
-  if (resolved !== null && !resolved.ok) {
+  if (resolved === null) {
+    return { paths: ESCALATE_PATHS, error: NO_CONFIG };
+  }
+  if (!resolved.ok) {
     return { paths: ESCALATE_PATHS, error: `${resolved.source}: ${resolved.errors.join('; ')}` };
   }
-  return { paths: [...ESCALATE_PATHS, ...(resolved?.config.protectedPaths ?? [])], error: null };
+  return { paths: [...ESCALATE_PATHS, ...(resolved.config.protectedPaths ?? [])], error: null };
 }
 
 function positiveInteger(value) {
@@ -420,6 +425,11 @@ function selfTest() {
     writeFileSync(configFile, JSON.stringify(config));
     diffChecks.push(['no protectedPaths adds nothing',
       matchEscalate(['spec/rules.md'], escalatePathsFor(scratch).paths).length === 0]);
+    rmSync(configFile);
+    const missing = run('--working-tree');
+    diffChecks.push(['a checkout with no config fails closed with exit 2 and names the fix',
+      escalatePathsFor(scratch).error !== null && missing.status === 2
+        && missing.stderr.includes('merge the base branch')]);
     writeFileSync(configFile, JSON.stringify({ ...config, protectedPaths: 'spec/**' }));
     const broken = run('--working-tree');
     diffChecks.push(['an invalid config fails closed with exit 2 and names the key',

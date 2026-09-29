@@ -506,6 +506,10 @@ function validatePriorConfig(cfg) {
 // `.autoloop/config.json` holding only what differs from these plugin
 // defaults. `version`, `baseBranch` and `gate.command` have no default.
 export const PROJECT_CONFIG_FILE = '.autoloop/config.json';
+
+// Why a checkout inside an autoloop repository has no config: its branch was
+// opened before devendor. Every per-checkout reader fails closed with the fix.
+export const NO_CONFIG = `no ${PROJECT_CONFIG_FILE} in this checkout — a branch opened before devendor: merge the base branch into it`;
 export const LEGACY_STATE_FILE = 'docs/agentic/STATE.md';
 export const DEFAULT_CONFIG = Object.freeze({
   gate: Object.freeze({ quickCommand: null, setupCommand: null }),

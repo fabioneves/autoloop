@@ -58,6 +58,7 @@ import {
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
 import {
+  NO_CONFIG,
   resolveProjectConfig,
   validateConfig,
 } from './config-contract.mjs';
@@ -1244,12 +1245,12 @@ function runGate(command, cwd) {
 }
 
 function loadPublicationConfig(repositoryRoot) {
-  // .autoloop/config.json over plugin defaults, else the legacy STATE block
-  // migrated in memory (a unit branch forked before a migration keeps working).
+  // .autoloop/config.json over plugin defaults; a unit branch forked before
+  // devendor has none and must merge the base first.
   const resolved = resolveProjectConfig(repositoryRoot, (path) =>
     readBoundedNoFollow(path, MAX_AUXILIARY_EVIDENCE_BYTES).toString('utf8'));
   if (!resolved?.ok) {
-    throw new Error(`ProjectConfig is invalid: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
+    throw new Error(`ProjectConfig is invalid: ${resolved?.errors?.join('; ') ?? NO_CONFIG}`);
   }
   return resolved.config;
 }

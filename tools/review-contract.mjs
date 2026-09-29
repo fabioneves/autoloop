@@ -31,7 +31,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { snapshotExecutionCheckout } from './checkout-contract.mjs';
-import { currentProjectConfig, resolveProjectConfig } from './config-contract.mjs';
+import { currentProjectConfig, NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 import { validReviewVerdict } from './dispatch.mjs';
 
 const GATING_SEVERITIES = new Set(['Critical', 'Major']);
@@ -535,10 +535,8 @@ function authenticatedFindings(rounds, gaps = []) {
 }
 
 // Round 1's projectConfig must equal prime's, which comes from the resolver:
-// `--state` names the base checkout's legacy STATE.md or .autoloop/config.json,
-// and the repository root is derived from it.
-// The base's config file, named exactly: `.autoloop/config.json` (root two
-// levels up) or the legacy `docs/agentic/STATE.md` (three). Anything else —
+// `--state` names the base checkout's `.autoloop/config.json` exactly, and the
+// repository root (two levels up) is derived from it. Anything else —
 // `.autoloop/STATE.md` is prose — would derive a wrong root.
 export function projectConfigForReview(path) {
   const segments = resolve(String(path)).split(sep);
@@ -547,7 +545,7 @@ export function projectConfigForReview(path) {
   if (String(path) !== '' && tail(2) === '.autoloop/config.json') root = resolve(path, '..', '..');
   else throw new Error('--state must name <base>/.autoloop/config.json');
   const resolved = resolveProjectConfig(root);
-  if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
+  if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? NO_CONFIG}`);
   return resolved.config;
 }
 

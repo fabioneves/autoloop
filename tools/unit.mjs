@@ -56,7 +56,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveProjectConfig } from './config-contract.mjs';
+import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 
 const TIMEOUT_MS = 30_000;
 const WAIT_MARKER_RE = /<!-- autoloop-waiting-v1 (\{[^\n]*?\}) -->/gu;
@@ -148,7 +148,7 @@ export function waitCleared(condition, facts) {
 
 function baseBranch(root) {
   const resolved = resolveProjectConfig(root);
-  if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
+  if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? NO_CONFIG}`);
   return resolved.config.baseBranch;
 }
 

@@ -2528,15 +2528,6 @@ function currentBranch() {
   }
 }
 
-
-
-
-
-
-
-
-
-
 // A command that runs the plugin's own prime to open a run (not --close-run,
 // --park or --self-test) in a repository other than the session's project.
 // It follows the command's own directory changes (cd, pushd, env -C, in
@@ -2617,12 +2608,8 @@ export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PR
   return null;
 }
 
-
-
-
 // The config comes from the one resolver: .autoloop/config.json over plugin
-// defaults, else the legacy STATE block migrated in memory (an older schema no
-// longer switches the guard off — it enforces the migrated config).
+// defaults. A repository without one has no base to guard here.
 export function loadConfiguredBase(root) {
   const resolved = resolveProjectConfig(root);
   if (resolved === null) throw new Error('no autoloop configuration in this repository');
@@ -2647,9 +2634,8 @@ export function parseArgs(args) {
 // Corpus replay: real command shapes from live sessions, each tagged with the
 // incident that earned it a place. Unit fixtures test what we imagined; the
 // corpus tests what sessions actually typed — five of one day's bugs were guard
-// verdicts on commands no fixture contained. Exposed as `--corpus` because the
-// release-proven manifest fast-path may skip an unchanged tool's self-test,
-// and a corpus edit must always be re-proven.
+// verdicts on commands no fixture contained. Exposed as `--corpus` so verify
+// replays it as its own step.
 export function replayCorpus() {
   const failures = [];
   let total = 0;
@@ -3189,7 +3175,7 @@ function selfTest() {
     }
   }
   // Global install: the base branch comes from .autoloop/config.json
-  // (over plugin defaults), else the legacy STATE block, else nothing.
+  // (over plugin defaults), else nothing.
   const baseCases = (() => {
     const root = mkdtempSync(join(tmpdir(), 'guard-base-'));
     const attempt = () => {

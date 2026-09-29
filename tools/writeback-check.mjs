@@ -840,6 +840,10 @@ function selfTest() {
     checkPrs([prs[2]], [{ number: 3, labels: [{ name: 'loop-started' }, { name: 'loop:08-code-review' }] }]).reminders.length === 0 &&
     checkPrs([prs[2]], [{ number: 3, labels: [{ name: 'loop:10-publish' }] }]).reminders.length === 1 &&
     checkPrs([prs[2]], [{ number: 3, labels: [] }]).reminders.length === 1 &&
+    // Plain-string labels count; a unit missing from the list, or no list (gh failed), still reminds.
+    checkPrs([prs[2]], [{ number: 3, labels: ['loop:08-code-review'] }]).reminders.length === 0 &&
+    checkPrs([prs[2]], [{ number: 9, labels: [{ name: 'loop:08-code-review' }] }]).reminders.length === 1 &&
+    checkPrs([prs[2]], null).reminders.length === 1 &&
     stranded.length === 1 && stranded[0].includes('#7') && stranded[0].includes('loop:04-claim') &&
     stranded[0].includes('--remove-label loop:07-diff-review') &&
     reminderWire.exitCode === 0 && reminderWire.stderr === '' &&

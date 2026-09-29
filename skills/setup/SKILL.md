@@ -165,7 +165,7 @@ this session's hooks and refuses the devendor commit while a run marker exists.
    `tools/agentic/` (the repository's own files there stay), `docs/agentic/LOOP.md`,
    `docs/agentic/STATE.md` (its prose moves), and the autoloop hook entries — and that devendor
    runs the base's vendored escalate/merge modules to read their policy. Also offer to move
-   `docs/agentic/checklist.md` to `.autoloop/checklist.md` (`--move-checklist` below).
+   `docs/agentic/checklist.md` to `.autoloop/checklist.md` (`--move-checklist`).
 2. **Work in a linked worktree, never this checkout** — deleting the vendored guard here makes it
    refuse every command. `setup.mjs` refuses anything but a linked worktree it is not running in.
 
@@ -176,21 +176,21 @@ this session's hooks and refuses the devendor commit while a run marker exists.
 
    Refusals, each with its remedy: `NOT_A_WORKTREE`/`LIVE_CHECKOUT` — use the worktree above;
    `VENDORED_POLICY_NOT_BASE` — recreate it from `origin/<base>`; `GATE_USES_VENDORED_TOOL` —
-   point the gate at a repository script first; `SYMLINKED_PATH`, `SETTINGS_UNREADABLE` — the human
-   fixes the named path; `ALREADY_DEVENDORED` — run the doctor instead; `VENDORED_POLICY_UNREADABLE`,
-   `DEVENDOR_ROUNDTRIP` — stop and report verbatim.
+   point the gate at a repository script first; `SYMLINKED_PATH`, `SETTINGS_UNREADABLE`,
+   `CHECKLIST_NOT_MOVABLE` — the human fixes the named path; `ALREADY_DEVENDORED` — run the
+   doctor; `VENDORED_POLICY_UNREADABLE`, `DEVENDOR_ROUNDTRIP` — stop and report verbatim.
 
    It writes `.autoloop/config.json` (overrides only) from the legacy config, the vendored
    escalate paths and the filled merge executor, read as JavaScript; moves the STATE prose to
    `.autoloop/STATE.md` with the current template's preamble and Config section; removes the
-   plugin's files and strips only autoloop's hook handlers. ARCH, LESSONS and the checklist stay.
+   plugin's files and strips only autoloop's hook handlers. ARCH and LESSONS stay.
 3. Show the typed report and `git -C <scratch>/devendor diff --stat`, then run the doctor against
-   the worktree (`verify.mjs --project-root <scratch>/devendor`). From the report: `kept` names
+   the worktree (`verify.mjs --project-root <scratch>/devendor`). In the report: `kept` names
    the repository's own files left in `tools/agentic/`; `staleProse` and `staleReferences` name
    lines in STATE, CLAUDE.md, AGENTS.md, ARCH, LESSONS and the checklist that still name the
-   vendored layout — ask whether to edit each in this PR.
-4. `fingerprintChanged: true` means every open loop PR reviewed before this lands needs its review
-   re-run (the chain binds the config's fingerprint): list them for the human.
+   vendored layout (or a moved checklist's path) — ask whether to edit each in this PR.
+4. Open loop branches predate the config: after the merge each needs the base merged in (their
+   tools refuse till then), and with `fingerprintChanged: true` a review re-run. List them.
 5. Commit in the worktree (`git -C … commit -F <file>`), push, open the PR with `--body-file`.
    Never merge it yourself.
 6. After the human merges, in this order: `git worktree remove <scratch>/devendor`; have every other

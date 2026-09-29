@@ -14,7 +14,9 @@
 // This decides only whether a hook acts OUTSIDE an open run. Once prime opened
 // a run (it refuses unless this repository is active), the guards act for the
 // rest of the run whatever the checkout later says: a deleted config or a
-// checked-out pre-devendor branch must not switch them off.
+// checked-out pre-devendor branch must not switch them off. The run marker
+// itself lives in the git dir, which the run can write — the guards are only
+// as durable as that marker.
 //
 //   node <plugin-tools>/hook-root.mjs --self-test
 
@@ -160,7 +162,7 @@ export function activeAutoloopRoot(root = hookRoot()) {
 
 // Where a plugin hook acts: the devendored autoloop repository at the project
 // root, or — while a plugin run is open — that root whatever the checkout now
-// says, so no file the run can change switches the hooks off mid-run.
+// says, so no tracked file the run changes switches the hooks off mid-run.
 export function guardedRoot(projectRoot = hookRoot()) {
   return activeAutoloopRoot(projectRoot)
     ?? (pluginRunBase([process.cwd(), projectRoot]) === null ? null : projectRoot);
