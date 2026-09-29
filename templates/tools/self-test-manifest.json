@@ -32,6 +32,7 @@
     "review-contract.mjs": "e1b171d778beba228af8781c827ca6bddbf3b9eac08f7b0bb446fdf3239bb9b6",
     "scaffold.mjs": "dbea56e83398627e3e08724ec3975bc1d0714366b9f58ad03a25e01916b4ed5e",
     "scan.mjs": "f9582f6bef6a84faab54a4baa29288e13337fd70bba3cb274e2b127fef28ebb8",
+    "setup.mjs": "d3d802c15eef7a08baa9f64f88d5ec01286acc6e9eed9c700cc4282e8d184863",
     "sizing-contract.mjs": "7bc0bf94e9103bba3fd7d6100aa0a27f2d028789ffba281a64945c07de3ddf14",
     "snapshot-contract.mjs": "86adc89209b6b457c054dc32bf5538fdd43ce8eb099ebb9c67bd5155426190db",
     "stats.mjs": "41622973c6aae6395461d4fde362837063714c935cb8507ffd9a7188c15d42ee",

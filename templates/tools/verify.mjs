@@ -58,6 +58,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'review-contract.mjs',
   'scaffold.mjs',
   'scan.mjs',
+  'setup.mjs',
   'sizing-contract.mjs',
   'snapshot-contract.mjs',
   'stats.mjs',
