@@ -16,9 +16,13 @@ Your first output, before a tool call or question, is exactly:
 
 If a tool call already happened, print the banner with the next output. Print it once.
 
-Mark each phase with a state badge (⏳ in progress · ❌ blocked · ⚠️ needs a human) and a
-five-cell ribbon in the same `∞` visual language — `▰` for done-or-current, `▱` for remaining —
-as the phase begins:
+**Every phase begins with one call, which prints its ribbon; repeat that line verbatim.** All
+five phases, every run — a live setup that ran all five printed ribbons 1, 2 and 4 by hand, so the
+operator could not tell that verification and delivery had happened:
+
+```bash
+node <templates>/tools/step.mjs --setup <resolve|audit|interview|write|verify> [--badge ❌|⚠️]
+```
 
 ```text
 ⏳ ∞ ▰▱▱▱▱ 1/5 RESOLVE ─ version · mode · base
@@ -28,7 +32,8 @@ as the phase begins:
 ⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY ─ evidence · delivery
 ```
 
-Do not re-print a phase's ribbon when it completes — ✅ belongs only on the closing rail.
+The badge is ⏳ unless the phase begins blocked (❌) or needing a human (⚠️). Do not re-print a
+phase's ribbon when it completes — ✅ belongs only on the closing rail.
 
 Doctor mode replaces the ribbon with its own single line: `∞ doctor ─ <audited ref>`.
 

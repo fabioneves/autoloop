@@ -33,6 +33,22 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'setup-ran-five-phases-and-printed-three-ribbons',
+    date: '2026-09-29',
+    symptom: 'LFE: a 0.55.3 setup ran resolve, audit, interview, write and verify '
+      + 'but printed only ribbons 1/5, 2/5 and 4/5; the operator asked where '
+      + 'step 5 was, though verification and delivery had run.',
+    cause: 'Setup ribbons were prose for the model to print by hand; nothing '
+      + 'produced them, so phases went unannounced.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'step.mjs', anchor: 'export function renderSetupPhase(' }),
+      Object.freeze({
+        file: '../../skills/setup/SKILL.md',
+        anchor: '**Every phase begins with one call, which prints its ribbon; repeat that line verbatim.**',
+      }),
+    ]),
+  }),
+  Object.freeze({
     id: 'setup-wrote-the-new-schema-before-the-new-guard',
     date: '2026-09-29',
     symptom: 'LFE: setup to 0.55.2 wrote STATE 0.28.0, then every Bash command '
