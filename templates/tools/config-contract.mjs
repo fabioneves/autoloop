@@ -283,7 +283,7 @@ function validateLegacyTracker(value, errors) {
   }
 }
 
-function validChecklistPath(value) {
+function validRepoRelativePath(value) {
   if (
     typeof value !== 'string'
     || value.length === 0
@@ -299,9 +299,24 @@ function validChecklistPath(value) {
   return value.split('/').every((part) => part && part !== '.' && part !== '..');
 }
 
+// The repository's own human-authorization paths (policy-as-data): globs
+// escalate-paths and the lane classifier add to the structural families.
+// Optional with no default, so the key's absence changes nothing.
+function validateProtectedPaths(value, errors) {
+  if (!Array.isArray(value)) {
+    errors.push('protectedPaths: must be an array of repository-relative globs');
+    return;
+  }
+  value.forEach((glob, index) => {
+    if (!validRepoRelativePath(glob)) {
+      errors.push(`protectedPaths[${index}]: must be a normalized repository-relative glob`);
+    }
+  });
+}
+
 function validateReview(value, errors) {
   if (!validateObjectShape(value, 'review', ['checklistPath'], [], errors)) return;
-  if (hasOwn(value, 'checklistPath') && !validChecklistPath(value.checklistPath)) {
+  if (hasOwn(value, 'checklistPath') && !validRepoRelativePath(value.checklistPath)) {
     errors.push('review.checklistPath: must be a normalized repository-relative path');
   }
 }
@@ -405,8 +420,9 @@ function validateProjectValues(cfg, expectedVersion, errors) {
 
 export function validateConfig(cfg) {
   const errors = [];
-  if (!validateObjectShape(cfg, '', PROJECT_KEYS, [], errors)) return errors;
+  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['protectedPaths'], errors)) return errors;
   validateProjectValues(cfg, CONFIG_VERSION, errors);
+  if (hasOwn(cfg, 'protectedPaths')) validateProtectedPaths(cfg.protectedPaths, errors);
   return errors;
 }
 
@@ -2132,6 +2148,35 @@ function selfTest() {
       expect('a config.json that cannot be read says so, and a dangling symlink never falls back to STATE',
         directory?.ok === false && directory.errors.some((error) => /unreadable/u.test(error))
           && dangling?.ok === false && dangling.source === '.autoloop/config.json');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  {
+    // policy-as-data: the repository's own protected paths are config, not a
+    // vendored escalate-paths.mjs. Optional and additive, so 0.28.0 stays.
+    expect('protectedPaths holds repository-relative globs',
+      validateConfig({ ...projectFixture(), protectedPaths: ['spec/**', 'compose.y*ml', '**/compose.y*ml'] }).length === 0
+        && validateConfig({ ...projectFixture(), protectedPaths: [] }).length === 0);
+    expect('protectedPaths refuses anything that is not a list of safe relative globs',
+      ['spec/**', [1], ['/etc/**'], ['../up/**'], [''], ['a\\b']].every((value) =>
+        validateConfig({ ...projectFixture(), protectedPaths: value })
+          .some((error) => error.startsWith('protectedPaths'))));
+    const root = mkdtempSync(join(tmpdir(), 'config-protected-'));
+    try {
+      mkdirSync(join(root, '.autoloop'));
+      const file = join(root, '.autoloop', 'config.json');
+      const minimal = { version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'x' } };
+      writeFileSync(file, JSON.stringify({ ...minimal, protectedPaths: ['spec/**'] }));
+      const set = resolveProjectConfig(root);
+      writeFileSync(file, JSON.stringify(minimal));
+      // No default: a repository that never sets the key resolves exactly the
+      // config it resolved before, so a review chain's fingerprint holds.
+      const unset = resolveProjectConfig(root);
+      expect('protectedPaths resolves when set, and is absent when not',
+        set?.ok === true && JSON.stringify(set.config.protectedPaths) === '["spec/**"]'
+          && unset?.ok === true && !Object.hasOwn(unset.config, 'protectedPaths'));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

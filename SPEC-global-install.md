@@ -66,8 +66,8 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
 - **Defaults.** Plugin defaults (`DEFAULT_CONFIG`) are deep-merged under the project file. The
   project states only what differs. Validation runs on the merged result, and unknown keys are
   refused.
-- **Schema.** It stays 0.28.0 in this module; the 0.29.0 bump comes with the policy keys in
-  policy-as-data. Everything except `version`, `baseBranch` and `gate.command` has a default.
+- **Schema.** It stays 0.28.0. Everything except `version`, `baseBranch` and `gate.command` has a
+  default.
 - **STATE prose.** It moves to `.autoloop/STATE.md`, with the legacy path as fallback. SessionStart
   injects whichever exists.
 - **Checklist.** `review.checklistPath` defaults to `.autoloop/checklist.md` if present, else the
@@ -80,9 +80,13 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
 
 ### policy-as-data
 
+- **Schema.** The keys are additive and optional, so the schema stays 0.28.0. A key with no
+  default is simply absent, so a repository that never sets one resolves exactly the config it
+  resolved before, and a review chain's config fingerprint holds.
 - **New config keys:**
-  - `protectedPaths` replaces `escalate-paths.mjs` `ESCALATE_PATHS` and `auto-merge`
-    `EXTRA_PROTECTED_PATHS`; the structural families stay in the plugin;
+  - `protectedPaths` (no default) replaces the repo entries of `escalate-paths.mjs`
+    `ESCALATE_PATHS` and `auto-merge` `EXTRA_PROTECTED_PATHS`; the structural families stay in the
+    plugin. A config that cannot be resolved leaves them unknown, so `escalate-paths` exits 2;
   - `merge.reversiblePaths` (default `["docs/**"]`);
   - `merge.loopLogin`, `merge.trustedHumans`;
   - `AUTOMERGE_MODE` stays derived from `merge.policy` (`auto` → `all-green`, `ratified` →
