@@ -33,6 +33,20 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'installed-loop-smoke-omitted-the-role-briefs',
+    date: '2026-09-29',
+    symptom: 'LFE: setup to 0.55.1 ran the installed tools/agentic/loop-smoke.mjs '
+      + 'and dispatch:plan-review failed with BRIEF_TEMPLATE_MISSING; the plugin '
+      + 'battery had passed the same file as release-proven.',
+    cause: 'From an installed copy the smoke builds its fixture by copying '
+      + 'UNIVERSAL_TOOL_FILES; 0.54.0 added briefs/ to what scaffold vendors but '
+      + 'not to that list. The plugin run builds its fixture through scaffold, '
+      + 'so only the installed path ever lacked the briefs, and nothing ran it.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'loop-smoke.mjs', anchor: "timedPhase('installed-copy'" }),
+    ]),
+  }),
+  Object.freeze({
     id: 'hook-relay-ran-the-old-guard-during-setup-reconcile',
     date: '2026-09-28',
     symptom: 'LFE: setup migrated STATE to 0.28.0 and reconciled tools/agentic '
