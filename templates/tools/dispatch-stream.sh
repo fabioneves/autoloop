@@ -60,7 +60,7 @@ echo "▸ full view: node $self_dir/dispatch-render.mjs --follow $live"
 # degrades to the raw stream rather than a dead watcher.
 if [ -f "$self_dir/dispatch-render.mjs" ]; then
   tail --pid "$dispatch_pid" -n +1 -F "$live" 2>/dev/null \
-    | node "$self_dir/dispatch-render.mjs"
+    | node "$self_dir/dispatch-render.mjs" --compact
 else
   tail --pid "$dispatch_pid" -n +1 -F "$live" 2>/dev/null
 fi

@@ -33,6 +33,19 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'foreground-dispatch-stream-flooded-the-orchestrator',
+    date: '2026-09-29',
+    symptom: 'LFE: one implement dispatch streamed ~196 lines / 21.9 KB into the '
+      + 'orchestrator by 5.5 minutes (314 lines / 30.7 KB for the whole live file); '
+      + 'about 8 dispatches per unit brought compaction forward.',
+    cause: 'Dispatches run in the foreground since background shells were killed, '
+      + 'so the pane stream rendered for a task view became the tool result.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch-render.mjs', anchor: "'the compact pane is bounded however long the dispatch runs'" }),
+      Object.freeze({ file: 'dispatch-stream.sh', anchor: 'dispatch-render.mjs" --compact' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'no-whole-run-kill-switch',
     date: '2026-09-29',
     symptom: 'Found comparing with a sibling loop project: a human could pause '
