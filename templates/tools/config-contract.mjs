@@ -487,21 +487,27 @@ export function resolveProjectConfig(root, read = (path) => readFileSync(path, '
     try {
       parsed = JSON.parse(read(jsonPath));
     } catch (error) {
-      return { ok: false, source, errors: [`${PROJECT_CONFIG_FILE}: not valid JSON (${error.message})`] };
+      return { ok: false, unreadable: true, source, errors: [`${PROJECT_CONFIG_FILE}: not valid JSON (${error.message})`] };
     }
-    if (!isRecord(parsed)) return { ok: false, source, errors: ['config: must be an object'] };
+    if (!isRecord(parsed)) return { ok: false, unreadable: false, source, errors: ['config: must be an object'] };
     const current = currentProjectConfig(withDefaults(parsed));
-    return current.ok ? { ok: true, source, config: current.config } : { ok: false, source, errors: current.errors };
+    return current.ok
+      ? { ok: true, source, config: current.config }
+      : { ok: false, unreadable: false, source, errors: current.errors };
   }
   const statePath = join(root, LEGACY_STATE_FILE);
   if (!existsSync(statePath)) return null;
   const source = LEGACY_STATE_FILE;
+  let legacy;
   try {
-    const current = currentProjectConfig(extractConfig(read(statePath)));
-    return current.ok ? { ok: true, source, config: current.config } : { ok: false, source, errors: current.errors };
+    legacy = extractConfig(read(statePath));
   } catch (error) {
-    return { ok: false, source, errors: [error.message] };
+    return { ok: false, unreadable: true, source, errors: [error.message] };
   }
+  const current = currentProjectConfig(legacy);
+  return current.ok
+    ? { ok: true, source, config: current.config }
+    : { ok: false, unreadable: false, source, errors: current.errors };
 }
 
 export function extractConfig(markdown) {
@@ -2092,9 +2098,10 @@ function selfTest() {
           && validateConfig(json.config).length === 0);
       expect('a required key without a default is refused with its path',
         missing?.ok === false && missing.errors.some((error) => error.startsWith('baseBranch')));
-      expect('unreadable JSON and invalid values are refused, never defaulted over',
-        broken?.ok === false && broken.errors.some((error) => /JSON/u.test(error))
-          && invalid?.ok === false && invalid.errors.some((error) => error.startsWith('merge.policy')));
+      expect('unreadable JSON and invalid values are refused, never defaulted over, and say which',
+        broken?.ok === false && broken.unreadable === true && broken.errors.some((error) => /JSON/u.test(error))
+          && invalid?.ok === false && invalid.unreadable === false
+          && invalid.errors.some((error) => error.startsWith('merge.policy')));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

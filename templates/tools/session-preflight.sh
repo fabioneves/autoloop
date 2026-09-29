@@ -35,7 +35,7 @@ else
   release_contract="$REPO_DIR/tools/agentic/release-verify.mjs"
   dispatch_tool="$REPO_DIR/tools/agentic/dispatch.mjs"
   if [ -f "$config_contract" ]; then
-    node "$config_contract" "$REPO_DIR/docs/agentic/STATE.md" 2>&1 || true
+    node "$config_contract" --root "$REPO_DIR" 2>&1 || true
   else
     echo 'FAIL  tools/agentic/config-contract.mjs missing — re-run autoloop:setup before the loop runs'
   fi
@@ -139,7 +139,7 @@ fi
 # with: observed three times in one day, where a fix that had shipped, installed
 # and reconciled onto the base was still inert because the checkout predated it.
 configured_base=$(sed -n 's/.*"baseBranch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-  "$REPO_DIR/docs/agentic/STATE.md" 2>/dev/null | head -1)
+  "$REPO_DIR/.autoloop/config.json" "$REPO_DIR/docs/agentic/STATE.md" 2>/dev/null | head -1)
 current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 if [ -n "$configured_base" ] && [ -n "$current_branch" ]; then
   if [ "$current_branch" = "$configured_base" ]; then

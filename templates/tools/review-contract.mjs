@@ -25,13 +25,13 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
+  mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { snapshotExecutionCheckout } from './checkout-contract.mjs';
-import { currentProjectConfig, extractConfig } from './config-contract.mjs';
+import { currentProjectConfig, resolveProjectConfig } from './config-contract.mjs';
 import { validReviewVerdict } from './dispatch.mjs';
 
 const GATING_SEVERITIES = new Set(['Critical', 'Major']);
@@ -532,6 +532,16 @@ function authenticatedFindings(rounds, gaps = []) {
     }
   }
   return history;
+}
+
+// Round 1's projectConfig must equal prime's, which comes from the resolver:
+// `--state` names the base checkout's legacy STATE.md or .autoloop/config.json,
+// and the repository root is derived from it.
+export function projectConfigForReview(path) {
+  const root = basename(path) === 'config.json' ? resolve(path, '..', '..') : resolve(path, '..', '..', '..');
+  const resolved = resolveProjectConfig(root);
+  if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
+  return resolved.config;
 }
 
 // Review convergence is a fixed plugin bound since 0.28.0 (operator,
@@ -1839,6 +1849,31 @@ function selfTest() {
     expected: ['continue', false],
     expectedCode: 'REVIEW_FIX_DELTA_REQUIRED',
   });
+  // Global install: round 1's projectConfig must equal prime's resolved one
+  // (defaults filled, older schemas migrated), or the fingerprint breaks.
+  const reviewConfigCheck = (() => {
+    const root = mkdtempSync(join(tmpdir(), 'review-config-'));
+    try {
+      mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
+      const statePath = join(root, 'docs', 'agentic', 'STATE.md');
+      writeFileSync(statePath, `\`\`\`json autoloop-config\n${JSON.stringify({ ...chainConfig027 })}\n\`\`\`\n`);
+      const legacy = projectConfigForReview(statePath);
+      mkdirSync(join(root, '.autoloop'));
+      const jsonPath = join(root, '.autoloop', 'config.json');
+      writeFileSync(jsonPath, JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'x' } }));
+      return legacy.version === '0.28.0' && legacy.caps === undefined
+        && projectConfigForReview(statePath).baseBranch === 'trunk'
+        && projectConfigForReview(jsonPath).baseBranch === 'trunk'
+        && projectConfigForReview(jsonPath).merge.policy === 'manual';
+    } catch (error) {
+      console.error(`round-1 config check threw: ${error.message}`);
+      return false;
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
+  if (!reviewConfigCheck) cases.push({ name: 'round 1 resolves the project config like prime', input: null, expected: ['never', false] });
+
   cases.push({
     name: 'a JSON input cannot lower the review cap',
     input: inputFor([acceptedFirst], JSON.parse(JSON.stringify(fixtureProjectConfig(1)))),
@@ -2368,7 +2403,7 @@ function appendRoundMain(args) {
       dispositions: optionalJson('--dispositions-file'),
     };
     if (first) {
-      const projectConfig = extractConfig(readFileSync(flagValue(args, '--state') ?? '', 'utf8'));
+      const projectConfig = projectConfigForReview(flagValue(args, '--state') ?? '');
       const baseOid = flagValue(args, '--base-oid') ?? String(spawnSync(
         'git',
         ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${projectConfig.baseBranch}`],

@@ -42,7 +42,7 @@ import {
   ownRunMarkers,
   runMarkerDirectory,
 } from './command-guard.mjs';
-import { extractConfig, validateProjectConfig } from './config-contract.mjs';
+import { resolveProjectConfig } from './config-contract.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
@@ -171,23 +171,9 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   const { checkout, repository } = snapshotRepository;
   const root = checkout.root;
 
-  let config;
-  try {
-    config = extractConfig(
-      readFileSync(join(root, 'docs', 'agentic', 'STATE.md'), 'utf8'),
-    );
-  } catch (error) {
-    return failure('config', 'PROJECT_CONFIG_UNREADABLE', error.message);
-  }
-  const configErrors = validateProjectConfig(config);
-  if (configErrors.length > 0) {
-    return failure(
-      'config',
-      'PROJECT_CONFIG_INVALID',
-      configErrors.join('; '),
-      { errors: configErrors },
-    );
-  }
+  const read = readPrimeConfig(root);
+  if (read.error !== undefined) return read;
+  const { config } = read;
 
   const base = baseSyncFacts(root, config.baseBranch);
   clearRunParks(root);
@@ -375,6 +361,23 @@ export function sectionSummary(snapshot) {
       ...(section?.error ? { error: section.error } : {}),
     }]),
   );
+}
+
+// The project config through the one resolver (.autoloop/config.json over
+// plugin defaults, else the legacy STATE block migrated in memory), keeping
+// prime's two typed failures: nothing readable vs. a config that fails.
+export function readPrimeConfig(root) {
+  const resolved = resolveProjectConfig(root);
+  if (resolved === null) {
+    return failure('config', 'PROJECT_CONFIG_UNREADABLE',
+      'no .autoloop/config.json or docs/agentic/STATE.md autoloop-config block');
+  }
+  if (!resolved.ok) {
+    return resolved.unreadable
+      ? failure('config', 'PROJECT_CONFIG_UNREADABLE', resolved.errors.join('; '))
+      : failure('config', 'PROJECT_CONFIG_INVALID', resolved.errors.join('; '), { errors: resolved.errors });
+  }
+  return { config: resolved.config };
 }
 
 // A full snapshot is hundreds of kilobytes; a model-facing tool result is
@@ -736,7 +739,32 @@ function selfTest() {
     })(),
   );
 
-  // Review of 0.56.1: with `eligible: []` a halt read as a drained queue, and
+  // Global install: prime reads .autoloop/config.json over plugin defaults,
+  // the legacy STATE block in memory, and refuses typed when neither exists.
+  check(
+    'prime reads the project config through the resolver and keeps its typed failures',
+    (() => {
+      const root = mkdtempSync(join(tmpdir(), 'prime-config-'));
+      try {
+        const none = readPrimeConfig(root);
+        mkdirSync(join(root, '.autoloop'), { recursive: true });
+        writeFileSync(join(root, '.autoloop', 'config.json'), '{ nope');
+        const unreadable = readPrimeConfig(root);
+        writeFileSync(join(root, '.autoloop', 'config.json'),
+          JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'true' } }));
+        const good = readPrimeConfig(root);
+        return none.error?.code === 'PROJECT_CONFIG_UNREADABLE'
+          && unreadable.error?.code === 'PROJECT_CONFIG_UNREADABLE'
+          && good.config?.baseBranch === 'trunk' && good.config?.merge?.policy === 'manual';
+      } catch {
+        return false;
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    })(),
+  );
+
+  // Review of 0.55.5: with `eligible: []` a halt read as a drained queue, and
   // a resumed unit still said "take it first".
   check(
     'a halt is named, and a resumed unit is not pointed past it',

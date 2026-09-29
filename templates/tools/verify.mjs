@@ -21,7 +21,7 @@ import {
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { extractConfig, validateConfig } from './config-contract.mjs';
+import { resolveProjectConfig } from './config-contract.mjs';
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const SELF_TEST_MANIFEST_NAME = 'self-test-manifest.json';
@@ -395,16 +395,14 @@ function installedEntrypointChecks(root, toolsDir) {
 
 function checkConfiguredChecklist(root) {
   try {
-    const statePath = resolve(root, 'docs', 'agentic', 'STATE.md');
-    const config = extractConfig(readFileSync(statePath, 'utf8'));
-    const errors = validateConfig(config);
-    if (errors.length > 0) {
+    const resolved = resolveProjectConfig(root);
+    if (!resolved?.ok) {
       return {
         ok: false,
-        detail: `ProjectConfig is invalid: ${errors.join('; ')}`,
+        detail: `ProjectConfig is invalid: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`,
       };
     }
-    return checkExists(resolve(root, config.review.checklistPath));
+    return checkExists(resolve(root, resolved.config.review.checklistPath));
   } catch (error) {
     return { ok: false, detail: `cannot resolve configured checklist: ${error.message}` };
   }
@@ -666,14 +664,8 @@ function installedToolFiles(config) {
 
 function installChecks(root, { full = false } = {}) {
   const toolsDir = resolve(root, 'tools', 'agentic');
-  let config = null;
-  try {
-    const state = readFileSync(resolve(root, 'docs', 'agentic', 'STATE.md'), 'utf8');
-    const candidate = extractConfig(state);
-    if (validateConfig(candidate).length === 0) config = candidate;
-  } catch {
-    config = null;
-  }
+  const resolved = resolveProjectConfig(root);
+  const config = resolved?.ok ? resolved.config : null;
   const requiredFiles = installedToolFiles(config);
   const checks = toolChecks(root, toolsDir, requiredFiles, 'install', { full });
   checks.push({

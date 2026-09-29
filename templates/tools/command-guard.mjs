@@ -53,9 +53,8 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  MIGRATABLE_CONFIG_VERSIONS,
-  extractConfig,
-  validateConfig,
+  CONFIG_VERSION,
+  resolveProjectConfig,
 } from './config-contract.mjs';
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { relayHookToBase } from './hook-relay.mjs';
@@ -2656,27 +2655,15 @@ export function loopRunIsLive(cwd = process.cwd()) {
   return ownRunMarkers(cwd).some(({ marker }) => marker.closedAt === undefined);
 }
 
+// The hook passes the legacy STATE path; its repository root is two levels up.
+// The config comes from the one resolver: .autoloop/config.json over plugin
+// defaults, else the legacy STATE block migrated in memory (an older schema no
+// longer switches the guard off — it enforces the migrated config).
 export function loadConfiguredBase(statePath) {
-  const config = extractConfig(readFileSync(statePath, 'utf8'));
-  const errors = validateConfig(config);
-  if (errors.length > 0) {
-    // A configuration awaiting migration is not a hostile one. Refusing here
-    // blocks every command in the repository, including the ones Setup needs to
-    // perform the migration, so report the remedy and let the command through.
-    // No loop can run under an unmigrated schema — Runtime rejects it at open —
-    // so nothing the guard exists to protect is reachable in this state.
-    if (MIGRATABLE_CONFIG_VERSIONS.includes(config?.version)) {
-      throw Object.assign(
-        new Error(
-          `repository configuration is schema ${config.version}; `
-          + 'run autoloop:setup to migrate. The command guard is inactive until then',
-        ),
-        { migrationPending: true },
-      );
-    }
-    throw new Error(`invalid ProjectConfig: ${errors.join('; ')}`);
-  }
-  return config.baseBranch;
+  const resolved = resolveProjectConfig(resolve(dirname(statePath), '..', '..'));
+  if (resolved === null) throw new Error('no autoloop configuration in this repository');
+  if (!resolved.ok) throw new Error(`invalid ProjectConfig (${resolved.source}): ${resolved.errors.join('; ')}`);
+  return resolved.config.baseBranch;
 }
 
 export function parseArgs(args) {
@@ -3248,6 +3235,32 @@ function selfTest() {
       console.error(`FAIL [expect block=${expect}, got ${got}]: ${cmd.split('\n')[0]}`);
       ok = false;
     }
+  }
+  // Global install: the base branch comes from .autoloop/config.json
+  // (over plugin defaults), else the legacy STATE block, else nothing.
+  const baseCases = (() => {
+    const root = mkdtempSync(join(tmpdir(), 'guard-base-'));
+    const statePath = join(root, 'docs', 'agentic', 'STATE.md');
+    const attempt = () => {
+      try {
+        return loadConfiguredBase(statePath);
+      } catch (error) {
+        return `THREW ${error.message}`;
+      }
+    };
+    try {
+      const none = attempt();
+      mkdirSync(join(root, '.autoloop'), { recursive: true });
+      writeFileSync(join(root, '.autoloop', 'config.json'),
+        JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'develop', gate: { command: 'true' } }));
+      return [none, attempt()];
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
+  if (!(baseCases[0].startsWith('THREW') && baseCases[1] === 'develop')) {
+    console.error(`FAIL [the guard reads its base branch through the project config resolver]: ${baseCases.join(' | ')}`);
+    ok = false;
   }
   // Every refusal must read as policy: a consistent guard identity prefix and a
   // closing sentence naming the sanctioned alternative, never an error dump.
@@ -3871,14 +3884,10 @@ function main() {
   try {
     baseBranch = loadConfiguredBase(parsed.statePath);
   } catch (error) {
-    if (error.migrationPending === true) {
-      console.error(`command-guard: ${error.message}`);
-      process.exit(0);
-    }
     refuse(
       `autoloop guard — the configured base branch cannot be resolved (${error.message}), `
       + 'so branch-sensitive rules cannot be proven. Run autoloop:setup to repair '
-      + 'docs/agentic/STATE.md.',
+      + '.autoloop/config.json.',
     );
   }
   const verdict = evaluate(cmd, currentBranch(), { baseBranch, cwd: payload?.cwd });
