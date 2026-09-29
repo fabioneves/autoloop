@@ -33,6 +33,45 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'foreground-dispatch-stream-flooded-the-orchestrator',
+    date: '2026-09-29',
+    symptom: 'LFE: one implement dispatch streamed ~196 lines / 21.9 KB into the '
+      + 'orchestrator by 5.5 minutes (314 lines / 30.7 KB for the whole live file); '
+      + 'about 8 dispatches per unit brought compaction forward.',
+    cause: 'Dispatches run in the foreground since background shells were killed, '
+      + 'so the pane stream rendered for a task view became the tool result.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch-render.mjs', anchor: "'the compact pane is bounded however long the dispatch runs'" }),
+      Object.freeze({ file: 'dispatch-stream.sh', anchor: 'dispatch-render.mjs" --compact' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'no-whole-run-kill-switch',
+    date: '2026-09-29',
+    symptom: 'Found comparing with a sibling loop project: a human could pause '
+      + 'auto-merge (automerge:halt) but had no way to stop the loop taking '
+      + 'new units short of killing the session.',
+    cause: 'Selection had no run-wide stop predicate.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "...(context.halted ? ['loop-halted'] : [])," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'function liftsHaltLabel(' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'nothing-kept-edits-off-the-hook-wiring',
+    date: '2026-09-29',
+    symptom: 'Found comparing with a sibling loop project: a dispatched writer '
+      + '(hooks off, Edit/Write allowed) and a live-run orchestrator (guard '
+      + 'matched Bash only) could both edit the hook wiring that runs the guard.',
+    cause: 'Hook wiring was protected against shell commands only. Scope is the '
+      + 'wiring alone (operator, 2026-09-29): other loop infrastructure is built '
+      + 'through the queue and flagged human:authorize at merge.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'edit-guard.mjs', anchor: 'export function hookWiringEditProblem(' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'a dispatch denies edits to the hook wiring of its worktree and its main checkout'" }),
+    ]),
+  }),
+  Object.freeze({
     id: 'setup-ran-five-phases-and-printed-three-ribbons',
     date: '2026-09-29',
     symptom: 'LFE: a 0.55.3 setup ran resolve, audit, interview, write and verify '

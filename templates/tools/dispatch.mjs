@@ -311,7 +311,34 @@ export function pluginsDir(env = process.env) {
   return join(env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'plugins');
 }
 
-function processSettings(tools, readRoots = []) {
+// The hook wiring a writer must never touch: the settings files that run the
+// session's guard (operator, 2026-09-29: the wiring alone — other loop
+// infrastructure is built through the queue and flagged human:authorize). A
+// writer child runs with hooks off and Edit allowed, so these deny rules keep
+// it off them (an Edit deny also refuses Write; verified live). Both the
+// dispatch's own worktree and the MAIN checkout are covered: the hooks run
+// the main checkout's copy. A Bash write is not covered here.
+const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);
+
+export function hookWiringRoots(cwd) {
+  const git = (args) => {
+    const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+    return result.status === 0 ? result.stdout.trim() : '';
+  };
+  const worktree = git(['rev-parse', '--show-toplevel']) || resolve(cwd);
+  const common = git(['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const main = common ? dirname(common) : worktree;
+  const real = (path) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  };
+  return [...new Set([real(worktree), real(main)])];
+}
+
+function processSettings(tools, readRoots = [], wiringRoots = []) {
   return {
     permissions: {
       allow: [
@@ -324,6 +351,9 @@ function processSettings(tools, readRoots = []) {
         'Read(~/.gitconfig)',
         'Read(~/.netrc)',
         'Read(~/.ssh/**)',
+        // A root with permission-rule metacharacters would corrupt the rule.
+        ...wiringRoots.filter((root) => !/[()*[\]]/u.test(root))
+          .flatMap((root) => HOOK_WIRING.map((path) => `Edit(/${root}/${path})`)),
       ],
     },
   };
@@ -346,7 +376,7 @@ export function resolveTools(role, requested = null) {
 
 // Pure: the exact argv a dispatch launches, so the self-test can pin the
 // posture without spawning anything.
-export function dispatchArgv(role, tools, readRoots = []) {
+export function dispatchArgv(role, tools, readRoots = [], wiringRoots = []) {
   const { posture, result } = ROLES[role];
   return [
     '--print',
@@ -361,7 +391,7 @@ export function dispatchArgv(role, tools, readRoots = []) {
     '--strict-mcp-config',
     '--disable-slash-commands',
     '--settings',
-    JSON.stringify(processSettings(tools, readRoots)),
+    JSON.stringify(processSettings(tools, readRoots, wiringRoots)),
     '--permission-mode',
     POSTURES[posture].permissionMode,
     '--tools',
@@ -373,9 +403,9 @@ export function dispatchArgv(role, tools, readRoots = []) {
 // fixture shim on a path and an installed binary resolve the same way. Other
 // models are reached through a proxied route, never a second CLI. Codex was a
 // second engine until 0.51.0 and is refused by name.
-function claudeArgv(role, tools, model, effort, readRoots = []) {
+function claudeArgv(role, tools, model, effort, readRoots = [], wiringRoots = []) {
   return [
-    ...dispatchArgv(role, tools, readRoots),
+    ...dispatchArgv(role, tools, readRoots, wiringRoots),
     ...(model === null ? [] : ['--model', model]),
     ...(effort === null ? [] : ['--effort', effort]),
   ];
@@ -1156,7 +1186,7 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 function runEngine({
   role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl, readRoots,
 }) {
-  const argv = claudeArgv(role, tools, model ?? null, effort ?? null, readRoots ?? []);
+  const argv = claudeArgv(role, tools, model ?? null, effort ?? null, readRoots ?? [], hookWiringRoots(cwd));
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
@@ -1702,6 +1732,35 @@ function selfTest() {
       && writerArgv.includes('Read(//home/op/.claude/plugins/**)')
       && !writerArgv.includes('--add-dir')
       && !launchedArgv.includes('unit-356'));
+    // sibling loop project comparison, 2026-09-29: a writer child runs with hooks off
+    // (--safe-mode) and Edit/Write allowed, so nothing kept it off the hook
+    // wiring that runs the session's guard. Deny beats the allow list
+    // (verified live: an Edit(...) deny also refuses Write). Review of
+    // 0.55.5: a unit worktree's writer must be kept off the MAIN checkout's
+    // wiring, which is what the hooks actually run.
+    const wiringRoots = (() => {
+      const repo = mkdtempSync(join(tmpdir(), 'dispatch-wiring-'));
+      try {
+        spawnSync('git', ['init', '-q', '-b', 'main', repo]);
+        spawnSync('git', ['-C', repo, '-c', 'user.name=f', '-c', 'user.email=f@x', 'commit', '-q', '--allow-empty', '-m', 'x']);
+        const worktree = join(repo, '.claude', 'worktrees', 'unit');
+        spawnSync('git', ['-C', repo, 'worktree', 'add', '-q', '-b', 'unit', worktree]);
+        const roots = hookWiringRoots(worktree);
+        const argv = dispatchArgv('implement', resolveTools('implement'), [], roots).join(' ');
+        return { repo: realpathSync(repo), worktree: realpathSync(worktree), roots, argv };
+      } catch (error) {
+        return { error: error.message };
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    })();
+    check('a dispatch denies edits to the hook wiring of its worktree and its main checkout',
+      JSON.stringify(wiringRoots.roots) === JSON.stringify([wiringRoots.worktree, wiringRoots.repo])
+        && ['.claude/settings.json', '.claude/settings.local.json'].every((path) =>
+          wiringRoots.argv.includes(`Edit(/${wiringRoots.repo}/${path})`)
+          && wiringRoots.argv.includes(`Edit(/${wiringRoots.worktree}/${path})`))
+        && !wiringRoots.argv.includes('tools/agentic')
+        && dispatchArgv('implement', resolveTools('implement'), [], ['/a(b)']).join(' ').includes('/a(b)') === false);
     check('the plugin skills root defaults to ~/.claude/plugins and follows CLAUDE_CONFIG_DIR',
       pluginsDir({}) === join(homedir(), '.claude', 'plugins')
       && pluginsDir({ CLAUDE_CONFIG_DIR: '/cfg' }) === '/cfg/plugins');

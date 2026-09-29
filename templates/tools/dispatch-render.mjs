@@ -83,6 +83,9 @@ function toolLine(name, input, cwd) {
   if (name === 'Grep') return `▸ grep /${compact(input.pattern, 80)}/${where(input.path)}`;
   if (name === 'Glob') return `▸ glob ${compact(input.pattern, 80)}${where(input.path)}`;
   if (name === 'Bash') return `▸ $ ${compact(String(input.command ?? '').split('\n')[0], 140)}`;
+  if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(name)) {
+    return `▸ ${name.toLowerCase()} ${shortPath(input.file_path ?? input.notebook_path, cwd)}`;
+  }
   if (name === 'StructuredOutput') {
     return typeof input.verdict === 'string'
       ? `■ verdict ${input.verdict}${Array.isArray(input.findings) ? ` · ${input.findings.length} findings` : ''}`
@@ -157,6 +160,79 @@ export function createRenderer() {
   };
 }
 
+// The pane view for a FOREGROUND dispatch, whose whole stdout becomes the
+// orchestrator's tool result (LFE, 2026-09-29: ~196 lines / 21.9 KB at 5.5
+// minutes of one implement). Milestones and errors always show; reads and
+// searches fold into one count line; each text block shows its first line;
+// thinking ticks drop; detail stops after a fixed budget, and a totals line
+// closes it. The full stream stays one `--follow` away.
+const COMPACT_DETAIL_LINES = 30;
+const COMPACT_ERROR_LINES = 10;
+const FOLDED = Object.freeze(['read', 'grep', 'glob']);
+
+export function createCompactRenderer() {
+  const render = createRenderer();
+  const totals = new Map();
+  const folded = new Map();
+  let detail = 0;
+  let errors = 0;
+  let noted = false;
+  const count = (kind) => totals.set(kind, (totals.get(kind) ?? 0) + 1);
+  const spend = (line) => {
+    if (detail < COMPACT_DETAIL_LINES) {
+      detail += 1;
+      return [line];
+    }
+    if (noted) return [];
+    noted = true;
+    return ['… more in the full view (the ▸ full view command above)'];
+  };
+  const flush = () => {
+    if (folded.size === 0) return [];
+    const line = `▸ ${[...folded].map(([kind, n]) => `${kind} ×${n}`).join(' · ')}`;
+    folded.clear();
+    return spend(line);
+  };
+  const renderLine = (raw) => {
+    const out = [];
+    let textShown = false;
+    for (const line of render(raw)) {
+      if (line.startsWith('⋯ ')) continue;
+      if (line.startsWith('■ ')) {
+        out.push(...flush(), line);
+        continue;
+      }
+      if (line.trimStart().startsWith('✖')) {
+        count('error');
+        out.push(...flush());
+        if (errors < COMPACT_ERROR_LINES) {
+          errors += 1;
+          out.push(line);
+        }
+        continue;
+      }
+      if (line.startsWith('│ ')) {
+        if (!textShown) out.push(...flush(), ...spend(compact(line, 100)));
+        textShown = true;
+        continue;
+      }
+      const kind = /^▸ (\S+)/u.exec(line)?.[1];
+      if (kind !== undefined) count(kind === '$' ? 'bash' : kind);
+      if (FOLDED.includes(kind)) {
+        folded.set(kind, (folded.get(kind) ?? 0) + 1);
+        continue;
+      }
+      out.push(...flush(), ...spend(line));
+    }
+    return out;
+  };
+  const finish = () => [
+    ...flush(),
+    ...(totals.size ? [`■ totals · ${[...totals].map(([kind, n]) => `${kind} ${n}`).join(' · ')}`] : []),
+  ];
+  return { renderLine, finish };
+}
+
 function selfTest() {
   const render = createRenderer();
   const feed = (value) => render(typeof value === 'string' ? value : JSON.stringify(value));
@@ -222,6 +298,53 @@ function selfTest() {
       type: 'result', subtype: 'success', duration_ms: 459377, num_turns: 59, total_cost_usd: 6.312,
     }).join('') === '■ done · success · 7m 39s · 59 turns · $6.31'],
     ['terminal result renders', feed({ type: 'result', subtype: 'success' }).join('') === '■ done · success'],
+    ['an edit or write names its file, not its JSON input', feed({
+      type: 'assistant',
+      message: { content: [
+        { type: 'tool_use', name: 'Edit', input: { file_path: '/repo/engine/a.go', old_string: 'x', new_string: 'y' } },
+        { type: 'tool_use', name: 'Write', input: { file_path: '/repo/engine/b.go', content: 'z'.repeat(500) } },
+      ] },
+    }).join('\n') === '▸ edit engine/a.go\n▸ write engine/b.go'],
+    // LFE, 2026-09-29: dispatches run in the FOREGROUND (background shells were
+    // killed), so the whole pane stream becomes the orchestrator's tool result:
+    // ~196 lines / 21.9 KB at 5.5 minutes of one implement dispatch.
+    ['the compact pane folds reads, keeps changes and milestones, and totals at the end', (() => {
+      const pane = createCompactRenderer();
+      const tool = (name, input) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name, input }] } });
+      const lines = [
+        JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-opus-5-5', cwd: '/repo' }),
+        ...Array.from({ length: 5 }, (unused, index) => tool('Read', { file_path: `/repo/f${index}.ts` })),
+        tool('Grep', { pattern: 'x', path: '/repo' }),
+        tool('Edit', { file_path: '/repo/f1.ts', old_string: 'a', new_string: 'b' }),
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Implemented the codec.\nAll green.' }] } }),
+        JSON.stringify({ type: 'system', subtype: 'thinking_tokens', estimated_tokens: 9000 }),
+        tool('Bash', { command: 'pnpm test' }),
+        JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'exit 1' }] } }),
+        JSON.stringify({ type: 'result', subtype: 'success', duration_ms: 61000, num_turns: 9 }),
+      ].flatMap((line) => pane.renderLine(line));
+      return [...lines, ...pane.finish()].join('\n') === [
+        '■ engine up · claude-opus-5-5',
+        '▸ read ×5 · grep ×1',
+        '▸ edit f1.ts',
+        '│ Implemented the codec.',
+        '▸ $ pnpm test',
+        '  ✖ exit 1',
+        '■ done · success · 1m 1s · 9 turns',
+        '■ totals · read 5 · grep 1 · edit 1 · bash 1 · error 1',
+      ].join('\n');
+    })()],
+    ['the compact pane is bounded however long the dispatch runs', (() => {
+      const pane = createCompactRenderer();
+      const out = [];
+      for (let index = 0; index < 400; index += 1) {
+        out.push(...pane.renderLine(JSON.stringify({ type: 'assistant', message: { content: [
+          { type: 'tool_use', name: index % 2 ? 'Read' : 'Edit', input: { file_path: `/x/f${index}.ts` } }] } })));
+      }
+      out.push(...pane.finish());
+      return out.length <= 34
+        && out.filter((line) => line.startsWith('… ')).length === 1
+        && out.at(-1) === '■ totals · edit 200 · read 200';
+    })()],
     ['unknown typed events degrade to a marker', feed({ type: 'stream_event', subtype: 'x' }).join('') === '· stream_event/x'],
     ['non-JSON garbage passes through truncated', render('not json at all')[0] === '· not json at all'],
     ['empty and null lines render nothing', render('').length === 0 && render('null').length === 0],
@@ -251,7 +374,9 @@ export function followTarget(args) {
 
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  const render = createRenderer();
+  const compactPane = process.argv.length === 3 && process.argv[2] === '--compact';
+  const pane = compactPane ? createCompactRenderer() : null;
+  const render = pane?.renderLine ?? createRenderer();
   const follow = followTarget(process.argv.slice(2));
   const input = follow === null
     ? process.stdin
@@ -260,6 +385,11 @@ function main() {
   reader.on('line', (line) => {
     for (const out of render(line)) process.stdout.write(`${out}\n`);
   });
+  if (pane !== null) {
+    reader.on('close', () => {
+      for (const out of pane.finish()) process.stdout.write(`${out}\n`);
+    });
+  }
   // The pipe closing (tail exited with the dispatch) ends the renderer; any
   // stdout error (pane gone) must not crash a still-running dispatch's watcher.
   process.stdout.on('error', () => {});

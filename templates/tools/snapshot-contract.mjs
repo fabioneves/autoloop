@@ -1152,6 +1152,22 @@ export function repositoryAbsenceDecision(snapshot, purpose, matches) {
   return absenceDecision(snapshot, sections, matches);
 }
 
+// Case-insensitive, as scan and the guard compare labels: a kill switch fails
+// toward halted.
+function isHaltLabel(label) {
+  return String(label).toLowerCase() === 'loop-halt';
+}
+
+// The open issues carrying the kill switch; null when the open-issue section
+// cannot prove there are none.
+export function haltIssueNumbers(snapshot) {
+  const open = snapshot?.sections?.openIssues;
+  if (open?.complete !== true) return null;
+  return open.items.filter((issue) => issue.labels.some(isHaltLabel))
+    .map((issue) => issue.number)
+    .sort((left, right) => left - right);
+}
+
 function queueContext(snapshot) {
   return {
     blocked: new Set(snapshot.sections.blockedIssues.items.map((issue) => issue.number)),
@@ -1165,6 +1181,10 @@ function queueContext(snapshot) {
       snapshot.sections.lifecycleMarkers.items.map((marker) => marker.issueNumber),
     ),
     withinBudget: repairBudgetAllows(snapshot.sections.queue.items),
+    // The whole-run kill switch: any open issue labelled `loop-halt` stops
+    // new units. The open-issue section is required for selection, so an
+    // unreadable switch already means no selection.
+    halted: snapshot.sections.openIssues.items.some((issue) => issue.labels.some(isHaltLabel)),
   };
 }
 
@@ -1197,6 +1217,7 @@ function queueIneligibility(snapshot, issue, context) {
     ...(context.owned.has(issue.number) ? ['owned-by-loop-pr'] : []),
     ...(context.recovering.has(issue.number) ? ['lifecycle-marker'] : []),
     ...(issue.dependencies.every((dependency) => dependency.state === 'CLOSED') ? [] : ['open-dependency']),
+    ...(context.halted ? ['loop-halted'] : []),
   ];
 }
 
@@ -1594,7 +1615,7 @@ async function selfTest() {
     url: 'https://example.test/issues/7#issuecomment-1',
     ...overrides,
   });
-  const queueSnapshot = ({ blocked = false, waiting = false, incomplete = null, repair = null, lastEditedAt = null, labels = null } = {}) => {
+  const queueSnapshot = ({ blocked = false, waiting = false, incomplete = null, repair = null, lastEditedAt = null, labels = null, halt = false } = {}) => {
     const sections = Object.fromEntries(
       SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]),
     );
@@ -1628,7 +1649,12 @@ async function selfTest() {
       },
       ...(repair === null ? {} : { repair }),
     }]);
-    sections.openIssues = completeSection([issue]);
+    sections.openIssues = completeSection([
+      issue,
+      ...(halt ? [issueSnapshotItem({
+        number: 40, title: 'halt', body: 'stop', updatedAt: '2026-01-01T00:00:00Z', lastEditedAt: null, labels: ['loop-halt'],
+      })] : []),
+    ]);
     sections.blockedIssues = completeSection(blocked ? [issue] : []);
     sections.authorVerification = completeSection([{
       login: 'maintainer',
@@ -2473,7 +2499,18 @@ async function selfTest() {
     const waiting = card(queueSnapshot({ waiting: true }));
     const unqueued = card(queueSnapshot(), 99);
     const unknown = card(queueSnapshot({ incomplete: 'openIssues' }));
-    return eligible.eligible === true && stableJson(eligible.ineligibleBecause) === stableJson([])
+    // a sibling loop project comparison, 2026-09-29: a whole-run kill switch. An
+    // open `loop-halt` issue stops new units; an unreadable open-issue section
+    // already yields no selection, so an unknown switch reads as halted.
+    const halted = card(queueSnapshot({ halt: true }));
+    return halted.eligible === false && halted.ineligibleBecause.includes('loop-halted')
+      && stableJson(haltIssueNumbers(queueSnapshot({ halt: true }))) === stableJson([40])
+      && stableJson(haltIssueNumbers(queueSnapshot())) === stableJson([])
+      && haltIssueNumbers(queueSnapshot({ incomplete: 'openIssues' })) === null
+      && card(queueSnapshot({ labels: ['loop-ready', 'Loop-Halt'] })).ineligibleBecause.includes('loop-halted')
+      && stableJson(eligibleIssueNumbers(queueSnapshot({ halt: true }))) === stableJson([])
+      && stableJson(eligibleIssueNumbers(queueSnapshot())) === stableJson([7])
+      && eligible.eligible === true && stableJson(eligible.ineligibleBecause) === stableJson([])
       && eligible.provenance.labeledBy === 'maintainer' && eligible.bodyEditedAfterApproval === false
       && edited.eligible === false && edited.ineligibleBecause.includes('body-edited-after-approval')
       && blocked.ineligibleBecause.includes('blocked')

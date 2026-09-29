@@ -1419,6 +1419,21 @@ function appliesRepairLabel(words) {
   return hasGhScopedAction(words, 'label', 'edit') && names(optionValues(words, '--name', '-n'));
 }
 
+// The whole-run kill switch (`loop-halt` on any open issue) is a human's to
+// lift: the loop may raise it, never remove, delete or rename it.
+function liftsHaltLabel(words) {
+  const halt = (values) => values.flatMap((value) => value.split(','))
+    .some((name) => name.trim().toLowerCase() === 'loop-halt');
+  const edit = hasGhScopedAction(words, 'issue', 'edit') || hasGhScopedAction(words, 'pr', 'edit');
+  if (edit && halt(optionValues(words, '--remove-label'))) return true;
+  if (hasGhScopedAction(words, 'label', 'delete') || hasGhScopedAction(words, 'label', 'edit')) {
+    return words.some((word) => word.toLowerCase() === 'loop-halt');
+  }
+  // The REST forms: removing it from an issue, deleting or renaming the label.
+  return mutatingGhApi(words) && githubApiEndpoints(words)
+    .some((segments) => segments.some((segment) => segment.toLowerCase() === 'loop-halt'));
+}
+
 function renamesProtectedLifecycleLabel(words) {
   return hasGhScopedAction(words, 'label', 'edit')
     && optionValues(words, '--name', '-n').some(
@@ -2098,6 +2113,15 @@ export function evaluate(inputCmd, branch, options = {}) {
         'autoloop guard — raw pull-request readiness mutation is outside loop authority. '
         + 'Use the exact-head Autoloop terminal finalizer. Returning a PR to draft is allowed '
         + '(`gh pr ready <N> --undo`) — it removes readiness rather than granting it.',
+    };
+  }
+  if (segments.some(({ command }) => liftsHaltLabel(shellWords(command)))) {
+    return {
+      block: true,
+      reason:
+        'autoloop guard — `loop-halt` is the whole-run kill switch, and only a human lifts it. '
+        + 'Stop taking new units: finish what is in flight, then close the run '
+        + '(`prime.mjs --close-run`).',
     };
   }
   if (segments.some(({ command }) => appliesRepairLabel(shellWords(command)))) {
@@ -3001,6 +3025,17 @@ function selfTest() {
     ['gh api repos/o/r/issues/7/comments -f body="resumed; reply /answer to change it"', 'feat/gh-2-y', false],
     // 2026-09-25: loop-repair makes an issue eligible through its parent's
     // loop-ready; only unit.mjs --repair may apply it, with the provenance marker.
+    // The whole-run kill switch is a human's: the loop never lifts it.
+    ['gh issue edit 40 --remove-label loop-halt', 'main', true],
+    ['gh issue edit 40 --remove-label bug,LOOP-HALT', 'main', true],
+    ['gh label delete loop-halt --yes', 'main', true],
+    ['gh label edit loop-halt --name loop-paused', 'main', true],
+    ['gh issue edit 40 --add-label loop-halt', 'main', false],
+    // Review of 0.55.5: the REST forms lift it too.
+    ['gh api -X DELETE repos/o/r/issues/40/labels/loop-halt', 'main', true],
+    ['gh api --method DELETE repos/o/r/labels/loop-halt', 'main', true],
+    ['gh api -X PATCH repos/o/r/labels/Loop-Halt -f new_name=x', 'main', true],
+    ['gh api repos/o/r/labels/loop-halt', 'main', false],
     ['gh issue edit 7 --add-label loop-repair', 'feat/gh-2-y', true],
     ['gh issue create --title t --body-file /tmp/b.md --label loop-repair', 'main', true],
     ['gh issue create --title t --body-file /tmp/b.md -l bug,loop-repair', 'main', true],

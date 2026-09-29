@@ -11,7 +11,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.55.4 · starting
+∞ setup · v0.55.5 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -629,7 +629,8 @@ and delete any lesson a guard rule, contract, or hook now enforces: the mechanis
 that point.
 
 Create lifecycle and step labels idempotently, including `loop-waiting`, `loop-obsolete`,
-`loop-decided` and `loop-repair` (`unit.mjs` also creates each one on first use). Do not create non-manual policy labels.
+`loop-decided`, `loop-repair` and `loop-halt` (the whole-run kill switch a human puts on any open
+issue) (`unit.mjs` also creates each one on first use). Do not create non-manual policy labels.
 
 Never mutate default/release branch protection, GitHub Apps, or credentials without explicit user
 authorization. Present the exact desired settings and verify after changes.

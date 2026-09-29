@@ -46,6 +46,7 @@ import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
   SNAPSHOT_SECTIONS,
   eligibleIssueNumbers,
+  haltIssueNumbers,
   markerSchedule,
   writeStdoutSync,
 } from './snapshot-contract.mjs';
@@ -53,7 +54,7 @@ import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.55.4';
+const AUTOLOOP_VERSION = '0.55.5';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -393,6 +394,7 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
     snapshotPath,
     snapshotBytes: Buffer.byteLength(bytes, 'utf8'),
     eligible: eligibleIssueNumbers(snapshot),
+    halted: haltIssueNumbers(snapshot),
     markers: markerSchedule(snapshot),
     sections: sectionSummary(snapshot),
   };
@@ -406,9 +408,15 @@ export function waitLines(waits) {
   ];
 }
 
-export function blockLines(blocks) {
+// The whole-run kill switch, named so a halt never reads as a drained queue.
+export function haltLines(halted) {
+  return (halted ?? []).map((number) => `halted: #${number} (loop-halt) — take no new unit; finish the one in flight`);
+}
+
+export function blockLines(blocks, halted = null) {
+  const next = (halted ?? []).length > 0 ? 'waits behind loop-halt' : 'take it first';
   return [
-    ...(blocks?.resumed ?? []).map((entry) => `resumed: #${entry.number} (@${entry.by}: ${entry.answer}) — take it first`),
+    ...(blocks?.resumed ?? []).map((entry) => `resumed: #${entry.number} (@${entry.by}: ${entry.answer}) — ${next}`),
     ...(blocks?.waiting ?? []).map((entry) => `blocked: #${entry.number} — ${entry.question}`),
     ...(blocks?.held ?? []).map((entry) => `held: #${entry.number} (${entry.reason})`),
     ...(blocks?.errors ?? []).map((error) => `block-triage error: ${error}`),
@@ -430,8 +438,9 @@ function report(summary) {
     + `  gate ${summary.config.gateCommand}`,
     `scan   ${summary.timings.scanMs}ms  prime ${summary.timings.primeMs}ms`
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
+    ...haltLines(summary.halted),
     ...waitLines(summary.waits),
-    ...blockLines(summary.blocks),
+    ...blockLines(summary.blocks, summary.halted),
     'section                    items  complete',
   ];
   for (const [name, section] of Object.entries(summary.sections)) {
@@ -632,6 +641,16 @@ function selfTest() {
     }).join('|') === 'resumed: #7 (@owner: 128 chars, "Unnamed device") — take it first'
       + '|blocked: #8 — What length?|held: #9 (no loop marker)|block-triage error: list: offline'
     && blockLines(undefined).length === 0,
+  );
+
+  // Review of 0.55.5: with `eligible: []` a halt read as a drained queue, and
+  // a resumed unit still said "take it first".
+  check(
+    'a halt is named, and a resumed unit is not pointed past it',
+    haltLines([40]).join('|') === 'halted: #40 (loop-halt) — take no new unit; finish the one in flight'
+      && haltLines([]).length === 0 && haltLines(null).length === 0
+      && blockLines({ resumed: [{ number: 7, by: 'o', answer: 'a' }] }, [40]).join('')
+        === 'resumed: #7 (@o: a) — waits behind loop-halt',
   );
 
   check(

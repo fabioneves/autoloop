@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.55.4 · starting
+∞ dev · v0.55.5 · starting
 ```
 
 The current host session is the orchestrator. It plans, applies its own checklist pass and fixes,
@@ -803,6 +803,12 @@ workflow. STATE is protected; ARCH remains ordinary map data.
 ## One unit
 
 ### 1. Select and premise-check
+
+**An open issue labelled `loop-halt` is the whole-run kill switch.** Prime prints `halted: #N`
+(`halted` in `--json`) and every candidate shows `loop-halted`: finish the unit already in flight,
+take no new one — a `resumed:` unit included — and close the run. Pitcrew keeps servicing open PRs.
+Only a human lifts it: never remove, delete or rename the label (the guard refuses each, REST forms
+included), and never close an issue that carries it.
 
 Invalidate/refetch queue sections affected by Pitcrew. A unit prime printed as `resumed:` goes
 first — a human answered its block, and it is the work they are waiting on. Otherwise choose
