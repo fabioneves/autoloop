@@ -176,7 +176,9 @@ once, in one PR:
    `.autoloop/STATE.md`, removes the vendored files, and strips only autoloop's handlers from
    `.claude/settings*.json`. ARCH, LESSONS and the checklist stay where they are.
 3. Show the typed report and `git -C <scratch>/devendor diff --stat`, then run the doctor against
-   the worktree (`verify.mjs --project-root <scratch>/devendor`).
+   the worktree (`verify.mjs --project-root <scratch>/devendor`). `staleProse` lists the
+   repository's own STATE lines that still name the vendored layout (the template-owned preamble
+   and Config section were already replaced): ask whether to edit each in this PR.
 4. `fingerprintChanged: true` means every open loop PR reviewed before this lands needs its review
    re-run (the chain binds the config's fingerprint): list them for the human.
 5. Commit in the worktree (`git -C … commit -F <file>`), push, open the PR with `--body-file`.

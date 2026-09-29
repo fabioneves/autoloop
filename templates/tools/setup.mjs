@@ -108,8 +108,23 @@ export function withoutVendoredHooks(document) {
   return Object.keys(next).length === 0 ? null : next;
 }
 
-export function stateProse(markdown) {
-  return `${String(markdown)
+// Splits markdown into its preamble and `## ` sections.
+function sections(markdown) {
+  const parts = String(markdown).split(/^(?=## )/mu);
+  return { preamble: parts[0], sections: parts.slice(1) };
+}
+
+// The legacy STATE's prose for .autoloop/STATE.md. The preamble and the
+// `## Config` section were always the template's (they describe the retired
+// config block, LOOP.md and the vendored tools), so they take the current
+// template's text; every other section is the repository's and moves verbatim.
+export function stateProse(markdown, template = readFileSync(join(TEMPLATES, 'STATE.template.md'), 'utf8')) {
+  const legacy = sections(markdown);
+  const current = sections(template);
+  const isConfig = (section) => /^## Config\b/u.test(section);
+  const config = current.sections.find(isConfig);
+  const body = legacy.sections.map((section) => (isConfig(section) ? config ?? '' : section));
+  return `${[current.preamble, ...body].join('')
     .replace(/```json[ \t]+autoloop-config[ \t]*\r?\n[\s\S]*?\r?\n```[ \t]*\r?\n?/u, '')
     .replace(/\n{3,}/gu, '\n\n')
     .trimEnd()}\n`;
@@ -163,7 +178,8 @@ export function devendor(root, { projectDir = process.env.CLAUDE_PROJECT_DIR } =
 
   mkdirSync(join(root, '.autoloop'), { recursive: true });
   writeFileSync(join(root, PROJECT_CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`);
-  writeFileSync(join(root, '.autoloop', 'STATE.md'), stateProse(readFileSync(join(root, LEGACY_STATE_FILE), 'utf8')));
+  const prose = stateProse(readFileSync(join(root, LEGACY_STATE_FILE), 'utf8'));
+  writeFileSync(join(root, '.autoloop', 'STATE.md'), prose);
   const removed = [LEGACY_STATE_FILE];
   rmSync(join(root, LEGACY_STATE_FILE));
   for (const path of [VENDORED_TOOLS, 'docs/agentic/LOOP.md']) {
@@ -184,6 +200,9 @@ export function devendor(root, { projectDir = process.env.CLAUDE_PROJECT_DIR } =
     config,
     removed,
     settings: settingsActions,
+    // The repository's own STATE lines that still name the vendored layout:
+    // its prose to edit, never setup's to rewrite.
+    staleProse: prose.split('\n').filter((line) => /tools\/agentic|\bvendored\b|LOOP\.md/u.test(line)),
     // A review chain binds the config's fingerprint: an open loop PR reviewed
     // before this lands needs its review re-run.
     fingerprintChanged: hashValue(config) !== hashValue(legacy.config),
@@ -245,8 +264,11 @@ async function selfTest() {
     };
     const legacyInstall = (root, { executor = true, config = legacyConfig } = {}) => {
       write(root, LEGACY_STATE_FILE, [
-        '# STATE', '', '## Mission', '', 'Keep the engine honest.', '', '## Config', '',
-        '```json autoloop-config', JSON.stringify(config, null, 2), '```', '', '## Protected ground', '', '- spec/', '',
+        '# STATE — autoloop standing config & policy', '', '> Not the task queue (see [`LOOP.md`](./LOOP.md)).', '',
+        '## Mission', '', 'Keep the engine honest.', '', '## Config (the single machine-readable config surface)', '',
+        'Skills and the vendored `tools/agentic/*` scripts read this block.', '',
+        '```json autoloop-config', JSON.stringify(config, null, 2), '```', '', '- `version` — the schema.', '',
+        '## Protected ground', '', '- spec/', '', '## Playbooks', '', 'Run `node tools/agentic/escalate-paths.mjs` first.', '',
       ].join('\n'));
       write(root, 'docs/agentic/LOOP.md', '# LOOP\n');
       write(root, 'docs/agentic/checklist.md', '# checklist\n');
@@ -298,8 +320,15 @@ async function selfTest() {
           hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-hook' }] }] },
         }));
     const prose = readIfPresent(join(repo, '.autoloop', 'STATE.md')) ?? '';
-    check('the STATE prose moves without its config block',
-      prose.includes('Keep the engine honest.') && prose.includes('## Protected ground') && !prose.includes('autoloop-config'));
+    // The preamble and Config section were always template-owned: they take
+    // the current template's text; the repository's own sections move verbatim.
+    check('the STATE prose moves with the current template\'s preamble and Config section',
+      prose.includes('Keep the engine honest.') && prose.includes('## Protected ground\n\n- spec/')
+        && !prose.includes('autoloop-config') && !prose.includes('LOOP.md')
+        && prose.includes('`.autoloop/config.json` holds only what differs') && prose.startsWith('# STATE — autoloop standing policy'));
+    check('repository prose that still names the vendored layout is reported, not rewritten',
+      JSON.stringify(result.staleProse) === JSON.stringify(['Run `node tools/agentic/escalate-paths.mjs` first.'])
+        && prose.includes('Run `node tools/agentic/escalate-paths.mjs` first.'));
     check('ARCH and the checklist stay where the repository keeps them',
       existsSync(join(repo, 'docs/agentic/ARCH.md')) && existsSync(join(repo, 'docs/agentic/checklist.md')));
     const executorSettings = settingsFromConfig(config, { owner: 'acme', name: 'app' });

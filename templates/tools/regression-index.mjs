@@ -1423,7 +1423,7 @@ export const INCIDENTS = Object.freeze([
       + 'structurally by the global cutover: STATE is the repository\'s own '
       + 'prose, which no plugin change has to reach; devendor moves it once.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'setup.mjs', anchor: 'export function stateProse(markdown) {' }),
+      Object.freeze({ file: 'setup.mjs', anchor: 'export function stateProse(markdown, template' }),
     ]),
   }),
   Object.freeze({
