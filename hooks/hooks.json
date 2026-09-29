@@ -1,12 +1,12 @@
 {
-  "description": "autoloop hooks. Every hook runs the plugin's own copy, finds the project from CLAUDE_PROJECT_DIR, and stands down unless it is a devendored autoloop repository (.autoloop/config.json, no vendored guard wired).",
+  "description": "autoloop hooks. Every hook runs the plugin's own copy, finds the project from CLAUDE_PROJECT_DIR, and stands down unless it is a devendored autoloop repository (.autoloop/config.json present) or a plugin run is open there.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/templates/tools/session-preflight.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/tools/session-preflight.sh\"",
             "timeout": 30,
             "statusMessage": "autoloop preflight (read-only checks)"
           }
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/edit-guard.mjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/tools/edit-guard.mjs\"",
             "timeout": 15
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; r=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --show-toplevel 2>/dev/null || printf %s \"$CLAUDE_PROJECT_DIR\"); { [ -e \"$r/.autoloop\" ] || [ -L \"$r/.autoloop\" ]; } && exit 2; c=$(git -C \"$r\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && grep -qs '\"baseBranch\":\"' \"$c\"/autoloop/run/*.json && exit 2; exit 0",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/tools/command-guard.mjs\"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; r=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --show-toplevel 2>/dev/null || printf %s \"$CLAUDE_PROJECT_DIR\"); { [ -e \"$r/.autoloop\" ] || [ -L \"$r/.autoloop\" ]; } && exit 2; c=$(git -C \"$r\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && grep -qs '\"baseBranch\":\"' \"$c\"/autoloop/run/*.json && exit 2; exit 0",
             "timeout": 15
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/label-swap-reminder.mjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/tools/label-swap-reminder.mjs\"",
             "timeout": 10
           }
         ]
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/subagent-transcript.mjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/tools/subagent-transcript.mjs\"",
             "timeout": 20,
             "statusMessage": "capturing subagent transcript"
           }
@@ -64,7 +64,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/tools/writeback-check.mjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/tools/writeback-check.mjs\"",
             "timeout": 45
           }
         ]

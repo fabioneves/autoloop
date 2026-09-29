@@ -19,14 +19,12 @@ import {
   join,
   resolve,
 } from 'node:path';
-import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_VERSION, effectiveChecklistPath, resolveProjectConfig } from './config-contract.mjs';
 import { vendoredLeftovers } from './hook-root.mjs';
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
-const SELF_TEST_MANIFEST_NAME = 'self-test-manifest.json';
 const SELF_TEST_PATTERN = /(?:async\s+)?function\s+selfTest\s*\(/;
 export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'attestation-contract.mjs',
@@ -41,6 +39,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'dispatch.mjs',
   'escalate-paths.mjs',
   'hook-root.mjs',
+  'run-markers.mjs',
   'label-swap-reminder.mjs',
   'lane-contract.mjs',
   'lifecycle-contract.mjs',
@@ -65,7 +64,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
 ]);
 const PLUGIN_TOOL_FILES = Object.freeze([
   ...UNIVERSAL_TOOL_FILES,
-  'auto-merge.reference.mjs',
+  'auto-merge.mjs',
   'merge-authorization-contract.mjs',
 ]);
 // Global install: the plugin ships these hooks in hooks/hooks.json, each
@@ -73,7 +72,7 @@ const PLUGIN_TOOL_FILES = Object.freeze([
 // and matcher, with exactly this command. The command guard fails closed only
 // inside an autoloop repository: a crashed guard refuses there, while a broken
 // plugin never refuses commands in every other repository.
-const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/templates/tools';
+const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/tools';
 export const PLUGIN_HOOKS = Object.freeze([
   { name: 'session-preflight.sh', event: 'SessionStart', matcher: null, command: `bash "${PLUGIN_TOOLS}/session-preflight.sh"` },
   { name: 'edit-guard.mjs', event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|NotebookEdit', command: `node "${PLUGIN_TOOLS}/edit-guard.mjs"` },
@@ -132,7 +131,7 @@ function checkPluginHooks(root) {
   try {
     const problems = pluginHookProblems(
       JSON.parse(readFileSync(resolve(root, 'hooks', 'hooks.json'), 'utf8')),
-      resolve(root, 'templates', 'tools'),
+      resolve(root, 'tools'),
     );
     return { ok: problems.length === 0, detail: problems.join('; ') };
   } catch (error) {
@@ -184,7 +183,7 @@ function checkRetiredCiPolicy(root) {
 function checkReleaseContract(root) {
   const result = run(
     process.execPath,
-    [resolve(root, 'templates', 'tools', 'release-verify.mjs'), '--check-root', root],
+    [resolve(root, 'tools', 'release-verify.mjs'), '--check-root', root],
     root,
   );
   return result.ok ? { ok: true, detail: '' } : result;
@@ -199,10 +198,6 @@ function checkExists(path) {
   } catch {
     return { ok: false, detail: `${path}: required artifact is missing` };
   }
-}
-
-function plainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function checkConfiguredChecklist(root) {
@@ -220,67 +215,8 @@ function checkConfiguredChecklist(root) {
   }
 }
 
-// The manifest hashes exactly the template tools this file would spawn a
-// self-test for. Deterministic: it reads bytes, never runs anything.
-function selfTestManifestTools(toolsDir) {
-  const ownName = basename(fileURLToPath(import.meta.url));
-  const tools = {};
-  for (const name of readdirSync(toolsDir).filter((entry) => entry.endsWith('.mjs')).sort()) {
-    if (name === ownName) continue;
-    const source = readFileSync(join(toolsDir, name));
-    if (!SELF_TEST_PATTERN.test(source.toString('utf8'))) continue;
-    tools[name] = createHash('sha256').update(source).digest('hex');
-  }
-  return Object.fromEntries(
-    Object.entries(tools).sort(([left], [right]) => left.localeCompare(right)),
-  );
-}
-
-function renderSelfTestManifest(toolsDir) {
-  return `${JSON.stringify({
-    version: 1,
-    node: nodeMajor(),
-    tools: selfTestManifestTools(toolsDir),
-  }, null, 2)}\n`;
-}
-
-// Plugin-root freshness: a stale committed manifest must not ship. The node
-// field is NOT compared against the running process — CI regenerates on more
-// than one Node line, so freshness binds the hashed template bytes.
-function checkSelfTestManifest(toolsDir) {
-  let committed;
-  try {
-    committed = JSON.parse(readFileSync(resolve(toolsDir, SELF_TEST_MANIFEST_NAME), 'utf8'));
-  } catch (error) {
-    return { ok: false, detail: `self-test manifest is unreadable: ${error.message}` };
-  }
-  const errors = [];
-  if (committed?.version !== 1) errors.push('version: expected 1');
-  if (!/^\d+$/u.test(String(committed?.node ?? ''))) {
-    errors.push('node: expected a numeric major version');
-  }
-  const expected = selfTestManifestTools(toolsDir);
-  const actual = plainObject(committed?.tools) ? committed.tools : {};
-  for (const [name, hash] of Object.entries(expected)) {
-    if (actual[name] !== hash) errors.push(`${name}: manifest hash is stale`);
-  }
-  for (const name of Object.keys(actual)) {
-    if (expected[name] === undefined) {
-      errors.push(`${name}: manifest entry has no template tool`);
-    }
-  }
-  return errors.length === 0
-    ? { ok: true, detail: '' }
-    : {
-      ok: false,
-      detail: 'regenerate with '
-        + '`node templates/tools/verify.mjs --emit-self-test-manifest '
-        + `> templates/tools/${SELF_TEST_MANIFEST_NAME}\`: ${errors.join('; ')}`,
-    };
-}
-
 function pluginChecks(root) {
-  const toolsDir = resolve(root, 'templates', 'tools');
+  const toolsDir = resolve(root, 'tools');
   const checks = toolChecks(root, toolsDir, PLUGIN_TOOL_FILES);
 
   for (const relativePath of [
@@ -297,7 +233,7 @@ function pluginChecks(root) {
     name: 'shell session-preflight',
     execute: () => run(
       'bash',
-      ['-n', resolve(root, 'templates', 'tools', 'session-preflight.sh')],
+      ['-n', resolve(root, 'tools', 'session-preflight.sh')],
       root,
     ),
   });
@@ -305,7 +241,7 @@ function pluginChecks(root) {
     name: 'shell dispatch-stream',
     execute: () => run(
       'bash',
-      ['-n', resolve(root, 'templates', 'tools', 'dispatch-stream.sh')],
+      ['-n', resolve(root, 'tools', 'dispatch-stream.sh')],
       root,
     ),
   });
@@ -313,13 +249,9 @@ function pluginChecks(root) {
     name: 'guard corpus replay',
     execute: () => run(
       process.execPath,
-      [resolve(root, 'templates', 'tools', 'command-guard.mjs'), '--corpus'],
+      [resolve(root, 'tools', 'command-guard.mjs'), '--corpus'],
       root,
     ),
-  });
-  checks.push({
-    name: 'release-proven self-test manifest',
-    execute: () => checkSelfTestManifest(toolsDir),
   });
   checks.push({
     name: 'release contract',
@@ -329,7 +261,7 @@ function pluginChecks(root) {
     name: 'forward contract lint',
     execute: () => run(
       process.execPath,
-      [resolve(root, 'templates', 'tools', 'contract-lint.mjs'), '--check-root', root],
+      [resolve(root, 'tools', 'contract-lint.mjs'), '--check-root', root],
       root,
     ),
   });
@@ -346,11 +278,11 @@ function pluginChecks(root) {
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
   'codebase-design': 6489,
-  dev: 58717,
+  dev: 58625,
   'lean-code': 3909,
-  pitcrew: 19813,
+  pitcrew: 19803,
   'queue-trace': 6933,
-  setup: 13888,
+  setup: 14026,
   shape: 26690,
 });
 
@@ -450,28 +382,10 @@ function projectChecks(root) {
   ];
 }
 
-function nodeMajor() {
-  return String(process.versions.node).split('.')[0];
-}
-
 function selfTest() {
   const success = run(process.execPath, ['--version'], process.cwd());
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
   const toolsDir = resolve(fileURLToPath(new URL('.', import.meta.url)));
-  // The committed manifest must match the template bytes it hashes.
-  const manifestRoot = mkdtempSync(join(tmpdir(), 'autoloop-manifest-'));
-  let freshManifestPasses;
-  let staleManifestFails;
-  try {
-    const fixtureTool = 'function selfTest() { return true; }\n';
-    writeFileSync(join(manifestRoot, 'fixture-tool.mjs'), fixtureTool);
-    writeFileSync(join(manifestRoot, SELF_TEST_MANIFEST_NAME), renderSelfTestManifest(manifestRoot));
-    freshManifestPasses = checkSelfTestManifest(manifestRoot).ok;
-    writeFileSync(join(manifestRoot, 'fixture-tool.mjs'), `${fixtureTool}// drifted\n`);
-    staleManifestFails = !checkSelfTestManifest(manifestRoot).ok;
-  } finally {
-    rmSync(manifestRoot, { recursive: true, force: true });
-  }
   // The project doctor: a devendored repository passes; any vendored layout
   // left behind fails and names devendor.
   const projectRoot = mkdtempSync(join(tmpdir(), 'autoloop-project-'));
@@ -546,7 +460,7 @@ function selfTest() {
   let crashMidRun;
   let crashBesideLegacyRun;
   try {
-    const stub = join(crashRoot, 'plugin', 'templates', 'tools', 'command-guard.mjs');
+    const stub = join(crashRoot, 'plugin', 'tools', 'command-guard.mjs');
     mkdirSync(dirname(stub), { recursive: true });
     mkdirSync(join(crashRoot, 'project', '.autoloop'), { recursive: true });
     writeFileSync(join(crashRoot, 'project', '.autoloop', 'config.json'), '{}');
@@ -589,7 +503,7 @@ function selfTest() {
       pluginProblems(pluginHookDocument(PLUGIN_HOOKS.map((entry) =>
         (entry.name === 'command-guard.mjs' ? { ...entry, matcher: 'Bash' } : entry)))).length > 0],
     ['a command guard without its fail-closed branch is refused',
-      pluginProblems(pluginHookDocument(withGuard('node "${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs"')))
+      pluginProblems(pluginHookDocument(withGuard('node "${CLAUDE_PLUGIN_ROOT}/tools/command-guard.mjs"')))
         .some((problem) => problem.includes('command-guard.mjs'))],
     ['a hook outside the contract is refused',
       pluginProblems(pluginHookDocument([...PLUGIN_HOOKS,
@@ -613,8 +527,6 @@ function selfTest() {
     ['structured command success', success.ok && success.detail.length > 0],
     ['structured command failure', !failure.ok && failure.detail.length > 0],
     ['invalid JSON is rejected', checkJson(fileURLToPath(import.meta.url)).ok === false],
-    ['a fresh committed manifest passes the plugin check', freshManifestPasses],
-    ['a stale committed manifest fails the plugin check', staleManifestFails],
     ['a devendored project passes the doctor', devendoredPasses],
     ['vendored hook wiring left behind fails the doctor and names the hook', vendoredWiringFails],
     ['a shipped tool left in tools/agentic fails the doctor, naming it', vendoredToolsFail],
@@ -636,9 +548,6 @@ function parseArgs(args) {
   if (args.length === 1 && args[0] === '--self-test') {
     return { mode: 'self-test', root: null, full: false, error: null };
   }
-  if (args.length === 1 && args[0] === '--emit-self-test-manifest') {
-    return { mode: 'emit-manifest', root: null, full: false, error: null };
-  }
   if (args.length === 2 && args[0] === '--plugin-root' && args[1]) {
     return { mode: 'plugin', root: args[1], full: false, error: null };
   }
@@ -649,8 +558,7 @@ function parseArgs(args) {
     mode: null,
     root: null,
     full: false,
-    error: 'expected --plugin-root <path>, --project-root <path>, '
-      + '--emit-self-test-manifest, or --self-test',
+    error: 'expected --plugin-root <path>, --project-root <path>, or --self-test',
   };
 }
 
@@ -661,12 +569,6 @@ function main() {
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
-  if (parsed.mode === 'emit-manifest') {
-    process.stdout.write(
-      renderSelfTestManifest(resolve(fileURLToPath(new URL('.', import.meta.url)))),
-    );
-    return;
-  }
 
   const root = resolve(parsed.root);
   const checks = parsed.mode === 'plugin'

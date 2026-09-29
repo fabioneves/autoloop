@@ -58,9 +58,9 @@ const FORWARD_ARTIFACTS = Object.freeze([
   'templates/STATE.template.md',
   'templates/ARCH.template.md',
   'hooks/hooks.json',
-  'templates/tools/label-swap-reminder.mjs',
-  'templates/tools/session-preflight.sh',
-  ...DISPATCH_CONSUMERS.map((name) => `templates/tools/${name}`),
+  'tools/label-swap-reminder.mjs',
+  'tools/session-preflight.sh',
+  ...DISPATCH_CONSUMERS.map((name) => `tools/${name}`),
 ]);
 const STALE_ROUTE_PATTERNS = Object.freeze([
   {
@@ -121,7 +121,7 @@ const STALE_ROUTE_PATTERNS = Object.freeze([
   {
     code: 'RETIRED_MACHINERY_TOOL',
     pattern: new RegExp(
-      `(?:\\btools/agentic|\\btemplates/tools|<plugin-tools>)/(?:${RETIRED_TOOLS.map((name) =>
+      `(?:\\b(?:tools/agentic|templates/tools|tools)|<plugin-tools>)/(?:${RETIRED_TOOLS.map((name) =>
         name.replace('.', '\\.')).join('|')})`,
       'gu',
     ),
@@ -240,9 +240,7 @@ function lintClaimConsumers(root, directory) {
     'loop-scope.mjs',
     'stats.mjs',
     'writeback-check.mjs',
-    directory === 'templates/tools'
-      ? 'auto-merge.reference.mjs'
-      : 'auto-merge.mjs',
+    'auto-merge.mjs',
   ];
   for (const name of claimConsumers) {
     const relativePath = `${directory}/${name}`;
@@ -265,7 +263,7 @@ function lintClaimConsumers(root, directory) {
 function lintRoot(root) {
   return [
     ...lintArtifactPaths(root, FORWARD_ARTIFACTS),
-    ...lintClaimConsumers(root, 'templates/tools'),
+    ...lintClaimConsumers(root, 'tools'),
   ];
 }
 
@@ -348,7 +346,7 @@ function selfTest() {
           .map((finding) => finding.code).join(',') === 'RAW_HUMAN_BLOCK'
         && lintRoutingText('gh issue edit 7 --add-label loop-blocked,human:decide')
           .map((finding) => finding.code).join(',') === 'RAW_HUMAN_BLOCK'
-        && lintRoutingText("['gh issue edit 4 --add-label loop-blocked', /BLOCKED/],", 'templates/tools/label-swap-reminder.mjs').length === 0
+        && lintRoutingText("['gh issue edit 4 --add-label loop-blocked', /BLOCKED/],", 'tools/label-swap-reminder.mjs').length === 0
         && lintRoutingText('Block it with `unit.mjs --block --reason X`; `loop-blocked` removes it from the queue.').length === 0
         && lintRoutingText('An ambiguous premise is a `decide`: record it with `unit.mjs --decide`.').length === 0,
     ],

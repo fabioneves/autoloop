@@ -21,7 +21,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { guardedRoot, loopRunIsOpen } from './command-guard.mjs';
+import { loopRunIsOpen } from './run-markers.mjs';
+import { guardedRoot } from './hook-root.mjs';
 
 const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);

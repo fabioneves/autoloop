@@ -7,7 +7,7 @@
 // runs from the plugin.
 //
 //   node <plugin-tools>/setup.mjs --init --root <repo> --base <branch> --gate <command>
-//   node <plugin-tools>/setup.mjs --devendor --root <linked worktree>
+//   node <plugin-tools>/setup.mjs --devendor --root <linked worktree> [--move-checklist]
 //   node <plugin-tools>/setup.mjs --self-test
 //
 // The doctor is `verify.mjs --project-root <repo>`.
@@ -19,25 +19,27 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CONFIG_VERSION, DEFAULT_CONFIG, LEGACY_STATE_FILE, PROJECT_CONFIG_FILE, repositoryRoot, resolveProjectConfig,
-  validateConfig,
+  CONFIG_VERSION, DEFAULT_CONFIG, LEGACY_STATE_FILE, PROJECT_CONFIG_FILE, repositoryRoot, resolveLegacyConfig,
+  resolveProjectConfig, validateConfig,
 } from './config-contract.mjs';
 import { runsVendoredTool, vendoredLeftovers } from './hook-root.mjs';
 import { hashValue } from './review-contract.mjs';
 
-const TEMPLATES = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const TEMPLATES = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'templates');
 const VENDORED_DIR = 'tools/agentic';
 const SETTINGS_FILES = ['.claude/settings.json', '.claude/settings.local.json'];
 const LEGACY_LOOP_FILE = 'docs/agentic/LOOP.md';
 // Repository documents that may still point at the vendored layout.
-const REFERENCE_FILES = ['CLAUDE.md', 'AGENTS.md', 'docs/agentic/ARCH.md', 'docs/agentic/LESSONS.md', 'docs/agentic/checklist.md'];
+const LEGACY_CHECKLIST = 'docs/agentic/checklist.md';
+const CHECKLIST = '.autoloop/checklist.md';
+const REFERENCE_FILES = ['CLAUDE.md', 'AGENTS.md', 'docs/agentic/ARCH.md', 'docs/agentic/LESSONS.md', LEGACY_CHECKLIST];
 // A line that names the vendored layout: a shipped tool, the retired
 // documents, or the word itself — never a repository's own file in tools/agentic.
 const staleLine = (line) => runsVendoredTool(line) || /\bvendored\b|LOOP\.md|docs\/agentic\/STATE\.md/u.test(line);
@@ -242,18 +244,19 @@ function removeEmptyDirectories(root, path) {
   }
 }
 
-export function devendor(root, { cwd = process.cwd(), projectDir = process.env.CLAUDE_PROJECT_DIR } = {}) {
+export function devendor(root, { cwd = process.cwd(), projectDir = process.env.CLAUDE_PROJECT_DIR, moveChecklist = false } = {}) {
   const place = worktreeProblem(root, cwd, projectDir);
   if (place !== null) return place;
   if (existsSync(join(root, PROJECT_CONFIG_FILE))) {
     return refusal('ALREADY_DEVENDORED', `${PROJECT_CONFIG_FILE} already exists`);
   }
-  const legacy = resolveProjectConfig(root);
-  if (legacy === null || legacy.source !== LEGACY_STATE_FILE) {
+  const legacy = resolveLegacyConfig(root);
+  if (legacy === null) {
     return refusal('NOT_LEGACY', `no ${LEGACY_STATE_FILE} config block to convert`);
   }
   if (!legacy.ok) return refusal('LEGACY_CONFIG_INVALID', legacy.errors.join('; '));
-  for (const path of [VENDORED_DIR, LEGACY_STATE_FILE, LEGACY_LOOP_FILE, ...SETTINGS_FILES, PROJECT_CONFIG_FILE, '.autoloop/STATE.md']) {
+  const written = [VENDORED_DIR, LEGACY_STATE_FILE, LEGACY_LOOP_FILE, ...SETTINGS_FILES, PROJECT_CONFIG_FILE, '.autoloop/STATE.md'];
+  for (const path of moveChecklist ? [...written, LEGACY_CHECKLIST, CHECKLIST] : written) {
     const link = symlinkedComponent(root, path);
     if (link !== null) return refusal('SYMLINKED_PATH', `${link} is a symlink; devendor writes only real paths under the root`);
   }
@@ -275,6 +278,17 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
     if (JSON.stringify(executor.reversiblePaths) !== JSON.stringify(['docs/**'])) {
       config.merge.reversiblePaths = executor.reversiblePaths;
     }
+  }
+  // Offered (the human decides): the legacy checklist joins .autoloop/, where
+  // the default path already points, so config no longer names it. A move
+  // that cannot happen is refused, never dropped.
+  if (moveChecklist) {
+    const unmovable = config.review.checklistPath !== LEGACY_CHECKLIST
+      ? `the configured checklist is ${config.review.checklistPath}, not ${LEGACY_CHECKLIST}`
+      : !existsSync(join(root, LEGACY_CHECKLIST)) ? `${LEGACY_CHECKLIST} does not exist`
+        : existsSync(join(root, CHECKLIST)) ? `${CHECKLIST} already exists` : null;
+    if (unmovable !== null) return refusal('CHECKLIST_NOT_MOVABLE', unmovable);
+    config.review.checklistPath = CHECKLIST;
   }
   const errors = validateConfig(config);
   if (errors.length > 0) return refusal('DEVENDOR_CONFIG_INVALID', errors.join('; '));
@@ -303,11 +317,12 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
   // (the review fingerprint and every reader depend on it).
   mkdirSync(join(root, '.autoloop'), { recursive: true });
   writeFileSync(join(root, PROJECT_CONFIG_FILE), `${JSON.stringify(overridesOnly(config), null, 2)}\n`);
-  const written = resolveProjectConfig(root);
-  if (!written?.ok || hashValue(written.config) !== hashValue(config)) {
+  const resolved = resolveProjectConfig(root);
+  if (!resolved?.ok || hashValue(resolved.config) !== hashValue(config)) {
     rmSync(join(root, '.autoloop'), { recursive: true, force: true });
     return refusal('DEVENDOR_ROUNDTRIP', 'the written overrides do not resolve to the converted config');
   }
+  if (moveChecklist) renameSync(join(root, LEGACY_CHECKLIST), join(root, CHECKLIST));
   const prose = stateProse(readFileSync(join(root, LEGACY_STATE_FILE), 'utf8'));
   writeFileSync(join(root, '.autoloop', 'STATE.md'), prose);
 
@@ -335,12 +350,17 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
     writeFileSync(join(root, file), `${JSON.stringify(next, null, 2)}\n`);
     return { file, action: 'vendored hooks removed' };
   });
-  const staleReferences = REFERENCE_FILES.flatMap((file) => (readIfPresent(join(root, file)) ?? '')
-    .split('\n').filter(staleLine).map((line) => `${file}: ${line.trim()}`));
+  // After a move the checklist is read at its new path, and a line naming its
+  // old one is stale too.
+  const stale = moveChecklist ? (line) => staleLine(line) || line.includes(LEGACY_CHECKLIST) : staleLine;
+  const staleReferences = REFERENCE_FILES.map((file) => (moveChecklist && file === LEGACY_CHECKLIST ? CHECKLIST : file))
+    .flatMap((file) => (readIfPresent(join(root, file)) ?? '')
+      .split('\n').filter(stale).map((line) => `${file}: ${line.trim()}`));
   return {
     ok: true,
     config,
     removed,
+    movedChecklist: moveChecklist,
     // The repository's own files under tools/agentic/ (a gate script): kept.
     kept,
     settings: settingsActions,
@@ -349,7 +369,7 @@ export function devendor(root, { cwd = process.cwd(), projectDir = process.env.C
     fingerprintChanged: hashValue(config) !== hashValue(legacy.config),
     // The repository's own lines that still name the vendored layout: its
     // prose to edit, never setup's to rewrite.
-    staleProse: prose.split('\n').filter(staleLine),
+    staleProse: prose.split('\n').filter(stale),
     staleReferences,
   };
 }
@@ -390,10 +410,10 @@ async function selfTest() {
     if (!passed) failures.push(name);
   };
   const { activeAutoloopRoot } = await import('./hook-root.mjs');
-  const { settingsFromConfig } = await import('./auto-merge.reference.mjs');
+  const { settingsFromConfig } = await import('./auto-merge.mjs');
   const { escalatePathsFor, matchEscalate } = await import('./escalate-paths.mjs');
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'autoloop-setup-')));
-  const doctor = (root) => spawnSync(process.execPath, [join(TEMPLATES, 'tools', 'verify.mjs'), '--project-root', root], {
+  const doctor = (root) => spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'verify.mjs'), '--project-root', root], {
     encoding: 'utf8',
   });
   const write = (root, path, text) => {
@@ -511,6 +531,32 @@ async function selfTest() {
         && executorSettings.SOLO_OPERATOR === true);
     check('devendor runs once', devendor(worktree, away).code === 'ALREADY_DEVENDORED');
 
+    // Offered at devendor: the legacy checklist joins the rest of the
+    // repository's autoloop data, and config stops naming its path.
+    const { worktree: moved } = legacyWorktree('moved', {
+      extra: (main) => {
+        write(main, 'docs/agentic/checklist.md', '# checklist\nRun the vendored gate.\n');
+        write(main, 'docs/agentic/ARCH.md', '# ARCH\nReviewers read docs/agentic/checklist.md.\n');
+      },
+    });
+    const movedResult = devendor(moved, { ...away, moveChecklist: true });
+    const movedConfig = JSON.parse(readIfPresent(join(moved, PROJECT_CONFIG_FILE)) ?? 'null');
+    check('--move-checklist moves the checklist into .autoloop and drops the path override',
+      movedResult.ok === true && movedResult.movedChecklist === true
+        && existsSync(join(moved, '.autoloop', 'checklist.md')) && !existsSync(join(moved, 'docs/agentic/checklist.md'))
+        && movedConfig?.review === undefined && resolveProjectConfig(moved)?.config.review.checklistPath === '.autoloop/checklist.md'
+        && doctor(moved).status === 0 && result.movedChecklist === false);
+    check('after a move the checklist is scanned at its new path, and lines naming its old one are stale',
+      movedResult.staleReferences.includes('.autoloop/checklist.md: Run the vendored gate.')
+        && movedResult.staleReferences.includes('docs/agentic/ARCH.md: Reviewers read docs/agentic/checklist.md.'));
+    const { worktree: blocked } = legacyWorktree('blocked', {
+      extra: (main) => write(main, '.autoloop/checklist.md', '# already here\n'),
+    });
+    const blockedResult = devendor(blocked, { ...away, moveChecklist: true });
+    check('a checklist move that cannot happen is refused before anything is written',
+      blockedResult.code === 'CHECKLIST_NOT_MOVABLE' && blockedResult.detail.includes('already exists')
+        && !existsSync(join(blocked, PROJECT_CONFIG_FILE)) && existsSync(join(blocked, LEGACY_STATE_FILE)));
+
     const { worktree: manual } = legacyWorktree('manual', {
       executor: false,
       config: { ...legacyConfig, merge: { policy: 'manual' }, protectedPaths: undefined },
@@ -597,11 +643,11 @@ async function main() {
   if (args.includes('--self-test')) process.exit((await selfTest()) ? 0 : 1);
   const root = flag(args, '--root');
   let result;
-  if (args.includes('--devendor') && root) result = devendor(resolve(root));
+  if (args.includes('--devendor') && root) result = devendor(resolve(root), { moveChecklist: args.includes('--move-checklist') });
   else if (args.includes('--init') && root && flag(args, '--base') && flag(args, '--gate')) {
     result = init(resolve(root), { base: flag(args, '--base'), gate: flag(args, '--gate') });
   } else {
-    console.error('usage: setup.mjs --init --root <repo> --base <branch> --gate <command> | --devendor --root <worktree> | --self-test');
+    console.error('usage: setup.mjs --init --root <repo> --base <branch> --gate <command> | --devendor --root <worktree> [--move-checklist] | --self-test');
     process.exit(2);
   }
   console.log(JSON.stringify(result, null, 2));

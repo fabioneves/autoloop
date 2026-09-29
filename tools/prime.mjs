@@ -37,18 +37,11 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { vendoredLeftovers } from './hook-root.mjs';
+import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
-  ancestorPids,
-  loopRunIsLive,
-  loopRunIsOpen,
-  ownRunMarkers,
-  processAlive,
-  runMarkerDirectory,
-} from './command-guard.mjs';
-import {
-  effectiveChecklistPath, PLUGIN_CHECKLIST, PROJECT_CONFIG_FILE, resolveProjectConfig,
+  effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig,
 } from './config-contract.mjs';
-import { activeAutoloopRoot } from './hook-root.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
@@ -62,7 +55,7 @@ import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.59.0';
+const AUTOLOOP_VERSION = '0.60.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -401,26 +394,24 @@ export function sectionSummary(snapshot) {
 }
 
 // The project config through the one resolver (.autoloop/config.json over
-// plugin defaults, else the legacy STATE block migrated in memory), keeping
-// prime's two typed failures: nothing readable vs. a config that fails.
+// plugin defaults), keeping prime's typed failures: a vendored install not yet
+// devendored, nothing readable, or a config that fails.
 export function readPrimeConfig(root) {
   const resolved = resolveProjectConfig(root);
   if (resolved === null) {
-    return failure('config', 'PROJECT_CONFIG_UNREADABLE',
-      'no .autoloop/config.json or docs/agentic/STATE.md autoloop-config block');
+    return existsSync(join(root, LEGACY_STATE_FILE))
+      ? failure('config', 'NOT_DEVENDORED', 'a vendored install (docs/agentic/STATE.md): run autoloop:setup to devendor it first')
+      : failure('config', 'PROJECT_CONFIG_UNREADABLE', 'no .autoloop/config.json');
   }
   if (!resolved.ok) {
     return resolved.unreadable
       ? failure('config', 'PROJECT_CONFIG_UNREADABLE', resolved.errors.join('; '))
       : failure('config', 'PROJECT_CONFIG_INVALID', resolved.errors.join('; '), { errors: resolved.errors });
   }
-  // A run opens only where the plugin's hooks guard the repository: a legacy
-  // install, or one whose vendored guard is still wired, runs another guard.
-  if (activeAutoloopRoot(root) === null) {
-    return failure('config', 'NOT_DEVENDORED', resolved.source === PROJECT_CONFIG_FILE
-      ? 'vendored hooks are still wired in .claude/settings*.json, so the plugin\'s guard is off: '
-        + 'finish the devendor with autoloop:setup'
-      : 'a vendored install (docs/agentic/STATE.md): run autoloop:setup to devendor it first');
+  // A half-finished devendor runs two guards and two sets of reminders.
+  if (vendoredLeftovers(root).hooks.length > 0) {
+    return failure('config', 'NOT_DEVENDORED',
+      'vendored hooks are still wired in .claude/settings*.json: finish the devendor with autoloop:setup');
   }
   return { config: resolved.config };
 }
@@ -624,16 +615,9 @@ function buildFixtureRepository(scratch, config) {
   run(['init', '--quiet', root]);
   run(['symbolic-ref', 'HEAD', 'refs/heads/main']);
   run(['remote', 'add', 'origin', 'https://github.com/autoloop-fixtures/prime.git']);
-  const statePath = join(root, 'docs', 'agentic', 'STATE.md');
-  mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, [
-    '# STATE — prime fixture',
-    '',
-    '```json autoloop-config',
-    JSON.stringify(config, null, 2),
-    '```',
-    '',
-  ].join('\n'));
+  const configPath = join(root, '.autoloop', 'config.json');
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   run(['add', '--all']);
   run([
     '-c', 'user.name=autoloop',
@@ -790,8 +774,8 @@ function selfTest() {
     })(),
   );
 
-  // Global install: prime reads .autoloop/config.json over plugin defaults,
-  // the legacy STATE block in memory, and refuses typed when neither exists.
+  // Global install: prime reads .autoloop/config.json over plugin defaults
+  // and refuses typed without it, or while vendored hooks are still wired.
   check(
     'prime reads the project config through the resolver and keeps its typed failures',
     (() => {
@@ -804,15 +788,11 @@ function selfTest() {
         writeFileSync(join(root, '.autoloop', 'config.json'),
           JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'true' } }));
         const good = readPrimeConfig(root);
-        // A run opens only where the plugin's hooks guard the repository.
         mkdirSync(join(root, '.claude'));
-        mkdirSync(join(root, 'tools', 'agentic'), { recursive: true });
-        writeFileSync(join(root, 'tools', 'agentic', 'command-guard.mjs'), '// vendored\n');
         writeFileSync(join(root, '.claude', 'settings.json'),
           '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node tools/agentic/command-guard.mjs"}]}]}}');
         const wired = readPrimeConfig(root);
         rmSync(join(root, '.claude'), { recursive: true, force: true });
-        rmSync(join(root, 'tools'), { recursive: true, force: true });
         rmSync(join(root, '.autoloop'), { recursive: true, force: true });
         mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
         writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'),
@@ -883,10 +863,7 @@ function selfTest() {
       && outsideRepository.error.code === 'CHECKOUT_UNAVAILABLE',
     );
 
-    writeFileSync(
-      join(root, 'docs', 'agentic', 'STATE.md'),
-      '# STATE\n\n```json autoloop-config\n{"version":"0.0.0"}\n```\n',
-    );
+    writeFileSync(join(root, '.autoloop', 'config.json'), '{"version":"0.0.0"}\n');
     const badConfig = primeDev({ cwd: root });
     check(
       'an invalid ProjectConfig is a typed config failure that names every error',
@@ -897,10 +874,10 @@ function selfTest() {
       && badConfig.error.errors.length > 0,
     );
 
-    writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'), '# STATE\n\nno config\n');
+    rmSync(join(root, '.autoloop'), { recursive: true, force: true });
     const missingConfig = primeDev({ cwd: root });
     check(
-      'a STATE without a config block is a typed config failure',
+      'a repository without .autoloop/config.json is a typed config failure',
       missingConfig.ok === false
       && missingConfig.error.code === 'PROJECT_CONFIG_UNREADABLE',
     );

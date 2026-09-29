@@ -40,8 +40,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
-  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -58,6 +56,9 @@ import {
 } from './config-contract.mjs';
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
+import {
+  runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunBase, ancestorChain, isClaudeProcess, procEntry, psEntry,
+} from './run-markers.mjs';
 
 const BRANCH_CREATION_FLAGS = new Set([
   '-c',
@@ -2527,145 +2528,6 @@ function currentBranch() {
   }
 }
 
-// The guard is defense-in-depth for commands a run issues; repository rules are
-// the enforcement boundary. Applying it to every Bash call in the project turns
-// ordinary development into a fight with a policy that was never aimed at it, so
-// it enforces only while a run is actually open.
-//
-// An open run is evidenced by a durable run marker that `prime.mjs` writes and
-// binds to the ancestry it observed. The marker names live PIDs; a run whose
-// orchestrator has exited leaves nothing alive to match, so the evidence
-// disappears with the run without needing a daemon to revoke it. Anything
-// unreadable or ambiguous means "no run": a guard that cannot establish an open
-// run must not block a human.
-// The common git dir, not `--git-path` (which is per-worktree for this path):
-// a command issued from a linked worktree must see the repository's run.
-export function runMarkerDirectory(cwd = process.cwd()) {
-  const result = spawnSync(
-    'git',
-    ['-C', cwd, 'rev-parse', '--git-common-dir'],
-    { encoding: 'utf8', timeout: 10_000, windowsHide: true },
-  );
-  if (result.status !== 0 || result.error) return null;
-  const common = String(result.stdout ?? '').trim();
-  if (!common) return null;
-  return join(isAbsolute(common) ? common : resolve(cwd, common), 'autoloop', 'run');
-}
-
-function procEntry(pid) {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-    const name = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
-    let exe = '';
-    try {
-      exe = readlinkSync(`/proc/${pid}/exe`);
-    } catch {
-      exe = ''; // another user's process: comm alone decides
-    }
-    return Number.isSafeInteger(parent) ? [parent, name, exe] : null;
-  } catch {
-    return process.platform === 'linux' ? null : psEntry(pid);
-  }
-}
-
-// Where /proc is absent (macOS), ps gives the parent and the command; the
-// command is often the executable's full path there, which also names a
-// Claude install the way /proc/<pid>/exe does.
-function psEntry(pid, run = (args) => spawnSync('ps', args, { encoding: 'utf8', timeout: 5000 })) {
-  const result = run(['-o', 'ppid=', '-o', 'comm=', '-p', String(pid)]);
-  const match = /^\s*(\d+)\s+(.+?)\s*$/u.exec(String(result?.stdout ?? '').split('\n')[0] ?? '');
-  if (result?.status !== 0 || match === null) return null;
-  const command = match[2];
-  return [Number(match[1]), basename(command), command.startsWith('/') ? command : ''];
-}
-
-// A session's ancestry ends at its own Claude Code process. Above it sit the
-// shell, the terminal multiplexer and the init chain that every other session
-// on the machine shares; recording those let any session in the repo pass for
-// the loop's own run. With no `claude` ancestor (another host) the whole chain
-// is kept, as before.
-//
-// comm is the name the binary was launched under, since it never retitles
-// itself (measured, 2.1.283): `claude` through the installer's symlink,
-// `claude.exe` for the npm package's copy, the bare version for a versioned
-// path launched directly. The executable's path names the install in all three.
-function isClaudeProcess(name, exe = '') {
-  return /^claude(?:\.exe)?$/u.test(name) || /\/claude\/versions\/[^/]+$|\/claude(?:\.exe)?$/u.test(exe);
-}
-
-export function ancestorChain(start, readEntry = procEntry, limit = 64) {
-  const pids = new Set();
-  let pid = start;
-  for (let depth = 0; depth < limit && pid > 1; depth += 1) {
-    pids.add(pid);
-    const entry = readEntry(pid);
-    if (entry === null) return pids;
-    const [parent, name, exe] = entry;
-    if (isClaudeProcess(name, exe)) return pids;
-    if (!Number.isSafeInteger(parent) || parent <= 0) return pids;
-    pid = parent;
-  }
-  return pids;
-}
-
-export function ancestorPids(limit = 64) {
-  return ancestorChain(process.ppid, procEntry, limit);
-}
-
-export function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
-}
-
-export function ownRunMarkers(cwd = process.cwd()) {
-  const directory = runMarkerDirectory(cwd);
-  if (directory === null) return [];
-  let entries;
-  try {
-    entries = readdirSync(directory);
-  } catch {
-    return [];
-  }
-  const ancestors = ancestorPids();
-  const markers = [];
-  for (const entry of entries) {
-    if (!entry.endsWith('.json')) continue;
-    const path = join(directory, entry);
-    let marker;
-    try {
-      marker = JSON.parse(readFileSync(path, 'utf8'));
-    } catch {
-      continue;
-    }
-    if (marker?.version !== 1 || !Array.isArray(marker.pids)) continue;
-    if (marker.pids.some((pid) =>
-      Number.isSafeInteger(pid)
-      && pid > 1
-      && ancestors.has(pid)
-      && processAlive(pid))) {
-      markers.push({ path, marker });
-    }
-  }
-  return markers;
-}
-
-// The base of an open run the plugin's prime opened (its marker records the
-// base; a legacy install's own prime writes markers without one — that run is
-// the vendored guard's, never this one's). Looked up from the hook's cwd and
-// from the project root, since either may be where the session works. null
-// when no such run is open.
-export function pluginRunBase(dirs = [process.cwd()]) {
-  const newest = dirs.flatMap((dir) => ownRunMarkers(dir))
-    .filter(({ marker }) => typeof marker.baseBranch === 'string')
-    .sort((left, right) => (right.marker.openedAtMs ?? 0) - (left.marker.openedAtMs ?? 0))[0];
-  return newest?.marker.baseBranch ?? null;
-}
-
 // A command that runs the plugin's own prime to open a run (not --close-run,
 // --park or --self-test) in a repository other than the session's project.
 // It follows the command's own directory changes (cd, pushd, env -C, in
@@ -2746,31 +2608,8 @@ export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PR
   return null;
 }
 
-// Where a plugin hook acts: the devendored autoloop repository at the project
-// root, or — while a plugin run is open — that root whatever the checkout now
-// says, so no file the run can change switches the hooks off mid-run.
-export function guardedRoot(projectRoot = hookRoot()) {
-  return activeAutoloopRoot(projectRoot)
-    ?? (pluginRunBase([process.cwd(), projectRoot]) === null ? null : projectRoot);
-}
-
-export function loopRunIsOpen(cwd = process.cwd()) {
-  return ownRunMarkers(cwd).length > 0;
-}
-
-// A run that closed deliberately is still OPEN to the command guard — the
-// session goes on issuing commands and the rules that block `gh pr merge` have
-// no reason to relax. `closedAt` answers a different question, asked only by the
-// Stop hook: is this run still supposed to be taking work? Anything present but
-// unrecognised counts as closed, because the liveness guard's failure direction
-// is silence.
-export function loopRunIsLive(cwd = process.cwd()) {
-  return ownRunMarkers(cwd).some(({ marker }) => marker.closedAt === undefined);
-}
-
 // The config comes from the one resolver: .autoloop/config.json over plugin
-// defaults, else the legacy STATE block migrated in memory (an older schema no
-// longer switches the guard off — it enforces the migrated config).
+// defaults. A repository without one has no base to guard here.
 export function loadConfiguredBase(root) {
   const resolved = resolveProjectConfig(root);
   if (resolved === null) throw new Error('no autoloop configuration in this repository');
@@ -2795,9 +2634,8 @@ export function parseArgs(args) {
 // Corpus replay: real command shapes from live sessions, each tagged with the
 // incident that earned it a place. Unit fixtures test what we imagined; the
 // corpus tests what sessions actually typed — five of one day's bugs were guard
-// verdicts on commands no fixture contained. Exposed as `--corpus` because the
-// release-proven manifest fast-path may skip an unchanged tool's self-test,
-// and a corpus edit must always be re-proven.
+// verdicts on commands no fixture contained. Exposed as `--corpus` so verify
+// replays it as its own step.
 export function replayCorpus() {
   const failures = [];
   let total = 0;
@@ -3337,7 +3175,7 @@ function selfTest() {
     }
   }
   // Global install: the base branch comes from .autoloop/config.json
-  // (over plugin defaults), else the legacy STATE block, else nothing.
+  // (over plugin defaults), else nothing.
   const baseCases = (() => {
     const root = mkdtempSync(join(tmpdir(), 'guard-base-'));
     const attempt = () => {
@@ -3834,11 +3672,11 @@ function selfTest() {
       }
       // Every hook (reminders, transcripts, the preflight) acts where the guard
       // does: a plugin run keeps the project guarded on a checkout without config.
-      const guarded = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
+      const guarded = spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'hook-root.mjs'), '--guarded-root'], {
         encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
       });
       writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now() }));
-      const vendoredRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
+      const vendoredRun = spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'hook-root.mjs'), '--guarded-root'], {
         encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
       });
       writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
@@ -4110,12 +3948,6 @@ function refuse(reason) {
 }
 
 function main() {
-  // For the shell hooks (session-preflight): the root a hook acts in, or exit 1.
-  if (process.argv[2] === '--guarded-root') {
-    const root = guardedRoot();
-    if (root !== null) console.log(root);
-    process.exit(root === null ? 1 : 0);
-  }
   if (process.argv.includes('--corpus')) {
     const { total, failures } = replayCorpus();
     for (const line of failures) console.error(line);

@@ -7,33 +7,33 @@
 // location, which is the plugin directory — and stands down unless the
 // project is a devendored autoloop repository:
 //
-//   - `.autoloop/config.json` is present (or unreadable: the resolver then
-//     refuses, which is the fail-closed outcome), and
-//   - no vendored guard is wired in `.claude/settings.json`. A legacy
-//     repository keeps its vendored hooks until devendor; a second, newer
-//     guard beside them would judge the old layout.
+//   `.autoloop/config.json` is present (or unreadable: the resolver then
+//   refuses, which is the fail-closed outcome). A legacy repository has none,
+//   so its vendored hooks run alone until devendor.
 //
 // This decides only whether a hook acts OUTSIDE an open run. Once prime opened
 // a run (it refuses unless this repository is active), the guards act for the
 // rest of the run whatever the checkout later says: a deleted config or a
-// checked-out pre-devendor branch must not switch them off.
+// checked-out pre-devendor branch must not switch them off. The run marker
+// itself lives in the git dir, which the run can write — the guards are only
+// as durable as that marker.
 //
 //   node <plugin-tools>/hook-root.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
+import { pluginRunBase } from './run-markers.mjs';
 
 const VENDORED_DIR = 'tools/agentic';
-const VENDORED_GUARD = `${VENDORED_DIR}/command-guard.mjs`;
 
 // Every file the plugin ever vendored into tools/agentic/: each name ever under
-// templates/tools in this repository's history, plus the executor's installed
+// templates/tools (now tools) in this repository's history, plus the executor's installed
 // name. A repository's own files there (a gate script) are not in it, and
 // nothing outside it is ever treated as the tool's.
 export const VENDORED_TOOL_NAMES = Object.freeze([
@@ -156,17 +156,16 @@ function configPresent(root) {
   }
 }
 
-// A legacy install's wiring: a hook command in the tracked settings running a
-// vendored guard that still exists. Nothing weaker counts — a permission entry,
-// an untracked local settings file or unreadable settings leave the plugin
-// guard on, since two guards are safer than none.
-function vendoredGuardWired(root) {
-  return existsSync(join(root, VENDORED_GUARD))
-    && hookCommands(root, '.claude/settings.json').some((command) => command.includes(VENDORED_GUARD));
+export function activeAutoloopRoot(root = hookRoot()) {
+  return configPresent(root) ? root : null;
 }
 
-export function activeAutoloopRoot(root = hookRoot()) {
-  return configPresent(root) && !vendoredGuardWired(root) ? root : null;
+// Where a plugin hook acts: the devendored autoloop repository at the project
+// root, or — while a plugin run is open — that root whatever the checkout now
+// says, so no tracked file the run changes switches the hooks off mid-run.
+export function guardedRoot(projectRoot = hookRoot()) {
+  return activeAutoloopRoot(projectRoot)
+    ?? (pluginRunBase([process.cwd(), projectRoot]) === null ? null : projectRoot);
 }
 
 function selfTest() {
@@ -194,24 +193,6 @@ function selfTest() {
     writeFileSync(join(repo, '.autoloop', 'config.json'), '{}');
     check('a devendored autoloop repository is active', activeAutoloopRoot(repo) === repo);
     mkdirSync(join(repo, '.claude'));
-    mkdirSync(join(repo, 'tools', 'agentic'), { recursive: true });
-    writeFileSync(join(repo, 'tools', 'agentic', 'command-guard.mjs'), '// vendored');
-    const wiring = { hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: `node "$CLAUDE_PROJECT_DIR/${VENDORED_GUARD}"` }] }] } };
-    writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify(wiring));
-    check('a repository whose vendored guard is still wired is inactive', activeAutoloopRoot(repo) === null);
-    // Only a real hook in the tracked settings, running a guard that exists,
-    // counts: a stray string (a permission entry, a local settings file, a
-    // symlink to notes) must not switch the plugin guard off.
-    writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: [`Bash(node ${VENDORED_GUARD} --self-test)`] } }));
-    writeFileSync(join(repo, '.claude', 'settings.local.json'), JSON.stringify(wiring));
-    check('a permission entry or local settings naming the vendored guard leave the plugin guard active',
-      activeAutoloopRoot(repo) === repo);
-    writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify(wiring));
-    rmSync(join(repo, 'tools'), { recursive: true, force: true });
-    check('wiring whose vendored guard file is gone leaves the plugin guard active',
-      activeAutoloopRoot(repo) === repo);
-    writeFileSync(join(repo, '.claude', 'settings.json'), '{"hooks":{}}');
-    rmSync(join(repo, '.claude', 'settings.local.json'));
     // The one definition of what is left of the vendored layout: shipped
     // files and hooks running them — never a repository's own gate script.
     mkdirSync(join(repo, 'tools', 'agentic', 'briefs'), { recursive: true });
@@ -228,14 +209,13 @@ function selfTest() {
         && JSON.stringify(leftovers.hooks.map(({ command }) => command)) === '["node tools/agentic/writeback-check.mjs"]');
     rmSync(join(repo, 'tools'), { recursive: true, force: true });
     rmSync(join(repo, '.claude', 'settings.local.json'));
-    // The shell hooks ask the same question (plus the open-run rule) through
-    // the command guard's CLI.
-    const cli = (dir) => spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'command-guard.mjs'), '--guarded-root'], {
+    // The shell hooks ask the same question (plus the open-run rule) through the CLI.
+    const cli = (dir) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
       encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: dir },
     });
     const activeCli = cli(repo);
     const inactiveCli = cli(scratch);
-    check('command-guard --guarded-root prints an active root and exits 0, else exits 1 silently',
+    check('--guarded-root prints an active root and exits 0, else exits 1 silently',
       activeCli.status === 0 && activeCli.stdout.trim() === repo
         && inactiveCli.status === 1 && inactiveCli.stdout === '');
     rmSync(join(repo, '.autoloop'), { recursive: true, force: true });
@@ -262,6 +242,12 @@ const isMain = (() => {
 })();
 if (isMain) {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  console.error('usage: hook-root.mjs --self-test (shell hooks ask command-guard.mjs --guarded-root)');
+  // For the shell hooks (session-preflight): the root a hook acts in, or exit 1.
+  if (process.argv.includes('--guarded-root')) {
+    const root = guardedRoot();
+    if (root !== null) console.log(root);
+    process.exit(root === null ? 1 : 0);
+  }
+  console.error('usage: hook-root.mjs --guarded-root | --self-test');
   process.exit(2);
 }

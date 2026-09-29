@@ -19,7 +19,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { fileURLToPath } from 'node:url';
 import { isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { guardedRoot } from './command-guard.mjs';
+import { guardedRoot } from './hook-root.mjs';
 
 const KEEP_FILES = 40; // ISO-stamped names sort chronologically; oldest pruned first
 

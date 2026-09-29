@@ -22,12 +22,12 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 # Exit 1 is "not a guarded autoloop repository": stay silent. Anything else
 # is the plugin failing, which an autoloop repository must hear about.
-node "$TOOLS_DIR/command-guard.mjs" --guarded-root >/dev/null 2>&1
+node "$TOOLS_DIR/hook-root.mjs" --guarded-root >/dev/null 2>&1
 active=$?
 if [ "$active" -ne 0 ]; then
   if [ "$active" -ne 1 ] && [ -e "$REPO_DIR/.autoloop/config.json" ]; then
     echo '## autoloop preflight'
-    echo "FAIL  command-guard.mjs --guarded-root exited $active — the plugin cannot tell whether it guards this repository; reinstall it and restart the session"
+    echo "FAIL  hook-root.mjs --guarded-root exited $active — the plugin cannot tell whether it guards this repository; reinstall it and restart the session"
   fi
   exit 0
 fi
@@ -141,12 +141,9 @@ fi
 run_timed 10 node "$TOOLS_DIR/step.mjs" --card-run 2>/dev/null || true
 
 # 6. The repository's loop policy prose, injected every session.
-for state in "$REPO_DIR/.autoloop/STATE.md" "$REPO_DIR/docs/agentic/STATE.md"; do
-  if [ -f "$state" ]; then
-    echo
-    cat "$state"
-    break
-  fi
-done
+if [ -f "$REPO_DIR/.autoloop/STATE.md" ]; then
+  echo
+  cat "$REPO_DIR/.autoloop/STATE.md"
+fi
 
 exit 0

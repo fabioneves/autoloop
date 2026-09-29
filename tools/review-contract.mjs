@@ -31,7 +31,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { snapshotExecutionCheckout } from './checkout-contract.mjs';
-import { currentProjectConfig, resolveProjectConfig } from './config-contract.mjs';
+import { currentProjectConfig, NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 import { validReviewVerdict } from './dispatch.mjs';
 
 const GATING_SEVERITIES = new Set(['Critical', 'Major']);
@@ -535,20 +535,17 @@ function authenticatedFindings(rounds, gaps = []) {
 }
 
 // Round 1's projectConfig must equal prime's, which comes from the resolver:
-// `--state` names the base checkout's legacy STATE.md or .autoloop/config.json,
-// and the repository root is derived from it.
-// The base's config file, named exactly: `.autoloop/config.json` (root two
-// levels up) or the legacy `docs/agentic/STATE.md` (three). Anything else —
+// `--state` names the base checkout's `.autoloop/config.json` exactly, and the
+// repository root (two levels up) is derived from it. Anything else —
 // `.autoloop/STATE.md` is prose — would derive a wrong root.
 export function projectConfigForReview(path) {
   const segments = resolve(String(path)).split(sep);
   const tail = (count) => segments.slice(-count).join('/');
   let root;
   if (String(path) !== '' && tail(2) === '.autoloop/config.json') root = resolve(path, '..', '..');
-  else if (String(path) !== '' && tail(3) === 'docs/agentic/STATE.md') root = resolve(path, '..', '..', '..');
-  else throw new Error('--state must name <base>/.autoloop/config.json or <base>/docs/agentic/STATE.md');
+  else throw new Error('--state must name <base>/.autoloop/config.json');
   const resolved = resolveProjectConfig(root);
-  if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
+  if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? NO_CONFIG}`);
   return resolved.config;
 }
 
@@ -1862,20 +1859,18 @@ function selfTest() {
   const reviewConfigCheck = (() => {
     const root = mkdtempSync(join(tmpdir(), 'review-config-'));
     try {
-      mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
-      const statePath = join(root, 'docs', 'agentic', 'STATE.md');
-      writeFileSync(statePath, `\`\`\`json autoloop-config\n${JSON.stringify({ ...chainConfig027 })}\n\`\`\`\n`);
-      const legacy = projectConfigForReview(statePath);
       mkdirSync(join(root, '.autoloop'));
       const jsonPath = join(root, '.autoloop', 'config.json');
+      writeFileSync(jsonPath, JSON.stringify({ ...chainConfig027 }));
+      const migrated = projectConfigForReview(jsonPath);
       writeFileSync(jsonPath, JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'x' } }));
-      return legacy.version === '0.28.0' && legacy.caps === undefined
-        && projectConfigForReview(statePath).baseBranch === 'trunk'
+      mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
+      return migrated.version === '0.28.0' && migrated.caps === undefined
         && projectConfigForReview(jsonPath).baseBranch === 'trunk'
         && projectConfigForReview(jsonPath).merge.policy === 'manual'
         // Beside the real STATE, so a root derived from it WOULD find config.
         // `.autoloop/STATE.md` is prose, and three levels up is the parent.
-        && ['', join(root, 'docs', 'agentic', 'STATE.txt'), join(root, '.autoloop', 'STATE.md'),
+        && ['', join(root, 'docs', 'agentic', 'STATE.md'), join(root, '.autoloop', 'STATE.md'),
           join(root, 'elsewhere', 'config.json')].every((bad) => {
           try {
             projectConfigForReview(bad);

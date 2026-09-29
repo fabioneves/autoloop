@@ -58,6 +58,7 @@ import {
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
 import {
+  NO_CONFIG,
   resolveProjectConfig,
   validateConfig,
 } from './config-contract.mjs';
@@ -1244,12 +1245,12 @@ function runGate(command, cwd) {
 }
 
 function loadPublicationConfig(repositoryRoot) {
-  // .autoloop/config.json over plugin defaults, else the legacy STATE block
-  // migrated in memory (a unit branch forked before a migration keeps working).
+  // .autoloop/config.json over plugin defaults; a unit branch forked before
+  // devendor has none and must merge the base first.
   const resolved = resolveProjectConfig(repositoryRoot, (path) =>
     readBoundedNoFollow(path, MAX_AUXILIARY_EVIDENCE_BYTES).toString('utf8'));
   if (!resolved?.ok) {
-    throw new Error(`ProjectConfig is invalid: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
+    throw new Error(`ProjectConfig is invalid: ${resolved?.errors?.join('; ') ?? NO_CONFIG}`);
   }
   return resolved.config;
 }
@@ -3893,21 +3894,16 @@ function selfTest() {
   } else {
     console.error('FAIL acknowledged solo delivery posts exactly the two verdict statuses');
   }
-  // v0.55.0 review: a unit branch forked before setup migrated the base
-  // still carries 0.27.0 STATE, and gate publication reads the checkout's
+  // v0.55.0 review: a unit branch forked before its config was migrated
+  // still carries an older schema, and gate publication reads the checkout's
   // copy. It reads as the current schema, migrated in memory.
   const branchState = (() => {
     const dir = mkdtempSync(resolve(tmpdir(), 'publish-verdict-state-'));
     try {
-      mkdirSync(resolve(dir, 'docs', 'agentic'), { recursive: true });
-      writeFileSync(resolve(dir, 'docs', 'agentic', 'STATE.md'), [
-        '```json autoloop-config',
-        JSON.stringify({ ...gateConfig, version: '0.27.0', caps: {
-          gateRetriesPerUnit: 2, codeReviewRoundsPerUnit: 5, sliceMaxLines: 700, sliceMaxFiles: 10,
-        } }),
-        '```',
-        '',
-      ].join('\n'));
+      mkdirSync(resolve(dir, '.autoloop'), { recursive: true });
+      writeFileSync(resolve(dir, '.autoloop', 'config.json'), JSON.stringify({ ...gateConfig, version: '0.27.0', caps: {
+        gateRetriesPerUnit: 2, codeReviewRoundsPerUnit: 5, sliceMaxLines: 700, sliceMaxFiles: 10,
+      } }));
       return loadPublicationConfig(dir);
     } catch (error) {
       return { error: error.message };
@@ -3919,7 +3915,7 @@ function selfTest() {
     && branchState.gate?.command === gateConfig.gate.command) {
     passed += 1;
   } else {
-    console.error(`FAIL a pre-migration branch STATE reads as the current schema: ${JSON.stringify(branchState)}`);
+    console.error(`FAIL a pre-migration branch config reads as the current schema: ${JSON.stringify(branchState)}`);
   }
   // Global install: a repository with only .autoloop/config.json (overrides
   // over plugin defaults) publishes from that.

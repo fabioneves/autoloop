@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.59.0 · starting
+∞ dev · v0.60.0 · starting
 ```
 
 This session is the orchestrator: it plans, applies its own checklist pass and fixes, runs gates,
@@ -31,8 +31,8 @@ reviewer identities never collide. Run Pitcrew first in the same run, then take 
    human divergence — stop and report. Use the base's STATE, not a session injection.
 
 Then one call (validates ProjectConfig, runs one `scan.mjs`, persists the snapshot, prints a
-decision-sized summary). It refuses `NOT_DEVENDORED` in a vendored install, or while a vendored
-guard is still wired: stop with the Setup remedy; never devendor inside a Dev run.
+decision-sized summary). It refuses `NOT_DEVENDORED` in a vendored install: stop with the Setup
+remedy; never devendor inside a Dev run.
 
 ```bash
 node <plugin-tools>/prime.mjs --json
@@ -127,11 +127,11 @@ Never in any command:
 ## The tools
 
 Every tool, brief and hook runs from the plugin: `<plugin-tools>` =
-`<this skill's real dir>/../../templates/tools/` (the SessionStart preflight prints it), written as
+`<this skill's real dir>/../../tools/` (the SessionStart preflight prints it), written as
 a literal absolute path, never a shell variable. A unit branch therefore runs the same guard as the
 base. Repository policy is data — `.autoloop/config.json`, read from the base; the gate is the
 repository's own `gate.command`, run on the unit's tree; the merge executor is
-`<plugin-tools>/auto-merge.reference.mjs`, run from the base checkout.
+`<plugin-tools>/auto-merge.mjs`, run from the base checkout.
 
 ### Behind base
 
@@ -249,7 +249,7 @@ push commits, post the kill evidence on the issue, `node <plugin-tools>/unit.mjs
 --minutes 60`, take the next unit. Never diagnose an external kill.
 
 Prompts go in a file; never inline untrusted text into a shell command. The role's standing brief
-(`templates/tools/briefs/<role>.md`) is prepended, so the prompt carries only unit facts (artifact
+(`tools/briefs/<role>.md`) is prepended, so the prompt carries only unit facts (artifact
 paths, the 🧊 frozen plan, rulings, accepted findings and dispositions, base changes, focus) and
 never restates a standing rule. A writer reporting partial or unknown effects enters
 lifecycle reconciliation — never blind-retry it. A review dispatch that mutated the repository is
@@ -738,7 +738,7 @@ finalizer is not an outcome — only its typed refusal is.
 
 `merge.policy: manual`: stop after the terminal result; the ready PR is the human's. Acknowledged
 solo non-manual: **switch to the base checkout first**, run
-`<plugin-tools>/auto-merge.reference.mjs <PR>` there once, and treat its typed verdict as final. A refusal goes to the human-block path —
+`<plugin-tools>/auto-merge.mjs <PR>` there once, and treat its typed verdict as final. A refusal goes to the human-block path —
 never retry blindly, weaken a predicate, or merge another way. No run submits a merge queue entry,
 publishes a tag, or creates a release.
 
@@ -894,7 +894,7 @@ close it, `--park` to sleep it), `step.mjs` (`--to`, `--resumed`, `--card`, `--p
 SessionStart hook runs `--card-run`), `unit.mjs` (`--obsolete`/`--wait`), `dispatch.mjs`,
 `scan.mjs`, `snapshot-contract.mjs` (invalidate/summary/section/`--unit`), `review-contract.mjs`,
 `publish-verdict.mjs`,
-`lifecycle-driver.mjs`, `escalate-paths.mjs`, and `auto-merge.reference.mjs`, the terminal merge
+`lifecycle-driver.mjs`, `escalate-paths.mjs`, and `auto-merge.mjs`, the terminal merge
 exception. Every other file in `<plugin-tools>` is a library those entry points own — never invoke
 a contract module directly.
 

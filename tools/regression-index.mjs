@@ -122,7 +122,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'step.mjs', anchor: 'export function renderSetupPhase(' }),
       Object.freeze({
-        file: '../../skills/setup/SKILL.md',
+        file: '../skills/setup/SKILL.md',
         anchor: '**Every phase begins with one call, which prints its ribbon; repeat that line verbatim.**',
       }),
     ]),
@@ -141,7 +141,7 @@ export const INCIDENTS = Object.freeze([
       + 'worktree while the session keeps its vendored hooks.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: '../../skills/setup/SKILL.md',
+        file: '../skills/setup/SKILL.md',
         anchor: '**Work in a linked worktree, never this checkout**',
       }),
       Object.freeze({ file: 'setup.mjs', anchor: "return refusal('LIVE_CHECKOUT'," }),
@@ -177,8 +177,8 @@ export const INCIDENTS = Object.freeze([
       + 'the one guard is the plugin\'s, wired by the plugin.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: '../../hooks/hooks.json',
-        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\\"',
+        file: '../hooks/hooks.json',
+        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/tools/command-guard.mjs\\"',
       }),
       Object.freeze({
         file: 'verify.mjs',
@@ -198,7 +198,7 @@ export const INCIDENTS = Object.freeze([
       + 'guard\'s remedy (--close-run) read as bypassing it.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: '../../skills/setup/SKILL.md',
+        file: '../skills/setup/SKILL.md',
         anchor: '**A parked run in this session is closed, not worked around.**',
       }),
     ]),
@@ -214,7 +214,7 @@ export const INCIDENTS = Object.freeze([
       + 'multiplexer and init chain above Claude Code are shared by every session. '
       + 'The ancestry now ends at the session\'s own claude process.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function ancestorChain(start, readEntry = procEntry, limit = 64) {' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'export function ancestorChain(start, readEntry = procEntry, limit = 64) {' }),
       Object.freeze({ file: 'command-guard.mjs', anchor: 'FAIL [an ancestry stops at its own claude process]' }),
     ]),
   }),
@@ -395,11 +395,11 @@ export const INCIDENTS = Object.freeze([
         anchor: 'FAIL [background dispatch launch rule]',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: '**Launch every dispatch in the background**',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: '**A killed stream task is not a killed dispatch.**',
       }),
     ]),
@@ -423,15 +423,15 @@ export const INCIDENTS = Object.freeze([
       + 'carries, and find the repository from CLAUDE_PROJECT_DIR.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: '../../hooks/hooks.json',
-        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/templates/tools/command-guard.mjs\\"',
+        file: '../hooks/hooks.json',
+        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/tools/command-guard.mjs\\"',
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
         anchor: 'const ROOT = hookRoot();',
       }),
       Object.freeze({
-        file: 'command-guard.mjs',
+        file: 'hook-root.mjs',
         anchor: 'export function guardedRoot(projectRoot = hookRoot()) {',
       }),
       Object.freeze({
@@ -471,10 +471,10 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
-        anchor: 'parked.hard.length === 0 && parked.reminders.length === 1',
+        anchor: 'parked.hard.length === 0 && parked.reminders.length === 0',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'A PARK is not a dark run',
       }),
     ]),
@@ -500,7 +500,7 @@ export const INCIDENTS = Object.freeze([
         anchor: 'a captured tip id is refused by name, with the root id to use instead',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: "it is\nthe chain's ROOT and stays the captured ID",
       }),
     ]),
@@ -580,7 +580,7 @@ export const INCIDENTS = Object.freeze([
         anchor: 'so writers are proxied too',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'the session\'s own environment is not a prerequisite and not evidence',
       }),
     ]),
@@ -613,7 +613,7 @@ export const INCIDENTS = Object.freeze([
         anchor: "name: 'a tool may not stamp a finding verified',",
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: '--append-escalation-round',
       }),
     ]),
@@ -634,15 +634,15 @@ export const INCIDENTS = Object.freeze([
       + 'missing step.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: 'auto-merge.reference.mjs',
+        file: 'auto-merge.mjs',
         anchor: 'function finalizerHasNotRun(pr) {',
       }),
       Object.freeze({
-        file: 'auto-merge.reference.mjs',
+        file: 'auto-merge.mjs',
         anchor: "name: 'a PR the terminal finalizer never touched says so first',",
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'Declining to invoke the\nfinalizer is not an outcome',
       }),
     ]),
@@ -668,7 +668,7 @@ export const INCIDENTS = Object.freeze([
         anchor: "'a reviewer brief carrying a shell fence is refused before the engine starts',",
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'REVIEWER_PROMPT_NOT_EXECUTABLE',
       }),
     ]),
@@ -703,7 +703,7 @@ export const INCIDENTS = Object.freeze([
         anchor: 'export function reviewEnvelopeStamp(role) {',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'a round that found only Minors is a `pass` that\n  lists them',
       }),
     ]),
@@ -738,7 +738,7 @@ export const INCIDENTS = Object.freeze([
         anchor: "name: 'a full-artifact round re-reading the delta head closes the review',",
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'A clean delta round does not converge the unit.',
       }),
     ]),
@@ -769,7 +769,7 @@ export const INCIDENTS = Object.freeze([
         anchor: "name: 'a re-raised finding may not change severity',",
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'a finding id is its defect AND its severity',
       }),
     ]),
@@ -834,7 +834,7 @@ export const INCIDENTS = Object.freeze([
         anchor: 'This is the ONE plan review',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'A second plan-review dispatch is a loop defect, not a round',
       }),
     ]),
@@ -862,11 +862,11 @@ export const INCIDENTS = Object.freeze([
         anchor: 'claim parented by the planned base with a forward-moved current base allows',
       }),
       Object.freeze({
-        file: 'auto-merge.reference.mjs',
+        file: 'auto-merge.mjs',
         anchor: 'function fetchPlannedBaseComparison(',
       }),
       Object.freeze({
-        file: 'auto-merge.reference.mjs',
+        file: 'auto-merge.mjs',
         anchor: 'claim commit whose planned base the current base no longer descends from blocks',
       }),
     ]),
@@ -892,7 +892,7 @@ export const INCIDENTS = Object.freeze([
         anchor: '--add-label loop:10-publish 2>/dev/null',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'No label moves at this step, or step 11',
       }),
     ]),
@@ -938,7 +938,7 @@ export const INCIDENTS = Object.freeze([
         anchor: 'reversed a human unblock',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'equally one human action, and equally irreversible',
       }),
     ]),
@@ -998,7 +998,7 @@ export const INCIDENTS = Object.freeze([
       + 'harness had removed.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'A step is announced ONCE, by its ribbon',
       }),
       Object.freeze({
@@ -1268,7 +1268,7 @@ export const INCIDENTS = Object.freeze([
       + 'report all along as `ok: false`, but nothing said so.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: '../../skills/setup/SKILL.md',
+        file: '../skills/setup/SKILL.md',
         anchor: 'Never write `$?` in any form: the tool result already carries the exit status.',
       }),
       Object.freeze({ file: 'setup.mjs', anchor: 'console.log(JSON.stringify(result, null, 2));' }),
@@ -1302,7 +1302,7 @@ export const INCIDENTS = Object.freeze([
       + 'said to ask the driver instead of improvising a gh call.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'Never hand-query a unit',
       }),
     ]),
@@ -1363,7 +1363,7 @@ export const INCIDENTS = Object.freeze([
       + 'an executable command is an invitation to improvise into a refusal.',
     enforcedBy: Object.freeze([
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'Write the URL as a literal',
       }),
     ]),
@@ -1385,7 +1385,7 @@ export const INCIDENTS = Object.freeze([
         anchor: 'takes the basename of path lines instead of dropping them',
       }),
       Object.freeze({
-        file: '../../skills/setup/SKILL.md',
+        file: '../skills/setup/SKILL.md',
         anchor: 'Version currency, one pipeline',
       }),
     ]),
@@ -1408,11 +1408,11 @@ export const INCIDENTS = Object.freeze([
         anchor: 'avoids the Projects-classic GraphQL failure',
       }),
       Object.freeze({
-        file: '../../skills/dev/SKILL.md',
+        file: '../skills/dev/SKILL.md',
         anchor: 'gh issue edit <pr-number> --add-label human:authorize',
       }),
       Object.freeze({
-        file: '../STATE.template.md',
+        file: '../templates/STATE.template.md',
         anchor: 'gh issue edit <pr-number> --add-label human:authorize',
       }),
     ]),
@@ -1507,7 +1507,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'dispatch.mjs', anchor: 'a writer is never rerun by the tool: it may have committed before it died' }),
       Object.freeze({ file: 'dispatch.mjs', anchor: 'export function waitState(' }),
       Object.freeze({ file: 'scan.mjs', anchor: 'export function transientCommandFailure(' }),
-      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '**A killed stream task is not a killed dispatch.**' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**A killed stream task is not a killed dispatch.**' }),
     ]),
   }),
   Object.freeze({
@@ -1545,7 +1545,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'review-contract.mjs', anchor: "return decision('clean', 'REVIEW_CAP_HANDOFF', {" }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "&& input.projectConfig.merge?.policy === 'manual'" }),
       Object.freeze({ file: 'unit.mjs', anchor: "condition = { on: 'time', until: new Date(now + minutes * 60_000).toISOString() };" }),
-      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '**`REVIEW_CAP_HANDOFF` — only Majors remain, under manual merge policy.**' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**`REVIEW_CAP_HANDOFF` — only Majors remain, under manual merge policy.**' }),
     ]),
   }),
   Object.freeze({
@@ -1560,7 +1560,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'publish-verdict.mjs', anchor: 'export function terminalGateSummary(' }),
       Object.freeze({ file: 'publish-verdict.mjs', anchor: 'const gate = (adapters.gate ?? terminalGateSummary)(snapshot, config);' }),
-      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '`node <plugin-tools>/publish-verdict.mjs gate <head> > <log> 2>&1`' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`node <plugin-tools>/publish-verdict.mjs gate <head> > <log> 2>&1`' }),
     ]),
   }),
   Object.freeze({
@@ -1575,7 +1575,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'unit.mjs', anchor: 'export function postDigest(' }),
       Object.freeze({ file: 'prime.mjs', anchor: 'export function withDigest(' }),
-      Object.freeze({ file: '../../skills/shape/SKILL.md', anchor: 'Each criterion must also AGREE with what it cites' }),
+      Object.freeze({ file: '../skills/shape/SKILL.md', anchor: 'Each criterion must also AGREE with what it cites' }),
     ]),
   }),
   Object.freeze({
@@ -1595,8 +1595,8 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'stats.mjs', anchor: 'export function timingRecord(' }),
       Object.freeze({ file: 'dispatch.mjs', anchor: 'function currentBranch(cwd) {' }),
       Object.freeze({ file: 'stats.mjs', anchor: "const PRE_CLAIM_ROLES = new Set(['plan', 'plan-review']);" }),
-      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '`--issue <N>` names the unit on every dispatch' }),
-      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '`node <plugin-tools>/stats.mjs --record --issue <N>`' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`--issue <N>` names the unit on every dispatch' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`node <plugin-tools>/stats.mjs --record --issue <N>`' }),
     ]),
   }),
   Object.freeze({
@@ -1686,7 +1686,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'unit.mjs', anchor: 'export function markBlocked(' }),
       Object.freeze({ file: 'contract-lint.mjs', anchor: "code: 'BLOCK_WHEN_UNSURE'," }),
       Object.freeze({ file: 'contract-lint.mjs', anchor: "code: 'RAW_HUMAN_BLOCK'," }),
-      Object.freeze({ file: '../../skills/dev/SKILL.md', anchor: '## Autonomy: fix, decide, or block' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '## Autonomy: fix, decide, or block' }),
     ]),
   }),
 ]);

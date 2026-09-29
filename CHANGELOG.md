@@ -3,6 +3,47 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.60.0] - 2026-09-29
+
+Post-cutover cleanup: the plugin's layout matches what it now is, the runtime reads only
+`.autoloop/config.json`, and the Stop hook stays quiet while a unit is legitimately in flight.
+
+### Breaking
+
+- **The runtime no longer reads a legacy install.** Every tool reads only `.autoloop/config.json`
+  (over plugin defaults); the legacy `docs/agentic/STATE.md` config block is read by
+  `setup --devendor` alone. A repository not yet devendored is inactive for the plugin's hooks and
+  prime refuses it `NOT_DEVENDORED`, as before.
+- **A branch opened before devendor must merge the base** before its gate, escalation check or
+  review runs: without a config in the checkout they refuse and name that fix (escalate-paths
+  exits 2 instead of reporting no protected paths).
+- The plugin's tools live in `tools/` (was `templates/tools/`); `templates/` keeps only the
+  document templates. The merge executor is `tools/auto-merge.mjs` (was
+  `auto-merge.reference.mjs`) and takes its settings only from config: no config, nothing
+  auto-merges.
+- The self-test manifest is gone; `verify.mjs --plugin-root` runs every self-test.
+
+### Added
+
+- `setup --devendor --move-checklist` moves `docs/agentic/checklist.md` to
+  `.autoloop/checklist.md` and drops the path override; a move that cannot happen is refused
+  (`CHECKLIST_NOT_MOVABLE`), and stale lines are reported at the checklist's new path.
+- Setup-phase ribbons fire during devendor in a legacy repository.
+
+### Changed
+
+- The Stop hook no longer reminds about a draft PR before the unit reaches publish, and the
+  dark-run check is silent while a dispatch is in flight.
+- prime again refuses `NOT_DEVENDORED` while vendored hooks are still wired after a devendor.
+- Run markers live in their own module (`run-markers.mjs`); the hook gate (`guardedRoot`) sits in
+  `hook-root.mjs`.
+- Specs moved to `docs/specs/`, old review notes to `docs/specs/archive/`.
+
+### Fixed
+
+- The dispatch CLI-seam self-test failed intermittently (EPIPE): its shim drained stdin with `cat`,
+  which the test's PATH does not contain.
+
 ## [0.59.0] - 2026-09-29
 
 Autoloop is now a global plugin: nothing of the tool lives in a repository, and a plugin update

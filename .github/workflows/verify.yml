@@ -35,11 +35,11 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Verify release and contracts
-        run: node templates/tools/verify.mjs --plugin-root .
+        run: node tools/verify.mjs --plugin-root .
       - name: Verify release tag
         if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
         run: >-
-          node templates/tools/release-verify.mjs
+          node tools/release-verify.mjs
           --release-mode
           --check-root .
           --repository "$GITHUB_REPOSITORY"
@@ -55,7 +55,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          node templates/tools/api-shape.mjs
+          node tools/api-shape.mjs
           --repository "$GITHUB_REPOSITORY"
 
       - name: Check committed whitespace
