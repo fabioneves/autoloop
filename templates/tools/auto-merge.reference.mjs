@@ -43,9 +43,11 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createPremergeRecord,
@@ -145,11 +147,16 @@ const BLOCK = Object.freeze({
   AUTOMERGE_MODE, LOOP_LOGIN, TRUSTED_HUMAN_LOGINS, SOLO_OPERATOR,
 });
 
+const PLACEHOLDER_REPOSITORY = Object.freeze({ owner: 'your-org', name: 'your-repo' });
+function isPlaceholder(block) {
+  return block.REPOSITORY.owner === PLACEHOLDER_REPOSITORY.owner && block.REPOSITORY.name === PLACEHOLDER_REPOSITORY.name;
+}
+
 // A block setup filled (not the placeholder) is policy a human chose. When
 // config.json takes over, every protected path must survive and the
 // reversible class must not change, or the move silently widens auto-merge.
 function blockConflicts(block, protectedPaths, reversiblePaths) {
-  if (block.REPOSITORY.owner === 'your-org') return [];
+  if (isPlaceholder(block)) return [];
   const problems = [];
   const lost = block.EXTRA_PROTECTED_PATHS.filter((glob) => !protectedPaths.includes(glob));
   if (lost.length > 0) problems.push(`protectedPaths is missing the filled block's ${lost.join(', ')}`);
@@ -190,10 +197,10 @@ export function settingsFromConfig(config, repository, block = BLOCK) {
 
 // The repository the checkout's remotes name. GH_REPO and GH_HOST are dropped
 // so an ambient override can never choose the merge target.
-function ghRepository(root) {
+function ghRepository(root, run = execFileSync) {
   const { GH_REPO: ignoredRepo, GH_HOST: ignoredHost, ...env } = process.env;
   try {
-    const view = JSON.parse(execFileSync('gh', ['repo', 'view', '--json', 'owner,name'], {
+    const view = JSON.parse(run('gh', ['repo', 'view', '--json', 'owner,name'], {
       cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000,
     }));
     const owner = view?.owner?.login;
@@ -203,17 +210,19 @@ function ghRepository(root) {
   }
 }
 
-export function repoSettings(root, lookupRepository = ghRepository) {
+export function repoSettings(root, lookupRepository = ghRepository, block = BLOCK) {
   const resolved = resolveProjectConfig(root);
-  if (resolved?.source !== PROJECT_CONFIG_FILE) return { source: 'block', ...BLOCK, error: null };
+  if (resolved?.source !== PROJECT_CONFIG_FILE) return { source: 'block', ...block, error: null };
   if (!resolved.ok) {
-    return { source: PROJECT_CONFIG_FILE, ...BLOCK, error: `${PROJECT_CONFIG_FILE}: ${resolved.errors.join('; ')}` };
+    return { source: PROJECT_CONFIG_FILE, ...block, error: `${PROJECT_CONFIG_FILE}: ${resolved.errors.join('; ')}` };
   }
-  const preflight = settingsFromConfig(resolved.config, undefined);
-  return preflight.error === null ? settingsFromConfig(resolved.config, lookupRepository(root)) : preflight;
+  const preflight = settingsFromConfig(resolved.config, undefined, block);
+  return preflight.error === null ? settingsFromConfig(resolved.config, lookupRepository(root), block) : preflight;
 }
 
 export const REPO = repoSettings(repositoryRoot());
+// A self-test run by another self-test skips the cases that spawn one.
+const NESTED_SELF_TEST = process.argv.includes('--nested');
 
 // The two verdict COMMIT STATUSES the finalizer posts (success-only,
 // SHA-bound, description carries the summary-hash prefix).
@@ -3027,6 +3036,31 @@ function soloTranscriptionCases() {
 // policy-as-data: with `.autoloop/config.json` present the repository's
 // settings come from config and the block above is ignored; without it the
 // Setup-filled block stays authoritative (legacy STATE repositories).
+// A copy of this file with its block filled the way Setup fills it, run
+// beside symlinks to the real sibling modules.
+function filledCopySelfTest() {
+  const self = fileURLToPath(import.meta.url);
+  const dir = mkdtempSync(join(tmpdir(), 'auto-merge-filled-'));
+  try {
+    for (const name of readdirSync(dirname(self))) {
+      if (name.endsWith('.mjs') && name !== basename(self)) symlinkSync(join(dirname(self), name), join(dir, name));
+    }
+    const fills = [
+      [/^export const REPOSITORY = .*$/mu, "export const REPOSITORY = { owner: 'acme', name: 'app' };"],
+      [/^export const EXTRA_PROTECTED_PATHS = .*$/mu, "export const EXTRA_PROTECTED_PATHS = ['spec/**', 'compose.y*ml'];"],
+      [/^export const AUTOMERGE_MODE = .*$/mu, "export const AUTOMERGE_MODE = 'all-green';"],
+      [/^export const LOOP_LOGIN = .*$/mu, "export const LOOP_LOGIN = 'loop-user';"],
+      [/^export const TRUSTED_HUMAN_LOGINS = .*$/mu, 'export const TRUSTED_HUMAN_LOGINS = [LOOP_LOGIN];'],
+      [/^export const SOLO_OPERATOR = .*$/mu, 'export const SOLO_OPERATOR = true;'],
+    ];
+    const copy = fills.reduce((text, [line, filled]) => text.replace(line, filled), readFileSync(self, 'utf8'));
+    writeFileSync(join(dir, 'auto-merge.mjs'), copy);
+    return spawnSync(process.execPath, [join(dir, 'auto-merge.mjs'), '--self-test'], { cwd: dir, encoding: 'utf8' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function configSettingsCases() {
   const repository = { owner: 'o', name: 'r' };
   const config = (merge, extra = {}) => ({
@@ -3036,10 +3070,16 @@ function configSettingsCases() {
     merge: { unverifiedInvocationAcknowledged: true, soloOperatorAcknowledged: true, loopLogin: 'loop-user', ...merge },
     ...extra,
   });
-  const auto = settingsFromConfig(config({ policy: 'auto' }, { protectedPaths: ['spec/**'] }), repository);
-  const ratified = settingsFromConfig(config({ policy: 'ratified', reversiblePaths: ['guides/**'] }), repository);
-  const refusal = (cfg, repo = repository) => settingsFromConfig(cfg, repo).error ?? '';
-  const unacknowledged = settingsFromConfig({ ...config({}), merge: { policy: 'auto', loopLogin: 'loop-user' } }, repository);
+  // The plugin's own placeholder block, passed explicitly: in a Setup-filled
+  // copy BLOCK is filled, and these cases are not about the move from it.
+  const placeholder = Object.freeze({
+    ...BLOCK, REPOSITORY: PLACEHOLDER_REPOSITORY, REVERSIBLE_PATHS: ['docs/**'], EXTRA_PROTECTED_PATHS: [],
+  });
+  const settings = (cfg, repo = repository) => settingsFromConfig(cfg, repo, placeholder);
+  const auto = settings(config({ policy: 'auto' }, { protectedPaths: ['spec/**'] }));
+  const ratified = settings(config({ policy: 'ratified', reversiblePaths: ['guides/**'] }));
+  const refusal = (cfg, repo = repository) => settings(cfg, repo).error ?? '';
+  const unacknowledged = settings({ ...config({}), merge: { policy: 'auto', loopLogin: 'loop-user' } });
   const nonSolo = authorizeMerge({
     config: engineConfig({
       repository, loopLogin: 'loop-user', trustedHumanLogins: unacknowledged.TRUSTED_HUMAN_LOGINS,
@@ -3049,10 +3089,23 @@ function configSettingsCases() {
   });
   // A repository moving from a filled block to config.json must carry the
   // block's policy over, or the move silently widens what auto-merges.
-  const filled = { ...BLOCK, REPOSITORY: { owner: 'acme', name: 'app' }, EXTRA_PROTECTED_PATHS: ['spec/**'], REVERSIBLE_PATHS: [] };
+  const filled = { ...placeholder, REPOSITORY: { owner: 'acme', name: 'app' }, EXTRA_PROTECTED_PATHS: ['spec/**'], REVERSIBLE_PATHS: [] };
   const dropped = settingsFromConfig(config({ policy: 'auto' }), repository, filled).error ?? '';
   const carried = settingsFromConfig(
     config({ policy: 'auto', reversiblePaths: [] }, { protectedPaths: ['spec/**', 'infra/**'] }), repository, filled);
+  // An ambient GH_REPO or GH_HOST must never choose the merge target.
+  const ambient = { GH_REPO: process.env.GH_REPO, GH_HOST: process.env.GH_HOST };
+  let ghEnv = null;
+  process.env.GH_REPO = 'someone-else/target';
+  process.env.GH_HOST = 'elsewhere.example';
+  const viewed = ghRepository('/r', (command, args, options) => {
+    ghEnv = { ...options.env };
+    return JSON.stringify({ owner: { login: 'o' }, name: 'r' });
+  });
+  for (const [key, value] of Object.entries(ambient)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   const scratch = mkdtempSync(join(tmpdir(), 'auto-merge-config-'));
   try {
     execFileSync('git', ['init', '-q', scratch]);
@@ -3061,26 +3114,33 @@ function configSettingsCases() {
       lookups.push(1);
       return repository;
     };
-    const unconfigured = repoSettings(scratch, lookup);
+    const unconfigured = repoSettings(scratch, lookup, placeholder);
     mkdirSync(join(scratch, '.autoloop'));
     writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify(config({ policy: 'auto' })));
-    const configured = repoSettings(scratch, lookup);
+    const configured = repoSettings(scratch, lookup, placeholder);
     // A legacy STATE block is never the executor's config: the filled block decides.
     const legacy = mkdtempSync(join(tmpdir(), 'auto-merge-legacy-'));
     mkdirSync(join(legacy, 'docs', 'agentic'), { recursive: true });
     writeFileSync(join(legacy, 'docs', 'agentic', 'STATE.md'),
       `\`\`\`json autoloop-config\n${JSON.stringify(config({ policy: 'auto' }))}\n\`\`\`\n`);
-    const fromState = repoSettings(legacy, lookup);
+    const fromState = repoSettings(legacy, lookup, placeholder);
     rmSync(legacy, { recursive: true, force: true });
     // The engine's own fixtures, run under a config's protectedPaths: the
     // configured jewel must veto an all-green merge like a block one did.
-    const child = process.env.AUTOLOOP_MERGE_CONFIG_CHILD === '1' ? null : (() => {
-      writeFileSync(join(scratch, '.autoloop', 'config.json'),
-        JSON.stringify(config({ policy: 'auto' }, { protectedPaths: ['spec/**'] })));
-      return spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--self-test'], {
-        cwd: scratch, encoding: 'utf8', env: { ...process.env, AUTOLOOP_MERGE_CONFIG_CHILD: '1' },
+    const child = NESTED_SELF_TEST ? null : (() => {
+      // It runs on this file's own BLOCK, so the config carries that block's
+      // policy over (as a real move must) and adds its own jewel.
+      writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify(config(
+        { policy: 'auto', reversiblePaths: BLOCK.REVERSIBLE_PATHS },
+        { protectedPaths: [...new Set([...BLOCK.EXTRA_PROTECTED_PATHS, 'jewel-config/**'])] },
+      )));
+      return spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--self-test', '--nested'], {
+        cwd: scratch, encoding: 'utf8',
       });
     })();
+    // Setup fills the block and then runs this self-test (verify does too, for
+    // every copy that differs from the manifest), so a filled copy must pass it.
+    const filledCopy = NESTED_SELF_TEST || !isPlaceholder(BLOCK) ? null : filledCopySelfTest();
     writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify({ ...config({}), merge: { policy: 'manual' } }));
     const manual = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '5', '--dry-run'], {
       cwd: scratch, encoding: 'utf8',
@@ -3108,8 +3168,8 @@ function configSettingsCases() {
       },
       {
         name: 'config: without config.json the filled block decides, and gh is never asked',
-        ok: unconfigured.source === 'block' && unconfigured.LOOP_LOGIN === BLOCK.LOOP_LOGIN
-          && unconfigured.AUTOMERGE_MODE === BLOCK.AUTOMERGE_MODE && configured.source === '.autoloop/config.json'
+        ok: unconfigured.source === 'block' && unconfigured.REPOSITORY === PLACEHOLDER_REPOSITORY
+          && unconfigured.LOOP_LOGIN === placeholder.LOOP_LOGIN && configured.source === '.autoloop/config.json'
           && configured.LOOP_LOGIN === 'loop-user' && lookups.length === 1,
       },
       {
@@ -3120,15 +3180,24 @@ function configSettingsCases() {
       {
         name: 'config: a filled block\'s protected or reversible paths missing from config refuse',
         ok: dropped.includes('spec/**') && dropped.includes('merge.reversiblePaths') && carried.error === null
-          && settingsFromConfig(config({ policy: 'auto' }), repository).error === null,
+          && settings(config({ policy: 'auto' })).error === null,
       },
       {
         name: 'config: a legacy STATE block leaves the filled block deciding',
-        ok: fromState.source === 'block' && fromState.LOOP_LOGIN === BLOCK.LOOP_LOGIN,
+        ok: fromState.source === 'block' && fromState.REPOSITORY === PLACEHOLDER_REPOSITORY,
       },
       {
         name: 'config: the engine fixtures pass under a configured protectedPaths, including its veto',
-        ok: child === null || (child.status === 0 && child.stdout.includes('PASS extra-protected spec/**')),
+        ok: child === null || (child.status === 0 && child.stdout.includes('PASS extra-protected jewel-config/**')),
+      },
+      {
+        name: 'config: gh repo view runs without GH_REPO or GH_HOST',
+        ok: viewed?.owner === 'o' && ghEnv !== null && !Object.hasOwn(ghEnv, 'GH_REPO') && !Object.hasOwn(ghEnv, 'GH_HOST'),
+      },
+      {
+        name: 'config: a Setup-filled copy passes its own self-test',
+        ok: filledCopy === null || filledCopy.status === 0,
+        detail: filledCopy?.stdout?.split('\n').filter((line) => line.startsWith('FAIL')).join('; '),
       },
       {
         name: 'config: a refused config exits 1 naming the reason before any GitHub read',
@@ -3156,6 +3225,7 @@ function selfTest() {
     if (check.ok) passed += 1;
     else failed += 1;
     console.log(`${check.ok ? 'PASS' : 'FAIL'} ${check.name}`);
+    if (!check.ok && check.detail) console.log(`  ${check.detail}`);
   }
   for (const fixture of FIXTURES) {
     const calls = [];
@@ -3205,7 +3275,9 @@ function usage() {
 
 function main() {
   const args = process.argv.slice(2);
-  if (args.length === 1 && args[0] === '--self-test') process.exit(selfTest() ? 0 : 1);
+  if (args[0] === '--self-test' && (args.length === 1 || (args.length === 2 && args[1] === '--nested'))) {
+    process.exit(selfTest() ? 0 : 1);
+  }
 
   const number = args.find((arg) => /^\d+$/.test(arg));
   const dryRun = args.includes('--dry-run');
