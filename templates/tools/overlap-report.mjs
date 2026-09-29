@@ -38,7 +38,7 @@ import {
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ancestorPids } from './command-guard.mjs';
+import { ancestorPids, runMarkerDirectory } from './command-guard.mjs';
 import { resolveDispatchLogPath } from './dispatch.mjs';
 
 function gitPath(root, relative) {
@@ -155,7 +155,7 @@ function processAlive(pid) {
 
 export function runStartedAtMs(root, ancestors = ancestorPids()) {
   try {
-    const directory = gitPath(root, 'autoloop/run');
+    const directory = runMarkerDirectory(root);
     if (directory === null || !existsSync(directory)) return null;
     for (const name of readdirSync(directory)) {
       if (!name.endsWith('.json')) continue;

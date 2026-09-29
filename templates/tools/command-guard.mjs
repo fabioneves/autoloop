@@ -49,7 +49,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
@@ -2538,16 +2538,18 @@ function currentBranch() {
 // disappears with the run without needing a daemon to revoke it. Anything
 // unreadable or ambiguous means "no run": a guard that cannot establish an open
 // run must not block a human.
+// The common git dir, not `--git-path` (which is per-worktree for this path):
+// a command issued from a linked worktree must see the repository's run.
 export function runMarkerDirectory(cwd = process.cwd()) {
   const result = spawnSync(
     'git',
-    ['-C', cwd, 'rev-parse', '--git-path', 'autoloop/run'],
+    ['-C', cwd, 'rev-parse', '--git-common-dir'],
     { encoding: 'utf8', timeout: 10_000, windowsHide: true },
   );
   if (result.status !== 0 || result.error) return null;
-  const path = String(result.stdout ?? '').trim();
-  if (!path) return null;
-  return isAbsolute(path) ? path : resolve(cwd, path);
+  const common = String(result.stdout ?? '').trim();
+  if (!common) return null;
+  return join(isAbsolute(common) ? common : resolve(cwd, common), 'autoloop', 'run');
 }
 
 function procEntry(pid) {
@@ -3698,6 +3700,20 @@ function selfTest() {
       });
       if (merge.status !== 2 || !merge.stderr.includes('autoloop guard')) {
         console.error(`FAIL [an open run keeps the guard on after its config is removed]: ${merge.status} ${merge.stderr}`);
+        ok = false;
+      }
+      // Review of the cutover (I7): markers live in the common git dir, so a
+      // command issued from a linked worktree of the repository sees the run.
+      execFileSync('git', ['-C', scratch, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x']);
+      const linked = join(scratch, '..', `${basename(scratch)}-linked`);
+      execFileSync('git', ['-C', scratch, 'worktree', 'add', '-q', '--detach', linked]);
+      const fromLinked = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
+        encoding: 'utf8', cwd: linked, env: { ...process.env, CLAUDE_PROJECT_DIR: linked },
+      });
+      rmSync(linked, { recursive: true, force: true });
+      if (fromLinked.status !== 2) {
+        console.error('FAIL [a linked worktree sees the repository\'s open run]');
         ok = false;
       }
     } finally {
