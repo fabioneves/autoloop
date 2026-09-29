@@ -27,7 +27,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CONFIG_VERSION, currentProjectConfig, extractConfig,
+  CONFIG_VERSION, resolveProjectConfig,
 } from './config-contract.mjs';
 import {
   BRIEF_FILES,
@@ -322,40 +322,30 @@ export function mergeModeConflict(mergePolicy, executorText) {
     + `reads, so the committed policy is being discarded. Set it to '${expected}'`;
 }
 
+// The one resolver: .autoloop/config.json over plugin defaults, else the
+// legacy STATE block migrated in memory. A migratable STATE reconciles as its
+// migrated form: Setup reconciles the tools BEFORE writing the migrated STATE,
+// because the working tree's guard runs on every command and a pre-reconcile
+// guard rejects the new schema.
 function readProjectConfig(root, warnings) {
-  let text;
-  try {
-    text = readFileSync(resolve(root, 'docs', 'agentic', 'STATE.md'), 'utf8');
-  } catch {
+  const resolved = resolveProjectConfig(root);
+  if (resolved === null) {
+    warnings.push('no .autoloop/config.json or docs/agentic/STATE.md; reconciling the universal tool set only');
+    return null;
+  }
+  if (!resolved.ok) {
+    warnings.push(resolved.unreadable
+      ? `ProjectConfig is unreadable (${resolved.errors.join('; ')}); reconciling the universal tool set only`
+      : 'ProjectConfig is not schema-current; reconciling the universal tool set only — migrate the configuration first');
+    return null;
+  }
+  if (resolved.migratedFrom !== null) {
     warnings.push(
-      'docs/agentic/STATE.md is absent; reconciling the universal tool set only',
+      `ProjectConfig is schema ${resolved.migratedFrom}; reconciled for its migrated form — `
+      + `write the migrated ${CONFIG_VERSION} block to STATE in the same commit`,
     );
-    return null;
   }
-  try {
-    const config = extractConfig(text);
-    // A migratable STATE reconciles as its migrated form: Setup reconciles the
-    // tools BEFORE writing the migrated STATE, because the working tree's guard
-    // runs on every command and a pre-reconcile guard rejects the new schema.
-    const current = currentProjectConfig(config);
-    if (!current.ok) {
-      warnings.push(
-        'ProjectConfig is not schema-current; reconciling the universal tool set '
-        + 'only — migrate the configuration first',
-      );
-      return null;
-    }
-    if (config.version !== CONFIG_VERSION) {
-      warnings.push(
-        `ProjectConfig is schema ${config.version}; reconciled for its migrated form — `
-        + `write the migrated ${CONFIG_VERSION} block to STATE in the same commit`,
-      );
-    }
-    return current.config;
-  } catch (error) {
-    warnings.push(`ProjectConfig is unreadable (${error.message}); reconciling the universal tool set only`);
-    return null;
-  }
+  return resolved.config;
 }
 
 export function reconcile(root, templates, { audit = false } = {}) {
@@ -1152,11 +1142,8 @@ export function mergeDocument(templateText, installText, options = {}) {
 }
 
 function readInstalledConfig(root) {
-  try {
-    return extractConfig(readFileSync(resolve(root, 'docs', 'agentic', 'STATE.md'), 'utf8'));
-  } catch {
-    return null;
-  }
+  const resolved = resolveProjectConfig(root);
+  return resolved?.ok ? resolved.config : null;
 }
 
 export function mergeDocumentFiles(root, templates, kind, { write = false } = {}) {
@@ -1261,6 +1248,8 @@ function fixtureState(policy) {
   ].join('\n');
 }
 
+// A VALID 0.25.0 block (caps included): the merge tests need an older schema
+// to call out, and the config resolver refuses an invalid one outright.
 const FIXTURE_CONFIG = Object.freeze({
   version: '0.25.0',
   baseBranch: 'main',
@@ -1268,6 +1257,9 @@ const FIXTURE_CONFIG = Object.freeze({
   merge: { policy: 'manual' },
   tracker: { provider: 'none' },
   review: { checklistPath: 'docs/agentic/checklist.md' },
+  caps: {
+    gateRetriesPerUnit: 2, codeReviewRoundsPerUnit: 5, sliceMaxLines: 700, sliceMaxFiles: 10, reviseRoundsPerPr: 3,
+  },
 });
 
 function fixtureStateTemplate() {
@@ -1864,6 +1856,20 @@ function selfTest() {
         && !toolsFirst.warnings.some((warning) => warning.includes('not schema-current'))
         && toolsFirst.warnings.some((warning) => warning.includes('0.27.0') && warning.includes('same commit')),
     );
+    // Global install: a repository whose config lives in .autoloop/config.json
+    // reconciles its policy tool set from it (review: scaffold read STATE only).
+    mkdirSync(join(root, '.autoloop'), { recursive: true });
+    writeFileSync(join(root, '.autoloop', 'config.json'), JSON.stringify({
+      version: '0.28.0', baseBranch: 'main', gate: { command: 'npm test' },
+      merge: { policy: 'auto', unverifiedInvocationAcknowledged: true, soloOperatorAcknowledged: true },
+    }));
+    writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'), '# STATE\n\nno config block\n');
+    const fromJson = reconcile(root, templates, { audit: true });
+    rmSync(join(root, '.autoloop'), { recursive: true, force: true });
+    expect('a config.json repository reconciles its policy tool set from config.json',
+      fromJson.nonManualTooling === true
+        && !fromJson.warnings.some((warning) => /not schema-current|unreadable/u.test(warning)));
+    writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'), fixtureState('auto'));
     // An unreadable config is not a return to `manual`: it says nothing about
     // the policy, so the non-manual tools (and a Setup-filled executor) stay.
     writeFileSync(join(root, 'docs', 'agentic', 'STATE.md'), '# STATE\n\nno config block\n');

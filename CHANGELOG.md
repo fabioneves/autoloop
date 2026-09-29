@@ -3,6 +3,35 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.57.0] - 2026-09-29
+
+The first step toward autoloop as a global tool, with nothing of it committed to a project (spec:
+`SPEC-global-install.md`, module `config-file`).
+
+### Added
+
+- **`.autoloop/config.json`: the project config, overrides only.** Plugin defaults fill the rest
+  (merge `manual`, tracker `none`, no quick or setup gate, checklist `docs/agentic/checklist.md`);
+  only `version`, `baseBranch` and `gate.command` are required. For example:
+  `{"version":"0.28.0","baseBranch":"main","gate":{"command":"npm test"}}`.
+- **One resolver for every tool** (`resolveProjectConfig`). It reads `config.json` when present,
+  else the legacy `docs/agentic/STATE.md` block, migrated in memory. A release no longer requires a
+  setup run to migrate config; a pending migration shows as a `NOTE` from
+  `config-contract.mjs --root <repo>`.
+- **`.autoloop/**` is human-escalated,** like `STATE.md`, because `config.json` outranks it.
+
+### Changed
+
+- An older, migratable STATE schema no longer switches the command guard off; the guard enforces
+  the migrated config.
+- `review-contract --state` accepts the base checkout's `STATE.md` or `.autoloop/config.json`, and
+  refuses anything else.
+
+### Upgrading
+
+Nothing to do. Existing repos keep working on their STATE block. Moving to `config.json` is a later
+module's `devendor` step.
+
 ## [0.56.1] - 2026-09-29
 
 ### Fixed

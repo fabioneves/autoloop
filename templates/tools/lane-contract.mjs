@@ -45,11 +45,18 @@ export const HUMAN_AUTHORIZATION_GLOBS = [
   '**/AGENTS.md',
   '**/CLAUDE.md',
   'docs/agentic/STATE.md',
+  // Global install: the project's loop config and policy. config.json outranks
+  // STATE, so it carries the protection STATE had.
+  '.autoloop/**',
 ];
 
 export const PATH_POLICY_FIXTURES = [
   { path: 'tools/agentic/gate.mjs', humanAuthorization: true, mergeProtected: true },
   { path: '.claude/settings.json', humanAuthorization: true, mergeProtected: true },
+  // The project's loop config and policy (global install): config.json
+  // outranks STATE, so a writer changing it would reconfigure the gate.
+  { path: '.autoloop/config.json', humanAuthorization: true, mergeProtected: true },
+  { path: '.autoloop/STATE.md', humanAuthorization: true, mergeProtected: true },
   { path: '.codex/hooks.json', humanAuthorization: true, mergeProtected: true },
   { path: '.opencode/plugins/autoloop.js', humanAuthorization: true, mergeProtected: true },
   { path: '.agents/plugins/marketplace.json', humanAuthorization: true, mergeProtected: true },

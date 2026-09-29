@@ -56,7 +56,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { extractConfig } from './config-contract.mjs';
+import { resolveProjectConfig } from './config-contract.mjs';
 
 const TIMEOUT_MS = 30_000;
 const WAIT_MARKER_RE = /<!-- autoloop-waiting-v1 (\{[^\n]*?\}) -->/gu;
@@ -147,7 +147,9 @@ export function waitCleared(condition, facts) {
 }
 
 function baseBranch(root) {
-  return extractConfig(readFileSync(join(root, 'docs', 'agentic', 'STATE.md'), 'utf8')).baseBranch;
+  const resolved = resolveProjectConfig(root);
+  if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
+  return resolved.config.baseBranch;
 }
 
 function remoteBaseOid(run, base) {

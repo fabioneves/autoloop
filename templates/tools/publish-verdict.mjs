@@ -58,8 +58,7 @@ import {
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
 import {
-  currentProjectConfig,
-  extractConfig,
+  resolveProjectConfig,
   validateConfig,
 } from './config-contract.mjs';
 import { finalizeHead } from './delivery-contract.mjs';
@@ -1245,18 +1244,14 @@ function runGate(command, cwd) {
 }
 
 function loadPublicationConfig(repositoryRoot) {
-  const statePath = resolve(repositoryRoot, 'docs', 'agentic', 'STATE.md');
-  const config = extractConfig(
-    readBoundedNoFollow(
-      statePath,
-      MAX_AUXILIARY_EVIDENCE_BYTES,
-    ).toString('utf8'),
-  );
-  const current = currentProjectConfig(config);
-  if (!current.ok) {
-    throw new Error(`ProjectConfig is invalid: ${current.errors.join('; ')}`);
+  // .autoloop/config.json over plugin defaults, else the legacy STATE block
+  // migrated in memory (a unit branch forked before a migration keeps working).
+  const resolved = resolveProjectConfig(repositoryRoot, (path) =>
+    readBoundedNoFollow(path, MAX_AUXILIARY_EVIDENCE_BYTES).toString('utf8'));
+  if (!resolved?.ok) {
+    throw new Error(`ProjectConfig is invalid: ${resolved?.errors?.join('; ') ?? 'no autoloop configuration'}`);
   }
-  return current.config;
+  return resolved.config;
 }
 
 function executeGateSummary(snapshot, config) {
@@ -3926,7 +3921,27 @@ function selfTest() {
   } else {
     console.error(`FAIL a pre-migration branch STATE reads as the current schema: ${JSON.stringify(branchState)}`);
   }
-  const total = cases.length + 54;
+  // Global install: a repository with only .autoloop/config.json (overrides
+  // over plugin defaults) publishes from that.
+  const jsonState = (() => {
+    const dir = mkdtempSync(resolve(tmpdir(), 'publish-verdict-json-'));
+    try {
+      mkdirSync(resolve(dir, '.autoloop'), { recursive: true });
+      writeFileSync(resolve(dir, '.autoloop', 'config.json'),
+        JSON.stringify({ version: '0.28.0', baseBranch: 'main', gate: { command: 'npm test' } }));
+      return loadPublicationConfig(dir);
+    } catch (error) {
+      return { error: error.message };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  })();
+  if (jsonState.gate?.command === 'npm test' && jsonState.merge?.policy === 'manual') {
+    passed += 1;
+  } else {
+    console.error(`FAIL a config.json repository publishes from it: ${JSON.stringify(jsonState)}`);
+  }
+  const total = cases.length + 55;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }
