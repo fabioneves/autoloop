@@ -87,8 +87,12 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
   - `protectedPaths` (no default) replaces the repo entries of `escalate-paths.mjs`
     `ESCALATE_PATHS` and `auto-merge` `EXTRA_PROTECTED_PATHS`; the structural families stay in the
     plugin. A config that cannot be resolved leaves them unknown, so `escalate-paths` exits 2;
-  - `merge.reversiblePaths` (default `["docs/**"]`);
-  - `merge.loopLogin`, `merge.trustedHumans`;
+  - `merge.reversiblePaths` (default `["docs/**"]`) and `merge.loopLogin`, both valid only under a
+    non-manual policy. There is no `merge.trustedHumans`: non-solo is retired, so the one trusted
+    human is the loop login;
+  - the executor refuses (exit 1, before any GitHub read) when `config.json` is present but its
+    policy is manual, `loopLogin` is unset, or the repository can't be read; it never falls back to
+    the filled block;
   - `AUTOMERGE_MODE` stays derived from `merge.policy` (`auto` → `all-green`, `ratified` →
     `classified`), never stored;
   - `REPOSITORY` comes from `git remote` / `gh repo view`, never stored.
@@ -96,7 +100,7 @@ ships as its own release. LFE keeps working at every step: the legacy sources ar
   executor runs from the plugin with its settings from config, and no filled copy exists.
 - **LFE today maps to:**
   `protectedPaths: ["spec/**", "compose.y*ml", "**/compose.y*ml"]`,
-  `merge.loopLogin: "fabioneves"`, `merge.trustedHumans: ["fabioneves"]`.
+  `merge.loopLogin: "fabioneves"`.
 - **Success:** the auto-merge self-test derives its fixtures from config; lane and escalate
   matching read `protectedPaths`; a repo's old files are ignored once `config.json` exists.
 

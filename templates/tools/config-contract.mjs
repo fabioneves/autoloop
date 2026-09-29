@@ -188,6 +188,25 @@ function validateGate(value, errors) {
   }
 }
 
+// The merge executor's repository settings (policy-as-data), read from config
+// instead of a Setup-filled block. The repository comes from git and the
+// executor's mode from merge.policy, so neither is stored.
+const MERGE_SETTING_KEYS = ['loopLogin', 'reversiblePaths'];
+const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u;
+
+function validateMergeSettings(value, errors) {
+  const nonManual = value.policy === 'ratified' || value.policy === 'auto';
+  for (const key of MERGE_SETTING_KEYS) {
+    if (hasOwn(value, key) && !nonManual) {
+      errors.push(`merge.${key}: only valid with a non-manual merge.policy`);
+    }
+  }
+  if (hasOwn(value, 'loopLogin') && !(typeof value.loopLogin === 'string' && GITHUB_LOGIN_RE.test(value.loopLogin))) {
+    errors.push('merge.loopLogin: must be a GitHub login');
+  }
+  if (hasOwn(value, 'reversiblePaths')) validateGlobList(value.reversiblePaths, 'merge.reversiblePaths', errors);
+}
+
 function validateMerge(value, expectedVersion, errors) {
   // Schema 0.24.0 predates the acknowledgement, so migration must be able to read
   // a legacy non-manual policy without demanding a field that could not exist.
@@ -196,7 +215,10 @@ function validateMerge(value, expectedVersion, errors) {
     value,
     'merge',
     ['policy'],
-    legacy ? [] : ['unverifiedInvocationAcknowledged', 'soloOperatorAcknowledged'],
+    [
+      ...(legacy ? [] : ['unverifiedInvocationAcknowledged', 'soloOperatorAcknowledged']),
+      ...(expectedVersion === CONFIG_VERSION ? MERGE_SETTING_KEYS : []),
+    ],
     errors,
   )) return;
   if (hasOwn(value, 'policy') && !['manual', 'ratified', 'auto'].includes(value.policy)) {
@@ -206,6 +228,7 @@ function validateMerge(value, expectedVersion, errors) {
   // is a deliberate, recorded acceptance of that risk rather than a default. The
   // acknowledgement is meaningless under manual, and a dead option is a defect.
   if (legacy) return;
+  validateMergeSettings(value, errors);
   // Whether a non-manual policy *requires* the acknowledgement is Runtime's
   // decision, so the failure names the real remedy instead of surfacing as a
   // migration error. The schema only rejects a meaningless value here.
@@ -302,14 +325,14 @@ function validRepoRelativePath(value) {
 // The repository's own human-authorization paths (policy-as-data): globs
 // escalate-paths and the lane classifier add to the structural families.
 // Optional with no default, so the key's absence changes nothing.
-function validateProtectedPaths(value, errors) {
+function validateGlobList(value, path, errors) {
   if (!Array.isArray(value)) {
-    errors.push('protectedPaths: must be an array of repository-relative globs');
+    errors.push(`${path}: must be an array of repository-relative globs`);
     return;
   }
   value.forEach((glob, index) => {
     if (!validRepoRelativePath(glob)) {
-      errors.push(`protectedPaths[${index}]: must be a normalized repository-relative glob`);
+      errors.push(`${path}[${index}]: must be a normalized repository-relative glob`);
     }
   });
 }
@@ -422,7 +445,7 @@ export function validateConfig(cfg) {
   const errors = [];
   if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['protectedPaths'], errors)) return errors;
   validateProjectValues(cfg, CONFIG_VERSION, errors);
-  if (hasOwn(cfg, 'protectedPaths')) validateProtectedPaths(cfg.protectedPaths, errors);
+  if (hasOwn(cfg, 'protectedPaths')) validateGlobList(cfg.protectedPaths, 'protectedPaths', errors);
   return errors;
 }
 
@@ -2163,6 +2186,19 @@ function selfTest() {
       ['spec/**', [1], ['/etc/**'], ['../up/**'], [''], ['a\\b']].every((value) =>
         validateConfig({ ...projectFixture(), protectedPaths: value })
           .some((error) => error.startsWith('protectedPaths'))));
+    // The merge executor's repository settings: optional, and meaningful only
+    // under a non-manual policy (a dead option is a defect).
+    const soloAuto = { policy: 'auto', unverifiedInvocationAcknowledged: true, soloOperatorAcknowledged: true };
+    const withMerge = (merge) => validateConfig({ ...projectFixture(), merge });
+    expect('merge.loopLogin and merge.reversiblePaths are valid under a non-manual policy',
+      withMerge({ ...soloAuto, loopLogin: 'loop-user', reversiblePaths: ['docs/**', 'guides/**'] }).length === 0
+        && withMerge({ ...soloAuto, loopLogin: 'autoloop[bot]' }).length === 0);
+    expect('merge settings are refused under a manual policy',
+      withMerge({ policy: 'manual', loopLogin: 'loop-user' }).includes('merge.loopLogin: only valid with a non-manual merge.policy')
+        && withMerge({ policy: 'manual', reversiblePaths: ['docs/**'] }).includes('merge.reversiblePaths: only valid with a non-manual merge.policy'));
+    expect('a malformed login or reversible glob is refused',
+      withMerge({ ...soloAuto, loopLogin: 'no spaces' }).includes('merge.loopLogin: must be a GitHub login')
+        && withMerge({ ...soloAuto, reversiblePaths: ['/abs/**'] }).includes('merge.reversiblePaths[0]: must be a normalized repository-relative glob'));
     const root = mkdtempSync(join(tmpdir(), 'config-protected-'));
     try {
       mkdirSync(join(root, '.autoloop'));
