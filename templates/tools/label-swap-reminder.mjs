@@ -76,8 +76,8 @@ const SETUP_PHASE_ANCHORS = [
     'autoloop: WRITE is running — `⏳ ∞ ▰▰▰▰▱ 4/5 WRITE` must already be printed (and 3/5 '
     + 'INTERVIEW before it); print any missing ribbon NOW. Next: `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` when '
     + 'evidence collection starts.'],
-  [/verify\.mjs\s+--install-root\b/,
-    'autoloop: install-root verify just ran — in a setup session `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` must '
+  [/verify\.mjs\s+--project-root\b/,
+    'autoloop: project verify just ran — in a setup session `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` must '
     + 'already be printed; print it NOW if missing. The closing rail `✅ ╰─ ∞ setup · complete …` '
     + 'is the only green line.'],
 ];
@@ -233,7 +233,7 @@ function selfTest() {
     ['node /cache/templates/tools/scaffold.mjs --audit .', /2\/5 AUDIT/],
     ['node /cache/templates/tools/scaffold.mjs --reconcile /repo', /4\/5 WRITE/],
     ['node /cache/templates/tools/scaffold.mjs --merge-state . > /tmp/s.md', /4\/5 WRITE/],
-    ['node tools/agentic/verify.mjs --install-root . 2>&1 | tee /tmp/v.txt', /5\/5 VERIFY/],
+    ['node /p/templates/tools/verify.mjs --project-root . 2>&1 | tee /tmp/v.txt', /5\/5 VERIFY/],
     // The run frame rides prime; the terminal riders ride terminal-finalize,
     // whose label mutations never pass through gh edit.
     ['node /cache/0.49.45/templates/tools/prime.mjs --json > /tmp/prime.json', /RUN OPEN/],
