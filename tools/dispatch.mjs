@@ -47,6 +47,7 @@ import {
 } from './config-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 import { pinnedModelsPath, pluginRunMarkers } from './run-markers.mjs';
+import { noteDispatchModel } from './step.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -734,6 +735,15 @@ function dispatchOnce(options, cwd) {
   const engineBinary = options.engine ?? route.engine ?? 'claude';
   const resolvedModel = options.model ?? route.model ?? null;
   const resolvedEffort = options.effort ?? route.effort ?? null;
+  // The unit's current step names the model that runs it, whatever the
+  // announcement said (LFE run 2026-09-30: "on ⚪ ENGINE" while Opus ran).
+  if (route.error === undefined && Number.isSafeInteger(options.issue) && resolvedModel !== null) {
+    try {
+      noteDispatchModel({ root: repositoryRoot(cwd), issue: options.issue, model: resolvedModel });
+    } catch {
+      // The parked view is a courtesy; the dispatch goes on.
+    }
+  }
   const result = route.error !== undefined
     ? failure('route', route.error.code, route.error.message, { ms: 0, startupMs: 0, stderr: '' })
     : executeDispatch({
@@ -2221,6 +2231,24 @@ function selfTest() {
     // Review of the model config: a run's dispatches run the table prime
     // pinned, so a writer editing its branch's config cannot move its own
     // reviewers; with no pin, an invalid project config refuses.
+    // LFE run 2026-09-30: a step announced without --model read "on ⚪ ENGINE"
+    // while the fix ran on Opus; a dispatch names its model on the step.
+    check(
+      'a dispatch with --issue names its model on that unit\'s current step',
+      (() => {
+        const stepsFile = join(repoScratch, '.git', 'autoloop', 'steps', '77.json');
+        mkdirSync(dirname(stepsFile), { recursive: true });
+        writeFileSync(stepsFile, JSON.stringify({ issue: 77, steps: [{ step: '07-diff-review', startedAtMs: 1, model: null }] }));
+        writeEngineShim(shimDirectory, shimBody(`printf x > "noted-$$.txt"\n${resultEvent({ result: 'done' })}`));
+        const result = runDispatch({
+          role: 'fix', prompt: 'x', tools: writerTools, cwd: repoScratch, issue: 77,
+          engine: join(shimDirectory, 'claude'),
+        });
+        const noted = JSON.parse(readFileSync(stepsFile, 'utf8')).steps.at(-1).model;
+        rmSync(stepsFile);
+        return result.ok === true && noted === 'claude-opus-5-5[1m]';
+      })(),
+    );
     check(
       'a pinned table wins over the checkout\'s config; unpinned, an invalid project config refuses',
       (() => {

@@ -163,6 +163,25 @@ export function parkedView({ root, run = realRun(root), nowMs = Date.now(), mark
   });
 }
 
+// A dispatch names the model it runs on the unit's current step, so the
+// parked view shows what is running even when the step was announced
+// without --model (LFE run 2026-09-30: "07 diff-review on ⚪ ENGINE" while
+// Opus ran the fix). A unit with no open record is left alone.
+export function noteDispatchModel({ root, run = realRun(root), issue, model }) {
+  if (!Number.isSafeInteger(issue) || typeof model !== 'string' || model === '') return { ok: false };
+  const { dir } = autoloopDir(root, run);
+  if (dir === null) return { ok: false };
+  const path = join(dir, 'steps', `${issue}.json`);
+  const stored = readJson(path, null);
+  const last = stored?.steps?.at(-1);
+  if (!last || stored.closed) return { ok: false };
+  if (last.model !== model) {
+    last.model = model;
+    writeAtomically(path, stored);
+  }
+  return { ok: true };
+}
+
 // `--resumed`: the unit's current step's dispatch came back. Recorded on the
 // step so the parked view stops reading it as running; the next step starts
 // fresh. A unit with no open record is left alone.
@@ -943,6 +962,22 @@ function transitionChecks(at) {
           const shown = parkedView({ root, run, nowMs: at(11, 2), markers: runFrom(at(11, 0)) });
           return same.lines[0] === 'already on 05-implement' && !hidden.includes('#380')
             && again.ok === true && again.lines[0] !== 'already on 05-implement' && shown.includes('#380');
+        } catch {
+          return false;
+        }
+      })()]);
+    // LFE run 2026-09-30: a fix announced without --model read "07 diff-review
+    // on ⚪ ENGINE" while Opus ran it; the dispatch names its own model.
+    results.push(['a dispatch names its model on the unit\'s current step',
+      (() => {
+        try {
+          labels = ['loop-ready'];
+          transition({ root, run, nowMs: at(12, 0), issue: 391, to: '07-diff-review', markers: () => [] });
+          const noted = noteDispatchModel({ root, run, issue: 391, model: 'claude-opus-5-5[1m]' });
+          const view = parkedView({ root, run, nowMs: at(12, 3), markers: () => [] });
+          const line = view.split('\n').find((text) => text.includes('#391')) ?? '';
+          return noted.ok === true && line.includes('07 diff-review on 🟠 OPUS 5.5') && !line.includes('ENGINE')
+            && noteDispatchModel({ root, run, issue: 9998, model: 'x' }).ok === false;
         } catch {
           return false;
         }
