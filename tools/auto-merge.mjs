@@ -768,9 +768,12 @@ function finalizedDeliveryMarker(comments, loopLogin, headOid) {
 // A loop repair's evidence: its marker and author, and its parent's live
 // standing (docs/specs/SPEC-repair-automerge.md). Null for any other issue,
 // including loop-repair with loop-ready, which takes the ordinary rule.
+function isLoopRepair(labels) {
+  return Array.isArray(labels) && labels.includes('loop-repair') && !labels.includes('loop-ready');
+}
+
 function deriveRepairEvidence(issue, parent) {
-  const labels = Array.isArray(issue?.labels) ? issue.labels : [];
-  if (!labels.includes('loop-repair') || labels.includes('loop-ready')) return null;
+  if (!isLoopRepair(issue?.labels)) return null;
   const marker = parseRepair(issue?.body);
   const readyEvent = latestLabelEvent(parent?.timeline?.items, 'loop-ready');
   const permission = parent?.permission;
@@ -1170,7 +1173,7 @@ function fetchPlannedBaseComparison(plannedBaseOid, baseOid) {
 // current role of whoever last labelled it loop-ready. Null for any other
 // issue, or a repair whose marker does not parse (its evidence is incomplete).
 function fetchRepairParent(issue) {
-  if (!issue.labels.includes('loop-repair') || issue.labels.includes('loop-ready')) return null;
+  if (!isLoopRepair(issue.labels)) return null;
   const marker = parseRepair(issue.body);
   if (marker === null) return null;
   const record = fetchIssueRecord(marker.parent);
