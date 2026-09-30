@@ -515,8 +515,10 @@ function lifecycleDriverIdentity() {
 
 export function inheritedLines(dispatches) {
   return [
-    ...(dispatches?.inherited ?? []).map((d) => `inherited ${d.role} dispatch pid ${d.pid} · #${d.issue ?? '?'} · result -> ${d.outputFile}`),
+    ...(dispatches?.inherited ?? []).map((d) => `inherited ${d.role} dispatch pid ${d.pid} · #${d.issue ?? '?'} · `
+      + (d.outputFile === null ? 'no result file: wait for the pid to exit, then reconcile' : `result -> ${d.outputFile}`)),
     ...(dispatches?.foreign ?? []).map((d) => `live session's ${d.role} dispatch pid ${d.pid} · #${d.issue ?? '?'} · not this run's`),
+    ...(dispatches?.unknown ?? []).map((d) => `unattributed ${d.role} dispatch pid ${d.pid} · #${d.issue ?? '?'} · leave its unit alone`),
   ];
 }
 
@@ -983,12 +985,16 @@ function selfTest() {
     // dispatch still writing and offered to stop it; prime now names it.
     check(
       'prime reports the dispatches this run inherits and those a live session owns',
-      JSON.stringify(persisted.dispatches) === JSON.stringify({ inherited: [], foreign: [] })
+      JSON.stringify(persisted.dispatches) === JSON.stringify({ inherited: [], foreign: [], unknown: [] })
       && inheritedLines({
-        inherited: [{ pid: 7, role: 'implement', issue: 389, outputFile: '/t/r.json' }],
+        inherited: [{ pid: 7, role: 'implement', issue: 389, outputFile: '/t/r.json' },
+          { pid: 9, role: 'implement', issue: 390, outputFile: null }],
         foreign: [{ pid: 8, role: 'code-review', issue: 12 }],
+        unknown: [{ pid: 6, role: 'plan-review', issue: 5 }],
       }).join('|') === 'inherited implement dispatch pid 7 · #389 · result -> /t/r.json|'
-        + 'live session\'s code-review dispatch pid 8 · #12 · not this run\'s'
+        + 'inherited implement dispatch pid 9 · #390 · no result file: wait for the pid to exit, then reconcile|'
+        + 'live session\'s code-review dispatch pid 8 · #12 · not this run\'s|'
+        + 'unattributed plan-review dispatch pid 6 · #5 · leave its unit alone'
       && inheritedLines(undefined).length === 0,
     );
     check(

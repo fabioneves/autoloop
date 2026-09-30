@@ -184,6 +184,7 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
 export function transition({
   root, run = realRun(root), evaluateCommand = evaluate, nowMs = Date.now(),
   issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false,
+  markers = ownRunMarkers,
 }) {
   const refuse = (message) => ({ ok: false, lines: [message] });
   if (!Number.isSafeInteger(issue) || issue < 1) return refuse('step: --issue must be a positive issue number');
@@ -196,7 +197,11 @@ export function transition({
   const stored = readJson(stepsPath, null);
   const record = stored === null || stored.closed ? { issue, steps: [] } : stored;
   const last = record.steps.at(-1);
-  if (last && last.step === to && (last.round ?? null) === (round ?? null)) {
+  // A step an ended session recorded is announced afresh by the run that
+  // inherits it, so the parked view (this run's steps only) shows it.
+  const since = runStartMs(markers(root));
+  const earlierRun = since !== null && Number.isSafeInteger(last?.startedAtMs) && last.startedAtMs < since;
+  if (last && last.step === to && (last.round ?? null) === (round ?? null) && !earlierRun) {
     return { ok: true, lines: [`already on ${to}`] };
   }
   // A staged unit runs its read-only steps 1-3 unlabelled, so the worked
@@ -880,6 +885,24 @@ function transitionChecks(at) {
           return card.ok === true && card.lines[0].includes('#999') && card.lines[0].includes('which spec?')
             // Any other outcome still needs recorded steps (a typo'd number is refused).
             && closeUnit({ root, run, nowMs: at(10, 30), issue: 998, outcome: 'shipped' }).ok === false;
+        } catch {
+          return false;
+        }
+      })()]);
+    // A session that inherits an ended session's in-flight unit announces its
+    // step again: a fresh entry this run, so the parked view shows it.
+    results.push(['a step recorded before this run is announced afresh and parked',
+      (() => {
+        try {
+          labels = ['loop-ready'];
+          const runFrom = (openedAtMs) => () => [{ marker: { version: 1, pids: [1], openedAtMs } }];
+          transition({ root, run, nowMs: at(9, 0), issue: 380, to: '05-implement', markers: runFrom(at(8, 0)) });
+          const same = transition({ root, run, nowMs: at(9, 10), issue: 380, to: '05-implement', markers: runFrom(at(8, 0)) });
+          const hidden = parkedView({ root, run, nowMs: at(11, 0), markers: runFrom(at(11, 0)) });
+          const again = transition({ root, run, nowMs: at(11, 1), issue: 380, to: '05-implement', markers: runFrom(at(11, 0)) });
+          const shown = parkedView({ root, run, nowMs: at(11, 2), markers: runFrom(at(11, 0)) });
+          return same.lines[0] === 'already on 05-implement' && !hidden.includes('#380')
+            && again.ok === true && again.lines[0] !== 'already on 05-implement' && shown.includes('#380');
         } catch {
           return false;
         }

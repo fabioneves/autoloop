@@ -44,9 +44,10 @@ node <plugin-tools>/prime.mjs --json
   `knownRefused` (deferred markers the same driver already refused since they last changed).
   `null` when evidence is incomplete — re-prime.
 - `eligible` — issues selection may take ("Queue and trust" applied). `null` → re-prime first.
-- `dispatches` — `inherited`: an ended session's dispatch, its unit yours and in flight: never stop
-  it; background `dispatch.mjs --wait-file <outputFile> --timeout-seconds 9999`, go on from its
-  result. `foreign`: a live session's run — start none here.
+- `dispatches` — `inherited`: an ended session's dispatch; its unit is yours and in flight, its
+  resume this wait. Never stop or re-dispatch it; re-announce its step, background `dispatch.mjs
+  --wait-file <outputFile> --timeout-seconds 9999` (exit 3: the kill drill), then the step's usual
+  path from its `cwd`. `foreign`: a live session's run — start none here. `unknown`: leave its unit.
 - `config` — `version`, `baseBranch`, `mergePolicy`, `gateCommand`, `checklistPath`,
   `checklistFile` (the file reviewers read — the repository's or the plugin's), plus
   `projectConfig` and its `fingerprint`: the review contract's `projectConfig`
