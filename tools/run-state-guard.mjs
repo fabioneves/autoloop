@@ -578,9 +578,14 @@ function gitClaims(words, head) {
     const key = words.slice(index + 1).findIndex((word) => /^core\.(?:worktree|gitdir)$/iu.test(word));
     if (key !== -1 && words[index + 2 + key] !== undefined) aims.push(words[index + 2 + key]);
   }
-  const aimed = aims.map((word) => ({ word, relations: ['inside', 'near'], prove: true }));
   const config = subcommand === 'config' && words.slice(index).some((word) => word === '--file' || word === '-f' || word.startsWith('--file='));
-  if (!GIT_WRITING.has(subcommand) && !config) return aimed;
+  // `worktree list` only reads; every other worktree subcommand writes.
+  const writes = config || (GIT_WRITING.has(subcommand) && !(subcommand === 'worktree' && words[index + 1] === 'list'));
+  // Aimed near protected state (the repository root holds the project's
+  // settings), git matters only when it writes; aimed inside it, always.
+  // A read-only `git -C <root> worktree list` was refused (LFE run 2026-09-30).
+  const aimed = aims.map((word) => ({ word, relations: writes ? ['inside', 'near'] : ['inside'], prove: true }));
+  if (!writes) return aimed;
   const paths = config ? optionValues(words, index, new Set(['--file', '-f']))
     : subcommand === 'archive' ? optionValues(words, index, new Set(['-o', '--output']))
       : operands(words, index + 1, new Set(['-b', '-B', '--orphan', '--reason', '-m', '--message']));
@@ -1055,6 +1060,18 @@ function selfTest() {
   const ordinary = ORDINARY.filter((command) => refused(command));
   check('reading the run state, and ordinary work elsewhere, is not refused', ordinary.length === 0);
   if (ordinary.length > 0) console.error(`  false positives: ${JSON.stringify(ordinary)}`);
+  // LFE run 2026-09-30: with the project's settings protected (a run is
+  // open), `git -C <root> worktree list` was refused, as was any read-only
+  // git command aimed at the repository root. Aiming git near protected
+  // state matters only for a subcommand that writes; inside it, always.
+  {
+    const settings = [`${repo}/.git/autoloop/run`, `${repo}/.claude/settings.json`, `${repo}/.claude/settings.local.json`];
+    const judged = (command) => runStateProblem(segmentsOf(command), { cwd: repo, protectedDirs: settings, codeDirs, home, env: {} }) !== null;
+    check('read-only git aimed at the repository root is not refused; writing or aiming inside state is',
+      !judged(`git -C ${repo} worktree list`) && !judged(`git -C ${repo} status --short`) && !judged(`git -C ${repo} log --oneline -1`)
+        && judged(`git -C ${repo} clean -fdx`) && judged(`git -C ${repo} checkout -- .`)
+        && judged(`git -C ${repo}/.git/autoloop/run status`) && judged(`git --work-tree=${repo} restore .`));
+  }
   check('nothing is judged without protected directories',
     runStateProblem(segmentsOf('rm -rf .git'), { cwd: repo, protectedDirs: [], home }) === null);
   check('an opaque segment refuses',

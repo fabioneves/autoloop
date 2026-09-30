@@ -3,6 +3,18 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.7] - 2026-09-30
+
+### Fixed
+
+- **Read-only git aimed at the repository root is no longer refused.** While a run is open, the
+  project's settings files are protected, and the run-state guard refused every `git -C <root> …`,
+  even `status` and `worktree list`.
+  - Read-only subcommands now refuse only when git is pointed inside protected state.
+  - Writing subcommands keep the wider rule.
+- **A terminal request handed to `lifecycle-driver --reconcile-json` now names
+  `publish-verdict.mjs terminal-finalize`,** the command that takes it.
+
 ## [0.65.6] - 2026-09-30
 
 ### Fixed

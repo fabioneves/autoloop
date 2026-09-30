@@ -907,6 +907,13 @@ function validateIntent(intent) {
 // plan body whose hash no longer matched the frozen intent).
 export function reconcileRequestGaps(request) {
   const gaps = [];
+  // The terminal request ({schemaVersion, record}) is the finalizer's input,
+  // not this one's; handed here twice in the LFE run (2026-09-30).
+  if (exactKeys(request, ['record', 'schemaVersion'])) {
+    return ['this is the terminal request, which `publish-verdict.mjs terminal-finalize --request-file <path> '
+      + '--review-evidence-file <path>` takes; --reconcile-json takes the lifecycle request '
+      + '(schemaVersion, intent, baseBranch, lifecycleCommentId, plan, premergeRecordDraft)'];
+  }
   if (!exactKeys(request, [
     'baseBranch',
     'intent',
@@ -2174,6 +2181,13 @@ function selfTest() {
           && reopenedCalls.length === 1 && reopenedCalls[0][0] === 'steps' && reopenedCalls[0][2] === true
           && unmerged === null && blocked === null && calls.length === 0;
       })(),
+    ],
+    // LFE run 2026-09-30 (twice): the terminal request was fed to
+    // --reconcile-json; the refusal now names the command that takes it.
+    [
+      'a terminal request handed to --reconcile-json names terminal-finalize',
+      reconcileRequestGaps({ schemaVersion: 1, record: {} })[0].includes('publish-verdict.mjs terminal-finalize --request-file')
+        && reconcileRequestGaps({ schemaVersion: 1 })[0].startsWith('request keys must be exactly'),
     ],
     [
       '--reconcile-issue takes exactly one positive issue number',
