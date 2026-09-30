@@ -69,8 +69,30 @@ function isAssignment(word) {
   return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word);
 }
 
-// The executable's index, behind wrappers, their options and assignments.
-function headIndex(words, from = 0) {
+// Wrapper options that take a value: the value is never the command
+// (`env -u NAME bash …` read NAME as the command, LFE run 2026-09-30, and
+// `sudo -u root rm …` hid the rm). Options that move where or how the command
+// runs are beyond the guard: the operands they change cannot be proven.
+const WRAPPER_VALUED = Object.freeze({
+  env: new Set(['-u', '--unset']),
+  timeout: new Set(['-s', '--signal', '-k', '--kill-after']),
+  nice: new Set(['-n', '--adjustment']),
+  ionice: new Set(['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid']),
+  sudo: new Set(['-u', '--user', '-g', '--group', '-U', '--other-user', '-h', '--host', '-p', '--prompt',
+    '-r', '--role', '-t', '--type', '-C', '--close-from', '-T', '--command-timeout']),
+  doas: new Set(['-u']),
+  stdbuf: new Set(['-i', '-o', '-e']),
+});
+const WRAPPER_UNFOLLOWABLE = Object.freeze({
+  env: new Set(['-C', '--chdir', '-S', '--split-string']),
+  sudo: new Set(['-D', '--chdir']),
+  doas: new Set(['-C']),
+});
+
+// Walks the wrappers in front of the command: their options (and those
+// options' values) and assignments. `onOption(wrapper, option)` sees each.
+function walkWrappers(words, from, onOption) {
+  let wrapper = null;
   for (let index = from; index < words.length; index += 1) {
     const word = words[index];
     // A function definition's body is the command: `f(){ rm …; }; f`.
@@ -79,11 +101,33 @@ function headIndex(words, from = 0) {
       index += 1;
       continue;
     }
-    if (isAssignment(word) || WRAPPERS.has(basename(word)) || /^\d+[smhd]?$/u.test(word)) continue;
-    if (word.startsWith('-') && index > from && WRAPPERS.has(basename(words[from]))) continue;
+    if (WRAPPERS.has(basename(word))) {
+      wrapper = basename(word);
+      continue;
+    }
+    if (isAssignment(word) || /^\d+[smhd]?$/u.test(word)) continue;
+    if (word.startsWith('-') && wrapper !== null) {
+      onOption(wrapper, word);
+      if (WRAPPER_VALUED[wrapper]?.has(word)) index += 1;
+      continue;
+    }
     return index;
   }
   return -1;
+}
+
+// A wrapper option the guard cannot follow (`env -C dir`), or null.
+export function unfollowableWrapperOption(words) {
+  let found = null;
+  walkWrappers(words, 0, (wrapper, option) => {
+    if (found === null && WRAPPER_UNFOLLOWABLE[wrapper]?.has(option.split('=')[0])) found = `${wrapper} ${option}`;
+  });
+  return found;
+}
+
+// The executable's index, behind wrappers, their options and assignments.
+function headIndex(words, from = 0) {
+  return walkWrappers(words, from, () => {});
 }
 
 // Brace expansion, as the shell does it before anything else: `{a,b}` lists
@@ -574,6 +618,11 @@ export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], h
     return 'autoloop guard — this command nests more command substitutions than the guard can take '
       + 'apart, so what it changes cannot be proven. Split it into smaller commands.';
   }
+  const unfollowable = segments.map((segment) => unfollowableWrapperOption(segment.words)).find((option) => option !== null);
+  if (unfollowable !== undefined) {
+    return `autoloop guard — \`${unfollowable}\` changes where or how the command runs, so what it changes `
+      + 'cannot be proven. Run the command without it (cd first in its own command).';
+  }
   if (segments.reduce((total, segment) => total + segment.words.length, 0) > MAX_TRACKED_WORDS) {
     return 'autoloop guard — this command is too large to check for changes to the run\'s own '
       + 'state, so it cannot be proven safe. Split it into smaller commands.';
@@ -617,6 +666,7 @@ function resolvesInside(word, at, dirs, home, env) {
 // Whether a segment only reads: no claim on any path. A command that opens a
 // run may do nothing else (command-guard.mjs).
 export function readsOnly(words) {
+  if (unfollowableWrapperOption(words) !== null) return false;
   const head = headIndex(words);
   if (head === -1) return true;
   if (['cd', 'pushd', 'popd'].includes(basename(words[head]))) return true;
@@ -767,6 +817,13 @@ function placeDir(word, at, home, env) {
 // tools at /p/tools. Exported so command-guard replays them through its own
 // tokenizer.
 export const TAMPERING = Object.freeze([
+  // A wrapper option's value is not the command (LFE run 2026-09-30), and
+  // skipping it must not hide the command behind it.
+  'env -u X rm -rf .git/autoloop/run',
+  'timeout -s KILL 5 rm -rf .git/autoloop/run',
+  'nice -n 5 rm /p/tools/dispatch.mjs',
+  'sudo -u root rm -rf .git/autoloop',
+  'env -C /tmp rm -rf .git/autoloop/run',
   'rm -f .git/autoloop/run/1.json',
   'rm -rf .git/autoloop',
   'rm -rf .git',
@@ -882,6 +939,11 @@ export const TAMPERING = Object.freeze([
 ]);
 
 export const ORDINARY = Object.freeze([
+  // LFE run 2026-09-30: `env -u NAME` read NAME as the command, and the
+  // refusal named the dispatch wrapper as a thing being changed.
+  'env -u ANTHROPIC_BASE_URL bash /p/tools/dispatch-stream.sh /t/l /t/r --role implement',
+  'env -u X ls /p/tools',
+  'timeout -s KILL 5 ls .git/autoloop/run',
   'cat .git/autoloop/run/1.json',
   'jq . .git/autoloop/run/1.json',
   'ls -la .git/autoloop/run',
