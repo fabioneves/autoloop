@@ -41,7 +41,7 @@ import { vendoredLeftovers } from './hook-root.mjs';
 import { latchDirectory, recordLatch } from './run-markers.mjs';
 import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
-  effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig,
+  effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
 } from './config-contract.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
@@ -267,8 +267,8 @@ export function configSummary(config, root = null) {
     gateCommand: config.gate.command,
     checklistPath: config.review.checklistPath,
     checklistFile: root === null ? null : effectiveChecklistPath(root, config),
-    fingerprint: hashValue(config),
-    projectConfig: config,
+    fingerprint: hashValue(reviewedConfig(config)),
+    projectConfig: reviewedConfig(config),
   };
 }
 
