@@ -182,8 +182,8 @@ was already retried: never re-dispatch it by hand — probe-rule or park. A succ
 **Writers at a usage limit** (`error.usageLimit: true`): inspect the branch for effects, then retry
 ONCE unchanged but for `--fallback`, noted on the collection line (`simplify returned ·
 CLAUDE-OPUS-5-5, CLAUDE-FABLE-5-1 at limit`). A role with no fallback fails
-`ROUTE_FALLBACK_MISSING`. simplify's fallback at its limit too → skip 06; implement (or a fallback)
-at its limit parks the unit ("Timed park"), never a close. No fallback for any other failure
+`ROUTE_FALLBACK_MISSING`. simplify's fallback at its limit too → skip 06; implement's fallback at
+its limit too parks the unit ("Timed park"), never a close. No fallback for any other failure
 class.
 
 Premise, finding verification, and disposition are in-session judgment, no `--model` knob.

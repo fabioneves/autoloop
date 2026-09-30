@@ -457,7 +457,7 @@ export function validateConfig(cfg) {
   if (hasOwn(cfg, 'protectedPaths')) validateGlobList(cfg.protectedPaths, 'protectedPaths', errors);
   // Each step's model, effort and fallback, overriding the operator's global
   // file (docs/specs/SPEC-model-config.md). Optional, so the schema holds.
-  if (hasOwn(cfg, 'models')) errors.push(...modelsShapeProblems(cfg.models, 'models').map((problem) => problem.replace(/^models: models\./u, 'models.')));
+  if (hasOwn(cfg, 'models')) errors.push(...modelsShapeProblems(cfg.models, 'models').map((problem) => problem.replace(/^models: models/u, 'models')));
   return errors;
 }
 

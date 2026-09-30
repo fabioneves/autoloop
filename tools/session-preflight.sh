@@ -4,7 +4,8 @@
 #
 # INFORMATIONAL: always exits 0. SessionStart hooks inject context, they don't gate —
 # the autoloop:dev skill treats any FAIL line below as a preflight failure (stop and
-# report). Every check is read-only and time-bounded so interactive sessions stay snappy.
+# report). Every check is time-bounded so interactive sessions stay snappy, and reads only,
+# except that the step-models file is written with its defaults when missing.
 #
 # Plugin hooks fire in every repository: silent unless CLAUDE_PROJECT_DIR is a
 # devendored autoloop repository (hook-root.mjs decides, for every hook alike).

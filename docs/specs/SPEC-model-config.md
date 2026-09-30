@@ -87,6 +87,14 @@ A role with a `null` fallback refuses as `ROUTE_FALLBACK_MISSING`.
 
 - Prime reports `models` (the resolved table) and `modelsSource`, so the run frame names the
   models.
+- Prime pins the resolved table at `<git common dir>/autoloop/models.json`, which is protected
+  run state, and every dispatch runs the pinned table (review finding).
+  - A writer editing its branch's `.autoloop/config.json` can't move its own reviewers.
+  - A global edit takes effect at the next prime.
+  - Outside a run, a dispatch resolves the checkout's own table, and an invalid project config
+    refuses.
+- A writer is sent to its fallback only when the run did no work: the checkout is unchanged and
+  the final result shows no tokens or turns (review finding).
 - The global config is a protected path while a run is open: the loop does not change its own
   models.
 
@@ -102,5 +110,10 @@ A role with a `null` fallback refuses as `ROUTE_FALLBACK_MISSING`.
   - `model_not_found` falls back for a writer and a reviewer;
   - a `null` fallback refuses.
 - Config-contract self-test: `models` shape-checked, and absent from the fingerprint.
-- `verify --plugin-root .`, plus a live `dispatch.mjs --role plan-review` smoke under plain
+- `verify --plugin-root .`, plus a live `dispatch.mjs --role code-review` smoke under plain
   `claude`, where astra is unavailable and the fallback path runs.
+  - plan-review defaults to Fable, which is always reachable, so it can't exercise the fallback.
+  - Run 2026-09-30: `ENGINE_EXIT_NONZERO (model unavailable) on gpt-6-astra[1m]`, then
+    `claude-sonnet-5[1m]` at `xhigh`, verdict `pass` in 22 s.
+  - `CLAUDE_CONFIG_DIR` also holds Claude Code's credentials, so a real engine must keep the
+    operator's.

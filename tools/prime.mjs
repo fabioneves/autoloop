@@ -534,7 +534,7 @@ export function primeModels(config, root = null) {
   return { models: resolved.models, modelsSource: resolved.source };
 }
 
-export function modelLines({ models, modelsSource }) {
+export function modelSourceLines({ models, modelsSource }) {
   if (!models) return [];
   const from = modelsSource?.global ?? `built-in defaults (${modelsSource?.globalError ?? 'no global file'})`;
   return [`models ${from}${modelsSource?.project ? ' + project overrides' : ''}${modelsSource?.created ? ' (created)' : ''}`];
@@ -589,7 +589,7 @@ function report(summary) {
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
     ...haltLines(summary.halted),
     ...knownRefusedLines(summary.markers),
-    ...modelLines(summary),
+    ...modelSourceLines(summary),
     ...inheritedLines(summary.dispatches),
     ...waitLines(summary.waits),
     ...blockLines(summary.blocks, summary.halted),
@@ -937,7 +937,7 @@ function selfTest() {
       && !existsSync(runMarkerDirectory(root))
       && resolvedModels.models.plan.model === 'gpt-6-astra[1m]'
       && resolvedModels.modelsSource.global === join(process.env.CLAUDE_CONFIG_DIR, 'autoloop', 'config.json')
-      && modelLines(resolvedModels).length === 1
+      && modelSourceLines(resolvedModels).length === 1
       // The resolved table is pinned for the run's dispatches.
       && readPinnedModels(pinnedModelsPath(root))?.ok === true,
     );
@@ -1079,8 +1079,11 @@ function main() {
   if (parsed.mode === 'self-test') {
     // Resolving models writes the global config when missing: a self-test
     // must never write the operator's own.
-    process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'prime-config-'));
-    process.exit(selfTest() ? 0 : 1);
+    const configDir = mkdtempSync(join(tmpdir(), 'prime-config-'));
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    const passed = selfTest();
+    rmSync(configDir, { recursive: true, force: true });
+    process.exit(passed ? 0 : 1);
   }
   const digest = () => postDigest({ run: realRun(process.cwd()) });
   if (parsed.mode === 'park') {

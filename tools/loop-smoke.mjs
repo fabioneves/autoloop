@@ -537,6 +537,9 @@ async function selfTest({ realEngine = false } = {}) {
     const dispatchEnvironment = realEngine ? { ...environment } : null;
     environment.HOME = join(scratch, 'home');
     mkdirSync(environment.HOME, { recursive: true });
+    // Step models resolve (and are written when missing) under the Claude
+    // config directory: the fixture's own, never the operator's.
+    environment.CLAUDE_CONFIG_DIR = join(scratch, 'claude-config');
 
     let fixture = null;
     const setup = await timedPhase('fixture-setup', async () => {

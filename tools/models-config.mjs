@@ -125,18 +125,18 @@ function readJson(path) {
  *  overwrites; a lost race keeps the other writer's file. */
 export function ensureGlobalConfig(path = globalConfigPath()) {
   if (existsSync(path)) return { created: false, error: null };
+  const temporary = `${path}.${process.pid}.tmp`;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    const temporary = `${path}.${process.pid}.tmp`;
     writeFileSync(temporary, `${JSON.stringify({ version: GLOBAL_CONFIG_VERSION, models: DEFAULT_MODELS }, null, 2)}\n`);
-    try {
-      linkSync(temporary, path);
-    } finally {
-      unlinkSync(temporary);
-    }
+    linkSync(temporary, path);
     return { created: true, error: null };
   } catch (error) {
     return existsSync(path) ? { created: false, error: null } : { created: false, error: error.message };
+  } finally {
+    try {
+      rmSync(temporary, { force: true });
+    } catch { /* its directory never existed */ }
   }
 }
 
@@ -202,7 +202,7 @@ export function modelLines(resolved) {
   if (!resolved.ok) return [`NOTE  step models refused: ${resolved.errors.join('; ')}`];
   const from = resolved.source.global ?? `built-in defaults (${resolved.source.globalError ?? 'no global file'})`;
   return [
-    `INFO  step models from ${from}`,
+    `INFO  step models from ${from} (project overrides: see prime)`,
     ...MODEL_ROLES.map((role) => {
       const { model, effort, fallback } = resolved.models[role];
       return `INFO    ${role} ${model}${effort ? ` !${effort}` : ''}${fallback ? ` > ${fallback}` : ''}`;
@@ -256,7 +256,7 @@ function selfTest() {
     check('the session-start lines name the source and each role\'s model, effort and fallback',
       (() => {
         const lines = modelLines(resolveModels({ path }));
-        return lines[0] === `INFO  step models from ${path}` && lines.length === 1 + MODEL_ROLES.length
+        return lines[0] === `INFO  step models from ${path} (project overrides: see prime)` && lines.length === 1 + MODEL_ROLES.length
           && lines.includes('INFO    plan-review claude-fable-5-1[1m] !xhigh > claude-sonnet-5[1m]')
           && modelLines({ ok: false, errors: ['x: bad'] })[0] === 'NOTE  step models refused: x: bad';
       })());

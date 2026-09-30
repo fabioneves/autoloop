@@ -30,8 +30,8 @@
 //
 //   NOT a secrets boundary: reading the environment or a credential file is
 //   allowed. Secrets are protected by scoping them (a repo-scoped token without
-//   admin rights, no API key in the loop's environment) and by loopback-only
-//   proxy routes in dispatch.mjs, not by this guard.
+//   admin rights, no API key in the loop's environment), and dispatch.mjs sets
+//   no endpoint of its own (a dispatch inherits the session's), not by this guard.
 //
 // Usage:  (hook) reads the PreToolUse payload on stdin
 //         node <plugin-tools>/command-guard.mjs --self-test

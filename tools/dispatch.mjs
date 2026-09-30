@@ -713,15 +713,10 @@ function hostName(engine) {
   return value.slice(value.lastIndexOf('/') + 1);
 }
 
-// A role's fallback is the one its resolved table names, or none.
-export function effectiveFallback(role, route) {
-  return route.fallback;
-}
-
 function routeFor(options, cwd) {
   const route = resolveRoute(options.role, cwd);
   if (route.error !== undefined || !options.fallback) return route;
-  const fallback = effectiveFallback(options.role, route);
+  const { fallback } = route;
   if (fallback === null) {
     return {
       error: {
@@ -837,7 +832,7 @@ export function runDispatch(options) {
   const cwd = options.cwd ?? process.cwd();
   const primary = resolveRoute(options.role, cwd);
   const fallbackAvailable = primary.error === undefined
-    && effectiveFallback(options.role, primary) !== null
+    && primary.fallback !== null
     && options.model === undefined
     && hostName(options.engine ?? primary.engine ?? 'claude') === 'claude';
   let onFallback = options.fallback === true;
@@ -973,7 +968,7 @@ function executeDispatch(options) {
   if (name !== 'claude') {
     const removed = name === 'codex';
     return failure('spawn', removed ? 'ENGINE_REMOVED' : 'ENGINE_UNKNOWN', removed
-      ? `${role}: ${name} is no longer a dispatch engine; route the model through a claude proxy route`
+      ? `${role}: ${name} is no longer a dispatch engine; run the model on the claude engine (the session decides which models it reaches)`
       : `${role}: unknown engine ${name}`, {
       ms: 0,
       startupMs: 0,
@@ -1766,7 +1761,6 @@ function selfTest() {
       'a result names the host that produced it',
       busyWriter.engine === 'claude' && idleWriter.error.engine === 'claude',
     );
-    // The legacy review-engine recording, read when no routes file exists.
     mkdirSync(join(repoScratch, '.git', 'autoloop'), { recursive: true });
     check(
       'the CLI passes --engine and --live-file through to the dispatch',
@@ -2221,9 +2215,7 @@ function selfTest() {
         return simplify.result.ok === true && simplify.argv.includes('--model claude-opus-5-5[1m]')
           && simplify.result.fallback === true && simplify.result.model === 'claude-opus-5-5[1m]'
           && planReview.argv.includes('--model claude-sonnet-5[1m]')
-          && refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING'
-          && effectiveFallback('x', { model: 'x', fallback: { model: 'y' } }).model === 'y'
-          && effectiveFallback('x', { model: 'x', fallback: null }) === null;
+          && refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING';
       })(),
     );
     // Review of the model config: a run's dispatches run the table prime
@@ -2725,8 +2717,11 @@ function main() {
   if (parsed.mode === 'self-test') {
     // Every dispatch resolves models, which writes the global config when it
     // is missing: a self-test must never write the operator's own.
-    process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'dispatch-config-'));
-    process.exit(selfTest() ? 0 : 1);
+    const configDir = mkdtempSync(join(tmpdir(), 'dispatch-config-'));
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    const passed = selfTest();
+    rmSync(configDir, { recursive: true, force: true });
+    process.exit(passed ? 0 : 1);
   }
 
   const tools = resolveTools(parsed.role, parsed.tools);

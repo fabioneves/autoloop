@@ -43,7 +43,7 @@ export const INCIDENTS = Object.freeze([
       + 'Fable and astra. The routes and fallbacks carried bare ids; the default '
       + 'model table (models-config.mjs) now carries [1m] on every id.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'models-config.mjs', anchor: '// Every id carries [1m]: a gateway serves a bare id with a 200k window.' }),
+      Object.freeze({ file: 'models-config.mjs', anchor: "plan: Object.freeze({ model: 'gpt-6-astra[1m]', effort: 'xhigh', fallback: 'claude-opus-5-5[1m]' })," }),
       Object.freeze({ file: 'dispatch.mjs', anchor: "'with no global config the defaults are written and every role resolves its own entry'" }),
     ]),
   }),
@@ -576,7 +576,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'session-preflight.sh',
-        anchor: 'reachable is this session\'s business — autoloop sets no proxy URL.',
+        anchor: 'run_timed 10 node "$TOOLS_DIR/models-config.mjs" --lines',
       }),
       Object.freeze({
         file: '../skills/dev/SKILL.md',

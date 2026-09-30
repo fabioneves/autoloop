@@ -70,7 +70,10 @@ project in `.autoloop/config.json` under `models`:
 | 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | xhigh | `claude-sonnet-5` |
 | 08 fixes | `fix` | `claude-opus-5-5` | — | `claude-fable-5-1` |
 
-Every id carries `[1m]` in the file. No artifact is judged by the model that wrote it: a config
+Every id carries `[1m]` in the file. The written file is yours: later plugin releases never change
+it, so delete it to pick up newer defaults. A project's `models` needs autoloop 0.65.0 or later,
+because older releases refuse the key. Prime pins the resolved table for its run, so edits take
+effect at the next prime. No artifact is judged by the model that wrote it: a config
 where a reviewer could run on its writer's model, fallback included, is refused. Autoloop does
 not manage proxies. A dispatch inherits the session's environment, so the command that started
 the session decides which models are reachable. A model the session cannot serve moves the step
