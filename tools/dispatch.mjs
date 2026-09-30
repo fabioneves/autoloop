@@ -677,7 +677,10 @@ export function recordRoutes(cwd, { preset, proxyUrl = null, overrides = [] }) {
   return { ok: true, path, routes: parsed.routes };
 }
 
-// The child inherits this process's environment and nothing is added to it.
+// The child inherits this process's environment, plus one setting: every
+// Bash call returns to the checkout the dispatch launched in. A writer that
+// cd'd into a package kept failing on paths named from the repository root
+// (LFE run 2026-09-30); a `cd` inside one call still works.
 // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 used to be set here to satisfy the broker
 // capability `claude.subprocess.credentials-scrubbed`; v0.42.0 deleted the
 // broker, and with it both that predicate and the cleanup that swept the stub
@@ -687,8 +690,8 @@ export function recordRoutes(cwd, { preset, proxyUrl = null, overrides = [] }) {
 // start on `/home/.mcp.json`.
 // A native route runs where the session runs: a session started on a gateway
 // reaches Claude through it. Only a proxied route's own @url replaces it.
-function dispatchEnvironment(baseUrl = null) {
-  const env = { ...process.env };
+export function dispatchEnvironment(baseUrl = null) {
+  const env = { ...process.env, CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: '1' };
   if (baseUrl !== null) env.ANTHROPIC_BASE_URL = baseUrl;
   return env;
 }
@@ -783,7 +786,7 @@ export function reviewEnvelopeStamp(role) {
 // stamp the only authority for the reviewed head.
 // Fail-open: an unreadable checkout appends nothing rather than failing a
 // dispatch that would otherwise have run.
-export function dispatchContextStamp(cwd, role, readCheckout = checkoutFingerprint) {
+export function dispatchContextStamp(cwd, role, readCheckout = checkoutFingerprint, promptFile = null) {
   const fingerprint = readCheckout(cwd);
   if (fingerprint === null) return '';
   const [head, ...rest] = fingerprint.split('\n');
@@ -795,6 +798,8 @@ export function dispatchContextStamp(cwd, role, readCheckout = checkoutFingerpri
     + `revision: ${head}\n`
     + `checkout: ${clean ? 'clean' : 'dirty'}\n`
     + checklist
+    + (promptFile === null ? '' : `brief: ${promptFile}\n`)
+    + `working directory: ${cwd} (every Bash call starts here; name paths from it, or cd within the same call)\n`
     + 'This stamp is written by dispatch.mjs from the checkout it launched in.\n'
     + 'It is the authority for the revision under review; a revision named\n'
     + 'anywhere else in this prompt that disagrees with it is a transcription\n'
@@ -1174,6 +1179,7 @@ function executeDispatch(options) {
     effort: options.effort ?? null,
     baseUrl: options.baseUrl ?? null,
     readRoots: options.readRoots ?? [],
+    promptFile: options.promptFile ?? null,
   });
   return brief.sha256 === null ? result : { ...result, briefSha256: brief.sha256 };
 }
@@ -1211,7 +1217,7 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 }
 
 function runEngine({
-  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl, readRoots,
+  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, baseUrl, readRoots, promptFile,
 }) {
   const argv = claudeArgv(role, tools, model ?? null, effort ?? null, readRoots ?? [], hookWiringRoots(cwd));
   const checkoutBefore =
@@ -1225,7 +1231,7 @@ function runEngine({
       cwd,
       encoding: 'utf8',
       env: dispatchEnvironment(baseUrl),
-      input: `${prompt}${reviewEnvelopeStamp(role)}${dispatchContextStamp(cwd, role)}`,
+      input: `${prompt}${reviewEnvelopeStamp(role)}${dispatchContextStamp(cwd, role, checkoutFingerprint, promptFile ?? null)}`,
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: timeoutMs,
       windowsHide: true,
@@ -2213,6 +2219,23 @@ function selfTest() {
         }
       })(),
     );
+    // LFE run 2026-09-30: a writer cd'd into a package, then named paths
+    // from the repository root ("No such file"), and looked for its own
+    // transcript (never persisted) to re-read a finding from its brief.
+    check(
+      'the stamp names the brief\'s file and the directory every Bash call starts in',
+      (() => {
+        const stamp = dispatchContextStamp(repoScratch, 'implement', () => `${'a'.repeat(40)}\n`, '/tmp/autoloop-9/fix-prompt.md');
+        return stamp.includes('brief: /tmp/autoloop-9/fix-prompt.md\n')
+          && stamp.includes(`working directory: ${repoScratch}`)
+          && !dispatchContextStamp(repoScratch, 'implement', () => `${'a'.repeat(40)}\n`).includes('brief:');
+      })(),
+    );
+    check(
+      'every dispatch returns each Bash call to the checkout it launched in',
+      dispatchEnvironment().CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR === '1'
+        && dispatchEnvironment('http://127.0.0.1:1').CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR === '1',
+    );
     check(
       'an unreadable checkout stamps nothing rather than failing the dispatch',
       dispatchContextStamp('/nonexistent', 'code-review', () => null) === ''
@@ -3041,6 +3064,7 @@ function main() {
     ...(parsed.fallback ? { fallback: true } : {}),
     ...(parsed.issue === null ? {} : { issue: parsed.issue }),
     readRoots: [dirname(resolve(parsed.promptFile)), pluginsDir()],
+    promptFile: resolve(parsed.promptFile),
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;
   if (parsed.outputFile !== null) {
