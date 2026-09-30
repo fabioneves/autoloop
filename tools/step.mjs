@@ -130,6 +130,18 @@ function runStartMs(markers) {
   return starts.length ? Math.min(...starts) : null;
 }
 
+// How many times the unit entered its current step: runs of that step in the
+// record, a re-announcement right after itself not counted (#427 went plan,
+// plan-review, plan, plan: v2).
+export function stepAttempt(steps) {
+  const current = steps.at(-1)?.step;
+  let attempts = 0;
+  steps.forEach((entry, index) => {
+    if (entry.step === current && steps[index - 1]?.step !== current) attempts += 1;
+  });
+  return attempts;
+}
+
 // A unit is in flight when its record is open and this run touched it: an
 // abandoned run's unit stays open in its steps file indefinitely.
 function openUnits(dir, sinceMs = null) {
@@ -141,7 +153,7 @@ function openUnits(dir, sinceMs = null) {
     .filter((record) => record && !record.closed && record.steps?.length
       && record.steps.at(-1).step !== '11-record'
       && (sinceMs === null || record.steps.at(-1).startedAtMs >= sinceMs))
-    .map((record) => ({ issue: record.issue, ...record.steps.at(-1) }))
+    .map((record) => ({ issue: record.issue, ...record.steps.at(-1), attempt: stepAttempt(record.steps) }))
     .sort((left, right) => left.issue - right.issue);
 }
 
@@ -342,9 +354,15 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
   const human = waiting.map((issue) => ` · #${issue} ⚠️ awaits /answer`).join('');
   return [
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
-    ...units.map(({ issue, step, model, startedAtMs, staged, returnedAtMs }) => {
+    ...units.map(({ issue, step, model, startedAtMs, staged, returnedAtMs, round, attempt }) => {
       const [name] = STEPS[step] ?? [step];
-      const label = `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()}`;
+      // Which round: the recorded one, else how many times the step was entered
+      // (a plan's revisions are versions) — only once there is more than one.
+      const recorded = typeof round === 'string' ? Number(round.split('/')[0]) : null;
+      const which = recorded !== null && Number.isSafeInteger(recorded)
+        ? ` r${recorded}`
+        : attempt > 1 ? ` ${step === '02-plan' ? 'v' : 'r'}${attempt}` : '';
+      const label = `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()}${which}`;
       // A step whose dispatch came back is not running: a staged unit waits
       // for the worked one to finish (LFE run 2026-09-30, "02 plan on ASTRA"
       // for a plan that had returned).
@@ -656,6 +674,18 @@ function selfTest() {
     ['a staged step recorded without a model reads as not dispatched', safely(() => renderParked({
       nowMs: at(10, 30), units: [{ issue: 388, step: '03-plan-review', model: null, staged: true, startedAtMs: at(10, 14) }], eligible: 5,
     }).includes('#388 · 03 plan-review staged, not dispatched · 16m'))],
+    // Operator, 2026-09-30: the parked view shows which round a step is on.
+    ['a step shows its round: the recorded one, else how many times it was entered',
+      renderParked({
+        nowMs: at(10, 30), eligible: 5, units: [
+          { issue: 398, step: '08-code-review', model: 'gpt-6-astra', round: '2/20', startedAtMs: at(10, 29) },
+          { issue: 427, step: '02-plan', model: 'gpt-6-astra', staged: true, attempt: 2, startedAtMs: at(10, 20) },
+          { issue: 430, step: '07-diff-review', model: 'gpt-6-astra', attempt: 1, startedAtMs: at(10, 25) },
+        ],
+      }).split('\n').slice(1, 4).join('|') === '├ #398 · 08 code-review r2 on 🟢 ASTRA 6 · 1m|'
+        + '├ #427 · 02 plan v2 on 🟢 ASTRA 6 · 10m|├ #430 · 07 diff-review on 🟢 ASTRA 6 · 5m'
+      && stepAttempt([{ step: '02-plan' }, { step: '03-plan-review' }, { step: '02-plan' }, { step: '02-plan' }]) === 2
+      && stepAttempt([{ step: '07-diff-review' }]) === 1],
     // LFE run 2026-09-30: a staged plan that had come back read "02 plan on
     // 🟢 ASTRA 6 · 7m" with nothing running; a returned step says so.
     ['a returned step reads as returned, staged or worked, aged from its return',
@@ -879,7 +909,7 @@ function transitionChecks(at) {
       }
     })();
     results.push(['the parked view lists open units from the steps files',
-      typeof view === 'string' && view.includes('├ #350 · 08 fix on 🟠 OPUS 5.5')
+      typeof view === 'string' && view.includes('├ #350 · 08 fix r1 on 🟠 OPUS 5.5')
         && view.includes(`queue 0 eligible as of ${clock(Date.parse('2026-09-28T09:00:00.000Z'))}`)]);
     // An abandoned run's unit stays open in its steps file; only this run's
     // units are in flight. Markers from before the stamp filter nothing.
