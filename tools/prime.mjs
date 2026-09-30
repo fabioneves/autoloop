@@ -39,7 +39,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
 import { latchDirectory, recordLatch } from './run-markers.mjs';
-import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
+import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
 } from './config-contract.mjs';
@@ -155,7 +155,7 @@ export function baseSyncFacts(root, baseBranch) {
   };
 }
 
-export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits, triage = triageBlocks } = {}) {
+export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits, triage = triageBlocks, elsewhere = liveRunsElsewhere } = {}) {
   if (!validateScanArgs(scanArgs)) {
     return failure(
       'input',
@@ -176,6 +176,21 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   const read = readPrimeConfig(root);
   if (read.error !== undefined) return read;
   const { config } = read;
+  // One orchestrator per checkout: a run another live session holds open
+  // refuses before this one writes anything.
+  const held = elsewhere(root);
+  if (held.length > 0) {
+    const [run] = held;
+    const since = Number.isFinite(run.openedAtMs) ? ` since ${new Date(run.openedAtMs).toISOString().slice(11, 16)}Z` : '';
+    return failure(
+      'run',
+      'RUN_OPEN_ELSEWHERE',
+      `another live Claude session (pid ${run.pid}) has a run open on this checkout${since}${run.parked ? ', parked' : ''}; `
+        + 'one orchestrator per checkout. Close that run in its session (prime.mjs --close-run) or exit that '
+        + 'session, then prime again.',
+      { runs: held },
+    );
+  }
   const models = primeModels(config, root);
   if (models.ok === false) return models;
 
@@ -293,7 +308,10 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, `${process.pid}.json`);
   // openedAtMs: status views (step.mjs) list only units this run touched.
-  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, openedAtMs: nowMs, baseBranch })}\n`);
+  // sessionId: the conversation that opened the run, so a fork of it (a
+  // session moved to the background) is recognised as the same run.
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID || null;
+  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, openedAtMs: nowMs, baseBranch, sessionId })}\n`);
   return path;
 }
 
@@ -941,6 +959,51 @@ function selfTest() {
       // The resolved table is pinned for the run's dispatches.
       && readPinnedModels(pinnedModelsPath(root))?.ok === true,
     );
+
+    // LFE run 2026-09-30: a resumed fork and a new session opened runs on
+    // one checkout 15 s apart. A live Claude session's open run refuses.
+    writeFileSync(join(root, '.autoloop', 'config.json'), `${JSON.stringify(fixtureConfig())}\n`);
+    const markerDirectory = runMarkerDirectory(root);
+    rmSync(markerDirectory, { recursive: true, force: true });
+    const refusedElsewhere = primeDev({ cwd: root, elsewhere: () => [{ pid: 4242, openedAtMs: Date.UTC(2026, 8, 30, 13, 4), parked: false }] });
+    check(
+      'a run another live session holds open on this checkout refuses before anything is written',
+      refusedElsewhere.ok === false && refusedElsewhere.step === 'run'
+      && refusedElsewhere.error.code === 'RUN_OPEN_ELSEWHERE'
+      && refusedElsewhere.error.message.includes('pid 4242')
+      && !existsSync(markerDirectory),
+    );
+    const claude = [1, 'claude', '/u/.local/share/claude/versions/2.1.284'];
+    mkdirSync(markerDirectory, { recursive: true });
+    const mark = (name, marker) => writeFileSync(join(markerDirectory, `${name}.json`), JSON.stringify({ version: 1, ...marker }));
+    mark('closed', { pids: [501], openedAtMs: 1, closedAt: '2026-09-30T12:00:00Z' });
+    mark('own', { pids: [502], openedAtMs: 2 });
+    mark('live', { pids: [503], openedAtMs: 3 });
+    mark('shell', { pids: [504], openedAtMs: 4 });
+    mark('elsewhere', { pids: [505], openedAtMs: 5 });
+    // Moving a session to the background forks it and leaves the original
+    // process alive and idle, holding its marker: the fork continues that
+    // run, so a marker from its own or its resumed session is its own.
+    mark('resumed-from', { pids: [506], openedAtMs: 6, sessionId: 'a4a33838-f9f6-44ef-bc58-aaa001b7d794' });
+    const found = liveRunsElsewhere(root, {
+      own: new Set([502]),
+      lineage: new Set(['a4a33838-f9f6-44ef-bc58-aaa001b7d794']),
+      entryOf: (pid) => (pid === 504 ? [1, 'zsh', '/usr/bin/zsh'] : claude),
+      cwdOf: (pid) => (pid === 505 ? '/elsewhere' : join(root, 'sub')),
+    });
+    check(
+      'only an open run of another live Claude session working in this repository counts, never this one or its lineage',
+      found.length === 1 && found[0].pid === 503 && found[0].openedAtMs === 3,
+    );
+    check(
+      'a session\'s lineage is its own id and the session its Claude process resumed',
+      JSON.stringify([...sessionLineage({ env: { CLAUDE_CODE_SESSION_ID: 'new-id' },
+        ownerCmdline: ['/c/versions/2.1.284', '--session-id', 'new-id', '--fork-session', '--resume',
+          '/h/.claude/projects/p/a4a33838-f9f6-44ef-bc58-aaa001b7d794.jsonl'] })].sort())
+        === JSON.stringify(['a4a33838-f9f6-44ef-bc58-aaa001b7d794', 'new-id'])
+      && JSON.stringify([...sessionLineage({ env: {}, ownerCmdline: ['claude'] })]) === '[]',
+    );
+    rmSync(markerDirectory, { recursive: true, force: true });
 
     rmSync(join(root, '.autoloop'), { recursive: true, force: true });
     const missingConfig = primeDev({ cwd: root });

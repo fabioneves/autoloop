@@ -122,6 +122,87 @@ export function latchDirectory(home = homedir()) {
 export const PLUGIN_CODE_DIRS = Object.freeze(['tools', 'hooks']
   .map((name) => join(dirname(dirname(fileURLToPath(import.meta.url))), name)));
 
+// The working directory of a live process, or null.
+function processCwd(pid) {
+  try {
+    return realpathSync(`/proc/${pid}/cwd`);
+  } catch {
+    return null;
+  }
+}
+
+// The conversations this session continues: its own id, and the session its
+// Claude process resumed or forked (`--resume <id or transcript path>`).
+// Moving a session to the background forks it and leaves the original
+// process alive and idle, holding the run it opened; the fork is that run.
+export function sessionLineage({ env = process.env, ownerCmdline = ownerCommandLine() } = {}) {
+  const lineage = new Set();
+  if (env.CLAUDE_CODE_SESSION_ID) lineage.add(env.CLAUDE_CODE_SESSION_ID);
+  for (const flag of ['--resume', '-r']) {
+    const at = ownerCmdline.indexOf(flag);
+    const id = at === -1 ? null : /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/u.exec(ownerCmdline[at + 1] ?? '')?.[1];
+    if (id) lineage.add(id);
+  }
+  return lineage;
+}
+
+function ownerCommandLine() {
+  try {
+    return readFileSync(`/proc/${sessionOwnerPid()}/cmdline`, 'utf8').split('\0');
+  } catch {
+    return [];
+  }
+}
+
+// Open runs on this checkout that another live Claude session holds: a
+// marker not closed, one of whose pids is a live Claude process outside this
+// process's own ancestry, working inside this repository. One orchestrator
+// per checkout (LFE run 2026-09-30: a resumed fork and a new session opened
+// runs 15 s apart and fought over the branch). A marker kept alive only by a
+// shell or tmux pid, or a pid now working elsewhere, is not a session's run.
+export function liveRunsElsewhere(root, {
+  own = new Set([process.pid, process.ppid, ...ancestorPids()]),
+  lineage = sessionLineage(),
+  entryOf = procEntry,
+  cwdOf = processCwd,
+} = {}) {
+  const directory = runMarkerDirectory(root);
+  if (directory === null) return [];
+  let names;
+  try {
+    names = readdirSync(directory).filter((name) => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  let top;
+  try {
+    top = realpathSync(root);
+  } catch {
+    top = root;
+  }
+  const runs = [];
+  for (const name of names) {
+    let marker;
+    try {
+      marker = JSON.parse(readRegularFile(join(directory, name)));
+    } catch {
+      continue;
+    }
+    if (marker?.closedAt !== undefined || !Array.isArray(marker?.pids)) continue;
+    const pids = marker.pids.filter((pid) => Number.isSafeInteger(pid) && pid > 1);
+    if (pids.some((pid) => own.has(pid))) continue;
+    if (typeof marker.sessionId === 'string' && lineage.has(marker.sessionId)) continue;
+    const holder = pids.find((pid) => {
+      const entry = entryOf(pid);
+      const cwd = entry === null ? null : cwdOf(pid);
+      return entry !== null && isClaudeProcess(entry[1], entry[2])
+        && cwd !== null && (cwd === top || cwd.startsWith(`${top}/`));
+    });
+    if (holder !== undefined) runs.push({ pid: holder, openedAtMs: marker.openedAtMs ?? null, parked: Boolean(marker.park) });
+  }
+  return runs;
+}
+
 // The step model table prime resolved for this run (models-config.mjs
 // pinModels): its dispatches read it here, beside the run's markers.
 export function pinnedModelsPath(cwd = process.cwd()) {
