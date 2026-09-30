@@ -87,13 +87,12 @@ with the Setup remedy). Never continue past a failure. Then:
      post; name it in the run record as a loop defect. The driver records unrepairable refusals as
      `terminal-refused`, which the scan stops surfacing.
    - Recover each surfaced marker with one bare call from the repository root:
-     `node <plugin-tools>/lifecycle-driver.mjs --reconcile-issue <N>` (it builds the request from
-     the marker chain root, frozen plan comment, and PR — never assemble one; a marker with no PR
-     is refused toward step 4's `--reconcile-json`). It applies only `reconcileLifecycle()`'s typed
-     action with compare-and-swap and readback. Never execute lifecycle action JSON in prose; never
-     hand-append a terminal outcome or edit a marker. A proven human merge missing its outcome is
-     backfilled through this driver before `terminal-record`. Git/GitHub facts are lifecycle
-     authority.
+     `node <plugin-tools>/lifecycle-driver.mjs --reconcile-issue <N>` (it builds the request itself
+     — never assemble one; a marker with no PR is refused toward step 4's `--reconcile-json`). It
+     applies only the typed action, with compare-and-swap and readback. Never execute lifecycle
+     action JSON in prose; never hand-append a terminal outcome or edit a marker. It backfills a proven human merge's outcome,
+     closes the issue GitHub left open and the unit's step: print `closeOut.card`; name `keptOpen`
+     or `error` in the run record. Git/GitHub facts are lifecycle authority.
 
 ### No improvised inspection
 

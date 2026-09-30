@@ -165,7 +165,7 @@ export function parkedView({ root, run = realRun(root), nowMs = Date.now(), mark
 
 export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '', ifOpen = false }) {
   const { dir } = autoloopDir(root, run);
-  if (dir === null) return { ok: false, lines: [`step: no steps recorded for #${issue} (not in a git repository)`] };
+  if (dir === null) return { ok: false, lines: ifOpen ? [] : [`step: no steps recorded for #${issue} (not in a git repository)`] };
   const path = join(dir, 'steps', `${issue}.json`);
   // A unit blocked at its premise, before any step was announced, still gets
   // its card (LFE run 2026-09-30: #389's --card failed "no steps recorded").

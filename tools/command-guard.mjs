@@ -2916,12 +2916,17 @@ export function switchesCheckout(words) {
   let index = git + 1;
   while (index < words.length && words[index].startsWith('-')) index += ['-C', '-c', '--git-dir', '--work-tree'].includes(words[index]) ? 2 : 1;
   const subcommand = words[index];
-  if (subcommand === 'switch') return true;
-  // `git checkout <ref>` (or `-b <new> [<start>]`) moves HEAD; `git checkout
-  // [<ref>] -- <paths>` edits files only.
   const rest = words.slice(index + 1);
-  return subcommand === 'checkout' && !rest.includes('--')
-    && (rest.some((word) => /^-[bB]$/u.test(word)) || rest.filter((word) => !word.startsWith('-')).length === 1);
+  if (rest.includes('--help') || rest.includes('-h')) return false;
+  // A new branch with no start point is made at HEAD: no file under a reader
+  // changes (review of the no-run switch rule).
+  const positional = rest.filter((word) => !word.startsWith('-'));
+  const creates = rest.some((word) => ['-b', '-B', '-c', '-C', '--create', '--force-create'].includes(word));
+  if (creates && positional.length <= 1) return false;
+  if (subcommand === 'switch') return true;
+  // `git checkout <ref>` (or `-b <new> <start>`) moves HEAD; `git checkout
+  // [<ref>] -- <paths>` edits files only.
+  return subcommand === 'checkout' && !rest.includes('--') && (creates || positional.length === 1);
 }
 
 function readingDispatchIn(dir) {
@@ -4435,7 +4440,10 @@ function selfTest() {
       if (!(switchesCheckout(shellWords('git switch feat/x')) && switchesCheckout(shellWords('git checkout -q main'))
         && !switchesCheckout(shellWords('git checkout -- src/a.ts')) && !switchesCheckout(shellWords('git checkout HEAD -- a'))
         && !switchesCheckout(shellWords('git status')) && !switchesCheckout(shellWords('echo git switch'))
-        && switchesCheckout(shellWords('git -C /r switch x')) && switchesCheckout(shellWords('git checkout -b new origin/x')))) {
+        && switchesCheckout(shellWords('git -C /r switch x')) && switchesCheckout(shellWords('git checkout -b new origin/x'))
+        // A branch made at HEAD, or help, changes no file (review of the no-run rule).
+        && !switchesCheckout(shellWords('git switch -c feat')) && !switchesCheckout(shellWords('git checkout -b feat'))
+        && !switchesCheckout(shellWords('git switch --help')) && switchesCheckout(shellWords('git switch -c feat origin/main')))) {
         console.error('FAIL [a branch switch is told apart from a file checkout]');
         ok = false;
       }
@@ -4956,7 +4964,8 @@ function main() {
       refuse(
         `autoloop guard — a ${reader.role} dispatch (pid ${reader.pid}) is reading this checkout, `
         + 'and switching branches would change the files under it. Do this in another worktree '
-        + '(`git worktree add`), or wait for the review to return.',
+        + '(`git worktree add`), or wait for the review to return; if the session that dispatched '
+        + `it is gone and its result is not wanted, stop pid ${reader.pid} first.`,
       );
     }
   }
