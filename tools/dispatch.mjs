@@ -659,14 +659,17 @@ export function usageLimitIn(stderr, stdout) {
 }
 
 // A model the session cannot serve (not on its gateway, a typo, no access)
-// refuses at once, having done nothing: the engine reports `model_not_found`
+// refuses at once, before any work: the engine reports `model_not_found`
 // (measured: exit 1, zero tokens, "There's an issue with the selected
-// model"). Its fallback is the only useful next attempt, for any role. Read
-// only where the engine reports its own failure, like a usage limit.
-const MODEL_UNAVAILABLE_RE = /"error":"model_not_found"|\[claude-code:unrecognized_model\]|There's an issue with the selected model/u;
+// model"). Its fallback is the only useful next attempt. Only the top-level
+// run counts — a subagent's refusal the parent recovered from is not one —
+// and a final result that shows any tokens or turns did work, so it is not
+// an unavailable model whatever its text says (review of the model config).
+const MODEL_UNAVAILABLE_TEXT = /There's an issue with the selected model/u;
 
 export function modelUnavailableIn(stderr, stdout) {
-  const reports = [String(stderr ?? '')];
+  let final = null;
+  let refused = false;
   for (const line of String(stdout ?? '').split(/\r?\n/u)) {
     let event;
     try {
@@ -674,13 +677,16 @@ export function modelUnavailableIn(stderr, stdout) {
     } catch {
       continue;
     }
-    const failed = (event?.type === 'result' && (event.is_error === true || event.subtype !== 'success'))
-      || event?.type === 'error'
-      || (event?.type === 'assistant' && typeof event.error === 'string')
-      || (event?.type === 'assistant' && event.message?.model === '<synthetic>');
-    if (failed) reports.push(line);
+    if (event?.parent_tool_use_id) continue;
+    if (event?.type === 'result') final = event;
+    if (event?.type === 'assistant' && event.error === 'model_not_found') refused = true;
   }
-  return MODEL_UNAVAILABLE_RE.test(reports.join('\n'));
+  if (final !== null) {
+    const usage = final.usage ?? {};
+    if ((usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) > 0 || (final.num_turns ?? 0) > 1) return false;
+    if (final.is_error === true && MODEL_UNAVAILABLE_TEXT.test(String(final.result ?? ''))) return true;
+  }
+  return refused || /\[claude-code:unrecognized_model\]/u.test(String(stderr ?? ''));
 }
 
 // Wall clock at module load. `startupMs` on every result is the distance from
@@ -1048,9 +1054,12 @@ function runEngine({
   }
   const ms = Date.now() - started;
   const stderr = String(result.stderr ?? '');
+  // A writer that changed the checkout did work, so it never reads as an
+  // unavailable model: its fallback would run the brief again on top.
+  const untouched = checkoutBefore === null || checkoutFingerprint(cwd) === checkoutBefore;
   const limited = {
     ...(usageLimitIn(stderr, result.stdout) ? { usageLimit: true } : {}),
-    ...(modelUnavailableIn(stderr, result.stdout) ? { modelUnavailable: true } : {}),
+    ...(untouched && modelUnavailableIn(stderr, result.stdout) ? { modelUnavailable: true } : {}),
   };
   if (result.error?.code === 'ETIMEDOUT' || result.signal === 'SIGTERM') {
     return failure(
@@ -2402,12 +2411,28 @@ function selfTest() {
       })(),
     );
     check(
+      'a writer that changed the checkout is never sent to its fallback, whatever it reports',
+      (() => {
+        const worked = `printf x > "worked-$$.txt"\n${unavailableOn('claude-opus-5-5', resultEvent({ result: 'done' })).replace(/^case/u, 'case')}`;
+        const { result, spawns } = spawnsOf('fix', worked);
+        return result.ok === false && spawns === 1 && result.error.modelUnavailable === undefined;
+      })(),
+    );
+    check(
       'the unavailable-model detector reads failure reports, never the transcript body',
       modelUnavailableIn('[claude-code:unrecognized_model] {"model":"x"}', '')
       && modelUnavailableIn('', JSON.stringify({ type: 'assistant', error: 'model_not_found', message: { model: '<synthetic>' } }))
       && modelUnavailableIn('', JSON.stringify({ type: 'result', subtype: 'success', is_error: true, result: "There's an issue with the selected model (x)." }))
       && !modelUnavailableIn('', JSON.stringify({ type: 'assistant', message: { content: 'model_not_found is what the API says' } }))
       && !modelUnavailableIn('', JSON.stringify({ type: 'result', subtype: 'success', result: "There's an issue with the selected model" }))
+      // Review of the model config: a run that did work is not an unavailable
+      // model, whatever a subagent or the final text says.
+      && !modelUnavailableIn('[claude-code:unrecognized_model] {"model":"haiku"}', [
+        JSON.stringify({ type: 'assistant', parent_tool_use_id: 't1', error: 'model_not_found', message: { model: '<synthetic>' } }),
+        JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: 80, usage: { input_tokens: 90000, output_tokens: 4000 } }),
+      ].join('\n'))
+      && !modelUnavailableIn('', JSON.stringify({ type: 'assistant', parent_tool_use_id: 't1', error: 'model_not_found' }))
+      && modelUnavailableIn('', JSON.stringify({ type: 'result', subtype: 'success', is_error: true, num_turns: 1, usage: { input_tokens: 0, output_tokens: 0 }, result: "There's an issue with the selected model (x)." }))
       && nextAttempt('implement', { code: 'ENGINE_EXIT_NONZERO', modelUnavailable: true },
         { attempts: 1, timeouts: 0, onFallback: false, fallbackAvailable: true }) === 'fallback'
       && nextAttempt('implement', { code: 'ENGINE_EXIT_NONZERO', modelUnavailable: true },
