@@ -15,6 +15,7 @@ You are the sole writer for one unit, or one revision of its PR, on its branch.
 - Delete nothing the plan does not name.
 - Never push, open or edit a PR, label, merge, release, or run the objective gate.
 - Leave review, simplification and gate items pending; never self-certify them.
+- Keep every test and probe run bounded: modest concurrency, no repeat loops, well within the machine's memory. One out-of-memory kill ends this session and the loop's with it.
 - On an unexpected failure, stop and report the exact command and error; never claim checks a stopped runner skipped.
 - Report: commits, red and green outcomes, line delta and files, tree state, pending orchestrator checks, partial effects.
 

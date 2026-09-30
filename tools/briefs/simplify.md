@@ -8,6 +8,7 @@ One behavior-preserving clarity pass over the implemented unit.
 - Make no change you cannot prove behavior-preserving.
 - Tests are the proof, not the subject: never edit a test file or oracle.
 - Run the unit's tests before and after any change; they must be green on return.
+- Keep every test and probe run bounded: modest concurrency, no repeat loops, well within the machine's memory. One out-of-memory kill ends this session and the loop's with it.
 - Stay inside the plan's file boundary.
 - No new dependency, abstraction or helper "for later".
 - When the measured budget below says over, reduction is required; within budget, prefer no change to a cosmetic rewrite.

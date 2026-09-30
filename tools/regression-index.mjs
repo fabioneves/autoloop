@@ -1689,6 +1689,21 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '## Autonomy: fix, decide, or block' }),
     ]),
   }),
+  Object.freeze({
+    id: 'a-writer-probe-ran-the-machine-out-of-memory',
+    date: '2026-09-30',
+    symptom: 'LFE #398: a fix writer raised its own probe to 64 concurrent processes with '
+      + '2,000 arguments each and ran it three times in a loop; the OOM killer fired and '
+      + 'systemd failed the whole tmux scope, taking the session and every dispatch in it.',
+    cause: 'Nothing bounded a writer\'s own test and probe runs, and a dispatch shares the '
+      + 'session\'s cgroup, so the double fork does not survive a scope kill. Every writer '
+      + 'brief now bounds its runs: modest concurrency, no repeat loops, within memory.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'briefs/implement.md', anchor: 'One out-of-memory kill ends this session and the loop\'s with it.' }),
+      Object.freeze({ file: 'briefs/fix.md', anchor: 'One out-of-memory kill ends this session and the loop\'s with it.' }),
+      Object.freeze({ file: 'briefs/simplify.md', anchor: 'One out-of-memory kill ends this session and the loop\'s with it.' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>
