@@ -410,7 +410,11 @@ export function checkMergedClosedGap(mergedPrs, openIssueNumbers) {
     }
     const issue = claim.issue;
     if (open.has(issue)) {
-      reminders.push(`Issue #${issue} is still OPEN but its loop PR #${pr.number} has MERGED — GitHub ignores closing keywords on non-default-base PRs (no link is ever created; it will NEVER close on its own): gh issue close ${issue} --comment "Merged via PR #${pr.number}"`);
+      // The reason is not always the base: a PR into the default branch whose
+      // closing keyword GitHub did not link leaves the issue open too (LFE,
+      // 2026-09-30: the old "non-default-base" wording was ignored twice for
+      // a PR into main).
+      reminders.push(`Issue #${issue} is still OPEN but its loop PR #${pr.number} has MERGED — GitHub did not link the PR to the issue (a non-default base ignores closing keywords; on the default base the keyword was missing or unlinked), so it will NEVER close on its own: gh issue close ${issue} --comment "Merged via PR #${pr.number}"`);
     }
   }
   return reminders;

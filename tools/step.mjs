@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { evaluate } from './command-guard.mjs';
-import { loopRunIsLive, ownRunMarkers } from './run-markers.mjs';
+import { loopRunIsLive, ownRunMarkers, sessionLatch } from './run-markers.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, SNAPSHOT_SECTIONS, verifySnapshot,
 } from './snapshot-contract.mjs';
@@ -165,10 +165,12 @@ export function parkedView({ root, run = realRun(root), nowMs = Date.now(), mark
 
 export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '' }) {
   const { dir } = autoloopDir(root, run);
-  const path = dir === null ? null : join(dir, 'steps', `${issue}.json`);
-  const record = path === null ? null : readJson(path, null);
-  if (!record?.steps?.length) return { ok: false, lines: [`step: no steps recorded for #${issue}`] };
-  const card = renderCard({ issue, title, outcome, steps: record.steps, nowMs, pr, lines, question });
+  if (dir === null) return { ok: false, lines: [`step: no steps recorded for #${issue} (not in a git repository)`] };
+  const path = join(dir, 'steps', `${issue}.json`);
+  // A unit blocked at its premise, before any step was announced, still gets
+  // its card (LFE run 2026-09-30: #389's --card failed "no steps recorded").
+  const record = readJson(path, null) ?? { issue, steps: [] };
+  const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, lines, question });
   record.closed = { outcome, atMs: nowMs };
   writeAtomically(path, record);
   return { ok: true, lines: [card] };
@@ -296,9 +298,12 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
   const human = waiting.map((issue) => ` · #${issue} ⚠️ awaits /answer`).join('');
   return [
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
-    ...units.map(({ issue, step, model, startedAtMs }) => {
+    ...units.map(({ issue, step, model, startedAtMs, staged }) => {
       const [name] = STEPS[step] ?? [step];
-      return `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()} on ${modelChip(model, step)} · ${minutes(nowMs - startedAtMs)}`;
+      // A staged step recorded without a model was announced, not launched:
+      // "on ⚪ ENGINE" read as a running review for hours (LFE #388).
+      const where = staged && !model ? 'staged, not dispatched' : `on ${modelChip(model, step)}`;
+      return `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()} ${where} · ${minutes(nowMs - startedAtMs)}`;
     }),
     `└ ${queue}${human} · resumes on results`,
   ].join('\n');
@@ -593,6 +598,9 @@ function selfTest() {
         && blocked.includes('│  ❓ May the stateless Axis A contract supersede the 1 Sept ruling?')
         && blocked.endsWith('╰─ 1m');
     })()],
+    ['a staged step recorded without a model reads as not dispatched', safely(() => renderParked({
+      nowMs: at(10, 30), units: [{ issue: 388, step: '03-plan-review', model: null, staged: true, startedAtMs: at(10, 14) }], eligible: 5,
+    }).includes('#388 · 03 plan-review staged, not dispatched · 16m'))],
     ['the parked block names every wait with its model and age, and the queue', safely(() => renderParked({
       nowMs: at(9, 53),
       units: [
@@ -858,10 +866,13 @@ function transitionChecks(at) {
         && rerun.labels.includes('loop-started') && rerun.labels.includes('loop:01-premise')
         && rerun.record?.closed === undefined && rerun.record?.steps?.length === 1
         && rerun.parked.includes('#360')]);
-    results.push(['a card for a unit with no steps is refused',
+    // A unit blocked at its premise has no announced step, and still gets
+    // its card (LFE run 2026-09-30).
+    results.push(['a card for a unit with no steps renders (a premise block)',
       (() => {
         try {
-          return closeUnit({ root, run, nowMs: at(10, 30), issue: 999, outcome: 'shipped' }).ok === false;
+          const card = closeUnit({ root, run, nowMs: at(10, 30), issue: 999, outcome: 'blocked', question: 'which spec?' });
+          return card.ok === true && card.lines[0].includes('#999') && card.lines[0].includes('which spec?');
         } catch {
           return false;
         }
@@ -961,7 +972,11 @@ function main() {
     process.stdout.write(`${renderSetupPhase(parsed.phase, parsed.badge)}\n`);
     return;
   }
-  const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
+  // Outside a repository (a unit's /tmp scratch dir), the run's own
+  // repository as the session latch records it (LFE run 2026-09-30).
+  const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout
+    || sessionLatch()?.latch?.scope
+    || process.cwd();
   if (parsed.mode === 'card-run') {
     try {
       const card = runCard({ root });
