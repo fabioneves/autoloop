@@ -813,6 +813,10 @@ function inlineInterpreterSource(cmd) {
         return false;
       }
       const argumentsAfterExecutable = words.slice(index + 1);
+      // node running a plugin tool directly: what follows is the tool's
+      // arguments, not node's (a park note's `head -race` read as -r/-e,
+      // LFE run 2026-09-30). Anything before the tool (`--import x`) is not.
+      if ((executable === 'node' || executable === 'nodejs') && isPluginScript(words[index + 1])) return false;
       if (argumentsAfterExecutable.some(
         (argument) =>
           sourceFlags.has(argument)
@@ -1508,8 +1512,12 @@ export function commentBodyProblem(words, read = (path) => readFileSync(path, 'u
 function textOnlySegment(words) {
   const head = words[0] ?? '';
   if (head === 'echo' || head === 'printf') return true;
-  if (head !== 'node' && head !== 'nodejs') return false;
-  const script = words[1];
+  return (head === 'node' || head === 'nodejs') && isPluginScript(words[1]);
+}
+
+// One of the plugin's own tools, named by an absolute path that exists: its
+// arguments are its own, and no plugin tool executes its argv.
+function isPluginScript(script) {
   if (script === undefined || !isAbsolute(script) || !existsSync(script)) return false;
   const real = realpathSync(script);
   return PLUGIN_CODE_DIRS.some((dir) => real.startsWith(`${realOrSelf(dir)}/`));
@@ -3090,6 +3098,11 @@ function selfTest() {
     [`node ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} --block --issue 5 --question "May #5 be finalized? A human runs: gh issue edit 5 --add-label loop-ready"`, 'feat/gh-1-x', false],
     // Only the plugin's own tools carry quoted text: any other script does not.
     ['node /tmp/x.mjs --question "gh issue edit 5 --add-label loop-ready"', 'feat/gh-1-x', true],
+    // LFE run 2026-09-30: a park note's `head -race` read as node's -r/-e.
+    // A plugin tool's arguments are its own; any other script's are not.
+    [`node ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} --park "#396 race evidence (base contracts + head -race suite)" --minutes 60`, 'feat/gh-1-x', false],
+    ['node /tmp/x.mjs --park "head -race suite"', 'feat/gh-1-x', true],
+    [`node --import /tmp/evil.mjs ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} -e x`, 'feat/gh-1-x', true],
     ["rg -n '^```(sh|bash|shell)' b.md", 'feat/gh-1-x', false],
     ["sed -i 's/a/it'\"'\"'s `x`/' f", 'feat/gh-1-x', false],
     ["ddev wp eval '$a = \"x\" . \"y\"; $b = $c - 7; echo $a;'", 'feat/gh-1-x', false],

@@ -3,6 +3,29 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.1] - 2026-09-30
+
+Fixes from the LFE run on 0.64 and 0.65.
+
+### Fixed
+
+- **The run-state guard found the wrong command behind a wrapper option that takes a value.**
+  - It now skips the value: `env -u NAME`, `timeout -s/-k`, `nice -n`, `sudo -u/-g`, `ionice`,
+    `doas -u`, `stdbuf`.
+  - Two commands that write were hidden from it: `sudo -u root rm …` and `env -C /tmp rm …`. It
+    refused `env -u ANTHROPIC_BASE_URL bash dispatch-stream.sh …` with a false reason.
+  - Options that change where or how the command runs (`env -C/-S`, `sudo -D`, `doas -C`) now
+    refuse, naming the option.
+- **The command guard reads a plugin tool's arguments as the tool's own.** A park note containing
+  `head -race` read as node's `-r`/`-e` and was refused. Anything placed before the tool is still
+  checked.
+- **Dev skill:**
+  - Base worktrees are named by commit (`<scratchpad>/base-<sha8>`), so a leftover from an earlier
+    session is reused, not a collision.
+  - The lifecycle root is the driver's node id (`IC_…`), never a numeric REST comment id.
+  - A dispatch never sets or unsets `ANTHROPIC_BASE_URL`.
+  - Its byte budget rises 176 bytes.
+
 ## [0.65.0] - 2026-09-30
 
 Step models become configuration (operator decisions recorded in

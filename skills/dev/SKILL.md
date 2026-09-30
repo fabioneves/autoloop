@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.65.0 · starting
+∞ dev · v0.65.1 · starting
 ```
 
 This session is the orchestrator: it plans, applies its own checklist pass and fixes, runs gates,
@@ -64,8 +64,7 @@ with the Setup remedy). Never continue past a failure. Then:
 1. Read `.autoloop/STATE.md` in full from the base checkout.
    **Policy comes from `origin/<base>`, never the working tree, every time**: invariants,
    hard-defers, `protectedPaths`. Only the unit's own code comes from the unit's
-   tree. Needing both, materialize the base: `git worktree add --detach <scratchpad>/base
-   origin/<base>`.
+   tree. Needing both, materialize the base as for the plan (step 02).
 2. Verify GitHub authentication and repository access.
 3. Run `cfg.gate.setupCommand` once when configured and not already satisfied.
 4. Share the retained snapshot with Pitcrew. After any Git/GitHub mutation (base switch included)
@@ -157,7 +156,7 @@ from `~/.claude/autoloop/config.json` (written with defaults when missing), over
 `.autoloop/config.json` `models`; prime reports the table (`models`) and refuses one where a
 reviewer could run on its writer's model. **No artifact is judged by the model that wrote it.** A
 dispatch inherits the session's environment: which models are reachable is the session's business
-— never probe, start or configure a proxy. A model the session cannot serve (`model_not_found`)
+— never probe, start or configure a proxy, nor set or unset `ANTHROPIC_BASE_URL` on a dispatch. A model the session cannot serve (`model_not_found`)
 moves any role to its fallback, stamped `(model unavailable)`.
 
 - Postures: `implement`, `simplify`, `fix` write (`Bash,Edit,Glob,Grep,Read,Write`,
@@ -387,8 +386,9 @@ A staged unit uses `--staged` and gets no labels until its claim.
 body}`). The prompt carries the FULL issue (never an excerpt), lane constraints, and paths to STATE, the
 checklist, and the spec. The orchestrator keeps premise, selection, `planHash`, intent, and claim.
 **Never ask a read-only role to run a command; hand it the base as FILES**:
-`git worktree add --detach <scratchpad>/base origin/<base>`, named in the prompt, removed at
-collection (`git worktree remove <scratchpad>/base`).
+`git worktree add --detach <scratchpad>/base-<sha8> origin/<base>` (`<sha8>`: the commit
+`origin/<base>` names; a path already there is that commit, reuse it), named in the prompt,
+removed at collection (`git worktree remove <scratchpad>/base-<sha8>`).
 
 The plan contains: verified premises and evidence; module/API seam and file boundary; behavior and
 non-behavior; **rules as complete invariants**; acceptance checks and failure modes; applicable
@@ -444,9 +444,9 @@ commit (raw `gh pr view --json` spells it `mergedAt`, plus `state`).
 The driver persists epoch 1, swaps `loop-started`/`loop:04-claim`, creates the planned-base branch
 and `chore: claim #N`, publishes it, posts the hash-bound frozen plan, opens one draft passing
 `parseLoopClaim()`, binds every identity into the marker, and returns `ACTIVE_DRAFT_RECOVERED` after
-stable readback. Retain its lifecycle comment ID for every later call — it is
-the chain's ROOT and stays the captured ID for the unit's life; a newer marker's ID is refused
-(`captured lifecycle root comment is not canonical`).
+stable readback. Retain its `lifecycleCommentId` (a node id, `IC_…`; never a numeric REST comment
+id) for every later call — it is the chain's ROOT and stays the captured ID for the unit's
+life; a newer marker's ID is refused (`captured lifecycle root comment is not canonical`).
 Never append a marker or perform these effects outside the driver.
 
 ### 5. Implement
