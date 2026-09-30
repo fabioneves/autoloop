@@ -428,39 +428,123 @@ function decodeAnsiCBody(body) {
   return output;
 }
 
-// The body alternatives are disjoint (`\\x` or a character that is neither a
-// quote nor a backslash): overlapping ones backtracked exponentially on a run
-// of backslashes, and a guard that hangs past the host's timeout lets the
-// command run (found while hardening the run-state rule).
-const ANSI_C_QUOTE = /\$'((?:\\[\s\S]|[^'\\])*)'/gu;
+// ANSI-C quotes (`$'…'`) decoded where the shell reads them: outside other
+// quotes only. A `$'` inside a single-quoted pattern (`rg '^Closes #388$'`)
+// is the pattern's last `$` and its closing quote, not the start of an ANSI-C
+// string; decoding it there desynced every reader after it (LFE replay).
+// One linear pass; `quoted` keeps each decoded string single-quoted for the
+// tokenizer.
+function decodeAnsiC(cmd, quoted) {
+  let out = '';
+  let quote = null;
+  for (let index = 0; index < cmd.length; index += 1) {
+    const char = cmd[index];
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (cmd[index + 1] ?? '');
+      index += 1;
+      continue;
+    }
+    if (quote === '"') {
+      out += char;
+      if (char === '"') quote = null;
+      continue;
+    }
+    if (char === '$' && cmd[index + 1] === "'") {
+      let end = index + 2;
+      while (end < cmd.length && cmd[end] !== "'") end += cmd[end] === '\\' ? 2 : 1;
+      const body = decodeAnsiCBody(cmd.slice(index + 2, Math.min(end, cmd.length)));
+      out += quoted ? `'${body.replaceAll("'", "'\\''")}'` : body;
+      index = end;
+      continue;
+    }
+    if (char === '$' && cmd[index + 1] === '"') {
+      index += 0;
+      continue; // `$"…"` is a locale string: the quote that follows opens it
+    }
+    if (char === "'" || char === '"') quote = char;
+    out += char;
+  }
+  return out;
+}
 
 function decodeAnsiCQuotes(cmd) {
-  return cmd.replace(ANSI_C_QUOTE, (_match, body) => decodeAnsiCBody(body));
+  return decodeAnsiC(cmd, false);
 }
 
 // The same decoding, kept quoted, for the tokenizer: `$'\x2egit'` is `'.git'`.
 function quotedAnsiC(cmd) {
-  return cmd.replace(ANSI_C_QUOTE, (_match, body) => `'${decodeAnsiCBody(body).replaceAll("'", "'\\''")}'`)
-    .replace(/\$"/gu, '"');
+  return decodeAnsiC(cmd, true);
 }
 
-function executableLexicalText(cmd) {
-  const decoded = decodeAnsiCQuotes(cmd);
+// The command as its words would execute, quotes removed so `g"h" pr merge`
+// still reads as gh. What quotes made literal stays inert: inside single
+// quotes the separators, redirections, `$` and backquotes; inside double
+// quotes the separators and redirections (a `$(…)` or backquote there still
+// runs, so those stay). Left
+// live, a quoted jq filter's `|` split the command into a pipeline and a
+// quoted regex's backquotes and `(sh|bash)` became a subshell running bash
+// (false refusals in the LFE run, 2026-09-30).
+// Parentheses and braces stay: they split nothing, and the GraphQL mutation
+// rules read `mutation{…(…)}` from a quoted query.
+// Newlines still split: a long quoted message read as one segment let a
+// position-blind flag check pair words from different lines.
+const INERT_IN_SINGLE = new Set(['|', ';', '&', '<', '>', '`', '$']);
+const INERT_IN_DOUBLE = new Set(['|', ';', '&', '<', '>']);
+
+// A quote character that is literal (inside the other kind of quote, or
+// backslash-escaped) is emitted escaped: the text's later readers see the
+// character, never a quote to balance. Emitted bare, `"it's"` left an
+// unbalanced `'` that turned the rest of the command — `&& git push` — into
+// one quoted word (caught by the verdict replay).
+const literalQuote = (char) => (char === "'" || char === '"' ? `\\${char}` : null);
+
+function executableLexicalText(cmd, { heredocBodies = false } = {}) {
+  // Heredoc bodies are stdin, not command text (an interpreter reading one is
+  // refused by interpreterHeredoc before this runs); their apostrophes must
+  // not drive the quote state. A rule that reads message text (the co-author
+  // trailer rides in a `git commit -F - <<EOF` body) asks for them back.
+  const decoded = decodeAnsiCQuotes(heredocBodies ? cmd : stripHeredocs(cmd));
   let output = '';
+  let quote = null;
   for (let index = 0; index < decoded.length; index += 1) {
     const char = decoded[index];
+    if (quote === "'") {
+      // A backslash in single quotes is literal; before a quote character it
+      // is emitted escaped, so it cannot pair with that (escaped) quote.
+      if (char === "'") quote = null;
+      else if (char === '\\' && (decoded[index + 1] === '"' || decoded[index + 1] === "'")) output += '\\\\';
+      else output += literalQuote(char) ?? (INERT_IN_SINGLE.has(char) ? '_' : char);
+      continue;
+    }
+    if (quote === '"' && char === '"') {
+      quote = null;
+      continue;
+    }
+    if (quote === '"' && char !== '\\') {
+      output += literalQuote(char) ?? (INERT_IN_DOUBLE.has(char) ? '_' : char);
+      continue;
+    }
     if (char === '\\') {
       if (decoded[index + 1] === '\r' && decoded[index + 2] === '\n') {
         index += 2;
       } else if (decoded[index + 1] === '\n') {
         index += 1;
       } else if (index + 1 < decoded.length) {
-        output += decoded[index + 1];
+        const escaped = decoded[index + 1];
+        output += literalQuote(escaped) ?? (quote === '"' && INERT_IN_DOUBLE.has(escaped) ? '_' : escaped);
         index += 1;
       }
       continue;
     }
-    if (char === "'" || char === '"') continue;
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
     if (
       char === '$'
       && (decoded[index + 1] === "'" || decoded[index + 1] === '"')
@@ -498,7 +582,9 @@ function hasActiveShellExpansion(cmd) {
       if (char === "'") quote = null;
       continue;
     }
-    if (char === "'") {
+    // Inside double quotes a `'` is literal: taking it for a quote desynced
+    // the scan on the `'"'"'` idiom, and a quoted backquote later read as live.
+    if (char === "'" && quote === null) {
       quote = "'";
       continue;
     }
@@ -724,8 +810,10 @@ function inlineInterpreterSource(cmd) {
   return shellSegments(executableLexicalText(cmd)).some(({ command }) => {
     const words = shellWords(command);
     if (isLookupSegment(words)) return false;
-    const shellSource = words.findIndex((word) =>
-      word === 'source' || word === '.');
+    // `.` and `source` run a file only as the command a segment runs: a `.`
+    // inside quoted code (PHP's concatenation) is text (LFE replay).
+    const shellSource = words.findIndex((word, index) =>
+      (word === 'source' || word === '.') && invokedAt(words, index));
     if (
       shellSource !== -1
       && words.slice(shellSource + 1).some((argument) =>
@@ -1427,8 +1515,12 @@ export function commentBodyProblem(words, read = (path) => readFileSync(path, 'u
   }));
 }
 
+// gh as the command a segment runs (behind wrappers or `eval`), not the word
+// `gh` inside an argument — a block question quoting the command a human
+// should run is text (LFE run, 2026-09-30).
 function hasGhScopedAction(words, scope, action) {
-  const gh = executableIndex(words, 'gh');
+  const gh = words.findIndex((word, index) => (word === 'gh' || word.endsWith('/gh'))
+    && (invokedAt(words, index) || words[index - 1] === 'eval'));
   if (gh === -1) return false;
   const scopeIndex = words.indexOf(scope, gh + 1);
   return scopeIndex !== -1 && words.indexOf(action, scopeIndex + 1) !== -1;
@@ -2295,18 +2387,37 @@ export function evaluate(inputCmd, branch, options = {}) {
   // Only a regular file the guard can read now proves what will be posted: not
   // a device, a /proc or /sys entry, a FIFO (which would hang the read), or a
   // file an earlier segment of the same command may rewrite.
-  const readBody = (path) => {
-    const expanded = expandHome(path);
-    const real = realpathSync(isAbsolute(expanded) ? expanded : resolve(options.cwd ?? process.cwd(), expanded));
-    if (/^\/(?:dev|proc|sys)\//u.test(real) || !statSync(real).isFile()) throw new Error('not a regular file');
-    return readFileSync(real, 'utf8').slice(0, 4096);
-  };
-  const bodyProblems = segments.map(({ command }) => commentBodyProblem(shellWords(command), readBody));
+  // The body is read where the post runs: the command's own `cd` steps are
+  // followed, over quote-aware segments (a quoted jq filter's `|` is not a
+  // pipe). The LFE run lost a PR-body PATCH to both (2026-09-30).
+  const bodySegments = shellSegments(cmd);
+  let bodyDir = options.cwd ?? process.cwd();
+  const bodyProblems = bodySegments.map(({ command }) => {
+    const words = shellWords(command);
+    if ((words[0] === 'cd' || words[0] === 'pushd') && words.length === 2 && !/[$`]/u.test(words[1])) {
+      bodyDir = resolve(bodyDir, expandHome(words[1]));
+      return null;
+    }
+    const at = bodyDir;
+    return commentBodyProblem(words, (path) => {
+      const expanded = expandHome(path);
+      const real = realpathSync(isAbsolute(expanded) ? expanded : resolve(at, expanded));
+      if (/^\/(?:dev|proc|sys)\//u.test(real) || !statSync(real).isFile()) throw new Error('not a regular file');
+      return readFileSync(real, 'utf8').slice(0, 4096);
+    });
+  });
   // A body file can be rewritten only by a segment that runs before or beside
-  // the post: an earlier segment, or a pipe or background `&` after it.
+  // the post and can write: an earlier one that is not a plain `cd` or a
+  // redirect-free reader, or a pipe or background `&` after the post.
   // Whatever follows a sequential operator runs after the post and cannot.
-  if (segments.length > 1 && segments.some(({ command, raw }, index) =>
-    readsCommentBodyFile(shellWords(command)) && (index > 0 || raw === '|' || raw === '&'))) {
+  const mayWrite = (command) => {
+    const words = shellWords(command);
+    if ((words[0] === 'cd' || words[0] === 'pushd') && words.length === 2) return false;
+    return /[<>]/u.test(command) || !readsOnly(words);
+  };
+  if (bodySegments.length > 1 && bodySegments.some(({ command, raw }, index) =>
+    readsCommentBodyFile(shellWords(command))
+      && (bodySegments.slice(0, index).some((earlier) => mayWrite(earlier.command)) || raw === '|' || raw === '&'))) {
     bodyProblems.push('unverifiable');
   }
   if (bodyProblems.includes('unverifiable')) {
@@ -2491,7 +2602,7 @@ export function evaluate(inputCmd, branch, options = {}) {
     segments.some(
       ({ command }) => gitSubcommandIndex(shellWords(command), 'commit') !== -1,
     )
-    && /Co-Authored-By:/i.test(executableLexicalText(rawCmd))
+    && /Co-Authored-By:/i.test(executableLexicalText(rawCmd, { heredocBodies: true }))
   ) {
     return {
       block: true,
@@ -2901,6 +3012,25 @@ function selfTest() {
   let corpusCount = 0;
   const cases = [
     // [cmd, branch, expectBlock, baseBranch]
+    // 2026-09-30, the LFE run: quoted text read as commands. A quoted jq
+    // filter's `|`, a quoted regex's backquotes and `(sh|bash)`, a block
+    // question quoting the command a human should run, the `'"'"'` idiom and
+    // PHP's ` . ` concatenation are all text.
+    ['node /p/unit.mjs --block --issue 5 --question "May #5 be finalized? A human runs: gh issue edit 5 --add-label loop-ready"', 'feat/gh-1-x', false],
+    ["rg -n '^```(sh|bash|shell)' b.md", 'feat/gh-1-x', false],
+    ["sed -i 's/a/it'\"'\"'s `x`/' f", 'feat/gh-1-x', false],
+    ["ddev wp eval '$a = \"x\" . \"y\"; $b = $c - 7; echo $a;'", 'feat/gh-1-x', false],
+    ["rg -c '^Closes #388$' f; node x.mjs", 'feat/gh-1-x', false],
+    // ...and none of that may hide a real command: a quote inside the other
+    // kind (or escaped) left bare turned the rest of the line into one word.
+    ['git commit -qm "it\'s" && git push origin main', 'feat/gh-1-x', true],
+    ['git commit -qm \'a "b\' && git push origin main', 'feat/gh-1-x', true],
+    ["echo it\\'s && git push origin main", 'feat/gh-1-x', true],
+    ["rg -c '^x$' f; gh pr merge 5 --squash", 'feat/gh-1-x', true],
+    ['gh issue edit 5 --add-label loop-ready', 'feat/gh-1-x', true],
+    ["eval 'gh issue edit 5 --add-label loop-ready'", 'feat/gh-1-x', true],
+    ['python3 -c "import json; print(1)"', 'feat/gh-1-x', true],
+    ['. /dev/stdin', 'feat/gh-1-x', true],
     // 2026-07-28: a live `scaffold.mjs --reconcile` pipeline was refused as
     // inline interpreter source. A word that merely NAMES an interpreter or an
     // assembler in argument position is data, not an invocation.
@@ -3453,6 +3583,25 @@ function selfTest() {
       && commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/missing.md'), read) === 'unverifiable'
       && commentBodyProblem(shellWords('gh issue comment 7 -F=/s/answer.md'), read) === 'answer'
       && commentBodyProblem(shellWords('gh issue view 7 --comments'), read) === null;
+  // The body is read where the post runs (a `cd` first is followed), and a
+  // quoted jq filter's `|` is not a pipe; an earlier writer still refuses
+  // (LFE run 2026-09-30: a PR-body PATCH and a run record were refused).
+  {
+    const bodyDir = mkdtempSync(join(tmpdir(), 'guard-body-'));
+    writeFileSync(join(bodyDir, 'body.md'), 'evidence\n');
+    const verdict = (command) => evaluate(command, 'feat/gh-1-x', { baseBranch: 'main', cwd: '/' }).block;
+    const bodyCases = [
+      verdict(`cd ${bodyDir}; gh issue comment 5 --body-file body.md; gh issue view 5 --json state --jq '{state}'`) === false,
+      verdict(`gh api --method PATCH repos/o/r/pulls/5 -F body=@${bodyDir}/body.md --jq '.body | length'`) === false,
+      verdict(`echo /answer > ${bodyDir}/body.md; gh issue comment 5 --body-file ${bodyDir}/body.md`) === true,
+      verdict(`gh issue comment 5 --body-file ${bodyDir}/body.md | tee x`) === true,
+    ];
+    rmSync(bodyDir, { recursive: true, force: true });
+    if (bodyCases.includes(false)) {
+      console.error(`FAIL [a comment body is read where the post runs, and only a writer makes it unverifiable]: ${JSON.stringify(bodyCases)}`);
+      ok = false;
+    }
+  }
     if (!answerFileCases) {
       console.error('FAIL [a body file starting with /answer is refused]');
       ok = false;
