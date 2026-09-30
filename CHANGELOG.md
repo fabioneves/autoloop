@@ -3,6 +3,57 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.0] - 2026-09-30
+
+Step models become configuration (operator decisions recorded in
+`docs/specs/SPEC-model-config.md`).
+
+### Breaking
+
+- **Routes are gone.** `dispatch.mjs --record-routes`, its presets, the `.git/autoloop/routes` file,
+  the legacy `review-engine` file, `@url` proxy routes and `ANTHROPIC_BASE_URL` injection are all
+  removed. A dispatch inherits the session's environment, so the command that started the session
+  decides which models are reachable.
+- **New default fallbacks.** The reviewer ≠ writer invariant is now enforced in code, fallbacks
+  included, so the defaults changed:
+  - `plan-review` and the three code reviews fall back to `claude-sonnet-5`;
+  - `implement` and `fix` fall back to Fable;
+  - `simplify` falls back to Opus.
+
+### Added
+
+- **`~/.claude/autoloop/config.json`** (under `CLAUDE_CONFIG_DIR` when set) holds each step's
+  `model`, `effort` and `fallback`.
+  - It is written with the defaults when missing, and never overwritten.
+  - A project overrides any role, field by field, with `models` in `.autoloop/config.json`. This
+    is optional under schema 0.28.0 and needs this release or later.
+  - A table where a reviewer could run on its writer's model is refused. Model ids are compared
+    ignoring case, the `[1m]` suffix, a vendor path, a gateway prefix and a release date.
+- **Prime resolves and pins the table for its run** (`.git/autoloop/models.json`, protected), and
+  every dispatch runs the pinned table.
+  - It reports `models` and where they came from.
+  - A writer can't move its own reviewers through its branch's config.
+- **An unavailable model falls back.** A model the session cannot serve (`model_not_found`) moves
+  any step to its fallback, and the result is stamped `(model unavailable)`. A writer that changed
+  the checkout or used tokens is never re-run this way.
+- **Session start prints the step models.**
+- The global config is protected while a run is open.
+
+### Fixed
+
+- The review contract's `projectConfig` leaves `models` out, as prime's fingerprint does.
+- Reviewer identities with a `[1m]` suffix are valid. Without this, every review chain would have
+  failed at round 2 once ids carried the suffix.
+- The same model spelled two ways is recognised as the author reviewing itself.
+
+### Changed
+
+- The dev skill drops its route recording, proxy probe and model table, and its budget ratchets
+  down to 56,963 bytes.
+
+Verified live: under plain `claude`, a `code-review` dispatch found `gpt-6-astra` unavailable and
+fell back to `claude-sonnet-5` at `xhigh`, returning verdict `pass` in 22 s.
+
 ## [0.64.1] - 2026-09-30
 
 ### Fixed

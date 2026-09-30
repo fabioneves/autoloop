@@ -282,7 +282,7 @@ function pluginChecks(root) {
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
   'codebase-design': 6489,
-  dev: 56964,
+  dev: 56963,
   'lean-code': 3909,
   pitcrew: 19803,
   'queue-trace': 6933,
