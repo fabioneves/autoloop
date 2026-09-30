@@ -61,7 +61,7 @@ const REPAIR_FACTS_QUERY = `
 query($owner:String!,$name:String!,$number:Int!,$parent:Int!){
   repository(owner:$owner,name:$name){
     repair: issue(number:$number){viewerDidAuthor}
-    parent: issue(number:$parent){state stateReason labels(first:100){nodes{name}}}
+    parent: issue(number:$parent){state stateReason lastEditedAt labels(first:100){nodes{name}}}
   }
 }`;
 
@@ -954,6 +954,9 @@ export function repairItemFacts(marker, parentTimeline, facts) {
       parentBlocked: parentLabels.includes('loop-blocked'),
       parentDelivered: parentLabels.includes('loop-delivered'),
       blocksParent: marker.blocksParent === true,
+      // Passed through as read: a missing field fails the facts schema
+      // instead of reading as never edited.
+      parentLastEditedAt: facts?.parent?.lastEditedAt,
     },
   };
 }
@@ -2115,7 +2118,7 @@ async function selfTest() {
           { __typename: 'LabeledEvent', label: { name: 'loop-ready' }, actor: { login: 'a' }, createdAt: 't1' },
         ], {
           repair: { viewerDidAuthor: true },
-          parent: { state: 'CLOSED', stateReason: 'COMPLETED', labels: { nodes: [{ name: 'loop-ready' }, { name: 'loop-delivered' }] } },
+          parent: { state: 'CLOSED', stateReason: 'COMPLETED', lastEditedAt: 't0', labels: { nodes: [{ name: 'loop-ready' }, { name: 'loop-delivered' }] } },
         });
         return JSON.stringify(facts.provenance) === '{"labeledBy":"a","labeledAt":"t1"}'
           && JSON.stringify(facts.repair) === JSON.stringify({
@@ -2129,8 +2132,17 @@ async function selfTest() {
             parentBlocked: false,
             parentDelivered: true,
             blocksParent: true,
+            parentLastEditedAt: 't0',
           });
       })(),
+    ],
+    [
+      'the parent\'s edit time is selected, and a missing one is not read as never edited',
+      /parent: issue\(number:\$parent\)\{[^}]*\blastEditedAt\b/u.test(REPAIR_FACTS_QUERY)
+        && repairItemFacts({ parent: 1, parentLabeledBy: 'a', parentLabeledAt: 't1' }, [], {
+          repair: { viewerDidAuthor: true },
+          parent: { state: 'OPEN', stateReason: null, labels: { nodes: [] } },
+        }).repair.parentLastEditedAt === undefined,
     ],
     [
       'blocked-by section parsing',

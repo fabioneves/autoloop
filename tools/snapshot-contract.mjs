@@ -510,6 +510,7 @@ function validProvenance(value) {
 const REPAIR_FACT_KEYS = [
   'parent', 'parentLabeledBy', 'parentLabeledAt', 'viewerDidAuthor', 'parentLastReadyEvent',
   'parentState', 'parentStateReason', 'parentBlocked', 'parentDelivered', 'blocksParent',
+  'parentLastEditedAt',
 ];
 const REPAIRS_PER_PARENT = 3;
 
@@ -528,6 +529,7 @@ function validRepairFacts(value) {
     && typeof value.parentBlocked === 'boolean'
     && typeof value.parentDelivered === 'boolean'
     && typeof value.blocksParent === 'boolean'
+    && nullableDateTime(value.parentLastEditedAt)
     && (last === null || (
       hasExactKeys(last, ['event', 'actor', 'at'])
       && ['labeled', 'unlabeled'].includes(last.event)
@@ -538,15 +540,20 @@ function validRepairFacts(value) {
 
 // An open parent authorizes its repairs until a human blocks it; a delivered
 // one keeps authorizing them (a carve-out's remainder outlives its parent); a
-// parent a human closed any other way revokes them.
+// parent a human closed any other way revokes them. A parent edited after its
+// loop-ready is no longer approved itself, and neither are its repairs
+// (docs/specs/SPEC-repair-automerge.md).
 function repairAuthorized(repair) {
   const last = repair.parentLastReadyEvent;
   const parentStanding = !repair.parentBlocked && (
     repair.parentState === 'OPEN'
     || (repair.parentStateReason === 'COMPLETED' && repair.parentDelivered)
   );
+  const parentUnchanged = repair.parentLastEditedAt === null
+    || Date.parse(repair.parentLastEditedAt) <= Date.parse(repair.parentLabeledAt);
   return repair.viewerDidAuthor === true
     && parentStanding
+    && parentUnchanged
     && last?.event === 'labeled'
     && last.actor === repair.parentLabeledBy
     && Date.parse(last.at) === Date.parse(repair.parentLabeledAt);
@@ -1819,6 +1826,7 @@ async function selfTest() {
     parentBlocked: false,
     parentDelivered: false,
     blocksParent: false,
+    parentLastEditedAt: null,
     ...overrides,
   });
   const eligibleWith = (options) => {
@@ -1847,6 +1855,11 @@ async function selfTest() {
     && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'NOT_PLANNED' }) }) === ''
     && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'COMPLETED' }) }) === ''
     && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'COMPLETED', parentDelivered: true }) }) === '7');
+  await check('a parent edited after its loop-ready revokes its repairs; an earlier edit does not', () =>
+    eligibleWith({ repair: repairFacts({ parentLastEditedAt: '2026-01-01T00:00:02Z' }) }) === ''
+    && eligibleWith({ repair: repairFacts({ parentLastEditedAt: '2026-01-01T00:00:00Z' }) }) === '7'
+    // At the label's instant counts as before it, as for an ordinary issue here.
+    && eligibleWith({ repair: repairFacts({ parentLastEditedAt: '2026-01-01T00:00:01Z' }) }) === '7');
   await check('the parent event matches by instant, not by spelling', () =>
     eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'labeled', actor: 'maintainer', at: '2026-01-01T00:00:01.000Z' } }) }) === '7');
   await check('at most three repairs per parent are eligible, the oldest first', () => {

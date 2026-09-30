@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.62.0" src="https://img.shields.io/badge/release-v0.62.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.63.0" src="https://img.shields.io/badge/release-v0.63.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -142,7 +142,7 @@ it installed from its own marketplace, keep either copy.
 
 ## Configuration and merge policy
 
-v0.62.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
+v0.63.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
 defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
 optional `protectedPaths`. The repository owns it; plugin updates never overwrite it.
 
@@ -154,12 +154,15 @@ when the repository keeps one, else the plugin's.
 | `merge.policy` | Behavior |
 |---|---|
 | `manual` | Default. The loop marks the PR ready; a human merges. |
-| `ratified` | Solo only. Merges on a trusted human risk label, or when every changed path is on the reversible allowlist. |
-| `auto` | Solo only. Merges a fully proven loop PR outside protected paths. |
+| `ratified` | Solo only. Merges on a trusted human risk label, or when every changed path is on the reversible allowlist; a loop repair counts as approved through its parent's `loop-ready`. |
+| `auto` | Solo only. Merges a fully proven loop PR outside protected paths; a loop repair merges on its parent's `loop-ready`. |
 
 Both non-manual policies require `merge.unverifiedInvocationAcknowledged: true` and
 `merge.soloOperatorAcknowledged: true`: you accept that no host can prove a human started the run,
-and that one login cannot separate writer from approver. Exact-head compare-and-swap merge, the
+and that one login cannot separate writer from approver. A repair stops merging when its parent
+loses or changes `loop-ready`, is edited after it, is blocked, or is closed as not planned; a parent
+closed as completed after delivery keeps authorizing its open repairs. To take over a revoked
+repair, label it `loop-ready`: it is then an ordinary issue. Exact-head compare-and-swap merge, the
 green-checks floor, ownership binding, protected paths, the pre-merge record, and the `loop-ready`
 kill switch stay enforced regardless.
 
@@ -177,7 +180,7 @@ kill switch stay enforced regardless.
 
 ## How it stays safe
 
-v0.62.0 dispatches every role through one call:
+v0.63.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>

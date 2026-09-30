@@ -1411,7 +1411,7 @@ function fetchIssueLabelSnapshot(repository, issue, fetchJson) {
   throw new Error('terminal issue-label pagination exceeded its bound');
 }
 
-function fetchTerminalStateSnapshot(repository, issue, pullRequest, fetchJson) {
+function fetchTerminalStateSnapshot(repository, issue, pullRequest, fetchJson, graphql) {
   const pr = fetchJson(
     repository,
     `repos/${repository.owner}/${repository.repo}/pulls/${pullRequest}`,
@@ -1452,7 +1452,7 @@ function fetchTerminalStateSnapshot(repository, issue, pullRequest, fetchJson) {
     // Read only for a true repair: one that also holds loop-ready needs no
     // standing, and a failed read must not fail it (review of this fix).
     ...(labels.includes('loop-repair') && !labels.includes('loop-ready')
-      ? { repair: fetchRepairStanding(repository, linkedIssue.body, fetchJson) } : {}),
+      ? { repair: fetchRepairStanding(repository, linkedIssue.body, fetchJson, graphql) } : {}),
   };
 }
 
@@ -1461,10 +1461,19 @@ function fetchTerminalStateSnapshot(repository, issue, pullRequest, fetchJson) {
 // repairAuthorized). Finalize re-reads that standing instead of demanding a
 // label a repair can never carry (every repair unit stalled at finalize until
 // a human relabelled it; LFE run, 2026-09-30).
-function fetchRepairStanding(repository, body, fetchJson) {
+function fetchRepairStanding(repository, body, fetchJson, graphql) {
   const marker = parseRepair(body);
   if (marker === null) return { marker: null };
   const parent = fetchJson(repository, `repos/${repository.owner}/${repository.repo}/issues/${marker.parent}`);
+  // REST does not report when a body was last edited; GraphQL does (null: never).
+  const edited = graphql(
+    repository,
+    'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){lastEditedAt}}}',
+    { owner: repository.owner, name: repository.repo, number: marker.parent },
+  )?.repository?.issue;
+  if (!edited || !(edited.lastEditedAt === null || typeof edited.lastEditedAt === 'string')) {
+    throw new Error('repair parent edit time is unreadable');
+  }
   const parentLabels = (Array.isArray(parent?.labels) ? parent.labels : []).map((label) => label?.name);
   let lastReady = null;
   for (let page = 1; page <= 20; page += 1) {
@@ -1488,19 +1497,23 @@ function fetchRepairStanding(repository, body, fetchJson) {
     parentBlocked: parentLabels.includes('loop-blocked'),
     parentDelivered: parentLabels.includes('loop-delivered'),
     lastReady,
+    parentLastEditedAt: edited.lastEditedAt,
   };
 }
 
 // The parent still authorizes the repair: standing (open and not blocked, or
-// completed and delivered) and its newest loop-ready event is the one the
-// marker copied.
+// completed and delivered), unedited since its approval, and its newest
+// loop-ready event is the one the marker copied.
 export function repairStands(repair) {
   const marker = repair?.marker;
   if (!marker) return false;
+  const unchanged = repair.parentLastEditedAt === null
+    || Date.parse(repair.parentLastEditedAt) <= Date.parse(marker.parentLabeledAt);
   const standing = !repair.parentBlocked && (
     repair.parentState === 'OPEN' || (repair.parentStateReason === 'COMPLETED' && repair.parentDelivered)
   );
   return standing
+    && unchanged
     && repair.lastReady?.event === 'labeled'
     && repair.lastReady.actor === marker.parentLabeledBy
     && Date.parse(repair.lastReady.at) === Date.parse(marker.parentLabeledAt);
@@ -1511,18 +1524,21 @@ export function fetchTerminalState(
   issue,
   pullRequest,
   fetchJson = githubRestJson,
+  graphql = githubGraphql,
 ) {
   const first = fetchTerminalStateSnapshot(
     repository,
     issue,
     pullRequest,
     fetchJson,
+    graphql,
   );
   const second = fetchTerminalStateSnapshot(
     repository,
     issue,
     pullRequest,
     fetchJson,
+    graphql,
   );
   if (stableJson(first) !== stableJson(second)) {
     throw new Error('terminal GitHub evidence changed during observation');
@@ -1892,8 +1908,8 @@ export function terminalStateGaps(state, input) {
   if (repair && !repairStands(state.repair)) {
     gaps.push(
       `issue #${input.record.issue} is a loop repair whose parent no longer authorizes it (its `
-      + 'marker is missing, the parent is blocked or closed, or its loop-ready changed since the '
-      + 'repair was filed). A human re-queues the parent; do not resume the repair.',
+      + 'marker is missing, the parent is blocked or closed, its loop-ready changed, or the parent '
+      + 'was edited after it). A human labels the repair loop-ready to take it over; do not resume it.',
     );
   } else if (!repair && !state.labels.includes('loop-ready')) {
     gaps.push(
@@ -3831,6 +3847,7 @@ function selfTest() {
         const standing = {
           marker, parentState: 'OPEN', parentStateReason: null, parentBlocked: false, parentDelivered: false,
           lastReady: { event: 'labeled', actor: 'human', at: '2026-09-30T01:00:00Z' },
+          parentLastEditedAt: null,
         };
         const repairLabels = ['loop-repair', 'loop-delivered'];
         return terminalStateGaps({ ...base, labels: repairLabels, repair: standing }, terminalInput).length === 0
@@ -3840,6 +3857,11 @@ function selfTest() {
             .some((gap) => gap.includes('no longer authorizes'))
           && terminalStateGaps({ ...base, labels: repairLabels, repair: { marker: null } }, terminalInput)
             .some((gap) => gap.includes('no longer authorizes'))
+          // A parent edited after its loop-ready revokes it; an earlier edit does not.
+          && terminalStateGaps({ ...base, labels: repairLabels, repair: { ...standing, parentLastEditedAt: '2026-09-30T01:30:00Z' } }, terminalInput)
+            .some((gap) => gap.includes('no longer authorizes'))
+          && terminalStateGaps({ ...base, labels: repairLabels, repair: { ...standing, parentLastEditedAt: '2026-09-30T00:30:00Z' } }, terminalInput).length === 0
+          && terminalStateGaps({ ...base, labels: repairLabels, repair: { ...standing, parentLastEditedAt: '2026-09-30T01:00:00Z' } }, terminalInput).length === 0
           // The standing as fetched: marker, parent labels, and the parent's
           // loop-ready events across pages (newest last).
           && (() => {
@@ -3855,8 +3877,13 @@ function selfTest() {
               if (endpoint.includes('/issues/7/events')) return page === 1 ? page1 : page === 2 ? page2 : [];
               throw new Error(`unexpected ${endpoint}`);
             };
-            const state = fetchTerminalState({ owner: 'o', repo: 'r' }, 8, 9, fake);
-            return repairStands(state.repair) && state.conflicting === false;
+            const edited = (at) => (_repo, _query, variables) =>
+              (variables.number === 7 ? { repository: { issue: { lastEditedAt: at } } } : null);
+            const state = fetchTerminalState({ owner: 'o', repo: 'r' }, 8, 9, fake, edited(null));
+            const editedLater = fetchTerminalState({ owner: 'o', repo: 'r' }, 8, 9, fake, edited('2026-09-30T01:30:00Z'));
+            return repairStands(state.repair) && state.conflicting === false
+              && editedLater.repair.parentLastEditedAt === '2026-09-30T01:30:00Z'
+              && !repairStands(editedLater.repair);
           })()
           // A conflicting head is routed to the revision path, never merged here.
           && terminalStateGaps({ ...base, conflicting: true }, terminalInput)

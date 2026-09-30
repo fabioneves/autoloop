@@ -3,6 +3,31 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.63.0] - 2026-09-30
+
+Loop repairs auto-merge (operator decision; spec `docs/specs/SPEC-repair-automerge.md`).
+
+### Changed
+
+- **A loop repair's PR merges on its parent's authority.** Under `auto` or `ratified`, an issue
+  with `loop-repair` and no `loop-ready` is authorized by its parent instead of a label it never
+  carries. The executor checks all of this live:
+  - the loop filed the repair and nobody edited it;
+  - its marker names the parent;
+  - the parent is not itself a repair, still carries `loop-ready`, has no hard label, and is open
+    or closed as completed after delivery;
+  - the parent's newest `loop-ready` event is the one the marker copied, by a labeller whose role
+    is trusted now.
+
+  Every other merge precondition is unchanged. A repair that also carries `loop-ready` takes the
+  ordinary rule.
+- **A parent edited after its `loop-ready` revokes its repairs** in selection, finalize and merge
+  alike. The parent itself was already ineligible after such an edit.
+  - To take over a revoked repair, label it `loop-ready`.
+  - A parent closed as completed after delivery keeps authorizing its open repairs. Close it as
+    not planned to revoke them.
+- **Finalize reads the parent's edit time from GraphQL**, because REST does not report it.
+
 ## [0.62.0] - 2026-09-30
 
 Fixes from the first long run on the global plugin: a 10-hour run of 9 units on one project,

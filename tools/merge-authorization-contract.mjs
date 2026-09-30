@@ -81,21 +81,10 @@ function validateChecks(pr, reasons) {
   }
 }
 
-function validateLinkedIssue(config, pr, reasons) {
-  const issue = pr.linkedIssue;
-  if (issue?.complete !== true) reasons.push('linked issue evidence is incomplete');
-  if (issue?.state !== 'OPEN') reasons.push('linked issue is not open');
-  if (!Array.isArray(issue?.labels)) {
-    reasons.push('linked issue labels are incomplete');
-  } else {
-    for (const label of issue.labels) {
-      if (HARD_LABELS.has(label)) reasons.push(`linked issue hard-block label present: ${label}`);
-    }
-    if (!issue.labels.includes('loop-ready')) reasons.push('linked issue is not currently loop-ready');
-    if (!issue.labels.includes('loop-delivered')) reasons.push('linked issue is not delivered');
-  }
-  if (issue?.blocked !== false) reasons.push('linked issue is blocked or blocker state is unknown');
-
+// The ordinary rule: the issue's own latest loop-ready event, by a trusted
+// role, newer than the issue's content.
+function validateLoopReady(issue, reasons) {
+  if (!issue?.labels?.includes('loop-ready')) reasons.push('linked issue is not currently loop-ready');
   const loopReady = issue?.loopReady;
   const editedAt = issue?.lastEditedAt ?? issue?.createdAt;
   if (
@@ -112,6 +101,75 @@ function validateLinkedIssue(config, pr, reasons) {
     || Date.parse(loopReady.labeledAt) <= Date.parse(editedAt)
   ) {
     reasons.push('latest loop-ready event is missing, untrusted, or older than issue content');
+  }
+}
+
+// A loop repair carries loop-repair, never loop-ready: its authority is its
+// parent's, read the way selection reads it (snapshot-contract
+// repairAuthorized) plus the labeller's role now. The loop never edits a
+// repair's body, so an edited one needs its own loop-ready
+// (docs/specs/SPEC-repair-automerge.md).
+function validateRepair(config, issue, reasons) {
+  const repair = issue?.repair;
+  if (repair?.complete !== true || repair.parent?.complete !== true || repair.parentReady?.complete !== true) {
+    reasons.push('repair evidence is incomplete');
+    return;
+  }
+  const { marker, parent, parentReady } = repair;
+  if (!marker || marker.parent !== parent.number || !validTimestamp(marker.parentLabeledAt)) {
+    reasons.push('repair marker is missing or names another parent');
+    return;
+  }
+  if (repair.author !== config.loopLogin) reasons.push('repair was not filed by the loop');
+  if (issue.lastEditedAt !== null) reasons.push('repair body was edited since the loop filed it; label it loop-ready to merge it');
+  const parentLabels = Array.isArray(parent.labels) ? parent.labels : [];
+  // One level deep: a parent that is itself a repair never authorizes one.
+  if (parentLabels.includes('loop-repair')) reasons.push(`repair parent #${parent.number} is itself a repair`);
+  if (!parentLabels.includes('loop-ready')) reasons.push(`repair parent #${parent.number} is not currently loop-ready`);
+  const parentStands = !parentLabels.some((label) => HARD_LABELS.has(label)) && (
+    parent.state === 'OPEN'
+    || (parent.state === 'CLOSED' && parent.stateReason === 'COMPLETED' && parentLabels.includes('loop-delivered'))
+  );
+  if (!parentStands) reasons.push(`repair parent #${parent.number} is blocked, or closed without delivery`);
+  // A parent edited after its approval no longer authorizes anything: the
+  // ordinary rule refuses the parent itself, and its repairs follow. Strictly
+  // earlier, as that rule reads it here: an edit at the label's instant refuses.
+  if (parent.lastEditedAt !== null && !(
+    validTimestamp(parent.lastEditedAt)
+    && Date.parse(parent.lastEditedAt) < Date.parse(marker.parentLabeledAt)
+  )) {
+    reasons.push(`repair parent #${parent.number} was edited after its loop-ready`);
+  }
+  if (
+    parentReady.event !== 'labeled'
+    || parentReady.actor !== marker.parentLabeledBy
+    || !validTimestamp(parentReady.labeledAt)
+    || Date.parse(parentReady.labeledAt) !== Date.parse(marker.parentLabeledAt)
+    || !TRUSTED_ROLES.has(parentReady.roleName)
+  ) {
+    reasons.push(`repair parent #${parent.number}'s loop-ready changed since the repair was filed, or its labeller is no longer trusted`);
+  }
+}
+
+function validateLinkedIssue(config, pr, reasons) {
+  const issue = pr.linkedIssue;
+  if (issue?.complete !== true) reasons.push('linked issue evidence is incomplete');
+  if (issue?.state !== 'OPEN') reasons.push('linked issue is not open');
+  if (!Array.isArray(issue?.labels)) {
+    reasons.push('linked issue labels are incomplete');
+  } else {
+    for (const label of issue.labels) {
+      if (HARD_LABELS.has(label)) reasons.push(`linked issue hard-block label present: ${label}`);
+    }
+    if (!issue.labels.includes('loop-delivered')) reasons.push('linked issue is not delivered');
+  }
+  if (issue?.blocked !== false) reasons.push('linked issue is blocked or blocker state is unknown');
+
+  const labels = Array.isArray(issue?.labels) ? issue.labels : [];
+  if (labels.includes('loop-repair') && !labels.includes('loop-ready')) {
+    validateRepair(config, issue, reasons);
+  } else {
+    validateLoopReady(issue, reasons);
   }
 
   if (issue?.dependenciesComplete !== true || !Array.isArray(issue?.dependencies)) {
@@ -514,6 +572,39 @@ function pathAFixture() {
   return input;
 }
 
+// A loop repair: loop-filed, never edited, no loop-ready of its own; its
+// authority is the parent's newest loop-ready event, which the marker copied.
+function repairFixture({ repair = {}, parent = {}, parentReady = {}, issue = {} } = {}) {
+  const input = fixture();
+  const evidence = {
+    complete: true,
+    author: 'solo-dev',
+    marker: { parent: 6, parentLabeledBy: 'solo-dev', parentLabeledAt: '2026-07-23T00:02:00Z' },
+    parent: { complete: true, number: 6, state: 'OPEN', stateReason: null, labels: ['loop-ready'], lastEditedAt: null, ...parent },
+    parentReady: {
+      complete: true,
+      event: 'labeled',
+      actor: 'solo-dev',
+      labeledAt: '2026-07-23T00:02:00Z',
+      roleName: 'admin',
+      ...parentReady,
+    },
+    ...repair,
+  };
+  input.pr = {
+    ...input.pr,
+    linkedIssue: {
+      ...input.pr.linkedIssue,
+      labels: ['loop-repair', 'loop-delivered'],
+      lastEditedAt: null,
+      loopReady: { complete: false, eventId: null, actor: null, labeledAt: null, roleName: null },
+      repair: evidence,
+      ...issue,
+    },
+  };
+  return input;
+}
+
 function selfTest() {
   const base = fixture();
   const pathA = pathAFixture();
@@ -737,6 +828,49 @@ function selfTest() {
         },
       },
     }), false],
+    // Repairs merge on their parent's standing (docs/specs/SPEC-repair-automerge.md).
+    ['a loop repair whose parent still stands authorizes', repairFixture(), true],
+    ['a repair of a delivered, completed parent authorizes',
+      repairFixture({ parent: { state: 'CLOSED', stateReason: 'COMPLETED', labels: ['loop-ready', 'loop-delivered'] } }), true],
+    ['a repair without its marker blocks', repairFixture({ repair: { marker: null } }), false, 'repair'],
+    ['an edited repair blocks', repairFixture({ issue: { lastEditedAt: '2026-07-24T00:04:00Z' } }), false, 'repair'],
+    ['a repair filed by someone else blocks', repairFixture({ repair: { author: 'friend' } }), false, 'repair'],
+    ['a repair whose parent is blocked blocks',
+      repairFixture({ parent: { labels: ['loop-ready', 'loop-blocked'] } }), false, 'repair'],
+    ['a repair whose parent was closed as not planned blocks',
+      repairFixture({ parent: { state: 'CLOSED', stateReason: 'NOT_PLANNED' } }), false, 'repair'],
+    ['a repair whose parent closed undelivered blocks',
+      repairFixture({ parent: { state: 'CLOSED', stateReason: 'COMPLETED' } }), false, 'repair'],
+    ['a repair whose parent was re-labelled since blocks',
+      repairFixture({ parentReady: { labeledAt: '2026-07-24T00:05:00Z' } }), false, 'repair'],
+    ['a repair whose parent lost loop-ready blocks',
+      repairFixture({ parentReady: { event: 'unlabeled' } }), false, 'repair'],
+    ['a repair whose parent labeller is no longer trusted blocks',
+      repairFixture({ parentReady: { roleName: 'read' } }), false, 'repair'],
+    ['a repair whose marker names another parent blocks',
+      repairFixture({ parent: { number: 5 } }), false, 'repair'],
+    ['incomplete repair evidence blocks', repairFixture({ repair: { complete: false } }), false, 'repair'],
+    ['a parent edited before its loop-ready still authorizes',
+      repairFixture({ parent: { lastEditedAt: '2026-07-23T00:01:00Z' } }), true],
+    ['a parent edited after its loop-ready revokes its repairs',
+      repairFixture({ parent: { lastEditedAt: '2026-07-23T00:03:00Z' } }), false, 'edited after'],
+    ['a parent edited at its loop-ready instant blocks, as the ordinary rule does',
+      repairFixture({ parent: { lastEditedAt: '2026-07-23T00:02:00Z' } }), false, 'edited after'],
+    ['a parent whose edit time is unknown blocks',
+      repairFixture({ parent: { lastEditedAt: undefined } }), false, 'edited after'],
+    ['incomplete parent evidence blocks', repairFixture({ parent: { complete: false } }), false, 'repair'],
+    ['a parent labeller role not proven for that labeller blocks',
+      repairFixture({ parentReady: { complete: false } }), false, 'repair'],
+    ['a parent labelled at the same time by another trusted actor blocks',
+      repairFixture({ parentReady: { actor: 'someone-else' } }), false, 'repair'],
+    ['a parent that no longer carries loop-ready blocks',
+      repairFixture({ parent: { labels: [] } }), false, 'not currently loop-ready'],
+    ['a parent that is itself a repair blocks',
+      repairFixture({ parent: { labels: ['loop-repair', 'loop-ready'] } }), false, 'itself a repair'],
+    ['loop-repair with loop-ready takes the ordinary rule',
+      repairFixture({ issue: { labels: ['loop-repair', 'loop-ready', 'loop-delivered'] } }), false, 'loop-ready'],
+    ['neither loop-ready nor loop-repair blocks',
+      repairFixture({ issue: { labels: ['loop-delivered'] } }), false, 'loop-ready'],
     ['reopened dependency blocks stale clear boolean', fixture({
       pr: {
         ...base.pr,
