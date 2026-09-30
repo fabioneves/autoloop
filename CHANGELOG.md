@@ -3,6 +3,14 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.3] - 2026-09-30
+
+### Fixed
+
+- **A dispatch records its model on the unit's current step.** A step announced without `--model`
+  showed "on ⚪ ENGINE" in the parked view while Opus was running it. The view now shows the model
+  that actually runs, including a fallback.
+
 ## [0.65.2] - 2026-09-30
 
 ### Fixed
