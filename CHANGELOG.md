@@ -3,6 +3,18 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.63.2] - 2026-09-30
+
+### Fixed
+
+- **Dispatches stop losing their working directory.** Each Bash call in a dispatched session returns
+  to the checkout (`CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1`). A writer that changed into a
+  package directory and then used paths relative to the repository root failed with "No such
+  file".
+- **A dispatch knows where its brief is.** The prompt's context stamp names the brief's file and the
+  working directory, so a dispatch rereads its brief instead of looking for a session transcript,
+  which it never has.
+
 ## [0.63.1] - 2026-09-30
 
 Fixes from the first hour on 0.63.0.
