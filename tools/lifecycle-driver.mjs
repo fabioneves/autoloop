@@ -654,14 +654,16 @@ export function blockRefusalRecord(result, nowMs, driver) {
 // GitHub closes a linked issue on merge, but not always (LFE run 2026-09-30:
 // #355 was linked and stayed open, #386 lost its link), and the unit's
 // `00-reconcile` step stayed open in the parked view while the loop moved on.
-// The issue is closed with a comment naming the PR, and the open step record
+// The issue is closed with a comment naming the PR — unless a human reopened
+// it, which says the delivery did not finish it — and the open step record
 // gets its SHIPPED card. Null for anything but a complete, merged lifecycle.
 export function closeOutMerged(result, { issueState, closeIssue, closeSteps }) {
   const mergeOid = result?.marker?.mergeOid;
   if (result?.state !== 'complete' || result.code !== 'LIFECYCLE_COMPLETE' || !SHA_RE.test(mergeOid ?? '')) return null;
   const pr = result.marker.pr ?? null;
   let issueClosed = false;
-  if (issueState() === 'open') {
+  const issue = issueState();
+  if (issue?.state === 'open' && issue.state_reason !== 'reopened') {
     closeIssue(`Delivered by PR #${pr} (merged ${mergeOid.slice(0, 8)}). GitHub did not close this issue `
       + 'on merge, so the loop closes it.');
     issueClosed = true;
@@ -2091,8 +2093,8 @@ function selfTest() {
       (() => {
         const merged = { state: 'complete', code: 'LIFECYCLE_COMPLETE', marker: { pr: 577, mergeOid: 'e'.repeat(40) } };
         const calls = [];
-        const effects = (state) => ({
-          issueState: () => state,
+        const effects = (state, reason = null) => ({
+          issueState: () => ({ state, state_reason: reason }),
           closeIssue: (body) => calls.push(['close', body]),
           closeSteps: (pr) => { calls.push(['steps', pr]); return ['card']; },
         });
@@ -2100,6 +2102,8 @@ function selfTest() {
         const openCalls = calls.splice(0);
         const closed = closeOutMerged(merged, effects('closed'));
         const closedCalls = calls.splice(0);
+        const reopened = closeOutMerged(merged, effects('open', 'reopened'));
+        const reopenedCalls = calls.splice(0);
         const unmerged = closeOutMerged({ ...merged, marker: { pr: 577 } }, effects('open'));
         const blocked = closeOutMerged({ ...merged, state: 'block', code: 'MERGE_OUTCOME_UNKNOWN' }, effects('open'));
         return JSON.stringify(open) === JSON.stringify({ issueClosed: true, card: ['card'] })
@@ -2107,6 +2111,8 @@ function selfTest() {
           && openCalls[1][0] === 'steps' && openCalls[1][1] === 577
           && JSON.stringify(closed) === JSON.stringify({ issueClosed: false, card: ['card'] })
           && closedCalls.length === 1 && closedCalls[0][0] === 'steps'
+          // A human reopened it after the merge: never closed again.
+          && reopened.issueClosed === false && reopenedCalls.length === 1 && reopenedCalls[0][0] === 'steps'
           && unmerged === null && blocked === null && calls.length === 0;
       })(),
     ],
@@ -2274,7 +2280,7 @@ function withCloseOut(result, cwd, issue) {
     const repository = repositoryTarget(root);
     const endpoint = `repos/${repository.owner}/${repository.repo}/issues/${issue}`;
     const closeOut = closeOutMerged(result, {
-      issueState: () => api(repository, endpoint)?.state,
+      issueState: () => api(repository, endpoint),
       closeIssue: (body) => {
         mutate(repository, `${endpoint}/comments`, 'POST', { body });
         mutate(repository, endpoint, 'PATCH', { state: 'closed', state_reason: 'completed' });
