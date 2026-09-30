@@ -362,9 +362,10 @@ export function checkCompaction(env = process.env) {
     ? { ok: true, detail: '' }
     : {
       ok: true,
-      note: 'long loop sessions compact late by default; to compact earlier set, in the `env` block of '
-        + 'the settings.json the loop session reads, CLAUDE_CODE_AUTO_COMPACT_WINDOW (tokens, e.g. "400000") '
-        + 'and/or CLAUDE_AUTOCOMPACT_PCT_OVERRIDE (percent, e.g. "60"); the SessionStart preflight '
+      note: 'long loop sessions compact late by default; set CLAUDE_CODE_AUTO_COMPACT_WINDOW="400000" '
+        + 'in the environment the loop session starts with (measured on a 10-hour run: ~37% lower '
+        + 'cost for two compactions; a lower CLAUDE_AUTOCOMPACT_PCT_OVERRIDE stacks on top of it, '
+        + 'so set only the window). Dispatched sessions inherit it. The SessionStart preflight '
         + 're-injects STATE after a compaction',
     };
 }
