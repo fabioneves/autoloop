@@ -30,8 +30,8 @@
 //
 //   NOT a secrets boundary: reading the environment or a credential file is
 //   allowed. Secrets are protected by scoping them (a repo-scoped token without
-//   admin rights, no API key in the loop's environment) and by loopback-only
-//   proxy routes in dispatch.mjs, not by this guard.
+//   admin rights, no API key in the loop's environment), and dispatch.mjs sets
+//   no endpoint of its own (a dispatch inherits the session's), not by this guard.
 //
 // Usage:  (hook) reads the PreToolUse payload on stdin
 //         node <plugin-tools>/command-guard.mjs --self-test
@@ -61,7 +61,7 @@ import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
-  procEntry, psEntry, commonDirOf, latchDirectory, processStart, protectedPaths, pruneLatches, recordLatch, sessionLatch,
+  procEntry, psEntry, commonDirOf, latchDirectory, pinnedModelsPath, processStart, protectedPaths, pruneLatches, recordLatch, sessionLatch,
   sessionOwnerPid, PLUGIN_CODE_DIRS,
 } from './run-markers.mjs';
 import { ORDINARY, readsOnly, runStateProblem, TAMPERING } from './run-state-guard.mjs';
@@ -4446,6 +4446,26 @@ function selfTest() {
         && !switchesCheckout(shellWords('git switch --help')) && switchesCheckout(shellWords('git switch -c feat origin/main')))) {
         console.error('FAIL [a branch switch is told apart from a file checkout]');
         ok = false;
+      }
+      // SPEC-model-config: the loop never changes its own step models; the
+      // operator's global model config is protected while a run is open.
+      {
+        const open = protectedPaths({ projectRoot: '/r', runOpen: true, home: '/h' }).state;
+        const closed = protectedPaths({ projectRoot: '/r', runOpen: false, home: '/h' }).state;
+        // Where the resolver reads it: CLAUDE_CONFIG_DIR when set (review).
+        const relocated = protectedPaths({ projectRoot: '/r', runOpen: true, home: '/h', configDir: '/c' }).state;
+        // The table a run pinned for its dispatches is run state, always.
+        const pinRepo = mkdtempSync(join(tmpdir(), 'guard-pin-'));
+        execFileSync('git', ['init', '-q', pinRepo]);
+        const pin = pinnedModelsPath(pinRepo);
+        const pinned = protectedPaths({ projectRoot: pinRepo, runOpen: false, home: '/h' }).state;
+        rmSync(pinRepo, { recursive: true, force: true });
+        if (!(open.includes('/h/.claude/autoloop/config.json') && !closed.includes('/h/.claude/autoloop/config.json')
+          && relocated.includes('/c/autoloop/config.json') && !relocated.includes('/h/.claude/autoloop/config.json')
+          && pin !== null && pin.endsWith('/autoloop/models.json') && pinned.includes(pin))) {
+          console.error('FAIL [the global model config is protected while a run is open, and only then; the pinned table always]');
+          ok = false;
+        }
       }
       // With no run open too: a new session's first `git switch main` broke a
       // diff-review the previous session left reading the checkout (LFE run,

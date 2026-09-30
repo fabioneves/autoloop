@@ -39,9 +39,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
 import { latchDirectory, recordLatch } from './run-markers.mjs';
-import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, processAlive, runMarkerDirectory } from './run-markers.mjs';
+import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
-  effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig,
+  effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
 } from './config-contract.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
@@ -54,10 +54,11 @@ import {
 } from './snapshot-contract.mjs';
 import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
+import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.64.0';
+const AUTOLOOP_VERSION = '0.65.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -175,6 +176,8 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   const read = readPrimeConfig(root);
   if (read.error !== undefined) return read;
   const { config } = read;
+  const models = primeModels(config, root);
+  if (models.ok === false) return models;
 
   const base = baseSyncFacts(root, config.baseBranch);
   pruneDeadRunMarkers(root);
@@ -238,6 +241,7 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
     repository: `${repository.owner}/${repository.repo}`,
     checkout,
     config: configSummary(config, root),
+    ...models,
     base,
     runMarker,
     waits,
@@ -267,8 +271,8 @@ export function configSummary(config, root = null) {
     gateCommand: config.gate.command,
     checklistPath: config.review.checklistPath,
     checklistFile: root === null ? null : effectiveChecklistPath(root, config),
-    fingerprint: hashValue(config),
-    projectConfig: config,
+    fingerprint: hashValue(reviewedConfig(config)),
+    projectConfig: reviewedConfig(config),
   };
 }
 
@@ -513,6 +517,29 @@ function lifecycleDriverIdentity() {
   }
 }
 
+// Each step's model table (models-config.mjs), resolved before the run
+// opens: a table that lets a reviewer judge its writer's model starts nothing.
+// Resolving writes the operator's global file when it is missing.
+// The table is pinned for the run's dispatches (run-markers pinnedModelsPath),
+// so what prime reports is what they run.
+export function primeModels(config, root = null) {
+  const resolved = resolveModels({ projectModels: config.models });
+  if (!resolved.ok) {
+    return failure('models', 'MODELS_INVALID', resolved.errors.join('; '), { errors: resolved.errors });
+  }
+  const pin = root === null ? null : pinnedModelsPath(root);
+  if (pin !== null && !pinModels(pin, resolved)) {
+    return failure('models', 'MODELS_UNPINNED', `the step model table could not be pinned at ${pin}`);
+  }
+  return { models: resolved.models, modelsSource: resolved.source };
+}
+
+export function modelSourceLines({ models, modelsSource }) {
+  if (!models) return [];
+  const from = modelsSource?.global ?? `built-in defaults (${modelsSource?.globalError ?? 'no global file'})`;
+  return [`models ${from}${modelsSource?.project ? ' + project overrides' : ''}${modelsSource?.created ? ' (created)' : ''}`];
+}
+
 export function inheritedLines(dispatches) {
   return [
     ...(dispatches?.inherited ?? []).map((d) => `inherited ${d.role} dispatch pid ${d.pid} · #${d.issue ?? '?'} · `
@@ -562,6 +589,7 @@ function report(summary) {
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
     ...haltLines(summary.halted),
     ...knownRefusedLines(summary.markers),
+    ...modelSourceLines(summary),
     ...inheritedLines(summary.dispatches),
     ...waitLines(summary.waits),
     ...blockLines(summary.blocks, summary.halted),
@@ -896,6 +924,24 @@ function selfTest() {
       && badConfig.error.errors.length > 0,
     );
 
+    // SPEC-model-config: the step model table is resolved before the run
+    // opens; one that lets a reviewer judge its writer's model starts nothing.
+    writeFileSync(join(root, '.autoloop', 'config.json'),
+      `${JSON.stringify({ ...fixtureConfig(), models: { 'code-review': { model: 'claude-opus-5-5[1m]' } } })}\n`);
+    const clashing = primeDev({ cwd: root });
+    const resolvedModels = primeModels(fixtureConfig(), root);
+    check(
+      'prime resolves the model table before opening the run, and refuses a clashing one',
+      clashing.ok === false && clashing.step === 'models' && clashing.error.code === 'MODELS_INVALID'
+      && clashing.error.message.includes('code-review could run on claude-opus-5-5[1m]')
+      && !existsSync(runMarkerDirectory(root))
+      && resolvedModels.models.plan.model === 'gpt-6-astra[1m]'
+      && resolvedModels.modelsSource.global === join(process.env.CLAUDE_CONFIG_DIR, 'autoloop', 'config.json')
+      && modelSourceLines(resolvedModels).length === 1
+      // The resolved table is pinned for the run's dispatches.
+      && readPinnedModels(pinnedModelsPath(root))?.ok === true,
+    );
+
     rmSync(join(root, '.autoloop'), { recursive: true, force: true });
     const missingConfig = primeDev({ cwd: root });
     check(
@@ -1030,7 +1076,15 @@ function main() {
     console.error('usage: prime.mjs [--json] [--scan-arg <value>]... | --close-run | --park <reason> --minutes <n> | --self-test');
     process.exit(2);
   }
-  if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+  if (parsed.mode === 'self-test') {
+    // Resolving models writes the global config when missing: a self-test
+    // must never write the operator's own.
+    const configDir = mkdtempSync(join(tmpdir(), 'prime-config-'));
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    const passed = selfTest();
+    rmSync(configDir, { recursive: true, force: true });
+    process.exit(passed ? 0 : 1);
+  }
   const digest = () => postDigest({ run: realRun(process.cwd()) });
   if (parsed.mode === 'park') {
     const outcome = withDigest(

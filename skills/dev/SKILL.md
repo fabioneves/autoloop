@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.64.0 · starting
+∞ dev · v0.65.0 · starting
 ```
 
 This session is the orchestrator: it plans, applies its own checklist pass and fixes, runs gates,
@@ -152,42 +152,13 @@ node <plugin-tools>/dispatch.mjs \
 
 `--issue <N>` names the unit on every dispatch: the run record itemizes cost by it.
 
-**Record routes ONCE, right after prime, through the tool** (never a redirect into `.git/`):
-
-```bash
-node <plugin-tools>/dispatch.mjs --record-routes --preset proxy --proxy-url http://127.0.0.1:18765  # standing
-node <plugin-tools>/dispatch.mjs --record-routes --preset host     # /autoloop:dev with host
-```
-
-`with proxy <url>` swaps the URL; `with host` records an empty table (host default for all).
-`--route "<role> <engine> [model] [@url] [!effort] [>model[@url]]"` (repeatable) overrides a role.
-URLs must be loopback (`127.0.0.1`, `localhost`, `[::1]`). A bad line fails the recording and keeps
-the previous table. Roles never need `--model`. The legacy `review-engine` recording is read only
-when no routes file exists.
-
-Every recorded ID carries `[1m]` (behind a gateway a bare ID gets a 200k window); omitted below.
-
-| Step | Role | Model | Route | `--fallback` (usage limit) |
-|---|---|---|---|---|
-| 02 plan (+ revisions) | `plan` | `gpt-6-astra` | proxy | `claude-opus-5-5` |
-| 03 plan review | `plan-review` | `claude-fable-5-1` | native | `claude-opus-5-5` |
-| 05 implement | `implement` | `claude-opus-5-5` | native | none — park |
-| 06 simplify | `simplify` | `claude-fable-5-1` | native | `gpt-6-astra` (proxy) |
-| 07 diff review | `diff-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` (default) |
-| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` (default) |
-| 08 fixes | `fix` | `claude-opus-5-5` | native | `gpt-6-astra` (proxy) |
-
-All models are assumed available. With no recorded `>model` the fallback is Opus (Fable for 07/08);
-a route on its default has none. **No artifact is judged by the
-model that wrote it.** A proxied route gets its `@<url>` as `ANTHROPIC_BASE_URL`; a native route
-inherits the session's. For a proxied route, the session's own environment is not a prerequisite and not evidence.
-Other vendors' models run on a proxied route, never a second CLI.
-
-**Proxy preflight is one probe**: `curl -s --max-time 5 <url>/health` (or `/v1/models`).
-**Write the URL as a literal** — never read it back from the routes file. No answer → the UNIT waits
-(`unit.mjs --wait --issue <N> --minutes 30 --note "<url> did not answer"`); take the next. Only when
-every remaining unit needs it, close the run with the URL as remedy. NEVER start, install, restart,
-or background a proxy, or infer its absence from env vars, PATH, or a port's process name.
+**Models come from config, never from you.** Each role's `model`, `effort` and `fallback` resolve
+from `~/.claude/autoloop/config.json` (written with defaults when missing), overridden per role by
+`.autoloop/config.json` `models`; prime reports the table (`models`) and refuses one where a
+reviewer could run on its writer's model. **No artifact is judged by the model that wrote it.** A
+dispatch inherits the session's environment: which models are reachable is the session's business
+— never probe, start or configure a proxy. A model the session cannot serve (`model_not_found`)
+moves any role to its fallback, stamped `(model unavailable)`.
 
 - Postures: `implement`, `simplify`, `fix` write (`Bash,Edit,Glob,Grep,Read,Write`,
   `acceptEdits`); the rest are read-only (`Glob,Grep,Read`, mode `plan`). `--tools` narrows, never
@@ -197,11 +168,8 @@ or background a proxy, or infer its absence from env vars, PATH, or a port's pro
   `{ok:false, step, error}` with stderr. Project fields (`jq '{ok, ms}'`,
   `jq -r .verdict.verdict`); never `cat` a result.
 - `--json` prints the full result; `--output-file` writes it. Results carry `engine`, `model`,
-  `effort`, `route`, `fallback` — report them on the ribbon. `--model <name>` overrides one
-  dispatch (never borrowing the route's URL). Models are explicit IDs, never aliases.
-- `--effort <low|medium|high|xhigh|max>`: **reviews run `xhigh`** (recorded as `!<level>`);
-  writers keep the default. `--live-file <path>` streams events (default under
-  `autoloop/dispatch-live/`).
+  `effort`, `fallback` — report them on the ribbon. `--model`/`--effort` override one dispatch.
+  `--live-file <path>` streams events (default under `autoloop/dispatch-live/`).
 - **Never estimate an engine's context window or trim/split a brief to fit a guessed limit —
   `dispatch.mjs` owns routing.**
 
@@ -213,10 +181,10 @@ was already retried: never re-dispatch it by hand — probe-rule or park. A succ
 
 **Writers at a usage limit** (`error.usageLimit: true`): inspect the branch for effects, then retry
 ONCE unchanged but for `--fallback`, noted on the collection line (`simplify returned ·
-GPT-6-ASTRA, CLAUDE-FABLE-5-1 at limit`). A route on its default fails `ROUTE_FALLBACK_MISSING`.
-Fallbacks follow the table (never onto the writer's model); astra unavailable for simplify too →
-skip 06; implement (or a fallback) at its limit parks the unit ("Timed park"), never a close. No fallback for any other
-failure class. A proxy failing the probe is not a usage limit.
+CLAUDE-OPUS-5-5, CLAUDE-FABLE-5-1 at limit`). A role with no fallback fails
+`ROUTE_FALLBACK_MISSING`. simplify's fallback at its limit too → skip 06; implement's fallback at
+its limit too parks the unit ("Timed park"), never a close. No fallback for any other failure
+class.
 
 Premise, finding verification, and disposition are in-session judgment, no `--model` knob.
 
@@ -272,7 +240,8 @@ first. A park showing one branch while eligible work waits is the defect.
 
 - **Parked wait (preferred)**: every dispatch backgrounded with its output file, completion signal
   (or a Monitor) armed, all commits pushed — **the park push is not step 10, and step 10 does not own
-  the push** — and the LAST output is `node <plugin-tools>/step.mjs --parked`, verbatim. Ending the
+  the push** — and the LAST output is the parked view: `node <plugin-tools>/step.mjs --parked --out
+  <scratchpad>/parked.txt`, then Read that file and print it verbatim (once). Ending the
   turn IS the wait. A dispatch's Bash `description` uses ribbon grammar
   (`#291 05 IMPLEMENT · OPUS 5.5`). A wait on anything but a dispatch (subagent, shell) is first
   recorded with `node <plugin-tools>/prime.mjs --park "<what>" --minutes <N>`, or the Stop hook
@@ -767,7 +736,7 @@ when the queue turns over, not per unit.
 Invalidate, re-derive, and take the next unit unless: the queue is exhausted with complete absence
 evidence (fresh full `scan.mjs`, every queue/lifecycle/dependency section complete); the context
 budget is spent; an invocation bound is reached; or a **run-scoped** guardrail failed (base dirty or
-diverged by human work, STATE/ProjectConfig unreadable, the proxy dead for every remaining unit).
+diverged by human work, STATE/ProjectConfig unreadable, no model reachable for any remaining unit).
 A one-unit guardrail (protected path, refused predicate, failed premise, cap) blocks that unit.
 
 **Those four close the RUN: `node <plugin-tools>/prime.mjs --close-run`** — the Stop hook refuses a
@@ -817,7 +786,7 @@ composed text, never raw issue or review bytes. One badge opens each status line
 `⚠️` means stop and ask, nothing else. Precedence `⚠️` > `❌` > `🚧` > `⏳`.
 
 After prime, open the run frame once (never on resume; eligible = prime's `eligible`; reviews row
-e.g. `GPT-6-ASTRA (proxy)`):
+from prime's `models`, e.g. `GPT-6-ASTRA`):
 
 ```text
 ┏━━ ∞ RUN OPEN · <HH:MM> ━━━━━━━━━━━━━━━━━━━━━━
@@ -842,7 +811,7 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
 09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      11 files planned
 ```
 
-- `--model`: the route's model, or the result's `model` when different; omit for your own steps
+- `--model`: the result's `model`; omit for your own steps
   (`⚪ ORCHESTRATOR`). `--fallback` when it ran. Review/fix rounds pass `--round <r>/<cap>` (a fix
   round is `08-fix`); plan review takes none.
 - Orphan reconciliation announces `00-reconcile` before any fetch or driver call. `⚠️ #N skipped

@@ -31,8 +31,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { snapshotExecutionCheckout } from './checkout-contract.mjs';
-import { currentProjectConfig, NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
+import { currentProjectConfig, NO_CONFIG, resolveProjectConfig, reviewedConfig } from './config-contract.mjs';
 import { validReviewVerdict } from './dispatch.mjs';
+import { sameModel } from './models-config.mjs';
 
 const GATING_SEVERITIES = new Set(['Critical', 'Major']);
 const REVIEW_SCOPES = new Map([
@@ -42,7 +43,10 @@ const REVIEW_SCOPES = new Map([
 const HASH_RE = /^[0-9a-f]{64}$/;
 const OID_RE = /^[0-9a-f]{40}$/;
 const FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
+// A model id may carry a context-window suffix (`claude:gpt-6-astra[1m]`, as
+// every configured id does since SPEC-model-config): refusing it failed a
+// review chain at round 2, when the previous round is validated.
+const IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/[\]-]{0,127}$/;
 const DISPATCH_ID_RE = IDENTITY_RE;
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
 const DISPOSITIONS = new Set(['fix', 'rebut', 'defer']);
@@ -200,6 +204,19 @@ function validRebuttal(rebuttal) {
 // One recorded round. `dispatchId` is the identity of the reviewer process that
 // produced the verdict — distinct per round is what "fresh reviewer" means once
 // there is no broker to seal an execution instance.
+// `<engine>:<model>`, compared as the same model however it is spelled (the
+// dispatch stamps `[1m]`, a hand-written --author may not); anything else,
+// exactly.
+function sameIdentity(left, right) {
+  const split = (identity) => {
+    const at = String(identity ?? '').indexOf(':');
+    return at === -1 ? null : [identity.slice(0, at), identity.slice(at + 1)];
+  };
+  const [a, b] = [split(left), split(right)];
+  if (a === null || b === null) return left === right;
+  return a[0] === b[0] && sameModel(a[1], b[1]);
+}
+
 export function validReviewRound(record) {
   return hasExactKeys(record, ROUND_KEYS)
     && Number.isSafeInteger(record.round)
@@ -213,7 +230,7 @@ export function validReviewRound(record) {
     // Writer and reviewer identities never collide. Under the broker this was
     // a sealed actor fingerprint; here it is the plain statement, and it is
     // still the invariant that makes an independent review independent.
-    && record.authorIdentity !== record.reviewerIdentity
+    && !sameIdentity(record.authorIdentity, record.reviewerIdentity)
     && HASH_RE.test(record.planFingerprint)
     && HASH_RE.test(record.repositoryFingerprint)
     && HASH_RE.test(record.configFingerprint)
@@ -546,7 +563,8 @@ export function projectConfigForReview(path) {
   else throw new Error('--state must name <base>/.autoloop/config.json');
   const resolved = resolveProjectConfig(root);
   if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? NO_CONFIG}`);
-  return resolved.config;
+  // As prime hands it over: the step model table is not reviewed policy.
+  return reviewedConfig(resolved.config);
 }
 
 // Review convergence is a fixed plugin bound since 0.28.0 (operator,
@@ -1457,6 +1475,12 @@ function selfTest() {
 
   const collidedFactory = roundFactory(fixtureProjectConfig(), { seed: 'collided' });
   const collided = collidedFactory(1, pass, { reviewerIdentity: 'orchestrator' });
+  // The same model spelled two ways (the dispatch stamps [1m], the skill's
+  // --author example does not) is still the writer reviewing itself.
+  const respelledFactory = roundFactory(fixtureProjectConfig(), { seed: 'respelled' });
+  const respelled = respelledFactory(1, pass, {
+    authorIdentity: 'claude:claude-opus-5-5', reviewerIdentity: 'claude:claude-opus-5-5[1m]',
+  });
 
   const cumulativeFactory = roundFactory(fixtureProjectConfig(), { seed: 'cumulative' });
   const cumulativeFirst = cumulativeFactory(1, failWith([finding]));
@@ -1730,6 +1754,7 @@ function selfTest() {
       input: inputFor([collided]),
       expected: ['error', false],
     },
+
     {
       name: 'three rounds retain closed and open cumulative findings',
       input: inputFor(
@@ -1865,7 +1890,15 @@ function selfTest() {
       const migrated = projectConfigForReview(jsonPath);
       writeFileSync(jsonPath, JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'x' } }));
       mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
-      return migrated.version === '0.28.0' && migrated.caps === undefined
+      // SPEC-model-config: routing is not reviewed policy. A project with a
+      // model table fingerprints exactly as prime hands it over, without it.
+      const withModels = { version: '0.28.0', baseBranch: 'trunk', gate: { command: 'x' }, models: { implement: { effort: 'high' } } };
+      writeFileSync(jsonPath, JSON.stringify(withModels));
+      const reviewed = projectConfigForReview(jsonPath);
+      const modelsLeftOut = reviewed.models === undefined
+        && hashValue(reviewed) === hashValue(reviewedConfig(resolveProjectConfig(root).config));
+      writeFileSync(jsonPath, JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'x' } }));
+      return modelsLeftOut && migrated.version === '0.28.0' && migrated.caps === undefined
         && projectConfigForReview(jsonPath).baseBranch === 'trunk'
         && projectConfigForReview(jsonPath).merge.policy === 'manual'
         // Beside the real STATE, so a root derived from it WOULD find config.
@@ -1887,6 +1920,9 @@ function selfTest() {
     }
   })();
   if (!reviewConfigCheck) cases.push({ name: 'round 1 resolves the project config like prime', input: null, expected: ['never', false] });
+  const respelledCheck = !validReviewRound(respelled)
+    && validReviewRound({ ...respelled, reviewerIdentity: 'claude:gpt-6-astra[1m]' });
+  if (!respelledCheck) cases.push({ name: 'the writer\'s model spelled another way is not an independent reviewer', input: null, expected: ['never', false] });
 
   cases.push({
     name: 'a JSON input cannot lower the review cap',

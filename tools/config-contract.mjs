@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boundedGit } from './git-budget.mjs';
+import { modelsShapeProblems } from './models-config.mjs';
 
 export const CONFIG_VERSION = '0.28.0';
 
@@ -451,10 +452,22 @@ function validateProjectValues(cfg, expectedVersion, errors) {
 
 export function validateConfig(cfg) {
   const errors = [];
-  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['protectedPaths'], errors)) return errors;
+  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['protectedPaths', 'models'], errors)) return errors;
   validateProjectValues(cfg, CONFIG_VERSION, errors);
   if (hasOwn(cfg, 'protectedPaths')) validateGlobList(cfg.protectedPaths, 'protectedPaths', errors);
+  // Each step's model, effort and fallback, overriding the operator's global
+  // file (docs/specs/SPEC-model-config.md). Optional, so the schema holds.
+  if (hasOwn(cfg, 'models')) errors.push(...modelsShapeProblems(cfg.models, 'models').map((problem) => problem.replace(/^models: models/u, 'models')));
   return errors;
+}
+
+// What a review round fingerprints: the project's policy, without its model
+// table. Routing is not reviewed policy, and each dispatch result stamps the
+// model it actually ran.
+export function reviewedConfig(cfg) {
+  if (!isRecord(cfg) || !hasOwn(cfg, 'models')) return cfg;
+  const { models, ...reviewed } = cfg;
+  return reviewed;
 }
 
 export const validateProjectConfig = validateConfig;
@@ -2226,6 +2239,14 @@ function selfTest() {
   {
     // policy-as-data: the repository's own protected paths are config, not a
     // vendored escalate-paths.mjs. Optional and additive, so 0.28.0 stays.
+    // SPEC-model-config: a project may override any step's model, effort or
+    // fallback; the shape is models-config's, and a bad one is refused here.
+    expect('models is an optional per-role override, shape-checked',
+      validateConfig({ ...projectFixture(), models: { implement: { effort: 'high' }, 'code-review': { fallback: null } } }).length === 0
+        && validateConfig({ ...projectFixture(), models: { deploy: { model: 'x' } } }).some((error) => error.includes('models.deploy'))
+        && validateConfig({ ...projectFixture(), models: { plan: { effort: 'huge' } } }).some((error) => error.includes('models.plan.effort')));
+    expect('the reviewed config leaves the model table out of the review fingerprint',
+      JSON.stringify(reviewedConfig({ ...projectFixture(), models: { implement: { effort: 'high' } } })) === JSON.stringify(projectFixture()));
     expect('protectedPaths holds repository-relative globs',
       validateConfig({ ...projectFixture(), protectedPaths: ['spec/**', 'compose.y*ml', '**/compose.y*ml'] }).length === 0
         && validateConfig({ ...projectFixture(), protectedPaths: [] }).length === 0);

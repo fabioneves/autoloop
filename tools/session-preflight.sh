@@ -4,7 +4,8 @@
 #
 # INFORMATIONAL: always exits 0. SessionStart hooks inject context, they don't gate —
 # the autoloop:dev skill treats any FAIL line below as a preflight failure (stop and
-# report). Every check is read-only and time-bounded so interactive sessions stay snappy.
+# report). Every check is time-bounded so interactive sessions stay snappy, and reads only,
+# except that the step-models file is written with its defaults when missing.
 #
 # Plugin hooks fire in every repository: silent unless CLAUDE_PROJECT_DIR is a
 # devendored autoloop repository (hook-root.mjs decides, for every hook alike).
@@ -77,51 +78,11 @@ if [ -n "$running_version" ] && [ -d "$plugin_cache" ]; then
   fi
 fi
 
-# 3b. Proxied review recording sanity. A recording carrying `@<url>` is
-# SELF-CONTAINED: dispatch.mjs reads that url and injects it as
-# ANTHROPIC_BASE_URL into verdict dispatches itself, so how this session was
-# launched is neither a prerequisite nor evidence. This check predated that
-# (0.49.2) and kept reading the session environment, so it told every
-# self-contained run that reviews would fail — and its remedy was worse than the
-# non-problem: a session-wide ANTHROPIC_BASE_URL is inherited by EVERY dispatch
-# child, including `implement` and `plan`, for which resolveDefaultBaseUrl
-# deliberately returns null. Writers are never proxied; exporting it proxies
-# them.
-# 0.50.0: per-role routes supersede the review-engine recording whenever the
-# routes file exists. dispatch injects each proxied route's own URL and strips a
-# session-wide ANTHROPIC_BASE_URL from native routes, so the session variable is
-# harmless there — but still worth naming, because non-dispatch tools inherit it.
-routes_file="$(git rev-parse --git-path autoloop/routes 2>/dev/null)"
-review_engine_file="$(git rev-parse --git-path autoloop/review-engine 2>/dev/null)"
-if [ -n "$routes_file" ] && [ -f "$routes_file" ]; then
-  echo "INFO  per-role routes ($routes_file) — review-engine is ignored while they exist:"
-  sed -e '/^[[:space:]]*$/d' -e '/^#/d' -e 's/^/INFO    /' "$routes_file"
-  if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-    echo "NOTE  ANTHROPIC_BASE_URL is set session-wide ($ANTHROPIC_BASE_URL); dispatch strips it from native routes and injects each proxied route's own URL"
-  fi
-elif [ -n "$review_engine_file" ] && [ -f "$review_engine_file" ]; then
-  recorded="$(head -1 "$review_engine_file")"
-  case "$recorded" in
-    claude\ *)
-      case "$recorded" in
-        *@http://*|*@https://*)
-          if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-            echo "NOTE  review-engine is self-contained ($recorded) AND ANTHROPIC_BASE_URL is set session-wide — every dispatch child inherits it, so writers are proxied too — right when that gateway passes Claude models through, otherwise unset it and let the recording route verdict roles alone"
-          else
-            echo "INFO  proxied reviews are self-contained: $recorded (dispatch injects the url; this session's environment is not used)"
-          fi
-          ;;
-        *)
-          if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
-            echo "NOTE  review-engine records a proxied model ($recorded) with no @<url> and ANTHROPIC_BASE_URL is unset — nothing supplies the endpoint and reviews fail typed; append ' @<url>' to the recording to make it self-contained, or re-record 'claude'"
-          else
-            echo "NOTE  proxied reviews rely on this session's ANTHROPIC_BASE_URL ($ANTHROPIC_BASE_URL), which every dispatch child inherits — writers included; append ' @<url>' to the recording and unset it"
-          fi
-          ;;
-      esac
-      ;;
-  esac
-fi
+# 3b. Step models (docs/specs/SPEC-model-config.md): each role's model, effort
+# and fallback from the operator's global config, written with the defaults
+# when missing; project overrides are prime's to report. Which models are
+# reachable is this session's business — autoloop sets no proxy URL.
+run_timed 10 node "$TOOLS_DIR/models-config.mjs" --lines 2>/dev/null
 
 # 4. Checkout identity: the loop starts from the configured base.
 configured_base=$(sed -n 's/.*"baseBranch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
