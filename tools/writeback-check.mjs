@@ -420,6 +420,21 @@ export function checkMergedClosedGap(mergedPrs, openIssueNumbers) {
   return reminders;
 }
 
+/** Pure: blocked issues a human has answered since the loop blocked them.
+ *  The loop cannot post `/answer` (the command guard refuses it), so an
+ *  `/answer` as an issue's latest comment is a human's. prime resumes such a
+ *  unit — but only when it runs, and the LFE run (2026-09-30) noticed four
+ *  answers 60–80 minutes late. */
+export function checkHumanAnswers(blockedIssues) {
+  const reminders = [];
+  for (const issue of blockedIssues ?? []) {
+    const last = (issue.comments ?? []).at(-1);
+    if (typeof last?.body !== 'string' || !/^\s*\/answer(?:\s|$)/u.test(last.body)) continue;
+    reminders.push(`#${issue.number} was answered by a human (${last.createdAt ?? 'recently'}) while blocked — re-prime (prime.mjs --json) at the next unit boundary to resume it`);
+  }
+  return reminders;
+}
+
 /** Pure: issues wearing a terminal loop label AND leftover step labels → reminders */
 export function checkStrandedStepLabels(issues) {
   const reminders = [];
@@ -599,6 +614,12 @@ function selfTest() {
     { number: 5, headRefName: 'fix/gh-5-colon', body: 'Closes: #5', isDraft: false },
     { number: 6, headRefName: 'fix/gh-6-mismatch', body: 'Closes #7', isDraft: false },
   ];
+  // A human's /answer on a blocked issue surfaces at the next stop.
+  const answered = checkHumanAnswers([
+    { number: 562, comments: [{ body: '<!-- autoloop-block-v1 {} -->', createdAt: 'a' }, { body: '/answer yes, finalize', createdAt: '2026-09-30T03:38:00Z' }] },
+    { number: 389, comments: [{ body: '/answer x' }, { body: 'still thinking' }] },
+    { number: 355, comments: [] },
+  ]);
   const { hard, reminders } = checkPrs(prs);
   // A live 0.42.3 run ended its turn at step 8 of 11 with four commits sitting
   // only in the local checkout. Nothing objected: the tree was clean, the PR was
@@ -860,6 +881,9 @@ function selfTest() {
   const gate = gateCases();
   for (const { name, ok: passed } of gate) if (!passed) console.error(`FAIL ${name}`);
   ok = ok && gate.every(({ ok: passed }) => passed);
+  const answersSurface = answered.length === 1 && answered[0].includes('#562') && answered[0].includes('re-prime');
+  if (!answersSurface) console.error(`FAIL a human answer on a blocked issue is surfaced: ${JSON.stringify(answered)}`);
+  ok = ok && answersSurface;
   console.log(ok ? 'self-test OK' : `self-test FAILED: ${JSON.stringify({ hard, reminders, blocked, dark, reminderWire, hardWire })}`);
   return ok;
 }
@@ -942,6 +966,10 @@ function main() {
   reminders.push(...unpushed.reminders);
   if (merged !== null && openIssues !== null) {
     reminders.push(...checkMergedClosedGap(merged, openIssues.map((issue) => issue.number)));
+  }
+  if (loopRunIsLive(ROOT)) {
+    const blocked = ghJson('issue list --label loop-blocked --state open --json number,comments --limit 100');
+    if (blocked !== null) reminders.push(...checkHumanAnswers(blocked));
   }
   if (openIssues !== null) {
     reminders.push(...checkStrandedStepLabels(openIssues));
