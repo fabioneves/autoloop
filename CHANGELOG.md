@@ -3,6 +3,15 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.6] - 2026-09-30
+
+### Fixed
+
+- **The parked view tracks what each dispatch is actually running.** Every dispatch clears a stale
+  "returned", counts review rounds, and records its role. A fix run under a review step reads
+  `07 diff-review r1 · fix on 🟠 OPUS 5.5`, and the next review round reads
+  `07 diff-review r2 on 🟢 ASTRA 6`.
+
 ## [0.65.5] - 2026-09-30
 
 ### Added
