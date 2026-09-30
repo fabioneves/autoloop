@@ -38,24 +38,24 @@ remedy; never devendor inside a Dev run.
 node <plugin-tools>/prime.mjs --json
 ```
 
-`{ok,version,repository,checkout,config,base,runMarker,waits,timings,snapshotPath,snapshotBytes,eligible,markers,sections}`:
+`{ok,version,repository,checkout,config,base,runMarker,waits,timings,snapshotPath,snapshotBytes,eligible,markers,sections,dispatches}`:
 
 - `markers` — lifecycle markers by issue: `gating` (issue open), `deferred` (issue closed),
   `knownRefused` (deferred markers the same driver already refused since they last changed).
   `null` when evidence is incomplete — re-prime.
-- `eligible` — issues selection may take ("Queue and trust" applied). `null` when evidence is
-  incomplete or the snapshot was invalidated — re-prime before choosing.
+- `eligible` — issues selection may take ("Queue and trust" applied). `null` → re-prime first.
+- `dispatches` — `inherited`: an ended session's dispatch, its unit yours and in flight: never stop
+  it; background `dispatch.mjs --wait-file <outputFile> --timeout-seconds 9999`, go on from its
+  result. `foreign`: a live session's run — start none here.
 - `config` — `version`, `baseBranch`, `mergePolicy`, `gateCommand`, `checklistPath`,
   `checklistFile` (the file reviewers read — the repository's or the plugin's), plus
-  `projectConfig` and its canonical SHA-256 `fingerprint`: the review contract's `projectConfig`
+  `projectConfig` and its `fingerprint`: the review contract's `projectConfig`
   and `configFingerprint`. Pass them as a pair; never hand-derive either.
-- `snapshotPath` — the durable snapshot; read it only through typed accessors. One unit's facts
-  (eligibility with reason, provenance, marker, PR):
+- `snapshotPath` — the durable snapshot; read it only through typed accessors. One unit's facts:
   `node <plugin-tools>/snapshot-contract.mjs --unit <N> <snapshotPath>`.
 - also `checkout` (root, fingerprint, branch, HEAD, clean), `base` (on it, behind `origin/<base>`
   by; prime never fetches, switches, or resets), `sections` (`{complete,items,error}` counts),
-  `waits` (`{lifted,waiting,errors}`: cleared `loop-waiting` lifted), and `runMarker` (open-run
-  evidence the guard enforces on).
+  `waits` (`{lifted,waiting,errors}`: cleared `loop-waiting` lifted), and `runMarker`.
 
 Prime fails closed with `{ok:false, step, error}` (an older schema is a typed migration failure
 with the Setup remedy). Never continue past a failure. Then:

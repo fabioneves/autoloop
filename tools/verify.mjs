@@ -39,6 +39,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'dispatch.mjs',
   'escalate-paths.mjs',
   'hook-root.mjs',
+  'inherited-dispatch.mjs',
   'run-markers.mjs',
   'run-state-guard.mjs',
   'git-budget.mjs',
@@ -280,7 +281,7 @@ function pluginChecks(root) {
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
   'codebase-design': 6489,
-  dev: 58779,
+  dev: 58857, // +78: inheriting an ended session's dispatch (0.64.0)
   'lean-code': 3909,
   pitcrew: 19803,
   'queue-trace': 6933,
