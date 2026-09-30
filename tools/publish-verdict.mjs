@@ -1908,8 +1908,8 @@ export function terminalStateGaps(state, input) {
   if (repair && !repairStands(state.repair)) {
     gaps.push(
       `issue #${input.record.issue} is a loop repair whose parent no longer authorizes it (its `
-      + 'marker is missing, the parent is blocked or closed, or its loop-ready changed since the '
-      + 'repair was filed). A human re-queues the parent; do not resume the repair.',
+      + 'marker is missing, the parent is blocked or closed, its loop-ready changed, or the parent '
+      + 'was edited after it). A human labels the repair loop-ready to take it over; do not resume it.',
     );
   } else if (!repair && !state.labels.includes('loop-ready')) {
     gaps.push(
@@ -3861,6 +3861,7 @@ function selfTest() {
           && terminalStateGaps({ ...base, labels: repairLabels, repair: { ...standing, parentLastEditedAt: '2026-09-30T01:30:00Z' } }, terminalInput)
             .some((gap) => gap.includes('no longer authorizes'))
           && terminalStateGaps({ ...base, labels: repairLabels, repair: { ...standing, parentLastEditedAt: '2026-09-30T00:30:00Z' } }, terminalInput).length === 0
+          && terminalStateGaps({ ...base, labels: repairLabels, repair: { ...standing, parentLastEditedAt: '2026-09-30T01:00:00Z' } }, terminalInput).length === 0
           // The standing as fetched: marker, parent labels, and the parent's
           // loop-ready events across pages (newest last).
           && (() => {

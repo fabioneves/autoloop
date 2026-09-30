@@ -132,10 +132,11 @@ function validateRepair(config, issue, reasons) {
   );
   if (!parentStands) reasons.push(`repair parent #${parent.number} is blocked, or closed without delivery`);
   // A parent edited after its approval no longer authorizes anything: the
-  // ordinary rule refuses the parent itself, and its repairs follow.
+  // ordinary rule refuses the parent itself, and its repairs follow. Strictly
+  // earlier, as that rule reads it here: an edit at the label's instant refuses.
   if (parent.lastEditedAt !== null && !(
     validTimestamp(parent.lastEditedAt)
-    && Date.parse(parent.lastEditedAt) <= Date.parse(marker.parentLabeledAt)
+    && Date.parse(parent.lastEditedAt) < Date.parse(marker.parentLabeledAt)
   )) {
     reasons.push(`repair parent #${parent.number} was edited after its loop-ready`);
   }
@@ -853,6 +854,8 @@ function selfTest() {
       repairFixture({ parent: { lastEditedAt: '2026-07-23T00:01:00Z' } }), true],
     ['a parent edited after its loop-ready revokes its repairs',
       repairFixture({ parent: { lastEditedAt: '2026-07-23T00:03:00Z' } }), false, 'edited after'],
+    ['a parent edited at its loop-ready instant blocks, as the ordinary rule does',
+      repairFixture({ parent: { lastEditedAt: '2026-07-23T00:02:00Z' } }), false, 'edited after'],
     ['a parent whose edit time is unknown blocks',
       repairFixture({ parent: { lastEditedAt: undefined } }), false, 'edited after'],
     ['incomplete parent evidence blocks', repairFixture({ parent: { complete: false } }), false, 'repair'],

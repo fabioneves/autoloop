@@ -28,7 +28,8 @@ The linked issue's authorization is ONE of:
    - the parent's latest `loop-ready` label event is `labeled`, by the actor and at the time the
      marker copied (`parentLabeledBy`, `parentLabeledAt`), and that actor holds a trusted role
      now; the parent still carries `loop-ready` and is not itself a repair;
-   - the parent was not edited after that event (`lastEditedAt` null or not later). Review
+   - the parent was not edited after that event (`lastEditedAt` null or not later; at merge,
+     strictly earlier, as the ordinary merge rule reads an edit at the label's instant). Review
      finding, operator decision 2026-09-30: an edited parent is no longer approved itself, so
      its repairs are revoked in selection, finalize and merge alike.
 

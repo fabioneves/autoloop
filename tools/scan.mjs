@@ -954,7 +954,9 @@ export function repairItemFacts(marker, parentTimeline, facts) {
       parentBlocked: parentLabels.includes('loop-blocked'),
       parentDelivered: parentLabels.includes('loop-delivered'),
       blocksParent: marker.blocksParent === true,
-      parentLastEditedAt: facts?.parent?.lastEditedAt ?? null,
+      // Passed through as read: a missing field fails the facts schema
+      // instead of reading as never edited.
+      parentLastEditedAt: facts?.parent?.lastEditedAt,
     },
   };
 }
@@ -2133,6 +2135,14 @@ async function selfTest() {
             parentLastEditedAt: 't0',
           });
       })(),
+    ],
+    [
+      'the parent\'s edit time is selected, and a missing one is not read as never edited',
+      /parent: issue\(number:\$parent\)\{[^}]*\blastEditedAt\b/u.test(REPAIR_FACTS_QUERY)
+        && repairItemFacts({ parent: 1, parentLabeledBy: 'a', parentLabeledAt: 't1' }, [], {
+          repair: { viewerDidAuthor: true },
+          parent: { state: 'OPEN', stateReason: null, labels: { nodes: [] } },
+        }).repair.parentLastEditedAt === undefined,
     ],
     [
       'blocked-by section parsing',

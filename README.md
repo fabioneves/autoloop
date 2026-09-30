@@ -161,7 +161,8 @@ Both non-manual policies require `merge.unverifiedInvocationAcknowledged: true` 
 `merge.soloOperatorAcknowledged: true`: you accept that no host can prove a human started the run,
 and that one login cannot separate writer from approver. A repair stops merging when its parent
 loses or changes `loop-ready`, is edited after it, is blocked, or is closed as not planned; a parent
-closed as completed after delivery keeps authorizing its open repairs. Exact-head compare-and-swap merge, the
+closed as completed after delivery keeps authorizing its open repairs. To take over a revoked
+repair, label it `loop-ready`: it is then an ordinary issue. Exact-head compare-and-swap merge, the
 green-checks floor, ownership binding, protected paths, the pre-merge record, and the `loop-ready`
 kill switch stay enforced regardless.
 

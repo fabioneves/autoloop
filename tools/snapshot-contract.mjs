@@ -1857,7 +1857,9 @@ async function selfTest() {
     && eligibleWith({ repair: repairFacts({ parentState: 'CLOSED', parentStateReason: 'COMPLETED', parentDelivered: true }) }) === '7');
   await check('a parent edited after its loop-ready revokes its repairs; an earlier edit does not', () =>
     eligibleWith({ repair: repairFacts({ parentLastEditedAt: '2026-01-01T00:00:02Z' }) }) === ''
-    && eligibleWith({ repair: repairFacts({ parentLastEditedAt: '2026-01-01T00:00:00Z' }) }) === '7');
+    && eligibleWith({ repair: repairFacts({ parentLastEditedAt: '2026-01-01T00:00:00Z' }) }) === '7'
+    // At the label's instant counts as before it, as for an ordinary issue here.
+    && eligibleWith({ repair: repairFacts({ parentLastEditedAt: '2026-01-01T00:00:01Z' }) }) === '7');
   await check('the parent event matches by instant, not by spelling', () =>
     eligibleWith({ repair: repairFacts({ parentLastReadyEvent: { event: 'labeled', actor: 'maintainer', at: '2026-01-01T00:00:01.000Z' } }) }) === '7');
   await check('at most three repairs per parent are eligible, the oldest first', () => {
