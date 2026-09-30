@@ -72,6 +72,7 @@ import {
 } from './lifecycle-contract.mjs';
 import { matchMergeProtected } from './lane-contract.mjs';
 import { authorizeMerge } from './merge-authorization-contract.mjs';
+import { parseRepair, repairMarker } from './unit.mjs';
 import {
   authorizePolicyPublication,
   buildCommitStatus,
@@ -333,6 +334,8 @@ const ISSUE_QUERY = `
         id
         number
         state
+        stateReason
+        author{login}
         body
         createdAt
         lastEditedAt
@@ -762,6 +765,51 @@ function finalizedDeliveryMarker(comments, loopLogin, headOid) {
     : null;
 }
 
+// A loop repair's evidence: its marker and author, and its parent's live
+// standing (docs/specs/SPEC-repair-automerge.md). Null for any other issue,
+// including loop-repair with loop-ready, which takes the ordinary rule.
+function deriveRepairEvidence(issue, parent) {
+  const labels = Array.isArray(issue?.labels) ? issue.labels : [];
+  if (!labels.includes('loop-repair') || labels.includes('loop-ready')) return null;
+  const marker = parseRepair(issue?.body);
+  const readyEvent = latestLabelEvent(parent?.timeline?.items, 'loop-ready');
+  const permission = parent?.permission;
+  return {
+    complete:
+      issue?.complete === true
+      && marker !== null
+      && parent?.issue?.complete === true
+      && parent.issue.labelsComplete === true
+      && Array.isArray(parent.issue.labels),
+    author: issue?.author ?? null,
+    marker: marker === null ? null : {
+      parent: marker.parent,
+      parentLabeledBy: marker.parentLabeledBy,
+      parentLabeledAt: marker.parentLabeledAt,
+    },
+    parent: {
+      complete: parent?.issue?.complete === true,
+      number: parent?.issue?.number ?? null,
+      state: upper(parent?.issue?.state),
+      stateReason: parent?.issue?.stateReason ?? null,
+      labels: Array.isArray(parent?.issue?.labels) ? parent.issue.labels : [],
+    },
+    parentReady: {
+      complete:
+        parent?.timeline?.complete === true
+        && typeof readyEvent?.actor?.login === 'string'
+        && typeof readyEvent?.created_at === 'string'
+        && permission?.complete === true
+        && permission.login === readyEvent.actor.login
+        && typeof permission.roleName === 'string',
+      event: readyEvent?.event ?? null,
+      actor: readyEvent?.actor?.login ?? null,
+      labeledAt: readyEvent?.created_at ?? null,
+      roleName: permission?.roleName ?? null,
+    },
+  };
+}
+
 export function deriveLiveIssueEvidence(input) {
   const issue = input?.issue;
   const timeline = input?.timeline;
@@ -918,6 +966,7 @@ export function deriveLiveIssueEvidence(input) {
         labeledAt: readyEvent?.created_at ?? null,
         roleName: permission?.roleName ?? null,
       },
+      repair: deriveRepairEvidence(issue, input?.repairParent),
     },
     ownership: ownership
       ? {
@@ -1055,6 +1104,8 @@ function fetchIssueRecord(number) {
       complete: true,
       number: issue.number,
       state: upper(issue.state),
+      stateReason: issue.stateReason ?? null,
+      author: issue.author?.login ?? null,
       body: issue.body,
       labels,
       labelsComplete: true,
@@ -1115,6 +1166,25 @@ function fetchPlannedBaseComparison(plannedBaseOid, baseOid) {
   }
 }
 
+// A loop repair's parent, read live: its record, its timeline, and the
+// current role of whoever last labelled it loop-ready. Null for any other
+// issue, or a repair whose marker does not parse (its evidence is incomplete).
+function fetchRepairParent(issue) {
+  if (!issue.labels.includes('loop-repair') || issue.labels.includes('loop-ready')) return null;
+  const marker = parseRepair(issue.body);
+  if (marker === null) return null;
+  const record = fetchIssueRecord(marker.parent);
+  const timeline = fetchTimeline(marker.parent);
+  const readyEvent = latestLabelEvent(timeline.items, 'loop-ready');
+  return {
+    issue: record.issue,
+    timeline,
+    permission: readyEvent?.actor?.login
+      ? fetchPermission(readyEvent.actor.login)
+      : { complete: false, login: null, roleName: null },
+  };
+}
+
 function fetchLinkedIssueEvidence(number, policyLive) {
   const record = fetchIssueRecord(number);
   const timeline = fetchTimeline(number);
@@ -1126,6 +1196,7 @@ function fetchLinkedIssueEvidence(number, policyLive) {
   return deriveLiveIssueEvidence({
     ...record,
     timeline,
+    repairParent: fetchRepairParent(record.issue),
     dependencies: fetchDependencies(record.issue.body),
     loopReadyPermission,
     plannedBaseComparison: fetchPlannedBaseComparison(marker?.plannedBaseOid, policyLive.pullRequest?.baseOid),
@@ -2842,6 +2913,46 @@ function liveEvidenceCases() {
     ...issueInput,
     timeline: { complete: false, items: issueInput.timeline.items },
   });
+  // A loop repair hydrates its parent's live standing
+  // (docs/specs/SPEC-repair-automerge.md).
+  const repairParent = {
+    issue: {
+      complete: true,
+      labelsComplete: true,
+      number: 6,
+      state: 'OPEN',
+      stateReason: null,
+      labels: ['loop-ready'],
+    },
+    timeline: {
+      complete: true,
+      items: [{
+        id: 6001,
+        event: 'labeled',
+        label: { name: 'loop-ready' },
+        actor: { login: 'maintainer' },
+        created_at: '2026-07-23T00:02:00Z',
+      }],
+    },
+    permission: { complete: true, login: 'maintainer', roleName: 'maintain' },
+  };
+  const repairInput = {
+    ...issueInput,
+    issue: {
+      ...issueInput.issue,
+      body: `${issueInput.issue.body}\n\n${repairMarker({ parent: 6, parentLabeledBy: 'maintainer', parentLabeledAt: '2026-07-23T00:02:00Z', depth: 1, blocksParent: false })}`,
+      labels: ['loop-repair', 'loop-delivered'],
+      author: REPO.LOOP_LOGIN,
+      lastEditedAt: null,
+    },
+    repairParent,
+  };
+  const repairEvidence = deriveLiveIssueEvidence(repairInput).linkedIssue.repair;
+  const repairForeignPermission = deriveLiveIssueEvidence({
+    ...repairInput,
+    repairParent: { ...repairParent, permission: { complete: true, login: 'someone-else', roleName: 'admin' } },
+  }).linkedIssue.repair;
+  const repairWithoutParent = deriveLiveIssueEvidence({ ...repairInput, repairParent: null }).linkedIssue.repair;
 
   const authorization = {
     complete: true,
@@ -2958,6 +3069,29 @@ function liveEvidenceCases() {
     {
       name: 'incomplete issue timeline cannot prove eligibility',
       ok: incompleteTimeline.linkedIssue.complete === false,
+    },
+    {
+      name: 'a loop repair hydrates its marker, author and its parent\'s live standing',
+      ok:
+        repairEvidence?.complete === true
+        && repairEvidence.author === REPO.LOOP_LOGIN
+        && repairEvidence.marker?.parent === 6
+        && repairEvidence.marker.parentLabeledBy === 'maintainer'
+        && repairEvidence.parent.number === 6
+        && repairEvidence.parent.state === 'OPEN'
+        && repairEvidence.parentReady.complete === true
+        && repairEvidence.parentReady.event === 'labeled'
+        && repairEvidence.parentReady.actor === 'maintainer'
+        && repairEvidence.parentReady.labeledAt === '2026-07-23T00:02:00Z'
+        && repairEvidence.parentReady.roleName === 'maintain',
+    },
+    {
+      name: 'an ordinary issue carries no repair evidence',
+      ok: issueEvidence.linkedIssue.repair === null,
+    },
+    {
+      name: 'a parent labeller\'s permission for another login, or no parent, is incomplete',
+      ok: repairForeignPermission?.parentReady.complete === false && repairWithoutParent?.complete === false,
     },
     {
       name: 'exact current Path A label event hydrates authorization',
