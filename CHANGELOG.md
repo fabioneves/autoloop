@@ -21,6 +21,11 @@ Fixes from the first hour on 0.63.0.
   session's first `git switch` had broken a review left running by the previous session. A branch
   made at HEAD (no start point) and `--help` are not switches, and the refusal names the
   reviewer's pid.
+- **Dispatches stop losing their working directory.** Each Bash call in a dispatched session returns
+  to the checkout (`CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1`). A writer that changed into a
+  package directory and then used paths relative to the repository root failed with "No such
+  file". The prompt's context stamp also names the brief's file and the working directory, so a
+  dispatch rereads its brief instead of looking for a transcript it never has.
 
 ## [0.63.0] - 2026-09-30
 
