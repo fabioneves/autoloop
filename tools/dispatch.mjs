@@ -36,6 +36,7 @@ import {
   renameSync,
   unlinkSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -44,6 +45,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CONFIG_VERSION, effectiveChecklistPath, PLUGIN_CHECKLIST, repositoryRoot, resolveProjectConfig,
 } from './config-contract.mjs';
+import { pluginRunMarkers } from './run-markers.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -1412,6 +1414,24 @@ export function parseArgs(args) {
   return parsed;
 }
 
+// A prompt file written before this run opened is a leftover: an LFE run
+// (2026-09-30) nearly dispatched yesterday's plan-review prompt, aimed at an
+// old base, because a Write to the same path in the same batch was refused.
+// runStartMs: the earliest open time of this run's markers (null: no run).
+export function stalePromptProblem(path, runStartMs, stat = statSync) {
+  if (path === '-' || !Number.isSafeInteger(runStartMs)) return null;
+  const mtimeMs = stat(path).mtimeMs;
+  return mtimeMs < runStartMs
+    ? `the prompt file ${path} was written before this run opened (${new Date(mtimeMs).toISOString()}) — `
+      + 'a leftover from an earlier run; write this dispatch\'s prompt, then dispatch it'
+    : null;
+}
+
+function currentRunStartMs(cwd = process.cwd()) {
+  const starts = pluginRunMarkers([cwd]).map(({ marker }) => marker.openedAtMs).filter(Number.isSafeInteger);
+  return starts.length === 0 ? null : Math.min(...starts);
+}
+
 function readPrompt(path) {
   const bytes = readFileSync(path === '-' ? 0 : path);
   if (bytes.length === 0) throw new Error('prompt is empty');
@@ -1694,6 +1714,13 @@ function selfTest() {
     && parseArgs(['--role', 'implement', '--prompt-file']).error !== null
     && parseArgs(['--role', 'implement', '--prompt-file', '/p', '--json']).json === true,
   );
+  cases.push([
+    'a prompt file written before the run opened is refused as a leftover; stdin and no run are not judged',
+    stalePromptProblem('/p', 2_000, () => ({ mtimeMs: 1_000 }))?.includes('before this run opened') === true
+      && stalePromptProblem('/p', 2_000, () => ({ mtimeMs: 3_000 })) === null
+      && stalePromptProblem('-', 2_000, () => ({ mtimeMs: 1_000 })) === null
+      && stalePromptProblem('/p', null, () => ({ mtimeMs: 1_000 })) === null,
+  ]);
 
   const scratch = mkdtempSync(join(tmpdir(), 'autoloop-dispatch-'));
   try {
@@ -2991,6 +3018,8 @@ function main() {
   }
   let prompt;
   try {
+    const stale = stalePromptProblem(parsed.promptFile, currentRunStartMs());
+    if (stale !== null) throw new Error(stale);
     prompt = readPrompt(parsed.promptFile);
   } catch (error) {
     console.error(`dispatch: unable to read the prompt: ${error.message}`);
