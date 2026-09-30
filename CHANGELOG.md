@@ -3,6 +3,14 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.8] - 2026-09-30
+
+### Fixed
+
+- **A waiting unit reads as waiting in the parked view.** `unit.mjs --wait` records the wait on the
+  unit's step, so the line reads `#427 · waits on #587 · 58m`. It no longer shows the step the unit
+  left. The next step or dispatch clears it.
+
 ## [0.65.7] - 2026-09-30
 
 ### Fixed
