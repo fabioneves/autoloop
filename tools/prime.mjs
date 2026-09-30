@@ -53,10 +53,11 @@ import {
   writeStdoutSync,
 } from './snapshot-contract.mjs';
 import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
+import { dispatchInheritance } from './inherited-dispatch.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.63.2';
+const AUTOLOOP_VERSION = '0.64.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -451,6 +452,9 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
       lifecycleDriverIdentity(),
     ),
     sections: sectionSummary(snapshot),
+    // A dispatch whose session ended is this run's to collect, not to stop
+    // (inherited-dispatch.mjs); one a live session owns is left alone.
+    dispatches: dispatchInheritance(cwd),
   };
 }
 
@@ -509,6 +513,15 @@ function lifecycleDriverIdentity() {
   }
 }
 
+export function inheritedLines(dispatches) {
+  return [
+    ...(dispatches?.inherited ?? []).map((d) => `inherited ${d.role} dispatch pid ${d.pid} · #${d.issue ?? '?'} · `
+      + (d.outputFile === null ? 'no result file: wait for the pid to exit, then reconcile' : `result -> ${d.outputFile}`)),
+    ...(dispatches?.foreign ?? []).map((d) => `live session's ${d.role} dispatch pid ${d.pid} · #${d.issue ?? '?'} · not this run's`),
+    ...(dispatches?.unknown ?? []).map((d) => `unattributed ${d.role} dispatch pid ${d.pid} · #${d.issue ?? '?'} · leave its unit alone`),
+  ];
+}
+
 export function waitLines(waits) {
   return [
     ...(waits?.lifted ?? []).map((entry) => `lifted: #${entry.number} (${entry.reason})`),
@@ -549,6 +562,7 @@ function report(summary) {
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
     ...haltLines(summary.halted),
     ...knownRefusedLines(summary.markers),
+    ...inheritedLines(summary.dispatches),
     ...waitLines(summary.waits),
     ...blockLines(summary.blocks, summary.halted),
     'section                    items  complete',
@@ -966,6 +980,22 @@ function selfTest() {
     const printedBytes = Buffer.byteLength(
       JSON.stringify(persisted, null, 1),
       'utf8',
+    );
+    // LFE run 2026-09-30: a new session found the last session's fix
+    // dispatch still writing and offered to stop it; prime now names it.
+    check(
+      'prime reports the dispatches this run inherits and those a live session owns',
+      JSON.stringify(persisted.dispatches) === JSON.stringify({ inherited: [], foreign: [], unknown: [] })
+      && inheritedLines({
+        inherited: [{ pid: 7, role: 'implement', issue: 389, outputFile: '/t/r.json' },
+          { pid: 9, role: 'implement', issue: 390, outputFile: null }],
+        foreign: [{ pid: 8, role: 'code-review', issue: 12 }],
+        unknown: [{ pid: 6, role: 'plan-review', issue: 5 }],
+      }).join('|') === 'inherited implement dispatch pid 7 · #389 · result -> /t/r.json|'
+        + 'inherited implement dispatch pid 9 · #390 · no result file: wait for the pid to exit, then reconcile|'
+        + 'live session\'s code-review dispatch pid 8 · #12 · not this run\'s|'
+        + 'unattributed plan-review dispatch pid 6 · #5 · leave its unit alone'
+      && inheritedLines(undefined).length === 0,
     );
     check(
       'stdout stays decision-sized while the persisted snapshot keeps every byte',

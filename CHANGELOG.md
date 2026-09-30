@@ -3,6 +3,32 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.64.0] - 2026-09-30
+
+### Added
+
+- **A new session inherits a dispatch whose session ended.** A dispatch keeps running when its
+  session exits, because it is detached from it. The next session now takes over its unit instead
+  of stopping it.
+  - prime reports `dispatches` with each dispatch's pid, role, unit, working directory and result
+    file:
+    - `inherited`: its session ended;
+    - `foreign`: a live session's;
+    - `unknown`: no launcher recorded.
+  - Classification uses the Claude process and conversation recorded in the dispatch's
+    environment.
+  - A launcher that is gone (no such process, or its pid reused) or an earlier conversation of the
+    same process means the dispatch is inherited. A live launcher it cannot recognise stays foreign.
+  - The dev skill treats an inherited unit's resume as that wait. It never stops or re-dispatches
+    it, re-announces the unit's step, waits with `dispatch.mjs --wait-file <result>
+    --timeout-seconds 9999`, and continues the step from the result.
+  - A step recorded by an earlier run is announced afresh, so the parked view shows the inherited
+    unit.
+
+### Changed
+
+- The dev skill's byte budget rises by 214 bytes, to 58,993, for the inheritance instructions.
+
 ## [0.63.2] - 2026-09-30
 
 ### Fixed
