@@ -50,7 +50,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   CONFIG_VERSION,
@@ -4439,6 +4439,35 @@ function selfTest() {
         console.error('FAIL [a branch switch is told apart from a file checkout]');
         ok = false;
       }
+      // With no run open too: a new session's first `git switch main` broke a
+      // diff-review the previous session left reading the checkout (LFE run,
+      // 2026-09-30 10:05, before prime had opened the run).
+      if (process.platform === 'linux') {
+        const checkout = mkdtempSync(join(tmpdir(), 'guard-switch-'));
+        const reader = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', 'dispatch.mjs', '--role', 'diff-review'], { cwd: checkout, stdio: 'ignore' });
+        try {
+          execFileSync('git', ['init', '-q', checkout]);
+          mkdirSync(join(checkout, '.autoloop'));
+          writeFileSync(join(checkout, '.autoloop', 'config.json'),
+            JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } }));
+          const run = (command) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+            input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: checkout }),
+            encoding: 'utf8', cwd: checkout, env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: checkout },
+          });
+          const switched = run('git switch main');
+          const status = run('git status --short');
+          reader.kill();
+          const afterwards = run('git switch main');
+          if (!(switched.status === 2 && switched.stderr.includes('reading this checkout')
+            && status.status === 0 && afterwards.status === 0)) {
+            console.error(`FAIL [a branch switch waits for a reviewer with no run open]: ${switched.status} ${status.status} ${afterwards.status} ${switched.stderr.slice(0, 160)}`);
+            ok = false;
+          }
+        } finally {
+          reader.kill();
+          rmSync(checkout, { recursive: true, force: true });
+        }
+      }
       // The session's owner: the first Claude ancestor; Claude as pid 1 (a
       // container); without Claude, the outermost ancestor; an unreadable
       // entry stops the walk where it is.
@@ -4917,6 +4946,21 @@ function main() {
     );
   }
 
+  // A reviewer reading this checkout outlives the session that dispatched it,
+  // so a branch switch waits for it with or without an open run (LFE run
+  // 2026-09-30: a new session's first `git switch main` broke the previous
+  // session's diff-review, before prime had opened the run).
+  if (segments.some(({ words }) => switchesCheckout(words))) {
+    const reader = readingDispatchIn(repositoryRoot(cwd));
+    if (reader !== null) {
+      refuse(
+        `autoloop guard — a ${reader.role} dispatch (pid ${reader.pid}) is reading this checkout, `
+        + 'and switching branches would change the files under it. Do this in another worktree '
+        + '(`git worktree add`), or wait for the review to return.',
+      );
+    }
+  }
+
   // Ordered before configuration loading: with no run open there is nothing to
   // guard, so a configuration problem must not block a human's command either.
   if (!runOpen) allow();
@@ -4949,16 +4993,6 @@ function main() {
   for (const baseBranch of bases) {
     const verdict = evaluate(cmd, branch, { baseBranch, cwd: payload?.cwd });
     if (verdict.block) refuse(verdict.reason);
-  }
-  if (segments.some(({ words }) => switchesCheckout(words))) {
-    const reader = readingDispatchIn(repositoryRoot(cwd));
-    if (reader !== null) {
-      refuse(
-        `autoloop guard — a ${reader.role} dispatch (pid ${reader.pid}) is reading this checkout, `
-        + 'and switching branches would change the files under it. Do this in another worktree '
-        + '(`git worktree add`), or wait for the review to return.',
-      );
-    }
   }
   allow();
 }
