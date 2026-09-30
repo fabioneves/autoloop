@@ -144,10 +144,15 @@ export function formatOverlapLine(summary) {
 // Falling back to the newest marker would reintroduce the bug on the exact
 // input that produced it, so an unresolvable ancestry means "no boundary": every
 // entry is in scope and `runScoped` says so.
+// The start is the marker's recorded `openedAtMs` (the earliest, when this run
+// primed more than once): its mtime moves every time `prime --park` rewrites
+// it, and a park-heavy LFE run (2026-09-30) reported `dispatches 0` on every
+// record. The mtime stays the fallback for a marker without the field.
 export function runStartedAtMs(root, ancestors = ancestorPids()) {
   try {
     const directory = runMarkerDirectory(root);
     if (directory === null || !existsSync(directory)) return null;
+    const starts = [];
     for (const name of readdirSync(directory)) {
       if (!name.endsWith('.json')) continue;
       const path = join(directory, name);
@@ -160,9 +165,9 @@ export function runStartedAtMs(root, ancestors = ancestorPids()) {
       if (marker?.version !== 1 || !Array.isArray(marker.pids)) continue;
       const mine = marker.pids.some((pid) =>
         Number.isSafeInteger(pid) && pid > 1 && ancestors.has(pid) && processAlive(pid));
-      if (mine) return statSync(path).mtimeMs;
+      if (mine) starts.push(Number.isSafeInteger(marker.openedAtMs) ? marker.openedAtMs : statSync(path).mtimeMs);
     }
-    return null;
+    return starts.length === 0 ? null : Math.min(...starts);
   } catch {
     return null;
   }
@@ -288,6 +293,14 @@ function selfTest() {
     check(
       'a marker naming only dead pids yields no boundary, not a wrong one',
       runStartedAtMs(scratch, new Set([123_456_789])) === null,
+    );
+    // A park rewrites the marker (its mtime moves to now); the recorded open
+    // time is the run's start, and the earliest of this run's markers wins.
+    writeFileSync(mine, JSON.stringify({ version: 1, pids: [process.ppid], openedAtMs: 1_000, park: { until: 'x' } }));
+    writeFileSync(join(directory, 'again.json'), JSON.stringify({ version: 1, pids: [process.ppid], openedAtMs: 2_000 }));
+    check(
+      'the boundary is the run\'s recorded open time, not a parked marker\'s mtime',
+      runStartedAtMs(scratch, new Set([process.ppid])) === 1_000,
     );
     rmSync(scratch, { recursive: true, force: true });
   }
