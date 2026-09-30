@@ -16,6 +16,9 @@ Fixes from the LFE run on 0.64 and 0.65.
     refused `env -u ANTHROPIC_BASE_URL bash dispatch-stream.sh …` with a false reason.
   - Options that change where or how the command runs (`env -C/-S`, `sudo -D`, `doas -C`) now
     refuse, naming the option.
+- **The command guard reads a plugin tool's arguments as the tool's own.** A park note containing
+  `head -race` read as node's `-r`/`-e` and was refused. Anything placed before the tool is still
+  checked.
 - **Dev skill:**
   - Base worktrees are named by commit (`<scratchpad>/base-<sha8>`), so a leftover from an earlier
     session is reused, not a collision.
