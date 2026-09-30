@@ -135,7 +135,7 @@ repository's own `gate.command`, run on the unit's tree; the merge executor is
 
 ### Behind base
 
-Behind base is not a defect. Pre-review and behind: merge freely. DIRTY (a real conflict) after
+Behind base is not a defect. Pre-review, behind or DIRTY: merge the base, resolve. DIRTY after
 review is a revision: invoke `autoloop:pitcrew`, `--begin-revision-json` BEFORE any merge. Post-review,
 no conflict: do NOT merge (it moves the head review binds — `committedHead == reviewedHead ==
 gatedHead`).

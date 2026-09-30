@@ -967,10 +967,9 @@ function main() {
   if (merged !== null && openIssues !== null) {
     reminders.push(...checkMergedClosedGap(merged, openIssues.map((issue) => issue.number)));
   }
-  if (loopRunIsLive(ROOT)) {
-    const blocked = ghJson('issue list --label loop-blocked --state open --json number,comments --limit 100');
-    if (blocked !== null) reminders.push(...checkHumanAnswers(blocked));
-  }
+  // The blocked issues are already on the wire (with comments) for the other
+  // checks: no second query (review of this check).
+  if (loopRunIsLive(ROOT) && issues !== null) reminders.push(...checkHumanAnswers(issues));
   if (openIssues !== null) {
     reminders.push(...checkStrandedStepLabels(openIssues));
     hard.push(...checkStepLabelDrift(prs, openIssues, pushedCommitCount));

@@ -165,7 +165,8 @@ export function runStartedAtMs(root, ancestors = ancestorPids()) {
       if (marker?.version !== 1 || !Array.isArray(marker.pids)) continue;
       const mine = marker.pids.some((pid) =>
         Number.isSafeInteger(pid) && pid > 1 && ancestors.has(pid) && processAlive(pid));
-      if (mine) starts.push(Number.isSafeInteger(marker.openedAtMs) ? marker.openedAtMs : statSync(path).mtimeMs);
+      // A closed marker is an earlier run's (step.mjs reads it the same way).
+      if (mine && marker.closedAt === undefined) starts.push(Number.isSafeInteger(marker.openedAtMs) ? marker.openedAtMs : statSync(path).mtimeMs);
     }
     return starts.length === 0 ? null : Math.min(...starts);
   } catch {

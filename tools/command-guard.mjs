@@ -62,7 +62,7 @@ import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
   procEntry, psEntry, commonDirOf, latchDirectory, processStart, protectedPaths, pruneLatches, recordLatch, sessionLatch,
-  sessionOwnerPid,
+  sessionOwnerPid, PLUGIN_CODE_DIRS,
 } from './run-markers.mjs';
 import { ORDINARY, readsOnly, runStateProblem, TAMPERING } from './run-state-guard.mjs';
 import { boundedGit, gitStalled, setGitDeadline } from './git-budget.mjs';
@@ -198,6 +198,9 @@ export function lexShell(cmd) {
   const pending = [];
   let single = false;
   let double = false;
+  // Inside `(( … ))` or `$(( … ))`, `<<` is a shift, never a heredoc: read as
+  // one, it hid the lines after `(( x = 1<<EOF ))` (review of the LFE fixes).
+  let arithmetic = 0;
   const atWordStart = () => out.length === 0 || /[\s;|&()]/u.test(out[out.length - 1]);
   for (let index = 0; index < cmd.length;) {
     const char = cmd[index];
@@ -229,7 +232,19 @@ export function lexShell(cmd) {
       while (index < cmd.length && cmd[index] !== '\n') index += 1;
       continue;
     }
-    if (char === '<' && cmd[index + 1] === '<' && cmd[index + 2] !== '<' && cmd[index - 1] !== '<') {
+    if (char === '(' && cmd[index + 1] === '(') {
+      arithmetic += 1;
+      out += '((';
+      index += 2;
+      continue;
+    }
+    if (arithmetic > 0 && char === ')' && cmd[index + 1] === ')') {
+      arithmetic -= 1;
+      out += '))';
+      index += 2;
+      continue;
+    }
+    if (arithmetic === 0 && char === '<' && cmd[index + 1] === '<' && cmd[index + 2] !== '<' && cmd[index - 1] !== '<') {
       let at = index + 2;
       const strip = cmd[at] === '-';
       if (cmd[at] === '-' || cmd[at] === '~') at += 1;
@@ -480,69 +495,29 @@ function quotedAnsiC(cmd) {
   return decodeAnsiC(cmd, true);
 }
 
-// The command as its words would execute, quotes removed so `g"h" pr merge`
-// still reads as gh. What quotes made literal stays inert: inside single
-// quotes the separators, redirections, `$` and backquotes; inside double
-// quotes the separators and redirections (a `$(…)` or backquote there still
-// runs, so those stay). Left live, a quoted jq filter's `|` split the command
-// into a pipeline and a quoted regex's backquotes and `(sh|bash)` became a
-// subshell running bash (false refusals in the LFE run, 2026-09-30).
-// Parentheses and braces stay: they split nothing, and the GraphQL mutation
-// rules read `mutation{…(…)}` from a quoted query. Newlines still split: a
-// long quoted message read as one segment let a position-blind flag check
-// pair words from different lines.
-const INERT_IN_SINGLE = new Set(['|', ';', '&', '<', '>', '`', '$']);
-const INERT_IN_DOUBLE = new Set(['|', ';', '&', '<', '>']);
-
-// A quote character that is literal (inside the other kind of quote, or
-// backslash-escaped) is emitted escaped: the text's later readers see the
-// character, never a quote to balance. Emitted bare, `"it's"` left an
-// unbalanced `'` that turned the rest of the command — `&& git push` — into
-// one quoted word (caught by the verdict replay).
-const literalQuote = (char) => (char === "'" || char === '"' ? `\\${char}` : null);
-
-function executableLexicalText(cmd, { heredocBodies = false } = {}) {
-  // Heredoc bodies are stdin, not command text (an interpreter reading one is
-  // refused by interpreterHeredoc before this runs); their apostrophes must
-  // not drive the quote state. A rule that reads message text (the co-author
-  // trailer rides in a `git commit -F - <<EOF` body) asks for them back.
-  const decoded = decodeAnsiCQuotes(heredocBodies ? cmd : stripHeredocs(cmd));
+function executableLexicalText(cmd) {
+  const decoded = decodeAnsiCQuotes(cmd);
   let output = '';
-  let quote = null;
   for (let index = 0; index < decoded.length; index += 1) {
     const char = decoded[index];
-    if (quote === "'") {
-      // A backslash in single quotes is literal; before a quote character it
-      // is emitted escaped, so it cannot pair with that (escaped) quote.
-      if (char === "'") quote = null;
-      else if (char === '\\' && (decoded[index + 1] === '"' || decoded[index + 1] === "'")) output += '\\\\';
-      else output += literalQuote(char) ?? (INERT_IN_SINGLE.has(char) ? '_' : char);
-      continue;
-    }
-    if (quote === '"' && char === '"') {
-      quote = null;
-      continue;
-    }
-    if (quote === '"' && char !== '\\') {
-      output += literalQuote(char) ?? (INERT_IN_DOUBLE.has(char) ? '_' : char);
-      continue;
-    }
     if (char === '\\') {
       if (decoded[index + 1] === '\r' && decoded[index + 2] === '\n') {
         index += 2;
       } else if (decoded[index + 1] === '\n') {
         index += 1;
       } else if (index + 1 < decoded.length) {
+        // An escaped quote is dropped like every quote here, and an escaped
+        // backslash stays escaped: emitted bare, either one re-opened a quote
+        // (or escaped the next character) for the reader of this text, so
+        // `echo it\'s && git push origin main` read as one quoted word.
         const escaped = decoded[index + 1];
-        output += literalQuote(escaped) ?? (quote === '"' && INERT_IN_DOUBLE.has(escaped) ? '_' : escaped);
+        if (escaped === '\\') output += '\\\\';
+        else if (escaped !== "'" && escaped !== '"') output += escaped;
         index += 1;
       }
       continue;
     }
-    if (char === "'" || char === '"') {
-      quote = char;
-      continue;
-    }
+    if (char === "'" || char === '"') continue;
     if (
       char === '$'
       && (decoded[index + 1] === "'" || decoded[index + 1] === '"')
@@ -805,13 +780,18 @@ function inlineInterpreterSource(cmd) {
     'wish',
     'zsh',
   ]);
+  // The interpreters a quote-aware reading shows invoked: a `|bash` inside a
+  // quoted regex (`rg '^```(sh|bash)'`) is text, and only an interpreter the
+  // shell really runs can be reading stdin (LFE run, 2026-09-30).
+  const invokedForReal = new Set(shellSegments(quotedAnsiC(stripHeredocs(cmd))).flatMap(({ command }) => {
+    const words = shellWords(command);
+    return words.filter((word, index) => invokedAt(words, index)).map((word) => word.slice(word.lastIndexOf('/') + 1));
+  }));
   return shellSegments(executableLexicalText(cmd)).some(({ command }) => {
     const words = shellWords(command);
     if (isLookupSegment(words)) return false;
-    // `.` and `source` run a file only as the command a segment runs: a `.`
-    // inside quoted code (PHP's concatenation) is text (LFE replay).
-    const shellSource = words.findIndex((word, index) =>
-      (word === 'source' || word === '.') && invokedAt(words, index));
+    const shellSource = words.findIndex((word) =>
+      word === 'source' || word === '.');
     if (
       shellSource !== -1
       && words.slice(shellSource + 1).some((argument) =>
@@ -847,6 +827,7 @@ function inlineInterpreterSource(cmd) {
       // blind, so `find . -exec node -e …` remains opaque wherever the name
       // sits.
       if (!invokedAt(words, index)) return false;
+      if (!invokedForReal.has(executable)) return false;
       if (argumentsAfterExecutable.length === 0) return true;
       // A probe that only prints a version or a usage banner executes nothing,
       // so it is not the no-script-argument stdin shape the return below cat-
@@ -1513,12 +1494,27 @@ export function commentBodyProblem(words, read = (path) => readFileSync(path, 'u
   }));
 }
 
-// gh as the command a segment runs (behind wrappers or `eval`), not the word
-// `gh` inside an argument — a block question quoting the command a human
-// should run is text (LFE run, 2026-09-30).
+// A segment that only prints or runs one of the plugin's own tools carries
+// its words as text: a block question quoting the command a human should run
+// (`unit.mjs --block --question "… gh issue edit 5 --add-label loop-ready"`)
+// was refused in the LFE run (2026-09-30). Everything else stays
+// position-blind: a keyword, group or unlisted wrapper in front of gh must not
+// hide it (review of that fix).
+function textOnlySegment(words) {
+  let index = 0;
+  while (index < words.length && isAssignmentWord(words[index])) index += 1;
+  const head = basename(words[index] ?? '');
+  if (head === 'echo' || head === 'printf') return true;
+  if (!/^node(?:js)?$/u.test(head)) return false;
+  const script = words.slice(index + 1).find((word) => !word.startsWith('-'));
+  if (script === undefined) return false;
+  const real = realOrSelf(resolve(script));
+  return PLUGIN_CODE_DIRS.some((dir) => real.startsWith(`${realOrSelf(dir)}/`));
+}
+
 function hasGhScopedAction(words, scope, action) {
-  const gh = words.findIndex((word, index) => (word === 'gh' || word.endsWith('/gh'))
-    && (invokedAt(words, index) || words[index - 1] === 'eval'));
+  if (textOnlySegment(words)) return false;
+  const gh = executableIndex(words, 'gh');
   if (gh === -1) return false;
   const scopeIndex = words.indexOf(scope, gh + 1);
   return scopeIndex !== -1 && words.indexOf(action, scopeIndex + 1) !== -1;
@@ -2388,7 +2384,9 @@ export function evaluate(inputCmd, branch, options = {}) {
   // The body is read where the post runs: the command's own `cd` steps are
   // followed, over quote-aware segments (a quoted jq filter's `|` is not a
   // pipe). The LFE run lost a PR-body PATCH to both (2026-09-30).
-  const bodySegments = shellSegments(cmd);
+  // ANSI-C and locale quotes decoded first: `-f body=$'/answer yes'` posts an
+  // /answer (review of the LFE fixes).
+  const bodySegments = shellSegments(quotedAnsiC(cmd));
   const plainCd = (words) => (words[0] === 'cd' || words[0] === 'pushd') && words.length === 2;
   let bodyDir = options.cwd ?? process.cwd();
   const bodyProblems = bodySegments.map(({ command }) => {
@@ -2406,12 +2404,20 @@ export function evaluate(inputCmd, branch, options = {}) {
     });
   });
   // A body file can be rewritten only by a segment that runs before or beside
-  // the post and can write: an earlier one that is not a plain `cd` or a
-  // redirect-free reader, or a pipe or background `&` after the post.
-  // Whatever follows a sequential operator runs after the post and cannot.
+  // the post: an earlier one not on this list of harmless ones (a plain `cd`,
+  // a redirect-free reader, read-only git, `gh … view/list`), or a pipe or
+  // background `&` after the post. Whatever follows a sequential operator runs
+  // after the post and cannot. A script, `git pull` or `git apply` can.
+  const HARMLESS = new Set(['cat', 'echo', 'grep', 'head', 'jq', 'ls', 'printf', 'pwd', 'rg', 'tail', 'test', 'true', 'wc']);
   const mayWrite = (command) => {
     const words = shellWords(command);
-    return !plainCd(words) && (/[<>]/u.test(command) || !readsOnly(words));
+    if (plainCd(words)) return false;
+    if (/[<>]/u.test(command)) return true;
+    const head = basename(words[0] ?? '');
+    if (HARMLESS.has(head)) return false;
+    if (head === 'git') return !READ_ONLY_GIT.has(words.slice(1).find((word) => !word.startsWith('-')) ?? '');
+    if (head === 'gh') return !['view', 'list'].includes(words[2]);
+    return true;
   };
   if (bodySegments.length > 1 && bodySegments.some(({ command, raw }, index) =>
     readsCommentBodyFile(shellWords(command))
@@ -2600,7 +2606,7 @@ export function evaluate(inputCmd, branch, options = {}) {
     segments.some(
       ({ command }) => gitSubcommandIndex(shellWords(command), 'commit') !== -1,
     )
-    && /Co-Authored-By:/i.test(executableLexicalText(rawCmd, { heredocBodies: true }))
+    && /Co-Authored-By:/i.test(executableLexicalText(rawCmd))
   ) {
     return {
       block: true,
@@ -2885,16 +2891,23 @@ export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PR
 // A branch switch in a checkout a reviewer is reading changes the files
 // under it: the LFE run (2026-09-30) switched to finalize one unit while
 // another's code review read the same checkout, and had to kill and redo the
-// review. The review roles read; anything that moves HEAD waits for them.
+// review. The review roles read; a branch switch waits for them (other
+// HEAD moves — reset, rebase, pull — are not covered here).
 const READING_ROLES = new Set(['plan-review', 'diff-review', 'code-review', 'doubt-review']);
 
 export function switchesCheckout(words) {
   const git = words.findIndex((word, index) => (word === 'git' || word.endsWith('/git')) && invokedAt(words, index));
   if (git === -1) return false;
-  const rest = words.slice(git + 1).filter((word) => !word.startsWith('-'));
-  if (rest[0] === 'switch') return true;
-  // `git checkout <ref>` moves HEAD; `git checkout [<ref>] -- <paths>` edits files only.
-  return rest[0] === 'checkout' && !words.includes('--') && rest.length === 2;
+  // Past git's own options (and -C / -c values) to the subcommand.
+  let index = git + 1;
+  while (index < words.length && words[index].startsWith('-')) index += ['-C', '-c', '--git-dir', '--work-tree'].includes(words[index]) ? 2 : 1;
+  const subcommand = words[index];
+  if (subcommand === 'switch') return true;
+  // `git checkout <ref>` (or `-b <new> [<start>]`) moves HEAD; `git checkout
+  // [<ref>] -- <paths>` edits files only.
+  const rest = words.slice(index + 1);
+  return subcommand === 'checkout' && !rest.includes('--')
+    && (rest.some((word) => /^-[bB]$/u.test(word)) || rest.filter((word) => !word.startsWith('-')).length === 1);
 }
 
 function readingDispatchIn(dir) {
@@ -3055,11 +3068,38 @@ function selfTest() {
     // filter's `|`, a quoted regex's backquotes and `(sh|bash)`, a block
     // question quoting the command a human should run, the `'"'"'` idiom and
     // PHP's ` . ` concatenation are all text.
-    ['node /p/unit.mjs --block --issue 5 --question "May #5 be finalized? A human runs: gh issue edit 5 --add-label loop-ready"', 'feat/gh-1-x', false],
+    [`node ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} --block --issue 5 --question "May #5 be finalized? A human runs: gh issue edit 5 --add-label loop-ready"`, 'feat/gh-1-x', false],
+    // Only the plugin's own tools carry quoted text: any other script does not.
+    ['node /tmp/x.mjs --question "gh issue edit 5 --add-label loop-ready"', 'feat/gh-1-x', true],
     ["rg -n '^```(sh|bash|shell)' b.md", 'feat/gh-1-x', false],
     ["sed -i 's/a/it'\"'\"'s `x`/' f", 'feat/gh-1-x', false],
     ["ddev wp eval '$a = \"x\" . \"y\"; $b = $c - 7; echo $a;'", 'feat/gh-1-x', false],
     ["rg -c '^Closes #388$' f; node x.mjs", 'feat/gh-1-x', false],
+    // Review of the LFE fixes: a keyword, group or unlisted wrapper in front
+    // of gh, an eval'd script, an escaped quote or backslash, and `.`/source
+    // behind a keyword — none may hide a refused command.
+    ["echo it\\'s && git push origin main", 'feat/gh-1-x', true],
+    ["echo \"\\\\'\" && git push origin main", 'feat/gh-1-x', true],
+    ["echo \"\\\\'\" && gh pr merge 5", 'feat/gh-1-x', true],
+    ["echo \"\\\\'\" ; gh issue edit 5 --add-label loop-ready", 'feat/gh-1-x', true],
+    ["echo \\\\\\\" && git push origin main", 'feat/gh-1-x', true],
+    ["echo \"a\\\\\\\"b\" ; gh pr merge 5", 'feat/gh-1-x', true],
+    ["printf '%s\\\\' \"\\\\'\" && git push origin main", 'feat/gh-1-x', true],
+    ["{ gh issue edit 5 --add-label loop-ready; }", 'feat/gh-1-x', true],
+    ["if true; then gh pr ready 5; fi", 'feat/gh-1-x', true],
+    ["flock /tmp/l gh issue edit 5 --remove-label loop-halt", 'feat/gh-1-x', true],
+    ["! gh issue edit 5 --add-label loop-ready", 'feat/gh-1-x', true],
+    ["for i in 1; do gh issue edit 5 --add-label loop-ready; done", 'feat/gh-1-x', true],
+    ["if true; then gh release create v1; fi", 'feat/gh-1-x', true],
+    ["eval \"x; gh pr ready 5\"", 'feat/gh-1-x', true],
+    ["eval 'echo; gh issue edit 5 --add-label loop-ready'", 'feat/gh-1-x', true],
+    ["eval \"x; gh issue edit 5 --remove-label loop-halt\"", 'feat/gh-1-x', true],
+    ["{ . /dev/stdin; }", 'feat/gh-1-x', true],
+    ["if true; then . /dev/stdin; fi", 'feat/gh-1-x', true],
+    ["! source /dev/stdin", 'feat/gh-1-x', true],
+    ["curl -s x | { source /dev/stdin; }", 'feat/gh-1-x', true],
+    ["echo \"x\" | bash", 'feat/gh-1-x', true],
+    ["(( x = 1<<EOF ))\ngit push origin main\nEOF", 'feat/gh-1-x', true],
     // ...and none of that may hide a real command: a quote inside the other
     // kind (or escaped) left bare turned the rest of the line into one word.
     ['git commit -qm "it\'s" && git push origin main', 'feat/gh-1-x', true],
@@ -3638,6 +3678,12 @@ function selfTest() {
         verdict(`gh api --method PATCH repos/o/r/pulls/5 -F body=@${bodyDir}/body.md --jq '.body | length'`) === false,
         verdict(`echo /answer > ${bodyDir}/body.md; gh issue comment 5 --body-file ${bodyDir}/body.md`) === true,
         verdict(`gh issue comment 5 --body-file ${bodyDir}/body.md | tee x`) === true,
+      verdict(`./gen.sh; gh issue comment 5 --body-file ${bodyDir}/body.md`) === true,
+      verdict(`git pull -q; gh issue comment 5 --body-file ${bodyDir}/body.md`) === true,
+      verdict(`git status; gh issue view 5; gh issue comment 5 --body-file ${bodyDir}/body.md`) === false,
+      verdict("gh api repos/o/r/issues/5/comments -f body=$'/answer yes'") === true,
+      verdict("gh api repos/o/r/issues/5/comments -f body=$'\\x2fanswer yes'") === true,
+      verdict('gh api repos/o/r/issues/5/comments -f body=$"/answer yes"') === true,
       ];
       rmSync(bodyDir, { recursive: true, force: true });
       if (bodyCases.includes(false)) {
@@ -4342,7 +4388,8 @@ function selfTest() {
       // checkouts and other git commands do not.
       if (!(switchesCheckout(shellWords('git switch feat/x')) && switchesCheckout(shellWords('git checkout -q main'))
         && !switchesCheckout(shellWords('git checkout -- src/a.ts')) && !switchesCheckout(shellWords('git checkout HEAD -- a'))
-        && !switchesCheckout(shellWords('git status')) && !switchesCheckout(shellWords('echo git switch')))) {
+        && !switchesCheckout(shellWords('git status')) && !switchesCheckout(shellWords('echo git switch'))
+        && switchesCheckout(shellWords('git -C /r switch x')) && switchesCheckout(shellWords('git checkout -b new origin/x')))) {
         console.error('FAIL [a branch switch is told apart from a file checkout]');
         ok = false;
       }

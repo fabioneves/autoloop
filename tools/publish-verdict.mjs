@@ -1444,11 +1444,15 @@ function fetchTerminalStateSnapshot(repository, issue, pullRequest, fetchJson) {
     pullRequestNodeId: pr.node_id,
     headOid: pr.head.sha,
     draft: pr.draft,
-    // GitHub's own verdict (null while it computes): a head that conflicts
-    // with the base cannot be delivered, however green its evidence.
+    // GitHub's own verdict: a head that conflicts with the base cannot be
+    // delivered, however green its evidence. null (still computing) does not
+    // refuse here — merge authority is enforced again at merge time.
     conflicting: pr.mergeable === false,
     labels,
-    ...(labels.includes('loop-repair') ? { repair: fetchRepairStanding(repository, linkedIssue.body, fetchJson) } : {}),
+    // Read only for a true repair: one that also holds loop-ready needs no
+    // standing, and a failed read must not fail it (review of this fix).
+    ...(labels.includes('loop-repair') && !labels.includes('loop-ready')
+      ? { repair: fetchRepairStanding(repository, linkedIssue.body, fetchJson) } : {}),
   };
 }
 
@@ -1871,7 +1875,7 @@ export function terminalStateGaps(state, input) {
   if (typeof state.draft !== 'boolean') gaps.push('draft state is unknown');
   if (state.conflicting === true) {
     gaps.push(
-      `pull request #${input.record.pullRequest} conflicts with its base (mergeStateStatus DIRTY): `
+      `pull request #${input.record.pullRequest} conflicts with its base (GitHub reports it not mergeable): `
       + 'a merge moves the reviewed head, so this is a revision — invoke autoloop:pitcrew and '
       + 'begin it with lifecycle-driver.mjs --begin-revision-json before any merge',
     );
@@ -3836,6 +3840,24 @@ function selfTest() {
             .some((gap) => gap.includes('no longer authorizes'))
           && terminalStateGaps({ ...base, labels: repairLabels, repair: { marker: null } }, terminalInput)
             .some((gap) => gap.includes('no longer authorizes'))
+          // The standing as fetched: marker, parent labels, and the parent's
+          // loop-ready events across pages (newest last).
+          && (() => {
+            const body = `<!-- autoloop-repair-v1 ${JSON.stringify(marker)} -->`;
+            const page1 = Array.from({ length: 100 }, () => ({ event: 'commented' }));
+            const page2 = [{ event: 'labeled', label: { name: 'Loop-Ready' }, actor: { login: 'human' }, created_at: '2026-09-30T01:00:00Z' }];
+            const fake = (_repo, endpoint) => {
+              const page = Number(/[?&]page=(\d+)/u.exec(endpoint)?.[1] ?? 0);
+              if (endpoint.endsWith('/pulls/9')) return { number: 9, state: 'open', merged: false, draft: false, head: { sha: 'a'.repeat(40) }, node_id: 'PR', mergeable: true };
+              if (endpoint.endsWith('/issues/8')) return { number: 8, state: 'open', node_id: 'I', body };
+              if (endpoint.includes('/issues/8/labels')) return page === 1 ? [{ id: 1, name: 'loop-repair' }] : [];
+              if (endpoint.endsWith('/issues/7')) return { state: 'open', state_reason: null, labels: [{ name: 'loop-ready' }] };
+              if (endpoint.includes('/issues/7/events')) return page === 1 ? page1 : page === 2 ? page2 : [];
+              throw new Error(`unexpected ${endpoint}`);
+            };
+            const state = fetchTerminalState({ owner: 'o', repo: 'r' }, 8, 9, fake);
+            return repairStands(state.repair) && state.conflicting === false;
+          })()
           // A conflicting head is routed to the revision path, never merged here.
           && terminalStateGaps({ ...base, conflicting: true }, terminalInput)
             .some((gap) => gap.includes('conflicts with its base') && gap.includes('--begin-revision-json'));

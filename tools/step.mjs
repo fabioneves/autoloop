@@ -169,7 +169,9 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
   const path = join(dir, 'steps', `${issue}.json`);
   // A unit blocked at its premise, before any step was announced, still gets
   // its card (LFE run 2026-09-30: #389's --card failed "no steps recorded").
-  const record = readJson(path, null) ?? { issue, steps: [] };
+  const stored = readJson(path, null);
+  if (!stored?.steps?.length && outcome !== 'blocked') return { ok: false, lines: [`step: no steps recorded for #${issue}`] };
+  const record = stored ?? { issue, steps: [] };
   const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, lines, question });
   record.closed = { outcome, atMs: nowMs };
   writeAtomically(path, record);
@@ -872,7 +874,9 @@ function transitionChecks(at) {
       (() => {
         try {
           const card = closeUnit({ root, run, nowMs: at(10, 30), issue: 999, outcome: 'blocked', question: 'which spec?' });
-          return card.ok === true && card.lines[0].includes('#999') && card.lines[0].includes('which spec?');
+          return card.ok === true && card.lines[0].includes('#999') && card.lines[0].includes('which spec?')
+            // Any other outcome still needs recorded steps (a typo'd number is refused).
+            && closeUnit({ root, run, nowMs: at(10, 30), issue: 998, outcome: 'shipped' }).ok === false;
         } catch {
           return false;
         }

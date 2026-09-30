@@ -1428,7 +1428,8 @@ export function stalePromptProblem(path, runStartMs, stat = statSync) {
 }
 
 function currentRunStartMs(cwd = process.cwd()) {
-  const starts = pluginRunMarkers([cwd]).map(({ marker }) => marker.openedAtMs).filter(Number.isSafeInteger);
+  const starts = pluginRunMarkers([cwd]).filter(({ marker }) => marker.closedAt === undefined)
+    .map(({ marker }) => marker.openedAtMs).filter(Number.isSafeInteger);
   return starts.length === 0 ? null : Math.min(...starts);
 }
 
