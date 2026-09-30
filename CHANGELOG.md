@@ -3,6 +3,14 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.5] - 2026-09-30
+
+### Added
+
+- **The parked view shows which round a step is on.** It uses the round the step records
+  (`08 code-review r2`), or otherwise how many times the unit entered the step: a revised plan reads
+  `02 plan v2`.
+
 ## [0.65.4] - 2026-09-30
 
 ### Added
