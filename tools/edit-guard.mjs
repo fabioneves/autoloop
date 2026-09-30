@@ -27,14 +27,12 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  latchDirectory, loopRunIsOpen, runMarkerDirectory, sessionLatch,
+  loopRunIsOpen, protectedPaths, sessionLatch,
 } from './run-markers.mjs';
 import { guardedRoot, hookRoot } from './hook-root.mjs';
 import { gitStalled, setGitDeadline } from './git-budget.mjs';
 
 const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
-const PLUGIN_CODE_DIRS = Object.freeze(['tools', 'hooks']
-  .map((name) => join(dirname(dirname(fileURLToPath(import.meta.url))), name)));
 const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);
 
 // A path through a symlink must not fail open: the file (or, for a new file,
@@ -169,8 +167,12 @@ function main() {
   }
   const open = loopRunIsOpen() || loopRunIsOpen(repoRoot) || latched !== null;
   const filePath = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
+  // The same paths the command guard protects (run-markers.mjs protectedPaths):
+  // the run's state and the guard's code in every autoloop repository, run or
+  // not; the settings while a run is open.
+  const paths = protectedPaths({ projectRoot: repoRoot, cwd: payload?.cwd ?? repoRoot, runOpen: open });
   const problem = hookWiringEditProblem(filePath, repoRoot, open)
-    ?? runStateEditProblem(filePath, repoRoot, [runMarkerDirectory(repoRoot), latchDirectory(), ...PLUGIN_CODE_DIRS], open);
+    ?? runStateEditProblem(filePath, repoRoot, [...paths.state, ...paths.code], true);
   if (problem !== null) {
     console.error(problem);
     process.exit(2);

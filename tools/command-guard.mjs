@@ -60,7 +60,8 @@ import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
-  procEntry, psEntry, commonDirOf, latchDirectory, pruneLatches, recordLatch, sessionLatch,
+  procEntry, psEntry, commonDirOf, latchDirectory, processStart, protectedPaths, pruneLatches, recordLatch, sessionLatch,
+  sessionOwnerPid,
 } from './run-markers.mjs';
 import { ORDINARY, readsOnly, runStateProblem, TAMPERING } from './run-state-guard.mjs';
 import { boundedGit, gitStalled, setGitDeadline } from './git-budget.mjs';
@@ -181,19 +182,115 @@ const GH_COMMANDS = new Set([
 
 // Strip heredoc bodies so text INSIDE a body (e.g. a PR description that quotes
 // "gh pr merge") never false-positives.
-// The rest of the `<<EOF` line is command text and stays: dropping it hid
-// `cat <<EOF && gh pr merge 5` from every rule (review of the guard
-// hardening; the bug predates it).
-const HEREDOC = /<<[-~]?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_-]*)\1([^\n]*)\r?\n([\s\S]*?)\r?\n[ \t]*\2(?![A-Za-z0-9_-])/g;
+// One linear pass over the command, the way the shell reads it: quotes,
+// `#` comments (at a word start, outside quotes) and heredocs (`<<EOF`,
+// `<<-EOF`, quoted or not — never the `<<<` here-string, never inside quotes
+// or a comment). It returns the command text without comments and without
+// heredoc bodies — the rest of a `<<EOF` line stays, since it is command text
+// — and the bodies, marked expanded when the delimiter was unquoted (the
+// shell then runs their substitutions). Regex versions of this hid whole
+// lines from every rule: `cat <<EOF && gh pr merge`, `echo x # it's` swallowing
+// the next line, `<<<` read as a heredoc (reviews of the guard hardening).
+export function lexShell(cmd) {
+  let out = '';
+  const bodies = [];
+  const pending = [];
+  let single = false;
+  let double = false;
+  const atWordStart = () => out.length === 0 || /[\s;|&()]/u.test(out[out.length - 1]);
+  for (let index = 0; index < cmd.length;) {
+    const char = cmd[index];
+    if (single) {
+      out += char;
+      if (char === "'") single = false;
+      index += 1;
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (cmd[index + 1] ?? '');
+      index += 2;
+      continue;
+    }
+    if (double) {
+      out += char;
+      if (char === '"') double = false;
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      if (char === "'") single = true;
+      else double = true;
+      out += char;
+      index += 1;
+      continue;
+    }
+    if (char === '#' && atWordStart()) {
+      while (index < cmd.length && cmd[index] !== '\n') index += 1;
+      continue;
+    }
+    if (char === '<' && cmd[index + 1] === '<' && cmd[index + 2] !== '<' && cmd[index - 1] !== '<') {
+      let at = index + 2;
+      const strip = cmd[at] === '-';
+      if (cmd[at] === '-' || cmd[at] === '~') at += 1;
+      while (cmd[at] === ' ' || cmd[at] === '\t') at += 1;
+      let delimiter = '';
+      let quoted = false;
+      while (at < cmd.length && !/[\s;|&<>()]/u.test(cmd[at])) {
+        if (cmd[at] === "'" || cmd[at] === '"') {
+          const quote = cmd[at];
+          quoted = true;
+          at += 1;
+          while (at < cmd.length && cmd[at] !== quote) delimiter += cmd[at++];
+          at += 1;
+        } else if (cmd[at] === '\\') {
+          quoted = true;
+          delimiter += cmd[at + 1] ?? '';
+          at += 2;
+        } else {
+          delimiter += cmd[at++];
+        }
+      }
+      if (delimiter === '') {
+        out += '<<';
+        index += 2;
+        continue;
+      }
+      pending.push({ delimiter, strip, expanded: !quoted });
+      out += ' ';
+      index = at;
+      continue;
+    }
+    if (char === '\n' && pending.length > 0) {
+      out += '\n';
+      index += 1;
+      for (const doc of pending) {
+        let body = '';
+        while (index < cmd.length) {
+          const end = cmd.indexOf('\n', index);
+          const line = cmd.slice(index, end === -1 ? cmd.length : end).replace(/\r$/u, '');
+          index = end === -1 ? cmd.length : end + 1;
+          if ((doc.strip ? line.replace(/^\t+/u, '') : line) === doc.delimiter) break;
+          body += `${line}\n`;
+        }
+        bodies.push({ body, expanded: doc.expanded });
+      }
+      pending.length = 0;
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return { text: out, bodies };
+}
 
 export function stripHeredocs(cmd) {
-  return cmd.replace(HEREDOC, (_match, _quote, _delimiter, rest) => ` ${rest}`);
+  return lexShell(cmd).text;
 }
 
 // The bodies of heredocs whose delimiter is unquoted: the shell expands them,
 // so a substitution inside runs.
 function expandedHeredocBodies(cmd) {
-  return [...cmd.matchAll(HEREDOC)].filter((match) => match[1] === '').map((match) => match[4]);
+  return lexShell(cmd).bodies.filter(({ expanded }) => expanded).map(({ body }) => body);
 }
 
 // Redirection operators glued to a word (`echo x>file`, `2>&1`) set apart,
@@ -2692,7 +2789,7 @@ function primeSegment(words, cwd, prime = PLUGIN_PRIME) {
 export function opensRun(command, cwd, prime = PLUGIN_PRIME) {
   if (typeof command !== 'string' || !/\bnode\b/u.test(command)) return false;
   let dir = cwd;
-  for (const { command: segment } of shellSegments(command)) {
+  for (const { command: segment } of shellSegments(stripHeredocs(command))) {
     const words = shellWords(trimSubshell(segment));
     if ((words[0] === 'cd' || words[0] === 'pushd') && words[1] !== undefined) {
       dir = resolve(dir, expandHome(words[1]));
@@ -3909,8 +4006,8 @@ function selfTest() {
       // the run open once seen, and every base any record names is enforced.
       const home = join(scratch, 'home');
       const latches = join(home, '.claude', 'autoloop', 'run-latches');
-      const latchHook = (command, sessionId = 'session-a') => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
-        input: JSON.stringify({ tool_name: 'Bash', session_id: sessionId, cwd: scratch, tool_input: { command } }),
+      const latchHook = (command) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', cwd: scratch, tool_input: { command } }),
         encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), HOME: home, CLAUDE_PROJECT_DIR: scratch },
       });
       const stateCommands = ['rm -rf .git/autoloop/run', `rm -rf ${latches}`, 'rm -rf .git', 'echo {} > .git/autoloop/run/f.json',
@@ -3936,7 +4033,7 @@ function selfTest() {
       // mention a deletion run nothing; ANSI-C quotes, substitutions (quoted
       // or not) and backquotes are taken apart.
       const judgedAt = (command) => runStateProblem(guardSegments(command), {
-        cwd: '/r', protectedDirs: ['/r/.git/autoloop/run', '/home/u/.claude/autoloop/run-latches'], codeDirs: ['/p/tools'], home: '/home/u',
+        cwd: '/r', protectedDirs: ['/r/.git/autoloop/run', '/home/u/.claude/autoloop/run-latches'], codeDirs: ['/p/tools'], home: '/home/u', env: {},
       });
       const tokenized = [
         ...TAMPERING.filter((command) => judgedAt(command) === null).map((command) => `evaded: ${command}`),
@@ -3951,6 +4048,10 @@ function selfTest() {
           'D=.git; rm -rf "$D"/autoloop',
           `echo ${'$(true) '.repeat(70)}`,
           'echo x>.git/autoloop/run/a.json',
+          "echo x # it's\nrm -rf .git/autoloop/run",
+          'cat <<<EOF\nrm -rf .git/autoloop/run\nEOF',
+          "alias ls='rm -rf .git/autoloop/run'\nls",
+          "cat /tmp/fake.json > \"$(echo /home/u/.claude/autoloop/run-latches/1.json)\"",
           'cat /tmp/forged>>.git/autoloop/run/1.json',
           'cat <<EOF && rm -rf .git/autoloop/run\nx\nEOF',
           'cat <<EOF\n$(rm -rf .git/autoloop/run)\nEOF',
@@ -3972,8 +4073,13 @@ function selfTest() {
       ];
       // The heredoc tail: text after `<<EOF` on its line is command text, for
       // every rule (it hid `gh pr merge` before this fix).
-      if (!evaluate('cat <<EOF && gh pr merge 5 --squash\nx\nEOF', 'feat/x', { baseBranch: 'main' }).block) {
-        tokenized.push('evaded: cat <<EOF && gh pr merge 5 --squash (evaluate)');
+      for (const shape of [
+        'cat <<EOF && gh pr merge 5 --squash\nx\nEOF',
+        "echo '<<EOF'\ngh pr merge 5 --squash\nEOF",
+        '# <<EOF\ngh pr merge 5 --squash\nEOF',
+        "echo x # it's\ngh pr merge 5 --squash",
+      ]) {
+        if (!evaluate(shape, 'feat/x', { baseBranch: 'main' }).block) tokenized.push(`evaded (evaluate): ${shape}`);
       }
       if (tokenized.length > 0) {
         console.error(`FAIL [the run-state rule holds through the guard's tokenizer]: ${JSON.stringify(tokenized)}`);
@@ -3987,7 +4093,9 @@ function selfTest() {
       writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } }));
       rmSync(join(markers, 'run.json'), { force: true });
       const primeAndDelete = latchHook(`node ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} --json && rm -rf .git/autoloop/run`, 'session-p');
-      const oversized = latchHook(`echo ${'x'.repeat(MAX_COMMAND_BYTES)}`, 'session-o');
+      const oversized = latchHook(`echo ${'x'.repeat(MAX_COMMAND_BYTES)}`);
+      // Refused by the run-opening rule alone (the script's text is not visible).
+      const primeAndScript = latchHook(`node ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} --json && sh /tmp/x.sh`);
       const stalled = join(scratch, 'stalled');
       execFileSync('git', ['init', '-q', stalled]);
       rmSync(join(stalled, '.git', 'config'));
@@ -4009,12 +4117,57 @@ function selfTest() {
         encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), HOME: lockedHome, CLAUDE_PROJECT_DIR: scratch },
       });
       rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
-      if (primeAndDelete.status !== 2 || oversized.status !== 2 || stalledHook.status !== 2 || stalledElapsed > 8000
+      if (primeAndDelete.status !== 2 || primeAndScript.status !== 2 || !primeAndScript.stderr.includes('opens a run')
+        || oversized.status !== 2 || stalledHook.status !== 2 || stalledElapsed > 8000
         || !stalledHook.stderr.includes('git') || unlatchable.status !== 2 || !unlatchable.stderr.includes('latch')) {
         console.error(`FAIL [prime-then-delete, a stalled git and an unwritable latch all refuse]: ${JSON.stringify({
-          primeAndDelete: primeAndDelete.status, oversized: oversized.status, stalled: stalledHook.status, stalledElapsed, stalledErr: stalledHook.stderr.slice(0, 120),
+          primeAndDelete: primeAndDelete.status, primeAndScript: primeAndScript.status, oversized: oversized.status, stalled: stalledHook.status, stalledElapsed, stalledErr: stalledHook.stderr.slice(0, 120),
           unlatchable: unlatchable.status,
         })}`);
+        ok = false;
+      }
+      // A session whose project directory is not itself a git repository,
+      // with the run in a repository inside it: the run's own repository is
+      // what git must read (a review found every command refused here).
+      const work = join(scratch, 'work');
+      const inner = join(work, 'repo');
+      mkdirSync(inner, { recursive: true });
+      execFileSync('git', ['init', '-q', inner]);
+      const innerMarkers = runMarkerDirectory(inner);
+      mkdirSync(innerMarkers, { recursive: true });
+      writeFileSync(join(innerMarkers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      const workHome = join(scratch, 'work-home');
+      const fromWork = (command) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', cwd: inner, tool_input: { command } }),
+        encoding: 'utf8', cwd: inner, env: { ...process.env, HOME: workHome, CLAUDE_PROJECT_DIR: work },
+      });
+      const workLs = fromWork('ls');
+      const workMerge = fromWork('gh pr merge 5 --squash');
+      if (workLs.status !== 0 || workMerge.status !== 2) {
+        console.error(`FAIL [a run in a repository under a non-git project directory is guarded, not locked]: ${workLs.status} ${workLs.stderr.slice(0, 160)} ${workMerge.status}`);
+        ok = false;
+      }
+      // The session's owner: the first Claude ancestor; Claude as pid 1 (a
+      // container); without Claude, the outermost ancestor; an unreadable
+      // entry stops the walk where it is.
+      const chains = {
+        claude: new Map([[100, [50, 'zsh', '']], [50, [1, 'claude', '/x/claude']], [1, [0, 'init', '']]]),
+        none: new Map([[100, [50, 'zsh', '']], [50, [1, 'tmux', '']], [1, [0, 'init', '']]]),
+        pidOne: new Map([[100, [1, 'zsh', '']], [1, [0, 'claude', '/x/claude']]]),
+        unreadable: new Map(),
+      };
+      const ownerOf = (chain) => sessionOwnerPid(100, (pid) => chains[chain].get(pid) ?? null);
+      const owners = [ownerOf('claude'), ownerOf('none'), ownerOf('pidOne'), ownerOf('unreadable')];
+      // A latch left by an earlier process with this pid (another start) is
+      // replaced, not honoured; this process's own start is readable.
+      const staleDir = join(scratch, 'stale-latches');
+      mkdirSync(staleDir, { recursive: true });
+      writeFileSync(join(staleDir, `${process.pid}.json`), JSON.stringify({ version: 2, owner: process.pid, ownerStart: 'another-process', baseBranch: 'old' }));
+      const replaced = recordLatch({ owner: process.pid, baseBranch: 'main', directory: staleDir });
+      const replacedLatch = sessionLatch({ owner: process.pid, directory: staleDir })?.latch;
+      if (JSON.stringify(owners) !== '[50,50,1,100]' || replaced === null || replacedLatch?.baseBranch !== 'main'
+        || (process.platform === 'linux' && processStart(process.pid) === null)) {
+        console.error(`FAIL [the latch owner and its pid-reuse check]: ${JSON.stringify({ owners, replaced, base: replacedLatch?.baseBranch })}`);
         ok = false;
       }
       // A latch whose processes have all exited is a finished session's: pruned.
@@ -4197,34 +4350,6 @@ function selfTest() {
 // keeps the refusal failing CLOSED if the host ever stops parsing this shape —
 // JSON with exit 0 would then fail OPEN, a security regression rather than a
 // cosmetic change. stderr keeps the reason visible in that case too.
-// The run's own state — the marker directories (the project's and the
-// command's) and the session latches — and the guard's own code: the plugin's
-// tools and hooks, which every hook call runs afresh. By real path too.
-export const PLUGIN_CODE_DIRS = Object.freeze(['tools', 'hooks']
-  .map((name) => join(dirname(dirname(fileURLToPath(import.meta.url))), name)));
-
-function withRealPaths(dirs) {
-  const present = dirs.filter((dir) => dir !== null);
-  return [...new Set([...present, ...present.map(realOrSelf)])];
-}
-
-// Also the shell snapshots every Bash call sources (an alias or function
-// appended there would run in a later command), and — while a run is open —
-// the repository's hook wiring, the Bash twin of the edit guard's rule.
-function runStateDirs(projectRoot, cwd, runOpen) {
-  return withRealPaths([
-    runMarkerDirectory(projectRoot), runMarkerDirectory(cwd), latchDirectory(),
-    join(homedir(), '.claude', 'shell-snapshots'),
-    ...(runOpen ? [
-      ...['.claude/settings.json', '.claude/settings.local.json'].map((file) => join(projectRoot, file)),
-      // The user's own settings and plugin registry: hooks, enabled plugins,
-      // disableAllHooks.
-      ...['settings.json', 'settings.local.json', 'plugins/installed_plugins.json', 'plugins/known_marketplaces.json']
-        .map((file) => join(homedir(), '.claude', file)),
-    ] : []),
-  ]);
-}
-
 // The command as the run-state rule reads it: each shell segment's words, and
 // the subshell parentheses that open before it and close after it. ANSI-C
 // quotes are decoded first, and every command substitution — outside single
@@ -4307,6 +4432,11 @@ function nestedScript(words) {
   while (index < words.length && (isAssignmentWord(words[index]) || EXEC_WRAPPERS.has(basename(words[index])))) index += 1;
   const head = basename(words[index] ?? '');
   if (head === 'eval') return { script: words.slice(index + 1).join(' '), child: false };
+  // An alias's value runs wherever its name is used later.
+  if (head === 'alias') {
+    const values = words.slice(index + 1).filter((word) => word.includes('=')).map((word) => word.slice(word.indexOf('=') + 1));
+    return values.length === 0 ? null : { script: values.join(' ; '), child: false };
+  }
   if (!/^(?:ba|da|k|z)?sh$/u.test(head)) return null;
   const flag = words.findIndex((word, at) => at > index && /^-[A-Za-z]*c[A-Za-z]*$/u.test(word));
   return flag === -1 || words[flag + 1] === undefined ? null : { script: words[flag + 1], child: true };
@@ -4418,7 +4548,8 @@ function main() {
   // The session latch (run-markers.mjs): prime writes it when it opens a run,
   // and the guard writes it the first time it sees one — refusing when it
   // cannot, since the markers alone are within the run's reach.
-  if (markers.length > 0 && recordLatch({ baseBranch: markers[0].marker.baseBranch, scope: projectRoot }) === null) {
+  if (markers.length > 0
+    && recordLatch({ baseBranch: markers[0].marker.baseBranch, scope: dirname(dirname(dirname(markers[0].path))) }) === null) {
     refuse(
       `autoloop guard — this session's run latch could not be written under ${latchDirectory()}, `
       + 'so the run would rest on its markers alone. Make that directory writable, then retry.',
@@ -4432,8 +4563,10 @@ function main() {
     );
   }
   // A run whose repository git can no longer read has hidden its markers (a
-  // broken HEAD or config): refuse until it can be read again.
-  if (latched !== null && commonDirOf(projectRoot) === null) {
+  // broken HEAD or config): refuse until it can be read again. The run's
+  // repository, as its latch records it — the session's project directory
+  // need not be one.
+  if (latched !== null && commonDirOf(latched.latch.scope ?? projectRoot) === null) {
     refuse(
       'autoloop guard — git cannot read this repository while a run is open (a damaged HEAD, '
       + 'config or refs), so the run\'s state cannot be checked. A human repairs the repository.',
@@ -4479,9 +4612,8 @@ function main() {
   const cwd = typeof payload?.cwd === 'string' ? payload.cwd : process.cwd();
   const runOpen = loopRunIsOpen() || loopRunIsOpen(projectRoot) || latched !== null;
   const segments = guardSegments(cmd);
-  const stateProblem = runStateProblem(segments, {
-    cwd, protectedDirs: runStateDirs(projectRoot, cwd, runOpen), codeDirs: withRealPaths(PLUGIN_CODE_DIRS),
-  });
+  const protectedDirs = protectedPaths({ projectRoot, cwd, runOpen });
+  const stateProblem = runStateProblem(segments, { cwd, protectedDirs: protectedDirs.state, codeDirs: protectedDirs.code });
   if (stateProblem !== null) refuse(stateProblem);
   // A command that opens a run does only that (and reads): prime writes the
   // latch, but a compound could still break git or remove the fresh records

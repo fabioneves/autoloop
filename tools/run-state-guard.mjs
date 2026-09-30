@@ -72,6 +72,12 @@ function isAssignment(word) {
 function headIndex(words, from = 0) {
   for (let index = from; index < words.length; index += 1) {
     const word = words[index];
+    // A function definition's body is the command: `f(){ rm …; }; f`.
+    if (/^[A-Za-z_][\w.-]*\(\)\{?$/u.test(word) || word === '()' || word === '(){') continue;
+    if (word === 'function') {
+      index += 1;
+      continue;
+    }
     if (isAssignment(word) || WRAPPERS.has(basename(word)) || /^\d+[smhd]?$/u.test(word)) continue;
     if (word.startsWith('-') && index > from && WRAPPERS.has(basename(words[from]))) continue;
     return index;
@@ -155,11 +161,19 @@ const CURRENT_USER = (() => {
 
 // `~`, `~+` ($PWD), `~-` ($OLDPWD) and the current user's own `~name`; any
 // other user's home, or a directory the guard lost track of, stays unknown.
+// The home a tilde means: the command's own HOME= when it set one.
+function homeOf(at, home) {
+  const own = at.vars.get('HOME');
+  if (own === undefined) return at.tainted ? null : home;
+  return own !== null && own.length === 1 ? own[0] : null;
+}
+
 function tildeExpanded(text, at, home) {
   const match = /^~([^/]*)(\/.*)?$/u.exec(text);
   if (match === null) return text;
   const [, user, rest = ''] = match;
-  const base = user === '' || user === CURRENT_USER ? home : user === '+' ? at.dir : user === '-' ? at.oldDir : null;
+  const base = user === '' || user === CURRENT_USER ? homeOf(at, home)
+    : user === '+' ? at.dir : user === '-' ? at.oldDir : null;
   return base === null ? `${UNKNOWN}${rest}` : `${base}${rest}`;
 }
 
@@ -178,11 +192,14 @@ function substitute(text, at, home, env) {
     const literal = text.slice(last, match.index);
     last = match.index + match[0].length;
     const own = at.vars.get(name);
+    // After `.`/`source`/`export $(…)` the command may have set anything: a
+    // variable it did not visibly set is unknown, not the environment's.
     const values = own !== undefined ? own
       : name === 'PWD' ? [at.dir ?? match[0]]
         : name === 'OLDPWD' ? [at.oldDir ?? match[0]]
-          : name === 'HOME' ? [home]
-            : [env[name] ?? ''];
+          : at.tainted ? null
+            : name === 'HOME' ? [home]
+              : [env[name] ?? ''];
     const next = [];
     for (const result of results) {
       for (const value of values ?? [match[0]]) next.push(result + literal + (value ?? match[0]));
@@ -196,8 +213,11 @@ function substitute(text, at, home, env) {
 
 // Every text a word can stand for — tildes, special parameters and variables
 // substituted, braces expanded. null past the cap.
+// `$(date +%F)` (a format without `/`) is a date: a log name, never a path.
+const DATE = /\$\(\s*date(?:\s+[^)/`$]*)?\)|`\s*date(?:\s+[^`/$]*)?`/gu;
+
 function expansions(word, at, home, env) {
-  const substituted = substitute(tildeExpanded(word.replace(SPECIAL_PARAMETER, '0'), at, home), at, home, env);
+  const substituted = substitute(tildeExpanded(word.replace(SPECIAL_PARAMETER, '0').replace(DATE, '0'), at, home), at, home, env);
   if (substituted === null) return null;
   const results = [];
   for (const text of substituted) {
@@ -361,10 +381,24 @@ function claims(words, head) {
     return [{ word: null, relations: [], prove: true }];
   }
   if (name === 'fd') return fdClaims(words, at);
+  // Remapping what a name runs (`hash -p /bin/rm cat`, `enable -f lib x`)
+  // makes every later command unknown.
+  if ((name === 'hash' && rest.includes('-p')) || (name === 'enable' && rest.includes('-f'))) {
+    return [{ word: null, relations: [], prove: true }];
+  }
   if (READ_ONLY.has(name)) return [];
   if (name === 'sed' || name === 'perl') {
-    return rest.some((word) => /^-[A-Za-z]*i/u.test(word) || word.startsWith('--in-place'))
-      ? all(operands(words, at), ['inside'], false) : [];
+    if (!rest.some((word) => /^-[A-Za-z]*i/u.test(word) || word.startsWith('--in-place'))) return [];
+    // The files an in-place edit rewrites: not the script (sed's first
+    // operand, unless -e/-f named it; perl's -e/-E code).
+    const scripts = name === 'sed'
+      ? new Set(['-e', '--expression', '-f', '--file'])
+      : new Set(['-e', '-E', '-M', '-I', '-m']);
+    const named = rest.some((word) => scripts.has(word) || /^-[A-Za-z]*[eEf]$/u.test(word));
+    const files = operands(words, at, scripts);
+    const valued = rest.flatMap((word, index) => (scripts.has(word) || /^-[A-Za-z]*[eEf]$/u.test(word)) ? [rest[index + 1]] : []);
+    const targets = files.filter((word) => !valued.includes(word));
+    return all(name === 'sed' && !named ? targets.slice(1) : targets, ['inside'], true);
   }
   if (name === 'find') return findClaims(words, at);
   if (name === 'xargs' || name === 'parallel') {
@@ -544,7 +578,7 @@ export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], h
   for (const at of placed) {
     // Redirections write, whatever the command.
     for (const target of at.writes) {
-      const problem = judge({ word: target, relations: ['inside'], prove: false }, at, dirs, home, env);
+      const problem = judge({ word: target, relations: ['inside'], prove: true }, at, dirs, home, env);
       if (problem !== null) return problem;
     }
     if (at.head === -1) continue;
@@ -627,14 +661,21 @@ function placeSegments(segments, cwd, home, env) {
   const dirStack = [];
   const stack = [];
   const vars = new Map();
+  let tainted = false;
   const unknown = (name) => vars.set(name, null);
   return segments.map((segment) => {
     for (let open = 0; open < segment.opens; open += 1) stack.push({ dir, oldDir });
     const list = joinSubstitutions(segment.words);
     const head = headIndex(list);
     const headName = head === -1 ? '' : basename(list[head]);
-    const at = { dir, oldDir, vars };
+    const at = { dir, oldDir, vars, tainted };
     const setter = ['export', 'declare', 'local', 'readonly', 'typeset'].includes(headName);
+    // Sourcing a file, or setting names the guard cannot read, may set any
+    // variable: from here on, only what the command visibly set is known.
+    if (['.', 'source', 'let', 'getopts'].includes(headName)
+      || (setter && list.slice(head + 1).some((word) => !isAssignment(word) && !word.startsWith('-')))) {
+      tainted = true;
+    }
     if (head === -1 || setter) {
       const nameref = setter && list.slice(head + 1).some((word) => /^-[A-Za-z]*n/u.test(word));
       for (const word of list.slice(setter ? head + 1 : 0).filter(isAssignment)) {
@@ -659,7 +700,7 @@ function placeSegments(segments, cwd, home, env) {
       const named = list.indexOf('-v', head);
       if (named !== -1 && list[named + 1] !== undefined) unknown(list[named + 1]);
     }
-    const scope = { dir, oldDir, vars: new Map(vars) };
+    const scope = { dir, oldDir, vars: new Map(vars), tainted };
     const chdir = list.findIndex((word, index) => index < head && (word === '-C' || word === '--chdir'));
     const segmentDir = chdir === -1 ? dir : placeDir(list[chdir + 1] ?? '', scope, home, env);
     const argv = [];
@@ -680,12 +721,16 @@ function placeSegments(segments, cwd, home, env) {
       // `>&2` and `>&-` duplicate descriptors; `>&file` writes a file.
       if (!/^&?(?:\d+|-)$/u.test(target)) writes.push(target.replace(/^&/u, ''));
     }
-    const placedSegment = { argv, head, writes, dir: segmentDir, oldDir, vars: scope.vars };
+    const placedSegment = { argv, head, writes, dir: segmentDir, oldDir, vars: scope.vars, tainted: scope.tainted };
     if (headName === 'cd' || headName === 'pushd') {
       const target = argv[head + 1];
-      const next = target === undefined ? home
+      // With CDPATH set, a relative target may resolve under any of its entries.
+      const cdpath = scope.vars.has('CDPATH') ? scope.vars.get('CDPATH') !== null && scope.vars.get('CDPATH').some(Boolean)
+        : scope.tainted || (env.CDPATH ?? '') !== '';
+      const next = target === undefined ? homeOf(scope, home)
         : target === '-' ? oldDir
-          : target.startsWith('-') ? null : placeDir(target, scope, home, env);
+          : target.startsWith('-') ? null
+            : cdpath && !/^(?:\/|\.|~)/u.test(target) ? null : placeDir(target, scope, home, env);
       if (headName === 'pushd') dirStack.push(dir);
       oldDir = dir;
       dir = next;
@@ -746,6 +791,8 @@ export const TAMPERING = Object.freeze([
   'tee .git/autoloop/run/a.json',
   'truncate -s0 .git/autoloop/run/1.json',
   'sed -i s/a/b/ .git/autoloop/run/1.json',
+  'sed -i -e s/a/b/ .git/autoloop/run/1.json',
+  'perl -pi -e s/a/b/ .git/autoloop/run/1.json',
   'find . -name *.json -delete',
   'find .git -path *run* -exec rm {} +',
   'rm -rf .g*/a*/r*',
@@ -822,6 +869,16 @@ export const TAMPERING = Object.freeze([
   'rm -rf .git/autoloop/(run|x)',
   'rsync -a /tmp/forged/ .git/autoloop/run',
   'cp -rT /tmp/forged .git',
+  'cat /tmp/fake.json > $(echo .git/autoloop/run/m.json)',
+  'L=$(ls /home/u/.claude/autoloop/run-latches/*.json) ; cat x > $L',
+  'sed -i s/a/b/ $(echo .git/autoloop/run/1.json)',
+  '. /tmp/v ; rm -rf $P',
+  'export $(cat /tmp/env) ; rm -rf $P',
+  'HOME=/r/.git/autoloop ; rm -rf ~/run',
+  'CDPATH=/r/.git/autoloop ; cd run && rm -f *',
+  'f(){ rm -rf .git/autoloop/run ; } ; f',
+  'function g { rm -rf .git/autoloop/run ; } ; g',
+  'hash -p /bin/rm cat ; cat .git/autoloop/run/1.json',
   'awk -i inplace 1 /p/tools/command-guard.mjs',
   'node /tmp/evil.mjs /p/tools/command-guard.mjs',
 ]);
@@ -850,7 +907,7 @@ export const ORDINARY = Object.freeze([
   'find . -name *.ts -exec wc -l {} +',
   'find . -type f -exec grep -l foo {} ;',
   'echo done > /tmp/autoloop-354/note.md',
-  'echo x > "$OUT"',
+  'OUT=/tmp/o.txt ; echo x > $OUT',
   'cd /tmp/autoloop-354 && rm -rf live',
   'S=/tmp/s ; rm -rf $S/rel',
   'J=$(mktemp) ; curl -c $J x ; rm -f $J',
@@ -882,6 +939,12 @@ export const ORDINARY = Object.freeze([
   'git config user.email x@x.invalid',
   'ln -s ../shared node_modules/shared',
   'rsync -a src/ /tmp/copy/',
+  "sed -i 's/`a`/`b`/' docs/x.md",
+  "sed -i -e 's/$x/y/' -e 's/a/b/' docs/x.md",
+  "perl -pi -e 's/`a`/b/' docs/x.md",
+  'npm test > /tmp/log-$(date +%F).txt 2>&1',
+  'echo done > ~/notes.txt',
+  'cd && ls',
 ]);
 
 function selfTest() {
@@ -924,7 +987,8 @@ function selfTest() {
     const words = text.slice(opens, text.length - closes).trim().match(/'[^']*'|\S+/gu).map((word) => word.replace(/^'(.*)'$/u, '$1'));
     return { words, opens, closes };
   });
-  const refused = (command, cwd = repo) => runStateProblem(segmentsOf(command), { cwd, protectedDirs, codeDirs, home }) !== null;
+  // env {}: the verdicts must not depend on the environment running the test.
+  const refused = (command, cwd = repo) => runStateProblem(segmentsOf(command), { cwd, protectedDirs, codeDirs, home, env: {} }) !== null;
   const tampering = TAMPERING.filter((command) => !refused(command));
   check('every shape that writes, moves or deletes the run state is refused', tampering.length === 0);
   if (tampering.length > 0) console.error(`  evaded: ${JSON.stringify(tampering)}`);

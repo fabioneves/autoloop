@@ -178,13 +178,14 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   const base = baseSyncFacts(root, config.baseBranch);
   pruneDeadRunMarkers(root);
   clearRunParks(root);
-  const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
   // The run's second record, outside the repository and owned by the
-  // session's Claude process (run-markers.mjs): written here, so no command
-  // between opening the run and the guard's first look can hide the run.
-  if (runMarker !== null && recordLatch({ baseBranch: config.baseBranch, scope: root }) === null) {
+  // session's Claude process (run-markers.mjs), written before the marker:
+  // no command between opening the run and the guard's first look can hide
+  // the run, and a latch that cannot be written leaves no marker behind.
+  if (recordLatch({ baseBranch: config.baseBranch, scope: root }) === null) {
     return failure('run', 'RUN_LATCH_UNWRITABLE', `the session latch could not be written under ${latchDirectory()}; the run is not opened`);
   }
+  const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });

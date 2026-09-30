@@ -23,24 +23,32 @@ fixing all three (2026-09-29).
   - `<pid>` is the session's Claude process, found through process ancestry the same way markers
     are matched. It is never found through git or through anything the run can edit.
   - The latch records the run's base, pinned once, and the owner's start time (against pid reuse).
-  - **prime writes it** when it opens a run, and refuses to open the run if it cannot. So no
-    command between opening the run and the guard's first look can hide the run.
+  - **prime writes it** when it opens a run, before the marker, and refuses to open the run if it
+    cannot. So no command between opening the run and the guard's first look can hide the run.
+  - An owner process running as pid 1 (a container) is recognized.
   - The command guard writes it too, the first time it sees open markers, and refuses if the write
     fails.
   - It is written atomically: a temp file, then a hard link into place.
-  - It holds while its owner lives. A present but unreadable latch fails closed: every command is
+  - It holds while its owner lives. A start time that cannot be read (for example when `ps` fails)
+    is never taken for pid reuse. A present but unreadable latch fails closed: every command is
     refused.
+  - Markers and latches are read only when they are regular files: a FIFO planted in their place
+    would otherwise hang the hook.
   - A run whose repository git can no longer read (a broken HEAD or config) is refused until the
-    repository is repaired. Breaking git hides the markers, but not the latch.
+    repository is repaired. Breaking git hides the markers, but not the latch. "The run's
+    repository" is the one the latch records, not the session's project directory, which need not
+    be a repository.
 - **Every base is enforced.** The guard evaluates the command against the latch's base and every
   open marker's base, and refuses if any of them refuses. A forged marker can only add
   restrictions.
 - **A command that opens a run does only that.** Besides prime it may only read. Prime is run on
   its own everywhere in the skills, and this closes every "prime, then undo the records" compound.
-- **Protected paths.** These are protected in every autoloop repository, run or not:
+- **Protected paths.** `run-markers.mjs protectedPaths` lists them once for both guards. These are
+  protected in every autoloop repository, run or not:
   - the marker directories, for both the project and the cwd;
   - the latch directory;
-  - the session's shell snapshots in `~/.claude/shell-snapshots`, which every Bash call sources;
+  - the session's shell snapshots in `~/.claude/shell-snapshots`, which every Bash call sources,
+    and `~/.claude/session-env`;
   - the plugin's own `tools/` and `hooks/`.
 
   While a run is open, these are protected as well:
@@ -67,14 +75,25 @@ fixing all three (2026-09-29).
   - Each resulting path must be neither inside a protected directory nor an ancestor of one. A
     copy must not land the protected name, and a hard link or symlink must not point at the
     protected state.
-  - **Unknown means refused.** A value from a substitution, `read`, `printf -v`, a nameref or a
-    positional parameter, or a relative path after an untracked `cd`, cannot be proven, so a
-    destructive command that uses one is refused.
+  - **Unknown means refused.** These cannot be proven, so a destructive command, a redirection or
+    an in-place edit that uses one is refused:
+    - a value from a substitution, `read`, `printf -v`, a nameref or a positional parameter;
+    - any variable the command did not visibly set, once it has sourced a file or run
+      `export $(…)`, `let` or `getopts`;
+    - a relative path after an untracked `cd`, or after any `cd` while `CDPATH` is set.
+
+    A `$(date …)` without a `/` in its format counts as a known date, so log names stay allowed.
+    The command's own `HOME=` decides what `~` and a bare `cd` mean. Function bodies and `alias`
+    values are judged as commands, and `hash -p` and `enable -f` are refused.
   - `git` is also refused when aimed at the state through `-C`, `--work-tree`, `--git-dir`,
     `GIT_WORK_TREE`/`GIT_DIR`/`GIT_COMMON_DIR` (inline or exported) or `config core.worktree`.
   - Any other program may not name a path inside the run state, and may not name the plugin's
     code, unless it is running a plugin tool.
 - **The tokenizer.**
+  - A single linear lexer (`lexShell`) handles quotes, `#` comments at a word start, and heredocs
+    (never `<<<`, never inside quotes or a comment). It replaced the regex versions, which hid whole
+    lines from every rule. `evaluate` uses it too: across 27,478 recorded commands it changed
+    exactly one verdict, and that one was a false positive.
   - It decodes ANSI-C quotes.
   - It splits redirections glued to words (`echo x>file`); `>&file` is a write, `>&2` is not.
   - It keeps the text after `<<EOF` on its line. This was a pre-existing bypass of every rule:
@@ -82,10 +101,10 @@ fixing all three (2026-09-29).
   - It judges substitutions outside single quotes, and those in unquoted heredoc bodies.
   - It judges `eval` and `sh -c` scripts as the commands they run.
   - Nesting past its caps refuses.
-- **False positives.** Replayed over 22,841 recorded Bash commands from every local project: 4
-  refused. Each is a destructive command whose operand is a value the guard cannot see:
-  `$(git worktree list …)`, `$(fd …)`, `$(date …)`, and an unknown loop-derived name. None is from
-  a loop run.
+- **False positives.** Replayed over 23,268 recorded Bash commands from every local project: 16
+  refused (0.07%). Each writes to a name built from a value the guard cannot see, such as
+  `$S/run-$name.log` where `name` comes from a substitution loop. One more refusal is correct: an
+  `rm` of a real latch. None of the 3,143 commands from the loop repositories is refused.
 - **Residual risk (accepted).** The guard runs as the same uid as the session. A script file the
   run writes and then executes can still reach any of it. Inline interpreter source is already
   refused. The enforcement boundary stays the repository's server-side rules, and an OS-level

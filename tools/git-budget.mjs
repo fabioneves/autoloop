@@ -34,7 +34,9 @@ export function gitStalled() {
 
 export function boundedGit(args, options = {}) {
   const remaining = deadline - Date.now();
-  if (remaining <= 0) {
+  // One stall is enough to refuse: later calls return at once rather than
+  // each spending its share of the budget on the same stalled repository.
+  if (remaining <= 0 || stalled) {
     stalled = true;
     return { status: null, stdout: '', stderr: '', error: new Error('git budget spent') };
   }

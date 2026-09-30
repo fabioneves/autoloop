@@ -44,6 +44,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -231,6 +232,10 @@ async function buildFixtureRepository(scratch) {
 export function runSmokeSteps({
   root,
   environment,
+  // The engine's own environment: the real HOME for real-engine credentials.
+  // Everything else (prime, the guards) runs under `environment`, whose HOME
+  // is the scratch one — the session latch lives there.
+  dispatchEnvironment = environment,
   argvLog,
   stepTimeoutMs = STEP_TIMEOUT_MS,
   roles = ['plan-review', 'implement', 'code-review'],
@@ -280,6 +285,15 @@ export function runSmokeSteps({
     if (result.status !== 0 || value.ok !== true) {
       return { ok: false, detail: `prime failed: ${bounded(JSON.stringify(value))}` };
     }
+    // prime itself writes the session latch as it opens the run, before any
+    // guard has seen it: no window in which a later command could hide the run.
+    let latched = false;
+    try {
+      latched = readdirSync(join(environment.HOME, '.claude', 'autoloop', 'run-latches')).some((name) => /^\d+\.json$/u.test(name));
+    } catch {
+      latched = false;
+    }
+    if (!latched) return { ok: false, detail: 'prime opened the run without writing the session latch' };
     const sections = Object.values(value.sections ?? {});
     let persistedKind = null;
     try {
@@ -328,7 +342,7 @@ export function runSmokeSteps({
           '--output-file', join(root, `.git/autoloop/${role}-result.json`),
           '--json',
         ],
-        { root, environment, stepTimeoutMs },
+        { root, environment: dispatchEnvironment, stepTimeoutMs },
       );
       if (!result.ok) return result;
       const value = result.value;
@@ -516,13 +530,13 @@ async function selfTest({ realEngine = false } = {}) {
       realEngine ? null : writeEngineShim(scratch, argvLog),
     );
     // prime writes the session latch under HOME, owned by the Claude process
-    // running the smoke: a shimmed smoke keeps it in the scratch dir, never
-    // in the operator's own home (real-engine mode needs the real one for
-    // the engine's credentials, and opens no run).
-    if (!realEngine) {
-      environment.HOME = join(scratch, 'home');
-      mkdirSync(environment.HOME, { recursive: true });
-    }
+    // running the smoke, and the guardrail step deletes it: every step but the
+    // engine's runs under a scratch HOME — never the operator's own, where
+    // live loops keep theirs. Only a real engine's dispatch keeps the real
+    // HOME, for its credentials.
+    const dispatchEnvironment = realEngine ? { ...environment } : null;
+    environment.HOME = join(scratch, 'home');
+    mkdirSync(environment.HOME, { recursive: true });
 
     let fixture = null;
     const setup = await timedPhase('fixture-setup', async () => {
@@ -539,6 +553,7 @@ async function selfTest({ realEngine = false } = {}) {
       outcome = runSmokeSteps({
         root: fixture.root,
         environment,
+        dispatchEnvironment: dispatchEnvironment ?? environment,
         argvLog,
         stepTimeoutMs,
         // The real-engine mode spends money, so it proves exactly one thing:
