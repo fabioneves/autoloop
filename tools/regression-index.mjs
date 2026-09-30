@@ -40,10 +40,11 @@ export const INCIDENTS = Object.freeze([
     cause: 'Behind a gateway (ANTHROPIC_BASE_URL) Claude Code cannot look a model '
       + 'up, so a bare id gets a 200k window: measured through the proxy, '
       + 'claude-opus-5-5 200,000 and claude-opus-5-5[1m] 1,000,000; the same for '
-      + 'Fable and astra. The routes and fallbacks carried bare ids.',
+      + 'Fable and astra. The routes and fallbacks carried bare ids; the default '
+      + 'model table (models-config.mjs) now carries [1m] on every id.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'dispatch.mjs', anchor: "'fallbacks carry [1m] and a suffixed route on its default has nowhere further to go'" }),
-      Object.freeze({ file: 'dispatch.mjs', anchor: "    'implement claude claude-opus-5-5[1m]'," }),
+      Object.freeze({ file: 'models-config.mjs', anchor: '// Every id carries [1m]: a gateway serves a bare id with a 200k window.' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'with no global config the defaults are written and every role resolves its own entry'" }),
     ]),
   }),
   Object.freeze({
@@ -226,10 +227,10 @@ export const INCIDENTS = Object.freeze([
       + 'models through, but the dispatch child ran direct (apiKeySource none).',
     cause: 'dispatchEnvironment deleted a session-wide ANTHROPIC_BASE_URL from '
       + 'every native route on the premise that the proxy never serves Claude '
-      + 'models. A native route now inherits the session environment; only a '
-      + 'proxied route\'s own @url replaces it.',
+      + 'models. Every dispatch now inherits the session environment untouched: '
+      + 'autoloop sets no URL at all (SPEC-model-config.md).',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'dispatch.mjs', anchor: "'a proxied route injects exactly its URL; a native route inherits the session\\'s'" }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'every dispatch inherits the session\\'s ANTHROPIC_BASE_URL and runs its own role\\'s model'" }),
     ]),
   }),
   Object.freeze({
@@ -1154,13 +1155,11 @@ export const INCIDENTS = Object.freeze([
       + 'fable` pin was resolved by the review proxy.',
     cause: 'The review-engine recording was keyed to the reviewer POSTURE, and '
       + '`plan` shares that posture for its read-only sandbox while being '
-      + 'authored work. Keying on the verdict RESULT separates the two.',
+      + 'authored work. Since SPEC-model-config every role resolves only its own '
+      + 'entry of one table, so nothing is shared by posture.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'dispatch.mjs', anchor: 'function followsReviewChoice(' }),
-      Object.freeze({
-        file: 'dispatch.mjs',
-        anchor: "// The plan is authored work: it never follows the review recording.",
-      }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: '  const entry = resolved.models[role];' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'with no global config the defaults are written and every role resolves its own entry'" }),
     ]),
   }),
   Object.freeze({
@@ -1466,13 +1465,13 @@ export const INCIDENTS = Object.freeze([
       + 'role shared one model and writers could not be routed at all.',
     cause: 'Routing was keyed to "verdict or not". Since 0.50.0 each role '
       + 'resolves only its own `routes` line (fail-closed on any bad line), a '
-      + 'native route never inherits a proxy URL, and the no-self-review '
-      + 'invariant is carried by the standing table instead of the code.',
+      + 'native route never inherits a proxy URL. Since SPEC-model-config each '
+      + 'role has its own entry in one config table, and the no-self-review '
+      + 'invariant is enforced in code, fallbacks included.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'dispatch.mjs', anchor: 'every role resolves its own recorded route and nothing else' }),
-      Object.freeze({ file: 'dispatch.mjs', anchor: 'a proxied route injects exactly its URL; a native route inherits the session' }),
-      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function standingRoutes(' }),
-      Object.freeze({ file: 'session-preflight.sh', anchor: 'review-engine is ignored while they exist' }),
+      Object.freeze({ file: 'models-config.mjs', anchor: 'export function invariantProblems(models) {' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'with no global config the defaults are written and every role resolves its own entry'" }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'an invalid model table fails the dispatch closed, typed, and names why'" }),
     ]),
   }),
   Object.freeze({
@@ -1634,12 +1633,12 @@ export const INCIDENTS = Object.freeze([
       + 'route would send its prompt and inherited credentials to that host.',
     cause: 'The URL check was syntax only. Proxy URLs are now loopback only '
       + '(127.0.0.1, localhost, [::1]) in the routes table, its fallback, the proxy '
-      + 'preset and the legacy review-engine recording.',
+      + 'preset and the legacy review-engine recording. Since SPEC-model-config '
+      + 'autoloop records no URL at all: a dispatch inherits the session '
+      + 'environment, so no recording can redirect it.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function loopbackUrl(text) {' }),
-      Object.freeze({ file: 'dispatch.mjs', anchor: "if (baseUrl !== null || !loopbackUrl(token.slice(1))) return null;" }),
-      Object.freeze({ file: 'dispatch.mjs', anchor: "if (route.baseUrl !== null || !loopbackUrl(token.slice(1))) {" }),
-      Object.freeze({ file: 'dispatch.mjs', anchor: '|| (fallback[2] !== undefined && !loopbackUrl(fallback[2]))) {' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function dispatchEnvironment() {' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'every dispatch inherits the session\\'s ANTHROPIC_BASE_URL and runs its own role\\'s model'" }),
     ]),
   }),  Object.freeze({
     id: 'a-route-without-a-fallback-stopped-on-an-unavailable-model',
@@ -1647,11 +1646,12 @@ export const INCIDENTS = Object.freeze([
     symptom: 'A route with no recorded >model failed ROUTE_FALLBACK_MISSING at a usage '
       + 'limit or an unavailable model, although every model on the table is available '
       + 'to the operator.',
-    cause: 'Fallbacks were opt-in per route. Every route now defaults to Opus, and the '
-      + 'code reviewers default to Fable, because Opus wrote the code they judge.',
+    cause: 'Fallbacks were opt-in per route. Since SPEC-model-config every role\'s '
+      + 'default carries a fallback, and a model the session cannot serve moves '
+      + 'any role, a writer too, to it.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'dispatch.mjs', anchor: 'export function effectiveFallback(role, route) {' }),
-      Object.freeze({ file: 'dispatch.mjs', anchor: "const CODE_REVIEW_ROLES = new Set(['diff-review', 'code-review', 'doubt-review']);" }),
+      Object.freeze({ file: 'models-config.mjs', anchor: "implement: Object.freeze({ model: 'claude-opus-5-5[1m]', effort: null, fallback: 'claude-fable-5-1[1m]' })," }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'an unavailable model moves any role, a writer too, to its fallback once, stamped'" }),
     ]),
   }),
   Object.freeze({
