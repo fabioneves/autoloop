@@ -3,6 +3,14 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.64.1] - 2026-09-30
+
+### Fixed
+
+- **The parked view prints once.** `step.mjs --parked --out <file>` writes the view to a file and
+  prints nothing, and the dev skill prints it from there. Before, every parked turn showed the view
+  twice: once as the tool's output and again as the loop's repeat.
+
 ## [0.64.0] - 2026-09-30
 
 ### Added
