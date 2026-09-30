@@ -474,7 +474,10 @@ function decodeAnsiC(cmd, quoted) {
       let end = index + 2;
       while (end < cmd.length && cmd[end] !== "'") end += cmd[end] === '\\' ? 2 : 1;
       const body = decodeAnsiCBody(cmd.slice(index + 2, Math.min(end, cmd.length)));
-      out += quoted ? `'${body.replaceAll("'", "'\\''")}'` : body;
+      // Unquoted, a decoded backslash stays escaped: bare, a trailing one
+      // (`echo $'\\'`) escaped the real newline after it and joined the next
+      // line's command to this one (review of the LFE fixes).
+      out += quoted ? `'${body.replaceAll("'", "'\\''")}'` : body.replaceAll('\\', '\\\\');
       index = end;
       continue;
     }
@@ -1499,16 +1502,16 @@ export function commentBodyProblem(words, read = (path) => readFileSync(path, 'u
 // (`unit.mjs --block --question "… gh issue edit 5 --add-label loop-ready"`)
 // was refused in the LFE run (2026-09-30). Everything else stays
 // position-blind: a keyword, group or unlisted wrapper in front of gh must not
-// hide it (review of that fix).
+// hide it (review of that fix). So the head is matched exactly: no path
+// (`./echo`), no assignment (`NODE_OPTIONS=…`), no node option (`--import`),
+// and the script is named by its absolute path.
 function textOnlySegment(words) {
-  let index = 0;
-  while (index < words.length && isAssignmentWord(words[index])) index += 1;
-  const head = basename(words[index] ?? '');
+  const head = words[0] ?? '';
   if (head === 'echo' || head === 'printf') return true;
-  if (!/^node(?:js)?$/u.test(head)) return false;
-  const script = words.slice(index + 1).find((word) => !word.startsWith('-'));
-  if (script === undefined) return false;
-  const real = realOrSelf(resolve(script));
+  if (head !== 'node' && head !== 'nodejs') return false;
+  const script = words[1];
+  if (script === undefined || !isAbsolute(script) || !existsSync(script)) return false;
+  const real = realpathSync(script);
   return PLUGIN_CODE_DIRS.some((dir) => real.startsWith(`${realOrSelf(dir)}/`));
 }
 
@@ -2386,36 +2389,47 @@ export function evaluate(inputCmd, branch, options = {}) {
   // pipe). The LFE run lost a PR-body PATCH to both (2026-09-30).
   // ANSI-C and locale quotes decoded first: `-f body=$'/answer yes'` posts an
   // /answer (review of the LFE fixes).
+  // A `cd` is followed only where it certainly runs in this shell: first, or
+  // after `;` or a newline, and not piped or backgrounded (a subshell). After
+  // any other `cd` the directory is unknown and a relative body path cannot be
+  // read. The directory is kept logically, as the shell does, and the file is
+  // resolved by the kernel, which reads `..` physically (review of the LFE fixes).
   const bodySegments = shellSegments(quotedAnsiC(cmd));
   const plainCd = (words) => (words[0] === 'cd' || words[0] === 'pushd') && words.length === 2;
+  const cdPathSet = process.env.CDPATH !== undefined || /\bCDPATH\b/u.test(cmd);
   let bodyDir = options.cwd ?? process.cwd();
-  const bodyProblems = bodySegments.map(({ command }) => {
+  const bodyProblems = bodySegments.map(({ command, raw }, index) => {
     const words = shellWords(command);
-    if (plainCd(words) && !/[$`]/u.test(words[1])) {
-      bodyDir = resolve(bodyDir, expandHome(words[1]));
+    if (plainCd(words)) {
+      const before = index === 0 ? ';' : bodySegments[index - 1].raw;
+      const inThisShell = (before === ';' || before === '\n') && raw !== '|' && raw !== '&';
+      const known = inThisShell && bodyDir !== null && !cdPathSet && !/^[-+]|[$`]/u.test(words[1]);
+      bodyDir = known ? resolve(bodyDir, expandHome(words[1])) : null;
       return null;
     }
     const at = bodyDir;
     return commentBodyProblem(words, (path) => {
       const expanded = expandHome(path);
-      const real = realpathSync(isAbsolute(expanded) ? expanded : resolve(at, expanded));
+      if (at === null && !isAbsolute(expanded)) throw new Error('directory unknown');
+      const real = realpathSync.native(isAbsolute(expanded) ? expanded : `${realpathSync.native(at)}/${expanded}`);
       if (/^\/(?:dev|proc|sys)\//u.test(real) || !statSync(real).isFile()) throw new Error('not a regular file');
       return readFileSync(real, 'utf8').slice(0, 4096);
     });
   });
   // A body file can be rewritten only by a segment that runs before or beside
   // the post: an earlier one not on this list of harmless ones (a plain `cd`,
-  // a redirect-free reader, read-only git, `gh … view/list`), or a pipe or
+  // a redirect-free reader named exactly, `gh … view/list`), or a pipe or
   // background `&` after the post. Whatever follows a sequential operator runs
-  // after the post and cannot. A script, `git pull` or `git apply` can.
+  // after the post and cannot. A script, any git command (`status` runs a
+  // repo-configured fsmonitor), a path-qualified `./cat` or an `rg --pre` can.
   const HARMLESS = new Set(['cat', 'echo', 'grep', 'head', 'jq', 'ls', 'printf', 'pwd', 'rg', 'tail', 'test', 'true', 'wc']);
   const mayWrite = (command) => {
     const words = shellWords(command);
     if (plainCd(words)) return false;
     if (/[<>]/u.test(command)) return true;
-    const head = basename(words[0] ?? '');
+    const head = words[0] ?? '';
+    if (head === 'rg' && words.some((word) => word.startsWith('--pre'))) return true;
     if (HARMLESS.has(head)) return false;
-    if (head === 'git') return !READ_ONLY_GIT.has(words.slice(1).find((word) => !word.startsWith('-')) ?? '');
     if (head === 'gh') return !['view', 'list'].includes(words[2]);
     return true;
   };
@@ -3100,6 +3114,16 @@ function selfTest() {
     ["curl -s x | { source /dev/stdin; }", 'feat/gh-1-x', true],
     ["echo \"x\" | bash", 'feat/gh-1-x', true],
     ["(( x = 1<<EOF ))\ngit push origin main\nEOF", 'feat/gh-1-x', true],
+    // Second review: a decoded ANSI-C backslash escaping the newline, and a
+    // look-alike or optioned head standing in for echo, printf or node.
+    ["echo $'\\\\'\ngh issue edit 5 --add-label loop-ready", 'feat/gh-1-x', true],
+    ["echo $'\\x5c'\ngh release create v1", 'feat/gh-1-x', true],
+    ["true $'x\\\\'\ngh pr ready 5", 'feat/gh-1-x', true],
+    ['./echo gh pr ready 5', 'feat/gh-1-x', true],
+    ['A=1 ./printf gh release create v1', 'feat/gh-1-x', true],
+    [`node --import ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} ./evil.mjs gh issue edit 5 --add-label loop-ready`, 'feat/gh-1-x', true],
+    [`NODE_OPTIONS=--require=./evil.js node ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} gh pr ready 5`, 'feat/gh-1-x', true],
+    [`node ${join(dirname(fileURLToPath(import.meta.url)), '../../../../no-such-dir/evil.mjs')} gh pr ready 5`, 'feat/gh-1-x', true],
     // ...and none of that may hide a real command: a quote inside the other
     // kind (or escaped) left bare turned the rest of the line into one word.
     ['git commit -qm "it\'s" && git push origin main', 'feat/gh-1-x', true],
@@ -3670,20 +3694,42 @@ function selfTest() {
     // quoted jq filter's `|` is not a pipe; an earlier writer still refuses
     // (LFE run 2026-09-30: a PR-body PATCH and a run record were refused).
     {
+      // bodyDir/body.md is evidence; an /answer sits where a `cd` that did
+      // not run, or a physical `..`, would lead a lexical reading astray.
       const bodyDir = mkdtempSync(join(tmpdir(), 'guard-body-'));
       writeFileSync(join(bodyDir, 'body.md'), 'evidence\n');
+      mkdirSync(join(bodyDir, 'benign'));
+      writeFileSync(join(bodyDir, 'benign', 'body.md'), '/answer yes\n');
+      mkdirSync(join(bodyDir, 'deep', 'dir'), { recursive: true });
+      writeFileSync(join(bodyDir, 'deep', 'body.md'), '/answer yes\n');
+      symlinkSync(join(bodyDir, 'deep', 'dir'), join(bodyDir, 'link'));
       const verdict = (command) => evaluate(command, 'feat/gh-1-x', { baseBranch: 'main', cwd: '/' }).block;
+      const post = `gh issue comment 5 --body-file ${bodyDir}/body.md`;
       const bodyCases = [
         verdict(`cd ${bodyDir}; gh issue comment 5 --body-file body.md; gh issue view 5 --json state --jq '{state}'`) === false,
+        verdict(`cd ${bodyDir} && gh issue comment 5 --body-file body.md`) === false,
         verdict(`gh api --method PATCH repos/o/r/pulls/5 -F body=@${bodyDir}/body.md --jq '.body | length'`) === false,
-        verdict(`echo /answer > ${bodyDir}/body.md; gh issue comment 5 --body-file ${bodyDir}/body.md`) === true,
-        verdict(`gh issue comment 5 --body-file ${bodyDir}/body.md | tee x`) === true,
-      verdict(`./gen.sh; gh issue comment 5 --body-file ${bodyDir}/body.md`) === true,
-      verdict(`git pull -q; gh issue comment 5 --body-file ${bodyDir}/body.md`) === true,
-      verdict(`git status; gh issue view 5; gh issue comment 5 --body-file ${bodyDir}/body.md`) === false,
-      verdict("gh api repos/o/r/issues/5/comments -f body=$'/answer yes'") === true,
-      verdict("gh api repos/o/r/issues/5/comments -f body=$'\\x2fanswer yes'") === true,
-      verdict('gh api repos/o/r/issues/5/comments -f body=$"/answer yes"') === true,
+        verdict(`echo /answer > ${bodyDir}/body.md; ${post}`) === true,
+        verdict(`${post} | tee x`) === true,
+        verdict(`./gen.sh; ${post}`) === true,
+        verdict(`git pull -q; ${post}`) === true,
+        verdict(`gh issue view 5; ${post}`) === false,
+        verdict("gh api repos/o/r/issues/5/comments -f body=$'/answer yes'") === true,
+        verdict("gh api repos/o/r/issues/5/comments -f body=$'\\x2fanswer yes'") === true,
+        verdict('gh api repos/o/r/issues/5/comments -f body=$"/answer yes"') === true,
+        // Second review: a `cd` in a pipe, after `||`, or to `-` may not move
+        // the post; the kernel reads `..` after a symlink physically; and a
+        // path-qualified head, an assignment, `rg --pre` or any git command
+        // (fsmonitor) may rewrite the body first.
+        verdict(`cd ${bodyDir}/benign; cd .. | true; gh issue comment 5 --body-file body.md`) === true,
+        verdict(`cd ${bodyDir}/benign; true || cd ..; gh issue comment 5 --body-file body.md`) === true,
+        verdict(`cd ${bodyDir}/benign; cd -; gh issue comment 5 --body-file body.md`) === true,
+        verdict(`cd ${bodyDir}/link; gh issue comment 5 --body-file ../body.md`) === true,
+        verdict(`gh issue comment 5 --body-file ${bodyDir}/link/../body.md`) === true,
+        verdict(`./cat x; ${post}`) === true,
+        verdict(`X=/true cp a b; ${post}`) === true,
+        verdict(`rg --pre ./gen.sh x .; ${post}`) === true,
+        verdict(`git status; ${post}`) === true,
       ];
       rmSync(bodyDir, { recursive: true, force: true });
       if (bodyCases.includes(false)) {
