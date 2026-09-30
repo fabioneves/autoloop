@@ -45,6 +45,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'git-budget.mjs',
   'label-swap-reminder.mjs',
   'lane-contract.mjs',
+  'models-config.mjs',
   'lifecycle-contract.mjs',
   'lifecycle-driver.mjs',
   'loop-scope.mjs',

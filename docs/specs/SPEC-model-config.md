@@ -27,7 +27,8 @@ Operator decisions, 2026-09-30:
   - Shape: `{"version": "1", "models": {<role>: {model, effort?, fallback?}}}`.
   - Unknown keys are refused.
 - **Project:** `.autoloop/config.json` may carry `models` with any subset of roles and fields.
-  - Schema 0.29.0, with a no-op migration from 0.28.0.
+  - It is an optional key under schema 0.28.0. There is no version bump, which would have sent
+    every repository through a migration PR for a key it need not carry.
   - `models` is left out of the review contract's `projectConfig` fingerprint. Routing is not
     reviewed policy, and each dispatch result stamps the model it actually ran.
 - **Resolution:** built-in defaults ← global ← project, per role and per field. Every tool reads
@@ -100,6 +101,6 @@ A role with a `null` fallback refuses as `ROUTE_FALLBACK_MISSING`.
   - the route comes from the resolved table;
   - `model_not_found` falls back for a writer and a reviewer;
   - a `null` fallback refuses.
-- Config-contract self-test: the 0.29.0 migration, and `models` absent from the fingerprint.
+- Config-contract self-test: `models` shape-checked, and absent from the fingerprint.
 - `verify --plugin-root .`, plus a live `dispatch.mjs --role plan-review` smoke under plain
   `claude`, where astra is unavailable and the fallback path runs.
