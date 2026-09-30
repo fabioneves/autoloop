@@ -54,27 +54,27 @@ clears, and a usage limit moves a role to its fallback model or parks the run un
 Every open question and every recent decision is collected in one pinned `loop-digest` issue,
 rewritten at each close or park.
 
-## Models and routes
+## Models
 
-Each role runs on its own recorded route: model, effort, and a fallback used when the model hits a
-usage limit or keeps failing. Other models run through a local Claude Code proxy, whose URL must be
-loopback. The standing table:
+Each step runs on its own model, reasoning effort and fallback, set in
+`~/.claude/autoloop/config.json` (created with these defaults when missing) and overridable per
+project in `.autoloop/config.json` under `models`:
 
-| Step | Role | Model | Route | Fallback |
+| Step | Role | Model | Effort | Fallback |
 |---|---|---|---|---|
-| 02 plan | `plan` | `gpt-6-astra` | proxy | `claude-opus-5-5` |
-| 03 plan review | `plan-review` | `claude-fable-5-1` | native | `claude-opus-5-5` |
-| 05 implement | `implement` | `claude-opus-5-5` | native | none (the unit parks) |
-| 06 simplify | `simplify` | `claude-fable-5-1` | native | `gpt-6-astra` (proxy) |
-| 07 diff review | `diff-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` |
-| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | proxy | `claude-fable-5-1` |
-| 08 fixes | `fix` | `claude-opus-5-5` | native | `gpt-6-astra` (proxy) |
+| 02 plan | `plan` | `gpt-6-astra` | xhigh | `claude-opus-5-5` |
+| 03 plan review | `plan-review` | `claude-fable-5-1` | xhigh | `claude-sonnet-5` |
+| 05 implement | `implement` | `claude-opus-5-5` | — | `claude-fable-5-1` |
+| 06 simplify | `simplify` | `claude-fable-5-1` | — | `claude-opus-5-5` |
+| 07 diff review | `diff-review` | `gpt-6-astra` | xhigh | `claude-sonnet-5` |
+| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | xhigh | `claude-sonnet-5` |
+| 08 fixes | `fix` | `claude-opus-5-5` | — | `claude-fable-5-1` |
 
-On the standing routes, no artifact is judged by the model that wrote it. A fallback can bend
-that for one run (for example, astra reviewing the simplify pass it covered for), and the run
-record says so. A route with no recorded fallback defaults to
-`claude-opus-5-5`, except the code reviewers, which default to `claude-fable-5-1` because Opus
-wrote the code they judge. `/autoloop:dev with host` runs every role on the host default.
+Every id carries `[1m]` in the file. No artifact is judged by the model that wrote it: a config
+where a reviewer could run on its writer's model, fallback included, is refused. Autoloop does
+not manage proxies. A dispatch inherits the session's environment, so the command that started
+the session decides which models are reachable. A model the session cannot serve moves the step
+to its fallback, as do a reviewer's usage limit and repeated failures.
 
 ## Guardrails
 
@@ -101,8 +101,7 @@ command (tests, lint, build — ideally sandboxed with no credentials or network
 /autoloop:setup
 ```
 
-Other models (for example `gpt-6-astra`) run through a local Claude Code proxy; see
-[Models and routes](#models-and-routes).
+Step models, efforts and fallbacks are configuration; see [Models](#models).
 
 The plugin bundles [agent-skills](https://github.com/addyosmani/agent-skills). If you already have
 it installed from its own marketplace, keep either copy.
@@ -190,8 +189,9 @@ Each role runs as a fresh, fixed-posture process. Reviewers are read-only and ca
 a prompt. Untrusted text travels in files, never shell source. Vendored hooks block direct merges,
 unsafe force-pushes, self-applied authorization labels, release publication, and malformed step
 swaps. Protected paths stop for `human:authorize`. Dispatch failures are typed and recorded. A
-read-only role retries a transient failure a bounded number of times and moves to its recorded
-fallback route on a usage limit; a writer never retries blindly, and there is no "skip review" mode.
+read-only role retries a transient failure a bounded number of times and moves to its configured
+fallback on a usage limit; any role moves to it when its model is unavailable; a writer never
+retries blindly, and there is no "skip review" mode.
 On restart the loop rebuilds state from Git and GitHub,
 adopts only proven orphans, and finishes or blocks them before taking new work. With nothing to do,
 it stops rather than polls.

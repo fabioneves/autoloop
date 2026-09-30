@@ -10,8 +10,9 @@
 // No artifact is judged by the model that wrote it: a table where a reviewer
 // and its writer share a model, fallbacks included, is refused.
 //
-// Usage: node models-config.mjs [--self-test]
-//        (no argument: print the resolved table for this checkout)
+// Usage: node models-config.mjs [--self-test | --lines]
+//        (no argument: the resolved global table as JSON; --lines: the
+//        session-start summary)
 
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -160,6 +161,20 @@ export function resolveModels({ projectModels, path = globalConfigPath(), create
     : { ok: true, models, source, errors: [] };
 }
 
+/** Session-start lines: where the table came from, and each role's model,
+ *  effort and fallback (project overrides are prime's to report). */
+export function modelLines(resolved) {
+  if (!resolved.ok) return [`NOTE  step models refused: ${resolved.errors.join('; ')}`];
+  const from = resolved.source.global ?? `built-in defaults (${resolved.source.globalError ?? 'no global file'})`;
+  return [
+    `INFO  step models from ${from}`,
+    ...MODEL_ROLES.map((role) => {
+      const { model, effort, fallback } = resolved.models[role];
+      return `INFO    ${role} ${model}${effort ? ` !${effort}` : ''}${fallback ? ` > ${fallback}` : ''}`;
+    }),
+  ];
+}
+
 function selfTest() {
   const results = [];
   const check = (name, ok) => results.push([name, ok === true]);
@@ -199,6 +214,13 @@ function selfTest() {
         && clash({ 'doubt-review': { fallback: 'claude-fable-5-1' } }).some((p) => p.includes('which simplify writes with'))
         && clash({ simplify: { model: 'claude-sonnet-5' } }).length === 3
         && resolveModels({ path, projectModels: { 'code-review': { model: 'claude-opus-5-5[1m]' } } }).ok === false);
+    check('the session-start lines name the source and each role\'s model, effort and fallback',
+      (() => {
+        const lines = modelLines(resolveModels({ path }));
+        return lines[0] === `INFO  step models from ${path}` && lines.length === 1 + MODEL_ROLES.length
+          && lines.includes('INFO    plan-review claude-fable-5-1[1m] !xhigh > claude-sonnet-5[1m]')
+          && modelLines({ ok: false, errors: ['x: bad'] })[0] === 'NOTE  step models refused: x: bad';
+      })());
     writeFileSync(path, '{not json');
     check('an unreadable global file refuses, naming it',
       resolveModels({ path }).errors[0].startsWith(path));
@@ -227,6 +249,10 @@ const isMain = (() => {
 if (isMain) {
   if (process.argv[2] === '--self-test') process.exit(selfTest() ? 0 : 1);
   const resolved = resolveModels();
+  if (process.argv[2] === '--lines') {
+    process.stdout.write(`${modelLines(resolved).join('\n')}\n`);
+    process.exit(0);
+  }
   process.stdout.write(`${JSON.stringify(resolved, null, 1)}\n`);
   process.exit(resolved.ok ? 0 : 1);
 }

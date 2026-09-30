@@ -570,19 +570,17 @@ export const INCIDENTS = Object.freeze([
       + 'remedy: dispatchEnvironment spreads process.env, so a session-wide '
       + 'ANTHROPIC_BASE_URL is inherited by EVERY dispatch child including '
       + 'implement and plan — exactly the writers resolveDefaultBaseUrl '
-      + 'returns null for. Following the advice would have proxied them.',
+      + 'returns null for. Following the advice would have proxied them. Since '
+      + 'SPEC-model-config autoloop manages no proxy: preflight prints the step '
+      + 'models and judges no environment, and the skill never probes one.',
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'session-preflight.sh',
-        anchor: 'proxied reviews are self-contained',
-      }),
-      Object.freeze({
-        file: 'session-preflight.sh',
-        anchor: 'so writers are proxied too',
+        anchor: 'reachable is this session\'s business — autoloop sets no proxy URL.',
       }),
       Object.freeze({
         file: '../skills/dev/SKILL.md',
-        anchor: 'the session\'s own environment is not a prerequisite and not evidence',
+        anchor: 'never probe, start or configure a proxy',
       }),
     ]),
   }),
@@ -1359,11 +1357,13 @@ export const INCIDENTS = Object.freeze([
     cause: 'The skill said to probe "the recorded URL" without giving the '
       + 'command, so a session composed one from the file it had just written. '
       + 'Same shape as the exit-3 merge contract: an outcome described without '
-      + 'an executable command is an invitation to improvise into a refusal.',
+      + 'an executable command is an invitation to improvise into a refusal. '
+      + 'Since SPEC-model-config the loop probes no proxy at all: an unreachable '
+      + 'model falls back inside dispatch.',
     enforcedBy: Object.freeze([
       Object.freeze({
         file: '../skills/dev/SKILL.md',
-        anchor: 'Write the URL as a literal',
+        anchor: 'never probe, start or configure a proxy',
       }),
     ]),
   }),
