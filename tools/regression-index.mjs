@@ -502,7 +502,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: '../skills/dev/SKILL.md',
-        anchor: "it is\nthe chain's ROOT and stays the captured ID",
+        anchor: "the chain's ROOT and stays the captured ID",
       }),
     ]),
   }),
