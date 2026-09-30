@@ -3,6 +3,15 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.2] - 2026-09-30
+
+### Fixed
+
+- **The parked view shows a step whose dispatch came back as returned.** Before, it showed as still
+  running.
+  - `step.mjs --resumed` records the return.
+  - A staged unit reads `02 plan returned · staged, waits its turn`.
+
 ## [0.65.1] - 2026-09-30
 
 Fixes from the LFE run on 0.64 and 0.65.

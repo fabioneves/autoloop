@@ -163,6 +163,21 @@ export function parkedView({ root, run = realRun(root), nowMs = Date.now(), mark
   });
 }
 
+// `--resumed`: the unit's current step's dispatch came back. Recorded on the
+// step so the parked view stops reading it as running; the next step starts
+// fresh. A unit with no open record is left alone.
+export function markReturned({ root, run = realRun(root), nowMs = Date.now(), issue }) {
+  const { dir } = autoloopDir(root, run);
+  if (dir === null) return { ok: false };
+  const path = join(dir, 'steps', `${issue}.json`);
+  const stored = readJson(path, null);
+  const last = stored?.steps?.at(-1);
+  if (!last || stored.closed) return { ok: false };
+  last.returnedAtMs = nowMs;
+  writeAtomically(path, stored);
+  return { ok: true };
+}
+
 export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '', ifOpen = false }) {
   const { dir } = autoloopDir(root, run);
   if (dir === null) return { ok: false, lines: ifOpen ? [] : [`step: no steps recorded for #${issue} (not in a git repository)`] };
@@ -308,12 +323,19 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
   const human = waiting.map((issue) => ` · #${issue} ⚠️ awaits /answer`).join('');
   return [
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
-    ...units.map(({ issue, step, model, startedAtMs, staged }) => {
+    ...units.map(({ issue, step, model, startedAtMs, staged, returnedAtMs }) => {
       const [name] = STEPS[step] ?? [step];
+      const label = `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()}`;
+      // A step whose dispatch came back is not running: a staged unit waits
+      // for the worked one to finish (LFE run 2026-09-30, "02 plan on ASTRA"
+      // for a plan that had returned).
+      if (Number.isFinite(returnedAtMs)) {
+        return `${label} returned${staged ? ' · staged, waits its turn' : ''} · ${minutes(nowMs - returnedAtMs)}`;
+      }
       // A staged step recorded without a model was announced, not launched:
       // "on ⚪ ENGINE" read as a running review for hours (LFE #388).
       const where = staged && !model ? 'staged, not dispatched' : `on ${modelChip(model, step)}`;
-      return `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()} ${where} · ${minutes(nowMs - startedAtMs)}`;
+      return `${label} ${where} · ${minutes(nowMs - startedAtMs)}`;
     }),
     `└ ${queue}${human} · resumes on results`,
   ].join('\n');
@@ -615,6 +637,20 @@ function selfTest() {
     ['a staged step recorded without a model reads as not dispatched', safely(() => renderParked({
       nowMs: at(10, 30), units: [{ issue: 388, step: '03-plan-review', model: null, staged: true, startedAtMs: at(10, 14) }], eligible: 5,
     }).includes('#388 · 03 plan-review staged, not dispatched · 16m'))],
+    // LFE run 2026-09-30: a staged plan that had come back read "02 plan on
+    // 🟢 ASTRA 6 · 7m" with nothing running; a returned step says so.
+    ['a returned step reads as returned, staged or worked, aged from its return',
+      renderParked({
+        nowMs: at(10, 30), eligible: 5, units: [
+          { issue: 427, step: '02-plan', model: 'gpt-6-astra', staged: true, startedAtMs: at(10, 0), returnedAtMs: at(10, 23) },
+          { issue: 398, step: '06-simplify', model: 'claude-fable-5-1', startedAtMs: at(10, 10), returnedAtMs: at(10, 28) },
+        ],
+      }).includes('├ #427 · 02 plan returned · staged, waits its turn · 7m')
+      && renderParked({
+        nowMs: at(10, 30), eligible: 5, units: [
+          { issue: 398, step: '06-simplify', model: 'claude-fable-5-1', startedAtMs: at(10, 10), returnedAtMs: at(10, 28) },
+        ],
+      }).includes('├ #398 · 06 simplify returned · 2m')],
     ['the parked block names every wait with its model and age, and the queue', safely(() => renderParked({
       nowMs: at(9, 53),
       units: [
@@ -911,6 +947,24 @@ function transitionChecks(at) {
           return false;
         }
       })()]);
+    // --resumed records the return on the unit's current step; the next
+    // step starts fresh.
+    results.push(['--resumed marks the current step returned, and the next step clears it',
+      (() => {
+        try {
+          labels = ['loop-ready'];
+          transition({ root, run, nowMs: at(11, 0), issue: 390, to: '02-plan', staged: true, model: 'gpt-6-astra', markers: () => [] });
+          markReturned({ root, run, nowMs: at(11, 5), issue: 390 });
+          const returned = parkedView({ root, run, nowMs: at(11, 9), markers: () => [] });
+          transition({ root, run, nowMs: at(11, 10), issue: 390, to: '03-plan-review', staged: true, model: 'claude-fable-5-1', markers: () => [] });
+          const next = parkedView({ root, run, nowMs: at(11, 11), markers: () => [] });
+          return returned.includes('#390 · 02 plan returned · staged, waits its turn · 4m')
+            && next.includes('#390 · 03 plan-review on') && !next.includes('returned')
+            && markReturned({ root, run, nowMs: at(11, 12), issue: 9999 }).ok === false;
+        } catch (error) {
+          return false;
+        }
+      })()]);
     // The lifecycle driver closes a reconciled unit on the orchestrator's
     // behalf: only a record still open, never re-rendering a card shown.
     results.push(['ifOpen closes an open record once, and nothing else',
@@ -1061,6 +1115,11 @@ function main() {
     process.exit(closed.ok ? 0 : 1);
   }
   if (parsed.mode === 'resumed') {
+    try {
+      markReturned({ root, issue: parsed.issue });
+    } catch {
+      // The line below is the collection record; the parked view is a courtesy.
+    }
     process.stdout.write(`${renderResumed({ atMs: Date.now(), issue: parsed.issue, what: parsed.what, ms: parsed.ms })}\n`);
     return;
   }
