@@ -18,65 +18,92 @@ fixing all three (2026-09-29).
 
 ### 1. run-state
 
-- **Session latch.**
-  - When the command guard sees an open plugin run for its session, it records a latch outside
-    the repository: `~/.claude/autoloop/run-latches/<sha256(session_id, common dir)>.json`. The
-    latch holds the base, the marker's process ids and the common dir.
-  - While any latched process is alive and in the hook's ancestry, the run counts as open, even
-    after every marker is gone. A present but unreadable latch fails closed: every command is
+- **Session latch, owned by the session's Claude process.** The run's second record lives outside
+  the repository at `~/.claude/autoloop/run-latches/<pid>.json`.
+  - `<pid>` is the session's Claude process, found through process ancestry the same way markers
+    are matched. It is never found through git or through anything the run can edit.
+  - The latch records the run's base, pinned once, and the owner's start time (against pid reuse).
+  - **prime writes it** when it opens a run, and refuses to open the run if it cannot. So no
+    command between opening the run and the guard's first look can hide the run.
+  - The command guard writes it too, the first time it sees open markers, and refuses if the write
+    fails.
+  - It is written atomically: a temp file, then a hard link into place.
+  - It holds while its owner lives. A present but unreadable latch fails closed: every command is
     refused.
-  - A latch is written once and never updated, so the first base observed is pinned.
-  - Latches whose processes are all dead are pruned.
-- **Every base is enforced.** The guard evaluates the command against each base it knows: the
-  latch's and every open marker's. It refuses if any of them refuses, so a forged marker can only
-  add restrictions.
-- **Latch failures refuse.** A latch that cannot be written, while plugin markers are open, is
-  refused. Latches are keyed by the repository the markers live in.
-- **Run-state and guard-code paths are protected** in every autoloop repository, whether or not a
-  run is open. This closes "prime, then delete the marker it just wrote".
-  - Protected paths:
-    - the marker directories, for both the project and the cwd;
-    - the latch directory;
-    - the plugin's own `tools/` and `hooks/`.
-- **Proven, not pattern-matched.** Matching dangerous word-forms one at a time lost to the shell's
-  rewriting in review: brace expansion, ANSI-C quotes, symlinks, `git --work-tree … clean`, and
-  unresolved substitutions. So a destructive command is proven instead.
-  - "Destructive" covers `rm`, `mv`, `cp`, `ln`, `rsync`, `chmod`/`chown`, `find` with actions,
-    `tar`/`unzip` extraction, `dd`, and writing `git`/`gh` subcommands.
-  - Before any operand is judged:
+  - A run whose repository git can no longer read (a broken HEAD or config) is refused until the
+    repository is repaired. Breaking git hides the markers, but not the latch.
+- **Every base is enforced.** The guard evaluates the command against the latch's base and every
+  open marker's base, and refuses if any of them refuses. A forged marker can only add
+  restrictions.
+- **A command that opens a run does only that.** Besides prime it may only read. Prime is run on
+  its own everywhere in the skills, and this closes every "prime, then undo the records" compound.
+- **Protected paths.** These are protected in every autoloop repository, run or not:
+  - the marker directories, for both the project and the cwd;
+  - the latch directory;
+  - the session's shell snapshots in `~/.claude/shell-snapshots`, which every Bash call sources;
+  - the plugin's own `tools/` and `hooks/`.
+
+  While a run is open, these are protected as well:
+  - the project's `.claude/settings*.json`;
+  - the user's `~/.claude/settings*.json` and the plugin registry.
+- **Destructive operands are proven.** Matching dangerous word-forms one at a time lost to the
+  shell's rewriting in three review rounds, so a destructive command's operands are proven
+  instead.
+  - The destructive commands are:
+    - `rm`, `mv`, `cp`, `ln`, `rsync`, `install`;
+    - `chmod`/`chown`;
+    - `find` with actions, `fd -x/-X`, `rg --pre`;
+    - `tar`/`unzip` extraction, `tar --remove-files`, `zip -m`;
+    - `dd`, `tee`, `truncate`, `rimraf`/`trash`/`del` (including via `npx`/`bunx`);
+    - destructive `xargs`/`parallel`, and writing `git`/`gh` subcommands.
+  - Before an operand is judged:
     - braces are expanded (capped);
-    - `~`, `$HOME`, `$$` and the command's own variables are substituted, with derivable values
-      followed: assignments, `$(mktemp)`, and the items of a `for` list;
+    - tildes are expanded (`~`, `~+`, `~-`, the user's own `~name`);
+    - variables are substituted: the command's own assignments, `for` lists, `$(mktemp)`, `$$`,
+      and otherwise the session's environment, as the shell would;
+    - `$PWD`/`$OLDPWD` follow the tracked directory, through `cd`, `cd -`, `pushd`/`popd` and
+      subshells;
     - symlinks already on disk are resolved.
-  - Each resulting path must be neither inside a protected directory nor an ancestor of one.
-  - An operand the guard still cannot resolve is refused if any of these hold:
-    - its origin mentions the git dir or `~/.claude`;
-    - it names a run-state component (`autoloop`, `run`, `run-latches`);
-    - its literal lead sits inside the state, or within two levels above it;
-    - it is fed by a `find` over the state.
-  - A destructive `xargs` is refused, since its operands come from the pipe.
-  - Any other program may not name a path inside the run state. Running the plugin's own code
-    (`node <plugin>/tools/x.mjs`) is fine.
-  - Redirections are writes; `>&file` counts, `>&2` does not.
-  - Command substitutions are judged as the commands they run, outside single quotes only.
-    Nesting past the tokenizer's caps refuses.
-  - The edit guard refuses Write/Edit targets inside the protected paths.
-- **False positives.** Replayed over 22,764 recorded Bash commands from every local project: 0.
+  - Each resulting path must be neither inside a protected directory nor an ancestor of one. A
+    copy must not land the protected name, and a hard link or symlink must not point at the
+    protected state.
+  - **Unknown means refused.** A value from a substitution, `read`, `printf -v`, a nameref or a
+    positional parameter, or a relative path after an untracked `cd`, cannot be proven, so a
+    destructive command that uses one is refused.
+  - `git` is also refused when aimed at the state through `-C`, `--work-tree`, `--git-dir`,
+    `GIT_WORK_TREE`/`GIT_DIR`/`GIT_COMMON_DIR` (inline or exported) or `config core.worktree`.
+  - Any other program may not name a path inside the run state, and may not name the plugin's
+    code, unless it is running a plugin tool.
+- **The tokenizer.**
+  - It decodes ANSI-C quotes.
+  - It splits redirections glued to words (`echo x>file`); `>&file` is a write, `>&2` is not.
+  - It keeps the text after `<<EOF` on its line. This was a pre-existing bypass of every rule:
+    `cat <<EOF && gh pr merge`.
+  - It judges substitutions outside single quotes, and those in unquoted heredoc bodies.
+  - It judges `eval` and `sh -c` scripts as the commands they run.
+  - Nesting past its caps refuses.
+- **False positives.** Replayed over 22,841 recorded Bash commands from every local project: 4
+  refused. Each is a destructive command whose operand is a value the guard cannot see:
+  `$(git worktree list …)`, `$(fd …)`, `$(date …)`, and an unknown loop-derived name. None is from
+  a loop run.
 - **Residual risk (accepted).** The guard runs as the same uid as the session. A script file the
-  run writes and then executes, or a value hidden behind an unsmelly opaque substitution, can
-  still reach the records. Inline interpreter source is already refused. The enforcement boundary
-  stays the repository's server-side rules.
+  run writes and then executes can still reach any of it. Inline interpreter source is already
+  refused. The enforcement boundary stays the repository's server-side rules, and an OS-level
+  sandbox is the structural fix (see the open question).
 
 ### 2. guard-budget
 
 - **Foreign-prime check.** `foreignPrimeProblem` memoises the common git dir: the project's is
   computed once, and each target directory once. More than 64 distinct target directories in one
   command is refused.
-- **Shared deadline.** Every git call a hook makes goes through `git-budget.mjs` and shares a
-  10 s deadline. Each call gets at most 4 s and is killed with SIGKILL when that runs out. A stalled
+- **Shared deadline.** Every git call the command guard and the edit guard make goes through
+  `git-budget.mjs` and shares a 10 s deadline. A caller that sets no deadline still gets at most
+  10 s per call. Each call gets at most 4 s and is killed with SIGKILL when that runs out. A stalled
   call (a FIFO at `.git/config`) or a spent budget refuses; "no answer" is never read as "no run".
 - **Command size.** Guarded commands over 64 KB are refused. The check grows faster than linearly
   in length (3.2 s at the cap), and the longest of 26,980 recorded commands was 32 KB.
+- **Linear tokenizer.** Subshell parentheses are cut by position, and the fd lead of a
+  redirection is found by walking back. Both were quadratic on padded input.
 - **Pre-existing regexes fixed.** Three regexes backtracked catastrophically:
   - the ANSI-C quote decoder, on a run of backslashes;
   - the git-mutation and interpreter-heredoc path prefixes, on a run of slashes.
@@ -94,6 +121,12 @@ fixing all three (2026-09-29).
 - If the committed config cannot be read, nothing auto-merges.
 - Every `gh` call the executor makes runs without an ambient `GH_REPO`/`GH_HOST`. A GitHub
   Enterprise repository's own host, as `gh repo view` reports it, is set explicitly.
+
+## Open question
+
+A text-level guard cannot be complete against a same-uid process that can write and run a script.
+The next structural step is OS-level write denial for these protected paths, for example Claude
+Code's sandbox for Bash, if it can be configured to do that. That is to be evaluated separately.
 
 ## Commands
 

@@ -38,6 +38,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
+import { latchDirectory, recordLatch } from './run-markers.mjs';
 import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig,
@@ -178,6 +179,12 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   pruneDeadRunMarkers(root);
   clearRunParks(root);
   const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
+  // The run's second record, outside the repository and owned by the
+  // session's Claude process (run-markers.mjs): written here, so no command
+  // between opening the run and the guard's first look can hide the run.
+  if (runMarker !== null && recordLatch({ baseBranch: config.baseBranch, scope: root }) === null) {
+    return failure('run', 'RUN_LATCH_UNWRITABLE', `the session latch could not be written under ${latchDirectory()}; the run is not opened`);
+  }
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });

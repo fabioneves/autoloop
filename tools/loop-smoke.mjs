@@ -455,7 +455,15 @@ export function runSmokeSteps({
     if (editBlocked.status !== 2) {
       return { ok: false, detail: `edit guard exited ${editBlocked.status} on a hook-wiring edit while the run was open, expected 2` };
     }
+    // Deleting the marker does not end the run: the session latch holds.
     rmSync(outcome.runMarker, { force: true });
+    const markerGone = runTool('command-guard.mjs (marker deleted)', [guard, '--root', root], guardOptions);
+    if (!markerGone.ok) return markerGone;
+    if (markerGone.status !== 2) {
+      return { ok: false, detail: `guard exited ${markerGone.status} with only the marker gone, expected the latch to hold (2)` };
+    }
+    // A session that ends takes both with it: the guards stand down.
+    rmSync(join(environment.HOME, '.claude', 'autoloop', 'run-latches'), { recursive: true, force: true });
     const standDown = runTool(
       'command-guard.mjs (run closed)',
       [guard, '--root', root],
@@ -465,10 +473,10 @@ export function runSmokeSteps({
     if (standDown.status !== 0) {
       return {
         ok: false,
-        detail: `guard exited ${standDown.status} after the run closed, expected 0`,
+        detail: `guard exited ${standDown.status} after the session ended, expected 0`,
       };
     }
-    return { ok: true, detail: 'merge and hook-wiring edit blocked while open; guards stand down when closed' };
+    return { ok: true, detail: 'merge and hook-wiring edit blocked while open; the latch outlives a deleted marker; guards stand down when the session ends' };
   });
 
   return outcome;
@@ -507,6 +515,14 @@ async function selfTest({ realEngine = false } = {}) {
       ghConfigDir,
       realEngine ? null : writeEngineShim(scratch, argvLog),
     );
+    // prime writes the session latch under HOME, owned by the Claude process
+    // running the smoke: a shimmed smoke keeps it in the scratch dir, never
+    // in the operator's own home (real-engine mode needs the real one for
+    // the engine's credentials, and opens no run).
+    if (!realEngine) {
+      environment.HOME = join(scratch, 'home');
+      mkdirSync(environment.HOME, { recursive: true });
+    }
 
     let fixture = null;
     const setup = await timedPhase('fixture-setup', async () => {

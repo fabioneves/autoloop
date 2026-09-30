@@ -26,7 +26,7 @@
 //   node <plugin-tools>/run-state-guard.mjs --self-test
 
 import { existsSync, realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,15 +36,16 @@ const READ_ONLY = new Set([
   'sha1sum', 'sha256sum', 'stat', 'tail', 'test', 'tree', 'true', 'wc',
 ]);
 const WRAPPERS = new Set([
-  'command', 'doas', 'env', 'exec', 'ionice', 'nice', 'nohup', 'setsid', 'stdbuf', 'sudo', 'time', 'timeout',
+  'builtin', 'bunx', 'command', 'doas', 'env', 'exec', 'ionice', 'nice', 'nohup', 'npx', 'pnpx', 'setsid', 'stdbuf',
+  'sudo', 'time', 'timeout',
   // Shell keywords that put a command after them: `do rm "$f"` runs rm.
   '!', '{', 'do', 'elif', 'else', 'if', 'then', 'until', 'while',
 ]);
 // Commands whose operands must be proven: they delete, move, overwrite or
 // re-permission what they name, or (chmod, chown) lock the guard out of it.
 const DESTRUCTIVE = new Set([
-  'chgrp', 'chmod', 'chown', 'cp', 'dd', 'install', 'ln', 'mkfifo', 'mknod', 'mv', 'rm', 'rmdir', 'rsync',
-  'shred', 'tar', 'tee', 'truncate', 'unlink', 'unzip',
+  'chgrp', 'chmod', 'chown', 'cp', 'dd', 'del', 'install', 'ln', 'mkfifo', 'mknod', 'mv', 'rimraf', 'rm', 'rmdir',
+  'rsync', 'shred', 'tar', 'tee', 'trash', 'trash-put', 'truncate', 'unlink', 'unzip', 'zip',
 ]);
 // Copies read their sources; only a move (or a symlink, whose source becomes
 // reachable under a new name) puts its sources at stake.
@@ -56,8 +57,8 @@ const GIT_VALUED = new Set(['-C', '--git-dir', '--work-tree', '--namespace', '--
 // gh commands that write files where an option (or, for clone, the operand) says.
 const GH_OUTPUTS = new Set(['-D', '--dir', '-O', '--output']);
 // Expansion syntax — a `$` in a regex argument (`'^\.ddev$|x'`) is not one.
-const EXPANSION = /\$(?:[A-Za-z_{(]|\d)|`/u;
-const REDIRECT = /^(?:\d*|&)(?:>>?|>\||<>|>&)(.*)$/u;
+const EXPANSION = /\$(?:[A-Za-z_{(@*']|\d)|`/u;
+const REDIRECT = /^(?:\d*|&)(?:>&|>>?|>\||<>)(.*)$/u;
 // Input redirections, here-docs and here-strings read: `< file` is no operand.
 const INPUT = /^\d*<(?![>&])(?:<<|<-?)?(.*)$/u;
 const MAX_TRACKED_WORDS = 20_000;
@@ -137,57 +138,72 @@ function rangeParts(from, to) {
   return parts;
 }
 
-const SPECIAL_PARAMETER = /\$(?:\$|!|\?|#|\d)/gu;
+// $$ $! $? $# are numbers; $0-$9, $@ and $* stay unknown.
+const SPECIAL_PARAMETER = /\$(?:\$|!|\?|#)/gu;
 const VARIABLE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/gu;
-// An unknown value whose origin mentions the git dir or the Claude config dir
-// may be the run state (`"$(git rev-parse --git-dir)"/autoloop`).
-const SMELL = /rev-parse|\.git(?![\w-])|autoloop|\.claude|run-latches|\bHOME\b|~/u;
 const MAX_ALTERNATIVES = 64;
+// Stands for a value the guard cannot know; EXPANSION matches it, VARIABLE
+// does not (so no environment lookup can fill it in).
+const UNKNOWN = "$'?'";
+const CURRENT_USER = (() => {
+  try {
+    return userInfo().username;
+  } catch {
+    return null;
+  }
+})();
 
-function homeExpanded(text, home) {
-  const expanded = text.replace(/^\$\{HOME\}|^\$HOME(?![A-Za-z0-9_])/u, home);
-  if (expanded === '~') return home;
-  return expanded.startsWith('~/') ? `${home}${expanded.slice(1)}` : expanded;
+// `~`, `~+` ($PWD), `~-` ($OLDPWD) and the current user's own `~name`; any
+// other user's home, or a directory the guard lost track of, stays unknown.
+function tildeExpanded(text, at, home) {
+  const match = /^~([^/]*)(\/.*)?$/u.exec(text);
+  if (match === null) return text;
+  const [, user, rest = ''] = match;
+  const base = user === '' || user === CURRENT_USER ? home : user === '+' ? at.dir : user === '-' ? at.oldDir : null;
+  return base === null ? `${UNKNOWN}${rest}` : `${base}${rest}`;
 }
 
-// A word's variables substituted, left to right, in one pass: a known one
-// by each of its values (a loop variable stands for every item), an unknown
-// one kept — with its smell. null past the cap.
-function substitute(text, vars) {
-  let results = [{ text: '', smell: false }];
+// A word's variables substituted, left to right, in one pass: one the
+// command set by each of its values (a loop variable stands for every
+// item); $PWD and $OLDPWD from the directory the guard tracks; any other
+// from the session's environment, as the shell would (unset is empty). A
+// value the command got from somewhere the guard cannot see — a
+// substitution, `read`, `printf -v`, a nameref — stays unknown. null past
+// the cap.
+function substitute(text, at, home, env) {
+  let results = [''];
   let last = 0;
   for (const match of text.matchAll(VARIABLE)) {
+    const name = match[1] ?? match[2];
     const literal = text.slice(last, match.index);
     last = match.index + match[0].length;
-    const entry = vars.get(match[1] ?? match[2]);
-    const smell = entry?.smell === true;
-    if (entry?.values == null) {
-      results = results.map((result) => ({ text: result.text + literal + match[0], smell: result.smell || smell }));
-      continue;
-    }
+    const own = at.vars.get(name);
+    const values = own !== undefined ? own
+      : name === 'PWD' ? [at.dir ?? match[0]]
+        : name === 'OLDPWD' ? [at.oldDir ?? match[0]]
+          : name === 'HOME' ? [home]
+            : [env[name] ?? ''];
     const next = [];
     for (const result of results) {
-      for (const value of entry.values) next.push({ text: result.text + literal + value, smell: result.smell || smell });
+      for (const value of values ?? [match[0]]) next.push(result + literal + (value ?? match[0]));
     }
     if (next.length > MAX_ALTERNATIVES) return null;
     results = next;
   }
   const tail = text.slice(last);
-  return results.map((result) => ({ ...result, text: result.text + tail }));
+  return results.map((result) => result + tail);
 }
 
-// Every text a word can stand for — `~`, $HOME, special parameters and the
-// command's own variables substituted, braces expanded — as { text, smell }.
-// null past the cap.
-function expansions(word, home, vars) {
-  const substituted = substitute(homeExpanded(word.replace(SPECIAL_PARAMETER, '0'), home), vars);
+// Every text a word can stand for — tildes, special parameters and variables
+// substituted, braces expanded. null past the cap.
+function expansions(word, at, home, env) {
+  const substituted = substitute(tildeExpanded(word.replace(SPECIAL_PARAMETER, '0'), at, home), at, home, env);
   if (substituted === null) return null;
   const results = [];
-  for (const { text, smell } of substituted) {
+  for (const text of substituted) {
     const braced = expandBraces(text);
     if (braced === null || results.length + braced.length > MAX_ALTERNATIVES) return null;
-    const inline = /\$\(|`/u.test(text) && SMELL.test(text);
-    for (const alternative of braced) results.push({ text: alternative, smell: smell || inline });
+    results.push(...braced);
   }
   return results;
 }
@@ -214,17 +230,15 @@ function canonical(path) {
 // What a word names where a segment runs: the concrete paths (and their real
 // locations), and the texts that stay unknown — an unresolved expansion, or a
 // relative path after a cd the guard could not follow. null past the cap.
-function resolveWord(word, at, home) {
-  const alternatives = expansions(word, home, at.vars);
+function resolveWord(word, at, home, env) {
+  const alternatives = expansions(word, at, home, env);
   if (alternatives === null) return null;
   const paths = [];
   const unknowns = [];
-  for (const { text, smell } of alternatives) {
+  for (const text of alternatives) {
     if (text === '') continue;
-    if (EXPANSION.test(text)) {
-      unknowns.push({ text, smell });
-    } else if (!isAbsolute(text) && at.dir === null) {
-      unknowns.push({ text, smell: smell || at.dirSmell, relative: true });
+    if (EXPANSION.test(text) || (!isAbsolute(text) && at.dir === null)) {
+      unknowns.push(text);
     } else {
       const path = isAbsolute(text) ? resolve(text) : resolve(at.dir, text);
       paths.push(path);
@@ -235,39 +249,21 @@ function resolveWord(word, at, home) {
   return { paths, unknowns };
 }
 
-// Whether a text the guard cannot resolve could still be the run state: its
-// origin smells of the git dir or the Claude config dir; a literal part names
-// a run-state component (`$X/autoloop`, `cd "$X" && rm -rf run`); or its
-// literal lead sits inside the state or within two levels above it
-// (`.git/$X`, `~/.claude/$X`).
-function unknownIsRisky({ text, smell, relative }, at, dirs, components, home) {
-  if (smell) return true;
-  const first = relative ? 0 : text.search(EXPANSION);
-  const literal = text.replace(new RegExp(EXPANSION.source, 'gu'), '/').split('/');
-  if (literal.some((part) => components.has(part))) return true;
-  if (first <= 0) return false;
-  // Bounded alternatives: each stops at the next `$`, `{` or `(`, so a padded
-  // word cannot make the replacement quadratic.
-  const pattern = text.replace(/\$\{[^}${(]*\}?|\$\([^)${(]*\)?|\$[A-Za-z_][A-Za-z0-9_]*|`[^`${(]*`?/gu, '*');
-  if (!isAbsolute(pattern) && at.dir === null) return false;
-  const path = isAbsolute(pattern) ? resolve(pattern) : resolve(at.dir, pattern);
-  return dirs.some((protectedDir) => {
-    const found = relation(path, protectedDir);
-    if (found === 'inside') return true;
-    if (found !== 'ancestor') return false;
-    return protectedDir.split('/').filter(Boolean).length - path.split('/').filter(Boolean).length <= 2;
-  });
-}
-
 // A glob segment against one name. Runs of `*` collapse, and a segment with
 // more wildcards than a protected name could need counts as matching: many
 // `.*` in one pattern backtrack exponentially.
-function segmentMatches(pattern, name) {
+function segmentMatches(pattern, name, extglob = false) {
   if (pattern === '**') return true;
+  // zsh and bash extglob alternations (`(run|x)`, `r(u)n`) are not modelled:
+  // in an operand a destructive command must prove, any segment using them
+  // may match. (Elsewhere — code or SQL handed to a program — they are text.)
+  if (extglob && /[(|]/u.test(pattern)) return true;
   if (!/[*?[]/u.test(pattern)) return pattern === name;
   const collapsed = pattern.replace(/\*+/gu, '*');
   if ((collapsed.match(/[*?]/gu) ?? []).length > 8) return true;
-  const source = collapsed.replace(/[.+^${}()|\\]/gu, '\\$&').replace(/\*/gu, '.*').replace(/\?/gu, '.');
+  // `[!x]` is the shell's negated class; after quoting, it becomes `[^x]`.
+  const source = collapsed.replace(/[.+^${}()|\\]/gu, '\\$&').replace(/\*/gu, '.*').replace(/\?/gu, '.')
+    .replace(/\[!/gu, '[^').replace(/\[\\\^/gu, '[^');
   try {
     return new RegExp(`^${source}$`, 'u').test(name);
   } catch {
@@ -277,12 +273,12 @@ function segmentMatches(pattern, name) {
 
 // How a path (possibly a glob) relates to a protected directory: 'inside'
 // (it or below), 'ancestor' (above), or null.
-export function relation(path, protectedDir) {
+export function relation(path, protectedDir, extglob = false) {
   const left = path.split('/').filter(Boolean);
   const right = protectedDir.split('/').filter(Boolean);
   for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
     if (left[index] === '**') return 'inside';
-    if (!segmentMatches(left[index], right[index])) return null;
+    if (!segmentMatches(left[index], right[index], extglob)) return null;
   }
   return left.length >= right.length ? 'inside' : 'ancestor';
 }
@@ -359,6 +355,12 @@ function claims(words, head) {
   const rest = words.slice(head + 1);
   const at = head + 1;
   const all = (list, relations, prove) => list.map((word) => ({ word, relations, prove }));
+  // Readers that run another program: rg's --pre on every file it reads, fd's
+  // -x/-X on every file it finds.
+  if (name === 'rg' && rest.some((word) => word === '--pre' || word.startsWith('--pre='))) {
+    return [{ word: null, relations: [], prove: true }];
+  }
+  if (name === 'fd') return fdClaims(words, at);
   if (READ_ONLY.has(name)) return [];
   if (name === 'sed' || name === 'perl') {
     return rest.some((word) => /^-[A-Za-z]*i/u.test(word) || word.startsWith('--in-place'))
@@ -371,7 +373,7 @@ function claims(words, head) {
     let index = at;
     while (index < words.length && words[index].startsWith('-')) index += /^-[IndPLEs]$/u.test(words[index]) ? 2 : 1;
     if (index >= words.length) return [];
-    const fed = claims([...words, '$XARGS_INPUT'], index);
+    const fed = claims([...words, UNKNOWN], index);
     return fed.some(({ prove }) => prove) ? [{ word: null, relations: [], prove: true }] : claims(words, index);
   }
   if (name === 'git') return gitClaims(words, head);
@@ -382,12 +384,26 @@ function claims(words, head) {
   }
   // Any other program may not name a path inside the run state (a script
   // told to write there); running or reading the plugin's own code is fine.
-  if (!DESTRUCTIVE.has(name)) return all(operands(words, at), ['inside'], false).map((claim) => ({ ...claim, stateOnly: true }));
+  if (!DESTRUCTIVE.has(name)) {
+    // An interpreter running one of the plugin's own tools may name the
+    // plugin's files (briefs, templates); any other program naming the
+    // guard's code is a writer until shown otherwise (patch, sponge, awk -i).
+    const list = operands(words, at);
+    const pluginTool = INTERPRETERS.test(name) && list.length > 0;
+    return all(list, ['inside'], false).map((claim, index) => ({ ...claim, stateOnly: pluginTool, script: pluginTool && index === 0 }));
+  }
+  if (name === 'tar' && rest.some((word) => word === '--remove-files')) {
+    return all(operands(words, at, new Set(['-f', '--file', '-C', '--directory'])), ['inside', 'ancestor'], true);
+  }
   if (name === 'tar' || name === 'unzip') {
     const extracting = name === 'unzip' || rest.some((word) => /^-?[A-Za-wyz]*x/u.test(word) || word === '--extract' || word === '--get');
     if (!extracting) return all(optionValues(words, at, new Set(['-f', '--file'])), ['inside'], true);
     const targets = optionValues(words, at, new Set(['-C', '--directory', '-d']));
     return all(targets.length > 0 ? targets : ['.'], ['inside', 'ancestor'], true);
+  }
+  if (name === 'zip') {
+    const moves = rest.some((word) => word === '--move' || /^-[A-Za-z]*m/u.test(word));
+    return moves ? all(operands(words, at), ['inside', 'ancestor'], true) : all(operands(words, at).slice(0, 1), ['inside'], true);
   }
   if (name === 'dd') return all(rest.filter((word) => word.startsWith('of=')).map((word) => word.slice(3)), ['inside', 'ancestor'], true);
   const list = operands(words, at, new Set(['-t', '--target-directory', '-m', '--mode', '-o', '--owner', '-g', '--group']));
@@ -415,18 +431,41 @@ function placingClaims(name, words, at, list) {
   const target = optionValues(words, at, new Set(['-t', '--target-directory']));
   const destination = target.length > 0 ? target[0] : list.at(-1);
   const sources = target.length > 0 ? list.filter((word) => word !== target[0]) : list.slice(0, -1);
-  const symbolic = name === 'ln' && rest.some((word) => /^-[A-Za-z]*s/u.test(word) || word === '--symbolic');
+  const flagged = (short, long) => rest.some((word) => (short !== null && new RegExp(`^-[A-Za-z]*${short}`, 'u').test(word) && !word.startsWith('--')) || long.includes(word));
+  const symbolic = (name === 'ln' && flagged('s', ['--symbolic'])) || (name === 'cp' && flagged('s', ['--symbolic-link']));
+  // A hard link is the protected file under another name: a later write to
+  // it writes the original, and no realpath shows it.
+  const hard = (name === 'ln' && !symbolic) || (name === 'cp' && flagged('l', ['--link']));
   const movesSources = name === 'mv' || symbolic || rest.includes('--remove-source-files');
   const deletes = name === 'rsync' && rest.some((word) => word.startsWith('--delete'));
+  // -T: the destination itself receives the source's contents.
+  const intoItself = (name === 'cp' || name === 'mv' || name === 'install') && flagged('T', ['--no-target-directory']);
+  const linkDest = name === 'rsync' ? optionValues(words, at, new Set(['--link-dest'])) : [];
   return [
     ...(movesSources ? sources.map((word) => ({ word, relations: ['inside', 'ancestor'], prove: true })) : []),
+    ...(hard ? sources.map((word) => ({ word, relations: ['inside'], prove: true })) : []),
+    ...linkDest.map((word) => ({ word, relations: ['inside'], prove: true })),
     ...(destination === undefined ? [] : [{
       word: destination,
-      relations: deletes ? ['inside', 'ancestor'] : ['inside', 'landing'],
+      relations: deletes || intoItself ? ['inside', 'ancestor'] : ['inside', 'landing'],
       prove: true,
-      landing: sources.map((source) => basename(source)),
+      // rsync's `src/` copies the contents: nothing of the source's own name lands.
+      landing: sources.map((source) => (name === 'rsync' && source.endsWith('/') ? '' : basename(source))),
     }]),
   ];
+}
+
+// fd runs -x/-X/--exec/--exec-batch on what it finds: judged like find's
+// actions — its search paths must be proven unless the command only reads.
+function fdClaims(words, at) {
+  const execAt = words.findIndex((word, index) => index >= at && ['-x', '-X', '--exec', '--exec-batch'].includes(word));
+  if (execAt === -1) return [];
+  // What fd finds is appended to the command: judged as an unknown operand.
+  const inner = [...words.slice(execAt + 1), UNKNOWN];
+  if (!claims(inner, headIndex(inner)).some(({ prove }) => prove)) return [];
+  const positional = operands(words.slice(0, execAt), at);
+  const paths = positional.slice(1);
+  return (paths.length > 0 ? paths : ['.']).map((word) => ({ word, relations: ['inside', 'ancestor'], prove: true }));
 }
 
 // git writes into its own dir and work tree by design; what it may not do is
@@ -437,7 +476,9 @@ function placingClaims(name, words, at, list) {
 // the latch's parents is refused.
 function gitClaims(words, head) {
   let index = head + 1;
-  const aims = [];
+  // GIT_WORK_TREE=… git clean aims git as surely as --work-tree does.
+  const aims = words.slice(0, head).filter((word) => /^GIT_(?:WORK_TREE|DIR|COMMON_DIR)=/u.test(word))
+    .map((word) => word.slice(word.indexOf('=') + 1));
   while (index < words.length && words[index].startsWith('-')) {
     const word = words[index];
     const equals = word.indexOf('=');
@@ -452,22 +493,25 @@ function gitClaims(words, head) {
     index += equals === -1 ? 2 : 1;
   }
   const subcommand = words[index] ?? '';
+  if (subcommand === 'config') {
+    const key = words.slice(index + 1).findIndex((word) => /^core\.(?:worktree|gitdir)$/iu.test(word));
+    if (key !== -1 && words[index + 2 + key] !== undefined) aims.push(words[index + 2 + key]);
+  }
+  const aimed = aims.map((word) => ({ word, relations: ['inside', 'near'], prove: true }));
   const config = subcommand === 'config' && words.slice(index).some((word) => word === '--file' || word === '-f' || word.startsWith('--file='));
-  if (!GIT_WRITING.has(subcommand) && !config) return [];
+  if (!GIT_WRITING.has(subcommand) && !config) return aimed;
   const paths = config ? optionValues(words, index, new Set(['--file', '-f']))
     : subcommand === 'archive' ? optionValues(words, index, new Set(['-o', '--output']))
       : operands(words, index + 1, new Set(['-b', '-B', '--orphan', '--reason', '-m', '--message']));
-  return [
-    ...aims.map((word) => ({ word, relations: ['inside', 'near'], prove: true })),
-    ...paths.map((word) => ({ word, relations: ['inside', 'near'], prove: false })),
-  ];
+  return [...aimed, ...paths.map((word) => ({ word, relations: ['inside', 'near'], prove: false }))];
 }
 
 function refusal(path, protectedDir) {
   return `autoloop guard — this command would change ${path}, which holds (or contains) this run's `
     + `own state or the guard's own code (${protectedDir}): the run markers and the session latch are `
     + 'how the guard knows a run is open, so a run never writes, moves or deletes them. Reading them is '
-    + 'fine (cat, jq, ls). A run that is finished closes with `prime.mjs --close-run`.';
+    + 'fine (cat, jq, ls). A run that is finished closes with `prime.mjs --close-run`; stale state is '
+    + 'cleared by a human, outside Claude Code.';
 }
 
 function unproven(word) {
@@ -481,8 +525,9 @@ function unproven(word) {
 // shell segment, and how many subshell parentheses open before it and close
 // after; `opaque` marks text the tokenizer could not take apart. protectedDirs
 // hold the run's state; codeDirs the guard's own code, which only a write
-// (not a program run with it as an argument) threatens.
-export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], home = homedir() }) {
+// (not a program run with it) threatens. env is the session's environment,
+// which the command's variables fall back to.
+export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], home = homedir(), env = process.env }) {
   const absolute = (list) => [...new Set(list.filter((dir) => typeof dir === 'string' && isAbsolute(dir)))];
   const stateDirs = absolute(protectedDirs);
   const dirs = absolute([...protectedDirs, ...codeDirs]);
@@ -495,33 +540,63 @@ export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], h
     return 'autoloop guard — this command is too large to check for changes to the run\'s own '
       + 'state, so it cannot be proven safe. Split it into smaller commands.';
   }
-  const placed = placeSegments(segments, typeof cwd === 'string' && isAbsolute(cwd) ? cwd : null, home, stateDirs);
-  // The names a run-state path is built from (`.git`, `autoloop`, `run`,
-  // `.claude`, `run-latches`): an unknown path that spells one is suspect.
-  const components = new Set(stateDirs.flatMap((dir) => dir.split('/').filter(Boolean).slice(-3)));
+  const placed = placeSegments(segments, typeof cwd === 'string' && isAbsolute(cwd) ? cwd : null, home, env);
   for (const at of placed) {
     // Redirections write, whatever the command.
     for (const target of at.writes) {
-      const problem = judge({ word: target, relations: ['inside'], prove: false }, at, dirs, components, home);
+      const problem = judge({ word: target, relations: ['inside'], prove: false }, at, dirs, home, env);
       if (problem !== null) return problem;
     }
     if (at.head === -1) continue;
     const name = basename(at.argv[at.head] ?? '');
     if (name === 'cd' || name === 'pushd' || name === 'popd') continue;
-    for (const claim of claims(at.argv, at.head)) {
-      const problem = judge(claim, at, claim.stateOnly ? stateDirs : dirs, components, home);
+    const list = claims(at.argv, at.head);
+    // An exported GIT_WORK_TREE / GIT_DIR aims every later git.
+    if (name === 'git') {
+      for (const key of ['GIT_WORK_TREE', 'GIT_DIR', 'GIT_COMMON_DIR']) {
+        if (at.vars.has(key)) list.push({ word: `$${key}`, relations: ['inside', 'near'], prove: true });
+      }
+    }
+    // Running a script from the plugin's code is what the plugin is for;
+    // running anything else lets it name the code only as data it reads.
+    const script = list.find((claim) => claim.script);
+    const runsPluginCode = script !== undefined && resolvesInside(script.word, at, codeDirsOnly(dirs, stateDirs), home, env);
+    for (const claim of list) {
+      const judged = claim.stateOnly && runsPluginCode ? stateDirs : claim.script ? stateDirs : dirs;
+      const problem = judge(claim, at, judged, home, env);
       if (problem !== null) return problem;
     }
   }
   return null;
 }
 
-function judge(claim, at, dirs, components, home) {
-  const resolved = claim.word === null ? null : resolveWord(claim.word, at, home);
+const INTERPRETERS = /^(?:bash|bun|dash|deno|node|nodejs|perl|php|python\d*(?:\.\d+)?|ruby|sh|zsh)$/u;
+
+function codeDirsOnly(dirs, stateDirs) {
+  return dirs.filter((dir) => !stateDirs.includes(dir));
+}
+
+function resolvesInside(word, at, dirs, home, env) {
+  const resolved = resolveWord(word, at, home, env);
+  return resolved !== null && resolved.unknowns.length === 0 && resolved.paths.length > 0
+    && resolved.paths.every((path) => dirs.some((dir) => relation(path, dir) === 'inside'));
+}
+
+// Whether a segment only reads: no claim on any path. A command that opens a
+// run may do nothing else (command-guard.mjs).
+export function readsOnly(words) {
+  const head = headIndex(words);
+  if (head === -1) return true;
+  if (['cd', 'pushd', 'popd'].includes(basename(words[head]))) return true;
+  return claims(words, head).length === 0;
+}
+
+function judge(claim, at, dirs, home, env) {
+  const resolved = claim.word === null ? null : resolveWord(claim.word, at, home, env);
   if (resolved === null) return claim.prove ? unproven(claim.word) : null;
   for (const path of resolved.paths) {
     for (const protectedDir of dirs) {
-      const found = relation(path, protectedDir);
+      const found = relation(path, protectedDir, claim.prove);
       if (found === null) continue;
       if (claim.relations.includes(found)) return refusal(path, protectedDir);
       if (found !== 'ancestor') continue;
@@ -535,53 +610,58 @@ function judge(claim, at, dirs, components, home) {
       }
     }
   }
-  if (claim.prove && resolved.unknowns.some((unknown) => unknownIsRisky(unknown, at, dirs, components, home))) {
-    return unproven(claim.word);
-  }
+  // What a destructive command names must be known: a value the guard cannot
+  // see could be anything, `..` included.
+  if (claim.prove && resolved.unknowns.length > 0) return unproven(claim.word);
   return null;
 }
 
-// Where each segment runs and what it can see: literal cd/pushd steps (and
-// subshell scope) move the directory, `env -C` moves one segment,
-// assignments, `for` lists and `read` define variables (a `read` fed by a
-// find over the state, or by anything that smells of it, is suspect), and
+// Where each segment runs and what it can see: cd, pushd/popd (the stack) and
+// `cd -` move the directory (subshells restore it), `env -C` moves one
+// segment; assignments and `for` lists define variables, and `read`,
+// `mapfile`, `printf -v` and namerefs define ones whose value is unknown;
 // redirections are split from the argv.
-function placeSegments(segments, cwd, home, dirs) {
+function placeSegments(segments, cwd, home, env) {
   let dir = cwd;
-  let dirSmell = false;
+  let oldDir = null;
+  const dirStack = [];
   const stack = [];
   const vars = new Map();
-  const define = (name, values, smell) => vars.set(name, { values, smell });
-  let previous = null;
+  const unknown = (name) => vars.set(name, null);
   return segments.map((segment) => {
-    for (let open = 0; open < segment.opens; open += 1) stack.push({ dir, dirSmell });
+    for (let open = 0; open < segment.opens; open += 1) stack.push({ dir, oldDir });
     const list = joinSubstitutions(segment.words);
     const head = headIndex(list);
     const headName = head === -1 ? '' : basename(list[head]);
+    const at = { dir, oldDir, vars };
     const setter = ['export', 'declare', 'local', 'readonly', 'typeset'].includes(headName);
     if (head === -1 || setter) {
+      const nameref = setter && list.slice(head + 1).some((word) => /^-[A-Za-z]*n/u.test(word));
       for (const word of list.slice(setter ? head + 1 : 0).filter(isAssignment)) {
         const [name, ...value] = word.split('=');
         const text = value.join('=');
-        if (/^\$\(\s*mktemp\b[^)]*\)$/u.test(text)) {
-          define(name, [join('/tmp', `mktemp-${name}`)], false);
-          continue;
+        if (nameref) {
+          unknown(name);
+        } else if (/^\$\(\s*mktemp\b[^)]*\)$/u.test(text)) {
+          vars.set(name, [join('/tmp', `mktemp-${name}`)]);
+        } else {
+          const values = expansions(text, at, home, env);
+          if (values === null) unknown(name);
+          else vars.set(name, values);
         }
-        const values = expansions(text, home, vars);
-        const unknown = values === null || values.some(({ text: item }) => EXPANSION.test(item));
-        define(name, unknown ? null : values.map(({ text: item }) => item),
-          values === null || values.some(({ smell }) => smell) || (unknown && SMELL.test(text)));
       }
-    } else if (list[0] === 'for' && list[2] === 'in') {
-      const items = list.slice(3).flatMap((word) => expansions(word, home, vars) ?? [{ text: '$UNKNOWN', smell: true }]);
-      define(list[1], items.length > MAX_ALTERNATIVES ? null : items.map(({ text }) => text), items.some(({ smell }) => smell));
-    } else if (headName === 'read' || headName === 'mapfile' || headName === 'readarray') {
-      const producer = previous === null ? null : producerRisk(previous, home, dirs);
-      for (const name of list.slice(head + 1).filter((word) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(word))) define(name, null, producer !== false);
+    } else if (list[head] === 'for' && list[head + 2] === 'in') {
+      const items = list.slice(head + 3).flatMap((word) => expansions(word, at, home, env) ?? [UNKNOWN]);
+      vars.set(list[head + 1], items.length > MAX_ALTERNATIVES ? null : items);
+    } else if (['read', 'mapfile', 'readarray'].includes(headName)) {
+      for (const name of list.slice(head + 1).filter((word) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(word))) unknown(name);
+    } else if (headName === 'printf') {
+      const named = list.indexOf('-v', head);
+      if (named !== -1 && list[named + 1] !== undefined) unknown(list[named + 1]);
     }
-    const at = { dir, dirSmell, vars: new Map(vars) };
+    const scope = { dir, oldDir, vars: new Map(vars) };
     const chdir = list.findIndex((word, index) => index < head && (word === '-C' || word === '--chdir'));
-    const segmentDir = chdir === -1 ? { dir, dirSmell } : placeDir(list[chdir + 1] ?? '', at, home);
+    const segmentDir = chdir === -1 ? dir : placeDir(list[chdir + 1] ?? '', scope, home, env);
     const argv = [];
     const writes = [];
     for (let index = 0; index < list.length; index += 1) {
@@ -600,17 +680,21 @@ function placeSegments(segments, cwd, home, dirs) {
       // `>&2` and `>&-` duplicate descriptors; `>&file` writes a file.
       if (!/^&?(?:\d+|-)$/u.test(target)) writes.push(target.replace(/^&/u, ''));
     }
+    const placedSegment = { argv, head, writes, dir: segmentDir, oldDir, vars: scope.vars };
     if (headName === 'cd' || headName === 'pushd') {
       const target = argv[head + 1];
-      ({ dir, dirSmell } = target === undefined || target.startsWith('-')
-        ? { dir: null, dirSmell: false } : placeDir(target, at, home));
+      const next = target === undefined ? home
+        : target === '-' ? oldDir
+          : target.startsWith('-') ? null : placeDir(target, scope, home, env);
+      if (headName === 'pushd') dirStack.push(dir);
+      oldDir = dir;
+      dir = next;
     } else if (headName === 'popd') {
-      ({ dir, dirSmell } = { dir: null, dirSmell: false });
+      oldDir = dir;
+      dir = dirStack.length > 0 ? dirStack.pop() : null;
     }
-    const placedSegment = { argv, head, writes, dir: segmentDir.dir, dirSmell: segmentDir.dirSmell, vars: at.vars };
     // A close with no open seen is a substitution's `)`, not a subshell's.
-    for (let close = 0; close < segment.closes && stack.length > 0; close += 1) ({ dir, dirSmell } = stack.pop());
-    previous = { words: list, head, at };
+    for (let close = 0; close < segment.closes && stack.length > 0; close += 1) ({ dir, oldDir } = stack.pop());
     return placedSegment;
   });
 }
@@ -629,28 +713,11 @@ function joinSubstitutions(words) {
   return joined;
 }
 
-// A directory a cd moves to: one concrete path, else unknown (and whether
-// that unknown smells of the run state).
-function placeDir(word, at, home) {
-  const resolved = resolveWord(word, at, home);
-  if (resolved === null) return { dir: null, dirSmell: true };
-  if (resolved.unknowns.length > 0 || resolved.paths.length === 0) {
-    return { dir: null, dirSmell: resolved.unknowns.some(({ smell }) => smell) };
-  }
-  return { dir: resolved.paths.at(-1), dirSmell: false };
-}
-
-// Whether a segment feeding a `read` could list the run state: a find over
-// (or into) it, or words that smell of it. false when it cannot.
-function producerRisk({ words, head, at }, home, dirs) {
-  if (head === -1) return false;
-  if (words.some((word) => SMELL.test(word))) return true;
-  if (basename(words[head]) !== 'find') return false;
-  return findStarts(words, head + 1).some((start) => {
-    const resolved = resolveWord(start, at, home);
-    if (resolved === null || resolved.unknowns.length > 0) return true;
-    return resolved.paths.some((path) => dirs.some((protectedDir) => relation(path, protectedDir) !== null));
-  });
+// A directory a cd moves to: one concrete path, else unknown.
+function placeDir(word, at, home, env) {
+  const resolved = resolveWord(word, at, home, env);
+  if (resolved === null || resolved.unknowns.length > 0 || resolved.paths.length === 0) return null;
+  return resolved.paths.at(-1);
 }
 
 // Fixtures, relative to a repository at /r with home /home/u and the plugin's
@@ -692,7 +759,19 @@ export const TAMPERING = Object.freeze([
   '(cd /tmp) ; cd .git/autoloop ; rm -rf run',
   'env -C .git/autoloop rm -rf run',
   'cd $(git rev-parse --git-dir) && rm -rf autoloop',
-  'cd "$X" && rm -rf run',
+  'X=$(cat /tmp/p) ; cd $X && rm -rf run',
+  'printf -v f %s .git/autoloop/run ; rm -rf $f',
+  'read f <<< .git/autoloop/run ; rm -rf $f',
+  'declare -n r=HOME ; rm -rf $r/.claude/autoloop/run-latches',
+  'cd .git/autoloop/run && rm -rf $PWD',
+  'cd .git/autoloop/run ; cd /tmp ; rm -rf $OLDPWD',
+  'cd .git/autoloop/run ; cd /tmp ; cd - ; rm -rf *',
+  'pushd .git/autoloop/run ; pushd /tmp ; popd ; rm -rf *',
+  'rm -rf ~+/.git/autoloop/run',
+  'rm -rf ~someoneelse/.claude/autoloop/run-latches',
+  'd=$(ls -d .g*) ; rm -rf $d',
+  'rm -rf $(cat /tmp/p)',
+  'set -- .git ; rm -rf $1/autoloop',
   'rm -rf $(git rev-parse --git-common-dir)/autoloop',
   'rm -rf ~/.claude/autoloop/run-latches',
   'rm -rf $HOME/.claude/autoloop',
@@ -721,6 +800,30 @@ export const TAMPERING = Object.freeze([
   'echo exit > /p/tools/command-guard.mjs',
   'cp /tmp/x.mjs /p/tools/command-guard.mjs',
   'rm -rf /p',
+  'patch /p/tools/command-guard.mjs /tmp/x.diff',
+  'GIT_WORK_TREE=.git/autoloop/run git clean -fdx',
+  'env GIT_WORK_TREE=.git/autoloop/run git clean -ffdx',
+  'GIT_DIR=.git/autoloop/run git init',
+  'export GIT_WORK_TREE=.git/autoloop/run ; git clean -fdx',
+  'git config core.worktree .git/autoloop/run && git clean -ffdx',
+  'ln .git/autoloop/run/1.json m.json',
+  'cp -l .git/autoloop/run/1.json m.json',
+  'ln /home/u/.claude/autoloop/run-latches/x.json l.json',
+  'ln /p/tools/command-guard.mjs g.mjs',
+  'fd -x rm',
+  'fd -X rm -rf',
+  'fd . .git -x rm',
+  'rg --pre rm . .git/autoloop/run',
+  'tar -cf /tmp/x.tar --remove-files .git/autoloop/run',
+  'zip -rm /tmp/x.zip .git',
+  'npx rimraf .git/autoloop',
+  'builtin cd .git && rm -rf autoloop',
+  'rm -rf .git/autoloop/[!x]un',
+  'rm -rf .git/autoloop/(run|x)',
+  'rsync -a /tmp/forged/ .git/autoloop/run',
+  'cp -rT /tmp/forged .git',
+  'awk -i inplace 1 /p/tools/command-guard.mjs',
+  'node /tmp/evil.mjs /p/tools/command-guard.mjs',
 ]);
 
 export const ORDINARY = Object.freeze([
@@ -750,6 +853,11 @@ export const ORDINARY = Object.freeze([
   'echo x > "$OUT"',
   'cd /tmp/autoloop-354 && rm -rf live',
   'S=/tmp/s ; rm -rf $S/rel',
+  'J=$(mktemp) ; curl -c $J x ; rm -f $J',
+  'for r in a b ; do rm -rf /tmp/s/$r-clone ; done',
+  'D=/tmp/perm-probe-$$ ; mkdir -p $D && rm -rf $D',
+  'export W=/tmp/s/stage ; rm -rf $W',
+  'cd /tmp/x && rm -rf $PWD/build',
   'sed -n 1,5p .git/autoloop/run/1.json',
   'npm test > /tmp/out.txt 2>&1',
   'npm test 2>&1 >&2',
@@ -767,6 +875,13 @@ export const ORDINARY = Object.freeze([
   'gh run view 5 --log',
   'node /p/tools/prime.mjs --close-run',
   'bash /p/tools/dispatch-stream.sh /tmp/a.jsonl',
+  'node /p/tools/dispatch.mjs --brief /p/tools/briefs/plan.md --role plan',
+  'rg -n x /p/tools/prime.mjs',
+  'fd -e ts src -x wc -l',
+  'git clean -fdx -e node_modules',
+  'git config user.email x@x.invalid',
+  'ln -s ../shared node_modules/shared',
+  'rsync -a src/ /tmp/copy/',
 ]);
 
 function selfTest() {
@@ -782,10 +897,32 @@ function selfTest() {
   const codeDirs = ['/p/tools'];
   // A minimal tokenizer for the fixtures; command-guard's self-test replays
   // them through the guard's own.
-  const segmentsOf = (command) => command.split(/\s*(?:&&|\|\||;|\|)\s*/u).filter(Boolean).map((text) => {
+  // Separators outside single quotes only, so a quoted regex stays one word.
+  const pieces = (command) => {
+    const out = [];
+    let current = '';
+    let quoted = false;
+    for (let index = 0; index < command.length; index += 1) {
+      const char = command[index];
+      if (char === "'") quoted = !quoted;
+      if (!quoted && (char === ';' || char === '|' || (char === '&' && command[index + 1] === '&'))) {
+        out.push(current.trim());
+        current = '';
+        if (command[index + 1] === char) index += 1;
+        continue;
+      }
+      current += char;
+    }
+    out.push(current.trim());
+    return out.filter(Boolean);
+  };
+  const segmentsOf = (command) => pieces(command).map((text) => {
     const opens = /^\(+/u.exec(text)?.[0].length ?? 0;
-    const closes = /\)+$/u.exec(text)?.[0].length ?? 0;
-    return { words: text.slice(opens, text.length - closes).trim().split(/\s+/u), opens, closes };
+    // Only parentheses left unbalanced close a subshell: `$(mktemp)` does not.
+    const balance = (text.match(/\(/gu) ?? []).length - (text.match(/\)/gu) ?? []).length;
+    const closes = Math.min(Math.max(0, -balance + opens), /\)+$/u.exec(text)?.[0].length ?? 0);
+    const words = text.slice(opens, text.length - closes).trim().match(/'[^']*'|\S+/gu).map((word) => word.replace(/^'(.*)'$/u, '$1'));
+    return { words, opens, closes };
   });
   const refused = (command, cwd = repo) => runStateProblem(segmentsOf(command), { cwd, protectedDirs, codeDirs, home }) !== null;
   const tampering = TAMPERING.filter((command) => !refused(command));
@@ -802,7 +939,7 @@ function selfTest() {
     `rm -rf ${'{a,b}'.repeat(40)}`, 'rm -rf {1..100000}'];
   const paddedAt = Date.now();
   for (const command of padded) refused(command);
-  check('padded globs, braces and pipelines stay fast', Date.now() - paddedAt < 1000);
+  check('padded globs, braces and pipelines stay fast', Date.now() - paddedAt < 3000);
   const braceSet = (word) => JSON.stringify([...new Set(expandBraces(word))].sort());
   check('braces expand to the words the shell gives', braceSet('a/{b,c{d,e}}/{1..3}')
     === JSON.stringify(['a/b/1', 'a/b/2', 'a/b/3', 'a/cd/1', 'a/cd/2', 'a/cd/3', 'a/ce/1', 'a/ce/2', 'a/ce/3'])

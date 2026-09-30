@@ -17,7 +17,8 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const PER_CALL_MS = 4000;
-const UNBUDGETED_MS = 20000;
+// Below the host's 15 s hook timeout even for a caller that set no deadline.
+const UNBUDGETED_MS = 10000;
 
 let deadline = Infinity;
 let stalled = false;

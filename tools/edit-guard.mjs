@@ -27,9 +27,10 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  commonDirOf, latchDirectory, loopRunIsOpen, runMarkerDirectory, sessionLatch,
+  latchDirectory, loopRunIsOpen, runMarkerDirectory, sessionLatch,
 } from './run-markers.mjs';
 import { guardedRoot, hookRoot } from './hook-root.mjs';
+import { gitStalled, setGitDeadline } from './git-budget.mjs';
 
 const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const PLUGIN_CODE_DIRS = Object.freeze(['tools', 'hooks']
@@ -109,9 +110,24 @@ function selfTest() {
       input: JSON.stringify({ tool_name: 'Edit', tool_input: { file_path: join(scratch, 'real', '.claude', 'settings.json') } }),
       cwd: scratch,
       encoding: 'utf8',
-      env: { ...process.env, CLAUDE_PROJECT_DIR: join(scratch, 'real') },
+      // A scratch HOME: the session latch lives there, and the operator's own
+      // must not decide this case.
+      env: { ...process.env, HOME: join(scratch, 'home'), CLAUDE_PROJECT_DIR: join(scratch, 'real') },
     });
     check('the hook entry allows the edit when no loop run is live', hook.status === 0);
+    // A FIFO for .git/config stalls git: the guard refuses within its budget
+    // instead of running past the host's timeout.
+    const stalled = join(scratch, 'stalled');
+    spawnSync('git', ['init', '-q', stalled]);
+    rmSync(join(stalled, '.git', 'config'));
+    spawnSync('mkfifo', [join(stalled, '.git', 'config')]);
+    const stalledAt = Date.now();
+    const stalledHook = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+      input: JSON.stringify({ tool_name: 'Edit', tool_input: { file_path: join(stalled, 'a.txt') } }),
+      cwd: stalled, encoding: 'utf8', timeout: 15000,
+      env: { ...process.env, HOME: join(scratch, 'home'), CLAUDE_PROJECT_DIR: stalled, AUTOLOOP_GUARD_BUDGET_MS: '2000' },
+    });
+    check('a stalled git refuses within the budget', stalledHook.status === 2 && Date.now() - stalledAt < 8000);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -124,6 +140,9 @@ function selfTest() {
 
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
+  // The same budget the command guard keeps: a stalled git (a FIFO for
+  // .git/config) must refuse before the host's timeout lets the edit through.
+  setGitDeadline(Date.now() + Math.min(10_000, Number(process.env.AUTOLOOP_GUARD_BUDGET_MS) || 10_000));
   let payload;
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
@@ -136,9 +155,18 @@ function main() {
   // (hook-root.mjs). Inside an open run — its markers, or the session latch
   // the command guard keeps once it has seen them — it never stands down.
   const projectRoot = hookRoot();
-  const latched = sessionLatch({ sessionId: payload?.session_id, commonDir: commonDirOf(projectRoot) });
+  const latched = sessionLatch();
   const repoRoot = guardedRoot(projectRoot) ?? (latched === null ? null : projectRoot);
-  if (repoRoot === null) process.exit(0);
+  // A stalled git hides the markers an open run is found by.
+  const stalledOut = () => {
+    if (!gitStalled()) return;
+    console.error('autoloop guard — a git call timed out (a stalled git directory), so the edit cannot be checked.');
+    process.exit(2);
+  };
+  if (repoRoot === null) {
+    stalledOut();
+    process.exit(0);
+  }
   const open = loopRunIsOpen() || loopRunIsOpen(repoRoot) || latched !== null;
   const filePath = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
   const problem = hookWiringEditProblem(filePath, repoRoot, open)
@@ -147,6 +175,7 @@ function main() {
     console.error(problem);
     process.exit(2);
   }
+  stalledOut();
   process.exit(0);
 }
 

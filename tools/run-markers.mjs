@@ -7,8 +7,7 @@
 // self-test exercises it.
 
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { boundedGit } from './git-budget.mjs';
@@ -101,17 +100,14 @@ export function pluginRunMarkers(dirs = [process.cwd()]) {
 
 // The session latch: the run's second record, outside the repository. The
 // markers live in the git dir, which the run can reach, and a run that
-// deleted them switched its own guard off (security audit after 0.60.0). The
-// command guard writes a latch the first time it sees an open plugin run in a
-// session — once, never updated, so the first base is pinned — and honours it
-// for as long as a latched process is alive in the hook's ancestry, whatever
-// happened to the markers. Keyed by session and repository (its common dir).
-const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/u;
-
-export function validSessionId(sessionId) {
-  return SESSION_ID.test(String(sessionId ?? ''));
-}
-
+// deleted them (or broke git so they could not be found) switched its own
+// guard off (security audits after 0.60.0). The latch belongs to the
+// session's Claude process — found in the ancestry the way markers are
+// matched, never through git or anything the run can edit — and records
+// the run's base, pinned once. prime writes it when it opens a run (no
+// window between opening and a first hook), the command guard writes it the
+// first time it sees an open run, and it holds for as long as that Claude
+// process lives. Its start time guards against pid reuse.
 export function latchDirectory(home = homedir()) {
   return join(home, '.claude', 'autoloop', 'run-latches');
 }
@@ -121,65 +117,104 @@ export function commonDirOf(cwd = process.cwd()) {
   return markers === null ? null : dirname(dirname(markers));
 }
 
-function latchPath(sessionId, commonDir, directory) {
-  return join(directory, `${createHash('sha256').update(`${sessionId}\0${commonDir}`).digest('hex')}.json`);
+// The session's Claude process: the first Claude ancestor, or (on a host
+// without one — CI) the outermost ancestor this process can see.
+export function sessionOwnerPid(start = process.ppid, readEntry = procEntry, limit = 64) {
+  let pid = start;
+  let last = null;
+  for (let depth = 0; depth < limit && pid > 1; depth += 1) {
+    last = pid;
+    const entry = readEntry(pid);
+    if (entry === null) return last;
+    const [parent, name, exe] = entry;
+    if (isClaudeProcess(name, exe)) return pid;
+    if (!Number.isSafeInteger(parent) || parent <= 0) return last;
+    pid = parent;
+  }
+  return last;
 }
 
-const livePid = (pid) => Number.isSafeInteger(pid) && pid > 1 && processAlive(pid);
+// When a process started, as the kernel (or ps) reports it: a pid reused by
+// a later process has a different start.
+export function processStart(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? null;
+  } catch {
+    if (process.platform === 'linux') return null;
+    const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000 });
+    const text = String(result.stdout ?? '').trim();
+    return result.status === 0 && text !== '' ? text : null;
+  }
+}
 
-export function recordLatch({ sessionId, commonDir, markers, directory = latchDirectory(), nowMs = Date.now() }) {
-  if (!SESSION_ID.test(String(sessionId ?? '')) || typeof commonDir !== 'string') return null;
-  const plugin = markers.filter(({ marker }) => typeof marker.baseBranch === 'string');
-  if (plugin.length === 0) return null;
-  const path = latchPath(sessionId, commonDir, directory);
-  const latch = {
-    version: 1,
-    sessionId,
-    commonDir,
-    baseBranch: plugin[0].marker.baseBranch,
-    pids: [...new Set(plugin.flatMap(({ marker }) => marker.pids))].filter((pid) => Number.isSafeInteger(pid) && pid > 1),
-    latchedAtMs: nowMs,
+function latchPath(owner, directory) {
+  return join(directory, `${owner}.json`);
+}
+
+export function recordLatch({ owner = sessionOwnerPid(), baseBranch, scope = null, directory = latchDirectory(), nowMs = Date.now() }) {
+  if (!Number.isSafeInteger(owner) || owner <= 1 || typeof baseBranch !== 'string') return null;
+  const path = latchPath(owner, directory);
+  const latch = { version: 2, owner, ownerStart: processStart(owner), baseBranch, scope, latchedAtMs: nowMs };
+  // Written whole to a temporary file and linked into place: a crash
+  // mid-write never leaves a torn (unreadable, so refusing) latch.
+  const place = () => {
+    const temporary = `${path}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, `${JSON.stringify(latch)}\n`, { flag: 'w', mode: 0o600 });
+      linkSync(temporary, path);
+      return true;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      return false;
+    } finally {
+      try {
+        unlinkSync(temporary);
+      } catch { /* already gone */ }
+    }
   };
   try {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
-    writeFileSync(path, `${JSON.stringify(latch)}\n`, { flag: 'wx', mode: 0o600 });
-  } catch (error) {
-    if (error?.code !== 'EEXIST') return null;
+    if (place()) return path;
+    // A latch left by an earlier process with this pid is not this one's.
+    const existing = sessionLatch({ owner, directory });
+    if (existing === null) return place() ? path : null;
+    return existing.unreadable ? null : path;
+  } catch {
+    return null;
   }
-  return path;
 }
 
-// { latch } while it binds this session's live ancestry; { unreadable } for a
-// latch that exists but cannot be trusted (the guard then refuses); null when
-// there is none, or its processes have all exited (the file is pruned).
-export function sessionLatch({ sessionId, commonDir, directory = latchDirectory(), ancestors = ancestorPids() }) {
-  if (!SESSION_ID.test(String(sessionId ?? '')) || typeof commonDir !== 'string') return null;
-  const path = latchPath(sessionId, commonDir, directory);
+// { latch } for this session's latch; { unreadable } for one that exists
+// but cannot be trusted (the guard then refuses); null when there is none,
+// or it was a dead or earlier process's (the file is pruned).
+export function sessionLatch({ owner = sessionOwnerPid(), directory = latchDirectory() } = {}) {
+  if (!Number.isSafeInteger(owner) || owner <= 1) return null;
+  const path = latchPath(owner, directory);
   let latch;
   try {
     latch = JSON.parse(readFileSync(path, 'utf8'));
   } catch (error) {
     return error?.code === 'ENOENT' ? null : { unreadable: true, path };
   }
-  if (latch?.version !== 1 || latch.sessionId !== sessionId || latch.commonDir !== commonDir
-    || typeof latch.baseBranch !== 'string' || !Array.isArray(latch.pids)) {
+  if (latch?.version !== 2 || latch.owner !== owner || typeof latch.baseBranch !== 'string') {
     return { unreadable: true, path };
   }
-  const live = latch.pids.filter(livePid);
-  if (live.length === 0) {
+  if (!processAlive(owner) || (latch.ownerStart !== null && latch.ownerStart !== processStart(owner))) {
     try {
       unlinkSync(path);
     } catch { /* already gone */ }
     return null;
   }
-  return live.some((pid) => ancestors.has(pid)) ? { latch, path } : null;
+  return { latch, path };
 }
 
-// Latches whose processes have all exited: their sessions are over.
+// Latches whose owners have exited (or whose pid now belongs to another
+// process): their sessions are over.
 export function pruneLatches(directory = latchDirectory()) {
   let names;
   try {
-    names = readdirSync(directory).filter((name) => name.endsWith('.json'));
+    names = readdirSync(directory).filter((name) => /^\d+\.json$/u.test(name));
   } catch {
     return [];
   }
@@ -187,8 +222,10 @@ export function pruneLatches(directory = latchDirectory()) {
   for (const name of names) {
     const path = join(directory, name);
     try {
-      const { pids } = JSON.parse(readFileSync(path, 'utf8'));
-      if (Array.isArray(pids) && !pids.some(livePid)) {
+      const { owner, ownerStart } = JSON.parse(readFileSync(path, 'utf8'));
+      const gone = !Number.isSafeInteger(owner) || !processAlive(owner)
+        || (ownerStart !== null && ownerStart !== undefined && ownerStart !== processStart(owner));
+      if (gone) {
         unlinkSync(path);
         pruned.push(path);
       }
