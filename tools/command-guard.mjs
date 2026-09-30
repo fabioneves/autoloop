@@ -2758,31 +2758,34 @@ export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PR
       dir = resolve(dir, expandHome(words[1]));
       continue;
     }
-    const node = nodeInvocation(words, dir);
-    if (node === null) continue;
-    const scriptIndex = words.findIndex((word, index) => index > node.index && !word.startsWith('-'));
-    if (scriptIndex === -1 || realOrSelf(resolve(node.target, expandHome(words[scriptIndex]))) !== prime) continue;
-    if (words.slice(scriptIndex + 1).some((word) => PRIME_EXEMPT.has(word))) continue;
+    const target = primeTarget(words, dir, prime);
+    if (target === null) continue;
     if (project === undefined) project = commonGitDir(projectRoot);
-    if (!targets.has(node.target)) {
+    if (!targets.has(target)) {
       if (targets.size === MAX_PRIME_TARGETS) return OVER_BUDGET;
-      targets.set(node.target, commonGitDir(node.target));
+      targets.set(target, commonGitDir(target));
     }
-    if (project === null || targets.get(node.target) === project) continue;
+    if (project === null || targets.get(target) === project) continue;
     return `autoloop guard — this session's project is ${projectRoot}, but prime would open the run in `
-      + `${node.target}, outside it: the session's hooks would guard the wrong repository. Start a `
+      + `${target}, outside it: the session's hooks would guard the wrong repository. Start a `
       + 'session in that repository and run the loop there.';
   }
   return null;
 }
 
 // Whether a segment runs the plugin's own prime to open a run.
-function primeSegment(words, cwd, prime = PLUGIN_PRIME) {
-  const node = nodeInvocation(words, cwd);
-  if (node === null) return false;
+// The directory a segment runs the plugin's prime in to open a run (not
+// --close-run, --park or --self-test), or null when it does not.
+function primeTarget(words, dir, prime = PLUGIN_PRIME) {
+  const node = nodeInvocation(words, dir);
+  if (node === null) return null;
   const scriptIndex = words.findIndex((word, index) => index > node.index && !word.startsWith('-'));
-  if (scriptIndex === -1 || realOrSelf(resolve(node.target, expandHome(words[scriptIndex]))) !== prime) return false;
-  return !words.slice(scriptIndex + 1).some((word) => PRIME_EXEMPT.has(word));
+  if (scriptIndex === -1 || realOrSelf(resolve(node.target, expandHome(words[scriptIndex]))) !== prime) return null;
+  return words.slice(scriptIndex + 1).some((word) => PRIME_EXEMPT.has(word)) ? null : node.target;
+}
+
+function primeSegment(words, cwd, prime = PLUGIN_PRIME) {
+  return primeTarget(words, cwd, prime) !== null;
 }
 
 // Whether a command opens a run anywhere in it (cd steps followed).
@@ -4102,7 +4105,7 @@ function selfTest() {
       spawnSync('mkfifo', [join(stalled, '.git', 'config')]);
       const stalledAt = Date.now();
       const stalledHook = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
-        input: JSON.stringify({ tool_name: 'Bash', session_id: 'session-s', cwd: stalled, tool_input: { command: 'ls' } }),
+        input: JSON.stringify({ tool_name: 'Bash', cwd: stalled, tool_input: { command: 'ls' } }),
         encoding: 'utf8', cwd: stalled, timeout: 15000,
         env: { ...isolatedEnv(), HOME: home, CLAUDE_PROJECT_DIR: stalled, AUTOLOOP_GUARD_BUDGET_MS: '3000' },
       });
@@ -4113,7 +4116,7 @@ function selfTest() {
       mkdirSync(join(lockedHome, '.claude'), { recursive: true });
       writeFileSync(join(lockedHome, '.claude', 'autoloop'), 'not a directory');
       const unlatchable = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
-        input: JSON.stringify({ tool_name: 'Bash', session_id: 'session-u', cwd: scratch, tool_input: { command: 'ls' } }),
+        input: JSON.stringify({ tool_name: 'Bash', cwd: scratch, tool_input: { command: 'ls' } }),
         encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), HOME: lockedHome, CLAUDE_PROJECT_DIR: scratch },
       });
       rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
@@ -4612,8 +4615,8 @@ function main() {
   const cwd = typeof payload?.cwd === 'string' ? payload.cwd : process.cwd();
   const runOpen = loopRunIsOpen() || loopRunIsOpen(projectRoot) || latched !== null;
   const segments = guardSegments(cmd);
-  const protectedDirs = protectedPaths({ projectRoot, cwd, runOpen });
-  const stateProblem = runStateProblem(segments, { cwd, protectedDirs: protectedDirs.state, codeDirs: protectedDirs.code });
+  const paths = protectedPaths({ projectRoot, cwd, runOpen });
+  const stateProblem = runStateProblem(segments, { cwd, protectedDirs: paths.state, codeDirs: paths.code });
   if (stateProblem !== null) refuse(stateProblem);
   // A command that opens a run does only that (and reads): prime writes the
   // latch, but a compound could still break git or remove the fresh records

@@ -50,6 +50,7 @@ const DESTRUCTIVE = new Set([
 // Copies read their sources; only a move (or a symlink, whose source becomes
 // reachable under a new name) puts its sources at stake.
 const COPYING = new Set(['cp', 'install', 'rsync']);
+const INTERPRETERS = /^(?:bash|bun|dash|deno|node|nodejs|perl|php|python\d*(?:\.\d+)?|ruby|sh|zsh)$/u;
 const FIND_ACTIONS = new Set(['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls']);
 // git subcommands that write where their paths (or an explicit work tree) point.
 const GIT_WRITING = new Set(['archive', 'checkout', 'checkout-index', 'clean', 'clone', 'init', 'mv', 'reset', 'restore', 'rm', 'worktree']);
@@ -394,10 +395,10 @@ function claims(words, head) {
     const scripts = name === 'sed'
       ? new Set(['-e', '--expression', '-f', '--file'])
       : new Set(['-e', '-E', '-M', '-I', '-m']);
-    const named = rest.some((word) => scripts.has(word) || /^-[A-Za-z]*[eEf]$/u.test(word));
-    const files = operands(words, at, scripts);
-    const valued = rest.flatMap((word, index) => (scripts.has(word) || /^-[A-Za-z]*[eEf]$/u.test(word)) ? [rest[index + 1]] : []);
-    const targets = files.filter((word) => !valued.includes(word));
+    const scriptFlag = (word) => scripts.has(word) || /^-[A-Za-z]*[eEf]$/u.test(word);
+    const named = rest.some(scriptFlag);
+    const valued = rest.flatMap((word, index) => (scriptFlag(word) ? [rest[index + 1]] : []));
+    const targets = operands(words, at, scripts).filter((word) => !valued.includes(word));
     return all(name === 'sed' && !named ? targets.slice(1) : targets, ['inside'], true);
   }
   if (name === 'find') return findClaims(words, at);
@@ -417,14 +418,16 @@ function claims(words, head) {
     return all([...optionValues(words, at, GH_OUTPUTS), ...cloned], ['inside', 'ancestor'], true);
   }
   // Any other program may not name a path inside the run state (a script
-  // told to write there); running or reading the plugin's own code is fine.
+  // told to write there). An interpreter running one of the plugin's own
+  // tools may name the plugin's files (briefs, templates); any other program
+  // naming the guard's code is a writer until shown otherwise (patch, sponge,
+  // awk -i). The interpreter's script is judged against the state alone.
   if (!DESTRUCTIVE.has(name)) {
-    // An interpreter running one of the plugin's own tools may name the
-    // plugin's files (briefs, templates); any other program naming the
-    // guard's code is a writer until shown otherwise (patch, sponge, awk -i).
     const list = operands(words, at);
-    const pluginTool = INTERPRETERS.test(name) && list.length > 0;
-    return all(list, ['inside'], false).map((claim, index) => ({ ...claim, stateOnly: pluginTool, script: pluginTool && index === 0 }));
+    const interpreter = INTERPRETERS.test(name) && list.length > 0;
+    return all(list, ['inside'], false).map((claim, index) => ({
+      ...claim, interpreterArg: interpreter, script: interpreter && index === 0,
+    }));
   }
   if (name === 'tar' && rest.some((word) => word === '--remove-files')) {
     return all(operands(words, at, new Set(['-f', '--file', '-C', '--directory'])), ['inside', 'ancestor'], true);
@@ -564,6 +567,7 @@ function unproven(word) {
 export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], home = homedir(), env = process.env }) {
   const absolute = (list) => [...new Set(list.filter((dir) => typeof dir === 'string' && isAbsolute(dir)))];
   const stateDirs = absolute(protectedDirs);
+  const codeOnly = absolute(codeDirs).filter((dir) => !stateDirs.includes(dir));
   const dirs = absolute([...protectedDirs, ...codeDirs]);
   if (dirs.length === 0) return null;
   if (segments.some((segment) => segment.opaque)) {
@@ -594,20 +598,14 @@ export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], h
     // Running a script from the plugin's code is what the plugin is for;
     // running anything else lets it name the code only as data it reads.
     const script = list.find((claim) => claim.script);
-    const runsPluginCode = script !== undefined && resolvesInside(script.word, at, codeDirsOnly(dirs, stateDirs), home, env);
+    const runsPluginCode = script !== undefined && resolvesInside(script.word, at, codeOnly, home, env);
     for (const claim of list) {
-      const judged = claim.stateOnly && runsPluginCode ? stateDirs : claim.script ? stateDirs : dirs;
+      const judged = claim.script || (claim.interpreterArg && runsPluginCode) ? stateDirs : dirs;
       const problem = judge(claim, at, judged, home, env);
       if (problem !== null) return problem;
     }
   }
   return null;
-}
-
-const INTERPRETERS = /^(?:bash|bun|dash|deno|node|nodejs|perl|php|python\d*(?:\.\d+)?|ruby|sh|zsh)$/u;
-
-function codeDirsOnly(dirs, stateDirs) {
-  return dirs.filter((dir) => !stateDirs.includes(dir));
 }
 
 function resolvesInside(word, at, dirs, home, env) {
