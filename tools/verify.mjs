@@ -357,8 +357,8 @@ function checkNoVendoredLayout(root) {
 // calls. Neither the model nor a hook can compact on demand; the operator's
 // settings can make it happen earlier. Advice, never a failure.
 export function checkCompaction(env = process.env) {
-  const set = ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'].filter((name) => (env[name] ?? '') !== '');
-  return set.length > 0
+  const configured = ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'].some((name) => (env[name] ?? '') !== '');
+  return configured
     ? { ok: true, detail: '' }
     : {
       ok: true,

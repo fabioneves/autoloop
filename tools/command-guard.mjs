@@ -463,10 +463,8 @@ function decodeAnsiC(cmd, quoted) {
       index = end;
       continue;
     }
-    if (char === '$' && cmd[index + 1] === '"') {
-      index += 0;
-      continue; // `$"…"` is a locale string: the quote that follows opens it
-    }
+    // `$"…"` is a locale string: drop the `$`, the quote that follows opens it.
+    if (char === '$' && cmd[index + 1] === '"') continue;
     if (char === "'" || char === '"') quote = char;
     out += char;
   }
@@ -486,14 +484,13 @@ function quotedAnsiC(cmd) {
 // still reads as gh. What quotes made literal stays inert: inside single
 // quotes the separators, redirections, `$` and backquotes; inside double
 // quotes the separators and redirections (a `$(…)` or backquote there still
-// runs, so those stay). Left
-// live, a quoted jq filter's `|` split the command into a pipeline and a
-// quoted regex's backquotes and `(sh|bash)` became a subshell running bash
-// (false refusals in the LFE run, 2026-09-30).
+// runs, so those stay). Left live, a quoted jq filter's `|` split the command
+// into a pipeline and a quoted regex's backquotes and `(sh|bash)` became a
+// subshell running bash (false refusals in the LFE run, 2026-09-30).
 // Parentheses and braces stay: they split nothing, and the GraphQL mutation
-// rules read `mutation{…(…)}` from a quoted query.
-// Newlines still split: a long quoted message read as one segment let a
-// position-blind flag check pair words from different lines.
+// rules read `mutation{…(…)}` from a quoted query. Newlines still split: a
+// long quoted message read as one segment let a position-blind flag check
+// pair words from different lines.
 const INERT_IN_SINGLE = new Set(['|', ';', '&', '<', '>', '`', '$']);
 const INERT_IN_DOUBLE = new Set(['|', ';', '&', '<', '>']);
 
@@ -2392,10 +2389,11 @@ export function evaluate(inputCmd, branch, options = {}) {
   // followed, over quote-aware segments (a quoted jq filter's `|` is not a
   // pipe). The LFE run lost a PR-body PATCH to both (2026-09-30).
   const bodySegments = shellSegments(cmd);
+  const plainCd = (words) => (words[0] === 'cd' || words[0] === 'pushd') && words.length === 2;
   let bodyDir = options.cwd ?? process.cwd();
   const bodyProblems = bodySegments.map(({ command }) => {
     const words = shellWords(command);
-    if ((words[0] === 'cd' || words[0] === 'pushd') && words.length === 2 && !/[$`]/u.test(words[1])) {
+    if (plainCd(words) && !/[$`]/u.test(words[1])) {
       bodyDir = resolve(bodyDir, expandHome(words[1]));
       return null;
     }
@@ -2413,8 +2411,7 @@ export function evaluate(inputCmd, branch, options = {}) {
   // Whatever follows a sequential operator runs after the post and cannot.
   const mayWrite = (command) => {
     const words = shellWords(command);
-    if ((words[0] === 'cd' || words[0] === 'pushd') && words.length === 2) return false;
-    return /[<>]/u.test(command) || !readsOnly(words);
+    return !plainCd(words) && (/[<>]/u.test(command) || !readsOnly(words));
   };
   if (bodySegments.length > 1 && bodySegments.some(({ command, raw }, index) =>
     readsCommentBodyFile(shellWords(command))
@@ -3625,28 +3622,28 @@ function selfTest() {
       && commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/missing.md'), read) === 'unverifiable'
       && commentBodyProblem(shellWords('gh issue comment 7 -F=/s/answer.md'), read) === 'answer'
       && commentBodyProblem(shellWords('gh issue view 7 --comments'), read) === null;
-  // The body is read where the post runs (a `cd` first is followed), and a
-  // quoted jq filter's `|` is not a pipe; an earlier writer still refuses
-  // (LFE run 2026-09-30: a PR-body PATCH and a run record were refused).
-  {
-    const bodyDir = mkdtempSync(join(tmpdir(), 'guard-body-'));
-    writeFileSync(join(bodyDir, 'body.md'), 'evidence\n');
-    const verdict = (command) => evaluate(command, 'feat/gh-1-x', { baseBranch: 'main', cwd: '/' }).block;
-    const bodyCases = [
-      verdict(`cd ${bodyDir}; gh issue comment 5 --body-file body.md; gh issue view 5 --json state --jq '{state}'`) === false,
-      verdict(`gh api --method PATCH repos/o/r/pulls/5 -F body=@${bodyDir}/body.md --jq '.body | length'`) === false,
-      verdict(`echo /answer > ${bodyDir}/body.md; gh issue comment 5 --body-file ${bodyDir}/body.md`) === true,
-      verdict(`gh issue comment 5 --body-file ${bodyDir}/body.md | tee x`) === true,
-    ];
-    rmSync(bodyDir, { recursive: true, force: true });
-    if (bodyCases.includes(false)) {
-      console.error(`FAIL [a comment body is read where the post runs, and only a writer makes it unverifiable]: ${JSON.stringify(bodyCases)}`);
-      ok = false;
-    }
-  }
     if (!answerFileCases) {
       console.error('FAIL [a body file starting with /answer is refused]');
       ok = false;
+    }
+    // The body is read where the post runs (a `cd` first is followed), and a
+    // quoted jq filter's `|` is not a pipe; an earlier writer still refuses
+    // (LFE run 2026-09-30: a PR-body PATCH and a run record were refused).
+    {
+      const bodyDir = mkdtempSync(join(tmpdir(), 'guard-body-'));
+      writeFileSync(join(bodyDir, 'body.md'), 'evidence\n');
+      const verdict = (command) => evaluate(command, 'feat/gh-1-x', { baseBranch: 'main', cwd: '/' }).block;
+      const bodyCases = [
+        verdict(`cd ${bodyDir}; gh issue comment 5 --body-file body.md; gh issue view 5 --json state --jq '{state}'`) === false,
+        verdict(`gh api --method PATCH repos/o/r/pulls/5 -F body=@${bodyDir}/body.md --jq '.body | length'`) === false,
+        verdict(`echo /answer > ${bodyDir}/body.md; gh issue comment 5 --body-file ${bodyDir}/body.md`) === true,
+        verdict(`gh issue comment 5 --body-file ${bodyDir}/body.md | tee x`) === true,
+      ];
+      rmSync(bodyDir, { recursive: true, force: true });
+      if (bodyCases.includes(false)) {
+        console.error(`FAIL [a comment body is read where the post runs, and only a writer makes it unverifiable]: ${JSON.stringify(bodyCases)}`);
+        ok = false;
+      }
     }
   }
   {
