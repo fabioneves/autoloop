@@ -128,7 +128,9 @@ export function protectedPaths({ projectRoot, cwd = projectRoot, runOpen, home =
     join(home, '.claude', 'shell-snapshots'), join(home, '.claude', 'session-env'),
     ...(runOpen ? [
       ...['.claude/settings.json', '.claude/settings.local.json'].map((file) => join(projectRoot, file)),
-      ...['settings.json', 'settings.local.json', 'plugins/installed_plugins.json', 'plugins/known_marketplaces.json']
+      ...['settings.json', 'settings.local.json', 'plugins/installed_plugins.json', 'plugins/known_marketplaces.json',
+        // The operator's step models (models-config.mjs): a run never changes its own.
+        'autoloop/config.json']
         .map((file) => join(home, '.claude', file)),
     ] : []),
   ];

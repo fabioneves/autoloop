@@ -4447,6 +4447,16 @@ function selfTest() {
         console.error('FAIL [a branch switch is told apart from a file checkout]');
         ok = false;
       }
+      // SPEC-model-config: the loop never changes its own step models; the
+      // operator's global model config is protected while a run is open.
+      {
+        const open = protectedPaths({ projectRoot: '/r', runOpen: true, home: '/h' }).state;
+        const closed = protectedPaths({ projectRoot: '/r', runOpen: false, home: '/h' }).state;
+        if (!(open.includes('/h/.claude/autoloop/config.json') && !closed.includes('/h/.claude/autoloop/config.json'))) {
+          console.error('FAIL [the global model config is protected while a run is open, and only then]');
+          ok = false;
+        }
+      }
       // With no run open too: a new session's first `git switch main` broke a
       // diff-review the previous session left reading the checkout (LFE run,
       // 2026-09-30 10:05, before prime had opened the run).
