@@ -175,11 +175,21 @@ export function parkedView({ root, run = realRun(root), nowMs = Date.now(), mark
   });
 }
 
-// A dispatch names the model it runs on the unit's current step, so the
-// parked view shows what is running even when the step was announced
-// without --model (LFE run 2026-09-30: "07 diff-review on ⚪ ENGINE" while
-// Opus ran the fix). A unit with no open record is left alone.
-export function noteDispatchModel({ root, run = realRun(root), issue, model }) {
+// What each step dispatches when it is itself: a different role under it (a
+// fix batch under a review step) is named on the parked line.
+const STEP_ROLES = Object.freeze({
+  '02-plan': 'plan', '03-plan-review': 'plan-review', '05-implement': 'implement', '06-simplify': 'simplify',
+  '07-diff-review': 'diff-review', '08-code-review': 'code-review', '08-fix': 'fix',
+});
+const REVIEW_ROLES = new Set(['plan-review', 'diff-review', 'code-review', 'doubt-review']);
+
+// A dispatch tells the unit's current step what is running, so the parked view
+// shows it even when the orchestrator announced nothing new (LFE run
+// 2026-09-30: "07 diff-review on ⚪ ENGINE" while Opus ran a fix; a closing
+// review round under the same step read "returned"). It names the model and
+// role, clears any return, and counts review rounds. A unit with no open
+// record is left alone.
+export function noteDispatch({ root, run = realRun(root), issue, model, role = null }) {
   if (!Number.isSafeInteger(issue) || typeof model !== 'string' || model === '') return { ok: false };
   const { dir } = autoloopDir(root, run);
   if (dir === null) return { ok: false };
@@ -187,10 +197,11 @@ export function noteDispatchModel({ root, run = realRun(root), issue, model }) {
   const stored = readJson(path, null);
   const last = stored?.steps?.at(-1);
   if (!last || stored.closed) return { ok: false };
-  if (last.model !== model) {
-    last.model = model;
-    writeAtomically(path, stored);
-  }
+  last.model = model;
+  delete last.returnedAtMs;
+  if (role !== null) last.role = role;
+  if (REVIEW_ROLES.has(role)) last.reviewRound = (last.reviewRound ?? 0) + 1;
+  writeAtomically(path, stored);
   return { ok: true };
 }
 
@@ -354,15 +365,19 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
   const human = waiting.map((issue) => ` · #${issue} ⚠️ awaits /answer`).join('');
   return [
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
-    ...units.map(({ issue, step, model, startedAtMs, staged, returnedAtMs, round, attempt }) => {
+    ...units.map(({ issue, step, model, startedAtMs, staged, returnedAtMs, round, attempt, role, reviewRound }) => {
       const [name] = STEPS[step] ?? [step];
-      // Which round: the recorded one, else how many times the step was entered
-      // (a plan's revisions are versions) — only once there is more than one.
+      // Which round: the announced one, else the review rounds dispatched under
+      // the step, else how many times the step was entered (a plan's revisions
+      // are versions) — the last only once there is more than one.
       const recorded = typeof round === 'string' ? Number(round.split('/')[0]) : null;
       const which = recorded !== null && Number.isSafeInteger(recorded)
         ? ` r${recorded}`
-        : attempt > 1 ? ` ${step === '02-plan' ? 'v' : 'r'}${attempt}` : '';
-      const label = `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()}${which}`;
+        : Number.isSafeInteger(reviewRound) ? ` r${reviewRound}`
+          : attempt > 1 ? ` ${step === '02-plan' ? 'v' : 'r'}${attempt}` : '';
+      // A different role running under the step (a fix batch under a review).
+      const under = role && STEP_ROLES[step] && role !== STEP_ROLES[step] ? ` · ${role}` : '';
+      const label = `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()}${which}${under}`;
       // A step whose dispatch came back is not running: a staged unit waits
       // for the worked one to finish (LFE run 2026-09-30, "02 plan on ASTRA"
       // for a plan that had returned).
@@ -1003,12 +1018,32 @@ function transitionChecks(at) {
         try {
           labels = ['loop-ready'];
           transition({ root, run, nowMs: at(12, 0), issue: 391, to: '07-diff-review', markers: () => [] });
-          const noted = noteDispatchModel({ root, run, issue: 391, model: 'claude-opus-5-5[1m]' });
+          const noted = noteDispatch({ root, run, issue: 391, model: 'claude-opus-5-5[1m]', role: 'fix' });
           const view = parkedView({ root, run, nowMs: at(12, 3), markers: () => [] });
           const line = view.split('\n').find((text) => text.includes('#391')) ?? '';
-          return noted.ok === true && line.includes('07 diff-review on 🟠 OPUS 5.5') && !line.includes('ENGINE')
-            && noteDispatchModel({ root, run, issue: 9998, model: 'x' }).ok === false;
+          return noted.ok === true && line.includes('07 diff-review · fix on 🟠 OPUS 5.5') && !line.includes('ENGINE')
+            && noteDispatch({ root, run, issue: 9998, model: 'x', role: 'fix' }).ok === false;
         } catch {
+          return false;
+        }
+      })()]);
+    // LFE run 2026-09-30, 17:32: diff-review r3 ran under the same announced
+    // step and the view still read "returned"; fix batches ran under it too.
+    // Each dispatch clears the return, counts review rounds, names its role.
+    results.push(['a dispatch clears the return, counts review rounds, and names a fix under a review step',
+      (() => {
+        try {
+          labels = ['loop-ready'];
+          transition({ root, run, nowMs: at(13, 0), issue: 392, to: '07-diff-review', markers: () => [] });
+          noteDispatch({ root, run, issue: 392, model: 'gpt-6-astra[1m]', role: 'diff-review' });
+          markReturned({ root, run, nowMs: at(13, 5), issue: 392 });
+          noteDispatch({ root, run, issue: 392, model: 'claude-opus-5-5[1m]', role: 'fix' });
+          const fixing = parkedView({ root, run, nowMs: at(13, 6), markers: () => [] }).split('\n').find((l) => l.includes('#392'));
+          noteDispatch({ root, run, issue: 392, model: 'gpt-6-astra[1m]', role: 'diff-review' });
+          const reviewing = parkedView({ root, run, nowMs: at(13, 7), markers: () => [] }).split('\n').find((l) => l.includes('#392'));
+          return fixing === '├ #392 · 07 diff-review r1 · fix on 🟠 OPUS 5.5 · 6m'
+            && reviewing === '├ #392 · 07 diff-review r2 on 🟢 ASTRA 6 · 7m';
+        } catch (error) {
           return false;
         }
       })()]);

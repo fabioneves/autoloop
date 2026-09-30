@@ -47,7 +47,7 @@ import {
 } from './config-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 import { pinnedModelsPath, pluginRunMarkers } from './run-markers.mjs';
-import { noteDispatchModel } from './step.mjs';
+import { noteDispatch } from './step.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -739,7 +739,7 @@ function dispatchOnce(options, cwd) {
   // announcement said (LFE run 2026-09-30: "on ⚪ ENGINE" while Opus ran).
   if (route.error === undefined && Number.isSafeInteger(options.issue) && resolvedModel !== null) {
     try {
-      noteDispatchModel({ root: repositoryRoot(cwd), issue: options.issue, model: resolvedModel });
+      noteDispatch({ root: repositoryRoot(cwd), issue: options.issue, model: resolvedModel, role: options.role });
     } catch {
       // The parked view is a courtesy; the dispatch goes on.
     }
