@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.4] - 2026-09-30
+
+### Added
+
+- **One orchestrator per checkout.** Before writing anything, prime refuses with
+  `RUN_OPEN_ELSEWHERE` when another live Claude session working in this repository holds an open
+  run on the checkout, and names its pid.
+  - Run markers now record the id of the session that opened them.
+  - A session's own runs include those opened by the session it was resumed or forked from, so a
+    session moved to the background keeps its run.
+  - Markers kept alive only by a shell or tmux process don't count.
+
+### Fixed
+
+- **Writer briefs bound their test and probe runs.** The implement, fix and simplify briefs now say
+  to keep test and probe runs bounded: modest concurrency, no repeat loops, well within the
+  machine's memory. A writer's stress probe ran out of memory, and the out-of-memory kill took down
+  the whole tmux scope, including the session and its dispatches.
+
 ## [0.65.3] - 2026-09-30
 
 ### Fixed
