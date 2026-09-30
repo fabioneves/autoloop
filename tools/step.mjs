@@ -163,13 +163,16 @@ export function parkedView({ root, run = realRun(root), nowMs = Date.now(), mark
   });
 }
 
-export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '' }) {
+export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '', ifOpen = false }) {
   const { dir } = autoloopDir(root, run);
-  if (dir === null) return { ok: false, lines: [`step: no steps recorded for #${issue} (not in a git repository)`] };
+  if (dir === null) return { ok: false, lines: ifOpen ? [] : [`step: no steps recorded for #${issue} (not in a git repository)`] };
   const path = join(dir, 'steps', `${issue}.json`);
   // A unit blocked at its premise, before any step was announced, still gets
   // its card (LFE run 2026-09-30: #389's --card failed "no steps recorded").
   const stored = readJson(path, null);
+  // ifOpen: close only a record still in flight (a tool closing on the
+  // orchestrator's behalf never re-renders a card already shown).
+  if (ifOpen && (!stored?.steps?.length || stored.closed)) return { ok: false, lines: [] };
   if (!stored?.steps?.length && outcome !== 'blocked') return { ok: false, lines: [`step: no steps recorded for #${issue}`] };
   const record = stored ?? { issue, steps: [] };
   const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, lines, question });
@@ -877,6 +880,24 @@ function transitionChecks(at) {
           return card.ok === true && card.lines[0].includes('#999') && card.lines[0].includes('which spec?')
             // Any other outcome still needs recorded steps (a typo'd number is refused).
             && closeUnit({ root, run, nowMs: at(10, 30), issue: 998, outcome: 'shipped' }).ok === false;
+        } catch {
+          return false;
+        }
+      })()]);
+    // The lifecycle driver closes a reconciled unit on the orchestrator's
+    // behalf: only a record still open, never re-rendering a card shown.
+    results.push(['ifOpen closes an open record once, and nothing else',
+      (() => {
+        try {
+          labels = ['loop-ready'];
+          go({ issue: 370, to: '00-reconcile' });
+          const first = closeUnit({ root, run, nowMs: at(10, 50), issue: 370, outcome: 'shipped', pr: 577, ifOpen: true });
+          const again = closeUnit({ root, run, nowMs: at(10, 51), issue: 370, outcome: 'shipped', pr: 577, ifOpen: true });
+          const none = closeUnit({ root, run, nowMs: at(10, 51), issue: 371, outcome: 'shipped', ifOpen: true });
+          return first.ok === true && first.lines[0].includes('#370 SHIPPED')
+            && again.ok === false && again.lines.length === 0
+            && none.ok === false && none.lines.length === 0
+            && !parkedView({ root, run, nowMs: at(10, 52) }).includes('#370');
         } catch {
           return false;
         }

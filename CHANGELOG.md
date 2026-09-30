@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.63.1] - 2026-09-30
+
+Fixes from the first hour on 0.63.0.
+
+### Fixed
+
+- **A reconcile that proves a merged delivery finishes the unit.** `lifecycle-driver
+  --reconcile-issue` closes the unit's open step record, so the parked view stops showing a
+  reconcile that ended long ago.
+  - It closes the issue when GitHub should have and didn't: the issue is open, was never
+    reopened, and the merged PR's closing references name it.
+  - It leaves the issue open when it is unlinked, reopened, or its state reason is unknown, and
+    names it in `closeOut.keptOpen`.
+  - A GitHub failure never skips the step close. A retry never comments twice.
+- **A branch switch waits for a review reading the checkout even with no run open.** A new
+  session's first `git switch` had broken a review left running by the previous session. A branch
+  made at HEAD (no start point) and `--help` are not switches, and the refusal names the
+  reviewer's pid.
+
 ## [0.63.0] - 2026-09-30
 
 Loop repairs auto-merge (operator decision; spec `docs/specs/SPEC-repair-automerge.md`).
