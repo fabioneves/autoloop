@@ -1444,6 +1444,9 @@ function fetchTerminalStateSnapshot(repository, issue, pullRequest, fetchJson) {
     pullRequestNodeId: pr.node_id,
     headOid: pr.head.sha,
     draft: pr.draft,
+    // GitHub's own verdict (null while it computes): a head that conflicts
+    // with the base cannot be delivered, however green its evidence.
+    conflicting: pr.mergeable === false,
     labels,
     ...(labels.includes('loop-repair') ? { repair: fetchRepairStanding(repository, linkedIssue.body, fetchJson) } : {}),
   };
@@ -1866,6 +1869,13 @@ export function terminalStateGaps(state, input) {
       + `${String(input.record.headOid).slice(0, 12)}…`);
   }
   if (typeof state.draft !== 'boolean') gaps.push('draft state is unknown');
+  if (state.conflicting === true) {
+    gaps.push(
+      `pull request #${input.record.pullRequest} conflicts with its base (mergeStateStatus DIRTY): `
+      + 'a merge moves the reviewed head, so this is a revision — invoke autoloop:pitcrew and '
+      + 'begin it with lifecycle-driver.mjs --begin-revision-json before any merge',
+    );
+  }
   if (
     !Array.isArray(state.labels)
     || state.labels.some((label) => typeof label !== 'string' || label.length === 0)
@@ -3825,7 +3835,10 @@ function selfTest() {
           && terminalStateGaps({ ...base, labels: repairLabels, repair: { ...standing, lastReady: { ...standing.lastReady, at: '2026-09-30T02:00:00Z' } } }, terminalInput)
             .some((gap) => gap.includes('no longer authorizes'))
           && terminalStateGaps({ ...base, labels: repairLabels, repair: { marker: null } }, terminalInput)
-            .some((gap) => gap.includes('no longer authorizes'));
+            .some((gap) => gap.includes('no longer authorizes'))
+          // A conflicting head is routed to the revision path, never merged here.
+          && terminalStateGaps({ ...base, conflicting: true }, terminalInput)
+            .some((gap) => gap.includes('conflicts with its base') && gap.includes('--begin-revision-json'));
       })()
     ) {
       passed += 1;

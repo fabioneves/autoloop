@@ -135,9 +135,9 @@ repository's own `gate.command`, run on the unit's tree; the merge executor is
 
 ### Behind base
 
-Behind base is not a defect. Pre-review and behind: merge freely. A real conflict
-(`mergeStateStatus` DIRTY): merge — Pitcrew's revision path. Post-review, no conflict: do NOT
-merge (it moves the head that review evidence binds — `committedHead == reviewedHead ==
+Behind base is not a defect. Pre-review and behind: merge freely. DIRTY (a real conflict) after
+review is a revision: invoke `autoloop:pitcrew`, `--begin-revision-json` BEFORE any merge. Post-review,
+no conflict: do NOT merge (it moves the head review binds — `committedHead == reviewedHead ==
 gatedHead`).
 
 ## Dispatch
@@ -660,8 +660,9 @@ committed = reviewed = gated = fetched PR head, and the publisher requires the e
 #236 to unblock the gate"), and timed-park ("Timed park", step 11) re-checking `origin/<base>`.
 `run complete` is only for an empty or exhausted queue.
 
-`step.mjs --to 09-gate`. Require a clean committed tree, push (`git push origin
-HEAD:refs/heads/<captured-loop-branch>`), and run the ONE full gate:
+`step.mjs --to 09-gate`. `gh pr view <PR> --json mergeStateStatus`: DIRTY → Behind base, not the
+gate. Require a clean committed tree, push (`git push origin HEAD:refs/heads/<captured-loop-branch>`),
+and run the ONE full gate:
 `node <plugin-tools>/publish-verdict.mjs gate <head> > <log> 2>&1` — it runs `cfg.gate.command` on
 the exact clean head and publishes `agentic/gate` when green, which `terminal-finalize` reuses.
 Record the gated OID.
@@ -684,10 +685,10 @@ A non-empty diff under manual policy whose every path is inside `docs/agentic/**
 instead of the app gate: `verify.mjs --project-root <unit tree>`. Doubt or a mixed diff → full app
 gate.
 
-After green, confirm the tree is clean. Red: load debugging guidance, fix via the delta-review path,
-re-gate. Exhausted retries are a `decide`: red outside the unit → blocking repair
-(`unit.mjs --repair --parent <N> --blocks-parent`) taken next; the unit's own → re-plan as at
-`REVIEW_CAP_REACHED`. Never weaken the gate.
+After green, confirm the tree is clean. Red in the unit's own diff: load debugging guidance, fix via
+the delta-review path, re-gate; fixes not converging → re-plan as at `REVIEW_CAP_REACHED`. Red
+outside the diff: re-gate once unchanged (a flake passes); red again → blocking repair
+(`unit.mjs --repair --parent <N> --blocks-parent`) taken next. Never weaken the gate.
 
 ### 10. Publish, finalize, and submit
 
