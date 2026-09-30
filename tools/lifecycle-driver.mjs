@@ -40,6 +40,7 @@ import {
   policyAttestationForRecord,
 } from './publish-verdict.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
+import { closeUnit } from './step.mjs';
 import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/u;
@@ -647,6 +648,25 @@ export function markerRefusalRecord(message, nowMs, driver) {
 export function blockRefusalRecord(result, nowMs, driver) {
   if (result?.state !== 'block' || typeof result.code !== 'string') return null;
   return markerRefusalRecord(`(${result.code})`, nowMs, driver);
+}
+
+// A reconcile that proves a merged delivery finishes the unit's bookkeeping:
+// GitHub closes a linked issue on merge, but not always (LFE run 2026-09-30:
+// #355 was linked and stayed open, #386 lost its link), and the unit's
+// `00-reconcile` step stayed open in the parked view while the loop moved on.
+// The issue is closed with a comment naming the PR, and the open step record
+// gets its SHIPPED card. Null for anything but a complete, merged lifecycle.
+export function closeOutMerged(result, { issueState, closeIssue, closeSteps }) {
+  const mergeOid = result?.marker?.mergeOid;
+  if (result?.state !== 'complete' || result.code !== 'LIFECYCLE_COMPLETE' || !SHA_RE.test(mergeOid ?? '')) return null;
+  const pr = result.marker.pr ?? null;
+  let issueClosed = false;
+  if (issueState() === 'open') {
+    closeIssue(`Delivered by PR #${pr} (merged ${mergeOid.slice(0, 8)}). GitHub did not close this issue `
+      + 'on merge, so the loop closes it.');
+    issueClosed = true;
+  }
+  return { issueClosed, card: closeSteps(pr) };
 }
 
 // This file's content hash: a plugin update that changes the driver retries
@@ -2063,6 +2083,33 @@ function selfTest() {
         && blockRefusalRecord({ state: 'block', code: 'lowercase' }, 7000, 'abc') === null
         && blockRefusalRecord(null, 7000, 'abc') === null,
     ],
+    // LFE run 2026-09-30: #355 and #386 reconciled LIFECYCLE_COMPLETE after a
+    // human merge, but GitHub closed neither issue and their reconcile steps
+    // stayed open in the parked view; the loop moved on past both.
+    [
+      'a completed, merged reconcile closes a still-open issue and its open step record',
+      (() => {
+        const merged = { state: 'complete', code: 'LIFECYCLE_COMPLETE', marker: { pr: 577, mergeOid: 'e'.repeat(40) } };
+        const calls = [];
+        const effects = (state) => ({
+          issueState: () => state,
+          closeIssue: (body) => calls.push(['close', body]),
+          closeSteps: (pr) => { calls.push(['steps', pr]); return ['card']; },
+        });
+        const open = closeOutMerged(merged, effects('open'));
+        const openCalls = calls.splice(0);
+        const closed = closeOutMerged(merged, effects('closed'));
+        const closedCalls = calls.splice(0);
+        const unmerged = closeOutMerged({ ...merged, marker: { pr: 577 } }, effects('open'));
+        const blocked = closeOutMerged({ ...merged, state: 'block', code: 'MERGE_OUTCOME_UNKNOWN' }, effects('open'));
+        return JSON.stringify(open) === JSON.stringify({ issueClosed: true, card: ['card'] })
+          && openCalls[0][0] === 'close' && openCalls[0][1].includes('PR #577') && openCalls[0][1].includes('eeeeeeee')
+          && openCalls[1][0] === 'steps' && openCalls[1][1] === 577
+          && JSON.stringify(closed) === JSON.stringify({ issueClosed: false, card: ['card'] })
+          && closedCalls.length === 1 && closedCalls[0][0] === 'steps'
+          && unmerged === null && blocked === null && calls.length === 0;
+      })(),
+    ],
     [
       '--reconcile-issue takes exactly one positive issue number',
       cliMode(['--reconcile-issue', '12']) === '--reconcile-issue'
@@ -2219,6 +2266,27 @@ function readCliInput() {
   return JSON.parse(readFileSync(0, 'utf8'));
 }
 
+// The close-out's effects, live. A failure is reported beside the result,
+// never in place of it: the lifecycle outcome stands either way.
+function withCloseOut(result, cwd, issue) {
+  try {
+    const root = command('git', ['rev-parse', '--show-toplevel'], { cwd });
+    const repository = repositoryTarget(root);
+    const endpoint = `repos/${repository.owner}/${repository.repo}/issues/${issue}`;
+    const closeOut = closeOutMerged(result, {
+      issueState: () => api(repository, endpoint)?.state,
+      closeIssue: (body) => {
+        mutate(repository, `${endpoint}/comments`, 'POST', { body });
+        mutate(repository, endpoint, 'PATCH', { state: 'closed', state_reason: 'completed' });
+      },
+      closeSteps: (pr) => closeUnit({ root, issue, outcome: 'shipped', pr, ifOpen: true }).lines,
+    });
+    return closeOut === null ? result : { ...result, closeOut };
+  } catch (error) {
+    return { ...result, closeOut: { error: error.message } };
+  }
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === '--self-test') {
@@ -2239,7 +2307,7 @@ function main() {
       const request = reconcileIssueRequest(process.cwd(), Number(args[1]));
       const result = driveLifecycle(request);
       recordMarkerRefusal(process.cwd(), Number(args[1]), blockRefusalRecord(result, Date.now(), driverIdentity()));
-      process.stdout.write(`${JSON.stringify(result)}\n`);
+      process.stdout.write(`${JSON.stringify(withCloseOut(result, process.cwd(), Number(args[1])))}\n`);
     } catch (error) {
       recordMarkerRefusal(process.cwd(), Number(args[1]), markerRefusalRecord(error.message, Date.now(), driverIdentity()));
       throw error;
