@@ -54,6 +54,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   CONFIG_VERSION,
+  repositoryRoot,
   resolveProjectConfig,
 } from './config-contract.mjs';
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
@@ -2884,6 +2885,47 @@ export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PR
   return null;
 }
 
+// A branch switch in a checkout a reviewer is reading changes the files
+// under it: the LFE run (2026-09-30) switched to finalize one unit while
+// another's code review read the same checkout, and had to kill and redo the
+// review. The review roles read; anything that moves HEAD waits for them.
+const READING_ROLES = new Set(['plan-review', 'diff-review', 'code-review', 'doubt-review']);
+
+export function switchesCheckout(words) {
+  const git = words.findIndex((word, index) => (word === 'git' || word.endsWith('/git')) && invokedAt(words, index));
+  if (git === -1) return false;
+  const rest = words.slice(git + 1).filter((word) => !word.startsWith('-'));
+  if (rest[0] === 'switch') return true;
+  // `git checkout <ref>` moves HEAD; `git checkout [<ref>] -- <paths>` edits files only.
+  return rest[0] === 'checkout' && !words.includes('--') && rest.length === 2;
+}
+
+function readingDispatchIn(dir) {
+  let top;
+  try {
+    top = realpathSync(dir);
+  } catch {
+    return null;
+  }
+  let entries;
+  try {
+    entries = readdirSync('/proc');
+  } catch {
+    return null; // no process table: the rule cannot look, and does not guess
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/u.test(entry)) continue;
+    try {
+      const args = readFileSync(`/proc/${entry}/cmdline`, 'utf8').split('\0');
+      const role = args[args.indexOf('--role') + 1];
+      if (!args.some((arg) => /dispatch(?:-stream\.sh|\.mjs)$/u.test(arg)) || !READING_ROLES.has(role)) continue;
+      const cwd = realpathSync(`/proc/${entry}/cwd`);
+      if (cwd === top || cwd.startsWith(`${top}/`)) return { pid: Number(entry), role };
+    } catch { /* gone, or not ours to read */ }
+  }
+  return null;
+}
+
 // Whether a segment runs the plugin's own prime to open a run.
 // The directory a segment runs the plugin's prime in to open a run (not
 // --close-run, --park or --self-test), or null when it does not.
@@ -4299,6 +4341,14 @@ function selfTest() {
         console.error(`FAIL [a run in a repository under a non-git project directory is guarded, not locked]: ${workLs.status} ${workLs.stderr.slice(0, 160)} ${workMerge.status}`);
         ok = false;
       }
+      // A branch switch waits for a reviewer reading the checkout; file
+      // checkouts and other git commands do not.
+      if (!(switchesCheckout(shellWords('git switch feat/x')) && switchesCheckout(shellWords('git checkout -q main'))
+        && !switchesCheckout(shellWords('git checkout -- src/a.ts')) && !switchesCheckout(shellWords('git checkout HEAD -- a'))
+        && !switchesCheckout(shellWords('git status')) && !switchesCheckout(shellWords('echo git switch')))) {
+        console.error('FAIL [a branch switch is told apart from a file checkout]');
+        ok = false;
+      }
       // The session's owner: the first Claude ancestor; Claude as pid 1 (a
       // container); without Claude, the outermost ancestor; an unreadable
       // entry stops the walk where it is.
@@ -4809,6 +4859,16 @@ function main() {
   for (const baseBranch of bases) {
     const verdict = evaluate(cmd, branch, { baseBranch, cwd: payload?.cwd });
     if (verdict.block) refuse(verdict.reason);
+  }
+  if (segments.some(({ words }) => switchesCheckout(words))) {
+    const reader = readingDispatchIn(repositoryRoot(cwd));
+    if (reader !== null) {
+      refuse(
+        `autoloop guard — a ${reader.role} dispatch (pid ${reader.pid}) is reading this checkout, `
+        + 'and switching branches would change the files under it. Do this in another worktree '
+        + '(`git worktree add`), or wait for the review to return.',
+      );
+    }
   }
   allow();
 }
