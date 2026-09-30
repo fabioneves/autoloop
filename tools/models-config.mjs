@@ -49,10 +49,14 @@ const JUDGED_BY = Object.freeze({
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9]+\])?$/u;
 
 /** The same model however it is spelled: case, a context-window suffix, a
- *  gateway's vendor prefix. */
+ *  vendor path or a gateway's vendor prefix, a release date. */
 export function sameModel(left, right) {
-  const norm = (id) => String(id ?? '').toLowerCase().replace(/\[[^\]]*\]$/u, '').replace(/^[a-z0-9]+-gateway-/u, '');
-  return left !== null && right !== null && norm(left) === norm(right);
+  const norm = (id) => String(id ?? '').toLowerCase()
+    .replace(/\[[^\]]*\]$/u, '')
+    .replace(/^.*\//u, '')
+    .replace(/^[a-z0-9]+-gateway-/u, '')
+    .replace(/-\d{8}$/u, '');
+  return left !== null && right !== null && left !== undefined && right !== undefined && norm(left) === norm(right);
 }
 
 export function globalConfigPath(env = process.env) {
@@ -236,7 +240,11 @@ function selfTest() {
         && globalShapeProblems({ version: '2' }, 'g').length === 1);
     check('ids match across case, the window suffix and a gateway prefix',
       sameModel('gpt-6-astra[1m]', 'anthropic-gateway-GPT-6-Astra') && !sameModel('gpt-6-astra', 'gpt-6-sol')
-        && !sameModel(null, null));
+        && !sameModel(null, null)
+        // A vendor path and a dated id name the same model (review).
+        && sameModel('anthropic/claude-opus-5-5', 'claude-opus-5-5[1m]')
+        && sameModel('claude-opus-5-5-20260901', 'claude-opus-5-5')
+        && !sameModel('claude-opus-5-5', 'claude-opus-5'));
     const clash = (models) => invariantProblems(mergeModels(DEFAULT_MODELS, models));
     check('the default table keeps every reviewer off its writer\'s models', clash({}).length === 0);
     check('a reviewer on its writer\'s model, primary or fallback, is refused and named',
