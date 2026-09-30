@@ -44,6 +44,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -231,6 +232,10 @@ async function buildFixtureRepository(scratch) {
 export function runSmokeSteps({
   root,
   environment,
+  // The engine's own environment: the real HOME for real-engine credentials.
+  // Everything else (prime, the guards) runs under `environment`, whose HOME
+  // is the scratch one — the session latch lives there.
+  dispatchEnvironment = environment,
   argvLog,
   stepTimeoutMs = STEP_TIMEOUT_MS,
   roles = ['plan-review', 'implement', 'code-review'],
@@ -280,6 +285,15 @@ export function runSmokeSteps({
     if (result.status !== 0 || value.ok !== true) {
       return { ok: false, detail: `prime failed: ${bounded(JSON.stringify(value))}` };
     }
+    // prime itself writes the session latch as it opens the run, before any
+    // guard has seen it: no window in which a later command could hide the run.
+    let latched = false;
+    try {
+      latched = readdirSync(join(environment.HOME, '.claude', 'autoloop', 'run-latches')).some((name) => /^\d+\.json$/u.test(name));
+    } catch {
+      latched = false;
+    }
+    if (!latched) return { ok: false, detail: 'prime opened the run without writing the session latch' };
     const sections = Object.values(value.sections ?? {});
     let persistedKind = null;
     try {
@@ -328,7 +342,7 @@ export function runSmokeSteps({
           '--output-file', join(root, `.git/autoloop/${role}-result.json`),
           '--json',
         ],
-        { root, environment, stepTimeoutMs },
+        { root, environment: dispatchEnvironment, stepTimeoutMs },
       );
       if (!result.ok) return result;
       const value = result.value;
@@ -455,7 +469,15 @@ export function runSmokeSteps({
     if (editBlocked.status !== 2) {
       return { ok: false, detail: `edit guard exited ${editBlocked.status} on a hook-wiring edit while the run was open, expected 2` };
     }
+    // Deleting the marker does not end the run: the session latch holds.
     rmSync(outcome.runMarker, { force: true });
+    const markerGone = runTool('command-guard.mjs (marker deleted)', [guard, '--root', root], guardOptions);
+    if (!markerGone.ok) return markerGone;
+    if (markerGone.status !== 2) {
+      return { ok: false, detail: `guard exited ${markerGone.status} with only the marker gone, expected the latch to hold (2)` };
+    }
+    // A session that ends takes both with it: the guards stand down.
+    rmSync(join(environment.HOME, '.claude', 'autoloop', 'run-latches'), { recursive: true, force: true });
     const standDown = runTool(
       'command-guard.mjs (run closed)',
       [guard, '--root', root],
@@ -465,10 +487,10 @@ export function runSmokeSteps({
     if (standDown.status !== 0) {
       return {
         ok: false,
-        detail: `guard exited ${standDown.status} after the run closed, expected 0`,
+        detail: `guard exited ${standDown.status} after the session ended, expected 0`,
       };
     }
-    return { ok: true, detail: 'merge and hook-wiring edit blocked while open; guards stand down when closed' };
+    return { ok: true, detail: 'merge and hook-wiring edit blocked while open; the latch outlives a deleted marker; guards stand down when the session ends' };
   });
 
   return outcome;
@@ -507,6 +529,14 @@ async function selfTest({ realEngine = false } = {}) {
       ghConfigDir,
       realEngine ? null : writeEngineShim(scratch, argvLog),
     );
+    // prime writes the session latch under HOME, owned by the Claude process
+    // running the smoke, and the guardrail step deletes it: every step but the
+    // engine's runs under a scratch HOME — never the operator's own, where
+    // live loops keep theirs. Only a real engine's dispatch keeps the real
+    // HOME, for its credentials.
+    const dispatchEnvironment = realEngine ? { ...environment } : null;
+    environment.HOME = join(scratch, 'home');
+    mkdirSync(environment.HOME, { recursive: true });
 
     let fixture = null;
     const setup = await timedPhase('fixture-setup', async () => {
@@ -523,6 +553,7 @@ async function selfTest({ realEngine = false } = {}) {
       outcome = runSmokeSteps({
         root: fixture.root,
         environment,
+        dispatchEnvironment: dispatchEnvironment ?? environment,
         argvLog,
         stepTimeoutMs,
         // The real-engine mode spends money, so it proves exactly one thing:

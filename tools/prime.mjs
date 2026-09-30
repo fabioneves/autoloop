@@ -38,6 +38,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
+import { latchDirectory, recordLatch } from './run-markers.mjs';
 import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig,
@@ -55,7 +56,7 @@ import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.60.0';
+const AUTOLOOP_VERSION = '0.61.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -177,6 +178,13 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   const base = baseSyncFacts(root, config.baseBranch);
   pruneDeadRunMarkers(root);
   clearRunParks(root);
+  // The run's second record, outside the repository and owned by the
+  // session's Claude process (run-markers.mjs), written before the marker:
+  // no command between opening the run and the guard's first look can hide
+  // the run, and a latch that cannot be written leaves no marker behind.
+  if (recordLatch({ baseBranch: config.baseBranch, scope: root }) === null) {
+    return failure('run', 'RUN_LATCH_UNWRITABLE', `the session latch could not be written under ${latchDirectory()}; the run is not opened`);
+  }
   const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.

@@ -37,8 +37,10 @@
 //         node <plugin-tools>/command-guard.mjs --self-test
 
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -57,8 +59,12 @@ import {
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import {
-  runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunBase, ancestorChain, isClaudeProcess, procEntry, psEntry,
+  runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
+  procEntry, psEntry, commonDirOf, latchDirectory, processStart, protectedPaths, pruneLatches, recordLatch, sessionLatch,
+  sessionOwnerPid,
 } from './run-markers.mjs';
+import { ORDINARY, readsOnly, runStateProblem, TAMPERING } from './run-state-guard.mjs';
+import { boundedGit, gitStalled, setGitDeadline } from './git-budget.mjs';
 
 const BRANCH_CREATION_FLAGS = new Set([
   '-c',
@@ -176,11 +182,153 @@ const GH_COMMANDS = new Set([
 
 // Strip heredoc bodies so text INSIDE a body (e.g. a PR description that quotes
 // "gh pr merge") never false-positives.
+// One linear pass over the command, the way the shell reads it: quotes,
+// `#` comments (at a word start, outside quotes) and heredocs (`<<EOF`,
+// `<<-EOF`, quoted or not — never the `<<<` here-string, never inside quotes
+// or a comment). It returns the command text without comments and without
+// heredoc bodies — the rest of a `<<EOF` line stays, since it is command text
+// — and the bodies, marked expanded when the delimiter was unquoted (the
+// shell then runs their substitutions). Regex versions of this hid whole
+// lines from every rule: `cat <<EOF && gh pr merge`, `echo x # it's` swallowing
+// the next line, `<<<` read as a heredoc (reviews of the guard hardening).
+export function lexShell(cmd) {
+  let out = '';
+  const bodies = [];
+  const pending = [];
+  let single = false;
+  let double = false;
+  const atWordStart = () => out.length === 0 || /[\s;|&()]/u.test(out[out.length - 1]);
+  for (let index = 0; index < cmd.length;) {
+    const char = cmd[index];
+    if (single) {
+      out += char;
+      if (char === "'") single = false;
+      index += 1;
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (cmd[index + 1] ?? '');
+      index += 2;
+      continue;
+    }
+    if (double) {
+      out += char;
+      if (char === '"') double = false;
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      if (char === "'") single = true;
+      else double = true;
+      out += char;
+      index += 1;
+      continue;
+    }
+    if (char === '#' && atWordStart()) {
+      while (index < cmd.length && cmd[index] !== '\n') index += 1;
+      continue;
+    }
+    if (char === '<' && cmd[index + 1] === '<' && cmd[index + 2] !== '<' && cmd[index - 1] !== '<') {
+      let at = index + 2;
+      const strip = cmd[at] === '-';
+      if (cmd[at] === '-' || cmd[at] === '~') at += 1;
+      while (cmd[at] === ' ' || cmd[at] === '\t') at += 1;
+      let delimiter = '';
+      let quoted = false;
+      while (at < cmd.length && !/[\s;|&<>()]/u.test(cmd[at])) {
+        if (cmd[at] === "'" || cmd[at] === '"') {
+          const quote = cmd[at];
+          quoted = true;
+          at += 1;
+          while (at < cmd.length && cmd[at] !== quote) delimiter += cmd[at++];
+          at += 1;
+        } else if (cmd[at] === '\\') {
+          quoted = true;
+          delimiter += cmd[at + 1] ?? '';
+          at += 2;
+        } else {
+          delimiter += cmd[at++];
+        }
+      }
+      if (delimiter === '') {
+        out += '<<';
+        index += 2;
+        continue;
+      }
+      pending.push({ delimiter, strip, expanded: !quoted });
+      out += ' ';
+      index = at;
+      continue;
+    }
+    if (char === '\n' && pending.length > 0) {
+      out += '\n';
+      index += 1;
+      for (const doc of pending) {
+        let body = '';
+        while (index < cmd.length) {
+          const end = cmd.indexOf('\n', index);
+          const line = cmd.slice(index, end === -1 ? cmd.length : end).replace(/\r$/u, '');
+          index = end === -1 ? cmd.length : end + 1;
+          if ((doc.strip ? line.replace(/^\t+/u, '') : line) === doc.delimiter) break;
+          body += `${line}\n`;
+        }
+        bodies.push({ body, expanded: doc.expanded });
+      }
+      pending.length = 0;
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return { text: out, bodies };
+}
+
 export function stripHeredocs(cmd) {
-  return cmd.replace(
-    /<<[-~]?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_-]*)\1[^\n]*\r?\n[\s\S]*?\r?\n[ \t]*\2(?![A-Za-z0-9_-])/g,
-    '',
-  );
+  return lexShell(cmd).text;
+}
+
+// The bodies of heredocs whose delimiter is unquoted: the shell expands them,
+// so a substitution inside runs.
+function expandedHeredocBodies(cmd) {
+  return lexShell(cmd).bodies.filter(({ expanded }) => expanded).map(({ body }) => body);
+}
+
+// Redirection operators glued to a word (`echo x>file`, `2>&1`) set apart,
+// outside quotes, so the rule sees the target as its own word.
+function spacedRedirections(text) {
+  let out = '';
+  let single = false;
+  let double = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (single) {
+      out += char;
+      if (char === "'") single = false;
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (text[index + 1] ?? '');
+      index += 1;
+      continue;
+    }
+    if (char === "'" && !double) single = true;
+    if (char === '"') double = !double;
+    if (double || (char !== '>' && char !== '<')) {
+      out += char;
+      continue;
+    }
+    // A leading fd number (or &) belongs to the operator only as a word of
+    // its own; found by walking back, not by a pattern over all of `out`.
+    let back = out.length;
+    while (back > 0 && /\d/u.test(out[back - 1])) back -= 1;
+    if (back === out.length && out[back - 1] === '&') back -= 1;
+    const word = back < out.length && (back === 0 || /\s/u.test(out[back - 1]));
+    out = word ? `${out.slice(0, back)} ${out.slice(back)}` : `${out} `;
+    let operator = char;
+    while (index + 1 < text.length && /[<>&|-]/u.test(text[index + 1]) && operator.length < 3) operator += text[++index];
+    out += `${operator} `;
+  }
+  return out;
 }
 
 function executableShellStructure(cmd) {
@@ -280,11 +428,20 @@ function decodeAnsiCBody(body) {
   return output;
 }
 
+// The body alternatives are disjoint (`\\x` or a character that is neither a
+// quote nor a backslash): overlapping ones backtracked exponentially on a run
+// of backslashes, and a guard that hangs past the host's timeout lets the
+// command run (found while hardening the run-state rule).
+const ANSI_C_QUOTE = /\$'((?:\\[\s\S]|[^'\\])*)'/gu;
+
 function decodeAnsiCQuotes(cmd) {
-  return cmd.replace(
-    /\$'((?:\\[\s\S]|[^'])*)'/gu,
-    (_match, body) => decodeAnsiCBody(body),
-  );
+  return cmd.replace(ANSI_C_QUOTE, (_match, body) => decodeAnsiCBody(body));
+}
+
+// The same decoding, kept quoted, for the tokenizer: `$'\x2egit'` is `'.git'`.
+function quotedAnsiC(cmd) {
+  return cmd.replace(ANSI_C_QUOTE, (_match, body) => `'${decodeAnsiCBody(body).replaceAll("'", "'\\''")}'`)
+    .replace(/\$"/gu, '"');
 }
 
 function executableLexicalText(cmd) {
@@ -318,7 +475,9 @@ function executableLexicalText(cmd) {
 function structuredGitMutation(cmd) {
   if (!executableShellStructure(cmd)) return false;
   const visible = executableLexicalText(cmd);
-  return /(?:^|[\s;&|(`{}])(?:\/[^\s;&|(`{}]+\/)*git\b(?:(?![;&|\n]).)*\b(?:commit|push)\b/u
+  // The path prefix's components exclude `/`: `(?:\/[^…]+\/)*`, whose
+  // class matched `/` too, backtracked exponentially on a run of slashes.
+  return /(?:^|[\s;&|(`{}])(?:\/(?:[^\s;&|(`{}/]+\/)*)?git\b(?:(?![;&|\n]).)*\b(?:commit|push)\b/u
     .test(visible);
 }
 
@@ -487,7 +646,7 @@ function opaqueMutationSyntax(cmd) {
 
 function interpreterHeredoc(cmd) {
   const interpreters =
-    /(?:^|[\s;&|])(?:\/[^\s;&|]+\/)*(?:ba|da|k|z)?sh(?:\s|$)|(?:^|[\s;&|])(?:\/[^\s;&|]+\/)*(?:node|nodejs|bun|deno|perl|php|ruby|python(?:\d+(?:\.\d+)?)?)(?:\s|$)/u;
+    /(?:^|[\s;&|])(?:\/(?:[^\s;&|/]+\/)*)?(?:ba|da|k|z)?sh(?:\s|$)|(?:^|[\s;&|])(?:\/(?:[^\s;&|/]+\/)*)?(?:node|nodejs|bun|deno|perl|php|ruby|python(?:\d+(?:\.\d+)?)?)(?:\s|$)/u;
   const shellSources =
     /(?:^|[\s;&|])(?:source(?=\s|$)|\.(?=\s|$))/u;
   const logicalLines = String(cmd).replace(/\\\r?\n/gu, ' ');
@@ -2517,15 +2676,9 @@ export function evaluate(inputCmd, branch, options = {}) {
 }
 
 function currentBranch() {
-  try {
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    return branch.length > 0 ? branch : null;
-  } catch {
-    return null;
-  }
+  const result = boundedGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const branch = result.status === 0 ? String(result.stdout ?? '').trim() : '';
+  return branch.length > 0 ? branch : null;
 }
 
 // A command that runs the plugin's own prime to open a run (not --close-run,
@@ -2546,9 +2699,7 @@ function realOrSelf(path) {
 }
 
 function commonGitDir(dir) {
-  const result = spawnSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
-    encoding: 'utf8', timeout: 10_000,
-  });
+  const result = boundedGit(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
   return result.status === 0 ? realOrSelf(result.stdout.trim()) : null;
 }
 
@@ -2583,10 +2734,23 @@ function trimSubshell(segment) {
   return segment.slice(start, end);
 }
 
-export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PRIME) {
+// The hook's own budget: the host kills a hook at 15 s and then lets the
+// command run, so a guard that cannot finish must refuse before that. Every
+// prime segment cost two git spawns, and a padded command outran the timeout
+// (security audit after 0.60.0); common dirs are now resolved once each.
+export const GUARD_DEADLINE_MS = 10_000;
+export const MAX_COMMAND_BYTES = 64 * 1024;
+const MAX_PRIME_TARGETS = 64;
+const OVER_BUDGET = 'autoloop guard — this command is too large to check within the guard\'s time '
+  + 'budget, so it cannot be proven safe. Split it into smaller commands.';
+
+export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PRIME, deadline = Date.now() + GUARD_DEADLINE_MS) {
   if (typeof command !== 'string' || !/\bnode\b/u.test(command)) return null;
   let dir = cwd;
+  let project;
+  const targets = new Map();
   for (const { command: segment } of shellSegments(command)) {
+    if (Date.now() > deadline) return OVER_BUDGET;
     let words = shellWords(trimSubshell(segment));
     const comment = words.findIndex((word) => word.startsWith('#'));
     if (comment !== -1) words = words.slice(0, comment);
@@ -2594,18 +2758,49 @@ export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PR
       dir = resolve(dir, expandHome(words[1]));
       continue;
     }
-    const node = nodeInvocation(words, dir);
-    if (node === null) continue;
-    const scriptIndex = words.findIndex((word, index) => index > node.index && !word.startsWith('-'));
-    if (scriptIndex === -1 || realOrSelf(resolve(node.target, expandHome(words[scriptIndex]))) !== prime) continue;
-    if (words.slice(scriptIndex + 1).some((word) => PRIME_EXEMPT.has(word))) continue;
-    const project = commonGitDir(projectRoot);
-    if (project === null || commonGitDir(node.target) === project) continue;
+    const target = primeTarget(words, dir, prime);
+    if (target === null) continue;
+    if (project === undefined) project = commonGitDir(projectRoot);
+    if (!targets.has(target)) {
+      if (targets.size === MAX_PRIME_TARGETS) return OVER_BUDGET;
+      targets.set(target, commonGitDir(target));
+    }
+    if (project === null || targets.get(target) === project) continue;
     return `autoloop guard — this session's project is ${projectRoot}, but prime would open the run in `
-      + `${node.target}, outside it: the session's hooks would guard the wrong repository. Start a `
+      + `${target}, outside it: the session's hooks would guard the wrong repository. Start a `
       + 'session in that repository and run the loop there.';
   }
   return null;
+}
+
+// Whether a segment runs the plugin's own prime to open a run.
+// The directory a segment runs the plugin's prime in to open a run (not
+// --close-run, --park or --self-test), or null when it does not.
+function primeTarget(words, dir, prime = PLUGIN_PRIME) {
+  const node = nodeInvocation(words, dir);
+  if (node === null) return null;
+  const scriptIndex = words.findIndex((word, index) => index > node.index && !word.startsWith('-'));
+  if (scriptIndex === -1 || realOrSelf(resolve(node.target, expandHome(words[scriptIndex]))) !== prime) return null;
+  return words.slice(scriptIndex + 1).some((word) => PRIME_EXEMPT.has(word)) ? null : node.target;
+}
+
+function primeSegment(words, cwd, prime = PLUGIN_PRIME) {
+  return primeTarget(words, cwd, prime) !== null;
+}
+
+// Whether a command opens a run anywhere in it (cd steps followed).
+export function opensRun(command, cwd, prime = PLUGIN_PRIME) {
+  if (typeof command !== 'string' || !/\bnode\b/u.test(command)) return false;
+  let dir = cwd;
+  for (const { command: segment } of shellSegments(stripHeredocs(command))) {
+    const words = shellWords(trimSubshell(segment));
+    if ((words[0] === 'cd' || words[0] === 'pushd') && words[1] !== undefined) {
+      dir = resolve(dir, expandHome(words[1]));
+      continue;
+    }
+    if (primeSegment(words, dir, prime)) return true;
+  }
+  return false;
 }
 
 // The config comes from the one resolver: .autoloop/config.json over plugin
@@ -2694,6 +2889,15 @@ export function askUserQuestionProblem(runIsLive) {
 }
 
 function selfTest() {
+  // Every hook this self-test spawns gets its own HOME: the session latch
+  // lives there and is keyed by the Claude process running the test, so a
+  // shared (or the real) HOME would latch one case's run into the next — or
+  // into the operator's own session.
+  const homes = [];
+  const isolatedEnv = () => {
+    homes.push(mkdtempSync(join(tmpdir(), 'guard-home-')));
+    return { ...process.env, HOME: homes.at(-1) };
+  };
   let corpusCount = 0;
   const cases = [
     // [cmd, branch, expectBlock, baseBranch]
@@ -3616,7 +3820,7 @@ function selfTest() {
     try {
       const hook = (root) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
         input: 'not json', encoding: 'utf8', cwd: scratch,
-        env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+        env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: root },
       }).status;
       const unrelated = hook(scratch);
       mkdirSync(join(scratch, '.autoloop'));
@@ -3637,7 +3841,7 @@ function selfTest() {
       rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
       const merge = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
         input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
-        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+        encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: scratch },
       });
       if (merge.status !== 2 || !merge.stderr.includes('autoloop guard')) {
         console.error(`FAIL [an open run keeps the guard on after its config is removed]: ${merge.status} ${merge.stderr}`);
@@ -3650,7 +3854,7 @@ function selfTest() {
       writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now() }));
       const legacyRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
         input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }),
-        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+        encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: scratch },
       });
       if (legacyRun.status !== 0) {
         console.error(`FAIL [a vendored-era marker never makes the plugin guard refuse]: ${legacyRun.status} ${legacyRun.stderr}`);
@@ -3663,7 +3867,7 @@ function selfTest() {
       writeFileSync(join(scratch, '.autoloop', 'config.json'), '{ typo');
       const typo = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
         input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git status' } }),
-        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+        encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: scratch },
       });
       rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
       if (typo.status !== 0) {
@@ -3673,11 +3877,11 @@ function selfTest() {
       // Every hook (reminders, transcripts, the preflight) acts where the guard
       // does: a plugin run keeps the project guarded on a checkout without config.
       const guarded = spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'hook-root.mjs'), '--guarded-root'], {
-        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+        encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: scratch },
       });
       writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now() }));
       const vendoredRun = spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'hook-root.mjs'), '--guarded-root'], {
-        encoding: 'utf8', cwd: scratch, env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+        encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: scratch },
       });
       writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
       if (guarded.status !== 0 || guarded.stdout.trim() !== realpathSync(scratch) || vendoredRun.status !== 1) {
@@ -3692,7 +3896,7 @@ function selfTest() {
       execFileSync('git', ['init', '-q', other]);
       const primeFrom = (cwd, command) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
         input: JSON.stringify({ tool_name: 'Bash', cwd, tool_input: { command } }),
-        encoding: 'utf8', cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: other },
+        encoding: 'utf8', cwd, env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: other },
       });
       const prime = join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs');
       const refused = (cwd, command) => primeFrom(cwd, command).status === 2;
@@ -3736,28 +3940,50 @@ function selfTest() {
         console.error(`FAIL [the foreign-prime check stays linear on padded input]: ${elapsed} ms`);
         ok = false;
       }
+      // Audit after 0.60.0: every prime segment spawned git twice, so a few
+      // thousand of them outran the host's 15 s timeout, which lets the
+      // command run. Common dirs resolve once each; too many distinct targets,
+      // or a spent budget, refuses.
+      const primes = Array(5000).fill(`node ${prime} --json`).join('; ');
+      const primesAt = Date.now();
+      const primesVerdict = foreignPrimeProblem(primes, scratch, scratch);
+      const primesElapsed = Date.now() - primesAt;
+      const targets = Array.from({ length: 65 }, (_, index) => {
+        mkdirSync(join(scratch, 'targets', String(index)), { recursive: true });
+        return `cd ${join(scratch, 'targets', String(index))} && node ${prime} --json`;
+      }).join('; ');
+      const budgetVerdicts = [
+        primesVerdict === null && primesElapsed < 2000,
+        foreignPrimeProblem(targets, scratch, scratch)?.includes('time budget') === true,
+        foreignPrimeProblem(`node ${prime} --json`, scratch, scratch, undefined, Date.now() - 1)?.includes('time budget') === true,
+      ];
+      rmSync(join(scratch, 'targets'), { recursive: true, force: true });
+      if (budgetVerdicts.includes(false)) {
+        console.error(`FAIL [the foreign-prime check fits the hook budget or refuses]: ${JSON.stringify(budgetVerdicts)} ${primesElapsed} ms`);
+        ok = false;
+      }
       rmSync(other, { recursive: true, force: true });
-      // A session that primed twice holds two plugin markers: the newest base wins.
-      // Both name assignments, so directory order cannot pass it by accident.
-      const newestOf = (first, second) => {
+      // A session that primed twice holds two plugin markers: every base is
+      // enforced (a forged marker can only add one), oldest first whatever the
+      // directory order.
+      const basesOf = (first, second) => {
         writeFileSync(join(markers, 'm1.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...first }));
         writeFileSync(join(markers, 'm2.json'), JSON.stringify({ version: 1, pids: [process.ppid], ...second }));
-        const base = pluginRunBase([scratch]);
+        const bases = [...new Set(pluginRunMarkers([scratch, scratch]).map(({ marker }) => marker.baseBranch))];
         rmSync(join(markers, 'm1.json'));
         rmSync(join(markers, 'm2.json'));
-        return base;
+        return JSON.stringify(bases);
       };
       const older = { openedAtMs: 1, baseBranch: 'old' };
       const newer = { openedAtMs: 2, baseBranch: 'new' };
-      const newest = newestOf(older, newer) === 'new' && newestOf(newer, older) === 'new' ? 'new' : 'old';
-      if (newest !== 'new') {
-        console.error(`FAIL [the newest plugin marker's base wins]: ${newest}`);
+      if (basesOf(older, newer) !== '["old","new"]' || basesOf(newer, older) !== '["old","new"]') {
+        console.error(`FAIL [every plugin marker's base is enforced, oldest first]: ${basesOf(older, newer)}`);
         ok = false;
       }
       // The hook's cwd is not the only place to look: the project root's run counts.
       const fromTmp = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
         input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
-        encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+        encoding: 'utf8', cwd: tmpdir(), env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: scratch },
       });
       if (fromTmp.status !== 2) {
         console.error(`FAIL [a hook whose cwd is outside the repository still sees the project's run]: ${fromTmp.status}`);
@@ -3770,11 +3996,202 @@ function selfTest() {
       execFileSync('git', ['-C', scratch, 'worktree', 'add', '-q', '--detach', linked]);
       const fromLinked = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
         input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'gh pr merge 5 --squash' } }),
-        encoding: 'utf8', cwd: linked, env: { ...process.env, CLAUDE_PROJECT_DIR: linked },
+        encoding: 'utf8', cwd: linked, env: { ...isolatedEnv(), CLAUDE_PROJECT_DIR: linked },
       });
       rmSync(linked, { recursive: true, force: true });
       if (fromLinked.status !== 2) {
         console.error('FAIL [a linked worktree sees the repository\'s open run]');
+        ok = false;
+      }
+      // Security audit after 0.60.0: the markers were the guard's only record
+      // of an open run, and the run could delete or forge them. The run's own
+      // state is refused to it, a session latch outside the repository keeps
+      // the run open once seen, and every base any record names is enforced.
+      const home = join(scratch, 'home');
+      const latches = join(home, '.claude', 'autoloop', 'run-latches');
+      const latchHook = (command) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', cwd: scratch, tool_input: { command } }),
+        encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), HOME: home, CLAUDE_PROJECT_DIR: scratch },
+      });
+      const stateCommands = ['rm -rf .git/autoloop/run', `rm -rf ${latches}`, 'rm -rf .git', 'echo {} > .git/autoloop/run/f.json',
+        'echo $(rm -rf .git/autoloop/run)', 'echo `rm -rf .git`', 'D=.git/autoloop; rm -rf $D'];
+      const stateVerdicts = stateCommands.map((command) => latchHook(command).status);
+      const readVerdict = latchHook(`cat ${join(markers, 'run.json')}`).status;
+      const latched = existsSync(latches) && readdirSync(latches).length === 1;
+      rmSync(join(markers, 'run.json'));
+      const afterDelete = latchHook('gh pr merge 5 --squash').status;
+      const [latchFile] = readdirSync(latches);
+      const latchText = readFileSync(join(latches, latchFile), 'utf8');
+      writeFileSync(join(latches, latchFile), '{ corrupt');
+      const corrupt = latchHook('ls');
+      writeFileSync(join(latches, latchFile), latchText);
+      if (stateVerdicts.some((status) => status !== 2) || readVerdict !== 0 || !latched
+        || afterDelete !== 2 || corrupt.status !== 2 || !corrupt.stderr.includes('latch')) {
+        console.error(`FAIL [the run's own state is refused to it, and the session latch outlives its markers]: `
+          + `${JSON.stringify({ stateVerdicts, readVerdict, latched, afterDelete, corrupt: corrupt.status })}`);
+        ok = false;
+      }
+      // The run-state rule through the guard's own tokenizer: its fixtures,
+      // plus the shapes only a real tokenizer produces — quoted messages that
+      // mention a deletion run nothing; ANSI-C quotes, substitutions (quoted
+      // or not) and backquotes are taken apart.
+      const judgedAt = (command) => runStateProblem(guardSegments(command), {
+        cwd: '/r', protectedDirs: ['/r/.git/autoloop/run', '/home/u/.claude/autoloop/run-latches'], codeDirs: ['/p/tools'], home: '/home/u', env: {},
+      });
+      const tokenized = [
+        ...TAMPERING.filter((command) => judgedAt(command) === null).map((command) => `evaded: ${command}`),
+        ...ORDINARY.filter((command) => judgedAt(command) !== null).map((command) => `refused: ${command}`),
+        ...[
+          "rm -rf $'\\x2egit'/autoloop",
+          'echo $(rm -rf .git/autoloop/run)',
+          'echo "$(rm -rf .git/autoloop/run)"',
+          'echo `rm -rf .git`',
+          'rm -rf "$(git rev-parse --git-common-dir)/autoloop"',
+          'rm -rf $(git rev-parse --git-common-dir)/autoloop',
+          'D=.git; rm -rf "$D"/autoloop',
+          `echo ${'$(true) '.repeat(70)}`,
+          'echo x>.git/autoloop/run/a.json',
+          "echo x # it's\nrm -rf .git/autoloop/run",
+          'cat <<<EOF\nrm -rf .git/autoloop/run\nEOF',
+          "alias ls='rm -rf .git/autoloop/run'\nls",
+          "cat /tmp/fake.json > \"$(echo /home/u/.claude/autoloop/run-latches/1.json)\"",
+          'cat /tmp/forged>>.git/autoloop/run/1.json',
+          'cat <<EOF && rm -rf .git/autoloop/run\nx\nEOF',
+          'cat <<EOF\n$(rm -rf .git/autoloop/run)\nEOF',
+          "eval 'rm -rf .git/autoloop/run'",
+          "bash -c 'rm -rf .git/autoloop/run'",
+        ].filter((command) => judgedAt(command) === null).map((command) => `evaded: ${command}`),
+        ...[
+          "git commit -m 'guard: refuse `rm -rf .git/autoloop/run` mid-run'",
+          "git commit -m 'refuses $(rm -rf .git) shapes'",
+          "echo '$(rm -rf .git)'",
+          "cat <<'EOF'\n$(rm -rf .git/autoloop/run)\nEOF",
+          'npm test 2>&1 | tail -5',
+          "git commit -m 'a>b'",
+          'J=$(mktemp) && curl -c $J x && rm -f $J',
+          'for r in a b; do rm -rf /tmp/s/$r-clone; done',
+          'D=/tmp/perm-probe-$$; mkdir -p $D && rm -rf $D',
+          'export W=/tmp/s/stage; rm -rf "$W"',
+        ].filter((command) => judgedAt(command) !== null).map((command) => `refused: ${command}`),
+      ];
+      // The heredoc tail: text after `<<EOF` on its line is command text, for
+      // every rule (it hid `gh pr merge` before this fix).
+      for (const shape of [
+        'cat <<EOF && gh pr merge 5 --squash\nx\nEOF',
+        "echo '<<EOF'\ngh pr merge 5 --squash\nEOF",
+        '# <<EOF\ngh pr merge 5 --squash\nEOF',
+        "echo x # it's\ngh pr merge 5 --squash",
+      ]) {
+        if (!evaluate(shape, 'feat/x', { baseBranch: 'main' }).block) tokenized.push(`evaded (evaluate): ${shape}`);
+      }
+      if (tokenized.length > 0) {
+        console.error(`FAIL [the run-state rule holds through the guard's tokenizer]: ${JSON.stringify(tokenized)}`);
+        ok = false;
+      }
+      // A command that runs prime and deletes the marker it just wrote is
+      // refused before any run is open; so is a git that stalls (a FIFO for
+      // .git/config), within the budget instead of past the host's timeout;
+      // and so is a run whose latch cannot be written.
+      mkdirSync(join(scratch, '.autoloop'), { recursive: true });
+      writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } }));
+      rmSync(join(markers, 'run.json'), { force: true });
+      const primeAndDelete = latchHook(`node ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} --json && rm -rf .git/autoloop/run`, 'session-p');
+      const oversized = latchHook(`echo ${'x'.repeat(MAX_COMMAND_BYTES)}`);
+      // Refused by the run-opening rule alone (the script's text is not visible).
+      const primeAndScript = latchHook(`node ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} --json && sh /tmp/x.sh`);
+      const stalled = join(scratch, 'stalled');
+      execFileSync('git', ['init', '-q', stalled]);
+      rmSync(join(stalled, '.git', 'config'));
+      spawnSync('mkfifo', [join(stalled, '.git', 'config')]);
+      const stalledAt = Date.now();
+      const stalledHook = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', cwd: stalled, tool_input: { command: 'ls' } }),
+        encoding: 'utf8', cwd: stalled, timeout: 15000,
+        env: { ...isolatedEnv(), HOME: home, CLAUDE_PROJECT_DIR: stalled, AUTOLOOP_GUARD_BUDGET_MS: '3000' },
+      });
+      const stalledElapsed = Date.now() - stalledAt;
+      rmSync(stalled, { recursive: true, force: true });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      const lockedHome = join(scratch, 'locked-home');
+      mkdirSync(join(lockedHome, '.claude'), { recursive: true });
+      writeFileSync(join(lockedHome, '.claude', 'autoloop'), 'not a directory');
+      const unlatchable = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', cwd: scratch, tool_input: { command: 'ls' } }),
+        encoding: 'utf8', cwd: scratch, env: { ...isolatedEnv(), HOME: lockedHome, CLAUDE_PROJECT_DIR: scratch },
+      });
+      rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
+      if (primeAndDelete.status !== 2 || primeAndScript.status !== 2 || !primeAndScript.stderr.includes('opens a run')
+        || oversized.status !== 2 || stalledHook.status !== 2 || stalledElapsed > 8000
+        || !stalledHook.stderr.includes('git') || unlatchable.status !== 2 || !unlatchable.stderr.includes('latch')) {
+        console.error(`FAIL [prime-then-delete, a stalled git and an unwritable latch all refuse]: ${JSON.stringify({
+          primeAndDelete: primeAndDelete.status, primeAndScript: primeAndScript.status, oversized: oversized.status, stalled: stalledHook.status, stalledElapsed, stalledErr: stalledHook.stderr.slice(0, 120),
+          unlatchable: unlatchable.status,
+        })}`);
+        ok = false;
+      }
+      // A session whose project directory is not itself a git repository,
+      // with the run in a repository inside it: the run's own repository is
+      // what git must read (a review found every command refused here).
+      const work = join(scratch, 'work');
+      const inner = join(work, 'repo');
+      mkdirSync(inner, { recursive: true });
+      execFileSync('git', ['init', '-q', inner]);
+      const innerMarkers = runMarkerDirectory(inner);
+      mkdirSync(innerMarkers, { recursive: true });
+      writeFileSync(join(innerMarkers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      const workHome = join(scratch, 'work-home');
+      const fromWork = (command) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', cwd: inner, tool_input: { command } }),
+        encoding: 'utf8', cwd: inner, env: { ...process.env, HOME: workHome, CLAUDE_PROJECT_DIR: work },
+      });
+      const workLs = fromWork('ls');
+      const workMerge = fromWork('gh pr merge 5 --squash');
+      if (workLs.status !== 0 || workMerge.status !== 2) {
+        console.error(`FAIL [a run in a repository under a non-git project directory is guarded, not locked]: ${workLs.status} ${workLs.stderr.slice(0, 160)} ${workMerge.status}`);
+        ok = false;
+      }
+      // The session's owner: the first Claude ancestor; Claude as pid 1 (a
+      // container); without Claude, the outermost ancestor; an unreadable
+      // entry stops the walk where it is.
+      const chains = {
+        claude: new Map([[100, [50, 'zsh', '']], [50, [1, 'claude', '/x/claude']], [1, [0, 'init', '']]]),
+        none: new Map([[100, [50, 'zsh', '']], [50, [1, 'tmux', '']], [1, [0, 'init', '']]]),
+        pidOne: new Map([[100, [1, 'zsh', '']], [1, [0, 'claude', '/x/claude']]]),
+        unreadable: new Map(),
+      };
+      const ownerOf = (chain) => sessionOwnerPid(100, (pid) => chains[chain].get(pid) ?? null);
+      const owners = [ownerOf('claude'), ownerOf('none'), ownerOf('pidOne'), ownerOf('unreadable')];
+      // A latch left by an earlier process with this pid (another start) is
+      // replaced, not honoured; this process's own start is readable.
+      const staleDir = join(scratch, 'stale-latches');
+      mkdirSync(staleDir, { recursive: true });
+      writeFileSync(join(staleDir, `${process.pid}.json`), JSON.stringify({ version: 2, owner: process.pid, ownerStart: 'another-process', baseBranch: 'old' }));
+      const replaced = recordLatch({ owner: process.pid, baseBranch: 'main', directory: staleDir });
+      const replacedLatch = sessionLatch({ owner: process.pid, directory: staleDir })?.latch;
+      if (JSON.stringify(owners) !== '[50,50,1,100]' || replaced === null || replacedLatch?.baseBranch !== 'main'
+        || (process.platform === 'linux' && processStart(process.pid) === null)) {
+        console.error(`FAIL [the latch owner and its pid-reuse check]: ${JSON.stringify({ owners, replaced, base: replacedLatch?.baseBranch })}`);
+        ok = false;
+      }
+      // A latch whose processes have all exited is a finished session's: pruned.
+      const exited = spawnSync(process.execPath, ['-e', '0']).pid;
+      mkdirSync(latches, { recursive: true });
+      writeFileSync(join(latches, `${exited}.json`), JSON.stringify({ version: 2, owner: exited, ownerStart: null, baseBranch: 'main' }));
+      const pruned = pruneLatches(latches);
+      if (pruned.length !== 1 || existsSync(join(latches, `${exited}.json`)) || !existsSync(join(latches, latchFile))) {
+        console.error(`FAIL [only latches whose processes have exited are pruned]: ${JSON.stringify(pruned)}`);
+        ok = false;
+      }
+      // A forged, newer marker naming another base cannot relax the rules the
+      // run's own base imposes: every base is enforced.
+      const base = execFileSync('git', ['-C', scratch, 'branch', '--show-current'], { encoding: 'utf8' }).trim();
+      rmSync(latches, { recursive: true, force: true });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: 1, baseBranch: base }));
+      writeFileSync(join(markers, 'forged.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'elsewhere' }));
+      const forged = latchHook('git commit --allow-empty -m x', 'session-c');
+      rmSync(join(markers, 'forged.json'));
+      if (forged.status !== 2) {
+        console.error(`FAIL [a forged marker naming another base cannot relax the base rules]: ${forged.status} ${forged.stderr}`);
         ok = false;
       }
     } finally {
@@ -3919,6 +4336,7 @@ function selfTest() {
       ? `self-test OK (${corpusCount} corpus + ${cases.length + messageChecks} cases)`
       : 'self-test FAILED',
   );
+  for (const home of homes) rmSync(home, { recursive: true, force: true });
   return ok;
 }
 
@@ -3935,6 +4353,133 @@ function selfTest() {
 // keeps the refusal failing CLOSED if the host ever stops parsing this shape —
 // JSON with exit 0 would then fail OPEN, a security regression rather than a
 // cosmetic change. stderr keeps the reason visible in that case too.
+// The command as the run-state rule reads it: each shell segment's words, and
+// the subshell parentheses that open before it and close after it. ANSI-C
+// quotes are decoded first, and every command substitution — outside single
+// quotes — is judged as the commands it runs; more of them than can be taken
+// apart makes an opaque segment, which the rule refuses.
+const MAX_SUBSTITUTION_BODIES = 64;
+
+export function guardSegments(cmd, depth = 0) {
+  const text = quotedAnsiC(stripHeredocs(cmd));
+  // shellSegments splits `>&file` at its `&`; the redirection is rejoined.
+  const pieces = [];
+  for (const piece of shellSegments(text)) {
+    const last = pieces.at(-1);
+    if (last !== undefined && last.raw === '&' && /[<>]$/u.test(last.command)) {
+      pieces[pieces.length - 1] = { ...piece, command: `${last.command}&${piece.command}` };
+    } else {
+      pieces.push(piece);
+    }
+  }
+  const segments = pieces.map(({ command }) => {
+    // Linear scans, like trimSubshell: an anchored-at-end pattern backtracks
+    // quadratically on a padded command.
+    let leading = 0;
+    let start = 0;
+    for (; start < command.length && (command[start] === '(' || /\s/u.test(command[start])); start += 1) {
+      if (command[start] === '(') leading += 1;
+    }
+    let trailing = 0;
+    let end = command.length;
+    for (; end > start && (command[end - 1] === ')' || /\s/u.test(command[end - 1])); end -= 1) {
+      if (command[end - 1] === ')') trailing += 1;
+    }
+    // Only parentheses the segment leaves unbalanced open or close a
+    // subshell: the `)` of `J=$(mktemp)` belongs to its substitution.
+    let balance = 0;
+    for (const char of command) balance += char === '(' ? 1 : char === ')' ? -1 : 0;
+    const opens = Math.min(leading, Math.max(0, balance + trailing));
+    const closes = Math.min(trailing, Math.max(0, leading - balance));
+    // Cut exactly those parentheses, by position (one pass each way).
+    let from = 0;
+    for (let seen = 0; seen < opens; from += 1) if (command[from] === '(') seen += 1;
+    let to = command.length;
+    for (let seen = 0; seen < closes; to -= 1) if (command[to - 1] === ')') seen += 1;
+    const body = command.slice(from, to);
+    let words = shellWords(spacedRedirections(body.trim()));
+    const comment = words.findIndex((word) => word.startsWith('#'));
+    if (comment !== -1) words = words.slice(0, comment);
+    return { words, opens, closes };
+  }).flatMap((segment) => {
+    // `eval` and a shell's `-c` script run text of their own: judged as the
+    // commands it holds (eval in this shell, `sh -c` in a child).
+    const inner = nestedScript(segment.words);
+    if (inner === null) return [segment];
+    if (depth >= MAX_SUBSTITUTION_DEPTH) return [segment, { words: [], opens: 0, closes: 0, opaque: true }];
+    const nested = guardSegments(inner.script, depth + 1);
+    if (nested.length > 0 && inner.child) {
+      nested[0].opens += 1;
+      nested.at(-1).closes += 1;
+    }
+    return [segment, ...nested];
+  });
+  const bodies = [...substitutionBodies(text), ...expandedHeredocBodies(quotedAnsiC(cmd)).flatMap(substitutionBodies)];
+  if (bodies.length === 0) return segments;
+  if (depth >= MAX_SUBSTITUTION_DEPTH || bodies.length > MAX_SUBSTITUTION_BODIES) {
+    return [...segments, { words: [], opens: 0, closes: 0, opaque: true }];
+  }
+  for (const body of bodies) {
+    const inner = guardSegments(body, depth + 1);
+    if (inner.length === 0) continue;
+    inner[0].opens += 1;
+    inner.at(-1).closes += 1;
+    segments.push(...inner);
+  }
+  return segments;
+}
+
+// The script an `eval` or a shell's `-c` runs, if the segment is one.
+function nestedScript(words) {
+  let index = 0;
+  while (index < words.length && (isAssignmentWord(words[index]) || EXEC_WRAPPERS.has(basename(words[index])))) index += 1;
+  const head = basename(words[index] ?? '');
+  if (head === 'eval') return { script: words.slice(index + 1).join(' '), child: false };
+  // An alias's value runs wherever its name is used later.
+  if (head === 'alias') {
+    const values = words.slice(index + 1).filter((word) => word.includes('=')).map((word) => word.slice(word.indexOf('=') + 1));
+    return values.length === 0 ? null : { script: values.join(' ; '), child: false };
+  }
+  if (!/^(?:ba|da|k|z)?sh$/u.test(head)) return null;
+  const flag = words.findIndex((word, at) => at > index && /^-[A-Za-z]*c[A-Za-z]*$/u.test(word));
+  return flag === -1 || words[flag + 1] === undefined ? null : { script: words[flag + 1], child: true };
+}
+
+// `$(…)` and backquote bodies outside single quotes, in one linear pass (a
+// quoted commit message that mentions `$(rm …)` runs nothing). One past the
+// cap is enough to know it was exceeded.
+function substitutionBodies(text) {
+  const bodies = [];
+  let single = false;
+  let double = false;
+  for (let index = 0; index < text.length && bodies.length <= MAX_SUBSTITUTION_BODIES; index += 1) {
+    const char = text[index];
+    if (single) {
+      if (char === "'") single = false;
+      continue;
+    }
+    if (char === '\\') {
+      index += 1;
+      continue;
+    }
+    if (char === "'" && !double) single = true;
+    else if (char === '"') double = !double;
+    else if (char === '$' && text[index + 1] === '(') {
+      const end = substitutionEnd(text, index + 2);
+      if (end === -1) break;
+      bodies.push(text.slice(index + 2, end));
+      index = end;
+    } else if (char === '`') {
+      let end = index + 1;
+      while (end < text.length && text[end] !== '`') end += text[end] === '\\' ? 2 : 1;
+      if (end >= text.length) break;
+      bodies.push(text.slice(index + 1, end));
+      index = end;
+    }
+  }
+  return bodies;
+}
+
 function refuse(reason) {
   process.stdout.write(`${JSON.stringify({
     hookSpecificOutput: {
@@ -3948,6 +4493,10 @@ function refuse(reason) {
 }
 
 function main() {
+  // AUTOLOOP_GUARD_BUDGET_MS can only shorten the budget (the self-test's
+  // stalled-git case); nothing can lengthen it past the host's timeout.
+  const budget = Math.min(GUARD_DEADLINE_MS, Number(process.env.AUTOLOOP_GUARD_BUDGET_MS) || GUARD_DEADLINE_MS);
+  const deadline = Date.now() + budget;
   if (process.argv.includes('--corpus')) {
     const { total, failures } = replayCorpus();
     for (const line of failures) console.error(line);
@@ -3966,11 +4515,25 @@ function main() {
   if (parsed.selfTest) process.exit(selfTest() ? 0 : 1);
   // Plugin hooks fire in every repository; outside an open run this one guards
   // only a devendored autoloop repository (hook-root.mjs), before reading
-  // anything. Inside an open run it never stands down: the run's marker is the
-  // authority, whatever the checkout now says.
+  // anything. Inside an open run it never stands down: the run's markers — and,
+  // once seen, the session latch that outlives them — are the authority,
+  // whatever the checkout now says.
+  // Every git call below shares the hook's budget; one that stalls or runs it
+  // out makes the guard refuse rather than read "no answer" as "no run".
+  setGitDeadline(deadline);
+  const allow = () => {
+    if (gitStalled()) {
+      refuse(
+        'autoloop guard — a git call timed out (a stalled or unreadable git directory), so whether '
+        + 'a run is open cannot be proven — the guard refuses in any repository whose git stalls. '
+        + 'Fix or leave the stalled repository, then retry.',
+      );
+    }
+    process.exit(0);
+  };
   const projectRoot = parsed.root ?? hookRoot();
   const root = activeAutoloopRoot(projectRoot);
-  const runBase = pluginRunBase([process.cwd(), projectRoot]);
+  const markers = pluginRunMarkers([process.cwd(), projectRoot]);
 
   let payload;
   let payloadError = null;
@@ -3983,9 +4546,36 @@ function main() {
   // anywhere but the session's project would leave the hooks guarding the
   // wrong repository. Only a hook can check it — Bash never sees
   // CLAUDE_PROJECT_DIR.
-  const foreign = foreignPrimeProblem(payload?.tool_input?.command, payload?.cwd ?? process.cwd(), projectRoot);
+  const foreign = foreignPrimeProblem(payload?.tool_input?.command, payload?.cwd ?? process.cwd(), projectRoot, undefined, deadline);
   if (foreign !== null) refuse(foreign);
-  if (root === null && runBase === null) process.exit(0);
+  // The session latch (run-markers.mjs): prime writes it when it opens a run,
+  // and the guard writes it the first time it sees one — refusing when it
+  // cannot, since the markers alone are within the run's reach.
+  if (markers.length > 0
+    && recordLatch({ baseBranch: markers[0].marker.baseBranch, scope: dirname(dirname(dirname(markers[0].path))) }) === null) {
+    refuse(
+      `autoloop guard — this session's run latch could not be written under ${latchDirectory()}, `
+      + 'so the run would rest on its markers alone. Make that directory writable, then retry.',
+    );
+  }
+  const latched = sessionLatch();
+  if (latched?.unreadable) {
+    refuse(
+      `autoloop guard — this session's run latch (${latched.path}) is unreadable, so whether a `
+      + 'run is open cannot be proven and every command is refused. Start a new session.',
+    );
+  }
+  // A run whose repository git can no longer read has hidden its markers (a
+  // broken HEAD or config): refuse until it can be read again. The run's
+  // repository, as its latch records it — the session's project directory
+  // need not be one.
+  if (latched !== null && commonDirOf(latched.latch.scope ?? projectRoot) === null) {
+    refuse(
+      'autoloop guard — git cannot read this repository while a run is open (a damaged HEAD, '
+      + 'config or refs), so the run\'s state cannot be checked. A human repairs the repository.',
+    );
+  }
+  if (root === null && markers.length === 0 && latched === null) allow();
   if (payloadError !== null) {
     const error = payloadError;
     refuse(
@@ -3997,7 +4587,7 @@ function main() {
   if (payload?.tool_name === 'AskUserQuestion') {
     const problem = askUserQuestionProblem(loopRunIsLive() || loopRunIsLive(projectRoot));
     if (problem !== null) refuse(problem);
-    process.exit(0);
+    allow();
   }
   const cmd = payload?.tool_input?.command;
   if (typeof cmd !== 'string') {
@@ -4008,9 +4598,40 @@ function main() {
     );
   }
 
+  // Parts of the check grow faster than linearly in the command's length
+  // (3.2 s at this cap, measured); twice the longest command recorded across
+  // 26,980 real Bash calls (32 KB) keeps every check inside the budget.
+  if (Buffer.byteLength(cmd) > MAX_COMMAND_BYTES) {
+    refuse(
+      `autoloop guard — this command is ${Buffer.byteLength(cmd)} bytes, over the ${MAX_COMMAND_BYTES}-byte `
+      + 'limit the guard can check within its time budget. Write long content to a file first '
+      + '(the Write tool) and pass the file.',
+    );
+  }
+
+  // The run's own state and the guard's own code are off limits in every
+  // autoloop repository, run or not: a command that runs prime and then
+  // deletes the marker it just wrote leaves nothing for a later check to see.
+  const cwd = typeof payload?.cwd === 'string' ? payload.cwd : process.cwd();
+  const runOpen = loopRunIsOpen() || loopRunIsOpen(projectRoot) || latched !== null;
+  const segments = guardSegments(cmd);
+  const paths = protectedPaths({ projectRoot, cwd, runOpen });
+  const stateProblem = runStateProblem(segments, { cwd, protectedDirs: paths.state, codeDirs: paths.code });
+  if (stateProblem !== null) refuse(stateProblem);
+  // A command that opens a run does only that (and reads): prime writes the
+  // latch, but a compound could still break git or remove the fresh records
+  // before the guard has ever seen the run.
+  if (opensRun(cmd, cwd) && !segments.every((segment) => readsOnly(segment.words) || primeSegment(segment.words, cwd))) {
+    refuse(
+      'autoloop guard — this command opens a run (prime.mjs) and does more than read besides. Run '
+      + '`node <plugin-tools>/prime.mjs --json` on its own (redirecting or piping its output to a reader is fine).',
+    );
+  }
+
   // Ordered before configuration loading: with no run open there is nothing to
   // guard, so a configuration problem must not block a human's command either.
-  if (!loopRunIsOpen() && !loopRunIsOpen(projectRoot)) process.exit(0);
+  if (!runOpen) allow();
+  pruneLatches();
 
   const launchProblem = backgroundDispatchProblem(
     cmd,
@@ -4018,22 +4639,29 @@ function main() {
   );
   if (launchProblem !== null) refuse(launchProblem);
 
-  let baseBranch;
-  try {
-    // While a plugin run is open its recorded base is the authority, whatever
-    // the checkout now says (a missing, unreadable or different config);
-    // otherwise the checkout's config decides.
-    baseBranch = runBase ?? loadConfiguredBase(root ?? projectRoot);
-  } catch (error) {
-    refuse(
-      `autoloop guard — the configured base branch cannot be resolved (${error.message}), `
-      + 'so branch-sensitive rules cannot be proven. Run autoloop:setup to repair '
-      + '.autoloop/config.json.',
-    );
+  // While a plugin run is open its recorded bases are the authority, whatever
+  // the checkout now says (a missing, unreadable or different config): the
+  // latch's pinned one and every open marker's, each enforced, so a forged
+  // marker can only add rules. Otherwise the checkout's config decides.
+  let bases = [...new Set([latched?.latch.baseBranch, ...markers.map(({ marker }) => marker.baseBranch)]
+    .filter((base) => typeof base === 'string'))];
+  if (bases.length === 0) {
+    try {
+      bases = [loadConfiguredBase(root ?? projectRoot)];
+    } catch (error) {
+      refuse(
+        `autoloop guard — the configured base branch cannot be resolved (${error.message}), `
+        + 'so branch-sensitive rules cannot be proven. Run autoloop:setup to repair '
+        + '.autoloop/config.json.',
+      );
+    }
   }
-  const verdict = evaluate(cmd, currentBranch(), { baseBranch, cwd: payload?.cwd });
-  if (verdict.block) refuse(verdict.reason);
-  process.exit(0);
+  const branch = currentBranch();
+  for (const baseBranch of bases) {
+    const verdict = evaluate(cmd, branch, { baseBranch, cwd: payload?.cwd });
+    if (verdict.block) refuse(verdict.reason);
+  }
+  allow();
 }
 
 // realpath compare — the naive `file://` string check fails open on encoded paths and symlinks.

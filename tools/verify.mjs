@@ -40,6 +40,8 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'escalate-paths.mjs',
   'hook-root.mjs',
   'run-markers.mjs',
+  'run-state-guard.mjs',
+  'git-budget.mjs',
   'label-swap-reminder.mjs',
   'lane-contract.mjs',
   'lifecycle-contract.mjs',

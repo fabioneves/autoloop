@@ -7,8 +7,11 @@
 // self-test exercises it.
 
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { boundedGit } from './git-budget.mjs';
 
 // The guard is defense-in-depth for commands a run issues; repository rules are
 // the enforcement boundary. Applying it to every Bash call in the project turns
@@ -18,21 +21,25 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 // An open run is evidenced by a durable run marker that `prime.mjs` writes and
 // binds to the ancestry it observed. The marker names live PIDs; a run whose
 // orchestrator has exited leaves nothing alive to match, so the evidence
-// disappears with the run without needing a daemon to revoke it. Anything
-// unreadable or ambiguous means "no run": a guard that cannot establish an open
-// run must not block a human.
+// disappears with the run without needing a daemon to revoke it. An unreadable
+// marker means "no run": a guard that cannot establish an open run must not
+// block a human. The session latch below is the exception — it exists only
+// because this session already had a run, so an unreadable one refuses.
 // The common git dir, not `--git-path` (which is per-worktree for this path):
 // a command issued from a linked worktree must see the repository's run.
+// Resolved once per directory per process: a hook asks for the same one
+// several times, and each ask is a git spawn under the hook's budget.
+const markerDirectories = new Map();
+
 export function runMarkerDirectory(cwd = process.cwd()) {
-  const result = spawnSync(
-    'git',
-    ['-C', cwd, 'rev-parse', '--git-common-dir'],
-    { encoding: 'utf8', timeout: 10_000, windowsHide: true },
-  );
+  if (markerDirectories.has(cwd)) return markerDirectories.get(cwd);
+  const result = boundedGit(['-C', cwd, 'rev-parse', '--git-common-dir']);
   if (result.status !== 0 || result.error) return null;
   const common = String(result.stdout ?? '').trim();
   if (!common) return null;
-  return join(isAbsolute(common) ? common : resolve(cwd, common), 'autoloop', 'run');
+  const directory = join(isAbsolute(common) ? common : resolve(cwd, common), 'autoloop', 'run');
+  markerDirectories.set(cwd, directory);
+  return directory;
 }
 
 export function ownRunMarkers(cwd = process.cwd()) {
@@ -51,7 +58,7 @@ export function ownRunMarkers(cwd = process.cwd()) {
     const path = join(directory, entry);
     let marker;
     try {
-      marker = JSON.parse(readFileSync(path, 'utf8'));
+      marker = JSON.parse(readRegularFile(path));
     } catch {
       continue;
     }
@@ -81,16 +88,209 @@ export function loopRunIsLive(cwd = process.cwd()) {
   return ownRunMarkers(cwd).some(({ marker }) => marker.closedAt === undefined);
 }
 
-// The base of an open run the plugin's prime opened (its marker records the
-// base; a legacy install's own prime writes markers without one — that run is
-// the vendored guard's, never this one's). Looked up from the hook's cwd and
-// from the project root, since either may be where the session works. null
-// when no such run is open.
-export function pluginRunBase(dirs = [process.cwd()]) {
-  const newest = dirs.flatMap((dir) => ownRunMarkers(dir))
-    .filter(({ marker }) => typeof marker.baseBranch === 'string')
-    .sort((left, right) => (right.marker.openedAtMs ?? 0) - (left.marker.openedAtMs ?? 0))[0];
-  return newest?.marker.baseBranch ?? null;
+// The open runs the plugin's prime opened (each marker records its base; a
+// legacy install's own prime writes markers without one — that run is the
+// vendored guard's, never this one's). Looked up from the hook's cwd and from
+// the project root, since either may be where the session works; oldest first.
+export function pluginRunMarkers(dirs = [process.cwd()]) {
+  const seen = new Set();
+  return dirs.flatMap((dir) => ownRunMarkers(dir))
+    .filter(({ path, marker }) => typeof marker.baseBranch === 'string' && !seen.has(path) && seen.add(path))
+    .sort((left, right) => (left.marker.openedAtMs ?? 0) - (right.marker.openedAtMs ?? 0));
+}
+
+// The session latch: the run's second record, outside the repository. The
+// markers live in the git dir, which the run can reach, and a run that
+// deleted them (or broke git so they could not be found) switched its own
+// guard off (security audits after 0.60.0). The latch belongs to the
+// session's Claude process — found in the ancestry the way markers are
+// matched, never through git or anything the run can edit — and records
+// the run's base, pinned once. prime writes it when it opens a run (no
+// window between opening and a first hook), the command guard writes it the
+// first time it sees an open run, and it holds for as long as that Claude
+// process lives. Its start time guards against pid reuse.
+export function latchDirectory(home = homedir()) {
+  return join(home, '.claude', 'autoloop', 'run-latches');
+}
+
+// What the run may not change, for both guards. state: the marker
+// directories (the project's and the command's), the session latches, the
+// shell snapshots and session environment files every Bash call sources, and
+// — while a run is open — the project's and the user's Claude settings and
+// plugin registry. code: the plugin's own tools and hooks (this file's
+// neighbours), which every hook call runs afresh.
+export const PLUGIN_CODE_DIRS = Object.freeze(['tools', 'hooks']
+  .map((name) => join(dirname(dirname(fileURLToPath(import.meta.url))), name)));
+
+export function protectedPaths({ projectRoot, cwd = projectRoot, runOpen, home = homedir() }) {
+  const state = [
+    runMarkerDirectory(projectRoot), runMarkerDirectory(cwd), latchDirectory(home),
+    join(home, '.claude', 'shell-snapshots'), join(home, '.claude', 'session-env'),
+    ...(runOpen ? [
+      ...['.claude/settings.json', '.claude/settings.local.json'].map((file) => join(projectRoot, file)),
+      ...['settings.json', 'settings.local.json', 'plugins/installed_plugins.json', 'plugins/known_marketplaces.json']
+        .map((file) => join(home, '.claude', file)),
+    ] : []),
+  ];
+  const withReal = (list) => {
+    const present = list.filter((path) => path !== null);
+    return [...new Set([...present, ...present.map((path) => {
+      try {
+        return realpathSync(path);
+      } catch {
+        return path;
+      }
+    })])];
+  };
+  return { state: withReal(state), code: withReal(PLUGIN_CODE_DIRS) };
+}
+
+export function commonDirOf(cwd = process.cwd()) {
+  const markers = runMarkerDirectory(cwd);
+  return markers === null ? null : dirname(dirname(markers));
+}
+
+// The session's Claude process: the first Claude ancestor, or (on a host
+// without one — CI) the outermost ancestor this process can see.
+export function sessionOwnerPid(start = process.ppid, readEntry = procEntry, limit = 64) {
+  let pid = start;
+  let last = null;
+  for (let depth = 0; depth < limit && pid >= 1; depth += 1) {
+    const entry = readEntry(pid);
+    // A Claude process may be pid 1 (a container); nothing else there is ours.
+    if (pid === 1) return entry !== null && isClaudeProcess(entry[1], entry[2]) ? 1 : last;
+    last = pid;
+    if (entry === null) return last;
+    const [parent, name, exe] = entry;
+    if (isClaudeProcess(name, exe)) return pid;
+    if (!Number.isSafeInteger(parent) || parent <= 0) return last;
+    pid = parent;
+  }
+  return last;
+}
+
+let ownerMemo;
+function currentOwner() {
+  if (ownerMemo === undefined) ownerMemo = sessionOwnerPid();
+  return ownerMemo;
+}
+
+// When a process started, as the kernel (or ps, in a fixed locale and zone)
+// reports it: a pid reused by a later process has a different start. null
+// when it cannot be read — which is never taken for a different process.
+export function processStart(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? null;
+  } catch {
+    if (process.platform === 'linux') return null;
+    const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8', timeout: 5000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+    });
+    const text = String(result.stdout ?? '').trim();
+    return result.status === 0 && text !== '' ? text : null;
+  }
+}
+
+// Whether a latch's owner is gone: dead, or its pid provably reused.
+function ownerGone(owner, ownerStart) {
+  if (!Number.isSafeInteger(owner) || !processAlive(owner)) return true;
+  if (ownerStart === null || ownerStart === undefined) return false;
+  const now = processStart(owner);
+  return now !== null && now !== ownerStart;
+}
+
+// A file read only if it is a regular one: a FIFO planted where a marker or
+// latch belongs would block the hook past its timeout.
+export function readRegularFile(path) {
+  if (!lstatSync(path).isFile()) throw new Error(`${path} is not a regular file`);
+  return readFileSync(path, 'utf8');
+}
+
+function latchPath(owner, directory) {
+  return join(directory, `${owner}.json`);
+}
+
+// scope: the run's repository root, so the guard can tell a repository git
+// no longer reads (a broken HEAD) from a project directory that was never one.
+export function recordLatch({ owner = currentOwner(), baseBranch, scope = null, directory = latchDirectory(), nowMs = Date.now() }) {
+  if (!Number.isSafeInteger(owner) || owner < 1 || typeof baseBranch !== 'string') return null;
+  const path = latchPath(owner, directory);
+  const existing = sessionLatch({ owner, directory });
+  if (existing !== null) return existing.unreadable ? null : path;
+  const latch = { version: 2, owner, ownerStart: processStart(owner), baseBranch, scope, latchedAtMs: nowMs };
+  // Written whole to a temporary file and linked into place: a crash
+  // mid-write never leaves a torn (unreadable, so refusing) latch.
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(temporary, `${JSON.stringify(latch)}\n`, { flag: 'w', mode: 0o600 });
+    linkSync(temporary, path);
+    return path;
+  } catch (error) {
+    // Another hook of this session linked it first: that one stands.
+    return error?.code === 'EEXIST' && sessionLatch({ owner, directory })?.latch !== undefined ? path : null;
+  } finally {
+    try {
+      unlinkSync(temporary);
+    } catch { /* already gone */ }
+  }
+}
+
+// { latch } for this session's latch; { unreadable } for one that exists
+// but cannot be trusted (the guard then refuses); null when there is none,
+// or it was a dead or provably earlier process's (the file is pruned).
+export function sessionLatch({ owner = currentOwner(), directory = latchDirectory() } = {}) {
+  if (!Number.isSafeInteger(owner) || owner < 1) return null;
+  const path = latchPath(owner, directory);
+  let latch;
+  try {
+    latch = JSON.parse(readRegularFile(path));
+  } catch (error) {
+    return error?.code === 'ENOENT' ? null : { unreadable: true, path };
+  }
+  if (latch?.version !== 2 || latch.owner !== owner || typeof latch.baseBranch !== 'string') {
+    return { unreadable: true, path };
+  }
+  if (ownerGone(owner, latch.ownerStart)) {
+    try {
+      unlinkSync(path);
+    } catch { /* already gone */ }
+    return null;
+  }
+  return { latch, path };
+}
+
+// Latches whose owners have exited (or whose pid now belongs to another
+// process): their sessions are over.
+export function pruneLatches(directory = latchDirectory(), nowMs = Date.now()) {
+  let names;
+  try {
+    names = readdirSync(directory);
+  } catch {
+    return [];
+  }
+  const pruned = [];
+  for (const name of names) {
+    const path = join(directory, name);
+    try {
+      // A temporary left by a crash between write and link.
+      if (/^\d+\.json\.\d+\.tmp$/u.test(name)) {
+        if (nowMs - lstatSync(path).mtimeMs > 60_000) {
+          unlinkSync(path);
+          pruned.push(path);
+        }
+        continue;
+      }
+      if (!/^\d+\.json$/u.test(name)) continue;
+      const { owner, ownerStart } = JSON.parse(readRegularFile(path));
+      if (ownerGone(owner, ownerStart)) {
+        unlinkSync(path);
+        pruned.push(path);
+      }
+    } catch { /* unreadable: left for the session that owns it to refuse on */ }
+  }
+  return pruned;
 }
 
 export function processAlive(pid) {

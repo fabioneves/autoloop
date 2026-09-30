@@ -14,9 +14,9 @@
 // This decides only whether a hook acts OUTSIDE an open run. Once prime opened
 // a run (it refuses unless this repository is active), the guards act for the
 // rest of the run whatever the checkout later says: a deleted config or a
-// checked-out pre-devendor branch must not switch them off. The run marker
-// itself lives in the git dir, which the run can write — the guards are only
-// as durable as that marker.
+// checked-out pre-devendor branch must not switch them off. The run's own
+// records are refused to it (run-state-guard.mjs), and the command guard's
+// session latch outlives a marker that goes missing anyway.
 //
 //   node <plugin-tools>/hook-root.mjs --self-test
 
@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
-import { pluginRunBase } from './run-markers.mjs';
+import { pluginRunMarkers } from './run-markers.mjs';
 
 const VENDORED_DIR = 'tools/agentic';
 
@@ -165,7 +165,7 @@ export function activeAutoloopRoot(root = hookRoot()) {
 // says, so no tracked file the run changes switches the hooks off mid-run.
 export function guardedRoot(projectRoot = hookRoot()) {
   return activeAutoloopRoot(projectRoot)
-    ?? (pluginRunBase([process.cwd(), projectRoot]) === null ? null : projectRoot);
+    ?? (pluginRunMarkers([process.cwd(), projectRoot]).length === 0 ? null : projectRoot);
 }
 
 function selfTest() {

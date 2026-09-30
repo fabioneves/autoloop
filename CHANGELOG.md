@@ -3,6 +3,56 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.61.0] - 2026-09-30
+
+Guard hardening after the 0.60.0 security audit (spec `docs/specs/SPEC-guard-hardening.md`): the
+run can no longer switch its own guard off by tampering with its state, time the guard out, or flip
+the merge policy in its working tree.
+
+### Breaking
+
+- **The merge executor reads the base branch's committed `.autoloop/config.json`** from GitHub. The
+  working tree only names the base. A committed config that cannot be read, is invalid or names
+  another base refuses, so nothing auto-merges.
+- **Destructive commands must name what they change.** Inside an autoloop repository, the guard
+  refuses one whose operand, redirection target or in-place edit it cannot resolve to a concrete
+  path: a value from a substitution, `read` or a pipe (destructive `xargs`), or a relative path
+  after an untracked `cd`.
+  - Measured on 23,268 recorded Bash commands: 16 refused (0.07%).
+  - None of the 3,143 commands from loop repositories was refused.
+- **A command that opens a run (`prime.mjs --json`) may do nothing else but read.**
+- **Guarded commands over 64 KB are refused**; the longest recorded command was 32 KB.
+
+### Added
+
+- **Session latch.** The run's second record, owned by the session's Claude process
+  (`~/.claude/autoloop/run-latches/<pid>.json`).
+  - prime writes it before the marker, and the guard writes it on first sight.
+  - It keeps the guard up after a marker is deleted, and pins the run's base.
+  - Every base the latch and open markers name is enforced, so a forged marker can only add
+    restrictions.
+  - A run whose repository git can no longer read is refused.
+- **`run-state-guard.mjs`.** The run's markers, latches, the shell snapshots and session-env files,
+  and the plugin's own `tools/` and `hooks/` are protected in every autoloop repository. The
+  project's and the user's Claude settings and plugin registry are protected while a run is open.
+  The edit guard protects the same paths.
+- **`git-budget.mjs`.** Every git call in both guards shares a 10 s deadline, and a stall refuses
+  instead of reading "no answer" as "no run".
+- **`lexShell`.** One linear shell lexer (quotes, comments, heredocs) for every rule.
+
+### Fixed
+
+- Pre-existing bypasses of every guard rule:
+  - the text after `<<EOF` on its line was hidden (`cat <<EOF && gh pr merge`);
+  - three regexes backtracked catastrophically and could hold the guard past the host's timeout
+    (ANSI-C quotes, and two path prefixes on runs of slashes);
+  - the guard's own code and the shell snapshots were writable from Bash.
+- A padded prime command outran the hook timeout (2,000 segments: 9.5 s, now 26 ms).
+- `currentBranch` ran git with no timeout.
+- The executor's `gh` calls honoured an ambient `GH_REPO`/`GH_HOST`. They now use the repository's
+  own host, including GitHub Enterprise.
+- Self-tests and the loop smoke never touch the real `HOME`.
+
 ## [0.60.0] - 2026-09-29
 
 Post-cutover cleanup: the plugin's layout matches what it now is, the runtime reads only
