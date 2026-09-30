@@ -134,19 +134,28 @@ export function settingsFromConfig(config, repository) {
 // Every gh call runs without GH_REPO and GH_HOST, so an ambient override can
 // never choose the repository (or host) that evidence is read from and the
 // merge is made in.
-function ghEnv() {
+// The host is the repository's own (a GitHub Enterprise remote), set
+// explicitly — never an ambient one.
+function ghEnv(host = null) {
   const { GH_REPO: ignoredRepo, GH_HOST: ignoredHost, ...env } = process.env;
-  return env;
+  return typeof host === 'string' && host !== '' && host !== 'github.com' ? { ...env, GH_HOST: host } : env;
 }
 
 // The repository the checkout's remotes name.
 function ghRepository(root, run = execFileSync) {
   try {
-    const view = JSON.parse(run('gh', ['repo', 'view', '--json', 'owner,name'], {
+    const view = JSON.parse(run('gh', ['repo', 'view', '--json', 'owner,name,url'], {
       cwd: root, env: ghEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000,
     }));
     const owner = view?.owner?.login;
-    return typeof owner === 'string' && typeof view?.name === 'string' ? { owner, name: view.name } : null;
+    if (typeof owner !== 'string' || typeof view?.name !== 'string') return null;
+    let host = null;
+    try {
+      host = new URL(view.url).host;
+    } catch {
+      host = null;
+    }
+    return { owner, name: view.name, host };
   } catch {
     return null;
   }
@@ -158,7 +167,7 @@ function committedConfigText(repository, base, run = execFileSync) {
   try {
     return run('gh', ['api', '-H', 'Accept: application/vnd.github.raw+json',
       `repos/${repository.owner}/${repository.name}/contents/${PROJECT_CONFIG_FILE}?ref=${encodeURIComponent(base)}`], {
-      env: ghEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000, maxBuffer: 1024 * 1024,
+      env: ghEnv(repository.host), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000, maxBuffer: 1024 * 1024,
     });
   } catch {
     return null;
@@ -406,7 +415,7 @@ function ghJson(args, input) {
   }
   const output = execFileSync('gh', args, {
     input,
-    env: ghEnv(),
+    env: ghEnv(REPO.REPOSITORY.host),
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
     timeout: 15000,
@@ -481,7 +490,7 @@ function fetchRestPage(endpoint) {
     'gh',
     ['api', '--include', ...args.slice(1)],
     {
-      env: ghEnv(),
+      env: ghEnv(REPO.REPOSITORY.host),
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15000,
@@ -1227,7 +1236,7 @@ function fetchKillSwitch() {
         '--limit',
         '1000',
       ],
-      { env: ghEnv(), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 },
+      { env: ghEnv(REPO.REPOSITORY.host), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 },
     );
     const issues = JSON.parse(output);
     if (!Array.isArray(issues)) throw new Error('issue list response was not an array');
@@ -3062,7 +3071,7 @@ function configSettingsCases() {
     process.env.GH_HOST = 'elsewhere.example';
     viewed = ghRepository('/r', (command, args, options) => {
       ghEnv = options.env === undefined ? null : { ...options.env };
-      return JSON.stringify({ owner: { login: 'o' }, name: 'r' });
+      return JSON.stringify({ owner: { login: 'o' }, name: 'r', url: 'https://ghe.example/o/r' });
     });
   } finally {
     for (const [key, value] of Object.entries(ambient)) {
@@ -3089,17 +3098,24 @@ function configSettingsCases() {
     const configured = repoSettings(scratch, lookup, committedAs(JSON.stringify(config({ policy: 'auto' }))));
     // The run can edit the working tree, never the base: the committed
     // config governs, and one that cannot be read or names another base refuses.
+    // A valid committed `manual` config (it carries no acknowledgements) under
+    // a working tree flipped to `auto`.
     const flipped = repoSettings(scratch, () => repository, committedAs(JSON.stringify({ ...config({}), merge: { policy: 'manual' } })));
     const unreadableBase = repoSettings(scratch, () => repository, committedAs(null));
     const otherBase = repoSettings(scratch, () => repository, committedAs(JSON.stringify({ ...config({ policy: 'auto' }), baseBranch: 'main' })));
     let committedCall = null;
+    let enterpriseCall = null;
     const ambientNow = { GH_REPO: process.env.GH_REPO, GH_HOST: process.env.GH_HOST };
     let committedText;
     try {
       process.env.GH_REPO = 'someone-else/target';
       process.env.GH_HOST = 'elsewhere.example';
-      committedText = committedConfigText(repository, 'trunk', (command, args, options) => {
+      committedText = committedConfigText(repository, 'release/1', (command, args, options) => {
         committedCall = { args, env: options.env };
+        return '{}';
+      });
+      committedConfigText({ ...repository, host: 'ghe.example' }, 'trunk', (command, args, options) => {
+        enterpriseCall = { env: options.env };
         return '{}';
       });
     } finally {
@@ -3167,11 +3183,13 @@ function configSettingsCases() {
           && reads.every((read) => read === `${repository.owner}/${repository.name}@trunk`),
       },
       {
-        name: 'config: the committed config is read from GitHub at the base, without GH_REPO or GH_HOST',
+        name: 'config: the committed config is read raw from GitHub at the (encoded) base, on the repository\'s own host only',
         ok: committedText === '{}' && committedCall !== null
-          && committedCall.args.includes(`repos/${repository.owner}/${repository.name}/contents/.autoloop/config.json?ref=trunk`)
+          && committedCall.args.includes(`repos/${repository.owner}/${repository.name}/contents/.autoloop/config.json?ref=release%2F1`)
+          && committedCall.args.includes('Accept: application/vnd.github.raw+json')
           && Object.hasOwn(committedCall.env, 'PATH')
-          && !Object.hasOwn(committedCall.env, 'GH_REPO') && !Object.hasOwn(committedCall.env, 'GH_HOST'),
+          && !Object.hasOwn(committedCall.env, 'GH_REPO') && !Object.hasOwn(committedCall.env, 'GH_HOST')
+          && enterpriseCall?.env.GH_HOST === 'ghe.example' && viewed?.host === 'ghe.example',
       },
       {
         name: 'config: without both acknowledgements the settings are non-solo, refused before any read and by the gate',

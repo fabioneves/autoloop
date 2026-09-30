@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { boundedGit } from './git-budget.mjs';
 
 // The guard is defense-in-depth for commands a run issues; repository rules are
 // the enforcement boundary. Applying it to every Bash call in the project turns
@@ -26,16 +27,19 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 // because this session already had a run, so an unreadable one refuses.
 // The common git dir, not `--git-path` (which is per-worktree for this path):
 // a command issued from a linked worktree must see the repository's run.
+// Resolved once per directory per process: a hook asks for the same one
+// several times, and each ask is a git spawn under the hook's budget.
+const markerDirectories = new Map();
+
 export function runMarkerDirectory(cwd = process.cwd()) {
-  const result = spawnSync(
-    'git',
-    ['-C', cwd, 'rev-parse', '--git-common-dir'],
-    { encoding: 'utf8', timeout: 10_000, windowsHide: true },
-  );
+  if (markerDirectories.has(cwd)) return markerDirectories.get(cwd);
+  const result = boundedGit(['-C', cwd, 'rev-parse', '--git-common-dir']);
   if (result.status !== 0 || result.error) return null;
   const common = String(result.stdout ?? '').trim();
   if (!common) return null;
-  return join(isAbsolute(common) ? common : resolve(cwd, common), 'autoloop', 'run');
+  const directory = join(isAbsolute(common) ? common : resolve(cwd, common), 'autoloop', 'run');
+  markerDirectories.set(cwd, directory);
+  return directory;
 }
 
 export function ownRunMarkers(cwd = process.cwd()) {
@@ -103,6 +107,10 @@ export function pluginRunMarkers(dirs = [process.cwd()]) {
 // for as long as a latched process is alive in the hook's ancestry, whatever
 // happened to the markers. Keyed by session and repository (its common dir).
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+
+export function validSessionId(sessionId) {
+  return SESSION_ID.test(String(sessionId ?? ''));
+}
 
 export function latchDirectory(home = homedir()) {
   return join(home, '.claude', 'autoloop', 'run-latches');

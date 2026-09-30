@@ -8,6 +8,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { boundedGit } from './git-budget.mjs';
 
 export const CONFIG_VERSION = '0.28.0';
 
@@ -541,7 +542,7 @@ function withDefaults(overrides, defaults = DEFAULT_CONFIG) {
 
 // The repository a tool runs in: the git top level, else the directory itself.
 export function repositoryRoot(cwd = process.cwd()) {
-  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', timeout: 20000 });
+  const top = boundedGit(['rev-parse', '--show-toplevel'], { cwd });
   return top.status === 0 ? top.stdout.trim() : resolve(cwd);
 }
 

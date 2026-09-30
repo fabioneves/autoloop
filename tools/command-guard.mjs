@@ -60,9 +60,10 @@ import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
-  procEntry, psEntry, commonDirOf, latchDirectory, pruneLatches, recordLatch, sessionLatch,
+  procEntry, psEntry, commonDirOf, latchDirectory, pruneLatches, recordLatch, sessionLatch, validSessionId,
 } from './run-markers.mjs';
-import { runStateProblem } from './run-state-guard.mjs';
+import { ORDINARY, runStateProblem, TAMPERING } from './run-state-guard.mjs';
+import { boundedGit, gitStalled, setGitDeadline } from './git-budget.mjs';
 
 const BRANCH_CREATION_FLAGS = new Set([
   '-c',
@@ -284,11 +285,20 @@ function decodeAnsiCBody(body) {
   return output;
 }
 
+// The body alternatives are disjoint (`\\x` or a character that is neither a
+// quote nor a backslash): overlapping ones backtracked exponentially on a run
+// of backslashes, and a guard that hangs past the host's timeout lets the
+// command run (found while hardening the run-state rule).
+const ANSI_C_QUOTE = /\$'((?:\\[\s\S]|[^'\\])*)'/gu;
+
 function decodeAnsiCQuotes(cmd) {
-  return cmd.replace(
-    /\$'((?:\\[\s\S]|[^'])*)'/gu,
-    (_match, body) => decodeAnsiCBody(body),
-  );
+  return cmd.replace(ANSI_C_QUOTE, (_match, body) => decodeAnsiCBody(body));
+}
+
+// The same decoding, kept quoted, for the tokenizer: `$'\x2egit'` is `'.git'`.
+function quotedAnsiC(cmd) {
+  return cmd.replace(ANSI_C_QUOTE, (_match, body) => `'${decodeAnsiCBody(body).replaceAll("'", "'\\''")}'`)
+    .replace(/\$"/gu, '"');
 }
 
 function executableLexicalText(cmd) {
@@ -322,7 +332,9 @@ function executableLexicalText(cmd) {
 function structuredGitMutation(cmd) {
   if (!executableShellStructure(cmd)) return false;
   const visible = executableLexicalText(cmd);
-  return /(?:^|[\s;&|(`{}])(?:\/[^\s;&|(`{}]+\/)*git\b(?:(?![;&|\n]).)*\b(?:commit|push)\b/u
+  // The path prefix's components exclude `/`: `(?:\/[^…]+\/)*`, whose
+  // class matched `/` too, backtracked exponentially on a run of slashes.
+  return /(?:^|[\s;&|(`{}])(?:\/(?:[^\s;&|(`{}/]+\/)*)?git\b(?:(?![;&|\n]).)*\b(?:commit|push)\b/u
     .test(visible);
 }
 
@@ -491,7 +503,7 @@ function opaqueMutationSyntax(cmd) {
 
 function interpreterHeredoc(cmd) {
   const interpreters =
-    /(?:^|[\s;&|])(?:\/[^\s;&|]+\/)*(?:ba|da|k|z)?sh(?:\s|$)|(?:^|[\s;&|])(?:\/[^\s;&|]+\/)*(?:node|nodejs|bun|deno|perl|php|ruby|python(?:\d+(?:\.\d+)?)?)(?:\s|$)/u;
+    /(?:^|[\s;&|])(?:\/(?:[^\s;&|/]+\/)*)?(?:ba|da|k|z)?sh(?:\s|$)|(?:^|[\s;&|])(?:\/(?:[^\s;&|/]+\/)*)?(?:node|nodejs|bun|deno|perl|php|ruby|python(?:\d+(?:\.\d+)?)?)(?:\s|$)/u;
   const shellSources =
     /(?:^|[\s;&|])(?:source(?=\s|$)|\.(?=\s|$))/u;
   const logicalLines = String(cmd).replace(/\\\r?\n/gu, ' ');
@@ -2521,15 +2533,9 @@ export function evaluate(inputCmd, branch, options = {}) {
 }
 
 function currentBranch() {
-  try {
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    return branch.length > 0 ? branch : null;
-  } catch {
-    return null;
-  }
+  const result = boundedGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const branch = result.status === 0 ? String(result.stdout ?? '').trim() : '';
+  return branch.length > 0 ? branch : null;
 }
 
 // A command that runs the plugin's own prime to open a run (not --close-run,
@@ -2550,9 +2556,7 @@ function realOrSelf(path) {
 }
 
 function commonGitDir(dir) {
-  const result = spawnSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
-    encoding: 'utf8', timeout: 10_000,
-  });
+  const result = boundedGit(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
   return result.status === 0 ? realOrSelf(result.stdout.trim()) : null;
 }
 
@@ -2592,6 +2596,7 @@ function trimSubshell(segment) {
 // prime segment cost two git spawns, and a padded command outran the timeout
 // (security audit after 0.60.0); common dirs are now resolved once each.
 export const GUARD_DEADLINE_MS = 10_000;
+export const MAX_COMMAND_BYTES = 64 * 1024;
 const MAX_PRIME_TARGETS = 64;
 const OVER_BUDGET = 'autoloop guard — this command is too large to check within the guard\'s time '
   + 'budget, so it cannot be proven safe. Split it into smaller commands.';
@@ -3848,6 +3853,78 @@ function selfTest() {
           + `${JSON.stringify({ stateVerdicts, readVerdict, latched, afterDelete, otherSession, corrupt: corrupt.status })}`);
         ok = false;
       }
+      // The run-state rule through the guard's own tokenizer: its fixtures,
+      // plus the shapes only a real tokenizer produces — quoted messages that
+      // mention a deletion run nothing; ANSI-C quotes, substitutions (quoted
+      // or not) and backquotes are taken apart.
+      const judgedAt = (command) => runStateProblem(guardSegments(command), {
+        cwd: '/r', protectedDirs: ['/r/.git/autoloop/run', '/home/u/.claude/autoloop/run-latches'], codeDirs: ['/p/tools'], home: '/home/u',
+      });
+      const tokenized = [
+        ...TAMPERING.filter((command) => judgedAt(command) === null).map((command) => `evaded: ${command}`),
+        ...ORDINARY.filter((command) => judgedAt(command) !== null).map((command) => `refused: ${command}`),
+        ...[
+          "rm -rf $'\\x2egit'/autoloop",
+          'echo $(rm -rf .git/autoloop/run)',
+          'echo "$(rm -rf .git/autoloop/run)"',
+          'echo `rm -rf .git`',
+          'rm -rf "$(git rev-parse --git-common-dir)/autoloop"',
+          'rm -rf $(git rev-parse --git-common-dir)/autoloop',
+          'D=.git; rm -rf "$D"/autoloop',
+          `echo ${'$(true) '.repeat(70)}`,
+        ].filter((command) => judgedAt(command) === null).map((command) => `evaded: ${command}`),
+        ...[
+          "git commit -m 'guard: refuse `rm -rf .git/autoloop/run` mid-run'",
+          "git commit -m 'refuses $(rm -rf .git) shapes'",
+          "echo '$(rm -rf .git)'",
+          'J=$(mktemp) && curl -c $J x && rm -f $J',
+          'for r in a b; do rm -rf /tmp/s/$r-clone; done',
+          'D=/tmp/perm-probe-$$; mkdir -p $D && rm -rf $D',
+          'export W=/tmp/s/stage; rm -rf "$W"',
+        ].filter((command) => judgedAt(command) !== null).map((command) => `refused: ${command}`),
+      ];
+      if (tokenized.length > 0) {
+        console.error(`FAIL [the run-state rule holds through the guard's tokenizer]: ${JSON.stringify(tokenized)}`);
+        ok = false;
+      }
+      // A command that runs prime and deletes the marker it just wrote is
+      // refused before any run is open; so is a git that stalls (a FIFO for
+      // .git/config), within the budget instead of past the host's timeout;
+      // and so is a run whose latch cannot be written.
+      mkdirSync(join(scratch, '.autoloop'), { recursive: true });
+      writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } }));
+      rmSync(join(markers, 'run.json'), { force: true });
+      const primeAndDelete = latchHook(`node ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} --json && rm -rf .git/autoloop/run`, 'session-p');
+      const oversized = latchHook(`echo ${'x'.repeat(MAX_COMMAND_BYTES)}`, 'session-o');
+      const stalled = join(scratch, 'stalled');
+      execFileSync('git', ['init', '-q', stalled]);
+      rmSync(join(stalled, '.git', 'config'));
+      spawnSync('mkfifo', [join(stalled, '.git', 'config')]);
+      const stalledAt = Date.now();
+      const stalledHook = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', session_id: 'session-s', cwd: stalled, tool_input: { command: 'ls' } }),
+        encoding: 'utf8', cwd: stalled, timeout: 15000,
+        env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: stalled, AUTOLOOP_GUARD_BUDGET_MS: '3000' },
+      });
+      const stalledElapsed = Date.now() - stalledAt;
+      rmSync(stalled, { recursive: true, force: true });
+      writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
+      const lockedHome = join(scratch, 'locked-home');
+      mkdirSync(join(lockedHome, '.claude'), { recursive: true });
+      writeFileSync(join(lockedHome, '.claude', 'autoloop'), 'not a directory');
+      const unlatchable = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ tool_name: 'Bash', session_id: 'session-u', cwd: scratch, tool_input: { command: 'ls' } }),
+        encoding: 'utf8', cwd: scratch, env: { ...process.env, HOME: lockedHome, CLAUDE_PROJECT_DIR: scratch },
+      });
+      rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
+      if (primeAndDelete.status !== 2 || oversized.status !== 2 || stalledHook.status !== 2 || stalledElapsed > 8000
+        || !stalledHook.stderr.includes('git call timed out') || unlatchable.status !== 2 || !unlatchable.stderr.includes('latch')) {
+        console.error(`FAIL [prime-then-delete, a stalled git and an unwritable latch all refuse]: ${JSON.stringify({
+          primeAndDelete: primeAndDelete.status, oversized: oversized.status, stalled: stalledHook.status, stalledElapsed, stalledErr: stalledHook.stderr.slice(0, 120),
+          unlatchable: unlatchable.status,
+        })}`);
+        ok = false;
+      }
       // A latch whose processes have all exited is a finished session's: pruned.
       const exited = spawnSync(process.execPath, ['-e', '0']).pid;
       mkdirSync(latches, { recursive: true });
@@ -4027,19 +4104,41 @@ function selfTest() {
 // keeps the refusal failing CLOSED if the host ever stops parsing this shape —
 // JSON with exit 0 would then fail OPEN, a security regression rather than a
 // cosmetic change. stderr keeps the reason visible in that case too.
-// The run's own state: the marker directories (the project's and the
-// command's, by real path too) and the session latches.
+// The run's own state — the marker directories (the project's and the
+// command's) and the session latches — and the guard's own code: the plugin's
+// tools and hooks, which every hook call runs afresh. By real path too.
+export const PLUGIN_CODE_DIRS = Object.freeze(['tools', 'hooks']
+  .map((name) => join(dirname(dirname(fileURLToPath(import.meta.url))), name)));
+
+function withRealPaths(dirs) {
+  const present = dirs.filter((dir) => dir !== null);
+  return [...new Set([...present, ...present.map(realOrSelf)])];
+}
+
 function runStateDirs(projectRoot, cwd) {
-  const dirs = [runMarkerDirectory(projectRoot), runMarkerDirectory(cwd), latchDirectory()]
-    .filter((dir) => dir !== null);
-  return [...new Set([...dirs, ...dirs.map(realOrSelf)])];
+  return withRealPaths([runMarkerDirectory(projectRoot), runMarkerDirectory(cwd), latchDirectory()]);
 }
 
 // The command as the run-state rule reads it: each shell segment's words, and
-// the subshell parentheses that open before it and close after it.
+// the subshell parentheses that open before it and close after it. ANSI-C
+// quotes are decoded first, and every command substitution — outside single
+// quotes — is judged as the commands it runs; more of them than can be taken
+// apart makes an opaque segment, which the rule refuses.
+const MAX_SUBSTITUTION_BODIES = 64;
+
 export function guardSegments(cmd, depth = 0) {
-  const text = stripHeredocs(cmd);
-  const segments = shellSegments(text).map(({ command }) => {
+  const text = quotedAnsiC(stripHeredocs(cmd));
+  // shellSegments splits `>&file` at its `&`; the redirection is rejoined.
+  const pieces = [];
+  for (const piece of shellSegments(text)) {
+    const last = pieces.at(-1);
+    if (last !== undefined && last.raw === '&' && /[<>]$/u.test(last.command)) {
+      pieces[pieces.length - 1] = { ...piece, command: `${last.command}&${piece.command}` };
+    } else {
+      pieces.push(piece);
+    }
+  }
+  const segments = pieces.map(({ command }) => {
     // Linear scans, like trimSubshell: an anchored-at-end pattern backtracks
     // quadratically on a padded command.
     let opens = 0;
@@ -4055,21 +4154,10 @@ export function guardSegments(cmd, depth = 0) {
     if (comment !== -1) words = words.slice(0, comment);
     return { words, opens, closes };
   });
-  // Command substitutions run commands of their own, in a subshell:
-  // `echo $(rm -rf …)` is judged as the rm it runs.
-  if (depth >= MAX_SUBSTITUTION_DEPTH) return segments;
-  const bodies = [];
-  for (let index = text.indexOf('$('); index !== -1 && bodies.length < 64;) {
-    const end = substitutionEnd(text, index + 2);
-    if (end === -1) break;
-    bodies.push(text.slice(index + 2, end));
-    index = text.indexOf('$(', end);
-  }
-  for (let index = text.indexOf('`'); index !== -1 && bodies.length < 64;) {
-    const end = text.indexOf('`', index + 1);
-    if (end === -1) break;
-    bodies.push(text.slice(index + 1, end));
-    index = text.indexOf('`', end + 1);
+  const bodies = substitutionBodies(text);
+  if (bodies.length === 0) return segments;
+  if (depth >= MAX_SUBSTITUTION_DEPTH || bodies.length > MAX_SUBSTITUTION_BODIES) {
+    return [...segments, { words: [], opens: 0, closes: 0, opaque: true }];
   }
   for (const body of bodies) {
     const inner = guardSegments(body, depth + 1);
@@ -4079,6 +4167,41 @@ export function guardSegments(cmd, depth = 0) {
     segments.push(...inner);
   }
   return segments;
+}
+
+// `$(…)` and backquote bodies outside single quotes, in one linear pass (a
+// quoted commit message that mentions `$(rm …)` runs nothing). One past the
+// cap is enough to know it was exceeded.
+function substitutionBodies(text) {
+  const bodies = [];
+  let single = false;
+  let double = false;
+  for (let index = 0; index < text.length && bodies.length <= MAX_SUBSTITUTION_BODIES; index += 1) {
+    const char = text[index];
+    if (single) {
+      if (char === "'") single = false;
+      continue;
+    }
+    if (char === '\\') {
+      index += 1;
+      continue;
+    }
+    if (char === "'" && !double) single = true;
+    else if (char === '"') double = !double;
+    else if (char === '$' && text[index + 1] === '(') {
+      const end = substitutionEnd(text, index + 2);
+      if (end === -1) break;
+      bodies.push(text.slice(index + 2, end));
+      index = end;
+    } else if (char === '`') {
+      let end = index + 1;
+      while (end < text.length && text[end] !== '`') end += text[end] === '\\' ? 2 : 1;
+      if (end >= text.length) break;
+      bodies.push(text.slice(index + 1, end));
+      index = end;
+    }
+  }
+  return bodies;
 }
 
 function refuse(reason) {
@@ -4094,7 +4217,10 @@ function refuse(reason) {
 }
 
 function main() {
-  const deadline = Date.now() + GUARD_DEADLINE_MS;
+  // AUTOLOOP_GUARD_BUDGET_MS can only shorten the budget (the self-test's
+  // stalled-git case); nothing can lengthen it past the host's timeout.
+  const budget = Math.min(GUARD_DEADLINE_MS, Number(process.env.AUTOLOOP_GUARD_BUDGET_MS) || GUARD_DEADLINE_MS);
+  const deadline = Date.now() + budget;
   if (process.argv.includes('--corpus')) {
     const { total, failures } = replayCorpus();
     for (const line of failures) console.error(line);
@@ -4116,6 +4242,18 @@ function main() {
   // anything. Inside an open run it never stands down: the run's markers — and,
   // once seen, the session latch that outlives them — are the authority,
   // whatever the checkout now says.
+  // Every git call below shares the hook's budget; one that stalls or runs it
+  // out makes the guard refuse rather than read "no answer" as "no run".
+  setGitDeadline(deadline);
+  const allow = () => {
+    if (gitStalled()) {
+      refuse(
+        'autoloop guard — a git call timed out (a stalled or unreadable git directory), so whether '
+        + 'a run is open cannot be proven. Fix or leave the stalled repository, then retry.',
+      );
+    }
+    process.exit(0);
+  };
   const projectRoot = parsed.root ?? hookRoot();
   const root = activeAutoloopRoot(projectRoot);
   const markers = pluginRunMarkers([process.cwd(), projectRoot]);
@@ -4133,17 +4271,35 @@ function main() {
   // CLAUDE_PROJECT_DIR.
   const foreign = foreignPrimeProblem(payload?.tool_input?.command, payload?.cwd ?? process.cwd(), projectRoot, undefined, deadline);
   if (foreign !== null) refuse(foreign);
+  // The session latch, per repository a run's markers live in (the project's,
+  // or the one a cwd outside it primed). A latch that cannot be written
+  // leaves the markers as the only record, so that refuses too.
   const sessionId = payload?.session_id;
-  const commonDir = commonDirOf(projectRoot);
-  if (markers.length > 0) recordLatch({ sessionId, commonDir, markers });
-  const latched = sessionLatch({ sessionId, commonDir });
-  if (latched?.unreadable) {
-    refuse(
-      `autoloop guard — this session's run latch (${latched.path}) is unreadable, so whether a `
-      + 'run is open cannot be proven and every command is refused. Start a new session.',
-    );
+  const markerRepos = new Map();
+  for (const entry of markers) {
+    const commonDir = dirname(dirname(dirname(entry.path)));
+    markerRepos.set(commonDir, [...(markerRepos.get(commonDir) ?? []), entry]);
   }
-  if (root === null && markers.length === 0 && latched === null) process.exit(0);
+  for (const [commonDir, own] of markerRepos) {
+    if (recordLatch({ sessionId, commonDir, markers: own }) === null && validSessionId(sessionId)) {
+      refuse(
+        `autoloop guard — this session's run latch could not be written under ${latchDirectory()}, `
+        + 'so the run would rest on its markers alone. Make that directory writable, then retry.',
+      );
+    }
+  }
+  let latched = null;
+  for (const commonDir of new Set([commonDirOf(projectRoot), ...markerRepos.keys()].filter(Boolean))) {
+    const found = sessionLatch({ sessionId, commonDir });
+    if (found?.unreadable) {
+      refuse(
+        `autoloop guard — this session's run latch (${found.path}) is unreadable, so whether a `
+        + 'run is open cannot be proven and every command is refused. Start a new session.',
+      );
+    }
+    latched ??= found;
+  }
+  if (root === null && markers.length === 0 && latched === null) allow();
   if (payloadError !== null) {
     const error = payloadError;
     refuse(
@@ -4155,7 +4311,7 @@ function main() {
   if (payload?.tool_name === 'AskUserQuestion') {
     const problem = askUserQuestionProblem(loopRunIsLive() || loopRunIsLive(projectRoot));
     if (problem !== null) refuse(problem);
-    process.exit(0);
+    allow();
   }
   const cmd = payload?.tool_input?.command;
   if (typeof cmd !== 'string') {
@@ -4166,9 +4322,29 @@ function main() {
     );
   }
 
+  // Parts of the check grow faster than linearly in the command's length
+  // (3.2 s at this cap, measured); twice the longest command recorded across
+  // 26,980 real Bash calls (32 KB) keeps every check inside the budget.
+  if (Buffer.byteLength(cmd) > MAX_COMMAND_BYTES) {
+    refuse(
+      `autoloop guard — this command is ${Buffer.byteLength(cmd)} bytes, over the ${MAX_COMMAND_BYTES}-byte `
+      + 'limit the guard can check within its time budget. Write long content to a file first '
+      + '(the Write tool) and pass the file.',
+    );
+  }
+
+  // The run's own state and the guard's own code are off limits in every
+  // autoloop repository, run or not: a command that runs prime and then
+  // deletes the marker it just wrote leaves nothing for a later check to see.
+  const cwd = typeof payload?.cwd === 'string' ? payload.cwd : process.cwd();
+  const stateProblem = runStateProblem(guardSegments(cmd), {
+    cwd, protectedDirs: runStateDirs(projectRoot, cwd), codeDirs: withRealPaths(PLUGIN_CODE_DIRS),
+  });
+  if (stateProblem !== null) refuse(stateProblem);
+
   // Ordered before configuration loading: with no run open there is nothing to
   // guard, so a configuration problem must not block a human's command either.
-  if (!loopRunIsOpen() && !loopRunIsOpen(projectRoot) && latched === null) process.exit(0);
+  if (!loopRunIsOpen() && !loopRunIsOpen(projectRoot) && latched === null) allow();
   pruneLatches();
 
   const launchProblem = backgroundDispatchProblem(
@@ -4176,10 +4352,6 @@ function main() {
     payload?.tool_input?.run_in_background,
   );
   if (launchProblem !== null) refuse(launchProblem);
-
-  const cwd = typeof payload?.cwd === 'string' ? payload.cwd : process.cwd();
-  const stateProblem = runStateProblem(guardSegments(cmd), { cwd, protectedDirs: runStateDirs(projectRoot, cwd) });
-  if (stateProblem !== null) refuse(stateProblem);
 
   // While a plugin run is open its recorded bases are the authority, whatever
   // the checkout now says (a missing, unreadable or different config): the
@@ -4203,7 +4375,7 @@ function main() {
     const verdict = evaluate(cmd, branch, { baseBranch, cwd: payload?.cwd });
     if (verdict.block) refuse(verdict.reason);
   }
-  process.exit(0);
+  allow();
 }
 
 // realpath compare — the naive `file://` string check fails open on encoded paths and symlinks.

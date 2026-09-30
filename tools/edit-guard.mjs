@@ -12,8 +12,9 @@
 // policy (operator, 2026-09-29).
 //
 // It also refuses edits to the run's own state — the run markers and the
-// session latches (run-state-guard.mjs says why) — the Write-tool twin of the
-// command guard's rule.
+// session latches — and to the guard's own code, the plugin's tools and hooks
+// (run-state-guard.mjs says why): the Write-tool twin of the command guard's
+// rule.
 //
 // A separate file from command-guard because the payload differs (an Edit
 // carries no Bash command).
@@ -31,6 +32,8 @@ import {
 import { guardedRoot, hookRoot } from './hook-root.mjs';
 
 const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const PLUGIN_CODE_DIRS = Object.freeze(['tools', 'hooks']
+  .map((name) => join(dirname(dirname(fileURLToPath(import.meta.url))), name)));
 const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);
 
 // A path through a symlink must not fail open: the file (or, for a new file,
@@ -88,11 +91,11 @@ function selfTest() {
       && !blocked('/elsewhere/.claude/settings.json'));
   check('nothing is refused without a live run, or without a path',
     !blocked('/r/.claude/settings.json', false) && !blocked(undefined) && !blocked(''));
-  const stateDirs = ['/r/.git/autoloop/run', '/h/.claude/autoloop/run-latches'];
+  const stateDirs = ['/r/.git/autoloop/run', '/h/.claude/autoloop/run-latches', '/p/tools'];
   const stateBlocked = (path, live = true) => runStateEditProblem(path, '/r', stateDirs, live) !== null;
   check('the run state is refused during a run, the rest of the git dir and the repository are not',
     stateBlocked('/r/.git/autoloop/run/1.json') && stateBlocked('.git/autoloop/run/new.json')
-      && stateBlocked('/h/.claude/autoloop/run-latches/x.json')
+      && stateBlocked('/h/.claude/autoloop/run-latches/x.json') && stateBlocked('/p/tools/command-guard.mjs')
       && !stateBlocked('/r/.git/autoloop/steps/1.json') && !stateBlocked('/r/src/run.ts')
       && !stateBlocked('/r/.git/autoloop/run/1.json', false));
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'edit-guard-')));
@@ -139,7 +142,7 @@ function main() {
   const open = loopRunIsOpen() || loopRunIsOpen(repoRoot) || latched !== null;
   const filePath = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
   const problem = hookWiringEditProblem(filePath, repoRoot, open)
-    ?? runStateEditProblem(filePath, repoRoot, [runMarkerDirectory(repoRoot), latchDirectory()], open);
+    ?? runStateEditProblem(filePath, repoRoot, [runMarkerDirectory(repoRoot), latchDirectory(), ...PLUGIN_CODE_DIRS], open);
   if (problem !== null) {
     console.error(problem);
     process.exit(2);
