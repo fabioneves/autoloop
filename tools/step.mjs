@@ -17,7 +17,7 @@ import {
   statSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { evaluate } from './command-guard.mjs';
 import { loopRunIsLive, ownRunMarkers, sessionLatch } from './run-markers.mjs';
@@ -545,6 +545,10 @@ function selfTest() {
         badge: '🚧', note: '2 Major open', fallback: true, staged: false, what: null, ms: null, error: null })],
     ['card and parked calls parse', parsed(['--card', '--issue', '350', '--outcome', 'delivered', '--pr', '550']).mode === 'card'
       && parsed(['--parked']).mode === 'parked'
+      // The view written to a file for the orchestrator to print once: a
+      // printed view was shown twice, the tool's copy and the repeat.
+      && JSON.stringify(parsed(['--parked', '--out', '/t/parked.txt'])) === JSON.stringify({ mode: 'parked', out: '/t/parked.txt', error: null })
+      && parsed(['--parked', '--out']).error !== null
       && parsed(['--card', '--issue', '350', '--outcome', 'finished']).error !== null],
     ['a resumed call parses', parsed(['--issue', '78', '--resumed', 'plan returned', '--ms', '401000']).mode === 'resumed'],
     // LFE, 2026-09-29: a 0.55.3 setup ran all five phases and printed only
@@ -956,6 +960,11 @@ const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round <r>/<cap>] [--mo
 
 export function parseArgs(argv) {
   if (argv.length === 1 && argv[0] === '--parked') return { mode: 'parked', error: null };
+  if (argv[0] === '--parked' && argv[1] === '--out') {
+    return argv.length === 3 && argv[2] !== ''
+      ? { mode: 'parked', out: argv[2], error: null }
+      : { mode: 'parked', out: null, error: '--parked --out needs one file path' };
+  }
   if (argv.length === 1 && argv[0] === '--card-run') return { mode: 'card-run', error: null };
   if (argv[0] === '--setup') {
     const [, phase, flag, badge = '⏳'] = argv;
@@ -1035,7 +1044,15 @@ function main() {
     return;
   }
   if (parsed.mode === 'parked') {
-    process.stdout.write(`${parkedView({ root })}\n`);
+    // With --out the view goes to the file only: the orchestrator reads it
+    // and prints it once, instead of the tool's copy plus its repeat.
+    const view = `${parkedView({ root })}\n`;
+    if (parsed.out) {
+      mkdirSync(dirname(resolve(parsed.out)), { recursive: true });
+      writeFileSync(parsed.out, view);
+    } else {
+      process.stdout.write(view);
+    }
     return;
   }
   if (parsed.mode === 'card') {

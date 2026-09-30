@@ -272,7 +272,8 @@ first. A park showing one branch while eligible work waits is the defect.
 
 - **Parked wait (preferred)**: every dispatch backgrounded with its output file, completion signal
   (or a Monitor) armed, all commits pushed — **the park push is not step 10, and step 10 does not own
-  the push** — and the LAST output is `node <plugin-tools>/step.mjs --parked`, verbatim. Ending the
+  the push** — and the LAST output is the parked view: `node <plugin-tools>/step.mjs --parked --out
+  <scratchpad>/parked.txt`, then Read that file and print it verbatim (once). Ending the
   turn IS the wait. A dispatch's Bash `description` uses ribbon grammar
   (`#291 05 IMPLEMENT · OPUS 5.5`). A wait on anything but a dispatch (subagent, shell) is first
   recorded with `node <plugin-tools>/prime.mjs --park "<what>" --minutes <N>`, or the Stop hook
