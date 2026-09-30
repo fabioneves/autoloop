@@ -122,16 +122,28 @@ export function latchDirectory(home = homedir()) {
 export const PLUGIN_CODE_DIRS = Object.freeze(['tools', 'hooks']
   .map((name) => join(dirname(dirname(fileURLToPath(import.meta.url))), name)));
 
-export function protectedPaths({ projectRoot, cwd = projectRoot, runOpen, home = homedir() }) {
+// The step model table prime resolved for this run (models-config.mjs
+// pinModels): its dispatches read it here, beside the run's markers.
+export function pinnedModelsPath(cwd = process.cwd()) {
+  const markers = runMarkerDirectory(cwd);
+  return markers === null ? null : join(dirname(markers), 'models.json');
+}
+
+export function protectedPaths({
+  projectRoot, cwd = projectRoot, runOpen, home = homedir(),
+  configDir = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'),
+}) {
   const state = [
     runMarkerDirectory(projectRoot), runMarkerDirectory(cwd), latchDirectory(home),
+    pinnedModelsPath(projectRoot), pinnedModelsPath(cwd),
     join(home, '.claude', 'shell-snapshots'), join(home, '.claude', 'session-env'),
     ...(runOpen ? [
       ...['.claude/settings.json', '.claude/settings.local.json'].map((file) => join(projectRoot, file)),
-      ...['settings.json', 'settings.local.json', 'plugins/installed_plugins.json', 'plugins/known_marketplaces.json',
-        // The operator's step models (models-config.mjs): a run never changes its own.
-        'autoloop/config.json']
+      ...['settings.json', 'settings.local.json', 'plugins/installed_plugins.json', 'plugins/known_marketplaces.json']
         .map((file) => join(home, '.claude', file)),
+      // The operator's step models, where models-config reads them: a run
+      // never changes its own.
+      join(configDir, 'autoloop', 'config.json'),
     ] : []),
   ];
   const withReal = (list) => {

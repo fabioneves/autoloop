@@ -45,8 +45,8 @@ import { fileURLToPath } from 'node:url';
 import {
   CONFIG_VERSION, effectiveChecklistPath, PLUGIN_CHECKLIST, repositoryRoot, resolveProjectConfig,
 } from './config-contract.mjs';
-import { resolveModels } from './models-config.mjs';
-import { pluginRunMarkers } from './run-markers.mjs';
+import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
+import { pinnedModelsPath, pluginRunMarkers } from './run-markers.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -434,16 +434,26 @@ function claudePayload(role, stdout) {
 // proxy here: the session command decides which models are reachable, and a
 // dispatch inherits its environment. A table that would let a reviewer run on
 // its writer's model is refused before anything runs.
-function projectModelsOf(cwd) {
-  const resolved = resolveProjectConfig(repositoryRoot(cwd));
-  return resolved?.ok ? resolved.config.models : undefined;
+// A run's dispatches run the table prime pinned: a writer that edits its
+// branch's config cannot move its own reviewers, and what prime reported is
+// what runs (review of the model config). With no pin (no run), the checkout
+// resolves its own, and an invalid project config refuses.
+function unpinnedModels(cwd) {
+  const root = repositoryRoot(cwd);
+  const project = resolveProjectConfig(root);
+  if (!project?.ok && existsSync(join(root, '.autoloop', 'config.json'))) {
+    return { ok: false, errors: [`project config: ${project?.errors?.join('; ') ?? 'unreadable'}`] };
+  }
+  return resolveModels({ projectModels: project?.ok ? project.config.models : undefined });
 }
 
 export function resolveRoute(role, cwd) {
   if (ROLES[role] === undefined) {
     return { error: { code: 'ENGINE_ROLE_UNSUPPORTED', message: `${role}: not a dispatch role` } };
   }
-  const resolved = resolveModels({ projectModels: projectModelsOf(cwd) });
+  const pin = pinnedModelsPath(cwd);
+  const pinned = pin === null ? null : readPinnedModels(pin);
+  const resolved = pinned ?? unpinnedModels(cwd);
   if (!resolved.ok) return { error: { code: 'MODELS_INVALID', message: resolved.errors.join('; ') } };
   const entry = resolved.models[role];
   return {
@@ -451,7 +461,7 @@ export function resolveRoute(role, cwd) {
     model: entry.model,
     effort: entry.effort,
     fallback: entry.fallback === null ? null : Object.freeze({ model: entry.fallback }),
-    source: 'config',
+    source: pinned === null ? 'config' : 'pinned',
   };
 }
 
@@ -2214,6 +2224,34 @@ function selfTest() {
           && refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING'
           && effectiveFallback('x', { model: 'x', fallback: { model: 'y' } }).model === 'y'
           && effectiveFallback('x', { model: 'x', fallback: null }) === null;
+      })(),
+    );
+    // Review of the model config: a run's dispatches run the table prime
+    // pinned, so a writer editing its branch's config cannot move its own
+    // reviewers; with no pin, an invalid project config refuses.
+    check(
+      'a pinned table wins over the checkout\'s config; unpinned, an invalid project config refuses',
+      (() => {
+        const projectConfig = join(repoScratch, '.autoloop', 'config.json');
+        mkdirSync(dirname(projectConfig), { recursive: true });
+        writeFileSync(projectConfig, JSON.stringify({
+          version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' },
+          models: { 'code-review': { model: 'claude-haiku-4-5' } },
+        }));
+        const pin = pinnedModelsPath(repoScratch);
+        pinModels(pin, resolveModels({ projectModels: undefined }));
+        const pinnedRoute = resolveRoute('code-review', repoScratch);
+        rmSync(pin);
+        const unpinned = resolveRoute('code-review', repoScratch);
+        writeFileSync(projectConfig, JSON.stringify({
+          version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' },
+          models: { 'code-review': { effort: 'extreme' } },
+        }));
+        const invalid = resolveRoute('code-review', repoScratch);
+        rmSync(join(repoScratch, '.autoloop'), { recursive: true, force: true });
+        return pinnedRoute.model === 'gpt-6-astra[1m]' && pinnedRoute.source === 'pinned'
+          && unpinned.model === 'claude-haiku-4-5' && unpinned.source === 'config'
+          && invalid.error?.code === 'MODELS_INVALID';
       })(),
     );
     check(

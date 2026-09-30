@@ -14,7 +14,7 @@
 //        (no argument: the resolved global table as JSON; --lines: the
 //        session-start summary)
 
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -161,6 +161,37 @@ export function resolveModels({ projectModels, path = globalConfigPath(), create
     : { ok: true, models, source, errors: [] };
 }
 
+/** Pins the table a run resolved for its dispatches (prime writes it under
+ *  the protected git dir): what prime reported is what every dispatch runs,
+ *  and nothing a unit's branch or a mid-run edit changes moves it. */
+export function pinModels(path, resolved) {
+  if (!resolved?.ok) return false;
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, models: resolved.models, source: resolved.source }, null, 1)}\n`);
+  renameSync(temporary, path);
+  return true;
+}
+
+/** The pinned table, re-checked: null when there is none, else {ok, models}
+ *  or {ok:false, errors}. */
+export function readPinnedModels(path) {
+  let pinned;
+  try {
+    pinned = readJson(path);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    return { ok: false, errors: [`${path}: ${error.message}`] };
+  }
+  const problems = pinned?.version === 1 ? modelsShapeProblems(pinned.models, path) : [`${path}: version must be 1`];
+  if (problems.length > 0) return { ok: false, errors: problems };
+  const models = mergeModels(DEFAULT_MODELS, pinned.models);
+  const clashes = invariantProblems(models);
+  return clashes.length > 0
+    ? { ok: false, errors: clashes.map((clash) => `no artifact is judged by the model that wrote it: ${clash}`) }
+    : { ok: true, models };
+}
+
 /** Session-start lines: where the table came from, and each role's model,
  *  effort and fallback (project overrides are prime's to report). */
 export function modelLines(resolved) {
@@ -221,6 +252,18 @@ function selfTest() {
           && lines.includes('INFO    plan-review claude-fable-5-1[1m] !xhigh > claude-sonnet-5[1m]')
           && modelLines({ ok: false, errors: ['x: bad'] })[0] === 'NOTE  step models refused: x: bad';
       })());
+    // Review of the model config: the table a run resolved is pinned for its
+    // dispatches, so a writer editing its branch's config (or the global file)
+    // cannot move its own reviewers.
+    const pin = join(scratch, 'pin', 'models.json');
+    const pinned = pinModels(pin, resolveModels({ path, projectModels: { implement: { effort: 'high' } } }));
+    const readBack = readPinnedModels(pin);
+    writeFileSync(pin, JSON.stringify({ version: 1, models: mergeModels(DEFAULT_MODELS, { 'code-review': { model: 'claude-opus-5-5' } }) }));
+    const tampered = readPinnedModels(pin);
+    check('a pinned table reads back as pinned, a missing one as absent, a clashing one as refused',
+      pinned === true && readBack.ok === true && readBack.models.implement.effort === 'high'
+        && readPinnedModels(join(scratch, 'none.json')) === null
+        && tampered.ok === false && tampered.errors[0].includes('code-review could run on claude-opus-5-5'));
     writeFileSync(path, '{not json');
     check('an unreadable global file refuses, naming it',
       resolveModels({ path }).errors[0].startsWith(path));

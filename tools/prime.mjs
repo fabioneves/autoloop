@@ -39,7 +39,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
 import { latchDirectory, recordLatch } from './run-markers.mjs';
-import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, processAlive, runMarkerDirectory } from './run-markers.mjs';
+import { ancestorPids, loopRunIsLive, loopRunIsOpen, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
 } from './config-contract.mjs';
@@ -54,7 +54,7 @@ import {
 } from './snapshot-contract.mjs';
 import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
-import { resolveModels } from './models-config.mjs';
+import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
@@ -176,7 +176,7 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   const read = readPrimeConfig(root);
   if (read.error !== undefined) return read;
   const { config } = read;
-  const models = primeModels(config);
+  const models = primeModels(config, root);
   if (models.ok === false) return models;
 
   const base = baseSyncFacts(root, config.baseBranch);
@@ -520,10 +520,16 @@ function lifecycleDriverIdentity() {
 // Each step's model table (models-config.mjs), resolved before the run
 // opens: a table that lets a reviewer judge its writer's model starts nothing.
 // Resolving writes the operator's global file when it is missing.
-export function primeModels(config) {
+// The table is pinned for the run's dispatches (run-markers pinnedModelsPath),
+// so what prime reports is what they run.
+export function primeModels(config, root = null) {
   const resolved = resolveModels({ projectModels: config.models });
   if (!resolved.ok) {
     return failure('models', 'MODELS_INVALID', resolved.errors.join('; '), { errors: resolved.errors });
+  }
+  const pin = root === null ? null : pinnedModelsPath(root);
+  if (pin !== null && !pinModels(pin, resolved)) {
+    return failure('models', 'MODELS_UNPINNED', `the step model table could not be pinned at ${pin}`);
   }
   return { models: resolved.models, modelsSource: resolved.source };
 }
@@ -923,7 +929,7 @@ function selfTest() {
     writeFileSync(join(root, '.autoloop', 'config.json'),
       `${JSON.stringify({ ...fixtureConfig(), models: { 'code-review': { model: 'claude-opus-5-5[1m]' } } })}\n`);
     const clashing = primeDev({ cwd: root });
-    const resolvedModels = primeModels(fixtureConfig());
+    const resolvedModels = primeModels(fixtureConfig(), root);
     check(
       'prime resolves the model table before opening the run, and refuses a clashing one',
       clashing.ok === false && clashing.step === 'models' && clashing.error.code === 'MODELS_INVALID'
@@ -931,7 +937,9 @@ function selfTest() {
       && !existsSync(runMarkerDirectory(root))
       && resolvedModels.models.plan.model === 'gpt-6-astra[1m]'
       && resolvedModels.modelsSource.global === join(process.env.CLAUDE_CONFIG_DIR, 'autoloop', 'config.json')
-      && modelLines(resolvedModels).length === 1,
+      && modelLines(resolvedModels).length === 1
+      // The resolved table is pinned for the run's dispatches.
+      && readPinnedModels(pinnedModelsPath(root))?.ok === true,
     );
 
     rmSync(join(root, '.autoloop'), { recursive: true, force: true });

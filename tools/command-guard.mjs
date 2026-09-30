@@ -61,7 +61,7 @@ import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
-  procEntry, psEntry, commonDirOf, latchDirectory, processStart, protectedPaths, pruneLatches, recordLatch, sessionLatch,
+  procEntry, psEntry, commonDirOf, latchDirectory, pinnedModelsPath, processStart, protectedPaths, pruneLatches, recordLatch, sessionLatch,
   sessionOwnerPid, PLUGIN_CODE_DIRS,
 } from './run-markers.mjs';
 import { ORDINARY, readsOnly, runStateProblem, TAMPERING } from './run-state-guard.mjs';
@@ -4452,8 +4452,18 @@ function selfTest() {
       {
         const open = protectedPaths({ projectRoot: '/r', runOpen: true, home: '/h' }).state;
         const closed = protectedPaths({ projectRoot: '/r', runOpen: false, home: '/h' }).state;
-        if (!(open.includes('/h/.claude/autoloop/config.json') && !closed.includes('/h/.claude/autoloop/config.json'))) {
-          console.error('FAIL [the global model config is protected while a run is open, and only then]');
+        // Where the resolver reads it: CLAUDE_CONFIG_DIR when set (review).
+        const relocated = protectedPaths({ projectRoot: '/r', runOpen: true, home: '/h', configDir: '/c' }).state;
+        // The table a run pinned for its dispatches is run state, always.
+        const pinRepo = mkdtempSync(join(tmpdir(), 'guard-pin-'));
+        execFileSync('git', ['init', '-q', pinRepo]);
+        const pin = pinnedModelsPath(pinRepo);
+        const pinned = protectedPaths({ projectRoot: pinRepo, runOpen: false, home: '/h' }).state;
+        rmSync(pinRepo, { recursive: true, force: true });
+        if (!(open.includes('/h/.claude/autoloop/config.json') && !closed.includes('/h/.claude/autoloop/config.json')
+          && relocated.includes('/c/autoloop/config.json') && !relocated.includes('/h/.claude/autoloop/config.json')
+          && pin !== null && pin.endsWith('/autoloop/models.json') && pinned.includes(pin))) {
+          console.error('FAIL [the global model config is protected while a run is open, and only then; the pinned table always]');
           ok = false;
         }
       }
