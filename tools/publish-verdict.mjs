@@ -57,6 +57,7 @@ import {
   validateAttestation,
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
+import { parseRepair } from './unit.mjs';
 import {
   NO_CONFIG,
   resolveProjectConfig,
@@ -1434,6 +1435,7 @@ function fetchTerminalStateSnapshot(repository, issue, pullRequest, fetchJson) {
   ) {
     throw new Error('terminal pull request or issue evidence is invalid');
   }
+  const labels = fetchIssueLabelSnapshot(repository, issue, fetchJson);
   return {
     complete: true,
     issue,
@@ -1442,8 +1444,59 @@ function fetchTerminalStateSnapshot(repository, issue, pullRequest, fetchJson) {
     pullRequestNodeId: pr.node_id,
     headOid: pr.head.sha,
     draft: pr.draft,
-    labels: fetchIssueLabelSnapshot(repository, issue, fetchJson),
+    labels,
+    ...(labels.includes('loop-repair') ? { repair: fetchRepairStanding(repository, linkedIssue.body, fetchJson) } : {}),
   };
+}
+
+// A loop repair holds `loop-repair`, never `loop-ready`: its authority is its
+// parent's `loop-ready`, exactly as selection reads it (snapshot-contract
+// repairAuthorized). Finalize re-reads that standing instead of demanding a
+// label a repair can never carry (every repair unit stalled at finalize until
+// a human relabelled it; LFE run, 2026-09-30).
+function fetchRepairStanding(repository, body, fetchJson) {
+  const marker = parseRepair(body);
+  if (marker === null) return { marker: null };
+  const parent = fetchJson(repository, `repos/${repository.owner}/${repository.repo}/issues/${marker.parent}`);
+  const parentLabels = (Array.isArray(parent?.labels) ? parent.labels : []).map((label) => label?.name);
+  let lastReady = null;
+  for (let page = 1; page <= 20; page += 1) {
+    const events = fetchJson(
+      repository,
+      `repos/${repository.owner}/${repository.repo}/issues/${marker.parent}/events?per_page=100&page=${page}`,
+    );
+    if (!Array.isArray(events)) throw new Error('repair parent events are unreadable');
+    for (const event of events) {
+      if (['labeled', 'unlabeled'].includes(event?.event) && event.label?.name?.toLowerCase() === 'loop-ready') {
+        lastReady = { event: event.event, actor: event.actor?.login ?? null, at: event.created_at ?? null };
+      }
+    }
+    if (events.length < 100) break;
+    if (page === 20) throw new Error('repair parent events exceed the pagination bound');
+  }
+  return {
+    marker,
+    parentState: parent?.state === 'open' ? 'OPEN' : 'CLOSED',
+    parentStateReason: typeof parent?.state_reason === 'string' ? parent.state_reason.toUpperCase() : null,
+    parentBlocked: parentLabels.includes('loop-blocked'),
+    parentDelivered: parentLabels.includes('loop-delivered'),
+    lastReady,
+  };
+}
+
+// The parent still authorizes the repair: standing (open and not blocked, or
+// completed and delivered) and its newest loop-ready event is the one the
+// marker copied.
+export function repairStands(repair) {
+  const marker = repair?.marker;
+  if (!marker) return false;
+  const standing = !repair.parentBlocked && (
+    repair.parentState === 'OPEN' || (repair.parentStateReason === 'COMPLETED' && repair.parentDelivered)
+  );
+  return standing
+    && repair.lastReady?.event === 'labeled'
+    && repair.lastReady.actor === marker.parentLabeledBy
+    && Date.parse(repair.lastReady.at) === Date.parse(marker.parentLabeledAt);
 }
 
 export function fetchTerminalState(
@@ -1821,7 +1874,14 @@ export function terminalStateGaps(state, input) {
     gaps.push('issue labels are missing, malformed, or duplicated');
     return gaps;
   }
-  if (!state.labels.includes('loop-ready')) {
+  const repair = state.labels.includes('loop-repair') && !state.labels.includes('loop-ready');
+  if (repair && !repairStands(state.repair)) {
+    gaps.push(
+      `issue #${input.record.issue} is a loop repair whose parent no longer authorizes it (its `
+      + 'marker is missing, the parent is blocked or closed, or its loop-ready changed since the '
+      + 'repair was filed). A human re-queues the parent; do not resume the repair.',
+    );
+  } else if (!repair && !state.labels.includes('loop-ready')) {
     gaps.push(
       `issue #${input.record.issue} is missing loop-ready — a deferred or blocked unit keeps `
       + 'its authorization only while a human re-applies it, and the loop may never apply, '
@@ -3750,6 +3810,23 @@ function selfTest() {
         { ...base, labels: ['loop-ready', 'loop-blocked'] },
         terminalInput,
       ).some((gap) => gap.includes('blocking label present: loop-blocked'))
+      // A loop repair finalizes on its parent's standing, never on a
+      // loop-ready it cannot carry; a revoked parent refuses it.
+      && (() => {
+        const marker = { parent: 7, parentLabeledBy: 'human', parentLabeledAt: '2026-09-30T01:00:00Z', depth: 1 };
+        const standing = {
+          marker, parentState: 'OPEN', parentStateReason: null, parentBlocked: false, parentDelivered: false,
+          lastReady: { event: 'labeled', actor: 'human', at: '2026-09-30T01:00:00Z' },
+        };
+        const repairLabels = ['loop-repair', 'loop-delivered'];
+        return terminalStateGaps({ ...base, labels: repairLabels, repair: standing }, terminalInput).length === 0
+          && terminalStateGaps({ ...base, labels: repairLabels, repair: { ...standing, parentBlocked: true } }, terminalInput)
+            .some((gap) => gap.includes('no longer authorizes'))
+          && terminalStateGaps({ ...base, labels: repairLabels, repair: { ...standing, lastReady: { ...standing.lastReady, at: '2026-09-30T02:00:00Z' } } }, terminalInput)
+            .some((gap) => gap.includes('no longer authorizes'))
+          && terminalStateGaps({ ...base, labels: repairLabels, repair: { marker: null } }, terminalInput)
+            .some((gap) => gap.includes('no longer authorizes'));
+      })()
     ) {
       passed += 1;
     } else {
