@@ -54,6 +54,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   CONFIG_VERSION,
+  repositoryRoot,
   resolveProjectConfig,
 } from './config-contract.mjs';
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
@@ -61,7 +62,7 @@ import { activeAutoloopRoot, hookRoot } from './hook-root.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
   procEntry, psEntry, commonDirOf, latchDirectory, processStart, protectedPaths, pruneLatches, recordLatch, sessionLatch,
-  sessionOwnerPid,
+  sessionOwnerPid, PLUGIN_CODE_DIRS,
 } from './run-markers.mjs';
 import { ORDINARY, readsOnly, runStateProblem, TAMPERING } from './run-state-guard.mjs';
 import { boundedGit, gitStalled, setGitDeadline } from './git-budget.mjs';
@@ -197,6 +198,9 @@ export function lexShell(cmd) {
   const pending = [];
   let single = false;
   let double = false;
+  // Inside `(( … ))` or `$(( … ))`, `<<` is a shift, never a heredoc: read as
+  // one, it hid the lines after `(( x = 1<<EOF ))` (review of the LFE fixes).
+  let arithmetic = 0;
   const atWordStart = () => out.length === 0 || /[\s;|&()]/u.test(out[out.length - 1]);
   for (let index = 0; index < cmd.length;) {
     const char = cmd[index];
@@ -228,7 +232,19 @@ export function lexShell(cmd) {
       while (index < cmd.length && cmd[index] !== '\n') index += 1;
       continue;
     }
-    if (char === '<' && cmd[index + 1] === '<' && cmd[index + 2] !== '<' && cmd[index - 1] !== '<') {
+    if (char === '(' && cmd[index + 1] === '(') {
+      arithmetic += 1;
+      out += '((';
+      index += 2;
+      continue;
+    }
+    if (arithmetic > 0 && char === ')' && cmd[index + 1] === ')') {
+      arithmetic -= 1;
+      out += '))';
+      index += 2;
+      continue;
+    }
+    if (arithmetic === 0 && char === '<' && cmd[index + 1] === '<' && cmd[index + 2] !== '<' && cmd[index - 1] !== '<') {
       let at = index + 2;
       const strip = cmd[at] === '-';
       if (cmd[at] === '-' || cmd[at] === '~') at += 1;
@@ -428,20 +444,58 @@ function decodeAnsiCBody(body) {
   return output;
 }
 
-// The body alternatives are disjoint (`\\x` or a character that is neither a
-// quote nor a backslash): overlapping ones backtracked exponentially on a run
-// of backslashes, and a guard that hangs past the host's timeout lets the
-// command run (found while hardening the run-state rule).
-const ANSI_C_QUOTE = /\$'((?:\\[\s\S]|[^'\\])*)'/gu;
+// ANSI-C quotes (`$'…'`) decoded where the shell reads them: outside other
+// quotes only. A `$'` inside a single-quoted pattern (`rg '^Closes #388$'`)
+// is the pattern's last `$` and its closing quote, not the start of an ANSI-C
+// string; decoding it there desynced every reader after it (LFE replay).
+// One linear pass; `quoted` keeps each decoded string single-quoted for the
+// tokenizer.
+function decodeAnsiC(cmd, quoted) {
+  let out = '';
+  let quote = null;
+  for (let index = 0; index < cmd.length; index += 1) {
+    const char = cmd[index];
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (cmd[index + 1] ?? '');
+      index += 1;
+      continue;
+    }
+    if (quote === '"') {
+      out += char;
+      if (char === '"') quote = null;
+      continue;
+    }
+    if (char === '$' && cmd[index + 1] === "'") {
+      let end = index + 2;
+      while (end < cmd.length && cmd[end] !== "'") end += cmd[end] === '\\' ? 2 : 1;
+      const body = decodeAnsiCBody(cmd.slice(index + 2, Math.min(end, cmd.length)));
+      // Unquoted, a decoded backslash stays escaped: bare, a trailing one
+      // (`echo $'\\'`) escaped the real newline after it and joined the next
+      // line's command to this one (review of the LFE fixes).
+      out += quoted ? `'${body.replaceAll("'", "'\\''")}'` : body.replaceAll('\\', '\\\\');
+      index = end;
+      continue;
+    }
+    // `$"…"` is a locale string: drop the `$`, the quote that follows opens it.
+    if (char === '$' && cmd[index + 1] === '"') continue;
+    if (char === "'" || char === '"') quote = char;
+    out += char;
+  }
+  return out;
+}
 
 function decodeAnsiCQuotes(cmd) {
-  return cmd.replace(ANSI_C_QUOTE, (_match, body) => decodeAnsiCBody(body));
+  return decodeAnsiC(cmd, false);
 }
 
 // The same decoding, kept quoted, for the tokenizer: `$'\x2egit'` is `'.git'`.
 function quotedAnsiC(cmd) {
-  return cmd.replace(ANSI_C_QUOTE, (_match, body) => `'${decodeAnsiCBody(body).replaceAll("'", "'\\''")}'`)
-    .replace(/\$"/gu, '"');
+  return decodeAnsiC(cmd, true);
 }
 
 function executableLexicalText(cmd) {
@@ -455,7 +509,13 @@ function executableLexicalText(cmd) {
       } else if (decoded[index + 1] === '\n') {
         index += 1;
       } else if (index + 1 < decoded.length) {
-        output += decoded[index + 1];
+        // An escaped quote is dropped like every quote here, and an escaped
+        // backslash stays escaped: emitted bare, either one re-opened a quote
+        // (or escaped the next character) for the reader of this text, so
+        // `echo it\'s && git push origin main` read as one quoted word.
+        const escaped = decoded[index + 1];
+        if (escaped === '\\') output += '\\\\';
+        else if (escaped !== "'" && escaped !== '"') output += escaped;
         index += 1;
       }
       continue;
@@ -498,7 +558,9 @@ function hasActiveShellExpansion(cmd) {
       if (char === "'") quote = null;
       continue;
     }
-    if (char === "'") {
+    // Inside double quotes a `'` is literal: taking it for a quote desynced
+    // the scan on the `'"'"'` idiom, and a quoted backquote later read as live.
+    if (char === "'" && quote === null) {
       quote = "'";
       continue;
     }
@@ -721,6 +783,13 @@ function inlineInterpreterSource(cmd) {
     'wish',
     'zsh',
   ]);
+  // The interpreters a quote-aware reading shows invoked: a `|bash` inside a
+  // quoted regex (`rg '^```(sh|bash)'`) is text, and only an interpreter the
+  // shell really runs can be reading stdin (LFE run, 2026-09-30).
+  const invokedForReal = new Set(shellSegments(quotedAnsiC(stripHeredocs(cmd))).flatMap(({ command }) => {
+    const words = shellWords(command);
+    return words.filter((word, index) => invokedAt(words, index)).map((word) => word.slice(word.lastIndexOf('/') + 1));
+  }));
   return shellSegments(executableLexicalText(cmd)).some(({ command }) => {
     const words = shellWords(command);
     if (isLookupSegment(words)) return false;
@@ -761,6 +830,7 @@ function inlineInterpreterSource(cmd) {
       // blind, so `find . -exec node -e …` remains opaque wherever the name
       // sits.
       if (!invokedAt(words, index)) return false;
+      if (!invokedForReal.has(executable)) return false;
       if (argumentsAfterExecutable.length === 0) return true;
       // A probe that only prints a version or a usage banner executes nothing,
       // so it is not the no-script-argument stdin shape the return below cat-
@@ -1427,7 +1497,26 @@ export function commentBodyProblem(words, read = (path) => readFileSync(path, 'u
   }));
 }
 
+// A segment that only prints or runs one of the plugin's own tools carries
+// its words as text: a block question quoting the command a human should run
+// (`unit.mjs --block --question "… gh issue edit 5 --add-label loop-ready"`)
+// was refused in the LFE run (2026-09-30). Everything else stays
+// position-blind: a keyword, group or unlisted wrapper in front of gh must not
+// hide it (review of that fix). So the head is matched exactly: no path
+// (`./echo`), no assignment (`NODE_OPTIONS=…`), no node option (`--import`),
+// and the script is named by its absolute path.
+function textOnlySegment(words) {
+  const head = words[0] ?? '';
+  if (head === 'echo' || head === 'printf') return true;
+  if (head !== 'node' && head !== 'nodejs') return false;
+  const script = words[1];
+  if (script === undefined || !isAbsolute(script) || !existsSync(script)) return false;
+  const real = realpathSync(script);
+  return PLUGIN_CODE_DIRS.some((dir) => real.startsWith(`${realOrSelf(dir)}/`));
+}
+
 function hasGhScopedAction(words, scope, action) {
+  if (textOnlySegment(words)) return false;
   const gh = executableIndex(words, 'gh');
   if (gh === -1) return false;
   const scopeIndex = words.indexOf(scope, gh + 1);
@@ -2295,18 +2384,58 @@ export function evaluate(inputCmd, branch, options = {}) {
   // Only a regular file the guard can read now proves what will be posted: not
   // a device, a /proc or /sys entry, a FIFO (which would hang the read), or a
   // file an earlier segment of the same command may rewrite.
-  const readBody = (path) => {
-    const expanded = expandHome(path);
-    const real = realpathSync(isAbsolute(expanded) ? expanded : resolve(options.cwd ?? process.cwd(), expanded));
-    if (/^\/(?:dev|proc|sys)\//u.test(real) || !statSync(real).isFile()) throw new Error('not a regular file');
-    return readFileSync(real, 'utf8').slice(0, 4096);
-  };
-  const bodyProblems = segments.map(({ command }) => commentBodyProblem(shellWords(command), readBody));
+  // The body is read where the post runs: the command's own `cd` steps are
+  // followed, over quote-aware segments (a quoted jq filter's `|` is not a
+  // pipe). The LFE run lost a PR-body PATCH to both (2026-09-30).
+  // ANSI-C and locale quotes decoded first: `-f body=$'/answer yes'` posts an
+  // /answer (review of the LFE fixes).
+  // A `cd` is followed only where it certainly runs in this shell: first, or
+  // after `;` or a newline, and not piped or backgrounded (a subshell). After
+  // any other `cd` the directory is unknown and a relative body path cannot be
+  // read. The directory is kept logically, as the shell does, and the file is
+  // resolved by the kernel, which reads `..` physically (review of the LFE fixes).
+  const bodySegments = shellSegments(quotedAnsiC(cmd));
+  const plainCd = (words) => (words[0] === 'cd' || words[0] === 'pushd') && words.length === 2;
+  const cdPathSet = process.env.CDPATH !== undefined || /\bCDPATH\b/u.test(cmd);
+  let bodyDir = options.cwd ?? process.cwd();
+  const bodyProblems = bodySegments.map(({ command, raw }, index) => {
+    const words = shellWords(command);
+    if (plainCd(words)) {
+      const before = index === 0 ? ';' : bodySegments[index - 1].raw;
+      const inThisShell = (before === ';' || before === '\n') && raw !== '|' && raw !== '&';
+      const known = inThisShell && bodyDir !== null && !cdPathSet && !/^[-+]|[$`]/u.test(words[1]);
+      bodyDir = known ? resolve(bodyDir, expandHome(words[1])) : null;
+      return null;
+    }
+    const at = bodyDir;
+    return commentBodyProblem(words, (path) => {
+      const expanded = expandHome(path);
+      if (at === null && !isAbsolute(expanded)) throw new Error('directory unknown');
+      const real = realpathSync.native(isAbsolute(expanded) ? expanded : `${realpathSync.native(at)}/${expanded}`);
+      if (/^\/(?:dev|proc|sys)\//u.test(real) || !statSync(real).isFile()) throw new Error('not a regular file');
+      return readFileSync(real, 'utf8').slice(0, 4096);
+    });
+  });
   // A body file can be rewritten only by a segment that runs before or beside
-  // the post: an earlier segment, or a pipe or background `&` after it.
-  // Whatever follows a sequential operator runs after the post and cannot.
-  if (segments.length > 1 && segments.some(({ command, raw }, index) =>
-    readsCommentBodyFile(shellWords(command)) && (index > 0 || raw === '|' || raw === '&'))) {
+  // the post: an earlier one not on this list of harmless ones (a plain `cd`,
+  // a redirect-free reader named exactly, `gh … view/list`), or a pipe or
+  // background `&` after the post. Whatever follows a sequential operator runs
+  // after the post and cannot. A script, any git command (`status` runs a
+  // repo-configured fsmonitor), a path-qualified `./cat` or an `rg --pre` can.
+  const HARMLESS = new Set(['cat', 'echo', 'grep', 'head', 'jq', 'ls', 'printf', 'pwd', 'rg', 'tail', 'test', 'true', 'wc']);
+  const mayWrite = (command) => {
+    const words = shellWords(command);
+    if (plainCd(words)) return false;
+    if (/[<>]/u.test(command)) return true;
+    const head = words[0] ?? '';
+    if (head === 'rg' && words.some((word) => word.startsWith('--pre'))) return true;
+    if (HARMLESS.has(head)) return false;
+    if (head === 'gh') return !['view', 'list'].includes(words[2]);
+    return true;
+  };
+  if (bodySegments.length > 1 && bodySegments.some(({ command, raw }, index) =>
+    readsCommentBodyFile(shellWords(command))
+      && (bodySegments.slice(0, index).some((earlier) => mayWrite(earlier.command)) || raw === '|' || raw === '&'))) {
     bodyProblems.push('unverifiable');
   }
   if (bodyProblems.includes('unverifiable')) {
@@ -2773,6 +2902,54 @@ export function foreignPrimeProblem(command, cwd, projectRoot, prime = PLUGIN_PR
   return null;
 }
 
+// A branch switch in a checkout a reviewer is reading changes the files
+// under it: the LFE run (2026-09-30) switched to finalize one unit while
+// another's code review read the same checkout, and had to kill and redo the
+// review. The review roles read; a branch switch waits for them (other
+// HEAD moves — reset, rebase, pull — are not covered here).
+const READING_ROLES = new Set(['plan-review', 'diff-review', 'code-review', 'doubt-review']);
+
+export function switchesCheckout(words) {
+  const git = words.findIndex((word, index) => (word === 'git' || word.endsWith('/git')) && invokedAt(words, index));
+  if (git === -1) return false;
+  // Past git's own options (and -C / -c values) to the subcommand.
+  let index = git + 1;
+  while (index < words.length && words[index].startsWith('-')) index += ['-C', '-c', '--git-dir', '--work-tree'].includes(words[index]) ? 2 : 1;
+  const subcommand = words[index];
+  if (subcommand === 'switch') return true;
+  // `git checkout <ref>` (or `-b <new> [<start>]`) moves HEAD; `git checkout
+  // [<ref>] -- <paths>` edits files only.
+  const rest = words.slice(index + 1);
+  return subcommand === 'checkout' && !rest.includes('--')
+    && (rest.some((word) => /^-[bB]$/u.test(word)) || rest.filter((word) => !word.startsWith('-')).length === 1);
+}
+
+function readingDispatchIn(dir) {
+  let top;
+  try {
+    top = realpathSync(dir);
+  } catch {
+    return null;
+  }
+  let entries;
+  try {
+    entries = readdirSync('/proc');
+  } catch {
+    return null; // no process table: the rule cannot look, and does not guess
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/u.test(entry)) continue;
+    try {
+      const args = readFileSync(`/proc/${entry}/cmdline`, 'utf8').split('\0');
+      const role = args[args.indexOf('--role') + 1];
+      if (!args.some((arg) => /dispatch(?:-stream\.sh|\.mjs)$/u.test(arg)) || !READING_ROLES.has(role)) continue;
+      const cwd = realpathSync(`/proc/${entry}/cwd`);
+      if (cwd === top || cwd.startsWith(`${top}/`)) return { pid: Number(entry), role };
+    } catch { /* gone, or not ours to read */ }
+  }
+  return null;
+}
+
 // Whether a segment runs the plugin's own prime to open a run.
 // The directory a segment runs the plugin's prime in to open a run (not
 // --close-run, --park or --self-test), or null when it does not.
@@ -2901,6 +3078,62 @@ function selfTest() {
   let corpusCount = 0;
   const cases = [
     // [cmd, branch, expectBlock, baseBranch]
+    // 2026-09-30, the LFE run: quoted text read as commands. A quoted jq
+    // filter's `|`, a quoted regex's backquotes and `(sh|bash)`, a block
+    // question quoting the command a human should run, the `'"'"'` idiom and
+    // PHP's ` . ` concatenation are all text.
+    [`node ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} --block --issue 5 --question "May #5 be finalized? A human runs: gh issue edit 5 --add-label loop-ready"`, 'feat/gh-1-x', false],
+    // Only the plugin's own tools carry quoted text: any other script does not.
+    ['node /tmp/x.mjs --question "gh issue edit 5 --add-label loop-ready"', 'feat/gh-1-x', true],
+    ["rg -n '^```(sh|bash|shell)' b.md", 'feat/gh-1-x', false],
+    ["sed -i 's/a/it'\"'\"'s `x`/' f", 'feat/gh-1-x', false],
+    ["ddev wp eval '$a = \"x\" . \"y\"; $b = $c - 7; echo $a;'", 'feat/gh-1-x', false],
+    ["rg -c '^Closes #388$' f; node x.mjs", 'feat/gh-1-x', false],
+    // Review of the LFE fixes: a keyword, group or unlisted wrapper in front
+    // of gh, an eval'd script, an escaped quote or backslash, and `.`/source
+    // behind a keyword — none may hide a refused command.
+    ["echo it\\'s && git push origin main", 'feat/gh-1-x', true],
+    ["echo \"\\\\'\" && git push origin main", 'feat/gh-1-x', true],
+    ["echo \"\\\\'\" && gh pr merge 5", 'feat/gh-1-x', true],
+    ["echo \"\\\\'\" ; gh issue edit 5 --add-label loop-ready", 'feat/gh-1-x', true],
+    ["echo \\\\\\\" && git push origin main", 'feat/gh-1-x', true],
+    ["echo \"a\\\\\\\"b\" ; gh pr merge 5", 'feat/gh-1-x', true],
+    ["printf '%s\\\\' \"\\\\'\" && git push origin main", 'feat/gh-1-x', true],
+    ["{ gh issue edit 5 --add-label loop-ready; }", 'feat/gh-1-x', true],
+    ["if true; then gh pr ready 5; fi", 'feat/gh-1-x', true],
+    ["flock /tmp/l gh issue edit 5 --remove-label loop-halt", 'feat/gh-1-x', true],
+    ["! gh issue edit 5 --add-label loop-ready", 'feat/gh-1-x', true],
+    ["for i in 1; do gh issue edit 5 --add-label loop-ready; done", 'feat/gh-1-x', true],
+    ["if true; then gh release create v1; fi", 'feat/gh-1-x', true],
+    ["eval \"x; gh pr ready 5\"", 'feat/gh-1-x', true],
+    ["eval 'echo; gh issue edit 5 --add-label loop-ready'", 'feat/gh-1-x', true],
+    ["eval \"x; gh issue edit 5 --remove-label loop-halt\"", 'feat/gh-1-x', true],
+    ["{ . /dev/stdin; }", 'feat/gh-1-x', true],
+    ["if true; then . /dev/stdin; fi", 'feat/gh-1-x', true],
+    ["! source /dev/stdin", 'feat/gh-1-x', true],
+    ["curl -s x | { source /dev/stdin; }", 'feat/gh-1-x', true],
+    ["echo \"x\" | bash", 'feat/gh-1-x', true],
+    ["(( x = 1<<EOF ))\ngit push origin main\nEOF", 'feat/gh-1-x', true],
+    // Second review: a decoded ANSI-C backslash escaping the newline, and a
+    // look-alike or optioned head standing in for echo, printf or node.
+    ["echo $'\\\\'\ngh issue edit 5 --add-label loop-ready", 'feat/gh-1-x', true],
+    ["echo $'\\x5c'\ngh release create v1", 'feat/gh-1-x', true],
+    ["true $'x\\\\'\ngh pr ready 5", 'feat/gh-1-x', true],
+    ['./echo gh pr ready 5', 'feat/gh-1-x', true],
+    ['A=1 ./printf gh release create v1', 'feat/gh-1-x', true],
+    [`node --import ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} ./evil.mjs gh issue edit 5 --add-label loop-ready`, 'feat/gh-1-x', true],
+    [`NODE_OPTIONS=--require=./evil.js node ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} gh pr ready 5`, 'feat/gh-1-x', true],
+    [`node ${join(dirname(fileURLToPath(import.meta.url)), '../../../../no-such-dir/evil.mjs')} gh pr ready 5`, 'feat/gh-1-x', true],
+    // ...and none of that may hide a real command: a quote inside the other
+    // kind (or escaped) left bare turned the rest of the line into one word.
+    ['git commit -qm "it\'s" && git push origin main', 'feat/gh-1-x', true],
+    ['git commit -qm \'a "b\' && git push origin main', 'feat/gh-1-x', true],
+    ["echo it\\'s && git push origin main", 'feat/gh-1-x', true],
+    ["rg -c '^x$' f; gh pr merge 5 --squash", 'feat/gh-1-x', true],
+    ['gh issue edit 5 --add-label loop-ready', 'feat/gh-1-x', true],
+    ["eval 'gh issue edit 5 --add-label loop-ready'", 'feat/gh-1-x', true],
+    ['python3 -c "import json; print(1)"', 'feat/gh-1-x', true],
+    ['. /dev/stdin', 'feat/gh-1-x', true],
     // 2026-07-28: a live `scaffold.mjs --reconcile` pipeline was refused as
     // inline interpreter source. A word that merely NAMES an interpreter or an
     // assembler in argument position is data, not an invocation.
@@ -3456,6 +3689,53 @@ function selfTest() {
     if (!answerFileCases) {
       console.error('FAIL [a body file starting with /answer is refused]');
       ok = false;
+    }
+    // The body is read where the post runs (a `cd` first is followed), and a
+    // quoted jq filter's `|` is not a pipe; an earlier writer still refuses
+    // (LFE run 2026-09-30: a PR-body PATCH and a run record were refused).
+    {
+      // bodyDir/body.md is evidence; an /answer sits where a `cd` that did
+      // not run, or a physical `..`, would lead a lexical reading astray.
+      const bodyDir = mkdtempSync(join(tmpdir(), 'guard-body-'));
+      writeFileSync(join(bodyDir, 'body.md'), 'evidence\n');
+      mkdirSync(join(bodyDir, 'benign'));
+      writeFileSync(join(bodyDir, 'benign', 'body.md'), '/answer yes\n');
+      mkdirSync(join(bodyDir, 'deep', 'dir'), { recursive: true });
+      writeFileSync(join(bodyDir, 'deep', 'body.md'), '/answer yes\n');
+      symlinkSync(join(bodyDir, 'deep', 'dir'), join(bodyDir, 'link'));
+      const verdict = (command) => evaluate(command, 'feat/gh-1-x', { baseBranch: 'main', cwd: '/' }).block;
+      const post = `gh issue comment 5 --body-file ${bodyDir}/body.md`;
+      const bodyCases = [
+        verdict(`cd ${bodyDir}; gh issue comment 5 --body-file body.md; gh issue view 5 --json state --jq '{state}'`) === false,
+        verdict(`cd ${bodyDir} && gh issue comment 5 --body-file body.md`) === false,
+        verdict(`gh api --method PATCH repos/o/r/pulls/5 -F body=@${bodyDir}/body.md --jq '.body | length'`) === false,
+        verdict(`echo /answer > ${bodyDir}/body.md; ${post}`) === true,
+        verdict(`${post} | tee x`) === true,
+        verdict(`./gen.sh; ${post}`) === true,
+        verdict(`git pull -q; ${post}`) === true,
+        verdict(`gh issue view 5; ${post}`) === false,
+        verdict("gh api repos/o/r/issues/5/comments -f body=$'/answer yes'") === true,
+        verdict("gh api repos/o/r/issues/5/comments -f body=$'\\x2fanswer yes'") === true,
+        verdict('gh api repos/o/r/issues/5/comments -f body=$"/answer yes"') === true,
+        // Second review: a `cd` in a pipe, after `||`, or to `-` may not move
+        // the post; the kernel reads `..` after a symlink physically; and a
+        // path-qualified head, an assignment, `rg --pre` or any git command
+        // (fsmonitor) may rewrite the body first.
+        verdict(`cd ${bodyDir}/benign; cd .. | true; gh issue comment 5 --body-file body.md`) === true,
+        verdict(`cd ${bodyDir}/benign; true || cd ..; gh issue comment 5 --body-file body.md`) === true,
+        verdict(`cd ${bodyDir}/benign; cd -; gh issue comment 5 --body-file body.md`) === true,
+        verdict(`cd ${bodyDir}/link; gh issue comment 5 --body-file ../body.md`) === true,
+        verdict(`gh issue comment 5 --body-file ${bodyDir}/link/../body.md`) === true,
+        verdict(`./cat x; ${post}`) === true,
+        verdict(`X=/true cp a b; ${post}`) === true,
+        verdict(`rg --pre ./gen.sh x .; ${post}`) === true,
+        verdict(`git status; ${post}`) === true,
+      ];
+      rmSync(bodyDir, { recursive: true, force: true });
+      if (bodyCases.includes(false)) {
+        console.error(`FAIL [a comment body is read where the post runs, and only a writer makes it unverifiable]: ${JSON.stringify(bodyCases)}`);
+        ok = false;
+      }
     }
   }
   {
@@ -4150,6 +4430,15 @@ function selfTest() {
         console.error(`FAIL [a run in a repository under a non-git project directory is guarded, not locked]: ${workLs.status} ${workLs.stderr.slice(0, 160)} ${workMerge.status}`);
         ok = false;
       }
+      // A branch switch waits for a reviewer reading the checkout; file
+      // checkouts and other git commands do not.
+      if (!(switchesCheckout(shellWords('git switch feat/x')) && switchesCheckout(shellWords('git checkout -q main'))
+        && !switchesCheckout(shellWords('git checkout -- src/a.ts')) && !switchesCheckout(shellWords('git checkout HEAD -- a'))
+        && !switchesCheckout(shellWords('git status')) && !switchesCheckout(shellWords('echo git switch'))
+        && switchesCheckout(shellWords('git -C /r switch x')) && switchesCheckout(shellWords('git checkout -b new origin/x')))) {
+        console.error('FAIL [a branch switch is told apart from a file checkout]');
+        ok = false;
+      }
       // The session's owner: the first Claude ancestor; Claude as pid 1 (a
       // container); without Claude, the outermost ancestor; an unreadable
       // entry stops the walk where it is.
@@ -4660,6 +4949,16 @@ function main() {
   for (const baseBranch of bases) {
     const verdict = evaluate(cmd, branch, { baseBranch, cwd: payload?.cwd });
     if (verdict.block) refuse(verdict.reason);
+  }
+  if (segments.some(({ words }) => switchesCheckout(words))) {
+    const reader = readingDispatchIn(repositoryRoot(cwd));
+    if (reader !== null) {
+      refuse(
+        `autoloop guard — a ${reader.role} dispatch (pid ${reader.pid}) is reading this checkout, `
+        + 'and switching branches would change the files under it. Do this in another worktree '
+        + '(`git worktree add`), or wait for the review to return.',
+      );
+    }
   }
   allow();
 }

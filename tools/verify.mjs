@@ -280,7 +280,7 @@ function pluginChecks(root) {
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
   'codebase-design': 6489,
-  dev: 58625,
+  dev: 58779,
   'lean-code': 3909,
   pitcrew: 19803,
   'queue-trace': 6933,
@@ -352,6 +352,24 @@ function checkNoVendoredLayout(root) {
     };
 }
 
+// A loop runs for hours in one session, and every call re-reads the whole
+// context: the LFE run (2026-09-30) grew from 70k to 682k tokens over 577
+// calls. Neither the model nor a hook can compact on demand; the operator's
+// settings can make it happen earlier. Advice, never a failure.
+export function checkCompaction(env = process.env) {
+  const configured = ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'].some((name) => (env[name] ?? '') !== '');
+  return configured
+    ? { ok: true, detail: '' }
+    : {
+      ok: true,
+      note: 'long loop sessions compact late by default; set CLAUDE_CODE_AUTO_COMPACT_WINDOW="400000" '
+        + 'in the environment the loop session starts with (measured on a 10-hour run: ~37% lower '
+        + 'cost for two compactions; a lower CLAUDE_AUTOCOMPACT_PCT_OVERRIDE stacks on top of it, '
+        + 'so set only the window). Dispatched sessions inherit it. The SessionStart preflight '
+        + 're-injects STATE after a compaction',
+    };
+}
+
 // A gate command naming a repository script (a relative path with an
 // extension) that is not there fails every gate; say so before a run does.
 function checkGateScripts(root) {
@@ -381,6 +399,7 @@ function projectChecks(root) {
     { name: 'retired CI policy absent', execute: () => checkRetiredCiPolicy(root) },
     { name: 'gate scripts present', execute: () => checkGateScripts(root) },
     { name: 'no vendored layout', execute: () => checkNoVendoredLayout(root) },
+    { name: 'session compaction', execute: () => checkCompaction() },
   ];
 }
 
@@ -535,6 +554,10 @@ function selfTest() {
     ['a repository\'s own file in tools/agentic passes the doctor', repositoryFilePasses],
     ['a gate command whose repository script is missing fails the doctor', missingGateScriptFails],
     ['a missing explicitly configured checklist fails the doctor', missingChecklistFails],
+    ['unset compaction settings are a note, never a failure; either setting satisfies it',
+      checkCompaction({}).ok === true && /CLAUDE_CODE_AUTO_COMPACT_WINDOW/u.test(checkCompaction({}).note ?? '')
+        && checkCompaction({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '60' }).note === undefined
+        && checkCompaction({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000' }).note === undefined],
   ];
   const failures = cases.filter(([, passed]) => !passed);
   for (const [name] of failures) console.error(`FAIL ${name}`);
@@ -584,7 +607,9 @@ function main() {
     // A check's duration prints on its own line, so a slow self-test names
     // itself instead of the log stalling on the previous check's PASS line.
     const timing = elapsedMs >= 1000 ? ` (${(elapsedMs / 1000).toFixed(1)}s)` : '';
-    if (result.ok) {
+    if (result.ok && result.note) {
+      console.log(`NOTE ${check.name}${timing}: ${result.note}`);
+    } else if (result.ok) {
       console.log(`PASS ${check.name}${timing}`);
       // A passing child's stdout is otherwise discarded, which swallowed the
       // self-tests' diagnostic attribution — surface every such line.

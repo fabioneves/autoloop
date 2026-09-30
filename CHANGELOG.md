@@ -3,6 +3,69 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.62.0] - 2026-09-30
+
+Fixes from the first long run on the global plugin: a 10-hour run of 9 units on one project,
+analysed afterwards. Repairs finalize, conflicts and flakes have a defined path, human answers
+surface at the next stop, and quoted text stops being read as commands.
+
+### Changed
+
+- **Terminal finalize refuses a PR GitHub reports as conflicting** and names the revision path.
+  In `skills/dev`, a DIRTY head before review merges the base; after review it is a revision
+  (`autoloop:pitcrew`, `--begin-revision-json` before any merge).
+- **Gate flakes:** a red gate outside the diff re-gates once, unchanged. Red again is a blocking
+  repair.
+- **During a run, a branch switch waits for a reviewer reading the checkout.** `git switch` and
+  `git checkout <ref>` are refused while a plan-, diff-, code- or doubt-review dispatch has its cwd
+  in the checkout. File checkouts are not affected.
+- **`dispatch.mjs` refuses a prompt file written before the run opened**, naming it a leftover.
+- **The doctor prints a NOTE** (a passing result) when no compaction window is set. It recommends
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW=400000` on its own, and says dispatched sessions inherit it.
+  - Measured on the run above (648 calls): 90% of cost was cache reads.
+  - A 400k window: about 37% lower cost, for two compactions.
+
+### Fixed
+
+- **A loop repair finalizes on its parent's standing.** Selection admits a repair without
+  `loop-ready`, but the finalizer demanded it, so every repair stalled until a human relabelled
+  it. Auto-merge still requires `loop-ready`, so a repair's PR stays with a human.
+- **A human's `/answer` on a blocked unit surfaces at the next stop.** While a run is live, the Stop
+  hook reads the blocked issues' comments in its existing query.
+- **`overlap-report`** starts the run at its recorded open time. A parked marker's mtime zeroed
+  every overlap line.
+- **Guard false refusals on quoted text:**
+  - a block question quoting a `gh` command;
+  - an `rg` pattern containing `(sh|bash)`;
+  - the `'"'"'` quoting idiom;
+  - a `cd` before a `--body-file` post;
+  - a quoted `jq` filter's `|`.
+
+  Each is fixed by a narrow rule:
+  - `gh` rules skip a segment that is exactly `echo`, `printf` or `node <absolute plugin tool>`;
+  - the interpreter-from-stdin rule is confirmed on quote-aware segments;
+  - the body rule decodes `$'…'` and follows a `cd` only where it certainly runs in this shell;
+  - the body rule accepts only exactly-named readers before the post (never git, whose `status`
+    runs a repository's fsmonitor).
+- **Pre-existing guard bypasses:**
+  - an escaped quote hid what followed it (`echo it\'s && git push origin main`);
+  - an arithmetic shift read as a heredoc (`(( x = 1<<EOF ))`) hid the lines after it;
+  - a decoded ANSI-C backslash (`true $'x\\'`) joined the next line to the current command;
+  - a body path through a symlink's `..` was read lexically, where the kernel reads it
+    physically.
+- **Other fixes from the run:**
+  - `writeback-check` names both causes for a merged-but-open issue;
+  - `step.mjs` works from a unit's scratch directory, and still cards a unit blocked at its
+    premise;
+  - the parked ribbon shows a staged step with no model as "staged, not dispatched";
+  - `escalate-paths` reports the executor's built-in merge-protected files at claim.
+
+Measured against 0.61.0 on 26,079 recorded commands:
+- 36 verdicts changed to allowed: quoted text, readers before a body post, and a feature-branch
+  push.
+- 5 changed to refused: real `python3 -c`, `sh -c` and process-substitution calls that 0.61.0
+  missed.
+
 ## [0.61.0] - 2026-09-30
 
 Guard hardening after the 0.60.0 security audit (spec `docs/specs/SPEC-guard-hardening.md`): the

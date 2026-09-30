@@ -13,6 +13,7 @@ import {
   classifyLaneProof,
   globToRe,
   matchHumanAuthorization,
+  matchMergeProtected,
 } from './lane-contract.mjs';
 
 // The structural families; a repository adds its own through the config's
@@ -418,6 +419,16 @@ function selfTest() {
     } catch {
       proven = null;
     }
+    const mergeProof = run('--base', 'HEAD', '--artifact-version', '1', '--artifact-fingerprint', 'a'.repeat(64),
+      '--estimated-lines', '1', '--planned-path', 'tsconfig.json', '--content-read-all', '--json');
+    diffChecks.push(['built-in merge-protected paths are reported at claim',
+      (() => {
+        try {
+          return JSON.parse(mergeProof.stdout).mergeProtectedHits.some(({ file, family }) => file === 'tsconfig.json' && family === 'tsconfig');
+        } catch {
+          return false;
+        }
+      })()]);
     diffChecks.push(['a configured protected path escalates the lane proof and the reported hits',
       proof.status === 1 && proven?.laneProof?.lane === 'full'
         && proven.laneProof.reasonCodes.includes('HUMAN_AUTHORIZATION_PATH')
@@ -556,10 +567,17 @@ function incompleteInputGuidance(mode, reasonCodes, args = []) {
 
 function outputResult(files, laneProof, args, sourceComplete, escalatePaths, error = null) {
   const hits = matchEscalate(files, escalatePaths);
+  // The executor's built-in merge-protected families (tsconfig, lockfiles,
+  // .github …): known at claim, so a unit that touches one is not surprised
+  // at merge (LFE #390 blamed the config, 2026-09-30). Information only.
+  const mergeProtectedHits = matchMergeProtected(files);
   if (args.includes('--json')) {
-    console.log(JSON.stringify({ laneProof, escalationHits: hits, sourceComplete, error }, null, 2));
+    console.log(JSON.stringify({ laneProof, escalationHits: hits, mergeProtectedHits, sourceComplete, error }, null, 2));
   } else {
     for (const { file, glob } of hits) console.log(`ESCALATE  ${file}  (matched ${glob})`);
+    for (const { file, family } of mergeProtectedHits) {
+      console.log(`MERGE-PROTECTED  ${file}  (${family}) — auto-merge leaves this PR for a human`);
+    }
     console.log(`LANE_PROOF ${JSON.stringify(laneProof)}`);
     if (error) console.error(`escalate-paths: ${error}`);
     else if (hits.length) console.log('→ apply `human:authorize` and record the matched path');
