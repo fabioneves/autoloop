@@ -154,7 +154,7 @@ when the repository keeps one, else the plugin's.
 | `merge.policy` | Behavior |
 |---|---|
 | `manual` | Default. The loop marks the PR ready; a human merges. |
-| `ratified` | Solo only. Merges on a trusted human risk label, or when every changed path is on the reversible allowlist. |
+| `ratified` | Solo only. Merges on a trusted human risk label, or when every changed path is on the reversible allowlist; a loop repair counts as approved through its parent's `loop-ready`. |
 | `auto` | Solo only. Merges a fully proven loop PR outside protected paths; a loop repair merges on its parent's `loop-ready`. |
 
 Both non-manual policies require `merge.unverifiedInvocationAcknowledged: true` and

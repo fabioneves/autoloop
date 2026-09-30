@@ -765,13 +765,13 @@ function finalizedDeliveryMarker(comments, loopLogin, headOid) {
     : null;
 }
 
-// A loop repair's evidence: its marker and author, and its parent's live
-// standing (docs/specs/SPEC-repair-automerge.md). Null for any other issue,
-// including loop-repair with loop-ready, which takes the ordinary rule.
+// loop-repair with loop-ready is a human-owned issue: the ordinary rule.
 function isLoopRepair(labels) {
   return Array.isArray(labels) && labels.includes('loop-repair') && !labels.includes('loop-ready');
 }
 
+// A loop repair's evidence: its marker and author, and its parent's live
+// standing (docs/specs/SPEC-repair-automerge.md). Null for any other issue.
 function deriveRepairEvidence(issue, parent) {
   if (!isLoopRepair(issue?.labels)) return null;
   const marker = parseRepair(issue?.body);
@@ -1176,16 +1176,20 @@ function fetchRepairParent(issue) {
   if (!isLoopRepair(issue.labels)) return null;
   const marker = parseRepair(issue.body);
   if (marker === null) return null;
-  const record = fetchIssueRecord(marker.parent);
-  const timeline = fetchTimeline(marker.parent);
-  const readyEvent = latestLabelEvent(timeline.items, 'loop-ready');
-  return {
-    issue: record.issue,
-    timeline,
-    permission: readyEvent?.actor?.login
-      ? fetchPermission(readyEvent.actor.login)
-      : { complete: false, login: null, roleName: null },
-  };
+  try {
+    const record = fetchIssueRecord(marker.parent);
+    const timeline = fetchTimeline(marker.parent);
+    const readyEvent = latestLabelEvent(timeline.items, 'loop-ready');
+    return {
+      issue: record.issue,
+      timeline,
+      permission: readyEvent?.actor?.login
+        ? fetchPermission(readyEvent.actor.login)
+        : { complete: false, login: null, roleName: null },
+    };
+  } catch (error) {
+    throw new Error(`repair #${issue.number}'s parent #${marker.parent}: ${error.message}`);
+  }
 }
 
 function fetchLinkedIssueEvidence(number, policyLive) {

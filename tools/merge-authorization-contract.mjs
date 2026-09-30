@@ -123,6 +123,9 @@ function validateRepair(config, issue, reasons) {
   if (repair.author !== config.loopLogin) reasons.push('repair was not filed by the loop');
   if (issue.lastEditedAt !== null) reasons.push('repair body was edited since the loop filed it; label it loop-ready to merge it');
   const parentLabels = Array.isArray(parent.labels) ? parent.labels : [];
+  // One level deep: a parent that is itself a repair never authorizes one.
+  if (parentLabels.includes('loop-repair')) reasons.push(`repair parent #${parent.number} is itself a repair`);
+  if (!parentLabels.includes('loop-ready')) reasons.push(`repair parent #${parent.number} is not currently loop-ready`);
   const parentStands = !parentLabels.some((label) => HARD_LABELS.has(label)) && (
     parent.state === 'OPEN'
     || (parent.state === 'CLOSED' && parent.stateReason === 'COMPLETED' && parentLabels.includes('loop-delivered'))
@@ -838,6 +841,15 @@ function selfTest() {
     ['a repair whose marker names another parent blocks',
       repairFixture({ parent: { number: 5 } }), false, 'repair'],
     ['incomplete repair evidence blocks', repairFixture({ repair: { complete: false } }), false, 'repair'],
+    ['incomplete parent evidence blocks', repairFixture({ parent: { complete: false } }), false, 'repair'],
+    ['a parent labeller role not proven for that labeller blocks',
+      repairFixture({ parentReady: { complete: false } }), false, 'repair'],
+    ['a parent labelled at the same time by another trusted actor blocks',
+      repairFixture({ parentReady: { actor: 'someone-else' } }), false, 'repair'],
+    ['a parent that no longer carries loop-ready blocks',
+      repairFixture({ parent: { labels: [] } }), false, 'not currently loop-ready'],
+    ['a parent that is itself a repair blocks',
+      repairFixture({ parent: { labels: ['loop-repair', 'loop-ready'] } }), false, 'itself a repair'],
     ['loop-repair with loop-ready takes the ordinary rule',
       repairFixture({ issue: { labels: ['loop-repair', 'loop-ready', 'loop-delivered'] } }), false, 'loop-ready'],
     ['neither loop-ready nor loop-repair blocks',
