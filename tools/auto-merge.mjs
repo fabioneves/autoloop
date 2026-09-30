@@ -796,6 +796,7 @@ function deriveRepairEvidence(issue, parent) {
       state: upper(parent?.issue?.state),
       stateReason: parent?.issue?.stateReason ?? null,
       labels: Array.isArray(parent?.issue?.labels) ? parent.issue.labels : [],
+      lastEditedAt: parent?.issue?.lastEditedAt,
     },
     parentReady: {
       complete:
@@ -2930,6 +2931,7 @@ function liveEvidenceCases() {
       state: 'OPEN',
       stateReason: null,
       labels: ['loop-ready'],
+      lastEditedAt: '2026-07-23T00:01:00Z',
     },
     timeline: {
       complete: true,
@@ -3086,6 +3088,7 @@ function liveEvidenceCases() {
         && repairEvidence.marker.parentLabeledBy === 'maintainer'
         && repairEvidence.parent.number === 6
         && repairEvidence.parent.state === 'OPEN'
+        && repairEvidence.parent.lastEditedAt === '2026-07-23T00:01:00Z'
         && repairEvidence.parentReady.complete === true
         && repairEvidence.parentReady.event === 'labeled'
         && repairEvidence.parentReady.actor === 'maintainer'

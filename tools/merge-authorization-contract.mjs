@@ -131,6 +131,14 @@ function validateRepair(config, issue, reasons) {
     || (parent.state === 'CLOSED' && parent.stateReason === 'COMPLETED' && parentLabels.includes('loop-delivered'))
   );
   if (!parentStands) reasons.push(`repair parent #${parent.number} is blocked, or closed without delivery`);
+  // A parent edited after its approval no longer authorizes anything: the
+  // ordinary rule refuses the parent itself, and its repairs follow.
+  if (parent.lastEditedAt !== null && !(
+    validTimestamp(parent.lastEditedAt)
+    && Date.parse(parent.lastEditedAt) <= Date.parse(marker.parentLabeledAt)
+  )) {
+    reasons.push(`repair parent #${parent.number} was edited after its loop-ready`);
+  }
   if (
     parentReady.event !== 'labeled'
     || parentReady.actor !== marker.parentLabeledBy
@@ -571,7 +579,7 @@ function repairFixture({ repair = {}, parent = {}, parentReady = {}, issue = {} 
     complete: true,
     author: 'solo-dev',
     marker: { parent: 6, parentLabeledBy: 'solo-dev', parentLabeledAt: '2026-07-23T00:02:00Z' },
-    parent: { complete: true, number: 6, state: 'OPEN', stateReason: null, labels: ['loop-ready'], ...parent },
+    parent: { complete: true, number: 6, state: 'OPEN', stateReason: null, labels: ['loop-ready'], lastEditedAt: null, ...parent },
     parentReady: {
       complete: true,
       event: 'labeled',
@@ -841,6 +849,12 @@ function selfTest() {
     ['a repair whose marker names another parent blocks',
       repairFixture({ parent: { number: 5 } }), false, 'repair'],
     ['incomplete repair evidence blocks', repairFixture({ repair: { complete: false } }), false, 'repair'],
+    ['a parent edited before its loop-ready still authorizes',
+      repairFixture({ parent: { lastEditedAt: '2026-07-23T00:01:00Z' } }), true],
+    ['a parent edited after its loop-ready revokes its repairs',
+      repairFixture({ parent: { lastEditedAt: '2026-07-23T00:03:00Z' } }), false, 'edited after'],
+    ['a parent whose edit time is unknown blocks',
+      repairFixture({ parent: { lastEditedAt: undefined } }), false, 'edited after'],
     ['incomplete parent evidence blocks', repairFixture({ parent: { complete: false } }), false, 'repair'],
     ['a parent labeller role not proven for that labeller blocks',
       repairFixture({ parentReady: { complete: false } }), false, 'repair'],

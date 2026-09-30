@@ -27,10 +27,17 @@ The linked issue's authorization is ONE of:
      `loop-delivered`;
    - the parent's latest `loop-ready` label event is `labeled`, by the actor and at the time the
      marker copied (`parentLabeledBy`, `parentLabeledAt`), and that actor holds a trusted role
-     now.
+     now; the parent still carries `loop-ready` and is not itself a repair;
+   - the parent was not edited after that event (`lastEditedAt` null or not later). Review
+     finding, operator decision 2026-09-30: an edited parent is no longer approved itself, so
+     its repairs are revoked in selection, finalize and merge alike.
 
 The evidence for path 2 is read live by the executor (issue record, parent record, parent
 timeline, actor permission), never from the working tree or the scan.
+
+A parent closed as COMPLETED after delivery keeps authorizing its open repairs (a carve-out's
+remainder outlives its parent). To revoke them, close the parent as not planned (operator
+decision 2026-09-30: documented, not changed).
 
 ## Boundaries
 
