@@ -31,7 +31,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { snapshotExecutionCheckout } from './checkout-contract.mjs';
-import { currentProjectConfig, NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
+import { currentProjectConfig, NO_CONFIG, resolveProjectConfig, reviewedConfig } from './config-contract.mjs';
 import { validReviewVerdict } from './dispatch.mjs';
 
 const GATING_SEVERITIES = new Set(['Critical', 'Major']);
@@ -546,7 +546,8 @@ export function projectConfigForReview(path) {
   else throw new Error('--state must name <base>/.autoloop/config.json');
   const resolved = resolveProjectConfig(root);
   if (!resolved?.ok) throw new Error(`project config: ${resolved?.errors?.join('; ') ?? NO_CONFIG}`);
-  return resolved.config;
+  // As prime hands it over: the step model table is not reviewed policy.
+  return reviewedConfig(resolved.config);
 }
 
 // Review convergence is a fixed plugin bound since 0.28.0 (operator,
@@ -1865,7 +1866,15 @@ function selfTest() {
       const migrated = projectConfigForReview(jsonPath);
       writeFileSync(jsonPath, JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'x' } }));
       mkdirSync(join(root, 'docs', 'agentic'), { recursive: true });
-      return migrated.version === '0.28.0' && migrated.caps === undefined
+      // SPEC-model-config: routing is not reviewed policy. A project with a
+      // model table fingerprints exactly as prime hands it over, without it.
+      const withModels = { version: '0.28.0', baseBranch: 'trunk', gate: { command: 'x' }, models: { implement: { effort: 'high' } } };
+      writeFileSync(jsonPath, JSON.stringify(withModels));
+      const reviewed = projectConfigForReview(jsonPath);
+      const modelsLeftOut = reviewed.models === undefined
+        && hashValue(reviewed) === hashValue(reviewedConfig(resolveProjectConfig(root).config));
+      writeFileSync(jsonPath, JSON.stringify({ version: '0.28.0', baseBranch: 'trunk', gate: { command: 'x' } }));
+      return modelsLeftOut && migrated.version === '0.28.0' && migrated.caps === undefined
         && projectConfigForReview(jsonPath).baseBranch === 'trunk'
         && projectConfigForReview(jsonPath).merge.policy === 'manual'
         // Beside the real STATE, so a root derived from it WOULD find config.
