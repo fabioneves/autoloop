@@ -992,27 +992,6 @@ function mergeOperation(markerValue, state) {
   };
 }
 
-function sameMergeOperation(left, right) {
-  return (
-    validMergeOperation(left)
-    && right
-    && typeof right === 'object'
-    && !Array.isArray(right)
-    && Object.keys(right).sort().join('\0')
-      === ['complete', 'headOid', 'kind', 'premergeRecord', 'state'].join('\0')
-    && right.complete === true
-    && validMergeOperation({
-      kind: right.kind,
-      state: right.state,
-      headOid: right.headOid,
-      premergeRecord: right.premergeRecord,
-    })
-    && left.kind === right.kind
-    && left.headOid === right.headOid
-    && left.premergeRecord === right.premergeRecord
-  );
-}
-
 function expectedPremergeRecord(input, ciBinding, requireCiBinding) {
   const record = input?.premergeRecordDraft;
   const markerValue = input?.marker;
@@ -1489,86 +1468,26 @@ function reconcileUnit(input, context = {}) {
   if (intentValue.mergePolicy === 'manual') {
     return transition('wait', 'await-human-merge', 'MANUAL_MERGE_PENDING');
   }
-  if (input.marker.mergeSubmitted === true) {
-    const { mergeSubmitted: ignoredLegacyFlag, ...legacyMarker } = input.marker;
-    return transition('block', 'park-merge-unknown', 'LEGACY_MERGE_OUTCOME_UNKNOWN', {
-      marker: {
-        ...legacyMarker,
-        phase: 'merge-unknown',
-        mergeOperation: mergeOperation(input.marker, 'unknown'),
-      },
-      terminal: 'human',
+  // The merge is the executor's (auto-merge.mjs, run from the base checkout),
+  // never the driver's, and no tool reports an attempt back here. So an open
+  // PR only waits; merge bookkeeping on it, which older runs recorded, is
+  // stale and clears, the legacy `mergeSubmitted` flag included. A live run
+  // invented an attempt this way and blocked two delivered units as "unknown
+  // merge" that the executor had refused.
+  if (operation || input.marker.mergeSubmitted === true) {
+    const {
+      mergeOperation: staleOperation,
+      mergeSubmitted: staleSubmission,
+      ...premergeMarker
+    } = input.marker;
+    return transition('act', 'clear-merge-bookkeeping', 'MERGE_BOOKKEEPING_STALE', {
+      marker: { ...premergeMarker, phase: 'premerge-record' },
     });
   }
-  if (!operation) {
-    return transition('act', 'record-merge-intent', 'MERGE_INTENT_REQUIRED', {
-      markerPatch: {
-        phase: 'merge-intent',
-        mergeOperation: mergeOperation(input.marker, 'intent'),
-      },
-    });
-  }
-  if (operation.state === 'intent') {
-    return transition('act', 'submit-ratified-merge', 'MERGE_READY', {
-      markerPatch: {
-        phase: 'merge-attempt',
-        mergeOperation: mergeOperation(input.marker, 'attempt'),
-      },
-      persistMarkerBeforeEffect: true,
-    });
-  }
-  if (operation.state === 'attempt') {
-    if (
-      facts.mergeAttempt?.complete === true
-      && !sameMergeOperation(operation, facts.mergeAttempt)
-    ) {
-      return artifactMismatch('merge-attempt');
-    }
-    const outcome = facts.mergeAttempt?.complete === true
-      ? facts.mergeAttempt.state
-      : 'unknown';
-    if (outcome === 'result') {
-      return transition('act', 'record-merge-result', 'MERGE_RESULT_OBSERVED', {
-        markerPatch: {
-          phase: 'merge-result',
-          mergeOperation: mergeOperation(input.marker, 'result'),
-        },
-      });
-    }
-    const refused = outcome === 'refusal';
-    return transition(
-      'block',
-      refused ? 'park-merge-refusal' : 'park-merge-unknown',
-      refused ? 'STRICT_DIRECT_MERGE_REFUSED' : 'MERGE_OUTCOME_UNKNOWN',
-      {
-        markerPatch: {
-          phase: refused ? 'merge-refusal' : 'merge-unknown',
-          mergeOperation: mergeOperation(input.marker, refused ? 'refusal' : 'unknown'),
-        },
-        terminal: 'human',
-      },
-    );
-  }
-  if (operation.state === 'refusal') {
-    return transition('block', 'park-merge-refusal', 'STRICT_DIRECT_MERGE_REFUSED', {
-      terminal: 'human',
-    });
-  }
-  if (operation.state === 'unknown') {
-    return transition('block', 'park-merge-unknown', 'MERGE_OUTCOME_UNKNOWN', {
-      terminal: 'human',
-    });
-  }
-  if (operation.state === 'result') {
-    return transition('block', 'park-merge-unknown', 'MERGE_RESULT_NOT_CONFIRMED', {
-      markerPatch: {
-        phase: 'merge-unknown',
-        mergeOperation: mergeOperation(input.marker, 'unknown'),
-      },
-      terminal: 'human',
-    });
-  }
-  return artifactMismatch('merge-operation');
+  return transition('wait', 'await-merge', 'MERGE_PENDING', {
+    nextStep: 'the merge is auto-merge.mjs <PR>, run once from the base checkout; a unit it '
+      + 'already refused carries a human block and waits for a human merge',
+  });
 }
 
 let SHA = 'a'.repeat(40);
@@ -1729,7 +1648,6 @@ function withTestPremergeDraft(input) {
   if (!record) return input;
   const premergeRecord = input.observed?.premergeRecord;
   const finalRecord = input.observed?.finalRecord;
-  const mergeAttempt = input.observed?.mergeAttempt;
   return {
     ...input,
     premergeRecordDraft: record,
@@ -1751,14 +1669,6 @@ function withTestPremergeDraft(input) {
             premergeRecordHash: premergeRecordHash(record),
             commentId: 'IC_premerge',
             ...finalRecord,
-            premergeRecord: record.recordId,
-          },
-        }
-        : {}),
-      ...(mergeAttempt?.premergeRecord === 'record-1'
-        ? {
-          mergeAttempt: {
-            ...mergeAttempt,
             premergeRecord: record.recordId,
           },
         }
@@ -1892,7 +1802,8 @@ function applyRecoveryTransition(world, result) {
       headOid: result.record.headOid,
       record: result.record,
     });
-  } else if (result.action === 'submit-ratified-merge') {
+  } else if (result.action === 'await-merge') {
+    // The executor (auto-merge.mjs) merges outside the driver.
     setObserved(world, 'merge', 'merge', {
       complete: true,
       merged: true,
@@ -1957,7 +1868,7 @@ function runCrashRecovery(seed, terminalWait = null) {
         world,
       };
     }
-    if (first.result.state === 'wait') {
+    if (first.result.state === 'wait' && first.result.action !== 'await-merge') {
       return { ok: false, reason: `unexpected wait ${first.result.action}`, world };
     }
   }
@@ -2079,18 +1990,11 @@ function crashWorld(phase) {
 }
 
 function crashRecoveryChecks() {
-  const humanTerminal = new Map([
-    ['merge-attempt', 'park-merge-unknown'],
-    ['merge-refusal', 'park-merge-refusal'],
-    ['merge-unknown', 'park-merge-unknown'],
-    ['merge-submitted', 'park-merge-unknown'],
-  ]);
   const checks = [];
   const covered = new Set();
   for (const phase of PHASES) {
     try {
       const recovery = runCrashRecovery(crashWorld(phase));
-      const expectedAction = humanTerminal.get(phase) ?? null;
       const counts = Object.entries(recovery.world.effects)
         .filter(([name]) => name !== 'marker')
         .map(([, count]) => count);
@@ -2098,8 +2002,8 @@ function crashRecoveryChecks() {
       checks.push([
         `crash restart from ${phase} is idempotent`,
         recovery.ok
-          && recovery.result.state === (expectedAction ? 'block' : 'complete')
-          && recovery.result.action === expectedAction
+          && recovery.result.state === 'complete'
+          && recovery.result.action === null
           && counts.every((count) => count === 1)
           && attempts.every((count) => count === 1),
       ]);
@@ -2189,9 +2093,7 @@ function crashRecoveryChecks() {
             'write-premerge-record',
             'bind-premerge-record',
             'restore-delivered',
-            'record-merge-intent',
-            'submit-ratified-merge',
-            'record-merge-result',
+            'await-merge',
             'append-merge-outcome',
           ].join(','),
     ]);
@@ -2960,7 +2862,7 @@ function selfTest() {
       expected: ['wait', 'await-human-merge'],
     },
     {
-      name: 'non-manual policy records strict-direct intent before submission',
+      name: 'non-manual delivered PR awaits the merge executor instead of inventing an attempt',
       input: {
         intent: { ...intent(), mergePolicy: 'ratified' },
         marker: marker({ mergePolicy: 'ratified', claimCommit: SHA, pr: 12, headOid: SHA, premergeRecord: 'record-1' }),
@@ -2969,10 +2871,10 @@ function selfTest() {
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       },
-      expected: ['act', 'record-merge-intent'],
+      expected: ['wait', 'await-merge'],
     },
     {
-      name: 'recorded intent can safely begin one strict-direct attempt',
+      name: 'stale intent bookkeeping on an open PR clears back to awaiting the merge',
       input: {
         intent: { ...intent(), mergePolicy: 'auto' },
         marker: marker({
@@ -2994,10 +2896,10 @@ function selfTest() {
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       },
-      expected: ['act', 'submit-ratified-merge'],
+      expected: ['act', 'clear-merge-bookkeeping'],
     },
     {
-      name: 'crash after attempt starts parks an unknown outcome for a human',
+      name: 'stale attempt bookkeeping on an open PR clears back to awaiting the merge',
       input: {
         intent: { ...intent(), mergePolicy: 'auto' },
         marker: marker({
@@ -3019,10 +2921,10 @@ function selfTest() {
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       },
-      expected: ['block', 'park-merge-unknown'],
+      expected: ['act', 'clear-merge-bookkeeping'],
     },
     {
-      name: 'definitive strict-direct refusal parks human-terminal',
+      name: 'stale refusal bookkeeping on an open PR clears back to awaiting the merge',
       input: {
         intent: { ...intent(), mergePolicy: 'auto' },
         marker: marker({
@@ -3031,30 +2933,48 @@ function selfTest() {
           pr: 12,
           headOid: SHA,
           premergeRecord: 'record-1',
-          phase: 'merge-attempt',
+          phase: 'merge-refusal',
           mergeOperation: {
-            kind: 'strict-direct',
-            state: 'attempt',
-            headOid: SHA,
-            premergeRecord: 'record-1',
-          },
-        }),
-        observed: observed({
-          delivery: { complete: true, exists: true, headOid: SHA, request: deliveryRequest() },
-          premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
-          mergeAttempt: {
-            complete: true,
             kind: 'strict-direct',
             state: 'refusal',
             headOid: SHA,
             premergeRecord: 'record-1',
           },
         }),
+        observed: observed({
+          delivery: { complete: true, exists: true, headOid: SHA, request: deliveryRequest() },
+          premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
+        }),
       },
-      expected: ['block', 'park-merge-refusal'],
+      expected: ['act', 'clear-merge-bookkeeping'],
     },
     {
-      name: 'legacy submitted boolean is recovered as unknown instead of waiting forever',
+      name: 'stale unknown bookkeeping on an open PR clears back to awaiting the merge',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({
+          mergePolicy: 'auto',
+          claimCommit: SHA,
+          pr: 12,
+          headOid: SHA,
+          premergeRecord: 'record-1',
+          phase: 'merge-unknown',
+          mergeOperation: {
+            kind: 'strict-direct',
+            state: 'unknown',
+            headOid: SHA,
+            premergeRecord: 'record-1',
+          },
+        }),
+        observed: observed({
+          delivery: { complete: true, exists: true, headOid: SHA, request: deliveryRequest() },
+          premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
+        }),
+      },
+      expected: ['act', 'clear-merge-bookkeeping'],
+    },
+    {
+      name: 'legacy submitted boolean on an open PR clears back to awaiting the merge',
       input: {
         intent: { ...intent(), mergePolicy: 'auto' },
         marker: marker({
@@ -3071,7 +2991,7 @@ function selfTest() {
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       },
-      expected: ['block', 'park-merge-unknown'],
+      expected: ['act', 'clear-merge-bookkeeping'],
     },
     {
       name: 'live merge after an attempt persists a typed result before terminal audit',
@@ -3126,7 +3046,7 @@ function selfTest() {
       expected: ['act', 'append-merge-outcome'],
     },
     {
-      name: 'unconfirmed typed result becomes unknown and parks human-terminal',
+      name: 'stale result bookkeeping on an open PR clears back to awaiting the merge',
       input: {
         intent: { ...intent(), mergePolicy: 'auto' },
         marker: marker({
@@ -3148,7 +3068,7 @@ function selfTest() {
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       },
-      expected: ['block', 'park-merge-unknown'],
+      expected: ['act', 'clear-merge-bookkeeping'],
     },
     {
       name: 'merged without outcome backfills final record',
@@ -3789,7 +3709,7 @@ function selfTest() {
       });
       return classified.complete === false && classified.state === 'unknown';
     })()],
-    ['legacy submitted boolean is replaced by typed unknown state', (() => {
+    ['legacy submitted boolean is dropped with the stale bookkeeping', (() => {
       const legacy = marker({
         mergePolicy: 'auto',
         claimCommit: SHA,
@@ -3807,8 +3727,44 @@ function selfTest() {
           premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
         }),
       }), testReconcileContext());
-      return recovered.marker?.mergeOperation?.state === 'unknown'
+      return recovered.marker?.phase === 'premerge-record'
+        && !Object.hasOwn(recovered.marker, 'mergeOperation')
         && !Object.hasOwn(recovered.marker, 'mergeSubmitted');
+    })()],
+    // A live run blocked two delivered units as "unknown merge operation":
+    // reconcile invented an intent and an attempt that no tool ever reports
+    // on, while auto-merge.mjs had refused them for a human merge.
+    ['stale merge bookkeeping clears to the premerge marker, which awaits the merge', (() => {
+      const stale = marker({
+        mergePolicy: 'auto',
+        claimCommit: SHA,
+        pr: 12,
+        headOid: SHA,
+        premergeRecord: 'record-1',
+        phase: 'merge-attempt',
+        mergeOperation: {
+          kind: 'strict-direct',
+          state: 'attempt',
+          headOid: SHA,
+          premergeRecord: 'record-1',
+        },
+      });
+      const reconcile = (markerValue) => reconcileLifecycle(withTestPremergeDraft({
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: markerValue,
+        observed: observed({
+          delivery: { complete: true, exists: true, headOid: SHA, request: deliveryRequest() },
+          premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
+        }),
+      }), testReconcileContext());
+      const cleared = reconcile(stale);
+      const pending = reconcile(cleared.marker);
+      return cleared.marker?.phase === 'premerge-record'
+        && !Object.hasOwn(cleared.marker, 'mergeOperation')
+        && validateMarker(cleared.marker).length === 0
+        && pending.state === 'wait'
+        && pending.code === 'MERGE_PENDING'
+        && /auto-merge\.mjs/.test(pending.nextStep ?? '');
     })()],
     ['premerge write action carries the exact typed record, body, and hash', (() => {
       const ready = marker({

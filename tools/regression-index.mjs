@@ -1704,6 +1704,21 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'briefs/simplify.md', anchor: 'One out-of-memory kill ends this session and the loop\'s with it.' }),
     ]),
   }),
+  Object.freeze({
+    id: 'reconcile-invented-a-merge-attempt-and-blocked-it-as-unknown',
+    date: '2026-10-01',
+    symptom: 'LFE #434 and #428: auto-merge.mjs refused both delivered PRs for a human merge '
+      + '(protected paths), and the next run\'s reconcile replaced that question with a '
+      + '"resolve the unknown merge operation" block.',
+    cause: 'Under a non-manual policy, reconcile recorded a merge intent, then an attempt, on '
+      + 'an open PR, but the driver never merges and no tool reports an attempt back, so '
+      + 'the attempt always read as unknown. An open PR now waits (MERGE_PENDING) and stale '
+      + 'merge bookkeeping on one clears.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'lifecycle-contract.mjs', anchor: "return transition('wait', 'await-merge', 'MERGE_PENDING', {" }),
+      Object.freeze({ file: 'lifecycle-contract.mjs', anchor: "['stale merge bookkeeping clears to the premerge marker, which awaits the merge', (() => {" }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>
