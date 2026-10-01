@@ -53,7 +53,8 @@
 //   node <plugin-tools>/unit.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
@@ -222,6 +223,32 @@ export function markObsolete({ issue, pr = null, commit = null, note = '', base,
   return { ok: true, issue, disposition: 'obsolete', evidence };
 }
 
+// The parked view (step.mjs) shows a waiting unit as waiting: the wait is
+// recorded on the unit's open step, which its next step or dispatch clears
+// (LFE run 2026-09-30: #427 waited on #587 and read "07 diff-review r3
+// returned · 58m"). A unit with no open record is left alone.
+export function noteWaitOnStep({ commonDir, issue, what, nowMs = Date.now() }) {
+  const path = join(commonDir, 'autoloop', 'steps', `${issue}.json`);
+  let record;
+  try {
+    record = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return false;
+  }
+  const last = record?.steps?.at?.(-1);
+  if (!last || record.closed) return false;
+  last.waiting = { on: what, atMs: nowMs };
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(record)}\n`);
+  renameSync(temporary, path);
+  return true;
+}
+
+function commonDirOf(run) {
+  const result = run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  return result?.ok ? String(result.stdout).trim() : null;
+}
+
 export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes = null, note = '', base, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
   if ([onIssue !== null, onBaseRed, minutes !== null].filter(Boolean).length !== 1) {
@@ -257,6 +284,13 @@ export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes 
   if (!comment.ok) return refusal('GH_FAILED', `comment on #${issue} failed: ${comment.stderr}`);
   const label = addLabel(run, issue, 'loop-waiting');
   if (!label.ok) return refusal('GH_FAILED', `label on #${issue} failed: ${label.stderr}`);
+  try {
+    const commonDir = commonDirOf(run);
+    const what = condition.on === 'issue' ? `#${condition.number}` : condition.on === 'time' ? `${minutes} min` : `a green ${base}`;
+    if (commonDir !== null) noteWaitOnStep({ commonDir, issue, what, nowMs: now });
+  } catch {
+    // The parked view is a courtesy; the wait stands.
+  }
   return { ok: true, issue, disposition: 'waiting', condition };
 }
 
@@ -739,6 +773,26 @@ function selfTest() {
     && waitCleared({ on: 'base', oid }, { baseOid: null }) === null);
 
   const selfWait = fakeRun([]);
+  // LFE run 2026-09-30: #427 waited on #587 and the parked view still read
+  // "07 diff-review r3 returned · 58m". A wait is recorded on the step.
+  check('a wait is recorded on the unit\'s open step, and only there',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-wait-'));
+      try {
+        const steps = join(scratch, 'autoloop', 'steps');
+        mkdirSync(steps, { recursive: true });
+        writeFileSync(join(steps, '427.json'), JSON.stringify({ issue: 427, steps: [{ step: '07-diff-review', startedAtMs: 1 }] }));
+        writeFileSync(join(steps, '9.json'), JSON.stringify({ issue: 9, steps: [{ step: '05-implement', startedAtMs: 1 }], closed: { outcome: 'blocked', atMs: 2 } }));
+        const noted = noteWaitOnStep({ commonDir: scratch, issue: 427, what: '#587', nowMs: 5000 });
+        const closed = noteWaitOnStep({ commonDir: scratch, issue: 9, what: '#1', nowMs: 5000 });
+        const missing = noteWaitOnStep({ commonDir: scratch, issue: 10, what: '#1', nowMs: 5000 });
+        const last = JSON.parse(readFileSync(join(steps, '427.json'), 'utf8')).steps.at(-1);
+        return noted === true && closed === false && missing === false
+          && JSON.stringify(last.waiting) === JSON.stringify({ on: '#587', atMs: 5000 });
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
   check('waiting on itself is refused before any call',
     markWaiting({ issue: 5, onIssue: 5, base: 'main', run: selfWait.run }).code === 'SELF_WAIT' && selfWait.calls.length === 0);
   const closedDep = fakeRun([['gh issue view 4', 'CLOSED']]);
@@ -760,7 +814,8 @@ function selfTest() {
   const timed = fakeRun([['gh issue comment 5', ''], ['gh issue edit 5', '']]);
   const timedWait = markWaiting({ issue: 5, minutes: 60, base: 'main', run: timed.run, now: Date.parse('2026-01-01T12:00:00Z') });
   check('a timed wait records its end and needs no other read',
-    timedWait.ok && timedWait.condition.until === until && timed.calls.length === 2
+    // Two GitHub calls, no reads; the one local git call finds the step record.
+    timedWait.ok && timedWait.condition.until === until && timed.calls.filter((call) => call.startsWith('gh ')).length === 2
     && markWaiting({ issue: 5, minutes: 0, base: 'main', run: timed.run }).code === 'INVALID_ARGS'
     && markWaiting({ issue: 5, minutes: 721, base: 'main', run: timed.run }).code === 'INVALID_ARGS'
     && markWaiting({ issue: 5, minutes: 60, onBaseRed: true, base: 'main', run: timed.run }).code === 'INVALID_ARGS');

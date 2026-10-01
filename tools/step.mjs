@@ -199,6 +199,7 @@ export function noteDispatch({ root, run = realRun(root), issue, model, role = n
   if (!last || stored.closed) return { ok: false };
   last.model = model;
   delete last.returnedAtMs;
+  delete last.waiting;
   if (role !== null) last.role = role;
   if (REVIEW_ROLES.has(role)) last.reviewRound = (last.reviewRound ?? 0) + 1;
   writeAtomically(path, stored);
@@ -365,7 +366,10 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
   const human = waiting.map((issue) => ` · #${issue} ⚠️ awaits /answer`).join('');
   return [
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
-    ...units.map(({ issue, step, model, startedAtMs, staged, returnedAtMs, round, attempt, role, reviewRound }) => {
+    ...units.map(({ issue, step, model, startedAtMs, staged, returnedAtMs, round, attempt, role, reviewRound, waiting }) => {
+      // A unit waiting on another issue, a green base or a timer is not in
+      // its step at all (unit.mjs --wait records it).
+      if (waiting?.on) return `├ #${issue} · waits on ${waiting.on} · ${minutes(nowMs - waiting.atMs)}`;
       const [name] = STEPS[step] ?? [step];
       // Which round: the announced one, else the review rounds dispatched under
       // the step, else how many times the step was entered (a plan's revisions
@@ -1044,6 +1048,26 @@ function transitionChecks(at) {
           return fixing === '├ #392 · 07 diff-review r1 · fix on 🟠 OPUS 5.5 · 6m'
             && reviewing === '├ #392 · 07 diff-review r2 on 🟢 ASTRA 6 · 7m';
         } catch (error) {
+          return false;
+        }
+      })()]);
+    // A waiting unit reads as waiting, aged from the wait; a dispatch clears it.
+    results.push(['a waiting unit reads "waits on", and a dispatch clears it',
+      (() => {
+        const line = renderParked({
+          nowMs: at(10, 58), eligible: 1,
+          units: [{ issue: 427, step: '07-diff-review', model: 'gpt-6-astra', reviewRound: 3, returnedAtMs: at(9, 0), waiting: { on: '#587', atMs: at(10, 0) }, startedAtMs: at(9, 0) }],
+        }).split('\n')[1];
+        try {
+          labels = ['loop-ready'];
+          transition({ root, run, nowMs: at(14, 0), issue: 393, to: '05-implement', markers: () => [] });
+          const path = join(root, '.git', 'autoloop', 'steps', '393.json');
+          const record = readJson(path, null);
+          record.steps.at(-1).waiting = { on: '#1', atMs: at(14, 1) };
+          writeFileSync(path, JSON.stringify(record));
+          noteDispatch({ root, run, issue: 393, model: 'claude-opus-5-5[1m]', role: 'implement' });
+          return line === '├ #427 · waits on #587 · 58m' && readJson(path, null).steps.at(-1).waiting === undefined;
+        } catch {
           return false;
         }
       })()]);
