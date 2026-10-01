@@ -2158,7 +2158,7 @@ function selfTest() {
         const reopened = closeOutMerged(merged, effects('open', 'reopened'));
         const reopenedCalls = calls.splice(0);
         const unmerged = closeOutMerged({ ...merged, marker: { pr: 577 } }, effects('open'));
-        const blocked = closeOutMerged({ ...merged, state: 'block', code: 'MERGE_OUTCOME_UNKNOWN' }, effects('open'));
+        const blocked = closeOutMerged({ ...merged, state: 'block', code: 'ARTIFACT_IDENTITY_MISMATCH' }, effects('open'));
         const unlinked = closeOutMerged(merged, effects('open', null, { linked: false }));
         const unlinkedCalls = calls.splice(0);
         const unknown = closeOutMerged(merged, effects('open', null, { omitReason: true }));

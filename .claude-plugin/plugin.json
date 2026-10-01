@@ -1,6 +1,6 @@
 {
   "name": "autoloop",
-  "version": "0.65.8",
+  "version": "0.65.9",
   "dependencies": [
     "agent-skills"
   ],

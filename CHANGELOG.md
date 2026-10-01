@@ -3,6 +3,17 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.65.9] - 2026-10-01
+
+### Fixed
+
+- **A delivered PR awaiting its merge no longer becomes an "unknown merge operation".** Under a
+  non-manual policy, reconcile used to record a merge attempt on an open PR. Nothing reports an
+  attempt back, so the attempt always read as unknown and blocked a human, even when
+  `auto-merge.mjs` had already refused the PR for a human merge. Reconcile now reports
+  `MERGE_PENDING` and leaves the merge to the executor. Stale merge bookkeeping on an open PR
+  clears back to the premerge record.
+
 ## [0.65.8] - 2026-09-30
 
 ### Fixed
