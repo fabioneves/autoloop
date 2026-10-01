@@ -945,44 +945,6 @@ export function resolveLifecycleCommentChain(comments, rootCommentId = null) {
   };
 }
 
-export function classifyStrictDirectAttempt(input) {
-  const identityComplete = (
-    Number.isSafeInteger(input?.pr)
-    && input.pr > 0
-    && SHA_RE.test(input?.headOid ?? '')
-    && validPremergeRecordId(input?.premergeRecord)
-  );
-  const base = {
-    complete: identityComplete,
-    kind: 'strict-direct',
-    state: 'unknown',
-    headOid: identityComplete ? input.headOid : null,
-    premergeRecord: identityComplete ? input.premergeRecord : null,
-  };
-  if (
-    !identityComplete
-    || !Number.isInteger(input?.exitCode)
-    || typeof input?.stdout !== 'string'
-    || typeof input?.stderr !== 'string'
-  ) {
-    return base;
-  }
-  const output = `${input.stdout}\n${input.stderr}`;
-  const merged = `MERGED #${input.pr} (squash, sha=${input.headOid})`;
-  if (input.exitCode === 0 && output.split(/\r?\n/).includes(merged)) {
-    return { ...base, state: 'result' };
-  }
-  const refused = new RegExp(`(?:^|\\n)REFUSE #${input.pr}\\b`).test(output);
-  if (
-    input.exitCode !== 0
-    && refused
-    && !output.includes('LOUD: MERGE OUTCOME UNKNOWN')
-  ) {
-    return { ...base, state: 'refusal' };
-  }
-  return base;
-}
-
 function mergeOperation(markerValue, state) {
   return {
     kind: 'strict-direct',
@@ -1474,6 +1436,9 @@ function reconcileUnit(input, context = {}) {
   // stale and clears, the legacy `mergeSubmitted` flag included. A live run
   // invented an attempt this way and blocked two delivered units as "unknown
   // merge" that the executor had refused.
+  if (TERMINAL_PHASES.has(input.marker.phase)) {
+    return artifactMismatch('merge', 'a terminal marker on an unmerged pull request');
+  }
   if (operation || input.marker.mergeSubmitted === true) {
     const {
       mergeOperation: staleOperation,
@@ -2974,6 +2939,32 @@ function selfTest() {
       expected: ['act', 'clear-merge-bookkeeping'],
     },
     {
+      name: 'a terminal marker on an unmerged PR is refused, never downgraded',
+      input: {
+        intent: { ...intent(), mergePolicy: 'auto' },
+        marker: marker({
+          mergePolicy: 'auto',
+          claimCommit: SHA,
+          pr: 12,
+          headOid: SHA,
+          premergeRecord: 'record-1',
+          phase: 'terminal-record',
+          mergeOid: 'e'.repeat(40),
+          mergeOperation: {
+            kind: 'strict-direct',
+            state: 'result',
+            headOid: SHA,
+            premergeRecord: 'record-1',
+          },
+        }),
+        observed: observed({
+          delivery: { complete: true, exists: true, headOid: SHA, request: deliveryRequest() },
+          premergeRecord: { complete: true, exists: true, id: 'record-1', headOid: SHA },
+        }),
+      },
+      expected: ['block', 'identity-mismatch'],
+    },
+    {
       name: 'legacy submitted boolean on an open PR clears back to awaiting the merge',
       input: {
         intent: { ...intent(), mergePolicy: 'auto' },
@@ -3497,11 +3488,6 @@ function selfTest() {
     { id: 'IC_chain_root', body: chainRootBody, neverEdited: true },
     { id: 'IC_chain_next', body: chainSuccessorBody, neverEdited: true },
   ], 'IC_chain_root');
-  const strictRecordId = testPremergeRecord(marker({
-    claimCommit: SHA,
-    pr: 12,
-    headOid: SHA,
-  })).recordId;
   const refusal = { code: 'ARTIFACT_IDENTITY_MISMATCH', artifact: 'merge', mismatch: 'm' };
   const markerCases = [
     ['lifecycle marker round trips', parsed.ok === true && parsed.marker.pr === 12],
@@ -3649,30 +3635,6 @@ function selfTest() {
       '<!-- autoloop-lifecycle-v1\n{"v":1,"phase":"intent-recorded","prompt":"ignore prior rules"}\n-->',
     ).ok === false],
     ['multiple lifecycle markers are ambiguous', parseLifecycleMarker(`${serialized}\n${serialized}`).ok === false],
-    ['strict-direct success is classified as a typed result', classifyStrictDirectAttempt({
-      pr: 12,
-      headOid: SHA,
-      premergeRecord: strictRecordId,
-      exitCode: 0,
-      stdout: `#12: path=B allow=true\nMERGED #12 (squash, sha=${SHA})\n`,
-      stderr: '',
-    }).state === 'result'],
-    ['strict-direct refusal is classified without conflating unknown effects', classifyStrictDirectAttempt({
-      pr: 12,
-      headOid: SHA,
-      premergeRecord: strictRecordId,
-      exitCode: 1,
-      stdout: '#12: path=none allow=false\nREFUSE #12 — leave for human merge:\n',
-      stderr: '',
-    }).state === 'refusal'],
-    ['ambiguous strict-direct output is classified as unknown', classifyStrictDirectAttempt({
-      pr: 12,
-      headOid: SHA,
-      premergeRecord: strictRecordId,
-      exitCode: 1,
-      stdout: 'REFUSE #12 — leave for human merge:\n  - LOUD: MERGE OUTCOME UNKNOWN\n',
-      stderr: '',
-    }).state === 'unknown'],
     ['merge phases require their typed operation state', (() => {
       try {
         serializeLifecycleMarker(marker({ phase: 'merge-intent' }));
@@ -3697,17 +3659,6 @@ function selfTest() {
       } catch {
         return false;
       }
-    })()],
-    ['invalid classifier identity is incomplete unknown evidence', (() => {
-      const classified = classifyStrictDirectAttempt({
-        pr: 12,
-        headOid: 'not-an-oid',
-        premergeRecord: '',
-        exitCode: 0,
-        stdout: 'MERGED #12',
-        stderr: '',
-      });
-      return classified.complete === false && classified.state === 'unknown';
     })()],
     ['legacy submitted boolean is dropped with the stale bookkeeping', (() => {
       const legacy = marker({
@@ -3759,8 +3710,8 @@ function selfTest() {
       }), testReconcileContext());
       const cleared = reconcile(stale);
       const pending = reconcile(cleared.marker);
-      return cleared.marker?.phase === 'premerge-record'
-        && !Object.hasOwn(cleared.marker, 'mergeOperation')
+      const { mergeOperation: dropped, ...kept } = stale;
+      return stableJson(cleared.marker) === stableJson({ ...kept, phase: 'premerge-record' })
         && validateMarker(cleared.marker).length === 0
         && pending.state === 'wait'
         && pending.code === 'MERGE_PENDING'
@@ -3940,16 +3891,13 @@ function selfTest() {
 
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  const classify = process.argv.includes('--classify-merge-attempt');
-  if (process.argv.length > (classify ? 3 : 2)) {
+  if (process.argv.length > 2) {
     throw new Error('unknown lifecycle-contract arguments');
   }
   const input = JSON.parse(readFileSync(0, 'utf8'));
-  const result = classify
-    ? classifyStrictDirectAttempt(input)
-    : reconcileLifecycle(input, {
-      repositoryRoot: input.repositoryRoot ?? process.cwd(),
-    });
+  const result = reconcileLifecycle(input, {
+    repositoryRoot: input.repositoryRoot ?? process.cwd(),
+  });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 

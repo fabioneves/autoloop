@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.65.8 · starting
+∞ dev · v0.65.9 · starting
 ```
 
 This session is the orchestrator: it plans, applies its own checklist pass and fixes, runs gates,
@@ -92,7 +92,8 @@ with the Setup remedy). Never continue past a failure. Then:
      applies only the typed action, with compare-and-swap and readback. Never execute lifecycle
      action JSON in prose; never hand-append a terminal outcome or edit a marker. It backfills a proven human merge's outcome,
      closes the issue GitHub left open and the unit's step: print `closeOut.card`; name `keptOpen`
-     or `error` in the run record. Git/GitHub facts are lifecycle authority.
+     or `error` in the run record. `MERGE_PENDING` on a unit without `loop-blocked`: run step 10's
+     `auto-merge.mjs <PR>` once. Git/GitHub facts are lifecycle authority.
 
 ### No improvised inspection
 

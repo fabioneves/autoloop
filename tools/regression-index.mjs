@@ -1717,6 +1717,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'lifecycle-contract.mjs', anchor: "return transition('wait', 'await-merge', 'MERGE_PENDING', {" }),
       Object.freeze({ file: 'lifecycle-contract.mjs', anchor: "['stale merge bookkeeping clears to the premerge marker, which awaits the merge', (() => {" }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`MERGE_PENDING` on a unit without `loop-blocked`' }),
     ]),
   }),
 ]);
