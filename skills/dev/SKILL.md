@@ -255,8 +255,8 @@ first. A park showing one branch while eligible work waits is the defect.
   ```
 
   Dotted `┄` only here; one `├` per wait, each with its `#N`; `└` the resume condition; branches
-  flush at column zero; no `∞` and no `HH:MM #N` prefix. The resume is one line,
-  `▶️ resumed — <what fired>` (`step.mjs --resumed`).
+  flush at column zero; no `∞` and no `HH:MM #N` prefix. The resume is the step's 🔔 line
+  (`step.mjs --resumed`).
 - **In-turn wait (no monitor)**: `node <plugin-tools>/dispatch.mjs --wait-file <result.json>
   --timeout-seconds 600`, then the heartbeat pair. Never `bash -c 'until …'` or `sleep N;` chains.
 
@@ -821,8 +821,8 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
 - A failed swap prints its reason and exits 1: read it, never retry blindly. **Never swap a step
   label by hand.**
 
-Collecting a result: `node <plugin-tools>/step.mjs --issue <N> --resumed "<what returned>" --ms
-<ms>`. Other waits: 🅿️ parked; 💤 idle (`HH:MM 💤 ∞ idle ─ no eligible units`, then close cleanly);
+Collecting a result: `node <plugin-tools>/step.mjs --issue <N> --resumed "<what it adds>" --result
+<result.json>` (a review's verdict and severities come from the result). Other waits: 🅿️ parked; 💤 idle (`HH:MM 💤 ∞ idle ─ no eligible units`, then close cleanly);
 🏁 run complete. 🎉 marks only a SHIPPED card and a clean-sweep run close.
 
 **A unit ends with its card**, repeated verbatim:

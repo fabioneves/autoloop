@@ -218,7 +218,7 @@ export function markReturned({ root, run = realRun(root), nowMs = Date.now(), is
   if (!last || stored.closed) return { ok: false };
   last.returnedAtMs = nowMs;
   writeAtomically(path, stored);
-  return { ok: true };
+  return { ok: true, step: last };
 }
 
 export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '', ifOpen = false }) {
@@ -527,17 +527,79 @@ function progress(step, round) {
 
 // One status line with fixed columns. Only plain-width segments are padded;
 // every emoji sits alone in its own column, so the columns line up.
-export function renderRibbon({ atMs, issue, step, round = null, badge = '⏳', model = null, fallback = false, note = '' }) {
+export function renderRibbon({ atMs, issue, step, round = null, badge = '⏳', model = null, fallback = false, note = '', span = null }) {
   const unit = `#${issue}`.padEnd(4);
   try {
     const [name, glyph] = STEPS[step];
     const chip = modelChip(model, step);
     const [dot, ...modelName] = chip.split(' ');
-    return `${clock(atMs)} ${unit} ${badge} ${glyph} ${name.padEnd(12)} ${progress(step, round).padEnd(17)}  `
+    return `${clock(atMs)} ${unit} ${badge} ${glyph} ${name.padEnd(12)} ${(span ?? progress(step, round)).padEnd(17)}  `
       + `${dot} ${modelName.join(' ').padEnd(12)}${fallback ? '↪' : ' '} ${oneLine(note)}`.trimEnd();
   } catch {
     return `${clock(atMs)} ${unit} ${badge} ${step} ${oneLine(note)}`.trimEnd();
   }
+}
+
+// A review's outcome, read from its dispatch result: the verdict, then each
+// severity present. No glyph carries a variation selector, so columns hold.
+const SEVERITY_GLYPHS = Object.freeze([
+  ['Critical', '🚨'],
+  ['Major', '🔺'],
+  ['Minor', '🔸'],
+  ['Suggestion', '💡'],
+]);
+
+function reviewOutcome(verdict) {
+  const findings = Array.isArray(verdict.findings) ? verdict.findings : [];
+  const counts = SEVERITY_GLYPHS
+    .map(([severity, glyph]) => [glyph, findings.filter((finding) => finding?.severity === severity).length, severity])
+    .filter(([, count]) => count > 0)
+    .map(([glyph, count, severity]) => `${glyph} ${count} ${severity}`);
+  return [verdict.verdict === 'pass' ? '✅ PASS' : '❌ FAIL', ...(counts.length > 0 ? counts : ['✨ clean'])].join(' · ');
+}
+
+// The step's start ribbon, closed: same columns, the duration in place of the
+// progress bar, the model that actually ran, and the outcome as the note.
+export function renderFinished({ atMs, issue, step, role = null, model = null, ms = null, result = null, what = '' }) {
+  const failed = result?.ok === false;
+  const verb = failed ? 'failed' : 'done';
+  const span = Number.isFinite(ms) ? `${verb} in ${duration(ms)}` : verb;
+  const ran = result?.role ?? role;
+  const outcome = failed
+    ? result.error?.code ?? 'dispatch failed'
+    : result?.verdict?.verdict ? reviewOutcome(result.verdict) : '';
+  const offStep = ran && STEP_ROLES[step] && ran !== STEP_ROLES[step] ? ran : '';
+  const note = [offStep, [outcome, oneLine(what)].filter(Boolean).join(' — ')].filter(Boolean).join(' · ');
+  return renderRibbon({
+    atMs, issue, step, badge: failed ? '💥' : '🔔', model: result?.model ?? model,
+    fallback: Boolean(result?.fallback), note, span,
+  });
+}
+
+// `--resumed`: marks the return on the unit's current step, then renders it.
+// An open step renders the finished line, its outcome read from the dispatch
+// result when one is given; without a record the plain resumed line stays.
+export function resumedLine({ root, run = realRun(root), nowMs = Date.now(), issue, what, ms = null, resultPath = null }) {
+  let returned = { ok: false };
+  try {
+    returned = markReturned({ root, run, nowMs, issue });
+  } catch {
+    // The line is the collection record; the parked view is a courtesy.
+  }
+  let result = null;
+  let note = what;
+  if (resultPath !== null) {
+    try {
+      result = JSON.parse(readFileSync(resultPath, 'utf8'));
+    } catch {
+      note = `${what} (result unreadable)`.trim();
+    }
+  }
+  const elapsedMs = ms ?? (Number.isFinite(result?.ms) ? result.ms : null);
+  const current = returned.ok ? returned.step : null;
+  return current && STEPS[current.step]
+    ? renderFinished({ atMs: nowMs, issue, step: current.step, role: current.role ?? null, model: current.model ?? null, ms: elapsedMs, result, what: note })
+    : renderResumed({ atMs: nowMs, issue, what: note, ms: elapsedMs });
 }
 
 export function renderResumed({ atMs, issue, what, ms = null }) {
@@ -608,6 +670,41 @@ function selfTest() {
     ['a resumed line carries the duration from ms',
       safely(() => renderResumed({ atMs: at(14, 14), issue: 78, what: 'plan returned', ms: 401_000 }))
         === '14:14 #78  ▶️ resumed — plan returned · 6m 41s'],
+    // Operator ask, 2026-10-03: "#597 ▶️ resumed — full review returned: fail,
+    // 3 Major, 1 Minor" said in prose what the dispatch result already holds.
+    // The finished line mirrors the step's start ribbon, column for column,
+    // and reads the verdict and severities from the result itself.
+    ['a finished review mirrors its ribbon and reads the verdict from the result', safely(() => renderFinished({
+      atMs: at(21, 52), issue: 597, step: '08-code-review', ms: 755_123,
+      result: { ok: true, role: 'code-review', model: 'gpt-6-astra[1m]', ms: 755_123, fallback: null,
+        verdict: { verdict: 'fail', findings: ['Major', 'Minor', 'Major', 'Major'].map((severity) => ({ severity })) } },
+    })) === '21:52 #597 🔔 🔍 CODE-REVIEW  done in 12m 35s    🟢 ASTRA 6       ❌ FAIL · 🔺 3 Major · 🔸 1 Minor'],
+    ['a clean pass says so, and every severity has its glyph', [
+      safely(() => renderFinished({ atMs: at(9, 0), issue: 7, step: '03-plan-review', ms: 60_000,
+        result: { ok: true, model: 'claude-fable-5-1', verdict: { verdict: 'pass', findings: [] } } })),
+      safely(() => renderFinished({ atMs: at(9, 0), issue: 7, step: '07-diff-review', ms: 60_000,
+        result: { ok: true, model: 'gpt-6-astra', verdict: { verdict: 'fail', findings:
+          ['Suggestion', 'Critical', 'Minor', 'Major'].map((severity) => ({ severity })) } } })),
+    ].every((line, index) => line.endsWith(index === 0
+      ? '✅ PASS · ✨ clean'
+      : '❌ FAIL · 🚨 1 Critical · 🔺 1 Major · 🔸 1 Minor · 💡 1 Suggestion'))],
+    ['a writer finishes with its note, a failed dispatch with its code, a fallback with its arrow', [
+      safely(() => renderFinished({ atMs: at(9, 0), issue: 7, step: '05-implement', ms: 2_509_000,
+        result: { ok: true, model: 'claude-opus-5-5' }, what: '34 paths, verification pending' })),
+      safely(() => renderFinished({ atMs: at(9, 0), issue: 7, step: '05-implement', ms: 180_000,
+        result: { ok: false, model: 'claude-opus-5-5', error: { code: 'ENGINE_EXIT_NONZERO' } } })),
+      safely(() => renderFinished({ atMs: at(9, 0), issue: 7, step: '08-code-review', ms: 60_000,
+        result: { ok: true, model: 'claude-sonnet-5', fallback: { from: 'gpt-6-astra' },
+          verdict: { verdict: 'pass', findings: [{ severity: 'Minor' }] } } })),
+    ].join('\n') === [
+      '09:00 #7   🔔 🔨 IMPLEMENT    done in 41m 49s    🟠 OPUS 5.5      34 paths, verification pending',
+      '09:00 #7   💥 🔨 IMPLEMENT    failed in 3m 0s    🟠 OPUS 5.5      ENGINE_EXIT_NONZERO',
+      '09:00 #7   🔔 🔍 CODE-REVIEW  done in 1m 0s      🔵 SONNET 5    ↪ ✅ PASS · 🔸 1 Minor',
+    ].join('\n')],
+    ['a role off its step is named, and no result falls back to the step record', [
+      safely(() => renderFinished({ atMs: at(9, 0), issue: 7, step: '08-fix', role: 'plan', model: 'gpt-6-astra',
+        ms: 576_012, what: 'proof re-derivation returned' })),
+    ].join('\n') === '09:00 #7   🔔 🔧 FIX          done in 9m 36s     🟢 ASTRA 6       plan · proof re-derivation returned'],
   ];
   const parsed = (argv) => {
     try {
@@ -1089,6 +1186,26 @@ function transitionChecks(at) {
           return false;
         }
       })()]);
+    // The finished line names the step from the record and the outcome from
+    // the dispatch result; with no record it keeps the plain resumed line.
+    results.push(['--resumed with --result renders the finished line from record and result',
+      (() => {
+        try {
+          labels = ['loop-ready'];
+          transition({ root, run, nowMs: at(12, 0), issue: 391, to: '08-code-review', round: '1/20', model: 'gpt-6-astra', markers: () => [] });
+          const resultPath = join(root, 'review-result.json');
+          writeFileSync(resultPath, JSON.stringify({ ok: true, role: 'code-review', model: 'gpt-6-astra[1m]', ms: 755_123,
+            verdict: { verdict: 'fail', findings: [{ severity: 'Major' }, { severity: 'Minor' }] } }));
+          const finished = resumedLine({ root, run, nowMs: at(12, 13), issue: 391, what: '', resultPath });
+          const unreadable = resumedLine({ root, run, nowMs: at(12, 14), issue: 391, what: 'review returned', resultPath: join(root, 'missing.json') });
+          const plain = resumedLine({ root, run, nowMs: at(12, 15), issue: 9998, what: 'plan returned', ms: 60_000 });
+          return finished === '12:13 #391 🔔 🔍 CODE-REVIEW  done in 12m 35s    🟢 ASTRA 6       ❌ FAIL · 🔺 1 Major · 🔸 1 Minor'
+            && unreadable.endsWith('review returned (result unreadable)')
+            && plain === '12:15 #9998 ▶️ resumed — plan returned · 1m 0s';
+        } catch (error) {
+          return false;
+        }
+      })()]);
     // The lifecycle driver closes a reconciled unit on the orchestrator's
     // behalf: only a record still open, never re-rendering a card shown.
     results.push(['ifOpen closes an open record once, and nothing else',
@@ -1133,7 +1250,7 @@ export function renderSetupPhase(phase, badge = '⏳') {
 }
 
 const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round <r>/<cap>] [--model <id>] [--fallback] [--staged] '
-  + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--ms <n>]\n'
+  + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--result <dispatch-result.json>] [--ms <n>]\n'
   + '       step.mjs --setup <resolve|audit|interview|write|verify> [--badge ⏳|❌|⚠️]\n       step.mjs --self-test';
 
 export function parseArgs(argv) {
@@ -1157,7 +1274,7 @@ export function parseArgs(argv) {
   };
   const valued = { '--issue': 'issue', '--to': 'to', '--round': 'round', '--model': 'model', '--badge': 'badge',
     '--note': 'note', '--resumed': 'what', '--ms': 'ms', '--outcome': 'outcome', '--title': 'title',
-    '--pr': 'pr', '--lines': 'lines', '--question': 'question' };
+    '--pr': 'pr', '--lines': 'lines', '--question': 'question', '--result': 'result' };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === '--fallback') { out.fallback = true; continue; }
@@ -1239,12 +1356,7 @@ function main() {
     process.exit(closed.ok ? 0 : 1);
   }
   if (parsed.mode === 'resumed') {
-    try {
-      markReturned({ root, issue: parsed.issue });
-    } catch {
-      // The line below is the collection record; the parked view is a courtesy.
-    }
-    process.stdout.write(`${renderResumed({ atMs: Date.now(), issue: parsed.issue, what: parsed.what, ms: parsed.ms })}\n`);
+    process.stdout.write(`${resumedLine({ root, issue: parsed.issue, what: parsed.what, ms: parsed.ms, resultPath: parsed.result ?? null })}\n`);
     return;
   }
   const result = transition({ root, ...parsed });
