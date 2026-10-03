@@ -3,6 +3,24 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.66.0] - 2026-10-03
+
+### Changed
+
+- **A returned step prints its finished line.** `step.mjs --resumed` used to print
+  `▶️ resumed — <text>`, so the orchestrator had to restate a review's verdict by hand. The line
+  now mirrors the step's start ribbon, closed:
+
+  ```text
+  21:39 #597 ⏳ 🔍 CODE-REVIEW  ▰▰▰▰▰▰▰▰▱▱▱ 08/11  🟢 ASTRA 6       full review
+  21:52 #597 🔔 🔍 CODE-REVIEW  done in 12m 35s    🟢 ASTRA 6       ❌ FAIL · 🔺 3 Major · 🔸 1 Minor
+  ```
+
+  - The new `--result <dispatch-result.json>` reads a review's verdict and severities from the
+    result: 🚨 Critical, 🔺 Major, 🔸 Minor, 💡 Suggestion, or `✅ PASS · ✨ clean`.
+  - The line names the model that ran, with ↪ after a fallback.
+  - A failed dispatch shows 💥 and its error code.
+
 ## [0.65.9] - 2026-10-01
 
 ### Fixed
