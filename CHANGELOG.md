@@ -3,6 +3,14 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- Review annotations now distinguish review scope from edit authorization. A full-review
+  finding stays in scope even when its fix needs a separate decision to extend the frozen
+  file boundary; recording the finding does not authorize those edits.
+
 ## [0.66.0] - 2026-10-03
 
 ### Changed

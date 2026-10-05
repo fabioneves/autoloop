@@ -33,6 +33,20 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'review-scope-was-confused-with-edit-authorization',
+    date: '2026-10-05',
+    symptom: 'A confirmed full-review finding was annotated out of scope because its fix '
+      + 'needed edits outside the frozen plan; the review recorder rejected the annotation.',
+    cause: 'The annotation instructions named inScope without distinguishing the review '
+      + 'boundary from permission to edit. Recording a finding grants no edit authority.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`inScope` is review scope, not edit authorization.' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'Round 1: every finding is `inScope:true`.' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'A fix outside the frozen boundary needs a separate scope decision; `true` grants no edit authority.' }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a full review cannot classify a finding out of scope'," }),
+    ]),
+  }),
+  Object.freeze({
     id: 'dispatched-children-got-a-200k-window-behind-the-gateway',
     date: '2026-09-29',
     symptom: 'LFE #352: the astra plan failed after compacting, and its Opus '
