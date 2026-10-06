@@ -584,23 +584,26 @@ node <plugin-tools>/review-contract.mjs --append-round --evidence-file <evidence
   --out <evidence-n.json>
 ```
 
-The tool derives every identity, head, fingerprint, version, and ledger field. Yours: `annotations.json` `[{id,verified,inScope}]` for every finding of the round (required when
-it raised any), and `dispositions.json`
-`[{findingId,disposition:"fix"|"rebut"|"defer",rationale,claim?,evidence?}]` for every gating
-finding of the PREVIOUS round (rebut needs `claim` and `evidence`; `defer` names `#<N>`; a
-re-raised deferral needs no new entry). Typed refusals: `CHECKOUT_DIRTY`, `DISPOSITION_REQUIRED`,
-`REBUTTAL_EVIDENCE_REQUIRED`, `FINDING_ANNOTATIONS_REQUIRED`; the output carries the transition (`REVIEW_FIX_DELTA_REQUIRED`,
-`REVIEW_FULL_CLOSE_REQUIRED`, `REVIEW_CLEAN`, …). Re-read with
+The tool derives identities, heads, fingerprints, versions and ledgers. Supply:
+
+- `annotations.json`: `[{id,verified,inScope}]` for every current finding.
+  `inScope` is review scope, not edit authorization. Round 1: every finding is `inScope:true`.
+  A fix outside the frozen boundary needs a separate scope decision; `true` grants no edit authority.
+- `dispositions.json`: `[{findingId,disposition:"fix"|"rebut"|"defer",rationale,claim?,evidence?}]`
+  for each previous gating finding. Rebut needs `claim` and `evidence`; `defer` names `#<N>`;
+  a re-raised deferral needs no new entry.
+
+Refusals: `CHECKOUT_DIRTY`, `DISPOSITION_REQUIRED`, `REBUTTAL_EVIDENCE_REQUIRED`,
+`FINDING_ANNOTATIONS_REQUIRED`. The output names the transition; re-read with
 `node <plugin-tools>/review-contract.mjs < <evidence-n.json>`.
 
-Rules an `evidenceGap` cites (one `reviewRounds` entry per dispatched round): `artifactVersion` strictly increases and `artifactFingerprint` changes every round (except the
-escalation round); `dispatchId` unique; author ≠ reviewer; round 1 is `full-artifact`; top-level
-`scope` names the closing round's (`full` = `full-artifact`, `delta` =
-`fix-delta-and-open-rebuttals`); `deltaBaseOid` is the base for round 1, then the previous head;
-`priorFindings` keeps the full Critical/Major ledger (resolved as `state: closed`; only open
-rebuts actionable); `verdict` is exactly what `dispatch.mjs` parsed, unedited;
-`projectConfig`/`configFingerprint` come from prime as a pair (canonical means `jq -S -c -j`); the
-input carries no cap.
+Evidence rules: one `reviewRounds` entry per review dispatch; `artifactVersion` increases and
+`artifactFingerprint` changes except on escalation; unique `dispatchId`; author ≠ reviewer;
+round 1 is `full-artifact`. Closing `scope`: `full` = `full-artifact`, `delta` =
+`fix-delta-and-open-rebuttals`. `deltaBaseOid`: base for round 1, previous head thereafter.
+`priorFindings`: full Critical/Major ledger, resolved as `state: closed`, only open rebuts
+actionable. Keep `verdict` as dispatch parsed it, unedited; `projectConfig`/`configFingerprint` paired
+from prime (canonical: `jq -S -c -j`); no input cap.
 
 **A clean delta round does not converge the unit.** It returns `REVIEW_FULL_CLOSE_REQUIRED`:
 dispatch one `full-artifact` round over the same head, commit nothing first, and record it as a
