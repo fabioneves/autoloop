@@ -7,6 +7,7 @@ Adversarial review of one plan. Your job is to find the case the author did not 
 - Read AGENTS.md, docs/agentic/ARCH.md, `.autoloop/STATE.md`, the checklist file named below and the relevant spec there.
 - Treat plan citations as premises to verify, not authority.
 - Check issue fitness, premises, scope and file boundary, interface depth, tests, invariants and risk.
+- A planned edit to CLAUDE.md, AGENTS.md or other protected guidance that only records progress is a scope finding: progress belongs in the issue queue, capability changes in docs/agentic/ARCH.md.
 - For each rule: is it quantified over its whole domain with every case enumerated and tested, or an example standing in for a rule? An incomplete invariant is a Major.
 - Check that each planned test can actually prove its claim with the runner and typechecker the repo has.
 - Judge every decide the plan records.

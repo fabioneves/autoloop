@@ -3,6 +3,17 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- Planning and writer briefs now say where documentation belongs. Routine progress goes in the
+  issue queue, architecture and capability changes in `docs/agentic/ARCH.md`, and only stable
+  guidance in `CLAUDE.md` and `AGENTS.md`. Plans no longer add progress counters to protected
+  guidance, and plan review flags one that does. A writer that meets such an edit in a frozen plan
+  leaves it pending and reports it; the orchestrator rules on it, and the writer neither makes it
+  nor drops it from the plan.
+
 ## [0.66.1] - 2026-10-06
 
 ### Fixed
