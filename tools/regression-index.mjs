@@ -33,6 +33,21 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'routine-units-edited-protected-guidance-to-count-progress',
+    date: '2026-10-06',
+    symptom: 'Each detmath export unit edited CLAUDE.md only to decrement a pending-export count, '
+      + 'so a routine unit picked up human:authorize and could not merge autonomously.',
+    cause: 'No brief said where progress belongs, so plans froze the count edit into protected '
+      + 'guidance and writers executed it as planned without flagging it.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'briefs/plan.md', anchor: 'Never plan a progress counter or task-status mirror into protected guidance' }),
+      Object.freeze({ file: 'briefs/plan-review.md', anchor: 'that only records progress is a scope finding' }),
+      Object.freeze({ file: 'briefs/implement.md', anchor: 'If the frozen plan names such an edit, leave that edit pending and report it for an orchestrator ruling' }),
+      Object.freeze({ file: 'briefs/fix.md', anchor: 'If the frozen plan names such an edit, leave that edit pending and report it for an orchestrator ruling' }),
+      Object.freeze({ file: 'briefs/simplify.md', anchor: 'leave a planned one in place and report it as unnecessary' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'review-scope-was-confused-with-edit-authorization',
     date: '2026-10-05',
     symptom: 'A confirmed full-review finding was annotated out of scope because its fix '

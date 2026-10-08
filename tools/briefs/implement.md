@@ -13,6 +13,7 @@ You are the sole writer for one unit, or one revision of its PR, on its branch.
 - Check staged content for secrets before every commit: no .env, auth.json, tokens or keys.
 - Smallest change inside the boundary; no unrelated cleanup, dependency, config, tooling or policy change.
 - Delete nothing the plan does not name.
+- Never add a progress counter or task-status mirror to protected guidance such as CLAUDE.md or AGENTS.md. If the frozen plan names such an edit, leave that edit pending and report it for an orchestrator ruling; do not make, drop or replan it yourself.
 - Never push, open or edit a PR, label, merge, release, or run the objective gate.
 - Leave review, simplification and gate items pending; never self-certify them.
 - Keep every test and probe run bounded: modest concurrency, no repeat loops, well within the machine's memory. One out-of-memory kill ends this session and the loop's with it.
