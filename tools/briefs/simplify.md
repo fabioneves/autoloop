@@ -10,7 +10,7 @@ One behavior-preserving clarity pass over the implemented unit.
 - Run the unit's tests before and after any change; they must be green on return.
 - Keep every test and probe run bounded: modest concurrency, no repeat loops, well within the machine's memory. One out-of-memory kill ends this session and the loop's with it.
 - Stay inside the plan's file boundary.
-- Never add a progress counter or task-status mirror to protected guidance such as CLAUDE.md or AGENTS.md; leave a planned one in place and report it as unnecessary.
+- The frozen plan is binding. Never add or update a progress counter or task-status mirror in protected guidance such as CLAUDE.md or AGENTS.md. If the plan requires one or an earlier writer made one, preserve the frozen plan and any existing edit, report the mismatch as pending for an orchestrator ruling; do not remove, resolve or replan it yourself.
 - No new dependency, abstraction or helper "for later".
 - When the measured budget below says over, reduction is required; within budget, prefer no change to a cosmetic rewrite.
 - If nothing is worth changing, report no change; never manufacture one.
