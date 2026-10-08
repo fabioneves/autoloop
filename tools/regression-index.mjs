@@ -42,9 +42,12 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'briefs/plan.md', anchor: 'Never plan a progress counter or task-status mirror into protected guidance' }),
       Object.freeze({ file: 'briefs/plan-review.md', anchor: 'that only records progress is a scope finding' }),
+      Object.freeze({ file: 'briefs/implement.md', anchor: 'Never add or update a progress counter or task-status mirror in protected guidance' }),
       Object.freeze({ file: 'briefs/implement.md', anchor: 'If the frozen plan names such an edit, leave that edit pending and report it for an orchestrator ruling' }),
+      Object.freeze({ file: 'briefs/fix.md', anchor: 'Never add or update a progress counter or task-status mirror in protected guidance' }),
       Object.freeze({ file: 'briefs/fix.md', anchor: 'If the frozen plan names such an edit, leave that edit pending and report it for an orchestrator ruling' }),
-      Object.freeze({ file: 'briefs/simplify.md', anchor: 'leave a planned one in place and report it as unnecessary' }),
+      Object.freeze({ file: 'briefs/simplify.md', anchor: 'Never add or update a progress counter or task-status mirror in protected guidance' }),
+      Object.freeze({ file: 'briefs/simplify.md', anchor: 'preserve the frozen plan and any existing edit, report the mismatch as pending for an orchestrator ruling' }),
     ]),
   }),
   Object.freeze({
