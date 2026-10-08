@@ -3,7 +3,7 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
-## [Unreleased]
+## [0.66.2] - 2026-10-08
 
 ### Fixed
 
