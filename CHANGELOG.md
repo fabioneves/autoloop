@@ -3,6 +3,15 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [Unreleased]
+
+### Changed
+
+- All dispatch roles now receive a shared writing rule. The rule applies to authored prose, output,
+  and documentation. It directs roles to use ASD-STE100 Simplified Technical English, Issue 9. It
+  keeps code, commands, identifiers, paths, URLs, exact quotes, required formats, and factual meaning
+  unchanged. It does not check conformance.
+
 ## [0.66.2] - 2026-10-08
 
 ### Fixed
