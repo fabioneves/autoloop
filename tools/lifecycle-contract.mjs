@@ -29,6 +29,17 @@ const LIFECYCLE_SUCCESSOR_KEYS = [
   'v',
 ];
 const MAX_PRIOR_REVISIONS = 16;
+export const BLOCKING_LABELS = new Set([
+  'automerge:halt',
+  'do-not-merge',
+  'human:authorize',
+  'human:decide',
+  'human:legal',
+  'loop-blocked',
+  'needs-dependency',
+  'needs-human',
+  'needs-secret',
+]);
 const DELIVERY_REQUEST_KEYS = [
   'committedHead',
   'gatedHead',
@@ -330,7 +341,13 @@ const PRIOR_REVISION_KEYS = [
 
 function validRevisionRequest(value) {
   return (
-    exactKeys(value, REVISION_REQUEST_KEYS)
+    exactKeys(value, [
+      ...REVISION_REQUEST_KEYS,
+      ...(value?.recoveryHeadOid === undefined ? [] : ['recoveryHeadOid']),
+    ])
+    && (value.recoveryHeadOid === undefined
+      || (SHA_RE.test(value.recoveryHeadOid)
+        && value.recoveryHeadOid !== value.expectedHeadOid))
     && Number.isSafeInteger(value.expectedEpoch)
     && value.expectedEpoch > 0
     && SHA_RE.test(value.expectedHeadOid ?? '')
@@ -354,6 +371,7 @@ function revisionIntentFor(request) {
   return {
     fromEpoch: request.expectedEpoch,
     fromHeadOid: request.expectedHeadOid,
+    ...(request.recoveryHeadOid === undefined ? {} : { recoveryHeadOid: request.recoveryHeadOid }),
     fromIdentityHash: request.expectedIdentityHash,
     fromPlanCommentId: request.expectedPlanCommentId,
     fromPremergeRecord: request.expectedPremergeRecord,
@@ -371,7 +389,13 @@ function revisionIntentFor(request) {
 
 function validRevisionIntent(value) {
   return (
-    exactKeys(value, REVISION_INTENT_KEYS)
+    exactKeys(value, [
+      ...REVISION_INTENT_KEYS,
+      ...(value?.recoveryHeadOid === undefined ? [] : ['recoveryHeadOid']),
+    ])
+    && (value.recoveryHeadOid === undefined
+      || (SHA_RE.test(value.recoveryHeadOid)
+        && value.recoveryHeadOid !== value.fromHeadOid))
     && Number.isSafeInteger(value.fromEpoch)
     && value.fromEpoch > 0
     && value.toEpoch === value.fromEpoch + 1
@@ -392,7 +416,13 @@ function validRevisionIntent(value) {
 
 function validPriorRevision(value) {
   return (
-    exactKeys(value, PRIOR_REVISION_KEYS)
+    exactKeys(value, [
+      ...PRIOR_REVISION_KEYS,
+      ...(value?.recoveryHeadOid === undefined ? [] : ['recoveryHeadOid']),
+    ])
+    && (value.recoveryHeadOid === undefined
+      || (SHA_RE.test(value.recoveryHeadOid)
+        && value.recoveryHeadOid !== value.headOid))
     && Number.isSafeInteger(value.epoch)
     && value.epoch > 0
     && SHA_RE.test(value.headOid ?? '')
@@ -413,6 +443,8 @@ function priorRevisionFor(markerValue, revisionIntent) {
   return {
     epoch: revisionIntent.fromEpoch,
     headOid: revisionIntent.fromHeadOid,
+    ...(revisionIntent.recoveryHeadOid === undefined
+      ? {} : { recoveryHeadOid: revisionIntent.recoveryHeadOid }),
     identityHash: revisionIntent.fromIdentityHash,
     planCommentId: revisionIntent.fromPlanCommentId,
     planHash: markerValue.planHash,
@@ -489,8 +521,12 @@ export function advanceLifecycleRevision(markerValue, observed) {
     return transition('block', 'invalid-revision', 'INVALID_STAGED_REVISION');
   }
   if (
-    !exactKeys(observed, ['complete', 'headOid', 'labels', 'planComment'])
+    !exactKeys(observed, [
+      'complete', 'headOid', 'labels', 'planComment',
+      ...(revisionIntent.recoveryHeadOid === undefined ? [] : ['draft']),
+    ])
     || observed.complete !== true
+    || (revisionIntent.recoveryHeadOid !== undefined && typeof observed.draft !== 'boolean')
     || !SHA_RE.test(observed.headOid ?? '')
     || !Array.isArray(observed.labels)
     || observed.labels.some((label) => typeof label !== 'string')
@@ -501,7 +537,8 @@ export function advanceLifecycleRevision(markerValue, observed) {
     return inspect('revision-prerequisites');
   }
   if (
-    observed.headOid !== revisionIntent.fromHeadOid
+    observed.headOid !== (revisionIntent.recoveryHeadOid ?? revisionIntent.fromHeadOid)
+    || (revisionIntent.recoveryHeadOid !== undefined && observed.draft !== true)
     || !observed.labels.includes('loop:revising')
     || observed.labels.includes('loop-delivered')
     || observed.planComment.id !== revisionIntent.planCommentId
@@ -976,6 +1013,63 @@ function expectedPremergeRecord(input, ciBinding, requireCiBinding) {
   return record;
 }
 
+export function verifiedRevisionSource(markerValue, facts, record) {
+  const observation = facts?.premergeRecord;
+  return markerValue?.phase === 'premerge-record'
+    && markerValue.mergeOperation === undefined
+    && markerValue.mergeSubmitted === undefined
+    && markerValue.mergeOid === undefined
+    && observation?.complete === true
+    && observation.exists === true
+    && observation.verified === true
+    && observation.id === markerValue.premergeRecord
+    && observation.bodyHash === markerValue.premergeRecordHash
+    && observation.commentId === markerValue.premergeRecordCommentId
+    && observation.issue === markerValue.issue
+    && observation.pullRequest === markerValue.pr
+    && observation.headOid === markerValue.headOid
+    && HASH_RE.test(observation.commentBodyHash ?? '')
+    && expectedPremergeRecord({ marker: markerValue, premergeRecordDraft: record }, null, false) !== null
+    && record.recordId === markerValue.premergeRecord
+    && record.plan.commentId === markerValue.planCommentId
+    && record.lifecycle.commentId === facts.lifecycleRootCommentId
+    && stableJson(observation.record) === stableJson(record);
+}
+
+function changedDeliveredHead(markerValue, facts) {
+  return markerValue.phase === 'premerge-record'
+    && markerValue.revisionIntent === undefined
+    && SHA_RE.test(markerValue.headOid ?? '')
+    && facts.remoteClaim.exists === true
+    && SHA_RE.test(facts.remoteClaim.headOid ?? '')
+    && facts.remoteClaim.headOid !== markerValue.headOid;
+}
+
+// A historical record proves A's approved identity; live CI on B cannot prove A or approve B.
+function reconcileChangedDeliveredHead(input) {
+  const { marker, observed: facts, premergeRecordDraft: record } = input;
+  if (facts.merge?.complete !== true) return inspect('merge');
+  if (facts.merge.merged !== false || marker.mergeOperation !== undefined
+    || marker.mergeSubmitted !== undefined || marker.mergeOid !== undefined) {
+    return transition('block', 'revision-race', 'REVISION_SOURCE_MISMATCH');
+  }
+  if (facts.remoteClaim.containsClaimCommit !== true) return artifactMismatch('remote-claim');
+  if (facts.draftPr.state !== 'open' || facts.draftPr.headOid !== facts.remoteClaim.headOid) {
+    return artifactMismatch('draft-pr');
+  }
+  if (!Array.isArray(facts.issueLabels)) return inspect('revision-labels');
+  if (facts.issueLabels.some((label) => BLOCKING_LABELS.has(label))) {
+    return transition('wait', 'await-human-revision', 'REVISION_HUMAN_GATE_PENDING');
+  }
+  if (!verifiedRevisionSource(marker, facts, record)) {
+    return artifactMismatch('premerge-record');
+  }
+  return transition('resume', 'begin-revision', 'REVISION_REQUIRED', {
+    sourceHeadOid: marker.headOid,
+    currentHeadOid: facts.remoteClaim.headOid,
+  });
+}
+
 // A merge is irreversible, so an identity mismatch on a merged unit can never be
 // repaired: no driver path binds a head after the merge. Recording it as a
 // terminal phase is what lets the next run stop reconciling it — LFE re-ran 45
@@ -1053,6 +1147,27 @@ function reconcileUnit(input, context = {}) {
     }
   }
 
+  if (
+    !merged
+    && input.marker.phase === 'premerge-record'
+    && SHA_RE.test(input.marker.headOid ?? '')
+    && (
+      SHA_RE.test(facts.draftPr?.headOid ?? '')
+        && facts.draftPr.headOid !== input.marker.headOid
+      || SHA_RE.test(facts.remoteClaim?.headOid ?? '')
+        && facts.remoteClaim.headOid !== input.marker.headOid
+    )
+  ) {
+    for (const [name, evidence] of [
+      ['local-claim', facts.localClaim],
+      ['remote-claim', facts.remoteClaim],
+      ['plan-comment', facts.planComment],
+      ['draft-pr', facts.draftPr],
+    ]) {
+      if (!completeExistence(evidence)) return inspect(name);
+      if (evidence.exists !== true) return artifactMismatch(name);
+    }
+  }
   if (!completeExistence(facts.localClaim)) return inspect('local-claim');
   // Once the PR is MERGED the local claim branch is leftover history, not
   // evidence. It may be absent, or present and rewritten — a rebase onto a
@@ -1169,6 +1284,9 @@ function reconcileUnit(input, context = {}) {
     return transition('act', 'bind-draft-pr', 'DRAFT_PR_DISCOVERED', {
       markerPatch: { phase: 'draft-pr', pr: facts.draftPr.number },
     });
+  }
+  if (!merged && changedDeliveredHead(input.marker, facts)) {
+    return reconcileChangedDeliveredHead(input);
   }
 
   // A ready-head bound to a superseded head is re-convergence work, not a
@@ -2229,7 +2347,134 @@ function revisionChecks() {
     },
   });
   const supersededReplay = beginLifecycleRevision(advancedC.marker, requestB);
+  const recoveryFacts = observed({
+    remoteClaim: {
+      complete: true, exists: true, branch: deliveredA.branch,
+      headOid: OTHER_SHA, containsClaimCommit: true,
+    },
+    planComment: {
+      complete: true, exists: true, planHash: deliveredA.planHash, id: deliveredA.planCommentId,
+    },
+    draftPr: {
+      complete: true, exists: true, number: deliveredA.pr, issue: deliveredA.issue,
+      branch: deliveredA.branch, headOid: OTHER_SHA, state: 'open',
+    },
+    delivery: { complete: true, exists: true, headOid: OTHER_SHA, request: deliveryRequestFor(OTHER_SHA) },
+    premergeRecord: testPremergeObservationFor(testPremergeRecord(deliveredA)),
+    lifecycleRootCommentId: 'IC_lifecycle',
+    issueLabels: ['loop-delivered'],
+  });
+  const reconcileRecovery = (facts = recoveryFacts) => reconcileLifecycle({
+    intent: intent(), marker: deliveredA, observed: facts,
+    premergeRecordDraft: testPremergeRecord(deliveredA),
+  }, testReconcileContext());
+  const recoveryResult = reconcileRecovery();
+  const recoveryRequest = revisionRequest(deliveredA, { recoveryHeadOid: OTHER_SHA });
+  const stagedRecovery = beginLifecycleRevision(deliveredA, recoveryRequest);
+  const observedRecovery = {
+    complete: true,
+    headOid: OTHER_SHA,
+    labels: ['loop:revising'],
+    draft: true,
+    planComment: {
+      complete: true,
+      id: recoveryRequest.planCommentId,
+      bodyHash: recoveryRequest.planHash,
+    },
+  };
+  const advancedRecovery = advanceLifecycleRevision(stagedRecovery.marker, observedRecovery);
+  const recoveryAudit = advancedRecovery.marker?.priorRevisions?.[0];
   return [
+    [
+      'delivered A with verified history and owned B requests an explicit revision',
+      recoveryResult.state === 'resume'
+        && recoveryResult.code === 'REVISION_REQUIRED'
+        && recoveryResult.action === 'begin-revision'
+        && recoveryResult.sourceHeadOid === SHA
+        && recoveryResult.currentHeadOid === OTHER_SHA,
+    ],
+    [
+      'reconcile refuses unverified history, human gates, and unrelated PR identity',
+      reconcileRecovery({ ...recoveryFacts, premergeRecord: { ...recoveryFacts.premergeRecord, verified: false } }).code
+        !== 'REVISION_REQUIRED'
+        && reconcileRecovery({ ...recoveryFacts, issueLabels: ['needs-human'] }).code
+          !== 'REVISION_REQUIRED'
+        && reconcileRecovery({ ...recoveryFacts, draftPr: { ...recoveryFacts.draftPr, number: 13 } }).code
+          !== 'REVISION_REQUIRED',
+    ],
+    [
+      'standalone human:decide stops changed-head reconciliation',
+      reconcileRecovery({ ...recoveryFacts,
+        issueLabels: ['loop-delivered', 'human:decide'],
+      }).code === 'REVISION_HUMAN_GATE_PENDING',
+    ],
+    [
+      'changed delivered head with missing source ownership never recreates a claim',
+      reconcileRecovery({
+        ...recoveryFacts,
+        localClaim: { complete: true, exists: false },
+      }).state === 'block'
+        && reconcileRecovery({
+          ...recoveryFacts,
+          remoteClaim: { complete: true, exists: false },
+        }).state === 'block',
+    ],
+    [
+      'historical A must match its bound record, plan, and lifecycle root',
+      reconcileRecovery({ ...recoveryFacts,
+        premergeRecord: { ...recoveryFacts.premergeRecord, commentId: 'IC_other' },
+      }).code === 'ARTIFACT_IDENTITY_MISMATCH'
+        && reconcileRecovery({ ...recoveryFacts,
+          premergeRecord: { ...recoveryFacts.premergeRecord, bodyHash: '0'.repeat(64) },
+        }).code === 'ARTIFACT_IDENTITY_MISMATCH'
+        && reconcileRecovery({ ...recoveryFacts,
+          lifecycleRootCommentId: 'IC_wrong',
+        }).code === 'ARTIFACT_IDENTITY_MISMATCH'
+        && reconcileRecovery({ ...recoveryFacts,
+          planComment: { ...recoveryFacts.planComment, id: 'IC_other' },
+        }).code === 'ARTIFACT_IDENTITY_MISMATCH',
+    ],
+    [
+      'an in-flight merge never becomes a revision source',
+      beginLifecycleRevision({ ...deliveredA, mergeOid: OTHER_SHA }, requestB).code
+        === 'REVISION_SOURCE_MISMATCH'
+        && reconcileRecovery({ ...recoveryFacts, merge: { complete: true, merged: true,
+          headOid: SHA, mergeOid: OTHER_SHA } }).code !== 'REVISION_REQUIRED',
+    ],
+    [
+      'recovery binds unreviewed B separately from historical A in intent and audit',
+      stagedRecovery.state === 'act'
+        && stagedRecovery.marker.revisionIntent.fromHeadOid === SHA
+        && stagedRecovery.marker.revisionIntent.recoveryHeadOid === OTHER_SHA
+        && advancedRecovery.state === 'act'
+        && advancedRecovery.marker.epoch === 2
+        && advancedRecovery.marker.phase === 'draft-pr'
+        && advancedRecovery.marker.headOid === undefined
+        && recoveryAudit.headOid === SHA
+        && recoveryAudit.recoveryHeadOid === OTHER_SHA
+        && parseLifecycleMarker(serializeLifecycleMarker(advancedRecovery.marker)).ok,
+    ],
+    [
+      'recovery rejects changed B, non-draft PR, and a conflicting staged candidate',
+      advanceLifecycleRevision(stagedRecovery.marker, { ...observedRecovery, headOid: 'c'.repeat(40) }).code
+        === 'REVISION_PREREQUISITE_MISMATCH'
+        && advanceLifecycleRevision(stagedRecovery.marker, { ...observedRecovery, draft: false }).code
+          === 'REVISION_PREREQUISITE_MISMATCH'
+        && beginLifecycleRevision(stagedRecovery.marker, { ...recoveryRequest, recoveryHeadOid: 'c'.repeat(40) }).code
+          === 'REVISION_INTENT_CONFLICT',
+    ],
+    [
+      'legacy same-head shapes stay unchanged and invalid recovery heads fail',
+      !Object.hasOwn(staged.marker.revisionIntent, 'recoveryHeadOid')
+        && staged.marker.revisionIntent.intentHash
+          === createHash('sha256').update(stableJson(requestB)).digest('hex')
+        && !Object.hasOwn(priorA, 'recoveryHeadOid')
+        && parseLifecycleMarker(serializeLifecycleMarker(staged.marker)).ok
+        && beginLifecycleRevision(deliveredA, { ...recoveryRequest, recoveryHeadOid: 'bad' }).code
+          === 'INVALID_REVISION_REQUEST'
+        && beginLifecycleRevision(deliveredA, { ...recoveryRequest, recoveryHeadOid: SHA }).code
+          === 'INVALID_REVISION_REQUEST',
+    ],
     [
       'delivered head stages one immutable revision intent',
       staged.state === 'act'

@@ -3,6 +3,15 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- A delivered, open PR with a new head can start a new draft revision. The driver verifies
+  the old delivery record and current branch separately. It records both heads, keeps the
+  old audit, and requires new exact-head review and gate evidence. A head race or a human
+  gate stops recovery.
+
 ## [0.67.0] - 2026-10-10
 
 ### Changed

@@ -1752,6 +1752,21 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`MERGE_PENDING` on a unit without `loop-blocked`' }),
     ]),
   }),
+  Object.freeze({
+    id: 'delivered-pr-head-moved-before-revision-entry',
+    date: '2026-10-10',
+    symptom: 'Two delivered, open PRs had new merge-updated heads. Pitcrew could not begin '
+      + 'a revision because the old approval named the prior head.',
+    cause: 'The revision request had one head field and the production reader compared the '
+      + 'historical premerge approval with the new live head. Recovery now binds both heads '
+      + 'without treating the old approval as a review of the new one.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'lifecycle-contract.mjs', anchor: 'delivered A with verified history and owned B requests an explicit revision' }),
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'production revision begins once, returns the PR to draft, and keeps A and B separate' }),
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'stale A verdicts and unrelated green CI do not approve B or C; C needs exact-head verdicts' }),
+      Object.freeze({ file: '../skills/pitcrew/SKILL.md', anchor: 'Use A for `expectedHeadOid` and B for optional `recoveryHeadOid`' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>
