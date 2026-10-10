@@ -15,8 +15,9 @@ Notable changes to Autoloop are recorded here. The format follows
   or `POLICY_DENIED`. Tool faults and unknown reasons are refused before any GitHub call.
   Existing block records and trusted answers remain supported; no existing gate is cleared.
   Callers that used other reason codes must use the actual human category or the repair path.
-- The Stop hook shows an unchanged draft-PR reminder once per session. A new head, step,
-  or draft-state change can show it again. Missing step evidence is no longer described as
+- The Stop hook shows an unchanged draft-PR reminder once per session. Expected Pitcrew
+  revision drafts stay silent. A new head, step, or draft-state change can show a reminder again.
+  Missing step evidence is no longer described as
   forgotten publication. Local reminder-storage failures do not block a session; hard errors
   and other diagnostics remain unchanged.
 

@@ -236,6 +236,8 @@ export function checkPrs(prs, issues = null) {
         `PR #${pr.number} (${pr.headRefName}) has invalid loop ownership (${claim.reasonCode}) — make its single closing claim match the branch issue`,
       );
     } else if (pr.isDraft) {
+      const labels = (issues ?? []).find((issue) => issue.number === claim.issue)?.labels ?? [];
+      if (labels.some((label) => (label?.name ?? label) === 'loop:revising')) continue;
       const step = unitStep(issues, claim.issue);
       if (step !== null && step < 10) continue;
       const message = `PR #${pr.number} (${pr.headRefName}) is still draft — `
@@ -1038,6 +1040,10 @@ process.stdout.write(JSON.stringify(result));
     const publishStep = [hook(), hook()];
     save({ issues: [{ ...publication[0], labels: [{ name: 'loop:05-implement' }] }] });
     const midUnit = hook();
+    save({ issues: [{ ...publication[0], labels: [{ name: 'loop:revising' }] }] });
+    const revising = hook();
+    save({ issues: [{ ...publication[0], labels: ['loop:revising'] }] });
+    const plainRevising = hook();
     save({ issues: publication });
     const publishAgain = hook();
     save({ prs: [{ ...initial.prs[0], isDraft: false }], issues: publication });
@@ -1097,6 +1103,8 @@ process.stdout.write(JSON.stringify(result));
           && !gap[1].stdout.includes('PR #3') },
       { name: 'publication-step changes are visible and expected mid-unit drafts stay silent',
         ok: showsDraft(publishStep[0]) && silent(publishStep[1]) && silent(midUnit) && showsDraft(publishAgain) },
+      { name: 'Pitcrew revision drafts are expected and stay silent',
+        ok: silent(revising) && silent(plainRevising) },
       { name: 'ready and absent PR observations clear their old reminder state',
         ok: silent(ready) && showsDraft(draftAgain) && silent(absent) && showsDraft(returned) },
       { name: 'each PR has independent reminder state',
