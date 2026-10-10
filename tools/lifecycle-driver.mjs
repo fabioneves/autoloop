@@ -1156,6 +1156,19 @@ function ensureLocalClaimGit(root, request, viewer) {
   );
 }
 
+function staleRevisionLabel(label) {
+  return label === 'loop-delivered' || label === 'loop-started'
+    || (label.startsWith('loop:') && label !== 'loop:revising');
+}
+
+function assertRevisionLabels(labels) {
+  if (!Array.isArray(labels) || !labels.some((label) => label?.name === 'loop:revising')) {
+    throw new Error('revision label mutation postcondition is invalid');
+  }
+  const gate = labels.find((label) => BLOCKING_LABELS.has(label?.name))?.name;
+  if (gate) throw new Error(`revision label response contains ${gate}`);
+}
+
 function productionAdapters(root) {
   return {
     read: (request) => readOperationalState(request, root),
@@ -1260,16 +1273,10 @@ function productionAdapters(root) {
       const endpoint = `repos/${state.repository.owner}/${state.repository.repo}/issues/`
         + `${state.issue.number}/labels`;
       if (!state.issue.labels.includes('loop:revising')) {
-        const added = mutate(state.repository, endpoint, 'POST', { labels: ['loop:revising'] });
-        if (!Array.isArray(added) || !added.some((label) => label?.name === 'loop:revising')) {
-          throw new Error('revision label addition postcondition is invalid');
-        }
+        assertRevisionLabels(mutate(state.repository, endpoint, 'POST', { labels: ['loop:revising'] }));
       }
-      for (const label of state.issue.labels) {
-        if (label === 'loop-delivered' || label === 'loop-started'
-          || (label.startsWith('loop:') && label !== 'loop:revising')) {
-          mutate(state.repository, `${endpoint}/${encodeURIComponent(label)}`, 'DELETE', {});
-        }
+      for (const label of state.issue.labels.filter(staleRevisionLabel)) {
+        assertRevisionLabels(mutate(state.repository, `${endpoint}/${encodeURIComponent(label)}`, 'DELETE', {}));
       }
     },
     ensureRevisionDraft: (state) => {
@@ -1588,7 +1595,7 @@ export function driveLifecycleRevision(request, context = {}) {
     }
     if (
       !prerequisites.labels.includes('loop:revising')
-      || prerequisites.labels.includes('loop-delivered')
+      || prerequisites.labels.some(staleRevisionLabel)
     ) {
       adapters.ensureRevisionLabels(state);
       continue;
@@ -1842,6 +1849,11 @@ else if (endpoint.endsWith('/issues/7/labels') && method === 'POST') {
 } else if (endpoint.includes('/issues/7/labels/') && method === 'DELETE') {
   const name = decodeURIComponent(endpoint.split('/labels/')[1]);
   state.issue.labels = state.issue.labels.filter((label) => label.name !== name);
+  state.writes.push('delete:' + name);
+  if (state.addHumanOnDelete) {
+    state.issue.labels.push({ name: state.addHumanOnDelete });
+    delete state.addHumanOnDelete;
+  }
   result = state.issue.labels;
 } else if (endpoint.endsWith('/issues/7')) result = state.issue;
 else throw Error('unexpected mock endpoint ' + endpoint + ' method ' + method);
@@ -1939,6 +1951,13 @@ process.stdout.write(JSON.stringify(result));
       ...initial.issue.labels, { name: 'human:decide' },
     ] } });
     const midEffectGate = refuse({ addHumanOnLabels: 'needs-human' });
+    const staleLabels = [...initial.issue.labels, { name: 'loop-started' }, { name: 'loop:09-gate' }];
+    const deleteGate = refuse({
+      issue: { ...initial.issue, labels: staleLabels }, addHumanOnDelete: 'human:decide',
+    });
+    setState({ issue: { ...initial.issue, labels: staleLabels }, haltAfter: 'marker,labels,delete:loop-delivered' });
+    const partialLabels = run();
+    const labelReplay = run();
     const wrongActor = refuse({ viewer: 'reader', roles: { ...initial.roles, reader: 'read' } });
     const missingNewPlan = refuse({ comments: initial.comments.filter((item) => item.node_id !== 'IC_revision_plan') });
     const headChangedWhileReading = refuse({ shiftHeadOnFirstRef: nextHead });
@@ -1986,7 +2005,7 @@ process.stdout.write(JSON.stringify(result));
         ...request.context.intent, mergePolicy: 'auto',
       } },
     });
-    const interrupted = ['marker', 'marker,labels', 'marker,labels,draft', 'marker,labels,draft,marker']
+    const interrupted = ['marker', 'marker,labels', 'marker,labels,delete:loop-delivered', 'marker,labels,delete:loop-delivered,draft', 'marker,labels,delete:loop-delivered,draft,marker']
       .map((haltAfter) => {
         setState({ haltAfter });
         const before = run();
@@ -2076,7 +2095,7 @@ process.stdout.write(JSON.stringify(result));
       ['production revision begins once, returns the PR to draft, and keeps A and B separate',
         success.status === 0 && success.value?.code === 'REVISION_ALREADY_BEGUN'
           && afterSuccess.pr.draft === true
-          && afterSuccess.writes.join(',') === 'marker,labels,draft,marker'
+          && afterSuccess.writes.join(',') === 'marker,labels,delete:loop-delivered,draft,marker'
           && currentMarker(afterSuccess).epoch === 2
           && currentMarker(afterSuccess).phase === 'draft-pr'
           && currentMarker(afterSuccess).headOid === undefined
@@ -2091,12 +2110,12 @@ process.stdout.write(JSON.stringify(result));
           && headDisagreement.state.writes.length === 0],
       ['B moving to C after labels leaves staged intent but no new epoch',
         headRace.value?.state === 'block'
-          && headRace.state.writes.join(',') === 'marker,labels'
+          && headRace.state.writes.join(',') === 'marker,labels,delete:loop-delivered'
           && currentMarker(headRace.state).revisionIntent?.recoveryHeadOid === currentHead
           && currentMarker(headRace.state).epoch === 1],
       ['B moving to C during draft conversion cannot start an epoch',
         draftRace.value?.state === 'block'
-          && draftRace.state.writes.join(',') === 'marker,labels,draft'
+          && draftRace.state.writes.join(',') === 'marker,labels,delete:loop-delivered,draft'
           && currentMarker(draftRace.state).epoch === 1
           && draftRace.state.pr.draft === true],
       ['a second merge-updated head enters its own exact-head revision',
@@ -2123,6 +2142,17 @@ process.stdout.write(JSON.stringify(result));
           && midEffectGate.state.issue.labels.some((label) => label.name === 'needs-human')
           && midEffectGate.state.writes.join(',') === 'marker,labels'
           && currentMarker(midEffectGate.state).epoch === 1],
+      ['a human gate in a deletion response prevents every later label mutation',
+        deleteGate.status !== 0
+          && deleteGate.state.writes.join(',') === 'marker,labels,delete:loop-delivered'
+          && deleteGate.state.issue.labels.some((label) => label.name === 'human:decide')
+          && deleteGate.state.issue.labels.some((label) => label.name === 'loop-started')
+          && currentMarker(deleteGate.state).epoch === 1],
+      ['partial label deletion replays before the revision epoch advances',
+        partialLabels.status !== 0
+          && labelReplay.value?.code === 'REVISION_ALREADY_BEGUN'
+          && labelReplay.state.issue.labels.map((label) => label.name).join(',') === 'loop:revising'
+          && labelReplay.state.writes.join(',') === 'marker,labels,delete:loop-delivered,delete:loop-started,delete:loop:09-gate,draft,marker'],
       ['a closed or merged PR, a real human gate, or an untrusted actor has no effects',
         closedPr.value?.code === 'REVISION_OWNERSHIP_MISMATCH'
           && mergedPr.value?.code === 'REVISION_OWNERSHIP_MISMATCH'
@@ -2137,7 +2167,7 @@ process.stdout.write(JSON.stringify(result));
           && inFlightMerge.state.writes.length === 0],
       ['legacy same-head revision remains readable and its replay makes no writes',
         sameHead.value?.code === 'REVISION_ALREADY_BEGUN'
-          && sameHead.state.writes.join(',') === 'marker,labels,marker'
+          && sameHead.state.writes.join(',') === 'marker,labels,delete:loop-delivered,marker'
           && !Object.hasOwn(currentMarker(sameHead.state).priorRevisions[0], 'recoveryHeadOid')
           && sameHeadReplay.value?.code === 'REVISION_ALREADY_BEGUN'
           && sameHeadReplay.state.writes.length === sameHead.state.writes.length],
@@ -2151,7 +2181,7 @@ process.stdout.write(JSON.stringify(result));
         interrupted.every(({ before, finished }) =>
           before.status !== 0 && before.stderr.includes('injected interruption')
           && finished.value?.code === 'REVISION_ALREADY_BEGUN'
-          && finished.state.writes.join(',') === 'marker,labels,draft,marker'
+          && finished.state.writes.join(',') === 'marker,labels,delete:loop-delivered,draft,marker'
           && currentMarker(finished.state).priorRevisions.length === 1)],
       ['a competing staged revision cannot replace the first B binding',
         stagedOnly.status !== 0 && stagedOnly.state.writes.join(',') === 'marker'
