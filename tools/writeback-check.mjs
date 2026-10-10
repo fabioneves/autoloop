@@ -51,7 +51,11 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync,
+  readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync,
+  symlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -63,6 +67,7 @@ import { blockedByIssueNumbers } from './snapshot-contract.mjs';
 // The hook runs from the plugin, so its own location never names the
 // repository: CLAUDE_PROJECT_DIR does.
 const ROOT = hookRoot();
+const MAX_DRAFT_REMINDER_BYTES = 64 * 1024;
 
 function ghJson(cmd) {
   try {
@@ -259,6 +264,37 @@ function draftReminderDelta(drafts, previous) {
   };
 }
 
+function readDraftReminderState(path) {
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  try {
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile() || stats.size > MAX_DRAFT_REMINDER_BYTES) {
+      throw new Error('reminder state is not a bounded regular file');
+    }
+    const buffer = Buffer.alloc(stats.size + 1);
+    const bytes = readSync(descriptor, buffer, 0, buffer.length, 0);
+    if (bytes !== stats.size) throw new Error('reminder state changed during its read');
+    return JSON.parse(buffer.subarray(0, bytes).toString('utf8'));
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function writeDraftReminderState(path, seen) {
+  const temporary = `${path}.${process.pid}.tmp`;
+  const descriptor = openSync(temporary, 'wx', 0o600);
+  try {
+    try {
+      writeFileSync(descriptor, JSON.stringify({ v: 1, seen }));
+    } finally {
+      closeSync(descriptor);
+    }
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
 function draftRemindersOnce(root, sessionId, drafts) {
   const messages = drafts.map((draft) => draft.message);
   if (typeof sessionId !== 'string' || !sessionId.trim()) return messages;
@@ -270,27 +306,16 @@ function draftRemindersOnce(root, sessionId, drafts) {
     const path = join(directory, `${key}.json`);
     let previous = null;
     try {
-      const stored = JSON.parse(readFileSync(path, 'utf8'));
+      const stored = readDraftReminderState(path);
       if (stored?.v === 1 && stored.seen !== null && typeof stored.seen === 'object'
         && !Array.isArray(stored.seen) && Object.entries(stored.seen).every(([number, fingerprint]) =>
           /^[1-9]\d*$/u.test(number) && /^[0-9a-f]{64}$/u.test(fingerprint))) previous = stored.seen;
-    } catch {
-      previous = null;
+    } catch (error) {
+      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
     }
     const delta = draftReminderDelta(drafts, previous);
     mkdirSync(directory, { recursive: true });
-    const temporary = `${path}.${process.pid}.tmp`;
-    const descriptor = openSync(temporary, 'wx', 0o600);
-    try {
-      try {
-        writeFileSync(descriptor, JSON.stringify({ v: 1, seen: delta.seen }));
-      } finally {
-        closeSync(descriptor);
-      }
-      renameSync(temporary, path);
-    } finally {
-      rmSync(temporary, { force: true });
-    }
+    writeDraftReminderState(path, delta.seen);
     return delta.reminders;
   } catch {
     return messages;
@@ -1011,9 +1036,9 @@ else if (args[0] === 'issue' && args[1] === 'list') {
 } else throw Error('unexpected mock command');
 process.stdout.write(JSON.stringify(result));
 `, { mode: 0o755 });
-    const hook = ({ root = project, session = 'session-a', envSession = '', active = false } = {}) => spawnSync(
+    const hook = ({ root = project, session = 'session-a', envSession = '', active = false, timeout = 30000 } = {}) => spawnSync(
       process.execPath, [fileURLToPath(import.meta.url)], {
-        cwd: scratch, encoding: 'utf8',
+        cwd: scratch, encoding: 'utf8', timeout, killSignal: 'SIGKILL',
         input: JSON.stringify({ stop_hook_active: active, ...(session === null ? {} : { session_id: session }) }),
         env: { ...process.env, CLAUDE_PROJECT_DIR: root, CLAUDE_CODE_SESSION_ID: envSession,
           MOCK_WRITEBACK_STATE: statePath, PATH: `${bin}:${process.env.PATH}` },
@@ -1076,8 +1101,25 @@ process.stdout.write(JSON.stringify(result));
     const corrupt = [hook({ session: 'corrupt' }), hook({ session: 'corrupt' })];
     writeFileSync(cachePath('interrupted') + '.tmp', '{partial');
     const interrupted = [hook({ session: 'interrupted' }), hook({ session: 'interrupted' })];
+    execFileSync('mkfifo', [cachePath('fifo')]);
+    const fifo = hook({ session: 'fifo', timeout: 5000 });
+    symlinkSync(cachePath('fifo'), cachePath('symlink'));
+    const symlink = hook({ session: 'symlink', timeout: 5000 });
+    symlinkSync(cachePath('interrupted'), cachePath('linked-file'));
+    const regularLink = hook({ session: 'linked-file' });
+    hook({ session: 'oversized' });
+    const oversizedBody = readFileSync(cachePath('oversized'), 'utf8') + ' '.repeat(64 * 1024);
+    writeFileSync(cachePath('oversized'), oversizedBody);
+    const oversized = hook({ session: 'oversized' });
+    const oversizedPreserved = statSync(cachePath('oversized')).size === Buffer.byteLength(oversizedBody);
     mkdirSync(cachePath('unwritable'));
     const unwritable = [hook({ session: 'unwritable' }), hook({ session: 'unwritable' })];
+    let failedPublication = false;
+    try {
+      writeDraftReminderState(cachePath('unwritable'), {});
+    } catch (error) {
+      failedPublication = error.syscall === 'rename';
+    }
     const leftover = readdirSync(cacheDirectory)
       .filter((name) => join(cacheDirectory, name).startsWith(cachePath('unwritable') + '.'));
     const recursive = hook({ session: 'recursive', active: true });
@@ -1120,9 +1162,15 @@ process.stdout.write(JSON.stringify(result));
       { name: 'corrupt or interrupted reminder storage cannot suppress the first warning',
         ok: showsDraft(corrupt[0]) && silent(corrupt[1])
           && showsDraft(interrupted[0]) && silent(interrupted[1]) },
+      { name: 'nonregular cache entries cannot block the hook or be replaced',
+        ok: showsDraft(fifo) && showsDraft(symlink) && showsDraft(regularLink)
+          && lstatSync(cachePath('fifo')).isFIFO() && lstatSync(cachePath('symlink')).isSymbolicLink()
+          && lstatSync(cachePath('linked-file')).isSymbolicLink() },
+      { name: 'oversized cache entries are ignored without suppression or replacement',
+        ok: showsDraft(oversized) && oversizedPreserved },
       { name: 'unwritable reminder storage fails open on every Stop',
         ok: unwritable.every(showsDraft) },
-      { name: 'failed reminder publication leaves no temporary state', ok: leftover.length === 0 },
+      { name: 'failed reminder publication leaves no temporary state', ok: failedPublication && leftover.length === 0 },
       { name: 'Stop recursion does not consume the next draft reminder',
         ok: silent(recursive) && showsDraft(afterRecursion) },
       { name: 'hard Stops still block after an unchanged draft reminder was shown',

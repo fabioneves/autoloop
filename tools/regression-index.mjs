@@ -1793,6 +1793,8 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'a comment update stays silent but a new head gets one reminder' }),
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'Pitcrew revision drafts are expected and stay silent' }),
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'unwritable reminder storage fails open on every Stop' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'nonregular cache entries cannot block the hook or be replaced' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'oversized cache entries are ignored without suppression or replacement' }),
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'hard Stops still block after an unchanged draft reminder was shown' }),
     ]),
   }),

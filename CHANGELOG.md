@@ -18,8 +18,9 @@ Notable changes to Autoloop are recorded here. The format follows
 - The Stop hook shows an unchanged draft-PR reminder once per session. Expected Pitcrew
   revision drafts stay silent. A new head, step, or draft-state change can show a reminder again.
   Missing step evidence is no longer described as
-  forgotten publication. Local reminder-storage failures do not block a session; hard errors
-  and other diagnostics remain unchanged.
+  forgotten publication. Local reminder-storage failures do not block a session. Nonregular
+  and oversized cache entries are ignored without replacement. Hard errors and other diagnostics
+  remain unchanged.
 
 ## [0.67.0] - 2026-10-10
 
