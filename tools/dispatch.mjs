@@ -919,6 +919,13 @@ export function skillRoots(plugins = pluginsDir(), cwd = process.cwd()) {
   };
 }
 
+const WRITING_RULE = 'Writing rule: Use ASD-STE100 Simplified Technical English, Issue 9, for all prose, output, '
+  + 'and documentation that you write. Use approved words only with their approved meanings and parts '
+  + 'of speech. Use technical nouns and verbs only as the standard permits. Keep code, commands, '
+  + 'identifiers, paths, URLs, exact quotations, required schemas and data formats, and factual '
+  + 'meaning unchanged. Do not claim that text conforms to the standard unless you check it against '
+  + 'the standard.';
+
 export function composeBrief(role, prompt, briefsDir = BRIEFS_DIR, roots = skillRoots()) {
   const path = join(briefsDir, `${role}.md`);
   let template;
@@ -931,7 +938,7 @@ export function composeBrief(role, prompt, briefsDir = BRIEFS_DIR, roots = skill
     roots[name] ?? `the ${name.replace('-skills', '')}${name === 'agent-skills' ? '-skills' : ''} plugin's skills directory`);
   return {
     ok: true,
-    prompt: `${resolved.trimEnd()}\n\n---\n\n${prompt}`,
+    prompt: `${resolved.trimEnd()}\n\n${WRITING_RULE}\n\n---\n\n${prompt}`,
     sha256: createHash('sha256').update(template).digest('hex'),
   };
 }
@@ -1342,6 +1349,12 @@ function selfTest() {
   // #350's briefs were about half standing role text the orchestrator rewrote
   // from memory each time; the template carries it now.
   {
+    const expectedWritingRule = 'Writing rule: Use ASD-STE100 Simplified Technical English, Issue 9, for all prose, output, '
+      + 'and documentation that you write. Use approved words only with their approved meanings and parts '
+      + 'of speech. Use technical nouns and verbs only as the standard permits. Keep code, commands, '
+      + 'identifiers, paths, URLs, exact quotations, required schemas and data formats, and factual '
+      + 'meaning unchanged. Do not claim that text conforms to the standard unless you check it against '
+      + 'the standard.';
     const briefs = mkdtempSync(join(tmpdir(), 'dispatch-briefs-'));
     writeFileSync(join(briefs, 'plan-review.md'), 'Adversarial plan review.\n');
     const composed = (() => {
@@ -1362,8 +1375,9 @@ function selfTest() {
     check(
       'a role brief template comes first, then the unit facts, and its hash is stamped',
       composed.ok === true
-        && composed.prompt === 'Adversarial plan review.\n\n---\n\nPlan: /tmp/p.md'
-        && /^[0-9a-f]{64}$/u.test(composed.sha256),
+        && composed.prompt === `Adversarial plan review.\n\n${expectedWritingRule}\n\n---\n\nPlan: /tmp/p.md`
+        && /^[0-9a-f]{64}$/u.test(composed.sha256)
+        && composed.sha256 === createHash('sha256').update('Adversarial plan review.\n').digest('hex'),
     );
     const tokened = (() => {
       const dir = mkdtempSync(join(tmpdir(), 'dispatch-briefs-'));
@@ -1425,6 +1439,21 @@ function selfTest() {
           }
         })();
         return brief.ok === true && reviewerPromptProblem(role, brief.prompt) === null;
+      }));
+    const unitFacts = [
+      'Fact: issue #42 has 3 tasks.',
+      'Command: `git status --short`',
+      'Path: `/tmp/unit facts.md`',
+      'URL: https://example.test/a?b=c',
+      'Quote: "Keep this exact text."',
+      'JSON: {"result":"pass","count":3}',
+    ].join('\n');
+    check('every role gets the writing rule and keeps the unit facts unchanged',
+      ROLE_NAMES.every((role) => {
+        const brief = composeBrief(role, unitFacts);
+        return brief.ok === true
+          && brief.prompt.includes(expectedWritingRule)
+          && brief.prompt.endsWith(`\n\n---\n\n${unitFacts}`);
       }));
   }
 
