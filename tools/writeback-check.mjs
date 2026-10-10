@@ -36,13 +36,13 @@
 // reminders too: both are the run working, not the run abandoned.
 //
 // Reminders (JSON systemMessage on stdout, exit 0 — never block):
-//   - a claimed loop PR still in draft (may be mid-unit OR a forgotten autoloop:dev step 10;
-//     a stricter variant hard-fails this — we deliberately soften it because thread/CI state needs
-//     GraphQL and step 10 / the pitcrew own readiness)
+//   - a claimed draft with no step evidence, or a step at/after publication;
+//     shown once per relevant state per session, never enforced — thread/CI state
+//     belongs to step 10 and Pitcrew
 //   - an issue wearing a terminal loop label (loop-delivered / loop-blocked) plus a leftover
 //     loop:* step label — a crashed or sloppy terminal transition stranded the step timeline
 //
-// Loop-safety: read-only; self-clearing (fill the gap → next run passes); fail-open on
+// Loop-safety: only session-local reminder writes; self-clearing (fill the gap → next run passes); fail-open on
 // every infrastructure error (gh missing, offline, rate-limited) — a Stop hook must
 // never wedge a session. --self-test runs the pure-function fixtures.
 //
@@ -50,12 +50,13 @@
 // Code's Stop-hook contract.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
-import { loopRunIsLive, loopRunIsOpen, ownRunMarkers } from './run-markers.mjs';
+import { loopRunIsLive, loopRunIsOpen, ownRunMarkers, runMarkerDirectory } from './run-markers.mjs';
 import { guardedRoot, hookRoot } from './hook-root.mjs';
 import { blockedByIssueNumbers } from './snapshot-contract.mjs';
 
@@ -210,10 +211,23 @@ function unitStep(issues, number) {
   return steps.length === 0 ? null : Math.max(...steps);
 }
 
-/** Pure: classify PRs → { hard: string[], reminders: string[] } */
+function draftFingerprint(pr, issue, issues) {
+  const labels = (issues ?? []).find((entry) => entry.number === issue)?.labels;
+  if (!Number.isSafeInteger(pr.number) || pr.number < 1
+    || !/^[0-9a-f]{40}$/iu.test(pr.headRefOid ?? '') || !Array.isArray(labels)) return null;
+  const steps = labels.map((label) => label?.name ?? label)
+    .filter((name) => typeof name === 'string'
+      && (name.startsWith('loop:') || name === 'loop-delivered' || name === 'loop-blocked')).sort();
+  return createHash('sha256').update(JSON.stringify([
+    pr.headRefName, pr.headRefOid.toLowerCase(), steps,
+  ])).digest('hex');
+}
+
+/** Pure: classify PRs and retain draft metadata for session-local reminders. */
 export function checkPrs(prs, issues = null) {
   const hard = [];
   const reminders = [];
+  const drafts = [];
   for (const pr of prs ?? []) {
     if (!LOOP_BRANCH_RE.test(pr.headRefName ?? '')) continue;
     const claim = parseLoopClaim({ branch: pr.headRefName, body: pr.body });
@@ -221,13 +235,64 @@ export function checkPrs(prs, issues = null) {
       hard.push(
         `PR #${pr.number} (${pr.headRefName}) has invalid loop ownership (${claim.reasonCode}) — make its single closing claim match the branch issue`,
       );
-    } else if (pr.isDraft && (unitStep(issues, claim.issue) ?? 10) >= 10) {
-      // Draft is expected until step 10 publishes it; only a draft past that
-      // (or with no step at all) may be a forgotten `gh pr ready`.
-      reminders.push(`PR #${pr.number} (${pr.headRefName}) is claimed but still draft — mid-unit, or a forgotten \`gh pr ready\` (autoloop:dev step 10)?`);
+    } else if (pr.isDraft) {
+      const step = unitStep(issues, claim.issue);
+      if (step !== null && step < 10) continue;
+      const message = `PR #${pr.number} (${pr.headRefName}) is still draft — `
+        + (step === null ? 'no publication step is recorded.'
+          : `step ${step} is recorded; check publication (autoloop:dev step 10).`);
+      reminders.push(message);
+      drafts.push({ number: pr.number, fingerprint: draftFingerprint(pr, claim.issue, issues), message });
     }
   }
-  return { hard, reminders };
+  return { hard, reminders, drafts };
+}
+
+function draftReminderDelta(drafts, previous) {
+  return {
+    reminders: drafts.filter((draft) => draft.fingerprint === null
+      || previous?.[draft.number] !== draft.fingerprint).map((draft) => draft.message),
+    seen: Object.fromEntries(drafts.filter((draft) => draft.fingerprint !== null)
+      .map((draft) => [draft.number, draft.fingerprint])),
+  };
+}
+
+function draftRemindersOnce(root, sessionId, drafts) {
+  const messages = drafts.map((draft) => draft.message);
+  if (typeof sessionId !== 'string' || !sessionId.trim()) return messages;
+  try {
+    const markerDirectory = runMarkerDirectory(root);
+    if (markerDirectory === null) return messages;
+    const directory = join(dirname(markerDirectory), 'draft-reminders');
+    const key = createHash('sha256').update(sessionId).digest('hex');
+    const path = join(directory, `${key}.json`);
+    let previous = null;
+    try {
+      const stored = JSON.parse(readFileSync(path, 'utf8'));
+      if (stored?.v === 1 && stored.seen !== null && typeof stored.seen === 'object'
+        && !Array.isArray(stored.seen) && Object.entries(stored.seen).every(([number, fingerprint]) =>
+          /^[1-9]\d*$/u.test(number) && /^[0-9a-f]{64}$/u.test(fingerprint))) previous = stored.seen;
+    } catch {
+      previous = null;
+    }
+    const delta = draftReminderDelta(drafts, previous);
+    mkdirSync(directory, { recursive: true });
+    const temporary = `${path}.${process.pid}.tmp`;
+    const descriptor = openSync(temporary, 'wx', 0o600);
+    try {
+      try {
+        writeFileSync(descriptor, JSON.stringify({ v: 1, seen: delta.seen }));
+      } finally {
+        closeSync(descriptor);
+      }
+      renameSync(temporary, path);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+    return delta.reminders;
+  } catch {
+    return messages;
+  }
 }
 
 /** Pure: open loop PRs carrying commits that exist only in the local checkout.
@@ -878,7 +943,7 @@ function selfTest() {
     hardWire.stderr.includes('Write-back contract gaps') &&
     hardWire.stderr.includes('PR #3') &&
     renderHookResult(['gap'], []).stderr.includes('reminders') === false;
-  const gate = gateCases();
+  const gate = [...gateCases(), ...draftReminderCases()];
   for (const { name, ok: passed } of gate) if (!passed) console.error(`FAIL ${name}`);
   ok = ok && gate.every(({ ok: passed }) => passed);
   const answersSurface = answered.length === 1 && answered[0].includes('#562') && answered[0].includes('re-prime');
@@ -916,6 +981,151 @@ function gateCases() {
   }
 }
 
+function draftReminderCases() {
+  const scratch = mkdtempSync(join(tmpdir(), 'writeback-reminders-'));
+  try {
+    const bin = join(scratch, 'bin');
+    mkdirSync(bin);
+    const project = join(scratch, 'project');
+    execFileSync('git', ['init', '-q', project]);
+    mkdirSync(join(project, '.autoloop'));
+    writeFileSync(join(project, '.autoloop', 'config.json'), '{}');
+    const statePath = join(scratch, 'github.json');
+    const initial = {
+      prs: [{ number: 3, headRefName: 'fix/gh-3-z', baseRefName: 'main', body: 'Closes #3',
+        isDraft: true, headRefOid: 'a'.repeat(40), updatedAt: '2026-01-01T12:00:00Z' }],
+      issues: [{ number: 3, labels: [{ name: 'loop-ready' }], body: '' }],
+    };
+    const save = (patch = {}) => writeFileSync(statePath, JSON.stringify({ ...structuredClone(initial), ...patch }));
+    writeFileSync(join(bin, 'gh'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const state = JSON.parse(fs.readFileSync(process.env.MOCK_WRITEBACK_STATE, 'utf8'));
+const args = process.argv.slice(2);
+let result;
+if (args[0] === 'pr' && args[1] === 'list') result = args.includes('open') ? state.prs : [];
+else if (args[0] === 'issue' && args[1] === 'list') {
+  if (state.failIssues && !args.includes('--label')) process.exit(1);
+  result = args.includes('--label') ? [] : state.issues;
+} else throw Error('unexpected mock command');
+process.stdout.write(JSON.stringify(result));
+`, { mode: 0o755 });
+    const hook = ({ root = project, session = 'session-a', envSession = '', active = false } = {}) => spawnSync(
+      process.execPath, [fileURLToPath(import.meta.url)], {
+        cwd: scratch, encoding: 'utf8',
+        input: JSON.stringify({ stop_hook_active: active, ...(session === null ? {} : { session_id: session }) }),
+        env: { ...process.env, CLAUDE_PROJECT_DIR: root, CLAUDE_CODE_SESSION_ID: envSession,
+          MOCK_WRITEBACK_STATE: statePath, PATH: `${bin}:${process.env.PATH}` },
+      },
+    );
+    const showsDraft = (result) => result.status === 0 && result.stdout.includes('PR #3');
+    const silent = (result) => result.status === 0 && result.stdout === '';
+    save();
+    const first = hook();
+    const repeated = hook();
+    save({ prs: [{ ...initial.prs[0], updatedAt: '2026-01-02T12:00:00Z' }] });
+    const commentOnly = hook();
+    save({ prs: [{ ...initial.prs[0], headRefOid: 'b'.repeat(40) }] });
+    const newHead = hook();
+    const headRepeated = hook();
+    const otherSession = hook({ session: 'session-b' });
+    const otherRepeated = hook({ session: 'session-b' });
+    const noIdentity = [hook({ session: null }), hook({ session: null })];
+    const fallback = [hook({ session: null, envSession: 'fallback' }), hook({ session: null, envSession: 'fallback' })];
+    save({ prs: [...initial.prs, { number: 99, headRefName: 'fix/gh-99-bad', body: 'Closes #98', isDraft: true }] });
+    const gap = [hook(), hook()];
+    const publication = [{ number: 3, labels: [{ name: 'loop:10-publish' }], body: '' }];
+    save({ issues: publication });
+    const publishStep = [hook(), hook()];
+    save({ issues: [{ ...publication[0], labels: [{ name: 'loop:05-implement' }] }] });
+    const midUnit = hook();
+    save({ issues: publication });
+    const publishAgain = hook();
+    save({ prs: [{ ...initial.prs[0], isDraft: false }], issues: publication });
+    const ready = hook();
+    save({ issues: publication });
+    const draftAgain = hook();
+    save({ prs: [] });
+    const absent = hook();
+    save({ issues: publication });
+    const returned = hook();
+    const secondPr = { ...initial.prs[0], number: 4, headRefName: 'fix/gh-4-z', body: 'Closes #4' };
+    save({ prs: [...initial.prs, secondPr], issues: [...publication, { number: 4, labels: [], body: '' }] });
+    const addedPr = [hook(), hook()];
+    const otherRoot = join(scratch, 'other-project');
+    execFileSync('git', ['init', '-q', otherRoot]);
+    mkdirSync(join(otherRoot, '.autoloop'));
+    writeFileSync(join(otherRoot, '.autoloop', 'config.json'), '{}');
+    const otherRepository = [hook({ root: otherRoot }), hook({ root: otherRoot })];
+    save();
+    const precedence = [hook({ session: 'payload', envSession: 'env-one' }), hook({ session: 'payload', envSession: 'env-two' })];
+    save({ failIssues: true });
+    const incomplete = [hook(), hook()];
+    save({ prs: [{ ...initial.prs[0], headRefOid: undefined }] });
+    const noHead = [hook(), hook()];
+    save();
+    const cacheDirectory = join(project, '.git', 'autoloop', 'draft-reminders');
+    mkdirSync(cacheDirectory, { recursive: true });
+    const cachePath = (session) => join(cacheDirectory, `${createHash('sha256').update(session).digest('hex')}.json`);
+    writeFileSync(cachePath('corrupt'), '{bad');
+    const corrupt = [hook({ session: 'corrupt' }), hook({ session: 'corrupt' })];
+    writeFileSync(cachePath('interrupted') + '.tmp', '{partial');
+    const interrupted = [hook({ session: 'interrupted' }), hook({ session: 'interrupted' })];
+    mkdirSync(cachePath('unwritable'));
+    const unwritable = [hook({ session: 'unwritable' }), hook({ session: 'unwritable' })];
+    const leftover = readdirSync(cacheDirectory)
+      .filter((name) => join(cacheDirectory, name).startsWith(cachePath('unwritable') + '.'));
+    const recursive = hook({ session: 'recursive', active: true });
+    const afterRecursion = hook({ session: 'recursive' });
+    save({ prs: [...initial.prs, { number: 99, headRefName: 'fix/gh-99-bad', body: 'Closes #98', isDraft: true }] });
+    const runDirectory = join(project, '.git', 'autoloop', 'run');
+    mkdirSync(runDirectory, { recursive: true });
+    writeFileSync(join(runDirectory, 'fixture.json'), JSON.stringify({ version: 1, pids: [process.pid] }));
+    const hardStops = [hook(), hook()];
+    return [
+      { name: 'the real Stop hook emits an unchanged draft reminder once per session',
+        ok: showsDraft(first) && silent(repeated) },
+      { name: 'missing step evidence is not described as forgotten publication',
+        ok: showsDraft(first) && !first.stdout.includes('forgotten') },
+      { name: 'a comment update stays silent but a new head gets one reminder',
+        ok: silent(commentOnly) && showsDraft(newHead) && silent(headRepeated) },
+      { name: 'a second session has independent draft reminders',
+        ok: showsDraft(otherSession) && silent(otherRepeated) },
+      { name: 'missing session identity fails open and the environment identity is a fallback',
+        ok: noIdentity.every(showsDraft) && showsDraft(fallback[0]) && silent(fallback[1]) },
+      { name: 'unchanged non-draft diagnostics are never suppressed',
+        ok: gap.every((result) => result.status === 0 && result.stdout.includes('invalid loop ownership'))
+          && !gap[1].stdout.includes('PR #3') },
+      { name: 'publication-step changes are visible and expected mid-unit drafts stay silent',
+        ok: showsDraft(publishStep[0]) && silent(publishStep[1]) && silent(midUnit) && showsDraft(publishAgain) },
+      { name: 'ready and absent PR observations clear their old reminder state',
+        ok: silent(ready) && showsDraft(draftAgain) && silent(absent) && showsDraft(returned) },
+      { name: 'each PR has independent reminder state',
+        ok: addedPr[0].status === 0 && addedPr[0].stdout.includes('PR #4')
+          && !addedPr[0].stdout.includes('PR #3') && silent(addedPr[1]) },
+      { name: 'repositories isolate reminder state even with the same session ID',
+        ok: showsDraft(otherRepository[0]) && silent(otherRepository[1]) },
+      { name: 'the hook payload session ID takes precedence over the environment',
+        ok: showsDraft(precedence[0]) && silent(precedence[1]) },
+      { name: 'incomplete issue or head evidence cannot suppress draft reminders',
+        ok: incomplete.every((result) => showsDraft(result) && result.stdout.includes('could not be listed'))
+          && noHead.every(showsDraft) },
+      { name: 'corrupt or interrupted reminder storage cannot suppress the first warning',
+        ok: showsDraft(corrupt[0]) && silent(corrupt[1])
+          && showsDraft(interrupted[0]) && silent(interrupted[1]) },
+      { name: 'unwritable reminder storage fails open on every Stop',
+        ok: unwritable.every(showsDraft) },
+      { name: 'failed reminder publication leaves no temporary state', ok: leftover.length === 0 },
+      { name: 'Stop recursion does not consume the next draft reminder',
+        ok: silent(recursive) && showsDraft(afterRecursion) },
+      { name: 'hard Stops still block after an unchanged draft reminder was shown',
+        ok: hardStops.every((result) => result.status === 2 && result.stderr.includes('invalid loop ownership'))
+          && !hardStops[1].stderr.includes('PR #3') },
+    ];
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
   // Outside an open run only a devendored autoloop repository is checked;
@@ -923,14 +1133,16 @@ function main() {
   if (guardedRoot(ROOT) === null) process.exit(0);
 
   // Never re-block a Stop that a previous block already continued.
+  let sessionId = process.env.CLAUDE_CODE_SESSION_ID;
   try {
     const payload = JSON.parse(readFileSync(0, 'utf8'));
     if (payload?.stop_hook_active) process.exit(0);
+    if (typeof payload?.session_id === 'string' && payload.session_id.trim()) sessionId = payload.session_id;
   } catch {
     /* no payload (manual run) — proceed */
   }
 
-  const prs = ghJson('pr list --state open --json number,headRefName,baseRefName,body,isDraft,updatedAt --limit 50');
+  const prs = ghJson('pr list --state open --json number,headRefName,headRefOid,baseRefName,body,isDraft,updatedAt --limit 50');
   const issues = ghJson('issue list --label loop-blocked --state open --json number,comments --limit 50');
   if (prs === null && issues === null) {
     // Fail open, but not mute. This branch fired for a completely different
@@ -947,7 +1159,10 @@ function main() {
   const merged = ghJson('pr list --state merged --json number,headRefName,body --limit 20');
   const openIssues = ghJson(OPEN_ISSUES_QUERY);
 
-  const { hard, reminders } = checkPrs(prs, openIssues);
+  const checked = checkPrs(prs, openIssues);
+  const hard = checked.hard;
+  const reminders = prs !== null && openIssues !== null
+    ? draftRemindersOnce(ROOT, sessionId, checked.drafts) : checked.reminders;
   const nowMs = Date.now();
   const streamLive = runInFlightEvidence([], dispatchStreamAgeMs(ROOT), nowMs);
   const processes = dispatchProcesses(ROOT);

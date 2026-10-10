@@ -1781,6 +1781,20 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: '../skills/pitcrew/SKILL.md', anchor: 'Tool faults and incomplete evidence are not human decisions.' }),
     ]),
   }),
+  Object.freeze({
+    id: 'unchanged-draft-reminder-repeated-on-unrelated-stops',
+    date: '2026-10-10',
+    symptom: 'The Stop hook repeated the same draft-PR warning after several unrelated '
+      + 'read-only replies.',
+    cause: 'Draft classification had no session-local state. The hook now records only '
+      + 'draft-reminder fingerprints, while hard errors and other diagnostics remain active.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'the real Stop hook emits an unchanged draft reminder once per session' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'a comment update stays silent but a new head gets one reminder' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'unwritable reminder storage fails open on every Stop' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'hard Stops still block after an unchanged draft reminder was shown' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>
