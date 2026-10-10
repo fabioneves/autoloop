@@ -843,6 +843,7 @@ function readOperationalState(request, root) {
     && !merged
     && remote.exists === true
     && remote.headOid !== marker.headOid
+    && premerge.author !== null
     && !authorizedRole(roleOf(premerge.author), premerge.author, viewer)
   ) {
     throw new Error('historical premerge record author is not authorized');
@@ -1805,6 +1806,11 @@ else if (endpoint === 'graphql') {
   }
 } else if (endpoint.includes('/collaborators/')) {
   const login = endpoint.split('/').at(-2);
+  if (login === 'null') {
+    state.nullAuthorQuery = true;
+    fs.writeFileSync(path, JSON.stringify(state));
+    throw Error('unexpected null collaborator');
+  }
   result = { role_name: state.roles[login] || 'read' };
 } else if (endpoint.includes('/git/ref/heads/')) {
   if (state.refMissing) {
@@ -1933,6 +1939,12 @@ process.stdout.write(JSON.stringify(result));
     const wrongRecordComments = structuredClone(initial.comments);
     wrongRecordComments[3].body += '\n';
     const malformedRecord = refuse({ comments: wrongRecordComments });
+    const missingRecordComments = initial.comments.filter((item) => item.node_id !== 'IC_premerge');
+    const missingRecord = refuse({ comments: missingRecordComments });
+    setState({ comments: missingRecordComments });
+    const missingRecordReconcile = run('--reconcile-json', {
+      ...request.context, schemaVersion: 1, lifecycleCommentId: 'IC_root', premergeRecordDraft: null,
+    });
     const changedIssue = refuse({ issue: { ...initial.issue, body: 'changed issue' } });
     const wrongPr = refuse({ pr: { ...initial.pr, number: 13 } });
     const wrongBranch = refuse({ pr: {
@@ -2125,7 +2137,14 @@ process.stdout.write(JSON.stringify(result));
       ['a changed issue, untrusted frozen plan, or malformed historical record has no effects',
         changedIssue.status !== 0 && changedIssue.state.writes.length === 0
           && wrongSourcePlan.value?.state === 'block' && wrongSourcePlan.state.writes.length === 0
-          && malformedRecord.status !== 0 && malformedRecord.state.writes.length === 0],
+          && malformedRecord.value?.code === 'REVISION_SOURCE_UNVERIFIED'
+          && malformedRecord.state.writes.length === 0],
+      ['missing historical records return typed refusals without null-author queries or effects',
+        missingRecord.value?.code === 'REVISION_SOURCE_UNVERIFIED'
+          && missingRecordReconcile.value?.code === 'ARTIFACT_IDENTITY_MISMATCH'
+          && missingRecordReconcile.value.artifact === 'premerge-record'
+          && [missingRecord, missingRecordReconcile].every((result) =>
+            result.state.writes.length === 0 && result.state.nullAuthorQuery !== true)],
       ['a wrong-author premerge record and a broken trusted chain have no effects',
         badAuthor.status !== 0 && badAuthor.state.writes.length === 0
           && brokenChain.status !== 0 && brokenChain.state.writes.length === 0],
