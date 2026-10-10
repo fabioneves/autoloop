@@ -1767,6 +1767,20 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: '../skills/pitcrew/SKILL.md', anchor: 'Use A for `expectedHeadOid` and B for optional `recoveryHeadOid`' }),
     ]),
   }),
+  Object.freeze({
+    id: 'tool-recovery-fault-created-a-human-decision',
+    date: '2026-10-10',
+    symptom: 'A changed delivered head was recorded as a human decision, although an answer '
+      + 'could not supply the missing lifecycle transition.',
+    cause: 'The block tool accepted every uppercase reason. New blocks now require a closed '
+      + 'human reason; legacy records remain readable and recovery uses its typed result.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'unit.mjs', anchor: 'cannot create a human block or make a GitHub call' }),
+      Object.freeze({ file: 'unit.mjs', anchor: 'legacy human reasons remain readable and visible in the digest' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`REVISION_REQUIRED` routes to Pitcrew, not a human block.' }),
+      Object.freeze({ file: '../skills/pitcrew/SKILL.md', anchor: 'Tool faults and incomplete evidence are not human decisions.' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

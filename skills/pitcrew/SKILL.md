@@ -55,8 +55,8 @@ Then, in order:
    marker while that runner still has write. Ignore untrusted lookalikes, and fail closed when
    role evidence is incomplete. A malformed, mismatched, or duplicate trusted marker blocks
    selection of its unit; a merged unit's unrepairable mismatch the driver records as
-   `terminal-refused`. Every phase update goes through the driver, which extends the captured
-   comment's successor chain; never post or edit a marker comment by hand.
+   `terminal-refused`. `REVISION_REQUIRED` starts revision, not a human block.
+   Only the driver extends the successor chain; never change markers by hand.
 
 No improvised inspection: the command guard blocks inline interpreters (`node -e`, `python -c`,
 interpreter heredocs) by policy — a guard block is the policy working, never an error to engineer
@@ -126,7 +126,7 @@ path from that phase. The diagnosis was worth having and the claim was not: repo
 diagnosis, and that Dev resumes from the marker, then move on. Both ends of the range behave the
 same way for the same reason — the marker phase names the owner, and Pitcrew owns only the middle.
 
-**A marker at `ready-head` or beyond makes the PR Dev's to finalize, never Pitcrew's to revise.**
+**A marker at `ready-head` makes the PR Dev's to finalize, never Pitcrew's to revise.**
 `ready-head` means "deliver me": GitHub merges a behind-but-`MERGEABLE`/`CLEAN` PR fine — the
 merge executor binds the exact PR head with CAS and requires CI green on that head, so
 behind-base alone changes nothing it checks. Merge base for CODE reasons only — pre-review
@@ -275,10 +275,11 @@ waits and any identity mismatch blocks.
 
 Under manual policy, stop after current-head delivery and the pre-merge record.
 
-If the revision requires protected judgment (a `human`-class matter, as in the dev skill's
-Autonomy section), or has incomplete evidence that targeted fallback cannot repair: block the unit's issue with `node <plugin-tools>/unit.mjs
---block --issue <N> --reason <CODE> --question "<one line>"` — it records the question with its
-`/answer` form, removes the step and terminal labels, and keeps `loop-ready` — and stop that PR.
+Only a human matter uses `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE>
+--question "<one line>"`: `TRUST_REQUIRED`, `IRREVERSIBLE_ACTION`, `UNSPECIFIED_VALUE`, or
+`POLICY_DENIED` (Dev's Autonomy rules). It records `/answer`, keeps `loop-ready`, and stops that PR.
+Tool faults and incomplete evidence are not human decisions. Keep the refusal; fix or decide.
+Never rename a fault to a human reason or clear an existing human gate.
 
 ## Chat and record
 

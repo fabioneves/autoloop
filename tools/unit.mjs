@@ -65,6 +65,9 @@ const DECISION_MARKER_RE = /<!-- autoloop-decision-v1 (\{[^\n]*?\}) -->/gu;
 const BLOCK_MARKER_RE = /<!-- autoloop-block-v1 (\{[^\n]*?\}) -->/gu;
 const REASON_RE = /^[A-Z][A-Z0-9_]*$/u;
 const BLOCK_GATES = Object.freeze(['human:decide', 'human:authorize']);
+const HUMAN_BLOCK_REASONS = new Set([
+  'TRUST_REQUIRED', 'IRREVERSIBLE_ACTION', 'UNSPECIFIED_VALUE', 'POLICY_DENIED',
+]);
 const REPAIR_MARKER_RE = /<!-- autoloop-repair-v1 (\{[^\n]*?\}) -->/gu;
 const REPAIRS_PER_PARENT = 3;
 const LAST_READY_LABEL_JQ = '[.[] | select(.event == "labeled" and .label.name == "loop-ready") | {by: .actor.login, at: .created_at}] | last // empty';
@@ -366,6 +369,10 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   if (!REASON_RE.test(reason ?? '')) return refusal('INVALID_ARGS', '--reason: expected an UPPER_SNAKE reason code');
   if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
   if (!BLOCK_GATES.includes(gate)) return refusal('INVALID_ARGS', `--gate: expected one of ${BLOCK_GATES.join(', ')}`);
+  if (!HUMAN_BLOCK_REASONS.has(reason)) {
+    return refusal('NON_HUMAN_BLOCK_REASON',
+      `--reason: expected one of ${[...HUMAN_BLOCK_REASONS].join(', ')}. Tool faults require fix or decide, not a human block. Do not rename a tool fault to a human reason.`);
+  }
   const facts = issueFacts(run, issue, 'state,labels');
   if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
   const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString() };
@@ -999,6 +1006,35 @@ function selfTest() {
     && parseBlock(blockMarker({ ...block, class: 'fix' })) === null
     && parseBlock(blockMarker({ ...block, reason: 'lower case' })) === null
     && parseBlock('<!-- autoloop-block-v1 {nope} -->') === null);
+  for (const reason of ['X', 'LIFECYCLE_MARKER_INVALID', 'ARTIFACT_IDENTITY_MISMATCH', 'REVISION_REQUIRED', 'REVISE_CAP_REACHED']) {
+    const nonHuman = fakeRun([
+      ['gh issue view 7', '{"state":"OPEN","labels":[]}'],
+      ['gh issue comment 7', ''], ['gh issue edit 7', ''],
+    ]);
+    const result = markBlocked({ issue: 7, reason, question: 'How should this tool fault be repaired?', run: nonHuman.run });
+    check(`${reason} cannot create a human block or make a GitHub call`,
+      result.code === 'NON_HUMAN_BLOCK_REASON' && nonHuman.calls.length === 0
+      && result.message.includes('TRUST_REQUIRED') && result.message.includes('fix or decide'));
+  }
+  for (const reason of ['TRUST_REQUIRED', 'IRREVERSIBLE_ACTION', 'UNSPECIFIED_VALUE', 'POLICY_DENIED']) {
+    const human = fakeRun([
+      ['gh issue view 7', '{"state":"OPEN","labels":[]}'],
+      ['gh issue comment 7', ''], ['gh issue edit 7', ''],
+    ]);
+    const note = 'Permission denied: protected path.\nKeep this exact evidence.';
+    const result = markBlocked({ issue: 7, reason, question: 'May the requested action proceed?', note, run: human.run });
+    check(`${reason} creates a human block and preserves its evidence`,
+      result.ok && result.block.reason === reason
+      && human.calls.some((call) => call.startsWith('gh issue comment 7') && call.includes(note))
+      && human.calls.at(-1) === 'gh issue edit 7 --add-label loop-blocked,human:decide');
+  }
+  const legacyBlock = { ...block, reason: 'LIFECYCLE_MARKER_INVALID' };
+  const legacyRows = digestRows([{ number: 7, title: 'Legacy block', labels: [],
+    comments: [{ body: blockMarker(legacyBlock) }],
+  }], []);
+  check('legacy human reasons remain readable and visible in the digest',
+    parseBlock(blockMarker(legacyBlock))?.reason === legacyBlock.reason
+    && legacyRows[0].question === legacyBlock.question);
   const unblockable = fakeRun([]);
   check('a block without a reason code or a one-line question is refused before any call',
     markBlocked({ issue: 7, reason: '', question: 'q?', run: unblockable.run }).code === 'INVALID_ARGS'
@@ -1024,15 +1060,15 @@ function selfTest() {
     ['gh issue comment 9', ''], ['gh issue edit 9', ''],
   ]);
   check('a block of a unit under revision drops loop-delivered and the revising label too',
-    markBlocked({ issue: 9, reason: 'REVISE_CAP_REACHED', question: 'q?', run: revising.run }).ok
+    markBlocked({ issue: 9, reason: 'POLICY_DENIED', question: 'May the denied action proceed?', run: revising.run }).ok
     && revising.calls.at(-1) === 'gh issue edit 9 --add-label loop-blocked,human:decide --remove-label loop-delivered,loop:revising');
   const authorizing = fakeRun([['gh issue view 8', '{"state":"OPEN","labels":[]}'], ['gh issue comment 8', ''], ['gh issue edit 8', '']]);
   check('a protected-path block carries human:authorize and removes nothing it did not find',
-    markBlocked({ issue: 8, reason: 'PROTECTED_PATH', question: 'May this unit touch .github/workflows?', gate: 'human:authorize', run: authorizing.run }).ok
+    markBlocked({ issue: 8, reason: 'TRUST_REQUIRED', question: 'May this unit touch .github/workflows?', gate: 'human:authorize', run: authorizing.run }).ok
     && authorizing.calls.at(-1) === 'gh issue edit 8 --add-label loop-blocked,human:authorize');
   const blockClosed = fakeRun([['gh issue view 7', '{"state":"CLOSED","labels":[]}']]);
   check('a block on an issue that is not open is refused',
-    markBlocked({ issue: 7, reason: 'X', question: 'q?', run: blockClosed.run }).code === 'ISSUE_NOT_OPEN');
+    markBlocked({ issue: 7, reason: 'TRUST_REQUIRED', question: 'q?', run: blockClosed.run }).code === 'ISSUE_NOT_OPEN');
   const markedRows = digestRows([{
     number: 7, title: 'Labels', labels: [{ name: 'human:decide' }],
     comments: [{ body: `${blockMarker(block)}\n**autoloop: blocked**` }, { body: 'a later note' }],
@@ -1042,7 +1078,7 @@ function selfTest() {
 
   const blockAt = '2026-09-25T10:00:00.000Z';
   const later = (minutes) => new Date(Date.parse(blockAt) + minutes * 60_000).toISOString();
-  const marked = { issue: 7, class: 'human', reason: 'UNSPECIFIED_VALUE', question: 'What length?', at: blockAt };
+  const marked = { issue: 7, class: 'human', reason: 'LIFECYCLE_MARKER_INVALID', question: 'What length?', at: blockAt };
   const trustedOnly = (login) => login === 'owner';
   check('an answer is a trusted /answer comment after the block, the newest winning',
     answerAfter(marked, [
@@ -1195,6 +1231,7 @@ function main() {
   if (parsed.error) {
     console.error(`unit: ${parsed.error}`);
     console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --choice T --why T [--alternatives "A; B"] | --lift | --digest [--post] | --self-test');
+    console.error(`human block reasons: ${[...HUMAN_BLOCK_REASONS].join(', ')}`);
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);

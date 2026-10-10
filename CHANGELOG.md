@@ -11,6 +11,10 @@ Notable changes to Autoloop are recorded here. The format follows
   the old delivery record and current branch separately. It records both heads, keeps the
   old audit, and requires new exact-head review and gate evidence. A head race or a human
   gate stops recovery.
+- New human blocks accept only `TRUST_REQUIRED`, `IRREVERSIBLE_ACTION`, `UNSPECIFIED_VALUE`,
+  or `POLICY_DENIED`. Tool faults and unknown reasons are refused before any GitHub call.
+  Existing block records and trusted answers remain supported; no existing gate is cleared.
+  Callers that used other reason codes must use the actual human category or the repair path.
 
 ## [0.67.0] - 2026-10-10
 
