@@ -48,15 +48,24 @@ const JUDGED_BY = Object.freeze({
 
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9]+\])?$/u;
 
-/** The same model however it is spelled: case, a context-window suffix, a
- *  vendor path or a gateway's vendor prefix, a release date. */
+function versionFamily(id) {
+  return /^claude-(opus|fable|sonnet|haiku)-\d[a-z0-9._:-]*$/u.exec(id)?.[1]
+    ?? /^claude-\d+(?:[.-]\d+)*-(opus|fable|sonnet|haiku)$/u.exec(id)?.[1]
+    ?? /^gpt-\d+(?:[.-]\d+)*-(astra|sol)(?:-[a-z0-9._:-]+)?$/u.exec(id)?.[1]
+    ?? null;
+}
+
+/** A family alias can overlap a fixed version; fixed versions keep exact normalized comparison. */
 export function sameModel(left, right) {
-  const norm = (id) => String(id ?? '').toLowerCase()
+  if (left === null || right === null || left === undefined || right === undefined) return false;
+  const norm = (id) => String(id).toLowerCase()
     .replace(/\[[^\]]*\]$/u, '')
     .replace(/^.*\//u, '')
     .replace(/^[a-z0-9]+-gateway-/u, '')
     .replace(/-\d{8}$/u, '');
-  return left !== null && right !== null && left !== undefined && right !== undefined && norm(left) === norm(right);
+  const leftId = norm(left);
+  const rightId = norm(right);
+  return leftId === rightId || leftId === versionFamily(rightId) || rightId === versionFamily(leftId);
 }
 
 export function globalConfigPath(env = process.env) {
@@ -245,6 +254,47 @@ function selfTest() {
         && sameModel('anthropic/claude-opus-5-5', 'claude-opus-5-5[1m]')
         && sameModel('claude-opus-5-5-20260901', 'claude-opus-5-5')
         && !sameModel('claude-opus-5-5', 'claude-opus-5'));
+    for (const [alias, version] of [
+      ['opus', 'claude-opus-5-5'],
+      ['fable', 'claude-fable-5-1'],
+      ['sonnet', 'claude-sonnet-5-5'],
+      ['haiku', 'claude-haiku-5-5'],
+      ['astra', 'gpt-6-astra'],
+      ['sol', 'gpt-5.6-sol'],
+      ['opus', 'claude-3-opus'],
+      ['sonnet', 'claude-3-5-sonnet'],
+    ]) {
+      check(`${alias} overlaps ${version} in either direction`,
+        sameModel(alias, version) && sameModel(version, alias));
+    }
+    check('family overlap needs no current-version map and keeps existing normalization',
+      sameModel('ANTHROPIC/OPUS[1m]', 'vendor-gateway-claude-opus-99-7-20990101')
+        && sameModel('sol[1m]', 'gpt-99.2-sol')
+        && sameModel('astra', 'openai/gpt-99-astra[1m]'));
+    check('fixed versions and unrelated or custom selectors do not collapse into a family',
+      !sameModel('claude-opus-5', 'claude-opus-5-5')
+        && !sameModel('gpt-5.6-sol', 'gpt-6-sol')
+        && !sameModel('astra', 'sol')
+        && !sameModel('opus', 'claude-opus-custom')
+        && !sameModel('custom-opus', 'claude-opus-5-5')
+        && !sameModel('opus', 'gpt-6-opus')
+        && !sameModel('astra', 'claude-6-astra')
+        && sameModel('vendor/custom-model[1m]', 'custom-model'));
+    for (const [writer, reviewers] of Object.entries(JUDGED_BY)) {
+      for (const role of reviewers) {
+        for (const writerField of ['model', 'fallback']) {
+          for (const reviewerField of ['model', 'fallback']) {
+            const table = Object.fromEntries(MODEL_ROLES.map((name) =>
+              [name, { model: `custom-${name}`, effort: 'high', fallback: null }]));
+            table[writer][writerField] = 'claude-opus-5-5';
+            table[role][reviewerField] = 'opus[1m]';
+            check(`${writer}.${writerField} and ${role}.${reviewerField} reject alias/version overlap`,
+              invariantProblems(table).some((problem) =>
+                problem.startsWith(`${role} could run on opus[1m], which ${writer} writes with`)));
+          }
+        }
+      }
+    }
     const clash = (models) => invariantProblems(mergeModels(DEFAULT_MODELS, models));
     check('the default table keeps every reviewer off its writer\'s models', clash({}).length === 0);
     check('a reviewer on its writer\'s model, primary or fallback, is refused and named',
