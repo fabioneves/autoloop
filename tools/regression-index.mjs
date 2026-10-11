@@ -1764,6 +1764,8 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'lifecycle-contract.mjs', anchor: 'delivered A with verified history and owned B requests an explicit revision' }),
       Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'production revision begins once, returns the PR to draft, and keeps A and B separate' }),
       Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'stale A verdicts and unrelated green CI do not approve B or C; C needs exact-head verdicts' }),
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'a wrong or missing PR base cannot start a revision' }),
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'a PR human:authorize merge signal is preserved without blocking revision' }),
       Object.freeze({ file: '../skills/pitcrew/SKILL.md', anchor: 'Use A for `expectedHeadOid` and B for optional `recoveryHeadOid`' }),
     ]),
   }),

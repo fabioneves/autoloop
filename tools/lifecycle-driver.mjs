@@ -1538,15 +1538,6 @@ export function driveLifecycleRevision(request, context = {}) {
       throw new Error('authenticated Pitcrew revision authority is unavailable');
     }
     const begun = beginLifecycleRevision(state.marker, request.revision);
-    if (begun.state === 'complete') {
-      return {
-        schemaVersion: 1,
-        state: 'complete',
-        code: begun.code,
-        epoch: begun.epoch,
-        lifecycleCommentId: request.lifecycleCommentId,
-      };
-    }
     if (begun.state === 'block') {
       return {
         schemaVersion: 1,
@@ -1556,7 +1547,7 @@ export function driveLifecycleRevision(request, context = {}) {
         lifecycleCommentId: request.lifecycleCommentId,
       };
     }
-    if (request.revision.recoveryHeadOid !== undefined) {
+    if (request.revision.recoveryHeadOid !== undefined && begun.state !== 'complete') {
       const sourceCode = revisionSourceCode(state, readRequest);
       if (sourceCode !== null) {
         return {
@@ -1567,6 +1558,31 @@ export function driveLifecycleRevision(request, context = {}) {
           lifecycleCommentId: request.lifecycleCommentId,
         };
       }
+    }
+    const actualBaseBranch = state.pullRequest?.base?.ref;
+    const expectedBaseBranch = readRequest.baseBranch;
+    if (typeof actualBaseBranch !== 'string' || !BRANCH_RE.test(actualBaseBranch)
+      || typeof expectedBaseBranch !== 'string' || !BRANCH_RE.test(expectedBaseBranch)) {
+      return {
+        schemaVersion: 1, state: 'wait', action: 'inspect-revision-target',
+        code: 'EVIDENCE_INCOMPLETE', lifecycleCommentId: request.lifecycleCommentId,
+      };
+    }
+    if (actualBaseBranch !== expectedBaseBranch) {
+      return {
+        schemaVersion: 1, state: 'block', action: 'revision-target',
+        code: 'REVISION_TARGET_MISMATCH', expectedBaseBranch, actualBaseBranch,
+        lifecycleCommentId: request.lifecycleCommentId,
+      };
+    }
+    if (begun.state === 'complete') {
+      return {
+        schemaVersion: 1,
+        state: 'complete',
+        code: begun.code,
+        epoch: begun.epoch,
+        lifecycleCommentId: request.lifecycleCommentId,
+      };
     }
     const prerequisites = revisionObserved(state, request);
     if (!prerequisites.complete) {
@@ -1798,6 +1814,7 @@ else if (endpoint === 'graphql') {
     if (!args.some((arg) => arg.includes('convertPullRequestToDraft'))) throw Error('unexpected GraphQL request');
     state.pr.draft = true;
     state.writes.push('draft');
+    if (state.shiftBaseOnDraft) state.pr.base.ref = state.shiftBaseOnDraft;
     if (state.shiftHeadOnDraft) {
       state.refHead = state.shiftHeadOnDraft;
       state.pr.head.sha = state.shiftHeadOnDraft;
@@ -1905,6 +1922,8 @@ process.stdout.write(JSON.stringify(result));
     const success = run();
     const afterSuccess = success.state;
     const replay = run();
+    setState({ ...afterSuccess, pr: { ...afterSuccess.pr, base: { ...afterSuccess.pr.base, ref: 'other' } } });
+    const retargetedReplay = run();
     setState({ roles: { maint: 'read' } });
     const wrongAuthor = run();
     setState({ refHead: nextHead });
@@ -1916,6 +1935,10 @@ process.stdout.write(JSON.stringify(result));
       return run('--begin-revision-json', value);
     };
     const draftRace = refuse({ shiftHeadOnDraft: nextHead });
+    const wrongBase = refuse({ pr: { ...initial.pr, base: { ...initial.pr.base, ref: 'other' } } });
+    const missingBase = refuse({ pr: { ...initial.pr, base: undefined } });
+    const baseRace = refuse({ shiftBaseOnDraft: 'other' });
+    const mergeSignal = refuse({ pr: { ...initial.pr, labels: [{ name: 'human:authorize' }] } });
     const otherShape = refuse({
       refHead: nextHead,
       pr: { ...structuredClone(initial.pr), head: { ...initial.pr.head, sha: nextHead } },
@@ -1992,6 +2015,10 @@ process.stdout.write(JSON.stringify(result));
     });
     const sameHead = run('--begin-revision-json', sameHeadRequest);
     const sameHeadReplay = run('--begin-revision-json', sameHeadRequest);
+    setState({ refHead: sourceHead, pr: { ...initial.pr,
+      head: { ...initial.pr.head, sha: sourceHead }, base: { ...initial.pr.base, ref: 'other' },
+    } });
+    const sameHeadWrongBase = run('--begin-revision-json', sameHeadRequest);
     const { kind: oldKind, v: oldVersion, recordId: oldRecordId, ...recordSeed } = record;
     const mergingBase = { ...marker, mergePolicy: 'auto', phase: 'merge-intent' };
     const mergingRecord = createPremergeRecord({ ...recordSeed,
@@ -2115,6 +2142,19 @@ process.stdout.write(JSON.stringify(result));
           && currentMarker(afterSuccess).priorRevisions[0].recoveryHeadOid === currentHead
           && replay.value?.code === 'REVISION_ALREADY_BEGUN'
           && replay.state.writes.length === afterSuccess.writes.length],
+      ['a wrong or missing PR base cannot start a revision',
+        [wrongBase, sameHeadWrongBase].every((result) =>
+          result.value?.code === 'REVISION_TARGET_MISMATCH' && result.state.writes.length === 0)
+          && missingBase.value?.code === 'EVIDENCE_INCOMPLETE' && missingBase.state.writes.length === 0],
+      ['a changed PR base is checked on readback and completed replay',
+        baseRace.value?.code === 'REVISION_TARGET_MISMATCH'
+          && currentMarker(baseRace.state).epoch === 1
+          && baseRace.state.writes.join(',') === 'marker,labels,delete:loop-delivered,draft'
+          && retargetedReplay.value?.code === 'REVISION_TARGET_MISMATCH'
+          && retargetedReplay.state.writes.length === afterSuccess.writes.length],
+      ['a PR human:authorize merge signal is preserved without blocking revision',
+        mergeSignal.value?.code === 'REVISION_ALREADY_BEGUN'
+          && mergeSignal.state.pr.labels.some((label) => label.name === 'human:authorize')],
       ['untrusted source author cannot start a revision',
         wrongAuthor.status !== 0 && wrongAuthor.state.writes.length === 0],
       ['PR and branch head disagreement cannot start a revision',
@@ -2313,7 +2353,7 @@ function selfTest() {
       author: 'maintainer',
       body: 'revision plan',
     }],
-    pullRequest: { head: { sha: delivered.headOid } },
+    pullRequest: { head: { sha: delivered.headOid }, base: { ref: 'main' } },
   });
   revision.planHash = sha256('revision plan');
   const revisionAdapters = {
@@ -2333,11 +2373,11 @@ function selfTest() {
   };
   const revisionResult = driveLifecycleRevision(revisionRequest, {
     adapters: revisionAdapters,
-    readRequest: {},
+    readRequest: { baseBranch: 'main' },
   });
   const revisionReplay = driveLifecycleRevision(revisionRequest, {
     adapters: revisionAdapters,
-    readRequest: {},
+    readRequest: { baseBranch: 'main' },
   });
   const raceMarker = delivered;
   const raceAdapters = {
@@ -2350,7 +2390,7 @@ function selfTest() {
         restId: 1,
         body: serializeLifecycleMarker(raceMarker),
       },
-      pullRequest: { head: { sha: '9'.repeat(40) } },
+      pullRequest: { head: { sha: '9'.repeat(40) }, base: { ref: 'main' } },
       issue: { number: 7, labels: ['loop-ready', 'loop:revising'] },
     }),
     updateMarker: () => {
@@ -2359,7 +2399,7 @@ function selfTest() {
   };
   const race = driveLifecycleRevision(revisionRequest, {
     adapters: raceAdapters,
-    readRequest: {},
+    readRequest: { baseBranch: 'main' },
   });
   const mergedIntent = fakeIntent();
   mergedIntent.planHash = sha256('merged frozen plan');

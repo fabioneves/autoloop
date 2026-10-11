@@ -8,7 +8,7 @@ Notable changes to Autoloop are recorded here. The format follows
 ### Fixed
 
 - A delivered, open PR with a new head can start a new draft revision. The driver verifies
-  the old delivery record and current branch separately. It records both heads, keeps the
+  the old delivery record, current branch, and configured PR target separately. It records both heads, keeps the
   old audit, and requires new exact-head review and gate evidence. A head race or a human
   gate stops recovery.
 - New human blocks accept only `TRUST_REQUIRED`, `IRREVERSIBLE_ACTION`, `UNSPECIFIED_VALUE`,

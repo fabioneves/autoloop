@@ -15,14 +15,14 @@ Use the existing Node.js ESM tools and Markdown skills. Add no dependency or con
 ## Required behavior
 
 1. Keep the existing same-head revision request valid. Add an explicit optional `recoveryHeadOid` to the revision request. `expectedHeadOid` still binds A; `recoveryHeadOid` binds B. The field is not a general bypass for a head mismatch.
-2. Authenticate the existing marker chain and historical premerge record for A. Check the issue, owned branch, PR identity, claim ancestry, source epoch, source plan, lifecycle identity, and premerge ID/hash/comment. Read the live PR and branch head independently. Require an open, unmerged PR and stable B. Refuse a merge operation, incomplete evidence, or a real human gate.
+2. Authenticate the existing marker chain and historical premerge record for A. Check the issue, owned branch, PR identity, claim ancestry, source epoch, source plan, lifecycle identity, and premerge ID/hash/comment. Read the live PR and branch head independently. Require an open, unmerged PR and stable B. Its live base must match the request's configured base before effects and on replay. Refuse a merge operation, incomplete evidence, or a real human gate.
 3. Require the new frozen revision plan and current writer authority. Before the first effect, verify both source identity and current-head prerequisites. Keep compare-and-swap and readback checks around each effect.
 4. Bind B in the durable revision intent and preserve that binding in revision history. A changed B, a competing request, or a conflicting staged intent must not silently replace the first intent. An interrupted request can replay without duplicate audit entries or repeated completed effects.
 5. Start one new `draft-pr` epoch. Preserve the audit for A. Clear active approved-head, premerge, and merge fields. Return the PR to draft during recovery, under the same guarded driver path. Do not carry review or gate approval from A into the new epoch.
 6. Require fresh review, the full configured gate, and exact-head finalization for the eventual B or C head. Existing delivery and merge checks stay unchanged.
 7. A normal reconcile of a valid delivered-A/current-B state returns a typed `REVISION_REQUIRED` result with source/current heads and the supported revision action. It must not call the trusted marker malformed. Distinguish this case from wrong ownership, an invalid chain, and unrelated identity mismatches.
 8. Production evidence reads must support historical A and current B separately. A pure contract test with a synthetic adapter is not sufficient proof of the production path.
-9. Existing human blocks remain authoritative. This module does not clear them, infer a human answer, or edit marker comments outside the owning driver.
+9. Existing issue-level human blocks remain authoritative. This module does not clear them, infer a human answer, or edit marker comments outside the owning driver. PR-level `human:authorize` is a merge signal under Dev's publish policy, not a revision block; preserve it without granting merge authority.
 
 ## Commands
 
