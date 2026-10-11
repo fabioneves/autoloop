@@ -3,6 +3,19 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [Unreleased]
+
+### Changed
+
+- Built-in step defaults use model-family aliases with the `[1m]` context selector and `high`
+  effort for every role and its fallback. The serving CLI selects the model version. Existing
+  global config files are not changed automatically.
+
+### Fixed
+
+- Writer/reviewer checks refuse an overlap between a family alias and a fixed-version model ID,
+  for primary and fallback choices.
+
 ## [0.67.0] - 2026-10-10
 
 ### Changed

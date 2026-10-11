@@ -948,16 +948,21 @@ function selfTest() {
       `${JSON.stringify({ ...fixtureConfig(), models: { 'code-review': { model: 'claude-opus-5-5[1m]' } } })}\n`);
     const clashing = primeDev({ cwd: root });
     const resolvedModels = primeModels(fixtureConfig(), root);
+    const pinnedModels = readPinnedModels(pinnedModelsPath(root));
     check(
       'prime resolves the model table before opening the run, and refuses a clashing one',
       clashing.ok === false && clashing.step === 'models' && clashing.error.code === 'MODELS_INVALID'
       && clashing.error.message.includes('code-review could run on claude-opus-5-5[1m]')
       && !existsSync(runMarkerDirectory(root))
-      && resolvedModels.models.plan.model === 'gpt-6-astra[1m]'
+      && resolvedModels.models.plan.model === 'astra[1m]'
+      && resolvedModels.models.plan.effort === 'high'
+      && resolvedModels.models.plan.fallback === 'opus[1m]'
       && resolvedModels.modelsSource.global === join(process.env.CLAUDE_CONFIG_DIR, 'autoloop', 'config.json')
       && modelSourceLines(resolvedModels).length === 1
       // The resolved table is pinned for the run's dispatches.
-      && readPinnedModels(pinnedModelsPath(root))?.ok === true,
+      && pinnedModels?.ok === true
+      && pinnedModels.models.plan.model === 'astra[1m]'
+      && pinnedModels.models.implement.effort === 'high',
     );
 
     // LFE run 2026-09-30: a resumed fork and a new session opened runs on

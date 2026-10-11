@@ -75,7 +75,7 @@ export const INCIDENTS = Object.freeze([
       + 'Fable and astra. The routes and fallbacks carried bare ids; the default '
       + 'model table (models-config.mjs) now carries [1m] on every id.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'models-config.mjs', anchor: "plan: Object.freeze({ model: 'gpt-6-astra[1m]', effort: 'xhigh', fallback: 'claude-opus-5-5[1m]' })," }),
+      Object.freeze({ file: 'models-config.mjs', anchor: "plan: Object.freeze({ model: 'astra[1m]', effort: 'high', fallback: 'opus[1m]' })," }),
       Object.freeze({ file: 'dispatch.mjs', anchor: "'with no global config the defaults are written and every role resolves its own entry'" }),
     ]),
   }),
@@ -1682,7 +1682,7 @@ export const INCIDENTS = Object.freeze([
       + 'default carries a fallback, and a model the session cannot serve moves '
       + 'any role, a writer too, to it.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'models-config.mjs', anchor: "implement: Object.freeze({ model: 'claude-opus-5-5[1m]', effort: null, fallback: 'claude-fable-5-1[1m]' })," }),
+      Object.freeze({ file: 'models-config.mjs', anchor: "implement: Object.freeze({ model: 'opus[1m]', effort: 'high', fallback: 'fable[1m]' })," }),
       Object.freeze({ file: 'dispatch.mjs', anchor: "'an unavailable model moves any role, a writer too, to its fallback once, stamped'" }),
     ]),
   }),
