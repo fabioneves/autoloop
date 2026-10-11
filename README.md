@@ -62,22 +62,32 @@ project in `.autoloop/config.json` under `models`:
 
 | Step | Role | Model | Effort | Fallback |
 |---|---|---|---|---|
-| 02 plan | `plan` | `gpt-6-astra` | xhigh | `claude-opus-5-5` |
-| 03 plan review | `plan-review` | `claude-fable-5-1` | xhigh | `claude-sonnet-5` |
-| 05 implement | `implement` | `claude-opus-5-5` | — | `claude-fable-5-1` |
-| 06 simplify | `simplify` | `claude-fable-5-1` | — | `claude-opus-5-5` |
-| 07 diff review | `diff-review` | `gpt-6-astra` | xhigh | `claude-sonnet-5` |
-| 08 code / doubt review | `code-review`, `doubt-review` | `gpt-6-astra` | xhigh | `claude-sonnet-5` |
-| 08 fixes | `fix` | `claude-opus-5-5` | — | `claude-fable-5-1` |
+| 02 plan | `plan` | `astra[1m]` | high | `opus[1m]` |
+| 03 plan review | `plan-review` | `fable[1m]` | high | `sonnet[1m]` |
+| 05 implement | `implement` | `opus[1m]` | high | `fable[1m]` |
+| 06 simplify | `simplify` | `fable[1m]` | high | `opus[1m]` |
+| 07 diff review | `diff-review` | `astra[1m]` | high | `sonnet[1m]` |
+| 08 code / doubt review | `code-review`, `doubt-review` | `astra[1m]` | high | `sonnet[1m]` |
+| 08 fixes | `fix` | `opus[1m]` | high | `fable[1m]` |
 
-Every id carries `[1m]` in the file. The written file is yours: later plugin releases never change
-it, so delete it to pick up newer defaults. A project's `models` needs autoloop 0.65.0 or later,
-because older releases refuse the key. Prime pins the resolved table for its run, so edits take
-effect at the next prime. No artifact is judged by the model that wrote it: a config
-where a reviewer could run on its writer's model, fallback included, is refused. Autoloop does
-not manage proxies. A dispatch inherits the session's environment, so the command that started
-the session decides which models are reachable. A model the session cannot serve moves the step
-to its fallback, as do a reviewer's usage limit and repeated failures.
+These are family aliases, not fixed model releases. `[1m]` selects the context window. The serving
+CLI or gateway resolves each alias, so its model version can change without an Autoloop release.
+`astra` and `sol` need a gateway that supports those names; Sol is configurable but has no default
+role assignment.
+
+Existing global files are never overwritten by a plugin update. Edit their `models` entries to
+adopt these defaults; project overrides still take precedence. Omitted effort inherits from the
+lower-precedence table. Explicit `null` uses the engine default. A project's `models` needs
+Autoloop 0.65.0 or later because older releases refuse the key.
+
+Prime pins the configured selectors, not the upstream versions behind aliases. Configuration
+edits take effect at the next prime, not in an already running process. A reviewer must not share
+its writer's model, including fallbacks. An alias and a known same-family version can overlap,
+so that pair is refused; two explicit different versions remain supported.
+
+Autoloop does not manage proxies. Dispatch inherits the session's environment, which determines
+available models. An unavailable model moves the step to its fallback, as do a reviewer's usage
+limit and repeated failures.
 
 ## Guardrails
 

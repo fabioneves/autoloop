@@ -574,7 +574,7 @@ tool, never by hand** (no `jq` program, skeleton, or script):
 # round 1, from the unit worktree, after the reviewer returns and its findings are verified
 node <plugin-tools>/review-contract.mjs --append-round --first-round \
   --result-file <round-1-result.json> --plan-fingerprint <frozen-plan-contentHash> \
-  --author <writer engine:model, e.g. claude:claude-opus-5-5> \
+  --author <writer engine:model, e.g. 'claude:opus[1m]'> \
   --state <base checkout>/.autoloop/config.json \
   [--annotations-file <annotations.json>] --out <evidence-1.json>
 # round n
