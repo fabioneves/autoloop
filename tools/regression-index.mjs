@@ -2115,6 +2115,50 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'loop-smoke.mjs', anchor: "runTool('command-guard.mjs (prime)'" }),
     ]),
   }),
+  Object.freeze({
+    id: 'guard-reduction-left-literal-evasions-of-the-kept-rules',
+    date: '2026-10-12',
+    symptom: 'Review of the 0.69.0 guard reduction: a commit on the base through the contents API '
+      + 'or createCommitOnBranch, a force ref move through updateRef, a merge through raw curl to '
+      + 'api.github.com, `git -c alias.m=\'push --force\' m`, `gh alias set m \'pr merge\'`, a '
+      + 'function, case or trap body, `bash <<EOF` fed a merge, `echo "gh pr merge" | sh`, '
+      + '`sudo -u dev gh pr merge`, `GH=gh; $GH pr merge` and `gh workflow run` on an unmerged '
+      + 'branch were all allowed. Three secret-path definitions disagreed (`src/tokenizer.ts` '
+      + 'was secret in one, `.github/CODEOWNERS` was ordinary, and a prefix widening by `.github/` '
+      + 'earned no label), and the dependency hard-defer lived only in skill prose.',
+    cause: 'The kept rules matched gh positionals and a few REST paths, not the API families, the '
+      + 'raw HTTP clients, or the text a command runs (alias values, function and trap bodies, fed '
+      + 'shells). Wrapper option values were read as the command. The guard, the merge families '
+      + 'and the lane each had their own secret-path regex; `.github/workflows` alone was protected; '
+      + 'widenLane matched a prefix as a file; no tool read a manifest diff at the merge gate.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['gh api -X PUT repos/o/r/contents/README.md -f branch=main -f message=x -f content=eA==', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['curl -X PUT https://api.github.com/repos/o/r/pulls/4/merge', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "[\"git -c alias.m='push --force' m origin feat/gh-1-x\", 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['git -c alias.st=status st', 'feat/gh-1-x', false]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "[\"gh alias set m 'pr merge' && gh m 1\", 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['f() { gh pr merge 1; }; f', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['case x in x) gh pr merge 1;; esac', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "[\"trap 'gh pr merge 1' EXIT\", 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['gh workflow run ci.yml', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['bash <<EOF\\ngh pr merge 4\\nEOF', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['echo \"gh pr merge 4\" | sh', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['sudo -u dev gh pr merge 4', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['GH=gh; $GH pr merge 4', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['gh api HTTPS://API.GITHUB.COM:443/repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true]," }),
+      Object.freeze({ file: 'guard-corpus.json', anchor: 'H1 a contents PUT commits on the base past the checkout' }),
+      Object.freeze({ file: 'guard-corpus.json', anchor: 'accepted by design, SPEC-guard-reduction required behavior 2' }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'isSecretPath is the one secret-path rule: whole segments, key material, env files'" }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a prefix widening at or under a guardrail root is refused WIDEN_GUARDRAIL_ROOT'" }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'every path under .github is protected'" }),
+      Object.freeze({ file: 'escalate-paths.mjs', anchor: "['.github/CODEOWNERS', true]," }),
+      Object.freeze({ file: 'auto-merge.mjs', anchor: "'package.json gains a dependency → human:authorize'" }),
+      Object.freeze({ file: 'auto-merge.mjs', anchor: "'a changed manifest without fetched contents → human:authorize (fail closed)'" }),
+      Object.freeze({ file: 'auto-merge.mjs', anchor: "'dependencyChanges names the gained keys and packages, and nothing for a bump or a removal'" }),
+      Object.freeze({ file: 'publish-verdict.mjs', anchor: 'a review ledger widened into a protected path labels the pull request human:authorize before readiness' }),
+      Object.freeze({ file: 'publish-verdict.mjs', anchor: "the human:authorize label is one gh api POST on the pull request's labels" }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

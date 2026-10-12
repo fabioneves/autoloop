@@ -160,10 +160,13 @@ optional `protectedPaths`. The repository owns it; plugin updates never overwrit
 
 `protectedPaths` lists the repository's own human-authorization globs (`*` and `**` only), added to
 the built-in families. The plugin protects only secret and credential paths (`.env*`, key material,
-path segments that contain `secret`, `credential`, `token`, or `crypt`), `.github/workflows/**`,
-and the loop's control roots (`.autoloop`, `.claude`, `.codex`, `.opencode`, `.agents`,
-`.githooks`). Documentation, dependency manifests, lockfiles, build configs, container files, and
-data are ordinary files; list them in `protectedPaths` when the repository wants them protected.
+a path segment that is the word `secret`, `credential`, `token`, or `crypt`; one rule, shared with
+the command guard), `.github/**`, and the loop's control roots (`.autoloop`, `.claude`, `.codex`,
+`.opencode`, `.agents`, `.githooks`). Documentation, dependency manifests, lockfiles, build
+configs, container files, and data are ordinary files; list them in `protectedPaths` when the
+repository wants them protected. A dependency change is the one ordinary-file exception: a
+`package.json` that gains a dependency or an install script, or a lockfile that adds a package,
+is refused at the merge gate as `human:authorize`.
 A non-manual policy also sets `merge.loopLogin`, and `ratified` may set
 `merge.reversiblePaths` (default `["docs/**"]`). The review checklist is `.autoloop/checklist.md`
 when the repository keeps one, else the plugin's.
@@ -207,12 +210,18 @@ Each role runs as a fresh, fixed-posture process. Reviewers are read-only and ca
 a prompt. Untrusted text travels in files, never shell source. The command guard refuses only an
 irreversible or unauthorized act, and NEVER: a merge (`gh pr merge`, the REST merge endpoint, a
 GraphQL merge mutation, or a hand-posted commit status); a commit on or a push to the base branch
-except through a pull request; `git push --force`/`-f` (`--force-with-lease` is allowed); a
-release-tag push or a GitHub release mutation; a branch-protection or ruleset mutation; `git add`
-or `git commit` naming a secret path; a `Co-Authored-By` trailer; `AskUserQuestion` while a run
-is live; a branch switch while a reviewer dispatch reads the checkout; a prime command that does
-anything else; and a hook payload it cannot read, for the session that owns a run. Every other
-command is allowed; `step.mjs` alone swaps step labels and keeps the ladder rules.
+except through a pull request; a GitHub API commit or ref mutation (`contents`, `git/*` writes,
+`createCommitOnBranch`, `updateRef`, `createRef`, `deleteRef`); `git push --force`/`-f`
+(`--force-with-lease` is allowed); a release-tag push or a GitHub release mutation; `gh workflow
+run|enable` or an actions dispatch endpoint; raw HTTP to the API with a write method; a
+branch-protection or ruleset mutation; `git add` or `git commit` naming a secret path; a
+`Co-Authored-By` trailer; `AskUserQuestion` while a run is live; a branch switch while a reviewer
+dispatch reads the checkout; a prime command that does anything else; and a hook payload it cannot
+read, for the session that owns a run. The rules also apply to the text a command runs: an
+in-command git or gh alias, a function, case or trap body, and a shell fed by a heredoc or a
+literal echo; a hidden alias is refused. An inline interpreter's program (`python3 -c`, `node
+-e`) is not judged. Every other command is allowed; `step.mjs` alone swaps step labels and keeps
+the ladder rules.
 Protected paths stop for `human:authorize`. Dispatch failures are typed and recorded. A
 read-only role retries a transient failure a bounded number of times and moves to its configured
 fallback on a usage limit; any role moves to it when its model is unavailable; a writer never

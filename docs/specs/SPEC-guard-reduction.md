@@ -19,13 +19,21 @@ like Python.
 ## Required behavior
 
 1. **Kept rules.** The guard refuses, in an owned session:
-   - `gh pr merge`, the REST merge endpoint, GraphQL merge mutations, and branch-protection
-     mutations;
+   - `gh pr merge`, the REST merge endpoint, GraphQL merge mutations, a hand-posted commit
+     status, and branch-protection mutations;
    - a commit on, or a push to, the configured base branch, except through a pull request;
+   - a GitHub API commit or ref mutation: a `contents`, `git/commits`, `git/trees`,
+     `git/blobs` or `git/refs` write, and `createCommitOnBranch`, `updateRef`, `updateRefs`,
+     `createRef`, `deleteRef`;
    - `git push --force` and `-f` (`--force-with-lease` stays allowed);
    - a release-tag push or a GitHub release mutation;
-   - `git add`, `git commit -a`, or `git commit <path>` naming a secret path (`.env*`, key
-     material, credential files, as defined by `escalate-paths.mjs`);
+   - `gh workflow run|enable` and the actions dispatch endpoints
+     (`actions/workflows/*/dispatches`, `actions/workflows/*/enable`, `repos/*/dispatches`): a
+     workflow from an unmerged branch runs with the repository's secrets;
+   - raw HTTP to the API host (`curl`, `wget`, `http`, `xh`) with a write method, or to an
+     endpoint of a refused family; a plain GET stays allowed;
+   - `git add`, `git commit -a <path>`, or `git commit <path>` naming a secret path (`.env*`, key
+     material, credential files, as defined by `isSecretPath` in `lane-contract.mjs`);
    - a `Co-Authored-By` trailer;
    - `AskUserQuestion` while a run is live;
    - a branch switch of the checkout while a reviewer dispatch reads it;
@@ -38,13 +46,23 @@ like Python.
 3. **Plain parsing.** The kept rules are matched on the literal command with the existing
    `lexShell` tokens. A token the lexer cannot classify is allowed, not refused. The guard never
    refuses because it does not understand a command.
-4. **Remedy text.** Each kept refusal names the rule and one allowed form. No refusal recommends a
+4. **Scripts a command runs as text.** The kept rules are matched on the text a command runs as
+   well as on the command itself: an in-command git alias (`git -c alias.m=<value> m`, judged as
+   `git <value>`; a `!` value as a script), a `gh alias set` value, a function body (`f() { … }`,
+   `function f { … }`), a `case` branch, a `trap` action, a shell fed by a heredoc, a here-string
+   or a literal `echo`/`printf` pipe, and the head a literal same-command assignment names
+   (`GH=gh; $GH pr merge`). An alias the guard cannot read (`--config-env=alias.*` with no literal
+   assignment in the command, a `$`-expansion value, a config include) is refused as hidden.
+5. **Accepted by design.** An inline interpreter's program (`python3 -c "os.system('gh pr merge
+   1')"`, `node -e …`) is not shell and is not judged: rule 2 removed the opaque-shell group, and
+   rule 3 allows what the lexer cannot classify. The corpus records each accepted form.
+6. **Remedy text.** Each kept refusal names the rule and one allowed form. No refusal recommends a
    measurement or a size.
-5. **Label discipline moves to tooling.** `step.mjs` remains the only tool that swaps step labels,
+7. **Label discipline moves to tooling.** `step.mjs` remains the only tool that swaps step labels,
    and it keeps its own ladder checks. The guard does not duplicate them.
-6. **Edit guard unchanged.** `tools/edit-guard.mjs` keeps refusing edits to settings, latches, run
+8. **Edit guard unchanged.** `tools/edit-guard.mjs` keeps refusing edits to settings, latches, run
    markers, and the plugin's tools and hooks.
-7. **Skill text.** `skills/dev/SKILL.md` and `skills/pitcrew/SKILL.md` drop the prose for removed
+9. **Skill text.** `skills/dev/SKILL.md` and `skills/pitcrew/SKILL.md` drop the prose for removed
    rules. The `NEVER` list in `README.md` matches the kept rules exactly.
 
 ## Commands
@@ -70,7 +88,9 @@ Write failing tests first: each removed rule has a test that its former trigger 
 (a literal `for` loop, `command -v`, a `grep` for `node`, `$?`, an `rg` pattern with Python
 syntax, a 70 KB command, an inline `--body`). Each kept rule keeps its refusal test and gains a
 test that the remedy names an allowed form. The guard self-test must show zero refusals on a
-corpus of 50 ordinary read, test, and inspection commands.
+corpus of 50 ordinary read, test, and inspection commands. Each literal evasion of a kept rule
+(requirements 1 and 4) is a refusal case in the self-test table and in `guard-corpus.json`; each
+accepted form (requirement 5) is an `allow` corpus case whose `why` names this spec.
 
 ## Boundaries
 

@@ -8,12 +8,13 @@
 //        mutation, or a hand-posted commit status the merge gate trusts.
 //     2. a commit on, or a push to, the configured base branch — the base
 //        takes pull requests only. Skipped when the same command switches
-//        branches first (git switch|checkout).
+//        branches first (git switch|checkout). A commit, tree, contents or
+//        ref write through the API (REST or GraphQL) is refused outright.
 //     3. `git push --force`/-f or a `+<refspec>` — only --force-with-lease.
 //     4. a release-tag push or a GitHub release mutation — a maintainer act.
 //     5. a branch-protection or ruleset mutation — the human's baseline.
 //     6. `git add` or `git commit` naming a secret path (`.env*`, key
-//        material, a credential or token path).
+//        material, a credential or token path: lane-contract isSecretPath).
 //     7. a commit message carrying Co-Authored-By.
 //     8. `AskUserQuestion` while a run is live.
 //     9. a branch switch of a checkout a reviewer dispatch is reading.
@@ -21,10 +22,21 @@
 //        runs it outside the session's project (checked in every session).
 //    11. a hook payload the guard cannot read, while this process holds a
 //        latch (fail closed for the owner).
+//    12. a workflow dispatch: `gh workflow run|enable` or the dispatch
+//        endpoints — an unmerged branch with the repository's secrets.
+//
+//   Rules 1, 2, 4, 5 and 12 are matched through `gh api` and through raw
+//   HTTP to the API host (curl, wget, httpie, xh), where any write method
+//   is refused. A git alias set on the command line, a gh alias, a function
+//   body, a case branch, a trap action, and a shell fed by a heredoc or a
+//   literal echo are judged as the commands they run; a hidden alias (from
+//   the environment or a config include) is refused.
 //
 //   ALLOW everything else (exit 0). The kept rules match the literal command
 //   with the lexer below; a token the lexer cannot classify is allowed. The
-//   guard never refuses because it does not understand a command.
+//   guard never refuses because it does not understand a command. An inline
+//   interpreter's program (`python3 -c`, `node -e`) is not shell, and is
+//   not judged (SPEC-guard-reduction, accepted).
 //
 //   The rules apply only to the session that owns a run (run-markers.mjs
 //   ownedRun), from its prime until /clear or exit — `--close-run` does not
@@ -61,6 +73,7 @@ import {
 } from './config-contract.mjs';
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { hookRoot } from './hook-root.mjs';
+import { isSecretPath } from './lane-contract.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
   procEntry, psEntry, commonDirOf, heldLatch, ownedRun, pinnedModelsPath, processStart, protectedPaths, pruneLatches, recordHostSession,
@@ -98,10 +111,14 @@ const BULK_PUSH_FLAGS = new Set([
 // shell then runs their substitutions). Regex versions of this hid whole
 // lines from every rule: `cat <<EOF && gh pr merge`, `echo x # it's` swallowing
 // the next line, `<<<` read as a heredoc (reviews of the guard hardening).
-export function lexShell(cmd) {
+export function lexShell(cmd, options = {}) {
   let out = '';
   const bodies = [];
   const pending = [];
+  // With `markHeredocs`, each `<<EOF` leaves a marker word (\u0001 + the
+  // body's index) where it stood, so a shell fed by a heredoc (`bash <<EOF`)
+  // can be judged on that body.
+  let registered = 0;
   let single = false;
   let double = false;
   // Inside `(( … ))` or `$(( … ))`, `<<` is a shift, never a heredoc: read as
@@ -178,7 +195,8 @@ export function lexShell(cmd) {
         continue;
       }
       pending.push({ delimiter, strip, expanded: !quoted });
-      out += ' ';
+      out += options.markHeredocs === true ? ` ${HEREDOC_MARK}${registered} ` : ' ';
+      registered += 1;
       index = at;
       continue;
     }
@@ -204,6 +222,8 @@ export function lexShell(cmd) {
   }
   return { text: out, bodies };
 }
+
+const HEREDOC_MARK = '\u0001';
 
 export function stripHeredocs(cmd) {
   return lexShell(cmd).text;
@@ -465,6 +485,23 @@ const EXEC_WRAPPERS = new Set([
   'xargs',
 ]);
 
+// A wrapper's options that take a value: the value is not the command it
+// runs (`sudo -u dev gh pr merge 4` runs gh, not dev).
+const WRAPPER_VALUE_OPTIONS = new Map([
+  ['doas', new Set(['-C', '-u'])],
+  ['env', new Set(['-C', '--chdir', '-S', '--split-string', '-u', '--unset'])],
+  ['ionice', new Set(['-c', '--class', '-n', '--classdata', '-p', '--pid'])],
+  ['nice', new Set(['-n', '--adjustment'])],
+  ['stdbuf', new Set(['-e', '-i', '-o', '--error', '--input', '--output'])],
+  ['sudo', new Set(['-C', '-D', '-g', '-h', '-p', '-r', '-t', '-T', '-u', '-U'])],
+  ['time', new Set(['-f', '--format', '-o', '--output'])],
+  ['timeout', new Set(['-k', '--kill-after', '-s', '--signal'])],
+  ['xargs', new Set([
+    '-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-i', '--replace', '-L', '--max-lines', '-n', '--max-args',
+    '-P', '--max-procs', '-s', '--max-chars',
+  ])],
+]);
+
 // find(1) hands the words after these flags to the kernel verbatim, so the
 // word after the flag is an invocation even though it is not segment-initial.
 const EXEC_FORWARDING_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
@@ -476,14 +513,40 @@ function invokedAt(words, index) {
 
 // Shell keywords that precede a command in its own position: `do gh pr merge`,
 // `then git push`, `! gh …`, `{ git push; }`. `eval` runs its arguments.
-const SHELL_KEYWORDS = new Set(['!', '{', '}', 'do', 'elif', 'else', 'eval', 'if', 'then', 'until', 'while']);
+// `function <name>` and `case <word> in` take the word after them; a
+// function head (`f()`, `f ()`) and a case label (`x)`, `(a|b)`) are
+// keywords of their own: the body after them is a command (review of the
+// guard reduction: `f() { gh pr merge 1; }; f` ran the merge).
+const SHELL_KEYWORDS = new Set(['!', '{', '}', 'do', 'elif', 'else', 'eval', 'if', 'in', 'then', 'until', 'while']);
+const KEYWORDS_WITH_NAME = new Set(['case', 'function']);
+
+function isFunctionHead(words, index) {
+  return /^[A-Za-z_][A-Za-z0-9_-]*\(\)$/u.test(words[index]) || words[index] === '()' || words[index + 1] === '()';
+}
+
+function isCaseLabel(word) {
+  return /^\(?[^()\s]*\)$/u.test(word);
+}
 
 function inExecutablePosition(words, position) {
+  let wrapper = null;
   for (let index = 0; index < position; index += 1) {
     const word = words[index];
+    const name = word.slice(word.lastIndexOf('/') + 1);
+    if (wrapper !== null && WRAPPER_VALUE_OPTIONS.get(wrapper).has(word)) {
+      index += 1;                                              // the option's value
+      continue;
+    }
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;      // VAR=value prefix
-    if (EXEC_WRAPPERS.has(word.slice(word.lastIndexOf('/') + 1))) continue;
-    if (SHELL_KEYWORDS.has(word)) continue;
+    if (EXEC_WRAPPERS.has(name)) {
+      wrapper = WRAPPER_VALUE_OPTIONS.has(name) ? name : null;
+      continue;
+    }
+    if (KEYWORDS_WITH_NAME.has(word)) {
+      index += 1;
+      continue;
+    }
+    if (SHELL_KEYWORDS.has(word) || isFunctionHead(words, index) || isCaseLabel(word)) continue;
     if (/^-/.test(word)) continue;                             // wrapper flags
     if (/^[0-9]+[smhd]?$/.test(word)) continue;                // timeout duration
     return false;
@@ -691,18 +754,29 @@ function mutatingGhApi(words) {
   return method !== null && !new Set(['GET', 'HEAD']).has(method);
 }
 
-function normalizedGithubApiEndpoint(value) {
-  if (typeof value !== 'string') return null;
-  const prefix = 'https://api.github.com/';
+const GITHUB_API_HOST = 'api.github.com';
+
+// The path segments of an API endpoint, from a bare path or an absolute URL
+// of the API host in any spelling (scheme, case, `:443`, userinfo, query);
+// null for another host or a path this reader cannot take apart.
+function normalizedGithubApiEndpoint(value, { absoluteOnly = false } = {}) {
+  if (typeof value !== 'string' || /\s/u.test(value)) return null;
   let endpoint;
-  if (value.startsWith(prefix)) {
-    endpoint = value.slice(prefix.length);
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value) || /^[^/]*api\.github\.com/iu.test(value)) {
+    let url;
+    try {
+      url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value) ? value : `https://${value}`);
+    } catch {
+      return null;
+    }
+    if (url.hostname.toLowerCase() !== GITHUB_API_HOST || !['http:', 'https:'].includes(url.protocol)) return null;
+    endpoint = url.pathname;
   } else {
-    if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value)) return null;
-    endpoint = value.replace(/^\/+/u, '');
+    if (absoluteOnly) return null;
+    endpoint = value;
   }
-  endpoint = endpoint.split(/[?#]/u, 1)[0];
-  if (!endpoint || /\s/u.test(endpoint)) return null;
+  endpoint = endpoint.split(/[?#]/u, 1)[0].replace(/^\/+/u, '');
+  if (!endpoint) return null;
   try {
     const segments = endpoint.split('/').map((segment) =>
       decodeURIComponent(segment));
@@ -762,22 +836,10 @@ function isAssignmentWord(word) {
   return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word);
 }
 
-// A path that holds a secret, as a commit must never: an `.env*` file, key
-// material by extension, or a path segment that is (or is joined from) the
-// word secret, credential, token or keys. Whole words only: `tokenizer.ts` is
-// source. The lane contract's protected families are wider (workflows, the
-// loop's control roots) and stop a merge, not a commit, so they stay there.
-const SECRET_PATH_FAMILIES = Object.freeze([
-  /(^|\/)\.env[^/]*$/iu,
-  /\.(?:jks|key|keystore|p12|pem|pfx)$/iu,
-  /(^|\/)keys(\/|$)/iu,
-  /(^|\/)[^/]*(?:^|[^a-z0-9])(?:secrets?|credentials?|tokens?)(?:[^a-z0-9]|$)[^/]*(\/|$)/iu,
-]);
-
-export function isSecretPath(path) {
-  return SECRET_PATH_FAMILIES.some((family) => family.test(path));
-}
-
+// A path that holds a secret, as a commit must never: the one rule in
+// lane-contract.mjs (isSecretPath), shared with the merge families and the
+// lane. The lane contract's other protected families (`.github`, the loop's
+// control roots) stop a merge, not a commit, so they stay there.
 // Options of `git add` and `git commit` that take a value, so the value is
 // never read as a path.
 const STAGING_VALUE_OPTIONS = new Set([
@@ -815,6 +877,7 @@ export function stagedSecretPaths(words) {
 
 const MERGE_MUTATION_RE = /\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch|enqueuePullRequest)\b/u;
 const PROTECTION_MUTATION_RE = /\b(?:create|update|delete)(?:RepositoryRuleset|BranchProtectionRule)\b/u;
+const COMMIT_REF_MUTATION_RE = /\b(?:createCommitOnBranch|updateRefs?|createRef|deleteRef)\b/u;
 const MAX_EVALUATE_DEPTH = 4;
 
 const MERGE_REASON = 'autoloop guard — no merge: the loop never merges a pull request, through `gh pr merge`, '
@@ -823,44 +886,252 @@ const MERGE_REASON = 'autoloop guard — no merge: the loop never merges a pull 
 const RELEASE_REASON = 'autoloop guard — no release publication: a release-tag push or a GitHub release '
   + 'mutation is a maintainer act. Allowed: `gh release view <tag>`; report release readiness and '
   + 'leave publication to the maintainer.';
+const STATUS_REASON = 'autoloop guard — no hand-posted commit status: verdict evidence comes only from '
+  + '`publish-verdict.mjs`, bound to the gate or review it ran on the exact head. Allowed: '
+  + '`gh api repos/<o>/<r>/commits/<sha>/status` to read one.';
+const PROTECTION_REASON = 'autoloop guard — no branch-protection mutation: the protection and ruleset baseline is '
+  + 'the human\'s. Allowed: `gh api repos/<o>/<r>/branches/<base>/protection` to read it; '
+  + 'report a mismatch instead of changing it.';
+const COMMIT_REF_REASON = 'autoloop guard — no commit or ref write through the API: a contents, commit, tree or '
+  + 'ref mutation commits past the checkout and its branch rules. Allowed: `git commit` on the unit branch '
+  + 'and `git push origin HEAD:refs/heads/<unit-branch>`.';
+const WORKFLOW_REASON = 'autoloop guard — no workflow dispatch: `gh workflow run|enable` and the dispatch '
+  + 'endpoints run an unmerged branch with the repository\'s secrets. Allowed: `gh run list --branch '
+  + '<unit-branch>` and `gh run view <id>`; a push to the unit branch triggers its own checks.';
+const RAW_API_REASON = 'autoloop guard — no raw HTTP write to the GitHub API: a write past `gh` has none of '
+  + 'its refusals. Allowed: `gh api <endpoint>` for a read, or the `gh` command the task needs.';
 
-// The refusals of a `gh api` segment: the merge endpoint, a merge mutation,
-// a hand-posted commit status, a release or tag mutation, and a protection
-// or ruleset mutation. Reads pass, whatever they name.
-function ghApiProblem(words) {
-  if (ghPositionals(words)?.[0] !== 'api') return null;
-  const endpoints = githubApiEndpoints(words);
-  const mutating = mutatingGhApi(words);
-  const text = words.join(' ');
-  if (endpoints.some((path) => (path[3] === 'pulls' && path[5] === 'merge') || path[3] === 'merges')
-    || MERGE_MUTATION_RE.test(text)) {
-    return MERGE_REASON;
-  }
-  if (mutating && endpoints.some((path) => path[0] === 'repos' && path[3] === 'statuses')) {
-    return 'autoloop guard — no hand-posted commit status: verdict evidence comes only from '
-      + '`publish-verdict.mjs`, bound to the gate or review it ran on the exact head. Allowed: '
-      + '`gh api repos/<o>/<r>/commits/<sha>/status` to read one.';
-  }
-  if (mutating && endpoints.some((path) =>
-    path.length >= 4 && path[0] === 'repos'
-    && (path[3] === 'releases' || (path[3] === 'git' && ['refs', 'tags'].includes(path[4]))))) {
+// The refusal an API endpoint earns, by family. The merge endpoint is
+// refused whatever the method (its read is `gh pr view`); every other
+// family refuses a write only. A `git/refs` write naming a tag is a release.
+function apiEndpointProblem(path, mutating, text = '') {
+  if ((path[3] === 'pulls' && path[5] === 'merge') || path[3] === 'merges') return MERGE_REASON;
+  if (!mutating) return null;
+  if (path.includes('protection') || path.includes('rulesets')) return PROTECTION_REASON;
+  if (path[0] !== 'repos' || path.length < 4) return null;
+  if (path[3] === 'statuses') return STATUS_REASON;
+  if (path[3] === 'releases'
+    || (path[3] === 'git' && (path[4] === 'tags' || (path[4] === 'refs' && (path[5] === 'tags' || /\brefs\/tags\//u.test(text)))))) {
     return RELEASE_REASON;
   }
-  if ((mutating && endpoints.some((path) => path.includes('protection') || path.includes('rulesets')))
-    || PROTECTION_MUTATION_RE.test(text)) {
-    return 'autoloop guard — no branch-protection mutation: the protection and ruleset baseline is '
-      + 'the human\'s. Allowed: `gh api repos/<o>/<r>/branches/<base>/protection` to read it; '
-      + 'report a mismatch instead of changing it.';
+  if (path[3] === 'contents' || (path[3] === 'git' && ['blobs', 'commits', 'refs', 'trees'].includes(path[4]))) {
+    return COMMIT_REF_REASON;
+  }
+  if (path[3] === 'dispatches'
+    || (path[3] === 'actions' && path[4] === 'workflows' && ['dispatches', 'enable'].includes(path[6]))) {
+    return WORKFLOW_REASON;
   }
   return null;
+}
+
+// The refusals of a `gh api` segment: the merge endpoint, a merge mutation,
+// a hand-posted commit status, a release or tag mutation, a commit or ref
+// write (REST or GraphQL), a workflow dispatch, and a protection or ruleset
+// mutation. Reads pass, whatever they name.
+function ghApiProblem(words) {
+  if (ghPositionals(words)?.[0] !== 'api') return null;
+  const mutating = mutatingGhApi(words);
+  const text = words.join(' ');
+  if (MERGE_MUTATION_RE.test(text)) return MERGE_REASON;
+  for (const path of githubApiEndpoints(words)) {
+    const problem = apiEndpointProblem(path, mutating, text);
+    if (problem !== null) return problem;
+  }
+  if (PROTECTION_MUTATION_RE.test(text)) return PROTECTION_REASON;
+  if (COMMIT_REF_MUTATION_RE.test(text)) return COMMIT_REF_REASON;
+  return null;
+}
+
+// Raw HTTP to the API host (`curl`, `wget`, httpie's `http`/`https`, `xh`):
+// a write method, or an endpoint of a refused family, is refused; a plain
+// GET or HEAD is a read. The method is read from the client's own options;
+// a data or upload option implies a write.
+const HTTP_CLIENTS = new Set(['curl', 'http', 'https', 'wget', 'xh']);
+const CURL_VALUE_OPTIONS = new Set([
+  '-A', '--user-agent', '-b', '--cookie', '-c', '--cookie-jar', '-D', '--dump-header', '-e', '--referer', '-H',
+  '--header', '-K', '--config', '-m', '--max-time', '-o', '--output', '-u', '--user', '-w', '--write-out', '-x',
+  '--proxy', '--cacert', '--capath', '--cert', '--connect-timeout', '--interface', '--key', '--limit-rate',
+  '--max-redirs', '--oauth2-bearer', '--proto', '--resolve', '--retry', '--retry-delay', '--stderr', '--trace',
+  '--trace-ascii', '--unix-socket',
+]);
+const CURL_WRITE_OPTIONS = new Set([
+  '-d', '--data', '--data-ascii', '--data-binary', '--data-raw', '--data-urlencode', '-F', '--form', '--form-string',
+  '--json', '-T', '--upload-file',
+]);
+const WGET_WRITE_OPTIONS = new Set(['--post-data', '--post-file', '--body-data', '--body-file']);
+const HTTP_METHOD_RE = /^[A-Z]{3,8}$/u;
+
+function rawApiProblem(words) {
+  const client = words.findIndex((word, index) =>
+    HTTP_CLIENTS.has(word.slice(word.lastIndexOf('/') + 1)) && invokedAt(words, index));
+  if (client === -1) return null;
+  const name = words[client].slice(words[client].lastIndexOf('/') + 1);
+  const args = words.slice(client + 1);
+  const endpoints = [];
+  let method = null;
+  let write = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    const [option, inlineValue] = argument.startsWith('--') && argument.includes('=')
+      ? [argument.slice(0, argument.indexOf('=')), argument.slice(argument.indexOf('=') + 1)]
+      : [argument, null];
+    const value = () => (inlineValue !== null ? inlineValue : args[++index] ?? '');
+    if (name === 'curl') {
+      if (option === '-X' || option === '--request') method = value().toUpperCase();
+      else if (/^-X[A-Za-z]+$/u.test(argument)) method = argument.slice(2).toUpperCase();
+      else if (argument === '-G' || argument === '--get') method = 'GET';
+      else if (argument === '-I' || argument === '--head') method ??= 'HEAD';
+      else if (CURL_WRITE_OPTIONS.has(option)) {
+        write = true;
+        value();
+      } else if (option === '--url') endpoints.push(normalizedGithubApiEndpoint(value(), { absoluteOnly: true }));
+      else if (CURL_VALUE_OPTIONS.has(option)) value();
+      else if (!argument.startsWith('-')) endpoints.push(normalizedGithubApiEndpoint(argument, { absoluteOnly: true }));
+    } else if (name === 'wget') {
+      if (option === '--method') method = value().toUpperCase();
+      else if (WGET_WRITE_OPTIONS.has(option)) {
+        write = true;
+        value();
+      } else if (!argument.startsWith('-')) endpoints.push(normalizedGithubApiEndpoint(argument, { absoluteOnly: true }));
+    } else if (argument.startsWith('-')) {
+      continue;
+    } else if (HTTP_METHOD_RE.test(argument) && endpoints.length === 0) {
+      method = argument;
+    } else if (endpoints.length === 0) {
+      endpoints.push(normalizedGithubApiEndpoint(argument, { absoluteOnly: true }));
+    } else if (/^[^=:]+(?::=|==?|:)/u.test(argument)) {
+      write = true;                                            // an httpie data item
+    }
+  }
+  const found = endpoints.filter((endpoint) => endpoint !== null);
+  if (found.length === 0) return null;
+  const effective = method ?? (write ? 'POST' : 'GET');
+  const mutating = !['GET', 'HEAD'].includes(effective);
+  for (const path of found) {
+    const problem = apiEndpointProblem(path, mutating, args.join(' '));
+    if (problem !== null) return problem;
+  }
+  return mutating ? RAW_API_REASON : null;
+}
+
+// A literal `NAME=value` the command sets before a segment (`GH=gh; $GH pr
+// merge 4`, `export G=git`): a later segment whose head is `$NAME` runs the
+// value. An assignment prefix of the same segment does not reach its own
+// head (the shell expands the head first), and a value with an expansion of
+// its own is not literal.
+function literalAssignments(words, into) {
+  const assignments = words[0] === 'export' || words[0] === 'declare' || words[0] === 'local' ? words.slice(1) : words;
+  if (assignments.length === 0 || !assignments.every(isAssignmentWord)) return;
+  for (const word of assignments) {
+    const name = word.slice(0, word.indexOf('='));
+    const value = word.slice(word.indexOf('=') + 1);
+    if (/[$`]/u.test(value)) into.delete(name);
+    else into.set(name, value);
+  }
+}
+
+function resolvedHead(words, assignments) {
+  const name = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/u.exec(words[0] ?? '')?.slice(1).find(Boolean);
+  if (name === undefined || !assignments.has(name)) return words;
+  return [...shellWords(assignments.get(name)), ...words.slice(1)];
+}
+
+// A git alias set on the command line runs its value where its name is used
+// (`git -c alias.m='push --force' m`): the segment is judged as the command
+// the value names, or as a script when the value starts with `!`. An alias
+// whose value the guard cannot read (`--config-env`, an expansion, a config
+// include) is hidden, and refused. `git -c alias.st=status st` is `git status`.
+const HIDDEN_ALIAS_REASON = 'autoloop guard — no hidden git alias: a `-c alias.*` value the guard cannot read, '
+  + '`--config-env=alias.*` or a config include can name any git command. Allowed: `git <subcommand>` '
+  + 'spelled out, or `git -c alias.<name>=<literal value> <name>`.';
+
+function resolvedGitAlias(words, assignments) {
+  const git = executableIndex(words, 'git');
+  if (git === -1) return { words };
+  const aliases = new Map();
+  const kept = words.slice(0, git + 1);
+  let hidden = false;
+  let subcommand = -1;
+  for (let index = git + 1; index < words.length; index += 1) {
+    const word = words[index];
+    let setting = null;
+    if (word === '-c' || word === '--config-env') setting = `${word}=${words[++index] ?? ''}`;
+    else if (/^-c.+/u.test(word)) setting = `-c=${word.slice(2)}`;
+    else if (word.startsWith('--config-env=')) setting = word;
+    if (setting !== null) {
+      const alias = /^(-c|--config-env)=alias\.([^=]+)=(.*)$/su.exec(setting);
+      if (/^(?:-c|--config-env)=include(?:if\.[^=]*)?\.path(?:=|$)/iu.test(setting)) hidden = true;
+      else if (alias === null) kept.push(...(word === '-c' || word === '--config-env' ? [word, words[index]] : [word]));
+      else if (alias[1] === '--config-env') {
+        if (assignments.has(alias[3])) aliases.set(alias[2].toLowerCase(), assignments.get(alias[3]));
+        else hidden = true;
+      } else if (/[$`]/u.test(alias[3])) hidden = true;
+      else aliases.set(alias[2].toLowerCase(), alias[3]);
+      continue;
+    }
+    if (['-C', '--git-dir', '--work-tree', '--namespace'].includes(word)) {
+      kept.push(word, words[++index] ?? '');
+      continue;
+    }
+    if (word.startsWith('-')) {
+      kept.push(word);
+      continue;
+    }
+    subcommand = index;
+    break;
+  }
+  if (subcommand === -1) return { words };
+  const value = aliases.get(words[subcommand].toLowerCase());
+  if (value === undefined) return hidden ? { words, hidden: true } : { words };
+  const rest = words.slice(subcommand + 1);
+  if (value.startsWith('!')) return { words, script: [value.slice(1), ...rest].join(' ') };
+  return { words: [...kept, ...shellWords(value), ...rest] };
 }
 
 // The command's segments as words: heredoc bodies and comments out, ANSI-C
 // quotes decoded, line continuations joined, subshell parentheses trimmed,
 // quotes kept until the words are split (so `;` in a message splits nothing).
+// Each segment carries the heredoc body it reads, the literal head an earlier
+// assignment names, and the git alias it runs.
 function segmentWords(cmd) {
-  const text = quotedAnsiC(stripHeredocs(cmd)).replace(/\\\r?\n/gu, '');
-  return shellSegments(text).map((segment) => ({ ...segment, words: shellWords(trimSubshell(segment.command)) }));
+  const lexed = lexShell(cmd, { markHeredocs: true });
+  const text = quotedAnsiC(lexed.text).replace(/\\\r?\n/gu, '');
+  const assignments = new Map();
+  return shellSegments(text).map((segment) => {
+    let heredoc;
+    const words = shellWords(trimSubshell(segment.command)).filter((word) => {
+      const mark = word.startsWith(HEREDOC_MARK) ? lexed.bodies[Number(word.slice(1))] : undefined;
+      if (mark !== undefined) heredoc = mark.body;
+      return mark === undefined;
+    });
+    const resolved = resolvedGitAlias(resolvedHead(words, assignments), assignments);
+    literalAssignments(words, assignments);
+    return { ...segment, ...resolved, heredoc };
+  });
+}
+
+// The text a shell segment runs when it is fed rather than told (`bash
+// <<EOF`, `sh <<< '…'`, `echo '…' | sh`): its heredoc, its here-string, or
+// the literal an `echo`/`printf` pipes into it. A shell with `-c` is read by
+// nestedScript; anything else fed to it is unknown, and allowed.
+function fedScript(segment, previous) {
+  const { words } = segment;
+  let index = 0;
+  while (index < words.length && (isAssignmentWord(words[index]) || EXEC_WRAPPERS.has(basename(words[index])))) index += 1;
+  if (!/^(?:ba|da|k|z)?sh$/u.test(basename(words[index] ?? ''))) return undefined;
+  if (words.some((word, at) => at > index && /^-[A-Za-z]*c[A-Za-z]*$/u.test(word))) return undefined;
+  const hereString = words.indexOf('<<<', index + 1);
+  if (hereString !== -1) return words[hereString + 1];
+  if (segment.heredoc !== undefined) return segment.heredoc;
+  if (previous?.raw !== '|') return undefined;
+  const head = basename(previous.words[0] ?? '');
+  if (head === 'cat' && previous.words.length === 1) return previous.heredoc;
+  if (head === 'echo') return previous.words.slice(1).filter((word) => !/^-[eEn]+$/u.test(word)).join(' ');
+  if (head === 'printf') {
+    const [format, ...values] = previous.words.slice(1).filter((word) => word !== '--');
+    return (format ?? '').replace(/\\n/gu, '\n').replace(/%[^a-zA-Z%]*[a-zA-Z]/gu, () => values.shift() ?? '');
+  }
+  return undefined;
 }
 
 export function evaluate(inputCmd, branch, options = {}) {
@@ -869,12 +1140,16 @@ export function evaluate(inputCmd, branch, options = {}) {
   const baseBranch = options.baseBranch ?? 'main';
   const segments = segmentWords(inputCmd);
 
-  // A script a segment runs as text (`eval`, `sh -c`), and every command
-  // substitution, is judged as the commands it holds. A literal evasion of a
-  // rule below is caught here; a script the lexer cannot take apart is allowed.
+  // A script a segment runs as text (`eval`, `sh -c`, a `!` git alias, a
+  // trap, a gh alias, a shell fed by a heredoc or a literal echo), and every
+  // command substitution, is judged as the commands it holds. A literal
+  // evasion of a rule below is caught here; a script the lexer cannot take
+  // apart is allowed.
   if (depth < MAX_EVALUATE_DEPTH) {
     const nested = [
-      ...segments.map(({ words }) => nestedScript(words)?.script).filter((script) => script !== undefined),
+      ...segments.map((segment, index) =>
+        nestedScript(segment.words)?.script ?? segment.script ?? fedScript(segment, segments[index - 1]))
+        .filter((script) => script !== undefined),
       ...substitutionBodies(quotedAnsiC(stripHeredocs(inputCmd))),
     ];
     for (const script of nested) {
@@ -882,6 +1157,7 @@ export function evaluate(inputCmd, branch, options = {}) {
       if (inner.block) return inner;
     }
   }
+  if (segments.some(({ hidden }) => hidden === true)) return { block: true, reason: HIDDEN_ALIAS_REASON };
 
   // 1. never merge — structural: `pr` then `merge` are gh's positional words.
   // A free-text scan also matched option arguments, so a PR *title* containing
@@ -902,9 +1178,18 @@ export function evaluate(inputCmd, branch, options = {}) {
     return { block: true, reason: RELEASE_REASON };
   }
 
-  // 1 and 5 through `gh api`.
+  // 12. a workflow dispatch runs an unmerged branch with the repository's
+  // secrets (review of the guard reduction).
+  if (segments.some(({ words }) => {
+    const positionals = ghPositionals(words);
+    return positionals?.[0] === 'workflow' && ['enable', 'run'].includes(positionals[1]);
+  })) {
+    return { block: true, reason: WORKFLOW_REASON };
+  }
+
+  // 1, 4, 5 and 12 through `gh api`, and through raw HTTP to the API host.
   for (const { words } of segments) {
-    const problem = ghApiProblem(words);
+    const problem = ghApiProblem(words) ?? rawApiProblem(words);
     if (problem !== null) return { block: true, reason: problem };
   }
 
@@ -1487,6 +1772,7 @@ function selfTest() {
     ['gh api repos/o/r/branches/main/protection -fenforce_admins=false', 'main', true],
     ['gh api repos/o/r/branches/main/protection -Frequired_status_checks=null', 'main', true],
     ['gh api repos/o/r/rulesets/123 -X DELETE', 'main', true],
+    ['gh api orgs/o/rulesets/123 -X DELETE', 'main', true],
     ['gh api repos/o/r/rulesets/123 -X PATCH -f enforcement=disabled', 'main', true],
     ["gh api graphql -f query='mutation{deleteRepositoryRuleset(input:{repositoryRulesetId:\"x\"}){clientMutationId}}'", 'main', true],
     ["gh api repos/o/r/branches/main/protection --jq '.enforce_admins.enabled'", 'main', false],
@@ -1503,7 +1789,11 @@ function selfTest() {
     ['git add keys/deploy', 'feat/gh-2-y', true],
     ['git add config/credentials.yml', 'feat/gh-2-y', true],
     ['git add secrets/api.json', 'feat/gh-2-y', true],
-    ['git add github-token.txt', 'feat/gh-2-y', true],
+    ['git add token.txt', 'feat/gh-2-y', true],
+    ['git add certs/server.crt', 'feat/gh-2-y', true],
+    ['git add .ssh/id_rsa', 'feat/gh-2-y', true],
+    ['git add github-token.txt', 'feat/gh-2-y', false],
+    ['git add auth/token-refresh.ts lib/encryption.ts', 'feat/gh-2-y', false],
     ['git add -- .env', 'feat/gh-2-y', true],
     ['git commit -a .env -m x', 'feat/gh-2-y', true],
     ['git commit -m "x" .env', 'feat/gh-2-y', true],
@@ -1550,6 +1840,116 @@ function selfTest() {
     ["awk '/^## Lessons/,0' docs/agentic/STATE.md", 'feat/gh-1-x', false],
     ['node --version', 'feat/gh-1-x', false],
     ['echo probe && gh auth status && node --version', 'feat/gh-1-x', false],
+    // 0.69.0 review of the guard reduction: literal evasions of the kept
+    // rules. H1: a commit or ref write through the GitHub API.
+    ['gh api -X PUT repos/o/r/contents/README.md -f branch=main -f message=x -f content=eA==', 'feat/gh-1-x', true],
+    ['gh api repos/o/r/contents/README.md -X DELETE -f sha=abc -f message=x', 'feat/gh-1-x', true],
+    ["gh api graphql -f query='mutation{createCommitOnBranch(input:{branch:{repositoryNameWithOwner:\"o/r\",branchName:\"main\"}}){clientMutationId}}'", 'feat/gh-1-x', true],
+    ["gh api graphql -f query='mutation{updateRef(input:{refId:\"x\",oid:\"y\",force:true}){clientMutationId}}'", 'feat/gh-1-x', true],
+    ["gh api graphql -f query='mutation{updateRefs(input:{repositoryId:\"x\",refUpdates:[]}){clientMutationId}}'", 'feat/gh-1-x', true],
+    ["gh api graphql -f query='mutation{createRef(input:{repositoryId:\"x\",name:\"refs/tags/v1\",oid:\"y\"}){clientMutationId}}'", 'feat/gh-1-x', true],
+    ["gh api graphql -f query='mutation{deleteRef(input:{refId:\"x\"}){clientMutationId}}'", 'feat/gh-1-x', true],
+    ['gh api repos/o/r/git/commits -X POST -f message=x -f tree=y', 'feat/gh-1-x', true],
+    ['gh api repos/o/r/git/trees -X POST --input /tmp/tree.json', 'feat/gh-1-x', true],
+    ['gh api repos/o/r/git/refs/heads/main -X PATCH -f sha=abc', 'feat/gh-1-x', true],
+    ['gh api repos/o/r/git/refs/heads/feat/gh-1-x -X DELETE', 'feat/gh-1-x', true],
+    ['gh api repos/o/r/contents/README.md', 'feat/gh-1-x', false],
+    ['gh api repos/o/r/git/refs/heads/main', 'feat/gh-1-x', false],
+    ['gh api repos/o/r/git/trees/abc --jq .tree', 'feat/gh-1-x', false],
+    ['gh api repos/o/r/git/commits/abc', 'feat/gh-1-x', false],
+    // H5: a workflow run or dispatch runs an unmerged branch with the
+    // repository's secrets.
+    ['gh workflow run ci.yml', 'feat/gh-1-x', true],
+    ['gh workflow run ci.yml --ref feat/gh-1-x -f x=1', 'feat/gh-1-x', true],
+    ['gh workflow enable ci.yml', 'feat/gh-1-x', true],
+    ['gh workflow list', 'feat/gh-1-x', false],
+    ['gh workflow view ci.yml', 'feat/gh-1-x', false],
+    ['gh api repos/o/r/actions/workflows/ci.yml/dispatches -f ref=feat/gh-1-x', 'feat/gh-1-x', true],
+    ['gh api repos/o/r/actions/workflows/123/enable -X PUT', 'feat/gh-1-x', true],
+    ['gh api repos/o/r/dispatches -f event_type=deploy', 'feat/gh-1-x', true],
+    ['gh api repos/o/r/actions/workflows', 'feat/gh-1-x', false],
+    ['gh api repos/o/r/actions/runs --jq .total_count', 'feat/gh-1-x', false],
+    // H2: raw HTTP to the API. A write method, or a refused family, is
+    // refused; a plain GET is a read.
+    ['curl -X PUT https://api.github.com/repos/o/r/pulls/4/merge', 'feat/gh-1-x', true],
+    ['curl -XDELETE https://api.github.com/repos/o/r/git/refs/heads/main', 'feat/gh-1-x', true],
+    ['curl --request POST -H "Authorization: token x" https://api.github.com/repos/o/r/dispatches', 'feat/gh-1-x', true],
+    ["curl -d '{\"base\":\"main\"}' https://api.github.com/repos/o/r/merges", 'feat/gh-1-x', true],
+    ['curl -X POST https://api.github.com/repos/o/r/issues/5/comments -d @body.json', 'feat/gh-1-x', true],
+    ['curl -T README.md https://api.github.com/repos/o/r/contents/README.md', 'feat/gh-1-x', true],
+    ['curl https://api.github.com/repos/o/r/pulls/4/merge', 'feat/gh-1-x', true],
+    ['wget --method=PUT -O- HTTPS://API.GITHUB.COM:443/repos/o/r/pulls/4/merge', 'feat/gh-1-x', true],
+    ['wget --post-data=x https://api.github.com/repos/o/r/merges', 'feat/gh-1-x', true],
+    ['http PUT api.github.com/repos/o/r/pulls/4/merge', 'feat/gh-1-x', true],
+    ['xh PUT https://user:tok@api.github.com/repos/o/r/pulls/4/merge', 'feat/gh-1-x', true],
+    ['curl -s https://api.github.com/repos/o/r/pulls/4', 'feat/gh-1-x', false],
+    ['curl -sI https://api.github.com/rate_limit', 'feat/gh-1-x', false],
+    ['curl -H "Authorization: token x" https://api.github.com/repos/o/r/pulls/4/files', 'feat/gh-1-x', false],
+    ['curl -X POST https://example.com/api/merge', 'feat/gh-1-x', false],
+    ['curl -X POST https://api.github.example.com/repos/o/r/merges', 'feat/gh-1-x', false],
+    ['http api.github.com/repos/o/r/pulls/4', 'feat/gh-1-x', false],
+    // H3: a command-scoped git alias runs its value. A readable alias is
+    // judged as the command it names; a hidden one is refused.
+    ["git -c alias.m='push --force' m origin feat/gh-1-x", 'feat/gh-1-x', true],
+    ["git -c alias.x='!gh pr merge 1' x", 'feat/gh-1-x', true],
+    ['git -c alias.p=push p origin HEAD:main', 'feat/gh-1-x', true],
+    ['git -calias.p=push p origin HEAD:main', 'feat/gh-1-x', true],
+    ['git -c alias.st=status st', 'feat/gh-1-x', false],
+    ['git -c alias.p=push p origin HEAD:refs/heads/feat/gh-1-x', 'feat/gh-1-x', false],
+    ['git --config-env=alias.m=M m origin feat/gh-1-x', 'feat/gh-1-x', true],
+    ['M="push --force"; git --config-env=alias.m=M m origin feat/gh-1-x', 'feat/gh-1-x', true],
+    ['M=status; git --config-env=alias.m=M m', 'feat/gh-1-x', false],
+    ['git -c alias.m="$CMD" m', 'feat/gh-1-x', true],
+    ['git -c include.path=/tmp/aliases m', 'feat/gh-1-x', true],
+    // H4: a gh alias, a function body, a case branch and a trap run text.
+    ["gh alias set m 'pr merge' && gh m 1", 'feat/gh-1-x', true],
+    ["gh alias set --shell m 'gh pr merge $1'", 'feat/gh-1-x', true],
+    ["gh alias set co 'pr checkout'", 'feat/gh-1-x', false],
+    ['f() { gh pr merge 1; }; f', 'feat/gh-1-x', true],
+    ['f () { gh pr merge 1; }', 'feat/gh-1-x', true],
+    ['function f { gh pr merge 1; }; f', 'feat/gh-1-x', true],
+    ['function f() { git push origin HEAD:main; }', 'feat/gh-1-x', true],
+    ['case x in x) gh pr merge 1;; esac', 'feat/gh-1-x', true],
+    ['case "$1" in (merge|m) gh pr merge 1 ;; *) echo no ;; esac', 'feat/gh-1-x', true],
+    ["trap 'gh pr merge 1' EXIT", 'feat/gh-1-x', true],
+    ["trap -- 'git push origin HEAD:main' INT", 'feat/gh-1-x', true],
+    ["trap 'rm -f /tmp/x' EXIT", 'feat/gh-1-x', false],
+    ['f() { git status; }; f', 'feat/gh-1-x', false],
+    // A shell fed by a heredoc, a here-string or a literal echo runs that text.
+    ['bash <<EOF\ngh pr merge 4\nEOF', 'feat/gh-1-x', true],
+    ["bash -s <<'EOF'\ngh pr merge 4\nEOF", 'feat/gh-1-x', true],
+    ['sh <<EOF\ngit push origin HEAD:main\nEOF', 'feat/gh-1-x', true],
+    ["sh <<< 'gh pr merge 1'", 'feat/gh-1-x', true],
+    ['echo "gh pr merge 4" | sh', 'feat/gh-1-x', true],
+    ["printf '%s\\n' 'gh pr merge 4' | bash", 'feat/gh-1-x', true],
+    ['cat <<EOF | sh\ngh pr merge 4\nEOF', 'feat/gh-1-x', true],
+    ['echo "gh pr view 4" | sh', 'feat/gh-1-x', false],
+    ['cat script.sh | sh', 'feat/gh-1-x', false],
+    ['cat <<EOF | sh\nls\nEOF', 'feat/gh-1-x', false],
+    ['echo "gh pr merge 4" | tee /tmp/x', 'feat/gh-1-x', false],
+    // Accepted by design (SPEC-guard-reduction, required behavior 2 and 3):
+    // an inline interpreter's program is not shell, and is not judged; a
+    // backslash-space joins one argv word, which gh rejects as a command.
+    ["python3 -c \"import os; os.system('gh pr merge 1')\"", 'feat/gh-1-x', false],
+    ["node -e \"require('child_process').execSync('gh pr merge 1')\"", 'feat/gh-1-x', false],
+    ['gh pr\\ merge 4', 'feat/gh-1-x', false],
+    // A wrapper's option value is not the command it runs.
+    ['sudo -u dev gh pr merge 4', 'feat/gh-1-x', true],
+    ['env -C /repo -u X gh pr merge 4', 'feat/gh-1-x', true],
+    ['timeout -s KILL -k 5 30 gh pr merge 4', 'feat/gh-1-x', true],
+    ['xargs -I {} -P 2 gh pr merge {}', 'feat/gh-1-x', true],
+    ['ionice -c 2 -n 7 nice -n 10 gh pr merge 4', 'feat/gh-1-x', true],
+    ['sudo -u dev git status', 'feat/gh-1-x', false],
+    // A literal assignment earlier in the command names the command head.
+    ['GH=gh; $GH pr merge 4', 'feat/gh-1-x', true],
+    ['export G=git; $G push origin HEAD:main', 'feat/gh-1-x', true],
+    ['GH=gh; ${GH} pr view 4', 'feat/gh-1-x', false],
+    ['GH=gh $GH pr merge 4', 'feat/gh-1-x', false],
+    // M6: every spelling of the API host normalises.
+    ['gh api HTTPS://API.GITHUB.COM:443/repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true],
+    ['gh api http://api.github.com/repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true],
+    ['gh api https://user:tok@api.github.com/repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true],
+    ['gh api https://api.github.com/repos/o/r/pulls/42/merge?x=1#f -X PUT', 'feat/gh-2-y', true],
   ];
   let ok = true;
   for (const [cmd, branch, expect, baseBranch, extra] of cases) {
@@ -1613,9 +2013,12 @@ function selfTest() {
       ['environment.ts', false], ['lib/env.mjs', false],
       ['server.pem', true], ['x/id.key', true], ['store.p12', true], ['cert.pfx', true], ['app.jks', true], ['java.keystore', true],
       ['keys/deploy', true], ['x/keys/a', true], ['keys', true], ['monkeys/a', false], ['hotkeys.json', false],
-      ['secrets/a.json', true], ['secret.txt', true], ['config/credentials.yml', true], ['credential-store/x', true],
-      ['token.json', true], ['github_token', true], ['api-tokens.md', true],
-      ['src/tokenizer.ts', false], ['secretary.md', false], ['credentialing.md', false], ['tokens-doc/readme.md', true],
+      ['secrets/a.json', true], ['secret.txt', true], ['config/credentials.yml', true], ['token.json', true],
+      ['tokens/x', true], ['certs/server.crt', true], ['.ssh/id_rsa', true], ['docs/secrets.md', true],
+      // 0.69.0 review: a segment that IS the word, not a name that contains it.
+      ['src/tokenizer.ts', false], ['auth/token-refresh.ts', false], ['lib/encryption.ts', false],
+      ['secretary.md', false], ['credentialing.md', false], ['credential-store/x', false], ['github_token', false],
+      ['api-tokens.md', false], ['tokens-doc/readme.md', false],
     ];
     const wrongFamily = secretCases.filter(([path, expected]) => isSecretPath(path) !== expected);
     const staged = [
@@ -2448,7 +2851,8 @@ export function guardSegments(cmd, depth = 0) {
   return segments;
 }
 
-// The script an `eval` or a shell's `-c` runs, if the segment is one.
+// The script an `eval`, a shell's `-c`, a `trap`, a shell alias or a gh
+// alias runs, if the segment is one.
 function nestedScript(words) {
   let index = 0;
   while (index < words.length && (isAssignmentWord(words[index]) || EXEC_WRAPPERS.has(basename(words[index])))) index += 1;
@@ -2458,6 +2862,19 @@ function nestedScript(words) {
   if (head === 'alias') {
     const values = words.slice(index + 1).filter((word) => word.includes('=')).map((word) => word.slice(word.indexOf('=') + 1));
     return values.length === 0 ? null : { script: values.join(' ; '), child: false };
+  }
+  // A trap's action runs on its signal (`trap 'gh pr merge 1' EXIT`).
+  if (head === 'trap') {
+    const action = words.slice(index + 1).find((word) => word !== '--' && !word.startsWith('-'));
+    return action === undefined || words.length < index + 3 ? null : { script: action, child: false };
+  }
+  // `gh alias set <name> <value>` runs `gh <value>` wherever the name is
+  // used; `--shell` makes the value a shell script.
+  if (head === 'gh' && words[index + 1] === 'alias' && words[index + 2] === 'set') {
+    const rest = words.slice(index + 3);
+    const shell = rest.some((word) => word === '--shell' || word === '-s');
+    const [, value] = rest.filter((word) => !word.startsWith('-'));
+    return value === undefined ? null : { script: shell ? value : `gh ${value}`, child: false };
   }
   if (!/^(?:ba|da|k|z)?sh$/u.test(head)) return null;
   const flag = words.findIndex((word, at) => at > index && /^-[A-Za-z]*c[A-Za-z]*$/u.test(word));

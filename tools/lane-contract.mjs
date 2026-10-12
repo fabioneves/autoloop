@@ -8,36 +8,43 @@ import { pathToFileURL } from 'node:url';
 // git hooks. A writer changing one would reconfigure the gate.
 const SHARED_GUARDRAIL_ROOTS = ['.autoloop', '.claude', '.codex', '.opencode', '.agents', '.githooks'];
 
-// The built-in protected families: secret and credential paths, CI workflows,
-// and the loop's control roots. Nothing else. Documentation, dependency
-// manifests, build configs, container files, and data are ordinary files; a
-// project that wants one protected lists it in `protectedPaths`.
-export const HUMAN_AUTHORIZATION_GLOBS = [
-  '.env*',
-  '**/.env*',
-  '*credential*',
-  '**/*credential*',
-  '*private-key*',
-  '**/*private-key*',
-  '*private_key*',
-  '**/*private_key*',
-  '*.key',
-  '**/*.key',
-  '*.pem',
-  '**/*.pem',
-  '*.p12',
-  '**/*.p12',
-  '*.pfx',
-  '**/*.pfx',
-  'credentials/**',
-  '**/credentials/**',
-  'keys/**',
-  '**/keys/**',
-  'secrets/**',
-  '**/secrets/**',
-  '.github/workflows/**',
-  ...SHARED_GUARDRAIL_ROOTS.map((root) => `${root}/**`),
-];
+// `.github` as a whole: workflows, composite actions, CODEOWNERS and
+// dependabot all run in CI with the repository's secrets or decide who
+// reviews (0.69.0 review of the protected-path reduction).
+const GUARDRAIL_ROOTS = ['.github', ...SHARED_GUARDRAIL_ROOTS];
+
+// The one secret-path rule, for the command guard (a commit), the merge
+// families (a merge) and the lane (a widening). A path holds a secret when
+// a segment IS one of the words secret, credential, token or crypt (with any
+// extension: `docs/secrets.md`, `crypt.ts`), not when a name contains one
+// (`src/tokenizer.ts`, `auth/token-refresh.ts`, `lib/encryption.ts` are
+// source); when it is key material by directory (`keys/`, `certs/`,
+// `.ssh/`), by name (`id_rsa*`, `id_ed25519*`, `private-key`, `keypair`)
+// or by extension; or when it is an `.env*` file.
+const SECRET_WORD_RE = /^(?:secrets?|credentials?|tokens?|crypt)(?:\..*)?$/iu;
+const SECRET_SEGMENT_RE = /^(?:keys|certs|\.ssh)$/iu;
+const SECRET_NAME_RE = /^id_(?:rsa|ed25519|ecdsa|dsa)(?:[^/]*)$|private[-_]?key|keypair/iu;
+const SECRET_EXTENSION_RE = /\.(?:crt|jks|key|keystore|p12|pem|pfx)$/iu;
+const ENV_FILE_RE = /^\.env(?:[^/]*)$/iu;
+
+export function isSecretPath(path) {
+  if (typeof path !== 'string' || path.length === 0) return false;
+  const segments = path.split('/').filter((segment) => segment.length > 0);
+  if (segments.length === 0) return false;
+  const leaf = segments[segments.length - 1];
+  return segments.some((segment) => SECRET_WORD_RE.test(segment) || SECRET_SEGMENT_RE.test(segment) || SECRET_NAME_RE.test(segment))
+    || SECRET_EXTENSION_RE.test(leaf)
+    || ENV_FILE_RE.test(leaf);
+}
+
+// The built-in protected families beside the secret rule, as globs: the
+// `.github` tree and the loop's control roots. Nothing else. Documentation,
+// dependency manifests, build configs, container files, and data are
+// ordinary files; a project that wants one protected lists it in
+// `protectedPaths`. A secret path is matched by `isSecretPath`, reported
+// under the `<secret-path>` glob.
+export const SECRET_PATH_GLOB = '<secret-path>';
+export const HUMAN_AUTHORIZATION_GLOBS = ['.github/workflows/**', ...GUARDRAIL_ROOTS.map((root) => `${root}/**`)];
 
 // The built-in families protect secrets, CI workflows, and the loop's own
 // control files. Every other path is ordinary: a project that wants it
@@ -79,7 +86,14 @@ export const PATH_POLICY_FIXTURES = [
   { path: 'tools/x.mjs', humanAuthorization: false, mergeProtected: false },
   { path: 'tools/agentic/gate.mjs', humanAuthorization: false, mergeProtected: false },
   { path: '.editorconfig', humanAuthorization: false, mergeProtected: false },
-  { path: '.github/dependabot.yml', humanAuthorization: false, mergeProtected: false },
+  { path: '.github/dependabot.yml', humanAuthorization: true, mergeProtected: true },
+  { path: '.github/CODEOWNERS', humanAuthorization: true, mergeProtected: true },
+  { path: 'auth/token-refresh.ts', humanAuthorization: false, mergeProtected: false },
+  { path: 'src/tokenizer.ts', humanAuthorization: false, mergeProtected: false },
+  { path: 'lib/encryption.ts', humanAuthorization: false, mergeProtected: false },
+  { path: 'docs/secrets.md', humanAuthorization: true, mergeProtected: true },
+  { path: 'certs/server.crt', humanAuthorization: true, mergeProtected: true },
+  { path: '.ssh/id_rsa', humanAuthorization: true, mergeProtected: true },
 ];
 
 export function globToRe(glob) {
@@ -102,12 +116,21 @@ function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+// A human-authorization hit: the secret rule first (reported as
+// `<secret-path>`), then the built-in and project globs, the most specific
+// (longest) matching glob named (`.github/workflows/**` over `.github/**`).
 export function matchHumanAuthorization(files, globs = HUMAN_AUTHORIZATION_GLOBS) {
-  const patterns = normalizedGlobs(globs).map((glob) => ({ glob, re: globToRe(glob) }));
+  const patterns = normalizedGlobs(globs)
+    .sort((left, right) => right.length - left.length)
+    .map((glob) => ({ glob, re: globToRe(glob) }));
   const hits = [];
   for (const file of files ?? []) {
     if (typeof file !== 'string' || file.length === 0) {
       hits.push({ file, glob: '<opaque-path>' });
+      continue;
+    }
+    if (isSecretPath(file)) {
+      hits.push({ file, glob: SECRET_PATH_GLOB });
       continue;
     }
     const matched = patterns.find(({ re }) => re.test(file));
@@ -116,27 +139,16 @@ export function matchHumanAuthorization(files, globs = HUMAN_AUTHORIZATION_GLOBS
   return hits;
 }
 
-// The same families as HUMAN_AUTHORIZATION_GLOBS, matched by segment so a
-// nested secret path is caught wherever it sits.
-// The `secret` families hold secret values or key material: a unit never
-// widens its lane into one (SPEC-elastic-scope); the others label it.
+// The same families as matchHumanAuthorization, named for the merge
+// executor's report. The `secret` family holds secret values or key
+// material: a unit never widens its lane into one (SPEC-elastic-scope); the
+// guardrail roots label it.
 const MERGE_PROTECTED_PATH_FAMILIES = [
-  { name: 'cryptographic credential paths', secret: true, matches: (path) => /(^|\/)[^/]*crypt[^/]*(\/|$)/i.test(path) },
-  { name: 'secret/credential path segments', secret: true, matches: (path) => /(^|\/)[^/]*(secret|credential|token)[^/]*(\/|$)/i.test(path) },
-  {
-    name: 'key material',
-    secret: true,
-    matches: (path) =>
-      /(^|\/)(?:keys?|certs?)(\/|$)/i.test(path)
-      || /(^|\/)[^/]*(?:private[-_]?key|keypair)[^/]*(\/|$)/i.test(path)
-      || /\.(?:jks|key|keystore|p12|pem|pfx)$/i.test(path),
-  },
-  { name: 'env files', secret: true, matches: (path) => /(^|\/)\.env[^/]*$/i.test(path) },
-  ...SHARED_GUARDRAIL_ROOTS.map((root) => ({
+  { name: 'secret path', secret: true, matches: isSecretPath },
+  ...GUARDRAIL_ROOTS.map((root) => ({
     name: root,
-    matches: (path) => new RegExp(`^${root.replace('.', '\\.')}\\/`, 'i').test(path),
+    matches: (path) => path.toLowerCase().startsWith(`${root}/`),
   })),
-  { name: '.github/workflows', matches: (path) => /^\.github\/workflows\//i.test(path) },
 ];
 
 export function matchMergeProtected(files, extraGlobs = []) {
@@ -315,11 +327,14 @@ export function laneCovers(paths, lane) {
   return (Array.isArray(paths) ? paths : []).every((path) => inLane(path, lane));
 }
 
-// Widens a lane by the given paths. A path in a secret family is refused
-// (`WIDEN_SECRET_PATH`) and a malformed one too (`WIDEN_PATH_INVALID`); any
-// other protected path (a workflow, a loop control file, a project
-// `protectedPaths` glob) is accepted and reported in `authorize`, which earns
-// the unit its `human:authorize` label rather than a block.
+// Widens a lane by the given paths. A secret path is refused
+// (`WIDEN_SECRET_PATH`), a malformed one too (`WIDEN_PATH_INVALID`), and a
+// directory prefix at or under a guardrail root (`.github/`, `.claude/`,
+// …) as well (`WIDEN_GUARDRAIL_ROOT`: a prefix is open-ended, and a lane
+// never takes a control tree whole). Any other protected path (one file
+// under a guardrail root, a project `protectedPaths` glob) is accepted and
+// reported in `authorize`, which earns the unit its `human:authorize` label
+// rather than a block. A prefix is matched as the directory it names.
 export function widenLane(lane, paths, extraGlobs = []) {
   const widened = [...(Array.isArray(lane) ? lane : [])];
   const authorize = [];
@@ -327,13 +342,15 @@ export function widenLane(lane, paths, extraGlobs = []) {
   for (const raw of Array.isArray(paths) ? paths : []) {
     const path = normalizedPath(typeof raw === 'string' ? raw.replace(/\/$/, '') : raw);
     if (path === null) return { ok: false, code: 'WIDEN_PATH_INVALID', path: raw };
-    const entry = typeof raw === 'string' && raw.endsWith('/') ? `${path}/` : path;
-    if (MERGE_PROTECTED_PATH_FAMILIES.some(({ secret, matches }) => secret === true && matches(path))) {
-      return { ok: false, code: 'WIDEN_SECRET_PATH', path: entry };
+    const prefix = typeof raw === 'string' && raw.endsWith('/');
+    const entry = prefix ? `${path}/` : path;
+    if (isSecretPath(path)) return { ok: false, code: 'WIDEN_SECRET_PATH', path: entry };
+    if (prefix && GUARDRAIL_ROOTS.some((root) => entry.toLowerCase().startsWith(`${root}/`))) {
+      return { ok: false, code: 'WIDEN_GUARDRAIL_ROOT', path: entry };
     }
     if (inLane(entry, widened)) continue;
     widened.push(entry);
-    authorize.push(...matchHumanAuthorization([path], globs));
+    authorize.push(...matchHumanAuthorization([entry], globs));
   }
   return { ok: true, lane: widened, authorize };
 }
@@ -1007,6 +1024,46 @@ function selfTest() {
     [
       'a widening into a path outside the repository is refused WIDEN_PATH_INVALID',
       ['../x.mjs', '/etc/passwd', 'a/../b', ''].every((path) => widenLane(['src/'], [path]).code === 'WIDEN_PATH_INVALID'),
+    ],
+    // 0.69.0 review: one secret-path rule for the guard, the merge families
+    // and the lane. A segment that is the word, not a word inside a name.
+    [
+      'isSecretPath is the one secret-path rule: whole segments, key material, env files',
+      [
+        ['src/tokenizer.ts', false], ['docs/secrets.md', true], ['certs/server.crt', true], ['.ssh/id_rsa', true],
+        ['config/credentials.json', true], ['lib/encryption.ts', false], ['auth/token-refresh.ts', false],
+        ['secret', true], ['x/secrets/a.json', true], ['secretary.md', false], ['credentialing.md', false],
+        ['token.json', true], ['tokens/x', true], ['crypt/a', true], ['crypt.ts', true], ['lib/crypto.ts', false],
+        ['keys/deploy', true], ['monkeys/a', false], ['hotkeys.json', false], ['id_ed25519.pub', true],
+        ['deploy/private-key.pem', true], ['private_key', true], ['x/keypair.json', true],
+        ['.env', true], ['.env.local', true], ['a/.env.production', true], ['environment.ts', false],
+        ['server.pem', true], ['x/id.key', true], ['store.p12', true], ['cert.pfx', true], ['app.jks', true],
+        ['java.keystore', true], ['a.crt', true],
+      ].every(([path, expected]) => isSecretPath(path) === expected),
+    ],
+    // M1: a prefix widening is matched as a directory, and a prefix that is
+    // a guardrail or secret root is refused outright.
+    [
+      'a prefix widening into a project-protected directory is a human:authorize hit',
+      (() => {
+        const spec = widenLane(['src/'], ['spec/'], ['spec/**']);
+        return spec.ok === true && spec.lane.includes('spec/') && spec.authorize.length === 1
+          && spec.authorize[0].glob === 'spec/**';
+      })(),
+    ],
+    [
+      'a prefix widening at or under a guardrail root is refused WIDEN_GUARDRAIL_ROOT',
+      ['.github/', '.github/workflows/', '.claude/', '.autoloop/', '.githooks/', '.codex/', '.opencode/', '.agents/']
+        .every((path) => widenLane(['src/'], [path]).code === 'WIDEN_GUARDRAIL_ROOT')
+        && widenLane(['src/'], ['keys/']).code === 'WIDEN_SECRET_PATH'
+        && widenLane(['src/'], ['.github/workflows/ci.yml']).ok === true,
+    ],
+    // M3a: `.github/**` is one protected family.
+    [
+      'every path under .github is protected',
+      ['.github/dependabot.yml', '.github/CODEOWNERS', '.github/actions/setup/action.yml', '.github/workflows/ci.yml']
+        .every((path) => matchMergeProtected([path]).length === 1 && matchHumanAuthorization([path]).length === 1)
+        && matchMergeProtected(['github/x.md']).length === 0,
     ],
   ];
   for (const fixture of PATH_POLICY_FIXTURES) {

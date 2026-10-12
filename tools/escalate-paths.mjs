@@ -268,10 +268,20 @@ function selfTest() {
     ['apps/web/.env.local', true],
     ['.ENV.local', true],
     ['.github/workflows/ci.yml', true],
-    ['.github/dependabot.yml', false],
+    // 0.69.0 review: `.github/**` whole (actions, CODEOWNERS, dependabot run
+    // in CI), and one secret-path rule (lane-contract isSecretPath).
+    ['.github/dependabot.yml', true],
+    ['.github/CODEOWNERS', true],
+    ['.github/actions/setup/action.yml', true],
     ['keys/x.pem', true],
     ['secrets/a.txt', true],
     ['config/credentials.json', true],
+    ['src/tokenizer.ts', false],
+    ['docs/secrets.md', true],
+    ['certs/server.crt', true],
+    ['.ssh/id_rsa', true],
+    ['lib/encryption.ts', false],
+    ['auth/token-refresh.ts', false],
     ['.autoloop/config.json', true],
     ['.githooks/pre-commit', true],
     // Ordinary files: a project lists them in protectedPaths when it wants them.
@@ -438,7 +448,7 @@ function selfTest() {
     diffChecks.push(['built-in merge-protected paths are reported at claim',
       (() => {
         try {
-          return JSON.parse(mergeProof.stdout).mergeProtectedHits.some(({ file, family }) => file === '.env.production' && family === 'env files');
+          return JSON.parse(mergeProof.stdout).mergeProtectedHits.some(({ file, family }) => file === '.env.production' && family === 'secret path');
         } catch {
           return false;
         }
