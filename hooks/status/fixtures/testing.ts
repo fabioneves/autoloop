@@ -49,13 +49,20 @@ export function rows(tree: RenderElement): string[] {
   return children.flatMap((child) => (typeof child === 'string' ? [child] : rows(child)))
 }
 
-export function findColor(tree: RenderElement, text: string): string | undefined {
-  if (tree.type === 'Text' && (tree.children ?? []).includes(text)) return tree.props?.['color'] as string | undefined
+type TextElement = Extract<RenderElement, { type: 'Text' }>
+
+/** The Text element that holds `text` as one of its own children. */
+export function findText(tree: RenderElement, text: string): TextElement | undefined {
+  if (tree.type === 'Text' && (tree.children ?? []).includes(text)) return tree
   const children = 'children' in tree ? tree.children ?? [] : []
   for (const child of children) {
     if (typeof child === 'string') continue
-    const found = findColor(child, text)
+    const found = findText(child, text)
     if (found !== undefined) return found
   }
   return undefined
+}
+
+export function findColor(tree: RenderElement, text: string): string | undefined {
+  return findText(tree, text)?.props?.['color'] as string | undefined
 }

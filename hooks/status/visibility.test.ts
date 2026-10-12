@@ -10,23 +10,33 @@ import type { StatusState } from '../../types'
 
 import { DISABLED, OWNED, UNOWNED } from './fixtures/projection'
 import { PERIOD_MS, band, ran, start, texts } from './fixtures/testing'
-import { STATUS_SCHEMA, isDrawable, isStale, parseProjection } from './read'
+import { STATUS_SCHEMA, isDrawable, isStale, parseProjection, readProjection } from './read'
+
+/** What the producer prints on a fault past ownership (status.mjs --self-test): owned false with the fault's code, exit 0. */
+const FAULT = JSON.stringify({ schema: STATUS_SCHEMA, owned: false, error: 'ENOTDIR' })
 
 const ENGINE_DRAWS: RenderElement = { type: 'Text', children: ['engine'] }
 
 type Answer = { stdout: string; exitCode?: number } | { deny: string } | { holdMs: number }
 
-/** Seats the host beneath the mod: the clock, the session id, the command registry and the producer. */
-function host(on: On, answer: () => Answer) {
+/** Seats the host beneath the mod: the clock, the session id, the command registry, the producer, the log and the state. */
+function host(on: On, answer: () => Answer, options: { denyState?: () => boolean } = {}) {
   const clock = mock.clock(on)
   // No ANTHROPIC_BASE_URL: the proxy column does not exist here.
   mock.env(on, {})
   const runs: { argv: readonly string[]; timeoutMs: number | undefined }[] = []
   let passed = 0
   let held: StatusState | null = null
-  on('session.id', () => ({ value: 'S-test' }))
+  let sessionId = 'S-test'
+  const logged: string[] = []
+  on('session.id', () => ({ value: sessionId }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('ui.log', ($, e) => {
+    logged.push(e.text)
+    return { value: undefined }
+  })
   on('process.run', async ($, e) => {
     runs.push({ argv: e.argv, timeoutMs: e.init?.timeoutMs })
     const next = answer()
@@ -43,10 +53,11 @@ function host(on: On, answer: () => Answer) {
   })
   // The test's `$` has no state noun: the mod's writes are read on their way down.
   on('state.set', { plugin: 'autoloop', key: 'status' }, ($, e, next) => {
+    if (options.denyState?.() === true) return { deny: 'the state is not writable now' }
     held = e.value
     return next(e)
   })
-  return { clock, runs, passed: () => passed, held: () => held }
+  return { clock, runs, passed: () => passed, held: () => held, logged, setSession: (id: string) => { sessionId = id } }
 }
 
 test('a session that owns no run: the band passes to the engine', async ($, on) => {
@@ -110,6 +121,34 @@ test('the tick runs the producer as a child with the session id and a 2 s timeou
   expect(held?.lastMs).toBe(0)
 })
 
+test('each tick asks the host for the session id of the moment: after a change the producer is given the new one', async ($, on) => {
+  const h = host(on, () => ({ stdout: OWNED }))
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  expect(h.runs[0]?.argv.slice(2)).toEqual(['--json', '--session', 'S-test'])
+  h.setSession('S-next')
+  await h.clock.advance(PERIOD_MS)
+  expect(h.runs[1]?.argv.slice(2)).toEqual(['--json', '--session', 'S-next'])
+})
+
+test('a /clear ends the session: the tick stops, the last projection is dropped and the band passes until the next session.start', async ($, on) => {
+  const h = host(on, () => ({ stdout: OWNED }))
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  expect(h.runs.length).toBe(1)
+  expect(h.passed()).toBe(0)
+  await $.session.end({ reason: 'clear', sessionId: 'S-test', resume: { id: 'S-test' } })
+  await h.clock.advance(3 * PERIOD_MS)
+  expect(h.runs.length).toBe(1)
+  expect(h.held()?.last).toBeNull()
+  expect(await band($, 120)).toEqual(ENGINE_DRAWS)
+  expect(h.passed()).toBe(1)
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  expect(h.runs.length).toBe(2)
+  expect(h.held()?.last?.owned).toBe(true)
+})
+
 test('a tick still running is not run again by the next period', async ($, on) => {
   const h = host(on, () => ({ holdMs: 2 * PERIOD_MS + 1000 }))
   await start($)
@@ -137,6 +176,37 @@ test('a rejected run keeps the last projection and marks it stale', async ($, on
   expect(isStale(held?.lastOkAtMs ?? null, h.clock.now())).toBe(true)
   // The band still draws the kept projection, marked stale with hollow glyphs.
   expect(texts(await band($, 120))).toMatch(/^◆ autoloop · stale · checked 33s ago · \[expand\]○ review #412/u)
+})
+
+test('a producer fault (owned false with an error) is a failed read: the last projection is kept and goes stale', async ($, on) => {
+  expect(await readProjection(async () => ran(FAULT), '/plugin', 'S-test')).toEqual({ ok: false })
+  let calls = 0
+  const h = host(on, () => ({ stdout: calls++ === 0 ? OWNED : FAULT }))
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  await h.clock.advance(PERIOD_MS)
+  expect(h.runs.length).toBe(2)
+  expect(h.held()?.last?.unit?.issue).toBe(412)
+  expect(h.held()?.lastOkAtMs).toBe(PERIOD_MS)
+  expect(texts(await band($, 120))).toMatch(/^◆ autoloop · checked 3s ago · \[expand\]● review #412/u)
+  await h.clock.advance(30_000)
+  expect(texts(await band($, 120))).toMatch(/^◆ autoloop · stale · /u)
+})
+
+test('a host call that rejects inside the tick is caught: logged once, the last state kept, and the next tick runs', async ($, on) => {
+  let denied = 2
+  const h = host(on, () => ({ stdout: OWNED }), { denyState: () => denied-- > 0 })
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  expect(h.held()).toBeNull()
+  expect(h.logged.length).toBe(1)
+  expect(h.logged[0]).toMatch(/tick failed/u)
+  await h.clock.advance(PERIOD_MS)
+  expect(h.runs.length).toBe(2)
+  expect(h.logged.length).toBe(1)
+  await h.clock.advance(PERIOD_MS)
+  expect(h.runs.length).toBe(3)
+  expect(h.held()?.last?.owned).toBe(true)
 })
 
 test('/autoloop answers that this session owns no run before the pane exists', async ($, on) => {

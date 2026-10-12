@@ -10,7 +10,7 @@ import type { StatusState } from '../../types'
 
 import { OWNED } from './fixtures/projection'
 import { PERIOD_MS, band, findColor, ran, rows, start, texts } from './fixtures/testing'
-import { PROXY_TIMEOUT_MS, parseProxyStatus, proxyUrl, readProxy } from './read'
+import { PROXY_TIMEOUT_MS, parseProxyStatus, proxyBase, proxyUrl, readProxy } from './read'
 import { PALETTE } from './theme'
 import { modelCounts, proxyColumn } from './view'
 
@@ -103,6 +103,44 @@ test('readProxy: ON with the active requests, OFF on a rejection, a non-200, a b
   expect(parseProxyStatus(JSON.stringify({ ok: true, active_requests: [{ id: 'x' }] }))).toEqual([
     { id: 'x', startedAt: null, elapsedMs: null, requestedModel: null, model: null, sessionId: null },
   ])
+})
+
+test('proxyBase takes an http or https loopback URL and refuses everything else (spec item 3)', () => {
+  expect(proxyBase('http://127.0.0.1:8787')).toBe('http://127.0.0.1:8787')
+  expect(proxyBase('http://localhost:8787/')).toBe('http://localhost:8787/')
+  expect(proxyBase('http://[::1]:8787')).toBe('http://[::1]:8787')
+  expect(proxyBase('https://localhost')).toBe('https://localhost')
+  expect(proxyBase('https://api.example.com')).toBeNull()
+  expect(proxyBase('http://10.0.0.5:8787')).toBeNull()
+  expect(proxyBase('http://127.0.0.1.example.com:8787')).toBeNull()
+  expect(proxyBase('ftp://127.0.0.1')).toBeNull()
+  expect(proxyBase('127.0.0.1:8787')).toBeNull()
+  expect(proxyBase('not a url')).toBeNull()
+  expect(proxyBase('')).toBeNull()
+  expect(proxyBase(undefined)).toBeNull()
+})
+
+// A base that is not a loopback URL counts as unset: the unauthenticated
+// read never leaves this machine.
+for (const base of ['https://gateway.example.com', 'http://10.0.0.5:8787', '::1:8787']) {
+  test(`ANTHROPIC_BASE_URL ${base}: no fetch and no column`, async ($, on) => {
+    const h = host(on, { ANTHROPIC_BASE_URL: base }, () => ({ body: THREE }))
+    await start($)
+    await h.clock.advance(PERIOD_MS)
+    expect(h.fetches.length).toBe(0)
+    expect(h.held()?.proxy).toBeNull()
+    const drawn = await band($)
+    expect(columns(drawn)).toEqual([80, 80])
+    expect(texts(drawn)).not.toMatch(/ON|OFF/u)
+  })
+}
+
+test('ANTHROPIC_BASE_URL on a loopback host with a port: the column, fetched at <base>/status', async ($, on) => {
+  const h = host(on, { ANTHROPIC_BASE_URL: 'http://[::1]:8787' }, () => ({ body: THREE }))
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  expect(h.fetches[0]?.url).toBe('http://[::1]:8787/status')
+  expect(columns(await band($))).toEqual([53, 53, 54])
 })
 
 test('the proxy column groups requests by model, sorted by count then name, and collapses when narrow', async () => {
@@ -198,6 +236,6 @@ test('under 120 columns the proxy column reads ON · n req with no model rows', 
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($, 100)
-  expect(columnBoxes(drawn).slice(1).flatMap(rows)).toEqual(['1 active · 0 waiting · 0 needs you', '● ON · 3 req'])
+  expect(columnBoxes(drawn).slice(1).flatMap(rows)).toEqual(['1 active · 0 waiting', '● ON · 3 req'])
   expect(columns(drawn)).toEqual([33, 33, 34])
 })

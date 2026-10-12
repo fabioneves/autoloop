@@ -8,7 +8,7 @@ import type { On, RenderElement } from 'claude-code'
 import type { StatusState } from '../../types'
 
 import { FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, REPLAN, RUN, WAITING } from './fixtures/projection'
-import { PERIOD_MS, band, findColor, projection, ran, rows, start } from './fixtures/testing'
+import { PERIOD_MS, band, findColor, projection, ran, rows, start, texts } from './fixtures/testing'
 import { PALETTE } from './theme'
 import { checkedAgo, columnWidths, isNarrow, loopColumn, shortModel, workColumn } from './view'
 
@@ -79,10 +79,10 @@ test('narrow: the Loop column drops the title; 120 columns is not narrow', () =>
   expect(loopColumn(projection(RUN), true).detail).toBe('code-review · fix 2/3 · ASTRA 6')
 })
 
-test('the Work column counts, hot only when a unit needs you', () => {
-  expect(workColumn(projection(RUN))).toEqual({ counts: '2 active · 3 waiting', needsYou: '6 needs you', hot: true })
-  expect(workColumn(projection(OWNED))).toEqual({ counts: '1 active · 0 waiting', needsYou: '0 needs you', hot: false })
-  expect(workColumn(projection(WAITING))).toEqual({ counts: '0 active · 2 waiting', needsYou: '0 needs you', hot: false })
+test('the Work column counts; `needs you` exists only when a unit needs a human (spec item 7)', () => {
+  expect(workColumn(projection(RUN))).toEqual({ counts: '2 active · 3 waiting', needsYou: '6 needs you' })
+  expect(workColumn(projection(OWNED))).toEqual({ counts: '1 active · 0 waiting', needsYou: null })
+  expect(workColumn(projection(WAITING))).toEqual({ counts: '0 active · 2 waiting', needsYou: null })
 })
 
 test('the header counts from the last successful read', () => {
@@ -114,12 +114,13 @@ test('the band draws the header, the Loop column and the Work column from the pr
   expect(findColor(drawn, '6 needs you')).toBe(PALETTE.crit)
 })
 
-test('needs you wears the ink color while nothing is blocked', async ($, on) => {
+test('no `needs you` while nothing is blocked', async ($, on) => {
   const h = host(on, () => OWNED)
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
-  expect(findColor(drawn, '0 needs you')).toBe(PALETTE.ink)
+  expect(rows(drawn)[3]).toBe('1 active · 0 waiting')
+  expect(texts(drawn)).not.toMatch(/needs you/u)
 })
 
 test('quiet minimum: the header plus one row per column when nothing is in flight or blocked', async ($, on) => {
@@ -129,7 +130,7 @@ test('quiet minimum: the header plus one row per column when nothing is in fligh
   expect(rows(await band($))).toEqual([
     '◆ autoloop · checked 0s ago · [expand]',
     '○ Idle',
-    '0 active · 1 waiting · 0 needs you',
+    '0 active · 1 waiting',
   ])
 })
 

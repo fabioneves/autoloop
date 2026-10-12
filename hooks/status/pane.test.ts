@@ -85,8 +85,8 @@ test('the Active section names phase, role, round and model, with the time since
     '● #412 Session recovery · review · code-review · fix 2/3 · ASTRA 6 · 3m 3s',
     '● #421 Fix round in flight · review · fix · fix 1/3 · OPUS 5.5',
   ])
-  // OWNED has no title, and its step started after this clock: the span clamps at zero.
-  expect(activeSection(projection(OWNED), AT_10_30).rows.map((row) => row.text)).toEqual(['#412 · review · code-review · fix 2/3 · ASTRA 6 · 0s'])
+  // OWNED has no title, and its step started a minute before this clock.
+  expect(activeSection(projection(OWNED), AT_10_30).rows.map((row) => row.text)).toEqual(['#412 · review · code-review · fix 2/3 · ASTRA 6 · 1m 0s'])
   expect(activeSection(projection(IDLE), AT_10_30).rows).toEqual([])
 })
 
@@ -127,6 +127,10 @@ test('paneSections keeps the order and drops the empty ones', async () => {
     .toEqual(['Needs you', 'Active', 'Waiting', 'Delivered', 'Proxy'])
   expect(paneSections(projection(IDLE), null, 'S-test', AT_10_30).map((section) => section.title)).toEqual(['Waiting'])
   expect(paneSections(projection(OWNED), { on: false }, 'S-test', AT_10_30).map((section) => section.title)).toEqual(['Active'])
+})
+
+test('the pane id is the literal the Pane matcher names', () => {
+  expect(PANE_ID).toBe('autoloop-status')
 })
 
 test('/autoloop from a session that owns no run answers so and opens nothing', async ($, on) => {

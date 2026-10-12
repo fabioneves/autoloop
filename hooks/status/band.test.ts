@@ -11,7 +11,7 @@ import type { HttpResponse, On, RenderElement } from 'claude-code'
 import type { StatusState } from '../../types'
 
 import { BLOCKED_THREE, DISABLED, FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, RUN, UNOWNED } from './fixtures/projection'
-import { PERIOD_MS, band, findColor, projection, ran, rows, start, texts } from './fixtures/testing'
+import { PERIOD_MS, band, findColor, findText, projection, ran, rows, start, texts } from './fixtures/testing'
 import { PALETTE } from './theme'
 import { needsYouRow, phaseRow, toastText } from './view'
 
@@ -116,11 +116,22 @@ test('one needs-you unit draws no `+n more`; no phase row without a unit; no nee
   expect(rows(await band($)).slice(1)).toEqual([
     '● review #412',
     'code-review · fix 2/3 · ASTRA 6',
-    '1 active · 0 waiting · 0 needs you',
+    '1 active · 0 waiting',
     '✓ plan  ✓ build  ✓ simplify  ● review  ○ gate  ○ deliver',
   ])
   await h.clock.advance(PERIOD_MS)
-  expect(rows(await band($)).slice(1)).toEqual(['○ Idle', '0 active · 1 waiting · 0 needs you'])
+  expect(rows(await band($)).slice(1)).toEqual(['○ Idle', '0 active · 1 waiting'])
+})
+
+test('a long title cannot add rows: the Loop head and the needs-you row truncate at the edge', async ($, on) => {
+  const long = 'x'.repeat(200)
+  const h = host(on, () => ({ stdout: RUN.replaceAll('Session recovery', long).replaceAll('Needs a policy answer', long) }))
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  const drawn = await band($)
+  expect(rows(drawn).length).toBe(6)
+  expect(findText(drawn, `review #412 · ${long}`)?.props?.['wrap']).toBe('truncate-end')
+  expect(findText(drawn, long)?.props?.['wrap']).toBe('truncate-end')
 })
 
 test('toastText shortens the question', () => {

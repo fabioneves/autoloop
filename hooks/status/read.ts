@@ -40,13 +40,17 @@ export function parseProjection(text: string): StatusProjection | null {
   return record as StatusProjection
 }
 
-/** One read: a child that cannot start, exits non-zero or prints another schema is a failed read. */
+/**
+ * One read: a child that cannot start, exits non-zero, prints another schema
+ * or reports a fault (`owned: false` with `error`, exit 0: the producer never
+ * throws) is a failed read, so the last projection is kept and goes stale.
+ */
 export async function readProjection(run: Runner, pluginRoot: string, sessionId: string): Promise<ProjectionRead> {
   try {
     const result = await run(projectionArgv(pluginRoot, sessionId), { timeoutMs: READ_TIMEOUT_MS })
     if (result.exitCode !== 0) return { ok: false }
     const projection = parseProjection(result.stdout)
-    return projection === null ? { ok: false } : { ok: true, projection }
+    return projection === null || projection.error !== undefined ? { ok: false } : { ok: true, projection }
   } catch {
     return { ok: false }
   }
@@ -72,6 +76,26 @@ export type ProxyFetch = (
   url: string,
   init: { timeoutMs: number },
 ) => Promise<{ status: number; text: string }>
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
+
+/**
+ * The proxy base `ANTHROPIC_BASE_URL` names, or null: unset, not a URL, not
+ * http or https, or not a loopback host (spec item 3). The read carries no
+ * auth, so it never leaves this machine: a public gateway gets no column and
+ * no fetch.
+ */
+export function proxyBase(value: string | undefined): string | null {
+  if (value === undefined || value === '') return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  return LOOPBACK_HOSTS.has(url.hostname) ? value : null
+}
 
 export function proxyUrl(base: string): string {
   return `${base.replace(/\/+$/u, '')}/status`

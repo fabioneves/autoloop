@@ -92,17 +92,15 @@ export function loopColumn(projection: StatusProjection, narrow: boolean): LoopC
 
 export type WorkColumn = {
   counts: string
-  needsYou: string
-  /** Drawn in the critical color: at least one unit needs a human. */
-  hot: boolean
+  /** `6 needs you`, drawn in the critical color; null while no unit needs a human (spec item 7). */
+  needsYou: string | null
 }
 
 export function workColumn(projection: StatusProjection): WorkColumn {
   const counts = projection.counts ?? { active: 0, waiting: 0, blocked: 0 }
   return {
     counts: `${counts.active} active · ${counts.waiting} waiting`,
-    needsYou: `${counts.blocked} needs you`,
-    hot: counts.blocked > 0,
+    needsYou: counts.blocked > 0 ? `${counts.blocked} needs you` : null,
   }
 }
 
@@ -153,9 +151,12 @@ export function phaseRow(projection: StatusProjection): PhaseCell[] | null {
   return phases.map((label, index) => ({ label, state: index < current ? 'done' : index === current ? 'current' : 'notYet' }))
 }
 
+export type BlockedUnit = StatusUnit & { needsYou: NonNullable<StatusUnit['needsYou']> }
+
 /** The units a human must answer, oldest first: issue numbers rise with time, and the projection carries no time on a unit. */
-export function blockedUnits(projection: StatusProjection): StatusUnit[] {
-  return (projection.units ?? []).filter((unit) => unit.needsYou !== null).sort((left, right) => left.issue - right.issue)
+export function blockedUnits(projection: StatusProjection): BlockedUnit[] {
+  return (projection.units ?? []).filter((unit): unit is BlockedUnit => unit.needsYou !== null)
+    .sort((left, right) => left.issue - right.issue)
 }
 
 /** The PR a human must merge or label: an authorization that carries one; null when the answer goes on the issue. */
@@ -175,7 +176,7 @@ export type NeedsYouRow = {
 /** The band's needs-you row for the oldest blocked unit (spec item 9); null while none is blocked. */
 export function needsYouRow(projection: StatusProjection): NeedsYouRow | null {
   const [oldest, ...rest] = blockedUnits(projection)
-  if (oldest === undefined || oldest.needsYou === null) return null
+  if (oldest === undefined) return null
   const pr = prToAuthorize(oldest)
   const right = pr === null ? `answer on #${oldest.issue}` : `merge or label PR #${pr}`
   return { issue: oldest.issue, text: oldest.needsYou.text, right, more: rest.length }

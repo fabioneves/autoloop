@@ -9,7 +9,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { StatusProjection, StatusState } from '../../types'
 import { PANE_ID, PANE_TITLE, paneSections } from './pane'
 import type { ProxyFetch } from './read'
-import { isDrawable, isStale, readProjection, readProxy } from './read'
+import { isDrawable, isStale, proxyBase, readProjection, readProxy } from './read'
 import { GLYPH, PALETTE } from './theme'
 import {
   blockedUnits, checkedAgo, columnWidths, isNarrow, loopColumn, needsYouRow, phaseRow, proxyColumn, toastText, workColumn,
@@ -33,16 +33,15 @@ export const register: Register = (on) => {
   // Module state, not `$.state`: a reload drops the old timer with it.
   let busy = false
   let slowReported = false
+  let faultReported = false
   let timer: Timer | null = null
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'autoloop', description: 'Show the state of the run this session owns.' })
-    // Ownership is the session's: the producer matches this id against the
-    // run latch of the Claude process it runs under.
-    const sessionId = await $.session.id()
     // The proxy is optional: without the variable the column does not exist
-    // and nothing is fetched. `claudeproxy` sets it before the session starts.
-    const base = await $.env.get('ANTHROPIC_BASE_URL')
+    // and nothing is fetched; a base that is not a loopback URL counts as
+    // unset. `claudeproxy` sets it before the session starts.
+    const base = proxyBase(await $.env.get('ANTHROPIC_BASE_URL'))
     const run = (argv: readonly string[], init: { timeoutMs: number }) => $.process.run(argv, init)
     // $.http.fetch has no timeout of its own: the read races a clock wait,
     // which the settled fetch then aborts.
@@ -58,9 +57,14 @@ export const register: Register = (on) => {
       busy = true
       try {
         const startedAtMs = await $.clock.now()
+        // Ownership is the session's: the producer matches this id against
+        // the run latch of the Claude process it runs under. Read on every
+        // tick, since after a /clear the process goes on under a new id with
+        // no session.start.
+        const sessionId = await $.session.id()
         const [read, proxy] = await Promise.all([
           readProjection(run, $.plugin.root, sessionId),
-          base === undefined || base === '' ? null : readProxy(fetch, base),
+          base === null ? null : readProxy(fetch, base),
         ])
         const nowMs = await $.clock.now()
         const lastMs = nowMs - startedAtMs
@@ -75,9 +79,7 @@ export const register: Register = (on) => {
         await $.state.set(STATUS, read.ok
           ? { ...held, last: read.projection, lastOkAtMs: nowMs, lastMs, proxy, seenBlocked: [...held.seenBlocked, ...fresh.map((unit) => unit.issue)] }
           : { ...held, lastMs, proxy })
-        for (const unit of fresh) {
-          if (unit.needsYou !== null) $.ui.toast(toastText({ issue: unit.issue, text: unit.needsYou.text }))
-        }
+        for (const unit of fresh) $.ui.toast(toastText({ issue: unit.issue, text: unit.needsYou.text }))
         // ui.status false turns the mod off for the project: the tick stops
         // until the next session.start (spec item 6). An unowned projection
         // keeps it, since the session may come to own a run.
@@ -85,6 +87,13 @@ export const register: Register = (on) => {
         if (lastMs > SLOW_TICK_MS && !slowReported) {
           slowReported = true
           $.ui.log(`autoloop status: a tick took ${lastMs} ms (period ${PERIOD_MS} ms)`)
+        }
+      } catch (error) {
+        // A host call that rejects (the clock, the state) keeps the last
+        // state; the next period tries again. Reported once, not every 3 s.
+        if (!faultReported) {
+          faultReported = true
+          $.ui.log(`autoloop status: a tick failed (${error instanceof Error ? error.message : String(error)})`)
         }
       } finally {
         busy = false
@@ -94,6 +103,16 @@ export const register: Register = (on) => {
     timer = $.clock.every(PERIOD_MS, () => {
       void tick()
     })
+    return next(e)
+  })
+
+  // The conversation ends (a /clear goes on under a new session id with no
+  // session.start): the tick stops and the last projection goes, so the band
+  // never draws a run this conversation does not own.
+  on('session.end', async ($, e, next) => {
+    timer?.cancel()
+    timer = null
+    await $.state.set(STATUS, EMPTY)
     return next(e)
   })
 
@@ -143,14 +162,14 @@ export const register: Register = (on) => {
         </Box>
         <Box>
           <Box flexDirection="column" width={loopWidth}>
-            <Text color={PALETTE.ink}>
+            <Text color={PALETTE.ink} wrap="truncate-end">
               <Text color={PALETTE.good}>{live(loop.glyph)}</Text> {loop.head}
             </Text>
             {loop.detail !== null && <Text color={PALETTE.ink2}>{loop.detail}</Text>}
           </Box>
           <Box flexDirection="column" width={workWidth}>
             <Text color={PALETTE.ink}>
-              {work.counts} · <Text color={work.hot ? PALETTE.crit : PALETTE.ink}>{work.needsYou}</Text>
+              {work.counts}{work.needsYou !== null && <Text> · <Text color={PALETTE.crit}>{work.needsYou}</Text></Text>}
             </Text>
           </Box>
           {proxy !== null && (
@@ -177,7 +196,7 @@ export const register: Register = (on) => {
         )}
         {needsYou !== null && (
           <Box justifyContent="space-between" backgroundColor={PALETTE.card}>
-            <Text color={PALETTE.ink}>
+            <Text color={PALETTE.ink} wrap="truncate-end">
               <Text color={PALETTE.crit}>{GLYPH.needsYou}</Text> #{needsYou.issue} {needsYou.text}
             </Text>
             <Text color={PALETTE.ink2}>{needsYou.right}{needsYou.more > 0 ? ` · +${needsYou.more} more` : ''}</Text>
@@ -187,7 +206,8 @@ export const register: Register = (on) => {
     )
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
+  // The literal, so `claude plugin validate` lists the pane's id (pane.test.ts holds PANE_ID to it).
+  on('ui.render', { component: 'Pane', requestId: 'autoloop-status' }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const held = await heldState($)
     if (!isDrawable(held.last)) return <Text color={PALETTE.ink2}>{quietReason(held.last)}</Text>
