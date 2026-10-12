@@ -36,6 +36,55 @@ export type StatusWorkedUnit = {
   returnedAtMs: number | null
   waitingOn: StatusWait | null
   decisions: number
+  /** The open loop pull request, from the scan or the deliver event. */
+  pr: number | null
+  /** The unit's steps this run, from the event file (SPEC-events item 5). */
+  steps: StatusStep[]
+}
+
+/** One step of the worked unit as the event file recorded it. */
+export type StatusStep = {
+  step: string
+  role: string | null
+  round: StatusRound | null
+  model: string | null
+  startedAtMs: number
+  /** When its dispatch returned; null while it runs or when none ran. */
+  returnedAtMs: number | null
+}
+
+/** One event of the run's log: the event file's line less `v` and `run`, with the PR beside the issue when known. */
+export type StatusEvent = {
+  at: number
+  kind: string
+  by: string
+  issue?: number
+  pr?: number
+  step?: string
+  round?: string
+  role?: string
+  model?: string
+  dispatch?: string
+  liveFile?: string
+  pid?: number
+  ms?: number
+  ok?: boolean
+  reason?: string
+  text?: string
+  paths?: string[]
+}
+
+/** A dispatch with a start and no end: running while its pid lives, died when it is gone. */
+export type StatusDispatch = {
+  dispatch: string
+  issue: number | null
+  pr: number | null
+  role: string | null
+  model: string | null
+  liveFile: string | null
+  pid: number | null
+  startedAtMs: number
+  state: 'running' | 'died'
 }
 
 /**
@@ -59,6 +108,9 @@ export type StatusProjection = {
   units?: StatusUnit[]
   counts?: { active: number; waiting: number; blocked: number; delivered: number; eligible: number | null }
   models?: Record<string, string>
+  /** The run's last 50 events, newest first. */
+  log?: StatusEvent[]
+  dispatches?: StatusDispatch[]
 }
 
 /** One active request as the proxy's `GET /status` lists it (its snake_case fields, read leniently). */

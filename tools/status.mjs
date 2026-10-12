@@ -199,7 +199,7 @@ function selfTest() {
     })());
     const projected = call(['--json', '--session', 'S-1']);
     check('the session that holds the latch and a live marker owns the run: the spec keys, its unit and the models', projected.status === 0
-      && projected.json !== null && Object.keys(projected.json).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models'
+      && projected.json !== null && Object.keys(projected.json).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models,log,dispatches'
       && projected.json.schema === 'autoloop.status/1' && projected.json.owned === true && projected.json.enabled === true
       && projected.json.unit?.issue === 412 && projected.json.unit.phase === 'review' && projected.json.unit.inFlight === true
       && JSON.stringify(projected.json.unit.round) === '{"kind":"fix","n":2,"budget":3}' && projected.json.unit.decisions === 1
