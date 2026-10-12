@@ -1806,6 +1806,39 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'hard Stops still block after an unchanged draft reminder was shown' }),
     ]),
   }),
+  Object.freeze({
+    id: 'late-review-collection-marked-the-gate-returned',
+    date: '2026-10-12',
+    symptom: 'A code-review result collected after the unit moved to step 09 printed '
+      + '"09 gate returned" while the Docker gate was still running.',
+    cause: 'Collection stamped the latest step before it read the result. Each dispatch now carries '
+      + 'a step and attempt receipt; only an exact current match marks a return.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'step.mjs', anchor: 'a late review cannot mark a later gate returned' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'same-role attempts reject old results, and duplicates keep the first return time' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'wrong, missing, malformed and legacy results leave the open record unchanged' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'real fake-engine success and failure receipts reach the collector' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'a fallback cannot rebind after a gate transition during the first attempt' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'a contested step lock cannot cancel a valid engine result or assert its return' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'only its own step returned' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'recursive-self-test-orphans-exhausted-session-memory',
+    date: '2026-10-12',
+    symptom: 'One self-test run left thousands of orphaned Node processes; three session cgroups '
+      + 'recorded 2467 OOM kills and the load average passed 2000.',
+    cause: 'The self-test started whenever argv[1] named the module, so each spawned worker started it '
+      + 'again; timeouts killed only the direct child. Self-tests now need --self-test, and verify '
+      + 'kills, confirms, and reports each self-test process group.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'importing with this module as argv[1] never starts the self-test' }),
+      Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'the self-test refuses to run inside its own worker' }),
+      Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'a timed-out worker is killed and confirmed gone' }),
+      Object.freeze({ file: 'verify.mjs', anchor: 'a timed-out self-test loses its whole process group, child included' }),
+      Object.freeze({ file: 'verify.mjs', anchor: 'a self-test that leaves a descendant fails and the descendant is killed' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

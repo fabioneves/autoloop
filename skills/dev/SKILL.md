@@ -825,7 +825,7 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
   label by hand.**
 
 Collecting a result: `node <plugin-tools>/step.mjs --issue <N> --resumed "<what it adds>" --result
-<result.json>` (a review's verdict and severities come from the result). Other waits: 🅿️ parked; 💤 idle (`HH:MM 💤 ∞ idle ─ no eligible units`, then close cleanly);
+<result.json>` (its receipt marks only its own step returned; no receipt, no completion). Other waits: 🅿️ parked; 💤 idle (`HH:MM 💤 ∞ idle ─ no eligible units`, then close cleanly);
 🏁 run complete. 🎉 marks only a SHIPPED card and a clean-sweep run close.
 
 **A unit ends with its card**, repeated verbatim:
