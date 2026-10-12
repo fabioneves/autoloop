@@ -372,12 +372,12 @@ export function applyControls(root, {
     // A cancel is the waiter's to apply while its dispatch runs; one left
     // behind (the dispatch ended first, or never started) is refused here,
     // so no control file stays in the directory for ever.
-    cancel: (control) => {
-      const { events } = readEvents(commonDir, { limit: 5000 });
-      const open = events.some((event) => event.kind === 'dispatch.start' && event.dispatch === control.dispatch)
-        && !events.some((event) => event.kind === 'dispatch.end' && event.dispatch === control.dispatch);
-      return open ? 'dispatch still running: the waiter applies it' : 'dispatch not running';
-    },
+    cancel: () => 'dispatch not running',
+  };
+  const dispatchRunning = (id) => {
+    const { events } = readEvents(commonDir, { limit: 5000 });
+    return events.some((event) => event.kind === 'dispatch.start' && event.dispatch === id)
+      && !events.some((event) => event.kind === 'dispatch.end' && event.dispatch === id);
   };
   let taken = [];
   try {
@@ -388,7 +388,7 @@ export function applyControls(root, {
   for (const { control, name, done } of taken) {
     const summary = `${control.kind}${control.pr ? ` PR #${control.pr}` : ''}${control.issue ? ` #${control.issue}` : ''}`;
     // A cancel of a running dispatch stays in place for the waiter.
-    if (control.kind === 'cancel' && handlers.cancel(control).startsWith('dispatch still running')) continue;
+    if (control.kind === 'cancel' && dispatchRunning(control.dispatch)) continue;
     let reason;
     try {
       reason = handlers[control.kind](control, name);
