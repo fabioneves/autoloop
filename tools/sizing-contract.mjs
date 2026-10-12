@@ -23,11 +23,12 @@
 // validates is worse than no marker, because it looks like data.
 //
 // Usage:
-//   node sizing-contract.mjs --shape --cases 5 --invariants 1 [--files 3] [--lines 260]
+//   node sizing-contract.mjs --shape --cases 5 --invariants 1 [--split-exempt "<reason>"]
 //   node sizing-contract.mjs --outcome --issue 219 --plan-rounds 1 --code-rounds 3 \
-//     --result blocked [--escalated] [--prod-lines 858] [--files 14]
+//     --result blocked [--escalated]
 //   node sizing-contract.mjs --self-test
 
+import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -49,6 +50,12 @@ const MAX_COUNT = 9999;
 const SPLIT_MAX_CASES = 5;
 const SPLIT_MAX_INVARIANTS = 1;
 const MAX_EXEMPT_REASON = 500;
+
+// Work-size fields that historical markers may carry. They are read so that old
+// markers stay valid, and dropped from every record this tool returns or writes.
+const RETIRED_SHAPE_FIELDS = ['filesEstimate', 'linesEstimate'];
+const RETIRED_OUTCOME_FIELDS = ['prodLines', 'files'];
+const RETIRED_FLAGS = new Set(['--files', '--lines', '--prod-lines']);
 
 // Deliberately NOT part of validateShapeRecord: that validator also parses
 // markers already living in issue bodies, and every breaching record filed
@@ -94,7 +101,7 @@ export function validateShapeRecord(record) {
     const problem = countProblem(key, record[key], { min });
     if (problem !== null) errors.push(problem);
   }
-  for (const key of ['filesEstimate', 'linesEstimate']) {
+  for (const key of RETIRED_SHAPE_FIELDS) {
     if (record[key] === undefined) continue;
     const problem = countProblem(key, record[key], { min: 0 });
     if (problem !== null) errors.push(problem);
@@ -106,9 +113,7 @@ export function validateShapeRecord(record) {
       errors.push(`splitExempt: must be <= ${MAX_EXEMPT_REASON} characters`);
     }
   }
-  const known = new Set([
-    'v', 'cases', 'invariants', 'filesEstimate', 'linesEstimate', 'splitExempt',
-  ]);
+  const known = new Set(['v', 'cases', 'invariants', 'splitExempt', ...RETIRED_SHAPE_FIELDS]);
   for (const key of Object.keys(record)) {
     if (!known.has(key)) errors.push(`${key}: unknown field`);
   }
@@ -131,18 +136,26 @@ export function validateOutcomeRecord(record) {
   if (!RESULTS.has(record.result)) {
     errors.push(`result: must be one of ${[...RESULTS].join(', ')}`);
   }
-  for (const key of ['prodLines', 'files']) {
+  for (const key of RETIRED_OUTCOME_FIELDS) {
     if (record[key] === undefined) continue;
     const problem = countProblem(key, record[key], { min: 0 });
     if (problem !== null) errors.push(problem);
   }
   const known = new Set([
-    'v', 'issue', 'planRounds', 'codeRounds', 'escalated', 'result', 'prodLines', 'files',
+    'v', 'issue', 'planRounds', 'codeRounds', 'escalated', 'result', ...RETIRED_OUTCOME_FIELDS,
   ]);
   for (const key of Object.keys(record)) {
     if (!known.has(key)) errors.push(`${key}: unknown field`);
   }
   return errors;
+}
+
+function currentShape({ v, cases, invariants, splitExempt }) {
+  return splitExempt === undefined ? { v, cases, invariants } : { v, cases, invariants, splitExempt };
+}
+
+function currentOutcome({ v, issue, planRounds, codeRounds, escalated, result }) {
+  return { v, issue, planRounds, codeRounds, escalated, result };
 }
 
 function serialize(tag, record, errors) {
@@ -151,14 +164,14 @@ function serialize(tag, record, errors) {
 }
 
 export function serializeShapeRecord(record) {
-  return serialize(SHAPE_TAG, record, validateShapeRecord(record));
+  return serialize(SHAPE_TAG, currentShape(record), validateShapeRecord(record));
 }
 
 export function serializeOutcomeRecord(record) {
-  return serialize(OUTCOME_TAG, record, validateOutcomeRecord(record));
+  return serialize(OUTCOME_TAG, currentOutcome(record), validateOutcomeRecord(record));
 }
 
-function parse(tag, text, validate) {
+function parse(tag, text, validate, project) {
   if (typeof text !== 'string' || text.length > 1_048_576) {
     return { ok: false, error: `${tag} text is missing or too large` };
   }
@@ -179,25 +192,23 @@ function parse(tag, text, validate) {
   }
   const errors = validate(record);
   return errors.length === 0
-    ? { ok: true, record }
+    ? { ok: true, record: project(record) }
     : { ok: false, error: `invalid ${tag} record: ${errors.join('; ')}` };
 }
 
 export function parseShapeRecord(text) {
-  return parse(SHAPE_TAG, text, validateShapeRecord);
+  return parse(SHAPE_TAG, text, validateShapeRecord, currentShape);
 }
 
 export function parseOutcomeRecord(text) {
-  return parse(OUTCOME_TAG, text, validateOutcomeRecord);
+  return parse(OUTCOME_TAG, text, validateOutcomeRecord, currentOutcome);
 }
 
 export function parseArgs(argv) {
   const out = { mode: null, values: {}, flags: new Set(), error: null };
   const numeric = new Map([
     ['--cases', 'cases'], ['--invariants', 'invariants'],
-    ['--files', 'files'], ['--lines', 'lines'],
-    ['--issue', 'issue'], ['--plan-rounds', 'planRounds'],
-    ['--code-rounds', 'codeRounds'], ['--prod-lines', 'prodLines'],
+    ['--issue', 'issue'], ['--plan-rounds', 'planRounds'], ['--code-rounds', 'codeRounds'],
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -208,6 +219,10 @@ export function parseArgs(argv) {
       }
       out.mode = flag.slice(2);
       continue;
+    }
+    if (RETIRED_FLAGS.has(flag)) {
+      out.error = `${flag} is retired: Autoloop records no work-size estimate or total`;
+      return out;
     }
     if (flag === '--escalated') { out.flags.add('escalated'); continue; }
     if (flag === '--split-exempt') {
@@ -250,8 +265,6 @@ export function parseArgs(argv) {
 export function recordFromArgs(parsed) {
   if (parsed.mode === 'shape') {
     const record = { v: 1, cases: parsed.values.cases, invariants: parsed.values.invariants };
-    if (parsed.values.files !== undefined) record.filesEstimate = parsed.values.files;
-    if (parsed.values.lines !== undefined) record.linesEstimate = parsed.values.lines;
     if (parsed.values.splitExempt !== undefined) record.splitExempt = parsed.values.splitExempt;
     return { serialize: serializeShapeRecord, record };
   }
@@ -263,8 +276,6 @@ export function recordFromArgs(parsed) {
     escalated: parsed.flags.has('escalated'),
     result: parsed.values.result,
   };
-  if (parsed.values.prodLines !== undefined) record.prodLines = parsed.values.prodLines;
-  if (parsed.values.files !== undefined) record.files = parsed.values.files;
   return { serialize: serializeOutcomeRecord, record };
 }
 
@@ -274,7 +285,7 @@ function selfTest() {
     if (!passed) { fail += 1; console.error(`FAIL ${name}`); }
   };
 
-  const shape = { v: 1, cases: 5, invariants: 1, filesEstimate: 3, linesEstimate: 260 };
+  const shape = { v: 1, cases: 5, invariants: 1 };
   const shapeText = serializeShapeRecord(shape);
   check('a shape record round-trips', parseShapeRecord(shapeText).record.cases === 5);
   check(
@@ -291,7 +302,6 @@ function selfTest() {
 
   const outcome = {
     v: 1, issue: 219, planRounds: 1, codeRounds: 3, escalated: true, result: 'blocked',
-    prodLines: 858, files: 14,
   };
   const outcomeText = serializeOutcomeRecord(outcome);
   check('an outcome record round-trips', parseOutcomeRecord(outcomeText).record.issue === 219);
@@ -398,7 +408,45 @@ function selfTest() {
     ])).record.splitExempt === 'irreducible',
   );
 
-  const total = 32;
+  // LFE #506: decisions invented a plan-character and a changed-line quota and
+  // compressed a complete plan to fit them. No work-size number is recorded now.
+  const sizeKeys = /filesEstimate|linesEstimate|prodLines|"files"/u;
+  check(
+    'fresh shape and outcome markers carry no work-size field',
+    !sizeKeys.test(serializeShapeRecord({ v: 1, cases: 3, invariants: 1, filesEstimate: 3, linesEstimate: 260 }))
+      && !sizeKeys.test(serializeOutcomeRecord({ ...outcome, prodLines: 858, files: 14 }))
+      && !sizeKeys.test(JSON.stringify(recordFromArgs(parseArgs(['--shape', '--cases', '3', '--invariants', '1'])).record)),
+  );
+  check(
+    'a retired size flag is refused by name, and no record is made from it',
+    ['--files', '--lines', '--prod-lines'].every((flag) => {
+      const parsed = parseArgs(['--outcome', '--issue', '7', flag, '3']);
+      return parsed.error !== null && parsed.error.includes(`${flag} is retired`);
+    }),
+  );
+  check(
+    'a historical size-bearing marker still parses, without its size fields',
+    (() => {
+      const shapeOld = parseShapeRecord('<!-- autoloop-shape-v1\n{"cases":7,"filesEstimate":5,"invariants":1,"linesEstimate":210,"v":1}\n-->');
+      const outcomeOld = parseOutcomeRecord('<!-- autoloop-outcome-v1\n{"codeRounds":3,"escalated":true,"files":14,"issue":219,"planRounds":1,"prodLines":858,"result":"blocked","v":1}\n-->');
+      return shapeOld.ok && outcomeOld.ok && shapeOld.record.cases === 7 && outcomeOld.record.codeRounds === 3
+        && !sizeKeys.test(JSON.stringify(shapeOld.record)) && !sizeKeys.test(JSON.stringify(outcomeOld.record));
+    })(),
+  );
+  check(
+    'the CLI emits a metric-free marker and refuses a retired flag without output',
+    (() => {
+      const cli = (args) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...args], {
+        encoding: 'utf8', timeout: 15000,
+      });
+      const fresh = cli(['--outcome', '--issue', '7', '--plan-rounds', '1', '--code-rounds', '2', '--result', 'shipped']);
+      const retired = cli(['--outcome', '--issue', '7', '--plan-rounds', '1', '--code-rounds', '2', '--result', 'shipped', '--prod-lines', '9']);
+      return fresh.status === 0 && fresh.stdout.includes(OUTCOME_TAG) && !sizeKeys.test(fresh.stdout)
+        && retired.status === 1 && retired.stdout === '' && retired.stderr.includes('--prod-lines is retired');
+    })(),
+  );
+
+  const total = 36;
   console.log(fail === 0 ? `self-test OK (${total} cases)` : `self-test: ${fail} FAILED`);
   return fail === 0;
 }

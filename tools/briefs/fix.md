@@ -17,6 +17,6 @@ You fix the verified review findings listed below, on the unit's branch. You are
 - Never push, open or edit a PR, label, merge, release, or run the objective gate.
 - Keep every test and probe run bounded: modest concurrency, no repeat loops, well within the machine's memory. One out-of-memory kill ends this session and the loop's with it.
 - On an unexpected failure, stop and report the exact command and error.
-- Report: commits per finding id, test outcomes, line delta, clean or dirty tree, and any partial effects.
+- Report: commits per finding id, test outcomes, clean or dirty tree, and any partial effects.
 
 The unit facts follow below: findings verbatim with ids and dispositions, touched files, frozen plan, base path, and focus.

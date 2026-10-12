@@ -18,7 +18,8 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { guardedRoot, hookRoot } from './hook-root.mjs';
+import { guardedRoot } from './hook-root.mjs';
+import { processStart, sessionOwnerPid } from './run-markers.mjs';
 
 // Claude Code 2.1.234 removed the task tools outright but only DEFERRED
 // PushNotification; a live run read the visible roster as the whole roster,
@@ -34,9 +35,9 @@ const EXTRAS = {
     + ' mapping) and carry the literal `## Constraints` section distilling them — the plan'
     + ' reviewer flags both when missing.',
   '06-simplify': ' Dispatch ONE behavior-preserving simplify pass (`--role simplify`, routed) whose'
-    + ' prompt loads `agent-skills:code-simplification` and carries the measured diff vs the'
-    + " plan's line budget; tests green before it returns, test files unedited, behavior frozen."
-    + ' Verify the returned diff yourself — a behavior change is reverted, not fixed.',
+    + ' prompt loads `agent-skills:code-simplification`; tests green before it returns, test files'
+    + ' unedited, behavior frozen. Verify the returned diff yourself — a behavior change is'
+    + ' reverted, not fixed.',
   '07-diff-review': ' Load `agent-skills:code-review-and-quality` AND the domain skills the plan'
     + ' named via the Skill tool in THIS message — naming in the plan is not loading; reviewing'
     + ' bare is a skipped rider. Plain run: the review is a `--role diff-review` dispatch.',
@@ -58,43 +59,11 @@ const DISPATCH_STEP = {
   'code-review': '08-code-review',
 };
 
-// Setup has no labels, so its phases had no mechanical anchor — and prose alone
-// proved intermittent: live runs printed one ribbon of five, then none, then a
-// scattered subset, across three wordings. Each phase inevitably runs a
-// signature command, so the ribbon rides that command the same way dev's riders
-// ride label swaps. First match wins; the reminder names the ribbon due NOW and
-// the one after it.
-const SETUP_PHASE_ANCHORS = [
-  [/release-verify\.mjs\s+--sort-versions/,
-    'autoloop: RESOLVE is running — its ribbon `⏳ ∞ ▰▱▱▱▱ 1/5 RESOLVE` must already be printed; '
-    + 'print it NOW if missing (late beats never). Next: `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` before the audit '
-    + 'battery.'],
-  [/config-contract\.mjs\s+--root\b/,
-    'autoloop: the AUDIT battery just ran — `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` must already be printed; print '
-    + 'it NOW if missing. Next: `⏳ ∞ ▰▰▰▱▱ 3/5 INTERVIEW` BEFORE the first question to the human.'],
-  [/setup\.mjs\s+--(?:init|devendor)\b/,
-    'autoloop: WRITE is running — `⏳ ∞ ▰▰▰▰▱ 4/5 WRITE` must already be printed (and 3/5 '
-    + 'INTERVIEW before it); print any missing ribbon NOW. Next: `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` when '
-    + 'evidence collection starts.'],
-  [/verify\.mjs\s+--project-root\b/,
-    'autoloop: project verify just ran — in a setup session `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` must '
-    + 'already be printed; print it NOW if missing. The closing rail `✅ ╰─ ∞ setup · complete …` '
-    + 'is the only green line.'],
-];
-
-// The setup ribbon a command earns, or null.
-export function setupPhaseReminder(command) {
-  if (typeof command !== 'string') return null;
-  return SETUP_PHASE_ANCHORS.find(([pattern]) => pattern.test(command))?.[1] ?? null;
-}
-
 // Returns null when the command is not a loop-label swap on an issue.
 // opts.archMap: docs/agentic/ARCH.md exists → step 6 also reminds the map update.
 export function reminderFor(command, opts = {}) {
   if (typeof command !== 'string') return null;
   if (/\bstep\.mjs\b/.test(command)) return stepReminder(command, opts);
-  const setup = setupPhaseReminder(command);
-  if (setup !== null) return setup;
 
   // The run frame and the panel probe have no label to ride; prime is the
   // command every run inevitably starts with, so they ride prime.
@@ -233,11 +202,6 @@ function selfTest() {
     ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /--outcome human/],
     ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /PushNotification `✖ #12/],
     ['node tools/agentic/unit.mjs --decide --issue 12 --choice c --why w', null],
-    ['ls /cache | node /cache/0.47.0/templates/tools/release-verify.mjs --sort-versions | tail -3', /1\/5 RESOLVE/],
-    ['node /cache/templates/tools/config-contract.mjs --root . --resolve', /2\/5 AUDIT/],
-    ['node /cache/templates/tools/setup.mjs --init --root /repo --base main --gate x', /4\/5 WRITE/],
-    ['node /cache/templates/tools/setup.mjs --devendor --root /tmp/w', /4\/5 WRITE/],
-    ['node /p/templates/tools/verify.mjs --project-root . 2>&1 | tee /tmp/v.txt', /5\/5 VERIFY/],
     // The run frame rides prime; the terminal riders ride terminal-finalize,
     // whose label mutations never pass through gh edit.
     ['node /cache/0.49.45/templates/tools/prime.mjs --json > /tmp/prime.json', /RUN OPEN/],
@@ -290,32 +254,34 @@ function selfTest() {
     console.error('FAIL: ARCH nudge contradicts the no-freshness-metadata contract');
   }
   if (/ARCH\.md/.test(withoutMap)) { fail++; console.error('FAIL: archMap:false leaked ARCH.md nudge'); }
-  // A plugin hook fires in every repository: it reminds only inside a
-  // devendored autoloop repository, read from CLAUDE_PROJECT_DIR.
+  // LFE #506: the simplify rider carried a measured diff against the plan's line budget.
+  if ([withMap, withoutMap].some((text) => /budget|measured|\blines?\b|line delta|reduction/iu.test(text))) {
+    fail++;
+    console.error('FAIL: the simplify rider asks for a work-size measurement or budget reduction');
+  }
+  // A plugin hook fires in every session: it reminds only the session that
+  // owns a run, whatever the repository holds.
   {
     const scratch = mkdtempSync(join(tmpdir(), 'label-swap-gate-'));
     try {
-      const hook = (command = 'gh issue edit 4 --add-label loop-blocked') => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
-        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }),
-        encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      const home = join(scratch, 'home');
+      const hook = (session) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ session_id: session, tool_name: 'Bash', tool_input: { command: 'gh issue edit 4 --add-label loop-blocked' } }),
+        encoding: 'utf8', cwd: tmpdir(), timeout: 15000, env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: scratch },
       }).stdout;
-      const unrelated = hook();
-      // A legacy install being devendored hears setup's ribbons, and nothing
-      // else: its own vendored reminder hook still handles the loop.
-      mkdirSync(join(scratch, 'docs', 'agentic'), { recursive: true });
-      writeFileSync(join(scratch, 'docs', 'agentic', 'STATE.md'), '# STATE\n');
-      const legacySetup = hook('node /p/tools/setup.mjs --devendor --root /tmp/w');
-      const legacyLoop = hook();
-      if (!/4\/5 WRITE/.test(legacySetup) || legacyLoop !== '') {
-        fail++;
-        console.error('FAIL: a legacy install hears setup\'s ribbons and no loop reminders');
-      }
       mkdirSync(join(scratch, '.autoloop'));
       writeFileSync(join(scratch, '.autoloop', 'config.json'), '{}');
-      const active = hook();
-      if (unrelated !== '' || !/PushNotification/.test(active)) {
+      const unowned = hook('S');
+      const owner = sessionOwnerPid(process.pid);
+      mkdirSync(join(home, '.claude', 'autoloop', 'run-latches'), { recursive: true });
+      writeFileSync(join(home, '.claude', 'autoloop', 'run-latches', `${owner}.json`), JSON.stringify({
+        version: 2, owner, ownerStart: processStart(owner), baseBranch: 'main', scope: scratch, sessionId: 'S',
+      }));
+      const owned = hook('S');
+      const otherSession = hook('T');
+      if (unowned !== '' || otherSession !== '' || !/PushNotification/.test(owned)) {
         fail++;
-        console.error('FAIL: the reminder is silent outside an autoloop repository and speaks inside one');
+        console.error('FAIL: the reminder speaks to the session that owns a run and to no other');
       }
     } finally {
       rmSync(scratch, { recursive: true, force: true });
@@ -335,14 +301,10 @@ if (entry) {
       try {
         const input = JSON.parse(raw);
         if (input.tool_name !== 'Bash') process.exit(0);
-        const root = guardedRoot();
-        // A legacy install (being devendored) hears setup's ribbons only; its
-        // vendored reminder hook still handles the loop.
-        const legacy = root === null && existsSync(join(hookRoot(), 'docs/agentic/STATE.md'));
-        if (root === null && !legacy) process.exit(0);
-        const msg = legacy
-          ? setupPhaseReminder(input.tool_input?.command)
-          : reminderFor(input.tool_input?.command, { archMap: existsSync(join(root, 'docs/agentic/ARCH.md')) });
+        // Only the session that owns a run hears riders (hook-root.mjs).
+        const root = guardedRoot(input.session_id);
+        if (root === null) process.exit(0);
+        const msg = reminderFor(input.tool_input?.command, { archMap: existsSync(join(root, 'docs/agentic/ARCH.md')) });
         if (msg) {
           console.log(JSON.stringify({
             hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: msg },

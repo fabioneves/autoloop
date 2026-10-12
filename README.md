@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.67.0" src="https://img.shields.io/badge/release-v0.67.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.68.0" src="https://img.shields.io/badge/release-v0.68.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -154,7 +154,7 @@ it installed from its own marketplace, keep either copy.
 
 ## Configuration and merge policy
 
-v0.67.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
+v0.68.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
 defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
 optional `protectedPaths`. The repository owns it; plugin updates never overwrite it.
 
@@ -183,16 +183,16 @@ kill switch stay enforced regardless.
 | Where | What |
 |---|---|
 | `.autoloop/config.json` | Settings, overrides only. |
-| `.autoloop/STATE.md` | Policy prose: mission, invariants, protected ground. Injected into every session. |
+| `.autoloop/STATE.md` | Policy prose: mission, invariants, protected ground. Every run reads it. |
 | `.autoloop/checklist.md` | Optional review criteria; the plugin's checklist when absent. |
 | `docs/agentic/ARCH.md`, `docs/agentic/LESSONS.md` | Architecture map and durable memory, yours to edit. |
-| The plugin | Every tool, role brief and hook (`hooks/hooks.json`); they act only in a repository with `.autoloop/config.json`. |
+| The plugin | Every tool, role brief and hook (`hooks/hooks.json`). A hook acts only for the session that owns a run, from its prime to `/clear` or exit; `--close-run` ends all but the command and edit guards. Every other session sees no hook effect. |
 | `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch. Never committed. |
 | Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked` / `loop-waiting` / `loop-obsolete` / `loop-decided` / `loop-repair`, the `loop-digest` issue; lifecycle markers, the frozen plan, and the run record. |
 
 ## How it stays safe
 
-v0.67.0 dispatches every role through one call:
+v0.68.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>

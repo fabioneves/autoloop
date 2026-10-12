@@ -1,6 +1,7 @@
 ---
 name: lean-code
-description: Enforce lean, self-documenting code with near-zero inline comments. Use when writing or editing any source file. Rationale, history and "what changed" belong in commit messages and PR descriptions — never in code comments. The autoloop's implement (implementer) and simplify steps apply this by default.
+description: Lean, self-documenting code with near-zero inline comments. Rationale, history and "what changed" belong in commit messages and PR descriptions — never in code comments. The autoloop's implement and simplify steps apply this by default.
+disable-model-invocation: true
 ---
 
 # Lean code

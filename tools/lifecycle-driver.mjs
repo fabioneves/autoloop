@@ -3,6 +3,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,16 +16,19 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createPremergeRecord,
+  createTerminalOutcome,
   derivePremergeRecordObservation,
   parsePremergeRecordComment,
   premergeRecordHash,
   serializePremergeRecord,
+  serializeTerminalOutcome,
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
 import { finalizeHead } from './delivery-contract.mjs';
 import {
   advanceLifecycleRevision,
   beginLifecycleRevision,
+  BLOCKING_LABELS,
   issueBodyMatches,
   lifecycleCommentNeverEdited,
   lifecycleIdentityHash,
@@ -33,6 +37,7 @@ import {
   resolveLifecycleCommentChain,
   serializeLifecycleMarker,
   serializeLifecycleSuccessor,
+  verifiedRevisionSource,
 } from './lifecycle-contract.mjs';
 import {
   appendPremergeTerminalOutcome,
@@ -49,16 +54,6 @@ const BRANCH_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,254})$/u;
 const COMMENT_ID_RE = /^[A-Za-z0-9_-]{1,255}$/u;
 const MAX_PAGES = 100;
 const MAX_STEPS = 24;
-const BLOCKING_LABELS = new Set([
-  'automerge:halt',
-  'do-not-merge',
-  'human:authorize',
-  'human:legal',
-  'loop-blocked',
-  'needs-dependency',
-  'needs-human',
-  'needs-secret',
-]);
 
 function stableJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -841,7 +836,21 @@ function readOperationalState(request, root) {
     marker,
     request.premergeRecordDraft,
   );
+  if (
+    marker?.phase === 'premerge-record'
+    && marker.premergeRecord
+    && pullRequest?.state === 'open'
+    && !merged
+    && remote.exists === true
+    && remote.headOid !== marker.headOid
+    && premerge.author !== null
+    && !authorizedRole(roleOf(premerge.author), premerge.author, viewer)
+  ) {
+    throw new Error('historical premerge record author is not authorized');
+  }
   const observed = {
+    lifecycleRootCommentId: markerRootEntry?.id ?? null,
+    issueLabels: labels,
     localClaim,
     remoteClaim: remote,
     planComment: {
@@ -859,6 +868,9 @@ function readOperationalState(request, root) {
           number: pullRequest.number,
           issue: request.intent.issue,
           branch: pullRequest.head.ref,
+          headOid: pullRequest.head.sha?.toLowerCase(),
+          state: pullRequest.state,
+          draft: pullRequest.draft,
         }
         : {}),
     },
@@ -1145,6 +1157,19 @@ function ensureLocalClaimGit(root, request, viewer) {
   );
 }
 
+function staleRevisionLabel(label) {
+  return label === 'loop-delivered' || label === 'loop-started'
+    || (label.startsWith('loop:') && label !== 'loop:revising');
+}
+
+function assertRevisionLabels(labels) {
+  if (!Array.isArray(labels) || !labels.some((label) => label?.name === 'loop:revising')) {
+    throw new Error('revision label mutation postcondition is invalid');
+  }
+  const gate = labels.find((label) => BLOCKING_LABELS.has(label?.name))?.name;
+  if (gate) throw new Error(`revision label response contains ${gate}`);
+}
+
 function productionAdapters(root) {
   return {
     read: (request) => readOperationalState(request, root),
@@ -1246,14 +1271,31 @@ function productionAdapters(root) {
       );
     },
     ensureRevisionLabels: (state) => {
-      const labels = state.issue.labels.filter(
-        (label) =>
-          label !== 'loop-delivered'
-          && label !== 'loop-started'
-          && !label.startsWith('loop:'),
-      );
-      labels.push('loop:revising');
-      replaceLabels(state, [...new Set(labels)]);
+      const endpoint = `repos/${state.repository.owner}/${state.repository.repo}/issues/`
+        + `${state.issue.number}/labels`;
+      if (!state.issue.labels.includes('loop:revising')) {
+        assertRevisionLabels(mutate(state.repository, endpoint, 'POST', { labels: ['loop:revising'] }));
+      }
+      for (const label of state.issue.labels.filter(staleRevisionLabel)) {
+        assertRevisionLabels(mutate(state.repository, `${endpoint}/${encodeURIComponent(label)}`, 'DELETE', {}));
+      }
+    },
+    ensureRevisionDraft: (state) => {
+      const prId = state.pullRequest?.node_id;
+      if (!COMMENT_ID_RE.test(prId ?? '')) {
+        throw new Error('pull request ID is unavailable for draft conversion');
+      }
+      const response = JSON.parse(command('gh', [
+        'api', '--hostname', state.repository.host, 'graphql',
+        '-f', 'query=mutation($pullRequestId:ID!){convertPullRequestToDraft(input:{pullRequestId:$pullRequestId}){pullRequest{id isDraft}}}',
+        '-f', `pullRequestId=${prId}`,
+      ]));
+      if (
+        response?.data?.convertPullRequestToDraft?.pullRequest?.id !== prId
+        || response.data.convertPullRequestToDraft.pullRequest.isDraft !== true
+      ) {
+        throw new Error('draft conversion postcondition is invalid');
+      }
     },
   };
 }
@@ -1410,12 +1452,17 @@ function revisionObserved(state, request) {
   return {
     complete: (
       state.pullRequest !== null
+      && (request.revision.recoveryHeadOid === undefined
+        || (state.pullRequest?.state === 'open'
+          && typeof state.pullRequest.draft === 'boolean'))
       && planComment !== undefined
       && sha256(planComment.body) === request.revision.planHash
       && planComment.author === state.viewer
       && ['write', 'maintain', 'admin'].includes(state.viewerRole)
     ),
     headOid: state.pullRequest?.head?.sha?.toLowerCase() ?? null,
+    ...(request.revision.recoveryHeadOid === undefined
+      ? {} : { draft: state.pullRequest?.draft ?? null }),
     labels: [...state.issue.labels],
     planComment: {
       complete: planComment !== undefined,
@@ -1423,6 +1470,43 @@ function revisionObserved(state, request) {
       bodyHash: planComment ? sha256(planComment.body) : null,
     },
   };
+}
+
+function revisionSourceCode(state, readRequest) {
+  const marker = state.marker;
+  const facts = state.observed;
+  const remote = facts?.remoteClaim;
+  const pr = state.pullRequest;
+  if (
+    state.issue.number !== marker.issue
+    || !INTENT_KEYS.every((key) => readRequest.intent?.[key] === marker[key])
+    || facts?.localClaim?.exists !== true
+    || facts.localClaim.branch !== marker.branch
+    || facts.localClaim.claimCommit !== marker.claimCommit
+    || remote?.exists !== true
+    || remote.branch !== marker.branch
+    || remote.containsClaimCommit !== true
+    || facts.planComment?.exists !== true
+    || facts.planComment.id !== marker.planCommentId
+    || facts.draftPr?.number !== marker.pr
+    || facts.draftPr.branch !== marker.branch
+    || facts.draftPr.issue !== marker.issue
+    || pr?.number !== marker.pr
+    || pr.state !== 'open'
+    || pr.merged_at !== null
+    || pr.head?.ref !== marker.branch
+    || pr.head?.repo?.full_name?.toLowerCase()
+      !== `${state.repository.owner}/${state.repository.repo}`
+    || remote.headOid !== pr.head.sha?.toLowerCase()
+    || facts.merge?.complete !== true
+    || facts.merge.merged !== false
+  ) {
+    return 'REVISION_OWNERSHIP_MISMATCH';
+  }
+  if (!verifiedRevisionSource(marker, facts, state.premergeRecordDraft)) {
+    return 'REVISION_SOURCE_UNVERIFIED';
+  }
+  return null;
 }
 
 export function driveLifecycleRevision(request, context = {}) {
@@ -1440,7 +1524,10 @@ export function driveLifecycleRevision(request, context = {}) {
     plan: context.plan,
     premergeRecordDraft: null,
   };
-  for (let step = 0; step < 6; step += 1) {
+  if (!context.adapters && !validateReconcileRequest(readRequest)) {
+    throw new Error('revision source context is invalid');
+  }
+  for (let step = 0; step < 8; step += 1) {
     const state = readStable(adapters, readRequest);
     if (
       !state.marker
@@ -1451,21 +1538,49 @@ export function driveLifecycleRevision(request, context = {}) {
       throw new Error('authenticated Pitcrew revision authority is unavailable');
     }
     const begun = beginLifecycleRevision(state.marker, request.revision);
-    if (begun.state === 'complete') {
-      return {
-        schemaVersion: 1,
-        state: 'complete',
-        code: begun.code,
-        epoch: begun.epoch,
-        lifecycleCommentId: request.lifecycleCommentId,
-      };
-    }
     if (begun.state === 'block') {
       return {
         schemaVersion: 1,
         state: 'block',
         action: begun.action,
         code: begun.code,
+        lifecycleCommentId: request.lifecycleCommentId,
+      };
+    }
+    if (request.revision.recoveryHeadOid !== undefined && begun.state !== 'complete') {
+      const sourceCode = revisionSourceCode(state, readRequest);
+      if (sourceCode !== null) {
+        return {
+          schemaVersion: 1,
+          state: 'block',
+          action: 'revision-source',
+          code: sourceCode,
+          lifecycleCommentId: request.lifecycleCommentId,
+        };
+      }
+    }
+    const actualBaseBranch = state.pullRequest?.base?.ref;
+    const expectedBaseBranch = readRequest.baseBranch;
+    if (typeof actualBaseBranch !== 'string' || !BRANCH_RE.test(actualBaseBranch)
+      || typeof expectedBaseBranch !== 'string' || !BRANCH_RE.test(expectedBaseBranch)) {
+      return {
+        schemaVersion: 1, state: 'wait', action: 'inspect-revision-target',
+        code: 'EVIDENCE_INCOMPLETE', lifecycleCommentId: request.lifecycleCommentId,
+      };
+    }
+    if (actualBaseBranch !== expectedBaseBranch) {
+      return {
+        schemaVersion: 1, state: 'block', action: 'revision-target',
+        code: 'REVISION_TARGET_MISMATCH', expectedBaseBranch, actualBaseBranch,
+        lifecycleCommentId: request.lifecycleCommentId,
+      };
+    }
+    if (begun.state === 'complete') {
+      return {
+        schemaVersion: 1,
+        state: 'complete',
+        code: begun.code,
+        epoch: begun.epoch,
         lifecycleCommentId: request.lifecycleCommentId,
       };
     }
@@ -1479,7 +1594,10 @@ export function driveLifecycleRevision(request, context = {}) {
         lifecycleCommentId: request.lifecycleCommentId,
       };
     }
-    if (prerequisites.headOid !== request.revision.expectedHeadOid) {
+    if (prerequisites.headOid !== (request.revision.recoveryHeadOid
+      ?? request.revision.expectedHeadOid)
+      || (request.revision.recoveryHeadOid !== undefined
+        && state.observed.remoteClaim.headOid !== request.revision.recoveryHeadOid)) {
       return {
         schemaVersion: 1,
         state: 'block',
@@ -1494,9 +1612,16 @@ export function driveLifecycleRevision(request, context = {}) {
     }
     if (
       !prerequisites.labels.includes('loop:revising')
-      || prerequisites.labels.includes('loop-delivered')
+      || prerequisites.labels.some(staleRevisionLabel)
     ) {
       adapters.ensureRevisionLabels(state);
+      continue;
+    }
+    if (
+      request.revision.recoveryHeadOid !== undefined
+      && prerequisites.draft !== true
+    ) {
+      adapters.ensureRevisionDraft(state);
       continue;
     }
     const advanced = advanceLifecycleRevision(state.marker, prerequisites);
@@ -1560,6 +1685,591 @@ export function exampleReconcileRequest() {
   const request = fakeReconcileRequest();
   request.intent.planHash = sha256(request.plan.body);
   return request;
+}
+
+function productionRevisionChecks() {
+  const root = mkdtempSync(join(tmpdir(), 'autoloop-revision-production-'));
+  try {
+    command('git', ['init', '-q', '-b', 'main', root]);
+    command('git', ['remote', 'add', 'origin', 'https://github.com/owner/repository.git'], { cwd: root });
+    const gitCommit = (message) => {
+      command('git', [
+        '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+        '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+        'commit', '--allow-empty', '--no-verify', '-m', message,
+      ], { cwd: root });
+      return command('git', ['rev-parse', 'HEAD'], { cwd: root }).toLowerCase();
+    };
+    const base = gitCommit('base');
+    const branch = 'feat/gh-7-contract';
+    command('git', ['switch', '-q', '-c', branch], { cwd: root });
+    const claimCommit = gitCommit('chore: claim #7');
+    const sourceHead = gitCommit('delivered A');
+    const currentHead = gitCommit('merge-updated B');
+    command('git', ['switch', '-q', '-c', 'candidate'], { cwd: root });
+    const nextHead = gitCommit('changed C');
+    command('git', ['switch', '-q', branch], { cwd: root });
+    const originalPlan = 'approved original plan';
+    const revisionPlan = 'frozen revision plan';
+    const issueBody = 'approved issue';
+    const lifecycle = {
+      v: 1,
+      ...fakeIntent(),
+      issueBodyHash: sha256(issueBody),
+      planHash: sha256(originalPlan),
+      branch,
+      plannedBaseOid: base,
+      epoch: 1,
+      phase: 'premerge-record',
+      claimCommit,
+      pr: 12,
+      planCommentId: 'IC_plan',
+      headOid: sourceHead,
+    };
+    const record = createPremergeRecord({
+      issue: 7, pullRequest: 12, headOid: sourceHead,
+      run: { intentHash: lifecycle.runIntentHash, receiptFingerprint: '1'.repeat(64) },
+      plan: { commentId: 'IC_plan', contentHash: lifecycle.planHash },
+      review: { summaryHash: '2'.repeat(64) },
+      gate: { summaryHash: '3'.repeat(64) },
+      ci: { evidenceHash: '4'.repeat(64) },
+      lifecycle: { commentId: 'IC_root', identityHash: lifecycleIdentityHash(lifecycle) },
+    });
+    const marker = {
+      ...lifecycle,
+      premergeRecord: record.recordId,
+      premergeRecordHash: premergeRecordHash(record),
+      premergeRecordCommentId: 'IC_premerge',
+    };
+    const comment = (id, body, login = 'maint') => ({
+      node_id: id, id: Number(id.replace(/\D/gu, '')) || 1,
+      body, user: { login }, created_at: '2026-10-10T00:00:00Z',
+      updated_at: '2026-10-10T00:00:00Z',
+    });
+    const initial = {
+      issue: { number: 7, state: 'open', body: issueBody,
+        repository_url: 'https://api.github.com/repos/owner/repository',
+        labels: [{ name: 'loop-delivered' }], node_id: 'I_issue' },
+      pr: { number: 12, state: 'open', draft: false, merged_at: null,
+        node_id: 'PR_12', head: { ref: branch, sha: currentHead,
+          repo: { full_name: 'owner/repository' } },
+        base: { ref: 'main', repo: { full_name: 'owner/repository' } }, body: 'Closes #7', title: 'Fixture' },
+      refHead: currentHead,
+      claimCommit,
+      comments: [
+        comment('IC_root', serializeLifecycleMarker(marker)),
+        comment('IC_plan', originalPlan),
+        comment('IC_revision_plan', revisionPlan),
+        comment('IC_premerge', serializePremergeRecord(record)),
+      ],
+      roles: { maint: 'maintain' },
+      viewer: 'maint',
+      writes: [],
+    };
+    const request = {
+      request: {
+        schemaVersion: 1,
+        lifecycleCommentId: 'IC_root',
+        revision: {
+          expectedEpoch: 1,
+          expectedHeadOid: sourceHead,
+          recoveryHeadOid: currentHead,
+          expectedIdentityHash: lifecycleIdentityHash(marker),
+          expectedPlanCommentId: 'IC_plan',
+          expectedPremergeRecord: record.recordId,
+          expectedPremergeRecordHash: premergeRecordHash(record),
+          expectedPremergeRecordCommentId: 'IC_premerge',
+          planCommentId: 'IC_revision_plan',
+          planHash: sha256(revisionPlan),
+          plannedBaseOid: base,
+          runIntentHash: '7'.repeat(64),
+          selector: 'codex',
+        },
+      },
+      context: {
+        intent: Object.fromEntries(Object.keys(fakeIntent()).map((key) => [key, marker[key]])),
+        baseBranch: 'main',
+        plan: { body: originalPlan, title: 'Fixture', prBody: 'Closes #7' },
+      },
+    };
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const gh = join(bin, 'gh');
+    writeFileSync(gh, `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = process.env.MOCK_REVISION_STATE;
+const state = JSON.parse(fs.readFileSync(path, 'utf8'));
+const args = process.argv.slice(2);
+const endpoint = args[args.indexOf('--hostname') + 2];
+const method = args.includes('--method') ? args[args.indexOf('--method') + 1] : 'GET';
+const input = method === 'GET' ? null : JSON.parse(fs.readFileSync(0, 'utf8'));
+let result;
+if (endpoint === 'user') result = { login: state.viewer };
+else if (endpoint === 'graphql') {
+  if (args.some((arg) => arg.includes('mergeCommit{oid}'))) {
+    result = { data: { repository: { pullRequest: {
+      merged: state.pr.merged_at !== null, mergeCommit: { oid: state.mergeOid },
+    } } } };
+  } else {
+    if (!args.some((arg) => arg.includes('convertPullRequestToDraft'))) throw Error('unexpected GraphQL request');
+    state.pr.draft = true;
+    state.writes.push('draft');
+    if (state.shiftBaseOnDraft) state.pr.base.ref = state.shiftBaseOnDraft;
+    if (state.shiftHeadOnDraft) {
+      state.refHead = state.shiftHeadOnDraft;
+      state.pr.head.sha = state.shiftHeadOnDraft;
+    }
+    result = { data: { convertPullRequestToDraft: { pullRequest: { id: state.pr.node_id, isDraft: true } } } };
+  }
+} else if (endpoint.includes('/collaborators/')) {
+  const login = endpoint.split('/').at(-2);
+  if (login === 'null') {
+    state.nullAuthorQuery = true;
+    fs.writeFileSync(path, JSON.stringify(state));
+    throw Error('unexpected null collaborator');
+  }
+  result = { role_name: state.roles[login] || 'read' };
+} else if (endpoint.includes('/git/ref/heads/')) {
+  if (state.refMissing) {
+    console.error('HTTP 404');
+    process.exit(1);
+  }
+  const value = { object: { sha: state.refHead } };
+  if (state.shiftHeadOnFirstRef) {
+    state.refHead = state.shiftHeadOnFirstRef;
+    state.pr.head.sha = state.shiftHeadOnFirstRef;
+    delete state.shiftHeadOnFirstRef;
+    fs.writeFileSync(path, JSON.stringify(state));
+  }
+  result = value;
+} else if (endpoint.includes('/compare/')) result = { status: state.compareStatus || 'ahead' };
+else if (endpoint.includes('/commits/') && endpoint.includes('/check-runs?')) {
+  result = { total_count: 0, check_runs: [] };
+} else if (endpoint.includes('/commits/') && endpoint.includes('/status?')) {
+  const head = endpoint.split('/commits/')[1].split('/')[0];
+  result = { sha: head, statuses: state.statuses?.[head] || [] };
+} else if (endpoint.endsWith('/pulls/12')) result = state.pr;
+else if (endpoint.includes('/pulls?')) result = [state.pr];
+else if (endpoint.endsWith('/issues/7/comments') && method === 'POST') {
+  const id = 'IC_s' + (state.writes.filter((entry) => entry === 'marker').length + 1);
+  result = { node_id: id, id: 100 + state.writes.length, body: input.body,
+    user: { login: state.viewer }, created_at: '2026-10-10T00:00:00Z',
+    updated_at: '2026-10-10T00:00:00Z' };
+  state.comments.push(result);
+  state.writes.push('marker');
+} else if (endpoint.includes('/issues/7/comments')) result = state.comments;
+else if (endpoint.endsWith('/issues/7/labels') && method === 'POST') {
+  if (state.addHumanOnLabels) state.issue.labels.push({ name: state.addHumanOnLabels });
+  for (const name of input.labels) {
+    if (!state.issue.labels.some((label) => label.name === name)) state.issue.labels.push({ name });
+  }
+  state.writes.push('labels');
+  if (state.shiftHeadOnLabels) {
+    state.refHead = state.shiftHeadOnLabels;
+    state.pr.head.sha = state.shiftHeadOnLabels;
+  }
+  result = state.issue.labels;
+} else if (endpoint.includes('/issues/7/labels/') && method === 'DELETE') {
+  const name = decodeURIComponent(endpoint.split('/labels/')[1]);
+  state.issue.labels = state.issue.labels.filter((label) => label.name !== name);
+  state.writes.push('delete:' + name);
+  if (state.addHumanOnDelete) {
+    state.issue.labels.push({ name: state.addHumanOnDelete });
+    delete state.addHumanOnDelete;
+  }
+  result = state.issue.labels;
+} else if (endpoint.endsWith('/issues/7')) result = state.issue;
+else throw Error('unexpected mock endpoint ' + endpoint + ' method ' + method);
+if (method !== 'GET' || endpoint === 'graphql') fs.writeFileSync(path, JSON.stringify(state));
+if (state.haltAfter === state.writes.join(',')) {
+  delete state.haltAfter;
+  fs.writeFileSync(path, JSON.stringify(state));
+  throw Error('injected interruption after ' + state.writes.join(','));
+}
+process.stdout.write(JSON.stringify(result));
+`);
+    chmodSync(gh, 0o755);
+    const statePath = join(root, 'mock-state.json');
+    const setState = (patch = {}) => writeFileSync(statePath, JSON.stringify({
+      ...structuredClone(initial), ...patch,
+    }));
+    const readState = () => JSON.parse(readFileSync(statePath, 'utf8'));
+    const run = (mode = '--begin-revision-json', value = request) => {
+      const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), mode], {
+        cwd: root, encoding: 'utf8', input: JSON.stringify(value),
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, MOCK_REVISION_STATE: statePath },
+        timeout: 120000,
+      });
+      return {
+        status: result.status,
+        stderr: result.stderr,
+        value: result.status === 0 ? JSON.parse(result.stdout) : null,
+        state: readState(),
+      };
+    };
+    const currentMarker = (state) => {
+      const comments = state.comments.map((item) => commentValue(item));
+      return authoritativeMarkerChain(
+        comments, (login) => state.roles[login] ?? 'read', state.viewer, 7, 'IC_root',
+      ).markerChain.tip.marker;
+    };
+    setState();
+    const normal = run('--reconcile-json', {
+      ...request.context, schemaVersion: 1, lifecycleCommentId: 'IC_root',
+      premergeRecordDraft: null,
+    });
+    setState();
+    const success = run();
+    const afterSuccess = success.state;
+    const replay = run();
+    setState({ ...afterSuccess, pr: { ...afterSuccess.pr, base: { ...afterSuccess.pr.base, ref: 'other' } } });
+    const retargetedReplay = run();
+    setState({ roles: { maint: 'read' } });
+    const wrongAuthor = run();
+    setState({ refHead: nextHead });
+    const headDisagreement = run();
+    setState({ shiftHeadOnLabels: nextHead });
+    const headRace = run();
+    const refuse = (patch, value = request) => {
+      setState(patch);
+      return run('--begin-revision-json', value);
+    };
+    const draftRace = refuse({ shiftHeadOnDraft: nextHead });
+    const wrongBase = refuse({ pr: { ...initial.pr, base: { ...initial.pr.base, ref: 'other' } } });
+    const missingBase = refuse({ pr: { ...initial.pr, base: undefined } });
+    const baseRace = refuse({ shiftBaseOnDraft: 'other' });
+    const mergeSignal = refuse({ pr: { ...initial.pr, labels: [{ name: 'human:authorize' }] } });
+    const otherShape = refuse({
+      refHead: nextHead,
+      pr: { ...structuredClone(initial.pr), head: { ...initial.pr.head, sha: nextHead } },
+    }, {
+      ...request, request: {
+        ...request.request,
+        revision: { ...request.request.revision, recoveryHeadOid: nextHead },
+      },
+    });
+    const badAuthorComments = structuredClone(initial.comments);
+    badAuthorComments[3].user.login = 'stranger';
+    const badAuthor = refuse({ comments: badAuthorComments });
+    const disconnected = comment('IC_fork', serializeLifecycleSuccessor(marker, {
+      v: 1, rootCommentId: 'IC_root', previousCommentId: 'IC_root',
+      previousBodyHash: 'f'.repeat(64), sequence: 1,
+    }));
+    const brokenChain = refuse({ comments: [...initial.comments, disconnected] });
+    const wrongPlanComments = structuredClone(initial.comments);
+    wrongPlanComments[1].user.login = 'stranger';
+    const wrongSourcePlan = refuse({ comments: wrongPlanComments });
+    const wrongRecordComments = structuredClone(initial.comments);
+    wrongRecordComments[3].body += '\n';
+    const malformedRecord = refuse({ comments: wrongRecordComments });
+    const missingRecordComments = initial.comments.filter((item) => item.node_id !== 'IC_premerge');
+    const missingRecord = refuse({ comments: missingRecordComments });
+    setState({ comments: missingRecordComments });
+    const missingRecordReconcile = run('--reconcile-json', {
+      ...request.context, schemaVersion: 1, lifecycleCommentId: 'IC_root', premergeRecordDraft: null,
+    });
+    const changedIssue = refuse({ issue: { ...initial.issue, body: 'changed issue' } });
+    const wrongPr = refuse({ pr: { ...initial.pr, number: 13 } });
+    const wrongBranch = refuse({ pr: {
+      ...initial.pr, head: { ...initial.pr.head, ref: 'feat/gh-8-elsewhere' },
+    } });
+    const wrongRepository = refuse({ pr: {
+      ...initial.pr, head: { ...initial.pr.head, repo: { full_name: 'other/repository' } },
+    } });
+    const wrongClaim = refuse({ compareStatus: 'diverged' });
+    const closedPr = refuse({ pr: { ...initial.pr, state: 'closed' } });
+    const mergedPr = refuse({ pr: { ...initial.pr, merged_at: '2026-10-10T00:00:00Z' }, mergeOid: nextHead });
+    const blocked = refuse({ issue: { ...initial.issue, labels: [
+      ...initial.issue.labels, { name: 'needs-human' },
+    ] } });
+    const humanDecide = refuse({ issue: { ...initial.issue, labels: [
+      ...initial.issue.labels, { name: 'human:decide' },
+    ] } });
+    const midEffectGate = refuse({ addHumanOnLabels: 'needs-human' });
+    const staleLabels = [...initial.issue.labels, { name: 'loop-started' }, { name: 'loop:09-gate' }];
+    const deleteGate = refuse({
+      issue: { ...initial.issue, labels: staleLabels }, addHumanOnDelete: 'human:decide',
+    });
+    setState({ issue: { ...initial.issue, labels: staleLabels }, haltAfter: 'marker,labels,delete:loop-delivered' });
+    const partialLabels = run();
+    const labelReplay = run();
+    const wrongActor = refuse({ viewer: 'reader', roles: { ...initial.roles, reader: 'read' } });
+    const missingNewPlan = refuse({ comments: initial.comments.filter((item) => item.node_id !== 'IC_revision_plan') });
+    const headChangedWhileReading = refuse({ shiftHeadOnFirstRef: nextHead });
+    const staleLegacy = refuse(initial, {
+      ...request, request: {
+        ...request.request,
+        revision: Object.fromEntries(Object.entries(request.request.revision)
+          .filter(([key]) => key !== 'recoveryHeadOid')),
+      },
+    });
+    const sameHeadRequest = {
+      ...request, request: {
+        ...request.request,
+        revision: Object.fromEntries(Object.entries(request.request.revision)
+          .filter(([key]) => key !== 'recoveryHeadOid')),
+      },
+    };
+    setState({ refHead: sourceHead,
+      pr: { ...initial.pr, head: { ...initial.pr.head, sha: sourceHead } },
+    });
+    const sameHead = run('--begin-revision-json', sameHeadRequest);
+    const sameHeadReplay = run('--begin-revision-json', sameHeadRequest);
+    setState({ refHead: sourceHead, pr: { ...initial.pr,
+      head: { ...initial.pr.head, sha: sourceHead }, base: { ...initial.pr.base, ref: 'other' },
+    } });
+    const sameHeadWrongBase = run('--begin-revision-json', sameHeadRequest);
+    const { kind: oldKind, v: oldVersion, recordId: oldRecordId, ...recordSeed } = record;
+    const mergingBase = { ...marker, mergePolicy: 'auto', phase: 'merge-intent' };
+    const mergingRecord = createPremergeRecord({ ...recordSeed,
+      lifecycle: { ...recordSeed.lifecycle, identityHash: lifecycleIdentityHash(mergingBase) },
+    });
+    const mergingMarker = { ...mergingBase,
+      premergeRecord: mergingRecord.recordId,
+      premergeRecordHash: premergeRecordHash(mergingRecord),
+      mergeOperation: { kind: 'strict-direct', state: 'intent',
+        headOid: sourceHead, premergeRecord: mergingRecord.recordId },
+    };
+    const mergingComments = structuredClone(initial.comments);
+    mergingComments[0].body = serializeLifecycleMarker(mergingMarker);
+    mergingComments[3].body = serializePremergeRecord(mergingRecord);
+    const inFlightMerge = refuse({ comments: mergingComments }, {
+      ...request, request: { ...request.request, revision: {
+        ...request.request.revision,
+        expectedIdentityHash: lifecycleIdentityHash(mergingMarker),
+        expectedPremergeRecord: mergingRecord.recordId,
+        expectedPremergeRecordHash: premergeRecordHash(mergingRecord),
+      } },
+      context: { ...request.context, intent: {
+        ...request.context.intent, mergePolicy: 'auto',
+      } },
+    });
+    const interrupted = ['marker', 'marker,labels', 'marker,labels,delete:loop-delivered', 'marker,labels,delete:loop-delivered,draft', 'marker,labels,delete:loop-delivered,draft,marker']
+      .map((haltAfter) => {
+        setState({ haltAfter });
+        const before = run();
+        const finished = run();
+        return { before, finished };
+      });
+    setState({ haltAfter: 'marker' });
+    const stagedOnly = run();
+    const competing = run('--begin-revision-json', {
+      ...request, request: {
+        ...request.request,
+        revision: { ...request.request.revision, planHash: '9'.repeat(64) },
+      },
+    });
+    const resumedOriginal = run();
+    const sourceMismatch = refuse(initial, {
+      ...request, request: {
+        ...request.request,
+        revision: { ...request.request.revision, expectedIdentityHash: 'e'.repeat(64) },
+      },
+    });
+    const brokenContext = refuse(initial, {
+      ...request, context: { ...request.context,
+        intent: { ...request.context.intent, planHash: 'f'.repeat(64) },
+      },
+    });
+    const nextReconcile = {
+      schemaVersion: 1,
+      intent: Object.fromEntries(INTENT_KEYS.map((key) => [key, currentMarker(afterSuccess)[key]])),
+      baseBranch: 'main',
+      lifecycleCommentId: 'IC_root',
+      plan: { body: revisionPlan, title: 'Fixture', prBody: 'Closes #7' },
+      premergeRecordDraft: null,
+    };
+    const greenStatuses = [
+      { context: 'agentic/review', state: 'success', description: '' },
+      { context: 'agentic/gate', state: 'success', description: '' },
+    ];
+    const unrelatedGreen = [{ context: 'unrelated/ci', state: 'success', description: '' }];
+    const priorApproval = { ...afterSuccess,
+      statuses: { [sourceHead]: greenStatuses, [currentHead]: unrelatedGreen },
+    };
+    writeFileSync(statePath, JSON.stringify(priorApproval));
+    const oldApprovalOnB = run('--reconcile-json', nextReconcile);
+    writeFileSync(statePath, JSON.stringify({ ...priorApproval,
+      refHead: nextHead,
+      pr: { ...priorApproval.pr, head: { ...priorApproval.pr.head, sha: nextHead } },
+      statuses: { ...priorApproval.statuses, [currentHead]: greenStatuses,
+        [nextHead]: unrelatedGreen },
+    }));
+    const oldApprovalOnC = run('--reconcile-json', nextReconcile);
+    const beforeFreshC = readState();
+    writeFileSync(statePath, JSON.stringify({ ...beforeFreshC,
+      statuses: { ...beforeFreshC.statuses, [nextHead]: greenStatuses },
+    }));
+    const freshC = run('--reconcile-json', nextReconcile);
+    const terminalComments = structuredClone(initial.comments);
+    terminalComments[0].body = serializeLifecycleMarker({
+      ...marker, phase: 'terminal-record', mergeOid: nextHead,
+    });
+    terminalComments[3].user.login = 'former';
+    terminalComments[3].body = `${serializePremergeRecord(record)}\n${serializeTerminalOutcome(
+      createTerminalOutcome(record, nextHead), record,
+    )}`;
+    setState({
+      comments: terminalComments,
+      roles: { maint: 'maintain', former: 'read' },
+      refMissing: true,
+      pr: { ...initial.pr, merged_at: '2026-10-10T00:00:00Z',
+        head: { ...initial.pr.head, sha: sourceHead } },
+      mergeOid: nextHead,
+    });
+    const mergedTerminal = run('--reconcile-json', {
+      ...request.context, schemaVersion: 1, lifecycleCommentId: 'IC_root',
+      premergeRecordDraft: null,
+    });
+    for (const [name, result] of Object.entries({ normal, success, headDisagreement, headRace,
+      oldApprovalOnB, oldApprovalOnC, freshC, mergedTerminal })) {
+      if (result.status !== 0) console.error(`  ${name}: ${result.stderr.trim()}`);
+    }
+    return [
+      ['normal production reconcile names A and B without using current B checks',
+        normal.status === 0 && normal.value?.code === 'REVISION_REQUIRED'
+          && normal.value.sourceHeadOid === sourceHead
+          && normal.value.currentHeadOid === currentHead
+          && normal.state.writes.length === 0],
+      ['production revision begins once, returns the PR to draft, and keeps A and B separate',
+        success.status === 0 && success.value?.code === 'REVISION_ALREADY_BEGUN'
+          && afterSuccess.pr.draft === true
+          && afterSuccess.writes.join(',') === 'marker,labels,delete:loop-delivered,draft,marker'
+          && currentMarker(afterSuccess).epoch === 2
+          && currentMarker(afterSuccess).phase === 'draft-pr'
+          && currentMarker(afterSuccess).headOid === undefined
+          && currentMarker(afterSuccess).priorRevisions[0].headOid === sourceHead
+          && currentMarker(afterSuccess).priorRevisions[0].recoveryHeadOid === currentHead
+          && replay.value?.code === 'REVISION_ALREADY_BEGUN'
+          && replay.state.writes.length === afterSuccess.writes.length],
+      ['a wrong or missing PR base cannot start a revision',
+        [wrongBase, sameHeadWrongBase].every((result) =>
+          result.value?.code === 'REVISION_TARGET_MISMATCH' && result.state.writes.length === 0)
+          && missingBase.value?.code === 'EVIDENCE_INCOMPLETE' && missingBase.state.writes.length === 0],
+      ['a changed PR base is checked on readback and completed replay',
+        baseRace.value?.code === 'REVISION_TARGET_MISMATCH'
+          && currentMarker(baseRace.state).epoch === 1
+          && baseRace.state.writes.join(',') === 'marker,labels,delete:loop-delivered,draft'
+          && retargetedReplay.value?.code === 'REVISION_TARGET_MISMATCH'
+          && retargetedReplay.state.writes.length === afterSuccess.writes.length],
+      ['a PR human:authorize merge signal is preserved without blocking revision',
+        mergeSignal.value?.code === 'REVISION_ALREADY_BEGUN'
+          && mergeSignal.state.pr.labels.some((label) => label.name === 'human:authorize')],
+      ['untrusted source author cannot start a revision',
+        wrongAuthor.status !== 0 && wrongAuthor.state.writes.length === 0],
+      ['PR and branch head disagreement cannot start a revision',
+        headDisagreement.value?.state === 'block'
+          && headDisagreement.state.writes.length === 0],
+      ['B moving to C after labels leaves staged intent but no new epoch',
+        headRace.value?.state === 'block'
+          && headRace.state.writes.join(',') === 'marker,labels,delete:loop-delivered'
+          && currentMarker(headRace.state).revisionIntent?.recoveryHeadOid === currentHead
+          && currentMarker(headRace.state).epoch === 1],
+      ['B moving to C during draft conversion cannot start an epoch',
+        draftRace.value?.state === 'block'
+          && draftRace.state.writes.join(',') === 'marker,labels,delete:loop-delivered,draft'
+          && currentMarker(draftRace.state).epoch === 1
+          && draftRace.state.pr.draft === true],
+      ['a second merge-updated head enters its own exact-head revision',
+        otherShape.value?.code === 'REVISION_ALREADY_BEGUN'
+          && currentMarker(otherShape.state).priorRevisions[0].headOid === sourceHead
+          && currentMarker(otherShape.state).priorRevisions[0].recoveryHeadOid === nextHead],
+      ['a changed issue, untrusted frozen plan, or malformed historical record has no effects',
+        changedIssue.status !== 0 && changedIssue.state.writes.length === 0
+          && wrongSourcePlan.value?.state === 'block' && wrongSourcePlan.state.writes.length === 0
+          && malformedRecord.value?.code === 'REVISION_SOURCE_UNVERIFIED'
+          && malformedRecord.state.writes.length === 0],
+      ['missing historical records return typed refusals without null-author queries or effects',
+        missingRecord.value?.code === 'REVISION_SOURCE_UNVERIFIED'
+          && missingRecordReconcile.value?.code === 'ARTIFACT_IDENTITY_MISMATCH'
+          && missingRecordReconcile.value.artifact === 'premerge-record'
+          && [missingRecord, missingRecordReconcile].every((result) =>
+            result.state.writes.length === 0 && result.state.nullAuthorQuery !== true)],
+      ['a wrong-author premerge record and a broken trusted chain have no effects',
+        badAuthor.status !== 0 && badAuthor.state.writes.length === 0
+          && brokenChain.status !== 0 && brokenChain.state.writes.length === 0],
+      ['wrong PR, branch, repository, or claim ancestry cannot start recovery',
+        [wrongPr, wrongBranch, wrongRepository, wrongClaim].every((result) =>
+          result.value?.code === 'REVISION_OWNERSHIP_MISMATCH'
+          && result.state.writes.length === 0)],
+      ['standalone human:decide stops production recovery before any write',
+        humanDecide.status !== 0
+          && humanDecide.state.writes.length === 0
+          && humanDecide.state.issue.labels.some((label) => label.name === 'human:decide')],
+      ['a human gate added during label mutation remains present and stops the epoch',
+        midEffectGate.status !== 0
+          && midEffectGate.state.issue.labels.some((label) => label.name === 'needs-human')
+          && midEffectGate.state.writes.join(',') === 'marker,labels'
+          && currentMarker(midEffectGate.state).epoch === 1],
+      ['a human gate in a deletion response prevents every later label mutation',
+        deleteGate.status !== 0
+          && deleteGate.state.writes.join(',') === 'marker,labels,delete:loop-delivered'
+          && deleteGate.state.issue.labels.some((label) => label.name === 'human:decide')
+          && deleteGate.state.issue.labels.some((label) => label.name === 'loop-started')
+          && currentMarker(deleteGate.state).epoch === 1],
+      ['partial label deletion replays before the revision epoch advances',
+        partialLabels.status !== 0
+          && labelReplay.value?.code === 'REVISION_ALREADY_BEGUN'
+          && labelReplay.state.issue.labels.map((label) => label.name).join(',') === 'loop:revising'
+          && labelReplay.state.writes.join(',') === 'marker,labels,delete:loop-delivered,delete:loop-started,delete:loop:09-gate,draft,marker'],
+      ['a closed or merged PR, a real human gate, or an untrusted actor has no effects',
+        closedPr.value?.code === 'REVISION_OWNERSHIP_MISMATCH'
+          && mergedPr.value?.code === 'REVISION_OWNERSHIP_MISMATCH'
+          && blocked.status !== 0 && wrongActor.status !== 0
+          && [closedPr, mergedPr, blocked, wrongActor].every((result) =>
+            result.state.writes.length === 0)],
+      ['missing new plan evidence waits without staging',
+        missingNewPlan.value?.code === 'EVIDENCE_INCOMPLETE'
+          && missingNewPlan.state.writes.length === 0],
+      ['an in-progress merge cannot enter recovery',
+        inFlightMerge.value?.code === 'REVISION_SOURCE_MISMATCH'
+          && inFlightMerge.state.writes.length === 0],
+      ['legacy same-head revision remains readable and its replay makes no writes',
+        sameHead.value?.code === 'REVISION_ALREADY_BEGUN'
+          && sameHead.state.writes.join(',') === 'marker,labels,delete:loop-delivered,marker'
+          && !Object.hasOwn(currentMarker(sameHead.state).priorRevisions[0], 'recoveryHeadOid')
+          && sameHeadReplay.value?.code === 'REVISION_ALREADY_BEGUN'
+          && sameHeadReplay.state.writes.length === sameHead.state.writes.length],
+      ['a moving stable read and a stale same-head request make no writes',
+        headChangedWhileReading.status !== 0
+          && headChangedWhileReading.stderr.includes('stable observation')
+          && headChangedWhileReading.state.writes.length === 0
+          && staleLegacy.value?.code === 'REVISION_PREREQUISITE_MISMATCH'
+          && staleLegacy.state.writes.length === 0],
+      ['replay after every effect writes one epoch and one audit entry',
+        interrupted.every(({ before, finished }) =>
+          before.status !== 0 && before.stderr.includes('injected interruption')
+          && finished.value?.code === 'REVISION_ALREADY_BEGUN'
+          && finished.state.writes.join(',') === 'marker,labels,delete:loop-delivered,draft,marker'
+          && currentMarker(finished.state).priorRevisions.length === 1)],
+      ['a competing staged revision cannot replace the first B binding',
+        stagedOnly.status !== 0 && stagedOnly.state.writes.join(',') === 'marker'
+          && competing.value?.code === 'REVISION_INTENT_CONFLICT'
+          && competing.state.writes.join(',') === 'marker'
+          && resumedOriginal.value?.code === 'REVISION_ALREADY_BEGUN'
+          && currentMarker(resumedOriginal.state).priorRevisions[0].recoveryHeadOid === currentHead],
+      ['stale A verdicts and unrelated green CI do not approve B or C; C needs exact-head verdicts',
+        oldApprovalOnB.value?.code === 'ACTIVE_DRAFT_RECOVERED'
+          && oldApprovalOnB.value.waitingOn === 'verdict-statuses'
+          && oldApprovalOnB.state.writes.length === afterSuccess.writes.length
+          && oldApprovalOnC.value?.code === 'ACTIVE_DRAFT_RECOVERED'
+          && oldApprovalOnC.value.waitingOn === 'verdict-statuses'
+          && oldApprovalOnC.state.writes.length === afterSuccess.writes.length
+          && freshC.value?.code === 'READY_HEAD_BOUND'
+          && currentMarker(freshC.state).headOid === nextHead
+          && currentMarker(freshC.state).priorRevisions[0].headOid === sourceHead],
+      ['a merged terminal record remains readable after its author loses write access',
+        mergedTerminal.status === 0
+          && mergedTerminal.value?.code === 'LIFECYCLE_COMPLETE'
+          && mergedTerminal.state.writes.length === 0],
+      ['stale source identity or caller context has no effects',
+        sourceMismatch.value?.code === 'REVISION_SOURCE_MISMATCH'
+          && sourceMismatch.state.writes.length === 0
+          && brokenContext.status !== 0 && brokenContext.state.writes.length === 0],
+    ];
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function selfTest() {
@@ -1643,7 +2353,7 @@ function selfTest() {
       author: 'maintainer',
       body: 'revision plan',
     }],
-    pullRequest: { head: { sha: delivered.headOid } },
+    pullRequest: { head: { sha: delivered.headOid }, base: { ref: 'main' } },
   });
   revision.planHash = sha256('revision plan');
   const revisionAdapters = {
@@ -1663,11 +2373,11 @@ function selfTest() {
   };
   const revisionResult = driveLifecycleRevision(revisionRequest, {
     adapters: revisionAdapters,
-    readRequest: {},
+    readRequest: { baseBranch: 'main' },
   });
   const revisionReplay = driveLifecycleRevision(revisionRequest, {
     adapters: revisionAdapters,
-    readRequest: {},
+    readRequest: { baseBranch: 'main' },
   });
   const raceMarker = delivered;
   const raceAdapters = {
@@ -1680,7 +2390,7 @@ function selfTest() {
         restId: 1,
         body: serializeLifecycleMarker(raceMarker),
       },
-      pullRequest: { head: { sha: '9'.repeat(40) } },
+      pullRequest: { head: { sha: '9'.repeat(40) }, base: { ref: 'main' } },
       issue: { number: 7, labels: ['loop-ready', 'loop:revising'] },
     }),
     updateMarker: () => {
@@ -1689,7 +2399,7 @@ function selfTest() {
   };
   const race = driveLifecycleRevision(revisionRequest, {
     adapters: raceAdapters,
-    readRequest: {},
+    readRequest: { baseBranch: 'main' },
   });
   const mergedIntent = fakeIntent();
   mergedIntent.planHash = sha256('merged frozen plan');
@@ -2182,6 +2892,46 @@ function selfTest() {
           && unmerged === null && blocked === null && calls.length === 0;
       })(),
     ],
+    // LFE, 2026-10-12: a delivered card left an automatic merge pending; the
+    // merged close-out is the verified outcome that ends it, once.
+    [
+      'a merged close-out supersedes a pending delivery once, and a reopened issue gets a human card',
+      (() => {
+        const base = mkdtempSync(join(tmpdir(), 'lifecycle-closeout-'));
+        try {
+          const run = (name, args) => (name === 'git' && args.includes('--git-common-dir')
+            ? { ok: true, stdout: join(base, '.git'), stderr: '' } : { ok: false, stdout: '', stderr: `unexpected ${name}` });
+          const stepsDir = join(base, '.git', 'autoloop', 'steps');
+          mkdirSync(stepsDir, { recursive: true });
+          for (const issue of [370, 371]) {
+            writeFileSync(join(stepsDir, `${issue}.json`), JSON.stringify({ issue,
+              steps: [{ step: '11-record', startedAtMs: 1000 }],
+              pending: { outcome: 'delivered', pr: 577, policy: 'auto', reason: null, atMs: 2000 } }));
+          }
+          const merged = { state: 'complete', code: 'LIFECYCLE_COMPLETE', marker: { pr: 577, mergeOid: 'e'.repeat(40) } };
+          const effects = (issue, state_reason) => ({
+            issueState: () => ({ state: state_reason === 'reopened' ? 'open' : 'closed', state_reason }),
+            prCloses: () => true,
+            closeIssue: () => {},
+            closeSteps: closeStepsFor(base, issue, run),
+          });
+          const first = closeOutMerged(merged, effects(370, 'completed'));
+          const again = closeOutMerged(merged, effects(370, 'completed'));
+          const reopened = closeOutMerged(merged, effects(371, 'reopened'));
+          const shipped = JSON.parse(readFileSync(join(stepsDir, '370.json'), 'utf8'));
+          const human = JSON.parse(readFileSync(join(stepsDir, '371.json'), 'utf8'));
+          return first.card.length === 1 && first.card[0].startsWith('╭─ ✅ #370 SHIPPED')
+            && again.card.length === 0 && again.error === undefined
+            && shipped.closed?.outcome === 'shipped' && shipped.pending === undefined
+            && reopened.card[0].startsWith('╭─ ⚠️ #371 NEEDS A HUMAN') && reopened.card[0].includes('reopened after PR #577 merged')
+            && human.closed?.outcome === 'human' && human.pending === undefined;
+        } catch {
+          return false;
+        } finally {
+          rmSync(base, { recursive: true, force: true });
+        }
+      })(),
+    ],
     // LFE run 2026-09-30 (twice): the terminal request was fed to
     // --reconcile-json; the refusal now names the command that takes it.
     [
@@ -2313,6 +3063,7 @@ function selfTest() {
           && !liveIssueMatchesIntent({ number: 8, state: 'open', body: approved }, intent);
       })(),
     ],
+    ...productionRevisionChecks(),
   ];
   const failures = checks.filter(([, ok]) => !ok);
   for (const [name] of failures) console.error(`FAIL ${name}`);
@@ -2345,6 +3096,15 @@ function readCliInput() {
   return JSON.parse(readFileSync(0, 'utf8'));
 }
 
+// The unit's step close after a verified merge: SHIPPED, or NEEDS A HUMAN when
+// a human reopened the issue. ifOpen closes an open or merge-pending record
+// once and never re-renders a card already shown.
+export function closeStepsFor(root, issue, run) {
+  return (pr, reopened) => closeUnit(reopened
+    ? { root, run, issue, outcome: 'human', pr, question: `reopened after PR #${pr} merged`, ifOpen: true }
+    : { root, run, issue, outcome: 'shipped', pr, ifOpen: true }).lines;
+}
+
 // The close-out's effects, live. A failure is reported beside the result,
 // never in place of it: the lifecycle outcome stands either way.
 function withCloseOut(result, cwd, issue) {
@@ -2362,9 +3122,7 @@ function withCloseOut(result, cwd, issue) {
         mutate(repository, endpoint, 'PATCH', { state: 'closed', state_reason: 'completed' });
         mutate(repository, `${endpoint}/comments`, 'POST', { body });
       },
-      closeSteps: (pr, reopened) => closeUnit(reopened
-        ? { root, issue, outcome: 'human', pr, question: `reopened after PR #${pr} merged`, ifOpen: true }
-        : { root, issue, outcome: 'shipped', pr, ifOpen: true }).lines,
+      closeSteps: closeStepsFor(root, issue),
     });
     return closeOut === null ? result : { ...result, closeOut };
   } catch (error) {

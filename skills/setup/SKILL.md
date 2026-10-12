@@ -1,6 +1,7 @@
 ---
 name: setup
-description: Initialize, configure, devendor, or diagnose Autoloop in a repository. Autoloop is a global plugin; a repository carries only .autoloop/config.json and its own docs. Doctor is read-only.
+description: Initialize, configure, devendor, or diagnose Autoloop in a repository. Doctor is read-only.
+disable-model-invocation: true
 ---
 
 # autoloop:setup — init / devendor / config / doctor
@@ -11,7 +12,7 @@ Your first output, before a tool call or question, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ setup · v0.67.0 · starting
+∞ setup · v0.68.0 · starting
 ```
 
 If a tool call already happened, print the banner with the next output. Print it once.
@@ -36,7 +37,7 @@ own data:
 | Path | What |
 |---|---|
 | `.autoloop/config.json` | ProjectConfig, overrides only; plugin defaults fill the rest |
-| `.autoloop/STATE.md` | Loop policy prose: mission, invariants, protected ground. Injected every session |
+| `.autoloop/STATE.md` | Loop policy prose: mission, invariants, protected ground. Read by every run |
 | `.autoloop/checklist.md` | Optional review checklist; the plugin's own is used when absent |
 | `docs/agentic/ARCH.md`, `docs/agentic/LESSONS.md` | Repository knowledge, visible to `rg`/`fd` |
 
@@ -59,8 +60,7 @@ Nothing else: no `tools/agentic/`, no autoloop entries in `.claude/settings.json
 ## Prime
 
 1. `<plugin-tools>` is `<this skill's real dir>/../../tools` — the plugin root's
-   `tools/`, a sibling of `skills/`. In a devendored repository the SessionStart preflight
-   prints it (`INFO  plugin tools: …`). Write it as a literal absolute path, never a shell variable:
+   `tools/`, a sibling of `skills/`. Write it as a literal absolute path, never a shell variable:
    the guard refuses a command it cannot resolve statically, `$CLAUDE_PLUGIN_ROOT` included.
 2. Print the banner.
 3. Version currency, one pipeline — `<cache>` is the versions directory two levels above the plugin
@@ -184,7 +184,7 @@ this session's hooks and refuses the devendor commit while a run marker exists.
    escalate paths and the filled merge executor, read as JavaScript; moves the STATE prose to
    `.autoloop/STATE.md` with the current template's preamble and Config section; removes the
    plugin's files and strips only autoloop's hook handlers. ARCH and LESSONS stay.
-3. Show the typed report and `git -C <scratch>/devendor diff --stat`, then run the doctor against
+3. Show the typed report, `git -C <scratch>/devendor diff --name-status`, then run the doctor on
    the worktree (`verify.mjs --project-root <scratch>/devendor`). In the report: `kept` names
    the repository's own files left in `tools/agentic/`; `staleProse` and `staleReferences` name
    lines in STATE, CLAUDE.md, AGENTS.md, ARCH, LESSONS and the checklist that still name the

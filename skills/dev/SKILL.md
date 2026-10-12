@@ -1,6 +1,7 @@
 ---
 name: dev
 description: Run Autoloop's forward GitHub issue-to-PR workflow from Claude Code. One prime call, one dispatch call per role, no routing to choose.
+disable-model-invocation: true
 ---
 
 # autoloop:dev — forward path
@@ -11,7 +12,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.67.0 · starting
+∞ dev · v0.68.0 · starting
 ```
 
 This session is the orchestrator: it plans, applies its own checklist pass and fixes, runs gates,
@@ -81,14 +82,14 @@ with the Setup remedy). Never continue past a failure. Then:
    - Authority: the author currently has admin/maintain, or it is the current runner's own marker
      and the runner still has write. Ignore other identities; fail closed on incomplete role
      evidence.
-   - A malformed, mismatched, or duplicate trusted marker blocks **its unit, never the run**: LIVE
-     unit → `unit.mjs --block --reason LIFECYCLE_MARKER_INVALID`, the driver's refusal verbatim
-     as `--note`, then select from the rest. TERMINAL unit (issue closed, PR merged) → no label, no
-     post; name it in the run record as a loop defect. The driver records unrepairable refusals as
-     `terminal-refused`, which the scan stops surfacing.
-   - Recover each surfaced marker with one bare call from the repository root:
-     `node <plugin-tools>/lifecycle-driver.mjs --reconcile-issue <N>` (it builds the request itself
-     — never assemble one; a marker with no PR is refused toward step 4's `--reconcile-json`). It
+   - Invalid trusted markers stop **their unit, never the run**. Only a human trust choice uses
+     `unit.mjs --block --reason TRUST_REQUIRED`; name the choice and quote the refusal as `--note`.
+     Other faults are `fix` or `decide`. TERMINAL units: record the defect, no label or post.
+     The driver seals unrepairable refusals as `terminal-refused`; the scan drops them.
+   - `REVISION_REQUIRED` routes to Pitcrew, not a human block. A is historical; B is unreviewed.
+     Start a new unapproved revision before edits; keep existing human gates.
+   - From the repository root, run `node <plugin-tools>/lifecycle-driver.mjs --reconcile-issue <N>`.
+     It builds the request; never assemble one. No PR: use step 4's `--reconcile-json`. It
      applies only the typed action, with compare-and-swap and readback. Never execute lifecycle
      action JSON in prose; never hand-append a terminal outcome or edit a marker. It backfills a proven human merge's outcome,
      closes the issue GitHub left open and the unit's step: print `closeOut.card`; name `keptOpen`
@@ -127,7 +128,7 @@ Never in any command:
 ## The tools
 
 Every tool, brief and hook runs from the plugin: `<plugin-tools>` =
-`<this skill's real dir>/../../tools/` (the SessionStart preflight prints it), written as
+`<this skill's real dir>/../../tools/`, written as
 a literal absolute path, never a shell variable. A unit branch therefore runs the same guard as the
 base. Repository policy is data — `.autoloop/config.json`, read from the base; the gate is the
 repository's own `gate.command`, run on the unit's tree; the merge executor is
@@ -407,6 +408,11 @@ a `human` block.
 
 Produce the planned lane proof from complete evidence. Unknown scope is full.
 
+**No work-size quota.** Never invent a plan-character, file-count or changed-line quota, in a plan
+or a `decide`; an estimate neither authorizes nor constrains delivery. Never compress a complete
+plan, split, delay or stop only to fit a number. Keep functional acceptance and the exact
+authorized path identities (a total of six files is not a list of six permitted paths).
+
 ### 3. Review the plan once
 
 `full` lane: no claim until the verdict. Small and docs lanes: claim and implement concurrently; a
@@ -462,14 +468,13 @@ blindly.
 ### 6. Simplify
 
 `step.mjs --to 06-simplify`, then **one behavior-preserving `--role simplify` dispatch before any
-review round**. The prompt loads `agent-skills:code-simplification` and states: the measured budget
-(plan prediction vs `git diff --stat` from the claim commit; over budget makes reduction required and
-names the excess, within it is still a clarity pass); behavior frozen (outputs, errors, side
+review round**. The prompt loads `agent-skills:code-simplification` and states: a clarity and
+structure pass with no size target; behavior frozen (outputs, errors, side
 effects, ordering; a change the writer cannot prove behavior-preserving is not made); tests green and test files untouched; the
-file boundary, no new dependencies or speculative abstractions; return changes and line delta.
+file boundary, no new dependencies or speculative abstractions; return the changes.
 
 Then run the full unit tests yourself and read the diff; a behavior change is reverted, not fixed.
-A trivial diff (~50 lines, two files) may be simplified inline; nothing else here is done by
+A small-lane diff may be simplified inline; nothing else here is done by
 hand. Residual complexity stays a review finding. Update ARCH on the unit branch when
 structure/integrations changed; keep curated docs merge-friendly (no shared freshness line, derived
 count prose, or table re-padding).
@@ -547,14 +552,6 @@ model fixes, the other reviews.
   alternative. The unit waits on the repair; once it merges, `unit.mjs --obsolete --issue <N> --pr
   <repair PR>` and close the draft as superseded. Block only a `human`-class Critical. Print the
   rail and take the next unit immediately.
-
-Measure size with git, never a summing script; production lines exclude test/vendored globs:
-
-```bash
-git diff --shortstat <base>...<head>
-git diff --shortstat <base>...<head> -- . ':(exclude)<glob>'
-git diff --name-only <base>...<head> -- . ':(exclude)<glob>' | wc -l
-```
 
 ### Carving out a predicate
 
@@ -712,7 +709,7 @@ finalizer is not an outcome — only its typed refusal is.
 
 `merge.policy: manual`: stop after the terminal result; the ready PR is the human's. Acknowledged
 solo non-manual: **switch to the base checkout first**, run
-`<plugin-tools>/auto-merge.mjs <PR>` there once, and treat its typed verdict as final. A refusal goes to the human-block path —
+`<plugin-tools>/auto-merge.mjs <PR>` there once. Classify its refusal through Autonomy;
 never retry blindly, weaken a predicate, or merge another way. No run submits a merge queue entry,
 publishes a tag, or creates a release.
 
@@ -730,7 +727,7 @@ outcomes; any `markers.knownRefused`; the `overlap:` line verbatim from
 
 ```bash
 node <plugin-tools>/sizing-contract.mjs --outcome --issue 219 \
-  --plan-rounds 1 --code-rounds 3 --escalated --result blocked --prod-lines 858 --files 14
+  --plan-rounds 1 --code-rounds 3 --escalated --result blocked
 ```
 
 `--result`: `shipped`, `blocked`, or `deferred`; `--escalated` only if the same-predicate rule
@@ -812,7 +809,7 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
 11 carry none), marks the snapshot stale, and prints the line:
 
 ```text
-09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      11 files planned
+09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      tests first
 ```
 
 - `--model`: the result's `model`; omit for your own steps
@@ -825,17 +822,17 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
   label by hand.**
 
 Collecting a result: `node <plugin-tools>/step.mjs --issue <N> --resumed "<what it adds>" --result
-<result.json>` (a review's verdict and severities come from the result). Other waits: 🅿️ parked; 💤 idle (`HH:MM 💤 ∞ idle ─ no eligible units`, then close cleanly);
+<result.json>` (its receipt marks only its own step returned; no receipt, no completion). Other waits: 🅿️ parked; 💤 idle (`HH:MM 💤 ∞ idle ─ no eligible units`, then close cleanly);
 🏁 run complete. 🎉 marks only a SHIPPED card and a clean-sweep run close.
 
 **A unit ends with its card**, repeated verbatim:
 
 ```bash
 node <plugin-tools>/step.mjs --card --issue <N> --outcome <shipped|delivered|blocked|human> \
-  [--title "<safe title>"] [--pr <P>] [--lines <n>] [--question "<one line>"]
+  [--title "<safe title>"] [--pr <P>] [--question|--reason "<one line>"]
 ```
 
-`shipped` = merged; `delivered` = ready PR awaiting human merge; `human` carries a `❓` question.
+`shipped` = merged; `delivered` = ready PR, merge pending until a later card; `human` has a `❓` question.
 A delivered or blocked card is followed by its PushNotification (text per the hook's rider;
 load the deferred tool with `ToolSearch("select:PushNotification")` at run open).
 
@@ -876,12 +873,13 @@ a contract module directly.
 
 Every obstacle is exactly one class; only `human` stops the unit:
 
-- **`human`** — only: (1) trust and irreversible acts — merge, secrets and credentials, destructive
-  or irreversible operations on data or history, protected paths (`human:authorize`), repository
-  and branch protection, `loop-ready` itself; (2) a product or contract value no source states,
-  with no clearly better option. `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE>
-  --question "<one line>"` (`--gate human:authorize` for a protected path) records the question
-  with its `/answer` form and swaps labels, keeping `loop-ready`. Take the next unit.
+- **`human`** — trust/authorization (`TRUST_REQUIRED`), irreversible acts (`IRREVERSIBLE_ACTION`),
+  an actual denial (`POLICY_DENIED`), or an unstated product/contract value with no better choice
+  (`UNSPECIFIED_VALUE`). Trust includes merge, credentials, protected paths, branch protection,
+  and `loop-ready`; irreversible acts include data/history destruction.
+  `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question "<one line>"`
+  (`--gate human:authorize` for protected paths) records `/answer`, swaps labels, and keeps
+  `loop-ready`. Unknown codes are refused; never rename a tool fault to a human reason.
 - **`fix`** — code, tests, docs, CI config, a dependency, or a correctable premise. In the unit's
   lane fix it in-unit; otherwise `node <plugin-tools>/unit.mjs --repair --parent <N> --title "<…>"
   --body-file <path>` (`--blocks-parent` when the unit needs it) and take it next, or carry on if

@@ -9,7 +9,6 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,7 +18,8 @@ import {
   join,
   resolve,
 } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_VERSION, effectiveChecklistPath, resolveProjectConfig } from './config-contract.mjs';
 import { vendoredLeftovers } from './hook-root.mjs';
@@ -36,6 +36,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'contract-lint.mjs',
   'delivery-contract.mjs',
   'dispatch-render.mjs',
+  'dispatch-return-association.mjs',
   'dispatch.mjs',
   'escalate-paths.mjs',
   'hook-root.mjs',
@@ -51,6 +52,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'loop-scope.mjs',
   'loop-smoke.mjs',
   'overlap-report.mjs',
+  'parked-disposition.mjs',
   'prime.mjs',
   'publish-verdict.mjs',
   'release-verify.mjs',
@@ -73,9 +75,10 @@ const PLUGIN_TOOL_FILES = Object.freeze([
 ]);
 // Global install: the plugin ships these hooks in hooks/hooks.json, each
 // running the plugin's own copy. Exactly one handler per tool, on its event
-// and matcher, with exactly this command. The command guard fails closed only
-// inside an autoloop repository: a crashed guard refuses there, while a broken
-// plugin never refuses commands in every other repository.
+// and matcher, with exactly this command, and no statusMessage (it prints in
+// every session). The command guard fails closed only for a session that owns
+// a run: a crashed guard refuses there, while a broken plugin never refuses
+// commands in any other session.
 const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/tools';
 export const PLUGIN_HOOKS = Object.freeze([
   { name: 'session-preflight.sh', event: 'SessionStart', matcher: null, command: `bash "${PLUGIN_TOOLS}/session-preflight.sh"` },
@@ -84,16 +87,15 @@ export const PLUGIN_HOOKS = Object.freeze([
     name: 'command-guard.mjs',
     event: 'PreToolUse',
     matcher: 'Bash|AskUserQuestion',
-    // The guard's own verdict (0 or 2) is final. Anything else is a crash: it
-    // refuses where the project's top level has any .autoloop entry (a
-    // symlink or unreadable directory included, as the resolver treats them)
-    // or the repository has a plugin run marker (one that records its base: a
-    // pre-devendor branch mid-run), never a legacy install's own marker.
+    // The guard's own verdict (0 or 2) is final; a guard that throws decides
+    // by ownership itself. Anything else is a guard that could not start: it
+    // refuses while the session's Claude process — $PPID, the hook shell's
+    // parent — holds a latch, decided by the latch file alone with no git
+    // call. Closed or not: the shell cannot read the hook input's session,
+    // and a closed run stays guarded until /clear.
     command: `node "${PLUGIN_TOOLS}/command-guard.mjs"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; `
-      + 'r=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || printf %s "$CLAUDE_PROJECT_DIR"); '
-      + '{ [ -e "$r/.autoloop" ] || [ -L "$r/.autoloop" ]; } && exit 2; '
-      + 'c=$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) '
-      + '&& grep -qs \'"baseBranch":"\' "$c"/autoloop/run/*.json && exit 2; exit 0',
+      + 'l="$HOME/.claude/autoloop/run-latches/$PPID.json"; '
+      + 'if [ -e "$l" ] || [ -L "$l" ]; then exit 2; fi; exit 0',
   },
   { name: 'label-swap-reminder.mjs', event: 'PostToolUse', matcher: 'Bash', command: `node "${PLUGIN_TOOLS}/label-swap-reminder.mjs"` },
   { name: 'subagent-transcript.mjs', event: 'SubagentStop', matcher: null, command: `node "${PLUGIN_TOOLS}/subagent-transcript.mjs"` },
@@ -110,6 +112,7 @@ export function pluginHookProblems(document, toolsDir) {
           problems.push(`hooks.${event}: expected command handlers only`);
           continue;
         }
+        if (handler.statusMessage !== undefined) problems.push(`hooks.${event}: a statusMessage prints in every session`);
         handlers.push({ event, matcher: group.matcher ?? null, command: handler.command });
       }
     }
@@ -161,6 +164,148 @@ function run(executable, args, cwd) {
       result.stderr?.trim(),
     ].filter(Boolean).join('\n'),
   };
+}
+
+// A self-test runs as its own process group, so its whole tree can be found
+// and killed: on 2026-10-12 a recursive self-test outlived its killed parent
+// and filled three 8 GiB session cgroups with orphans (PPid 1).
+const SELF_TEST_TIMEOUT_MS = 600000;
+const CLEANUP_WAIT_MS = 5000;
+// A descendant killed just before its test exits can still be dying, or be a
+// zombie init has not reaped yet; only what outlives this is a leftover.
+const SETTLE_MS = 1000;
+const RUN_ID = randomUUID();
+const selfTestProcesses = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
+let activeGroup = null;
+// Set in --self-test mode: verify.mjs never starts its own self-test from
+// inside it, so the gate's run of it cannot recurse.
+let selfTesting = false;
+const OWN_PATH = fileURLToPath(import.meta.url);
+
+function processGroupAlive(pgid) {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== 'ESRCH';
+  }
+}
+
+function killProcessGroup(pgid) {
+  try {
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    // Already gone.
+  }
+}
+
+function realOrSelf(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+// A signal is no proof of exit: the group is polled until empty, within a
+// bound, and a group that will not empty is reported, never assumed gone.
+// The settle window starts at the test's exit: a descendant that holds its
+// output keeps 'close' away until the timeout.
+export function runSelfTest(path, cwd, {
+  timeoutMs = SELF_TEST_TIMEOUT_MS, cleanupWaitMs = CLEANUP_WAIT_MS, settleMs = SETTLE_MS, tally = selfTestProcesses,
+  groupAlive = processGroupAlive, killGroup = killProcessGroup,
+} = {}) {
+  if (selfTesting && realOrSelf(path) === realOrSelf(OWN_PATH)) {
+    return Promise.resolve({ ok: false, cleanupFailed: false, detail: 'verify.mjs never runs its own self-test from inside it' });
+  }
+  const groupGone = async (pgid, waitMs) => {
+    const until = Date.now() + waitMs;
+    while (groupAlive(pgid)) {
+      if (Date.now() >= until) return false;
+      await new Promise((done) => setTimeout(done, 25));
+    }
+    return true;
+  };
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path, '--self-test'], {
+      cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+      // Labels the test's processes, so /proc/<pid>/environ attributes them to this run.
+      env: { ...process.env, AUTOLOOP_VERIFY_RUN_ID: RUN_ID },
+    });
+    const pgid = child.pid ?? null;
+    let output = '';
+    let timedOut = false;
+    let finished = false;
+    let exitWait = null;
+    let closed = false;
+    let onClose = () => {};
+    const collect = (chunk) => {
+      if (output.length < MAX_OUTPUT_BYTES) output += chunk;
+    };
+    const closedWithin = (waitMs) => new Promise((done) => {
+      if (closed) {
+        done();
+        return;
+      }
+      const timer = setTimeout(done, waitMs);
+      onClose = () => {
+        clearTimeout(timer);
+        done();
+      };
+    });
+    const finish = async (code, signal, exited) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(deadline);
+      clearTimeout(exitWait);
+      if (exited) tally.exited += 1;
+      const leftovers = exited && !timedOut && !(await groupGone(pgid, settleMs));
+      if (leftovers) {
+        tally.leftovers += 1;
+        killGroup(pgid);
+      }
+      const gone = await groupGone(pgid, cleanupWaitMs);
+      if (!gone) tally.uncleaned += 1;
+      await closedWithin(cleanupWaitMs);
+      if (activeGroup === pgid) activeGroup = null;
+      const problems = [
+        timedOut && `timed out after ${timeoutMs / 1000}s; its process group was killed`,
+        leftovers && 'exited but left processes in its group; they were killed',
+        !gone && `cleanup FAILED: process group ${pgid} still has members ${cleanupWaitMs}ms after SIGKILL`,
+      ].filter(Boolean);
+      const record = `process: run ${RUN_ID} pgid ${pgid} exit ${code ?? '-'} signal ${signal ?? '-'} `
+        + `timed-out ${timedOut} leftovers ${leftovers} cleanup ${gone ? 'confirmed' : 'FAILED'}`;
+      resolve({
+        ok: exited && code === 0 && problems.length === 0,
+        cleanupFailed: !gone,
+        detail: [output.trim(), ...problems, ...(problems.length || code !== 0 ? [record] : [])]
+          .filter(Boolean).join('\n'),
+      });
+    };
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      tally.timedOut += 1;
+      killGroup(pgid);
+      exitWait = setTimeout(() => finish(null, 'SIGKILL', false), cleanupWaitMs);
+    }, timeoutMs);
+    if (pgid === null) {
+      child.on('error', (error) => {
+        clearTimeout(deadline);
+        resolve({ ok: false, cleanupFailed: false, detail: error.message });
+      });
+      return;
+    }
+    tally.launched += 1;
+    tally.groups.push(pgid);
+    activeGroup = pgid;
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    child.on('exit', (code, signal) => finish(code, signal, true));
+    child.on('close', () => {
+      closed = true;
+      onClose();
+    });
+  });
 }
 
 function checkJson(path) {
@@ -273,7 +418,39 @@ function pluginChecks(root) {
     name: 'skill byte budgets',
     execute: () => checkSkillBudgets(root),
   });
+  checks.push({
+    name: 'skill model invocation',
+    execute: () => checkSkillInvocation(root),
+  });
   return checks;
+}
+
+// Autoloop's skills run when invoked by name or by the loop, never because a
+// request resembles their description (operator, 2026-10-12). Pitcrew stays
+// model-invocable — Dev calls it with the Skill tool — and its description
+// names Autoloop-owned pull requests only. Role briefs read lean-code by path.
+export const EXPLICIT_ONLY_SKILLS = Object.freeze(['codebase-design', 'dev', 'lean-code', 'queue-trace', 'setup', 'shape']);
+
+export function skillInvocationProblems(frontmatters) {
+  return Object.entries(frontmatters).sort(([left], [right]) => left.localeCompare(right)).flatMap(([skill, text]) => {
+    const disabled = /^disable-model-invocation: true$/mu.test(text);
+    if (EXPLICIT_ONLY_SKILLS.includes(skill)) return disabled ? [] : [`SKILL_MODEL_INVOCABLE ${skill}`];
+    if (skill === 'pitcrew') {
+      return !disabled && /^description: .*Autoloop-owned pull requests only/mu.test(text) ? [] : ['SKILL_PITCREW_SCOPE pitcrew'];
+    }
+    return [`SKILL_INVOCATION_UNDECIDED ${skill}`];
+  });
+}
+
+function checkSkillInvocation(root) {
+  const skills = resolve(root, 'skills');
+  const frontmatters = {};
+  for (const name of existsSync(skills) ? readdirSync(skills) : []) {
+    const path = join(skills, name, 'SKILL.md');
+    if (existsSync(path)) frontmatters[name] = /^---\n([\s\S]*?)\n---\n/u.exec(readFileSync(path, 'utf8'))?.[1] ?? '';
+  }
+  const problems = skillInvocationProblems(frontmatters);
+  return problems.length === 0 ? { ok: true, detail: '' } : { ok: false, detail: problems.join('\n') };
 }
 
 // Every skill loads whole into the session that invokes it, and again after
@@ -281,13 +458,13 @@ function pluginChecks(root) {
 // read on each of 69 calls. Budgets are bytes and only ratchet down — shrink a
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
-  'codebase-design': 6489,
-  dev: 57282, // +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
-  'lean-code': 3909,
-  pitcrew: 19803,
-  'queue-trace': 6933,
-  setup: 14026,
-  shape: 26690,
+  'codebase-design': 6442,
+  dev: 57167, // -103: work-size guidance removed; +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
+  'lean-code': 3873,
+  pitcrew: 19784,
+  'queue-trace': 6929,
+  setup: 13860,
+  shape: 26272,
 });
 
 export function skillBudgetProblems(sizes, budgets = SKILL_BUDGETS) {
@@ -316,7 +493,6 @@ function toolChecks(root, toolsDir, requiredFiles) {
       execute: () => checkExists(resolve(toolsDir, name)),
     });
   }
-  const ownName = basename(fileURLToPath(import.meta.url));
   const toolNames = existsSync(toolsDir) ? readdirSync(toolsDir)
     .filter((name) => name.endsWith('.mjs'))
     .sort() : [];
@@ -326,11 +502,12 @@ function toolChecks(root, toolsDir, requiredFiles) {
       name: `syntax ${name}`,
       execute: () => run(process.execPath, ['--check', path], root),
     });
-    if (name === ownName) continue;
+    // verify.mjs's own self-test too: its --self-test mode builds none of
+    // these checks and refuses to start itself (runSelfTest), so it cannot recurse.
     if (!SELF_TEST_PATTERN.test(readFileSync(path, 'utf8'))) continue;
     checks.push({
       name: `self-test ${name}`,
-      execute: () => run(process.execPath, [path, '--self-test'], root),
+      execute: () => runSelfTest(path, root),
     });
   }
   return checks;
@@ -405,7 +582,70 @@ function projectChecks(root) {
   ];
 }
 
-function selfTest() {
+// Each fixture starts at most one child, so a broken runner cannot multiply.
+async function processCases() {
+  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-verify-processes-'));
+  const fixture = (name, body) => {
+    const path = join(scratch, name);
+    writeFileSync(path, `import { spawn } from 'node:child_process';\n${body}\n`);
+    return path;
+  };
+  const lingering = "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });"
+    + ' child.unref(); console.log(`child ${child.pid}`);';
+  const pidOf = (detail) => Number(/child (\d+)/u.exec(detail)?.[1]);
+  const gone = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      return Number.isSafeInteger(pid) && error.code === 'ESRCH';
+    }
+  };
+  const tally = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
+  const options = { timeoutMs: 400, cleanupWaitMs: 2000, tally };
+  try {
+    const passed = await runSelfTest(fixture('pass.mjs', "console.log('self-test OK');"), scratch, options);
+    const failed = await runSelfTest(fixture('fail.mjs', 'process.exit(4);'), scratch, options);
+    const hung = await runSelfTest(fixture('hang.mjs', `${lingering} setInterval(() => {}, 1000);`), scratch, options);
+    const leaked = await runSelfTest(fixture('leak.mjs', lingering), scratch, options);
+    // A descendant holding the test's stdout keeps 'close' from ever firing:
+    // it waited out the whole timeout before (review O3).
+    const holdingAt = Date.now();
+    const holding = await runSelfTest(fixture('holding.mjs', lingering.replace("stdio: 'ignore'", "stdio: 'inherit'")),
+      scratch, { ...options, timeoutMs: 15000 });
+    const holdingMs = Date.now() - holdingAt;
+    // A group that never empties is reported, and the gate stops on it.
+    const stuck = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
+    const unconfirmed = await runSelfTest(join(scratch, 'pass.mjs'), scratch, {
+      ...options, tally: stuck, settleMs: 50, cleanupWaitMs: 200, groupAlive: () => true, killGroup: () => {},
+    });
+    const ran = [];
+    const gate = await runChecks([
+      { name: 'stuck', execute: () => unconfirmed },
+      { name: 'next', execute: () => ran.push('next') && { ok: true } },
+    ], { log: () => {}, error: () => {} });
+    return [
+      ['a clean self-test passes with its cleanup confirmed', passed.ok && !passed.cleanupFailed],
+      ['a failing self-test fails with its process record', !failed.ok && /process: run .* exit 4 /u.test(failed.detail)],
+      ['a timed-out self-test loses its whole process group, child included', !hung.ok && !hung.cleanupFailed
+        && /timed out/u.test(hung.detail) && gone(pidOf(hung.detail))],
+      ['a self-test that leaves a descendant fails and the descendant is killed', !leaked.ok && !leaked.cleanupFailed
+        && /left processes/u.test(leaked.detail) && gone(pidOf(leaked.detail))],
+      ['a descendant holding the test\'s output is reported as left processes within seconds, not as a timeout',
+        !holding.ok && !holding.cleanupFailed && /left processes/u.test(holding.detail) && !/timed out/u.test(holding.detail)
+          && holdingMs < 8000 && gone(pidOf(holding.detail))],
+      ['a group that cannot be confirmed gone fails as a cleanup failure, and the gate stops there',
+        !unconfirmed.ok && unconfirmed.cleanupFailed && stuck.uncleaned === 1 && gate.stopped && gate.failures.length === 1
+          && ran.length === 0],
+      ['every launched group is accounted for', tally.launched === 5 && tally.exited === 5 && tally.timedOut === 1
+        && tally.leftovers === 2 && tally.uncleaned === 0 && tally.groups.every((pgid) => !processGroupAlive(pgid))],
+    ];
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+async function selfTest() {
   const success = run(process.execPath, ['--version'], process.cwd());
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
   const toolsDir = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -472,53 +712,52 @@ function selfTest() {
   const withGuard = (command) => PLUGIN_HOOKS.map((entry) =>
     (entry.name === 'command-guard.mjs' ? { ...entry, command } : entry));
   const guardEntry = PLUGIN_HOOKS.find((entry) => entry.name === 'command-guard.mjs');
-  // A crashed guard refuses inside an autoloop repository and nowhere else:
-  // a broken plugin must not refuse every command in every repository.
+  // A crashed guard refuses only while the session's Claude process (here
+  // the shell's parent: this process) holds an open latch; a broken plugin
+  // must not refuse every command in every session.
   const crashRoot = mkdtempSync(join(tmpdir(), 'autoloop-hook-crash-'));
-  let crashInside;
-  let crashOutside;
+  let crashWithoutRun;
+  let crashOwned;
+  let crashClosed;
+  let crashOddLatch;
   let refusalKept;
-  let crashBesideDanglingConfig;
-  let crashInSubdirectory;
-  let crashMidRun;
-  let crashBesideLegacyRun;
   try {
     const stub = join(crashRoot, 'plugin', 'tools', 'command-guard.mjs');
     mkdirSync(dirname(stub), { recursive: true });
     mkdirSync(join(crashRoot, 'project', '.autoloop'), { recursive: true });
     writeFileSync(join(crashRoot, 'project', '.autoloop', 'config.json'), '{}');
-    mkdirSync(join(crashRoot, 'project', 'sub'));
-    spawnSync('git', ['init', '-q', join(crashRoot, 'project')]);
-    mkdirSync(join(crashRoot, 'elsewhere'));
-    mkdirSync(join(crashRoot, 'dangling'));
-    symlinkSync(join(crashRoot, 'nowhere'), join(crashRoot, 'dangling', '.autoloop'));
-    const guardExits = (code, project) => {
+    const latches = join(crashRoot, 'home', '.claude', 'autoloop', 'run-latches');
+    const latch = join(latches, `${process.pid}.json`);
+    const guardExits = (code) => {
       writeFileSync(stub, `process.exit(${code});\n`);
       return spawnSync('sh', ['-c', guardEntry.command], {
-        env: { ...process.env, CLAUDE_PLUGIN_ROOT: join(crashRoot, 'plugin'), CLAUDE_PROJECT_DIR: join(crashRoot, project) },
+        timeout: 15000,
+        env: { ...process.env, HOME: join(crashRoot, 'home'), CLAUDE_PLUGIN_ROOT: join(crashRoot, 'plugin'), CLAUDE_PROJECT_DIR: join(crashRoot, 'project') },
       }).status;
     };
-    crashInside = guardExits(1, 'project');
-    crashOutside = guardExits(1, 'elsewhere');
-    // The guard's own refusal is final wherever it happens; a crash beside a
-    // config the shell cannot follow (a dangling symlink) still refuses.
-    refusalKept = guardExits(2, 'elsewhere') === 2 && guardExits(0, 'project') === 0;
-    crashBesideDanglingConfig = guardExits(1, 'dangling');
-    crashInSubdirectory = guardExits(1, 'project/sub');
-    // A crash on a checkout without .autoloop (a pre-devendor branch) while
-    // the repository has a run open still refuses.
-    mkdirSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run'), { recursive: true });
-    spawnSync('git', ['init', '-q', join(crashRoot, 'midrun')]);
-    writeFileSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run', 'run.json'), '{"version":1,"pids":[1],"baseBranch":"main"}');
-    crashMidRun = guardExits(1, 'midrun');
-    // A legacy install's own markers carry no base: a crashing plugin guard
-    // must not refuse commands its vendored guard is still judging.
-    writeFileSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run', 'run.json'), '{"version":1,"pids":[1]}');
-    crashBesideLegacyRun = guardExits(1, 'midrun');
+    crashWithoutRun = guardExits(1);
+    mkdirSync(latches, { recursive: true });
+    writeFileSync(latch, JSON.stringify({ version: 2, owner: process.pid, baseBranch: 'main', sessionId: 'S' }));
+    crashOwned = guardExits(1);
+    // The guard's own verdict is final wherever it happens.
+    refusalKept = guardExits(0) === 0 && guardExits(2) === 2;
+    writeFileSync(latch, JSON.stringify({ version: 2, owner: process.pid, baseBranch: 'main', sessionId: 'S', closedAt: '2026-10-12T00:00:00.000Z' }));
+    crashClosed = guardExits(1);
+    rmSync(latch);
+    mkdirSync(latch);
+    crashOddLatch = guardExits(1);
   } finally {
     rmSync(crashRoot, { recursive: true, force: true });
   }
+  const processes = await processCases();
+  const own = fileURLToPath(import.meta.url);
+  const scheduled = toolChecks(process.cwd(), dirname(own), []).map(({ name }) => name);
+  const nested = await runSelfTest(own, process.cwd(), { timeoutMs: 5000 });
   const cases = [
+    ...processes,
+    ['the gate runs verify.mjs\'s own self-test in its own group, and a self-test never starts it again',
+      scheduled.includes(`self-test ${basename(own)}`) && !nested.ok && /never runs its own self-test/u.test(nested.detail)
+        && !selfTestProcesses.groups.length],
     ['the plugin hook document passes its contract', pluginProblems(pluginHookDocument()).length === 0],
     ['a missing plugin hook is named',
       pluginProblems(pluginHookDocument(PLUGIN_HOOKS.slice(1))).some((problem) => problem.includes(PLUGIN_HOOKS[0].name))],
@@ -533,13 +772,21 @@ function selfTest() {
         { name: 'x', event: 'Stop', matcher: null, command: 'echo hi' }])).some((problem) => problem.includes('echo hi'))],
     ['a vendored tool path is refused',
       pluginProblems(pluginHookDocument(withGuard('node "$CLAUDE_PROJECT_DIR/tools/agentic/command-guard.mjs" || exit 2'))).length > 0],
-    ['a crashed plugin guard refuses in an autoloop repository and allows elsewhere',
-      crashInside === 2 && crashOutside === 0],
-    ['the guard\'s own refusal is never turned into an allow', refusalKept],
-    ['a crash beside an unfollowable .autoloop still refuses', crashBesideDanglingConfig === 2],
-    ['a crash in a session started in a subdirectory still refuses', crashInSubdirectory === 2],
-    ['a crash while the repository has a plugin run open still refuses', crashMidRun === 2],
-    ['a crash beside a legacy install\'s own run does not refuse', crashBesideLegacyRun === 0],
+    ['a plugin guard that cannot start refuses while the session\'s Claude process ($PPID) holds a latch, closed too, and allows without one',
+      crashOwned === 2 && crashWithoutRun === 0 && crashClosed === 2],
+    ['the guard\'s own verdict is never turned around', refusalKept],
+    ['a crash beside a latch that is not a plain file still refuses', crashOddLatch === 2],
+    ['a hook with a statusMessage is refused',
+      pluginProblems({ hooks: { Stop: [{ hooks: [{ type: 'command', command: PLUGIN_HOOKS.at(-1).command, statusMessage: 'x' }] }] } })
+        .some((problem) => problem.includes('statusMessage'))],
+    ['a loop-only skill the model may invoke, or a pitcrew description wider than Autoloop-owned PRs, fails',
+      JSON.stringify(skillInvocationProblems({
+        dev: 'name: dev\ndisable-model-invocation: true',
+        shape: 'name: shape',
+        pitcrew: 'name: pitcrew\ndescription: Service pull requests after failing CI.',
+        novel: 'name: novel',
+      })) === JSON.stringify(['SKILL_INVOCATION_UNDECIDED novel', 'SKILL_PITCREW_SCOPE pitcrew', 'SKILL_MODEL_INVOCABLE shape'])
+        && skillInvocationProblems({ pitcrew: 'description: Service Autoloop-owned pull requests only, after CI fails.' }).length === 0],
     // 0.56.0: a skill loads whole into the session that invokes it and again
     // after every compaction (LFE: the dev skill added ~50k tokens to a 70k
     // floor, re-read on every one of 69 calls). A skill never grows silently.
@@ -589,41 +836,78 @@ function parseArgs(args) {
   };
 }
 
-function main() {
-  const parsed = parseArgs(process.argv.slice(2));
-  if (parsed.error) {
-    console.error(`verify: ${parsed.error}`);
-    process.exit(2);
-  }
-  if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+function selfTestProcessSummary() {
+  const { launched, exited, timedOut, leftovers, uncleaned, groups } = selfTestProcesses;
+  return `self-test processes: run ${RUN_ID}; launched ${launched}, exited ${exited}, timed out ${timedOut}, `
+    + `leftovers killed ${leftovers}, cleanup failures ${uncleaned}; process groups ${groups.join(' ') || 'none'}`;
+}
 
-  const root = resolve(parsed.root);
-  const checks = parsed.mode === 'plugin'
-    ? pluginChecks(root)
-    : projectChecks(root);
+// An interrupted verify takes its running self-test group with it; the exit
+// is reported as unconfirmed rather than assumed.
+function killActiveGroupOn(signal, code) {
+  process.once(signal, () => {
+    if (activeGroup !== null) {
+      killProcessGroup(activeGroup);
+      console.error(`verify: ${signal}; killed self-test process group ${activeGroup} (exit not confirmed)`);
+    }
+    console.error(selfTestProcessSummary());
+    process.exit(code);
+  });
+}
+
+export async function runChecks(checks, { log = console.log, error = console.error } = {}) {
   const failures = [];
   for (const check of checks) {
     const startedAt = process.hrtime.bigint();
-    const result = check.execute();
+    const result = await check.execute();
     const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
     // A check's duration prints on its own line, so a slow self-test names
     // itself instead of the log stalling on the previous check's PASS line.
     const timing = elapsedMs >= 1000 ? ` (${(elapsedMs / 1000).toFixed(1)}s)` : '';
     if (result.ok && result.note) {
-      console.log(`NOTE ${check.name}${timing}: ${result.note}`);
+      log(`NOTE ${check.name}${timing}: ${result.note}`);
     } else if (result.ok) {
-      console.log(`PASS ${check.name}${timing}`);
+      log(`PASS ${check.name}${timing}`);
       // A passing child's stdout is otherwise discarded, which swallowed the
       // self-tests' diagnostic attribution — surface every such line.
       for (const line of result.detail?.match(/^(?:slow checks|matrix phases): .+$/gmu) ?? []) {
-        console.log(`  ${line}`);
+        log(`  ${line}`);
       }
     } else {
-      console.error(`FAIL ${check.name}${timing}`);
-      if (result.detail) console.error(result.detail);
+      error(`FAIL ${check.name}${timing}`);
+      if (result.detail) error(result.detail);
       failures.push(check.name);
+      // A group that would not empty may still hold memory or processes:
+      // launching the next self-test on top of it is how orphans pile up.
+      if (result.cleanupFailed) {
+        error('verify: stopped; a self-test process group could not be confirmed gone');
+        return { failures, stopped: true };
+      }
     }
   }
+  return { failures, stopped: false };
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.error) {
+    console.error(`verify: ${parsed.error}`);
+    process.exit(2);
+  }
+  killActiveGroupOn('SIGINT', 130);
+  killActiveGroupOn('SIGTERM', 143);
+  killActiveGroupOn('SIGHUP', 129);
+  if (parsed.mode === 'self-test') {
+    selfTesting = true;
+    process.exit(await selfTest() ? 0 : 1);
+  }
+
+  const root = resolve(parsed.root);
+  const checks = parsed.mode === 'plugin'
+    ? pluginChecks(root)
+    : projectChecks(root);
+  const { failures } = await runChecks(checks);
+  if (selfTestProcesses.launched > 0) console.log(selfTestProcessSummary());
   if (failures.length > 0) {
     console.error(`verification failed (${failures.length} check(s))`);
     process.exit(1);
@@ -640,4 +924,4 @@ function isMainModule() {
   }
 }
 
-if (isMainModule()) main();
+if (isMainModule()) await main();

@@ -38,8 +38,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
-import { latchDirectory, recordLatch } from './run-markers.mjs';
-import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
+import { closeLatch, latchDirectory, processStart, recordHostSession, recordLatch, sessionOwnerPid, takeHostSession } from './run-markers.mjs';
+import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownedRun, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
 } from './config-contract.mjs';
@@ -58,7 +58,7 @@ import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs'
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.67.0';
+const AUTOLOOP_VERSION = '0.68.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -155,7 +155,13 @@ export function baseSyncFacts(root, baseBranch) {
   };
 }
 
-export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits, triage = triageBlocks, elsewhere = liveRunsElsewhere } = {}) {
+export function primeDev({
+  cwd = process.cwd(), scanArgs = [], lift = liftWaits, triage = triageBlocks, elsewhere = liveRunsElsewhere,
+  latches = latchDirectory(), owner = sessionOwnerPid(),
+} = {}) {
+  // Taken first, so every prime run uses up the guard's hand-off, even one
+  // that stops below; the next prime command gets a new one.
+  const sessionId = takeHostSession({ owner, directory: latches });
   if (!validateScanArgs(scanArgs)) {
     return failure(
       'input',
@@ -193,6 +199,24 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   }
   const models = primeModels(config, root);
   if (models.ok === false) return models;
+  // The conversation the run belongs to is the host's, from the prime
+  // command's hook input (the command guard hands it over); the environment
+  // a command can change is never trusted (security review H2).
+  if (processStart(owner) === null) {
+    return failure('run', 'RUN_SESSION_UNKNOWN', `the start time of this session's Claude process (pid ${owner}) cannot be read; the run is not opened`);
+  }
+  if (sessionId === null) {
+    return failure('run', 'RUN_SESSION_UNKNOWN', 'the host session id is unknown: the command guard hands it over, once, from '
+      + 'the prime command\'s hook input, so run `node <plugin-tools>/prime.mjs --json` on its own through Bash in a Claude '
+      + 'Code session with the plugin enabled; the run is not opened');
+  }
+  // The environment can only add a refusal: a hand-off left by another
+  // conversation in this process (after /clear) is not this run's (N1f).
+  const envSession = process.env.CLAUDE_CODE_SESSION_ID;
+  if (envSession && envSession !== sessionId) {
+    return failure('run', 'RUN_SESSION_UNKNOWN', 'the handed-over session id belongs to another conversation of this '
+      + 'Claude process; run `node <plugin-tools>/prime.mjs --json` again on its own; the run is not opened');
+  }
 
   const base = baseSyncFacts(root, config.baseBranch);
   pruneDeadRunMarkers(root);
@@ -200,11 +224,18 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   // The run's second record, outside the repository and owned by the
   // session's Claude process (run-markers.mjs), written before the marker:
   // no command between opening the run and the guard's first look can hide
-  // the run, and a latch that cannot be written leaves no marker behind.
-  if (recordLatch({ baseBranch: config.baseBranch, scope: root }) === null) {
-    return failure('run', 'RUN_LATCH_UNWRITABLE', `the session latch could not be written under ${latchDirectory()}; the run is not opened`);
+  // the run, and a latch that cannot be written leaves no marker behind. It
+  // names this conversation: the hooks act for it alone. Read back, it must
+  // say so: an open latch of another conversation is never rebound.
+  if (recordLatch({ owner, baseBranch: config.baseBranch, scope: root, sessionId, directory: latches }) === null) {
+    return failure('run', 'RUN_LATCH_UNWRITABLE', `the session latch could not be written under ${latches}; the run is not opened`);
   }
-  const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
+  const owned = ownedRun({ sessionId, owner, directory: latches });
+  if (owned === null || owned.unreadable) {
+    return failure('run', 'RUN_LATCH_UNCONFIRMED', 'this Claude process holds a run latch open for another conversation '
+      + '(/clear started this one), so the run is not opened. Close it with `prime.mjs --close-run`, then prime again.');
+  }
+  const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch, sessionId);
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });
@@ -298,7 +329,8 @@ export function configSummary(config, root = null) {
 // `baseBranch` lets the guards keep enforcing the run's base even if the
 // checkout later stops resolving its own config (a deleted .autoloop, a
 // branch forked before devendor): the open run, not the checkout, decides.
-export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now(), baseBranch = null) {
+export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now(), baseBranch = null,
+  sessionId = process.env.CLAUDE_CODE_SESSION_ID || null) {
   const directory = runMarkerDirectory(root);
   if (directory === null) return null;
   const live = [...new Set(pids)].filter(
@@ -310,8 +342,10 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
   // openedAtMs: status views (step.mjs) list only units this run touched.
   // sessionId: the conversation that opened the run, so a fork of it (a
   // session moved to the background) is recognised as the same run.
-  const sessionId = process.env.CLAUDE_CODE_SESSION_ID || null;
-  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, openedAtMs: nowMs, baseBranch, sessionId })}\n`);
+  // starts: each pid's start time, so a later process given the same pid is
+  // never taken for the run's.
+  const starts = Object.fromEntries(live.map((pid) => [pid, processStart(pid)]));
+  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, starts, openedAtMs: nowMs, baseBranch, sessionId })}\n`);
   return path;
 }
 
@@ -321,9 +355,10 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
 // live 0.49.58 session that stopped with thirteen eligible units is what the
 // distinction costs when it is left to inference.
 //
-// The marker itself stays exactly where it is, pids intact: a closed run keeps
-// issuing commands, and disarming the command guard at the close would trade
-// this defect for a worse one.
+// The marker itself stays exactly where it is, pids intact; the session's
+// latch closes with it (closeRun), which ends the Stop check, preflight,
+// riders and transcript capture until a new prime. The guards keep this
+// session until /clear or exit (operator, 2026-10-12).
 export function closeRunMarkers(root = process.cwd(), now = new Date()) {
   const closed = [];
   for (const { path, marker } of ownRunMarkers(root)) {
@@ -336,6 +371,12 @@ export function closeRunMarkers(root = process.cwd(), now = new Date()) {
     }
   }
   return { ok: true, closed };
+}
+
+// --close-run: the run stops taking work; only the guards still act for the session.
+export function closeRun(root = process.cwd(), { directory = latchDirectory(), now = new Date() } = {}) {
+  const outcome = closeRunMarkers(root, now);
+  return outcome.ok === true ? { ...outcome, latch: closeLatch({ directory, nowMs: now.getTime() }) } : outcome;
 }
 
 // A usage limit or a red base is a reason to WAIT, and the run used to have no
@@ -901,6 +942,8 @@ function selfTest() {
   const scratch = mkdtempSync(join(tmpdir(), 'autoloop-prime-'));
   try {
     const root = buildFixtureRepository(scratch, fixtureConfig());
+    // Never the operator's latch directory: prime takes the guard's hand-off from it.
+    const scratchLatches = join(scratch, 'scratch-latches');
     const base = baseSyncFacts(root, 'main');
     check(
       'base facts report the live branch and a missing remote base honestly',
@@ -915,6 +958,7 @@ function selfTest() {
     const invalid = primeDev({
       cwd: root,
       scanArgs: ['x'.repeat(300)],
+      latches: scratchLatches,
     });
     check(
       'an invalid scan argument fails closed before any child runs',
@@ -923,7 +967,7 @@ function selfTest() {
       && invalid.error.code === 'INVALID_SCAN_ARGS',
     );
 
-    const outsideRepository = primeDev({ cwd: scratch });
+    const outsideRepository = primeDev({ cwd: scratch, latches: scratchLatches });
     check(
       'a directory outside a checkout is a typed checkout failure',
       outsideRepository.ok === false
@@ -932,7 +976,7 @@ function selfTest() {
     );
 
     writeFileSync(join(root, '.autoloop', 'config.json'), '{"version":"0.0.0"}\n');
-    const badConfig = primeDev({ cwd: root });
+    const badConfig = primeDev({ cwd: root, latches: scratchLatches });
     check(
       'an invalid ProjectConfig is a typed config failure that names every error',
       badConfig.ok === false
@@ -946,7 +990,7 @@ function selfTest() {
     // opens; one that lets a reviewer judge its writer's model starts nothing.
     writeFileSync(join(root, '.autoloop', 'config.json'),
       `${JSON.stringify({ ...fixtureConfig(), models: { 'code-review': { model: 'claude-opus-5-5[1m]' } } })}\n`);
-    const clashing = primeDev({ cwd: root });
+    const clashing = primeDev({ cwd: root, latches: scratchLatches });
     const resolvedModels = primeModels(fixtureConfig(), root);
     const pinnedModels = readPinnedModels(pinnedModelsPath(root));
     check(
@@ -970,7 +1014,7 @@ function selfTest() {
     writeFileSync(join(root, '.autoloop', 'config.json'), `${JSON.stringify(fixtureConfig())}\n`);
     const markerDirectory = runMarkerDirectory(root);
     rmSync(markerDirectory, { recursive: true, force: true });
-    const refusedElsewhere = primeDev({ cwd: root, elsewhere: () => [{ pid: 4242, openedAtMs: Date.UTC(2026, 8, 30, 13, 4), parked: false }] });
+    const refusedElsewhere = primeDev({ cwd: root, latches: scratchLatches, elsewhere: () => [{ pid: 4242, openedAtMs: Date.UTC(2026, 8, 30, 13, 4), parked: false }] });
     check(
       'a run another live session holds open on this checkout refuses before anything is written',
       refusedElsewhere.ok === false && refusedElsewhere.step === 'run'
@@ -978,6 +1022,91 @@ function selfTest() {
       && refusedElsewhere.error.message.includes('pid 4242')
       && !existsSync(markerDirectory),
     );
+    // Security review H2: prime took the session id from the environment, so
+    // `env -u CLAUDE_CODE_SESSION_ID` (or a foreign value) rebound the open
+    // latch and switched the session's guards off. The id is the hook
+    // input's, handed over by the guard; an open latch is never rebound.
+    {
+      const home = join(scratch, 'home');
+      const latches = join(home, '.claude', 'autoloop', 'run-latches');
+      const quiet = { cwd: root, elsewhere: () => [], lift: () => ({ ok: true, lifted: [] }), triage: () => ({ ok: true, resumed: [] }),
+        scanArgs: ['--pr', 'x'], latches };
+      const envBefore = process.env.CLAUDE_CODE_SESSION_ID;
+      const primeWith = (env) => {
+        if (env === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+        else process.env.CLAUDE_CODE_SESSION_ID = env;
+        return primeDev(quiet);
+      };
+      const latchOf = () => {
+        try {
+          return JSON.parse(readFileSync(join(latches, `${sessionOwnerPid()}.json`), 'utf8'));
+        } catch {
+          return null;
+        }
+      };
+      try {
+        const unknown = primeWith('from-env');
+        const unknownWrote = existsSync(markerDirectory) || latchOf() !== null;
+        const exited = spawnSync(process.execPath, ['-e', '0'], { timeout: 10000 }).pid;
+        const noStart = primeDev({ ...quiet, owner: exited });
+        recordHostSession({ sessionId: 'S-host', directory: latches });
+        const opened = primeWith('S-host');
+        const bound = latchOf()?.sessionId;
+        // Re-audit N1: the hand-off is single-use. A prime the guard did not
+        // recognise (env -u …, sh -c …, node --stack-size …, a script) gets
+        // no fresh hand-off and opens nothing.
+        const attempts = [primeWith(undefined), primeWith(''), primeWith('S-foreign')].map((result) => result.error?.code);
+        recordHostSession({ sessionId: 'S-after-clear', directory: latches });
+        rmSync(markerDirectory, { recursive: true, force: true });
+        const rebinding = primeWith('S-after-clear');
+        const guard = spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'command-guard.mjs')], {
+          input: JSON.stringify({ session_id: 'S-host', tool_name: 'Bash', cwd: root, tool_input: { command: 'gh pr merge 42 --squash' } }),
+          encoding: 'utf8', cwd: root, timeout: 30000, env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: root },
+        });
+        check(
+          'prime opens a run only for the host session the guard handed it, refuses without one, and never rebinds an open latch',
+          unknown.ok === false && unknown.error.code === 'RUN_SESSION_UNKNOWN' && !unknownWrote
+          && noStart.ok === false && noStart.error.code === 'RUN_SESSION_UNKNOWN'
+          && opened.error?.code === 'SCAN_FAILED' && bound === 'S-host'
+          && JSON.stringify(attempts) === '["RUN_SESSION_UNKNOWN","RUN_SESSION_UNKNOWN","RUN_SESSION_UNKNOWN"]'
+          && latchOf()?.sessionId === 'S-host'
+          && rebinding.ok === false && rebinding.error.code === 'RUN_LATCH_UNCONFIRMED' && !existsSync(markerDirectory)
+          && latchOf()?.sessionId === 'S-host' && guard.status === 2,
+        );
+        // After --close-run and /clear (session S2): an unrecognised prime
+        // finds no hand-off, nor a stale one, and reopens nothing; a prime the
+        // guard saw in S2 opens S2's run.
+        closeLatch({ directory: latches });
+        const unrecognised = primeWith('S2');
+        recordHostSession({ sessionId: 'S-host', directory: latches, nowMs: Date.now() - 60_000 });
+        const stale = primeWith('S2');
+        const afterStale = latchOf();
+        recordHostSession({ sessionId: 'S2', directory: latches });
+        const recognised = primeWith('S2');
+        check(
+          'after /clear an unrecognised or stale prime opens and reopens nothing; a prime the guard saw opens the new session\'s run',
+          unrecognised.error?.code === 'RUN_SESSION_UNKNOWN' && stale.error?.code === 'RUN_SESSION_UNKNOWN'
+          && afterStale?.sessionId === 'S-host' && typeof afterStale?.closedAt === 'string'
+          && recognised.error?.code === 'SCAN_FAILED' && latchOf()?.sessionId === 'S2' && latchOf()?.closedAt === undefined,
+        );
+        // Re-audit N1f: a fresh hand-off from a recognised prime that never
+        // ran, then /clear and an unrecognised prime within its lifetime. A
+        // set environment id that differs from the hand-off refuses.
+        closeLatch({ directory: latches });
+        recordHostSession({ sessionId: 'S2', directory: latches });
+        const crossed = primeWith('S3');
+        const afterCrossed = latchOf();
+        check(
+          'a hand-off from another conversation is refused when the environment names a different session',
+          crossed.ok === false && crossed.error.code === 'RUN_SESSION_UNKNOWN'
+          && afterCrossed?.sessionId === 'S2' && typeof afterCrossed?.closedAt === 'string',
+        );
+      } finally {
+        if (envBefore === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+        else process.env.CLAUDE_CODE_SESSION_ID = envBefore;
+        rmSync(markerDirectory, { recursive: true, force: true });
+      }
+    }
     const claude = [1, 'claude', '/u/.local/share/claude/versions/2.1.284'];
     mkdirSync(markerDirectory, { recursive: true });
     const mark = (name, marker) => writeFileSync(join(markerDirectory, `${name}.json`), JSON.stringify({ version: 1, ...marker }));
@@ -1011,7 +1140,7 @@ function selfTest() {
     rmSync(markerDirectory, { recursive: true, force: true });
 
     rmSync(join(root, '.autoloop'), { recursive: true, force: true });
-    const missingConfig = primeDev({ cwd: root });
+    const missingConfig = primeDev({ cwd: root, latches: scratchLatches });
     check(
       'a repository without .autoloop/config.json is a typed config failure',
       missingConfig.ok === false
@@ -1036,6 +1165,8 @@ function selfTest() {
       && JSON.parse(readFileSync(markerPath, 'utf8')).baseBranch === 'trunk'
       // The run's start, so status views drop units an earlier run left open.
       && Number.isSafeInteger(JSON.parse(readFileSync(markerPath, 'utf8')).openedAtMs)
+      // Each pid's start time: a reused pid never matches the marker.
+      && JSON.parse(readFileSync(markerPath, 'utf8')).starts?.[process.ppid] === processStart(process.ppid)
       && (process.platform !== 'linux' || loopRunIsOpen(root) === true),
     );
 
@@ -1059,10 +1190,12 @@ function selfTest() {
       && JSON.parse(readFileSync(markerPath, 'utf8')).version === 1,
     );
 
-    const closed = closeRunMarkers(root);
+    const latches = join(scratch, 'latches');
+    recordLatch({ baseBranch: 'trunk', scope: root, sessionId: 'session-1', directory: latches });
+    const closed = closeRun(root, { directory: latches });
     const reclosed = closeRunMarkers(root);
     check(
-      'closing the run stamps closedAt, ends liveness, and leaves the guard armed',
+      'closing the run stamps closedAt, ends liveness and the session\'s ownership, and keeps the markers',
       closed.ok === true
       && closed.closed.includes(markerPath)
       && typeof JSON.parse(readFileSync(markerPath, 'utf8')).closedAt === 'string'
@@ -1070,7 +1203,9 @@ function selfTest() {
       && (process.platform !== 'linux' || loopRunIsLive(root) === false)
       && (process.platform !== 'linux' || loopRunIsOpen(root) === true)
       && reclosed.ok === true
-      && reclosed.closed.length === 0,
+      && reclosed.closed.length === 0
+      && typeof closed.latch === 'string'
+      && ownedRun({ sessionId: 'session-1', directory: latches }) === null,
     );
 
     const persisted = persistPrimeSnapshot({
@@ -1163,7 +1298,7 @@ function main() {
     process.exit(outcome.ok === true ? 0 : 1);
   }
   if (parsed.mode === 'close-run') {
-    const outcome = withDigest(closeRunMarkers(), digest);
+    const outcome = withDigest(closeRun(), digest);
     writeStdoutSync(`${JSON.stringify(outcome, null, 1)}\n`);
     process.exit(outcome.ok === true ? 0 : 1);
   }

@@ -51,8 +51,7 @@ command before completion. No application build is required for this prose-contr
 Plans identify the evidence domain, existing tools to reuse, any auxiliary verifier or
 generator required, what the checks prove, and what still needs source review. Plan review
 checks whether this method is feasible with the available tools and covers its stated claims.
-Temporary location and exclusion from production-line counts do not exempt auxiliary code
-from the work boundary. Existing git-based production-size reporting remains unchanged.
+A temporary location does not exempt auxiliary code from the work boundary.
 
 A writer that needs an unplanned evidence model, generator, or control system reports the
 method/scope mismatch and partial effects; it does not silently build it or replan itself.

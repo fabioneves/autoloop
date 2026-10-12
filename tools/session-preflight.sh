@@ -7,31 +7,15 @@
 # report). Every check is time-bounded so interactive sessions stay snappy, and reads only,
 # except that the step-models file is written with its defaults when missing.
 #
-# Plugin hooks fire in every repository: silent unless CLAUDE_PROJECT_DIR is a
-# devendored autoloop repository (hook-root.mjs decides, for every hook alike).
+# Plugin hooks fire in every session: silent unless this session owns an open
+# run (hook-root.mjs decides from the hook input on stdin, for every hook
+# alike) — no git, no gh and no output before that. A run is owned from its
+# prime on, so this speaks after a compaction of the owning session.
 
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-REPO_DIR="$(git -C "$PROJECT" rev-parse --show-toplevel 2>/dev/null || printf %s "$PROJECT")"
+command -v node >/dev/null 2>&1 || exit 0
+REPO_DIR="$(node "$TOOLS_DIR/hook-root.mjs" --guarded-root 2>/dev/null)" || exit 0
 cd "$REPO_DIR" || exit 0
-if ! command -v node >/dev/null 2>&1; then
-  if [ -e "$REPO_DIR/.autoloop/config.json" ]; then
-    echo '## autoloop preflight'
-    echo 'FAIL  node not installed — no autoloop tool can run'
-  fi
-  exit 0
-fi
-# Exit 1 is "not a guarded autoloop repository": stay silent. Anything else
-# is the plugin failing, which an autoloop repository must hear about.
-node "$TOOLS_DIR/hook-root.mjs" --guarded-root >/dev/null 2>&1
-active=$?
-if [ "$active" -ne 0 ]; then
-  if [ "$active" -ne 1 ] && [ -e "$REPO_DIR/.autoloop/config.json" ]; then
-    echo '## autoloop preflight'
-    echo "FAIL  hook-root.mjs --guarded-root exited $active — the plugin cannot tell whether it guards this repository; reinstall it and restart the session"
-  fi
-  exit 0
-fi
 
 echo '## autoloop preflight'
 
@@ -101,7 +85,7 @@ fi
 # skill search to find its place). Silent unless this session's run is live.
 run_timed 10 node "$TOOLS_DIR/step.mjs" --card-run 2>/dev/null || true
 
-# 6. The repository's loop policy prose, injected every session.
+# 6. The repository's loop policy prose, injected into the owning session.
 if [ -f "$REPO_DIR/.autoloop/STATE.md" ]; then
   echo
   cat "$REPO_DIR/.autoloop/STATE.md"

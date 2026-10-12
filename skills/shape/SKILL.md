@@ -1,6 +1,7 @@
 ---
 name: shape
-description: Turn a feature description, spec/ADR, or brain-dump into PR-sized, loop-ready-candidate GitHub issues — or lint an existing issue against the loop's standards (shape lint #N). Interviews the human when underspecified, then runs one mandatory seven-axis rule check on every unit before anything is filed — premise, acceptance, coverage, proof-terminates, size, hard-defer, structure — the same axes both modes share. Verifies premises against the code, sizes units against the enforced split rule, requires each acceptance criterion to name a proof that terminates, maps every source clause onto a unit, chains dependencies via "Blocked by" derived from what each unit reads, and files issues UNLABELLED — applying loop-ready stays the maintainer's trust act. An interactive human-run skill; the loop never invokes it.
+description: Turn a feature description, spec/ADR, or brain-dump into PR-sized, loop-ready-candidate GitHub issues — or lint an existing issue against the loop's standards (shape lint #N). Interviews the human when underspecified, then runs one mandatory seven-axis rule check on every unit before anything is filed — premise, acceptance, coverage, proof-terminates, size, hard-defer, structure — the same axes both modes share. Verifies premises against the code, sizes units against the enforced split rule, requires each acceptance criterion to name a proof that terminates, maps every source clause onto a unit, chains dependencies via "Blocked by", and files issues UNLABELLED — applying loop-ready stays the maintainer's trust act. An interactive human-run skill; the loop never invokes it.
+disable-model-invocation: true
 ---
 
 # autoloop:shape — spec in, PR-sized issues out
@@ -41,12 +42,9 @@ successive fixes each closed a case and admitted another. A 200-line unit with t
 identically, which is exactly why the line budget would not have saved it. `#219` was not too
 voluminous either; it was two units, and the half with the enumerable case list converged cleanly.
 
-**Lines are a tripwire, and a tripwire only fires in one direction.** ~300 production lines is a
-smoke signal: over it, *go count your cases*. **Under it proves nothing** — a unit is never
-well-sized because of its line estimate, only because its cases enumerate. That direction is the
-whole point, because the failure being fixed here was a number granting permission: 858 lines read
-as "comfortably inside a 1000/20 cap" and the unit shipped nothing. A 300 tripwire read as a budget
-would fail exactly the same way, just sooner.
+**No line or file estimate.** Never estimate, count or record a unit's lines or files: a size
+number neither permits nor forbids a unit. A number granting permission is the failure fixed here —
+858 lines read as "comfortably inside a 1000/20 cap" and the unit shipped nothing.
 
 Both blocked on the same-predicate escalation — the loop noticing an invariant too large to
 enumerate. That is a SHAPING failure surfacing three hours late, and it is the failure this rule
@@ -137,10 +135,9 @@ whose proof could not terminate. Every one of those is an axis on this list.
   concretely (constructor, closed API surface, single boundary, allowlisted gate), never as advice
   to "consider a different approach".
 - **Size**: list the cases the unit's invariant must prove. Past ~5, unfinishable, more than one
-  hard invariant, or an independently shippable half — SPLIT, whatever the line estimate says.
+  hard invariant, or an independently shippable half — SPLIT.
   Propose the split concretely (per-invariant slices + dependency order), never as advice to
-  "consider splitting". The ~300-line tripwire is a smoke signal that sends you to the case list,
-  never a criterion on its own.
+  "consider splitting".
 - **Hard-defer smells**: hidden new dependency, secret/env need, production data write — surface
   them so the maintainer routes them consciously.
 - **Structure**: `## Blocked by` present, and each edge justified by something this unit READS
@@ -253,7 +250,7 @@ Input: a feature description, a spec/ADR path, or nothing (pure interview).
    **End every body with the sizing marker, composed by the tool — never hand-written:**
 
    ```bash
-   node <plugin-tools>/sizing-contract.mjs --shape --cases 5 --invariants 1 --files 3 --lines 260
+   node <plugin-tools>/sizing-contract.mjs --shape --cases 5 --invariants 1
    ```
 
    Append its output verbatim as the body's last line. It records what this skill JUDGED at shaping

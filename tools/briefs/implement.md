@@ -18,6 +18,6 @@ You are the sole writer for one unit, or one revision of its PR, on its branch.
 - Leave review, simplification and gate items pending; never self-certify them.
 - Keep every test and probe run bounded: modest concurrency, no repeat loops, well within the machine's memory. One out-of-memory kill ends this session and the loop's with it.
 - On an unexpected failure, stop and report the exact command and error; never claim checks a stopped runner skipped.
-- Report: commits, red and green outcomes, line delta and files, tree state, pending orchestrator checks, partial effects.
+- Report: commits, red and green outcomes, changed paths, tree state, pending orchestrator checks, partial effects.
 
 The unit facts follow below: frozen plan, issue, record and rulings, dispositions, base path, and focus.
