@@ -467,7 +467,7 @@ const MODEL_DOTS = Object.freeze([
   [/opus/u, '🟠'],
   [/sonnet/u, '🔵'],
   [/haiku/u, '🟡'],
-  [/astra|gpt/u, '🟢'],
+  [/astra|gpt|^(?:[a-z]+-gateway-)?sol(?:\[1m\])?$/u, '🟢'],
 ]);
 
 export function shortModel(id) {
@@ -627,6 +627,14 @@ function selfTest() {
       modelChip('claude-fable-5-1'), modelChip('claude-opus-5-5'), modelChip('gpt-6-astra'),
       modelChip('claude-sonnet-5'), modelChip(null), modelChip('mystery'),
     ].join('|')) === '🟣 FABLE 5.1|🟠 OPUS 5.5|🟢 ASTRA 6|🔵 SONNET 5|⚪ ORCHESTRATOR|⚪ MYSTERY'],
+    ['family aliases display without invented versions and retain their badges', safely(() => [
+      modelChip('opus'), modelChip('opus[1m]'), modelChip('fable'), modelChip('fable[1m]'),
+      modelChip('astra'), modelChip('astra[1m]'), modelChip('sol'), modelChip('sol[1m]'),
+      modelChip('sonnet[1m]'), modelChip('haiku[1m]'), modelChip('openai-gateway-sol[1m]'),
+    ].join('|')) === '🟠 OPUS|🟠 OPUS|🟣 FABLE|🟣 FABLE|🟢 ASTRA|🟢 ASTRA|🟢 SOL|🟢 SOL|🔵 SONNET|🟡 HAIKU|🟢 SOL'],
+    ['Sol recognition does not color unrelated custom names', safely(() => [
+      modelChip('console'), modelChip('solar-custom'), modelChip('custom-sol'), modelChip('mystery[1m]'),
+    ].join('|')) === '⚪ CONSOLE|⚪ SOLAR-CUSTOM|⚪ CUSTOM-SOL|⚪ MYSTERY'],
     // A dispatch with no pinned model runs the engine's default, not the
     // orchestrator; only the steps the orchestrator runs itself say so.
     ['a dispatched step with no known model is the engine, not the orchestrator', safely(() => [

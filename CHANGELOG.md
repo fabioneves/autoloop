@@ -5,8 +5,16 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Built-in step defaults use model-family aliases with the `[1m]` context selector and `high`
+  effort for every role and its fallback. The serving CLI selects the model version. Existing
+  global config files are not changed automatically.
+
 ### Fixed
 
+- Writer/reviewer checks refuse an overlap between a family alias and a fixed-version model ID,
+  for primary and fallback choices.
 - A delivered, open PR with a new head can start a new draft revision. The driver verifies
   the old delivery record, current branch, and configured PR target separately. It records both heads, keeps the
   old audit, and requires new exact-head review and gate evidence. A head race or a human
