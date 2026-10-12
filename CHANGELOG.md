@@ -61,6 +61,29 @@ Notable changes to Autoloop are recorded here. The format follows
   `lifted: #N (PR #M merged)` and `resumed: #N`, and the unit re-plans once on the new base (one
   `plan` dispatch with the frozen plan as input, no new plan review) before it claims. The premise
   step does not compare; `--on-issue`, `--on-base-red`, and `--minutes` are unchanged.
+- A code review converges in at most three fix rounds
+  ([SPEC-review-rounds](docs/specs/SPEC-review-rounds.md)). `review-contract.mjs` gives a unit
+  round 1 plus three fix rounds (`FIX_ROUND_BUDGET`) and refuses a fourth with
+  `REVIEW_FIX_BUDGET_SPENT`. A Major still open then returns `REVIEW_REPLAN`: the host decides it
+  (a rebut whose rationale names the decision comment, then one closing full round over the same
+  artifact; a rejected decision is not decided again), re-plans once (a full round recorded with
+  `--append-round --plan-fingerprint <new plan>`; a second is refused `REVIEW_REPLAN_SPENT`), or
+  defers it to a repair (allowed for any Major once the budget is spent). A Major surviving the
+  re-plan round returns `REVIEW_OPEN_FINDINGS` (state `draft`, the `openFindings` ledger, no
+  review status): the unit goes out as a draft pull request with `## Open findings` and
+  `human:decide`. A Critical surviving the re-plan round returns `POLICY_DENIED` (state `block`);
+  before that a verified Critical is fixed in the next round regardless of the budget. Minors
+  never count and never hold delivery. Findings are keyed by stable id plus `predicate`
+  (annotations and ledger entries carry it): a Major re-raised, reworded, or re-filed on the same
+  predicate keeps its raisings. A full round over an unchanged artifact is valid whenever the round
+  fixed nothing, and `--append-round` keeps the artifact version then. Retired:
+  `REVIEW_ROUND_CAP`, `REVIEW_CAP_HANDOFF`, `REVIEW_CAP_REACHED`, `REVIEW_CLOSING_ROUND_REQUIRED`,
+  and the `cap-reached` state. `step.mjs --round` takes `full`, `fix-<1..3>`, `re-plan`, or
+  `open-findings`; the ribbon, the parked view, the run card, and the closing card show
+  `fix 2/3`, `re-plan`, or `open findings` instead of a round number up to 20. The code-review
+  brief keys findings by predicate and keeps a re-raise under its id; the fix brief covers the whole
+  invariant after two consecutive Majors on one predicate; the plan brief takes the findings
+  ledger as its re-plan input. The dev skill's step 8 states the budget rules.
 
 ## [0.68.0] - 2026-10-12
 

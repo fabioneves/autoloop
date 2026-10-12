@@ -341,8 +341,8 @@ base OID, and snapshot fingerprint.
 too). Without it the unit is not resumable: report it awaiting re-authorization with
 `gh issue edit <N> --add-label loop-ready` for its human, and take other work.
 
-**A resume at the review cap is decided, not claimed**: recorded rounds already include the
-closing round → take the `REVIEW_CAP_REACHED` decision (carve or re-plan, step 8) without claiming.
+**A resume past the fix budget is decided, not claimed**: recorded rounds already spent it →
+take the `REVIEW_REPLAN` choice (step 8) without claiming.
 
 **Blocking never strips `loop-ready`**; it removes `loop-started` and the `loop:*` step label only.
 **The unblock is equally one human action, and equally irreversible by the loop**: a trusted actor
@@ -526,42 +526,43 @@ over the new delta plus open rebuts. A rebut closes only when a fresh reviewer a
 ID. Fixes are dispatched (`WRITER_MADE_NO_CHANGE` refuses a fixer that did nothing); the writer's
 model fixes, the other reviews.
 
-- **Two consecutive Majors in one predicate** (rule, function) → the N+2 fix prompt derives the
-  COMPLETE invariant from the spec, enumerates every implied case, tests each, and satisfies it
-  jointly; say so in the disposition and scope the next review to the invariant. A third after
-  that is a planning failure — no more instance-scoped rounds.
-- **A Major raised in three rounds is deferred, not blocked**: `unit.mjs --repair --parent <N>`
-  (summary, evidence, round history; else fold into an open repair), disposition `defer` with
-  `Filed as follow-up #<N>`. Never before the third raising, never a Critical; a later re-raise is
-  the same deferral. List `deferredFindings` under `## Deferred findings` in the PR body.
-- **The cap is 20 rounds** (`REVIEW_ROUND_CAP`, not configurable). `REVIEW_CLOSING_ROUND_REQUIRED`:
-  fix, commit, one more `--scope full` round; the contract refuses any after it. At the cap: hand
-  off, carve, or re-plan, and move on — never ask, widen, or stop. The closing round is the last
-  chance to carve (honest only, recorded with `unit.mjs --decide`).
-- **`REVIEW_CAP_HANDOFF` — only Majors remain, under manual merge policy.** File each
-  `handedOffFindings` entry as a repair with the finding's summary, evidence and round history
-  (fold the rest when the budget refuses), add
-  `## Open findings at the review cap` to the PR body (one line each with its follow-up), and
-  continue to gate and publish.
-- **`REVIEW_CAP_REACHED`** (a Critical remains, or non-manual policy) is a `decide`: **re-plan** —
-  a `--blocks-parent` repair naming the wrongly enumerated invariant and its true domain, every
-  open finding, and the round history; `unit.mjs --decide` names more rounds as the rejected
-  alternative. The unit waits on the repair; once it merges, `unit.mjs --obsolete --issue <N> --pr
-  <repair PR>` and close the draft as superseded. Block only a `human`-class Critical. Print the
-  rail and take the next unit immediately.
+- **Annotate each verified finding's `predicate`** (rule, function); a Major re-raised, reworded
+  or re-filed on one predicate is the same finding.
+- **Two consecutive Majors on one predicate** → the next fix derives the COMPLETE invariant from
+  the spec, tests every implied case, and satisfies it jointly; say so in the disposition. A
+  third is a plan defect: re-plan.
+- **The budget is round 1 plus three fix rounds**; a fourth is refused
+  (`REVIEW_FIX_BUDGET_SPENT`). A verified Critical is always fixed next round. Minors never count
+  and never hold delivery: list them under `## Minor findings`.
+- **`REVIEW_REPLAN` — the budget is spent, Majors remain.** Sort each, on its verified evidence,
+  into one. `decide` (the reviewer is wrong, or a design disagreement): `unit.mjs --decide` naming
+  the finding id, disposition `rebut` whose rationale names the decision comment, one closing
+  `--scope full` round on the same head; a rejected decision is final. `re-plan` (regressing
+  fixes, or a plan defect), once: `plan` (input: the `openFindings` ledger and round history),
+  `implement`, one `--scope full` round recorded with `--plan-fingerprint <new plan>`; a second
+  is refused (`REVIEW_REPLAN_SPENT`); carving (below) is a re-plan. `defer` (real and outside the
+  unit): `unit.mjs --repair --parent <N>` (summary, evidence, round history), disposition `defer`
+  with `Filed as follow-up #<N>`; also allowed for a Major raised in three rounds, never a
+  Critical; a re-raise is the same deferral. List `deferredFindings` under `## Deferred findings`
+  in the PR body.
+- **After the re-plan round there is no further round.** `REVIEW_OPEN_FINDINGS` (a Major
+  remains): file each `openFindings` entry as a repair, list them under `## Open findings` in the
+  PR body, push, keep the PR draft, and `unit.mjs --block --reason POLICY_DENIED --question
+  "<which finding to accept, rework or drop>"`; a Critical remaining (`POLICY_DENIED`) blocks the
+  same way. Take the next unit.
 
 ### Carving out a predicate
 
 Honest only when the predicate is **separable** (no stub left), the remainder **independently
 valuable**, and the unit **no longer claims what it no longer does** — else re-plan. In one pass:
-file the new issue with `unit.mjs --repair --parent <N>` (complete invariant, every open finding
-verbatim with ID and evidence, round history, parent PR link); amend the frozen plan on the branch
+file the new issue with `unit.mjs --repair --parent <N>` (complete invariant, open findings
+verbatim, round history, parent PR link); amend the frozen plan on the branch
 (carved behaviour → non-behaviour naming the issue); reduce the artifact, restoring touched code to
 its pre-unit state; state in the PR body what shipped, what did not, where the rest lives, and
 which acceptance criteria are not claimed; review the reduced artifact once more, full-artifact,
-carve out of scope (counts against the cap; cap spent → re-plan).
+carve out of scope (the unit's one re-plan round).
 
-`reviewTransition()` is authoritative for clean/block/cap behavior. **Build every round with the
+`reviewTransition()` is authoritative for clean/continue/draft/block. **Build every round with the
 tool, never by hand** (no `jq` program, skeleton, or script):
 
 ```bash
@@ -580,7 +581,7 @@ node <plugin-tools>/review-contract.mjs --append-round --evidence-file <evidence
 
 The tool derives identities, heads, fingerprints, versions and ledgers. Supply:
 
-- `annotations.json`: `[{id,verified,inScope}]` for every current finding.
+- `annotations.json`: `[{id,verified,inScope,predicate?}]` for every current finding.
   `inScope` is review scope, not edit authorization. Round 1: every finding is `inScope:true`.
   A fix outside the frozen boundary needs a separate scope decision; `true` grants no edit authority.
 - `dispositions.json`: `[{findingId,disposition:"fix"|"rebut"|"defer",rationale,claim?,evidence?}]`
@@ -592,7 +593,7 @@ Refusals: `CHECKOUT_DIRTY`, `DISPOSITION_REQUIRED`, `REBUTTAL_EVIDENCE_REQUIRED`
 `node <plugin-tools>/review-contract.mjs < <evidence-n.json>`.
 
 Evidence rules: one `reviewRounds` entry per review dispatch; `artifactVersion` increases and
-`artifactFingerprint` changes except on escalation; unique `dispatchId`; author ≠ reviewer;
+`artifactFingerprint` changes except on a round that fixed nothing; unique `dispatchId`; author ≠ reviewer;
 round 1 is `full-artifact`. Closing `scope`: `full` = `full-artifact`, `delta` =
 `fix-delta-and-open-rebuttals`. `deltaBaseOid`: base for round 1, previous head thereafter.
 `priorFindings`: full Critical/Major ledger, resolved as `state: closed`, only open rebuts
@@ -601,8 +602,7 @@ from prime (canonical: `jq -S -c -j`); no input cap.
 
 **A clean delta round does not converge the unit.** It returns `REVIEW_FULL_CLOSE_REQUIRED`:
 dispatch one `full-artifact` round over the same head, commit nothing first, and record it as a
-scope escalation (same head/version/fingerprint, new `dispatchId`, empty delta; allowed one round
-past the cap) with the tool:
+scope escalation (same head/version/fingerprint, new `dispatchId`, empty delta) with the tool:
 
 ```bash
 node <plugin-tools>/review-contract.mjs --append-escalation-round \
@@ -653,7 +653,7 @@ instead of the app gate: `verify.mjs --project-root <unit tree>`. Doubt or a mix
 gate.
 
 After green, confirm the tree is clean. Red in the unit's own diff: load debugging guidance, fix via
-the delta-review path, re-gate; fixes not converging → re-plan as at `REVIEW_CAP_REACHED`. Red
+the delta-review path, re-gate; fixes not converging → re-plan as at `REVIEW_REPLAN`. Red
 outside the diff: re-gate once unchanged (a flake passes); red again → blocking repair
 (`unit.mjs --repair --parent <N> --blocks-parent`) taken next. Never weaken the gate.
 
@@ -797,7 +797,7 @@ from prime's `models`, e.g. `GPT-6-ASTRA`):
 **Every step begins with one call, exactly once, no-ops included:**
 
 ```bash
-node <plugin-tools>/step.mjs --issue <N> --to <step> [--model <id>] [--round <r>/<cap>] \
+node <plugin-tools>/step.mjs --issue <N> --to <step> [--model <id>] [--round <round>] \
   [--fallback] [--badge <b>] [--note "<short detail>"] [--staged]
 ```
 
@@ -810,8 +810,8 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
 ```
 
 - `--model`: the result's `model`; omit for your own steps
-  (`⚪ ORCHESTRATOR`). `--fallback` when it ran. Review/fix rounds pass `--round <r>/<cap>` (a fix
-  round is `08-fix`); plan review takes none.
+  (`⚪ ORCHESTRATOR`). `--fallback` when it ran. Review/fix rounds pass `--round full|fix-<1..3>|
+  re-plan|open-findings` (a fix round is `08-fix`); plan review takes none.
 - Orphan reconciliation announces `00-reconcile` before any fetch or driver call. `⚠️ #N skipped
   <steps>` is expected only for 06; any other skip is a defect to fix first.
 - The dot is the model's colour (🟣 Fable, 🟠 Opus, 🟢 Astra, 🔵 Sonnet, 🟡 Haiku, ⚪ other).
@@ -873,7 +873,8 @@ Every obstacle is exactly one class; only `human` stops the unit:
 - **`human`** — an authorization only a human gives: an irreversible external act
   (`IRREVERSIBLE_ACTION`: production write, provisioning, message sent, data/history destruction)
   or a denial (`POLICY_DENIED`: a secret, a dependency install, a permission — merge, credentials,
-  protected paths, branch protection, `loop-ready` — or a STATE exception).
+  protected paths, branch protection, `loop-ready` — a STATE exception, or a finding surviving the
+  re-plan round).
   `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question "<one line>"`
   (`--gate human:authorize` for protected paths) records `/answer`, swaps labels, and keeps
   `loop-ready`. Other codes are refused; a specification gap is a `decide`, never a block.
@@ -883,7 +884,7 @@ Every obstacle is exactly one class; only `human` stops the unit:
   the unit does not depend on it.
 - **`decide`** — a judgment call with a recommendable option: an issue/spec contradiction, a
   missing value the loop can choose, a design, ratification or scope question, oversized work, a
-  Critical open at the cap. Record it FIRST with
+  Major open past the fix budget. Record it FIRST with
   `node <plugin-tools>/unit.mjs --decide --issue <N> --question "<one line>" --choice "<…>" --why
   "<evidence>" --alternatives "<a>; <b>"`, then continue. A human reverses one with `/answer`.
 

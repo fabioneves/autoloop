@@ -97,7 +97,7 @@ export function reminderFor(command, opts = {}) {
     if (role === 'implement') {
       return 'autoloop: an implement-role dispatch just went out — it serves step 05 (writer), '
         + 'step 06 (simplify pass), or a FIX round inside a later step. A fix answering review '
-        + 'findings is announced as `step.mjs --to 08-fix --round <r>/<cap>` under the current '
+        + 'findings is announced as `step.mjs --to 08-fix --round fix-<n>` under the current '
         + 'step (labels only climb). Otherwise the step must ALREADY be announced '
         + '(`step.mjs --issue <N> --to 05-implement`); if not, run it NOW — late beats never.';
     }

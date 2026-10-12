@@ -240,13 +240,15 @@ function selfTest() {
   const history = project({ snapshot: invalidateSnapshot(snapshot, 'ISSUE_MUTATION') });
   const visible = project({
     records: [
-      record(530, { step: '08-fix', round: '1/5', model: 'claude-opus-5-5', startedAtMs: at(10, 9, 51) }),
+      record(530, { step: '08-fix', round: 'fix-1', model: 'claude-opus-5-5', startedAtMs: at(10, 9, 51) }),
       record(531, { step: '09-gate', startedAtMs: at(12, 9, 0) }, { step: '11-record', startedAtMs: at(12, 9, 40) }),
       deepFreeze({ issue: 532, steps: [{ step: '05-implement', startedAtMs: at(12, 9, 0) }],
         closed: { outcome: 'shipped', atMs: at(12, 9, 30) } }),
       record(533, { step: '05-implement', model: 'claude-opus-5-5', startedAtMs: at(12, 9, 0) }),
       deepFreeze({ issue: 534, decisions: 2, steps: [{ step: '02-plan', startedAtMs: at(12, 9, 0) }] }),
       deepFreeze({ issue: 535, decisions: 'two', steps: [{ step: '02-plan', startedAtMs: at(12, 9, 0) }] }),
+      record(536, { step: '08-code-review', round: 're-plan', model: 'gpt-6-astra', startedAtMs: at(12, 9, 0) }),
+      record(537, { step: '08-code-review', round: 'open-findings', model: 'gpt-6-astra', startedAtMs: at(12, 9, 0) }),
     ],
   });
   const duplicated = project({
@@ -342,10 +344,14 @@ function selfTest() {
         && observed(history, 501) === JSON.stringify({ disposition: 'blocked', labels: ['human:decide', 'loop-blocked'], atMs: scanMs, current: false })
         && JSON.stringify(history.humanWaits) === '[]'],
     ['earlier-run units and record steps stay visible as last seen; only a card closes a unit',
-      unit(visible, 530)?.local === 'earlier-run' && unit(visible, 530)?.round === '1/5'
+      unit(visible, 530)?.local === 'earlier-run' && unit(visible, 530)?.round === 'fix-1'
         && unit(visible, 531)?.local === 'mark' && unit(visible, 531)?.step === '11-record'
         && unit(visible, 532) === null
-        && JSON.stringify(visible.units.map((entry) => entry.issue)) === '[530,531,533,534,535]'],
+        && JSON.stringify(visible.units.map((entry) => entry.issue)) === '[530,531,533,534,535,536,537]'],
+    // SPEC-review-rounds: the projection carries the round as step.mjs named
+    // it (fix-N, re-plan, open-findings) for the parked view to render.
+    ['a review step keeps its named round: a fix round, the re-plan round, the open-findings hand-off',
+      [530, 536, 537].map((number) => unit(visible, number)?.round).join('|') === 'fix-1|re-plan|open-findings'],
     // Flow release: a decision the loop took (unit.mjs --decide) is counted on
     // the record; the card shows the count, and a malformed count reads as none.
     ['a unit carries its recorded decision count; none or a malformed count is zero',

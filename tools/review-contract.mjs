@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
-// Code-review convergence: the authority for clean / continue / block / cap.
+// Code-review convergence: the authority for clean / continue / draft / block.
 //
-// Every decision this file made under the broker survives unchanged — round 1
-// covers the complete artifact, rounds 2+ cover only the fix delta plus open
-// rebuts, a verified Critical/Major outside a later delta earns a full round,
-// Majors still open past the closing round are handed off at merge, a Critical
-// there reaches the cap, and a rebut closes only when a fresh reviewer accepts
-// that exact finding ID.
+// Round 1 covers the complete artifact, rounds 2+ cover only the fix delta plus
+// open rebuts, a verified Critical/Major outside a later delta earns a full
+// round, and a rebut closes only when a fresh reviewer accepts that exact
+// finding ID. A unit gets at most three fix rounds (SPEC-review-rounds): a
+// Major still open after them is decided, re-planned once, or deferred, and a
+// Major surviving the re-plan round hands the unit off as a draft. A verified
+// Critical is fixed at any round and blocks when it survives the re-plan.
 //
 // What changed is the shape of the evidence. It used to be a chain of
 // broker-signed runtime receipts whose authenticity came from an in-process
@@ -54,7 +55,15 @@ const DISPOSITIONS = new Set(['fix', 'rebut', 'defer']);
 // after this many raisings it may be deferred to a filed follow-up issue, which
 // the PR body lists, so the human still sees it at merge. A Critical never is.
 const DEFER_AFTER_RAISINGS = 3;
+// SPEC-review-rounds: round 1 plus this many fix rounds. On one project 12
+// units reached a 20-round cap; rounds after the third did not converge, and
+// late Majors were raised on lines earlier fixes added. A Major still open
+// once the budget is spent is a decision (a rebut naming its decision
+// comment), one re-plan round, or a deferral — never a fourth fix. A Critical
+// is fixed regardless.
+export const FIX_ROUND_BUDGET = 3;
 const FOLLOW_UP_RE = /#[1-9][0-9]*/u;
+const DECISION_LINK_RE = /#issuecomment-[1-9][0-9]*/u;
 const LEDGER_STATES = new Set(['open', 'closed']);
 
 const ROUND_KEYS = [
@@ -92,6 +101,11 @@ const LEDGER_KEYS = [
   'state',
   'rationale',
 ];
+// The predicate (rule, function) a finding is about. A Major re-raised,
+// reworded or re-filed under a new id on the same predicate is the same
+// finding: its raisings count under the predicate. Optional, so evidence
+// recorded before 0.69.0 still validates; absent, the finding id is the key.
+const LEDGER_OPTIONAL_KEYS = ['predicate'];
 const REBUTTAL_KEYS = ['findingId', 'claim', 'evidence'];
 
 function isPlainObject(value) {
@@ -103,6 +117,16 @@ function isPlainObject(value) {
 function hasExactKeys(value, keys) {
   return isPlainObject(value)
     && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
+}
+
+function hasKeys(value, required, optional) {
+  return isPlainObject(value)
+    && required.every((key) => key in value)
+    && Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
+}
+
+function validPredicate(value) {
+  return value === undefined || boundedText(value, 1, 256);
 }
 
 function canonicalize(value) {
@@ -166,10 +190,11 @@ function validAnnotations(annotations) {
     && new Set(annotations.map((annotation) => annotation?.id)).size
       === annotations.length
     && annotations.every((annotation) =>
-      hasExactKeys(annotation, ['id', 'verified', 'inScope'])
+      hasKeys(annotation, ['id', 'verified', 'inScope'], LEDGER_OPTIONAL_KEYS)
       && FINDING_ID_RE.test(annotation.id)
       && typeof annotation.verified === 'boolean'
-      && typeof annotation.inScope === 'boolean');
+      && typeof annotation.inScope === 'boolean'
+      && validPredicate(annotation.predicate));
 }
 
 function validCheckout(checkout) {
@@ -182,7 +207,8 @@ function validCheckout(checkout) {
 }
 
 function validLedgerEntry(entry) {
-  return hasExactKeys(entry, LEDGER_KEYS)
+  return hasKeys(entry, LEDGER_KEYS, LEDGER_OPTIONAL_KEYS)
+    && validPredicate(entry.predicate)
     && FINDING_ID_RE.test(entry.findingId)
     && GATING_SEVERITIES.has(entry.severity)
     && boundedText(entry.summary, 1, 4096)
@@ -335,21 +361,28 @@ function validCumulativeLedger(previous, current) {
   return true;
 }
 
+function openEntries(record, disposition) {
+  return record.priorFindings.filter((entry) =>
+    entry.state === 'open' && entry.disposition === disposition);
+}
+
 // Convergence closes on a full-artifact round, and the closing round may be a
 // re-read of bytes a delta round already saw. That round is distinguished by
-// its SCOPE, not by its content: it reviews strictly more of the same artifact.
+// its SCOPE, not by its content: it reviews the whole of the same artifact.
 // Without this the rule deadlocks — the moment a delta round comes back clean,
 // the mandated full round has nothing new to fingerprint and the chain refuses
 // it as "nothing was re-reviewed". A live run hit exactly that, ran the closing
-// round anyway, and could not record it.
-function scopeEscalates(previous, current) {
+// round anyway, and could not record it. A round that fixed nothing — every
+// open finding rebutted (a decision) or deferred — is the same case: the
+// artifact did not change, so the round is full over the same bytes.
+function sameArtifactRound(previous, current) {
   return isPlainObject(previous)
     && isPlainObject(current)
-    && previous.scope === REVIEW_SCOPES.get('delta')
     && current.scope === REVIEW_SCOPES.get('full')
     && current.artifactFingerprint === previous.artifactFingerprint
     && current.artifactVersion === previous.artifactVersion
-    && current.headOid === previous.headOid;
+    && current.headOid === previous.headOid
+    && openEntries(current, 'fix').length === 0;
 }
 
 // A prior ledger entry leaves the gating set once it is closed, fixed,
@@ -359,29 +392,6 @@ function ledgerEntryCloses(entry, rebutsById) {
     || entry.disposition === 'fix'
     || entry.disposition === 'defer'
     || rebutsById.get(entry.findingId)?.status === 'accepted';
-}
-
-// The one round past the cap that is not an escalation: the cap round still
-// gated, the fix went in, and nothing had reviewed it. Handing off there left an
-// unreviewed commit on the PR; one full round over it closes or hands off with
-// evidence. Full only, and only after a cap round that actually gated.
-function closesCappedFindings(input) {
-  const rounds = input.reviewRounds;
-  const capVerdict = Array.isArray(rounds) && rounds.length >= 2
-    ? rounds.at(-2)?.verdict
-    : undefined;
-  return input.scope === 'full'
-    && isPlainObject(capVerdict)
-    && Array.isArray(capVerdict.findings)
-    && Array.isArray(capVerdict.rebuts)
-    && (gatingFindings(capVerdict).length > 0
-      || capVerdict.rebuts.some(({ status }) => status === 'rejected'));
-}
-
-function closesByScopeEscalation(rounds) {
-  return Array.isArray(rounds)
-    && rounds.length >= 2
-    && scopeEscalates(rounds.at(-2), rounds.at(-1));
 }
 
 // Fingerprints and OIDs are unreadable at full length in a one-line gap, and a
@@ -414,8 +424,9 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
     return null;
   }
   const first = rounds[0];
+  // The plan is not here: a re-plan round records its new plan fingerprint
+  // (`roundBudget` allows that once).
   const stable = [
-    'planFingerprint',
     'repositoryFingerprint',
     'configFingerprint',
     'configuredBaseOid',
@@ -482,7 +493,7 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
       gaps.push(`round ${index + 1}: the cumulative finding ledger is not carried forward`);
       return null;
     }
-    if (scopeEscalates(previous, current)) continue;
+    if (sameArtifactRound(previous, current)) continue;
     if (current.artifactVersion <= previous.artifactVersion) {
       gaps.push(
         `round ${index + 1}: artifactVersion must strictly increase per round `
@@ -494,9 +505,9 @@ function roundHistory(rounds, round, scope, expected, projectConfig, gaps = []) 
     if (current.artifactFingerprint === previous.artifactFingerprint) {
       gaps.push(
         `round ${index + 1}: artifactFingerprint is unchanged — nothing was `
-        + 're-reviewed. A closing full-artifact round over an unchanged '
-        + 'artifact must also carry the previous round\'s artifactVersion and '
-        + 'headOid to record as a scope escalation',
+        + 're-reviewed. A full-artifact round over an unchanged artifact '
+        + '(a closing round, or one that rebuts or defers every open finding) '
+        + 'must also carry the previous round\'s artifactVersion and headOid',
       );
       return null;
     }
@@ -567,18 +578,96 @@ export function projectConfigForReview(path) {
   return reviewedConfig(resolved.config);
 }
 
-// Review convergence is a fixed plugin bound since 0.28.0 (operator,
-// 2026-09-28: "bump code reviews limit to 20"). Repository config no longer
-// carries it, so no caller can raise it.
-export const REVIEW_ROUND_CAP = 20;
+// A finding's predicate: the one its ledger entry or its annotation names,
+// else its id. Both the ledger and the closing round's annotations are read,
+// because the closing round's own findings have no ledger entry yet.
+function predicateIndex(rounds, annotations) {
+  const index = new Map();
+  for (const record of rounds) {
+    for (const entry of record.priorFindings) {
+      if (entry.predicate !== undefined) index.set(entry.findingId, entry.predicate);
+    }
+  }
+  for (const annotation of annotations) {
+    if (annotation.predicate !== undefined) index.set(annotation.id, annotation.predicate);
+  }
+  return (id) => index.get(id) ?? id;
+}
 
-// In-process test seam: fixtures exercise the cap with one- and two-round
-// histories. A Symbol key survives spreading but never JSON, so the stdin
-// contract cannot set it.
-const ROUND_CAP_FOR_TESTS = Symbol('roundCapForTests');
+// How many of the given rounds raised the predicate, under any id.
+function raisingsOf(rounds, predicate, predicateOf) {
+  return rounds.filter(({ verdict }) =>
+    verdict.findings.some(({ id }) => predicateOf(id) === predicate)).length;
+}
 
-function roundCap(input) {
-  return input?.projectConfig?.[ROUND_CAP_FOR_TESTS] ?? REVIEW_ROUND_CAP;
+// Which round is which, read from the record: a round whose plan fingerprint
+// differs from the one before it is the re-plan round; a round with an open
+// `fix` disposition is a fix round; any other round rebuts or defers over the
+// same artifact. The refusals name themselves: REVIEW_FIX_BUDGET_SPENT for a
+// fourth fix round, or a second decision on a predicate a fresh reviewer
+// already rejected; REVIEW_REPLAN_SPENT for any round after the re-plan round.
+function roundBudget(rounds, predicateOf, gaps = []) {
+  let fixRounds = 0;
+  let replanRound = null;
+  const decided = new Set();
+  const rejected = new Set();
+  for (let index = 1; index < rounds.length; index += 1) {
+    const previous = rounds[index - 1];
+    const current = rounds[index];
+    const at = `round ${current.round}`;
+    for (const rebut of previous.verdict.rebuts) {
+      const predicate = predicateOf(rebut.findingId);
+      if (rebut.status === 'rejected' && decided.has(predicate)) rejected.add(predicate);
+    }
+    if (replanRound !== null) {
+      gaps.push(
+        `${at}: round ${replanRound} re-planned the unit and was its last review — a Major `
+        + 'still open there hands the unit off as a draft, a Critical blocks',
+      );
+      return { code: 'REVIEW_REPLAN_SPENT' };
+    }
+    if (current.planFingerprint !== previous.planFingerprint) {
+      if (current.scope !== REVIEW_SCOPES.get('full')) {
+        gaps.push(`${at}: the re-plan round reviews the complete artifact (scope full)`);
+        return { code: 'INVALID_REVIEW_EVIDENCE' };
+      }
+      replanRound = current.round;
+      continue;
+    }
+    const spent = fixRounds >= FIX_ROUND_BUDGET;
+    const fixes = openEntries(current, 'fix');
+    if (fixes.length > 0) {
+      if (spent && !fixes.some(({ severity }) => severity === 'Critical')) {
+        gaps.push(
+          `${at}: the budget of ${FIX_ROUND_BUDGET} fix rounds is spent — decide (rebut `
+          + 'naming the decision comment), re-plan once, or defer each open Major',
+        );
+        return { code: 'REVIEW_FIX_BUDGET_SPENT' };
+      }
+      fixRounds += 1;
+    }
+    if (!spent) continue;
+    for (const entry of openEntries(current, 'rebut')) {
+      const predicate = predicateOf(entry.findingId);
+      if (!DECISION_LINK_RE.test(entry.rationale)) {
+        gaps.push(
+          `${at}: after the fix budget a rebuttal of ${entry.findingId} is a decision — `
+          + 'record it with unit.mjs --decide and name the decision comment '
+          + '(…#issuecomment-N) in the rationale',
+        );
+        return { code: 'INVALID_REVIEW_EVIDENCE' };
+      }
+      if (rejected.has(predicate)) {
+        gaps.push(
+          `${at}: a fresh reviewer rejected the decision on ${entry.findingId}; `
+          + 're-plan once or defer it',
+        );
+        return { code: 'REVIEW_FIX_BUDGET_SPENT' };
+      }
+      decided.add(predicate);
+    }
+  }
+  return { code: null, fixRounds, replanRound };
 }
 
 export function reviewTransition(input) {
@@ -602,10 +691,6 @@ export function reviewTransition(input) {
     // A chain started before setup migrated STATE keeps its config (every
     // round's fingerprint binds it); valid at a migratable schema is enough.
     || !currentProjectConfig(input.projectConfig).ok
-    || (input.round > roundCap(input)
-      && !(input.round === roundCap(input) + 1
-        && (closesByScopeEscalation(input.reviewRounds)
-          || closesCappedFindings(input))))
     || !validExpected(input.expected)
     || !validAnnotations(input.findingAnnotations)
   ) {
@@ -631,6 +716,13 @@ export function reviewTransition(input) {
       ? { evidenceGap: evidenceGaps[0] }
       : {});
   }
+  const predicateOf = predicateIndex(history.rounds, input.findingAnnotations);
+  const budget = roundBudget(history.rounds, predicateOf, evidenceGaps);
+  if (budget.code !== null) {
+    return decision('error', budget.code, { evidenceGap: evidenceGaps.at(-1) });
+  }
+  const budgetSpent = budget.fixRounds >= FIX_ROUND_BUDGET;
+  const fixRounds = { used: budget.fixRounds, budget: FIX_ROUND_BUDGET };
 
   const currentVerdict = history.current.verdict;
   const currentIds = currentVerdict.findings.map(({ id }) => id);
@@ -665,13 +757,17 @@ export function reviewTransition(input) {
   const deferred = history.current.priorFindings.filter(
     ({ disposition }) => disposition === 'defer',
   );
+  // Once the fix budget is spent, deferral is one of the three ways out and
+  // needs no third raising.
   for (const entry of deferred) {
-    const raisings = history.rounds.slice(0, -1).filter(({ verdict }) =>
-      verdict.findings.some(({ id }) => id === entry.findingId)).length;
-    if (raisings < DEFER_AFTER_RAISINGS) {
+    const raisings = raisingsOf(
+      history.rounds.slice(0, -1), predicateOf(entry.findingId), predicateOf,
+    );
+    if (raisings < DEFER_AFTER_RAISINGS && !budgetSpent) {
       return decision('error', 'INVALID_REVIEW_EVIDENCE', {
         evidenceGap: `finding ${entry.findingId} is deferred after ${raisings} raising(s); `
-          + `only a Major raised in ${DEFER_AFTER_RAISINGS} rounds may be deferred — fix or rebut it`,
+          + `only a Major raised in ${DEFER_AFTER_RAISINGS} rounds, or any Major once the fix `
+          + 'budget is spent, may be deferred — fix or rebut it',
       });
     }
   }
@@ -718,12 +814,12 @@ export function reviewTransition(input) {
     return decision('verify', 'FINDING_VERIFICATION_REQUIRED');
   }
 
-  const late = input.scope === 'delta'
+  const critical = currentGating.some(({ severity }) => severity === 'Critical');
+  const late = input.scope === 'delta' && (!budgetSpent || critical)
     ? currentGating.filter(({ id }) => annotations.get(id).inScope !== true)
     : [];
   // A real defect the delta could not see is a reason to look wider, not to
-  // stop: fix it and review the whole artifact. At the cap that full round is
-  // the closing round.
+  // stop: fix it and review the whole artifact.
   if (late.length > 0) {
     return decision('continue', 'REVIEW_FULL_ROUND_REQUIRED', {
       findings: late.map(({ id, severity }) => ({ id, severity })),
@@ -748,38 +844,37 @@ export function reviewTransition(input) {
     }
     return decision('clean', 'REVIEW_CLEAN', closedEvidence());
   }
-  if (input.round === roundCap(input)) {
-    return decision('continue', 'REVIEW_CLOSING_ROUND_REQUIRED', {
-      unresolvedFindings: currentGating.length,
-      rejectedRebuts: rejectedRebuts.length,
-    });
-  }
-  // Past the closing round a Major is handed to the human at merge instead of
-  // parking the unit: the loop files each as a follow-up and lists it in the PR
-  // body. Only under manual policy, so a hand-off can never reach auto-merge,
-  // and never with a Critical open.
-  if (
-    input.round > roundCap(input)
-    && input.projectConfig.merge?.policy === 'manual'
-    && currentGating.every(({ severity }) => severity === 'Major')
-  ) {
-    return decision('clean', 'REVIEW_CAP_HANDOFF', {
-      handedOffFindings: currentGating.map(({ id, severity }) => ({ id, severity })),
-      ...closedEvidence(),
-    });
-  }
-  if (input.round > roundCap(input)) {
-    // The cap is spent, and the unit cannot ship as it stands. What happens next
-    // is the loop's decision (re-plan), not a human's by default.
-    return decision('cap-reached', 'REVIEW_CAP_REACHED', {
-      unresolvedFindings: currentGating.length,
-      rejectedRebuts: rejectedRebuts.length,
-    });
-  }
-  return decision('continue', 'REVIEW_FIX_DELTA_REQUIRED', {
+  // The ledger of what still gates, for the PR body or the block comment.
+  const openFindings = currentGating.map(({ id, severity, summary, evidence }) => ({
+    id,
+    severity,
+    predicate: predicateOf(id),
+    raisings: raisingsOf(history.rounds, predicateOf(id), predicateOf),
+    summary,
+    evidence,
+  }));
+  const detail = {
     unresolvedFindings: currentGating.length,
     rejectedRebuts: rejectedRebuts.length,
-  });
+    fixRounds,
+  };
+  // The re-plan round was the last review. A Critical that survived it is
+  // the human's (POLICY_DENIED, the ledger in the block comment); a Major is
+  // filed as a repair and the unit goes out as a draft with `## Open
+  // findings` and `human:decide` — the one review path that waits for a human.
+  if (budget.replanRound !== null) {
+    const handoff = { ...detail, openFindings, reviewedHead: history.current.headOid };
+    return critical
+      ? decision('block', 'POLICY_DENIED', handoff)
+      : decision('draft', 'REVIEW_OPEN_FINDINGS', handoff);
+  }
+  if (!budgetSpent || critical) {
+    return decision('continue', 'REVIEW_FIX_DELTA_REQUIRED', detail);
+  }
+  // The fix budget is spent and only Majors remain: each is decided (a rebut
+  // naming its decision comment, then one closing full round), re-planned
+  // (once, every open finding in the plan brief), or deferred to a repair.
+  return decision('continue', 'REVIEW_REPLAN', { ...detail, openFindings });
 }
 
 // The closing full-artifact round is the ONE round nobody can derive from the
@@ -899,12 +994,13 @@ export function appendEscalationRound(evidence, result, options = {}) {
 // the rebuttal) and the finding annotations. Everything else is derived — the
 // checkout, the artifact fingerprint, the version, the ledger carry-forward —
 // and the result goes through `reviewTransition` before it is returned.
-function dispositionLedgerEntry(finding, disposition) {
+function dispositionLedgerEntry(finding, disposition, predicate) {
   return {
     findingId: finding.id,
     severity: finding.severity,
     summary: finding.summary,
     evidence: finding.evidence,
+    ...(predicate === undefined ? {} : { predicate }),
     disposition: disposition.disposition,
     state: 'open',
     rationale: disposition.rationale,
@@ -987,6 +1083,17 @@ export function appendRound(evidence, result, options = {}) {
     if (!REVIEW_SCOPES.has(options.scope)) {
       return refuse('INVALID_SCOPE', 'scope must be full or delta');
     }
+    // A re-plan round carries its new frozen plan; the contract allows one.
+    const planFingerprint = options.planFingerprint ?? previous.planFingerprint;
+    if (!HASH_RE.test(planFingerprint)) {
+      return refuse('INVALID_PLAN_FINGERPRINT', 'planFingerprint must be a sha256');
+    }
+    if (planFingerprint !== previous.planFingerprint && options.scope !== 'full') {
+      return refuse('INVALID_SCOPE', 'the re-plan round reviews the complete artifact: scope full');
+    }
+    const predicates = new Map(
+      (evidence.findingAnnotations ?? []).map((annotation) => [annotation?.id, annotation?.predicate]),
+    );
     const dispositions = new Map(
       (options.dispositions ?? []).map((entry) => [entry?.findingId, entry]),
     );
@@ -1007,8 +1114,8 @@ export function appendRound(evidence, result, options = {}) {
         return refuse(
           'DISPOSITION_REQUIRED',
           `finding ${finding.id} gated the previous round; dispose it as fix, `
-          + 'rebut, or (a Major raised in 3 rounds) defer naming its follow-up #N, '
-          + 'with a rationale',
+          + 'rebut, or (a Major raised in 3 rounds, or any Major once the fix budget '
+          + 'is spent) defer naming its follow-up #N, with a rationale',
         );
       }
       if (disposition.disposition === 'rebut'
@@ -1038,7 +1145,7 @@ export function appendRound(evidence, result, options = {}) {
     }
     for (const finding of previousGating) {
       const disposition = dispositions.get(finding.id);
-      priorFindings.push(dispositionLedgerEntry(finding, disposition));
+      priorFindings.push(dispositionLedgerEntry(finding, disposition, predicates.get(finding.id)));
       if (disposition.disposition === 'rebut') {
         openRebuttals.push({
           findingId: finding.id, claim: disposition.claim, evidence: disposition.evidence,
@@ -1049,12 +1156,16 @@ export function appendRound(evidence, result, options = {}) {
       round: evidence.round + 1,
       scope: options.scope,
       projectConfig: evidence.projectConfig,
-      planFingerprint: previous.planFingerprint,
+      planFingerprint,
       configFingerprint: previous.configFingerprint,
       configuredBaseOid: previous.configuredBaseOid,
       deltaBaseOid: previous.headOid,
       authorIdentity: previous.authorIdentity,
-      artifactVersion: previous.artifactVersion + 1,
+      // The version counts artifacts, so a round over the same bytes (a
+      // closing round, a decision, a deferral) keeps the previous one.
+      artifactVersion: options.artifactFingerprint === previous.artifactFingerprint
+        ? previous.artifactVersion
+        : previous.artifactVersion + 1,
       reviewRounds: evidence.reviewRounds,
     };
   }
@@ -1130,7 +1241,7 @@ export function authorizeReviewPublication(input, targetHeadOid, liveCheckout) {
   };
 }
 
-function fixtureProjectConfig(testRoundCap = null) {
+function fixtureProjectConfig() {
   return {
     version: '0.28.0',
     baseBranch: 'main',
@@ -1138,7 +1249,6 @@ function fixtureProjectConfig(testRoundCap = null) {
     merge: { policy: 'manual' },
     tracker: { provider: 'none' },
     review: { checklistPath: 'docs/agentic/checklist.md' },
-    ...(testRoundCap === null ? {} : { [ROUND_CAP_FOR_TESTS]: testRoundCap }),
   };
 }
 
@@ -1192,15 +1302,17 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
           ({ findingId }) => findingId === prior.id,
         );
         const deferred = (overrides.defer ?? []).includes(prior.id);
+        const predicate = options.predicates?.[prior.id];
         ledger.set(prior.id, {
           findingId: prior.id,
           severity: prior.severity,
           summary: prior.summary,
           evidence: prior.evidence,
+          ...(predicate === undefined ? {} : { predicate }),
           disposition: rebutted ? 'rebut' : deferred ? 'defer' : 'fix',
           state: 'open',
           rationale: rebutted
-            ? 'The author supplied a bounded rebuttal with evidence.'
+            ? overrides.rebutRationale ?? 'The author supplied a bounded rebuttal with evidence.'
             : deferred
               ? overrides.deferRationale ?? 'Deferred to follow-up #99.'
               : 'The exact fix delta contains the bounded fix.',
@@ -1345,11 +1457,10 @@ function selfTest() {
   const mismatchFirst = mismatchFactory(1, failWith([finding]));
   const mismatchDelta = mismatchFactory(2, pass);
 
-  const escalationCap = fixtureProjectConfig(2);
-  const escalationFactory = roundFactory(escalationCap, { seed: 'escalation' });
+  const escalationFactory = roundFactory(fixtureProjectConfig(), { seed: 'escalation' });
   const escalationFirst = escalationFactory(1, failWith([finding]));
   const escalationDelta = escalationFactory(2, pass);
-  const widerFactory = roundFactory(escalationCap, { seed: 'wider' });
+  const widerFactory = roundFactory(fixtureProjectConfig(), { seed: 'wider' });
   const widerFirst = widerFactory(1, failWith([finding]));
   const widerDelta = widerFactory(2, pass);
   const escalationWiderArtifact = widerFactory(3, pass, { scope: 'full-artifact' });
@@ -1376,47 +1487,6 @@ function selfTest() {
   const lateClean = lateFactory(1, pass);
   const late = lateFactory(2, failWith([lateFinding]));
 
-  const configuredCap = fixtureProjectConfig(1);
-  const cappedFailure = roundFactory(configuredCap, { seed: 'capped' })(
-    1,
-    failWith([finding]),
-  );
-
-  // self-resolving-units: the cap round earns one closing full round.
-  const closingFactory = roundFactory(configuredCap, { seed: 'closing' });
-  const closingFirst = closingFactory(1, failWith([finding]));
-  const closingStillFails = closingFactory(2, failWith([cumulativeFinding]), {
-    scope: 'full-artifact',
-  });
-  const closingCleanFactory = roundFactory(configuredCap, { seed: 'closing-clean' });
-  const closingCleanFirst = closingCleanFactory(1, failWith([finding]));
-  const closingClean = closingCleanFactory(2, pass, { scope: 'full-artifact' });
-  // limits-never-stop: a closing round that still gates on Majors alone hands
-  // the unit off at merge under manual policy; a Critical or a non-manual
-  // policy still blocks.
-  const closingCriticalFactory = roundFactory(configuredCap, { seed: 'closing-critical' });
-  const closingCriticalFirst = closingCriticalFactory(1, failWith([finding]));
-  const closingCritical = closingCriticalFactory(
-    2,
-    failWith([{ ...cumulativeFinding, id: 'finding-critical', severity: 'Critical' }]),
-    { scope: 'full-artifact' },
-  );
-  const ratifiedCap = { ...fixtureProjectConfig(1), merge: { policy: 'ratified' } };
-  const closingRatifiedFactory = roundFactory(ratifiedCap, { seed: 'closing-ratified' });
-  const closingRatifiedFirst = closingRatifiedFactory(1, failWith([finding]));
-  const closingRatified = closingRatifiedFactory(2, failWith([cumulativeFinding]), {
-    scope: 'full-artifact',
-  });
-  const closingDeltaFactory = roundFactory(configuredCap, { seed: 'closing-delta' });
-  const closingDeltaFirst = closingDeltaFactory(1, failWith([finding]));
-  const closingDelta = closingDeltaFactory(2, pass);
-  const beyondFactory = roundFactory(configuredCap, { seed: 'beyond' });
-  const beyondRounds = [
-    beyondFactory(1, failWith([finding])),
-    beyondFactory(2, failWith([cumulativeFinding]), { scope: 'full-artifact' }),
-  ];
-  beyondRounds.push(beyondFactory(3, pass, { scope: 'full-artifact' }));
-
   // A Major the fix keeps missing is deferred to a filed follow-up, not a block.
   const deferRounds = (seed, raised, severity = 'Major', deferRationale = undefined) => {
     const recurring = { ...finding, id: `recurring-${seed}`, severity };
@@ -1434,6 +1504,92 @@ function selfTest() {
   const deferredAtTwo = deferRounds('defer-2', 2);
   const deferredCritical = deferRounds('defer-critical', 3, 'Critical');
   const deferredUnnamed = deferRounds('defer-unnamed', 3, 'Major', 'Deferred for later.');
+
+  // SPEC-review-rounds: round 1 plus three fix rounds, each re-raising one
+  // Major, spends the fix budget at round 4. What follows is a decision, a
+  // re-plan, or a deferral — never a fourth fix.
+  const sameArtifactAs = (record) => ({
+    scope: 'full-artifact',
+    artifactVersion: record.artifactVersion,
+    artifactFingerprint: record.artifactFingerprint,
+    headOid: record.headOid,
+  });
+  const decisionLink = 'Decided: https://example.test/acme/widgets/issues/1#issuecomment-77';
+  const spentChain = (seed, fourth = null, options = {}) => {
+    const major = { ...finding, id: `budget-${seed}` };
+    const factory = roundFactory(fixtureProjectConfig(), { seed, ...options });
+    const rounds = [1, 2, 3].map((round) => factory(round, failWith([major])));
+    rounds.push(factory(4, fourth ?? failWith([major])));
+    return { factory, rounds, major };
+  };
+  const spent = spentChain('spent');
+  const fourthFix = spentChain('fourth-fix');
+  fourthFix.rounds.push(fourthFix.factory(5, failWith([fourthFix.major])));
+  const decided = spentChain('decided');
+  const decidedClose = decided.factory(5, {
+    verdict: 'pass', findings: [], rebuts: [accept(decided.major.id, 'The decision stands.')],
+  }, { ...sameArtifactAs(decided.rounds[3]), rebutRationale: decisionLink });
+  const undecided = spentChain('undecided');
+  const undecidedClose = undecided.factory(5, {
+    verdict: 'pass', findings: [], rebuts: [accept(undecided.major.id, 'Accepted.')],
+  }, sameArtifactAs(undecided.rounds[3]));
+  const rejectedDecision = spentChain('rejected-decision');
+  const rejectedDecisionClose = rejectedDecision.factory(5, failWith(
+    [rejectedDecision.major], [reject(rejectedDecision.major.id, 'Still reproduces.')],
+  ), { ...sameArtifactAs(rejectedDecision.rounds[3]), rebutRationale: decisionLink });
+  const secondDecision = rejectedDecision.factory(6, {
+    verdict: 'pass', findings: [], rebuts: [accept(rejectedDecision.major.id, 'Fine.')],
+  }, { ...sameArtifactAs(rejectedDecisionClose), rebutRationale: decisionLink });
+  const replanned = spentChain('replanned');
+  const replanClean = replanned.factory(5, pass, {
+    scope: 'full-artifact', planFingerprint: hash('plan-replanned-v2'),
+  });
+  const replanOpen = spentChain('replan-open');
+  const replanStillMajor = replanOpen.factory(5, failWith([replanOpen.major]), {
+    scope: 'full-artifact', planFingerprint: hash('plan-replan-open-v2'),
+  });
+  const secondReplan = replanOpen.factory(6, pass, {
+    scope: 'full-artifact', planFingerprint: hash('plan-replan-open-v3'),
+  });
+  const replanDelta = spentChain('replan-delta');
+  const replanDeltaRound = replanDelta.factory(5, pass, {
+    planFingerprint: hash('plan-replan-delta-v2'),
+  });
+  const replanCritical = spentChain('replan-critical');
+  const replanStillCritical = replanCritical.factory(5, failWith([
+    { ...cumulativeFinding, id: 'critical-after-replan', severity: 'Critical' },
+  ]), { scope: 'full-artifact', planFingerprint: hash('plan-replan-critical-v2') });
+  // A Critical raised once the budget is spent is still fixed in the next round.
+  const criticalFinding = { ...cumulativeFinding, id: 'critical-round-4', severity: 'Critical' };
+  const lateCritical = spentChain('late-critical', failWith([{ ...finding, id: 'budget-late-critical' }, criticalFinding]));
+  const lateCriticalFixed = lateCritical.factory(5, pass);
+  // A Major first raised in the last fix round may be deferred once the budget
+  // is spent, although it was raised only once.
+  const lateMajorFactory = roundFactory(fixtureProjectConfig(), { seed: 'late-major-defer' });
+  const lateMajor = { ...finding, id: 'late-major-defer' };
+  const lateMajorRounds = [1, 2, 3].map((round) => lateMajorFactory(round, failWith([finding])));
+  lateMajorRounds.push(lateMajorFactory(4, failWith([lateMajor])));
+  lateMajorRounds.push(lateMajorFactory(5, failWith([lateMajor]), {
+    scope: 'full-artifact', defer: [lateMajor.id],
+  }));
+  // Minors never consume the budget and never hold delivery.
+  const minor = { id: 'minor-1', severity: 'Minor', summary: 'A nit', evidence: 'src/reviewed.mjs:7' };
+  const minorOnly = spentChain('minor-only', { verdict: 'pass', findings: [minor], rebuts: [] });
+  const minorClose = minorOnly.factory(5, { verdict: 'pass', findings: [minor], rebuts: [] },
+    sameArtifactAs(minorOnly.rounds[3]));
+  // A re-filed Major on the same predicate is the same finding: its raisings
+  // count under the predicate, not under the new id.
+  const refiled = { ...rewordedFinding, id: 'finding-9' };
+  const predicates = { [finding.id]: 'rule:gate', [refiled.id]: 'rule:gate' };
+  const refiledFactory = roundFactory(fixtureProjectConfig(), { seed: 'refiled', predicates });
+  const refiledRounds = [
+    refiledFactory(1, failWith([finding])),
+    refiledFactory(2, failWith([refiled])),
+    refiledFactory(3, failWith([refiled])),
+  ];
+  refiledRounds.push(refiledFactory(4, failWith([refiled]), { scope: 'full-artifact', defer: [refiled.id] }));
+  const refiledInput = inputFor(refiledRounds, fixtureProjectConfig(), { scope: 'full' });
+  refiledInput.findingAnnotations = [{ id: refiled.id, verified: true, inScope: true, predicate: 'rule:gate' }];
 
   const wrongDeltaFactory = roundFactory(fixtureProjectConfig(), { seed: 'wrong-delta' });
   const wrongDeltaFirst = wrongDeltaFactory(1, failWith([finding]));
@@ -1585,28 +1741,28 @@ function selfTest() {
       expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
     },
     {
-      name: 'a full round past the cap that is not a scope escalation is refused',
+      name: 'a full round over a changed artifact after a clean delta is an ordinary round',
       input: inputFor(
         [widerFirst, widerDelta, escalationWiderArtifact],
-        escalationCap,
-        { scope: 'full' },
-      ),
-      expected: ['error', false],
-      expectedCode: 'INVALID_REVIEW_INPUT',
-    },
-    {
-      name: 'a full-artifact round re-reading the delta head closes the review',
-      input: inputFor(
-        [escalationFirst, escalationDelta, escalationClose],
-        escalationCap,
+        fixtureProjectConfig(),
         { scope: 'full' },
       ),
       expected: ['clean', true],
     },
     {
-      name: 'a Major continues below the cap',
+      name: 'a full-artifact round re-reading the delta head closes the review',
+      input: inputFor(
+        [escalationFirst, escalationDelta, escalationClose],
+        fixtureProjectConfig(),
+        { scope: 'full' },
+      ),
+      expected: ['clean', true],
+    },
+    {
+      name: 'a Major continues within the fix budget',
       input: inputFor([acceptedFirst]),
       expected: ['continue', false],
+      expectedCode: 'REVIEW_FIX_DELTA_REQUIRED',
     },
     {
       name: 'an accepted rebut permits a clean result',
@@ -1649,47 +1805,6 @@ function selfTest() {
       expected: ['verify', false],
     },
     {
-      name: 'a gating finding at the cap earns one closing full round',
-      input: inputFor([cappedFailure], configuredCap),
-      expected: ['continue', false],
-      expectedCode: 'REVIEW_CLOSING_ROUND_REQUIRED',
-    },
-    {
-      name: 'a closing round that still gates on Majors hands the unit off at merge',
-      input: inputFor([closingFirst, closingStillFails], configuredCap, { scope: 'full' }),
-      expected: ['clean', true],
-      expectedCode: 'REVIEW_CAP_HANDOFF',
-    },
-    {
-      name: 'a closing round that still gates on a Critical reaches the cap',
-      input: inputFor([closingCriticalFirst, closingCritical], configuredCap, { scope: 'full' }),
-      expected: ['cap-reached', false],
-      expectedCode: 'REVIEW_CAP_REACHED',
-    },
-    {
-      name: 'a closing round under a non-manual merge policy reaches the cap',
-      input: inputFor([closingRatifiedFirst, closingRatified], ratifiedCap, { scope: 'full' }),
-      expected: ['cap-reached', false],
-      expectedCode: 'REVIEW_CAP_REACHED',
-    },
-    {
-      name: 'a clean closing round past the cap publishes',
-      input: inputFor([closingCleanFirst, closingClean], configuredCap, { scope: 'full' }),
-      expected: ['clean', true],
-    },
-    {
-      name: 'the closing round past the cap is always full',
-      input: inputFor([closingDeltaFirst, closingDelta], configuredCap),
-      expected: ['error', false],
-      expectedCode: 'INVALID_REVIEW_INPUT',
-    },
-    {
-      name: 'there is no round after the closing round',
-      input: inputFor(beyondRounds, configuredCap, { scope: 'full' }),
-      expected: ['error', false],
-      expectedCode: 'INVALID_REVIEW_INPUT',
-    },
-    {
       name: 'a Major raised in three rounds may be deferred to a named follow-up',
       input: inputFor(deferredAtThree, fixtureProjectConfig(), { scope: 'full' }),
       expected: ['clean', true],
@@ -1709,6 +1824,109 @@ function selfTest() {
       name: 'a deferral must name its follow-up issue',
       input: inputFor(deferredUnnamed, fixtureProjectConfig(), { scope: 'full' }),
       expected: ['error', false],
+    },
+    // SPEC-review-rounds: on one project 12 units reached a 20-round cap and
+    // rounds after the third did not converge. Round 1 plus three fix rounds
+    // is the budget; a Major still open then is decided, re-planned once, or
+    // deferred.
+    {
+      name: 'three fix rounds spend the budget: a Major still open is decided, re-planned or deferred',
+      input: inputFor(spent.rounds),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_REPLAN',
+    },
+    {
+      name: 'a fourth fix round is refused',
+      input: inputFor(fourthFix.rounds),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_FIX_BUDGET_SPENT',
+    },
+    {
+      name: 'a decision rebuts the finding and one closing full round over the same artifact closes it',
+      input: inputFor([...decided.rounds, decidedClose], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['clean', true],
+      expectedCode: 'REVIEW_CLEAN',
+    },
+    {
+      name: 'after the budget a rebuttal must carry its decision link',
+      input: inputFor([...undecided.rounds, undecidedClose], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedGap: 'decision',
+    },
+    {
+      name: 'a decision the closing reviewer rejects leaves re-plan or defer',
+      input: inputFor([...rejectedDecision.rounds, rejectedDecisionClose], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_REPLAN',
+    },
+    {
+      name: 'a rejected decision is not decided again',
+      input: inputFor([...rejectedDecision.rounds, rejectedDecisionClose, secondDecision], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_FIX_BUDGET_SPENT',
+    },
+    {
+      name: 'a re-plan round is a new plan reviewed whole, and a clean one delivers',
+      input: inputFor([...replanned.rounds, replanClean], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['clean', true],
+      expectedCode: 'REVIEW_CLEAN',
+    },
+    {
+      name: 'a Major surviving the re-plan round hands the unit off as a draft with its ledger',
+      input: inputFor([...replanOpen.rounds, replanStillMajor], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['draft', false],
+      expectedCode: 'REVIEW_OPEN_FINDINGS',
+    },
+    {
+      name: 'a second re-plan is refused',
+      input: inputFor([...replanOpen.rounds, replanStillMajor, secondReplan], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REPLAN_SPENT',
+    },
+    {
+      name: 'the re-plan round reviews the complete artifact',
+      input: inputFor([...replanDelta.rounds, replanDeltaRound]),
+      expected: ['error', false],
+      expectedGap: 're-plan round',
+    },
+    {
+      name: 'a Critical surviving the re-plan round blocks with the ledger',
+      input: inputFor([...replanCritical.rounds, replanStillCritical], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['block', false],
+      expectedCode: 'POLICY_DENIED',
+    },
+    {
+      name: 'a verified Critical past the budget is still fixed in the next round',
+      input: inputFor(lateCritical.rounds),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FIX_DELTA_REQUIRED',
+    },
+    {
+      name: 'the Critical fix round past the budget is accepted',
+      input: inputFor([...lateCritical.rounds, lateCriticalFixed]),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
+    },
+    {
+      name: 'once the budget is spent a Major raised only once may be deferred',
+      input: inputFor(lateMajorRounds, fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['clean', true],
+    },
+    {
+      name: 'Minors never consume the budget and never hold delivery',
+      input: inputFor(minorOnly.rounds),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
+    },
+    {
+      name: 'a closing round that finds only Minors delivers',
+      input: inputFor([...minorOnly.rounds, minorClose], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['clean', true],
+    },
+    {
+      name: 'a Major re-filed under a new id on the same predicate keeps its raisings',
+      input: refiledInput,
+      expected: ['clean', true],
     },
     {
       name: 'the caller cannot configure the review cap',
@@ -1923,13 +2141,6 @@ function selfTest() {
   const respelledCheck = !validReviewRound(respelled)
     && validReviewRound({ ...respelled, reviewerIdentity: 'claude:gpt-6-astra[1m]' });
   if (!respelledCheck) cases.push({ name: 'the writer\'s model spelled another way is not an independent reviewer', input: null, expected: ['never', false] });
-
-  cases.push({
-    name: 'a JSON input cannot lower the review cap',
-    input: inputFor([acceptedFirst], JSON.parse(JSON.stringify(fixtureProjectConfig(1)))),
-    expected: ['continue', false],
-    expectedCode: 'REVIEW_FIX_DELTA_REQUIRED',
-  });
 
   let passed = 0;
   for (const fixture of cases) {
@@ -2187,6 +2398,71 @@ function selfTest() {
       expected: true,
     },
     {
+      // SPEC-review-rounds, through the builder: three fix rounds, a fourth
+      // refused by name, one re-plan round with its new plan, the ledger
+      // keyed by the predicate the orchestrator annotated.
+      name: 'the builder refuses a fourth fix round and accepts one re-plan round with its new plan',
+      actual: (() => {
+        if (!builtFirst.ok) return false;
+        let evidence = builtFirst.evidence;
+        const next = (round, options) => appendRound(evidence, reviewed(failWith([finding])), {
+          scope: 'delta',
+          checkout: builderCheckout(`budget-${round}`),
+          artifactFingerprint: hash(`budget-tree-${round}`),
+          dispatchId: `budget-${round}`,
+          findingAnnotations: [{ ...verifiedIn(finding.id), predicate: 'rule:gate' }],
+          dispositions: [{ findingId: finding.id, disposition: 'fix', rationale: 'Fixed again.' }],
+          ...options,
+        });
+        for (const round of [2, 3, 4]) {
+          const built = next(round, {});
+          if (built.ok !== true) return false;
+          evidence = built.evidence;
+        }
+        const spentCode = reviewTransition(evidence).code;
+        const fourth = next(5, {});
+        const replanDelta = next(5, { planFingerprint: hash('plan-builder-v2') });
+        const replan = next(5, { scope: 'full', planFingerprint: hash('plan-builder-v2') });
+        if (replan.ok !== true) return false;
+        const again = appendRound(replan.evidence, reviewed(pass), {
+          scope: 'full',
+          checkout: builderCheckout('budget-6'),
+          artifactFingerprint: hash('budget-tree-6'),
+          dispatchId: 'budget-6',
+          findingAnnotations: [],
+          dispositions: [{ findingId: finding.id, disposition: 'fix', rationale: 'Once more.' }],
+          planFingerprint: hash('plan-builder-v3'),
+        });
+        return spentCode === 'REVIEW_REPLAN'
+          && fourth.ok === false && fourth.code === 'REVIEW_FIX_BUDGET_SPENT'
+          && replanDelta.ok === false && replanDelta.code === 'INVALID_SCOPE'
+          && replan.code === 'REVIEW_OPEN_FINDINGS'
+          && replan.evidence.reviewRounds[4].planFingerprint === hash('plan-builder-v2')
+          && replan.evidence.reviewRounds[4].priorFindings.at(-1).predicate === 'rule:gate'
+          && reviewTransition(replan.evidence).openFindings[0].raisings === 5
+          && again.ok === false && again.code === 'REVIEW_REPLAN_SPENT';
+      })(),
+      expected: true,
+    },
+    {
+      name: 'a round over the same artifact keeps its version, so a decision needs no commit',
+      actual: (() => {
+        if (!builtFirst.ok) return false;
+        const decided = appendRound(builtFirst.evidence, reviewed({
+          verdict: 'pass', findings: [], rebuts: [accept(finding.id, 'Agreed.')],
+        }), {
+          ...rebutOptions,
+          scope: 'full',
+          checkout: builderCheckout('b-1'),
+          artifactFingerprint: hash('tree-1'),
+        });
+        return decided.ok === true
+          && decided.code === 'REVIEW_CLEAN'
+          && decided.evidence.reviewRounds[1].artifactVersion === 1;
+      })(),
+      expected: true,
+    },
+    {
       name: 'a rebut without its claim and evidence is refused',
       actual: builtFirst.ok
         ? appendRound(builtFirst.evidence, reviewed(pass), secondOptions({
@@ -2259,20 +2535,26 @@ function selfTest() {
   ];
 
   const cleanInput = inputFor([clean]);
-  const handoffInput = inputFor([closingFirst, closingStillFails], configuredCap, { scope: 'full' });
+  const openFindingsInput = inputFor(
+    [...replanOpen.rounds, replanStillMajor], fixtureProjectConfig(), { scope: 'full' },
+  );
   const publicationCases = [
     {
-      name: 'a cap hand-off publishes its reviewed head and names the handed-off Majors',
+      name: 'a draft hand-off names its open findings with predicate and raisings, and publishes nothing',
       actual: (() => {
         const authorization = authorizeReviewPublication(
-          handoffInput,
-          closingStillFails.headOid,
-          closingStillFails.checkout,
+          openFindingsInput,
+          replanStillMajor.headOid,
+          replanStillMajor.checkout,
         );
-        return authorization.authorized
-          && authorization.code === 'REVIEW_CAP_HANDOFF'
-          && JSON.stringify(reviewTransition(handoffInput).handedOffFindings)
-            === JSON.stringify([{ id: cumulativeFinding.id, severity: 'Major' }]);
+        const transition = reviewTransition(openFindingsInput);
+        return authorization.authorized === false
+          && authorization.code === 'REVIEW_OPEN_FINDINGS'
+          && transition.reviewedHead === replanStillMajor.headOid
+          && transition.fixRounds.used === 3
+          && JSON.stringify(transition.openFindings.map(({ id, severity, predicate, raisings }) =>
+            ({ id, severity, predicate, raisings })))
+            === JSON.stringify([{ id: replanOpen.major.id, severity: 'Major', predicate: replanOpen.major.id, raisings: 5 }]);
       })(),
       expected: true,
     },
@@ -2423,7 +2705,8 @@ function appendRoundMain(args) {
   const usage = 'review-contract: --append-round --result-file <path> '
     + '(--first-round --plan-fingerprint <sha256> --author <engine:model> '
     + '--state <base STATE.md> [--base-oid <oid>] | --evidence-file <path> '
-    + '--scope full|delta [--dispositions-file <path>]) '
+    + '--scope full|delta [--dispositions-file <path>] '
+    + '[--plan-fingerprint <sha256 of the re-plan>]) '
     + '[--annotations-file <path>] [--checkout <dir>] [--out <path>]\n';
   const resultFile = flagValue(args, '--result-file');
   const first = args.includes('--first-round');
@@ -2451,6 +2734,10 @@ function appendRoundMain(args) {
         ?? String(statSync(resultFile).mtimeMs).replace('.', '-'),
       findingAnnotations: optionalJson('--annotations-file'),
       dispositions: optionalJson('--dispositions-file'),
+      // A later round names a plan fingerprint only when it is the re-plan.
+      ...(first || flagValue(args, '--plan-fingerprint') === null
+        ? {}
+        : { planFingerprint: flagValue(args, '--plan-fingerprint') }),
     };
     if (first) {
       const projectConfig = projectConfigForReview(flagValue(args, '--state') ?? '');

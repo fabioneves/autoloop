@@ -201,10 +201,9 @@ skipped.
      verdict accepts that exact ID;
    - verified Critical/Major in the delta is fixed or rebutted;
    - verified out-of-delta Critical/Major is fixed and the next round is full;
-   - a gating cap round earns one closing full round. If only Majors gate there under manual policy,
-     the result is `REVIEW_CAP_HANDOFF`: file each Major as a repair and list it in the PR body.
-     A Critical, or a non-manual policy, is `REVIEW_CAP_REACHED`: the dev skill's re-plan decide
-     applies, not a human block.
+   - a Major open after three fix rounds is decided, re-planned once, or deferred
+     (`REVIEW_REPLAN`, dev skill step 8); after the re-plan round a Major is `REVIEW_OPEN_FINDINGS`
+     (draft, `human:decide`) and a Critical blocks `POLICY_DENIED`.
 
    Invoke `node <plugin-tools>/review-contract.mjs` on stdin with
    `{round,scope,projectConfig,expected:{planFingerprint,repositoryFingerprint,configuredBaseOid,artifactVersion,artifactFingerprint,headOid},findingAnnotations:[{id,verified,inScope}],reviewRounds:[...]}`
@@ -212,7 +211,7 @@ skipped.
    records one dispatched round: its unique `dispatchId`, differing `authorIdentity` and
    `reviewerIdentity`, scope, delta base, the complete prior gating ledger with `fix`/`rebut`
    dispositions and `state: closed` for resolved entries, the open rebuttals, and the exact verdict
-   `dispatch.mjs` parsed. The contract applies its own fixed 20-round cap; the input carries none.
+   `dispatch.mjs` parsed. The contract applies its own fix budget; the input carries none.
    Treat the returned `reviewedHead` and checkout as artifact-attested, not live-worktree
    authority; re-read HEAD, let the live delivery contract enforce committed = reviewed = gated =
    the independently fetched PR head, and require the exact clean live checkout when publishing

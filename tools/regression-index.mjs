@@ -61,6 +61,37 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'review-rounds-past-three-did-not-converge',
+    date: '2026-10-12',
+    symptom: 'On one project 12 units reached the code-review round cap of 20. One unit ran 15 '
+      + 'review and 6 fix dispatches in a day, another 8 fix and 8 review rounds plus a two-hour '
+      + 'timeout. Majors in late rounds were raised on lines that earlier fixes added.',
+    cause: 'The contract bounded rounds at 20 and nothing else: a Major could be fixed again '
+      + 'every round, and a re-filed Major under a new id restarted its count. Since 0.69.0 a '
+      + 'unit gets round 1 plus three fix rounds; a Major still open is decided, re-planned once, '
+      + 'or deferred, findings are keyed by predicate, a Critical is fixed regardless, and a Major '
+      + 'surviving the re-plan round hands the unit off as a draft with human:decide.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'review-contract.mjs', anchor: 'export const FIX_ROUND_BUDGET = 3;' }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a fourth fix round is refused'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a Major re-filed under a new id on the same predicate keeps its raisings'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a decision rebuts the finding and one closing full round over the same artifact closes it'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a second re-plan is refused'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a verified Critical past the budget is still fixed in the next round'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a Critical surviving the re-plan round blocks with the ledger'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'Minors never consume the budget and never hold delivery'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a Major surviving the re-plan round hands the unit off as a draft with its ledger'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'the builder refuses a fourth fix round and accepts one re-plan round with its new plan'," }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a review round replaces the counter with the fix budget'," }),
+      Object.freeze({ file: 'step.mjs', anchor: "'round 1, the re-plan round and the open-findings hand-off name themselves'," }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: "'a review step keeps its named round: a fix round, the re-plan round, the open-findings hand-off'," }),
+      Object.freeze({ file: 'briefs/code-review.md', anchor: 'A re-raise on the same predicate is the same finding' }),
+      Object.freeze({ file: 'briefs/fix.md', anchor: 'or a predicate has a Major in two consecutive rounds' }),
+      Object.freeze({ file: 'briefs/plan.md', anchor: 'On a re-plan, the input is the code-review findings ledger' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**After the re-plan round there is no further round.**' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'premise-blocks-waited-on-decisions-the-loop-can-take',
     date: '2026-10-12',
     symptom: 'On one project 33 units blocked at premise for a human decision, ten of them in one '
@@ -619,7 +650,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'label-swap-reminder.mjs',
-        anchor: 'findings is announced as `step.mjs --to 08-fix --round <r>/<cap>` under the current ',
+        anchor: 'findings is announced as `step.mjs --to 08-fix --round fix-<n>` under the current ',
       }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
@@ -820,7 +851,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'review-contract.mjs',
-        anchor: 'function scopeEscalates(previous, current) {',
+        anchor: 'function sameArtifactRound(previous, current) {',
       }),
       Object.freeze({
         file: 'review-contract.mjs',
@@ -1609,7 +1640,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'unit.mjs', anchor: 'export function liftWaits(' }),
       Object.freeze({ file: 'snapshot-contract.mjs', anchor: "...(issue.labels.includes('loop-waiting') ? ['waiting'] : [])" }),
       Object.freeze({ file: 'review-contract.mjs', anchor: 'const DEFER_AFTER_RAISINGS = 3;' }),
-      Object.freeze({ file: 'review-contract.mjs', anchor: "decision('continue', 'REVIEW_CLOSING_ROUND_REQUIRED'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "return decision('continue', 'REVIEW_REPLAN', {" }),
       Object.freeze({ file: 'lifecycle-contract.mjs', anchor: 'export function issueBodyIdentity(' }),
     ]),
   }),
@@ -1620,14 +1651,16 @@ export const INCIDENTS = Object.freeze([
       + 'host killed three times, sat at human:decide for hours. The only '
       + 'answers were "ship it with the findings listed" and "try again later".',
     cause: 'Reaching a limit had one outcome, a block. Since 0.50.0 a closing '
-      + 'round with only Majors under manual policy is REVIEW_CAP_HANDOFF: the '
-      + 'unit publishes with the findings filed and listed for the human at '
-      + 'merge. The kill bound becomes a timed wait that prime lifts.',
+      + 'round with only Majors under manual policy was REVIEW_CAP_HANDOFF: the '
+      + 'unit published with the findings filed and listed for the human at '
+      + 'merge; since 0.69.0 the spent fix budget is REVIEW_REPLAN, and the loop '
+      + 'decides, re-plans once, or defers. The kill bound becomes a timed wait '
+      + 'that prime lifts.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'review-contract.mjs', anchor: "return decision('clean', 'REVIEW_CAP_HANDOFF', {" }),
-      Object.freeze({ file: 'review-contract.mjs', anchor: "&& input.projectConfig.merge?.policy === 'manual'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "return decision('continue', 'REVIEW_REPLAN', {" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'three fix rounds spend the budget: a Major still open is decided, re-planned or deferred'," }),
       Object.freeze({ file: 'unit.mjs', anchor: "condition = { on: 'time', until: new Date(now + minutes * 60_000).toISOString() };" }),
-      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**`REVIEW_CAP_HANDOFF` — only Majors remain, under manual merge policy.**' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**`REVIEW_REPLAN` — the budget is spent, Majors remain.**' }),
     ]),
   }),
   Object.freeze({

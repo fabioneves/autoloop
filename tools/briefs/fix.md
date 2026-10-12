@@ -6,7 +6,7 @@ You fix the verified review findings listed below, on the unit's branch. You are
 - Read AGENTS.md, CLAUDE.md and any coding-conventions document AGENTS.md names; read `.autoloop/STATE.md` and the checklist file named below from the configured base.
 - Fix every finding listed; each one's disposition below is binding.
 - For a behavior defect, write a test that fails on it first, then make it pass.
-- When the facts mark a fix invariant-scoped, derive the complete invariant from the cited spec, test every case it implies, and satisfy it jointly.
+- When the facts mark a fix invariant-scoped, or a predicate has a Major in two consecutive rounds, derive the complete invariant from the cited spec, test every case it implies, and satisfy it jointly. Do not fix the reported instance alone.
 - Stay inside the frozen plan's boundary; do not replan.
 - Never weaken a test, gate or review predicate to clear a finding.
 - Commit each fix as a conventional commit naming its finding id and recording its verification; no co-author trailer.
