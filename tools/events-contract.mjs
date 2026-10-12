@@ -13,7 +13,7 @@ import {
   appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -289,7 +289,9 @@ export function setRunId(commonDir, id) {
 // undefined and null fields, appends, and reports a failure as one stderr line.
 // Never throws; the writer's own result is never changed by it.
 export function emitEvent(commonDir, event, { nowMs = Date.now(), stderr = process.stderr } = {}) {
-  if (typeof commonDir !== 'string' || commonDir.length === 0) return { ok: false, error: 'no common dir' };
+  // Absolute only: a relative or empty value (a fake, a failed resolve) must
+  // never create an autoloop/ directory under the current working directory.
+  if (typeof commonDir !== 'string' || !isAbsolute(commonDir)) return { ok: false, error: 'no absolute common dir' };
   const record = { v: EVENT_VERSION, at: nowMs, run: currentRunId(commonDir) };
   for (const [name, value] of Object.entries(event)) if (value !== undefined && value !== null) record[name] = value;
   const result = appendEvent(commonDir, record);
@@ -445,6 +447,19 @@ function selfTest() {
         && unknown.ok && second.run === 'unknown'
         && (process.getuid?.() === 0 || (!failed.ok && lines.length === 1 && lines[0].startsWith('events: step not recorded')));
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  check('emitEvent refuses a relative or empty common dir and creates nothing', () => {
+    const dir = fresh();
+    const cwd = process.cwd();
+    try {
+      process.chdir(dir);
+      const relative = emitEvent('a'.repeat(40), { by: 'unit', kind: 'wait', issue: 5, reason: 'issue' }, { stderr: { write() {} } });
+      const empty = emitEvent('', { by: 'unit', kind: 'wait', issue: 5, reason: 'issue' }, { stderr: { write() {} } });
+      return !relative.ok && !empty.ok && readdirSync(dir).length === 0;
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
   check('the paused marker is set, read and cleared', () => {
     const dir = fresh();

@@ -308,7 +308,7 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
 
 export function transition({
   root, run = realRun(root), nowMs = Date.now(),
-  issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false,
+  issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false, pr = null,
   markers = ownRunMarkers,
 }) {
   const refuse = (message) => ({ ok: false, lines: [message] });
@@ -373,6 +373,9 @@ export function transition({
       const next = latest === null || latest.closed ? { issue, steps: [] } : latest;
       // Sent back to a ladder or fix step, the delivered head is no longer the unit's.
       if (LADDER.includes(to) || to === '08-fix') delete next.pending;
+      // The unit's pull request, once the publish step names it: every later
+      // ribbon and card shows it beside the issue (SPEC-events item 6).
+      if (Number.isSafeInteger(pr) && pr > 0) next.pr = pr;
       next.steps.push({
         step: to, stepId: newAssociationId(), round, model, fallback, staged, startedAtMs: nowMs,
         ...(skipped.length ? { skipped } : {}),
@@ -385,13 +388,13 @@ export function transition({
   }
   // The UI's copy of the transition (SPEC-events). Fail-open: a refused or
   // failed append is one stderr line and the ribbon still prints.
+  const knownPr = Number.isSafeInteger(pr) && pr > 0 ? pr : Number.isSafeInteger(record.pr) && record.pr > 0 ? record.pr : null;
   emitEvent(dirname(dir), {
-    by: 'step', kind: 'step', issue, step: to, round, model, text: eventText(note),
-    pr: Number.isSafeInteger(record.pr) && record.pr > 0 ? record.pr : undefined,
+    by: 'step', kind: 'step', issue, step: to, round, model, text: eventText(note), pr: knownPr ?? undefined,
   }, { nowMs });
   return {
     ok: true,
-    lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note }),
+    lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note, pr: knownPr }),
       ...(skipped.length ? [`⚠️ #${issue} skipped ${skipped.join(', ')}`] : []),
       ...(warning ? [warning] : [])],
   };
@@ -934,14 +937,17 @@ function progress(step, round) {
 
 // One status line with fixed columns. Only plain-width segments are padded;
 // every emoji sits alone in its own column, so the columns line up.
-export function renderRibbon({ atMs, issue, step, round = null, badge = '⏳', model = null, fallback = false, note = '', span = null }) {
+export function renderRibbon({ atMs, issue, step, round = null, badge = '⏳', model = null, fallback = false, note = '', span = null, pr = null }) {
   const unit = `#${issue}`.padEnd(4);
+  // The pull request beside the issue once one exists, so a PR in the list
+  // is read back to its unit without a lookup (operator, 2026-10-12).
+  const prChip = Number.isSafeInteger(pr) && pr > 0 ? `PR #${pr} ` : '';
   try {
     const [name, glyph] = STEPS[step];
     const chip = modelChip(model, step);
     const [dot, ...modelName] = chip.split(' ');
     return `${clock(atMs)} ${unit} ${badge} ${glyph} ${name.padEnd(12)} ${(span ?? progress(step, round)).padEnd(17)}  `
-      + `${dot} ${modelName.join(' ').padEnd(12)}${fallback ? '↪' : ' '} ${oneLine(note)}`.trimEnd();
+      + `${dot} ${modelName.join(' ').padEnd(12)}${fallback ? '↪' : ' '} ${prChip}${oneLine(note)}`.trimEnd();
   } catch {
     return `${clock(atMs)} ${unit} ${badge} ${step} ${oneLine(note)}`.trimEnd();
   }
@@ -1449,6 +1455,21 @@ function transitionChecks(at) {
         && unwritable.after.includes('loop:06-simplify')
         && readJson(join(root, '.git', 'autoloop', 'steps', '353.json'), null)?.steps?.at(-1)?.step === '06-simplify'
         && (process.getuid?.() === 0 || readEvents(join(root, '.git')).events.length === 1)]);
+    const withPr = (() => {
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:09-gate'];
+      const publish = go({ issue: 354, to: '10-publish', pr: 530 });
+      const record = go({ issue: 354, to: '11-record' });
+      const after = labels;
+      labels = saved;
+      return { publish, record, after, stored: readJson(join(root, '.git', 'autoloop', 'steps', '354.json'), null),
+        events: readEvents(join(root, '.git')).events.filter((event) => event.issue === 354) };
+    })();
+    results.push(['a transition with --pr keeps the PR on the record, and every later ribbon names it beside the issue',
+      withPr.publish.ok === true && withPr.publish.lines[0].includes('#354 ') && withPr.publish.lines[0].includes(' PR #530')
+        && withPr.record.lines[0].includes(' PR #530') && withPr.stored?.pr === 530
+        && withPr.events.length === 2 && withPr.events.every((event) => event.pr === 530)
+        && !renderRibbon({ atMs: at(9, 51), issue: 354, step: '11-record' }).includes('PR #')]);
     const backward = go({ to: '05-implement', model: 'claude-opus-5-5' });
     results.push(['a backward swap is refused by this tool, printed, and changes nothing',
       backward.ok === false && /step labels only climb/u.test(backward.lines.join(' '))

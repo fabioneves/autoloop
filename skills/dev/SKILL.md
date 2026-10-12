@@ -46,6 +46,9 @@ node <plugin-tools>/prime.mjs --json
   `knownRefused` (deferred markers the same driver already refused since they last changed).
   `null` when evidence is incomplete — re-prime.
 - `eligible` — issues selection may take ("Queue and trust" applied). `null` → re-prime first.
+  `paused: true` — the operator paused the loop: finish in-flight units, take none, park.
+- A prompt `autoloop: control` means the operator used the status pane: run prime, which applies
+  the control (pause, unpause, answer, merge, label), then act on its summary.
 - `dispatches` — `inherited`: an ended session's dispatch; its unit is yours and in flight, its
   resume this wait. Never stop or re-dispatch it; re-announce its step, background `dispatch.mjs
   --wait-file <outputFile> --timeout-seconds 9999` (exit 3: the kill drill), then the step's usual
@@ -228,12 +231,11 @@ invalid.
 read-only steps 1–3 (premise and plan against `origin/<base>`, then its plan-review dispatch), and
 reconcile `markers.deferred` one `--reconcile-issue` at a time. Read the committed tree (`git show`,
 `git grep`), never the working tree. At most ONE staged unit; never two writers; never claim the
-staged unit until the worked unit is terminal (delivered, blocked, deferred); every marker and label
-names its own issue. At collection finish the worked unit through step 11, then claim the staged one
-with its reviewed plan.
+staged unit until the worked unit is terminal; every marker and label names its own issue. At
+collection finish the worked unit through step 11, then claim the staged one.
 
 **Staging is a PRECONDITION of parking.** Eligible queue non-empty with nothing staged → stage one
-first. A park showing one branch while eligible work waits is the defect.
+first.
 
 **Liveness — never go dark; parking is not stopping.**
 
@@ -272,11 +274,11 @@ The run record's `overlap:` line comes from `overlap-report.mjs`.
 - **Bounded reads only**: field projection, `tail -20` of logs, never a full read of dispatch
   output; a failure's stderr tail only.
 - **Narration is the delta**: say what CHANGED and what needs the human.
-  **A step is announced ONCE, by its ribbon**; extra detail is a `--note` suffix.
-- **The scratchpad is a write target, never a cwd**: never `cd <scratchpad> && …` (`git`, `gh`,
-  the driver, the gate need the repo cwd).
+  **A step is announced ONCE, by its ribbon**: the line `step.mjs` prints on its tool row. Never
+  repeat it in prose; extra detail is a `--note` suffix.
+- **The scratchpad is a write target, never a cwd**: never `cd <scratchpad> && …`.
 - **After compaction, re-fetch byte-exact values** (SHA, planHash, comment id, label) from GitHub
-  or disk; never recall them. Prefer handing off at a unit boundary over compacting mid-unit.
+  or disk; never recall them. Prefer a hand-off at a unit boundary over compacting mid-unit.
 
 ## Lane and convergence policy
 
@@ -460,7 +462,7 @@ self-documenting code, conventional commits, **one commit per completed plan tas
 trailer, no PR/merge, no objective gate. `extraPaths` (edits a plan task needed outside the
 boundary) reach round 1 via `--boundary-file <plan-result.json> --implement-result-file
 <implement-result.json>`. A quick gate may run once after collection. A timed-out writer: inspect
-the branch against the plan's tasks and dispatch only the remainder — never retry blindly.
+the branch against the plan's tasks and dispatch only the remainder.
 
 ### 6. Simplify
 
@@ -657,8 +659,9 @@ Never weaken the gate.
 
 ### 10. Publish, finalize, and submit
 
-**No label moves at this step, or step 11.** Announce `step.mjs --to 10-publish` (and `11-record`);
-the finalizer swaps `loop:09-gate` to `loop-delivered`.
+**No label moves at this step, or step 11.** Announce `step.mjs --to 10-publish --pr <M>` (and
+`11-record`); the ribbon then names the PR beside the issue. The finalizer swaps `loop:09-gate`
+to `loop-delivered`.
 
 Push with `git push origin HEAD:refs/heads/<captured-loop-branch>` and verify the PR head equals the
 gated OID; only after a rebase,
@@ -804,7 +807,7 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
   (`⚪ ORCHESTRATOR`). `--fallback` when it ran. Review/fix rounds pass `--round full|fix-<1..3>|
   re-plan|open-findings` (a fix round is `08-fix`); plan review takes none.
 - Orphan reconciliation announces `00-reconcile` before any fetch or driver call. `⚠️ #N skipped
-  <steps>` is expected only for 06; any other skip is a defect to fix first.
+  <steps>` is expected only for 06; any other skip is a defect.
 - The dot is the model's colour (🟣 Fable, 🟠 Opus, 🟢 Astra, 🔵 Sonnet, 🟡 Haiku, ⚪ other).
 - A failed swap prints its reason and exits 1: read it, never retry blindly. **Never swap a step
   label by hand.**
@@ -872,8 +875,7 @@ Every obstacle is exactly one class; only `human` stops the unit:
   `loop-ready`. Other codes are refused; a specification gap is a `decide`, never a block.
 - **`fix`** — code, tests, docs, CI config, a dependency, or a correctable premise. In the unit's
   lane fix it in-unit; otherwise `node <plugin-tools>/unit.mjs --repair --parent <N> --title "<…>"
-  --body-file <path>` (`--blocks-parent` when the unit needs it) and take it next, or carry on if
-  the unit does not depend on it.
+  --body-file <path>` (`--blocks-parent` when the unit needs it) and take it next.
 - **`decide`** — a judgment call with a recommendable option: an issue/spec contradiction, a
   missing value the loop can choose, a design, ratification or scope question, oversized work, a
   Major open past the fix budget. Record it FIRST with
@@ -901,7 +903,7 @@ remedy) stops the RUN; never improvise past a guardrail.
   `human:authorize`, and the finalizer labels a widening into a protected path.
 - Call every plugin tool as ONE bare command — no `&&`, `;`, pipe, `cd X &&`, or `> file`; use its
   own `--out`/flags. The one exception is step 9's `publish-verdict.mjs gate <head> > <log> 2>&1`.
-  Never write under `.git/` with Write, Edit, or a redirect; recordings there go through a tool.
+  Never write under `.git/` with Write, Edit, or a redirect.
 - "stage 2 classifier error"/"classifier unavailable": retry the same call once, unchanged. A policy
   denial of a loop step: `unit.mjs --block --reason POLICY_DENIED`, verbatim reason as `--note`,
   next unit — never a run halt.
@@ -914,6 +916,5 @@ remedy) stops the RUN; never improvise past a guardrail.
 ```text
 /autoloop:dev
 /autoloop:dev only #42
-/autoloop:dev maxUnits: 3
 /autoloop:dev drain the queue
 ```
