@@ -1839,6 +1839,29 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'verify.mjs', anchor: 'a self-test that leaves a descendant fails and the descendant is killed' }),
     ]),
   }),
+  Object.freeze({
+    id: 'old-reconcile-marks-hid-blocked-waiting-and-repair-units',
+    date: '2026-10-12',
+    symptom: 'The LFE parked view showed open units as "00 reconcile" for 26h while their labels said '
+      + 'loop-waiting, loop-blocked with a human gate, or loop-repair.',
+    cause: 'Status views showed only the latest local step and hid earlier-run and record-step units. '
+      + 'One pure projection now prefers a verified, same-repository, not future-dated snapshot '
+      + 'over an older local mark, dates invalidated data as history, and keeps every open unit visible.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'a local reconcile mark yields to a current blocked, waiting or repair observation' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'newer local work outranks an older snapshot, and an active attempt keeps its model, role and round' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'a unit absent from the snapshot stays visible with its own local state' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'invalid, foreign, future-dated, unidentified, incomplete and missing snapshots are not authority' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'an invalidated snapshot is dated history, never current' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'earlier-run units and record steps stay visible as last seen; only a card closes a unit' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'one entry per unit, and a blocked unit is not repeated as a human wait' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'the parked view shows a current blocked, waiting or repair observation instead of an old reconcile mark' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'the run card carries the same dispositions from the same projection' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'status rendering makes no GitHub call and changes no file' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'the projected run card stays within its byte bound and keeps the park' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'units an earlier run left open stay visible as last seen, never as running' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

@@ -22,9 +22,12 @@ import { fileURLToPath } from 'node:url';
 import { evaluate } from './command-guard.mjs';
 import { loopRunIsLive, ownRunMarkers, sessionLatch } from './run-markers.mjs';
 import {
-  completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, SNAPSHOT_SECTIONS, verifySnapshot,
+  completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, issueSnapshotItem, SNAPSHOT_SECTIONS,
+  verifySnapshot,
 } from './snapshot-contract.mjs';
 import { realRun } from './unit.mjs';
+import { parseGitHubRemote } from './checkout-contract.mjs';
+import { projectParked, stepAttempt } from './parked-disposition.mjs';
 import { newAssociationId, readStepBinding, updateStepRecord, validReceipt } from './dispatch-return-association.mjs';
 
 const LADDER = Object.freeze([
@@ -131,46 +134,37 @@ function runStartMs(markers) {
   return starts.length ? Math.min(...starts) : null;
 }
 
-// How many times the unit entered its current step: runs of that step in the
-// record, a re-announcement right after itself not counted (#427 went plan,
-// plan-review, plan, plan: v2).
-export function stepAttempt(steps) {
-  const current = steps.at(-1)?.step;
-  let attempts = 0;
-  steps.forEach((entry, index) => {
-    if (entry.step === current && steps[index - 1]?.step !== current) attempts += 1;
-  });
-  return attempts;
+// The repository the checkout's one origin names, read locally; null when it
+// cannot be proved, so no snapshot speaks for this checkout.
+function originRepository(run) {
+  const origin = run('git', ['config', '--get-all', 'remote.origin.url']);
+  const values = origin.ok ? origin.stdout.split(/\r?\n/u).filter(Boolean) : [];
+  const parsed = values.length === 1 ? parseGitHubRemote(values[0]) : null;
+  return parsed ? `${parsed.owner}/${parsed.repo}` : null;
 }
 
-// A unit is in flight when its record is open and this run touched it: an
-// abandoned run's unit stays open in its steps file indefinitely.
-function openUnits(dir, sinceMs = null) {
+// Every open unit with what it waits for, from the steps files and the
+// retained snapshot. Reads only: no GitHub call, no state change.
+function projectedUnits(dir, run, nowMs, sinceMs) {
   const directory = join(dir, 'steps');
-  if (!existsSync(directory)) return [];
-  return readdirSync(directory)
+  const records = existsSync(directory) ? readdirSync(directory)
     .filter((name) => /^\d+\.json$/u.test(name))
-    .map((name) => readJson(join(directory, name), null))
-    .filter((record) => record && !record.closed && record.steps?.length
-      && record.steps.at(-1).step !== '11-record'
-      && (sinceMs === null || record.steps.at(-1).startedAtMs >= sinceMs))
-    .map((record) => ({ issue: record.issue, ...record.steps.at(-1), attempt: stepAttempt(record.steps) }))
-    .sort((left, right) => left.issue - right.issue);
+    .map((name) => readJson(join(directory, name), null)) : [];
+  const path = retainedSnapshotPath(dir);
+  const snapshot = path === null ? null : readJson(path, null);
+  return { snapshot, ...projectParked({ records, snapshot, repository: originRepository(run), nowMs, sinceMs }) };
 }
 
 export function parkedView({ root, run = realRun(root), nowMs = Date.now(), markers = ownRunMarkers }) {
   const { dir } = autoloopDir(root, run);
   if (dir === null) return renderParked({ nowMs, units: [], eligible: null });
-  const snapshotPath = retainedSnapshotPath(dir);
-  const snapshot = snapshotPath === null ? null : readJson(snapshotPath, null);
+  const { snapshot, units, humanWaits } = projectedUnits(dir, run, nowMs, runStartMs(markers(root)));
   // Every step swap marks the snapshot stale, so a parked view nearly always
   // reads one; the count recorded just before that swap is shown with its time.
   const eligible = eligibleIssueNumbers(snapshot);
   const last = eligible === null ? readJson(join(dir, QUEUE_COUNT), null) : null;
-  const blocked = snapshot?.sections?.blockedIssues;
-  const waiting = blocked?.complete === true ? blocked.items.map((issue) => issue.number).slice(0, 3) : [];
   return renderParked({
-    nowMs, units: openUnits(dir, runStartMs(markers(root))), waiting,
+    nowMs, units, waiting: humanWaits,
     eligible: eligible !== null ? eligible.length : last?.eligible ?? null,
     asOfMs: eligible === null ? last?.scannedAtMs ?? null : null,
   });
@@ -402,35 +396,68 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
   const human = waiting.map((issue) => ` · #${issue} ⚠️ awaits /answer`).join('');
   return [
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
-    ...units.map(({ issue, step, model, startedAtMs, staged, returnedAtMs, round, attempt, role, reviewRound, waiting }) => {
-      // A unit waiting on another issue, a green base or a timer is not in
-      // its step at all (unit.mjs --wait records it).
-      if (waiting?.on) return `├ #${issue} · waits on ${waiting.on} · ${minutes(nowMs - waiting.atMs)}`;
-      const [name] = STEPS[step] ?? [step];
-      // Which round: the announced one, else the review rounds dispatched under
-      // the step, else how many times the step was entered (a plan's revisions
-      // are versions) — the last only once there is more than one.
-      const recorded = typeof round === 'string' ? Number(round.split('/')[0]) : null;
-      const which = recorded !== null && Number.isSafeInteger(recorded)
-        ? ` r${recorded}`
-        : Number.isSafeInteger(reviewRound) ? ` r${reviewRound}`
-          : attempt > 1 ? ` ${step === '02-plan' ? 'v' : 'r'}${attempt}` : '';
-      // A different role running under the step (a fix batch under a review).
-      const under = role && STEP_ROLES[step] && role !== STEP_ROLES[step] ? ` · ${role}` : '';
-      const label = `├ #${issue} · ${step.slice(0, 2)} ${name.toLowerCase()}${which}${under}`;
-      // A step whose dispatch came back is not running: a staged unit waits
-      // for the worked one to finish (LFE run 2026-09-30, "02 plan on ASTRA"
-      // for a plan that had returned).
-      if (Number.isFinite(returnedAtMs)) {
-        return `${label} returned${staged ? ' · staged, waits its turn' : ''} · ${minutes(nowMs - returnedAtMs)}`;
-      }
-      // A staged step recorded without a model was announced, not launched:
-      // "on ⚪ ENGINE" read as a running review for hours (LFE #388).
-      const where = staged && !model ? 'staged, not dispatched' : `on ${modelChip(model, step)}`;
-      return `${label} ${where} · ${minutes(nowMs - startedAtMs)}`;
+    ...units.map((unit) => {
+      const local = parkedLocal(unit, nowMs);
+      return unit.observed
+        ? `├ #${unit.issue} · ${DISPOSITION_GLYPHS[unit.observed.disposition]} ${observation(unit.observed, nowMs)} · local ${local}`
+        : `├ #${unit.issue} · ${local}`;
     }),
     `└ ${queue}${human} · resumes on results`,
   ].join('\n');
+}
+
+const DISPOSITION_GLYPHS = Object.freeze({ blocked: '❌', waiting: '⌛', repair: '🩹' });
+
+// A clock time, with its date when it is not today: a time from yesterday is
+// dated history.
+function stamp(atMs, nowMs) {
+  if (!Number.isFinite(atMs)) return 'unknown';
+  const [at, now] = [new Date(atMs), new Date(nowMs)];
+  return at.toDateString() === now.toDateString() ? clock(atMs)
+    : `${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')} ${clock(atMs)}`;
+}
+
+function observation({ disposition, labels, atMs, current }, nowMs) {
+  const gates = disposition === 'blocked' ? ` (${labels.join(', ')})` : '';
+  return `${disposition}${gates} ${current ? 'per scan' : 'as of scan'} ${stamp(atMs, nowMs)}${current ? '' : ', unconfirmed'}`;
+}
+
+// A mark, an earlier run's step or an undated one was seen, not confirmed
+// running: it shows when it was last seen, never an elapsed running time.
+function lastSeenNote({ local, lastSeenAtMs }, nowMs) {
+  return local === 'current' || local === undefined ? null
+    : `last seen ${stamp(lastSeenAtMs, nowMs)}${local === 'earlier-run' ? ' (earlier run)' : ''}`;
+}
+
+function parkedLocal(unit, nowMs) {
+  const { step, model, startedAtMs, staged, returnedAtMs, round, attempt, role, reviewRound, waiting } = unit;
+  const seen = lastSeenNote(unit, nowMs);
+  // A unit waiting on another issue, a green base or a timer is not in
+  // its step at all (unit.mjs --wait records it).
+  if (waiting?.on) return `waits on ${waiting.on} · ${seen ?? minutes(nowMs - waiting.atMs)}`;
+  const [name] = STEPS[step] ?? [step];
+  // Which round: the announced one, else the review rounds dispatched under
+  // the step, else how many times the step was entered (a plan's revisions
+  // are versions) — the last only once there is more than one.
+  const recorded = typeof round === 'string' ? Number(round.split('/')[0]) : null;
+  const which = recorded !== null && Number.isSafeInteger(recorded)
+    ? ` r${recorded}`
+    : Number.isSafeInteger(reviewRound) ? ` r${reviewRound}`
+      : attempt > 1 ? ` ${step === '02-plan' ? 'v' : 'r'}${attempt}` : '';
+  // A different role running under the step (a fix batch under a review).
+  const under = role && STEP_ROLES[step] && role !== STEP_ROLES[step] ? ` · ${role}` : '';
+  const label = `${step.slice(0, 2)} ${name.toLowerCase()}${which}${under}`;
+  if (seen) return `${label} · ${seen}`;
+  // A step whose dispatch came back is not running: a staged unit waits
+  // for the worked one to finish (LFE run 2026-09-30, "02 plan on ASTRA"
+  // for a plan that had returned).
+  if (Number.isFinite(returnedAtMs)) {
+    return `${label} returned${staged ? ' · staged, waits its turn' : ''} · ${minutes(nowMs - returnedAtMs)}`;
+  }
+  // A staged step recorded without a model was announced, not launched:
+  // "on ⚪ ENGINE" read as a running review for hours (LFE #388).
+  const where = staged && !model ? 'staged, not dispatched' : `on ${modelChip(model, step)}`;
+  return `${label} ${where} · ${minutes(nowMs - startedAtMs)}`;
 }
 
 const RUN_CARD_LIMIT = 1500;
@@ -442,9 +469,13 @@ export function renderRunCard({ nowMs, units, park, snapshot }) {
     `## autoloop run state after compaction — facts as of ${clock(nowMs)}, re-prime before deciding`,
     ...(park?.until ? [`- parked until ${clock(Date.parse(park.until))}: ${oneLine(park.reason, 120)}`] : []),
     ...(snapshot ? [`- retained snapshot ${snapshot.path}, ${minutes(snapshot.ageMs)} old`] : []),
-    ...units.map(({ issue, step, model, round, startedAtMs }) => {
+    ...units.map((unit) => {
+      const { issue, step, model, round, startedAtMs } = unit;
       const [name] = STEPS[step] ?? [step];
-      return `- #${issue} at ${step.slice(0, 2)} ${name.toLowerCase()}${round ? ` r${round}` : ''} on ${modelChip(model, step)} since ${clock(startedAtMs)}`;
+      const seen = lastSeenNote(unit, nowMs);
+      const local = `${step.slice(0, 2)} ${name.toLowerCase()}${round ? ` r${round}` : ''} `
+        + `${seen ?? `on ${modelChip(model, step)} since ${clock(startedAtMs)}`}`;
+      return unit.observed ? `- #${issue} ${observation(unit.observed, nowMs)}; local ${local}` : `- #${issue} at ${local}`;
     }),
     ...(units.length === 0 ? ['- no unit in flight'] : []),
   ];
@@ -466,7 +497,8 @@ export function runCard({ root, run = realRun(root), nowMs = Date.now(), live = 
   const park = own.map(({ marker }) => marker.park).find((value) => value?.until) ?? null;
   const newest = retainedSnapshotPath(dir);
   const snapshot = newest ? { path: newest, ageMs: nowMs - statSync(newest).mtimeMs } : null;
-  return renderRunCard({ nowMs, units: openUnits(dir, runStartMs(own)), park, snapshot });
+  const { units } = projectedUnits(dir, run, nowMs, runStartMs(own));
+  return renderRunCard({ nowMs, units, park, snapshot });
 }
 
 function readJsonText(text) {
@@ -796,6 +828,7 @@ function selfTest() {
       .every((call) => parsed(call.split(' ')).error !== null)],
   );
   checks.push(...transitionChecks(at));
+  checks.push(...dispositionChecks());
   const minute = 60_000;
   const start = at(9, 9);
   const history = [
@@ -1087,9 +1120,11 @@ function transitionChecks(at) {
         return [`THREW ${error.message}`, '', ''];
       }
     })();
-    results.push(['status views list only the units the current run touched',
-      !scoped[0].includes('#350') && scoped[1].includes('#350')
-        && !scoped[2].includes('#350') && scoped[2].includes('- no unit in flight')]);
+    results.push(['units an earlier run left open stay visible as last seen, never as running',
+      scoped[0].includes('├ #350 · 08 fix r1 · last seen 09:51 (earlier run)') && !scoped[0].includes('#350 · 08 fix r1 on')
+        && scoped[1].includes('├ #350 · 08 fix r1 on 🟠 OPUS 5.5')
+        && scoped[2].includes('- #350 at 08 fix r1/5 last seen 09:51 (earlier run)')
+        && !scoped[2].includes('#350 at 08 fix r1/5 on')]);
     const closed = (() => {
       try {
         return closeUnit({ root, run, nowMs: at(10, 30), issue: 350, outcome: 'delivered', pr: 550 });
@@ -1142,7 +1177,7 @@ function transitionChecks(at) {
       })()]);
     // A session that inherits an ended session's in-flight unit announces its
     // step again: a fresh entry this run, so the parked view shows it.
-    results.push(['a step recorded before this run is announced afresh and parked',
+    results.push(['a step recorded before this run reads as last seen until it is announced afresh',
       (() => {
         try {
           labels = ['loop-ready'];
@@ -1152,8 +1187,10 @@ function transitionChecks(at) {
           const hidden = parkedView({ root, run, nowMs: at(11, 0), markers: runFrom(at(11, 0)) });
           const again = transition({ root, run, nowMs: at(11, 1), issue: 380, to: '05-implement', markers: runFrom(at(11, 0)) });
           const shown = parkedView({ root, run, nowMs: at(11, 2), markers: runFrom(at(11, 0)) });
-          return same.lines[0] === 'already on 05-implement' && !hidden.includes('#380')
-            && again.ok === true && again.lines[0] !== 'already on 05-implement' && shown.includes('#380');
+          return same.lines[0] === 'already on 05-implement'
+            && hidden.includes('├ #380 · 05 implement · last seen 09:00 (earlier run)')
+            && again.ok === true && again.lines[0] !== 'already on 05-implement'
+            && shown.includes('├ #380 · 05 implement on ⚪ ENGINE · 1m');
         } catch {
           return false;
         }
@@ -1386,6 +1423,135 @@ function transitionChecks(at) {
           return false;
         }
       })()]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  return results;
+}
+
+// LFE, 2026-10-12: open units read "00 reconcile" for 26h while their labels
+// said loop-waiting, loop-blocked or loop-repair. Status reads project the
+// retained snapshot over the local record and never call GitHub.
+function dispositionChecks() {
+  const day = (d, hh, mm) => new Date(2026, 9, d, hh, mm).getTime();
+  const nowMs = day(12, 10, 30);
+  const scanMs = day(12, 10, 20);
+  const root = mkdtempSync(join(tmpdir(), 'step-disposition-'));
+  const autoloop = join(root, '.git', 'autoloop');
+  const snapshotPath = join(autoloop, 'prime', `${'a'.repeat(40)}.snapshot.json`);
+  const issue = (number, labels) => issueSnapshotItem({
+    number, title: `Issue ${number}`, body: '', updatedAt: '2026-10-11T08:00:00Z', labels: labels.map((name) => ({ name })),
+  });
+  const snapshotOf = (issues, scannedAtMs = scanMs) => {
+    const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+    sections.repo = completeSection([{ owner: 'acme', name: 'widgets', nameWithOwner: 'acme/widgets', defaultBranch: 'main' }]);
+    sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: 'a'.repeat(40) }]);
+    sections.openIssues = completeSection(issues);
+    sections.blockedIssues = completeSection(issues.filter((item) => item.labels.includes('loop-blocked')));
+    return createSnapshot({ scannedAt: new Date(scannedAtMs).toISOString(), sections });
+  };
+  const issues = [
+    issue(501, ['human:decide', 'loop-blocked']), issue(502, ['loop-waiting']), issue(503, ['loop-repair']),
+    issue(504, ['loop-started']), issue(520, ['loop-blocked']), issue(510, ['loop-blocked']),
+  ];
+  const records = [
+    ...[501, 502, 503, 504].map((number) => ({ issue: number, steps: [{ step: '00-reconcile', startedAtMs: day(11, 8, 0) }] })),
+    { issue: 520, steps: [{ step: '05-implement', stepId: 's', dispatchId: 'd', model: 'claude-opus-5-5', role: 'implement',
+      startedAtMs: day(12, 10, 25) }] },
+    { issue: 530, steps: [{ step: '08-fix', round: '1/5', model: 'claude-opus-5-5', startedAtMs: day(10, 9, 51) }] },
+    { issue: 531, steps: [{ step: '09-gate', startedAtMs: day(12, 9, 0) }, { step: '11-record', startedAtMs: day(12, 9, 40) }] },
+  ];
+  let origin = 'git@github.com:acme/widgets.git';
+  const calls = [];
+  const run = (command, args) => {
+    calls.push([command, ...args].join(' '));
+    if (command === 'git' && args.includes('--git-common-dir')) return { ok: true, stdout: join(root, '.git'), stderr: '' };
+    if (command === 'git' && args.join(' ') === 'config --get-all remote.origin.url') return { ok: true, stdout: origin, stderr: '' };
+    return { ok: false, stdout: '', stderr: `unexpected ${command}` };
+  };
+  const markers = () => [{ marker: { version: 1, pids: [1], openedAtMs: day(11, 7, 0) } }];
+  const write = (snapshot, extra = []) => {
+    rmSync(join(autoloop, 'steps'), { recursive: true, force: true });
+    mkdirSync(join(autoloop, 'steps'), { recursive: true });
+    mkdirSync(dirname(snapshotPath), { recursive: true });
+    for (const record of [...records, ...extra]) {
+      writeFileSync(join(autoloop, 'steps', `${record.issue}.json`), JSON.stringify(record));
+    }
+    writeFileSync(snapshotPath, JSON.stringify(snapshot));
+  };
+  const files = () => [...readdirSync(join(autoloop, 'steps')).sort().map((name) => readFileSync(join(autoloop, 'steps', name), 'utf8')),
+    readFileSync(snapshotPath, 'utf8'), String(existsSync(join(autoloop, QUEUE_COUNT)))].join('\n');
+  const views = () => {
+    try {
+      return { parked: parkedView({ root, run, nowMs, markers }), card: runCard({ root, run, nowMs, live: () => true, markers }) };
+    } catch (error) {
+      return { parked: `THREW ${error.message}`, card: `THREW ${error.message}` };
+    }
+  };
+  const results = [];
+  try {
+    write(snapshotOf(issues));
+    const before = files();
+    const current = views();
+    const unchanged = files() === before && calls.every((call) => !call.startsWith('gh'));
+    results.push(['the parked view shows a current blocked, waiting or repair observation instead of an old reconcile mark',
+      [
+        '├ #501 · ❌ blocked (human:decide, loop-blocked) per scan 10:20 · local 00 reconcile · last seen 10-11 08:00',
+        '├ #502 · ⌛ waiting per scan 10:20 · local 00 reconcile · last seen 10-11 08:00',
+        '├ #503 · 🩹 repair per scan 10:20 · local 00 reconcile · last seen 10-11 08:00',
+        '├ #504 · 00 reconcile · last seen 10-11 08:00',
+      ].every((line) => current.parked.split('\n').includes(line)) && !/26h|on ⚪ ORCHESTRATOR/u.test(current.parked)]);
+    results.push(['newer local work keeps its active attempt over an older snapshot',
+      current.parked.split('\n').includes('├ #520 · 05 implement on 🟠 OPUS 5.5 · 5m')
+        && current.card.includes('- #520 at 05 implement on 🟠 OPUS 5.5 since 10:25')]);
+    results.push(['earlier-run and record-step units stay visible, each once, and a shown unit is no extra human wait',
+      current.parked.split('\n').includes('├ #530 · 08 fix r1 · last seen 10-10 09:51 (earlier run)')
+        && current.parked.split('\n').includes('├ #531 · 11 record · last seen 09:40')
+        && current.parked.endsWith('└ queue 0 eligible · #510 ⚠️ awaits /answer · resumes on results')
+        && [501, 502, 503, 504, 520, 530, 531].every((number) => current.parked.split(`#${number} `).length === 2
+          && current.card.split(`#${number} `).length === 2)]);
+    results.push(['the run card carries the same dispositions from the same projection',
+      current.card.includes('- #501 blocked (human:decide, loop-blocked) per scan 10:20; local 00 reconcile last seen 10-11 08:00')
+        && current.card.includes('- #502 waiting per scan 10:20; local 00 reconcile last seen 10-11 08:00')
+        && current.card.includes('- #530 at 08 fix r1/5 last seen 10-10 09:51 (earlier run)')
+        && current.card.includes('- #531 at 11 record last seen 09:40')]);
+    results.push(['status rendering makes no GitHub call and changes no file', unchanged]);
+    write(invalidateSnapshot(snapshotOf(issues), 'ISSUE_MUTATION'));
+    const history = views();
+    results.push(['an invalidated snapshot is shown as dated history, never as current',
+      history.parked.split('\n').includes(
+        '├ #501 · ❌ blocked (human:decide, loop-blocked) as of scan 10:20, unconfirmed · local 00 reconcile · last seen 10-11 08:00')
+        && !history.parked.includes('per scan') && !history.parked.includes('awaits /answer')
+        && history.card.includes('- #501 blocked (human:decide, loop-blocked) as of scan 10:20, unconfirmed; local')]);
+    const unqualified = (view) => view.parked.split('\n').includes('├ #501 · 00 reconcile · last seen 10-11 08:00')
+      && !view.parked.includes('blocked (') && !view.card.includes('blocked (') && !view.parked.includes('awaits /answer');
+    origin = 'https://github.com/other/widgets.git';
+    write(snapshotOf(issues));
+    const foreign = views();
+    origin = 'git@github.com:acme/widgets.git';
+    write(snapshotOf(issues, nowMs + 60_000));
+    const future = views();
+    const tampered = JSON.parse(JSON.stringify(snapshotOf(issues)));
+    tampered.sections.openIssues.items[0].labels = ['loop-started'];
+    write(tampered);
+    const invalid = views();
+    results.push(['a foreign, future-dated or unverifiable snapshot leaves the local state qualified',
+      unqualified(foreign) && unqualified(future) && unqualified(invalid)]);
+    write(snapshotOf(issues), Array.from({ length: 80 }, (unused, index) => ({
+      issue: 600 + index, steps: [{ step: '00-reconcile', startedAtMs: day(11, 8, 0) }],
+    })));
+    const crowded = (() => {
+      try {
+        return runCard({ root, run, nowMs, live: () => true,
+          markers: () => [{ marker: { version: 1, pids: [1], openedAtMs: day(11, 7, 0),
+            park: { reason: 'operator message', until: new Date(day(12, 22, 49)).toISOString() } } }] });
+      } catch (error) {
+        return `THREW ${error.message}`;
+      }
+    })();
+    results.push(['the projected run card stays within its byte bound and keeps the park',
+      Buffer.byteLength(crowded) <= 1500 && crowded.includes('- parked until 22:49: operator message')
+        && crowded.includes('- #501 blocked (') && crowded.endsWith('\n…')]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

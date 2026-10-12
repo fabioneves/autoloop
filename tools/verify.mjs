@@ -53,6 +53,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'loop-scope.mjs',
   'loop-smoke.mjs',
   'overlap-report.mjs',
+  'parked-disposition.mjs',
   'prime.mjs',
   'publish-verdict.mjs',
   'release-verify.mjs',
