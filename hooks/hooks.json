@@ -1,5 +1,5 @@
 {
-  "description": "autoloop hooks. Every hook runs the plugin's own copy, finds the project from CLAUDE_PROJECT_DIR, and acts only for the session that owns a run (its open latch names the conversation): every other session sees no hook effect.",
+  "description": "autoloop hooks. Every hook runs the plugin's own copy, finds the project from CLAUDE_PROJECT_DIR, and acts only for the session that owns a run (its latch names the conversation; after --close-run only the command and edit guards act): every other session sees no hook effect.",
   "hooks": {
     "SessionStart": [
       {
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/tools/command-guard.mjs\"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; l=\"$HOME/.claude/autoloop/run-latches/$PPID.json\"; if [ -f \"$l\" ] && [ ! -L \"$l\" ]; then grep -qs '\"closedAt\"' \"$l\" || exit 2; elif [ -e \"$l\" ] || [ -L \"$l\" ]; then exit 2; fi; exit 0",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/tools/command-guard.mjs\"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; l=\"$HOME/.claude/autoloop/run-latches/$PPID.json\"; if [ -e \"$l\" ] || [ -L \"$l\" ]; then exit 2; fi; exit 0",
             "timeout": 15
           }
         ]

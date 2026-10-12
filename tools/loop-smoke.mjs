@@ -277,6 +277,15 @@ export function runSmokeSteps({
   });
 
   const primed = timed('prime', () => {
+    // The host runs the command guard on the prime command first; it hands
+    // prime the hook input's session id.
+    const primeCommand = `node ${tool('prime.mjs')} --json`;
+    const handed = runTool('command-guard.mjs (prime)', [tool('command-guard.mjs')], {
+      root, stepTimeoutMs, environment: { ...environment, CLAUDE_PROJECT_DIR: root },
+      input: JSON.stringify({ session_id: SMOKE_SESSION_ID, tool_name: 'Bash', cwd: root, tool_input: { command: primeCommand } }),
+    });
+    if (!handed.ok) return handed;
+    if (handed.status !== 0) return { ok: false, detail: `the guard refused the prime command: ${bounded(handed.stderr)}` };
     const result = runToolJson(
       'prime.mjs --json',
       [tool('prime.mjs'), '--json'],

@@ -730,7 +730,7 @@ function routeFor(options, cwd) {
   return { ...route, model: fallback.model };
 }
 
-function dispatchOnce(options, cwd, binding, previousDispatchId) {
+function dispatchOnce(options, cwd, binding, previousDispatchId, newRound) {
   const windowStartedAtMs = Date.now();
   const route = routeFor(options, cwd);
   const engineBinary = options.engine ?? route.engine ?? 'claude';
@@ -740,7 +740,7 @@ function dispatchOnce(options, cwd, binding, previousDispatchId) {
   if (route.error === undefined && Number.isSafeInteger(options.issue) && binding !== null) {
     try {
       const noted = noteDispatch({ root: repositoryRoot(cwd), issue: options.issue,
-        model: resolvedModel, role: options.role, binding, previousDispatchId });
+        model: resolvedModel, role: options.role, binding, previousDispatchId, newRound });
       if (noted.error) process.stderr.write(`dispatch: step record unavailable: ${noted.error}\n`);
       receipt = noted.receipt ?? null;
     } catch (error) {
@@ -858,10 +858,13 @@ export function runDispatch(options) {
     && hostName(options.engine ?? primary.engine ?? 'claude') === 'claude';
   let onFallback = options.fallback === true;
   let timeouts = 0;
+  // A retry or fallback is the same review round as the attempt it follows.
+  let counted = false;
   const earlier = [];
   for (let attempts = 1; ; attempts += 1) {
-    const result = dispatchOnce({ ...options, fallback: onFallback }, cwd, binding, previousDispatchId);
+    const result = dispatchOnce({ ...options, fallback: onFallback }, cwd, binding, previousDispatchId, !counted);
     if (result.receipt) {
+      counted = true;
       binding = { ...binding, stepId: result.receipt.stepId };
       previousDispatchId = result.receipt.dispatchId;
     }
@@ -1922,6 +1925,7 @@ function selfTest() {
           resultEvent({ structured_output: { title: 'feat: keep the whole plan', prBody: 'Closes #506', body } }),
         ));
         const planned = runDispatch({
+          timeoutMs: 15000,
           role: 'plan',
           prompt: 'plan issue #506',
           tools: resolveTools('plan'),
@@ -2119,12 +2123,14 @@ function selfTest() {
         resetModels();
         writeEngineShim(shimDirectory, shimBody(resultEvent({ structured_output: PASSING_VERDICT })));
         const reviewer = runDispatch({
+          timeoutMs: 15000,
           role: 'code-review', prompt: 'review', tools: reviewerTools, cwd: repoScratch,
           engine: join(shimDirectory, 'claude'),
         });
         const reviewerArgv = readFileSync(argvPath, 'utf8');
         writeEngineShim(shimDirectory, shimBody(`printf x > "effort-$$.txt"\n${resultEvent({ result: 'done' })}`));
         const writer = runDispatch({
+          timeoutMs: 15000,
           role: 'implement', prompt: 'implement', tools: writerTools, cwd: repoScratch,
           engine: join(shimDirectory, 'claude'),
         });
@@ -2141,6 +2147,7 @@ function selfTest() {
         setModels({ implement: { effort: null } });
         writeEngineShim(shimDirectory, shimBody(`printf x > "null-effort-$$.txt"\n${resultEvent({ result: 'done' })}`));
         const result = runDispatch({
+          timeoutMs: 15000,
           role: 'implement', prompt: 'implement', tools: writerTools, cwd: repoScratch,
           engine: join(shimDirectory, 'claude'),
         });
@@ -2356,14 +2363,14 @@ function selfTest() {
       const begin = transition({ root: repoScratch, run: stepRun, issue: 78,
         to: '08-code-review', staged: true, nowMs: 1000 });
       writeEngineShim(shimDirectory, shimBody(resultEvent({ structured_output: PASSING_VERDICT })));
-      const succeeded = runDispatch({ role: 'code-review', prompt: 'review', tools: reviewerTools,
+      const succeeded = runDispatch({ timeoutMs: 15000, role: 'code-review', prompt: 'review', tools: reviewerTools,
         cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 78 });
       const resultPath = join(scratch, 'real-success.json');
       writeFileSync(resultPath, JSON.stringify(succeeded));
       const finished = resumedLine({ root: repoScratch, run: stepRun, nowMs: 2000,
         issue: 78, what: 'review returned', resultPath });
       writeEngineShim(shimDirectory, shimBody('exit 7'));
-      const failed = runDispatch({ role: 'code-review', prompt: 'review', tools: reviewerTools,
+      const failed = runDispatch({ timeoutMs: 15000, role: 'code-review', prompt: 'review', tools: reviewerTools,
         cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 78, retryDelayMs: 0 });
       writeFileSync(resultPath, JSON.stringify(failed));
       const failure = resumedLine({ root: repoScratch, run: stepRun, nowMs: 3000,
@@ -2374,7 +2381,9 @@ function selfTest() {
         && failed.receipt?.dispatchId === last.dispatchId && failed.receipt?.dispatchId !== succeeded.receipt?.dispatchId
         && failed.error.model === last.model && Number.isFinite(failed.error.ms)
         && failure.includes('💥 🔍 CODE-REVIEW') && failure.includes('ENGINE_EXIT_NONZERO')
-        && last.returnedAtMs === 3000 && last.reviewRound === 4;
+        // One review round per dispatch, however many attempts it took
+        // (SPEC-dispatch-return-association: the correct review count).
+        && last.returnedAtMs === 3000 && last.reviewRound === 2;
     })());
     check('an off-step fix carries the review step receipt and actual model', (() => {
       const stepRun = (command) => ({ ok: true, stdout: command === 'git' ? join(repoScratch, '.git') : '[]', stderr: '' });
@@ -2382,7 +2391,7 @@ function selfTest() {
         to: '07-diff-review', staged: true, nowMs: 1000 });
       writeEngineShim(shimDirectory, shimBody('printf x > "fix-$$.txt"\n'
         + resultEvent({ result: 'fixed' })));
-      const fixed = runDispatch({ role: 'fix', prompt: 'fix', tools: writerTools,
+      const fixed = runDispatch({ timeoutMs: 15000, role: 'fix', prompt: 'fix', tools: writerTools,
         cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 79 });
       const resultPath = join(scratch, 'off-step.json');
       writeFileSync(resultPath, JSON.stringify(fixed));
@@ -2401,7 +2410,7 @@ function selfTest() {
         + `"${process.execPath}" "${fileURLToPath(new URL('./step.mjs', import.meta.url))}" --issue 80 --to 09-gate --staged >/dev/null; `
         + "printf 'You have hit your usage limit\\n' >&2; exit 1;; esac\n"
         + resultEvent({ structured_output: PASSING_VERDICT })));
-      const result = runDispatch({ role: 'code-review', prompt: 'review', tools: reviewerTools,
+      const result = runDispatch({ timeoutMs: 15000, role: 'code-review', prompt: 'review', tools: reviewerTools,
         cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 80, retryDelayMs: 0 });
       const recordPath = join(repoScratch, '.git', 'autoloop', 'steps', '80.json');
       const before = readFileSync(recordPath, 'utf8');
@@ -2424,7 +2433,7 @@ function selfTest() {
       mkdirSync(`${path}.lock`);
       let result;
       try {
-        result = runDispatch({ role: 'plan-review', prompt: 'review', tools: reviewerTools,
+        result = runDispatch({ timeoutMs: 15000, role: 'plan-review', prompt: 'review', tools: reviewerTools,
           cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 81 });
       } finally {
         rmSync(`${path}.lock`, { recursive: true, force: true });

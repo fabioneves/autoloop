@@ -16,6 +16,7 @@ import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
   statSync, writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -183,9 +184,10 @@ const REVIEW_ROLES = new Set(['plan-review', 'diff-review', 'code-review', 'doub
 // shows it even when the orchestrator announced nothing new (LFE run
 // 2026-09-30: "07 diff-review on ⚪ ENGINE" while Opus ran a fix; a closing
 // review round under the same step read "returned"). It names the model and
-// role, clears any return, and counts review rounds. A unit with no open
-// record is left alone.
-export function noteDispatch({ root, run = realRun(root), issue, model, role = null, binding, previousDispatchId }) {
+// role, clears any return, and counts review rounds: one per dispatch, its
+// retries and fallback included (newRound). A unit with no open record is
+// left alone.
+export function noteDispatch({ root, run = realRun(root), issue, model, role = null, binding, previousDispatchId, newRound = true }) {
   if (!Number.isSafeInteger(issue) || issue < 1 || (model !== null && (typeof model !== 'string' || model === ''))
     || typeof role !== 'string' || role === '') return { ok: false };
   const { dir } = autoloopDir(root, run);
@@ -210,7 +212,7 @@ export function noteDispatch({ root, run = realRun(root), issue, model, role = n
       delete last.returnedAtMs;
       delete last.waiting;
       last.role = role;
-      if (REVIEW_ROLES.has(role)) last.reviewRound = (last.reviewRound ?? 0) + 1;
+      if (REVIEW_ROLES.has(role) && newRound) last.reviewRound = (last.reviewRound ?? 0) + 1;
       return { ok: true, changed: true, record,
         receipt: { issue, stepId, dispatchId, role } };
     });
@@ -339,6 +341,8 @@ export function transition({
         return { ok: false, changed: false };
       }
       const next = latest === null || latest.closed ? { issue, steps: [] } : latest;
+      // Sent back to a ladder or fix step, the delivered head is no longer the unit's.
+      if (LADDER.includes(to) || to === '08-fix') delete next.pending;
       next.steps.push({
         step: to, stepId: newAssociationId(), round, model, fallback, staged, startedAtMs: nowMs,
         ...(skipped.length ? { skipped } : {}),
@@ -433,16 +437,17 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
 
 const DISPOSITION_GLYPHS = Object.freeze({ blocked: '❌', waiting: '⌛', repair: '🩹' });
 
-// A human gate first, then a pending merge, then any other observation. A
-// pending merge is the card's fact: never "merged" from checks or elapsed time.
+// A human gate first, then a pending merge with any waiting or repair beside
+// it, then any other observation. A pending merge is the card's fact: never
+// "merged" from checks or elapsed time.
 function dispositionNote({ observed, pending }, nowMs) {
-  if (observed && (observed.disposition === 'blocked' || !pending)) {
-    return [DISPOSITION_GLYPHS[observed.disposition], observation(observed, nowMs)];
-  }
+  const seen = observed ? [DISPOSITION_GLYPHS[observed.disposition], observation(observed, nowMs)] : null;
+  if (seen && (observed.disposition === 'blocked' || !pending)) return seen;
   if (!pending) return null;
   const { pr, policy, reason, atMs, observedAtMs } = pending;
   return ['🔀', `${pr ? `PR #${pr} ` : ''}${mergeCaption(policy)}${reason ? ` (${oneLine(reason, 80)})` : ''}`
-    + ` since ${stamp(atMs, nowMs)}${observedAtMs === null ? '' : ` · PR open per scan ${stamp(observedAtMs, nowMs)}`}`];
+    + ` since ${stamp(atMs, nowMs)}${observedAtMs === null ? '' : ` · PR open per scan ${stamp(observedAtMs, nowMs)}`}`
+    + (seen ? ` · ${seen.join(' ')}` : '')];
 }
 
 // A clock time, with its date when it is not today: a time from yesterday is
@@ -1447,6 +1452,36 @@ function transitionChecks(at) {
       return line.includes('▶️ resumed') && line.includes('step record unavailable')
         && readFileSync(path, 'utf8') === before;
     })()]);
+    // Review R1/L5: a lock left by a writer that died (a SIGKILLed dispatch)
+    // wedged every later write to the unit's record.
+    results.push(['a lock left by a dead writer, or a reused pid, wedges no transition, dispatch note or close', (() => {
+      labels = ['loop-ready'];
+      go({ issue: 407, to: '02-plan' });
+      const path = join(root, '.git', 'autoloop', 'steps', '407.json');
+      const dead = spawnSync(process.execPath, ['-e', '0'], { timeout: 10000 }).pid;
+      const plant = (owner) => {
+        mkdirSync(`${path}.lock`);
+        writeFileSync(join(`${path}.lock`, 'owner'), JSON.stringify(owner));
+      };
+      plant({ pid: dead, start: null });
+      const moved = go({ issue: 407, to: '03-plan-review' });
+      plant({ pid: process.pid, start: 'an-earlier-process' });
+      const noted = noteDispatch({ root, run, issue: 407, role: 'plan-review', model: 'gpt-6-astra' });
+      plant({ pid: dead, start: null });
+      const closed = closeUnit({ root, run, issue: 407, outcome: 'blocked' });
+      const record = readJson(path, null);
+      rmSync(`${path}.lock`, { recursive: true, force: true });
+      return moved.ok === true && moved.lines.every((line) => !line.startsWith('!')) && noted.ok === true
+        && closed.ok === true && record?.closed?.outcome === 'blocked' && record.steps.at(-1).step === '03-plan-review';
+    })()]);
+    results.push(['a corrupt step record is reported by transition and never replaced', (() => {
+      labels = ['loop-ready'];
+      const path = join(root, '.git', 'autoloop', 'steps', '408.json');
+      writeFileSync(path, '{ corrupt');
+      const moved = go({ issue: 408, to: '02-plan' });
+      return moved.ok === true && moved.lines.some((line) => line.startsWith('! step: #408 moved to 02-plan but its record failed'))
+        && readFileSync(path, 'utf8') === '{ corrupt';
+    })()]);
     // The lifecycle driver closes a reconciled unit on the orchestrator's
     // behalf: only a record still open, never re-rendering a card shown.
     results.push(['ifOpen closes an open record once, and nothing else',
@@ -1696,6 +1731,23 @@ function pendingMergeChecks() {
       pending: { pr: 770, policy: 'auto', reason: null, atMs: day(9, 30), observedAtMs: null } }] }).split('\n')[1];
     results.push(['a human gate outranks a pending merge on the parked line',
       gated === '├ #670 · ❌ blocked (human:decide) per scan 09:50 · local 11 record · last seen 09:31']);
+    // Review gap 10: a waiting or repair observation beside a pending merge
+    // was dropped from the line; a revision left the old delivery pending.
+    const beside = (issue, disposition, labels) => ({ issue, step: '11-record', local: 'mark', lastSeenAtMs: day(9, 31),
+      startedAtMs: day(9, 31), observed: { disposition, labels, atMs: day(9, 50), current: true },
+      pending: { pr: issue + 100, policy: 'auto', reason: null, atMs: day(9, 30), observedAtMs: null } });
+    const both = renderParked({ nowMs: day(10, 0), eligible: 0, units: [beside(671, 'waiting', ['loop-waiting'])] }).split('\n')[1];
+    const bothCard = renderRunCard({ nowMs: day(10, 0), units: [beside(672, 'repair', ['loop-repair'])] });
+    results.push(['a pending merge beside a waiting or repair observation names both on the parked line and the run card',
+      both === '├ #671 · 🔀 PR #771 automatic merge pending since 09:30 · ⌛ waiting per scan 09:50 · local 11 record · last seen 09:31'
+        && bothCard.includes('- #672 PR #772 automatic merge pending since 09:30 · 🩹 repair per scan 09:50; local 11 record')]);
+    seed(663);
+    closeUnit({ root: checkouts.auto, run, nowMs: day(9, 40), issue: 663, outcome: 'delivered', pr: 763 });
+    const revised = transition({ root: checkouts.auto, run, nowMs: day(9, 45), issue: 663, to: '08-fix', markers });
+    const revisedView = parkedView({ root: base, run, nowMs: day(10, 0), markers });
+    results.push(['a delivered unit sent back to a fix or revision step is no longer merge pending',
+      revised.ok === true && record(663)?.pending === undefined && record(663)?.steps.at(-1).step === '08-fix'
+        && revisedView.includes('├ #663 · 08 fix') && !revisedView.includes('PR #763')]);
     const shipped = closeUnit({ root: checkouts.auto, run, nowMs: day(10, 5), issue: 660, outcome: 'shipped', pr: 760, ifOpen: true });
     const shippedAgain = closeUnit({ root: checkouts.auto, run, nowMs: day(10, 6), issue: 660, outcome: 'shipped', pr: 760, ifOpen: true });
     results.push(['a later verified shipped close-out supersedes the pending delivery exactly once',

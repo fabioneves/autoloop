@@ -3,8 +3,9 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
-  mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
+import { processAlive, processStart } from './run-markers.mjs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,20 +43,80 @@ export function readStepBinding(path, issue) {
   };
 }
 
+// A writer that died holding the lock (a SIGKILLed dispatch) wedged every
+// later step write (review R1). The lock names its holder, pid and start
+// time, and a lock whose holder is dead, or whose pid now names another
+// process, is moved aside and removed: a rename has one winner, and the
+// winner checks it moved that same stale lock. A lock with no holder yet is
+// another writer's first instant, stale only after LOCK_GRACE_MS.
+const LOCK_GRACE_MS = 5_000;
+const MAX_RECLAIMS = 3;
+
+function lockHolder(lock) {
+  try {
+    return readFileSync(join(lock, 'owner'), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function staleLock(lock, holder) {
+  let owner = null;
+  try {
+    owner = JSON.parse(holder);
+  } catch { /* no holder yet */ }
+  if (!Number.isSafeInteger(owner?.pid) || owner.pid < 1) {
+    try {
+      return Date.now() - statSync(lock).mtimeMs > LOCK_GRACE_MS;
+    } catch {
+      return false;
+    }
+  }
+  if (!processAlive(owner.pid)) return true;
+  const start = processStart(owner.pid);
+  return typeof owner.start === 'string' && start !== null && start !== owner.start;
+}
+
+function reclaimLock(lock, holder) {
+  const aside = `${lock}.${randomUUID()}.stale`;
+  try {
+    renameSync(lock, aside);
+  } catch {
+    return;
+  }
+  if (lockHolder(aside) === holder) {
+    rmSync(aside, { recursive: true, force: true });
+    return;
+  }
+  try {
+    renameSync(aside, lock);
+  } catch { /* a live writer took the lock meanwhile */ }
+}
+
 export function updateStepRecord(path, change, { waitMs = 300 } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const lock = `${path}.lock`;
   const deadline = Date.now() + waitMs;
+  let reclaims = 0;
   for (;;) {
     try {
       mkdirSync(lock);
       break;
     } catch (error) {
-      if (error.code !== 'EEXIST' || Date.now() >= deadline) throw error;
+      if (error.code !== 'EEXIST') throw error;
+      const holder = lockHolder(lock);
+      if (reclaims < MAX_RECLAIMS && staleLock(lock, holder)) {
+        reclaims += 1;
+        reclaimLock(lock, holder);
+        continue;
+      }
+      if (Date.now() >= deadline) throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
     }
   }
+  const owner = join(lock, 'owner');
   try {
+    writeFileSync(owner, JSON.stringify({ pid: process.pid, start: processStart(process.pid), nonce: randomUUID() }));
     let record = null;
     try {
       record = JSON.parse(readFileSync(path, 'utf8'));
@@ -75,7 +136,8 @@ export function updateStepRecord(path, change, { waitMs = 300 } = {}) {
     }
     return outcome;
   } finally {
-    rmdirSync(lock);
+    try { unlinkSync(owner); } catch { /* never written */ }
+    try { rmdirSync(lock); } catch { /* reclaimed or replaced: no longer this writer's */ }
   }
 }
 
@@ -108,7 +170,11 @@ async function selfTest() {
     checks.push(['a later writer preserves earlier data', current.steps.length === 2
       && current.steps[0].stepId === earlier.steps[0].stepId && current.steps[1].waiting === 'newer']);
     const before = readFileSync(path, 'utf8');
-    mkdirSync(`${path}.lock`);
+    const plantLock = (target, owner) => {
+      mkdirSync(`${target}.lock`);
+      if (owner !== undefined) writeFileSync(join(`${target}.lock`, 'owner'), JSON.stringify(owner));
+    };
+    plantLock(path, { pid: process.pid, start: processStart(process.pid) });
     try {
       let blocked = false;
       try { updateStepRecord(path, () => ({ changed: true, record: {} }), { waitMs: 0 }); }
@@ -116,8 +182,48 @@ async function selfTest() {
       checks.push(['an owned lock blocks a second writer without being reclaimed', blocked
         && readFileSync(path, 'utf8') === before]);
     } finally {
-      rmdirSync(`${path}.lock`);
+      rmSync(`${path}.lock`, { recursive: true, force: true });
     }
+    // Review R1/L5: a lock whose holder died wedged every later step write.
+    const dead = await worker(['-e', '0']);
+    const reclaimable = [{ pid: dead.pid, start: null }, { pid: process.pid, start: 'an-earlier-process' }];
+    const reclaimed = reclaimable.map((owner) => {
+      plantLock(path, owner);
+      try {
+        return updateStepRecord(path, (record) => ({ changed: true, record: { ...record, reclaimed: owner.pid } }), { waitMs: 0 }).changed
+          && JSON.parse(readFileSync(path, 'utf8')).reclaimed === owner.pid;
+      } catch {
+        rmSync(`${path}.lock`, { recursive: true, force: true });
+        return false;
+      }
+    });
+    checks.push(['a lock whose holder is dead, or whose pid now names another process, is reclaimed',
+      reclaimed.every(Boolean) && !existsSync(`${path}.lock`)]);
+    const ready = join(root, 'holding');
+    const killAbort = new AbortController();
+    const holding = worker([...MODULE_EVAL, `const { writeFileSync } = await import('node:fs');
+      const { updateStepRecord } = await import(process.argv[1]);
+      updateStepRecord(process.argv[2], () => {
+        writeFileSync(process.argv[3], '');
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000);
+        return { changed: false };
+      });`, self, path, ready], { signal: killAbort.signal });
+    const readyBy = Date.now() + 5000;
+    while (!existsSync(ready) && Date.now() < readyBy) await new Promise((done) => setTimeout(done, 20));
+    killAbort.abort();
+    const killed = await holding;
+    let afterKill = false;
+    try {
+      afterKill = updateStepRecord(path, (record) => ({ changed: true, record: { ...record, afterKill: true } }), { waitMs: 0 }).changed;
+    } catch { /* still wedged */ }
+    checks.push(['a lock left by a SIGKILLed writer no longer wedges the next one', killed.cancelled && killed.closed
+      && afterKill && JSON.parse(readFileSync(path, 'utf8')).afterKill === true]);
+    const raced = join(root, 'steps', '10.json');
+    updateStepRecord(raced, () => ({ changed: true, record: { issue: 10, steps: [], counter: 0 } }));
+    plantLock(raced, { pid: dead.pid, start: null });
+    const racers = await Promise.all([worker([...MODULE_EVAL, RACER, self, raced]), worker([...MODULE_EVAL, RACER, self, raced])]);
+    checks.push(['two writers reclaiming one stale lock both land, one at a time', racers.every(({ code }) => code === 0)
+      && JSON.parse(readFileSync(raced, 'utf8')).counter === 2]);
     let invalid = false;
     writeFileSync(join(root, 'steps', '8.json'), 'not JSON');
     try { updateStepRecord(join(root, 'steps', '8.json'), () => ({ changed: true, record: {} })); }
@@ -126,13 +232,7 @@ async function selfTest() {
       && readFileSync(join(root, 'steps', '8.json'), 'utf8') === 'not JSON']);
     const concurrent = join(root, 'steps', '9.json');
     updateStepRecord(concurrent, () => ({ changed: true, record: { issue: 9, steps: [], counter: 0 } }));
-    const writer = `const { updateStepRecord } = await import(process.argv[1]);
-      updateStepRecord(process.argv[2], (record) => {
-        const counter = record.counter;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-        return { changed: true, record: { ...record, counter: counter + 1 } };
-      });`;
-    const writers = await Promise.all([worker([...MODULE_EVAL, writer, self, concurrent]), worker([...MODULE_EVAL, writer, self, concurrent])]);
+    const writers = await Promise.all([worker([...MODULE_EVAL, RACER, self, concurrent]), worker([...MODULE_EVAL, RACER, self, concurrent])]);
     checks.push(['concurrent writers retain both updates', writers.every(({ code }) => code === 0)
       && JSON.parse(readFileSync(concurrent, 'utf8')).counter === 2]);
     // An importer whose argv[1] is this module once re-entered the self-test,
@@ -171,7 +271,15 @@ async function selfTest() {
 }
 
 const WORKER_ENV = 'AUTOLOOP_ASSOCIATION_WORKER';
-const WORKER_BUDGET = 8;
+const WORKER_BUDGET = 12;
+// A writer that reads, waits, then increments: two of them lose an update
+// unless the lock serialises them.
+const RACER = `const { updateStepRecord } = await import(process.argv[1]);
+  updateStepRecord(process.argv[2], (record) => {
+    const counter = record.counter;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    return { changed: true, record: { ...record, counter: counter + 1 } };
+  }, { waitMs: 2000 });`;
 const MODULE_EVAL = Object.freeze(['--input-type=module', '-e']);
 
 function gone(pid) {

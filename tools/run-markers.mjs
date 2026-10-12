@@ -6,10 +6,10 @@
 // prime, step and the reports all read runs through here; the guard's own
 // self-test exercises it.
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
-  existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync,
-  unlinkSync, writeFileSync,
+  closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
+  readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -91,12 +91,11 @@ export function loopRunIsOpen(cwd = process.cwd()) {
   return ownRunMarkers(cwd).length > 0;
 }
 
-// A run that closed deliberately is still OPEN to the command guard — the
-// session goes on issuing commands and the rules that block `gh pr merge` have
-// no reason to relax. `closedAt` answers a different question, asked only by the
-// Stop hook: is this run still supposed to be taking work? Anything present but
-// unrecognised counts as closed, because the liveness guard's failure direction
-// is silence.
+// Whether a marker is still taking work. `closedAt` is asked only by the Stop
+// hook, the parked view and the AskUserQuestion rule; the guards keep a closed
+// run's rules for its session (its latch, ownedRun includeClosed). Anything
+// present but unrecognised counts as closed, because the liveness guard's
+// failure direction is silence.
 export function loopRunIsLive(cwd = process.cwd()) {
   return ownRunMarkers(cwd).some(({ marker }) => marker.closedAt === undefined);
 }
@@ -310,10 +309,16 @@ function ownerGone(owner, ownerStart) {
 }
 
 // A file read only if it is a regular one: a FIFO planted where a marker or
-// latch belongs would block the hook past its timeout.
+// latch belongs would block the hook past its timeout. Checked on the open
+// descriptor, so a swap after the check cannot reach the read.
 export function readRegularFile(path) {
-  if (!lstatSync(path).isFile()) throw new Error(`${path} is not a regular file`);
-  return readFileSync(path, 'utf8');
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error(`${path} is not a regular file`);
+    return readFileSync(fd, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function latchPath(owner, directory) {
@@ -333,6 +338,9 @@ export function recordLatch({
   if (existing?.unreadable) return null;
   if (existing !== null) {
     const { closedAt, ...kept } = existing.latch;
+    // An open latch keeps the conversation it names: rebinding it would
+    // switch that session's guards off (security review H2).
+    if (closedAt === undefined && typeof kept.sessionId === 'string' && kept.sessionId !== '') return path;
     return replaceLatch(path, { ...kept, sessionId }) ? path : null;
   }
   const latch = { version: 2, owner, ownerStart: processStart(owner), baseBranch, scope, latchedAtMs: nowMs, sessionId };
@@ -376,11 +384,11 @@ export function closeLatch({ owner = currentOwner(), directory = latchDirectory(
   return replaceLatch(existing.path, { ...existing.latch, closedAt: new Date(nowMs).toISOString() }) ? existing.path : null;
 }
 
-// This Claude process's open latch, read only: { latch, path } when it is
-// this process's (same start time) and not closed; { unreadable, path } when
-// it exists but cannot be trusted; else null. With no latch at all it reads
-// one directory listing: no git, no process.
-export function openLatch({ owner, directory = latchDirectory() } = {}) {
+// This Claude process's latch, read only: { latch, path, closed } when it is
+// this process's (same start time); { unreadable, path } when it exists but
+// cannot be trusted; else null. With no latch at all it reads one directory
+// listing: no git, no process.
+export function heldLatch({ owner, directory = latchDirectory() } = {}) {
   let names;
   try {
     names = readdirSync(directory);
@@ -399,17 +407,75 @@ export function openLatch({ owner, directory = latchDirectory() } = {}) {
   }
   if (latch?.version !== 2 || latch.owner !== pid || typeof latch.baseBranch !== 'string') return { unreadable: true, path };
   if (latch.ownerStart === null || latch.ownerStart === undefined || latch.ownerStart !== processStart(pid)) return null;
-  return latch.closedAt === undefined ? { latch, path } : null;
+  return { latch, path, closed: latch.closedAt !== undefined };
+}
+
+export function openLatch(where = {}) {
+  const held = heldLatch(where);
+  return held?.closed ? null : held;
 }
 
 // The one ownership predicate (SPEC-session-ownership): this process's open
 // latch, naming the conversation in the hook's input (`session_id`). /clear
 // starts another conversation, so it ends ownership; compaction keeps it.
-// Every hook asks it before any git, GitHub or file work.
-export function ownedRun({ sessionId, ...where } = {}) {
+// Every hook asks it before any git, GitHub or file work. The guards pass
+// includeClosed: --close-run ends the Stop check, preflight, riders and
+// transcript capture, but this session stays guarded until /clear or exit.
+export function ownedRun({ sessionId, includeClosed = false, ...where } = {}) {
   if (typeof sessionId !== 'string' || sessionId === '') return null;
-  const open = openLatch(where);
-  return open === null || open.unreadable || open.latch.sessionId === sessionId ? open : null;
+  const held = includeClosed ? heldLatch(where) : openLatch(where);
+  return held === null || held.unreadable || held.latch.sessionId === sessionId ? held : null;
+}
+
+// The host's session id for prime. Bash sees only the environment, which a
+// command can change; the command guard reads `session_id` from the hook
+// input of the prime command and leaves it here, beside the latch, with the
+// owner's start time so a reused pid never inherits it.
+function sessionPath(owner, directory) {
+  return join(directory, `${owner}.session`);
+}
+
+// A prime whose input names no session clears an earlier one: prime then
+// refuses rather than open the run for a conversation that did not ask.
+export function recordHostSession({ owner = currentOwner(), sessionId, directory = latchDirectory() } = {}) {
+  if (!Number.isSafeInteger(owner) || owner < 1) return null;
+  const path = sessionPath(owner, directory);
+  const ownerStart = processStart(owner);
+  if (typeof sessionId !== 'string' || sessionId === '' || ownerStart === null) {
+    try {
+      unlinkSync(path);
+    } catch { /* none recorded */ }
+    return null;
+  }
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try {
+      writeFileSync(fd, `${JSON.stringify({ sessionId, ownerStart })}\n`);
+    } finally {
+      closeSync(fd);
+    }
+    if (existsSync(path) && !lstatSync(path).isFile()) throw new Error(`${path} is not a regular file`);
+    renameSync(temporary, path);
+    return path;
+  } catch {
+    try {
+      unlinkSync(temporary);
+    } catch { /* never written */ }
+    return null;
+  }
+}
+
+export function hostSessionId({ owner = currentOwner(), directory = latchDirectory() } = {}) {
+  if (!Number.isSafeInteger(owner) || owner < 1) return null;
+  try {
+    const { sessionId, ownerStart } = JSON.parse(readRegularFile(sessionPath(owner, directory)));
+    const start = processStart(owner);
+    return typeof sessionId === 'string' && sessionId !== '' && start !== null && ownerStart === start ? sessionId : null;
+  } catch {
+    return null;
+  }
 }
 
 // { latch } for this session's latch; { unreadable } for one that exists
@@ -450,15 +516,18 @@ export function pruneLatches(directory = latchDirectory(), nowMs = Date.now()) {
     const path = join(directory, name);
     try {
       // A temporary left by a crash between write and link.
-      if (/^\d+\.json\.\d+\.tmp$/u.test(name)) {
+      if (/^\d+\.(?:json|session)\.\d+\.tmp$/u.test(name)) {
         if (nowMs - lstatSync(path).mtimeMs > 60_000) {
           unlinkSync(path);
           pruned.push(path);
         }
         continue;
       }
-      if (!/^\d+\.json$/u.test(name)) continue;
-      const { owner, ownerStart } = JSON.parse(readRegularFile(path));
+      const kind = /^(\d+)\.(json|session)$/u.exec(name);
+      if (kind === null) continue;
+      const recorded = JSON.parse(readRegularFile(path));
+      const owner = kind[2] === 'session' ? Number(kind[1]) : recorded.owner;
+      const { ownerStart } = recorded;
       if (ownerGone(owner, ownerStart)) {
         unlinkSync(path);
         pruned.push(path);
@@ -565,6 +634,10 @@ function selfTest() {
       owned(undefined) === null && owned('') === null && owned('s-2') === null);
     plant({ sessionId: 's-1', closedAt: '2026-10-12T00:00:00.000Z' });
     check('a closed latch is no ownership', owned('s-1') === null);
+    const guarding = (sessionId) => ownedRun({ sessionId, includeClosed: true, directory });
+    check('a closed latch keeps the guards for its own session only, until /clear',
+      guarding('s-1')?.closed === true && guarding('s-1')?.latch?.sessionId === 's-1'
+        && guarding('s-2') === null && guarding(undefined) === null);
     plant({ sessionId: 's-1', ownerStart: 'another-process' });
     check('a latch whose pid now belongs to another process (start time differs) is no ownership',
       owned('s-1') === null && existsSync(latchFile));
@@ -580,6 +653,9 @@ function selfTest() {
     const first = JSON.parse(readFileSync(latchFile, 'utf8'));
     check('prime records the session id and this process\'s start time in a new latch',
       opened === latchFile && first.sessionId === 's-1' && first.ownerStart === start && owned('s-1') !== null);
+    for (const other of ['s-foreign', null, '']) recordLatch({ baseBranch: 'main', scope: scratch, sessionId: other, directory });
+    check('an open latch is never rebound to another, an empty or a missing session id',
+      JSON.parse(readFileSync(latchFile, 'utf8')).sessionId === 's-1' && owned('s-1') !== null && owned('s-foreign') === null);
     const closed = closeLatch({ directory, nowMs: Date.UTC(2026, 9, 12) });
     check('--close-run closes the latch: ownership ends',
       closed === latchFile && typeof JSON.parse(readFileSync(latchFile, 'utf8')).closedAt === 'string' && owned('s-1') === null);
@@ -588,6 +664,39 @@ function selfTest() {
     check('a later prime re-opens ownership for its own conversation and keeps the pinned base',
       reopened === latchFile && second.closedAt === undefined && second.sessionId === 's-2'
         && second.baseBranch === 'main' && owned('s-2') !== null && owned('s-1') === null);
+    // The host's session id, as the command guard read it from the prime
+    // command's hook input: only this process's file, with its start time.
+    const sessionFile = join(directory, `${owner}.session`);
+    const recorded = recordHostSession({ sessionId: 's-host', directory });
+    const mode = lstatSync(sessionFile).mode & 0o777;
+    const hostRead = hostSessionId({ directory });
+    writeFileSync(sessionFile, JSON.stringify({ sessionId: 's-host', ownerStart: 'another-process' }));
+    const reused = hostSessionId({ directory });
+    rmSync(sessionFile);
+    symlinkSync(latchFile, sessionFile);
+    const linked = hostSessionId({ directory }) === null && recordHostSession({ sessionId: 's-host', directory }) === null;
+    rmSync(sessionFile);
+    check('the guard hands prime the host session id in a private file of this process; nothing else is trusted',
+      recorded === sessionFile && mode === 0o600 && hostRead === 's-host' && reused === null && linked
+        && hostSessionId({ directory }) === null && recordHostSession({ sessionId: '', directory }) === null);
+    // A latch swapped for a FIFO between the type check and the read once
+    // could hang the guard past its timeout (review L4).
+    if (process.platform === 'linux') {
+      const race = join(scratch, 'race');
+      mkdirSync(race);
+      writeFileSync(join(race, 'regular'), '{}');
+      spawnSync('mkfifo', [join(race, 'fifo')], { timeout: 5000 });
+      const swapper = spawn(process.execPath, ['-e', `const fs = require('node:fs'); const [d] = process.argv.slice(1);
+        const until = Date.now() + 15000;
+        while (Date.now() < until) { for (const name of ['regular', 'fifo']) {
+          try { fs.renameSync(d + '/' + name, d + '/latch'); fs.renameSync(d + '/latch', d + '/' + name); } catch {} } }`, race], { stdio: 'ignore' });
+      const reader = spawnSync(process.execPath, ['--input-type=module', '-e', `const { readRegularFile } = await import(process.argv[2]);
+        const until = Date.now() + 3000;
+        while (Date.now() < until) { try { readRegularFile(process.argv[1]); } catch {} }
+        console.log('done');`, join(race, 'latch'), fileURLToPath(import.meta.url)], { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' });
+      swapper.kill('SIGKILL');
+      check('a latch swapped for a FIFO mid-read never hangs the reader', reader.status === 0 && reader.stdout.includes('done'));
+    }
     // Marker hardening: a live ancestor whose start differs is a reused pid.
     const repo = join(scratch, 'repo');
     spawnSync('git', ['init', '-q', repo], { timeout: 10000 });

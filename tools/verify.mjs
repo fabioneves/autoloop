@@ -87,14 +87,15 @@ export const PLUGIN_HOOKS = Object.freeze([
     name: 'command-guard.mjs',
     event: 'PreToolUse',
     matcher: 'Bash|AskUserQuestion',
-    // The guard's own verdict (0 or 2) is final. Anything else is a crash: it
-    // refuses while the session's Claude process (the shell's parent) holds a
-    // latch that is not closed — decided by the latch file alone, with no git
-    // call; a latch that is not a plain file refuses too.
+    // The guard's own verdict (0 or 2) is final; a guard that throws decides
+    // by ownership itself. Anything else is a guard that could not start: it
+    // refuses while the session's Claude process — $PPID, the hook shell's
+    // parent — holds a latch, decided by the latch file alone with no git
+    // call. Closed or not: the shell cannot read the hook input's session,
+    // and a closed run stays guarded until /clear.
     command: `node "${PLUGIN_TOOLS}/command-guard.mjs"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; `
       + 'l="$HOME/.claude/autoloop/run-latches/$PPID.json"; '
-      + 'if [ -f "$l" ] && [ ! -L "$l" ]; then grep -qs \'"closedAt"\' "$l" || exit 2; '
-      + 'elif [ -e "$l" ] || [ -L "$l" ]; then exit 2; fi; exit 0',
+      + 'if [ -e "$l" ] || [ -L "$l" ]; then exit 2; fi; exit 0',
   },
   { name: 'label-swap-reminder.mjs', event: 'PostToolUse', matcher: 'Bash', command: `node "${PLUGIN_TOOLS}/label-swap-reminder.mjs"` },
   { name: 'subagent-transcript.mjs', event: 'SubagentStop', matcher: null, command: `node "${PLUGIN_TOOLS}/subagent-transcript.mjs"` },
@@ -176,8 +177,12 @@ const SETTLE_MS = 1000;
 const RUN_ID = randomUUID();
 const selfTestProcesses = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
 let activeGroup = null;
+// Set in --self-test mode: verify.mjs never starts its own self-test from
+// inside it, so the gate's run of it cannot recurse.
+let selfTesting = false;
+const OWN_PATH = fileURLToPath(import.meta.url);
 
-function groupAlive(pgid) {
+function processGroupAlive(pgid) {
   try {
     process.kill(-pgid, 0);
     return true;
@@ -186,7 +191,7 @@ function groupAlive(pgid) {
   }
 }
 
-function killGroup(pgid) {
+function killProcessGroup(pgid) {
   try {
     process.kill(-pgid, 'SIGKILL');
   } catch {
@@ -194,46 +199,74 @@ function killGroup(pgid) {
   }
 }
 
-async function groupGone(pgid, waitMs) {
-  const until = Date.now() + waitMs;
-  while (groupAlive(pgid)) {
-    if (Date.now() >= until) return false;
-    await new Promise((done) => setTimeout(done, 25));
+function realOrSelf(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
   }
-  return true;
 }
 
 // A signal is no proof of exit: the group is polled until empty, within a
 // bound, and a group that will not empty is reported, never assumed gone.
+// The settle window starts at the test's exit: a descendant that holds its
+// output keeps 'close' away until the timeout.
 export function runSelfTest(path, cwd, {
   timeoutMs = SELF_TEST_TIMEOUT_MS, cleanupWaitMs = CLEANUP_WAIT_MS, settleMs = SETTLE_MS, tally = selfTestProcesses,
+  groupAlive = processGroupAlive, killGroup = killProcessGroup,
 } = {}) {
+  if (selfTesting && realOrSelf(path) === realOrSelf(OWN_PATH)) {
+    return Promise.resolve({ ok: false, cleanupFailed: false, detail: 'verify.mjs never runs its own self-test from inside it' });
+  }
+  const groupGone = async (pgid, waitMs) => {
+    const until = Date.now() + waitMs;
+    while (groupAlive(pgid)) {
+      if (Date.now() >= until) return false;
+      await new Promise((done) => setTimeout(done, 25));
+    }
+    return true;
+  };
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path, '--self-test'], {
       cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+      // Labels the test's processes, so /proc/<pid>/environ attributes them to this run.
       env: { ...process.env, AUTOLOOP_VERIFY_RUN_ID: RUN_ID },
     });
     const pgid = child.pid ?? null;
     let output = '';
     let timedOut = false;
     let finished = false;
-    let closeWait = null;
+    let exitWait = null;
+    let closed = false;
+    let onClose = () => {};
     const collect = (chunk) => {
       if (output.length < MAX_OUTPUT_BYTES) output += chunk;
     };
-    const finish = async (code, signal, closed) => {
+    const closedWithin = (waitMs) => new Promise((done) => {
+      if (closed) {
+        done();
+        return;
+      }
+      const timer = setTimeout(done, waitMs);
+      onClose = () => {
+        clearTimeout(timer);
+        done();
+      };
+    });
+    const finish = async (code, signal, exited) => {
       if (finished) return;
       finished = true;
       clearTimeout(deadline);
-      clearTimeout(closeWait);
-      if (closed) tally.exited += 1;
-      const leftovers = closed && !timedOut && !(await groupGone(pgid, settleMs));
+      clearTimeout(exitWait);
+      if (exited) tally.exited += 1;
+      const leftovers = exited && !timedOut && !(await groupGone(pgid, settleMs));
       if (leftovers) {
         tally.leftovers += 1;
         killGroup(pgid);
       }
       const gone = await groupGone(pgid, cleanupWaitMs);
       if (!gone) tally.uncleaned += 1;
+      await closedWithin(cleanupWaitMs);
       if (activeGroup === pgid) activeGroup = null;
       const problems = [
         timedOut && `timed out after ${timeoutMs / 1000}s; its process group was killed`,
@@ -243,7 +276,7 @@ export function runSelfTest(path, cwd, {
       const record = `process: run ${RUN_ID} pgid ${pgid} exit ${code ?? '-'} signal ${signal ?? '-'} `
         + `timed-out ${timedOut} leftovers ${leftovers} cleanup ${gone ? 'confirmed' : 'FAILED'}`;
       resolve({
-        ok: closed && code === 0 && problems.length === 0,
+        ok: exited && code === 0 && problems.length === 0,
         cleanupFailed: !gone,
         detail: [output.trim(), ...problems, ...(problems.length || code !== 0 ? [record] : [])]
           .filter(Boolean).join('\n'),
@@ -253,7 +286,7 @@ export function runSelfTest(path, cwd, {
       timedOut = true;
       tally.timedOut += 1;
       killGroup(pgid);
-      closeWait = setTimeout(() => finish(null, 'SIGKILL', false), cleanupWaitMs);
+      exitWait = setTimeout(() => finish(null, 'SIGKILL', false), cleanupWaitMs);
     }, timeoutMs);
     if (pgid === null) {
       child.on('error', (error) => {
@@ -267,7 +300,11 @@ export function runSelfTest(path, cwd, {
     activeGroup = pgid;
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
-    child.on('close', (code, signal) => finish(code, signal, true));
+    child.on('exit', (code, signal) => finish(code, signal, true));
+    child.on('close', () => {
+      closed = true;
+      onClose();
+    });
   });
 }
 
@@ -456,7 +493,6 @@ function toolChecks(root, toolsDir, requiredFiles) {
       execute: () => checkExists(resolve(toolsDir, name)),
     });
   }
-  const ownName = basename(fileURLToPath(import.meta.url));
   const toolNames = existsSync(toolsDir) ? readdirSync(toolsDir)
     .filter((name) => name.endsWith('.mjs'))
     .sort() : [];
@@ -466,7 +502,8 @@ function toolChecks(root, toolsDir, requiredFiles) {
       name: `syntax ${name}`,
       execute: () => run(process.execPath, ['--check', path], root),
     });
-    if (name === ownName) continue;
+    // verify.mjs's own self-test too: its --self-test mode builds none of
+    // these checks and refuses to start itself (runSelfTest), so it cannot recurse.
     if (!SELF_TEST_PATTERN.test(readFileSync(path, 'utf8'))) continue;
     checks.push({
       name: `self-test ${name}`,
@@ -571,6 +608,22 @@ async function processCases() {
     const failed = await runSelfTest(fixture('fail.mjs', 'process.exit(4);'), scratch, options);
     const hung = await runSelfTest(fixture('hang.mjs', `${lingering} setInterval(() => {}, 1000);`), scratch, options);
     const leaked = await runSelfTest(fixture('leak.mjs', lingering), scratch, options);
+    // A descendant holding the test's stdout keeps 'close' from ever firing:
+    // it waited out the whole timeout before (review O3).
+    const holdingAt = Date.now();
+    const holding = await runSelfTest(fixture('holding.mjs', lingering.replace("stdio: 'ignore'", "stdio: 'inherit'")),
+      scratch, { ...options, timeoutMs: 15000 });
+    const holdingMs = Date.now() - holdingAt;
+    // A group that never empties is reported, and the gate stops on it.
+    const stuck = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
+    const unconfirmed = await runSelfTest(join(scratch, 'pass.mjs'), scratch, {
+      ...options, tally: stuck, settleMs: 50, cleanupWaitMs: 200, groupAlive: () => true, killGroup: () => {},
+    });
+    const ran = [];
+    const gate = await runChecks([
+      { name: 'stuck', execute: () => unconfirmed },
+      { name: 'next', execute: () => ran.push('next') && { ok: true } },
+    ], { log: () => {}, error: () => {} });
     return [
       ['a clean self-test passes with its cleanup confirmed', passed.ok && !passed.cleanupFailed],
       ['a failing self-test fails with its process record', !failed.ok && /process: run .* exit 4 /u.test(failed.detail)],
@@ -578,8 +631,14 @@ async function processCases() {
         && /timed out/u.test(hung.detail) && gone(pidOf(hung.detail))],
       ['a self-test that leaves a descendant fails and the descendant is killed', !leaked.ok && !leaked.cleanupFailed
         && /left processes/u.test(leaked.detail) && gone(pidOf(leaked.detail))],
-      ['every launched group is accounted for', tally.launched === 4 && tally.exited === 4 && tally.timedOut === 1
-        && tally.leftovers === 1 && tally.uncleaned === 0 && tally.groups.every((pgid) => !groupAlive(pgid))],
+      ['a descendant holding the test\'s output is reported as left processes within seconds, not as a timeout',
+        !holding.ok && !holding.cleanupFailed && /left processes/u.test(holding.detail) && !/timed out/u.test(holding.detail)
+          && holdingMs < 8000 && gone(pidOf(holding.detail))],
+      ['a group that cannot be confirmed gone fails as a cleanup failure, and the gate stops there',
+        !unconfirmed.ok && unconfirmed.cleanupFailed && stuck.uncleaned === 1 && gate.stopped && gate.failures.length === 1
+          && ran.length === 0],
+      ['every launched group is accounted for', tally.launched === 5 && tally.exited === 5 && tally.timedOut === 1
+        && tally.leftovers === 2 && tally.uncleaned === 0 && tally.groups.every((pgid) => !processGroupAlive(pgid))],
     ];
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -691,8 +750,14 @@ async function selfTest() {
     rmSync(crashRoot, { recursive: true, force: true });
   }
   const processes = await processCases();
+  const own = fileURLToPath(import.meta.url);
+  const scheduled = toolChecks(process.cwd(), dirname(own), []).map(({ name }) => name);
+  const nested = await runSelfTest(own, process.cwd(), { timeoutMs: 5000 });
   const cases = [
     ...processes,
+    ['the gate runs verify.mjs\'s own self-test in its own group, and a self-test never starts it again',
+      scheduled.includes(`self-test ${basename(own)}`) && !nested.ok && /never runs its own self-test/u.test(nested.detail)
+        && !selfTestProcesses.groups.length],
     ['the plugin hook document passes its contract', pluginProblems(pluginHookDocument()).length === 0],
     ['a missing plugin hook is named',
       pluginProblems(pluginHookDocument(PLUGIN_HOOKS.slice(1))).some((problem) => problem.includes(PLUGIN_HOOKS[0].name))],
@@ -707,8 +772,8 @@ async function selfTest() {
         { name: 'x', event: 'Stop', matcher: null, command: 'echo hi' }])).some((problem) => problem.includes('echo hi'))],
     ['a vendored tool path is refused',
       pluginProblems(pluginHookDocument(withGuard('node "$CLAUDE_PROJECT_DIR/tools/agentic/command-guard.mjs" || exit 2'))).length > 0],
-    ['a crashed plugin guard refuses while the session holds an open latch, and allows without one or after its close',
-      crashOwned === 2 && crashWithoutRun === 0 && crashClosed === 0],
+    ['a plugin guard that cannot start refuses while the session\'s Claude process ($PPID) holds a latch, closed too, and allows without one',
+      crashOwned === 2 && crashWithoutRun === 0 && crashClosed === 2],
     ['the guard\'s own verdict is never turned around', refusalKept],
     ['a crash beside a latch that is not a plain file still refuses', crashOddLatch === 2],
     ['a hook with a statusMessage is refused',
@@ -782,7 +847,7 @@ function selfTestProcessSummary() {
 function killActiveGroupOn(signal, code) {
   process.once(signal, () => {
     if (activeGroup !== null) {
-      killGroup(activeGroup);
+      killProcessGroup(activeGroup);
       console.error(`verify: ${signal}; killed self-test process group ${activeGroup} (exit not confirmed)`);
     }
     console.error(selfTestProcessSummary());
@@ -790,21 +855,7 @@ function killActiveGroupOn(signal, code) {
   });
 }
 
-async function main() {
-  const parsed = parseArgs(process.argv.slice(2));
-  if (parsed.error) {
-    console.error(`verify: ${parsed.error}`);
-    process.exit(2);
-  }
-  if (parsed.mode === 'self-test') process.exit(await selfTest() ? 0 : 1);
-  killActiveGroupOn('SIGINT', 130);
-  killActiveGroupOn('SIGTERM', 143);
-  killActiveGroupOn('SIGHUP', 129);
-
-  const root = resolve(parsed.root);
-  const checks = parsed.mode === 'plugin'
-    ? pluginChecks(root)
-    : projectChecks(root);
+export async function runChecks(checks, { log = console.log, error = console.error } = {}) {
   const failures = [];
   for (const check of checks) {
     const startedAt = process.hrtime.bigint();
@@ -814,26 +865,48 @@ async function main() {
     // itself instead of the log stalling on the previous check's PASS line.
     const timing = elapsedMs >= 1000 ? ` (${(elapsedMs / 1000).toFixed(1)}s)` : '';
     if (result.ok && result.note) {
-      console.log(`NOTE ${check.name}${timing}: ${result.note}`);
+      log(`NOTE ${check.name}${timing}: ${result.note}`);
     } else if (result.ok) {
-      console.log(`PASS ${check.name}${timing}`);
+      log(`PASS ${check.name}${timing}`);
       // A passing child's stdout is otherwise discarded, which swallowed the
       // self-tests' diagnostic attribution — surface every such line.
       for (const line of result.detail?.match(/^(?:slow checks|matrix phases): .+$/gmu) ?? []) {
-        console.log(`  ${line}`);
+        log(`  ${line}`);
       }
     } else {
-      console.error(`FAIL ${check.name}${timing}`);
-      if (result.detail) console.error(result.detail);
+      error(`FAIL ${check.name}${timing}`);
+      if (result.detail) error(result.detail);
       failures.push(check.name);
       // A group that would not empty may still hold memory or processes:
       // launching the next self-test on top of it is how orphans pile up.
       if (result.cleanupFailed) {
-        console.error('verify: stopped; a self-test process group could not be confirmed gone');
-        break;
+        error('verify: stopped; a self-test process group could not be confirmed gone');
+        return { failures, stopped: true };
       }
     }
   }
+  return { failures, stopped: false };
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.error) {
+    console.error(`verify: ${parsed.error}`);
+    process.exit(2);
+  }
+  killActiveGroupOn('SIGINT', 130);
+  killActiveGroupOn('SIGTERM', 143);
+  killActiveGroupOn('SIGHUP', 129);
+  if (parsed.mode === 'self-test') {
+    selfTesting = true;
+    process.exit(await selfTest() ? 0 : 1);
+  }
+
+  const root = resolve(parsed.root);
+  const checks = parsed.mode === 'plugin'
+    ? pluginChecks(root)
+    : projectChecks(root);
+  const { failures } = await runChecks(checks);
   if (selfTestProcesses.launched > 0) console.log(selfTestProcessSummary());
   if (failures.length > 0) {
     console.error(`verification failed (${failures.length} check(s))`);

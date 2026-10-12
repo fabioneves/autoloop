@@ -2,7 +2,8 @@
 // autoloop — edit-guard.mjs
 //
 // PreToolUse hook for Edit|Write|MultiEdit|NotebookEdit. While this session
-// owns a run (from its prime to --close-run or /clear), it refuses edits to
+// owns a run (from its prime to /clear or exit; --close-run does not end
+// it), it refuses edits to
 // the repository's hook wiring —
 // `.claude/settings.json` and `.claude/settings.local.json` — the one edit
 // that can switch the session's own guard off mid-run (repository settings can
@@ -26,7 +27,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ownedRun, processStart, protectedPaths, sessionOwnerPid } from './run-markers.mjs';
+import { heldLatch, ownedRun, processStart, protectedPaths, sessionOwnerPid } from './run-markers.mjs';
 import { hookRoot } from './hook-root.mjs';
 import { gitStalled, setGitDeadline } from './git-budget.mjs';
 
@@ -118,6 +119,27 @@ function selfTest() {
     const wiring = join(scratch, 'real', '.claude', 'settings.json');
     check('the hook entry refuses a hook-wiring edit for the owning session and allows it for any other',
       edit(wiring, join(scratch, 'real')).status === 2 && edit(wiring, join(scratch, 'real'), 'T').status === 0);
+    // Review L3: a payload that is unreadable or names no session may be the
+    // owner's while this process holds a latch; H1: --close-run keeps this
+    // session guarded until /clear.
+    const latchFile = join(home, '.claude', 'autoloop', 'run-latches', `${owner}.json`);
+    const raw = (input) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+      input, cwd: join(scratch, 'real'), encoding: 'utf8', timeout: 15000, killSignal: 'SIGKILL',
+      env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: join(scratch, 'real'), AUTOLOOP_GUARD_BUDGET_MS: '2000' },
+    }).status;
+    const nameless = () => [raw('not json'), raw(JSON.stringify({ tool_name: 'Edit', tool_input: { file_path: wiring } })),
+      raw(JSON.stringify({ session_id: '', tool_name: 'Edit', tool_input: { file_path: wiring } }))];
+    const heldOpen = nameless();
+    const openText = readFileSync(latchFile, 'utf8');
+    writeFileSync(latchFile, JSON.stringify({ ...JSON.parse(openText), closedAt: '2026-10-12T00:00:00.000Z' }));
+    const heldClosed = nameless();
+    const closedOwn = edit(wiring, join(scratch, 'real')).status;
+    const closedCleared = edit(wiring, join(scratch, 'real'), 'T').status;
+    rmSync(latchFile);
+    const unheld = nameless();
+    writeFileSync(latchFile, openText);
+    check('a closed run keeps the edit guard for its own session until /clear, and a payload naming no session is refused beside a latch',
+      JSON.stringify([heldOpen, heldClosed, unheld, closedOwn, closedCleared]) === JSON.stringify([[2, 2, 2], [2, 2, 2], [0, 0, 0], 2, 0]));
     // A FIFO for .git/config stalls git: the owning session's guard refuses
     // within its budget instead of running past the host's timeout.
     const stalled = join(scratch, 'stalled');
@@ -142,17 +164,25 @@ function main() {
   // The same budget the command guard keeps: a stalled git (a FIFO for
   // .git/config) must refuse before the host's timeout lets the edit through.
   setGitDeadline(Date.now() + Math.min(10_000, Number(process.env.AUTOLOOP_GUARD_BUDGET_MS) || 10_000));
-  let payload;
+  let payload = null;
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
-  } catch {
-    process.exit(0); // not an edit this guard can read; the command guard still gates the shell
+  } catch { /* names no session: decided below */ }
+  const sessionId = typeof payload?.session_id === 'string' && payload.session_id !== '' ? payload.session_id : null;
+  // A payload that is unreadable or names no session may be the owner's
+  // while this process holds a latch (open or closed): refused, as the
+  // command guard refuses it.
+  if (sessionId === null) {
+    if (heldLatch() === null) process.exit(0);
+    console.error('autoloop guard — the hook payload is unreadable or names no session, so the edit cannot be checked.');
+    process.exit(2);
   }
   if (!EDIT_TOOLS.includes(payload?.tool_name)) process.exit(0);
   // Plugin hooks fire in every session; this one guards only the session
-  // that owns a run (run-markers.mjs ownedRun), before any git call, and
-  // then whatever the checkout says (an unreadable latch of its own too).
-  if (ownedRun({ sessionId: payload?.session_id }) === null) process.exit(0);
+  // that owns a run (run-markers.mjs ownedRun) — until /clear or exit, a
+  // closed run too — before any git call, and then whatever the checkout
+  // says (an unreadable latch of its own too).
+  if (ownedRun({ sessionId, includeClosed: true }) === null) process.exit(0);
   const repoRoot = hookRoot();
   const filePath = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
   // The same paths the command guard protects (run-markers.mjs protectedPaths).

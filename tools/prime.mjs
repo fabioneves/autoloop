@@ -38,7 +38,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
-import { closeLatch, latchDirectory, processStart, recordLatch } from './run-markers.mjs';
+import { closeLatch, hostSessionId, latchDirectory, processStart, recordHostSession, recordLatch, sessionOwnerPid } from './run-markers.mjs';
 import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownedRun, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
@@ -155,7 +155,10 @@ export function baseSyncFacts(root, baseBranch) {
   };
 }
 
-export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits, triage = triageBlocks, elsewhere = liveRunsElsewhere } = {}) {
+export function primeDev({
+  cwd = process.cwd(), scanArgs = [], lift = liftWaits, triage = triageBlocks, elsewhere = liveRunsElsewhere,
+  latches = latchDirectory(), owner = sessionOwnerPid(),
+} = {}) {
   if (!validateScanArgs(scanArgs)) {
     return failure(
       'input',
@@ -193,6 +196,17 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   }
   const models = primeModels(config, root);
   if (models.ok === false) return models;
+  // The conversation the run belongs to is the host's, from the prime
+  // command's hook input (the command guard hands it over); the environment
+  // a command can change is never trusted (security review H2).
+  if (processStart(owner) === null) {
+    return failure('run', 'RUN_SESSION_UNKNOWN', `the start time of this session's Claude process (pid ${owner}) cannot be read; the run is not opened`);
+  }
+  const sessionId = hostSessionId({ owner, directory: latches });
+  if (sessionId === null) {
+    return failure('run', 'RUN_SESSION_UNKNOWN', 'the host session id is unknown: the command guard records it from the prime '
+      + 'command\'s hook input, so run prime through Bash in a Claude Code session with the plugin enabled; the run is not opened');
+  }
 
   const base = baseSyncFacts(root, config.baseBranch);
   pruneDeadRunMarkers(root);
@@ -201,12 +215,17 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   // session's Claude process (run-markers.mjs), written before the marker:
   // no command between opening the run and the guard's first look can hide
   // the run, and a latch that cannot be written leaves no marker behind. It
-  // names this conversation: the hooks act for it alone.
-  const sessionId = process.env.CLAUDE_CODE_SESSION_ID || null;
-  if (recordLatch({ baseBranch: config.baseBranch, scope: root, sessionId }) === null) {
-    return failure('run', 'RUN_LATCH_UNWRITABLE', `the session latch could not be written under ${latchDirectory()}; the run is not opened`);
+  // names this conversation: the hooks act for it alone. Read back, it must
+  // say so: an open latch of another conversation is never rebound.
+  if (recordLatch({ owner, baseBranch: config.baseBranch, scope: root, sessionId, directory: latches }) === null) {
+    return failure('run', 'RUN_LATCH_UNWRITABLE', `the session latch could not be written under ${latches}; the run is not opened`);
   }
-  const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
+  const owned = ownedRun({ sessionId, owner, directory: latches });
+  if (owned === null || owned.unreadable) {
+    return failure('run', 'RUN_LATCH_UNCONFIRMED', 'this Claude process holds a run latch open for another conversation '
+      + '(/clear started this one), so the run is not opened. Close it with `prime.mjs --close-run`, then prime again.');
+  }
+  const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch, sessionId);
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });
@@ -300,7 +319,8 @@ export function configSummary(config, root = null) {
 // `baseBranch` lets the guards keep enforcing the run's base even if the
 // checkout later stops resolving its own config (a deleted .autoloop, a
 // branch forked before devendor): the open run, not the checkout, decides.
-export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now(), baseBranch = null) {
+export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now(), baseBranch = null,
+  sessionId = process.env.CLAUDE_CODE_SESSION_ID || null) {
   const directory = runMarkerDirectory(root);
   if (directory === null) return null;
   const live = [...new Set(pids)].filter(
@@ -314,7 +334,6 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
   // session moved to the background) is recognised as the same run.
   // starts: each pid's start time, so a later process given the same pid is
   // never taken for the run's.
-  const sessionId = process.env.CLAUDE_CODE_SESSION_ID || null;
   const starts = Object.fromEntries(live.map((pid) => [pid, processStart(pid)]));
   writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, starts, openedAtMs: nowMs, baseBranch, sessionId })}\n`);
   return path;
@@ -327,8 +346,9 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
 // distinction costs when it is left to inference.
 //
 // The marker itself stays exactly where it is, pids intact; the session's
-// latch closes with it (closeRun), which ends the session's ownership: from
-// then on no hook acts for it until a new prime (operator, 2026-10-12).
+// latch closes with it (closeRun), which ends the Stop check, preflight,
+// riders and transcript capture until a new prime. The guards keep this
+// session until /clear or exit (operator, 2026-10-12).
 export function closeRunMarkers(root = process.cwd(), now = new Date()) {
   const closed = [];
   for (const { path, marker } of ownRunMarkers(root)) {
@@ -343,7 +363,7 @@ export function closeRunMarkers(root = process.cwd(), now = new Date()) {
   return { ok: true, closed };
 }
 
-// --close-run: the run stops taking work, and the session stops owning it.
+// --close-run: the run stops taking work; only the guards still act for the session.
 export function closeRun(root = process.cwd(), { directory = latchDirectory(), now = new Date() } = {}) {
   const outcome = closeRunMarkers(root, now);
   return outcome.ok === true ? { ...outcome, latch: closeLatch({ directory, nowMs: now.getTime() }) } : outcome;
@@ -989,6 +1009,59 @@ function selfTest() {
       && refusedElsewhere.error.message.includes('pid 4242')
       && !existsSync(markerDirectory),
     );
+    // Security review H2: prime took the session id from the environment, so
+    // `env -u CLAUDE_CODE_SESSION_ID` (or a foreign value) rebound the open
+    // latch and switched the session's guards off. The id is the hook
+    // input's, handed over by the guard; an open latch is never rebound.
+    {
+      const home = join(scratch, 'home');
+      const latches = join(home, '.claude', 'autoloop', 'run-latches');
+      const quiet = { cwd: root, elsewhere: () => [], lift: () => ({ ok: true, lifted: [] }), triage: () => ({ ok: true, resumed: [] }),
+        scanArgs: ['--pr', 'x'], latches };
+      const envBefore = process.env.CLAUDE_CODE_SESSION_ID;
+      const primeWith = (env) => {
+        if (env === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+        else process.env.CLAUDE_CODE_SESSION_ID = env;
+        return primeDev(quiet);
+      };
+      const latchOf = () => {
+        try {
+          return JSON.parse(readFileSync(join(latches, `${sessionOwnerPid()}.json`), 'utf8'));
+        } catch {
+          return null;
+        }
+      };
+      try {
+        const unknown = primeWith('from-env');
+        const unknownWrote = existsSync(markerDirectory) || latchOf() !== null;
+        const exited = spawnSync(process.execPath, ['-e', '0'], { timeout: 10000 }).pid;
+        const noStart = primeDev({ ...quiet, owner: exited });
+        recordHostSession({ sessionId: 'S-host', directory: latches });
+        const opened = primeWith('S-host');
+        const bound = latchOf()?.sessionId;
+        const attempts = [primeWith(undefined), primeWith(''), primeWith('S-foreign')].map((result) => result.error?.code);
+        recordHostSession({ sessionId: 'S-after-clear', directory: latches });
+        rmSync(markerDirectory, { recursive: true, force: true });
+        const rebinding = primeWith('S-after-clear');
+        const guard = spawnSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'command-guard.mjs')], {
+          input: JSON.stringify({ session_id: 'S-host', tool_name: 'Bash', cwd: root, tool_input: { command: 'gh pr merge 42 --squash' } }),
+          encoding: 'utf8', cwd: root, timeout: 30000, env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: root },
+        });
+        check(
+          'prime opens a run only for the host session the guard handed it, refuses without one, and never rebinds an open latch',
+          unknown.ok === false && unknown.error.code === 'RUN_SESSION_UNKNOWN' && !unknownWrote
+          && noStart.ok === false && noStart.error.code === 'RUN_SESSION_UNKNOWN'
+          && opened.error?.code === 'SCAN_FAILED' && bound === 'S-host'
+          && JSON.stringify(attempts) === '["SCAN_FAILED","SCAN_FAILED","SCAN_FAILED"]' && latchOf()?.sessionId === 'S-host'
+          && rebinding.ok === false && rebinding.error.code === 'RUN_LATCH_UNCONFIRMED' && !existsSync(markerDirectory)
+          && latchOf()?.sessionId === 'S-host' && guard.status === 2,
+        );
+      } finally {
+        if (envBefore === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+        else process.env.CLAUDE_CODE_SESSION_ID = envBefore;
+        rmSync(markerDirectory, { recursive: true, force: true });
+      }
+    }
     const claude = [1, 'claude', '/u/.local/share/claude/versions/2.1.284'];
     mkdirSync(markerDirectory, { recursive: true });
     const mark = (name, marker) => writeFileSync(join(markerDirectory, `${name}.json`), JSON.stringify({ version: 1, ...marker }));

@@ -59,43 +59,11 @@ const DISPATCH_STEP = {
   'code-review': '08-code-review',
 };
 
-// Setup has no labels, so its phases had no mechanical anchor — and prose alone
-// proved intermittent: live runs printed one ribbon of five, then none, then a
-// scattered subset, across three wordings. Each phase inevitably runs a
-// signature command, so the ribbon rides that command the same way dev's riders
-// ride label swaps. First match wins; the reminder names the ribbon due NOW and
-// the one after it.
-const SETUP_PHASE_ANCHORS = [
-  [/release-verify\.mjs\s+--sort-versions/,
-    'autoloop: RESOLVE is running — its ribbon `⏳ ∞ ▰▱▱▱▱ 1/5 RESOLVE` must already be printed; '
-    + 'print it NOW if missing (late beats never). Next: `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` before the audit '
-    + 'battery.'],
-  [/config-contract\.mjs\s+--root\b/,
-    'autoloop: the AUDIT battery just ran — `⏳ ∞ ▰▰▱▱▱ 2/5 AUDIT` must already be printed; print '
-    + 'it NOW if missing. Next: `⏳ ∞ ▰▰▰▱▱ 3/5 INTERVIEW` BEFORE the first question to the human.'],
-  [/setup\.mjs\s+--(?:init|devendor)\b/,
-    'autoloop: WRITE is running — `⏳ ∞ ▰▰▰▰▱ 4/5 WRITE` must already be printed (and 3/5 '
-    + 'INTERVIEW before it); print any missing ribbon NOW. Next: `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` when '
-    + 'evidence collection starts.'],
-  [/verify\.mjs\s+--project-root\b/,
-    'autoloop: project verify just ran — in a setup session `⏳ ∞ ▰▰▰▰▰ 5/5 VERIFY` must '
-    + 'already be printed; print it NOW if missing. The closing rail `✅ ╰─ ∞ setup · complete …` '
-    + 'is the only green line.'],
-];
-
-// The setup ribbon a command earns, or null.
-export function setupPhaseReminder(command) {
-  if (typeof command !== 'string') return null;
-  return SETUP_PHASE_ANCHORS.find(([pattern]) => pattern.test(command))?.[1] ?? null;
-}
-
 // Returns null when the command is not a loop-label swap on an issue.
 // opts.archMap: docs/agentic/ARCH.md exists → step 6 also reminds the map update.
 export function reminderFor(command, opts = {}) {
   if (typeof command !== 'string') return null;
   if (/\bstep\.mjs\b/.test(command)) return stepReminder(command, opts);
-  const setup = setupPhaseReminder(command);
-  if (setup !== null) return setup;
 
   // The run frame and the panel probe have no label to ride; prime is the
   // command every run inevitably starts with, so they ride prime.
@@ -234,11 +202,6 @@ function selfTest() {
     ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /--outcome human/],
     ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /PushNotification `✖ #12/],
     ['node tools/agentic/unit.mjs --decide --issue 12 --choice c --why w', null],
-    ['ls /cache | node /cache/0.47.0/templates/tools/release-verify.mjs --sort-versions | tail -3', /1\/5 RESOLVE/],
-    ['node /cache/templates/tools/config-contract.mjs --root . --resolve', /2\/5 AUDIT/],
-    ['node /cache/templates/tools/setup.mjs --init --root /repo --base main --gate x', /4\/5 WRITE/],
-    ['node /cache/templates/tools/setup.mjs --devendor --root /tmp/w', /4\/5 WRITE/],
-    ['node /p/templates/tools/verify.mjs --project-root . 2>&1 | tee /tmp/v.txt', /5\/5 VERIFY/],
     // The run frame rides prime; the terminal riders ride terminal-finalize,
     // whose label mutations never pass through gh edit.
     ['node /cache/0.49.45/templates/tools/prime.mjs --json > /tmp/prime.json', /RUN OPEN/],

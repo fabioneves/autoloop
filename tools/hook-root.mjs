@@ -302,9 +302,9 @@ function sessionOwnershipCases(check) {
       stop: () => node('writeback-check.mjs', { session_id: 'S', hook_event_name: 'Stop', stop_hook_active: false }),
     };
     reader();
-    // An unreadable payload names no session: beside this process's open
-    // latch it may be the owner's, so the guard refuses it as its crash
-    // fallback does; with no open latch it is allowed.
+    // An unreadable payload names no session: beside a latch of this
+    // process (open or closed) it may be the owner's, so the guard refuses it
+    // as its crash fallback does; with no latch it is allowed.
     const notOwned = (variant, openLatchHeld) => {
       writeFileSync(log, '');
       const preflight = hooks.preflight();
@@ -322,7 +322,7 @@ function sessionOwnershipCases(check) {
       return {
         [`${variant}: no preflight, no STATE injection, no Stop output`]: preflight.status === 0 && preflight.stdout === ''
           && stop.status === 0 && stop.stdout === '' && stop.stderr === '',
-        [`${variant}: the guards allow run-state edits, a large command, a branch switch beside a reviewer and a stalled git; an unreadable payload only beside no open latch`]:
+        [`${variant}: the guards allow run-state edits, a large command, a branch switch beside a reviewer and a stalled git; an unreadable payload only beside no latch`]:
           verdicts.every((status) => status === 0),
         [`${variant}: no rider and no transcript copy`]: rider.stdout === '' && captured.status === 0 && !existsSync(transcripts),
         [`${variant}: no gh or git call and no reminder file`]: calls() === '' && !existsSync(join(repo, '.git', 'autoloop', 'draft-reminders')),
@@ -331,14 +331,26 @@ function sessionOwnershipCases(check) {
     const variants = [
       ['no latch', null],
       ['another conversation after /clear', { sessionId: 'S-before-clear' }],
-      ['a closed run', { closedAt: '2026-10-12T00:00:00.000Z' }],
+      ['a closed run after /clear', { sessionId: 'S-before-clear', closedAt: '2026-10-12T00:00:00.000Z' }],
       ['a reused pid', { ownerStart: 'another-process' }],
     ];
     for (const [variant, fields] of variants) {
       latch(fields);
-      const held = fields !== null && fields.closedAt === undefined && fields.ownerStart === undefined;
+      const held = fields !== null && fields.ownerStart === undefined;
       for (const [name, passed] of Object.entries(notOwned(variant, held))) check(`a session that owns no run, ${name}`, passed);
     }
+    // Security review H1: --close-run ends the Stop check, preflight, riders
+    // and transcript capture; this session stays guarded until /clear.
+    latch({ closedAt: '2026-10-12T00:00:00.000Z' });
+    const closedPreflight = hooks.preflight();
+    const closedStop = hooks.stop();
+    const closedRider = hooks.rider();
+    const closedCapture = hooks.transcript();
+    check('a closed run of this session: no preflight, Stop output, rider or transcript copy, and both guards refuse until /clear',
+      closedPreflight.stdout === '' && closedStop.stdout === '' && closedStop.stderr === '' && closedRider.stdout === ''
+        && closedCapture.status === 0 && !existsSync(transcripts)
+        && bash('rm -rf .git/autoloop/run').status === 2 && bash('gh pr merge 42 --squash').status === 2
+        && edit(join(latches, 'x.json')).status === 2 && bash('gh pr merge 42 --squash', 'S-after-clear').status === 0);
     latch(null);
     const prime = join(tools, 'prime.mjs');
     const other = join(scratch, 'other');

@@ -26,10 +26,14 @@
 //        strands the old label; a skipped step leaves no timeline trace.
 //
 //   ALLOW other literal canonical commands (exit 0). The rules apply only to the
-//   session that owns a run (run-markers.mjs ownedRun); a command that runs the
-//   plugin's prime is checked in every session. An invalid hook payload fails
-//   closed while this process holds an open run: it cannot prove which command
-//   the host is about to execute.
+//   session that owns a run (run-markers.mjs ownedRun), from its prime until
+//   /clear or exit — `--close-run` does not end them; a command that runs the
+//   plugin's prime is checked in every session, and hands prime the hook
+//   input's session id. A hook payload that is invalid or names no session
+//   fails closed while this process holds a latch: it cannot prove which
+//   command the host is about to execute. A guard that throws exits by the
+//   same ownership; one that cannot start falls back to hooks.json, which
+//   reads the latch of the shell's parent ($PPID, the Claude process).
 //
 //   NOT a secrets boundary: reading the environment or a credential file is
 //   allowed. Secrets are protected by scoping them (a repo-scoped token without
@@ -63,8 +67,8 @@ import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { hookRoot } from './hook-root.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
-  procEntry, psEntry, commonDirOf, openLatch, ownedRun, pinnedModelsPath, processStart, protectedPaths, pruneLatches, recordLatch, sessionLatch,
-  sessionOwnerPid, PLUGIN_CODE_DIRS,
+  procEntry, psEntry, commonDirOf, heldLatch, ownedRun, pinnedModelsPath, processStart, protectedPaths, pruneLatches, recordHostSession,
+  recordLatch, sessionLatch, sessionOwnerPid, PLUGIN_CODE_DIRS,
 } from './run-markers.mjs';
 import { ORDINARY, readsOnly, runStateProblem, TAMPERING } from './run-state-guard.mjs';
 import { boundedGit, gitStalled, setGitDeadline } from './git-budget.mjs';
@@ -4301,7 +4305,7 @@ function selfTest() {
       const readVerdict = latchHook(`cat ${join(markers, 'run.json')}`).status;
       rmSync(join(markers, 'run.json'));
       const afterDelete = latchHook('gh pr merge 5 --squash').status;
-      const [latchFile] = readdirSync(latches);
+      const [latchFile] = readdirSync(latches).filter((name) => name.endsWith('.json'));
       const latchText = readFileSync(join(latches, latchFile), 'utf8');
       writeFileSync(join(latches, latchFile), '{ corrupt');
       const corrupt = latchHook('ls');
@@ -4311,6 +4315,74 @@ function selfTest() {
         console.error(`FAIL [the run's own state is refused to it, and the session latch outlives its markers]: `
           + `${JSON.stringify({ stateVerdicts, readVerdict, afterDelete, corrupt: corrupt.status })}`);
         ok = false;
+      }
+      // Security review H1: a run closed its latch with --close-run and the
+      // guard stood down for the rest of the session, so it could merge. A
+      // closed latch keeps this session guarded until /clear or exit.
+      const sessionHook = (command, session, payload = { session_id: session }) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ ...payload, tool_name: 'Bash', cwd: scratch, tool_input: { command } }),
+        encoding: 'utf8', cwd: scratch, timeout: 30000, env: { ...isolatedEnv(), HOME: home, CLAUDE_PROJECT_DIR: scratch },
+      });
+      const escapes = ['gh pr merge 42 --squash', 'rm -rf .git/autoloop/run'];
+      writeFileSync(join(latches, latchFile), JSON.stringify({ ...JSON.parse(latchText), closedAt: '2026-10-12T00:00:00.000Z' }));
+      const afterClose = escapes.map((command) => sessionHook(command, 'S').status);
+      const afterClear = escapes.map((command) => sessionHook(command, 'S-after-clear').status);
+      // Review L3: a payload that names no session, beside a latch of this
+      // process (open, or closed), is refused like an unreadable one.
+      const noSessionClosed = [{}, { session_id: '' }, { session_id: 7 }].map((payload) => sessionHook('gh pr merge 42 --squash', null, payload).status);
+      writeFileSync(join(latches, latchFile), latchText);
+      const noSessionOpen = sessionHook('gh pr merge 42 --squash', null, {});
+      if (JSON.stringify(afterClose) !== '[2,2]' || JSON.stringify(afterClear) !== '[0,0]'
+        || JSON.stringify(noSessionClosed) !== '[2,2,2]' || noSessionOpen.status !== 2 || !noSessionOpen.stderr.includes('names no session')) {
+        console.error(`FAIL [a closed run keeps the guard for its own session until /clear, and a payload naming no session is refused beside a latch]: ${JSON.stringify({ afterClose, afterClear, noSessionClosed, noSessionOpen: noSessionOpen.status })}`);
+        ok = false;
+      }
+      // Security review H2: prime took its session id from the environment,
+      // which the command can change. The guard hands it the hook input's.
+      {
+        const primeHome = join(scratch, 'prime-home');
+        const hostFile = join(primeHome, '.claude', 'autoloop', 'run-latches', `${owner}.session`);
+        const primeTool = join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs');
+        const primeHook = (payload, command = `node ${primeTool} --json`) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+          input: JSON.stringify({ ...payload, tool_name: 'Bash', cwd: scratch, tool_input: { command } }),
+          encoding: 'utf8', cwd: scratch, timeout: 30000, env: { ...isolatedEnv(), HOME: primeHome, CLAUDE_PROJECT_DIR: scratch, CLAUDE_CODE_SESSION_ID: 'from-env' },
+        });
+        const hostOf = () => {
+          try {
+            return JSON.parse(readFileSync(hostFile, 'utf8')).sessionId;
+          } catch {
+            return null;
+          }
+        };
+        const handed = primeHook({ session_id: 'S-host' });
+        const recorded = hostOf();
+        const hostMode = statSync(hostFile).mode & 0o777;
+        const refusedCompound = primeHook({ session_id: 'S-other' }, `node ${primeTool} --json && rm -rf .git/autoloop/run`);
+        const afterRefusal = hostOf();
+        const unnamed = primeHook({});
+        if (handed.status !== 0 || recorded !== 'S-host' || hostMode !== 0o600
+          || refusedCompound.status !== 2 || afterRefusal !== 'S-host' || unnamed.status !== 0 || hostOf() !== null) {
+          console.error(`FAIL [the guard hands prime the hook input's session id, never the environment's]: ${JSON.stringify({ handed: handed.status, recorded, afterRefusal, unnamed: unnamed.status, left: hostOf() })}`);
+          ok = false;
+        }
+      }
+      // Review L1: a guard that throws decides by ownership, not by the
+      // shell fallback alone: refuse for this session's run, allow otherwise.
+      {
+        const crashDir = join(scratch, 'crash-latches');
+        mkdirSync(crashDir, { recursive: true });
+        const verdict = (sessionId) => crashExitCode(sessionId, { directory: crashDir });
+        const none = verdict('S');
+        writeFileSync(join(crashDir, `${owner}.json`), JSON.stringify({ version: 2, owner, ownerStart: processStart(owner), baseBranch: 'main', sessionId: 'S' }));
+        const open = [verdict('S'), verdict('T'), verdict(undefined)];
+        writeFileSync(join(crashDir, `${owner}.json`), JSON.stringify({ version: 2, owner, ownerStart: processStart(owner), baseBranch: 'main', sessionId: 'S', closedAt: 'x' }));
+        const closed = [verdict('S'), verdict('T')];
+        writeFileSync(join(crashDir, `${owner}.json`), '{ corrupt');
+        const corrupt = verdict('S');
+        if (JSON.stringify([none, ...open, ...closed, corrupt]) !== '[0,2,0,2,2,0,2]') {
+          console.error(`FAIL [a crashed guard refuses only for the session that owns a run, closed too]: ${JSON.stringify([none, ...open, ...closed, corrupt])}`);
+          ok = false;
+        }
       }
       // The run-state rule through the guard's own tokenizer: its fixtures,
       // plus the shapes only a real tokenizer produces — quoted messages that
@@ -4840,7 +4912,8 @@ function oversizedCommand(cmd) {
 // and a command that opens a run does only that (and reads) — a compound
 // could break git or remove the fresh records before the guard has ever seen
 // the run. Git is asked only about a command that runs prime.
-function primeCommandProblems(cmd, cwd, projectRoot, deadline) {
+// A prime that passes hands prime the host's session id (spec exception 4).
+function primeCommandProblems(cmd, cwd, projectRoot, deadline, sessionId) {
   const foreign = foreignPrimeProblem(cmd, cwd, projectRoot, undefined, deadline);
   if (foreign !== null) refuse(foreign);
   if (!opensRun(cmd, cwd)) return;
@@ -4850,6 +4923,22 @@ function primeCommandProblems(cmd, cwd, projectRoot, deadline) {
       'autoloop guard — this command opens a run (prime.mjs) and does more than read besides. Run '
       + '`node <plugin-tools>/prime.mjs --json` on its own (redirecting or piping its output to a reader is fine).',
     );
+  }
+  recordHostSession({ sessionId });
+}
+
+// What a guard that threw exits with: 2 for the session that owns a run (its
+// latch closed too), 0 for any other, and 1 — the hooks.json fallback then
+// decides from the latch file — when ownership cannot be read. A payload not
+// yet read names no session: any latch of this process refuses.
+export function crashExitCode(sessionId, where = {}) {
+  try {
+    const owned = typeof sessionId === 'string' && sessionId !== ''
+      ? ownedRun({ sessionId, includeClosed: true, ...where })
+      : heldLatch(where);
+    return owned === null ? 0 : 2;
+  } catch {
+    return 1;
   }
 }
 
@@ -4894,26 +4983,36 @@ function main() {
   };
   let payload;
   let payloadError = null;
+  let crashSession = null;
+  const crashed = (error) => {
+    process.stderr.write(`autoloop guard — the guard failed (${error?.message ?? error}), so the command cannot be proven safe.\n`);
+    process.exit(crashExitCode(crashSession));
+  };
+  process.on('uncaughtException', crashed);
+  process.on('unhandledRejection', crashed);
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
   } catch (error) {
     payloadError = error;
   }
+  const sessionId = typeof payload?.session_id === 'string' && payload.session_id !== '' ? payload.session_id : null;
+  crashSession = sessionId;
   const cmd = payload?.tool_input?.command;
   const cwd = typeof payload?.cwd === 'string' ? payload.cwd : process.cwd();
   const projectDir = () => parsed.root ?? hookRoot();
-  const latched = ownedRun({ sessionId: payload?.session_id });
+  const latched = ownedRun({ sessionId, includeClosed: true });
   if (latched === null) {
-    // An unreadable payload names no session: while this process holds an
-    // open run it may be the owner's, so it refuses as a crashed guard does.
-    if (payloadError !== null && openLatch() !== null) {
+    // A payload that is unreadable or names no session may be the owner's
+    // while this process holds a latch (open or closed), so it refuses as a
+    // crashed guard does.
+    if ((payloadError !== null || sessionId === null) && heldLatch() !== null) {
       refuse(
-        `autoloop guard — the hook payload was unreadable (${payloadError.message}), so the command `
-        + 'cannot be proven safe. Re-run the command; if this repeats, re-run autoloop:setup '
+        `autoloop guard — the hook payload ${payloadError === null ? 'names no session' : `was unreadable (${payloadError.message})`}, `
+        + 'so the command cannot be proven safe. Re-run the command; if this repeats, re-run autoloop:setup '
         + 'to repair the hook wiring.',
       );
     }
-    if (typeof cmd === 'string') primeCommandProblems(cmd, cwd, projectDir, deadline);
+    if (typeof cmd === 'string') primeCommandProblems(cmd, cwd, projectDir, deadline, sessionId);
     allow();
   }
   if (latched.unreadable) {
@@ -4946,7 +5045,7 @@ function main() {
       + 'hook wiring.',
     );
   }
-  primeCommandProblems(cmd, cwd, projectRoot, deadline);
+  primeCommandProblems(cmd, cwd, projectRoot, deadline, sessionId);
 
   // Parts of the check grow faster than linearly in the command's length
   // (3.2 s at this cap, measured); twice the longest command recorded across

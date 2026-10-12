@@ -1833,7 +1833,9 @@ export const INCIDENTS = Object.freeze([
     symptom: 'A code-review result collected after the unit moved to step 09 printed '
       + '"09 gate returned" while the Docker gate was still running.',
     cause: 'Collection stamped the latest step before it read the result. Each dispatch now carries '
-      + 'a step and attempt receipt; only an exact current match marks a return.',
+      + 'a step and attempt receipt; only an exact current match marks a return, and a retry or '
+      + 'fallback counts no new review round. The record lock names its holder, so a lock a killed '
+      + 'writer left is reclaimed instead of wedging every later step write (review R1).',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'step.mjs', anchor: 'a late review cannot mark a later gate returned' }),
       Object.freeze({ file: 'step.mjs', anchor: 'same-role attempts reject old results, and duplicates keep the first return time' }),
@@ -1841,6 +1843,13 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'dispatch.mjs', anchor: 'real fake-engine success and failure receipts reach the collector' }),
       Object.freeze({ file: 'dispatch.mjs', anchor: 'a fallback cannot rebind after a gate transition during the first attempt' }),
       Object.freeze({ file: 'dispatch.mjs', anchor: 'a contested step lock cannot cancel a valid engine result or assert its return' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: 'One review round per dispatch, however many attempts it took' }),
+      Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'an owned lock blocks a second writer without being reclaimed' }),
+      Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'a lock whose holder is dead, or whose pid now names another process, is reclaimed' }),
+      Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'a lock left by a SIGKILLed writer no longer wedges the next one' }),
+      Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'two writers reclaiming one stale lock both land, one at a time' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a lock left by a dead writer, or a reused pid, wedges no transition, dispatch note or close' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a corrupt step record is reported by transition and never replaced' }),
       Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'only its own step returned' }),
     ]),
   }),
@@ -1851,13 +1860,18 @@ export const INCIDENTS = Object.freeze([
       + 'recorded 2467 OOM kills and the load average passed 2000.',
     cause: 'The self-test started whenever argv[1] named the module, so each spawned worker started it '
       + 'again; timeouts killed only the direct child. Self-tests now need --self-test, and verify '
-      + 'kills, confirms, and reports each self-test process group.',
+      + 'kills, confirms, and reports each self-test process group: settled from the test\'s exit, '
+      + 'so a descendant holding its output is a leftover, not a timeout. verify.mjs runs its own '
+      + 'self-test in the gate and never starts it from inside it.',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'importing with this module as argv[1] never starts the self-test' }),
       Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'the self-test refuses to run inside its own worker' }),
       Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'a timed-out worker is killed and confirmed gone' }),
       Object.freeze({ file: 'verify.mjs', anchor: 'a timed-out self-test loses its whole process group, child included' }),
       Object.freeze({ file: 'verify.mjs', anchor: 'a self-test that leaves a descendant fails and the descendant is killed' }),
+      Object.freeze({ file: 'verify.mjs', anchor: 'is reported as left processes within seconds, not as a timeout' }),
+      Object.freeze({ file: 'verify.mjs', anchor: 'a group that cannot be confirmed gone fails as a cleanup failure, and the gate stops there' }),
+      Object.freeze({ file: 'verify.mjs', anchor: 'own self-test in its own group, and a self-test never starts it again' }),
     ]),
   }),
   Object.freeze({
@@ -1899,6 +1913,8 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'step.mjs', anchor: 'a delivered automatic merge stays pending through 11-record, a repeated card and the run card' }),
       Object.freeze({ file: 'step.mjs', anchor: 'rendering a pending merge makes no GitHub call, never merges and changes no record' }),
       Object.freeze({ file: 'step.mjs', anchor: 'a human gate outranks a pending merge on the parked line' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a pending merge beside a waiting or repair observation names both on the parked line and the run card' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a delivered unit sent back to a fix or revision step is no longer merge pending' }),
       Object.freeze({ file: 'step.mjs', anchor: 'a later verified shipped close-out supersedes the pending delivery exactly once' }),
       Object.freeze({ file: 'step.mjs', anchor: 'a human or blocked card supersedes a pending delivery, and a delivered card cannot reopen a finished unit' }),
       Object.freeze({ file: 'step.mjs', anchor: 'a legacy delivered record stays readable and unchanged, pending only while its open PR is observed' }),
@@ -1918,7 +1934,7 @@ export const INCIDENTS = Object.freeze([
       + 'session_id. Prime writes it, --close-run closes it, /clear changes the session. Loop '
       + 'skills are explicit-invocation only.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'run-markers.mjs', anchor: 'export function ownedRun({ sessionId, ...where } = {}) {' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'export function ownedRun({ sessionId, includeClosed = false, ...where } = {}) {' }),
       Object.freeze({ file: 'run-markers.mjs', anchor: 'a missing session id, or another session (after /clear), is no ownership' }),
       Object.freeze({ file: 'run-markers.mjs', anchor: 'a closed latch is no ownership' }),
       Object.freeze({ file: 'run-markers.mjs', anchor: 'a latch whose pid now belongs to another process (start time differs) is no ownership' }),
@@ -1927,15 +1943,44 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'hook-root.mjs', anchor: 'function sessionOwnershipCases(check) {' }),
       Object.freeze({ file: 'hook-root.mjs', anchor: 'the owning session keeps the preflight and STATE, the Stop check, the rider and the transcript copy' }),
       Object.freeze({ file: 'hook-root.mjs', anchor: 'without a run, the guard still refuses a prime compound that deletes run state, and a prime in a foreign repository' }),
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'const latched = ownedRun({ sessionId: payload?.session_id });' }),
-      Object.freeze({ file: 'edit-guard.mjs', anchor: 'if (ownedRun({ sessionId: payload?.session_id }) === null) process.exit(0);' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'const latched = ownedRun({ sessionId, includeClosed: true });' }),
+      Object.freeze({ file: 'edit-guard.mjs', anchor: 'if (ownedRun({ sessionId, includeClosed: true }) === null) process.exit(0);' }),
       Object.freeze({ file: 'subagent-transcript.mjs', anchor: 'const root = guardedRoot(payload?.session_id);' }),
       Object.freeze({ file: 'session-preflight.sh', anchor: 'REPO_DIR="$(node "$TOOLS_DIR/hook-root.mjs" --guarded-root 2>/dev/null)" || exit 0' }),
       Object.freeze({ file: 'prime.mjs', anchor: 'export function closeRun(' }),
       Object.freeze({ file: '../hooks/hooks.json', anchor: 'run-latches/$PPID.json' }),
-      Object.freeze({ file: 'verify.mjs', anchor: 'a crashed plugin guard refuses while the session holds an open latch, and allows without one or after its close' }),
+      Object.freeze({ file: 'verify.mjs', anchor: 'holds a latch, closed too, and allows without one' }),
       Object.freeze({ file: 'verify.mjs', anchor: 'a hook with a statusMessage is refused' }),
       Object.freeze({ file: 'verify.mjs', anchor: "export const EXPLICIT_ONLY_SKILLS = Object.freeze(['codebase-design', 'dev', 'lean-code', 'queue-trace', 'setup', 'shape']);" }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'close-run-disabled-the-guards',
+    date: '2026-10-12',
+    symptom: 'Security review of the session-ownership change: a run could run prime.mjs --close-run '
+      + '(or re-prime with CLAUDE_CODE_SESSION_ID unset, empty or foreign) and the command and edit '
+      + 'guards stood down for the rest of the session, so `gh pr merge` and deleting the run state '
+      + 'were allowed.',
+    cause: 'A closed latch ended all ownership, and prime bound the latch to the session id in its '
+      + 'environment, which a command can change. A closed latch now keeps both guards for its own '
+      + 'session until /clear or exit; prime reads the session id the command guard took from the '
+      + 'prime command\'s hook input, refuses without it, never rebinds an open latch, and confirms '
+      + 'the latch before writing a marker. A payload naming no session, a crashed guard and a guard '
+      + 'that cannot start all refuse beside a latch; latches are read from an fd that cannot block.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'a closed latch keeps the guards for its own session only, until /clear' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'an open latch is never rebound to another, an empty or a missing session id' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'the guard hands prime the host session id in a private file of this process; nothing else is trusted' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'a latch swapped for a FIFO mid-read never hangs the reader' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'a closed run keeps the guard for its own session until /clear, and a payload naming no session is refused beside a latch' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'the guard hands prime the hook input' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'a crashed guard refuses only for the session that owns a run, closed too' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "process.on('uncaughtException', crashed);" }),
+      Object.freeze({ file: 'edit-guard.mjs', anchor: 'a closed run keeps the edit guard for its own session until /clear, and a payload naming no session is refused beside a latch' }),
+      Object.freeze({ file: 'hook-root.mjs', anchor: 'a closed run of this session: no preflight, Stop output, rider or transcript copy, and both guards refuse until /clear' }),
+      Object.freeze({ file: 'prime.mjs', anchor: 'prime opens a run only for the host session the guard handed it, refuses without one, and never rebinds an open latch' }),
+      Object.freeze({ file: 'verify.mjs', anchor: 'holds a latch, closed too, and allows without one' }),
+      Object.freeze({ file: 'loop-smoke.mjs', anchor: "runTool('command-guard.mjs (prime)'" }),
     ]),
   }),
 ]);

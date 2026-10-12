@@ -21,12 +21,21 @@ Notable changes to Autoloop are recorded here. The format follows
 ### Fixed
 
 - Autoloop hooks act only in the session that owns a run. Ownership starts at `prime.mjs`
-  and ends at `prime.mjs --close-run` or `/clear`. Other sessions get no preflight, STATE text,
-  GitHub or git calls, riders, transcript copies, Stop checks, or guard refusals. The one
-  exception: the command guard still checks a command that runs the plugin's `prime.mjs`. A
-  crashed guard refuses only while the session holds an open run latch. A session that does
-  not own a run can switch branches while a loop reviewer reads the checkout. The `statusMessage`
-  hook text is removed. Run markers record process start times, so a reused PID is not an owner.
+  and ends at `/clear` or process exit. `prime.mjs --close-run` ends the Stop check, preflight,
+  riders, and transcript capture, but the command and edit guards keep enforcing for that session.
+  Other sessions get no preflight, STATE text, GitHub or git calls, riders, transcript copies, Stop
+  checks, or guard refusals. The one exception: the command guard still checks a command that runs
+  the plugin's `prime.mjs`. A session that does not own a run can switch branches while a loop
+  reviewer reads the checkout. The `statusMessage` hook text is removed. Run markers record process
+  start times, so a reused PID is not an owner.
+- Prime binds the run to the session id in the prime command's hook input, which the command guard
+  records. It does not use `CLAUDE_CODE_SESSION_ID`. Prime refuses with `RUN_SESSION_UNKNOWN` when
+  the session id or the Claude process start time is unknown. It refuses with
+  `RUN_LATCH_UNCONFIRMED`, and writes no marker, when this process holds an open latch for another
+  session; an open latch is never rebound. While this process holds a latch, the guards refuse a hook
+  payload that is unreadable or names no session. A guard that throws refuses only for the owning
+  session. A guard that cannot start refuses while any latch of the shell's parent (`$PPID`) exists.
+  Latch files are read without following links or blocking on a FIFO.
   `dev`, `shape`, `setup`, `queue-trace`, `lean-code`, and `codebase-design` run only when
   invoked by name, and `pitcrew` is limited to Autoloop-owned pull requests. Vendored
   pre-plugin installs (`tools/agentic/*`) are not changed by this fix; devendor them.
@@ -49,15 +58,24 @@ Notable changes to Autoloop are recorded here. The format follows
   publication. Changed or removed blockers allow a new notice; unrelated labels do not.
 - A collected dispatch result marks only the step and attempt that launched it. A late, duplicate,
   mismatched, unreadable, or legacy result prints a plain collection line and no longer marks a
-  later step, such as the gate, as returned. Retries and fallbacks keep their original step.
+  later step, such as the gate, as returned. Retries and fallbacks keep their original step and
+  count as one review round. A step-record lock names its writer; a lock left by a dead writer, or
+  by a PID that now names another process, is reclaimed instead of blocking every later step write.
+  A corrupt step record is reported, not replaced.
 - A delivered card names the configured merge policy: "awaits human merge" only under `manual`,
   and a neutral caption when the policy is unknown. A delivered unit stays in the parked view and
   run card as merge pending, with its PR and any `--reason`, until a shipped, human, or blocked card
-  closes it. Status views do not merge or call GitHub. Legacy delivered records are not rewritten;
+  closes it, or the unit goes back to a fix or ladder step. A waiting or repair observation shows
+  next to a pending merge; a human block replaces it. Status views do not merge or call GitHub. Legacy delivered records are not rewritten;
   such a record shows as merge pending only while a later scan observes its open PR.
 - `verify.mjs` runs each self-test in its own process group. A timeout kills the whole group, a
   test that leaves processes behind fails, and cleanup is confirmed rather than assumed. The run
-  prints its process counts and group IDs.
+  prints its process counts and group IDs. The check for leftover processes starts when the test
+  exits, so a descendant that holds the test's output fails in seconds, not at the timeout. The gate
+  also runs the `verify.mjs` self-test, which never starts itself. `--self-test` kills its active
+  fixture group on SIGTERM.
+- Setup-phase reminders are removed from the PostToolUse rider; they could not fire outside an
+  owned run. `step.mjs` prints the setup ribbons.
 
 ## [0.67.0] - 2026-10-10
 
