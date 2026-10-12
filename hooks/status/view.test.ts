@@ -160,6 +160,8 @@ test('the band draws the header, the Loop column and the Work column from the pr
     '● review #412 · Session recovery',
     'code-review · fix 2/3 · ASTRA 6',
     '2 active · 3 waiting · 6 needs you',
+    '✓ plan  ✓ build  ✓ simplify  ● review  ○ gate  ○ deliver',
+    '! #417 Needs a policy answeranswer on #417 · +5 more',
   ])
   expect(findColor(drawn, '6 needs you')).toBe(PALETTE.crit)
 })

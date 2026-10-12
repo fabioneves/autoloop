@@ -96,11 +96,21 @@ function rows(tree: RenderElement): string[] {
   return children.flatMap((child) => (typeof child === 'string' ? [child] : rows(child)))
 }
 
-/** The column Boxes of the band's second row, with their widths. */
-function columns(tree: RenderElement): number[] {
+/** The column Boxes of the band's second row. */
+function columnBoxes(tree: RenderElement): RenderElement[] {
   const body = tree.type === 'Box' ? tree.children?.[1] : undefined
   if (body === undefined || typeof body === 'string' || body.type !== 'Box') return []
-  return (body.children ?? []).map((child) => (typeof child !== 'string' && child.type === 'Box' ? Number(child.props?.['width']) : -1))
+  return (body.children ?? []).filter((child): child is RenderElement => typeof child !== 'string' && child.type === 'Box')
+}
+
+function columns(tree: RenderElement): number[] {
+  return columnBoxes(tree).map((box) => (box.type === 'Box' ? Number(box.props?.['width']) : -1))
+}
+
+/** The rows of the band's last column, the proxy's. */
+function proxyRows(tree: RenderElement): string[] {
+  const last = columnBoxes(tree).at(-1)
+  return last === undefined ? [] : rows(last)
 }
 
 test('readProxy: ON with the active requests, OFF on a rejection, a non-200, a body that does not parse, or ok false', async () => {
@@ -161,7 +171,7 @@ test('ANTHROPIC_BASE_URL set: each tick fetches <base>/status without auth; ON d
   expect(h.held()?.proxy?.on).toBe(true)
   const drawn = await band($)
   expect(columns(drawn)).toEqual([53, 53, 54])
-  expect(rows(drawn).slice(-3)).toEqual(['● ON · 3 active requests', 'OPUS 5.5 ×2', 'ASTRA 6 ×1'])
+  expect(proxyRows(drawn)).toEqual(['● ON · 3 active requests', 'OPUS 5.5 ×2', 'ASTRA 6 ×1'])
   expect(findColor(drawn, 'ON')).toBe(PALETTE.good)
   await h.clock.advance(PERIOD_MS)
   expect(h.fetches.length).toBe(2)
@@ -179,7 +189,7 @@ test('each OFF cause draws OFF and drops the last ON value: a rejection, a 500, 
     await h.clock.advance(PERIOD_MS)
     expect(h.held()?.proxy).toEqual({ on: false })
     const drawn = await band($)
-    expect(rows(drawn).slice(-1)).toEqual(['○ OFF · 0 requests'])
+    expect(proxyRows(drawn)).toEqual(['○ OFF · 0 requests'])
     expect(findColor(drawn, 'OFF')).toBe(PALETTE.warn)
   }
   // The projection read went on through every proxy failure.
@@ -212,7 +222,7 @@ test('one tick runs both reads; a tick still running is skipped by the next peri
   await h.clock.advance(PERIOD_MS)
   expect(h.runs()).toBe(2)
   expect(h.fetches.length).toBe(2)
-  expect(rows(await band($)).slice(-1)).toEqual(['● ON · 0 active requests'])
+  expect(proxyRows(await band($))).toEqual(['● ON · 0 active requests'])
 })
 
 test('under 120 columns the proxy column reads ON · n req with no model rows', async ($, on) => {
@@ -220,7 +230,7 @@ test('under 120 columns the proxy column reads ON · n req with no model rows', 
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($, 100)
-  expect(rows(drawn).slice(-2)).toEqual(['1 active · 0 waiting · 0 needs you', '● ON · 3 req'])
+  expect(columnBoxes(drawn).slice(1).flatMap(rows)).toEqual(['1 active · 0 waiting · 0 needs you', '● ON · 3 req'])
   expect(columns(drawn)).toEqual([33, 33, 34])
 })
 

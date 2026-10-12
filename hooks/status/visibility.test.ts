@@ -159,8 +159,8 @@ test('a rejected run keeps the last projection and marks it stale', async ($, on
   expect(isStale(held?.lastOkAtMs ?? null, h.clock.now())).toBe(false)
   await h.clock.advance(30_000)
   expect(isStale(held?.lastOkAtMs ?? null, h.clock.now())).toBe(true)
-  // The band still draws the kept projection.
-  expect(texts(await band($))).toMatch(/^◆ autoloop · checked 33s ago · \[expand\]● review #412/u)
+  // The band still draws the kept projection, marked stale with hollow glyphs.
+  expect(texts(await band($))).toMatch(/^◆ autoloop · stale · checked 33s ago · \[expand\]○ review #412/u)
 })
 
 test('/autoloop answers that this session owns no run before the pane exists', async ($, on) => {

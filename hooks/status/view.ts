@@ -1,8 +1,9 @@
-// The band's view (docs/specs/SPEC-status-mod.md, items 7, 10, 12, 13 and
-// 17): pure functions from the projection and the proxy read to column text. They hold no `$`;
-// register.tsx draws what they return. Status is carried by a glyph and a
-// word, so each column hands back its glyph apart from its text.
-import type { ProxyRead, ProxyRequest, StatusProjection, StatusRound, StatusWorkedUnit } from '../../types'
+// The band's view (docs/specs/SPEC-status-mod.md, items 7 to 13, 16 and
+// 17): pure functions from the projection and the proxy read to column and
+// row text. They hold no `$`; register.tsx draws what they return. Status is
+// carried by a glyph and a word, so each column hands back its glyph apart
+// from its text.
+import type { ProxyRead, ProxyRequest, StatusProjection, StatusRound, StatusUnit, StatusWorkedUnit } from '../../types'
 import { GLYPH } from './theme'
 
 /** Under this many body columns the band drops its wider texts (spec item 12). */
@@ -24,6 +25,15 @@ export function shortModel(id: string | null | undefined): string {
   const gpt = /^gpt-(\d+(?:\.\d+)?)-([a-z]+)$/u.exec(model)
   if (gpt) return `${(gpt[2] ?? '').toUpperCase()} ${gpt[1]}`
   return model.toUpperCase()
+}
+
+/** A span as step.mjs `duration` prints it (`45s`, `3m 2s`, `1h 05m`), kept identical. */
+export function duration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`
 }
 
 /** The header's age of the last successful read. */
@@ -120,4 +130,46 @@ export function proxyColumn(proxy: ProxyRead, narrow: boolean): ProxyColumn {
     on: true, word: 'ON', tail: ` · ${count} active requests`,
     rows: modelCounts(proxy.requests).map(({ model, count: n }) => `${model} ×${n}`),
   }
+}
+
+export type PhaseCell = { label: string; state: 'done' | 'current' | 'notYet' }
+
+/** The producer's phases against the worked unit's: null without a unit (spec item 8). */
+export function phaseRow(projection: StatusProjection): PhaseCell[] | null {
+  const unit = projection.unit ?? null
+  if (unit === null) return null
+  const phases = projection.phases ?? []
+  const current = phases.indexOf(unit.phase)
+  return phases.map((label, index) => ({ label, state: index < current ? 'done' : index === current ? 'current' : 'notYet' }))
+}
+
+/** The units a human must answer, oldest first: issue numbers rise with time, and the projection carries no time on a unit. */
+export function blockedUnits(projection: StatusProjection): StatusUnit[] {
+  return (projection.units ?? []).filter((unit) => unit.needsYou !== null).sort((left, right) => left.issue - right.issue)
+}
+
+export type NeedsYouRow = {
+  issue: number
+  text: string
+  /** What answers it: `answer on #N`, or `merge or label PR #M` for an authorization with its PR. */
+  right: string
+  /** How many more units need a human. */
+  more: number
+}
+
+/** The band's needs-you row for the oldest blocked unit (spec item 9); null while none is blocked. */
+export function needsYouRow(projection: StatusProjection): NeedsYouRow | null {
+  const [oldest, ...rest] = blockedUnits(projection)
+  if (oldest === undefined || oldest.needsYou === null) return null
+  const right = oldest.needsYou.kind === 'authorize' && oldest.pr !== null
+    ? `merge or label PR #${oldest.pr}` : `answer on #${oldest.issue}`
+  return { issue: oldest.issue, text: oldest.needsYou.text, right, more: rest.length }
+}
+
+const TOAST_TEXT_MAX = 60
+
+/** The toast for a unit newly blocked (spec item 16): `#N needs you: <short>`. */
+export function toastText(unit: { issue: number; text: string }): string {
+  const short = unit.text.length > TOAST_TEXT_MAX ? `${unit.text.slice(0, TOAST_TEXT_MAX - 1)}…` : unit.text
+  return `#${unit.issue} needs you: ${short}`
 }
