@@ -90,7 +90,6 @@ export type StatusState = {
   proxy: ProxyRead | null
   /** Issues whose needs-you toast was shown in this session. */
   seenBlocked: number[]
-  paneOpen: boolean
 }
 
 declare module 'claude-code' {

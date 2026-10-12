@@ -1,13 +1,13 @@
 // The status mod (docs/specs/SPEC-status-mod.md): a band above the prompt
-// for the session that owns a run. This module holds the hooks; the read is
-// in read.ts, the column and row text in view.ts, the palette in theme.ts.
-// The band draws only from a projection that is owned and enabled, so every
-// other session sees no change. This release draws the header, the Loop,
-// Work and Proxy columns, the phase row and the needs-you row, and toasts a
-// unit the first time it needs a human; the pane is a later task.
+// and, on request, a pane for the session that owns a run. This module
+// holds the hooks; the read is in read.ts, the band's text in view.ts, the
+// pane's sections in pane.ts, the palette in theme.ts. The band draws only
+// from a projection that is owned and enabled, so every other session sees
+// no change; the pane opens only on /autoloop or the band's expand press.
 import type { Register, Timer } from 'claude-code'
 
 import type { StatusProjection, StatusState } from '../../types'
+import { PANE_ID, PANE_TITLE, paneSections } from './pane'
 import type { ProxyFetch } from './read'
 import { isDrawable, isStale, readProjection, readProxy } from './read'
 import { GLYPH, PALETTE } from './theme'
@@ -19,12 +19,12 @@ const STATUS = { plugin: 'autoloop', key: 'status' } as const
 const PERIOD_MS = 3000
 /** A tick past this is reported once: the period is not raised by itself (tasks/plan-status-mod.md, risks). */
 const SLOW_TICK_MS = 500
-const EMPTY: StatusState = { last: null, lastOkAtMs: null, lastMs: null, proxy: null, seenBlocked: [], paneOpen: false }
-
-/** The command's answer before the pane exists: the worked unit's phase and issue, or idle. */
-function summary(projection: StatusProjection): string {
-  const unit = projection.unit ?? null
-  return unit === null ? 'idle' : `${unit.phase} #${unit.issue}`
+const EMPTY: StatusState = { last: null, lastOkAtMs: null, lastMs: null, proxy: null, seenBlocked: [] }
+/** Why the pane and the command stay quiet while the projection is not drawable: not the owner, or the band turned off. */
+function quietReason(projection: StatusProjection | null): string {
+  return projection === null || projection.owned !== true
+    ? 'autoloop: this session owns no run'
+    : 'autoloop: the status band is off (ui.status is false in .autoloop/config.json)'
 }
 
 export const register: Register = (on) => {
@@ -95,11 +95,18 @@ export const register: Register = (on) => {
     return next(e)
   })
 
-  on('command.run', { command: 'autoloop' }, async ($) => {
+  // The pane opens on the person's ask alone: here and on the expand press.
+  on('command.run', { command: 'autoloop' }, async ($, e) => {
+    const args = e.args.trim()
+    if (args === 'close') {
+      await $.ui.close({ id: PANE_ID })
+      return { text: 'autoloop: status pane closed' }
+    }
+    if (args !== '') return { text: `autoloop: unknown argument "${args}"; use /autoloop or /autoloop close` }
     const last = (await $.state.get(STATUS)).value?.last ?? null
-    if (last === null || last.owned !== true) return { text: 'autoloop: this session owns no run' }
-    // The pane is a later task; until then the command answers the band's line.
-    return { text: `autoloop: ${summary(last)}` }
+    if (!isDrawable(last)) return { text: quietReason(last) }
+    const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE })
+    return { text: opened.isPlaced ? 'autoloop: status pane opened' : `autoloop: status pane waits (${opened.reason})` }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -119,11 +126,7 @@ export const register: Register = (on) => {
     const needsYou = needsYouRow(held.last)
     const [loopWidth, workWidth, proxyWidth] = columnWidths(e.props.bodyColumns, proxy === null ? 2 : 3)
     const { Box, Button, Text } = $.ui.resolve(e)
-    // The pane is a later task: the press only marks it open in state.
-    const expand = async () => {
-      const current = (await $.state.get(STATUS)).value ?? EMPTY
-      await $.state.set(STATUS, { ...current, paneOpen: true })
-    }
+    const expand = () => void $.ui.open({ id: PANE_ID, title: PANE_TITLE })
     const phaseGlyph = (state: 'done' | 'current' | 'notYet') =>
       (state === 'done' ? GLYPH.done : state === 'current' ? live(GLYPH.active) : GLYPH.notYet)
     return (
@@ -132,7 +135,7 @@ export const register: Register = (on) => {
           <Text color={PALETTE.ink}>
             <Text color={PALETTE.accent}>{GLYPH.brand}</Text> autoloop · {stale && <Text><Text color={PALETTE.warn}>stale</Text> · </Text>}{checkedAgo(held.lastOkAtMs, nowMs)} ·{' '}
           </Text>
-          <Button key="expand" label="expand" hotkey="e" plain onPress={() => void expand()} />
+          <Button key="expand" label="expand" hotkey="e" plain onPress={expand} />
         </Box>
         <Box>
           <Box flexDirection="column" width={loopWidth}>
@@ -173,6 +176,30 @@ export const register: Register = (on) => {
             <Text color={PALETTE.ink2}>{needsYou.right}{needsYou.more > 0 ? ` · +${needsYou.more} more` : ''}</Text>
           </Box>
         )}
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    const held = (await $.state.get(STATUS)).value ?? EMPTY
+    if (!isDrawable(held.last)) return <Text color={PALETTE.ink2}>{quietReason(held.last)}</Text>
+    const sections = paneSections(held.last, held.proxy, await $.session.id(), await $.clock.now())
+    const glyphColor = (glyph: string) => (glyph === GLYPH.needsYou ? PALETTE.crit : glyph === GLYPH.waiting ? PALETTE.warn : PALETTE.good)
+    return (
+      <Box flexDirection="column">
+        {sections.map((section) => (
+          <Box flexDirection="column" marginBottom={1}>
+            <Text color={PALETTE.ink2} bold>{section.title}</Text>
+            {section.rows.map((row) => (
+              <Text color={PALETTE.ink}>
+                <Text color={glyphColor(row.glyph)}>{row.glyph}</Text> {row.text}
+                {row.chips.map((chip) => <Text color={PALETTE.info}>  {chip}</Text>)}
+                {row.mark !== null && <Text> · <Text color={PALETTE.accent}>{row.mark}</Text></Text>}
+              </Text>
+            ))}
+          </Box>
+        ))}
       </Box>
     )
   })

@@ -43,7 +43,7 @@ export function checkedAgo(lastOkAtMs: number | null, nowMs: number): string {
 }
 
 /** The round as the `--round` grammar names it: `fix 2/3`, `re-plan`, `open findings`, `full`. */
-function roundLabel(round: StatusRound): string {
+export function roundLabel(round: StatusRound): string {
   if (round.kind === 'fix') return `fix ${round.n ?? '?'}${round.budget === undefined ? '' : `/${round.budget}`}`
   return round.kind === 'open-findings' ? 'open findings' : round.kind
 }

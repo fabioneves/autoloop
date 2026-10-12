@@ -193,7 +193,8 @@ test('under 120 columns the Loop column drops the title', async ($, on) => {
   expect(rows(await band($, 120))[1]).toBe('● review #412 · Session recovery')
 })
 
-test('expand is a Button with hotkey e that only marks the pane open', async ($, on) => {
+test('expand is a Button with hotkey e', async ($, on) => {
+  // What the press opens is pane.test.ts's.
   const h = host(on, () => RUN)
   await start($)
   await h.clock.advance(PERIOD_MS)
@@ -210,9 +211,6 @@ test('expand is a Button with hotkey e that only marks the pane open', async ($,
   })(drawn)
   expect(button?.type).toBe('Button')
   expect(button?.type === 'Button' ? button.props.hotkey : null).toBe('e')
-  expect(h.held()?.paneOpen).toBe(false)
-  await $.ui.press({ plugin: 'autoloop', key: 'expand' })
-  expect(h.held()?.paneOpen).toBe(true)
   expect(h.held()?.last?.unit?.issue).toBe(412)
 })
 
