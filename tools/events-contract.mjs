@@ -10,7 +10,7 @@
 // for a UI concern, so `appendEvent` and `writeControl` return `{ ok, error }`
 // and never throw.
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync,
+  appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -246,6 +246,47 @@ export function takeControls(commonDir, kinds, { nowMs = Date.now() } = {}) {
   return taken;
 }
 
+// The run id every writer stamps: prime writes it at run.start and clears it
+// at run.end. A writer outside a run (an older plugin opened it, a bare tool
+// call) stamps `unknown`, which the UI shows as such.
+export const RUN_ID_FILE = 'run-id';
+export function currentRunId(commonDir) {
+  try {
+    const id = readFileSync(join(eventsDir(commonDir), RUN_ID_FILE), 'utf8').trim();
+    return id.length > 0 ? id : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+export function setRunId(commonDir, id) {
+  try {
+    const path = join(eventsDir(commonDir), RUN_ID_FILE);
+    if (id === null) {
+      if (existsSync(path)) unlinkSync(path);
+    } else {
+      mkdirSync(eventsDir(commonDir), { recursive: true });
+      writeFileSync(path, `${id}\n`);
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
+// What a writer calls: fills the version, the time and the run, drops
+// undefined and null fields, appends, and reports a failure as one stderr line.
+// Never throws; the writer's own result is never changed by it.
+export function emitEvent(commonDir, event, { nowMs = Date.now(), stderr = process.stderr } = {}) {
+  if (typeof commonDir !== 'string' || commonDir.length === 0) return { ok: false, error: 'no common dir' };
+  const record = { v: EVENT_VERSION, at: nowMs, run: currentRunId(commonDir) };
+  for (const [name, value] of Object.entries(event)) if (value !== undefined && value !== null) record[name] = value;
+  const result = appendEvent(commonDir, record);
+  if (!result.ok) {
+    try { stderr.write(`events: ${record.kind ?? 'event'} not recorded: ${result.error}\n`); } catch { /* a closed stderr changes nothing */ }
+  }
+  return result;
+}
+
 // The paused marker: a control the loop keeps applied until unpause.
 export const PAUSED_FILE = 'paused';
 export function pausedPath(commonDir) { return join(controlDir(commonDir), PAUSED_FILE); }
@@ -373,6 +414,24 @@ function selfTest() {
       const later = Date.now() + CONTROL_RETENTION_MS + 1000;
       takeControls(dir, [], { nowMs: later });
       return readdirSync(join(dir, 'autoloop', CONTROL_DIR, 'done')).length === 0;
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  check('emitEvent stamps v, at and the run id, drops null fields, and reports a failure on stderr', () => {
+    const dir = fresh();
+    try {
+      const lines = [];
+      const stderr = { write: (line) => lines.push(line) };
+      setRunId(dir, 'run-7');
+      const ok = emitEvent(dir, { by: 'step', kind: 'step', issue: 5, step: '02-plan', round: null, model: undefined, text: 'go' }, { nowMs: 42, stderr });
+      const { events } = readEvents(dir);
+      setRunId(dir, null);
+      const unknown = emitEvent(dir, { by: 'prime', kind: 'select', issue: 6 }, { nowMs: 43, stderr });
+      const second = readEvents(dir).events[1];
+      chmodSync(join(dir, 'autoloop', EVENTS_FILE), 0o400);
+      const failed = emitEvent(dir, { by: 'step', kind: 'step', issue: 5, step: 'x', text: 'oops' }, { stderr });
+      return ok.ok && events[0].v === 1 && events[0].at === 42 && events[0].run === 'run-7' && !('round' in events[0]) && !('model' in events[0])
+        && unknown.ok && second.run === 'unknown'
+        && (process.getuid?.() === 0 || (!failed.ok && lines.length === 1 && lines[0].startsWith('events: step not recorded')));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   check('the paused marker is set, read and cleared', () => {

@@ -13,7 +13,7 @@
 //   node step.mjs --self-test
 
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
   statSync, writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { latchDirectory, loopRunIsLive, ownedRun, ownRunMarkers, processStart, sessionLatch, sessionOwnerPid } from './run-markers.mjs';
+import { emitEvent, readEvents } from './events-contract.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, issueSnapshotItem, SNAPSHOT_SECTIONS,
   snapshotProblem, verifySnapshot,
@@ -382,6 +383,12 @@ export function transition({
   } catch (error) {
     warning = `! step: #${issue} moved to ${to} but its record failed: ${error.message}; re-prime before deciding`;
   }
+  // The UI's copy of the transition (SPEC-events). Fail-open: a refused or
+  // failed append is one stderr line and the ribbon still prints.
+  emitEvent(dirname(dir), {
+    by: 'step', kind: 'step', issue, step: to, round, model, text: eventText(note),
+    pr: Number.isSafeInteger(record.pr) && record.pr > 0 ? record.pr : undefined,
+  }, { nowMs });
   return {
     ok: true,
     lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note }),
@@ -844,6 +851,12 @@ function clock(atMs) {
 // The 🧊 frozen plan is named the same way on every line (operator ask,
 // 2026-09-28). Ice cube, not snowflake: ❄️ carries a variation selector and
 // would break the aligned columns.
+// An event's text: one plain line, no glyphs added, cut at the contract's limit.
+function eventText(text) {
+  const flat = String(text ?? '').replace(/\s+/gu, ' ').trim();
+  return flat.length === 0 ? undefined : [...flat].slice(0, 200).join('');
+}
+
 function oneLine(text, limit = 90) {
   const flat = String(text ?? '').replace(/\s+/gu, ' ').trim()
     .replace(/(?<!🧊 )\b(frozen plan)\b/giu, '🧊 $1');
@@ -1357,11 +1370,35 @@ function transitionChecks(at) {
         && snapshot.invalidation?.reasonCodes?.includes('ISSUE_MUTATION')
         && steps?.steps?.at(-1)?.step === '06-simplify' && steps.steps.at(-1).model === 'claude-fable-5-1'
         && first.lines.length === 1 && first.lines[0].startsWith('09:51 #350 ⏳ 🧹 SIMPLIFY')]);
+    const events = readEvents(join(root, '.git')).events;
+    results.push(['a transition appends one step event with the issue, the step, the model and the note',
+      events.length === 1 && events[0].kind === 'step' && events[0].by === 'step' && events[0].issue === 350
+        && events[0].step === '06-simplify' && events[0].model === 'claude-fable-5-1' && events[0].at === at(9, 51)
+        && !('round' in events[0]) && !('pr' in events[0])]);
     const edits = calls.filter((call) => call.startsWith('gh issue edit')).length;
     const again = go({ to: '06-simplify', model: 'claude-fable-5-1' });
     results.push(['the same step twice swaps nothing and says so',
       again.ok === true && again.lines.join('') === 'already on 06-simplify'
-        && calls.filter((call) => call.startsWith('gh issue edit')).length === edits]);
+        && calls.filter((call) => call.startsWith('gh issue edit')).length === edits
+        && readEvents(join(root, '.git')).events.length === 1]);
+    // Fail-open: the event file is the UI's; a write it refuses changes nothing
+    // of the transition (the labels, the record, the ribbon).
+    const unwritable = (() => {
+      const eventsPath = join(root, '.git', 'autoloop', 'events.jsonl');
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:05-implement'];
+      chmodSync(eventsPath, 0o400);
+      const result = go({ issue: 353, to: '06-simplify', model: 'claude-fable-5-1' });
+      chmodSync(eventsPath, 0o644);
+      const after = labels;
+      labels = saved;
+      return { result, after };
+    })();
+    results.push(['a transition whose event cannot be written still swaps, records and prints the ribbon',
+      unwritable.result.ok === true && unwritable.result.lines[0].startsWith('09:51 #353 ⏳ 🧹 SIMPLIFY')
+        && unwritable.after.includes('loop:06-simplify')
+        && readJson(join(root, '.git', 'autoloop', 'steps', '353.json'), null)?.steps?.at(-1)?.step === '06-simplify'
+        && (process.getuid?.() === 0 || readEvents(join(root, '.git')).events.length === 1)]);
     const backward = go({ to: '05-implement', model: 'claude-opus-5-5' });
     results.push(['a backward swap is refused by this tool, printed, and changes nothing',
       backward.ok === false && /step labels only climb/u.test(backward.lines.join(' '))
