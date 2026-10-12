@@ -408,6 +408,11 @@ a `human` block.
 
 Produce the planned lane proof from complete evidence. Unknown scope is full.
 
+**No work-size quota.** Never invent a plan-character, file-count or changed-line quota, in a plan
+or a `decide`; an estimate neither authorizes nor constrains delivery. Never compress a complete
+plan, split, delay or stop only to fit a number. Keep functional acceptance and the exact
+authorized path identities (a total of six files is not a list of six permitted paths).
+
 ### 3. Review the plan once
 
 `full` lane: no claim until the verdict. Small and docs lanes: claim and implement concurrently; a
@@ -463,14 +468,13 @@ blindly.
 ### 6. Simplify
 
 `step.mjs --to 06-simplify`, then **one behavior-preserving `--role simplify` dispatch before any
-review round**. The prompt loads `agent-skills:code-simplification` and states: the measured budget
-(plan prediction vs `git diff --stat` from the claim commit; over budget makes reduction required and
-names the excess, within it is still a clarity pass); behavior frozen (outputs, errors, side
+review round**. The prompt loads `agent-skills:code-simplification` and states: a clarity and
+structure pass with no size target; behavior frozen (outputs, errors, side
 effects, ordering; a change the writer cannot prove behavior-preserving is not made); tests green and test files untouched; the
-file boundary, no new dependencies or speculative abstractions; return changes and line delta.
+file boundary, no new dependencies or speculative abstractions; return the changes.
 
 Then run the full unit tests yourself and read the diff; a behavior change is reverted, not fixed.
-A trivial diff (~50 lines, two files) may be simplified inline; nothing else here is done by
+A small-lane diff may be simplified inline; nothing else here is done by
 hand. Residual complexity stays a review finding. Update ARCH on the unit branch when
 structure/integrations changed; keep curated docs merge-friendly (no shared freshness line, derived
 count prose, or table re-padding).
@@ -548,14 +552,6 @@ model fixes, the other reviews.
   alternative. The unit waits on the repair; once it merges, `unit.mjs --obsolete --issue <N> --pr
   <repair PR>` and close the draft as superseded. Block only a `human`-class Critical. Print the
   rail and take the next unit immediately.
-
-Measure size with git, never a summing script; production lines exclude test/vendored globs:
-
-```bash
-git diff --shortstat <base>...<head>
-git diff --shortstat <base>...<head> -- . ':(exclude)<glob>'
-git diff --name-only <base>...<head> -- . ':(exclude)<glob>' | wc -l
-```
 
 ### Carving out a predicate
 
@@ -731,7 +727,7 @@ outcomes; any `markers.knownRefused`; the `overlap:` line verbatim from
 
 ```bash
 node <plugin-tools>/sizing-contract.mjs --outcome --issue 219 \
-  --plan-rounds 1 --code-rounds 3 --escalated --result blocked --prod-lines 858 --files 14
+  --plan-rounds 1 --code-rounds 3 --escalated --result blocked
 ```
 
 `--result`: `shipped`, `blocked`, or `deferred`; `--escalated` only if the same-predicate rule
@@ -813,7 +809,7 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
 11 carry none), marks the snapshot stale, and prints the line:
 
 ```text
-09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      11 files planned
+09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      tests first
 ```
 
 - `--model`: the result's `model`; omit for your own steps
@@ -833,7 +829,7 @@ Collecting a result: `node <plugin-tools>/step.mjs --issue <N> --resumed "<what 
 
 ```bash
 node <plugin-tools>/step.mjs --card --issue <N> --outcome <shipped|delivered|blocked|human> \
-  [--title "<safe title>"] [--pr <P>] [--lines <n>] [--question|--reason "<one line>"]
+  [--title "<safe title>"] [--pr <P>] [--question|--reason "<one line>"]
 ```
 
 `shipped` = merged; `delivered` = ready PR, merge pending until a later card; `human` has a `❓` question.

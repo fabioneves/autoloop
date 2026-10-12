@@ -35,9 +35,9 @@ const EXTRAS = {
     + ' mapping) and carry the literal `## Constraints` section distilling them — the plan'
     + ' reviewer flags both when missing.',
   '06-simplify': ' Dispatch ONE behavior-preserving simplify pass (`--role simplify`, routed) whose'
-    + ' prompt loads `agent-skills:code-simplification` and carries the measured diff vs the'
-    + " plan's line budget; tests green before it returns, test files unedited, behavior frozen."
-    + ' Verify the returned diff yourself — a behavior change is reverted, not fixed.',
+    + ' prompt loads `agent-skills:code-simplification`; tests green before it returns, test files'
+    + ' unedited, behavior frozen. Verify the returned diff yourself — a behavior change is'
+    + ' reverted, not fixed.',
   '07-diff-review': ' Load `agent-skills:code-review-and-quality` AND the domain skills the plan'
     + ' named via the Skill tool in THIS message — naming in the plan is not loading; reviewing'
     + ' bare is a skipped rider. Plain run: the review is a `--role diff-review` dispatch.',
@@ -291,6 +291,11 @@ function selfTest() {
     console.error('FAIL: ARCH nudge contradicts the no-freshness-metadata contract');
   }
   if (/ARCH\.md/.test(withoutMap)) { fail++; console.error('FAIL: archMap:false leaked ARCH.md nudge'); }
+  // LFE #506: the simplify rider carried a measured diff against the plan's line budget.
+  if ([withMap, withoutMap].some((text) => /budget|measured|\blines?\b|line delta|reduction/iu.test(text))) {
+    fail++;
+    console.error('FAIL: the simplify rider asks for a work-size measurement or budget reduction');
+  }
   // A plugin hook fires in every session: it reminds only the session that
   // owns a run, whatever the repository holds.
   {

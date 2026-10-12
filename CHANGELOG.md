@@ -7,6 +7,13 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
+- Autoloop no longer invents, enforces, or reports work-size quotas. Plan and plan-review briefs
+  forbid plan-character, file-count, and changed-line quotas and size-only compression, splits,
+  delays, or stops. Simplify has no size budget. Writers report changed paths, not line or file
+  totals. Cards, `sizing-contract.mjs` markers, and `stats.mjs --sizing` text and JSON carry no
+  line or file counts. `--lines`, `--files`, and `--prod-lines` are refused as retired.
+  Historical markers with size fields still parse; the fields are dropped. Command-guard refusals
+  no longer recommend `wc -l` or `git diff --shortstat`.
 - Built-in step defaults use model-family aliases with the `[1m]` context selector and `high`
   effort for every role and its fallback. The serving CLI selects the model version. Existing
   global config files are not changed automatically.

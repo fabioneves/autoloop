@@ -12,11 +12,11 @@ One behavior-preserving clarity pass over the implemented unit.
 - Stay inside the plan's file boundary.
 - The frozen plan is binding. Never add or update a progress counter or task-status mirror in protected guidance such as CLAUDE.md or AGENTS.md. If the plan requires one or an earlier writer made one, preserve the frozen plan and any existing edit, report the mismatch as pending for an orchestrator ruling; do not remove, resolve or replan it yourself.
 - No new dependency, abstraction or helper "for later".
-- When the measured budget below says over, reduction is required; within budget, prefer no change to a cosmetic rewrite.
+- Improve clarity and structure; no size target applies. Prefer no change to a cosmetic rewrite.
 - If nothing is worth changing, report no change; never manufacture one.
 - Commit with a conventional message recording the verification; no co-author trailer.
 - Check staged content for secrets before committing.
 - Never push, open or edit a PR, label, merge, release, delete files, or run the objective gate.
-- Report: what changed, line delta, test outcome, clean or dirty tree.
+- Report: what changed, test outcome, clean or dirty tree.
 
-The unit facts follow below: measured budget, frozen plan, dispositions, base path, and focus.
+The unit facts follow below: frozen plan, dispositions, base path, and focus.

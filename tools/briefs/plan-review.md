@@ -11,6 +11,7 @@ Adversarial review of one plan. Your job is to find the case the author did not 
 - For each rule: is it quantified over its whole domain with every case enumerated and tested, or an example standing in for a rule? An incomplete invariant is a Major.
 - Check that each planned test can actually prove its claim with the runner and typechecker the repo has.
 - Judge every decide the plan records.
+- Never invent a plan-character, file-count or changed-line quota. A size estimate neither authorizes nor constrains delivery. A plan compressed, split, delayed or stopped only to fit such a number is a finding. Keep the functional acceptance and the exact authorized path identities: a total of six files is not a list of six permitted paths.
 - Do not reopen a settled human ruling or an accepted disposition.
 - Review the plan as written, not an imagined implementation.
 - Cite path:line for every finding; if a read is denied, report the gap, never work around it.

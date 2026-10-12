@@ -44,7 +44,9 @@ Outcome:
 ## Not changed
 
 - The simplify brief's "measured budget" (the plan's own predicted line count against the diff)
-  is plan-relative guidance, not a configured limit.
+  is plan-relative guidance, not a configured limit. Superseded by
+  [SPEC-work-size-removal.md](SPEC-work-size-removal.md), which removes this budget, the
+  git-measurement block, and the shape line tripwire.
 - The `--card-run` 1.5 KB cap, the dispatch timeouts and the guard's parse limits are internal
   safety bounds, not repository policy.
 

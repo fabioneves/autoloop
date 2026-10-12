@@ -247,7 +247,7 @@ function mergePolicy(root) {
 // A delivered card records the pending merge and keeps the unit open; only a
 // shipped, human or blocked card closes it (the lifecycle driver's verified
 // merged close-out among them, with ifOpen, once).
-export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '', reason = '', ifOpen = false }) {
+export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, question = '', reason = '', ifOpen = false }) {
   const { dir } = autoloopDir(root, run);
   if (dir === null) return { ok: false, lines: ifOpen ? [] : [`step: no steps recorded for #${issue} (not in a git repository)`] };
   const path = join(dir, 'steps', `${issue}.json`);
@@ -262,7 +262,7 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
         return { ok: false, changed: false, lines: [`step: #${issue} is closed as ${stored.closed.outcome}; a delivered card cannot reopen it`] };
       }
       const record = stored ?? { issue, steps: [] };
-      const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, lines, question, policy, reason });
+      const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, question, policy, reason });
       if (outcome === 'delivered') {
         const since = record.pending?.pr === pr && Number.isFinite(record.pending.atMs) ? record.pending.atMs : nowMs;
         delete record.closed;
@@ -390,7 +390,7 @@ function stepTimes(steps, nowMs) {
 }
 
 // The time-only closing card, one per unit.
-export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null, lines = null, question = '', policy = null, reason = '' }) {
+export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null, question = '', policy = null, reason = '' }) {
   const head = (OUTCOMES[outcome] ?? `${outcome} #{n}`).replace('{n}', String(issue)).replace('{merge}', mergeCaption(policy));
   const { times, rounds, round } = stepTimes(steps, nowMs);
   const longest = Math.max(1, ...times.values());
@@ -402,7 +402,6 @@ export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null
   });
   const total = minutes(nowMs - (steps[0]?.startedAtMs ?? nowMs));
   const facts = [total,
-    ...(Number.isFinite(lines) ? [`${lines} lines`] : []),
     ...(rounds > 0 ? [`${rounds} round${rounds === 1 ? '' : 's'}`] : []),
     ...(Number.isFinite(pr) ? [`PR #${pr}`] : [])];
   return [
@@ -751,8 +750,8 @@ function selfTest() {
       ribbon({ atMs: at(9, 40), issue: 350, step: '06-simplify' }).includes('⚪ ENGINE'),
     ].join('|')) === '⚪ ENGINE|⚪ ENGINE|⚪ ENGINE|⚪ ORCHESTRATOR|⚪ ORCHESTRATOR|true'],
     ['a step ribbon has fixed columns: time, unit, badge, step, bar, model, note',
-      ribbon({ atMs: at(9, 40), issue: 350, step: '05-implement', model: 'claude-opus-5-5', note: '11 files planned' })
-        === '09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      11 files planned'],
+      ribbon({ atMs: at(9, 40), issue: 350, step: '05-implement', model: 'claude-opus-5-5', note: 'tests first' })
+        === '09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      tests first'],
     ['a review round replaces the counter with the round',
       ribbon({ atMs: at(10, 2), issue: 350, step: '08-code-review', round: '2/5', badge: '🚧', model: 'gpt-6-astra', note: '2 Major open' })
         === '10:02 #350 🚧 🔍 CODE-REVIEW  ▰▰▱▱▱ r2/5         🟢 ASTRA 6       2 Major open'],
@@ -806,14 +805,14 @@ function selfTest() {
       : '❌ FAIL · 🚨 1 Critical · 🔺 1 Major · 🔸 1 Minor · 💡 1 Suggestion'))],
     ['a writer finishes with its note, a failed dispatch with its code, a fallback with its arrow', [
       safely(() => renderFinished({ atMs: at(9, 0), issue: 7, step: '05-implement', ms: 2_509_000,
-        result: { ok: true, model: 'claude-opus-5-5' }, what: '34 paths, verification pending' })),
+        result: { ok: true, model: 'claude-opus-5-5' }, what: 'commits recorded, verification pending' })),
       safely(() => renderFinished({ atMs: at(9, 0), issue: 7, step: '05-implement', ms: 180_000,
         result: { ok: false, model: 'claude-opus-5-5', error: { code: 'ENGINE_EXIT_NONZERO' } } })),
       safely(() => renderFinished({ atMs: at(9, 0), issue: 7, step: '08-code-review', ms: 60_000,
         result: { ok: true, model: 'claude-sonnet-5', fallback: { from: 'gpt-6-astra' },
           verdict: { verdict: 'pass', findings: [{ severity: 'Minor' }] } } })),
     ].join('\n') === [
-      '09:00 #7   🔔 🔨 IMPLEMENT    done in 41m 49s    🟠 OPUS 5.5      34 paths, verification pending',
+      '09:00 #7   🔔 🔨 IMPLEMENT    done in 41m 49s    🟠 OPUS 5.5      commits recorded, verification pending',
       '09:00 #7   💥 🔨 IMPLEMENT    failed in 3m 0s    🟠 OPUS 5.5      ENGINE_EXIT_NONZERO',
       '09:00 #7   🔔 🔍 CODE-REVIEW  done in 1m 0s      🔵 SONNET 5    ↪ ✅ PASS · 🔸 1 Minor',
     ].join('\n')],
@@ -863,7 +862,8 @@ function selfTest() {
         && parsed(['--setup', 'audit', '--badge', '🎉']).error !== null
         && parsed(['--setup']).error !== null],
     ['bad calls are refused', ['--issue x --to 02-plan', '--to 02-plan', '--issue 7', '--issue 7 --to 02-plan --round 9',
-      '--issue 7 --to 02-plan --colour red', '--issue 7 --resumed x --ms soon']
+      '--issue 7 --to 02-plan --colour red', '--issue 7 --resumed x --ms soon',
+      '--card --issue 7 --outcome shipped --lines 393']
       .every((call) => parsed(call.split(' ')).error !== null)],
   );
   checks.push(...transitionChecks(at));
@@ -886,6 +886,7 @@ function selfTest() {
     nowMs: start + 77 * minute, pr: 550, lines: 393, policy: 'manual',
   }));
   checks.push(
+    // LFE #506: a card names time, rounds and PR, never a changed-line total, even when a caller passes one.
     ['a closing card shows each step\'s time with bars scaled to the longest, rounds folded into review',
       card === [
         '╭─ ⚠️ #350 DELIVERED · awaits human merge · Axis B playback state machine',
@@ -895,7 +896,7 @@ function selfTest() {
         '│  🧹 simplify        6m  ▰▰',
         '│  🔍 code-review    42m  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰  r2/5',
         '│  🚦 gate            9m  ▰▰▰',
-        '╰─ 1h 17m · 393 lines · 2 rounds · PR #550',
+        '╰─ 1h 17m · 2 rounds · PR #550',
       ].join('\n')],
     ['a blocked card ends on its question', (() => {
       const blocked = safely(() => renderCard({
@@ -1064,7 +1065,7 @@ function transitionChecks(at) {
         ['08-code-review', '09-gate'],
         [], [], [], [],
       ])]);
-    const first = go({ to: '06-simplify', model: 'claude-fable-5-1', note: '393 lines' });
+    const first = go({ to: '06-simplify', model: 'claude-fable-5-1', note: 'clarity pass' });
     const snapshot = JSON.parse(readFileSync(join(prime, 'a.snapshot.json'), 'utf8'));
     const steps = (() => {
       try {
@@ -1767,7 +1768,7 @@ export function parseArgs(argv) {
   };
   const valued = { '--issue': 'issue', '--to': 'to', '--round': 'round', '--model': 'model', '--badge': 'badge',
     '--note': 'note', '--resumed': 'what', '--ms': 'ms', '--outcome': 'outcome', '--title': 'title',
-    '--pr': 'pr', '--lines': 'lines', '--question': 'question', '--reason': 'reason', '--result': 'result' };
+    '--pr': 'pr', '--question': 'question', '--reason': 'reason', '--result': 'result' };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === '--fallback') { out.fallback = true; continue; }
@@ -1786,10 +1787,9 @@ export function parseArgs(argv) {
     out.ms = Number(out.ms);
     if (!Number.isFinite(out.ms)) return { ...out, error: '--ms needs a number' };
   }
-  for (const key of ['pr', 'lines']) {
-    if (out[key] === undefined) continue;
-    if (!/^\d{1,9}$/u.test(String(out[key]))) return { ...out, error: `--${key} needs a number` };
-    out[key] = Number(out[key]);
+  if (out.pr !== undefined) {
+    if (!/^\d{1,9}$/u.test(String(out.pr))) return { ...out, error: '--pr needs a number' };
+    out.pr = Number(out.pr);
   }
   if (out.card) {
     if (OUTCOMES[out.outcome] === undefined) {

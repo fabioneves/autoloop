@@ -1463,6 +1463,16 @@ function selfTest() {
       'Quote: "Keep this exact text."',
       'JSON: {"result":"pass","count":3}',
     ].join('\n');
+    // LFE #506: decisions invented plan-character and changed-line quotas and
+    // compressed a complete plan to fit them; no brief asks for size numbers.
+    check('no role brief requests a work-size total or budget reduction, and plan briefs forbid invented quotas',
+      ['plan', 'plan-review', 'implement', 'fix', 'simplify'].every((role) => {
+        const brief = composeBrief(role, 'x');
+        return brief.ok === true
+          && !/line delta|measured budget|reduction is required|lines and files|over budget/iu.test(brief.prompt);
+      })
+        && ['plan', 'plan-review'].every((role) => composeBrief(role, 'x').prompt
+          .includes('Never invent a plan-character, file-count or changed-line quota')));
     check('every role gets the writing rule and keeps the unit facts unchanged',
       ROLE_NAMES.every((role) => {
         const brief = composeBrief(role, unitFacts);
@@ -1899,6 +1909,27 @@ function selfTest() {
           && argvSeen.includes('--permission-mode plan')
           && !/--tools \S*(?:Write|Edit|Bash)/.test(argvSeen)
           && argvSeen.includes('--json-schema');
+      })(),
+    );
+    check(
+      // LFE #506: a 24048-character plan was compressed to fit an invented
+      // 16000-character cap. A readable plan inside the 65535 bound is kept whole.
+      'a readable plan body over 16000 characters is accepted with its exact body',
+      (() => {
+        const body = Array.from({ length: 400 }, (_, index) =>
+          `## Task ${index + 1}\n\nWrite the failing test first, then the code.\n`).join('\n');
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: { title: 'feat: keep the whole plan', prBody: 'Closes #506', body } }),
+        ));
+        const planned = runDispatch({
+          role: 'plan',
+          prompt: 'plan issue #506',
+          tools: resolveTools('plan'),
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        return body.length > 16000 && body.length < 65535
+          && planned.ok === true && planned.plan.body === body;
       })(),
     );
     check(

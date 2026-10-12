@@ -1011,24 +1011,20 @@ export function unresolvedExpansionReason(rawCmd) {
   // whatever the inner command PRINTS, which is exactly what cannot be known
   // before running it. Telling the reader to "assign it a literal" is advice
   // they cannot follow.
-  // A live run measuring per-package sizes hit this and had nowhere to go.
-  // 2026-07-29: the alternatives named were BOTH measurements, so a session
-  // wanting one method body — grep for the signature, feed its line number to
-  // `sed -n` — was answered with `wc -l` and `git diff --shortstat` and had
-  // nowhere to go again. Locating a definition and reading around it is the
-  // commonest reason to reach for a substitution at all, and unlike a
-  // measurement it has an exact one-command answer, so it is named first.
+  // 2026-07-29: a session wanting one method body — grep for the signature, feed
+  // its line number to `sed -n` — had nowhere to go. Locating a definition and
+  // reading around it is the commonest reason to reach for a substitution at
+  // all, and it has an exact one-command answer, so it is named first.
   // 2026-08-12: `echo ".test.ts tracked: $(git ls-files '*.test.ts' | wc -l)"` — a
-  // substitution whose only job was labeling a count. The measuring remedies name the
-  // numbers but never the label, so the labeling spelling is stated with them.
+  // substitution whose only job was labeling a count, so the labeling spelling
+  // is stated. Work-size measurement advice was removed for LFE #506.
   if (tokens.every((token) => token === 'a command substitution')) {
     return `${what}, because its value is whatever the inner command prints and that is not `
       + 'knowable before running it. Run the inner command as its own call and use the value it '
       + 'returns, or pick a spelling that needs no substitution. To read the region around a '
       + 'match — the usual reason to feed `grep -n` into `sed` — `rg -n -A<lines> <pattern> '
       + '<file>` prints the match and what follows in one pass, and the host file-reading tool '
-      + 'takes an offset and a line count directly. To measure, `wc -l <paths>` and '
-      + '`git diff --shortstat` print their numbers directly. To label a count, run the '
+      + 'takes an offset and a line count directly. To label a count, run the '
       + 'counting command bare and let prose carry the label — two counts are two commands, '
       + 'and their order says which is which. A real program goes in a file.';
   }
@@ -1042,13 +1038,12 @@ const ASSEMBLER_REMEDY = Object.freeze({
     + 'To LIST, run the plain command alone (`ls -1 <dir>`) — the output is yours to '
     + 'read directly. To ACT on each entry, write a reviewed program file and run it.',
   // Naming only the file form made the remedy read as "do something absurd":
-  // a live run was blocked extracting a number from `git diff --stat` and
-  // authoring an awk FILE for that is more ceremony than the measurement. The
-  // fanout remedy above already learned this — name the command to run instead.
+  // authoring an awk FILE for a column or a tally is more ceremony than the
+  // task. The fanout remedy above already learned this — name the command to
+  // run instead. Work-size measurement advice was removed for LFE #506.
   awk: 'This inline `awk` program can start a process (`system()`, `getline` or a `|` to or '
-    + 'from a command), and the guard cannot see what that process is. Most loop uses of it are a '
-    + 'measurement with a plainer spelling: `git diff --shortstat` for insert/delete counts, '
-    + '`wc -l` for a line count, `cut -f<n>` for a column, `sort | uniq -c` for a tally. '
+    + 'from a command), and the guard cannot see what that process is. Most loop uses of it have a '
+    + 'plainer spelling: `cut -f<n>` for a column, `sort | uniq -c` for a tally. '
     // 2026-07-29: `sed -n <range>p file | cat -n | awk '{print $1+<offset>, ...}'` — the awk
     // existed only to undo `cat -n` renumbering from 1, which happens only because `sed` ran
     // FIRST. Number before slicing and the arithmetic disappears, so the remedy names the
@@ -1057,9 +1052,6 @@ const ASSEMBLER_REMEDY = Object.freeze({
     + 'keeps the real line numbers, while slicing first makes `cat -n` restart at 1 and is the '
     + 'usual reason to reach for `awk` arithmetic here. The host file-reading tool takes an offset '
     + 'and a line count directly. '
-    + 'To total a diff while EXCLUDING paths — the reviewable-surface measurement that most often '
-    + 'reaches for `awk` over `--numstat` — git does it natively: '
-    + "`git diff --shortstat <range> -- . ':(exclude)<glob>'`. "
     + 'To splice one file into another — a findings block into a prompt template — do not template '
     + 'at all: write the parts and `cat head.md findings.md tail.md > prompt.md`, or for JSON use '
     + '`jq -n --rawfile <name> <file>`. A placeholder line that has to be found and replaced is an '
@@ -3962,8 +3954,8 @@ function selfTest() {
     }
     // 2026-07-29: a session wanting the body of one PHP method wrote
     // `sed -n "$(grep -n '<signature>' f | cut -d: -f1),+40p" f` and the remedy
-    // offered only `wc -l` and `git diff --shortstat` — measurements, when the
-    // reader was navigating. A region read has an exact spelling; name it.
+    // offered only measurements, when the reader was navigating. A region read
+    // has an exact spelling; name it.
     // 0.50.0: the region read itself is now allowed; the remedy still has to
     // read well where a substitution stays refused.
     messageChecks += 1;
@@ -4053,16 +4045,21 @@ function selfTest() {
     }
     messageChecks += 1;
     const awkReason = evaluate("ps aux | awk 'NR==1 {system(\"true\")}'", 'feat/gh-1-x').reason ?? '';
-    // 2026-07-28: a live run was blocked pulling a number out of `git diff
-    // --stat` and told to author an awk FILE — more ceremony than the
-    // measurement it was making. A remedy that is absurd for the common case
-    // is not a remedy, so the plainer spellings are named before the file form.
+    // 2026-07-28: a live run was told to author an awk FILE — more ceremony
+    // than the task. A remedy that is absurd for the common case is not a
+    // remedy, so the plainer spellings are named before the file form.
     if (
       !awkReason.includes('awk -f <file>')
-      || !awkReason.includes('--shortstat')
-      || !awkReason.includes('wc -l')
+      || !awkReason.includes('cut -f<n>')
     ) {
       console.error('FAIL [inline-awk refusal names plainer spellings and the file-backed form]');
+      ok = false;
+    }
+    // LFE #506: no refusal recommends a work-size measurement.
+    messageChecks += 1;
+    if ([awkReason, regionReason, labelReason].some((reason) =>
+      /--shortstat|wc -l|insert\/delete|production-line|To measure/u.test(reason))) {
+      console.error('FAIL [no refusal remedy recommends a work-size measurement]');
       ok = false;
     }
     messageChecks += 1;

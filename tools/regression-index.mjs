@@ -33,6 +33,27 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // still there.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'decisions-invented-work-size-quotas-and-compressed-a-plan',
+    date: '2026-10-12',
+    symptom: 'LFE #506: decisions invented a 16000-character plan cap and a six-path, 987-line '
+      + 'cap, and a complete 24048-character plan was compressed to fit them.',
+    cause: 'Briefs, the simplify rider and the record tools asked for line and file totals and a '
+      + 'plan-relative line budget, so estimates read as limits. No project policy set them.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'briefs/plan.md', anchor: 'Never invent a plan-character, file-count or changed-line quota' }),
+      Object.freeze({ file: 'briefs/plan-review.md', anchor: 'A plan compressed, split, delayed or stopped only to fit such a number is a finding' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**No work-size quota.**' }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'a readable plan body over 16000 characters is accepted with its exact body'" }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'no role brief requests a work-size total or budget reduction, and plan briefs forbid invented quotas'" }),
+      Object.freeze({ file: 'label-swap-reminder.mjs', anchor: 'the simplify rider asks for a work-size measurement or budget reduction' }),
+      Object.freeze({ file: 'sizing-contract.mjs', anchor: "'a retired size flag is refused by name, and no record is made from it'" }),
+      Object.freeze({ file: 'sizing-contract.mjs', anchor: "'a historical size-bearing marker still parses, without its size fields'" }),
+      Object.freeze({ file: 'stats.mjs', anchor: "['historical size fields never reach the JSON report, nested or top-level'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'--card --issue 7 --outcome shipped --lines 393'" }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'FAIL [no refusal remedy recommends a work-size measurement]' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'routine-units-edited-protected-guidance-to-count-progress',
     date: '2026-10-06',
     symptom: 'Each detmath export unit edited CLAUDE.md only to decrement a pending-export count, '

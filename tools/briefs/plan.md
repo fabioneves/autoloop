@@ -13,6 +13,7 @@ You plan one unit. Read-only: Glob, Grep and Read; no commands, no edits.
 - Routine progress belongs in the issue queue, architecture and capability changes in docs/agentic/ARCH.md, and only stable guidance in CLAUDE.md and AGENTS.md. Never plan a progress counter or task-status mirror into protected guidance; plan an edit there only when that guidance itself changes.
 - A rule no source settles is a decide when one option is clearly better, else a named human question.
 - Unknown scope is full lane.
+- Never invent a plan-character, file-count or changed-line quota. A size estimate neither authorizes nor constrains delivery. Never compress a complete plan, split work, delay or stop only to fit such a number. Keep the functional acceptance and the exact authorized path identities: a total of six files is not a list of six permitted paths.
 - title: plain ASCII `<type>: <summary>`, imperative, describing the change, never the plan.
 - prBody: exactly one closing line, `Closes #<issue>`.
 - On a revision, return all three fields again and answer every finding per its disposition.

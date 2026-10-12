@@ -228,9 +228,9 @@ function gh(cmd) {
 
 // ── The sizing join ────────────────────────────────────────────────────────
 //
-// `sizing-contract.mjs` has recorded a PREDICTION per unit (cases, invariants,
-// estimated files/lines, in the issue body) and an OUTCOME per unit (review
-// rounds, escalation, result, actual files/lines, in the run record comment)
+// `sizing-contract.mjs` has recorded a PREDICTION per unit (cases and
+// invariants, in the issue body) and an OUTCOME per unit (review rounds,
+// escalation and result, in the run record comment)
 // since it was written. Its own header says "Only the PAIR is useful" — and the
 // pair had never been joined, so the ~5-case threshold stayed an argument from
 // two runs and nobody could ask whether five-case units really do converge
@@ -261,7 +261,18 @@ export function joinSizing(rows) {
   const predictionOnly = [];
   const outcomeOnly = [];
   for (const { issue, shape, outcome } of rows ?? []) {
-    if (shape && outcome) paired.push({ issue, shape, outcome });
+    if (shape && outcome) {
+      paired.push({
+        issue,
+        shape: { cases: shape.cases, invariants: shape.invariants },
+        outcome: {
+          planRounds: outcome.planRounds,
+          codeRounds: outcome.codeRounds,
+          escalated: outcome.escalated,
+          result: outcome.result,
+        },
+      });
+    }
     else if (shape) predictionOnly.push(issue);
     else if (outcome) outcomeOnly.push(issue);
   }
@@ -279,24 +290,7 @@ export function joinSizing(rows) {
       medianCodeRoundsShipped: medianOf(shipped.map(({ outcome }) => outcome.codeRounds)),
     };
   });
-  // Prediction error, signed: positive means the unit cost MORE than shaped.
-  // Reported separately from cost because a bad line estimate and a bad case
-  // count are different shaping errors with different fixes.
-  const lineErrors = paired
-    .filter(({ shape, outcome }) =>
-      shape.linesEstimate != null && outcome.prodLines != null)
-    .map(({ issue, shape, outcome }) => ({
-      issue, predicted: shape.linesEstimate, actual: outcome.prodLines,
-      error: outcome.prodLines - shape.linesEstimate,
-    }));
-  return {
-    paired,
-    predictionOnly,
-    outcomeOnly,
-    buckets,
-    medianLineError: medianOf(lineErrors.map((e) => e.error)),
-    lineErrors,
-  };
+  return { paired, predictionOnly, outcomeOnly, buckets };
 }
 
 // Predictions ride the issue BODY, outcomes ride a run-record COMMENT (dev step
@@ -341,46 +335,47 @@ function reportSizing(argv) {
     console.log(JSON.stringify(report, null, 2));
     return;
   }
-  console.log('issue  cases inv  pred-lines  result     rounds  esc  act-lines  line-err');
+  for (const line of renderSizing(report)) console.log(line);
+}
+
+export function renderSizing(report) {
+  const out = [];
+  out.push('issue  cases inv  result     rounds  esc');
   for (const { issue, shape, outcome } of report.paired) {
-    const predicted = shape.linesEstimate ?? null;
-    const actual = outcome.prodLines ?? null;
-    const error = predicted != null && actual != null ? actual - predicted : null;
-    console.log(
+    out.push(
       `#${String(issue).padEnd(5)}`
       + `${String(shape.cases).padEnd(6)}${String(shape.invariants).padEnd(5)}`
-      + `${String(predicted ?? '—').padEnd(12)}${String(outcome.result).padEnd(11)}`
-      + `${String(outcome.codeRounds).padEnd(8)}${(outcome.escalated ? 'yes' : 'no').padEnd(5)}`
-      + `${String(actual ?? '—').padEnd(11)}${error == null ? '—' : (error > 0 ? `+${error}` : error)}`,
+      + `${String(outcome.result).padEnd(11)}${String(outcome.codeRounds).padEnd(8)}`
+      + `${outcome.escalated ? 'yes' : 'no'}`,
     );
   }
-  console.log(`\ncost by predicted case count (${report.paired.length} paired units):`);
-  console.log('bucket              n   blocked  escalated  median rounds  median rounds (shipped)');
+  out.push(`\ncost by predicted case count (${report.paired.length} paired units):`);
+  out.push('bucket              n   blocked  escalated  median rounds  median rounds (shipped)');
   for (const b of report.buckets) {
-    console.log(
+    out.push(
       `${b.bucket.padEnd(20)}${String(b.n).padEnd(4)}${String(b.blocked).padEnd(9)}`
       + `${String(b.escalated).padEnd(11)}${String(b.medianCodeRounds ?? '—').padEnd(15)}`
       + `${b.medianCodeRoundsShipped ?? '—'}`,
     );
   }
-  console.log(`\nmedian production-line error: ${report.medianLineError ?? '—'} (positive = cost more than shaped)`);
   // Named, never silently dropped — the same rule the timing scoreboard follows.
   if (report.predictionOnly.length) {
-    console.log(
+    out.push(
       `\n⚠ ${report.predictionOnly.length} shaped but no outcome yet (queued or in flight): `
       + report.predictionOnly.map((n) => `#${n}`).join(', '),
     );
   }
   if (report.outcomeOnly.length) {
-    console.log(
+    out.push(
       `⚠ ${report.outcomeOnly.length} ran with NO sizing marker (shaped before the marker, or filed by hand): `
       + report.outcomeOnly.map((n) => `#${n}`).join(', '),
     );
   }
   if (report.paired.length === 0) {
-    console.log('\nNo paired units yet — a prediction with no outcome is an opinion, and an outcome');
-    console.log('with no prediction cannot say which shaping choice produced it.');
+    out.push('\nNo paired units yet — a prediction with no outcome is an opinion, and an outcome');
+    out.push('with no prediction cannot say which shaping choice produced it.');
   }
+  return out;
 }
 
 export function claimedIssues(prs) {
@@ -555,8 +550,8 @@ function selfTest() {
       ];
     })(),
     // The sizing join, on the two units that actually produced records: #240
-    // (7 cases, blocked, escalated) and #266 (6 cases, shipped, 7 rounds, 33
-    // production lines against a 240 estimate).
+    // (7 cases, blocked, escalated) and #266 (6 cases, shipped, 7 rounds). Both
+    // rows keep the historical size fields they were recorded with.
     ...(() => {
       const rows = [
         { issue: 240,
@@ -584,10 +579,21 @@ function selfTest() {
         ['median rounds spans the bucket', over.medianCodeRounds === 4.5],
         ['shipped-only median excludes the blocked unit',
           over.medianCodeRoundsShipped === 7],
-        ['line error is signed, negative when a unit cost LESS than shaped',
-          r.medianLineError === -207],
+        // LFE #506: no work-size number is reported, even from a historical record.
+        ['historical size fields never reach the JSON report, nested or top-level',
+          !/linesEstimate|prodLines|filesEstimate|"files"|lineErrors|medianLineError/u.test(JSON.stringify(
+            joinSizing([...rows, { issue: 300,
+              shape: { v: 1, cases: 2, invariants: 1, filesEstimate: 4, linesEstimate: 90 },
+              outcome: { v: 1, issue: 300, planRounds: 1, codeRounds: 1, escalated: false, result: 'shipped', prodLines: 80, files: 3 } }]),
+          ))],
+        ['the text report keeps cases, rounds, escalation and result, and names no line count',
+          (() => {
+            const text = renderSizing(r).join('\n');
+            return /issue {2}cases inv {2}result {5}rounds {2}esc/u.test(text) && text.includes('#266 ')
+              && !/lines|line-err|production-line|\b210\b|\b33\b/u.test(text);
+          })()],
         ['an empty join says so rather than dividing by zero',
-          joinSizing([]).paired.length === 0 && joinSizing([]).medianLineError === null],
+          joinSizing([]).paired.length === 0 && renderSizing(joinSizing([])).some((line) => line.includes('No paired units yet'))],
         ['a null row list is tolerated', joinSizing(null).paired.length === 0],
       ];
     })(),

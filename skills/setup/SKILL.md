@@ -184,7 +184,7 @@ this session's hooks and refuses the devendor commit while a run marker exists.
    escalate paths and the filled merge executor, read as JavaScript; moves the STATE prose to
    `.autoloop/STATE.md` with the current template's preamble and Config section; removes the
    plugin's files and strips only autoloop's hook handlers. ARCH and LESSONS stay.
-3. Show the typed report and `git -C <scratch>/devendor diff --stat`, then run the doctor against
+3. Show the typed report, `git -C <scratch>/devendor diff --name-status`, then run the doctor on
    the worktree (`verify.mjs --project-root <scratch>/devendor`). In the report: `kept` names
    the repository's own files left in `tools/agentic/`; `staleProse` and `staleReferences` name
    lines in STATE, CLAUDE.md, AGENTS.md, ARCH, LESSONS and the checklist that still name the
