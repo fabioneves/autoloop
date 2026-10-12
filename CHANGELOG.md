@@ -7,9 +7,11 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Changed
 
-- The plugin protects only secret and credential paths (`.env*`, key material, path segments that
-  contain `secret`, `credential`, `token`, or `crypt`), `.github/workflows/**`, and the loop's
-  control roots (`.autoloop`, `.claude`, `.codex`, `.opencode`, `.agents`, `.githooks`).
+- The plugin protects only secret and credential paths (one rule, `isSecretPath` in
+  `lane-contract.mjs`: a path segment that is the word `secret`, `credential`, `token`, or `crypt`,
+  key material, and `.env*` files; `src/tokenizer.ts` is source), `.github/**` (workflows,
+  composite actions, CODEOWNERS, and dependabot all run in CI), and the loop's control roots
+  (`.autoloop`, `.claude`, `.codex`, `.opencode`, `.agents`, `.githooks`).
   `CLAUDE.md`, `AGENTS*.md`, `docs/agentic/**`, other root dotfiles, `.github` outside
   `workflows`, `package.json`, lockfiles, `tsconfig*`, build and lint configs, `data/**`,
   container build and compose files, and `tools/**` are ordinary files: they get no
@@ -111,6 +113,20 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- The command guard refuses the literal evasions of its kept rules: GitHub API commit and ref
+  writes (`contents`, `git/commits|trees|refs`, `createCommitOnBranch`, `updateRef(s)`,
+  `createRef`, `deleteRef`), raw HTTP writes to `api.github.com`, `gh workflow run|enable` and the
+  actions dispatch endpoints, in-command git aliases (a readable alias is judged as its value; a
+  hidden one is refused), `gh alias set` values, function, case, and trap bodies, and shells fed
+  by a heredoc, a here-string, or a literal `echo`. Wrapper option values (`sudo -u dev`) are not
+  read as the command. An inline interpreter's program (`python3 -c`, `node -e`) stays accepted
+  by design and is recorded in the guard corpus.
+- The merge gate enforces the dependency hard-defer: a `package.json` or `composer.json` that
+  gains a dependency or an install script, or a lockfile that adds a package, is refused as
+  `human:authorize` (`dependency change`).
+- `widenLane` refuses a prefix widening at or under a guardrail root (`WIDEN_GUARDRAIL_ROOT`) and
+  labels a prefix widening into a project-protected directory. `terminal-finalize` applies
+  `human:authorize` to the pull request when a recorded widening reached a protected path.
 - The review contract admits one round after the re-plan round: a fix round when every open
   `fix` entry is Critical, or a closing round that only defers (naming the seam) or decides
   (naming the decision comment); a Critical fix is followed by the closing full round. A Critical

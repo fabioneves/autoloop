@@ -140,7 +140,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a widening into a protected path labels human:authorize and does not refuse'," }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'an implement result listing extra paths is recorded as widenings before round 1'," }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a finding outside the seam is deferred to a repair at any round; one inside it is widened'," }),
-      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widened path is in the unit lane for the dirty-tree and exact-head checks'," }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widened path is in the unit lane and a prefix matches only its directory'," }),
       Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widening into a protected path is a human:authorize hit, not a refusal'," }),
       Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widening into a secret path is refused WIDEN_SECRET_PATH'," }),
       Object.freeze({ file: 'dispatch.mjs', anchor: "'an implement result passes its extra-paths block through typed, and a malformed block is a typed failure that keeps the text'," }),

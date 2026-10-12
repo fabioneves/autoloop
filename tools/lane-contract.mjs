@@ -323,10 +323,6 @@ export function inLane(path, lane) {
     entry === path || (entry.endsWith('/') && path.startsWith(entry)));
 }
 
-export function laneCovers(paths, lane) {
-  return (Array.isArray(paths) ? paths : []).every((path) => inLane(path, lane));
-}
-
 // Widens a lane by the given paths. A secret path is refused
 // (`WIDEN_SECRET_PATH`), a malformed one too (`WIDEN_PATH_INVALID`), and a
 // directory prefix at or under a guardrail root (`.github/`, `.claude/`,
@@ -993,11 +989,11 @@ function selfTest() {
         === '[".env*",".github/workflows/**","secrets/**"]',
     ],
     // SPEC-elastic-scope: the unit's lane is the plan boundary plus every
-    // recorded widening, for the dirty-tree and exact-head checks alike.
+    // recorded widening, for the exact-head and protected-path checks.
     [
-      'a widened path is in the unit lane for the dirty-tree and exact-head checks',
-      laneCovers(['src/a.mjs', 'lib/b.mjs'], widenLane(['src/'], ['lib/b.mjs']).lane)
-        && !laneCovers(['lib/c.mjs'], ['src/'])
+      'a widened path is in the unit lane and a prefix matches only its directory',
+      widenLane(['src/'], ['lib/b.mjs']).lane.every((entry) => inLane('lib/b.mjs', [entry]) || entry === 'src/')
+        && !inLane('lib/c.mjs', ['src/'])
         && inLane('src/x/y.mjs', ['src/'])
         && !inLane('srcx/y.mjs', ['src/'])
         && !inLane('src', ['src/']),

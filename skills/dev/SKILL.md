@@ -263,8 +263,7 @@ The run record's `overlap:` line comes from `overlap-report.mjs`.
 
 ### Context economy — the window is a budget
 
-- **Batch independent reads and commands into ONE message** (parallel tool calls), never one per
-  turn: every turn re-reads the whole context.
+- **Batch independent reads and commands into ONE message**: every turn re-reads the context.
 - **Bulky artifacts move file-to-file**; the window sees titles, hashes, verdicts. Plan body:
   `jq -j .plan.body <result.json> > body.md`, post with `--body-file`, hash with the portable
   fingerprint helper `node <plugin-tools>/release-verify.mjs --fingerprint-stdin <body.md`.
@@ -272,12 +271,10 @@ The run record's `overlap:` line comes from `overlap-report.mjs`.
   JSON via `jq -n --rawfile`.
 - **Bounded reads only**: field projection, `tail -20` of logs, never a full read of dispatch
   output; a failure's stderr tail only.
-- **Narration is the delta**: say what CHANGED and what needs the human; never restate a result or
-  a ribbon. **A step is announced ONCE, by its ribbon** — never a second header line; extra detail
-  is a `--note` suffix.
-- **The scratchpad is a write target, never a cwd**: `gh pr view 238 --json title,body >
-  <scratchpad>/pr238.json`; never `cd <scratchpad> && …` (`git`, `gh`, the driver, the gate need
-  the repo cwd).
+- **Narration is the delta**: say what CHANGED and what needs the human.
+  **A step is announced ONCE, by its ribbon**; extra detail is a `--note` suffix.
+- **The scratchpad is a write target, never a cwd**: never `cd <scratchpad> && …` (`git`, `gh`,
+  the driver, the gate need the repo cwd).
 - **After compaction, re-fetch byte-exact values** (SHA, planHash, comment id, label) from GitHub
   or disk; never recall them. Prefer handing off at a unit boundary over compacting mid-unit.
 
@@ -774,15 +771,8 @@ branch. Dirty → do not switch; report it.
 **Tools render per-unit status; repeat their output verbatim and add nothing.** Values are safe
 composed text, never raw issue or review bytes. One badge opens each status line:
 
-| badge | state |
-|---|---|
-| ⏳ | in progress |
-| ✅ | terminal success — shipped, converged, complete |
-| 🚧 | a review returned `fail`; the loop fixes the findings itself |
-| ❌ | blocked — a guardrail refused or the unit failed |
-| ⚠️ | needs a human — a human-block path, a decision, a Major the loop may not dispose |
-
-`⚠️` means stop and ask, nothing else. Precedence `⚠️` > `❌` > `🚧` > `⏳`.
+⏳ in progress · ✅ terminal success · 🚧 a review returned `fail`, the loop fixes it · ❌ blocked
+(a guardrail refused or the unit failed) · ⚠️ needs a human. Precedence `⚠️` > `❌` > `🚧` > `⏳`.
 
 After prime, open the run frame once (never on resume; eligible = prime's `eligible`; reviews row
 from prime's `models`, e.g. `GPT-6-ASTRA`):
@@ -905,7 +895,10 @@ remedy) stops the RUN; never improvise past a guardrail.
 - One startup snapshot plus mutation-driven invalidation; the configured base for every
   diff/classifier/gate decision; writers serialized, reviewers fresh and read-only.
 - Never claim delivered before exact-head CI green. Never run a merge command (step 10's
-  `auto-merge.mjs` is the one exception).
+  `auto-merge.mjs` is the one exception). The guard judges alias values, function, case and trap
+  bodies, and fed shells as the command; a hidden alias or a raw API write is refused. `.github/**`
+  is protected; a dependency or install-script change is refused at the merge gate as
+  `human:authorize`, and the finalizer labels a widening into a protected path.
 - Call every plugin tool as ONE bare command — no `&&`, `;`, pipe, `cd X &&`, or `> file`; use its
   own `--out`/flags. The one exception is step 9's `publish-verdict.mjs gate <head> > <log> 2>&1`.
   Never write under `.git/` with Write, Edit, or a redirect; recordings there go through a tool.
