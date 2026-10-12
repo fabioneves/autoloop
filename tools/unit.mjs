@@ -72,13 +72,14 @@
 //   node <plugin-tools>/unit.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 import { updateStepRecord } from './dispatch-return-association.mjs';
 import { inLane } from './lane-contract.mjs';
+import { emitEvent, readEvents } from './events-contract.mjs';
 import {
   SNAPSHOT_SECTIONS, completeSection, createSnapshot, deliveredPullRequests, invalidateSnapshot, snapshotProblem,
   verifySnapshot,
@@ -320,6 +321,22 @@ function commonDirOf(run) {
   return result?.ok ? String(result.stdout).trim() : null;
 }
 
+// The UI's copy of a unit's change of state (SPEC-events). Never throws and
+// never changes the unit's result.
+function unitEvent(run, event, nowMs, commonDir = undefined) {
+  try {
+    const dir = commonDir === undefined ? commonDirOf(run) : commonDir;
+    if (dir !== null) emitEvent(dir, { by: 'unit', ...event }, { nowMs });
+  } catch {
+    // The event is a courtesy to the UI; the unit's state stands.
+  }
+}
+
+const eventText = (value) => {
+  const flat = String(value ?? '').replace(/\s+/gu, ' ').trim();
+  return flat.length === 0 ? undefined : [...flat].slice(0, 200).join('');
+};
+
 export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes = null, onPr = null, paths = [], note = '', base, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
   if ([onIssue !== null, onBaseRed, minutes !== null, onPr !== null].filter(Boolean).length !== 1) {
@@ -371,6 +388,12 @@ export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes 
   } catch {
     // The parked view is a courtesy; the wait stands.
   }
+  unitEvent(run, {
+    kind: 'wait', issue, reason: condition.on,
+    pr: condition.on === 'pr' ? condition.number : undefined,
+    paths: condition.on === 'pr' ? condition.paths : undefined,
+    text: eventText(condition.on === 'issue' ? `#${condition.number}` : condition.on === 'time' ? `${minutes} min` : note),
+  }, now);
   return { ok: true, issue, disposition: 'waiting', condition };
 }
 
@@ -456,6 +479,7 @@ export function markDecided({ issue, question, choice, alternatives = [], why, r
     // The parked view is a courtesy; the decision stands.
   }
   const url = /https?:\/\/\S+/u.exec(String(comment.stdout ?? ''))?.[0] ?? null;
+  unitEvent(run, { kind: 'decision', issue, text: eventText(`${decision.question} → ${decision.choice}`) }, now);
   return { ok: true, issue, disposition: 'decided', decision, url };
 }
 
@@ -571,6 +595,8 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   }
   const facts = issueFacts(run, issue, 'state,labels');
   if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+  // Resolved before the label edit: the edit is the call a caller checks last.
+  const commonDir = (() => { try { return commonDirOf(run); } catch { return null; } })();
   const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString() };
   const body = [
     blockMarker(block),
@@ -589,6 +615,7 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
     ...(stale.length > 0 ? ['--remove-label', stale.join(',')] : [])];
   const labelled = run('gh', edit);
   if (!labelled.ok) return refusal('GH_FAILED', `labels on #${issue} failed: ${labelled.stderr}`);
+  unitEvent(run, { kind: 'block', issue, reason: block.reason, text: eventText(block.question) }, now, commonDir);
   return { ok: true, issue, disposition: 'blocked', block };
 }
 
@@ -699,8 +726,10 @@ export function liftWaits({ base, run, now = Date.now() }) {
     const removed = run('gh', ['issue', 'edit', String(issue.number), '--remove-label', 'loop-waiting']);
     // A lifted PR wait is resumed: the unit re-plans once on the merged base
     // before it claims, and prime points the host at it first.
-    if (removed.ok) lifted.push({ number: issue.number, reason: cleared, ...(condition.on === 'pr' ? { resumed: true } : {}) });
-    else errors.push(`#${issue.number}: ${removed.stderr}`);
+    if (removed.ok) {
+      lifted.push({ number: issue.number, reason: cleared, ...(condition.on === 'pr' ? { resumed: true } : {}) });
+      unitEvent(run, { kind: 'resume', issue: issue.number, reason: condition.on, text: eventText(cleared) }, now);
+    } else errors.push(`#${issue.number}: ${removed.stderr}`);
   }
   return { lifted, waiting, errors };
 }
@@ -1107,6 +1136,37 @@ function selfTest() {
           && prWait.calls[1].includes('waits on PR #70')
           && prWait.calls[1].includes('src/a.mjs, src/b/')
           && JSON.stringify(last.waiting) === JSON.stringify({ on: 'PR #70 (src/a.mjs, src/b/)', atMs: 7000 });
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
+  check('a wait, a decision, a block and a lift each append their event; an unwritable file changes none of them',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-events-'));
+      try {
+        const git = ['git rev-parse', scratch];
+        const waits = fakeRun([['gh pr view 70', 'OPEN'], ['gh issue comment 5', ''], ['gh issue edit 5 --add-label loop-waiting', ''], git]);
+        markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs'], base: 'main', run: waits.run, now: 7000 });
+        const decides = fakeRun([['gh issue view 5', 'OPEN'], ['gh issue comment 5', 'https://x/5#c1'], ['gh issue edit 5', ''], git]);
+        markDecided({ issue: 5, question: 'Which spec wins?', choice: 'the newer', why: 'dated', run: decides.run, now: 8000 });
+        const blocks = fakeRun([['gh issue view 7', '{"state":"OPEN","labels":[]}'], ['gh issue comment 7', ''], ['gh issue edit 7', ''], git]);
+        const blocked = markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'May it proceed?', run: blocks.run, now: 9000 });
+        const condition = { on: 'issue', number: 4 };
+        const lifts = fakeRun([['gh issue list', JSON.stringify([{ number: 5, comments: [{ body: waitMarker(condition) }] }])],
+          ['gh issue view 4', 'CLOSED'], ['gh issue edit', ''], git]);
+        liftWaits({ base: 'main', run: lifts.run, now: 10000 });
+        const { events } = readEvents(scratch);
+        const kinds = events.map((event) => `${event.kind}:${event.issue}:${event.at}`).join(' ');
+        chmodSync(join(scratch, 'autoloop', 'events.jsonl'), 0o400);
+        const again = markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'May it proceed?', run: fakeRun([['gh issue view 7', '{"state":"OPEN","labels":[]}'], ['gh issue comment 7', ''], ['gh issue edit 7', ''], git]).run, now: 9500 });
+        chmodSync(join(scratch, 'autoloop', 'events.jsonl'), 0o644);
+        return blocked.ok === true && blocks.calls.at(-1).startsWith('gh issue edit 7 --add-label loop-blocked')
+          && kinds === 'wait:5:7000 decision:5:8000 block:7:9000 resume:5:10000'
+          && events[0].pr === 70 && events[0].reason === 'pr' && events[0].paths.join() === 'src/a.mjs'
+          && events[1].text === 'Which spec wins? → the newer'
+          && events[2].reason === 'POLICY_DENIED' && events[2].text === 'May it proceed?'
+          && events[3].reason === 'issue' && events.every((event) => event.by === 'unit' && event.run === 'unknown')
+          && again.ok === true && (process.getuid?.() === 0 || readEvents(scratch).events.length === 4);
       } finally {
         rmSync(scratch, { recursive: true, force: true });
       }

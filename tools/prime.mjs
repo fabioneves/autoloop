@@ -54,6 +54,7 @@ import {
 } from './snapshot-contract.mjs';
 import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
+import { currentRunId, emitEvent, readEvents, setRunId } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
 // Bumped by every release together with the other version literals; the
@@ -236,6 +237,7 @@ export function primeDev({
       + '(/clear started this one), so the run is not opened. Close it with `prime.mjs --close-run`, then prime again.');
   }
   const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch, sessionId);
+  openRunEvents(root);
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });
@@ -373,9 +375,34 @@ export function closeRunMarkers(root = process.cwd(), now = new Date()) {
   return { ok: true, closed };
 }
 
+// The event file's run (SPEC-events): a run id written once per run, at the
+// first prime that opens it, and cleared when the run closes. Every prime of
+// the same run keeps the id, so the UI reads one run across unit boundaries.
+// Fail-open: an unwritable file leaves the prime result as it is.
+export function eventsCommonDir(root) {
+  const result = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8' });
+  return result.status === 0 ? String(result.stdout).trim() : null;
+}
+
+export function openRunEvents(root, { nowMs = Date.now(), commonDir = eventsCommonDir(root) } = {}) {
+  if (commonDir === null || currentRunId(commonDir) !== 'unknown') return null;
+  const id = String(nowMs);
+  if (!setRunId(commonDir, id).ok) return null;
+  emitEvent(commonDir, { by: 'prime', kind: 'run.start' }, { nowMs });
+  return id;
+}
+
+export function closeRunEvents(root, { nowMs = Date.now(), reason = undefined, commonDir = eventsCommonDir(root) } = {}) {
+  if (commonDir === null || currentRunId(commonDir) === 'unknown') return false;
+  emitEvent(commonDir, { by: 'prime', kind: 'run.end', reason }, { nowMs });
+  setRunId(commonDir, null);
+  return true;
+}
+
 // --close-run: the run stops taking work; only the guards still act for the session.
 export function closeRun(root = process.cwd(), { directory = latchDirectory(), now = new Date() } = {}) {
   const outcome = closeRunMarkers(root, now);
+  if (outcome.ok === true) closeRunEvents(root, { nowMs: now.getTime() });
   return outcome.ok === true ? { ...outcome, latch: closeLatch({ directory, nowMs: now.getTime() }) } : outcome;
 }
 
@@ -960,6 +987,23 @@ function selfTest() {
     const root = buildFixtureRepository(scratch, fixtureConfig());
     // Never the operator's latch directory: prime takes the guard's hand-off from it.
     const scratchLatches = join(scratch, 'scratch-latches');
+    check(
+      'a run opens its events once across primes, and closes them with run.end and a cleared id',
+      (() => {
+        const common = join(root, '.git');
+        const first = openRunEvents(root, { nowMs: 5000, commonDir: common });
+        const second = openRunEvents(root, { nowMs: 6000, commonDir: common });
+        const opened = readEvents(common).events;
+        const idWhileOpen = currentRunId(common);
+        const closed = closeRunEvents(root, { nowMs: 7000, commonDir: common });
+        const after = readEvents(common).events;
+        const again = closeRunEvents(root, { nowMs: 8000, commonDir: common });
+        return first === '5000' && second === null && idWhileOpen === '5000' && opened.length === 1
+          && opened[0].kind === 'run.start' && opened[0].run === '5000' && opened[0].by === 'prime'
+          && closed === true && after.length === 2 && after[1].kind === 'run.end' && after[1].run === '5000' && after[1].at === 7000
+          && currentRunId(common) === 'unknown' && again === false && after.length === readEvents(common).events.length;
+      })(),
+    );
     const base = baseSyncFacts(root, 'main');
     check(
       'base facts report the live branch and a missing remote base honestly',

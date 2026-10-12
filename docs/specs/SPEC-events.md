@@ -35,12 +35,15 @@ operator answers on GitHub and the loop finds the answer at its next prime.
    `issue` or `pr`, `paths`), `resume`, `block` (`reason`, `text`), `deliver` (`pr`), `merge`
    (`pr`, `ok`), `label` (`text`), `control` (`text`: the control the loop applied), `pause`,
    `unpause`.
-4. **Writers today.** `step.mjs` writes `step`, `decision`, `block`; `dispatch.mjs` writes
-   `dispatch.start` and `dispatch.end` (the live file path, whichever the caller chose, and the
-   engine pid); `unit.mjs` writes `wait` and `resume`; `prime.mjs` writes `run.start`,
-   `run.end`, `select`, `pause`, `unpause`; `publish-verdict.mjs` and `terminal-finalize`
-   write `deliver`, `merge`, `label`. Each write is fail-open: a failure is one stderr line and
-   the tool's own work goes on.
+4. **Writers today.** `step.mjs` writes `step`; `dispatch.mjs` writes `dispatch.start` and
+   `dispatch.end` (the live file path, whichever the caller chose, and its own pid, which leads
+   the process group under `dispatch-stream.sh`); `unit.mjs` writes `wait`, `resume`,
+   `decision`, `block`; `prime.mjs` writes `run.start` (once per run: the run id is kept in
+   `autoloop/run-id` until `--close-run` writes `run.end` and clears it), `pause`, `unpause`;
+   the delivery path writes `deliver`, `merge`, `label`. `select` is the scheduler's: today the
+   first `step` event of an issue marks its selection, since the model chooses from prime's
+   `eligible` list. Each write is fail-open: a failure is one stderr line and the tool's own work
+   goes on.
 5. **The projection reads events.** `status.mjs --json` derives `unit.steps`, `log` (the last 50
    events, newest first), `dispatches` (every `dispatch.start` without a `dispatch.end`; `pid`
    alive is `running`, gone is `died`) and `pr` per issue from the event file, joined with the
