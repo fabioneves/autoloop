@@ -22,39 +22,41 @@ Today the same facts are spread over `step.mjs --card-run` text, GitHub labels, 
 
 ### Data sources
 
-1. **One projection, owned by autoloop.** `step.mjs --card-run --json` prints the run card as one JSON object on stdout, built by the same code path as the text card (`runCard`, `projectParked`, `ownRunMarkers`, `readPinnedModels`). The mod does not read `.git/autoloop/` files itself. The text card does not change.
-2. **Ownership.** The projection applies the session-ownership predicate (`SPEC-session-ownership.md`). When this session owns no run, the JSON is `{ "owned": false }`. The mod starts the projection with `$.process.run`, so the child is in the Claude process tree and ancestry matching works as it does for the hooks today.
+1. **One projection, owned by autoloop.** `node tools/status.mjs --json --session <id>` prints the run status as one JSON object on stdout. It is the one entry the mod calls; today it delegates to `step.mjs`'s card projection (`runCard`, `projectParked`, `ownRunMarkers`, `readPinnedModels`), and a later release that replaces the step state machine replaces only the producer. The JSON carries `"schema": "autoloop.status/1"`; the mod refuses another schema and shows `stale`. The mod does not read `.git/autoloop/` files itself and never interprets a step id: it reads `phase`, `disposition`, and `round` only. The text card does not change.
+2. **Ownership.** The projection applies the session-ownership predicate (`SPEC-session-ownership.md`): the run latch of this Claude process must carry the session id the mod passes as `--session`, and a run marker must be open. A missing or different session id is not ownership. When this session owns no run, the JSON is `{ "schema": "autoloop.status/1", "owned": false }`. The mod starts the projection with `$.process.run` so the child shares the Claude pid lineage, and it passes the session id from the mod API; pid ancestry alone is not ownership.
 3. **Proxy.** The mod reads `ANTHROPIC_BASE_URL` with `$.env.get`. When it is unset, the proxy column does not exist. When it is set, each tick fetches `<base>/status` with `$.http.fetch` (no `auth`). A response `{ ok: true, active_requests: [...] }` is ON. A failed fetch, a non-200, or a body that does not parse is OFF. The contract is the proxy's `GET /status` (fields: `id`, `started_at`, `elapsed_ms`, `requested_model`, `model`, `session_id`).
 4. **Refresh.** One `$.clock.every(3000)` tick runs both reads. A tick that is still running when the next one fires is skipped. Each read has a timeout of 2 s. A read failure keeps the last value and marks it stale.
 5. **No GitHub calls, no writes.** The projection and the mod read local files, `git rev-parse --git-common-dir`, `git config remote.origin.url`, and the proxy's loopback endpoint. Nothing else.
 
-### JSON shape of `--card-run --json`
+### JSON shape of `status.mjs --json`
 
 ```json
 {
+  "schema": "autoloop.status/1",
   "owned": true,
   "enabled": true,
   "run": { "openedAtMs": 0, "parkedUntil": null, "closedAt": null, "snapshotScannedAt": "ISO", "snapshotAuthority": "current|history|none" },
-  "unit": { "issue": 412, "title": "...", "step": "08-code-review", "stepLabel": "review", "role": "code-review", "model": "gpt-astra", "round": "2/5", "reviewRound": 2, "inFlight": true, "startedAtMs": 0, "returnedAtMs": null, "waiting": null },
+  "phases": ["plan", "build", "simplify", "review", "gate", "deliver"],
+  "unit": { "issue": 412, "title": "...", "phase": "review", "role": "code-review", "model": "gpt-astra", "fallback": false, "round": { "kind": "fix", "n": 2, "budget": 3 }, "inFlight": true, "startedAtMs": 0, "returnedAtMs": null, "waitingOn": null, "decisions": 1 },
   "units": [
-    { "issue": 412, "title": "...", "disposition": "active|waiting|blocked|returned", "step": "08-code-review", "stepLabel": "review", "role": "code-review", "model": "gpt-astra", "detail": "1 major finding", "waitingOn": null, "pr": 204 }
+    { "issue": 412, "title": "...", "disposition": "active|waiting|blocked|returned|delivered", "phase": "review", "role": "code-review", "model": "gpt-astra", "detail": "1 major finding", "waitingOn": null, "pr": 204, "decisions": 1, "needsYou": null }
   ],
-  "counts": { "active": 2, "waiting": 1, "blocked": 1, "eligible": 4 },
+  "counts": { "active": 2, "waiting": 1, "blocked": 1, "delivered": 1, "eligible": 4 },
   "models": { "implement": "opus", "code-review": "gpt-astra" }
 }
 ```
 
-`title` comes from the snapshot when present, else null. `stepLabel` is the ladder label (`plan`, `build`, `test`, `simplify`, `review`, `deliver`) mapped from `STEPS`; the mapping lives in `step.mjs` beside `STEPS`. `disposition` follows the parked-view precedence in `parkedLine`. `blocked` means a human label or `closed.outcome === 'human'`, as `projectParked` decides it.
+`title` comes from the snapshot when present, else null. `phases` is the producer's ordered phase list; `phase` is one of them, mapped in `step.mjs` beside `STEPS` (`plan` = premise, plan, plan review, claim; `build` = implement; `simplify`; `review` = diff review, code review, fix; `gate`; `deliver` = publish, record). `round` follows the `step.mjs --round` grammar: `{kind: "full"|"fix"|"re-plan"|"open-findings", n, budget}`, `n` and `budget` only for `fix`; null when the step has no round. `waitingOn` is `{kind: "issue"|"pr"|"base"|"time", number, paths, until}`. `disposition` follows the parked-view precedence in `parkedLine`; `delivered` is a unit whose merge is pending (`pending` on the step record), with its `pr`. `needsYou` is null or `{kind: "block"|"decide"|"authorize", text}`: a `POLICY_DENIED` or `IRREVERSIBLE_ACTION` block with its question, a draft delivered with `human:decide`, or a pull request carrying `human:authorize`; `counts.blocked` counts units whose `needsYou` is not null.
 
 ### Band (AbovePrompt)
 
 6. **Visibility.** The band draws only when `owned` is true and `ui.status` is not false in the project config. Otherwise the hook passes (`next(e)`): a session that owns no run sees nothing, with or without the proxy. The band yields to a survey (`e.props.hasSurvey`). The projection reports the config value as `enabled`, so the mod reads no config file itself; when `enabled` is false the tick stops until the next `session.start`.
 7. **Columns.**
-   - Loop: glyph + step label + `#issue`, then `role · round r/m` (or `round r` when the cap is unknown). Idle: `Idle · last delivered #N`.
+   - Loop: glyph + phase + `#issue`, then `role · fix 2/3` (`re-plan`, `open findings`, or nothing when the step has no round). Idle: `Idle · last delivered #N`.
    - Work: `n active · n waiting · n needs you`. `needs you` is drawn in the critical color and only when n > 0.
    - Proxy: `● ON · n active requests` then one row per distinct `requested_model` with its count (`Opus ×1`), models sorted by count then name; or `○ OFF · 0 requests`.
-8. **Phase row.** Drawn only when `unit` exists: the six ladder labels, done ones with `✓`, the current with `●`, the rest with `○`. The row does not show a percentage.
-9. **Needs-you row.** When `counts.blocked > 0`: one highlighted row for the oldest blocked unit, `! #N <question or title>`, and the text `/autoloop decide N` on the right. More than one: `+n more` after it.
+8. **Phase row.** Drawn only when `unit` exists: the producer's `phases` in order, done ones with `✓`, the current with `●`, the rest with `○`. The row does not show a percentage.
+9. **Needs-you row.** When `counts.blocked > 0`: one highlighted row for the oldest unit with `needsYou`, `! #N <text>`, and on the right `answer on #N` for a block or a decide, `merge or label PR #M` for an authorize. More than one: `+n more` after it. The mod registers no decide command; a human answers on the issue.
 10. **Quiet minimum.** With no unit in flight and no blocked unit the band is the header plus one row per column, no phase row.
 11. **Stale.** The header shows `checked Ns ago`. Past 30 s without a successful read the glyphs turn hollow and the header says `stale`.
 12. **Narrow terminals.** Under 120 columns the proxy column drops the per-model rows and shows `ON · n req`; the Loop column drops the title.
@@ -68,17 +70,18 @@ Today the same facts are spread over `step.mjs --card-run` text, GitHub labels, 
 
 ### Models
 
-17. The Loop column names the pinned model of the current role from `models.<role>`; a `fallback` in use shows `model (fallback)` when the step record says so.
+17. The Loop column names the pinned model of the current role from `models.<role>`; `unit.fallback` true shows `model (fallback)`.
 
 ### Config
 
-18. **`ui.status`.** `.autoloop/config.json` accepts an optional `ui` object with one key, `status: boolean`. There is no default key: a config that never sets it keeps the hash it had (the `protectedPaths` route; a `DEFAULT_CONFIG` entry broke the devendor round-trip and would change every project's resolved-config hash). Readers ask `statusBandEnabled(config)`, true unless `ui.status === false`. Optional, so the schema version does not change. `reviewedConfig` leaves `ui` out of the review fingerprint: a display preference is not reviewed policy. `--card-run --json` reports the value as `enabled`.
+18. **`ui.status`.** `.autoloop/config.json` accepts an optional `ui` object with one key, `status: boolean`. There is no default key: a config that never sets it keeps the hash it had (the `protectedPaths` route; a `DEFAULT_CONFIG` entry broke the devendor round-trip and would change every project's resolved-config hash). Readers ask `statusBandEnabled(config)`, true unless `ui.status === false`. Optional, so the schema version does not change. `reviewedConfig` leaves `ui` out of the review fingerprint: a display preference is not reviewed policy. `status.mjs --json` reports the value as `enabled`.
 
 ## Commands
 
 ```bash
-node tools/step.mjs --card-run --json            # the projection
-node tools/step.mjs --self-test                  # covers the JSON projection
+node tools/status.mjs --json --session <id>      # the projection (delegates to step.mjs today)
+node tools/status.mjs --self-test
+node tools/step.mjs --self-test                  # covers the card projection the JSON is built from
 node tools/verify.mjs --plugin-root .            # the plugin's full check
 claude plugin validate .                         # manifest + module admission
 claude plugin test .                             # the mod's *.test.ts
@@ -94,7 +97,8 @@ hooks/status/view.ts             pure functions: counts → column text, width r
 hooks/status/theme.ts            the palette and glyphs
 hooks/status/*.test.ts           claude plugin test
 types/index.d.ts                 PluginState contract: autoloop.status (last reads, seen blocked ids, pane open)
-tools/step.mjs                   --card-run --json and the STEP_LABELS map
+tools/status.mjs                 the stable producer entry: --json --session <id>, schema autoloop.status/1
+tools/step.mjs                   statusProjection() beside runCard, and the PHASES map beside STEPS
 docs/specs/SPEC-status-mod.md    this file
 ```
 
@@ -110,7 +114,8 @@ Risk: the engine may refuse a `hooks.json` that holds both `hooks` and `modules`
 
 ## Testing strategy
 
-- `step.mjs --self-test` gains cases for `--card-run --json`: not owned → `{owned:false}`; `ui.status: false` → `enabled: false`; an in-flight review step → `unit.inFlight`, `stepLabel: 'review'`, `round`; a `waiting` step → disposition `waiting`; a `closed.outcome === 'human'` record → counted in `blocked`; the text card output is byte-identical before and after.
+- `step.mjs --self-test` gains cases for `statusProjection`: not owned (no latch for the session id, or a different id) → `{owned:false}`; `ui.status: false` → `enabled: false`; an in-flight review step → `unit.inFlight`, `phase: 'review'`, `round: {kind:'fix', n:2, budget:3}`; a `re-plan` and an `open-findings` round; a `waiting` step on an issue and on a PR with paths → `waitingOn`; a delivered unit with `pending` → disposition `delivered` and `counts.delivered`; a `POLICY_DENIED` block, a `human:decide` draft, and a `human:authorize` PR → `needsYou` of each kind and `counts.blocked`; a fallback model → `fallback: true`; a decision count; the text card output is byte-identical before and after.
+- `status.mjs --self-test`: the schema field; `--session` required; a wrong schema is refused by the view (mod test).
 - `config-contract.mjs --self-test` gains: `ui.status` accepted, `ui.other` refused, `ui` absent from `reviewedConfig`.
 - The mod's `*.test.ts` (via `claude plugin test`): the band passes when not owned, and when `enabled` is false even with the proxy up; the proxy column is absent with `ANTHROPIC_BASE_URL` unset; OFF on a failed fetch; ON with grouped model counts; the needs-you toast fires once per issue; stale after 30 s with the mock clock; the narrow-width rules.
 - Test doubles replace only the host: `$.http.fetch` (the proxy is an external service to the mod) and `$.process.run` output, which is the projection's real JSON captured from `step.mjs --self-test` fixtures, not hand-written.
