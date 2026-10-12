@@ -37,6 +37,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'contract-lint.mjs',
   'delivery-contract.mjs',
   'dispatch-render.mjs',
+  'dispatch-return-association.mjs',
   'dispatch.mjs',
   'escalate-paths.mjs',
   'hook-root.mjs',

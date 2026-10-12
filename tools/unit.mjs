@@ -53,11 +53,12 @@
 //   node <plugin-tools>/unit.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
+import { updateStepRecord } from './dispatch-return-association.mjs';
 
 const TIMEOUT_MS = 30_000;
 const WAIT_MARKER_RE = /<!-- autoloop-waiting-v1 (\{[^\n]*?\}) -->/gu;
@@ -232,19 +233,17 @@ export function markObsolete({ issue, pr = null, commit = null, note = '', base,
 // returned · 58m"). A unit with no open record is left alone.
 export function noteWaitOnStep({ commonDir, issue, what, nowMs = Date.now() }) {
   const path = join(commonDir, 'autoloop', 'steps', `${issue}.json`);
-  let record;
   try {
-    record = JSON.parse(readFileSync(path, 'utf8'));
+    const result = updateStepRecord(path, (record) => {
+      const last = record?.steps?.at(-1);
+      if (!last || record.closed || record.issue !== issue) return { changed: false, ok: false };
+      last.waiting = { on: what, atMs: nowMs };
+      return { changed: true, ok: true, record };
+    });
+    return result.ok;
   } catch {
     return false;
   }
-  const last = record?.steps?.at?.(-1);
-  if (!last || record.closed) return false;
-  last.waiting = { on: what, atMs: nowMs };
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(record)}\n`);
-  renameSync(temporary, path);
-  return true;
 }
 
 function commonDirOf(run) {

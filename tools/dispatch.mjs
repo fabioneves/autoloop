@@ -47,7 +47,8 @@ import {
 } from './config-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 import { pinnedModelsPath, pluginRunMarkers } from './run-markers.mjs';
-import { noteDispatch } from './step.mjs';
+import { noteDispatch, resumedLine, transition } from './step.mjs';
+import { readStepBinding } from './dispatch-return-association.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -729,19 +730,21 @@ function routeFor(options, cwd) {
   return { ...route, model: fallback.model };
 }
 
-function dispatchOnce(options, cwd) {
+function dispatchOnce(options, cwd, binding, previousDispatchId) {
   const windowStartedAtMs = Date.now();
   const route = routeFor(options, cwd);
   const engineBinary = options.engine ?? route.engine ?? 'claude';
   const resolvedModel = options.model ?? route.model ?? null;
   const resolvedEffort = options.effort ?? route.effort ?? null;
-  // The unit's current step names the model that runs it, whatever the
-  // announcement said (LFE run 2026-09-30: "on ⚪ ENGINE" while Opus ran).
-  if (route.error === undefined && Number.isSafeInteger(options.issue) && resolvedModel !== null) {
+  let receipt = null;
+  if (route.error === undefined && Number.isSafeInteger(options.issue) && binding !== null) {
     try {
-      noteDispatch({ root: repositoryRoot(cwd), issue: options.issue, model: resolvedModel, role: options.role });
-    } catch {
-      // The parked view is a courtesy; the dispatch goes on.
+      const noted = noteDispatch({ root: repositoryRoot(cwd), issue: options.issue,
+        model: resolvedModel, role: options.role, binding, previousDispatchId });
+      if (noted.error) process.stderr.write(`dispatch: step record unavailable: ${noted.error}\n`);
+      receipt = noted.receipt ?? null;
+    } catch (error) {
+      process.stderr.write(`dispatch: step record unavailable: ${error.message}\n`);
     }
   }
   const result = route.error !== undefined
@@ -778,6 +781,8 @@ function dispatchOnce(options, cwd) {
   return result.ok
     ? {
       ...result,
+      role: options.role,
+      ...(receipt === null ? {} : { receipt }),
       engine,
       ...(model === null ? {} : { model }),
       ...(effort === null ? {} : { effort }),
@@ -785,6 +790,8 @@ function dispatchOnce(options, cwd) {
     }
     : {
       ...result,
+      role: options.role,
+      ...(receipt === null ? {} : { receipt }),
       error: {
         ...result.error,
         engine,
@@ -840,6 +847,10 @@ function sleepMs(ms) {
 // failure, so a collection line can say why the fallback ran.
 export function runDispatch(options) {
   const cwd = options.cwd ?? process.cwd();
+  const logPath = Number.isSafeInteger(options.issue) ? resolveDispatchLogPath(cwd) : null;
+  let binding = logPath === null ? null
+    : readStepBinding(join(dirname(logPath), 'steps', `${options.issue}.json`), options.issue);
+  let previousDispatchId = binding?.dispatchId ?? null;
   const primary = resolveRoute(options.role, cwd);
   const fallbackAvailable = primary.error === undefined
     && primary.fallback !== null
@@ -849,7 +860,11 @@ export function runDispatch(options) {
   let timeouts = 0;
   const earlier = [];
   for (let attempts = 1; ; attempts += 1) {
-    const result = dispatchOnce({ ...options, fallback: onFallback }, cwd);
+    const result = dispatchOnce({ ...options, fallback: onFallback }, cwd, binding, previousDispatchId);
+    if (result.receipt) {
+      binding = { ...binding, stepId: result.receipt.stepId };
+      previousDispatchId = result.receipt.dispatchId;
+    }
     if (result.ok) return earlier.length === 0 ? result : { ...result, earlierAttempts: earlier };
     const { error } = result;
     if (error.code === 'DISPATCH_TIMEOUT') timeouts += 1;
@@ -2303,6 +2318,93 @@ function selfTest() {
         return result.ok === true && noted === 'opus[1m]';
       })(),
     );
+    check('real fake-engine success and failure receipts reach the collector', (() => {
+      const stepRun = (command, args) => ({ ok: true,
+        stdout: command === 'git' ? join(repoScratch, '.git') : '[]', stderr: '' });
+      const recordPath = join(repoScratch, '.git', 'autoloop', 'steps', '78.json');
+      const begin = transition({ root: repoScratch, run: stepRun, issue: 78,
+        to: '08-code-review', staged: true, nowMs: 1000 });
+      writeEngineShim(shimDirectory, shimBody(resultEvent({ structured_output: PASSING_VERDICT })));
+      const succeeded = runDispatch({ role: 'code-review', prompt: 'review', tools: reviewerTools,
+        cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 78 });
+      const resultPath = join(scratch, 'real-success.json');
+      writeFileSync(resultPath, JSON.stringify(succeeded));
+      const finished = resumedLine({ root: repoScratch, run: stepRun, nowMs: 2000,
+        issue: 78, what: 'review returned', resultPath });
+      writeEngineShim(shimDirectory, shimBody('exit 7'));
+      const failed = runDispatch({ role: 'code-review', prompt: 'review', tools: reviewerTools,
+        cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 78, retryDelayMs: 0 });
+      writeFileSync(resultPath, JSON.stringify(failed));
+      const failure = resumedLine({ root: repoScratch, run: stepRun, nowMs: 3000,
+        issue: 78, what: 'review failed', resultPath });
+      const last = JSON.parse(readFileSync(recordPath, 'utf8')).steps.at(-1);
+      return begin.ok && succeeded.receipt?.issue === 78 && succeeded.receipt?.role === 'code-review'
+        && succeeded.receipt?.stepId === last.stepId && finished.includes('🔔 🔍 CODE-REVIEW')
+        && failed.receipt?.dispatchId === last.dispatchId && failed.receipt?.dispatchId !== succeeded.receipt?.dispatchId
+        && failed.error.model === last.model && Number.isFinite(failed.error.ms)
+        && failure.includes('💥 🔍 CODE-REVIEW') && failure.includes('ENGINE_EXIT_NONZERO')
+        && last.returnedAtMs === 3000 && last.reviewRound === 4;
+    })());
+    check('an off-step fix carries the review step receipt and actual model', (() => {
+      const stepRun = (command) => ({ ok: true, stdout: command === 'git' ? join(repoScratch, '.git') : '[]', stderr: '' });
+      transition({ root: repoScratch, run: stepRun, issue: 79,
+        to: '07-diff-review', staged: true, nowMs: 1000 });
+      writeEngineShim(shimDirectory, shimBody('printf x > "fix-$$.txt"\n'
+        + resultEvent({ result: 'fixed' })));
+      const fixed = runDispatch({ role: 'fix', prompt: 'fix', tools: writerTools,
+        cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 79 });
+      const resultPath = join(scratch, 'off-step.json');
+      writeFileSync(resultPath, JSON.stringify(fixed));
+      const line = resumedLine({ root: repoScratch, run: stepRun, nowMs: 2000,
+        issue: 79, what: 'fix returned', resultPath });
+      const last = JSON.parse(readFileSync(join(repoScratch, '.git', 'autoloop', 'steps', '79.json'), 'utf8')).steps.at(-1);
+      return fixed.ok && fixed.receipt?.stepId === last.stepId && fixed.receipt?.role === 'fix'
+        && last.role === 'fix' && line.includes('👓 DIFF-REVIEW') && line.includes('fix · fix returned')
+        && last.returnedAtMs === 2000;
+    })());
+    check('a fallback cannot rebind after a gate transition during the first attempt', (() => {
+      const stepRun = (command) => ({ ok: true, stdout: command === 'git' ? join(repoScratch, '.git') : '[]', stderr: '' });
+      transition({ root: repoScratch, run: stepRun, issue: 80,
+        to: '08-code-review', staged: true, nowMs: 1000 });
+      writeEngineShim(shimDirectory, shimBody('case " $* " in *" --model astra[1m] "*) '
+        + `"${process.execPath}" "${fileURLToPath(new URL('./step.mjs', import.meta.url))}" --issue 80 --to 09-gate --staged >/dev/null; `
+        + "printf 'You have hit your usage limit\\n' >&2; exit 1;; esac\n"
+        + resultEvent({ structured_output: PASSING_VERDICT })));
+      const result = runDispatch({ role: 'code-review', prompt: 'review', tools: reviewerTools,
+        cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 80, retryDelayMs: 0 });
+      const recordPath = join(repoScratch, '.git', 'autoloop', 'steps', '80.json');
+      const before = readFileSync(recordPath, 'utf8');
+      const resultPath = join(scratch, 'late-fallback.json');
+      writeFileSync(resultPath, JSON.stringify(result));
+      const line = resumedLine({ root: repoScratch, run: stepRun, issue: 80, what: 'review returned', resultPath });
+      const last = JSON.parse(readFileSync(recordPath, 'utf8')).steps.at(-1);
+      return result.ok && result.fallback === true && result.model === 'sonnet[1m]'
+        && result.receipt === undefined && last.step === '09-gate'
+        && line.includes('▶️ resumed') && !line.includes('GATE')
+        && readFileSync(recordPath, 'utf8') === before;
+    })());
+    check('a contested step lock cannot cancel a valid engine result or assert its return', (() => {
+      const stepRun = (command) => ({ ok: true, stdout: command === 'git' ? join(repoScratch, '.git') : '[]', stderr: '' });
+      transition({ root: repoScratch, run: stepRun, issue: 81,
+        to: '03-plan-review', staged: true, nowMs: 1000 });
+      const path = join(repoScratch, '.git', 'autoloop', 'steps', '81.json');
+      const before = readFileSync(path, 'utf8');
+      writeEngineShim(shimDirectory, shimBody(resultEvent({ structured_output: PASSING_VERDICT })));
+      mkdirSync(`${path}.lock`);
+      let result;
+      try {
+        result = runDispatch({ role: 'plan-review', prompt: 'review', tools: reviewerTools,
+          cwd: repoScratch, engine: join(shimDirectory, 'claude'), issue: 81 });
+      } finally {
+        rmSync(`${path}.lock`, { recursive: true, force: true });
+      }
+      const resultPath = join(scratch, 'contested-result.json');
+      writeFileSync(resultPath, JSON.stringify(result));
+      const line = resumedLine({ root: repoScratch, run: stepRun, issue: 81,
+        what: 'review returned', resultPath });
+      return result.ok && result.receipt === undefined && readFileSync(path, 'utf8') === before
+        && line.includes('▶️ resumed') && !line.includes('PLAN-REVIEW');
+    })());
     check(
       'a pinned table wins over the checkout\'s config; unpinned, an invalid project config refuses',
       (() => {

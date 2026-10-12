@@ -25,6 +25,7 @@ import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, SNAPSHOT_SECTIONS, verifySnapshot,
 } from './snapshot-contract.mjs';
 import { realRun } from './unit.mjs';
+import { newAssociationId, readStepBinding, updateStepRecord, validReceipt } from './dispatch-return-association.mjs';
 
 const LADDER = Object.freeze([
   '01-premise', '02-plan', '03-plan-review', '04-claim', '05-implement',
@@ -189,54 +190,73 @@ const REVIEW_ROLES = new Set(['plan-review', 'diff-review', 'code-review', 'doub
 // review round under the same step read "returned"). It names the model and
 // role, clears any return, and counts review rounds. A unit with no open
 // record is left alone.
-export function noteDispatch({ root, run = realRun(root), issue, model, role = null }) {
-  if (!Number.isSafeInteger(issue) || typeof model !== 'string' || model === '') return { ok: false };
+export function noteDispatch({ root, run = realRun(root), issue, model, role = null, binding, previousDispatchId }) {
+  if (!Number.isSafeInteger(issue) || issue < 1 || (model !== null && (typeof model !== 'string' || model === ''))
+    || typeof role !== 'string' || role === '') return { ok: false };
   const { dir } = autoloopDir(root, run);
   if (dir === null) return { ok: false };
   const path = join(dir, 'steps', `${issue}.json`);
-  const stored = readJson(path, null);
-  const last = stored?.steps?.at(-1);
-  if (!last || stored.closed) return { ok: false };
-  last.model = model;
-  delete last.returnedAtMs;
-  delete last.waiting;
-  if (role !== null) last.role = role;
-  if (REVIEW_ROLES.has(role)) last.reviewRound = (last.reviewRound ?? 0) + 1;
-  writeAtomically(path, stored);
-  return { ok: true };
+  const original = binding === undefined ? readStepBinding(path, issue) : binding;
+  if (original === null) return { ok: false };
+  try {
+    return updateStepRecord(path, (record) => {
+      const last = record?.steps?.at(-1);
+      const previous = previousDispatchId === undefined ? original.dispatchId : previousDispatchId;
+      if (record?.issue !== issue || record.closed || !last
+        || record.steps.length - 1 !== original.index || last.startedAtMs !== original.startedAtMs
+        || (last.stepId ?? null) !== original.stepId || (last.dispatchId ?? null) !== previous) {
+        return { ok: false, changed: false };
+      }
+      const stepId = last.stepId ?? newAssociationId();
+      const dispatchId = newAssociationId();
+      last.stepId = stepId;
+      last.dispatchId = dispatchId;
+      last.model = model;
+      delete last.returnedAtMs;
+      delete last.waiting;
+      last.role = role;
+      if (REVIEW_ROLES.has(role)) last.reviewRound = (last.reviewRound ?? 0) + 1;
+      return { ok: true, changed: true, record,
+        receipt: { issue, stepId, dispatchId, role } };
+    });
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
 }
 
-// `--resumed`: the unit's current step's dispatch came back. Recorded on the
-// step so the parked view stops reading it as running; the next step starts
-// fresh. A unit with no open record is left alone.
-export function markReturned({ root, run = realRun(root), nowMs = Date.now(), issue }) {
+export function markReturned({ root, run = realRun(root), nowMs = Date.now(), issue, receipt }) {
   const { dir } = autoloopDir(root, run);
-  if (dir === null) return { ok: false };
+  if (dir === null || receipt?.issue !== issue) return { ok: false };
   const path = join(dir, 'steps', `${issue}.json`);
-  const stored = readJson(path, null);
-  const last = stored?.steps?.at(-1);
-  if (!last || stored.closed) return { ok: false };
-  last.returnedAtMs = nowMs;
-  writeAtomically(path, stored);
-  return { ok: true, step: last };
+  return updateStepRecord(path, (record) => {
+    const last = record?.steps?.at(-1);
+    if (record?.issue !== issue || record.closed || !last
+      || last.stepId !== receipt.stepId || last.dispatchId !== receipt.dispatchId
+      || last.role !== receipt.role) return { ok: false, changed: false };
+    const changed = !Number.isFinite(last.returnedAtMs);
+    if (changed) last.returnedAtMs = nowMs;
+    return { ok: true, changed, record, step: last };
+  });
 }
 
 export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '', ifOpen = false }) {
   const { dir } = autoloopDir(root, run);
   if (dir === null) return { ok: false, lines: ifOpen ? [] : [`step: no steps recorded for #${issue} (not in a git repository)`] };
   const path = join(dir, 'steps', `${issue}.json`);
-  // A unit blocked at its premise, before any step was announced, still gets
-  // its card (LFE run 2026-09-30: #389's --card failed "no steps recorded").
-  const stored = readJson(path, null);
-  // ifOpen: close only a record still in flight (a tool closing on the
-  // orchestrator's behalf never re-renders a card already shown).
-  if (ifOpen && (!stored?.steps?.length || stored.closed)) return { ok: false, lines: [] };
-  if (!stored?.steps?.length && outcome !== 'blocked') return { ok: false, lines: [`step: no steps recorded for #${issue}`] };
-  const record = stored ?? { issue, steps: [] };
-  const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, lines, question });
-  record.closed = { outcome, atMs: nowMs };
-  writeAtomically(path, record);
-  return { ok: true, lines: [card] };
+  try {
+    return updateStepRecord(path, (stored) => {
+      if (ifOpen && (!stored?.steps?.length || stored.closed)) return { ok: false, changed: false, lines: [] };
+      if (!stored?.steps?.length && outcome !== 'blocked') {
+        return { ok: false, changed: false, lines: [`step: no steps recorded for #${issue}`] };
+      }
+      const record = stored ?? { issue, steps: [] };
+      const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, lines, question });
+      record.closed = { outcome, atMs: nowMs };
+      return { ok: true, changed: true, record, lines: [card] };
+    });
+  } catch (error) {
+    return { ok: false, lines: [`step: could not close #${issue}: ${error.message}`] };
+  }
 }
 
 export function transition({
@@ -286,10 +306,26 @@ export function transition({
   let warning = null;
   try {
     if (!staged && LADDER.includes(to)) warning = invalidateRetainedSnapshot(dir);
-    record.steps.push({
-      step: to, round, model, fallback, staged, startedAtMs: nowMs, ...(skipped.length ? { skipped } : {}),
+    const saved = updateStepRecord(stepsPath, (latest) => {
+      const previous = latest?.steps?.at(-1);
+      if (latest !== null && (latest.issue !== issue || !Array.isArray(latest.steps))) {
+        throw new Error('invalid step record');
+      }
+      if ((latest?.steps?.length ?? 0) !== (stored?.steps?.length ?? 0)
+        || Boolean(latest?.closed) !== Boolean(stored?.closed)
+        || previous?.step !== stored?.steps?.at(-1)?.step
+        || previous?.stepId !== stored?.steps?.at(-1)?.stepId
+        || previous?.startedAtMs !== stored?.steps?.at(-1)?.startedAtMs) {
+        return { ok: false, changed: false };
+      }
+      const current = latest === null || latest.closed ? { issue, steps: [] } : latest;
+      current.steps.push({
+        step: to, stepId: newAssociationId(), round, model, fallback, staged, startedAtMs: nowMs,
+        ...(skipped.length ? { skipped } : {}),
+      });
+      return { ok: true, changed: true, record: current };
     });
-    writeAtomically(stepsPath, record);
+    if (!saved.ok) warning = `! step: #${issue} moved to ${to} but newer step state was kept; re-prime before deciding`;
   } catch (error) {
     warning = `! step: #${issue} moved to ${to} but its record failed: ${error.message}; re-prime before deciding`;
   }
@@ -571,21 +607,12 @@ export function renderFinished({ atMs, issue, step, role = null, model = null, m
   const offStep = ran && STEP_ROLES[step] && ran !== STEP_ROLES[step] ? ran : '';
   const note = [offStep, [outcome, oneLine(what)].filter(Boolean).join(' — ')].filter(Boolean).join(' · ');
   return renderRibbon({
-    atMs, issue, step, badge: failed ? '💥' : '🔔', model: result?.model ?? model,
-    fallback: Boolean(result?.fallback), note, span,
+    atMs, issue, step, badge: failed ? '💥' : '🔔', model: result?.model ?? result?.error?.model ?? model,
+    fallback: Boolean(result?.fallback ?? result?.error?.fallback), note, span,
   });
 }
 
-// `--resumed`: marks the return on the unit's current step, then renders it.
-// An open step renders the finished line, its outcome read from the dispatch
-// result when one is given; without a record the plain resumed line stays.
 export function resumedLine({ root, run = realRun(root), nowMs = Date.now(), issue, what, ms = null, resultPath = null }) {
-  let returned = { ok: false };
-  try {
-    returned = markReturned({ root, run, nowMs, issue });
-  } catch {
-    // The line is the collection record; the parked view is a courtesy.
-  }
   let result = null;
   let note = what;
   if (resultPath !== null) {
@@ -595,10 +622,21 @@ export function resumedLine({ root, run = realRun(root), nowMs = Date.now(), iss
       note = `${what} (result unreadable)`.trim();
     }
   }
-  const elapsedMs = ms ?? (Number.isFinite(result?.ms) ? result.ms : null);
+  const receipt = validReceipt(result, issue);
+  let returned = { ok: false };
+  if (receipt !== null) {
+    try {
+      returned = markReturned({ root, run, nowMs, issue, receipt });
+    } catch (error) {
+      note = `${note} (step record unavailable: ${error.message})`.trim();
+    }
+  }
+  const elapsedMs = ms ?? (Number.isFinite(result?.ms) ? result.ms
+    : Number.isFinite(result?.error?.ms) ? result.error.ms : null);
   const current = returned.ok ? returned.step : null;
   return current && STEPS[current.step]
-    ? renderFinished({ atMs: nowMs, issue, step: current.step, role: current.role ?? null, model: current.model ?? null, ms: elapsedMs, result, what: note })
+    ? renderFinished({ atMs: nowMs, issue, step: current.step, role: receipt.role,
+      model: current.model ?? null, ms: elapsedMs, result, what: note })
     : renderResumed({ atMs: nowMs, issue, what: note, ms: elapsedMs });
 }
 
@@ -1144,8 +1182,8 @@ function transitionChecks(at) {
         try {
           labels = ['loop-ready'];
           transition({ root, run, nowMs: at(13, 0), issue: 392, to: '07-diff-review', markers: () => [] });
-          noteDispatch({ root, run, issue: 392, model: 'gpt-6-astra[1m]', role: 'diff-review' });
-          markReturned({ root, run, nowMs: at(13, 5), issue: 392 });
+          const launched = noteDispatch({ root, run, issue: 392, model: 'gpt-6-astra[1m]', role: 'diff-review' });
+          markReturned({ root, run, nowMs: at(13, 5), issue: 392, receipt: launched.receipt });
           noteDispatch({ root, run, issue: 392, model: 'claude-opus-5-5[1m]', role: 'fix' });
           const fixing = parkedView({ root, run, nowMs: at(13, 6), markers: () => [] }).split('\n').find((l) => l.includes('#392'));
           noteDispatch({ root, run, issue: 392, model: 'gpt-6-astra[1m]', role: 'diff-review' });
@@ -1176,21 +1214,25 @@ function transitionChecks(at) {
           return false;
         }
       })()]);
-    // --resumed records the return on the unit's current step; the next
-    // step starts fresh.
-    results.push(['--resumed marks the current step returned, and the next step clears it',
+    results.push(['a bound return marks its step; a new step does not inherit it',
       (() => {
         try {
           labels = ['loop-ready'];
           transition({ root, run, nowMs: at(11, 0), issue: 390, to: '02-plan', staged: true, model: 'gpt-6-astra', markers: () => [] });
-          markReturned({ root, run, nowMs: at(11, 5), issue: 390 });
+          const launched = noteDispatch({ root, run, issue: 390, model: 'gpt-6-astra', role: 'plan' });
+          const path = join(root, '.git', 'autoloop', 'steps', '390.json');
+          const before = readFileSync(path, 'utf8');
+          const plain = resumedLine({ root, run, nowMs: at(11, 4), issue: 390, what: 'unbound plan returned' });
+          const unchanged = readFileSync(path, 'utf8') === before;
+          markReturned({ root, run, nowMs: at(11, 5), issue: 390, receipt: launched.receipt });
           const returned = parkedView({ root, run, nowMs: at(11, 9), markers: () => [] });
           transition({ root, run, nowMs: at(11, 10), issue: 390, to: '03-plan-review', staged: true, model: 'claude-fable-5-1', markers: () => [] });
           const next = parkedView({ root, run, nowMs: at(11, 11), markers: () => [] });
-          return returned.includes('#390 · 02 plan returned · staged, waits its turn · 4m')
+          return plain.includes('▶️ resumed') && unchanged
+            && returned.includes('#390 · 02 plan returned · staged, waits its turn · 4m')
             && next.includes('#390 · 03 plan-review on') && !next.includes('returned')
-            && markReturned({ root, run, nowMs: at(11, 12), issue: 9999 }).ok === false;
-        } catch (error) {
+            && markReturned({ root, run, nowMs: at(11, 12), issue: 9999, receipt: launched.receipt }).ok === false;
+        } catch {
           return false;
         }
       })()]);
@@ -1201,19 +1243,131 @@ function transitionChecks(at) {
         try {
           labels = ['loop-ready'];
           transition({ root, run, nowMs: at(12, 0), issue: 391, to: '08-code-review', round: '1/20', model: 'gpt-6-astra', markers: () => [] });
+          const launched = noteDispatch({ root, run, issue: 391, role: 'code-review', model: 'gpt-6-astra[1m]' });
           const resultPath = join(root, 'review-result.json');
           writeFileSync(resultPath, JSON.stringify({ ok: true, role: 'code-review', model: 'gpt-6-astra[1m]', ms: 755_123,
+            receipt: launched.receipt,
             verdict: { verdict: 'fail', findings: [{ severity: 'Major' }, { severity: 'Minor' }] } }));
           const finished = resumedLine({ root, run, nowMs: at(12, 13), issue: 391, what: '', resultPath });
+          const path = join(root, '.git', 'autoloop', 'steps', '391.json');
+          const beforeUnreadable = readFileSync(path, 'utf8');
           const unreadable = resumedLine({ root, run, nowMs: at(12, 14), issue: 391, what: 'review returned', resultPath: join(root, 'missing.json') });
           const plain = resumedLine({ root, run, nowMs: at(12, 15), issue: 9998, what: 'plan returned', ms: 60_000 });
           return finished === '12:13 #391 🔔 🔍 CODE-REVIEW  done in 12m 35s    🟢 ASTRA 6       ❌ FAIL · 🔺 1 Major · 🔸 1 Minor'
-            && unreadable.endsWith('review returned (result unreadable)')
+            && unreadable.includes('▶️ resumed') && unreadable.endsWith('review returned (result unreadable)')
+            && readFileSync(path, 'utf8') === beforeUnreadable
             && plain === '12:15 #9998 ▶️ resumed — plan returned · 1m 0s';
         } catch (error) {
           return false;
         }
       })()]);
+    results.push(['a late review cannot mark a later gate returned', (() => {
+      labels = ['loop-ready'];
+      go({ issue: 401, to: '08-code-review' });
+      const launched = noteDispatch({ root, run, issue: 401, role: 'code-review', model: 'gpt-6-astra' });
+      const resultPath = join(root, 'late-review.json');
+      writeFileSync(resultPath, JSON.stringify({ ok: true, role: 'code-review', model: 'gpt-6-astra',
+        ms: 90_000, receipt: launched.receipt, verdict: { verdict: 'pass', findings: [] } }));
+      go({ issue: 401, to: '09-gate' });
+      const path = join(root, '.git', 'autoloop', 'steps', '401.json');
+      const before = readFileSync(path, 'utf8');
+      const line = resumedLine({ root, run, issue: 401, what: 'review returned', resultPath });
+      return launched.receipt?.stepId && readFileSync(path, 'utf8') === before
+        && line.includes('▶️ resumed') && !line.includes('GATE');
+    })()]);
+    results.push(['same-role attempts reject old results, and duplicates keep the first return time', (() => {
+      labels = ['loop-ready'];
+      go({ issue: 402, to: '07-diff-review' });
+      const first = noteDispatch({ root, run, issue: 402, role: 'diff-review', model: 'gpt-6-astra' });
+      const second = noteDispatch({ root, run, issue: 402, role: 'diff-review', model: 'claude-sonnet-5' });
+      const path = join(root, '.git', 'autoloop', 'steps', '402.json');
+      const firstPath = join(root, 'first-review.json');
+      const secondPath = join(root, 'second-review.json');
+      writeFileSync(firstPath, JSON.stringify({ ok: true, role: 'diff-review', model: 'gpt-6-astra',
+        receipt: first.receipt, verdict: { verdict: 'pass', findings: [] } }));
+      writeFileSync(secondPath, JSON.stringify({ ok: true, role: 'diff-review', model: 'claude-sonnet-5',
+        receipt: second.receipt, verdict: { verdict: 'pass', findings: [] } }));
+      const before = readFileSync(path, 'utf8');
+      const stale = resumedLine({ root, run, issue: 402, what: 'old', resultPath: firstPath, nowMs: at(14, 1) });
+      const unchanged = readFileSync(path, 'utf8') === before;
+      const matched = resumedLine({ root, run, issue: 402, what: 'new', resultPath: secondPath, nowMs: at(14, 2) });
+      const duplicate = resumedLine({ root, run, issue: 402, what: 'new again', resultPath: secondPath, nowMs: at(14, 3) });
+      const last = readJson(path, null).steps.at(-1);
+      return first.receipt?.dispatchId !== second.receipt?.dispatchId && unchanged
+        && stale.includes('▶️ resumed') && matched.includes('🔔 👓 DIFF-REVIEW')
+        && duplicate.includes('🔔 👓 DIFF-REVIEW') && last.returnedAtMs === at(14, 2)
+        && last.reviewRound === 2 && last.model === 'claude-sonnet-5';
+    })()]);
+    results.push(['wrong, missing, malformed and legacy results leave the open record unchanged', (() => {
+      labels = ['loop-ready'];
+      go({ issue: 403, to: '08-fix' });
+      const launched = noteDispatch({ root, run, issue: 403, role: 'fix', model: 'claude-opus-5-5' });
+      const path = join(root, '.git', 'autoloop', 'steps', '403.json');
+      const resultPath = join(root, 'bad-result.json');
+      const before = readFileSync(path, 'utf8');
+      const examples = [
+        { ok: true, role: 'fix', receipt: { ...launched.receipt, issue: 404 } },
+        { ok: true, role: 'plan', receipt: launched.receipt },
+        { ok: true, role: 'fix', receipt: { ...launched.receipt, dispatchId: 'old' } },
+        { ok: true, role: 'fix' },
+        { ok: true, role: 'fix', receipt: null },
+        { role: 'fix', receipt: launched.receipt },
+      ];
+      return examples.every((value) => {
+        writeFileSync(resultPath, JSON.stringify(value));
+        const line = resumedLine({ root, run, issue: 403, what: 'fix returned', resultPath });
+        return line.includes('▶️ resumed') && readFileSync(path, 'utf8') === before;
+      }) && resumedLine({ root, run, issue: 403, what: 'no result' }).includes('▶️ resumed')
+        && readFileSync(path, 'utf8') === before;
+    })()]);
+    results.push(['a closed unit and a new generation reject a prior result', (() => {
+      labels = ['loop-ready'];
+      go({ issue: 404, to: '02-plan' });
+      const launched = noteDispatch({ root, run, issue: 404, role: 'plan', model: 'gpt-6-astra' });
+      const resultPath = join(root, 'prior-generation.json');
+      writeFileSync(resultPath, JSON.stringify({ ok: true, role: 'plan', model: 'gpt-6-astra', receipt: launched.receipt }));
+      closeUnit({ root, run, issue: 404, outcome: 'blocked' });
+      const path = join(root, '.git', 'autoloop', 'steps', '404.json');
+      const beforeClosed = readFileSync(path, 'utf8');
+      const closedLine = resumedLine({ root, run, issue: 404, what: 'plan returned', resultPath });
+      labels = ['loop-ready'];
+      go({ issue: 404, to: '02-plan' });
+      const beforeNew = readFileSync(path, 'utf8');
+      const newLine = resumedLine({ root, run, issue: 404, what: 'plan returned', resultPath });
+      return launched.receipt?.stepId && beforeClosed !== beforeNew
+        && closedLine.includes('▶️ resumed') && newLine.includes('▶️ resumed')
+        && readFileSync(path, 'utf8') === beforeNew;
+    })()]);
+    results.push(['a retry cannot replace a newer independent launch on the same step', (() => {
+      labels = ['loop-ready'];
+      go({ issue: 405, to: '08-code-review' });
+      const path = join(root, '.git', 'autoloop', 'steps', '405.json');
+      const original = readStepBinding(path, 405);
+      const first = noteDispatch({ root, run, issue: 405, role: 'code-review', model: 'gpt-6-astra',
+        binding: original, previousDispatchId: original.dispatchId });
+      const independent = noteDispatch({ root, run, issue: 405, role: 'code-review', model: 'claude-sonnet-5' });
+      const before = readFileSync(path, 'utf8');
+      const retried = noteDispatch({ root, run, issue: 405, role: 'code-review', model: 'gpt-6-astra',
+        binding: { ...original, stepId: first.receipt.stepId }, previousDispatchId: first.receipt.dispatchId });
+      return first.receipt?.stepId === independent.receipt?.stepId
+        && independent.receipt?.dispatchId !== first.receipt?.dispatchId && retried.ok === false
+        && readFileSync(path, 'utf8') === before;
+    })()]);
+    results.push(['a collector blocked by a writer keeps the result plain and changes no bytes', (() => {
+      labels = ['loop-ready'];
+      go({ issue: 406, to: '02-plan' });
+      const launched = noteDispatch({ root, run, issue: 406, role: 'plan', model: 'gpt-6-astra' });
+      const path = join(root, '.git', 'autoloop', 'steps', '406.json');
+      const resultPath = join(root, 'locked-result.json');
+      writeFileSync(resultPath, JSON.stringify({ ok: true, role: 'plan', receipt: launched.receipt }));
+      const before = readFileSync(path, 'utf8');
+      mkdirSync(`${path}.lock`);
+      let line;
+      try { line = resumedLine({ root, run, issue: 406, what: 'plan returned', resultPath }); }
+      finally { rmSync(`${path}.lock`, { recursive: true, force: true }); }
+      return line.includes('▶️ resumed') && line.includes('step record unavailable')
+        && readFileSync(path, 'utf8') === before;
+    })()]);
     // The lifecycle driver closes a reconciled unit on the orchestrator's
     // behalf: only a record still open, never re-rendering a card shown.
     results.push(['ifOpen closes an open record once, and nothing else',
