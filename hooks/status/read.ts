@@ -21,8 +21,8 @@ export function projectionArgv(pluginRoot: string, sessionId: string): string[] 
   return ['node', `${pluginRoot}/tools/status.mjs`, '--json', '--session', sessionId]
 }
 
-/** The producer's stdout as a projection, or null when it is not this mod's schema. */
-export function parseProjection(text: string): StatusProjection | null {
+/** The text as one JSON object, or null when it is not one. */
+function parseRecord(text: string): Record<string, unknown> | null {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
@@ -30,8 +30,13 @@ export function parseProjection(text: string): StatusProjection | null {
     return null
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
-  const record = parsed as Record<string, unknown>
-  if (record['schema'] !== STATUS_SCHEMA || typeof record['owned'] !== 'boolean') return null
+  return parsed as Record<string, unknown>
+}
+
+/** The producer's stdout as a projection, or null when it is not this mod's schema. */
+export function parseProjection(text: string): StatusProjection | null {
+  const record = parseRecord(text)
+  if (record === null || record['schema'] !== STATUS_SCHEMA || typeof record['owned'] !== 'boolean') return null
   return record as StatusProjection
 }
 
@@ -78,15 +83,8 @@ function stringOrNull(value: unknown): string | null {
 
 /** The proxy's body as its active requests, or null when it is not `{ ok: true, active_requests: [...] }`. */
 export function parseProxyStatus(text: string): ProxyRequest[] | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return null
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
-  const record = parsed as Record<string, unknown>
-  if (record['ok'] !== true || !Array.isArray(record['active_requests'])) return null
+  const record = parseRecord(text)
+  if (record === null || record['ok'] !== true || !Array.isArray(record['active_requests'])) return null
   const requests: ProxyRequest[] = []
   for (const entry of record['active_requests'] as unknown[]) {
     if (typeof entry !== 'object' || entry === null) return null

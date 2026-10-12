@@ -4,7 +4,7 @@
 // pane's sections in pane.ts, the palette in theme.ts. The band draws only
 // from a projection that is owned and enabled, so every other session sees
 // no change; the pane opens only on /autoloop or the band's expand press.
-import type { Register, Timer } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { StatusProjection, StatusState } from '../../types'
 import { PANE_ID, PANE_TITLE, paneSections } from './pane'
@@ -20,6 +20,8 @@ const PERIOD_MS = 3000
 /** A tick past this is reported once: the period is not raised by itself (tasks/plan-status-mod.md, risks). */
 const SLOW_TICK_MS = 500
 const EMPTY: StatusState = { last: null, lastOkAtMs: null, lastMs: null, proxy: null, seenBlocked: [] }
+/** The mod's state as last written; EMPTY before the first tick. */
+const heldState = async ($: EngineInterface): Promise<StatusState> => (await $.state.get(STATUS)).value ?? EMPTY
 /** Why the pane and the command stay quiet while the projection is not drawable: not the owner, or the band turned off. */
 function quietReason(projection: StatusProjection | null): string {
   return projection === null || projection.owned !== true
@@ -62,7 +64,7 @@ export const register: Register = (on) => {
         ])
         const nowMs = await $.clock.now()
         const lastMs = nowMs - startedAtMs
-        const held = (await $.state.get(STATUS)).value ?? EMPTY
+        const held = await heldState($)
         // A unit blocked for the first time in this session is toasted once:
         // the seen list lives in $.state, so a reload does not toast it again.
         const fresh = read.ok && isDrawable(read.projection)
@@ -103,7 +105,7 @@ export const register: Register = (on) => {
       return { text: 'autoloop: status pane closed' }
     }
     if (args !== '') return { text: `autoloop: unknown argument "${args}"; use /autoloop or /autoloop close` }
-    const last = (await $.state.get(STATUS)).value?.last ?? null
+    const { last } = await heldState($)
     if (!isDrawable(last)) return { text: quietReason(last) }
     const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE })
     return { text: opened.isPlaced ? 'autoloop: status pane opened' : `autoloop: status pane waits (${opened.reason})` }
@@ -111,7 +113,7 @@ export const register: Register = (on) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    const held = (await $.state.get(STATUS)).value ?? EMPTY
+    const held = await heldState($)
     if (!isDrawable(held.last)) return next(e)
     const nowMs = await $.clock.now()
     // Stale: the glyphs that mean "running now" draw hollow, since nothing
@@ -129,6 +131,8 @@ export const register: Register = (on) => {
     const expand = () => void $.ui.open({ id: PANE_ID, title: PANE_TITLE })
     const phaseGlyph = (state: 'done' | 'current' | 'notYet') =>
       (state === 'done' ? GLYPH.done : state === 'current' ? live(GLYPH.active) : GLYPH.notYet)
+    // ON is good, OFF is a warning: the glyph and the word wear the same color.
+    const proxyColor = proxy?.on ? PALETTE.good : PALETTE.warn
     return (
       <Box flexDirection="column">
         <Box>
@@ -152,8 +156,8 @@ export const register: Register = (on) => {
           {proxy !== null && (
             <Box flexDirection="column" width={proxyWidth}>
               <Text color={PALETTE.ink}>
-                <Text color={proxy.on ? PALETTE.good : PALETTE.warn}>{proxy.on ? GLYPH.active : GLYPH.notYet}</Text>{' '}
-                <Text color={proxy.on ? PALETTE.good : PALETTE.warn}>{proxy.word}</Text>{proxy.tail}
+                <Text color={proxyColor}>{proxy.on ? GLYPH.active : GLYPH.notYet}</Text>{' '}
+                <Text color={proxyColor}>{proxy.word}</Text>{proxy.tail}
               </Text>
               {proxy.rows.map((row) => <Text color={PALETTE.ink2}>{row}</Text>)}
             </Box>
@@ -161,11 +165,14 @@ export const register: Register = (on) => {
         </Box>
         {phases !== null && (
           <Text color={PALETTE.ink}>
-            {phases.map((cell, index) => (
-              <Text color={cell.state === 'notYet' ? PALETTE.ink3 : PALETTE.ink}>
-                {index === 0 ? '' : '  '}<Text color={cell.state === 'notYet' ? PALETTE.ink3 : PALETTE.good}>{phaseGlyph(cell.state)}</Text> {cell.label}
-              </Text>
-            ))}
+            {phases.map((cell, index) => {
+              const notYet = cell.state === 'notYet'
+              return (
+                <Text color={notYet ? PALETTE.ink3 : PALETTE.ink}>
+                  {index === 0 ? '' : '  '}<Text color={notYet ? PALETTE.ink3 : PALETTE.good}>{phaseGlyph(cell.state)}</Text> {cell.label}
+                </Text>
+              )
+            })}
           </Text>
         )}
         {needsYou !== null && (
@@ -182,7 +189,7 @@ export const register: Register = (on) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const held = (await $.state.get(STATUS)).value ?? EMPTY
+    const held = await heldState($)
     if (!isDrawable(held.last)) return <Text color={PALETTE.ink2}>{quietReason(held.last)}</Text>
     const sections = paneSections(held.last, held.proxy, await $.session.id(), await $.clock.now())
     const glyphColor = (glyph: string) => (glyph === GLYPH.needsYou ? PALETTE.crit : glyph === GLYPH.waiting ? PALETTE.warn : PALETTE.good)

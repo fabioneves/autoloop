@@ -42,18 +42,28 @@ export function checkedAgo(lastOkAtMs: number | null, nowMs: number): string {
   return `checked ${Math.max(0, Math.floor((nowMs - lastOkAtMs) / 1000))}s ago`
 }
 
-/** The round as the `--round` grammar names it: `fix 2/3`, `re-plan`, `open findings`, `full`. */
-export function roundLabel(round: StatusRound): string {
+/** The round as the `--round` grammar names it: `fix 2/3`, `re-plan`, `open findings`, `full`; null without one. */
+export function roundLabel(round: StatusRound | null): string | null {
+  if (round === null) return null
   if (round.kind === 'fix') return `fix ${round.n ?? '?'}${round.budget === undefined ? '' : `/${round.budget}`}`
   return round.kind === 'open-findings' ? 'open findings' : round.kind
+}
+
+/** A model's short name, marked when it ran as a fallback: `OPUS 5.5 (fallback)`. */
+export function modelName(model: string, fallback: boolean): string {
+  return fallback ? `${shortModel(model)} (fallback)` : shortModel(model)
+}
+
+/** The model a proxy request asked for; `unknown` when it named none. */
+export function requestedName(request: ProxyRequest): string {
+  return request.requestedModel === null ? 'unknown' : shortModel(request.requestedModel)
 }
 
 /** The model the Loop column names: the one that ran under a fallback, else the role's pinned one. */
 function modelLabel(unit: StatusWorkedUnit, models: Record<string, string>): string | null {
   const pinned = unit.role === null ? undefined : models[unit.role]
   const named = unit.fallback ? unit.model ?? pinned : pinned ?? unit.model
-  if (named === undefined || named === null) return null
-  return unit.fallback ? `${shortModel(named)} (fallback)` : shortModel(named)
+  return named === undefined || named === null ? null : modelName(named, unit.fallback)
 }
 
 export type LoopColumn = {
@@ -75,7 +85,7 @@ export function loopColumn(projection: StatusProjection, narrow: boolean): LoopC
     return { glyph: GLYPH.notYet, head: last === null ? 'Idle' : `Idle · last delivered #${last}`, detail: null }
   }
   const title = narrow || unit.title === null ? '' : ` · ${unit.title}`
-  const detail = [unit.role, unit.round === null ? null : roundLabel(unit.round), modelLabel(unit, projection.models ?? {})]
+  const detail = [unit.role, roundLabel(unit.round), modelLabel(unit, projection.models ?? {})]
     .filter((part): part is string => part !== null)
   return { glyph: GLYPH.active, head: `${unit.phase} #${unit.issue}${title}`, detail: detail.length === 0 ? null : detail.join(' · ') }
 }
@@ -106,7 +116,7 @@ export function columnWidths(bodyColumns: number, count: number): number[] {
 export function modelCounts(requests: ProxyRequest[]): { model: string; count: number }[] {
   const counts = new Map<string, number>()
   for (const request of requests) {
-    const model = request.requestedModel === null ? 'unknown' : shortModel(request.requestedModel)
+    const model = requestedName(request)
     counts.set(model, (counts.get(model) ?? 0) + 1)
   }
   return [...counts].map(([model, count]) => ({ model, count }))
@@ -148,6 +158,11 @@ export function blockedUnits(projection: StatusProjection): StatusUnit[] {
   return (projection.units ?? []).filter((unit) => unit.needsYou !== null).sort((left, right) => left.issue - right.issue)
 }
 
+/** The PR a human must merge or label: an authorization that carries one; null when the answer goes on the issue. */
+export function prToAuthorize(unit: StatusUnit): number | null {
+  return unit.needsYou?.kind === 'authorize' ? unit.pr : null
+}
+
 export type NeedsYouRow = {
   issue: number
   text: string
@@ -161,8 +176,8 @@ export type NeedsYouRow = {
 export function needsYouRow(projection: StatusProjection): NeedsYouRow | null {
   const [oldest, ...rest] = blockedUnits(projection)
   if (oldest === undefined || oldest.needsYou === null) return null
-  const right = oldest.needsYou.kind === 'authorize' && oldest.pr !== null
-    ? `merge or label PR #${oldest.pr}` : `answer on #${oldest.issue}`
+  const pr = prToAuthorize(oldest)
+  const right = pr === null ? `answer on #${oldest.issue}` : `merge or label PR #${pr}`
   return { issue: oldest.issue, text: oldest.needsYou.text, right, more: rest.length }
 }
 

@@ -5,16 +5,15 @@
 // The proxy is an external service, so its bodies are hand-written here;
 // the projection is the producer's own (fixtures/projection.ts).
 import { expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
-import type { HttpInit, HttpResponse, On, ProcessRunResult, RenderElement } from 'claude-code'
+import type { HttpInit, HttpResponse, On, RenderElement } from 'claude-code'
 import type { StatusState } from '../../types'
 
 import { OWNED } from './fixtures/projection'
+import { PERIOD_MS, band, findColor, ran, rows, start, texts } from './fixtures/testing'
 import { PROXY_TIMEOUT_MS, parseProxyStatus, proxyUrl, readProxy } from './read'
 import { PALETTE } from './theme'
 import { modelCounts, proxyColumn } from './view'
 
-const PERIOD_MS = 3000
 const BASE = 'http://127.0.0.1:8787'
 
 const request = (id: string, requested_model: string | null, model: string | null = null) => ({
@@ -29,10 +28,6 @@ const NONE = JSON.stringify({ ok: true, active_requests: [] })
 
 function response(text: string, status = 200): HttpResponse {
   return { status, ok: status >= 200 && status < 300, headers: {}, text }
-}
-
-function ran(stdout: string): ProcessRunResult {
-  return { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
 }
 
 type Answer = { body: string; status?: number } | { deny: string } | { holdMs: number }
@@ -67,33 +62,6 @@ function host(on: On, env: Record<string, string>, answer: () => Answer, options
     return next(e)
   })
   return { clock, fetches, runs: () => runs, held: () => held }
-}
-
-async function start($: Engine) {
-  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-}
-
-function band($: Engine, bodyColumns = 160) {
-  return $.ui.render({
-    surface: 'terminal',
-    component: 'AbovePrompt',
-    requestId: 'band',
-    props: { hasSurvey: false, isWorking: false, maxRows: 8, bodyColumns, scroll: { offset: 0, bodyRows: 7 }, view: {} },
-  })
-}
-
-function texts(tree: RenderElement): string {
-  if (tree.type === 'Button') return `[${tree.props.label}]`
-  const children = 'children' in tree ? tree.children ?? [] : []
-  return children.map((child) => (typeof child === 'string' ? child : texts(child))).join('')
-}
-
-function rows(tree: RenderElement): string[] {
-  const children = 'children' in tree ? tree.children ?? [] : []
-  const column = tree.type === 'Box' && tree.props?.['flexDirection'] === 'column'
-  const holdsBoxes = children.some((child) => typeof child !== 'string' && child.type === 'Box')
-  if (tree.type !== 'Box' || (!column && !holdsBoxes)) return [texts(tree)]
-  return children.flatMap((child) => (typeof child === 'string' ? [child] : rows(child)))
 }
 
 /** The column Boxes of the band's second row. */
@@ -233,14 +201,3 @@ test('under 120 columns the proxy column reads ON · n req with no model rows', 
   expect(columnBoxes(drawn).slice(1).flatMap(rows)).toEqual(['1 active · 0 waiting · 0 needs you', '● ON · 3 req'])
   expect(columns(drawn)).toEqual([33, 33, 34])
 })
-
-function findColor(tree: RenderElement, text: string): string | undefined {
-  if (tree.type === 'Text' && (tree.children ?? []).includes(text)) return tree.props?.['color'] as string | undefined
-  const children = 'children' in tree ? tree.children ?? [] : []
-  for (const child of children) {
-    if (typeof child === 'string') continue
-    const found = findColor(child, text)
-    if (found !== undefined) return found
-  }
-  return undefined
-}

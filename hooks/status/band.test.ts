@@ -7,32 +7,20 @@
 // projection text is the producer's own (fixtures/projection.ts); the proxy
 // body is hand-written (an external service).
 import { expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
-import type { HttpResponse, On, ProcessRunResult, RenderElement } from 'claude-code'
-import type { StatusProjection, StatusState } from '../../types'
+import type { HttpResponse, On, RenderElement } from 'claude-code'
+import type { StatusState } from '../../types'
 
 import { BLOCKED_THREE, DISABLED, FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, RUN, UNOWNED } from './fixtures/projection'
-import { parseProjection } from './read'
+import { PERIOD_MS, band, findColor, projection, ran, rows, start, texts } from './fixtures/testing'
 import { PALETTE } from './theme'
 import { needsYouRow, phaseRow, toastText } from './view'
 
-const PERIOD_MS = 3000
 const BASE = 'http://127.0.0.1:8787'
 const THREE = JSON.stringify({ ok: true, active_requests: [
   { id: 'r1', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model: 'claude-opus-5-5', model: 'anthropic-gateway-opus[1m]', session_id: 'S-test' },
   { id: 'r2', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model: 'gpt-6-astra', model: null, session_id: 'S-other' },
   { id: 'r3', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model: 'claude-opus-5-5', model: null, session_id: 'S-test' },
 ] })
-
-function projection(text: string): StatusProjection {
-  const parsed = parseProjection(text)
-  if (parsed === null) throw new Error('the fixture is not a projection')
-  return parsed
-}
-
-function ran(stdout: string): ProcessRunResult {
-  return { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-}
 
 type Answer = { stdout: string } | { deny: string }
 
@@ -64,45 +52,6 @@ function host(on: On, answer: () => Answer, env: Record<string, string> = {}) {
     return next(e)
   })
   return { clock, runs: () => runs, held: () => held, toasts }
-}
-
-async function start($: Engine) {
-  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-}
-
-function band($: Engine, bodyColumns = 160) {
-  return $.ui.render({
-    surface: 'terminal',
-    component: 'AbovePrompt',
-    requestId: 'band',
-    props: { hasSurvey: false, isWorking: false, maxRows: 8, bodyColumns, scroll: { offset: 0, bodyRows: 7 }, view: {} },
-  })
-}
-
-function texts(tree: RenderElement): string {
-  if (tree.type === 'Button') return `[${tree.props.label}]`
-  const children = 'children' in tree ? tree.children ?? [] : []
-  return children.map((child) => (typeof child === 'string' ? child : texts(child))).join('')
-}
-
-/** The band's rows: a column Box, or a row Box of Boxes, lists its children's rows; a row Box of texts is one row. */
-function rows(tree: RenderElement): string[] {
-  const children = 'children' in tree ? tree.children ?? [] : []
-  const column = tree.type === 'Box' && tree.props?.['flexDirection'] === 'column'
-  const holdsBoxes = children.some((child) => typeof child !== 'string' && child.type === 'Box')
-  if (tree.type !== 'Box' || (!column && !holdsBoxes)) return [texts(tree)]
-  return children.flatMap((child) => (typeof child === 'string' ? [child] : rows(child)))
-}
-
-function findColor(tree: RenderElement, text: string): string | undefined {
-  if (tree.type === 'Text' && (tree.children ?? []).includes(text)) return tree.props?.['color'] as string | undefined
-  const children = 'children' in tree ? tree.children ?? [] : []
-  for (const child of children) {
-    if (typeof child === 'string') continue
-    const found = findColor(child, text)
-    if (found !== undefined) return found
-  }
-  return undefined
 }
 
 /** The Box that holds `text` somewhere beneath it and is nearest to it. */

@@ -4,26 +4,13 @@
 // with a doubled host. The header counts from the mock clock; the tick's
 // duration is read back from state.
 import { expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
-import type { On, ProcessRunResult, RenderElement } from 'claude-code'
-import type { StatusProjection, StatusState } from '../../types'
+import type { On, RenderElement } from 'claude-code'
+import type { StatusState } from '../../types'
 
 import { FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, REPLAN, RUN, WAITING } from './fixtures/projection'
-import { parseProjection } from './read'
+import { PERIOD_MS, band, findColor, projection, ran, rows, start } from './fixtures/testing'
 import { PALETTE } from './theme'
 import { checkedAgo, columnWidths, isNarrow, loopColumn, shortModel, workColumn } from './view'
-
-const PERIOD_MS = 3000
-
-function projection(text: string): StatusProjection {
-  const parsed = parseProjection(text)
-  if (parsed === null) throw new Error('the fixture is not a projection')
-  return parsed
-}
-
-function ran(stdout: string): ProcessRunResult {
-  return { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-}
 
 /** Seats the host beneath the mod: the clock, the session id, the registry, no proxy, and the producer. */
 function host(on: On, stdout: () => string, options: { holdMs?: number } = {}) {
@@ -47,45 +34,6 @@ function host(on: On, stdout: () => string, options: { holdMs?: number } = {}) {
     return next(e)
   })
   return { clock, held: () => held, logged }
-}
-
-async function start($: Engine) {
-  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-}
-
-function band($: Engine, bodyColumns = 160) {
-  return $.ui.render({
-    surface: 'terminal',
-    component: 'AbovePrompt',
-    requestId: 'band',
-    props: { hasSurvey: false, isWorking: false, maxRows: 8, bodyColumns, scroll: { offset: 0, bodyRows: 7 }, view: {} },
-  })
-}
-
-function texts(tree: RenderElement): string {
-  if (tree.type === 'Button') return `[${tree.props.label}]`
-  const children = 'children' in tree ? tree.children ?? [] : []
-  return children.map((child) => (typeof child === 'string' ? child : texts(child))).join('')
-}
-
-/** The band's rows: a column Box, or a row Box of Boxes, lists its children's rows; a row Box of texts is one row. */
-function rows(tree: RenderElement): string[] {
-  const children = 'children' in tree ? tree.children ?? [] : []
-  const column = tree.type === 'Box' && tree.props?.['flexDirection'] === 'column'
-  const holdsBoxes = children.some((child) => typeof child !== 'string' && child.type === 'Box')
-  if (tree.type !== 'Box' || (!column && !holdsBoxes)) return [texts(tree)]
-  return children.flatMap((child) => (typeof child === 'string' ? [child] : rows(child)))
-}
-
-function findColor(tree: RenderElement, text: string): string | undefined {
-  if (tree.type === 'Text' && (tree.children ?? []).includes(text)) return tree.props?.['color'] as string | undefined
-  const children = 'children' in tree ? tree.children ?? [] : []
-  for (const child of children) {
-    if (typeof child === 'string') continue
-    const found = findColor(child, text)
-    if (found !== undefined) return found
-  }
-  return undefined
 }
 
 test('shortModel names a model as step.mjs does', () => {

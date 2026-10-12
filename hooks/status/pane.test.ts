@@ -6,17 +6,16 @@
 // hand-written proxy body; empty sections are not drawn.
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { HttpResponse, On, PaneOpenArgs, ProcessRunResult, RenderElement } from 'claude-code'
-import type { StatusProjection } from '../../types'
+import type { HttpResponse, On, PaneOpenArgs } from 'claude-code'
 
 import { DISABLED, IDLE, OWNED, RUN, UNOWNED, WAITS } from './fixtures/projection'
+import { PERIOD_MS, band, findColor, projection, ran, rows, start } from './fixtures/testing'
 import {
   PANE_ID, activeSection, deliveredSection, needsYouSection, paneSections, proxySection, waitingSection,
 } from './pane'
-import { parseProjection, readProxy } from './read'
+import { readProxy } from './read'
 import { PALETTE } from './theme'
 
-const PERIOD_MS = 3000
 const BASE = 'http://127.0.0.1:8787'
 /** The fixture's clock: 10:30 on 2026-09-28, three minutes after #412's fix round started. */
 const AT_10_30 = Date.UTC(2026, 8, 28, 10, 30)
@@ -25,16 +24,6 @@ const THREE = JSON.stringify({ ok: true, active_requests: [
   { id: 'r2', started_at: '2026-09-28T10:29:30.000Z', elapsed_ms: 30_000, requested_model: 'gpt-6-astra', model: null, session_id: 'S-other' },
   { id: 'r3', started_at: '2026-09-28T10:29:59.000Z', elapsed_ms: 1_000, requested_model: null, model: null, session_id: null },
 ] })
-
-function projection(text: string): StatusProjection {
-  const parsed = parseProjection(text)
-  if (parsed === null) throw new Error('the fixture is not a projection')
-  return parsed
-}
-
-function ran(stdout: string): ProcessRunResult {
-  return { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-}
 
 /** Seats the host beneath the mod: the clock at 10:30, the environment, the session id, the registry, the producer, the proxy, the panes and the toasts. */
 function host(on: On, stdout: () => string, env: Record<string, string> = {}) {
@@ -62,10 +51,6 @@ function host(on: On, stdout: () => string, env: Record<string, string> = {}) {
   return { clock, opens, closes }
 }
 
-async function start($: Engine) {
-  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-}
-
 function command($: Engine, args: string) {
   return $.command.run({ command: 'autoloop', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
 }
@@ -77,30 +62,6 @@ function pane($: Engine) {
     requestId: PANE_ID,
     props: { title: 'autoloop', isFocused: false, bodyColumns: 70, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   })
-}
-
-function texts(tree: RenderElement): string {
-  if (tree.type === 'Button') return `[${tree.props.label}]`
-  const children = 'children' in tree ? tree.children ?? [] : []
-  return children.map((child) => (typeof child === 'string' ? child : texts(child))).join('')
-}
-
-/** The pane's rows: a column Box lists its children's rows; anything else is one row. */
-function rows(tree: RenderElement): string[] {
-  const children = 'children' in tree ? tree.children ?? [] : []
-  if (tree.type !== 'Box' || tree.props?.['flexDirection'] !== 'column') return [texts(tree)]
-  return children.flatMap((child) => (typeof child === 'string' ? [child] : rows(child)))
-}
-
-function findColor(tree: RenderElement, text: string): string | undefined {
-  if (tree.type === 'Text' && (tree.children ?? []).includes(text)) return tree.props?.['color'] as string | undefined
-  const children = 'children' in tree ? tree.children ?? [] : []
-  for (const child of children) {
-    if (typeof child === 'string') continue
-    const found = findColor(child, text)
-    if (found !== undefined) return found
-  }
-  return undefined
 }
 
 test('the Needs you section lists every unit a human must answer, oldest first, with a chip for the answer or the PR', () => {
@@ -202,12 +163,7 @@ test('the band\'s expand press opens the pane; nothing opens it on session.start
   await start($)
   await h.clock.advance(3 * PERIOD_MS)
   expect(h.opens).toEqual([])
-  await $.ui.render({
-    surface: 'terminal',
-    component: 'AbovePrompt',
-    requestId: 'band',
-    props: { hasSurvey: false, isWorking: false, maxRows: 8, bodyColumns: 160, scroll: { offset: 0, bodyRows: 7 }, view: {} },
-  })
+  await band($)
   await $.ui.press({ plugin: 'autoloop', key: 'expand' })
   expect(h.opens.map((open) => open.id)).toEqual([PANE_ID])
 })

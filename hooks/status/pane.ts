@@ -5,7 +5,7 @@
 // carried by the glyph and the words.
 import type { ProxyRead, StatusProjection, StatusUnit, StatusWait } from '../../types'
 import { GLYPH } from './theme'
-import { blockedUnits, duration, roundLabel, shortModel } from './view'
+import { blockedUnits, duration, modelName, prToAuthorize, requestedName, roundLabel, shortModel } from './view'
 
 export const PANE_ID = 'autoloop-status'
 export const PANE_TITLE = 'autoloop'
@@ -31,8 +31,10 @@ const head = (unit: StatusUnit): string => (unit.title === null ? `#${unit.issue
 export function needsYouSection(projection: StatusProjection): PaneSection {
   return {
     title: 'Needs you',
-    rows: blockedUnits(projection).map((unit) => row(GLYPH.needsYou, [head(unit)],
-      [unit.needsYou?.kind === 'authorize' && unit.pr !== null ? `PR #${unit.pr}` : `answer on #${unit.issue}`])),
+    rows: blockedUnits(projection).map((unit) => {
+      const pr = prToAuthorize(unit)
+      return row(GLYPH.needsYou, [head(unit)], [pr === null ? `answer on #${unit.issue}` : `PR #${pr}`])
+    }),
   }
 }
 
@@ -44,9 +46,9 @@ export function activeSection(projection: StatusProjection, nowMs: number): Pane
     title: 'Active',
     rows: units.map((unit) => {
       const isWorked = worked !== null && worked.issue === unit.issue
-      const model = unit.model === null ? null : `${shortModel(unit.model)}${isWorked && worked.fallback ? ' (fallback)' : ''}`
+      const model = unit.model === null ? null : modelName(unit.model, isWorked && worked.fallback)
       const elapsed = isWorked ? duration(nowMs - worked.startedAtMs) : null
-      return row(GLYPH.active, [head(unit), unit.phase, unit.role, unit.round === null ? null : roundLabel(unit.round), model, elapsed])
+      return row(GLYPH.active, [head(unit), unit.phase, unit.role, roundLabel(unit.round), model, elapsed])
     }),
   }
 }
@@ -82,7 +84,7 @@ export function proxySection(proxy: ProxyRead | null, sessionId: string): PaneSe
   return {
     title: 'Proxy',
     rows: requests.map((request) => {
-      const requested = request.requestedModel === null ? 'unknown' : shortModel(request.requestedModel)
+      const requested = requestedName(request)
       const models = request.model === null ? requested : `${requested} → ${shortModel(request.model)}`
       return row(GLYPH.active, [models, request.elapsedMs === null ? null : duration(request.elapsedMs)], [],
         request.sessionId !== null && request.sessionId === sessionId ? 'this session' : null)

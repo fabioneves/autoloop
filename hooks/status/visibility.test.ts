@@ -5,21 +5,16 @@
 // The host is doubled (process.run, session.id, the clock); the projection
 // text is what the producer printed (fixtures/projection.ts).
 import { expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
-import type { On, ProcessRunResult, RenderElement } from 'claude-code'
+import type { On, RenderElement } from 'claude-code'
 import type { StatusState } from '../../types'
 
 import { DISABLED, OWNED, UNOWNED } from './fixtures/projection'
+import { PERIOD_MS, band, ran, start, texts } from './fixtures/testing'
 import { STATUS_SCHEMA, isDrawable, isStale, parseProjection } from './read'
 
 const ENGINE_DRAWS: RenderElement = { type: 'Text', children: ['engine'] }
-const PERIOD_MS = 3000
 
 type Answer = { stdout: string; exitCode?: number } | { deny: string } | { holdMs: number }
-
-function ran(stdout: string, exitCode = 0): ProcessRunResult {
-  return { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-}
 
 /** Seats the host beneath the mod: the clock, the session id, the command registry and the producer. */
 function host(on: On, answer: () => Answer) {
@@ -54,30 +49,11 @@ function host(on: On, answer: () => Answer) {
   return { clock, runs, passed: () => passed, held: () => held }
 }
 
-async function start($: Engine) {
-  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-}
-
-function band($: Engine, hasSurvey = false) {
-  return $.ui.render({
-    surface: 'terminal',
-    component: 'AbovePrompt',
-    requestId: 'band',
-    props: { hasSurvey, isWorking: false, maxRows: 8, bodyColumns: 120, scroll: { offset: 0, bodyRows: 7 }, view: {} },
-  })
-}
-
-function texts(tree: RenderElement): string {
-  if (tree.type === 'Button') return `[${tree.props.label}]`
-  const children = 'children' in tree ? tree.children ?? [] : []
-  return children.map((child) => (typeof child === 'string' ? child : texts(child))).join('')
-}
-
 test('a session that owns no run: the band passes to the engine', async ($, on) => {
   const h = host(on, () => ({ stdout: UNOWNED }))
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect(await band($)).toEqual(ENGINE_DRAWS)
+  expect(await band($, 120)).toEqual(ENGINE_DRAWS)
   expect(h.passed()).toBe(1)
 })
 
@@ -85,7 +61,7 @@ test('an owned run with ui.status false: the band passes', async ($, on) => {
   const h = host(on, () => ({ stdout: DISABLED }))
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect(await band($)).toEqual(ENGINE_DRAWS)
+  expect(await band($, 120)).toEqual(ENGINE_DRAWS)
   expect(h.passed()).toBe(1)
 })
 
@@ -93,7 +69,7 @@ test('an owned, enabled run draws the band with the phase and issue', async ($, 
   const h = host(on, () => ({ stdout: OWNED }))
   await start($)
   await h.clock.advance(PERIOD_MS)
-  const drawn = await band($)
+  const drawn = await band($, 120)
   expect(h.passed()).toBe(0)
   expect(texts(drawn)).toMatch(/^◆ autoloop · checked 0s ago · \[expand\]● review #412/u)
 })
@@ -105,7 +81,7 @@ test('a wrong schema is not drawable: the read is refused and the band passes', 
   await h.clock.advance(PERIOD_MS)
   expect(parseProjection(other)).toBeNull()
   expect(isDrawable({ schema: 'autoloop.status/9', owned: true, enabled: true })).toBe(false)
-  expect(await band($)).toEqual(ENGINE_DRAWS)
+  expect(await band($, 120)).toEqual(ENGINE_DRAWS)
   expect(h.held()?.last).toBeNull()
 })
 
@@ -113,7 +89,7 @@ test('a survey holds the band: the hook passes even for an owned run', async ($,
   const h = host(on, () => ({ stdout: OWNED }))
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect(await band($, true)).toEqual(ENGINE_DRAWS)
+  expect(await band($, 120, true)).toEqual(ENGINE_DRAWS)
   expect(h.passed()).toBe(1)
 })
 
@@ -160,7 +136,7 @@ test('a rejected run keeps the last projection and marks it stale', async ($, on
   await h.clock.advance(30_000)
   expect(isStale(held?.lastOkAtMs ?? null, h.clock.now())).toBe(true)
   // The band still draws the kept projection, marked stale with hollow glyphs.
-  expect(texts(await band($))).toMatch(/^◆ autoloop · stale · checked 33s ago · \[expand\]○ review #412/u)
+  expect(texts(await band($, 120))).toMatch(/^◆ autoloop · stale · checked 33s ago · \[expand\]○ review #412/u)
 })
 
 test('/autoloop answers that this session owns no run before the pane exists', async ($, on) => {

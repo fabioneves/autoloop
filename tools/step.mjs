@@ -692,11 +692,13 @@ export function statusProjection({
   const own = markers(root);
   const park = own.map(({ marker }) => marker.park).find((value) => value?.until) ?? null;
   const resolved = resolveProjectConfig(root);
-  const { snapshot, authority, units, humanWaits } = projectedUnits(dir, run, nowMs, runStartMs(own));
+  const openedAtMs = runStartMs(own);
+  const { snapshot, authority, units, humanWaits } = projectedUnits(dir, run, nowMs, openedAtMs);
   const spoken = authority.authority !== 'none';
   const titleOf = (issue) => (spoken ? snapshot.sections.openIssues.items.find((item) => item.number === issue)?.title ?? null : null);
   const pinned = readPinnedModels(join(dir, 'models.json'));
   const models = pinned?.ok ? Object.fromEntries(Object.entries(pinned.models).map(([role, entry]) => [role, entry.model])) : {};
+  const phaseOf = (unit) => PHASES[unit.step] ?? null;
   const roleOf = (unit) => unit.role ?? STEP_ROLES[unit.step] ?? null;
   // A staged step without a model was announced, not launched: no model ran.
   const modelOf = (unit) => unit.model ?? (unit.staged ? null : models[roleOf(unit)] ?? null);
@@ -705,7 +707,7 @@ export function statusProjection({
   const projected = units.map((unit) => {
     const title = titleOf(unit.issue);
     return {
-      issue: unit.issue, title, disposition: unitDisposition(unit), phase: PHASES[unit.step] ?? null, role: roleOf(unit),
+      issue: unit.issue, title, disposition: unitDisposition(unit), phase: phaseOf(unit), role: roleOf(unit),
       model: modelOf(unit), round: roundFacts(unit.round), detail: unitDetail(unit, nowMs), waitingOn: waitingFacts(unit.waiting),
       pr: unit.pending?.pr ?? openPrs.find((item) => item.issue === unit.issue)?.number ?? null,
       decisions: unit.decisions, needsYou: needsYouFacts(unit, title),
@@ -731,7 +733,7 @@ export function statusProjection({
     owned: true,
     enabled: statusBandEnabled(resolved?.ok ? resolved.config : null),
     run: {
-      openedAtMs: runStartMs(own),
+      openedAtMs,
       parkedUntil: park?.until ?? null,
       closedAt: own.some(({ marker }) => marker.closedAt === undefined) ? null : own[0]?.marker.closedAt ?? null,
       snapshotScannedAt: spoken ? snapshot.scannedAt : null,
@@ -739,7 +741,7 @@ export function statusProjection({
     },
     phases: [...PHASE_ORDER],
     unit: worked === null ? null : {
-      issue: worked.issue, title: titleOf(worked.issue), phase: PHASES[worked.step] ?? null, role: roleOf(worked),
+      issue: worked.issue, title: titleOf(worked.issue), phase: phaseOf(worked), role: roleOf(worked),
       model: modelOf(worked), fallback: worked.fallback === true, round: roundFacts(worked.round),
       inFlight: typeof worked.dispatchId === 'string' && !Number.isFinite(worked.returnedAtMs),
       startedAtMs: worked.startedAtMs, returnedAtMs: Number.isFinite(worked.returnedAtMs) ? worked.returnedAtMs : null,
