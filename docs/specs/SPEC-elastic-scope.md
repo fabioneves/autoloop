@@ -33,7 +33,7 @@ defect one directory away, which the loop then queues as a new unit, or a block.
    a plan task cannot pass its test without it, and requires the writer to list each such path in
    its result with the reason. The host records those as `widen` before the first review.
 5. **Repair limits unchanged.** At most three repairs per parent, depth one, and a repair is
-   `loop-ready` on creation so the loop takes it next.
+   eligible on creation through its parent's `loop-ready` provenance, so the loop takes it next.
 6. **Lane proof.** `lane-contract.mjs` accepts the widened set as the unit's lane for exact-head
    checks, protected-path checks, and the dirty-tree rule. A widening that adds a protected path
    is a `human:authorize` label, not a block.
