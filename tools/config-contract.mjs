@@ -452,21 +452,26 @@ function validateProjectValues(cfg, expectedVersion, errors) {
 
 export function validateConfig(cfg) {
   const errors = [];
-  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['protectedPaths', 'models'], errors)) return errors;
+  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['protectedPaths', 'models', 'ui'], errors)) return errors;
   validateProjectValues(cfg, CONFIG_VERSION, errors);
   if (hasOwn(cfg, 'protectedPaths')) validateGlobList(cfg.protectedPaths, 'protectedPaths', errors);
   // Each step's model, effort and fallback, overriding the operator's global
   // file (docs/specs/SPEC-model-config.md). Optional, so the schema holds.
   if (hasOwn(cfg, 'models')) errors.push(...modelsShapeProblems(cfg.models, 'models').map((problem) => problem.replace(/^models: models/u, 'models')));
+  // The status band (docs/specs/SPEC-status-mod.md): on unless a project says no.
+  if (hasOwn(cfg, 'ui') && validateObjectShape(cfg.ui, 'ui', [], ['status'], errors)
+    && hasOwn(cfg.ui, 'status') && typeof cfg.ui.status !== 'boolean') {
+    errors.push('ui.status: must be true or false');
+  }
   return errors;
 }
 
 // What a review round fingerprints: the project's policy, without its model
-// table. Routing is not reviewed policy, and each dispatch result stamps the
-// model it actually ran.
+// table or display preferences. Routing is not reviewed policy, and each
+// dispatch result stamps the model it actually ran.
 export function reviewedConfig(cfg) {
-  if (!isRecord(cfg) || !hasOwn(cfg, 'models')) return cfg;
-  const { models, ...reviewed } = cfg;
+  if (!isRecord(cfg)) return cfg;
+  const { models, ui, ...reviewed } = cfg;
   return reviewed;
 }
 
@@ -531,6 +536,12 @@ export const DEFAULT_CONFIG = Object.freeze({
   tracker: Object.freeze({ provider: 'none' }),
   review: Object.freeze({ checklistPath: '.autoloop/checklist.md' }),
 });
+
+// The status band is on unless the project turns it off. No default key: a
+// resolved config keeps the hash it had, as with protectedPaths.
+export function statusBandEnabled(config) {
+  return config?.ui?.status !== false;
+}
 
 // The plugin's own review checklist, for a repository that keeps none.
 export const PLUGIN_CHECKLIST = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'templates', 'checklist.template.md');
@@ -2247,6 +2258,27 @@ function selfTest() {
         && validateConfig({ ...projectFixture(), models: { plan: { effort: 'huge' } } }).some((error) => error.includes('models.plan.effort')));
     expect('the reviewed config leaves the model table out of the review fingerprint',
       JSON.stringify(reviewedConfig({ ...projectFixture(), models: { implement: { effort: 'high' } } })) === JSON.stringify(projectFixture()));
+    // SPEC-status-mod: `ui.status` turns the status band off for a project.
+    // Optional and additive like `models`, so 0.28.0 stays.
+    expect('ui.status is an optional boolean',
+      validateConfig({ ...projectFixture(), ui: { status: false } }).length === 0
+        && validateConfig({ ...projectFixture(), ui: { status: true } }).length === 0
+        && validateConfig({ ...projectFixture(), ui: { status: 'no' } }).includes('ui.status: must be true or false')
+        && validateConfig({ ...projectFixture(), ui: { other: 1 } }).includes('ui.other: unknown key')
+        && validateConfig({ ...projectFixture(), ui: [] }).includes('ui: must be a JSON object'));
+    // No default key (as protectedPaths): a config that never sets it keeps
+    // its hash, and a reader asks statusBandEnabled.
+    {
+      const minimalText = JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'x' } });
+      const off = resolveConfigText(JSON.stringify({ ...JSON.parse(minimalText), ui: { status: false } }));
+      expect('ui is absent from a resolved config that never set it, and resolves as set',
+        !Object.hasOwn(resolveConfigText(minimalText).config, 'ui') && off.config.ui.status === false);
+      expect('the status band is on unless ui.status is false',
+        statusBandEnabled(resolveConfigText(minimalText).config) === true && statusBandEnabled(off.config) === false
+          && statusBandEnabled(null) === true);
+    }
+    expect('the reviewed config leaves ui out of the review fingerprint',
+      JSON.stringify(reviewedConfig({ ...projectFixture(), ui: { status: false } })) === JSON.stringify(projectFixture()));
     expect('protectedPaths holds repository-relative globs',
       validateConfig({ ...projectFixture(), protectedPaths: ['spec/**', 'compose.y*ml', '**/compose.y*ml'] }).length === 0
         && validateConfig({ ...projectFixture(), protectedPaths: [] }).length === 0);
