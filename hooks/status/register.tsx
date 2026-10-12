@@ -2,15 +2,16 @@
 // for the session that owns a run. This module holds the hooks; the read is
 // in read.ts, the column text in view.ts, the palette in theme.ts. The band
 // draws only from a projection that is owned and enabled, so every other
-// session sees no change. This release draws the header, the Loop column and
-// the Work column; the phase row, the pane and the proxy column are later
+// session sees no change. This release draws the header and the Loop, Work
+// and Proxy columns; the phase row, the needs-you row and the pane are later
 // tasks.
 import type { Register } from 'claude-code'
 
 import type { StatusProjection, StatusState } from '../../types'
-import { isDrawable, readProjection } from './read'
+import type { ProxyFetch } from './read'
+import { isDrawable, readProjection, readProxy } from './read'
 import { GLYPH, PALETTE } from './theme'
-import { checkedAgo, columnWidths, isNarrow, loopColumn, workColumn } from './view'
+import { checkedAgo, columnWidths, isNarrow, loopColumn, proxyColumn, workColumn } from './view'
 
 const STATUS = { plugin: 'autoloop', key: 'status' } as const
 const PERIOD_MS = 3000
@@ -34,21 +35,37 @@ export const register: Register = (on) => {
     // Ownership is the session's: the producer matches this id against the
     // run latch of the Claude process it runs under.
     const sessionId = await $.session.id()
+    // The proxy is optional: without the variable the column does not exist
+    // and nothing is fetched. `claudeproxy` sets it before the session starts.
+    const base = await $.env.get('ANTHROPIC_BASE_URL')
     const run = (argv: readonly string[], init: { timeoutMs: number }) => $.process.run(argv, init)
+    // $.http.fetch has no timeout of its own: the read races a clock wait,
+    // which the settled fetch then aborts.
+    const fetch: ProxyFetch = (url, { timeoutMs }) => {
+      const stop = new AbortController()
+      const timeout = $.clock.sleep(timeoutMs, { signal: stop.signal }).then(() => {
+        throw new Error(`no answer within ${timeoutMs} ms`)
+      })
+      return Promise.race([$.http.fetch(url), timeout]).finally(() => stop.abort())
+    }
     const tick = async () => {
       if (busy) return
       busy = true
       try {
         const startedAtMs = await $.clock.now()
-        const read = await readProjection(run, $.plugin.root, sessionId)
+        const [read, proxy] = await Promise.all([
+          readProjection(run, $.plugin.root, sessionId),
+          base === undefined || base === '' ? null : readProxy(fetch, base),
+        ])
         const nowMs = await $.clock.now()
         const lastMs = nowMs - startedAtMs
         const held = (await $.state.get(STATUS)).value ?? EMPTY
-        // A failed read keeps the last projection; lastOkAtMs not moving is
-        // what marks it stale.
+        // A failed projection read keeps the last projection; lastOkAtMs not
+        // moving is what marks it stale. The proxy read is taken as it came:
+        // OFF is a fact.
         await $.state.set(STATUS, read.ok
-          ? { ...held, last: read.projection, lastOkAtMs: nowMs, lastMs }
-          : { ...held, lastMs })
+          ? { ...held, last: read.projection, lastOkAtMs: nowMs, lastMs, proxy }
+          : { ...held, lastMs, proxy })
         if (lastMs > SLOW_TICK_MS && !slowReported) {
           slowReported = true
           $.ui.log(`autoloop status: a tick took ${lastMs} ms (period ${PERIOD_MS} ms)`)
@@ -78,7 +95,8 @@ export const register: Register = (on) => {
     const narrow = isNarrow(e.props.bodyColumns)
     const loop = loopColumn(held.last, narrow)
     const work = workColumn(held.last)
-    const [loopWidth, workWidth] = columnWidths(e.props.bodyColumns, 2)
+    const proxy = held.proxy === null ? null : proxyColumn(held.proxy, narrow)
+    const [loopWidth, workWidth, proxyWidth] = columnWidths(e.props.bodyColumns, proxy === null ? 2 : 3)
     const { Box, Button, Text } = $.ui.resolve(e)
     // The pane is a later task: the press only marks it open in state.
     const expand = async () => {
@@ -105,6 +123,15 @@ export const register: Register = (on) => {
               {work.counts} · <Text color={work.hot ? PALETTE.crit : PALETTE.ink}>{work.needsYou}</Text>
             </Text>
           </Box>
+          {proxy !== null && (
+            <Box flexDirection="column" width={proxyWidth}>
+              <Text color={PALETTE.ink}>
+                <Text color={proxy.on ? PALETTE.good : PALETTE.warn}>{proxy.on ? GLYPH.active : GLYPH.notYet}</Text>{' '}
+                <Text color={proxy.on ? PALETTE.good : PALETTE.warn}>{proxy.word}</Text>{proxy.tail}
+              </Text>
+              {proxy.rows.map((row) => <Text color={PALETTE.ink2}>{row}</Text>)}
+            </Box>
+          )}
         </Box>
       </Box>
     )

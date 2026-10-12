@@ -1,11 +1,13 @@
-// The projection read (docs/specs/SPEC-status-mod.md, items 1, 2 and 4): the
-// producer `tools/status.mjs --json --session <id>` run as a child of the
-// Claude process, parsed and held to its schema. Pure over an injected
-// runner, so a test doubles the host and not the producer.
-import type { StatusProjection } from '../../types'
+// The two reads (docs/specs/SPEC-status-mod.md, items 1 to 4): the
+// projection, `tools/status.mjs --json --session <id>` run as a child of the
+// Claude process and held to its schema; and the proxy, `GET <base>/status`
+// without auth. Each is pure over an injected runner or fetch, so a test
+// doubles the host and not the producer.
+import type { ProxyRead, ProxyRequest, StatusProjection } from '../../types'
 
 export const STATUS_SCHEMA = 'autoloop.status/1'
 export const READ_TIMEOUT_MS = 2000
+export const PROXY_TIMEOUT_MS = 2000
 export const STALE_AFTER_MS = 30_000
 
 export type Runner = (
@@ -59,4 +61,56 @@ export function isDrawable(projection: StatusProjection | null): projection is S
 /** Stale: no successful read yet, or none within the last 30 s. */
 export function isStale(lastOkAtMs: number | null, nowMs: number): boolean {
   return lastOkAtMs === null || nowMs - lastOkAtMs > STALE_AFTER_MS
+}
+
+export type ProxyFetch = (
+  url: string,
+  init: { timeoutMs: number },
+) => Promise<{ status: number; text: string }>
+
+export function proxyUrl(base: string): string {
+  return `${base.replace(/\/+$/u, '')}/status`
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+/** The proxy's body as its active requests, or null when it is not `{ ok: true, active_requests: [...] }`. */
+export function parseProxyStatus(text: string): ProxyRequest[] | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+  const record = parsed as Record<string, unknown>
+  if (record['ok'] !== true || !Array.isArray(record['active_requests'])) return null
+  const requests: ProxyRequest[] = []
+  for (const entry of record['active_requests'] as unknown[]) {
+    if (typeof entry !== 'object' || entry === null) return null
+    const fields = entry as Record<string, unknown>
+    requests.push({
+      id: String(fields['id'] ?? ''),
+      startedAt: stringOrNull(fields['started_at']),
+      elapsedMs: typeof fields['elapsed_ms'] === 'number' ? fields['elapsed_ms'] : null,
+      requestedModel: stringOrNull(fields['requested_model']),
+      model: stringOrNull(fields['model']),
+      sessionId: stringOrNull(fields['session_id']),
+    })
+  }
+  return requests
+}
+
+/** One proxy read: a rejected fetch, a non-200 or a body that does not parse is OFF. */
+export async function readProxy(fetch: ProxyFetch, base: string): Promise<ProxyRead> {
+  try {
+    const result = await fetch(proxyUrl(base), { timeoutMs: PROXY_TIMEOUT_MS })
+    if (result.status !== 200) return { on: false }
+    const requests = parseProxyStatus(result.text)
+    return requests === null ? { on: false } : { on: true, requests }
+  } catch {
+    return { on: false }
+  }
 }

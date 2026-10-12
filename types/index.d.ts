@@ -20,7 +20,7 @@ export type StatusUnit = {
 
 export type StatusRound = { kind: 'full' | 'fix' | 're-plan' | 'open-findings'; n?: number; budget?: number }
 
-export type StatusWait = { kind: 'issue' | 'pr' | 'base' | 'time'; number: number | null; paths: string[]; until: string | null }
+export type StatusWait = { kind: 'issue' | 'pr' | 'base' | 'time'; number: number | null; paths: string[] | null; until: string | null }
 
 /** The worked unit: the newest unstaged step, in flight or returned. */
 export type StatusWorkedUnit = {
@@ -61,6 +61,23 @@ export type StatusProjection = {
   models?: Record<string, string>
 }
 
+/** One active request as the proxy's `GET /status` lists it (its snake_case fields, read leniently). */
+export type ProxyRequest = {
+  id: string
+  startedAt: string | null
+  elapsedMs: number | null
+  requestedModel: string | null
+  model: string | null
+  sessionId: string | null
+}
+
+/**
+ * The proxy read: ON with the active requests, or OFF. OFF is a fact, not a
+ * stale value: a failed fetch, a non-200 or a body that does not parse drops
+ * the last ON read.
+ */
+export type ProxyRead = { on: true; requests: ProxyRequest[] } | { on: false }
+
 /** The mod's session state: the last reads and what it has already shown. */
 export type StatusState = {
   /** The last projection that parsed, kept through failed reads. */
@@ -69,8 +86,8 @@ export type StatusState = {
   lastOkAtMs: number | null
   /** How long the last tick took, successful or not. */
   lastMs: number | null
-  /** The proxy read (a later task); null until it exists. */
-  proxy: null
+  /** The last proxy read; null while ANTHROPIC_BASE_URL is unset (no column) or before the first tick. */
+  proxy: ProxyRead | null
   /** Issues whose needs-you toast was shown in this session. */
   seenBlocked: number[]
   paneOpen: boolean

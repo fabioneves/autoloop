@@ -24,6 +24,8 @@ function ran(stdout: string, exitCode = 0): ProcessRunResult {
 /** Seats the host beneath the mod: the clock, the session id, the command registry and the producer. */
 function host(on: On, answer: () => Answer) {
   const clock = mock.clock(on)
+  // No ANTHROPIC_BASE_URL: the proxy column does not exist here.
+  mock.env(on, {})
   const runs: { argv: readonly string[]; timeoutMs: number | undefined }[] = []
   let passed = 0
   let held: StatusState | null = null
