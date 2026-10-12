@@ -10,7 +10,7 @@ Adversarial review of one plan. Your job is to find the case the author did not 
 - A planned edit to CLAUDE.md, AGENTS.md or other protected guidance that only records progress is a scope finding: progress belongs in the issue queue, capability changes in docs/agentic/ARCH.md.
 - For each rule: is it quantified over its whole domain with every case enumerated and tested, or an example standing in for a rule? An incomplete invariant is a Major.
 - Check that each planned test can actually prove its claim with the runner and typechecker the repo has.
-- Judge every decide the plan records.
+- Check that each decision the plan records has its question, choice, alternatives and evidence, and that the premises carry it. A decision without evidence, or a request for ratification or approval instead of a decision, is a finding. A decision is never a finding because no human approved it.
 - Never invent a plan-character, file-count or changed-line quota. A size estimate neither authorizes nor constrains delivery. A plan compressed, split, delayed or stopped only to fit such a number is a finding. Keep the functional acceptance and the exact authorized path identities: a total of six files is not a list of six permitted paths.
 - Do not reopen a settled human ruling or an accepted disposition.
 - Review the plan as written, not an imagined implementation.

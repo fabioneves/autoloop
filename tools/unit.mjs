@@ -7,18 +7,30 @@
 //               evidence (a PR merged into the configured base, or a commit
 //               the remote base contains), then comments it, labels the issue
 //               `loop-obsolete` and closes it as not planned. Reopening undoes it.
-//   --wait      The unit waits on another issue, on a red base, or for a time
-//               (a step the host keeps killing backs off instead of blocking). A machine
-//               comment records the condition and the issue is labelled
-//               `loop-waiting`, which the queue skips. Prime calls liftWaits
-//               before every scan and removes the label once the condition has
-//               cleared, so the unit comes back without a human.
+//   --wait      The unit waits on another issue, on a red base, for a time
+//               (a step the host keeps killing backs off instead of blocking),
+//               or on a delivered pull request whose changed paths overlap the
+//               plan boundary. A machine comment records the condition and the
+//               issue is labelled `loop-waiting`, which the queue skips. Prime
+//               calls liftWaits before every scan and removes the label once
+//               the condition has cleared, so the unit comes back without a
+//               human; a lifted PR wait is reported `resumed`, and the unit
+//               re-plans once on the merged base.
 //
-//   --block     A genuine human decision: trust, an irreversible act, or a product
-//               value no source states. A machine comment records the reason
-//               code and the one-line question; the labels swap to loop-blocked
-//               plus the gate label in one edit, and loop-ready stays. A human
-//               answers with `/answer <decision>` on the issue.
+//   --overlap   The pure check before a claim: the plan boundary against the
+//               delivered set (open loop PRs at ready-head or premerge-record,
+//               with their changed paths, from the retained snapshot). A hit
+//               names the PR and the overlapping paths for `--wait --on-pr`.
+//
+//   --block     An authorization only the human can give: an irreversible
+//               external act (IRREVERSIBLE_ACTION) or a secret, dependency,
+//               permission or policy exception (POLICY_DENIED). A machine
+//               comment records the reason code and the one-line question; the
+//               labels swap to loop-blocked plus the gate label in one edit, and
+//               loop-ready stays. A human answers with `/answer <decision>` on
+//               the issue. TRUST_REQUIRED and UNSPECIFIED_VALUE are retired: a
+//               specification gap is decided (33 premise blocks on one project
+//               waited for a human on gaps the loop could decide).
 //
 //   --repair    Work a unit needs that is outside its own lane: an issue the loop
 //               files itself, labelled `loop-repair` (never `loop-ready`) with a
@@ -27,10 +39,15 @@
 //               one level deep. `--blocks-parent` also puts the parent on
 //               `loop-waiting` until the repair closes.
 //
-//   --decide    A judgment call the loop made itself: the recommended option,
-//               its alternatives and why. A machine comment records it and the
-//               issue is labelled `loop-decided`; a human reverses it by replying
-//               `/answer <what instead>`.
+//   --decide    A judgment call the loop made itself: the question, the
+//               recommended option, its alternatives and the evidence. A machine
+//               comment records it and the issue is labelled `loop-decided`; a
+//               human reverses it by replying `/answer <what instead>`.
+//
+//   --decisions Every decision of one unit with its comment link, and the
+//               `## Decisions` section the PR body and the run record carry.
+//               A block whose reason is now retired, lifted by `/answer`, is
+//               listed as decided by that answer.
 //
 //   --digest    Every decision waiting on a human, one row each: open loop-blocked
 //               issues and human:authorize PRs, then the loop's own decisions of
@@ -44,10 +61,12 @@
 //
 // Usage:
 //   node <plugin-tools>/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
-//   node <plugin-tools>/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720>) [--note <text>]
+//   node <plugin-tools>/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720> | --on-pr <M> --paths <a,b/>) [--note <text>]
+//   node <plugin-tools>/unit.mjs --overlap --issue <N> --boundary-file <path> --snapshot <path>
 //   node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>]
 //   node <plugin-tools>/unit.mjs --repair --parent <N> --title <text> --body-file <path> [--blocks-parent]
-//   node <plugin-tools>/unit.mjs --decide --issue <N> --choice <text> --why <text> [--alternatives "<a>; <b>"]
+//   node <plugin-tools>/unit.mjs --decide --issue <N> --question <one line> --choice <text> --why <text> [--alternatives "<a>; <b>"]
+//   node <plugin-tools>/unit.mjs --decisions --issue <N> [--out <path>]
 //   node <plugin-tools>/unit.mjs --lift
 //   node <plugin-tools>/unit.mjs --digest [--post]
 //   node <plugin-tools>/unit.mjs --self-test
@@ -59,6 +78,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 import { updateStepRecord } from './dispatch-return-association.mjs';
+import { inLane } from './lane-contract.mjs';
+import {
+  SNAPSHOT_SECTIONS, completeSection, createSnapshot, deliveredPullRequests, invalidateSnapshot, snapshotProblem,
+  verifySnapshot,
+} from './snapshot-contract.mjs';
 
 const TIMEOUT_MS = 30_000;
 const WAIT_MARKER_RE = /<!-- autoloop-waiting-v1 (\{[^\n]*?\}) -->/gu;
@@ -66,9 +90,10 @@ const DECISION_MARKER_RE = /<!-- autoloop-decision-v1 (\{[^\n]*?\}) -->/gu;
 const BLOCK_MARKER_RE = /<!-- autoloop-block-v1 (\{[^\n]*?\}) -->/gu;
 const REASON_RE = /^[A-Z][A-Z0-9_]*$/u;
 const BLOCK_GATES = Object.freeze(['human:decide', 'human:authorize']);
-const HUMAN_BLOCK_REASONS = new Set([
-  'TRUST_REQUIRED', 'IRREVERSIBLE_ACTION', 'UNSPECIFIED_VALUE', 'POLICY_DENIED',
-]);
+const HUMAN_BLOCK_REASONS = new Set(['IRREVERSIBLE_ACTION', 'POLICY_DENIED']);
+// Reasons that carried specification gaps to a human; a gap is decided now.
+const RETIRED_BLOCK_REASONS = new Set(['TRUST_REQUIRED', 'UNSPECIFIED_VALUE']);
+const RESUMED_MARKER_RE = /<!-- autoloop-resumed-v1 (\{[^\n]*?\}) -->/gu;
 const REPAIR_MARKER_RE = /<!-- autoloop-repair-v1 (\{[^\n]*?\}) -->/gu;
 const REPAIRS_PER_PARENT = 3;
 const LAST_READY_LABEL_JQ = '[.[] | select(.event == "labeled" and .label.name == "loop-ready") | {by: .actor.login, at: .created_at}] | last // empty';
@@ -119,6 +144,11 @@ export function waitCondition(bodies) {
         if (parsed?.on === 'issue' && positive(parsed.number)) newest = { on: 'issue', number: parsed.number };
         else if (parsed?.on === 'base' && SHA_RE.test(parsed.oid ?? '')) newest = { on: 'base', oid: parsed.oid };
         else if (parsed?.on === 'time' && Number.isFinite(Date.parse(parsed.until))) newest = { on: 'time', until: parsed.until };
+        else if (parsed?.on === 'pr' && positive(parsed.number) && pathList(parsed.paths) !== null) {
+          // `until` caps the wait (0.69.0); a marker without it holds until the PR settles.
+          newest = { on: 'pr', number: parsed.number, paths: parsed.paths,
+            ...(Number.isFinite(Date.parse(parsed.until)) ? { until: parsed.until } : {}) };
+        }
       } catch {
         // An unparseable marker is not a condition; an earlier valid one still stands.
       }
@@ -129,6 +159,31 @@ export function waitCondition(bodies) {
 
 export function waitMarker(condition) {
   return `<!-- autoloop-waiting-v1 ${JSON.stringify(condition)} -->`;
+}
+
+/** Pure: a non-empty list of non-empty path strings, or null. */
+function pathList(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((path) => typeof path === 'string' && path.length > 0)
+    ? value
+    : null;
+}
+
+/** Pure: the first delivered PR whose changed files intersect the boundary,
+ *  with the intersecting paths, or null. The boundary is a lane: an entry
+ *  ending in `/` is a directory prefix; any other entry matches one path exactly. */
+export function overlapWith(boundary, deliveredPrs) {
+  const lane = (Array.isArray(boundary) ? boundary : []).filter((entry) => typeof entry === 'string' && entry.length > 0);
+  for (const delivered of Array.isArray(deliveredPrs) ? deliveredPrs : []) {
+    const paths = (delivered?.files ?? []).filter((path) => inLane(path, lane));
+    if (paths.length > 0) return { pr: delivered.pr, paths };
+  }
+  return null;
+}
+
+/** Pure: the boundary inside a plan dispatch result, a plan, or a bare list; null when absent. */
+export function boundaryOf(value) {
+  const found = Array.isArray(value) ? value : value?.plan?.boundary ?? value?.boundary;
+  return pathList(found);
 }
 
 /** Pure: the reason a condition has cleared, or null while it still holds.
@@ -146,6 +201,15 @@ export function waitCleared(condition, facts) {
   if (condition?.on === 'time') {
     return Number.isFinite(facts?.now) && facts.now >= Date.parse(condition.until)
       ? `its wait ended at ${condition.until}`
+      : null;
+  }
+  if (condition?.on === 'pr') {
+    const state = facts?.prStates?.[condition.number];
+    if (state === 'MERGED' || state === 'CLOSED') return `PR #${condition.number} ${state.toLowerCase()}`;
+    // A PR wait is capped like a timed wait: a PR nobody merges must not hold
+    // the unit for ever. The lift is still a resume, so the unit re-plans.
+    return condition.until !== undefined && Number.isFinite(facts?.now) && facts.now >= Date.parse(condition.until)
+      ? `PR #${condition.number} still open after ${MAX_WAIT_MINUTES} min; re-plan`
       : null;
   }
   return null;
@@ -173,6 +237,11 @@ function issueFacts(run, number, fields) {
 
 function issueState(run, number) {
   const result = run('gh', ['issue', 'view', String(number), '--json', 'state', '--jq', '.state']);
+  return result.ok ? result.stdout : null;
+}
+
+function prState(run, number) {
+  const result = run('gh', ['pr', 'view', String(number), '--json', 'state', '--jq', '.state']);
   return result.ok ? result.stdout : null;
 }
 
@@ -251,14 +320,21 @@ function commonDirOf(run) {
   return result?.ok ? String(result.stdout).trim() : null;
 }
 
-export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes = null, note = '', base, run, now = Date.now() }) {
+export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes = null, onPr = null, paths = [], note = '', base, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
-  if ([onIssue !== null, onBaseRed, minutes !== null].filter(Boolean).length !== 1) {
-    return refusal('INVALID_ARGS', 'expected exactly one of --on-issue, --on-base-red or --minutes');
+  if ([onIssue !== null, onBaseRed, minutes !== null, onPr !== null].filter(Boolean).length !== 1) {
+    return refusal('INVALID_ARGS', 'expected exactly one of --on-issue, --on-base-red, --minutes or --on-pr');
   }
   let condition;
   let reason;
-  if (onIssue !== null) {
+  if (onPr !== null) {
+    if (!positive(onPr)) return refusal('INVALID_ARGS', '--on-pr: expected a positive PR number');
+    if (pathList(paths) === null) return refusal('INVALID_ARGS', '--paths: expected the overlapping paths, comma-separated');
+    const state = prState(run, onPr);
+    if (state !== 'OPEN') return refusal('NOTHING_TO_WAIT_ON', `PR #${onPr} is ${state === null ? 'unreadable' : 'not open'}`);
+    condition = { on: 'pr', number: onPr, paths, until: new Date(now + MAX_WAIT_MINUTES * 60_000).toISOString() };
+    reason = `waits on PR #${onPr}, which changes ${paths.join(', ')} inside this plan's boundary; the label is lifted when it merges or closes (or at ${condition.until}), and the unit re-plans on the new base`;
+  } else if (onIssue !== null) {
     if (!positive(onIssue)) return refusal('INVALID_ARGS', '--on-issue: expected a positive issue number');
     if (onIssue === issue) return refusal('SELF_WAIT', `#${issue} cannot wait on itself`);
     const state = issueState(run, onIssue);
@@ -288,7 +364,9 @@ export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes 
   if (!label.ok) return refusal('GH_FAILED', `label on #${issue} failed: ${label.stderr}`);
   try {
     const commonDir = commonDirOf(run);
-    const what = condition.on === 'issue' ? `#${condition.number}` : condition.on === 'time' ? `${minutes} min` : `a green ${base}`;
+    const what = condition.on === 'issue' ? `#${condition.number}`
+      : condition.on === 'pr' ? `PR #${condition.number} (${condition.paths.join(', ')})`
+        : condition.on === 'time' ? `${minutes} min` : `a green ${base}`;
     if (commonDir !== null) noteWaitOnStep({ commonDir, issue, what, nowMs: now });
   } catch {
     // The parked view is a courtesy; the wait stands.
@@ -319,19 +397,39 @@ function newestMarker(pattern, body, valid) {
   return newest;
 }
 
+// A marker before 0.69.0 has no question; it still parses.
 export function parseDecision(body) {
   return newestMarker(DECISION_MARKER_RE, body, (parsed) =>
     positive(parsed?.issue) && text(parsed.choice) && text(parsed.why)
+    && (parsed.question === undefined || (text(parsed.question) && !parsed.question.includes('\n')))
     && Array.isArray(parsed.alternatives) && parsed.alternatives.every((entry) => typeof entry === 'string')
     && Number.isFinite(Date.parse(parsed.at)));
 }
 
-export function markDecided({ issue, choice, alternatives = [], why, run, now = Date.now() }) {
+// The parked line and the closing card (step.mjs) count a unit's decisions
+// from its record. A unit with no open record is left alone.
+export function noteDecisionOnStep({ commonDir, issue }) {
+  const path = join(commonDir, 'autoloop', 'steps', `${issue}.json`);
+  try {
+    const result = updateStepRecord(path, (record) => {
+      if (!record?.steps?.length || record.closed || record.issue !== issue) return { changed: false, ok: false };
+      record.decisions = (Number.isSafeInteger(record.decisions) ? record.decisions : 0) + 1;
+      return { changed: true, ok: true, record };
+    });
+    return result.ok;
+  } catch {
+    return false;
+  }
+}
+
+export function markDecided({ issue, question, choice, alternatives = [], why, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
+  if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
   if (!text(choice) || !text(why)) return refusal('INVALID_ARGS', 'expected a non-empty --choice and --why');
   if (issueState(run, issue) !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
   const decision = {
     issue,
+    question: text(question),
     choice: text(choice),
     alternatives: alternatives.map((entry) => entry.trim()).filter(Boolean),
     why: text(why),
@@ -341,6 +439,7 @@ export function markDecided({ issue, choice, alternatives = [], why, run, now = 
     decisionMarker(decision),
     `**autoloop: decided** — ${decision.choice}`,
     '',
+    `Question: ${decision.question}`,
     `Why: ${decision.why}`,
     ...(decision.alternatives.length > 0 ? [`Alternatives: ${decision.alternatives.join('; ')}`] : []),
     '',
@@ -350,7 +449,101 @@ export function markDecided({ issue, choice, alternatives = [], why, run, now = 
   if (!comment.ok) return refusal('GH_FAILED', `comment on #${issue} failed: ${comment.stderr}`);
   const label = addLabel(run, issue, 'loop-decided');
   if (!label.ok) return refusal('GH_FAILED', `label on #${issue} failed: ${label.stderr}`);
-  return { ok: true, issue, disposition: 'decided', decision };
+  try {
+    const commonDir = commonDirOf(run);
+    if (commonDir !== null) noteDecisionOnStep({ commonDir, issue });
+  } catch {
+    // The parked view is a courtesy; the decision stands.
+  }
+  const url = /https?:\/\/\S+/u.exec(String(comment.stdout ?? ''))?.[0] ?? null;
+  return { ok: true, issue, disposition: 'decided', decision, url };
+}
+
+/** Pure: a unit's decisions in comment order, from the loop's own markers.
+ *  Each carries its comment link and the newest later `/answer`. A block
+ *  whose reason is retired, lifted by an answer, is the decision that answer
+ *  took. The list is informational: the premise step applies the trust check
+ *  before planning from an answer. */
+export function unitDecisions(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  const own = (comment) => comment?.viewerDidAuthor === true;
+  // An answer reverses the newest decision before it: scan to the next decision.
+  const answerAfterIndex = (index) => {
+    const rest = list.slice(index + 1);
+    const next = rest.findIndex((comment) => own(comment) && parseDecision(comment.body) !== null);
+    const later = (next === -1 ? rest : rest.slice(0, next))
+      .map((comment) => ({ match: ANSWER_RE.exec(String(comment?.body ?? '')), by: comment?.author?.login ?? 'unknown', url: comment?.url ?? null }))
+      .findLast(({ match }) => match !== null);
+    return later ? { by: later.by, text: (later.match[1] ?? '').trim(), url: later.url } : null;
+  };
+  const decisions = [];
+  list.forEach((comment, index) => {
+    if (!own(comment)) return;
+    const decision = parseDecision(comment.body);
+    if (decision !== null) {
+      decisions.push({ kind: 'decision', question: decision.question ?? null, choice: decision.choice, alternatives: decision.alternatives,
+        why: decision.why, at: decision.at, url: comment.url ?? null, answer: answerAfterIndex(index) });
+      return;
+    }
+    const resumed = newestMarker(RESUMED_MARKER_RE, comment.body, (parsed) => positive(parsed?.issue) && text(parsed.by) && typeof parsed.answer === 'string');
+    if (resumed === null) return;
+    const block = list.slice(0, index).filter(own).map((entry) => parseBlock(entry.body)).findLast((entry) => entry !== null);
+    if (!block || !RETIRED_BLOCK_REASONS.has(block.reason)) return;
+    const answer = list.slice(0, index).findLast((entry) => entry?.author?.login === resumed.by && ANSWER_RE.test(String(entry?.body ?? '')));
+    decisions.push({ kind: 'answer', question: block.question, choice: resumed.answer, alternatives: [], why: `@${resumed.by} answered the ${block.reason} block`,
+      at: resumed.at, url: answer?.url ?? comment.url ?? null, by: resumed.by, answer: null });
+  });
+  return decisions;
+}
+
+/** Pure: the `## Decisions` section of a PR body or run record; empty without decisions. */
+export function decisionsSection(decisions) {
+  if (!Array.isArray(decisions) || decisions.length === 0) return '';
+  const link = (entry) => (entry.kind === 'answer'
+    ? `[answer](${entry.url}) by @${entry.by}`
+    : `[decision](${entry.url})`);
+  return ['## Decisions', '', ...decisions.map((entry) => [
+    `- ${entry.question ?? 'Question not recorded'} → ${entry.choice} (${link(entry)})`,
+    ...(entry.alternatives.length > 0 ? [`alternatives: ${entry.alternatives.join('; ')}`] : []),
+    `evidence: ${entry.why}`,
+    ...(entry.answer ? [`reversed by @${entry.answer.by}: ${entry.answer.text}`] : []),
+  ].join('; '))].join('\n');
+}
+
+/** Pure: the `## Scope changes` section of a PR body, from the review
+ *  evidence's `scopeChanges` (SPEC-elastic-scope); empty without widenings. */
+export function scopeChangesSection(scopeChanges) {
+  if (!Array.isArray(scopeChanges) || scopeChanges.length === 0) return '';
+  return ['## Scope changes', '', ...scopeChanges.map((change) =>
+    `- ${change.findingId}: ${change.paths.join(', ')} — ${change.rationale}`)].join('\n');
+}
+
+/** Pure: the `## Open findings` section of a draft PR body, from the review
+ *  transition's `openFindings` ledger (SPEC-review-rounds §4); empty without entries. */
+export function openFindingsSection(openFindings) {
+  if (!Array.isArray(openFindings) || openFindings.length === 0) return '';
+  return ['## Open findings', '', ...openFindings.map((entry) =>
+    `- ${entry.id} (${entry.severity}, ${entry.predicate}, raised in ${entry.raisings} round${entry.raisings === 1 ? '' : 's'}): `
+    + `${entry.summary} — ${entry.evidence}`)].join('\n');
+}
+
+/** Pure: the `## Minor findings` section of a PR body (SPEC-review-rounds §6:
+ *  Minors ride into the PR, never hold it); empty without Minors. */
+export function minorFindingsSection(minors) {
+  const listed = (Array.isArray(minors) ? minors : []).filter((entry) => entry?.severity === 'Minor');
+  if (listed.length === 0) return '';
+  return ['## Minor findings', '', ...listed.map((entry) => `- ${entry.id}: ${entry.summary} — ${entry.evidence}`)].join('\n');
+}
+
+/** Every decision of one unit from GitHub, with the section the PR body carries. */
+export function collectUnitDecisions({ issue, run }) {
+  if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
+  const viewed = run('gh', ['issue', 'view', String(issue), '--json', 'comments']);
+  if (!viewed.ok) return refusal('GH_FAILED', `view of #${issue} failed: ${viewed.stderr}`);
+  let comments;
+  try { comments = JSON.parse(viewed.stdout).comments; } catch { return refusal('GH_FAILED', `view of #${issue}: unparseable`); }
+  const decisions = unitDecisions(comments);
+  return { ok: true, issue, decisions, section: decisionsSection(decisions) };
 }
 
 export function blockMarker(block) {
@@ -368,6 +561,10 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   if (!REASON_RE.test(reason ?? '')) return refusal('INVALID_ARGS', '--reason: expected an UPPER_SNAKE reason code');
   if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
   if (!BLOCK_GATES.includes(gate)) return refusal('INVALID_ARGS', `--gate: expected one of ${BLOCK_GATES.join(', ')}`);
+  if (RETIRED_BLOCK_REASONS.has(reason)) {
+    return refusal('BLOCK_REASON_RETIRED',
+      `--reason ${reason} is retired: a contradiction, a missing value, a design or scope choice is decided with --decide --question --choice --why --alternatives. Block only for ${[...HUMAN_BLOCK_REASONS].join(' or ')}.`);
+  }
   if (!HUMAN_BLOCK_REASONS.has(reason)) {
     return refusal('NON_HUMAN_BLOCK_REASON',
       `--reason: expected one of ${[...HUMAN_BLOCK_REASONS].join(', ')}. Tool faults require fix or decide, not a human block. Do not rename a tool fault to a human reason.`);
@@ -377,7 +574,7 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString() };
   const body = [
     blockMarker(block),
-    `**autoloop: blocked — needs a human decision** (\`${reason}\`)`,
+    `**autoloop: blocked — needs a human authorization** (\`${reason}\`)`,
     '',
     block.question,
     ...(note ? ['', note] : []),
@@ -480,6 +677,7 @@ export function liftWaits({ base, run, now = Date.now() }) {
   const errors = [];
   const baseOid = remoteBaseOid(run, base);
   const issueStates = {};
+  const prStates = {};
   for (const issue of issues) {
     const condition = waitCondition((issue.comments ?? []).map((comment) => comment.body));
     if (condition === null) {
@@ -489,17 +687,47 @@ export function liftWaits({ base, run, now = Date.now() }) {
     if (condition.on === 'issue' && !(condition.number in issueStates)) {
       issueStates[condition.number] = issueState(run, condition.number);
     }
-    const cleared = waitCleared(condition, { issueStates, baseOid, now });
+    if (condition.on === 'pr' && !(condition.number in prStates)) {
+      prStates[condition.number] = prState(run, condition.number);
+    }
+    const cleared = waitCleared(condition, { issueStates, prStates, baseOid, now });
     if (cleared === null) {
-      const holding = { issue: `#${condition.number} is open`, base: 'the base has not moved', time: `until ${condition.until}` };
+      const holding = { issue: `#${condition.number} is open`, base: 'the base has not moved', time: `until ${condition.until}`, pr: `PR #${condition.number} is open` };
       waiting.push({ number: issue.number, reason: holding[condition.on] });
       continue;
     }
     const removed = run('gh', ['issue', 'edit', String(issue.number), '--remove-label', 'loop-waiting']);
-    if (removed.ok) lifted.push({ number: issue.number, reason: cleared });
+    // A lifted PR wait is resumed: the unit re-plans once on the merged base
+    // before it claims, and prime points the host at it first.
+    if (removed.ok) lifted.push({ number: issue.number, reason: cleared, ...(condition.on === 'pr' ? { resumed: true } : {}) });
     else errors.push(`#${issue.number}: ${removed.stderr}`);
   }
   return { lifted, waiting, errors };
+}
+
+/** The overlap check for one unit: the boundary against the delivered set of
+ *  a verified, complete snapshot. The unit's own PR (a re-plan) never overlaps
+ *  itself. Refuses, rather than claims, when the delivered set is unknown. */
+export function overlapCheck({ issue, boundaryFile, snapshotPath }) {
+  if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
+  let boundary;
+  let snapshot;
+  try {
+    boundary = boundaryOf(JSON.parse(readFileSync(boundaryFile ?? '', 'utf8')));
+  } catch (error) {
+    return refusal('INVALID_ARGS', `--boundary-file: ${error.message}`);
+  }
+  if (boundary === null) return refusal('INVALID_ARGS', '--boundary-file: expected a plan result with a non-empty boundary');
+  try {
+    snapshot = JSON.parse(readFileSync(snapshotPath ?? '', 'utf8'));
+  } catch (error) {
+    return refusal('INVALID_ARGS', `--snapshot: ${error.message}`);
+  }
+  if (!verifySnapshot(snapshot)) return refusal('SNAPSHOT_INVALID', `--snapshot: ${snapshotProblem(snapshot)}`);
+  const delivered = deliveredPullRequests(snapshot);
+  if (delivered === null) return refusal('SNAPSHOT_INCOMPLETE', 'openPrs or lifecycleMarkers is incomplete or invalidated; re-prime before the claim');
+  const overlap = overlapWith(boundary, delivered.filter((entry) => entry.issue !== issue));
+  return { ok: true, issue, overlap, delivered: delivered.map((entry) => entry.pr) };
 }
 
 /** Pure: the newest `/answer` a trusted actor posted after the block, or null. */
@@ -710,11 +938,11 @@ export function postDigest({ run, now = Date.now() }) {
 }
 
 export function parseArgs(args) {
-  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, error: null };
+  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, onPr: null, paths: [], boundaryFile: null, snapshot: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, out: null, error: null };
   const value = (index) => args[index + 1];
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
-    if (['--obsolete', '--wait', '--block', '--repair', '--decide', '--lift', '--digest', '--self-test'].includes(flag)) {
+    if (['--obsolete', '--wait', '--block', '--repair', '--decide', '--decisions', '--lift', '--digest', '--overlap', '--self-test'].includes(flag)) {
       if (parsed.mode !== null) return { ...parsed, error: 'expected one mode' };
       parsed.mode = flag.slice(2);
     } else if (flag === '--on-base-red') {
@@ -723,24 +951,24 @@ export function parseArgs(args) {
       parsed.post = true;
     } else if (flag === '--blocks-parent') {
       parsed.blocksParent = true;
-    } else if (['--issue', '--pr', '--on-issue', '--minutes', '--parent'].includes(flag)) {
+    } else if (['--issue', '--pr', '--on-issue', '--minutes', '--parent', '--on-pr'].includes(flag)) {
       const number = positive(value(index));
       if (number === null) return { ...parsed, error: `${flag}: expected a positive number` };
-      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes', '--parent': 'parent' }[flag]] = number;
+      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes', '--parent': 'parent', '--on-pr': 'onPr' }[flag]] = number;
       index += 1;
-    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate', '--title', '--body-file'].includes(flag)) {
+    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate', '--title', '--body-file', '--out', '--boundary-file', '--snapshot'].includes(flag)) {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
-      parsed[flag === '--body-file' ? 'bodyFile' : flag.slice(2)] = value(index);
+      parsed[{ '--body-file': 'bodyFile', '--boundary-file': 'boundaryFile' }[flag] ?? flag.slice(2)] = value(index);
       index += 1;
-    } else if (flag === '--alternatives') {
+    } else if (flag === '--alternatives' || flag === '--paths') {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
-      parsed.alternatives = value(index).split(';').map((entry) => entry.trim()).filter(Boolean);
+      parsed[flag.slice(2)] = value(index).split(flag === '--paths' ? ',' : ';').map((entry) => entry.trim()).filter(Boolean);
       index += 1;
     } else {
       return { ...parsed, error: `unknown argument ${flag}` };
     }
   }
-  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --repair, --decide, --lift, --digest or --self-test' };
+  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --repair, --decide, --decisions, --lift, --digest, --overlap or --self-test' };
   return parsed;
 }
 
@@ -841,6 +1069,209 @@ function selfTest() {
   check('a missing label is created and the add retried once',
     markWaiting({ issue: 5, onIssue: 4, base: 'main', run: missingLabel.run.bind(missingLabel) }).ok
     && missingLabel.calls.some((call) => call.startsWith('gh label create loop-waiting')));
+
+  // Flow 2026-10: on one project nine open loop PRs formed two conflict groups
+  // because units on the same files were planned while an earlier one was
+  // delivered and unmerged. A boundary that overlaps a delivered PR waits.
+  const delivered = [
+    { pr: 70, issue: 7, phase: 'ready-head', files: ['src/a.mjs', 'docs/x.md'] },
+    { pr: 80, issue: 8, phase: 'premerge-record', files: ['src/b/c.mjs', 'src/b/d.mjs'] },
+  ];
+  check('overlapWith names the first delivered PR whose files intersect the boundary, and the paths',
+    JSON.stringify(overlapWith(['src/a.mjs', 'src/b/d.mjs'], delivered)) === '{"pr":70,"paths":["src/a.mjs"]}'
+    && JSON.stringify(overlapWith(['src/b/'], delivered)) === '{"pr":80,"paths":["src/b/c.mjs","src/b/d.mjs"]}'
+    && overlapWith(['src/b', 'src/a.mjs.bak', 'src/'.slice(0, 3)], delivered) === null
+    && overlapWith(['src/z.mjs', 'lib/'], delivered) === null
+    && overlapWith([], delivered) === null
+    && overlapWith(['src/a.mjs'], []) === null
+    && overlapWith(['src/a.mjs'], null) === null);
+  const prWaitClosed = fakeRun([['gh pr view 70', 'MERGED']]);
+  check('waiting on a PR that is not open is refused',
+    markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs'], base: 'main', run: prWaitClosed.run }).code === 'NOTHING_TO_WAIT_ON'
+    && markWaiting({ issue: 5, onPr: 70, paths: [], base: 'main', run: fakeRun([]).run }).code === 'INVALID_ARGS'
+    && markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs'], onIssue: 4, base: 'main', run: fakeRun([]).run }).code === 'INVALID_ARGS');
+  check('a PR wait is recorded on the step as "PR #M (paths)", which the parked card prints as "waits on PR #M (paths)"',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-pr-wait-'));
+      try {
+        const steps = join(scratch, 'autoloop', 'steps');
+        mkdirSync(steps, { recursive: true });
+        writeFileSync(join(steps, '5.json'), JSON.stringify({ issue: 5, steps: [{ step: '03-plan-review', startedAtMs: 1 }] }));
+        const prWait = fakeRun([['gh pr view 70', 'OPEN'], ['gh issue comment 5', ''], ['gh issue edit 5 --add-label loop-waiting', ''], ['git rev-parse', scratch]]);
+        const waited = markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs', 'src/b/'], base: 'main', run: prWait.run, now: 7000 });
+        const last = JSON.parse(readFileSync(join(steps, '5.json'), 'utf8')).steps.at(-1);
+        const until = new Date(7000 + 720 * 60_000).toISOString();
+        return waited.ok === true
+          && JSON.stringify(waited.condition) === `{"on":"pr","number":70,"paths":["src/a.mjs","src/b/"],"until":"${until}"}`
+          && prWait.calls[1].includes(`autoloop-waiting-v1 {"on":"pr","number":70,"paths":["src/a.mjs","src/b/"],"until":"${until}"}`)
+          && prWait.calls[1].includes('waits on PR #70')
+          && prWait.calls[1].includes('src/a.mjs, src/b/')
+          && JSON.stringify(last.waiting) === JSON.stringify({ on: 'PR #70 (src/a.mjs, src/b/)', atMs: 7000 });
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
+  // Review of the flow release: `--minutes` is capped at 720 and `--on-pr` was
+  // not, so a PR nobody merged held its unit for ever.
+  check('a PR wait lifts after 720 minutes with a re-plan reason, and is resumed',
+    (() => {
+      const capped = { on: 'pr', number: 80, paths: ['src/a.mjs'], until: '2026-01-01T12:00:00.000Z' };
+      const marked = waitCondition([waitMarker(capped)]);
+      const listed = JSON.stringify([{ number: 9, comments: [{ body: waitMarker(capped) }] }]);
+      const lifting = fakeRun([['gh issue list', listed], ['git rev-parse', oid], ['gh pr view 80', 'OPEN'], ['gh issue edit', '']]);
+      const lift = liftWaits({ base: 'main', run: lifting.run, now: Date.parse('2026-01-01T12:00:00.000Z') });
+      return marked.until === '2026-01-01T12:00:00.000Z'
+        && waitCleared(capped, { prStates: { 80: 'OPEN' }, now: Date.parse('2026-01-01T11:59:59.000Z') }) === null
+        && waitCleared(capped, { prStates: { 80: 'OPEN' }, now: Date.parse('2026-01-01T12:00:00.000Z') }) === 'PR #80 still open after 720 min; re-plan'
+        && waitCleared(capped, { prStates: { 80: 'MERGED' }, now: Date.parse('2026-01-01T12:00:00.000Z') }) === 'PR #80 merged'
+        && JSON.stringify(lift.lifted) === JSON.stringify([{ number: 9, reason: 'PR #80 still open after 720 min; re-plan', resumed: true }]);
+    })());
+  check('a PR wait round-trips and clears when the PR merges or closes, not while it is open',
+    JSON.stringify(waitCondition([waitMarker({ on: 'pr', number: 70, paths: ['src/a.mjs'] })])) === '{"on":"pr","number":70,"paths":["src/a.mjs"]}'
+    && waitCondition([waitMarker({ on: 'pr', number: 70, paths: 'src/a.mjs' })]) === null
+    && waitCleared({ on: 'pr', number: 70, paths: ['src/a.mjs'] }, { prStates: { 70: 'MERGED' } }) === 'PR #70 merged'
+    && waitCleared({ on: 'pr', number: 70, paths: ['src/a.mjs'] }, { prStates: { 70: 'CLOSED' } }) === 'PR #70 closed'
+    && waitCleared({ on: 'pr', number: 70, paths: ['src/a.mjs'] }, { prStates: { 70: 'OPEN' } }) === null
+    && waitCleared({ on: 'pr', number: 70, paths: ['src/a.mjs'] }, { prStates: {} }) === null);
+  const prList = JSON.stringify([
+    { number: 14, comments: [{ body: waitMarker({ on: 'pr', number: 70, paths: ['src/a.mjs'] }) }] },
+    { number: 15, comments: [{ body: waitMarker({ on: 'pr', number: 80, paths: ['src/b/'] }) }] },
+    { number: 16, comments: [{ body: waitMarker({ on: 'issue', number: 4 }) }] },
+  ]);
+  const prLifting = fakeRun([
+    ['gh issue list', prList], ['git rev-parse', oid],
+    ['gh pr view 70', 'MERGED'], ['gh pr view 80', 'OPEN'], ['gh issue view 4', 'CLOSED'], ['gh issue edit', ''],
+  ]);
+  const prLift = liftWaits({ base: 'main', run: prLifting.run });
+  check('prime lifts a PR wait on merge, marks it resumed for a re-plan, and holds it while the PR is open',
+    JSON.stringify(prLift.lifted) === JSON.stringify([
+      { number: 14, reason: 'PR #70 merged', resumed: true },
+      { number: 16, reason: '#4 is closed' },
+    ])
+    && JSON.stringify(prLift.waiting) === JSON.stringify([{ number: 15, reason: 'PR #80 is open' }])
+    && prLift.errors.length === 0
+    && prLifting.calls.filter((call) => call.startsWith('gh pr view')).length === 2);
+  check('the overlap check reads the boundary from a plan result file or a bare list',
+    JSON.stringify(boundaryOf({ ok: true, plan: { boundary: ['a'] } })) === '["a"]'
+    && JSON.stringify(boundaryOf({ boundary: ['b'] })) === '["b"]'
+    && JSON.stringify(boundaryOf(['c'])) === '["c"]'
+    && boundaryOf({ plan: {} }) === null
+    && boundaryOf(['', 1]) === null);
+  const markerBody = (issue, pr) => '<!-- autoloop-lifecycle-v1\n' + JSON.stringify({
+    branch: `feat/gh-${issue}-unit`, headOid: oid, intentSource: 'invocation', issue, issueBodyHash: 'b'.repeat(64),
+    mergePolicy: 'manual', phase: 'ready-head', planHash: 'c'.repeat(64), plannedBaseOid: oid, pr,
+    runIntentHash: 'd'.repeat(64), selector: 'native', v: 1,
+  }) + '\n-->';
+  const prItem = (issue, number, files) => ({
+    number, title: 'unit', body: `Closes #${issue}`, isDraft: false, reviewDecision: null,
+    headRefName: `feat/gh-${issue}-unit`, headRefOid: oid, baseRefName: 'main', mergeStateStatus: 'CLEAN',
+    mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-01-01T00:00:00Z', author: 'autoloop',
+    headRepository: 'owner/repo', statusCheckState: null, statusCheckRollup: [], files, issue,
+    orphanCandidate: false, ownership: 'loop',
+  });
+  const markerItem = (issue, pr) => ({
+    issueNumber: issue, id: `IC_${issue}`, tipId: `IC_${issue}`, sequence: 0, author: 'autoloop', authorAssociation: 'MEMBER',
+    body: markerBody(issue, pr), createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', url: null,
+  });
+  // A verified snapshot whose delivered set is the given [issue, pr, files] rows.
+  const snapshotWith = (prs) => {
+    const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+    sections.repo = completeSection([{ owner: 'owner', name: 'repo', nameWithOwner: 'owner/repo', defaultBranch: 'main' }]);
+    sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: oid }]);
+    sections.openPrs = completeSection(prs.map(([issue, pr, files]) => prItem(issue, pr, files)));
+    sections.lifecycleMarkers = completeSection(prs.map(([issue, pr]) => markerItem(issue, pr)));
+    return createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z', sections });
+  };
+  check('--overlap reads a plan result and a retained snapshot, skips the unit\'s own PR, and refuses an invalidated snapshot',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-overlap-'));
+      try {
+        const snapshot = snapshotWith([[7, 70, ['src/a.mjs']], [8, 80, ['src/b/c.mjs']]]);
+        const snapshotPath = join(scratch, 'snapshot.json');
+        const stalePath = join(scratch, 'stale.json');
+        const planPath = join(scratch, 'plan.json');
+        writeFileSync(snapshotPath, JSON.stringify(snapshot));
+        writeFileSync(stalePath, JSON.stringify(invalidateSnapshot(snapshot, 'PR_MUTATION')));
+        writeFileSync(planPath, JSON.stringify({ ok: true, role: 'plan', plan: { title: 't', prBody: 'Closes #9', body: 'b', boundary: ['src/b/'] } }));
+        const hit = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath });
+        const own = overlapCheck({ issue: 8, boundaryFile: planPath, snapshotPath });
+        const stale = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath: stalePath });
+        const missing = overlapCheck({ issue: 9, boundaryFile: join(scratch, 'none.json'), snapshotPath });
+        return snapshot.sections.openPrs.complete === true && snapshot.sections.lifecycleMarkers.complete === true
+          && hit.ok === true && JSON.stringify(hit.overlap) === '{"pr":80,"paths":["src/b/c.mjs"]}'
+          && JSON.stringify(hit.delivered) === '[70,80]'
+          && own.ok === true && own.overlap === null
+          && stale.code === 'SNAPSHOT_INCOMPLETE'
+          && missing.code === 'INVALID_ARGS';
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
+
+  // The lane is exact or a `/` prefix: `src/x` never covers `src/xy/a.mjs`.
+  check('a lane entry without a trailing slash matches its exact path only',
+    !inLane('src/xy/a.mjs', ['src/x']) && inLane('src/x', ['src/x']) && inLane('src/x/a.mjs', ['src/x/']));
+  // SPEC-overlap-wait end to end with one fake run: the hit waits, the merge
+  // lifts it as resumed, and the re-check on the new delivered set claims.
+  check('an overlap hit waits on the PR, the merge lifts it resumed, the re-check against the new snapshot is clear, and an older snapshot names its version',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-overlap-chain-'));
+      try {
+        const before = join(scratch, 'before.json');
+        const after = join(scratch, 'after.json');
+        const planPath = join(scratch, 'plan.json');
+        writeFileSync(before, JSON.stringify(snapshotWith([[8, 80, ['src/b/c.mjs']]])));
+        writeFileSync(after, JSON.stringify(snapshotWith([])));
+        writeFileSync(planPath, JSON.stringify({ ok: true, plan: { boundary: ['src/b/'] } }));
+        const steps = join(scratch, 'autoloop', 'steps');
+        mkdirSync(steps, { recursive: true });
+        writeFileSync(join(steps, '9.json'), JSON.stringify({ issue: 9, steps: [{ step: '03-plan-review', startedAtMs: 1 }] }));
+        const calls = [];
+        let listed = '[]';
+        let prState80 = 'OPEN';
+        const run = (command, args) => {
+          const line = [command, ...args].join(' ');
+          calls.push(line);
+          if (line.startsWith('gh pr view 80')) return { ok: true, stdout: prState80, stderr: '' };
+          if (line.startsWith('gh issue list')) return { ok: true, stdout: listed, stderr: '' };
+          if (command === 'git') return { ok: true, stdout: args.includes('--git-common-dir') ? scratch : oid, stderr: '' };
+          return { ok: true, stdout: '', stderr: '' };
+        };
+        const hit = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath: before });
+        const waited = hit.ok === true && hit.overlap !== null
+          ? markWaiting({ issue: 9, onPr: hit.overlap.pr, paths: hit.overlap.paths, base: 'main', run, now: 7000 })
+          : { ok: false };
+        const comment = calls.find((call) => call.startsWith('gh issue comment 9 --body ')) ?? '';
+        listed = JSON.stringify([{ number: 9, comments: [{ body: comment.slice('gh issue comment 9 --body '.length) }] }]);
+        prState80 = 'MERGED';
+        const lift = liftWaits({ base: 'main', run, now: 8000 });
+        const clear = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath: after });
+        // A retained snapshot from 0.68 (version 2) is refused by its version.
+        const older = join(scratch, 'older.json');
+        writeFileSync(older, JSON.stringify({ ...snapshotWith([]), version: 2 }));
+        const refused = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath: older });
+        return refused.code === 'SNAPSHOT_INVALID' && refused.message === '--snapshot: snapshot version 2, expected 3; re-prime'
+          && JSON.stringify(hit.overlap) === '{"pr":80,"paths":["src/b/c.mjs"]}'
+          && waited.ok === true && waited.condition.number === 80
+          && JSON.stringify(lift.lifted) === JSON.stringify([{ number: 9, reason: 'PR #80 merged', resumed: true }])
+          && calls.includes('gh issue edit 9 --remove-label loop-waiting')
+          && clear.ok === true && clear.overlap === null;
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
+  check('the PR body sections list open findings with predicate and raisings, and Minors, and are empty without entries',
+    openFindingsSection([
+      { id: 'gate-null', severity: 'Major', predicate: 'rule:gate', raisings: 5, summary: 'The gate passes null', evidence: 'src/gate.mjs:9' },
+      { id: 'late-1', severity: 'Major', predicate: 'late-1', raisings: 1, summary: 'Off by one', evidence: 'src/x.mjs:3' },
+    ]) === '## Open findings\n\n- gate-null (Major, rule:gate, raised in 5 rounds): The gate passes null — src/gate.mjs:9\n'
+      + '- late-1 (Major, late-1, raised in 1 round): Off by one — src/x.mjs:3'
+    && openFindingsSection([]) === '' && openFindingsSection(undefined) === ''
+    && minorFindingsSection([
+      { id: 'minor-1', severity: 'Minor', summary: 'A nit', evidence: 'src/a.mjs:7' },
+      { id: 'major-1', severity: 'Major', summary: 'Not a minor', evidence: 'src/a.mjs:8' },
+    ]) === '## Minor findings\n\n- minor-1: A nit — src/a.mjs:7'
+    && minorFindingsSection([]) === '' && minorFindingsSection(null) === '');
 
   const unmerged = fakeRun([['gh issue view 5', 'OPEN'], ['gh pr view 9', '{"state":"OPEN","baseRefName":"main","url":"u"}']]);
   check('obsolete refuses an unmerged PR and touches nothing',
@@ -947,29 +1378,100 @@ function selfTest() {
     postDigest({ run: fakeRun([]).run }).ok === false);
 
   const decidedAt = '2026-09-25T10:00:00.000Z';
-  const decision = { issue: 5, choice: 'derive the bits from the locked construction', alternatives: ['whitelist the constant', 'block'], why: 'e_hypot.c:80-81 builds it', at: decidedAt };
-  check('a decision marker round-trips, the newest wins, junk is skipped',
+  const decision = { issue: 5, question: 'Which bits does the constant need?', choice: 'derive the bits from the locked construction', alternatives: ['whitelist the constant', 'block'], why: 'e_hypot.c:80-81 builds it', at: decidedAt };
+  const { question: _question, ...legacyDecision } = decision;
+  check('a decision marker round-trips question, choice, alternatives and evidence; the newest wins, junk is skipped',
     JSON.stringify(parseDecision(decisionMarker(decision))) === JSON.stringify(decision)
     && parseDecision(`${decisionMarker(decision)}\n${decisionMarker({ ...decision, choice: 'later' })}`).choice === 'later'
     && parseDecision('<!-- autoloop-decision-v1 {nope} -->') === null
     && parseDecision(decisionMarker({ ...decision, why: '' })) === null
+    && parseDecision(decisionMarker({ ...decision, question: 7 })) === null
     && parseDecision('plain') === null);
+  check('a decision marker without a question (before 0.69.0) still parses',
+    JSON.stringify(parseDecision(decisionMarker(legacyDecision))) === JSON.stringify(legacyDecision));
   const undecided = fakeRun([]);
-  check('a decision without a choice or a why is refused before any call',
-    markDecided({ issue: 5, choice: '', why: 'w', run: undecided.run }).code === 'INVALID_ARGS'
-    && markDecided({ issue: 5, choice: 'c', why: '  ', run: undecided.run }).code === 'INVALID_ARGS'
+  check('a decision without a question, a choice or a why is refused before any call',
+    markDecided({ issue: 5, question: 'q?', choice: '', why: 'w', run: undecided.run }).code === 'INVALID_ARGS'
+    && markDecided({ issue: 5, question: 'q?', choice: 'c', why: '  ', run: undecided.run }).code === 'INVALID_ARGS'
+    && markDecided({ issue: 5, choice: 'c', why: 'w', run: undecided.run }).code === 'INVALID_ARGS'
+    && markDecided({ issue: 5, question: 'two\nlines', choice: 'c', why: 'w', run: undecided.run }).code === 'INVALID_ARGS'
     && undecided.calls.length === 0);
   const decidedClosed = fakeRun([['gh issue view 5', 'CLOSED']]);
   check('a decision on an issue that is not open is refused',
-    markDecided({ issue: 5, choice: 'c', why: 'w', run: decidedClosed.run }).code === 'ISSUE_NOT_OPEN');
-  const deciding = fakeRun([['gh issue view 5', 'OPEN'], ['gh issue comment 5', ''], ['gh issue edit 5 --add-label loop-decided', '']]);
-  const decided = markDecided({ issue: 5, choice: decision.choice, alternatives: decision.alternatives, why: decision.why, run: deciding.run, now: Date.parse(decidedAt) });
-  check('a decision comments the marker with the reversal form, labels, and never edits the body',
+    markDecided({ issue: 5, question: 'q?', choice: 'c', why: 'w', run: decidedClosed.run }).code === 'ISSUE_NOT_OPEN');
+  const decisionUrl = 'https://github.com/o/r/issues/5#issuecomment-77';
+  const deciding = fakeRun([['gh issue view 5', 'OPEN'], ['gh issue comment 5', decisionUrl], ['gh issue edit 5 --add-label loop-decided', '']]);
+  const decided = markDecided({ issue: 5, question: decision.question, choice: decision.choice, alternatives: decision.alternatives, why: decision.why, run: deciding.run, now: Date.parse(decidedAt) });
+  check('a decision comments the marker with the question, the reversal form and its link, labels, and never edits the body',
     decided.ok && decided.disposition === 'decided'
-    && parseDecision(deciding.calls[1]).choice === decision.choice
+    && JSON.stringify(parseDecision(deciding.calls[1])) === JSON.stringify(decision)
+    && deciding.calls[1].includes(`Question: ${decision.question}`)
     && deciding.calls[1].includes('/answer')
     && deciding.calls[2] === 'gh issue edit 5 --add-label loop-decided'
+    && decided.url === decisionUrl
     && !deciding.calls.some((call) => call.includes('--body-file') || call.includes('loop-ready')));
+  check('a decision is counted on the unit\'s open step record, and only there',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-decide-'));
+      try {
+        const steps = join(scratch, 'autoloop', 'steps');
+        mkdirSync(steps, { recursive: true });
+        writeFileSync(join(steps, '5.json'), JSON.stringify({ issue: 5, steps: [{ step: '01-premise', startedAtMs: 1 }] }));
+        writeFileSync(join(steps, '9.json'), JSON.stringify({ issue: 9, steps: [{ step: '05-implement', startedAtMs: 1 }], closed: { outcome: 'blocked', atMs: 2 } }));
+        const first = noteDecisionOnStep({ commonDir: scratch, issue: 5 });
+        const second = noteDecisionOnStep({ commonDir: scratch, issue: 5 });
+        const closed = noteDecisionOnStep({ commonDir: scratch, issue: 9 });
+        const missing = noteDecisionOnStep({ commonDir: scratch, issue: 10 });
+        return first === true && second === true && closed === false && missing === false
+          && JSON.parse(readFileSync(join(steps, '5.json'), 'utf8')).decisions === 2
+          && JSON.parse(readFileSync(join(steps, '9.json'), 'utf8')).decisions === undefined;
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
+  const laterAt = '2026-09-25T11:00:00.000Z';
+  const unitComments = [
+    { viewerDidAuthor: true, url: decisionUrl, createdAt: decidedAt, body: `${decisionMarker(decision)}\n**autoloop: decided**` },
+    { viewerDidAuthor: true, url: 'https://github.com/o/r/issues/5#issuecomment-78', createdAt: laterAt,
+      body: decisionMarker({ ...decision, question: 'Which label length applies?', choice: '64 characters', alternatives: [], why: 'the form field is 64 wide', at: laterAt }) },
+    { viewerDidAuthor: false, url: 'https://github.com/o/r/issues/5#issuecomment-79', createdAt: laterAt, body: decisionMarker({ ...decision, choice: 'forged' }) },
+    { author: { login: 'owner' }, url: 'https://github.com/o/r/issues/5#issuecomment-80', createdAt: '2026-09-25T12:00:00.000Z', body: '/answer 128 characters' },
+  ];
+  const listed = unitDecisions(unitComments);
+  const section = decisionsSection(listed);
+  check('a unit\'s decisions are its loop-authored markers in order, each with its comment link and any later /answer',
+    listed.length === 2
+    && listed[0].url === decisionUrl && listed[0].question === decision.question && listed[0].answer === null
+    && listed[1].choice === '64 characters' && listed[1].answer.by === 'owner' && listed[1].answer.text === '128 characters');
+  check('the PR body section lists every decision under ## Decisions with its link, and is empty without decisions',
+    section.startsWith('## Decisions\n')
+    && section.includes(`- Which bits does the constant need? → derive the bits from the locked construction ([decision](${decisionUrl}))`)
+    && section.includes('alternatives: whitelist the constant; block')
+    && section.includes('evidence: e_hypot.c:80-81 builds it')
+    && section.includes('- Which label length applies? → 64 characters ([decision](https://github.com/o/r/issues/5#issuecomment-78))')
+    && section.includes('reversed by @owner: 128 characters')
+    && !section.includes('forged')
+    && decisionsSection([]) === '');
+  // SPEC-elastic-scope: the PR body lists each widening with its finding id.
+  check('the PR body section lists every widening under ## Scope changes with its finding id, and is empty without widenings',
+    scopeChangesSection([
+      { findingId: 'implement:extra-1', paths: ['lib/shared.mjs'], rationale: 'task 2 cannot pass its test without the helper' },
+      { findingId: 'guard-null', paths: ['lib/guard.mjs', 'lib/guard.test.mjs'], rationale: 'the guard lives in lib' },
+    ]) === '## Scope changes\n\n- implement:extra-1: lib/shared.mjs — task 2 cannot pass its test without the helper\n- guard-null: lib/guard.mjs, lib/guard.test.mjs — the guard lives in lib'
+    && scopeChangesSection([]) === ''
+    && scopeChangesSection(undefined) === '');
+  const retiredBlockAt = '2026-09-20T10:00:00.000Z';
+  const liftedByAnswer = unitDecisions([
+    { viewerDidAuthor: true, url: 'https://github.com/o/r/issues/5#issuecomment-60', createdAt: retiredBlockAt,
+      body: blockMarker({ issue: 5, class: 'human', reason: 'TRUST_REQUIRED', question: 'Which spec wins?', at: retiredBlockAt }) },
+    { author: { login: 'owner' }, url: 'https://github.com/o/r/issues/5#issuecomment-61', createdAt: '2026-09-20T11:00:00.000Z', body: '/answer the issue text' },
+    { viewerDidAuthor: true, url: 'https://github.com/o/r/issues/5#issuecomment-62', createdAt: '2026-09-20T12:00:00.000Z',
+      body: `<!-- autoloop-resumed-v1 ${JSON.stringify({ issue: 5, by: 'owner', answer: 'the issue text', at: '2026-09-20T12:00:00.000Z' })} -->` },
+  ]);
+  check('a resumed block whose reason is now retired is listed as decided by the /answer that lifted it',
+    liftedByAnswer.length === 1 && liftedByAnswer[0].question === 'Which spec wins?'
+    && liftedByAnswer[0].choice === 'the issue text' && liftedByAnswer[0].url === 'https://github.com/o/r/issues/5#issuecomment-61'
+    && decisionsSection(liftedByAnswer).includes('- Which spec wins? → the issue text ([answer](https://github.com/o/r/issues/5#issuecomment-61) by @owner)'));
   const decidedIssues = [
     { number: 40, title: 'Recent', comments: [{ body: decisionMarker({ ...decision, issue: 40 }) }] },
     { number: 41, title: 'Stale', comments: [{ body: decisionMarker({ ...decision, issue: 41, at: '2026-09-01T00:00:00.000Z' }) }] },
@@ -998,7 +1500,7 @@ function selfTest() {
   check('a decision comment is never read as a blocked unit\'s question',
     blockedThenDecided[0].question === 'Blocked: what length?');
 
-  const block = { issue: 7, class: 'human', reason: 'UNSPECIFIED_VALUE', question: 'What maximum device-label length applies?', at: decidedAt };
+  const block = { issue: 7, class: 'human', reason: 'POLICY_DENIED', question: 'May the unit install the new dependency?', at: decidedAt };
   check('a block marker round-trips, the newest wins, junk is skipped',
     JSON.stringify(parseBlock(blockMarker(block))) === JSON.stringify(block)
     && parseBlock(`${blockMarker(block)}\n${blockMarker({ ...block, question: 'later?' })}`).question === 'later?'
@@ -1013,9 +1515,23 @@ function selfTest() {
     const result = markBlocked({ issue: 7, reason, question: 'How should this tool fault be repaired?', run: nonHuman.run });
     check(`${reason} cannot create a human block or make a GitHub call`,
       result.code === 'NON_HUMAN_BLOCK_REASON' && nonHuman.calls.length === 0
-      && result.message.includes('TRUST_REQUIRED') && result.message.includes('fix or decide'));
+      && result.message.includes('POLICY_DENIED') && result.message.includes('fix or decide'));
   }
-  for (const reason of ['TRUST_REQUIRED', 'IRREVERSIBLE_ACTION', 'UNSPECIFIED_VALUE', 'POLICY_DENIED']) {
+  // Flow release: 33 premise blocks on one project waited for a human on
+  // specification gaps the loop can decide. The two reasons that carried them
+  // are retired; the remedy names --decide.
+  for (const reason of ['TRUST_REQUIRED', 'UNSPECIFIED_VALUE']) {
+    const retired = fakeRun([
+      ['gh issue view 7', '{"state":"OPEN","labels":[]}'],
+      ['gh issue comment 7', ''], ['gh issue edit 7', ''],
+    ]);
+    const result = markBlocked({ issue: 7, reason, question: 'Which specification wins?', run: retired.run });
+    check(`${reason} is refused as retired, names --decide, and makes no GitHub call`,
+      result.code === 'BLOCK_REASON_RETIRED' && retired.calls.length === 0
+      && result.message.includes('--decide') && result.message.includes(reason)
+      && result.message.includes('POLICY_DENIED'));
+  }
+  for (const reason of ['IRREVERSIBLE_ACTION', 'POLICY_DENIED']) {
     const human = fakeRun([
       ['gh issue view 7', '{"state":"OPEN","labels":[]}'],
       ['gh issue comment 7', ''], ['gh issue edit 7', ''],
@@ -1063,11 +1579,11 @@ function selfTest() {
     && revising.calls.at(-1) === 'gh issue edit 9 --add-label loop-blocked,human:decide --remove-label loop-delivered,loop:revising');
   const authorizing = fakeRun([['gh issue view 8', '{"state":"OPEN","labels":[]}'], ['gh issue comment 8', ''], ['gh issue edit 8', '']]);
   check('a protected-path block carries human:authorize and removes nothing it did not find',
-    markBlocked({ issue: 8, reason: 'TRUST_REQUIRED', question: 'May this unit touch .github/workflows?', gate: 'human:authorize', run: authorizing.run }).ok
+    markBlocked({ issue: 8, reason: 'POLICY_DENIED', question: 'May this unit touch .github/workflows?', gate: 'human:authorize', run: authorizing.run }).ok
     && authorizing.calls.at(-1) === 'gh issue edit 8 --add-label loop-blocked,human:authorize');
   const blockClosed = fakeRun([['gh issue view 7', '{"state":"CLOSED","labels":[]}']]);
   check('a block on an issue that is not open is refused',
-    markBlocked({ issue: 7, reason: 'TRUST_REQUIRED', question: 'q?', run: blockClosed.run }).code === 'ISSUE_NOT_OPEN');
+    markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'q?', run: blockClosed.run }).code === 'ISSUE_NOT_OPEN');
   const markedRows = digestRows([{
     number: 7, title: 'Labels', labels: [{ name: 'human:decide' }],
     comments: [{ body: `${blockMarker(block)}\n**autoloop: blocked**` }, { body: 'a later note' }],
@@ -1113,6 +1629,9 @@ function selfTest() {
     { number: 14, title: 'Quoted marker', labels: [{ name: 'loop-blocked' }],
       comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker(marked), createdAt: blockAt },
         { author: { login: 'owner' }, body: '/answer go', createdAt: later(30) }] },
+    { number: 15, title: 'Retired reason', labels: [{ name: 'loop-blocked' }, { name: 'human:decide' }],
+      comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 15, reason: 'TRUST_REQUIRED' }), createdAt: blockAt },
+        { author: { login: 'owner' }, body: '/answer the issue text wins', createdAt: later(30) }] },
   ]);
   const triaging = fakeRun([
     ['gh issue list --label loop-blocked', blockedList],
@@ -1123,6 +1642,9 @@ function selfTest() {
     ['gh api repos/{owner}/{repo}/issues/12/events', later(0.1)],
     ['gh api repos/{owner}/{repo}/issues/13/events', later(0.1)],
     ['gh api repos/{owner}/{repo}/issues/14/events', later(0.1)],
+    ['gh api repos/{owner}/{repo}/issues/15/events', later(0.1)],
+    ['gh issue edit 15', ''],
+    ['gh issue comment 15', ''],
     ['gh issue edit 13', ''],
     ['gh issue comment 13', ''],
     ['gh api repos/{owner}/{repo}/collaborators/owner/permission', 'admin'],
@@ -1132,7 +1654,7 @@ function selfTest() {
   ]);
   const triage = triageBlocks({ run: triaging.run, now: Date.parse(later(60)) });
   check('prime resumes an answered loop block, and holds the rest with their reason',
-    triage.resumed.map((entry) => `${entry.number}:${entry.by}:${entry.answer}`).join(',') === '7:owner:128,13:owner:64'
+    triage.resumed.map((entry) => `${entry.number}:${entry.by}:${entry.answer}`).join(',') === '7:owner:128,13:owner:64,15:owner:the issue text wins'
     && triage.waiting.map((entry) => `${entry.number}:${entry.question}`).join(',') === '8:What length?,11:What length?'
     && triage.held.map((entry) => entry.number).join(',') === '9,10,12,14'
     && triage.errors.length === 0);
@@ -1140,6 +1662,7 @@ function selfTest() {
     triaging.calls.includes('gh issue edit 7 --remove-label loop-blocked,human:decide')
     && triaging.calls.some((call) => call.startsWith('gh issue comment 7') && call.includes('autoloop-resumed-v1'))
     && !triaging.calls.some((call) => /gh issue (edit|comment) (8|9|10|11|12|14)\b/u.test(call))
+    && triaging.calls.includes('gh issue edit 15 --remove-label loop-blocked,human:decide')
     && !triaging.calls.some((call) => call.includes('loop-ready')));
   check('a failed listing resumes nothing and reports it',
     triageBlocks({ run: fakeRun([['gh issue list', false]]).run }).errors.length === 1);
@@ -1211,8 +1734,12 @@ function selfTest() {
   check('arguments parse and refuse',
     parseArgs(['--repair', '--parent', '248', '--title', 't', '--body-file', 'b.md', '--blocks-parent']).blocksParent === true
     && parseArgs(['--block', '--issue', '7', '--reason', 'X', '--question', 'q?', '--gate', 'human:authorize']).gate === 'human:authorize'
-    && parseArgs(['--decide', '--issue', '5', '--choice', 'c', '--why', 'w', '--alternatives', 'a; b']).alternatives.join('|') === 'a|b'
+    && parseArgs(['--decide', '--issue', '5', '--question', 'q?', '--choice', 'c', '--why', 'w', '--alternatives', 'a; b']).alternatives.join('|') === 'a|b'
+    && parseArgs(['--decisions', '--issue', '5', '--out', 'd.md']).out === 'd.md'
     && parseArgs(['--wait', '--issue', '5', '--on-issue', '4']).onIssue === 4
+    && parseArgs(['--wait', '--issue', '5', '--on-pr', '70', '--paths', 'src/a.mjs, src/b/']).paths.join('|') === 'src/a.mjs|src/b/'
+    && parseArgs(['--wait', '--issue', '5', '--on-pr', '70', '--paths', 'src/a.mjs']).onPr === 70
+    && parseArgs(['--overlap', '--issue', '5', '--boundary-file', 'plan.json', '--snapshot', 'snap.json']).snapshot === 'snap.json'
     && parseArgs(['--obsolete', '--issue', '5', '--commit', 'abc1234']).commit === 'abc1234'
     && parseArgs(['--wait', '--issue', '5', '--minutes', '60']).minutes === 60
     && parseArgs(['--digest', '--post']).post === true
@@ -1229,11 +1756,16 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`unit: ${parsed.error}`);
-    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --choice T --why T [--alternatives "A; B"] | --lift | --digest [--post] | --self-test');
-    console.error(`human block reasons: ${[...HUMAN_BLOCK_REASONS].join(', ')}`);
+    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720 | --on-pr M --paths A,B/) [--note T] | --overlap --issue N --boundary-file PATH --snapshot PATH | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --question T --choice T --why T [--alternatives "A; B"] | --decisions --issue N [--out PATH] | --lift | --digest [--post] | --self-test');
+    console.error(`human block reasons: ${[...HUMAN_BLOCK_REASONS].join(', ')}; retired (use --decide): ${[...RETIRED_BLOCK_REASONS].join(', ')}`);
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+  if (parsed.mode === 'overlap') {
+    const outcome = overlapCheck({ issue: parsed.issue, boundaryFile: parsed.boundaryFile, snapshotPath: parsed.snapshot });
+    console.log(JSON.stringify(outcome, null, 1));
+    process.exit(outcome.ok ? 0 : 1);
+  }
   const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
   const run = realRun(root);
   if (parsed.mode === 'repair') {
@@ -1250,6 +1782,19 @@ function main() {
   }
   if (parsed.mode === 'decide' || parsed.mode === 'block') {
     const outcome = parsed.mode === 'decide' ? markDecided({ ...parsed, run }) : markBlocked({ ...parsed, run });
+    console.log(JSON.stringify(outcome, null, 1));
+    process.exit(outcome.ok ? 0 : 1);
+  }
+  if (parsed.mode === 'decisions') {
+    const outcome = collectUnitDecisions({ issue: parsed.issue, run });
+    if (outcome.ok && parsed.out !== null) {
+      try {
+        writeFileSync(parsed.out, `${outcome.section}\n`);
+      } catch (error) {
+        console.log(JSON.stringify(refusal('INVALID_ARGS', `--out: ${error.message}`)));
+        process.exit(1);
+      }
+    }
     console.log(JSON.stringify(outcome, null, 1));
     process.exit(outcome.ok ? 0 : 1);
   }

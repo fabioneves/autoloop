@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.68.0" src="https://img.shields.io/badge/release-v0.68.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.69.0" src="https://img.shields.io/badge/release-v0.69.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -154,12 +154,20 @@ it installed from its own marketplace, keep either copy.
 
 ## Configuration and merge policy
 
-v0.68.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
+v0.69.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
 defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
 optional `protectedPaths`. The repository owns it; plugin updates never overwrite it.
 
 `protectedPaths` lists the repository's own human-authorization globs (`*` and `**` only), added to
-the built-in families. A non-manual policy also sets `merge.loopLogin`, and `ratified` may set
+the built-in families. The plugin protects only secret and credential paths (`.env*`, key material,
+a path segment that is the word `secret`, `credential`, `token`, or `crypt`; one rule, shared with
+the command guard), `.github/**`, and the loop's control roots (`.autoloop`, `.claude`, `.codex`,
+`.opencode`, `.agents`, `.githooks`). Documentation, dependency manifests, lockfiles, build
+configs, container files, and data are ordinary files; list them in `protectedPaths` when the
+repository wants them protected. A dependency change is the one ordinary-file exception: a
+`package.json` that gains a dependency or an install script, or a lockfile that adds a package,
+is refused at the merge gate as `human:authorize`.
+A non-manual policy also sets `merge.loopLogin`, and `ratified` may set
 `merge.reversiblePaths` (default `["docs/**"]`). The review checklist is `.autoloop/checklist.md`
 when the repository keeps one, else the plugin's.
 
@@ -192,16 +200,29 @@ kill switch stay enforced regardless.
 
 ## How it stays safe
 
-v0.68.0 dispatches every role through one call:
+v0.69.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>
 ```
 
 Each role runs as a fresh, fixed-posture process. Reviewers are read-only and cannot be widened by
-a prompt. Untrusted text travels in files, never shell source. Vendored hooks block direct merges,
-unsafe force-pushes, self-applied authorization labels, release publication, and malformed step
-swaps. Protected paths stop for `human:authorize`. Dispatch failures are typed and recorded. A
+a prompt. Untrusted text travels in files, never shell source. The command guard refuses only an
+irreversible or unauthorized act, and NEVER: a merge (`gh pr merge`, the REST merge endpoint, a
+GraphQL merge mutation, or a hand-posted commit status); a commit on or a push to the base branch
+except through a pull request; a GitHub API commit or ref mutation (`contents`, `git/*` writes,
+`createCommitOnBranch`, `updateRef`, `createRef`, `deleteRef`); `git push --force`/`-f`
+(`--force-with-lease` is allowed); a release-tag push or a GitHub release mutation; `gh workflow
+run|enable` or an actions dispatch endpoint; raw HTTP to the API with a write method; a
+branch-protection or ruleset mutation; `git add` or `git commit` naming a secret path; a
+`Co-Authored-By` trailer; `AskUserQuestion` while a run is live; a branch switch while a reviewer
+dispatch reads the checkout; a prime command that does anything else; and a hook payload it cannot
+read, for the session that owns a run. The rules also apply to the text a command runs: an
+in-command git or gh alias, a function, case or trap body, and a shell fed by a heredoc or a
+literal echo; a hidden alias is refused. An inline interpreter's program (`python3 -c`, `node
+-e`) is not judged. Every other command is allowed; `step.mjs` alone swaps step labels and keeps
+the ladder rules.
+Protected paths stop for `human:authorize`. Dispatch failures are typed and recorded. A
 read-only role retries a transient failure a bounded number of times and moves to its configured
 fallback on a usage limit; any role moves to it when its model is unavailable; a writer never
 retries blindly, and there is no "skip review" mode.
@@ -209,8 +230,9 @@ On restart the loop rebuilds state from Git and GitHub,
 adopts only proven orphans, and finishes or blocks them before taking new work. With nothing to do,
 it stops rather than polls.
 
-The command guard is not a sandbox and not a secrets boundary. Branch, tag, and release protection
-remain your server-side rules; give the loop a repository-scoped token without admin rights.
+The command guard is not a sandbox and not a secrets boundary: it keeps a secret path out of a
+commit, and reads nothing else. Branch, tag, and release protection remain your server-side
+rules; give the loop a repository-scoped token without admin rights.
 
 ## Releases
 

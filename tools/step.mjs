@@ -20,13 +20,12 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { evaluate } from './command-guard.mjs';
 import { loopRunIsLive, ownRunMarkers, sessionLatch } from './run-markers.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, issueSnapshotItem, SNAPSHOT_SECTIONS,
-  verifySnapshot,
+  snapshotProblem, verifySnapshot,
 } from './snapshot-contract.mjs';
-import { realRun } from './unit.mjs';
+import { noteDecisionOnStep, realRun } from './unit.mjs';
 import { parseGitHubRemote } from './checkout-contract.mjs';
 import { mergeCaption, projectParked, stepAttempt } from './parked-disposition.mjs';
 import { resolveProjectConfig } from './config-contract.mjs';
@@ -58,11 +57,32 @@ export function swapPlan(current, to) {
   return { remove, add };
 }
 
-// Pure: the ladder steps a transition jumps over. The guard cannot see them:
-// swapPlan always names the predecessor, so a 03→09 swap reads as a proper
-// one. A fix round sits at 08; 10 and 11 come after 09. No ladder label yet
-// (a fresh or staged unit) skips nothing. A skip is noted, never refused:
-// step 06 is skipped by rule when no simplify engine is available.
+// Pure: the refusal of a swap that moves down the ladder, or null. The ladder
+// only climbs: a live run swapped 03 back to 02 to re-review a plan (plan
+// review is ONE dispatch), and 08 back to 05 for a fix round (a fix round
+// rides step 08's label). Since 0.69.0 the command guard no longer checks
+// label swaps; this tool is the only one that swaps them, and keeps the rule.
+export function backwardStep(current, to) {
+  if (!LADDER.includes(to)) return null;
+  const highest = current
+    .map((label) => /^loop:(0\d-[a-z-]+)$/u.exec(label)?.[1])
+    .filter((step) => step !== undefined)
+    .reduce((top, step) => Math.max(top, LADDER.indexOf(step)), -1);
+  if (highest === -1 || LADDER.indexOf(to) >= highest) return null;
+  const from = `loop:${LADDER[highest]}`;
+  const remedy = to === '02-plan' && LADDER[highest] === '03-plan-review'
+    ? 'Plan review is ONE dispatch: the revision ships reviewed-once with its dispositions recorded '
+      + 'and carried into code-review r1. Continue forward (claim).'
+    : `Work that answers this step's findings runs under \`${from}\`: dispatch the writer there as `
+      + 'a fix round of the budget.';
+  return `step: step labels only climb: \`${from}\` → \`loop:${to}\` moves backward. ${remedy}`;
+}
+
+// Pure: the ladder steps a transition jumps over. swapPlan always names the
+// predecessor, so a 03→09 swap reads as a proper one. A fix round sits at 08;
+// 10 and 11 come after 09. No ladder label yet (a fresh or staged unit) skips
+// nothing. A skip is noted, never refused: step 06 is skipped by rule when no
+// simplify engine is available.
 export function skippedSteps(current, to) {
   const position = (step) => {
     if (step === '08-fix') return LADDER.indexOf('08-code-review');
@@ -113,16 +133,16 @@ function retainedSnapshotPath(dir) {
 // parked view.
 const QUEUE_COUNT = 'queue-count.json';
 
-function invalidateRetainedSnapshot(dir) {
+function invalidateRetainedSnapshot(dir, reason = 'ISSUE_MUTATION') {
   const path = retainedSnapshotPath(dir);
   if (path === null) return null;
   const snapshot = readJson(path, null);
-  if (!verifySnapshot(snapshot)) return `! retained snapshot ${path} is unreadable; re-prime before deciding`;
+  if (!verifySnapshot(snapshot)) return `! retained snapshot ${path}: ${snapshotProblem(snapshot)} before deciding`;
   const eligible = eligibleIssueNumbers(snapshot);
   if (eligible !== null) {
     writeAtomically(join(dir, QUEUE_COUNT), { eligible: eligible.length, scannedAtMs: Date.parse(snapshot.scannedAt) });
   }
-  writeAtomically(path, invalidateSnapshot(snapshot, 'ISSUE_MUTATION'));
+  writeAtomically(path, invalidateSnapshot(snapshot, reason));
   return null;
 }
 
@@ -264,7 +284,8 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
         return { ok: false, changed: false, lines: [`step: #${issue} is closed as ${stored.closed.outcome}; a delivered card cannot reopen it`] };
       }
       const record = stored ?? { issue, steps: [] };
-      const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, question, policy, reason });
+      const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, question, policy, reason,
+        decisions: Number.isSafeInteger(record.decisions) ? record.decisions : 0 });
       if (outcome === 'delivered') {
         const since = record.pending?.pr === pr && Number.isFinite(record.pending.atMs) ? record.pending.atMs : nowMs;
         delete record.closed;
@@ -273,7 +294,10 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
         delete record.pending;
         record.closed = { outcome, atMs: nowMs };
       }
-      return { ok: true, changed: true, record, lines: [card] };
+      // A merged PR changes the delivered set (SPEC-overlap-wait): the
+      // retained snapshot no longer speaks for open PRs.
+      const warning = outcome === 'shipped' ? invalidateRetainedSnapshot(dir, 'PR_MUTATION') : null;
+      return { ok: true, changed: true, record, lines: [card, ...(warning ? [warning] : [])] };
     });
   } catch (error) {
     return { ok: false, lines: [`step: could not close #${issue}: ${error.message}`] };
@@ -281,7 +305,7 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
 }
 
 export function transition({
-  root, run = realRun(root), evaluateCommand = evaluate, nowMs = Date.now(),
+  root, run = realRun(root), nowMs = Date.now(),
   issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false,
   markers = ownRunMarkers,
 }) {
@@ -311,13 +335,17 @@ export function transition({
   const current = readJsonText(labels.stdout);
   const plan = staged ? null : swapPlan(current, to);
   const skipped = staged ? [] : skippedSteps(current, to);
-  if (plan !== null) {
+  // The draft hand-off (SPEC-review-rounds §4) is the one review path that
+  // waits for a human: its round labels `human:decide` in the same edit. The
+  // PR stays a draft; this tool never touches it.
+  const handoff = !staged && round === 'open-findings' && !current.includes('human:decide') ? ['human:decide'] : [];
+  const edit = plan === null && handoff.length === 0 ? null : { remove: plan?.remove ?? [], add: [...(plan?.add ?? []), ...handoff] };
+  if (edit !== null) {
     const argv = ['issue', 'edit', String(issue),
-      ...(plan.remove.length ? ['--remove-label', plan.remove.join(',')] : []),
-      ...(plan.add.length ? ['--add-label', plan.add.join(',')] : [])];
-    const branch = run('git', ['branch', '--show-current']).stdout || 'main';
-    const verdict = evaluateCommand(`gh ${argv.join(' ')}`, branch, { stepTool: true });
-    if (verdict.block) return refuse(verdict.reason);
+      ...(edit.remove.length ? ['--remove-label', edit.remove.join(',')] : []),
+      ...(edit.add.length ? ['--add-label', edit.add.join(',')] : [])];
+    const backward = backwardStep(current, to);
+    if (backward !== null) return refuse(backward);
     const swapped = run('gh', argv);
     if (!swapped.ok) return refuse(`step: label swap on #${issue} failed: ${swapped.stderr}`);
   }
@@ -375,6 +403,27 @@ function minutes(ms) {
   return total < 60 ? `${total}m` : `${Math.floor(total / 60)}h ${String(total % 60).padStart(2, '0')}m`;
 }
 
+// A review round, as `--round` names it (SPEC-review-rounds): `full` is
+// round 1 or a closing round, `fix-N` the Nth of three fix rounds, `re-plan`
+// the one re-plan round, `open-findings` the draft hand-off. The display
+// never counts rounds up to a cap.
+const FIX_ROUND_BUDGET = 3;
+const ROUND_RE = /^(?:full|fix-[1-3]|re-plan|open-findings)$/u;
+
+export function roundLabel(round) {
+  if (typeof round !== 'string' || !ROUND_RE.test(round)) return null;
+  if (round.startsWith('fix-')) return `fix ${round.slice(4)}/${FIX_ROUND_BUDGET}`;
+  return round === 'open-findings' ? 'open findings' : round;
+}
+
+// Fix rounds spent, for the bar: none at round 1, all three once the budget
+// is behind the unit.
+function roundCells(round) {
+  if (round === 'full') return 0;
+  if (round.startsWith('fix-')) return Number(round.slice(4));
+  return FIX_ROUND_BUDGET;
+}
+
 // Time per step from a unit's step history. Fix rounds fold into code
 // review: they are how step 08 converges, not a step of their own.
 function stepTimes(steps, nowMs) {
@@ -385,17 +434,21 @@ function stepTimes(steps, nowMs) {
     const key = entry.step === '08-fix' ? '08-code-review' : entry.step;
     const end = steps[index + 1]?.startedAtMs ?? nowMs;
     times.set(key, (times.get(key) ?? 0) + Math.max(0, end - entry.startedAtMs));
-    const match = /^(\d+)\/(\d+)$/u.exec(String(entry.round ?? ''));
-    if (match && key === '08-code-review') {
-      rounds = Math.max(rounds, Number(match[1]));
-      round = `r${match[1]}/${match[2]}`;
+    if (entry.step === '08-code-review') {
+      rounds += 1;
+      round = roundLabel(entry.round) ?? round;
     }
   });
   return { times, rounds, round };
 }
 
+// The decisions the loop took on a unit, for a card or a parked line.
+function decisionsFact(decisions) {
+  return Number.isSafeInteger(decisions) && decisions > 0 ? [`${decisions} decision${decisions === 1 ? '' : 's'}`] : [];
+}
+
 // The time-only closing card, one per unit.
-export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null, question = '', policy = null, reason = '' }) {
+export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null, question = '', policy = null, reason = '', decisions = 0 }) {
   const head = (OUTCOMES[outcome] ?? `${outcome} #{n}`).replace('{n}', String(issue)).replace('{merge}', mergeCaption(policy));
   const { times, rounds, round } = stepTimes(steps, nowMs);
   const longest = Math.max(1, ...times.values());
@@ -408,6 +461,7 @@ export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null
   const total = minutes(nowMs - (steps[0]?.startedAtMs ?? nowMs));
   const facts = [total,
     ...(rounds > 0 ? [`${rounds} round${rounds === 1 ? '' : 's'}`] : []),
+    ...decisionsFact(decisions),
     ...(Number.isFinite(pr) ? [`PR #${pr}`] : [])];
   return [
     `╭─ ${head}${title ? ` · ${oneLine(title, 70)}` : ''}`,
@@ -427,7 +481,7 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
   return [
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
     ...units.map((unit) => {
-      const local = parkedLocal(unit, nowMs);
+      const local = [parkedLocal(unit, nowMs), ...decisionsFact(unit.decisions)].join(' · ');
       const note = dispositionNote(unit, nowMs);
       return note ? `├ #${unit.issue} · ${note.join(' ')} · local ${local}` : `├ #${unit.issue} · ${local}`;
     }),
@@ -466,6 +520,13 @@ function observation({ disposition, labels, atMs, current }, nowMs) {
 
 // A mark, an earlier run's step or an undated one was seen, not confirmed
 // running: it shows when it was last seen, never an elapsed running time.
+// The round beside a step name: the fix step drops the word it already
+// carries ("08 fix 1/3", not "08 fix fix 1/3").
+function stepRoundLabel(step, round) {
+  const label = roundLabel(round);
+  return label !== null && step === '08-fix' ? label.replace(/^fix /u, '') : label;
+}
+
 function lastSeenNote({ local, lastSeenAtMs }, nowMs) {
   return local === 'current' || local === undefined ? null
     : `last seen ${stamp(lastSeenAtMs, nowMs)}${local === 'earlier-run' ? ' (earlier run)' : ''}`;
@@ -481,9 +542,9 @@ function parkedLocal(unit, nowMs) {
   // Which round: the announced one, else the review rounds dispatched under
   // the step, else how many times the step was entered (a plan's revisions
   // are versions) — the last only once there is more than one.
-  const recorded = typeof round === 'string' ? Number(round.split('/')[0]) : null;
-  const which = recorded !== null && Number.isSafeInteger(recorded)
-    ? ` r${recorded}`
+  const recorded = stepRoundLabel(step, round);
+  const which = recorded !== null
+    ? ` ${recorded}`
     : Number.isSafeInteger(reviewRound) ? ` r${reviewRound}`
       : attempt > 1 ? ` ${step === '02-plan' ? 'v' : 'r'}${attempt}` : '';
   // A different role running under the step (a fix batch under a review).
@@ -515,7 +576,8 @@ export function renderRunCard({ nowMs, units, park, snapshot }) {
       const { issue, step, model, round, startedAtMs } = unit;
       const [name] = STEPS[step] ?? [step];
       const seen = lastSeenNote(unit, nowMs);
-      const local = `${step.slice(0, 2)} ${name.toLowerCase()}${round ? ` r${round}` : ''} `
+      const label = stepRoundLabel(step, round);
+      const local = `${step.slice(0, 2)} ${name.toLowerCase()}${label ? ` ${label}` : ''} `
         + `${seen ?? `on ${modelChip(model, step)} since ${clock(startedAtMs)}`}`;
       const note = dispositionNote(unit, nowMs);
       return note ? `- #${issue} ${note[1]}; local ${local}` : `- #${issue} at ${local}`;
@@ -627,10 +689,10 @@ export function duration(ms) {
 }
 
 function progress(step, round) {
-  const rounds = /^(\d+)\/(\d+)$/u.exec(String(round ?? ''));
-  if (rounds && Number(rounds[1]) <= Number(rounds[2])) {
-    const [done, cap] = [Number(rounds[1]), Number(rounds[2])];
-    return `${'▰'.repeat(done)}${'▱'.repeat(cap - done)} r${done}/${cap}`;
+  const label = roundLabel(round);
+  if (label !== null) {
+    const done = roundCells(round);
+    return `${'▰'.repeat(done)}${'▱'.repeat(FIX_ROUND_BUDGET - done)} ${label}`;
   }
   const n = Number(step.slice(0, 2));
   return `${'▰'.repeat(n)}${'▱'.repeat(11 - n)} ${step.slice(0, 2)}/11`;
@@ -758,11 +820,28 @@ function selfTest() {
     ['a step ribbon has fixed columns: time, unit, badge, step, bar, model, note',
       ribbon({ atMs: at(9, 40), issue: 350, step: '05-implement', model: 'claude-opus-5-5', note: 'tests first' })
         === '09:40 #350 ⏳ 🔨 IMPLEMENT    ▰▰▰▰▰▱▱▱▱▱▱ 05/11  🟠 OPUS 5.5      tests first'],
-    ['a review round replaces the counter with the round',
-      ribbon({ atMs: at(10, 2), issue: 350, step: '08-code-review', round: '2/5', badge: '🚧', model: 'gpt-6-astra', note: '2 Major open' })
-        === '10:02 #350 🚧 🔍 CODE-REVIEW  ▰▰▱▱▱ r2/5         🟢 ASTRA 6       2 Major open'],
-    ['a fix round has its own glyph', ribbon({ atMs: at(10, 19), issue: 350, step: '08-fix', round: '2/5', badge: '🚧', model: 'claude-opus-5-5', note: 'x' })
-      .startsWith('10:19 #350 🚧 🔧 FIX          ▰▰▱▱▱ r2/5         🟠 OPUS 5.5')],
+    // SPEC-review-rounds: the bar is the fix budget (three), never a round
+    // count up to 20.
+    ['a review round replaces the counter with the fix budget',
+      ribbon({ atMs: at(10, 2), issue: 350, step: '08-code-review', round: 'fix-2', badge: '🚧', model: 'gpt-6-astra', note: '2 Major open' })
+        === '10:02 #350 🚧 🔍 CODE-REVIEW  ▰▰▱ fix 2/3        🟢 ASTRA 6       2 Major open'],
+    ['round 1, the re-plan round and the open-findings hand-off name themselves',
+      [
+        ribbon({ atMs: at(10, 2), issue: 350, step: '08-code-review', round: 'full', model: 'gpt-6-astra' }),
+        ribbon({ atMs: at(10, 2), issue: 350, step: '08-code-review', round: 're-plan', model: 'gpt-6-astra' }),
+        ribbon({ atMs: at(10, 2), issue: 350, step: '08-code-review', round: 'open-findings', model: 'gpt-6-astra' }),
+      ].map((line) => line.slice(29, 46)).join('|') === '▱▱▱ full         |▰▰▰ re-plan      |▰▰▰ open findings'],
+    // The budget lives in review-contract.mjs; this tool's copy and its round
+    // pattern agree with it, or a changed budget would print the wrong bar.
+    ['the fix round budget and the round pattern agree with review-contract.mjs', safely(() => {
+      const printed = spawnSync(process.execPath, ['--input-type=module', '-e',
+        `import { FIX_ROUND_BUDGET } from ${JSON.stringify(new URL('./review-contract.mjs', import.meta.url).href)};`
+        + 'process.stdout.write(String(FIX_ROUND_BUDGET));'], { encoding: 'utf8', timeout: 15000 });
+      const budget = Number(printed.stdout);
+      return budget === FIX_ROUND_BUDGET && ROUND_RE.test(`fix-${budget}`) && !ROUND_RE.test(`fix-${budget + 1}`);
+    }) === true],
+    ['a fix round has its own glyph', ribbon({ atMs: at(10, 19), issue: 350, step: '08-fix', round: 'fix-2', badge: '🚧', model: 'claude-opus-5-5', note: 'x' })
+      .startsWith('10:19 #350 🚧 🔧 FIX          ▰▰▱ fix 2/3        🟠 OPUS 5.5')],
     ['a fallback is marked beside the model',
       ribbon({ atMs: at(10, 31), issue: 356, step: '03-plan-review', model: 'claude-opus-5-5', fallback: true, note: 'FABLE timed out' })
         === '10:31 #356 ⏳ 🔬 PLAN-REVIEW  ▰▰▰▱▱▱▱▱▱▱▱ 03/11  🟠 OPUS 5.5    ↪ FABLE timed out'],
@@ -835,9 +914,9 @@ function selfTest() {
     }
   };
   checks.push(
-    ['a transition call parses', JSON.stringify(parsed(['--issue', '350', '--to', '08-code-review', '--round', '2/5',
+    ['a transition call parses', JSON.stringify(parsed(['--issue', '350', '--to', '08-code-review', '--round', 'fix-2',
       '--model', 'gpt-6-astra', '--badge', '🚧', '--note', '2 Major open', '--fallback']))
-      === JSON.stringify({ mode: 'to', issue: 350, to: '08-code-review', round: '2/5', model: 'gpt-6-astra',
+      === JSON.stringify({ mode: 'to', issue: 350, to: '08-code-review', round: 'fix-2', model: 'gpt-6-astra',
         badge: '🚧', note: '2 Major open', fallback: true, staged: false, what: null, ms: null, error: null })],
     ['card and parked calls parse', parsed(['--card', '--issue', '350', '--outcome', 'delivered', '--pr', '550']).mode === 'card'
       && parsed(['--parked']).mode === 'parked'
@@ -868,6 +947,7 @@ function selfTest() {
         && parsed(['--setup', 'audit', '--badge', '🎉']).error !== null
         && parsed(['--setup']).error !== null],
     ['bad calls are refused', ['--issue x --to 02-plan', '--to 02-plan', '--issue 7', '--issue 7 --to 02-plan --round 9',
+      '--issue 7 --to 08-code-review --round 2/20', '--issue 7 --to 08-fix --round fix-4',
       '--issue 7 --to 02-plan --colour red', '--issue 7 --resumed x --ms soon',
       '--card --issue 7 --outcome shipped --lines 393']
       .every((call) => parsed(call.split(' ')).error !== null)],
@@ -882,28 +962,41 @@ function selfTest() {
     { step: '03-plan-review', model: 'claude-fable-5-1', startedAtMs: start + 1 * minute },
     { step: '05-implement', model: 'claude-opus-5-5', startedAtMs: start + 9 * minute },
     { step: '06-simplify', model: 'claude-fable-5-1', startedAtMs: start + 20 * minute },
-    { step: '08-code-review', round: '1/5', model: 'gpt-6-astra', startedAtMs: start + 26 * minute },
-    { step: '08-fix', round: '1/5', model: 'claude-opus-5-5', startedAtMs: start + 40 * minute },
-    { step: '08-code-review', round: '2/5', model: 'gpt-6-astra', startedAtMs: start + 52 * minute },
+    { step: '08-code-review', round: 'full', model: 'gpt-6-astra', startedAtMs: start + 26 * minute },
+    { step: '08-fix', round: 'fix-1', model: 'claude-opus-5-5', startedAtMs: start + 40 * minute },
+    { step: '08-code-review', round: 'fix-1', model: 'gpt-6-astra', startedAtMs: start + 52 * minute },
     { step: '09-gate', startedAtMs: start + 68 * minute },
   ];
   const card = safely(() => renderCard({
     issue: 350, title: 'Axis B playback state machine', outcome: 'delivered', steps: history,
-    nowMs: start + 77 * minute, pr: 550, lines: 393, policy: 'manual',
+    nowMs: start + 77 * minute, pr: 550, lines: 393, policy: 'manual', decisions: 2,
   }));
   checks.push(
     // LFE #506: a card names time, rounds and PR, never a changed-line total, even when a caller passes one.
-    ['a closing card shows each step\'s time with bars scaled to the longest, rounds folded into review',
+    // Flow release: the card counts the decisions the loop took (unit.mjs --decide).
+    ['a closing card shows each step\'s time with bars scaled to the longest, rounds folded into review, and its decisions',
       card === [
         '╭─ ⚠️ #350 DELIVERED · awaits human merge · Axis B playback state machine',
         '│  🧭 premise         1m  ▰',
         '│  🔬 plan-review     8m  ▰▰▰',
         '│  🔨 implement      11m  ▰▰▰▰',
         '│  🧹 simplify        6m  ▰▰',
-        '│  🔍 code-review    42m  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰  r2/5',
+        '│  🔍 code-review    42m  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰  fix 1/3',
         '│  🚦 gate            9m  ▰▰▰',
-        '╰─ 1h 17m · 2 rounds · PR #550',
-      ].join('\n')],
+        '╰─ 1h 17m · 2 rounds · 2 decisions · PR #550',
+      ].join('\n')
+      && safely(() => renderCard({ issue: 351, outcome: 'shipped', steps: history.slice(0, 1), nowMs: start + minute, decisions: 0 })).endsWith('╰─ 1m')
+      && safely(() => renderCard({ issue: 351, outcome: 'shipped', steps: history.slice(0, 1), nowMs: start + minute, decisions: 1 })).endsWith('╰─ 1m · 1 decision')],
+    ['a parked line counts the unit\'s decisions when it has any, and says nothing when it has none',
+      safely(() => renderParked({
+        nowMs: at(10, 30), eligible: 5, units: [
+          { issue: 398, step: '08-code-review', model: 'gpt-6-astra', round: 'fix-2', startedAtMs: at(10, 29), decisions: 2 },
+          { issue: 427, step: '02-plan', model: 'gpt-6-astra', startedAtMs: at(10, 20), decisions: 1 },
+          { issue: 430, step: '07-diff-review', model: 'gpt-6-astra', startedAtMs: at(10, 25), decisions: 0 },
+          { issue: 431, step: '07-diff-review', model: 'gpt-6-astra', startedAtMs: at(10, 25) },
+        ],
+      }).split('\n').slice(1, 5).join('|')) === '├ #398 · 08 code-review fix 2/3 on 🟢 ASTRA 6 · 1m · 2 decisions|'
+        + '├ #427 · 02 plan on 🟢 ASTRA 6 · 10m · 1 decision|├ #430 · 07 diff-review on 🟢 ASTRA 6 · 5m|├ #431 · 07 diff-review on 🟢 ASTRA 6 · 5m'],
     ['a blocked card ends on its question', (() => {
       const blocked = safely(() => renderCard({
         issue: 349, outcome: 'human', steps: history.slice(0, 1), nowMs: start + minute,
@@ -917,15 +1010,20 @@ function selfTest() {
       nowMs: at(10, 30), units: [{ issue: 388, step: '03-plan-review', model: null, staged: true, startedAtMs: at(10, 14) }], eligible: 5,
     }).includes('#388 · 03 plan-review staged, not dispatched · 16m'))],
     // Operator, 2026-09-30: the parked view shows which round a step is on.
+    // SPEC-review-rounds: a review step reads `fix 2/3`, `re-plan` or `open
+    // findings`, never a round number up to 20.
     ['a step shows its round: the recorded one, else how many times it was entered',
       renderParked({
         nowMs: at(10, 30), eligible: 5, units: [
-          { issue: 398, step: '08-code-review', model: 'gpt-6-astra', round: '2/20', startedAtMs: at(10, 29) },
+          { issue: 398, step: '08-code-review', model: 'gpt-6-astra', round: 'fix-2', startedAtMs: at(10, 29) },
           { issue: 427, step: '02-plan', model: 'gpt-6-astra', staged: true, attempt: 2, startedAtMs: at(10, 20) },
           { issue: 430, step: '07-diff-review', model: 'gpt-6-astra', attempt: 1, startedAtMs: at(10, 25) },
+          { issue: 440, step: '08-code-review', model: 'gpt-6-astra', round: 're-plan', startedAtMs: at(10, 29) },
+          { issue: 441, step: '08-code-review', model: 'gpt-6-astra', round: 'open-findings', startedAtMs: at(10, 29) },
         ],
-      }).split('\n').slice(1, 4).join('|') === '├ #398 · 08 code-review r2 on 🟢 ASTRA 6 · 1m|'
-        + '├ #427 · 02 plan v2 on 🟢 ASTRA 6 · 10m|├ #430 · 07 diff-review on 🟢 ASTRA 6 · 5m'
+      }).split('\n').slice(1, 6).join('|') === '├ #398 · 08 code-review fix 2/3 on 🟢 ASTRA 6 · 1m|'
+        + '├ #427 · 02 plan v2 on 🟢 ASTRA 6 · 10m|├ #430 · 07 diff-review on 🟢 ASTRA 6 · 5m|'
+        + '├ #440 · 08 code-review re-plan on 🟢 ASTRA 6 · 1m|├ #441 · 08 code-review open findings on 🟢 ASTRA 6 · 1m'
       && stepAttempt([{ step: '02-plan' }, { step: '03-plan-review' }, { step: '02-plan' }, { step: '02-plan' }]) === 2
       && stepAttempt([{ step: '07-diff-review' }]) === 1],
     // LFE run 2026-09-30: a staged plan that had come back read "02 plan on
@@ -1093,13 +1191,39 @@ function transitionChecks(at) {
       again.ok === true && again.lines.join('') === 'already on 06-simplify'
         && calls.filter((call) => call.startsWith('gh issue edit')).length === edits]);
     const backward = go({ to: '05-implement', model: 'claude-opus-5-5' });
-    results.push(['a swap the guard refuses is printed and changes nothing',
+    results.push(['a backward swap is refused by this tool, printed, and changes nothing',
       backward.ok === false && /step labels only climb/u.test(backward.lines.join(' '))
         && labels.includes('loop:06-simplify')]);
-    const round = go({ to: '08-code-review', round: '1/5', model: 'gpt-6-astra' });
-    const fix = go({ to: '08-fix', round: '1/5', model: 'claude-opus-5-5' });
+    // The refusal names the pair it caught and a remedy for that step: the
+    // 08→05 refusal once carried the 03→02 plan-review remedy ("claim").
+    const reviewBack = backwardStep(['loop:08-code-review'], '05-implement') ?? '';
+    const planBack = backwardStep(['loop:03-plan-review'], '02-plan') ?? '';
+    results.push(['a backward-swap refusal names the caught pair and its own remedy',
+      reviewBack.includes('`loop:08-code-review` → `loop:05-implement`') && reviewBack.includes('under `loop:08-code-review`')
+        && !reviewBack.includes('claim') && planBack.includes('`loop:03-plan-review` → `loop:02-plan`')
+        && planBack.includes('Plan review is ONE dispatch')
+        && backwardStep(['loop:03-plan-review'], '04-claim') === null && backwardStep([], '02-plan') === null
+        && backwardStep(['loop:08-code-review'], '08-fix') === null && backwardStep(['loop:08-code-review'], '09-gate') === null]);
+    const round = go({ to: '08-code-review', round: 'full', model: 'gpt-6-astra' });
+    const fix = go({ to: '08-fix', round: 'fix-1', model: 'claude-opus-5-5' });
     results.push(['review and fix rounds are separate announcements under one label',
       round.ok === true && fix.ok === true && fix.lines[0].includes('🔧 FIX') && labels.includes('loop:08-code-review')]);
+    // SPEC-review-rounds §4: the draft hand-off labels `human:decide` through
+    // the step's own label edit and leaves the PR a draft.
+    const handoff = (() => {
+      const before = calls.length;
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:08-code-review'];
+      const result = go({ issue: 352, to: '08-code-review', round: 'open-findings', model: 'gpt-6-astra' });
+      const after = labels;
+      labels = saved;
+      return { result, after, calls: calls.slice(before) };
+    })();
+    results.push(['the open-findings round labels human:decide and leaves the PR a draft',
+      handoff.result.ok === true && handoff.result.lines[0].includes('open findings')
+        && handoff.calls.includes('gh issue edit 352 --add-label human:decide')
+        && handoff.after.includes('human:decide') && handoff.after.includes('loop:08-code-review')
+        && !handoff.calls.some((call) => call.startsWith('gh pr'))]);
     results.push(['a skipped step is printed under the ribbon and recorded',
       round.lines[1] === '⚠️ #350 skipped 07-diff-review'
         && readJson(join(root, '.git', 'autoloop', 'steps', '350.json'), { steps: [] })
@@ -1137,6 +1261,20 @@ function transitionChecks(at) {
     })();
     results.push(['a labelled step already in place still invalidates the snapshot',
       retried.invalidation?.reasonCodes?.includes('ISSUE_MUTATION') === true]);
+    // A retained snapshot from 0.68 (version 2) names its version, not "unreadable".
+    const olderSnapshot = (() => {
+      const current = JSON.parse(readFileSync(join(prime, 'a.snapshot.json'), 'utf8'));
+      writeFileSync(join(prime, 'a.snapshot.json'), JSON.stringify({ ...current, version: 2 }));
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:05-implement'];
+      const result = go({ issue: 363, to: '06-simplify', model: 'claude-fable-5-1' });
+      labels = saved;
+      writeFileSync(join(prime, 'a.snapshot.json'), JSON.stringify(current));
+      return result;
+    })();
+    results.push(['a retained snapshot of an older version is refused by its version',
+      olderSnapshot.ok === true
+        && olderSnapshot.lines.some((line) => line.includes('snapshot version 2, expected 3; re-prime'))]);
     const editsBefore = calls.filter((call) => call.startsWith('gh issue edit')).length;
     const staged = go({ issue: 356, to: '02-plan', staged: true, model: 'gpt-6-astra' });
     results.push(['a staged unit is announced and recorded, never labelled',
@@ -1151,7 +1289,7 @@ function transitionChecks(at) {
       }
     })();
     results.push(['the parked view lists open units from the steps files',
-      typeof view === 'string' && view.includes('├ #350 · 08 fix r1 on 🟠 OPUS 5.5')
+      typeof view === 'string' && view.includes('├ #350 · 08 fix 1/3 on 🟠 OPUS 5.5')
         && view.includes(`queue 0 eligible as of ${clock(Date.parse('2026-09-28T09:00:00.000Z'))}`)]);
     // An abandoned run's unit stays open in its steps file; only this run's
     // units are in flight. Markers from before the stamp filter nothing.
@@ -1168,10 +1306,22 @@ function transitionChecks(at) {
       }
     })();
     results.push(['units an earlier run left open stay visible as last seen, never as running',
-      scoped[0].includes('├ #350 · 08 fix r1 · last seen 09:51 (earlier run)') && !scoped[0].includes('#350 · 08 fix r1 on')
-        && scoped[1].includes('├ #350 · 08 fix r1 on 🟠 OPUS 5.5')
-        && scoped[2].includes('- #350 at 08 fix r1/5 last seen 09:51 (earlier run)')
-        && !scoped[2].includes('#350 at 08 fix r1/5 on')]);
+      scoped[0].includes('├ #350 · 08 fix 1/3 · last seen 09:51 (earlier run)') && !scoped[0].includes('#350 · 08 fix 1/3 on')
+        && scoped[1].includes('├ #350 · 08 fix 1/3 on 🟠 OPUS 5.5')
+        && scoped[2].includes('- #350 at 08 fix 1/3 last seen 09:51 (earlier run)')
+        && !scoped[2].includes('#350 at 08 fix 1/3 on')]);
+    // Flow release: a decision recorded by unit.mjs --decide reaches the
+    // parked line and the closing card from the unit's record.
+    const decided = (() => {
+      try {
+        const noted = noteDecisionOnStep({ commonDir: join(root, '.git'), issue: 350 });
+        return { noted, view: parkedView({ root, run, nowMs: at(10, 30) }) };
+      } catch (error) {
+        return { noted: false, view: `THREW ${error.message}` };
+      }
+    })();
+    results.push(['a recorded decision is counted on the unit\'s parked line',
+      decided.noted === true && decided.view.includes('├ #350 · 08 fix 1/3 on 🟠 OPUS 5.5 · 39m · 1 decision')]);
     const closed = (() => {
       try {
         return closeUnit({ root, run, nowMs: at(10, 30), issue: 350, outcome: 'shipped', pr: 550 });
@@ -1186,8 +1336,14 @@ function transitionChecks(at) {
         return `THREW ${error.message}`;
       }
     })();
-    results.push(['closing a unit prints its card and drops it from the parked view',
-      closed.ok === true && closed.lines[0].startsWith('╭─ ✅ #350 SHIPPED') && !afterClose.includes('#350')]);
+    results.push(['closing a unit prints its card with its decision count and drops it from the parked view',
+      closed.ok === true && closed.lines[0].startsWith('╭─ ✅ #350 SHIPPED') && closed.lines[0].endsWith(' · 1 decision · PR #550')
+        && !afterClose.includes('#350')]);
+    // SPEC-overlap-wait: a merged loop PR leaves the delivered set, so the
+    // shipped card is where the retained snapshot learns of the PR mutation.
+    results.push(['a shipped card invalidates the retained snapshot as a PR mutation',
+      closed.ok === true && closed.lines.length === 1
+        && JSON.parse(readFileSync(join(prime, 'a.snapshot.json'), 'utf8')).invalidation?.reasonCodes?.includes('PR_MUTATION') === true]);
     // Review of feat/status-first: a unit blocked at 01 and unblocked by a
     // human re-ran 01 as "already on", so loop-started never came back and
     // the unit was invisible to --parked and --card-run.
@@ -1278,6 +1434,13 @@ function transitionChecks(at) {
           return false;
         }
       })()]);
+    // Flow 2026-10: a unit held by overlap names the delivered PR and the
+    // shared paths (unit.mjs --wait --on-pr records them on the step).
+    results.push(['a unit held by overlap reads "waits on PR #M (paths)"',
+      renderParked({
+        nowMs: at(10, 30), eligible: 1,
+        units: [{ issue: 14, step: '03-plan-review', model: 'gpt-6-astra', returnedAtMs: at(10, 0), waiting: { on: 'PR #70 (src/a.mjs, src/b/)', atMs: at(10, 0) }, startedAtMs: at(9, 50) }],
+      }).split('\n')[1] === '├ #14 · waits on PR #70 (src/a.mjs, src/b/) · 30m']);
     // A waiting unit reads as waiting, aged from the wait; a dispatch clears it.
     results.push(['a waiting unit reads "waits on", and a dispatch clears it',
       (() => {
@@ -1326,7 +1489,7 @@ function transitionChecks(at) {
       (() => {
         try {
           labels = ['loop-ready'];
-          transition({ root, run, nowMs: at(12, 0), issue: 391, to: '08-code-review', round: '1/20', model: 'gpt-6-astra', markers: () => [] });
+          transition({ root, run, nowMs: at(12, 0), issue: 391, to: '08-code-review', round: 'full', model: 'gpt-6-astra', markers: () => [] });
           const launched = noteDispatch({ root, run, issue: 391, role: 'code-review', model: 'gpt-6-astra[1m]' });
           const resultPath = join(root, 'review-result.json');
           writeFileSync(resultPath, JSON.stringify({ ok: true, role: 'code-review', model: 'gpt-6-astra[1m]', ms: 755_123,
@@ -1523,7 +1686,7 @@ function dispositionChecks() {
       number, title: 'loop unit', body: `Closes #${issueNumber}`, isDraft: false, reviewDecision: 'APPROVED',
       headRefName: `feat/gh-${issueNumber}-loop-unit`, headRefOid: 'b'.repeat(40), baseRefName: 'main',
       mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-10-12T08:00:00Z',
-      author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [],
+      author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [], files: [],
       issue: issueNumber, orphanCandidate: false, ownership: 'loop',
     })));
     sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: 'a'.repeat(40) }]);
@@ -1539,7 +1702,7 @@ function dispositionChecks() {
     ...[501, 502, 503, 504].map((number) => ({ issue: number, steps: [{ step: '00-reconcile', startedAtMs: day(11, 8, 0) }] })),
     { issue: 520, steps: [{ step: '05-implement', stepId: 's', dispatchId: 'd', model: 'claude-opus-5-5', role: 'implement',
       startedAtMs: day(12, 10, 25) }] },
-    { issue: 530, steps: [{ step: '08-fix', round: '1/5', model: 'claude-opus-5-5', startedAtMs: day(10, 9, 51) }] },
+    { issue: 530, steps: [{ step: '08-fix', round: 'fix-1', model: 'claude-opus-5-5', startedAtMs: day(10, 9, 51) }] },
     { issue: 531, steps: [{ step: '09-gate', startedAtMs: day(12, 9, 0) }, { step: '11-record', startedAtMs: day(12, 9, 40) }] },
   ];
   let origin = 'git@github.com:acme/widgets.git';
@@ -1586,7 +1749,7 @@ function dispositionChecks() {
       current.parked.split('\n').includes('├ #520 · 05 implement on 🟠 OPUS 5.5 · 5m')
         && current.card.includes('- #520 at 05 implement on 🟠 OPUS 5.5 since 10:25')]);
     results.push(['earlier-run and record-step units stay visible, each once, and a shown unit is no extra human wait',
-      current.parked.split('\n').includes('├ #530 · 08 fix r1 · last seen 10-10 09:51 (earlier run)')
+      current.parked.split('\n').includes('├ #530 · 08 fix 1/3 · last seen 10-10 09:51 (earlier run)')
         && current.parked.split('\n').includes('├ #531 · 11 record · last seen 09:40')
         && current.parked.endsWith('└ queue 0 eligible · #510 ⚠️ awaits /answer · resumes on results')
         && [501, 502, 503, 504, 520, 530, 531].every((number) => current.parked.split(`#${number} `).length === 2
@@ -1594,7 +1757,7 @@ function dispositionChecks() {
     results.push(['the run card carries the same dispositions from the same projection',
       current.card.includes('- #501 blocked (human:decide, loop-blocked) per scan 10:20; local 00 reconcile last seen 10-11 08:00')
         && current.card.includes('- #502 waiting per scan 10:20; local 00 reconcile last seen 10-11 08:00')
-        && current.card.includes('- #530 at 08 fix r1/5 last seen 10-10 09:51 (earlier run)')
+        && current.card.includes('- #530 at 08 fix 1/3 last seen 10-10 09:51 (earlier run)')
         && current.card.includes('- #531 at 11 record last seen 09:40')]);
     results.push(['status rendering makes no GitHub call and changes no file', unchanged]);
     write(invalidateSnapshot(snapshotOf(issues), 'ISSUE_MUTATION'));
@@ -1793,7 +1956,7 @@ export function renderSetupPhase(phase, badge = '⏳') {
   return `${badge} ∞ ${cells} ${index + 1}/${SETUP_PHASES.length} ${name} ─ ${detail}`;
 }
 
-const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round <r>/<cap>] [--model <id>] [--fallback] [--staged] '
+const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round full|fix-<1..3>|re-plan|open-findings] [--model <id>] [--fallback] [--staged] '
   + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--result <dispatch-result.json>] [--ms <n>]\n'
   + '       step.mjs --setup <resolve|audit|interview|write|verify> [--badge ⏳|❌|⚠️]\n       step.mjs --self-test';
 
@@ -1832,7 +1995,7 @@ export function parseArgs(argv) {
   }
   out.issue = /^[1-9]\d{0,8}$/u.test(String(out.issue)) ? Number(out.issue) : null;
   if (out.issue === null) return { ...out, error: '--issue must be a positive issue number' };
-  if (out.round !== null && !/^\d+\/\d+$/u.test(out.round)) return { ...out, error: '--round must look like 2/5' };
+  if (out.round !== null && !ROUND_RE.test(out.round)) return { ...out, error: '--round must be full, fix-<1..3>, re-plan or open-findings' };
   if (out.ms !== null) {
     out.ms = Number(out.ms);
     if (!Number.isFinite(out.ms)) return { ...out, error: '--ms needs a number' };

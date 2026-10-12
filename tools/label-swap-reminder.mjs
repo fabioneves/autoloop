@@ -56,7 +56,9 @@ const EXTRAS = {
 const DISPATCH_STEP = {
   'plan-review': '03-plan-review',
   implement: '05-implement',
+  simplify: '06-simplify',
   'code-review': '08-code-review',
+  fix: '08-fix',
 };
 
 // Returns null when the command is not a loop-label swap on an issue.
@@ -97,9 +99,15 @@ export function reminderFor(command, opts = {}) {
     if (role === 'implement') {
       return 'autoloop: an implement-role dispatch just went out — it serves step 05 (writer), '
         + 'step 06 (simplify pass), or a FIX round inside a later step. A fix answering review '
-        + 'findings is announced as `step.mjs --to 08-fix --round <r>/<cap>` under the current '
+        + 'findings is announced as `step.mjs --to 08-fix --round fix-<n>` under the current '
         + 'step (labels only climb). Otherwise the step must ALREADY be announced '
         + '(`step.mjs --issue <N> --to 05-implement`); if not, run it NOW — late beats never.';
+    }
+    // A fix round rides the review step's label: announced, never swapped back.
+    if (role === 'fix') {
+      return 'autoloop: a fix-role dispatch just went out — it answers review findings under the '
+        + 'current step (labels only climb) and is announced as `step.mjs --issue <N> --to 08-fix '
+        + '--round fix-<n>` (1..3 of the budget). If it is not, run it NOW — late beats never.';
     }
     const once = role === 'plan-review'
       ? ' This is the ONE plan review: a Critical/Major on the revised plan is a recorded '
@@ -143,8 +151,10 @@ export function reminderFor(command, opts = {}) {
     return `autoloop: \`loop-blocked\` landed for ${n} — TERMINAL riders due NOW, same message or the next: `
       + `① the unit's card, \`step.mjs --card --issue ${n.slice(1)} --outcome blocked\`; `
       + `② PushNotification \`✖ ${n} blocked — <reason gate>\`${PUSH_NOTE} `
-      + `③ a comment recording the reason + gate label, and remove \`loop-started\` `
-      + `and every \`loop:*\` step label. KEEP \`loop-ready\`: \`loop-blocked\` already takes the `
+      + `③ the block is recorded by \`unit.mjs --block --issue ${n.slice(1)} --reason <CODE> `
+      + `--question "<one line>"\`, which posts the comment, adds the gate label and removes `
+      + `\`loop-started\` and every \`loop:*\` step label itself — never remove them by hand. `
+      + `KEEP \`loop-ready\`: \`loop-blocked\` already takes the `
       + `issue out of the eligible queue, and \`loop-ready\` is the human's authorization token `
       + `that no loop path may re-apply — stripping it turns their one-label unblock into a `
       + `deadlock the loop cannot leave. `
@@ -199,8 +209,8 @@ function selfTest() {
     ['gh issue edit 4 --add-label loop-blocked', /KEEP `loop-ready`/],
     ['gh issue edit 4 --add-label loop-blocked', /reversed a human unblock/],
     ['gh issue edit 293 --add-label loop-blocked,human:decide', /unlabeled` events after the block comment/],
-    ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /--outcome human/],
-    ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /PushNotification `✖ #12/],
+    ['node tools/agentic/unit.mjs --block --issue 12 --reason POLICY_DENIED --question "q?"', /--outcome human/],
+    ['node tools/agentic/unit.mjs --block --issue 12 --reason POLICY_DENIED --question "q?"', /PushNotification `✖ #12/],
     ['node tools/agentic/unit.mjs --decide --issue 12 --choice c --why w', null],
     // The run frame rides prime; the terminal riders ride terminal-finalize,
     // whose label mutations never pass through gh edit.
@@ -214,6 +224,12 @@ function selfTest() {
     ['node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json', /--to 08-fix/],
     ['node tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json', /labels only climb/],
     ['node tools/agentic/dispatch.mjs --role code-review --prompt-file /tmp/p.md --json', /--to 08-code-review/],
+    // 0.69.0: fix and simplify are roles of their own; each gets its rider.
+    ['node tools/agentic/dispatch.mjs --role fix --prompt-file /tmp/p.md --json', /--to 08-fix --round fix-<n>/],
+    ['node tools/agentic/dispatch.mjs --role fix --prompt-file /tmp/p.md --json', /^(?![\s\S]*--to 05-implement)/],
+    ['node tools/agentic/dispatch.mjs --role simplify --prompt-file /tmp/p.md --json', /--to 06-simplify/],
+    ['gh issue edit 4 --add-label loop-blocked', /unit\.mjs --block --issue 4 --reason <CODE>/],
+    ['gh issue edit 4 --add-label loop-blocked', /never remove them by hand/],
     ['node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/p.md --json', /--to 03-plan-review/],
     // A live run dispatched plan review three times for one plan (r1..r3).
     ['node tools/agentic/dispatch.mjs --role plan-review --prompt-file /tmp/p.md --json', /ONE plan review/],

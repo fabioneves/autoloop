@@ -31,7 +31,148 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // `anchor` is verbatim source text from `file`. Keep it short enough to survive
 // reformatting and specific enough that its presence really means the case is
 // still there.
+//
+// `retired` keeps an incident whose enforcer a release removed on purpose:
+// the entry stays, with the release and the reason ('<version>: <why>'), and
+// its enforcers are no longer checked. A rule removed without this note
+// fails the audit, which is the point.
 export const INCIDENTS = Object.freeze([
+  Object.freeze({
+    id: 'flow-release-review-left-no-round-after-the-re-plan-and-no-pr-wait-cap',
+    date: '2026-10-12',
+    symptom: 'The 0.69.0 release review found a Critical first seen in the re-plan round could be '
+      + 'neither fixed nor decided (every later round was REVIEW_REPLAN_SPENT), a PR wait had no '
+      + 'cap while --minutes had one, the draft hand-off labelled human:decide by prose only, a '
+      + '0.68 retained snapshot failed verify as "unreadable", and the fix round budget lived in '
+      + 'two files with no check that they agree.',
+    cause: 'The round-budget rule, the PR-wait lift, the hand-off label, and the snapshot version '
+      + 'message were each written in one place and never exercised end to end.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'a Critical first seen in the re-plan round is fixed in one more round'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'a second fix round after the re-plan round is refused'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'a Critical still open after the admitted fix round blocks with the ledger'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'the append-round CLI builds the widened boundary, covers a widening by the delta, and hands off after the budget'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'the fix round budget and the round pattern agree with review-contract.mjs'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'the open-findings round labels human:decide and leaves the PR a draft'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a shipped card invalidates the retained snapshot as a PR mutation'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a retained snapshot of an older version is refused by its version'" }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "'a retained snapshot of an older version names its version and the re-prime remedy'" }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: "'a retained snapshot of an older version names its version in the authority detail'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a PR wait lifts after 720 minutes with a re-plan reason, and is resumed'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a lane entry without a trailing slash matches its exact path only'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'an overlap hit waits on the PR, the merge lifts it resumed, the re-check against the new snapshot is clear, and an older snapshot names its version'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'the PR body sections list open findings with predicate and raisings, and Minors, and are empty without entries'" }),
+      Object.freeze({ file: 'label-swap-reminder.mjs', anchor: "--role fix --prompt-file /tmp/p.md --json', /--to 08-fix --round fix-<n>/" }),
+      Object.freeze({ file: '../docs/specs/SPEC-review-rounds.md', anchor: 'contract admits exactly one round after it' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**After the re-plan round, one round.**' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'delivered-units-on-shared-files-conflicted-each-other',
+    date: '2026-10-12',
+    symptom: 'On one project nine open loop pull requests formed two conflict groups of four and '
+      + 'three: merging any one of them conflicted the others.',
+    cause: 'Selection took the next eligible issue while an earlier unit was delivered and unmerged, '
+      + 'and nothing compared the new plan\'s file boundary with the delivered pull requests\' changed '
+      + 'paths. The boundary was prose, the scan did not fetch changed paths, and no wait named a PR.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'a plan without a structured boundary is refused, and a boundary passes through'" }),
+      Object.freeze({ file: 'scan.mjs', anchor: "'the PR query fetches changed paths, pages past 100, and the normalized PR carries them sorted and unique'" }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "'the delivered set is every open loop PR at ready-head or premerge-record, with its paths'" }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "'a merged or closed loop PR is a PR_MUTATION, which invalidates the delivered set'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'overlapWith names the first delivered PR whose files intersect the boundary, and the paths'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a PR wait round-trips and clears when the PR merges or closes, not while it is open'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'prime lifts a PR wait on merge, marks it resumed for a re-plan, and holds it while the PR is open'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'--overlap reads a plan result and a retained snapshot, skips the unit\\'s own PR, and refuses an invalidated snapshot'" }),
+      Object.freeze({ file: 'prime.mjs', anchor: "'a lifted PR wait is printed lifted and resumed, and is not pointed past a halt'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a unit held by overlap reads \"waits on PR #M (paths)\"'" }),
+      Object.freeze({ file: 'briefs/plan.md', anchor: 'boundary: the complete file boundary' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**Overlap check before the claim**' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'review-rounds-past-three-did-not-converge',
+    date: '2026-10-12',
+    symptom: 'On one project 12 units reached the code-review round cap of 20. One unit ran 15 '
+      + 'review and 6 fix dispatches in a day, another 8 fix and 8 review rounds plus a two-hour '
+      + 'timeout. Majors in late rounds were raised on lines that earlier fixes added.',
+    cause: 'The contract bounded rounds at 20 and nothing else: a Major could be fixed again '
+      + 'every round, and a re-filed Major under a new id restarted its count. Since 0.69.0 a '
+      + 'unit gets round 1 plus three fix rounds; a Major still open is decided, re-planned once, '
+      + 'or deferred, findings are keyed by predicate, a Critical is fixed regardless, and a Major '
+      + 'surviving the re-plan round hands the unit off as a draft with human:decide.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'review-contract.mjs', anchor: 'export const FIX_ROUND_BUDGET = 3;' }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a fourth fix round is refused'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a Major re-filed under a new id on the same predicate keeps its raisings'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a decision rebuts the finding and one closing full round over the same artifact closes it'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a second re-plan is refused'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a verified Critical past the budget is still fixed in the next round'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a Critical still open after the admitted fix round blocks with the ledger'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'Minors never consume the budget and never hold delivery'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a Major surviving the re-plan round hands the unit off as a draft with its ledger'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'the builder refuses a fourth fix round and accepts one re-plan round with its new plan'," }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a review round replaces the counter with the fix budget'," }),
+      Object.freeze({ file: 'step.mjs', anchor: "'round 1, the re-plan round and the open-findings hand-off name themselves'," }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: "'a review step keeps its named round: a fix round, the re-plan round, the open-findings hand-off'," }),
+      Object.freeze({ file: 'briefs/code-review.md', anchor: 'A re-raise on the same predicate is the same finding' }),
+      Object.freeze({ file: 'briefs/fix.md', anchor: 'or a predicate has a Major in two consecutive rounds' }),
+      Object.freeze({ file: 'briefs/plan.md', anchor: 'On a re-plan, the input is the code-review findings ledger' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**After the re-plan round, one round.**' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'fixes-outside-the-plan-boundary-became-repair-issues',
+    date: '2026-10-12',
+    symptom: 'On one project a verified Major whose fix was one directory outside the frozen file '
+      + 'boundary became a repair issue, which the loop queued behind the stopped run, or a block.',
+    cause: 'The frozen boundary was edit authority: a fix outside it needed a separate scope '
+      + 'decision, the implementer was told to stay inside it, and nothing distinguished a path in '
+      + 'the unit\'s own seam from one in another subsystem. Since 0.69.0 a verified finding is '
+      + 'fixed where the defect is under a recorded `widen` disposition, the next delta round must '
+      + 'change the widened paths, a writer lists `extraPaths` that a plan task needed and round 1 '
+      + 'records them, a widening into a protected path labels human:authorize and into a secret '
+      + 'path is refused, and only a path outside the seam is deferred to a repair.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a widen disposition adds its paths to the evidence boundary, the delta covers them, and the close lists the scope change'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a delta round that omits a widened path is refused REVIEW_DELTA_SCOPE_INCOMPLETE'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a widen without a verified finding, without paths, or into a secret path is refused'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a widening into a protected path labels human:authorize and does not refuse'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'an implement result listing extra paths is recorded as widenings before round 1'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a finding outside the seam is deferred to a repair at any round; one inside it is widened'," }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widened path is in the unit lane and a prefix matches only its directory'," }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widening into a protected path is a human:authorize hit, not a refusal'," }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widening into a secret path is refused WIDEN_SECRET_PATH'," }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'an implement result passes its extra-paths block through typed, and a malformed block is a typed failure that keeps the text'," }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'the PR body section lists every widening under ## Scope changes with its finding id, and is empty without widenings'," }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a repair is filed with the parent provenance, loop-repair and never loop-ready, then the parent waits on it'," }),
+      Object.freeze({ file: 'briefs/implement.md', anchor: 'An edit outside the boundary is allowed only when a plan task cannot pass its test without it.' }),
+      Object.freeze({ file: 'briefs/fix.md', anchor: 'Fix where the defect is.' }),
+      Object.freeze({ file: 'briefs/code-review.md', anchor: 'do not refuse it as out of scope' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'A verified fix outside the boundary is a `widen` disposition.' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'premise-blocks-waited-on-decisions-the-loop-can-take',
+    date: '2026-10-12',
+    symptom: 'On one project 33 units blocked at premise for a human decision, ten of them in one '
+      + 'hour on a batch of decision-shaped issues; most were specification gaps on issues written '
+      + 'weeks before they were built.',
+    cause: 'The planner read a contradiction between an issue and the specification as '
+      + 'TRUST_REQUIRED or UNSPECIFIED_VALUE and blocked. The briefs asked for a named human question, '
+      + 'and no record made the loop\'s own decisions visible in the pull request.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'unit.mjs', anchor: 'is refused as retired, names --decide, and makes no GitHub call' }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a decision marker without a question (before 0.69.0) still parses'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'the PR body section lists every decision under ## Decisions with its link, and is empty without decisions'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a resumed block whose reason is now retired is listed as decided by the /answer that lifted it'" }),
+      Object.freeze({ file: 'step.mjs', anchor: 'decisions when it has any, and says nothing when it has none' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: "'a unit carries its recorded decision count; none or a malformed count is zero'" }),
+      Object.freeze({ file: 'briefs/plan.md', anchor: 'Do not request ratification or approval' }),
+      Object.freeze({ file: 'briefs/plan-review.md', anchor: 'A decision is never a finding because no human approved it.' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'a specification gap is a `decide`, never a block' }),
+    ]),
+  }),
   Object.freeze({
     id: 'decisions-invented-work-size-quotas-and-compressed-a-plan',
     date: '2026-10-12',
@@ -81,7 +222,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`inScope` is review scope, not edit authorization.' }),
       Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'Round 1: every finding is `inScope:true`.' }),
-      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'A fix outside the frozen boundary needs a separate scope decision; `true` grants no edit authority.' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'A verified fix outside the boundary is a `widen` disposition.' }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a full review cannot classify a finding out of scope'," }),
     ]),
   }),
@@ -123,7 +264,9 @@ export const INCIDENTS = Object.freeze([
       + 'the dispatch down with its task. dispatch-stream.sh has since detached '
       + 'the dispatch, so a killed watcher no longer loses it (verified live).',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: "if (/dispatch-stream\\.sh/u.test(text)) return null;" }),
+      // 0.69.0: the guard no longer judges a launch shape; the ordinary
+      // corpus proves a background dispatch is allowed.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
     ]),
   }),
   Object.freeze({
@@ -148,7 +291,7 @@ export const INCIDENTS = Object.freeze([
     cause: 'Selection had no run-wide stop predicate.',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'snapshot-contract.mjs', anchor: "...(context.halted ? ['loop-halted'] : [])," }),
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function liftsHaltLabel(' }),
+      // 0.69.0: the guard's loop-halt rule is removed (SPEC-guard-reduction).
     ]),
   }),
   Object.freeze({
@@ -440,14 +583,9 @@ export const INCIDENTS = Object.freeze([
       + 'the background again and a killed watcher\'s result is collected with '
       + '--wait-file. Only a bare backgrounded dispatch.mjs is refused.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'export function backgroundDispatchProblem(command, runInBackground) {',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'FAIL [background dispatch launch rule]',
-      }),
+      // 0.69.0: the guard no longer judges a launch shape; the ordinary
+      // corpus proves a background dispatch is allowed.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({
         file: '../skills/dev/SKILL.md',
         anchor: '**Launch every dispatch in the background**',
@@ -573,7 +711,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'label-swap-reminder.mjs',
-        anchor: 'findings is announced as `step.mjs --to 08-fix --round <r>/<cap>` under the current ',
+        anchor: 'findings is announced as `step.mjs --to 08-fix --round fix-<n>` under the current ',
       }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
@@ -596,14 +734,9 @@ export const INCIDENTS = Object.freeze([
       + 'message: the reader at 08 had to reverse-engineer the rule to learn '
       + 'that fix rounds run under the current step label.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'backward-swap refusal names the caught pair and its own remedy',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'The remedy must fit the swap the guard caught',
-      }),
+      // 0.69.0: the ladder rule and its remedy moved from the guard to step.mjs.
+      Object.freeze({ file: 'step.mjs', anchor: 'export function backwardStep(' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a backward-swap refusal names the caught pair and its own remedy' }),
       Object.freeze({
         file: 'guard-corpus.json',
         anchor: 'block was right, remedy was wrong',
@@ -779,7 +912,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'review-contract.mjs',
-        anchor: 'function scopeEscalates(previous, current) {',
+        anchor: 'function sameArtifactRound(previous, current) {',
       }),
       Object.freeze({
         file: 'review-contract.mjs',
@@ -838,14 +971,8 @@ export const INCIDENTS = Object.freeze([
       + 'predecessor to be retired in the same command, so an add-only swap '
       + 'and a skipped step both passed as progress.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'function addsStepWithoutRetiringPredecessor(',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: "['gh issue edit 298 --add-label loop:05-implement', 'feat/gh-298-x', true]",
-      }),
+      // 0.69.0: the guard's add-only rule is removed; step.mjs, the only
+      // label-swapping tool, always retires the predecessor.
       Object.freeze({
         file: 'step.mjs',
         anchor: 'the predecessor is named even when an earlier swap already lost it',
@@ -873,14 +1000,9 @@ export const INCIDENTS = Object.freeze([
       + 'backward one — so re-review read as a round, and 0.49.49 had '
       + 'already raised a pitcrew cap in its name.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'function swapsStepLabelBackward(',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: '--add-label "loop:02-plan" --remove-label "loop:03-plan-review"',
-      }),
+      // 0.69.0: the ladder rule moved from the guard to step.mjs.
+      Object.freeze({ file: 'step.mjs', anchor: 'export function backwardStep(' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a backward swap is refused by this tool, printed, and changes nothing' }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
         anchor: 'This is the ONE plan review',
@@ -935,14 +1057,10 @@ export const INCIDENTS = Object.freeze([
       + 'new loop:NN label" pattern-matched. The terminal finalizer owns the '
       + 'only swap after the gate, and no guard refused the invented label.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'function addsUnknownStepLabel(',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: '--add-label loop:10-publish 2>/dev/null',
-      }),
+      // 0.69.0: the guard's step-label rule is removed; step.mjs, the only
+      // label-swapping tool, refuses a step it does not know.
+      Object.freeze({ file: 'step.mjs', anchor: "'an unknown step is refused before anything moves'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "08's label; 00, 10 and 11 carry none." }),
       Object.freeze({
         file: '../skills/dev/SKILL.md',
         anchor: 'No label moves at this step, or step 11',
@@ -1070,7 +1188,9 @@ export const INCIDENTS = Object.freeze([
       + 'operation repeated. The printed remedy was the expansion the guard '
       + 'could perform itself.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function expandLiteralForLoops(' }),
+      // 0.69.0: loops are never judged; the ordinary corpus holds a literal
+      // loop, and a loop body that merges is still caught.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({
         file: 'command-guard.mjs',
         anchor: "['for f in 41 42; do gh pr merge $f; done', 'feat/gh-1-x', true]",
@@ -1087,7 +1207,8 @@ export const INCIDENTS = Object.freeze([
       + 'an invocation with no script argument, which is the stdin shape. '
       + '`-v`/`-V` make it a lookup that runs nothing.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function isLookupSegment(' }),
+      // 0.69.0: interpreters are never judged; the ordinary corpus holds the lookup.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({
         file: 'command-guard.mjs',
         anchor: "['command -v php', 'feat/gh-1-x', false]",
@@ -1173,6 +1294,7 @@ export const INCIDENTS = Object.freeze([
     cause: 'Named tokens were joined with `, ` and truncated at three with no '
       + 'remainder, so a long list also sent the reader back for a second '
       + 'refusal having fixed everything the first one mentioned.',
+    retired: '0.69.0: the guard no longer refuses an unresolved token, so no refusal names one (SPEC-guard-reduction).',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'command-guard.mjs', anchor: 'export function nameList(' }),
       Object.freeze({
@@ -1334,11 +1456,9 @@ export const INCIDENTS = Object.freeze([
       + 'required a closing sentence naming the sanctioned alternative, and '
       + 'generic prose satisfied it on shape while naming nothing.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'fanout refusal names the listing command to use instead',
-      }),
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'const ASSEMBLER_REMEDY' }),
+      // 0.69.0: the assembler rule is removed; every kept refusal names its
+      // rule and one allowed form.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'a refusal names its rule and one allowed form' }),
     ]),
   }),
   Object.freeze({
@@ -1389,6 +1509,7 @@ export const INCIDENTS = Object.freeze([
       + 'variable that actually defeated resolution.',
     cause: 'One generic message served every expansion shape. Wrong advice is '
       + 'worse than none: the reader fixes the half the message names.',
+    retired: '0.69.0: the guard no longer refuses an expansion, so no expansion refusal exists (SPEC-guard-reduction).',
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'command-guard.mjs',
@@ -1455,10 +1576,8 @@ export const INCIDENTS = Object.freeze([
       + 'now names the vehicle, and the dev skill and STATE template '
       + 'prescribe it where the label self-apply is described.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'avoids the Projects-classic GraphQL failure',
-      }),
+      // 0.69.0: the guard's label rules are removed; the skill and the STATE
+      // template still prescribe the vehicle.
       Object.freeze({
         file: '../skills/dev/SKILL.md',
         anchor: 'gh issue edit <pr-number> --add-label human:authorize',
@@ -1492,7 +1611,8 @@ export const INCIDENTS = Object.freeze([
       + 'a number that no position turns into a command. Since 0.50.0 special '
       + 'parameters are judged as a literal `0`, so the decoration is allowed.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function neutralizeSpecialParameters(' }),
+      // 0.69.0: no expansion is judged; the ordinary corpus holds `echo $?`.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({ file: 'guard-corpus.json', anchor: 'exit=$?' }),
     ]),
   }),
@@ -1504,6 +1624,7 @@ export const INCIDENTS = Object.freeze([
       + 'that never said how to get a LABELED count.',
     cause: 'The substitution remedy named the numbers but not the labeling '
       + 'spelling — run the counter bare and let prose carry the label.',
+    retired: '0.69.0: the guard no longer refuses a substitution, so the labeled count is allowed as typed (SPEC-guard-reduction).',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'command-guard.mjs', anchor: 'let prose carry the label' }),
       Object.freeze({ file: 'guard-corpus.json', anchor: '.test.ts tracked:' }),
@@ -1538,8 +1659,9 @@ export const INCIDENTS = Object.freeze([
       + 'Git/GitHub CLI environment, or a git/gh call other than a read-only git '
       + 'subcommand — and awk only runs anything through system/getline/pipes.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function markedPositionProblem(' }),
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function awkProgramCanRunCommands(' }),
+      // 0.69.0: opaque syntax is never judged (SPEC-guard-reduction); the
+      // ordinary corpus holds substitutions, `$?` and an awk pipe.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({ file: 'guard-corpus.json', anchor: 'find . $(cat args.txt)' }),
     ]),
   }),
@@ -1579,7 +1701,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'unit.mjs', anchor: 'export function liftWaits(' }),
       Object.freeze({ file: 'snapshot-contract.mjs', anchor: "...(issue.labels.includes('loop-waiting') ? ['waiting'] : [])" }),
       Object.freeze({ file: 'review-contract.mjs', anchor: 'const DEFER_AFTER_RAISINGS = 3;' }),
-      Object.freeze({ file: 'review-contract.mjs', anchor: "decision('continue', 'REVIEW_CLOSING_ROUND_REQUIRED'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "return decision('continue', 'REVIEW_REPLAN', {" }),
       Object.freeze({ file: 'lifecycle-contract.mjs', anchor: 'export function issueBodyIdentity(' }),
     ]),
   }),
@@ -1590,14 +1712,16 @@ export const INCIDENTS = Object.freeze([
       + 'host killed three times, sat at human:decide for hours. The only '
       + 'answers were "ship it with the findings listed" and "try again later".',
     cause: 'Reaching a limit had one outcome, a block. Since 0.50.0 a closing '
-      + 'round with only Majors under manual policy is REVIEW_CAP_HANDOFF: the '
-      + 'unit publishes with the findings filed and listed for the human at '
-      + 'merge. The kill bound becomes a timed wait that prime lifts.',
+      + 'round with only Majors under manual policy was REVIEW_CAP_HANDOFF: the '
+      + 'unit published with the findings filed and listed for the human at '
+      + 'merge; since 0.69.0 the spent fix budget is REVIEW_REPLAN, and the loop '
+      + 'decides, re-plans once, or defers. The kill bound becomes a timed wait '
+      + 'that prime lifts.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'review-contract.mjs', anchor: "return decision('clean', 'REVIEW_CAP_HANDOFF', {" }),
-      Object.freeze({ file: 'review-contract.mjs', anchor: "&& input.projectConfig.merge?.policy === 'manual'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "return decision('continue', 'REVIEW_REPLAN', {" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'three fix rounds spend the budget: a Major still open is decided, re-planned or deferred'," }),
       Object.freeze({ file: 'unit.mjs', anchor: "condition = { on: 'time', until: new Date(now + minutes * 60_000).toISOString() };" }),
-      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**`REVIEW_CAP_HANDOFF` — only Majors remain, under manual merge policy.**' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**`REVIEW_REPLAN` — the budget is spent, Majors remain.**' }),
     ]),
   }),
   Object.freeze({
@@ -1720,7 +1844,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'unit.mjs', anchor: 'export function markRepair(' }),
       Object.freeze({ file: 'snapshot-contract.mjs', anchor: 'function repairAuthorized(repair) {' }),
       Object.freeze({ file: 'scan.mjs', anchor: 'export function repairItemFacts(' }),
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function appliesRepairLabel(words) {' }),
+      // 0.69.0: the guard's loop-repair rule is removed (SPEC-guard-reduction).
     ]),
   }),
   Object.freeze({
@@ -1991,12 +2115,62 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'loop-smoke.mjs', anchor: "runTool('command-guard.mjs (prime)'" }),
     ]),
   }),
+  Object.freeze({
+    id: 'guard-reduction-left-literal-evasions-of-the-kept-rules',
+    date: '2026-10-12',
+    symptom: 'Review of the 0.69.0 guard reduction: a commit on the base through the contents API '
+      + 'or createCommitOnBranch, a force ref move through updateRef, a merge through raw curl to '
+      + 'api.github.com, `git -c alias.m=\'push --force\' m`, `gh alias set m \'pr merge\'`, a '
+      + 'function, case or trap body, `bash <<EOF` fed a merge, `echo "gh pr merge" | sh`, '
+      + '`sudo -u dev gh pr merge`, `GH=gh; $GH pr merge` and `gh workflow run` on an unmerged '
+      + 'branch were all allowed. Three secret-path definitions disagreed (`src/tokenizer.ts` '
+      + 'was secret in one, `.github/CODEOWNERS` was ordinary, and a prefix widening by `.github/` '
+      + 'earned no label), and the dependency hard-defer lived only in skill prose.',
+    cause: 'The kept rules matched gh positionals and a few REST paths, not the API families, the '
+      + 'raw HTTP clients, or the text a command runs (alias values, function and trap bodies, fed '
+      + 'shells). Wrapper option values were read as the command. The guard, the merge families '
+      + 'and the lane each had their own secret-path regex; `.github/workflows` alone was protected; '
+      + 'widenLane matched a prefix as a file; no tool read a manifest diff at the merge gate.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['gh api -X PUT repos/o/r/contents/README.md -f branch=main -f message=x -f content=eA==', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['curl -X PUT https://api.github.com/repos/o/r/pulls/4/merge', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "[\"git -c alias.m='push --force' m origin feat/gh-1-x\", 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['git -c alias.st=status st', 'feat/gh-1-x', false]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "[\"gh alias set m 'pr merge' && gh m 1\", 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['f() { gh pr merge 1; }; f', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['case x in x) gh pr merge 1;; esac', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "[\"trap 'gh pr merge 1' EXIT\", 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['gh workflow run ci.yml', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['bash <<EOF\\ngh pr merge 4\\nEOF', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['echo \"gh pr merge 4\" | sh', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['sudo -u dev gh pr merge 4', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['GH=gh; $GH pr merge 4', 'feat/gh-1-x', true]," }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: "['gh api HTTPS://API.GITHUB.COM:443/repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true]," }),
+      Object.freeze({ file: 'guard-corpus.json', anchor: 'H1 a contents PUT commits on the base past the checkout' }),
+      Object.freeze({ file: 'guard-corpus.json', anchor: 'accepted by design, SPEC-guard-reduction required behavior 2' }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'isSecretPath is the one secret-path rule: whole segments, key material, env files'" }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a prefix widening at or under a guardrail root is refused WIDEN_GUARDRAIL_ROOT'" }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'every path under .github is protected'" }),
+      Object.freeze({ file: 'escalate-paths.mjs', anchor: "['.github/CODEOWNERS', true]," }),
+      Object.freeze({ file: 'auto-merge.mjs', anchor: "'package.json gains a dependency → human:authorize'" }),
+      Object.freeze({ file: 'auto-merge.mjs', anchor: "'a changed manifest without fetched contents → human:authorize (fail closed)'" }),
+      Object.freeze({ file: 'auto-merge.mjs', anchor: "'dependencyChanges names the gained keys and packages, and nothing for a bump or a removal'" }),
+      Object.freeze({ file: 'publish-verdict.mjs', anchor: 'a review ledger widened into a protected path labels the pull request human:authorize before readiness' }),
+      Object.freeze({ file: 'publish-verdict.mjs', anchor: "the human:authorize label is one gh api POST on the pull request's labels" }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>
   readFileSync(join(HERE, file), 'utf8')) {
   return incidents.map((incident) => {
     const failures = [];
+    if (incident.retired !== undefined) {
+      if (!/^\d+\.\d+\.\d+: \S/u.test(String(incident.retired))) {
+        failures.push('retired without a "<version>: <why>" note');
+      }
+      return { id: incident.id, date: incident.date, ok: failures.length === 0, retired: incident.retired, failures };
+    }
     for (const enforcer of incident.enforcedBy) {
       let source;
       try {
@@ -2071,6 +2245,11 @@ function selfTest() {
     ['a guard case with no `why` is rejected', auditGuardCorpus({
       cases: [{ cmd: 'ls', expect: 'allow' }],
     }).length === 1],
+    ['a retired incident keeps its entry, is not checked, and must name its release and reason', (() => {
+      const [noted] = auditIncidents([{ id: 'x', date: '2026-01-01', retired: '0.69.0: the rule is removed', enforcedBy: [{ file: 'a.mjs', anchor: 'GONE' }] }], read);
+      const [bare] = auditIncidents([{ id: 'y', date: '2026-01-01', retired: 'gone', enforcedBy: [] }], read);
+      return noted.ok && noted.retired === '0.69.0: the rule is removed' && !bare.ok && bare.failures[0].includes('<version>: <why>');
+    })()],
     ['every incident states a symptom and a cause', INCIDENTS.every((entry) =>
       entry.symptom.length > 20 && entry.cause.length > 20)],
   ];
@@ -2094,7 +2273,7 @@ function main() {
     console.log(JSON.stringify({ ok: broken === 0, incidents: rows, guard }, null, 1));
   } else {
     for (const row of rows) {
-      console.log(`${row.ok ? 'PASS' : 'FAIL'} ${row.date} ${row.id}`);
+      console.log(`${row.ok ? (row.retired ? 'RETIRED' : 'PASS') : 'FAIL'} ${row.date} ${row.id}${row.retired ? ` (${row.retired})` : ''}`);
       for (const failure of row.failures) console.log(`     ${failure}`);
     }
     console.log(`${guard.length === 0 ? 'PASS' : 'FAIL'} guard corpus provenance`);

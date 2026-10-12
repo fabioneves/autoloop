@@ -12,7 +12,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.68.0 · starting
+∞ dev · v0.69.0 · starting
 ```
 
 This session is the orchestrator: it plans, applies its own checklist pass and fixes, runs gates,
@@ -24,9 +24,10 @@ reviewer identities never collide. Run Pitcrew first in the same run, then take 
 **Base first, then prime.** Before prime:
 
 1. Dirty tree: only a lifecycle-bound, same-issue orphan with every dirty path in the plan boundary
-   and no human-authorization path may resume on its own branch. Anything else is human work —
-   stop; never stash, discard, or relocate it. Uncommitted setup artifacts (`.autoloop/**`) are
-   Setup's: stop with the Setup remedy; never commit them inside a Dev run.
+   (widened by its recorded `widen` dispositions) and no human-authorization path may resume on
+   its own branch. Anything else is human work — stop; never stash, discard, or relocate it.
+   Uncommitted setup artifacts (`.autoloop/**`) are Setup's: stop with the Setup remedy; never
+   commit them inside a Dev run.
 2. Clean tree: fetch, switch to the configured base (`baseBranch` from `.autoloop/config.json`;
    the remote default branch until it is readable), pull fast-forward. A non-fast-forward pull is
    human divergence — stop and report. Use the base's STATE, not a session injection.
@@ -83,7 +84,7 @@ with the Setup remedy). Never continue past a failure. Then:
      and the runner still has write. Ignore other identities; fail closed on incomplete role
      evidence.
    - Invalid trusted markers stop **their unit, never the run**. Only a human trust choice uses
-     `unit.mjs --block --reason TRUST_REQUIRED`; name the choice and quote the refusal as `--note`.
+     `unit.mjs --block --reason POLICY_DENIED`; name the choice and quote the refusal as `--note`.
      Other faults are `fix` or `decide`. TERMINAL units: record the defect, no label or post.
      The driver seals unrepairable refusals as `terminal-refused`; the scan drops them.
    - `REVISION_REQUIRED` routes to Pitcrew, not a human block. A is historical; B is unreviewed.
@@ -96,10 +97,9 @@ with the Setup remedy). Never continue past a failure. Then:
      or `error` in the run record. `MERGE_PENDING` on a unit without `loop-blocked`: run step 10's
      `auto-merge.mjs <PR>` once. Git/GitHub facts are lifecycle authority.
 
-### No improvised inspection
+### Typed reads
 
-The guard blocks inline interpreters (`node -e`, `python -c`, interpreter heredocs) by policy —
-never engineer around it. Sanctioned reads: the prime summary;
+Read run state through the typed accessors: the prime summary;
 `node <plugin-tools>/snapshot-contract.mjs --summary <snapshotPath>`;
 `node <plugin-tools>/snapshot-contract.mjs --section <name> <snapshotPath>`; and plain `jq` with a
 single-quoted filter on files prime names, projecting the CONTRACT's shape, not `gh`'s, with no
@@ -116,14 +116,12 @@ hedges:
 
 Never in any command:
 
-- `--body "$(…)"`: write the body to a file in its OWN earlier step (Write tool) and pass
-  `--body-file` (the guard must read it to prove it is not an `/answer`); commits use
-  `git commit -F -` with a quoted heredoc or `-F <path>`.
-- `$?` decoration; a shell variable for a known path (write the literal).
 - A commit SHA typed from memory: copy it from the tool result, or let the machine supply it. The
   dispatch's `autoloop-dispatch-context-v1` stamp is the authority for the reviewed head; a
   review prompt never states one.
-- `<(…)`: byte-compare with `cmp -l a b | head`, or diff files.
+
+Untrusted text (an issue body, a review, a comment) goes to a file first and is posted with
+`--body-file <path>`; a commit message goes through `git commit -F <path>` or a quoted heredoc.
 
 ## The tools
 
@@ -164,7 +162,7 @@ moves any role to its fallback, stamped `(model unavailable)`.
 - Postures: `implement`, `simplify`, `fix` write (`Bash,Edit,Glob,Grep,Read,Write`,
   `acceptEdits`); the rest are read-only (`Glob,Grep,Read`, mode `plan`). `--tools` narrows, never
   widens.
-- Success: `{ok:true, role, tools, startupMs, ms, <payload>}` — `.plan` `{title, prBody, body}`,
+- Success: `{ok:true, role, tools, startupMs, ms, <payload>}` — `.plan` `{title, prBody, body, boundary}`,
   `.verdict` `{verdict, findings, rebuts}` (reviews), `.text` (writers). Failure:
   `{ok:false, step, error}` with stderr. Project fields (`jq '{ok, ms}'`,
   `jq -r .verdict.verdict`); never `cat` a result.
@@ -191,7 +189,7 @@ Premise, finding verification, and disposition are in-session judgment, no `--mo
 
 **Plan prompts state the contract**: `title` is plain ASCII `<type>: <summary>`, imperative,
 describing the change, never the artifact (no `plan(#N) v2`). A revision restates the WHOLE
-`{title, prBody, body}` contract, including exactly one `Closes #<N>` for the branch's issue
+`{title, prBody, body, boundary}` contract, including exactly one `Closes #<N>` for the branch's issue
 (`parseLoopClaim`) — check with `^(Closes|Fixes|Resolves) #<N>`, never a substring count.
 `INVALID_PLAN_TITLE`: take `rejectedPlan`'s body, write a compliant title yourself, proceed — never
 re-dispatch. `INVALID_PLAN_RESULT` means re-dispatch.
@@ -206,16 +204,16 @@ bash <plugin-tools>/dispatch-stream.sh \
 ```
 
 Then stage or park; the completion notification wakes the run. Collect the typed result from the
-output file, never the stream. The guard refuses only a bare `dispatch.mjs --role` in the
-background; a sub-minute dispatch may run `dispatch.mjs` directly in the foreground.
+output file, never the stream. A bare background `dispatch.mjs --role` dies with its task when the
+host kills it; a sub-minute dispatch may run `dispatch.mjs` in the foreground.
 
 **A killed stream task is not a killed dispatch.** The dispatch runs detached (pid in
 `<result.json>.pid`). A task ending `[killed]` or without a result: never re-dispatch first — run
 `node <plugin-tools>/dispatch.mjs --wait-file <result.json> --timeout-seconds 7200`. Exit 0: collect.
 Exit 3: the dispatch died. Check effects (`git status --short`, branch log): effects → lifecycle
 reconciliation; none → re-dispatch unchanged, serially. **Three consecutive kills on one step**:
-push commits, post the kill evidence on the issue, `node <plugin-tools>/unit.mjs --wait --issue <N>
---minutes 60`, take the next unit. Never diagnose an external kill.
+push commits, post the kill evidence on the issue, `unit.mjs --wait --issue <N> --minutes 60`, take
+the next unit. Never diagnose an external kill.
 
 Prompts go in a file; never inline untrusted text into a shell command. The role's standing brief
 (`tools/briefs/<role>.md`) is prepended, so the prompt carries only unit facts (artifact
@@ -265,8 +263,7 @@ The run record's `overlap:` line comes from `overlap-report.mjs`.
 
 ### Context economy — the window is a budget
 
-- **Batch independent reads and commands into ONE message** (parallel tool calls), never one per
-  turn: every turn re-reads the whole context.
+- **Batch independent reads and commands into ONE message**: every turn re-reads the context.
 - **Bulky artifacts move file-to-file**; the window sees titles, hashes, verdicts. Plan body:
   `jq -j .plan.body <result.json> > body.md`, post with `--body-file`, hash with the portable
   fingerprint helper `node <plugin-tools>/release-verify.mjs --fingerprint-stdin <body.md`.
@@ -274,12 +271,10 @@ The run record's `overlap:` line comes from `overlap-report.mjs`.
   JSON via `jq -n --rawfile`.
 - **Bounded reads only**: field projection, `tail -20` of logs, never a full read of dispatch
   output; a failure's stderr tail only.
-- **Narration is the delta**: say what CHANGED and what needs the human; never restate a result or
-  a ribbon. **A step is announced ONCE, by its ribbon** — never a second header line; extra detail
-  is a `--note` suffix.
-- **The scratchpad is a write target, never a cwd**: `gh pr view 238 --json title,body >
-  <scratchpad>/pr238.json`; never `cd <scratchpad> && …` (`git`, `gh`, the driver, the gate need
-  the repo cwd).
+- **Narration is the delta**: say what CHANGED and what needs the human.
+  **A step is announced ONCE, by its ribbon**; extra detail is a `--note` suffix.
+- **The scratchpad is a write target, never a cwd**: never `cd <scratchpad> && …` (`git`, `gh`,
+  the driver, the gate need the repo cwd).
 - **After compaction, re-fetch byte-exact values** (SHA, planHash, comment id, label) from GitHub
   or disk; never recall them. Prefer handing off at a unit boundary over compacting mid-unit.
 
@@ -294,7 +289,7 @@ Plan review is dispatched exactly once; revisions never trigger another plan rev
 
 Code review round 1 is full; rounds 2+ cover the fix delta and open rebuts. A verified
 Critical/Major outside a later delta is fixed and the next round is `full`
-(`REVIEW_FULL_ROUND_REQUIRED`), never silently clean. Cap handling: step 8.
+(`REVIEW_FULL_ROUND_REQUIRED`), never silently clean. The budget: step 8.
 
 The staged unit overlaps only as read-only planning/review; Git/GitHub mutations, authoring,
 labels, branches, pushes, and lifecycle writes stay serialized.
@@ -305,7 +300,7 @@ Eligible: an open issue with `loop-ready` (or a loop repair), complete provenanc
 dependency. Select and stage only from prime's `eligible`, which applies:
 
 - the label event pre-exists this run; nothing in the loop may apply, create, or rename
-  `loop-ready` (guard-enforced);
+  `loop-ready`;
 - the last `loop-ready` event's actor currently has write/maintain/admin;
 - body hash/`lastEditedAt` unchanged since approval, unless a trusted actor re-applied the label;
 - `## Blocked by` parsed; `dependencies` evidence and `blockerResolutionDecision()` prove every
@@ -344,24 +339,23 @@ base OID, and snapshot fingerprint.
 too). Without it the unit is not resumable: report it awaiting re-authorization with
 `gh issue edit <N> --add-label loop-ready` for its human, and take other work.
 
-**A resume at the review cap is decided, not claimed**: recorded rounds already include the
-closing round → take the `REVIEW_CAP_REACHED` decision (carve or re-plan, step 8) without claiming.
+**A resume past the fix budget is decided, not claimed**: recorded rounds already spent it →
+take the `REVIEW_REPLAN` choice (step 8) without claiming.
 
 **Blocking never strips `loop-ready`**; it removes `loop-started` and the `loop:*` step label only.
 **The unblock is equally one human action, and equally irreversible by the loop**: a trusted actor
-removing `loop-blocked` is the decision. Never re-block from an old block comment (read it as
-context); the only `loop-blocked` apply is a unit THIS run blocks, with a new reason comment.
+removing `loop-blocked` is the decision. Never re-block from an old block comment; the only
+`loop-blocked` apply is a unit THIS run blocks, with a new reason comment.
 
-**An answered block resumes itself.** Blocks end with `/answer <decision>`; prime lifts a block when a
-trusted actor (write/maintain/admin) posted `/answer` after the marker and prints `resumed: #N
-(@login: <answer>)`; it HOLDS (never lifts) a block with no loop marker or whose marker predates
-the current block (`held:`) — never hand-lift a held unit. The loop
-never writes `/answer`. The answer settles that one question in premise and plan (a plan
-contradicting it is wrong), nothing else.
+**An answered block resumes itself.** Blocks end with `/answer <decision>`; prime lifts a block when
+a trusted actor (write/maintain/admin) posted `/answer` after the marker and prints `resumed: #N
+(@login: <answer>)`; it HOLDS a block with no loop marker or whose marker predates the current
+block (`held:`) — never hand-lift a held unit. The loop never writes `/answer`. The answer settles
+that one question in premise and plan (a plan contradicting it is wrong), nothing else.
 
-Read the unit's `autoloop-decision-v1` and `autoloop-resumed-v1` comments first; a later trusted
-`/answer` reverses a decision — plan from it, never re-take it. Challenge premises against current
-code and STATE:
+`node <plugin-tools>/unit.mjs --decisions --issue <N> --out <path>` lists the unit's decisions
+with any later `/answer` (an answer reverses one; plan from it); its section goes in the plan
+prompt, PR body and run record. Challenge premises against current code and STATE:
 
 - **Already delivered** → `node <plugin-tools>/unit.mjs --obsolete --issue <N> --pr <M>` (or
   `--commit <sha>`, `--note "<line>"`); refused unless merged into / contained in the base; closes
@@ -369,9 +363,9 @@ code and STATE:
 - **Needs another open issue** → `node <plugin-tools>/unit.mjs --wait --issue <N> --on-issue <M>`
   (a machine comment, never a body edit); prime lifts it when #M closes.
 - Otherwise **Autonomy**: `fix` a stale premise in-unit or via `unit.mjs --repair --parent <N>
-  --blocks-parent`; `decide` ambiguity, duplicates of open work, open design choices, or oversized
-  scope with `unit.mjs --decide` before planning (a duplicate of delivered work is `--obsolete`);
-  `human` → `unit.mjs --block`. Never change scope silently.
+  --title "<…>" --body-file <path> --blocks-parent`; `decide` a gap, a design or scope question, or
+  duplicates of open work with `unit.mjs --decide` before planning (a duplicate of delivered work
+  is `--obsolete`); `human` → `unit.mjs --block`. Never change scope silently.
 
 Take the next unit after obsolete, wait, or block. Open the unit (adds `loop-started` and
 `loop:01-premise`):
@@ -385,7 +379,7 @@ A staged unit uses `--staged` and gets no labels until its claim.
 ### 2. Plan
 
 `step.mjs --to 02-plan`, then dispatch `--role plan` (wrapper shape; typed `{title, prBody,
-body}`). The prompt carries the FULL issue (never an excerpt), lane constraints, and paths to STATE, the
+body, boundary}`). The prompt carries the FULL issue (never an excerpt), lane constraints, and paths to STATE, the
 checklist, and the spec. The orchestrator keeps premise, selection, `planHash`, intent, and claim.
 **Never ask a read-only role to run a command; hand it the base as FILES**:
 `git worktree add --detach <scratchpad>/base-<sha8> origin/<base>` (`<sha8>`: the commit
@@ -416,54 +410,57 @@ authorized path identities (a total of six files is not a list of six permitted 
 ### 3. Review the plan once
 
 `full` lane: no claim until the verdict. Small and docs lanes: claim and implement concurrently; a
-Critical stops the implement dispatch for the revision path; Minors ride into code-review r1.
+Critical stops the implement dispatch for the revision; Minors ride into r1.
 
 `step.mjs --to 03-plan-review`, then exactly one fresh `--role plan-review` dispatch (wrapper
-shape), given the same base directory. It checks premises, scope, interface depth, tests, invariants, risk, and issue fitness, and
-explicitly **invariant completeness** (an incomplete invariant is a plan-level Major). Verify each
-Critical/Major; record fix/rebut/defer dispositions in-session; narrate as in step 8. **The
-revision is one `--role plan` dispatch** (with the base directory) carrying the plan, every
-verified finding, and its disposition. **A second plan-review dispatch is a loop defect, not a round**
-— never swap back to `loop:02-plan`; a Critical/Major the revision still carries rides into
-code-review r1 as context.
+shape, same base directory; an incomplete invariant is a plan-level Major). Verify each
+Critical/Major; record fix/rebut/defer dispositions; narrate as in step 8. **The revision is one
+`--role plan` dispatch** (with the base directory) carrying the plan, every verified finding, and
+its disposition. **A second plan-review dispatch is a loop defect, not a round** — never swap back
+to `loop:02-plan`; a Critical/Major the revision still carries rides into r1.
+
+**Overlap check before the claim** (full lane: after the verdict): `node <plugin-tools>/unit.mjs
+--overlap --issue <N> --boundary-file <plan-result.json> --snapshot <snapshotPath>`. A hit names
+the PR and paths: `node <plugin-tools>/unit.mjs --wait --issue <N> --on-pr <M> --paths <a,b/>`;
+take the next unit. Prime lifts it when #M merges or closes (`resumed: #N (PR #M merged)`):
+re-plan ONCE (one `--role plan` dispatch; frozen plan as input; new base; no plan review),
+re-check, claim. Premise never compares; an open issue stays `--on-issue`. A repair child whose
+boundary overlaps its parent's delivered PR waits on that PR the same way.
 
 ### 4. Persist intent and claim
 
-`step.mjs --to 04-claim`. Before the first external mutation, durably post the lifecycle intent
-marker binding issue and body hash, plan hash/reference, branch, planned base OID, merge policy,
-and phase. Write the closed request
+`step.mjs --to 04-claim`. The driver posts the lifecycle intent marker before any other mutation.
+Write the closed request
 `{schemaVersion:1,intent,baseBranch,lifecycleCommentId:null,plan:{body,title,prBody},premergeRecordDraft:null}`
-to a bounded file:
+to a file:
 
 ```bash
 node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 ```
 
-Compose it from `node <plugin-tools>/lifecycle-driver.mjs --example-request` plus
-`jq -n --rawfile` over the real values — never read the driver's source. Run it from the repository
-root. **`plan.body` is the frozen artifact, byte for byte**: once posted, fetch it from GitHub
-(`jq -j .body <response.json> > body.md`; `--jq`/`jq -r` add a newline); `sha256(plan.body)` must
-equal `intent.planHash`.
+Compose it from `lifecycle-driver.mjs --example-request` with `jq -n --rawfile` (no `boundary`);
+never read the driver's source; run at the repository root.
+**`plan.body` is the frozen artifact, byte for byte**: once posted, fetch it from GitHub
+(`jq -j .body`; `--jq`/`jq -r` add a newline); `sha256(plan.body)` must equal `intent.planHash`.
 
-**Never hand-query a unit's merge state** — the driver reports `phase`, `merged`, and the merge
-commit (raw `gh pr view --json` spells it `mergedAt`, plus `state`).
+**Never hand-query a unit's merge state**: the driver reports `phase`, `merged`, and the merge
+commit (`gh pr view --json` spells it `mergedAt`).
 
-The driver persists epoch 1, swaps `loop-started`/`loop:04-claim`, creates the planned-base branch
-and `chore: claim #N`, publishes it, posts the hash-bound frozen plan, opens one draft passing
-`parseLoopClaim()`, binds every identity into the marker, and returns `ACTIVE_DRAFT_RECOVERED` after
-stable readback. Retain its `lifecycleCommentId` (a node id, `IC_…`; never a numeric REST comment
-id) for every later call — it is the chain's ROOT and stays the captured ID for the unit's
-life; a newer marker's ID is refused (`captured lifecycle root comment is not canonical`).
-Never append a marker or perform these effects outside the driver.
+The driver claims (labels, branch, `chore: claim #N`, push, frozen plan comment, one draft passing
+`parseLoopClaim()`, marker) and returns `ACTIVE_DRAFT_RECOVERED` after stable readback. Retain its
+`lifecycleCommentId` (`IC_…` node id, never a REST id) for every later call:
+it is the chain's ROOT and stays the captured ID; a newer marker's ID is refused (`captured
+lifecycle root comment is not canonical`). Never append a marker outside the driver.
 
 ### 5. Implement
 
 `step.mjs --to 05-implement`, then dispatch `--role implement` (same wrapper shape). Give only the
 frozen plan, relevant STATE invariants, evidence, and named skills. Require TDD, lean
 self-documenting code, conventional commits, **one commit per completed plan task**, no co-author
-trailer, no PR/merge, no objective gate. A quick gate may run once after collection. A timed-out
-writer: inspect the branch against the plan's tasks and dispatch only the remainder — never retry
-blindly.
+trailer, no PR/merge, no objective gate. `extraPaths` (edits a plan task needed outside the
+boundary) reach round 1 via `--boundary-file <plan-result.json> --implement-result-file
+<implement-result.json>`. A quick gate may run once after collection. A timed-out writer: inspect
+the branch against the plan's tasks and dispatch only the remainder — never retry blindly.
 
 ### 6. Simplify
 
@@ -484,8 +481,8 @@ count prose, or table re-padding).
 `step.mjs --to 07-diff-review`, then a `--role diff-review` dispatch briefed with the simplified
 diff, `config.checklistFile`, frozen plan, invariants, boundary, and untrusted-input model (no
 commands), plus code-review, security, and domain guidance. Disposition like step 8; fixes go to one
-`--role implement` dispatch carrying every verified finding. The orchestrator never edits the
-checkout here; step 8 covers the fixes.
+`--role fix` dispatch carrying every verified finding. The orchestrator never edits the checkout
+here; step 8 covers the fixes.
 
 **Convergence closes only on a full-artifact round**, so after a fix batch dispatch the next round
 **full-artifact and closing**; delta scope is for mid-storm (several Criticals). Typical: r1 full →
@@ -526,45 +523,45 @@ Give every Critical/Major a stable ID; pass all prior findings forward and tell 
 **a finding id is its defect AND its severity — re-opening one keeps both; a different severity is
 a NEW id** (prose may change). After fixes, record the reviewed HEAD and dispatch a fresh reviewer
 over the new delta plus open rebuts. A rebut closes only when a fresh reviewer accepts that exact
-ID. Fixes are dispatched (`WRITER_MADE_NO_CHANGE` refuses a fixer that did nothing); the writer's
-model fixes, the other reviews.
+ID. Fixes are dispatched (`WRITER_MADE_NO_CHANGE` refuses a fixer that did nothing).
 
-- **Two consecutive Majors in one predicate** (rule, function) → the N+2 fix prompt derives the
-  COMPLETE invariant from the spec, enumerates every implied case, tests each, and satisfies it
-  jointly; say so in the disposition and scope the next review to the invariant. A third after
-  that is a planning failure — no more instance-scoped rounds.
-- **A Major raised in three rounds is deferred, not blocked**: `unit.mjs --repair --parent <N>`
-  (summary, evidence, round history; else fold into an open repair), disposition `defer` with
-  `Filed as follow-up #<N>`. Never before the third raising, never a Critical; a later re-raise is
-  the same deferral. List `deferredFindings` under `## Deferred findings` in the PR body.
-- **The cap is 20 rounds** (`REVIEW_ROUND_CAP`, not configurable). `REVIEW_CLOSING_ROUND_REQUIRED`:
-  fix, commit, one more `--scope full` round; the contract refuses any after it. At the cap: hand
-  off, carve, or re-plan, and move on — never ask, widen, or stop. The closing round is the last
-  chance to carve (honest only, recorded with `unit.mjs --decide`).
-- **`REVIEW_CAP_HANDOFF` — only Majors remain, under manual merge policy.** File each
-  `handedOffFindings` entry as a repair with the finding's summary, evidence and round history
-  (fold the rest when the budget refuses), add
-  `## Open findings at the review cap` to the PR body (one line each with its follow-up), and
-  continue to gate and publish.
-- **`REVIEW_CAP_REACHED`** (a Critical remains, or non-manual policy) is a `decide`: **re-plan** —
-  a `--blocks-parent` repair naming the wrongly enumerated invariant and its true domain, every
-  open finding, and the round history; `unit.mjs --decide` names more rounds as the rejected
-  alternative. The unit waits on the repair; once it merges, `unit.mjs --obsolete --issue <N> --pr
-  <repair PR>` and close the draft as superseded. Block only a `human`-class Critical. Print the
-  rail and take the next unit immediately.
+- **Annotate each verified finding's `predicate`** (rule, function); a Major re-raised, reworded
+  or re-filed on one predicate is the same finding.
+- **Two consecutive Majors on one predicate** → the next fix derives the COMPLETE invariant from
+  the spec, tests every implied case, and satisfies it jointly; say so in the disposition. A
+  third is a plan defect: re-plan.
+- **The budget is round 1 plus three fix rounds**; a fourth is refused
+  (`REVIEW_FIX_BUDGET_SPENT`). A verified Critical is always fixed next round. Minors never count
+  and never hold delivery: list them under `## Minor findings`.
+- **`REVIEW_REPLAN` — the budget is spent, Majors remain.** Sort each, on its verified evidence,
+  into one. `decide` (the reviewer is wrong, or a design disagreement): `unit.mjs --decide` naming
+  the finding id, disposition `rebut` whose rationale names the decision comment, one closing
+  `--scope full` round on the same head; a rejected decision is final. `re-plan` (regressing
+  fixes, or a plan defect), once: `plan` (input: the `openFindings` ledger and round history),
+  `implement`, one `--scope full` round recorded with `--plan-fingerprint <new plan>`; a second
+  is refused (`REVIEW_REPLAN_SPENT`); carving (below) is a re-plan. `defer` (outside the seam):
+  `unit.mjs --repair --parent <N>` (summary, evidence, round history), disposition `defer` naming
+  `seam` and `Filed as follow-up #<N>`; also for a Major raised in three rounds, never a
+  Critical; a re-raise is the same deferral. PR body: `deferredFindings` under `## Deferred
+  findings`, `scopeChanges` under `## Scope changes`.
+- **After the re-plan round, one round.** A Critical it raised: one fix round, then the closing
+  full round. A Major: `defer` (seam) or `decide` in the closing round, else `REVIEW_OPEN_FINDINGS`:
+  `step.mjs --to 08-code-review --round open-findings` (labels `human:decide`), a repair per
+  `openFindings` entry under `## Open findings`, push, PR stays draft, `unit.mjs --block --reason
+  POLICY_DENIED --question "<accept, rework or drop?>"`; a Critical still open blocks the same way.
 
 ### Carving out a predicate
 
 Honest only when the predicate is **separable** (no stub left), the remainder **independently
 valuable**, and the unit **no longer claims what it no longer does** — else re-plan. In one pass:
-file the new issue with `unit.mjs --repair --parent <N>` (complete invariant, every open finding
-verbatim with ID and evidence, round history, parent PR link); amend the frozen plan on the branch
-(carved behaviour → non-behaviour naming the issue); reduce the artifact, restoring touched code to
-its pre-unit state; state in the PR body what shipped, what did not, where the rest lives, and
-which acceptance criteria are not claimed; review the reduced artifact once more, full-artifact,
-carve out of scope (counts against the cap; cap spent → re-plan).
+file the new issue with `unit.mjs --repair --parent <N>` (complete invariant, open findings
+verbatim, round history, parent PR link); amend the frozen plan on the branch (carved behaviour →
+non-behaviour naming the issue); reduce the artifact, restoring touched code to its pre-unit
+state; state in the PR body what shipped, what did not, where the rest lives, and which acceptance
+criteria are not claimed; review the reduced artifact once more, full-artifact, carve out of scope
+(the unit's one re-plan round).
 
-`reviewTransition()` is authoritative for clean/block/cap behavior. **Build every round with the
+`reviewTransition()` is authoritative for clean/continue/draft/block. **Build every round with the
 tool, never by hand** (no `jq` program, skeleton, or script):
 
 ```bash
@@ -583,29 +580,25 @@ node <plugin-tools>/review-contract.mjs --append-round --evidence-file <evidence
 
 The tool derives identities, heads, fingerprints, versions and ledgers. Supply:
 
-- `annotations.json`: `[{id,verified,inScope}]` for every current finding.
+- `annotations.json`: `[{id,verified,inScope,predicate?}]` for every current finding.
   `inScope` is review scope, not edit authorization. Round 1: every finding is `inScope:true`.
-  A fix outside the frozen boundary needs a separate scope decision; `true` grants no edit authority.
-- `dispositions.json`: `[{findingId,disposition:"fix"|"rebut"|"defer",rationale,claim?,evidence?}]`
-  for each previous gating finding. Rebut needs `claim` and `evidence`; `defer` names `#<N>`;
-  a re-raised deferral needs no new entry.
+  A verified fix outside the boundary is a `widen` disposition.
+- `dispositions.json`: `[{findingId,disposition:"fix"|"widen"|"rebut"|"defer",rationale,claim?,
+  evidence?,paths?,seam?}]` for each previous gating finding. Rebut needs `claim` and `evidence`.
+  `widen` names `paths` (the next delta must change them; no secret path). `defer` names
+  `#<N>`, plus `seam` when the path is in another top-level package or service directory or
+  named out of scope; a re-raise needs no new entry.
 
-Refusals: `CHECKOUT_DIRTY`, `DISPOSITION_REQUIRED`, `REBUTTAL_EVIDENCE_REQUIRED`,
-`FINDING_ANNOTATIONS_REQUIRED`. The output names the transition; re-read with
+Every refusal names itself. The output names the transition; re-read with
 `node <plugin-tools>/review-contract.mjs < <evidence-n.json>`.
 
 Evidence rules: one `reviewRounds` entry per review dispatch; `artifactVersion` increases and
-`artifactFingerprint` changes except on escalation; unique `dispatchId`; author ≠ reviewer;
-round 1 is `full-artifact`. Closing `scope`: `full` = `full-artifact`, `delta` =
-`fix-delta-and-open-rebuttals`. `deltaBaseOid`: base for round 1, previous head thereafter.
-`priorFindings`: full Critical/Major ledger, resolved as `state: closed`, only open rebuts
-actionable. Keep `verdict` as dispatch parsed it, unedited; `projectConfig`/`configFingerprint` paired
-from prime (canonical: `jq -S -c -j`); no input cap.
+`artifactFingerprint` changes except on a round that fixed nothing; author ≠ reviewer. Keep
+`verdict` as dispatch parsed it, unedited.
 
 **A clean delta round does not converge the unit.** It returns `REVIEW_FULL_CLOSE_REQUIRED`:
-dispatch one `full-artifact` round over the same head, commit nothing first, and record it as a
-scope escalation (same head/version/fingerprint, new `dispatchId`, empty delta; allowed one round
-past the cap) with the tool:
+dispatch one `full-artifact` round over the same head, commit nothing first, and record it with
+the tool:
 
 ```bash
 node <plugin-tools>/review-contract.mjs --append-escalation-round \
@@ -613,14 +606,15 @@ node <plugin-tools>/review-contract.mjs --append-escalation-round \
   [--annotations-file <annotations.json>] --out <next-evidence.json>
 ```
 
-It refuses unless the evidence is a clean delta awaiting its close; if the round raises findings
-it refuses `FINDING_ANNOTATIONS_REQUIRED`: verify each and pass them.
+It refuses unless the evidence is a clean delta awaiting its close; findings the round raises
+need annotations: verify each and pass them.
 
-**Every refusal names itself**: read `INVALID_REVIEW_EVIDENCE`'s `evidenceGap` before touching the
-artifact; an empty gap is a contract defect. Pass only orchestrator verification/scope
-annotations; caller-authored rebut statuses and unsealed dispositions have no authority. Retain
-the byte-exact clean input as review-verdict evidence; `reviewedHead` is artifact-attested. Re-read HEAD before the gate; the delivery contract enforces
-committed = reviewed = gated = fetched PR head, and the publisher requires the exact clean checkout.
+Read `INVALID_REVIEW_EVIDENCE`'s `evidenceGap` before touching the artifact; an empty gap is a
+contract defect. Pass only orchestrator verification/scope annotations; caller-authored rebut
+statuses and unsealed dispositions have no authority. Retain the byte-exact clean input as
+review-verdict evidence; `reviewedHead` is artifact-attested. Re-read HEAD before the gate; the
+delivery contract enforces committed = reviewed = gated = fetched PR head, and the publisher
+requires the exact clean checkout.
 
 ### 9. Gate
 
@@ -656,9 +650,10 @@ instead of the app gate: `verify.mjs --project-root <unit tree>`. Doubt or a mix
 gate.
 
 After green, confirm the tree is clean. Red in the unit's own diff: load debugging guidance, fix via
-the delta-review path, re-gate; fixes not converging → re-plan as at `REVIEW_CAP_REACHED`. Red
+the delta-review path, re-gate; fixes not converging → re-plan as at `REVIEW_REPLAN`. Red
 outside the diff: re-gate once unchanged (a flake passes); red again → blocking repair
-(`unit.mjs --repair --parent <N> --blocks-parent`) taken next. Never weaken the gate.
+(`unit.mjs --repair --parent <N> --title "<…>" --body-file <path> --blocks-parent`) taken next.
+Never weaken the gate.
 
 ### 10. Publish, finalize, and submit
 
@@ -738,7 +733,7 @@ Invalidate, re-derive, and take the next unit unless: the queue is exhausted wit
 evidence (fresh full `scan.mjs`, every queue/lifecycle/dependency section complete); the context
 budget is spent; an invocation bound is reached; or a **run-scoped** guardrail failed (base dirty or
 diverged by human work, STATE/ProjectConfig unreadable, no model reachable for any remaining unit).
-A one-unit guardrail (protected path, refused predicate, failed premise, cap) blocks that unit.
+A one-unit guardrail (protected path, refused predicate, failed premise) blocks that unit.
 
 **Those four close the RUN: `node <plugin-tools>/prime.mjs --close-run`** — the Stop hook refuses a
 turn ending with eligible units and no close. A PARK is not a dark run: with a live dispatch stream
@@ -776,15 +771,8 @@ branch. Dirty → do not switch; report it.
 **Tools render per-unit status; repeat their output verbatim and add nothing.** Values are safe
 composed text, never raw issue or review bytes. One badge opens each status line:
 
-| badge | state |
-|---|---|
-| ⏳ | in progress |
-| ✅ | terminal success — shipped, converged, complete |
-| 🚧 | a review returned `fail`; the loop fixes the findings itself |
-| ❌ | blocked — a guardrail refused or the unit failed |
-| ⚠️ | needs a human — a human-block path, a decision, a Major the loop may not dispose |
-
-`⚠️` means stop and ask, nothing else. Precedence `⚠️` > `❌` > `🚧` > `⏳`.
+⏳ in progress · ✅ terminal success · 🚧 a review returned `fail`, the loop fixes it · ❌ blocked
+(a guardrail refused or the unit failed) · ⚠️ needs a human. Precedence `⚠️` > `❌` > `🚧` > `⏳`.
 
 After prime, open the run frame once (never on resume; eligible = prime's `eligible`; reviews row
 from prime's `models`, e.g. `GPT-6-ASTRA`):
@@ -800,7 +788,7 @@ from prime's `models`, e.g. `GPT-6-ASTRA`):
 **Every step begins with one call, exactly once, no-ops included:**
 
 ```bash
-node <plugin-tools>/step.mjs --issue <N> --to <step> [--model <id>] [--round <r>/<cap>] \
+node <plugin-tools>/step.mjs --issue <N> --to <step> [--model <id>] [--round <round>] \
   [--fallback] [--badge <b>] [--note "<short detail>"] [--staged]
 ```
 
@@ -813,8 +801,8 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
 ```
 
 - `--model`: the result's `model`; omit for your own steps
-  (`⚪ ORCHESTRATOR`). `--fallback` when it ran. Review/fix rounds pass `--round <r>/<cap>` (a fix
-  round is `08-fix`); plan review takes none.
+  (`⚪ ORCHESTRATOR`). `--fallback` when it ran. Review/fix rounds pass `--round full|fix-<1..3>|
+  re-plan|open-findings` (a fix round is `08-fix`); plan review takes none.
 - Orphan reconciliation announces `00-reconcile` before any fetch or driver call. `⚠️ #N skipped
   <steps>` is expected only for 06; any other skip is a defect to fix first.
 - The dot is the model's colour (🟣 Fable, 🟠 Opus, 🟢 Astra, 🔵 Sonnet, 🟡 Haiku, ⚪ other).
@@ -862,7 +850,8 @@ In prose: the 🧊 frozen plan, and model names UPPER-CASE in code spans (`` `CL
 
 Dev invokes exactly these entry points: `prime.mjs` (`--json` to open a run, `--close-run` to
 close it, `--park` to sleep it), `step.mjs` (`--to`, `--resumed`, `--card`, `--parked`; the
-SessionStart hook runs `--card-run`), `unit.mjs` (`--obsolete`/`--wait`), `dispatch.mjs`,
+SessionStart hook runs `--card-run`), `unit.mjs` (`--obsolete`, `--wait`, `--overlap`, `--block`,
+`--repair`, `--decide`, `--decisions`), `dispatch.mjs`,
 `scan.mjs`, `snapshot-contract.mjs` (invalidate/summary/section/`--unit`), `review-contract.mjs`,
 `publish-verdict.mjs`,
 `lifecycle-driver.mjs`, `escalate-paths.mjs`, and `auto-merge.mjs`, the terminal merge
@@ -873,21 +862,23 @@ a contract module directly.
 
 Every obstacle is exactly one class; only `human` stops the unit:
 
-- **`human`** — trust/authorization (`TRUST_REQUIRED`), irreversible acts (`IRREVERSIBLE_ACTION`),
-  an actual denial (`POLICY_DENIED`), or an unstated product/contract value with no better choice
-  (`UNSPECIFIED_VALUE`). Trust includes merge, credentials, protected paths, branch protection,
-  and `loop-ready`; irreversible acts include data/history destruction.
+- **`human`** — an authorization only a human gives: an irreversible external act
+  (`IRREVERSIBLE_ACTION`: production write, provisioning, message sent, data/history destruction)
+  or a denial (`POLICY_DENIED`: a secret, a dependency install, a permission — merge, credentials,
+  protected paths, branch protection, `loop-ready` — a STATE exception, or a finding surviving the
+  re-plan round).
   `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question "<one line>"`
   (`--gate human:authorize` for protected paths) records `/answer`, swaps labels, and keeps
-  `loop-ready`. Unknown codes are refused; never rename a tool fault to a human reason.
+  `loop-ready`. Other codes are refused; a specification gap is a `decide`, never a block.
 - **`fix`** — code, tests, docs, CI config, a dependency, or a correctable premise. In the unit's
   lane fix it in-unit; otherwise `node <plugin-tools>/unit.mjs --repair --parent <N> --title "<…>"
   --body-file <path>` (`--blocks-parent` when the unit needs it) and take it next, or carry on if
   the unit does not depend on it.
-- **`decide`** — a judgment call with a recommendable option (ambiguity, scope correction, design
-  choice, oversized work, a Critical open at the cap). Record it FIRST with
-  `node <plugin-tools>/unit.mjs --decide --issue <N> --choice "<…>" --why "<evidence>" --alternatives
-  "<a>; <b>"`, then continue. A human reverses one with `/answer <what instead>`; never re-take it.
+- **`decide`** — a judgment call with a recommendable option: an issue/spec contradiction, a
+  missing value the loop can choose, a design, ratification or scope question, oversized work, a
+  Major open past the fix budget. Record it FIRST with
+  `node <plugin-tools>/unit.mjs --decide --issue <N> --question "<one line>" --choice "<…>" --why
+  "<evidence>" --alternatives "<a>; <b>"`, then continue. A human reverses one with `/answer`.
 
 The `human` list is closed: anything else (an unexplained refusal, an unnamed state, a loop defect)
 is `fix` or `decide` — never "when unsure, block". Never take a `decide` touching a `human` matter;
@@ -897,14 +888,17 @@ remedy) stops the RUN; never improvise past a guardrail.
 
 ## Hard rules
 
-- Fix, decide, or block — in that order of preference. A verified late Critical/Major or an
-  unresolved cap finding stops the unit shipping as it stands, never the run.
+- Fix, decide, or block — in that order of preference. A verified late Critical/Major or an open
+  finding past the budget stops the unit shipping as it stands, never the run.
 - Never use an incomplete section to prove absence.
 - Read STATE once from a current un-compacted injection or from disk after the base switch.
 - One startup snapshot plus mutation-driven invalidation; the configured base for every
   diff/classifier/gate decision; writers serialized, reviewers fresh and read-only.
 - Never claim delivered before exact-head CI green. Never run a merge command (step 10's
-  `auto-merge.mjs` is the one exception).
+  `auto-merge.mjs` is the one exception). The guard judges alias values, function, case and trap
+  bodies, and fed shells as the command; a hidden alias or a raw API write is refused. `.github/**`
+  is protected; a dependency or install-script change is refused at the merge gate as
+  `human:authorize`, and the finalizer labels a widening into a protected path.
 - Call every plugin tool as ONE bare command — no `&&`, `;`, pipe, `cd X &&`, or `> file`; use its
   own `--out`/flags. The one exception is step 9's `publish-verdict.mjs gate <head> > <log> 2>&1`.
   Never write under `.git/` with Write, Edit, or a redirect; recordings there go through a tool.

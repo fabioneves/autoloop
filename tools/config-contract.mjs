@@ -15,7 +15,7 @@ export const CONFIG_VERSION = '0.28.0';
 
 // 0.27.0 carried four numeric caps. 0.28.0 retires the block (operator,
 // 2026-09-28): review convergence is a fixed plugin bound (review-contract's
-// REVIEW_ROUND_CAP), the slice budgets only ever produced notes, and
+// FIX_ROUND_BUDGET since 0.69.0), the slice budgets only ever produced notes, and
 // gateRetriesPerUnit was never read by any tool or skill instruction.
 const CAPS_CONFIG_VERSION = '0.27.0';
 
