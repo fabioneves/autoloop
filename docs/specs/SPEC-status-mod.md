@@ -18,6 +18,32 @@ Today the same facts are spread over `step.mjs --card-run` text, GitHub labels, 
 6. Autoloop owns the mod. It ships in the plugin, on by default, and a project turns it off in `.autoloop/config.json` with `"ui": { "status": false }`.
 7. The mod shows only in a session that owns a `/autoloop:dev` run. The proxy column alone never makes it appear.
 
+## Release two (2026-10-12, after the first live run)
+
+The first live band was read as a line of bare text: no cell boundaries, no spacing, no highlight
+on the row that needs a human; `e: expand` typed an `e` into the prompt; the proxy read OFF while
+it served every request because it has no `/status` endpoint yet. Decisions:
+
+8. **A card, not a line.** The band is one bordered box (`round`) with one padded cell per
+   column, a dim upper-case label on each (`LOOP`, `WORK`, `PROXY`), and a `│` between cells.
+   The needs-you row is a strip with its own background across the box, `!` bold in the critical
+   color. The header row is inside the box: `◆ autoloop · checked 3s ago` left, `/autoloop: console`
+   right. Item 7's column texts stay.
+9. **No hotkey hint.** The host presses a band `Button` only while the band holds the keyboard
+   (`ctrl+x tab` or a click); from the prompt the key is typed. The `expand` button and item 13
+   are removed. The hint names the command.
+10. **Three proxy states.** `● ON · n requests` (200 and a parsed body), `◐ UP · no status`
+    (the port answers, but not 200 or not parsable), `○ OFF` (no connection within 2 s). Item 3's
+    two states are replaced; `readProxy` returns `{ on: 'on' | 'up' | 'off' }`.
+11. **The pane becomes the central.** Items 14 and 15 are replaced by [Central](SPEC-central.md):
+    one pane with four tabs (Run, Live, Units, Log), dispatch cards and wake rows in the
+    transcript, and the spinner word. The toast (item 16) stays.
+12. **Renderer.** The pane docks as a sidebar only in the fullscreen renderer (`/tui fullscreen`,
+    or `CLAUDE_CODE_NO_FLICKER=1` at launch); on the classic renderer it opens inline above the
+    prompt. The mod works on both; the sidebar is the intended layout for a loop session.
+13. **PR with the issue.** Everywhere a unit is named (Loop cell, needs-you strip, toast) the
+    open loop pull request follows the issue: `#517 · PR #530`.
+
 ## Required behavior
 
 ### Data sources
