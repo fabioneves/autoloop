@@ -1,6 +1,7 @@
 ---
 name: setup
-description: Initialize, configure, devendor, or diagnose Autoloop in a repository. Autoloop is a global plugin; a repository carries only .autoloop/config.json and its own docs. Doctor is read-only.
+description: Initialize, configure, devendor, or diagnose Autoloop in a repository. Doctor is read-only.
+disable-model-invocation: true
 ---
 
 # autoloop:setup — init / devendor / config / doctor
@@ -36,7 +37,7 @@ own data:
 | Path | What |
 |---|---|
 | `.autoloop/config.json` | ProjectConfig, overrides only; plugin defaults fill the rest |
-| `.autoloop/STATE.md` | Loop policy prose: mission, invariants, protected ground. Injected every session |
+| `.autoloop/STATE.md` | Loop policy prose: mission, invariants, protected ground. Read by every run |
 | `.autoloop/checklist.md` | Optional review checklist; the plugin's own is used when absent |
 | `docs/agentic/ARCH.md`, `docs/agentic/LESSONS.md` | Repository knowledge, visible to `rg`/`fd` |
 
@@ -59,8 +60,7 @@ Nothing else: no `tools/agentic/`, no autoloop entries in `.claude/settings.json
 ## Prime
 
 1. `<plugin-tools>` is `<this skill's real dir>/../../tools` — the plugin root's
-   `tools/`, a sibling of `skills/`. In a devendored repository the SessionStart preflight
-   prints it (`INFO  plugin tools: …`). Write it as a literal absolute path, never a shell variable:
+   `tools/`, a sibling of `skills/`. Write it as a literal absolute path, never a shell variable:
    the guard refuses a command it cannot resolve statically, `$CLAUDE_PLUGIN_ROOT` included.
 2. Print the banner.
 3. Version currency, one pipeline — `<cache>` is the versions directory two levels above the plugin

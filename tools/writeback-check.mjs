@@ -61,13 +61,16 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
 import { BLOCKING_LABELS } from './lifecycle-contract.mjs';
-import { loopRunIsLive, loopRunIsOpen, ownRunMarkers, runMarkerDirectory } from './run-markers.mjs';
-import { guardedRoot, hookRoot } from './hook-root.mjs';
+import {
+  loopRunIsLive, loopRunIsOpen, ownRunMarkers, processStart, runMarkerDirectory, sessionOwnerPid,
+} from './run-markers.mjs';
+import { guardedRoot } from './hook-root.mjs';
 import { blockedByIssueNumbers } from './snapshot-contract.mjs';
 
 // The hook runs from the plugin, so its own location never names the
-// repository: CLAUDE_PROJECT_DIR does.
-const ROOT = hookRoot();
+// repository: CLAUDE_PROJECT_DIR does, read only once the session is known
+// to own a run (main).
+let ROOT = null;
 const MAX_DRAFT_REMINDER_BYTES = 64 * 1024;
 
 function ghJson(cmd) {
@@ -986,8 +989,19 @@ function selfTest() {
   return ok;
 }
 
-// Plugin hooks fire in every repository: the Stop hook checks only a
-// devendored autoloop repository, found from CLAUDE_PROJECT_DIR.
+// The latch prime writes, naming the conversation that owns the run, in the
+// fixture's HOME.
+function ownLatch(home, sessionId, scope) {
+  const owner = sessionOwnerPid(process.pid);
+  const directory = join(home, '.claude', 'autoloop', 'run-latches');
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, `${owner}.json`), JSON.stringify({
+    version: 2, owner, ownerStart: processStart(owner), baseBranch: 'main', scope, sessionId,
+  }));
+}
+
+// Plugin hooks fire in every session: the Stop hook checks only the session
+// that owns a run, whatever the repository holds.
 function gateCases() {
   const scratch = mkdtempSync(join(tmpdir(), 'writeback-gate-'));
   try {
@@ -995,19 +1009,20 @@ function gateCases() {
     mkdirSync(shim);
     writeFileSync(join(shim, 'gh'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     const project = join(scratch, 'project');
-    mkdirSync(project);
-    const hook = () => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
-      input: '{}', encoding: 'utf8', cwd: tmpdir(),
-      env: { ...process.env, CLAUDE_PROJECT_DIR: project, PATH: `${shim}:${process.env.PATH}` },
-    });
-    const unrelated = hook();
-    mkdirSync(join(project, '.autoloop'));
+    const home = join(scratch, 'home');
+    mkdirSync(join(project, '.autoloop'), { recursive: true });
     writeFileSync(join(project, '.autoloop', 'config.json'), '{}');
-    const active = hook();
+    const hook = () => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+      input: '{"session_id":"S"}', encoding: 'utf8', cwd: tmpdir(), timeout: 30000, killSignal: 'SIGKILL',
+      env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: project, PATH: `${shim}:${process.env.PATH}` },
+    });
+    const unowned = hook();
+    ownLatch(home, 'S', project);
+    const owned = hook();
     return [{
-      name: 'the Stop hook is silent outside an autoloop repository and checks inside one',
-      ok: unrelated.status === 0 && unrelated.stdout === ''
-        && active.status === 0 && active.stdout.includes('no GitHub data was reachable'),
+      name: 'the Stop hook is silent for a session that owns no run and checks the owning session',
+      ok: unowned.status === 0 && unowned.stdout === ''
+        && owned.status === 0 && owned.stdout.includes('no GitHub data was reachable'),
     }];
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -1070,14 +1085,17 @@ else if (args[0] === 'issue' && args[1] === 'list') {
 } else throw Error('unexpected mock command');
 process.stdout.write(JSON.stringify(result));
 `, { mode: 0o755 });
-    const hook = ({ root = project, session = 'session-a', envSession = '', active = false, timeout = 30000 } = {}) => spawnSync(
-      process.execPath, [fileURLToPath(import.meta.url)], {
+    // Each call's conversation owns the run, as a re-prime after /clear makes it.
+    const home = join(scratch, 'home');
+    const hook = ({ root = project, session = 'session-a', envSession = '', active = false, timeout = 30000 } = {}) => {
+      ownLatch(home, session ?? 'session-a', root);
+      return spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
         cwd: scratch, encoding: 'utf8', timeout, killSignal: 'SIGKILL',
         input: JSON.stringify({ stop_hook_active: active, ...(session === null ? {} : { session_id: session }) }),
-        env: { ...process.env, CLAUDE_PROJECT_DIR: root, CLAUDE_CODE_SESSION_ID: envSession,
+        env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: root, CLAUDE_CODE_SESSION_ID: envSession,
           MOCK_WRITEBACK_STATE: statePath, PATH: `${bin}:${process.env.PATH}` },
-      },
-    );
+      });
+    };
     const showsDraft = (result) => result.status === 0 && result.stdout.includes('PR #3');
     const silent = (result) => result.status === 0 && result.stdout === '';
     save();
@@ -1191,8 +1209,8 @@ process.stdout.write(JSON.stringify(result));
         ok: silent(commentOnly) && showsDraft(newHead) && silent(headRepeated) },
       { name: 'a second session has independent draft reminders',
         ok: showsDraft(otherSession) && silent(otherRepeated) },
-      { name: 'missing session identity fails open and the environment identity is a fallback',
-        ok: noIdentity.every(showsDraft) && showsDraft(fallback[0]) && silent(fallback[1]) },
+      { name: 'a Stop that names no session, or only an environment identity, owns no run and stays silent',
+        ok: noIdentity.every(silent) && fallback.every(silent) },
       { name: 'unchanged non-draft diagnostics are never suppressed',
         ok: gap.every((result) => result.status === 0 && result.stdout.includes('invalid loop ownership'))
           && !gap[1].stdout.includes('PR #3') },
@@ -1253,19 +1271,17 @@ process.stdout.write(JSON.stringify(result));
 
 function main() {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  // Outside an open run only a devendored autoloop repository is checked;
-  // inside one the Stop hook never stands down.
-  if (guardedRoot(ROOT) === null) process.exit(0);
-
-  // Never re-block a Stop that a previous block already continued.
-  let sessionId = process.env.CLAUDE_CODE_SESSION_ID;
+  let payload = null;
   try {
-    const payload = JSON.parse(readFileSync(0, 'utf8'));
-    if (payload?.stop_hook_active) process.exit(0);
-    if (typeof payload?.session_id === 'string' && payload.session_id.trim()) sessionId = payload.session_id;
-  } catch {
-    /* no payload (manual run) — proceed */
-  }
+    payload = JSON.parse(readFileSync(0, 'utf8'));
+  } catch { /* no payload names no session, so no owner */ }
+  // Never re-block a Stop that a previous block already continued.
+  if (payload?.stop_hook_active) process.exit(0);
+  // Only the session that owns a run is checked (hook-root.mjs); for it the
+  // Stop hook never stands down, whatever the checkout says.
+  const sessionId = payload?.session_id;
+  ROOT = guardedRoot(sessionId);
+  if (ROOT === null) process.exit(0);
 
   const prs = ghJson('pr list --state open --json number,headRefName,headRefOid,baseRefName,body,isDraft,updatedAt --limit 50');
   const issues = ghJson('issue list --label loop-blocked --state open --json number,comments --limit 50');

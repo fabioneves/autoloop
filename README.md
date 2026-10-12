@@ -183,10 +183,10 @@ kill switch stay enforced regardless.
 | Where | What |
 |---|---|
 | `.autoloop/config.json` | Settings, overrides only. |
-| `.autoloop/STATE.md` | Policy prose: mission, invariants, protected ground. Injected into every session. |
+| `.autoloop/STATE.md` | Policy prose: mission, invariants, protected ground. Every run reads it. |
 | `.autoloop/checklist.md` | Optional review criteria; the plugin's checklist when absent. |
 | `docs/agentic/ARCH.md`, `docs/agentic/LESSONS.md` | Architecture map and durable memory, yours to edit. |
-| The plugin | Every tool, role brief and hook (`hooks/hooks.json`); they act only in a repository with `.autoloop/config.json`. |
+| The plugin | Every tool, role brief and hook (`hooks/hooks.json`). A hook acts only for the session that owns a run, from its prime to `--close-run` or `/clear`; every other session sees no hook effect. |
 | `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch. Never committed. |
 | Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked` / `loop-waiting` / `loop-obsolete` / `loop-decided` / `loop-repair`, the `loop-digest` issue; lifecycle markers, the frozen plan, and the run record. |
 

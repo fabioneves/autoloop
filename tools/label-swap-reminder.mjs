@@ -18,7 +18,8 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { guardedRoot, hookRoot } from './hook-root.mjs';
+import { guardedRoot } from './hook-root.mjs';
+import { processStart, sessionOwnerPid } from './run-markers.mjs';
 
 // Claude Code 2.1.234 removed the task tools outright but only DEFERRED
 // PushNotification; a live run read the visible roster as the whole roster,
@@ -290,32 +291,29 @@ function selfTest() {
     console.error('FAIL: ARCH nudge contradicts the no-freshness-metadata contract');
   }
   if (/ARCH\.md/.test(withoutMap)) { fail++; console.error('FAIL: archMap:false leaked ARCH.md nudge'); }
-  // A plugin hook fires in every repository: it reminds only inside a
-  // devendored autoloop repository, read from CLAUDE_PROJECT_DIR.
+  // A plugin hook fires in every session: it reminds only the session that
+  // owns a run, whatever the repository holds.
   {
     const scratch = mkdtempSync(join(tmpdir(), 'label-swap-gate-'));
     try {
-      const hook = (command = 'gh issue edit 4 --add-label loop-blocked') => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
-        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }),
-        encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: scratch },
+      const home = join(scratch, 'home');
+      const hook = (session) => spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify({ session_id: session, tool_name: 'Bash', tool_input: { command: 'gh issue edit 4 --add-label loop-blocked' } }),
+        encoding: 'utf8', cwd: tmpdir(), timeout: 15000, env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: scratch },
       }).stdout;
-      const unrelated = hook();
-      // A legacy install being devendored hears setup's ribbons, and nothing
-      // else: its own vendored reminder hook still handles the loop.
-      mkdirSync(join(scratch, 'docs', 'agentic'), { recursive: true });
-      writeFileSync(join(scratch, 'docs', 'agentic', 'STATE.md'), '# STATE\n');
-      const legacySetup = hook('node /p/tools/setup.mjs --devendor --root /tmp/w');
-      const legacyLoop = hook();
-      if (!/4\/5 WRITE/.test(legacySetup) || legacyLoop !== '') {
-        fail++;
-        console.error('FAIL: a legacy install hears setup\'s ribbons and no loop reminders');
-      }
       mkdirSync(join(scratch, '.autoloop'));
       writeFileSync(join(scratch, '.autoloop', 'config.json'), '{}');
-      const active = hook();
-      if (unrelated !== '' || !/PushNotification/.test(active)) {
+      const unowned = hook('S');
+      const owner = sessionOwnerPid(process.pid);
+      mkdirSync(join(home, '.claude', 'autoloop', 'run-latches'), { recursive: true });
+      writeFileSync(join(home, '.claude', 'autoloop', 'run-latches', `${owner}.json`), JSON.stringify({
+        version: 2, owner, ownerStart: processStart(owner), baseBranch: 'main', scope: scratch, sessionId: 'S',
+      }));
+      const owned = hook('S');
+      const otherSession = hook('T');
+      if (unowned !== '' || otherSession !== '' || !/PushNotification/.test(owned)) {
         fail++;
-        console.error('FAIL: the reminder is silent outside an autoloop repository and speaks inside one');
+        console.error('FAIL: the reminder speaks to the session that owns a run and to no other');
       }
     } finally {
       rmSync(scratch, { recursive: true, force: true });
@@ -335,14 +333,10 @@ if (entry) {
       try {
         const input = JSON.parse(raw);
         if (input.tool_name !== 'Bash') process.exit(0);
-        const root = guardedRoot();
-        // A legacy install (being devendored) hears setup's ribbons only; its
-        // vendored reminder hook still handles the loop.
-        const legacy = root === null && existsSync(join(hookRoot(), 'docs/agentic/STATE.md'));
-        if (root === null && !legacy) process.exit(0);
-        const msg = legacy
-          ? setupPhaseReminder(input.tool_input?.command)
-          : reminderFor(input.tool_input?.command, { archMap: existsSync(join(root, 'docs/agentic/ARCH.md')) });
+        // Only the session that owns a run hears riders (hook-root.mjs).
+        const root = guardedRoot(input.session_id);
+        if (root === null) process.exit(0);
+        const msg = reminderFor(input.tool_input?.command, { archMap: existsSync(join(root, 'docs/agentic/ARCH.md')) });
         if (msg) {
           console.log(JSON.stringify({
             hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: msg },

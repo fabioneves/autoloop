@@ -1,6 +1,6 @@
 ---
 name: pitcrew
-description: Service Autoloop-owned pull requests after human review, failing CI, or base conflicts. Reuse Dev's prime when called by Dev; a standalone invocation primes for itself.
+description: Service Autoloop-owned pull requests only, after human review, failing CI, or base conflicts; never any other PR. Reuse Dev's prime when called by Dev; a standalone invocation primes for itself.
 ---
 
 # autoloop:pitcrew — return path
@@ -69,7 +69,7 @@ filter) on the exact file the prime summary names, which the guard sanctions.
 ## Dispatch
 
 **Every tool runs from the plugin.** Resolve this skill's real path, then
-`<skill dir>/../../tools/` (the SessionStart preflight prints it); every `<plugin-tools>`
+`<skill dir>/../../tools/`; every `<plugin-tools>`
 below is that directory, written as a literal absolute path in the command you actually run.
 Repository policy is data in the base's `.autoloop/config.json`.
 

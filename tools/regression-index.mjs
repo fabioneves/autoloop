@@ -461,15 +461,15 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'writeback-check.mjs',
-        anchor: 'const ROOT = hookRoot();',
+        anchor: 'ROOT = guardedRoot(sessionId);',
       }),
       Object.freeze({
         file: 'hook-root.mjs',
-        anchor: 'export function guardedRoot(projectRoot = hookRoot()) {',
+        anchor: 'return owned === null || owned.unreadable ? null : hookRoot();',
       }),
       Object.freeze({
         file: 'command-guard.mjs',
-        anchor: 'a plugin run keeps every hook acting; a vendored run does not',
+        anchor: 'the owning session keeps every hook acting; a marker alone does not',
       }),
       Object.freeze({
         file: 'hook-root.mjs',
@@ -477,7 +477,7 @@ export const INCIDENTS = Object.freeze([
       }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
-        anchor: 'const root = guardedRoot();',
+        anchor: 'const root = guardedRoot(input.session_id);',
       }),
     ]),
   }),
@@ -1882,6 +1882,39 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'step.mjs', anchor: 'a human or blocked card supersedes a pending delivery, and a delivered card cannot reopen a finished unit' }),
       Object.freeze({ file: 'step.mjs', anchor: 'a legacy delivered record stays readable and unchanged, pending only while its open PR is observed' }),
       Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'a merged close-out supersedes a pending delivery once, and a reopened issue gets a human card' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'autoloop-acted-in-sessions-not-running-it',
+    date: '2026-10-12',
+    symptom: 'Human sessions in an Autoloop repository got the preflight and STATE injected, four gh '
+      + 'queries and reminders on every Stop, riders, transcript copies and guard refusals, and a '
+      + 'crashed guard refused there while any stale marker remained; loop skills could trigger on '
+      + 'ordinary requests.',
+    cause: 'Every hook decided through guardedRoot(), which answered for any repository with '
+      + '.autoloop/config.json, run or not. One predicate now decides (run-markers.mjs ownedRun): '
+      + 'this Claude process\'s open latch, its start time matching, naming the hook input\'s '
+      + 'session_id. Prime writes it, --close-run closes it, /clear changes the session. Loop '
+      + 'skills are explicit-invocation only.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'export function ownedRun({ sessionId, ...where } = {}) {' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'a missing session id, or another session (after /clear), is no ownership' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'a closed latch is no ownership' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'a latch whose pid now belongs to another process (start time differs) is no ownership' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'a later prime re-opens ownership for its own conversation and keeps the pinned base' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'a marker names its pids with start times, and a reused ancestor pid matches nothing' }),
+      Object.freeze({ file: 'hook-root.mjs', anchor: 'function sessionOwnershipCases(check) {' }),
+      Object.freeze({ file: 'hook-root.mjs', anchor: 'the owning session keeps the preflight and STATE, the Stop check, the rider and the transcript copy' }),
+      Object.freeze({ file: 'hook-root.mjs', anchor: 'without a run, the guard still refuses a prime compound that deletes run state, and a prime in a foreign repository' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'const latched = ownedRun({ sessionId: payload?.session_id });' }),
+      Object.freeze({ file: 'edit-guard.mjs', anchor: 'if (ownedRun({ sessionId: payload?.session_id }) === null) process.exit(0);' }),
+      Object.freeze({ file: 'subagent-transcript.mjs', anchor: 'const root = guardedRoot(payload?.session_id);' }),
+      Object.freeze({ file: 'session-preflight.sh', anchor: 'REPO_DIR="$(node "$TOOLS_DIR/hook-root.mjs" --guarded-root 2>/dev/null)" || exit 0' }),
+      Object.freeze({ file: 'prime.mjs', anchor: 'export function closeRun(' }),
+      Object.freeze({ file: '../hooks/hooks.json', anchor: 'run-latches/$PPID.json' }),
+      Object.freeze({ file: 'verify.mjs', anchor: 'a crashed plugin guard refuses while the session holds an open latch, and allows without one or after its close' }),
+      Object.freeze({ file: 'verify.mjs', anchor: 'a hook with a statusMessage is refused' }),
+      Object.freeze({ file: 'verify.mjs', anchor: "export const EXPLICIT_ONLY_SKILLS = Object.freeze(['codebase-design', 'dev', 'lean-code', 'queue-trace', 'setup', 'shape']);" }),
     ]),
   }),
 ]);

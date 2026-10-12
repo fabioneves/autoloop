@@ -9,7 +9,6 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -76,9 +75,10 @@ const PLUGIN_TOOL_FILES = Object.freeze([
 ]);
 // Global install: the plugin ships these hooks in hooks/hooks.json, each
 // running the plugin's own copy. Exactly one handler per tool, on its event
-// and matcher, with exactly this command. The command guard fails closed only
-// inside an autoloop repository: a crashed guard refuses there, while a broken
-// plugin never refuses commands in every other repository.
+// and matcher, with exactly this command, and no statusMessage (it prints in
+// every session). The command guard fails closed only for a session that owns
+// a run: a crashed guard refuses there, while a broken plugin never refuses
+// commands in any other session.
 const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/tools';
 export const PLUGIN_HOOKS = Object.freeze([
   { name: 'session-preflight.sh', event: 'SessionStart', matcher: null, command: `bash "${PLUGIN_TOOLS}/session-preflight.sh"` },
@@ -88,15 +88,13 @@ export const PLUGIN_HOOKS = Object.freeze([
     event: 'PreToolUse',
     matcher: 'Bash|AskUserQuestion',
     // The guard's own verdict (0 or 2) is final. Anything else is a crash: it
-    // refuses where the project's top level has any .autoloop entry (a
-    // symlink or unreadable directory included, as the resolver treats them)
-    // or the repository has a plugin run marker (one that records its base: a
-    // pre-devendor branch mid-run), never a legacy install's own marker.
+    // refuses while the session's Claude process (the shell's parent) holds a
+    // latch that is not closed — decided by the latch file alone, with no git
+    // call; a latch that is not a plain file refuses too.
     command: `node "${PLUGIN_TOOLS}/command-guard.mjs"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; `
-      + 'r=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || printf %s "$CLAUDE_PROJECT_DIR"); '
-      + '{ [ -e "$r/.autoloop" ] || [ -L "$r/.autoloop" ]; } && exit 2; '
-      + 'c=$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) '
-      + '&& grep -qs \'"baseBranch":"\' "$c"/autoloop/run/*.json && exit 2; exit 0',
+      + 'l="$HOME/.claude/autoloop/run-latches/$PPID.json"; '
+      + 'if [ -f "$l" ] && [ ! -L "$l" ]; then grep -qs \'"closedAt"\' "$l" || exit 2; '
+      + 'elif [ -e "$l" ] || [ -L "$l" ]; then exit 2; fi; exit 0',
   },
   { name: 'label-swap-reminder.mjs', event: 'PostToolUse', matcher: 'Bash', command: `node "${PLUGIN_TOOLS}/label-swap-reminder.mjs"` },
   { name: 'subagent-transcript.mjs', event: 'SubagentStop', matcher: null, command: `node "${PLUGIN_TOOLS}/subagent-transcript.mjs"` },
@@ -113,6 +111,7 @@ export function pluginHookProblems(document, toolsDir) {
           problems.push(`hooks.${event}: expected command handlers only`);
           continue;
         }
+        if (handler.statusMessage !== undefined) problems.push(`hooks.${event}: a statusMessage prints in every session`);
         handlers.push({ event, matcher: group.matcher ?? null, command: handler.command });
       }
     }
@@ -382,7 +381,39 @@ function pluginChecks(root) {
     name: 'skill byte budgets',
     execute: () => checkSkillBudgets(root),
   });
+  checks.push({
+    name: 'skill model invocation',
+    execute: () => checkSkillInvocation(root),
+  });
   return checks;
+}
+
+// Autoloop's skills run when invoked by name or by the loop, never because a
+// request resembles their description (operator, 2026-10-12). Pitcrew stays
+// model-invocable — Dev calls it with the Skill tool — and its description
+// names Autoloop-owned pull requests only. Role briefs read lean-code by path.
+export const EXPLICIT_ONLY_SKILLS = Object.freeze(['codebase-design', 'dev', 'lean-code', 'queue-trace', 'setup', 'shape']);
+
+export function skillInvocationProblems(frontmatters) {
+  return Object.entries(frontmatters).sort(([left], [right]) => left.localeCompare(right)).flatMap(([skill, text]) => {
+    const disabled = /^disable-model-invocation: true$/mu.test(text);
+    if (EXPLICIT_ONLY_SKILLS.includes(skill)) return disabled ? [] : [`SKILL_MODEL_INVOCABLE ${skill}`];
+    if (skill === 'pitcrew') {
+      return !disabled && /^description: .*Autoloop-owned pull requests only/mu.test(text) ? [] : ['SKILL_PITCREW_SCOPE pitcrew'];
+    }
+    return [`SKILL_INVOCATION_UNDECIDED ${skill}`];
+  });
+}
+
+function checkSkillInvocation(root) {
+  const skills = resolve(root, 'skills');
+  const frontmatters = {};
+  for (const name of existsSync(skills) ? readdirSync(skills) : []) {
+    const path = join(skills, name, 'SKILL.md');
+    if (existsSync(path)) frontmatters[name] = /^---\n([\s\S]*?)\n---\n/u.exec(readFileSync(path, 'utf8'))?.[1] ?? '';
+  }
+  const problems = skillInvocationProblems(frontmatters);
+  return problems.length === 0 ? { ok: true, detail: '' } : { ok: false, detail: problems.join('\n') };
 }
 
 // Every skill loads whole into the session that invokes it, and again after
@@ -390,13 +421,13 @@ function pluginChecks(root) {
 // read on each of 69 calls. Budgets are bytes and only ratchet down — shrink a
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
-  'codebase-design': 6489,
-  dev: 57282, // +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
-  'lean-code': 3909,
-  pitcrew: 19803,
-  'queue-trace': 6933,
-  setup: 14026,
-  shape: 26690,
+  'codebase-design': 6442,
+  dev: 57270, // +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
+  'lean-code': 3873,
+  pitcrew: 19784,
+  'queue-trace': 6929,
+  setup: 13861,
+  shape: 26687,
 });
 
 export function skillBudgetProblems(sizes, budgets = SKILL_BUDGETS) {
@@ -622,49 +653,40 @@ async function selfTest() {
   const withGuard = (command) => PLUGIN_HOOKS.map((entry) =>
     (entry.name === 'command-guard.mjs' ? { ...entry, command } : entry));
   const guardEntry = PLUGIN_HOOKS.find((entry) => entry.name === 'command-guard.mjs');
-  // A crashed guard refuses inside an autoloop repository and nowhere else:
-  // a broken plugin must not refuse every command in every repository.
+  // A crashed guard refuses only while the session's Claude process (here
+  // the shell's parent: this process) holds an open latch; a broken plugin
+  // must not refuse every command in every session.
   const crashRoot = mkdtempSync(join(tmpdir(), 'autoloop-hook-crash-'));
-  let crashInside;
-  let crashOutside;
+  let crashWithoutRun;
+  let crashOwned;
+  let crashClosed;
+  let crashOddLatch;
   let refusalKept;
-  let crashBesideDanglingConfig;
-  let crashInSubdirectory;
-  let crashMidRun;
-  let crashBesideLegacyRun;
   try {
     const stub = join(crashRoot, 'plugin', 'tools', 'command-guard.mjs');
     mkdirSync(dirname(stub), { recursive: true });
     mkdirSync(join(crashRoot, 'project', '.autoloop'), { recursive: true });
     writeFileSync(join(crashRoot, 'project', '.autoloop', 'config.json'), '{}');
-    mkdirSync(join(crashRoot, 'project', 'sub'));
-    spawnSync('git', ['init', '-q', join(crashRoot, 'project')]);
-    mkdirSync(join(crashRoot, 'elsewhere'));
-    mkdirSync(join(crashRoot, 'dangling'));
-    symlinkSync(join(crashRoot, 'nowhere'), join(crashRoot, 'dangling', '.autoloop'));
-    const guardExits = (code, project) => {
+    const latches = join(crashRoot, 'home', '.claude', 'autoloop', 'run-latches');
+    const latch = join(latches, `${process.pid}.json`);
+    const guardExits = (code) => {
       writeFileSync(stub, `process.exit(${code});\n`);
       return spawnSync('sh', ['-c', guardEntry.command], {
-        env: { ...process.env, CLAUDE_PLUGIN_ROOT: join(crashRoot, 'plugin'), CLAUDE_PROJECT_DIR: join(crashRoot, project) },
+        timeout: 15000,
+        env: { ...process.env, HOME: join(crashRoot, 'home'), CLAUDE_PLUGIN_ROOT: join(crashRoot, 'plugin'), CLAUDE_PROJECT_DIR: join(crashRoot, 'project') },
       }).status;
     };
-    crashInside = guardExits(1, 'project');
-    crashOutside = guardExits(1, 'elsewhere');
-    // The guard's own refusal is final wherever it happens; a crash beside a
-    // config the shell cannot follow (a dangling symlink) still refuses.
-    refusalKept = guardExits(2, 'elsewhere') === 2 && guardExits(0, 'project') === 0;
-    crashBesideDanglingConfig = guardExits(1, 'dangling');
-    crashInSubdirectory = guardExits(1, 'project/sub');
-    // A crash on a checkout without .autoloop (a pre-devendor branch) while
-    // the repository has a run open still refuses.
-    mkdirSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run'), { recursive: true });
-    spawnSync('git', ['init', '-q', join(crashRoot, 'midrun')]);
-    writeFileSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run', 'run.json'), '{"version":1,"pids":[1],"baseBranch":"main"}');
-    crashMidRun = guardExits(1, 'midrun');
-    // A legacy install's own markers carry no base: a crashing plugin guard
-    // must not refuse commands its vendored guard is still judging.
-    writeFileSync(join(crashRoot, 'midrun', '.git', 'autoloop', 'run', 'run.json'), '{"version":1,"pids":[1]}');
-    crashBesideLegacyRun = guardExits(1, 'midrun');
+    crashWithoutRun = guardExits(1);
+    mkdirSync(latches, { recursive: true });
+    writeFileSync(latch, JSON.stringify({ version: 2, owner: process.pid, baseBranch: 'main', sessionId: 'S' }));
+    crashOwned = guardExits(1);
+    // The guard's own verdict is final wherever it happens.
+    refusalKept = guardExits(0) === 0 && guardExits(2) === 2;
+    writeFileSync(latch, JSON.stringify({ version: 2, owner: process.pid, baseBranch: 'main', sessionId: 'S', closedAt: '2026-10-12T00:00:00.000Z' }));
+    crashClosed = guardExits(1);
+    rmSync(latch);
+    mkdirSync(latch);
+    crashOddLatch = guardExits(1);
   } finally {
     rmSync(crashRoot, { recursive: true, force: true });
   }
@@ -685,13 +707,21 @@ async function selfTest() {
         { name: 'x', event: 'Stop', matcher: null, command: 'echo hi' }])).some((problem) => problem.includes('echo hi'))],
     ['a vendored tool path is refused',
       pluginProblems(pluginHookDocument(withGuard('node "$CLAUDE_PROJECT_DIR/tools/agentic/command-guard.mjs" || exit 2'))).length > 0],
-    ['a crashed plugin guard refuses in an autoloop repository and allows elsewhere',
-      crashInside === 2 && crashOutside === 0],
-    ['the guard\'s own refusal is never turned into an allow', refusalKept],
-    ['a crash beside an unfollowable .autoloop still refuses', crashBesideDanglingConfig === 2],
-    ['a crash in a session started in a subdirectory still refuses', crashInSubdirectory === 2],
-    ['a crash while the repository has a plugin run open still refuses', crashMidRun === 2],
-    ['a crash beside a legacy install\'s own run does not refuse', crashBesideLegacyRun === 0],
+    ['a crashed plugin guard refuses while the session holds an open latch, and allows without one or after its close',
+      crashOwned === 2 && crashWithoutRun === 0 && crashClosed === 0],
+    ['the guard\'s own verdict is never turned around', refusalKept],
+    ['a crash beside a latch that is not a plain file still refuses', crashOddLatch === 2],
+    ['a hook with a statusMessage is refused',
+      pluginProblems({ hooks: { Stop: [{ hooks: [{ type: 'command', command: PLUGIN_HOOKS.at(-1).command, statusMessage: 'x' }] }] } })
+        .some((problem) => problem.includes('statusMessage'))],
+    ['a loop-only skill the model may invoke, or a pitcrew description wider than Autoloop-owned PRs, fails',
+      JSON.stringify(skillInvocationProblems({
+        dev: 'name: dev\ndisable-model-invocation: true',
+        shape: 'name: shape',
+        pitcrew: 'name: pitcrew\ndescription: Service pull requests after failing CI.',
+        novel: 'name: novel',
+      })) === JSON.stringify(['SKILL_INVOCATION_UNDECIDED novel', 'SKILL_PITCREW_SCOPE pitcrew', 'SKILL_MODEL_INVOCABLE shape'])
+        && skillInvocationProblems({ pitcrew: 'description: Service Autoloop-owned pull requests only, after CI fails.' }).length === 0],
     // 0.56.0: a skill loads whole into the session that invokes it and again
     // after every compaction (LFE: the dev skill added ~50k tokens to a 70k
     // floor, re-read on every one of 69 calls). A skill never grows silently.

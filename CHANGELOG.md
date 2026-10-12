@@ -13,6 +13,16 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ### Fixed
 
+- Autoloop hooks act only in the session that owns a run. Ownership starts at `prime.mjs`
+  and ends at `prime.mjs --close-run` or `/clear`. Other sessions get no preflight, STATE text,
+  GitHub or git calls, riders, transcript copies, Stop checks, or guard refusals. The one
+  exception: the command guard still checks a command that runs the plugin's `prime.mjs`. A
+  crashed guard refuses only while the session holds an open run latch. A session that does
+  not own a run can switch branches while a loop reviewer reads the checkout. The `statusMessage`
+  hook text is removed. Run markers record process start times, so a reused PID is not an owner.
+  `dev`, `shape`, `setup`, `queue-trace`, `lean-code`, and `codebase-design` run only when
+  invoked by name, and `pitcrew` is limited to Autoloop-owned pull requests. Vendored
+  pre-plugin installs (`tools/agentic/*`) are not changed by this fix; devendor them.
 - Writer/reviewer checks refuse an overlap between a family alias and a fixed-version model ID,
   for primary and fallback choices.
 - A delivered, open PR with a new head can start a new draft revision. The driver verifies

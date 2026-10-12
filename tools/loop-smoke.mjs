@@ -62,6 +62,9 @@ const REAL_ENGINE_BUDGET_MS = 10 * 60_000;
 const REAL_ENGINE_STEP_TIMEOUT_MS = 9 * 60_000;
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const FIXTURE_ORIGIN_URL = 'https://github.com/autoloop-smoke/fixture.git';
+// The conversation the fixture's run belongs to: prime records it in the
+// session latch, and every hook input names it.
+const SMOKE_SESSION_ID = 'autoloop-smoke-session';
 // Ambient credentials and host-repo Git state must not leak into the fixture:
 // the smoke's contract is deterministic offline behavior.
 const STRIPPED_ENV_PREFIXES = ['GIT_'];
@@ -130,6 +133,7 @@ function smokeEnvironment(ghConfigDir, shimDirectory) {
   environment.GH_CONFIG_DIR = ghConfigDir;
   // The session under test is the fixture's; the smoke's own host session is not.
   delete environment.CLAUDE_PROJECT_DIR;
+  environment.CLAUDE_CODE_SESSION_ID = SMOKE_SESSION_ID;
   if (shimDirectory !== null) {
     environment.PATH = [shimDirectory, environment.PATH ?? '']
       .filter(Boolean)
@@ -252,26 +256,24 @@ export function runSmokeSteps({
   const tool = (name) => join(TOOL_DIRECTORY, name);
   const outcome = { steps, runMarker: null, dispatches: [] };
 
-  // SessionStart from the plugin: the preflight speaks only in a devendored
-  // repository, names the plugin tools, and injects the STATE prose.
+  // SessionStart from the plugin: the preflight speaks only to the session
+  // that owns a run — silent before prime, in the fixture as anywhere else.
+  const preflight = (projectDir) => spawnSync('bash', [join(TOOL_DIRECTORY, 'session-preflight.sh')], {
+    cwd: root, encoding: 'utf8', timeout: stepTimeoutMs, input: JSON.stringify({ session_id: SMOKE_SESSION_ID }),
+    env: { ...environment, CLAUDE_PROJECT_DIR: projectDir },
+  });
   timed('session-start', () => {
-    const preflight = (projectDir) => spawnSync('bash', [join(TOOL_DIRECTORY, 'session-preflight.sh')], {
-      cwd: root, encoding: 'utf8', timeout: stepTimeoutMs, env: { ...environment, CLAUDE_PROJECT_DIR: projectDir },
-    });
     const unrelated = mkdtempSync(join(tmpdir(), 'autoloop-smoke-unrelated-'));
     const elsewhere = preflight(unrelated);
     rmSync(unrelated, { recursive: true, force: true });
     const here = preflight(root);
-    const missing = [
+    const spoke = [
       elsewhere.stdout !== '' && 'output in an unrelated repository',
-      !here.stdout.includes('PASS  autoloop config') && 'the config verdict',
-      !here.stdout.includes(`INFO  plugin tools: ${TOOL_DIRECTORY}`) && 'the plugin tools path',
-      !here.stdout.includes('Scratch fixture repository for the no-model end-to-end loop smoke.') && 'the STATE prose',
-      /tools\/agentic/u.test(here.stdout) && 'a vendored path',
+      here.stdout !== '' && 'output in the fixture before prime',
     ].filter(Boolean);
-    return missing.length === 0
-      ? { ok: true, detail: 'silent elsewhere; config, plugin tools and STATE prose here' }
-      : { ok: false, detail: `preflight: ${missing.join(', ')}` };
+    return spoke.length === 0
+      ? { ok: true, detail: 'silent before the session owns a run' }
+      : { ok: false, detail: `preflight: ${spoke.join(', ')}` };
   });
 
   const primed = timed('prime', () => {
@@ -327,6 +329,21 @@ export function runSmokeSteps({
     };
   });
   if (!primed) return outcome;
+
+  // The owning session (after a compaction, say) hears the preflight: the
+  // config verdict, the plugin tools and the STATE prose.
+  timed('owned-session-start', () => {
+    const here = preflight(root);
+    const missing = [
+      !here.stdout.includes('PASS  autoloop config') && 'the config verdict',
+      !here.stdout.includes(`INFO  plugin tools: ${TOOL_DIRECTORY}`) && 'the plugin tools path',
+      !here.stdout.includes('Scratch fixture repository for the no-model end-to-end loop smoke.') && 'the STATE prose',
+      /tools\/agentic/u.test(here.stdout) && 'a vendored path',
+    ].filter(Boolean);
+    return missing.length === 0
+      ? { ok: true, detail: 'config, plugin tools and STATE prose for the owning session' }
+      : { ok: false, detail: `preflight: ${missing.join(', ')}` };
+  });
 
   for (const role of roles) {
     const promptPath = join(root, `.git/autoloop/${role}-prompt.md`);
@@ -428,7 +445,7 @@ export function runSmokeSteps({
       root,
       environment,
       stepTimeoutMs,
-      input: JSON.stringify({ tool_input: { command: 'gh pr merge 9 --squash' } }),
+      input: JSON.stringify({ session_id: SMOKE_SESSION_ID, tool_input: { command: 'gh pr merge 9 --squash' } }),
     };
     const blocked = runTool(
       'command-guard.mjs (run open)',
@@ -462,7 +479,7 @@ export function runSmokeSteps({
     // The edit guard, run from the plugin, finds the repository from
     // CLAUDE_PROJECT_DIR and refuses a hook-wiring edit while the run is open.
     const editGuard = tool('edit-guard.mjs');
-    const wiringEdit = JSON.stringify({ tool_name: 'Edit', tool_input: { file_path: join(root, '.claude', 'settings.json') } });
+    const wiringEdit = JSON.stringify({ session_id: SMOKE_SESSION_ID, tool_name: 'Edit', tool_input: { file_path: join(root, '.claude', 'settings.json') } });
     const editOptions = { root, stepTimeoutMs, input: wiringEdit, environment: { ...environment, CLAUDE_PROJECT_DIR: root } };
     const editBlocked = runTool('edit-guard.mjs (run open)', [editGuard], editOptions);
     if (!editBlocked.ok) return editBlocked;

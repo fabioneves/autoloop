@@ -2,33 +2,28 @@
 // autoloop — hook-root.mjs
 //
 // Where a plugin hook acts, and whether it acts at all. Hooks ship in the
-// plugin (hooks/hooks.json) and fire in every repository the user opens, so
+// plugin (hooks/hooks.json) and fire in every session the user opens, so
 // each one finds the project from CLAUDE_PROJECT_DIR — never from its own
-// location, which is the plugin directory — and stands down unless the
-// project is a devendored autoloop repository:
+// location, which is the plugin directory.
 //
-//   `.autoloop/config.json` is present (or unreadable: the resolver then
-//   refuses, which is the fail-closed outcome). A legacy repository has none,
-//   so its vendored hooks run alone until devendor.
-//
-// This decides only whether a hook acts OUTSIDE an open run. Once prime opened
-// a run (it refuses unless this repository is active), the guards act for the
-// rest of the run whatever the checkout later says: a deleted config or a
-// checked-out pre-devendor branch must not switch them off. The run's own
-// records are refused to it (run-state-guard.mjs), and the command guard's
-// session latch outlives a marker that goes missing anyway.
+// A hook acts only for the session that owns the run (run-markers.mjs
+// ownedRun): its Claude process's open latch names the conversation in the
+// hook's input. Without it every hook does nothing — no output, no git, no
+// GitHub, no file — whatever the repository holds. Prime, setup and doctor
+// ask activeAutoloopRoot instead: whether the repository is devendored
+// (`.autoloop/config.json` present, or unreadable: the resolver then refuses).
 //
 //   node <plugin-tools>/hook-root.mjs --self-test
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
-  lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
-import { pluginRunMarkers } from './run-markers.mjs';
+import { CONFIG_VERSION, PROJECT_CONFIG_FILE, repositoryRoot } from './config-contract.mjs';
+import { ownedRun, processStart, sessionOwnerPid } from './run-markers.mjs';
 
 const VENDORED_DIR = 'tools/agentic';
 
@@ -160,12 +155,12 @@ export function activeAutoloopRoot(root = hookRoot()) {
   return configPresent(root) ? root : null;
 }
 
-// Where a plugin hook acts: the devendored autoloop repository at the project
-// root, or — while a plugin run is open — that root whatever the checkout now
-// says, so no tracked file the run changes switches the hooks off mid-run.
-export function guardedRoot(projectRoot = hookRoot()) {
-  return activeAutoloopRoot(projectRoot)
-    ?? (pluginRunMarkers([process.cwd(), projectRoot]).length === 0 ? null : projectRoot);
+// Where a plugin hook acts: the project root, for the session that owns a
+// run, whatever the checkout now says; null for every other session, decided
+// before the project root is looked up (that costs a git call).
+export function guardedRoot(sessionId) {
+  const owned = ownedRun({ sessionId });
+  return owned === null || owned.unreadable ? null : hookRoot();
 }
 
 function selfTest() {
@@ -209,15 +204,22 @@ function selfTest() {
         && JSON.stringify(leftovers.hooks.map(({ command }) => command)) === '["node tools/agentic/writeback-check.mjs"]');
     rmSync(join(repo, 'tools'), { recursive: true, force: true });
     rmSync(join(repo, '.claude', 'settings.local.json'));
-    // The shell hooks ask the same question (plus the open-run rule) through the CLI.
-    const cli = (dir) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
-      encoding: 'utf8', cwd: tmpdir(), env: { ...process.env, CLAUDE_PROJECT_DIR: dir },
+    // The shell hooks ask the same question through the CLI, with the hook's
+    // input on stdin.
+    const home = join(scratch, 'home');
+    const owner = sessionOwnerPid(process.pid);
+    mkdirSync(join(home, '.claude', 'autoloop', 'run-latches'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'autoloop', 'run-latches', `${owner}.json`), JSON.stringify({
+      version: 2, owner, ownerStart: processStart(owner), baseBranch: 'main', scope: repo, sessionId: 'S',
+    }));
+    const cli = (input) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--guarded-root'], {
+      input, encoding: 'utf8', cwd: tmpdir(), timeout: 15000, env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: repo },
     });
-    const activeCli = cli(repo);
-    const inactiveCli = cli(scratch);
-    check('--guarded-root prints an active root and exits 0, else exits 1 silently',
-      activeCli.status === 0 && activeCli.stdout.trim() === repo
-        && inactiveCli.status === 1 && inactiveCli.stdout === '');
+    const ownerCli = cli('{"session_id":"S"}');
+    const others = [cli('{"session_id":"T"}'), cli('')];
+    check('--guarded-root prints the root for the owning session and exits 0, else exits 1 silently',
+      ownerCli.status === 0 && ownerCli.stdout.trim() === repo
+        && others.every((result) => result.status === 1 && result.stdout === ''));
     rmSync(join(repo, '.autoloop'), { recursive: true, force: true });
     writeFileSync(join(repo, '.autoloop'), 'not a directory');
     check('an inaccessible config path keeps the hooks active (the resolver refuses)',
@@ -225,11 +227,148 @@ function selfTest() {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+  sessionOwnershipCases(check);
   for (const name of failures) console.error(`FAIL ${name}`);
   console.log(failures.length === 0
     ? `self-test OK (${cases.length} cases)`
     : `self-test FAILED (${failures.length}/${cases.length})`);
   return failures.length === 0;
+}
+
+// Every hook entry point, as the host runs it, in a repository with
+// .autoloop/config.json: a session that does not own a run sees no hook
+// effect and pays no git or GitHub call; the owning session keeps them all.
+// Counting shims stand in for gh and git, and HOME is the fixture's.
+function sessionOwnershipCases(check) {
+  const tools = dirname(fileURLToPath(import.meta.url));
+  const realGit = (process.env.PATH ?? '').split(':').map((dir) => join(dir, 'git'))
+    .find((path) => spawnSync(path, ['--version'], { timeout: 5000 }).status === 0);
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'hook-ownership-')));
+  const readers = [];
+  try {
+    const bin = join(scratch, 'bin');
+    const log = join(scratch, 'calls.log');
+    mkdirSync(bin);
+    writeFileSync(log, '');
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "gh $*" >> "${log}"\nexit 1\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\necho "git $*" >> "${log}"\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+    const home = join(scratch, 'home');
+    const latches = join(home, '.claude', 'autoloop', 'run-latches');
+    const config = JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } });
+    const repository = (name) => {
+      const dir = join(scratch, name);
+      spawnSync(realGit, ['init', '-q', '-b', 'main', dir], { timeout: 10000 });
+      mkdirSync(join(dir, '.autoloop'));
+      writeFileSync(join(dir, '.autoloop', 'config.json'), config);
+      writeFileSync(join(dir, '.autoloop', 'STATE.md'), '# STATE\nSTATE-PROSE-MARK\n');
+      return dir;
+    };
+    const repo = repository('repo');
+    const stalled = repository('stalled');
+    rmSync(join(stalled, '.git', 'config'));
+    spawnSync('mkfifo', [join(stalled, '.git', 'config')], { timeout: 5000 });
+    const transcript = join(scratch, 'child.jsonl');
+    writeFileSync(transcript, '{"type":"user"}\n');
+    const env = (project = repo) => ({
+      ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, CLAUDE_PROJECT_DIR: project,
+      CLAUDE_CONFIG_DIR: join(scratch, 'claude-config'), CLAUDE_CODE_SESSION_ID: '', AUTOLOOP_GUARD_BUDGET_MS: '3000',
+    });
+    const run = (args, input, project) => spawnSync(args[0], args.slice(1), {
+      input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8', cwd: project ?? repo,
+      env: env(project), timeout: 20000, killSignal: 'SIGKILL',
+    });
+    const node = (tool, input, project) => run([process.execPath, join(tools, tool)], input, project);
+    const calls = () => readFileSync(log, 'utf8');
+    const owner = sessionOwnerPid(process.pid);
+    const latch = (fields) => {
+      rmSync(latches, { recursive: true, force: true });
+      if (fields === null) return;
+      mkdirSync(latches, { recursive: true });
+      writeFileSync(join(latches, `${owner}.json`), JSON.stringify({
+        version: 2, owner, ownerStart: processStart(owner), baseBranch: 'main', scope: repo, latchedAtMs: 1, sessionId: 'S', ...fields,
+      }));
+    };
+    const reader = () => {
+      if (process.platform !== 'linux') return;
+      readers.push(spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', 'dispatch.mjs', '--role', 'diff-review'], { cwd: repo, stdio: 'ignore' }));
+    };
+    const bash = (command, session = 'S') => node('command-guard.mjs', { session_id: session, tool_name: 'Bash', cwd: repo, tool_input: { command } });
+    const edit = (filePath, project) => node('edit-guard.mjs', { session_id: 'S', tool_name: 'Edit', cwd: project ?? repo, tool_input: { file_path: filePath } }, project);
+    const transcripts = join(repo, '.git', 'autoloop', 'subagent-transcripts');
+    const hooks = {
+      preflight: () => run(['bash', join(tools, 'session-preflight.sh')], { session_id: 'S', hook_event_name: 'SessionStart', source: 'startup' }),
+      rider: () => node('label-swap-reminder.mjs', { session_id: 'S', tool_name: 'Bash', tool_input: { command: 'gh issue edit 4 --add-label loop-blocked' } }),
+      transcript: () => node('subagent-transcript.mjs', { session_id: 'S', hook_event_name: 'SubagentStop', transcript_path: transcript }),
+      stop: () => node('writeback-check.mjs', { session_id: 'S', hook_event_name: 'Stop', stop_hook_active: false }),
+    };
+    reader();
+    // An unreadable payload names no session: beside this process's open
+    // latch it may be the owner's, so the guard refuses it as its crash
+    // fallback does; with no open latch it is allowed.
+    const notOwned = (variant, openLatchHeld) => {
+      writeFileSync(log, '');
+      const preflight = hooks.preflight();
+      const stop = hooks.stop();
+      const unreadable = node('command-guard.mjs', 'not json').status;
+      const verdicts = [
+        bash('rm -rf .git/autoloop/run'), bash(`echo ${'x'.repeat(70 * 1024)}`), bash('git switch main'),
+        { status: unreadable === (openLatchHeld ? 2 : 0) ? 0 : 1 },
+        node('command-guard.mjs', { session_id: 'S', tool_name: 'AskUserQuestion', tool_input: {} }),
+        node('command-guard.mjs', { session_id: 'S', tool_name: 'Bash', cwd: stalled, tool_input: { command: 'ls' } }, stalled),
+        edit(join(latches, 'x.json')), edit(join(repo, '.claude', 'settings.json')), edit(join(stalled, 'a.txt'), stalled),
+      ].map((result) => result.status);
+      const rider = hooks.rider();
+      const captured = hooks.transcript();
+      return {
+        [`${variant}: no preflight, no STATE injection, no Stop output`]: preflight.status === 0 && preflight.stdout === ''
+          && stop.status === 0 && stop.stdout === '' && stop.stderr === '',
+        [`${variant}: the guards allow run-state edits, a large command, a branch switch beside a reviewer and a stalled git; an unreadable payload only beside no open latch`]:
+          verdicts.every((status) => status === 0),
+        [`${variant}: no rider and no transcript copy`]: rider.stdout === '' && captured.status === 0 && !existsSync(transcripts),
+        [`${variant}: no gh or git call and no reminder file`]: calls() === '' && !existsSync(join(repo, '.git', 'autoloop', 'draft-reminders')),
+      };
+    };
+    const variants = [
+      ['no latch', null],
+      ['another conversation after /clear', { sessionId: 'S-before-clear' }],
+      ['a closed run', { closedAt: '2026-10-12T00:00:00.000Z' }],
+      ['a reused pid', { ownerStart: 'another-process' }],
+    ];
+    for (const [variant, fields] of variants) {
+      latch(fields);
+      const held = fields !== null && fields.closedAt === undefined && fields.ownerStart === undefined;
+      for (const [name, passed] of Object.entries(notOwned(variant, held))) check(`a session that owns no run, ${name}`, passed);
+    }
+    latch(null);
+    const prime = join(tools, 'prime.mjs');
+    const other = join(scratch, 'other');
+    spawnSync(realGit, ['init', '-q', other], { timeout: 10000 });
+    const primeCompound = bash(`node ${prime} --json && rm -rf .git/autoloop/run`);
+    const foreignPrime = run([process.execPath, join(tools, 'command-guard.mjs')],
+      { session_id: 'S', tool_name: 'Bash', cwd: repo, tool_input: { command: `node ${prime} --json` } }, other);
+    check('without a run, the guard still refuses a prime compound that deletes run state, and a prime in a foreign repository',
+      primeCompound.status === 2 && primeCompound.stderr.includes('opens a run')
+        && foreignPrime.status === 2 && foreignPrime.stderr.includes('outside it'));
+    latch({});
+    writeFileSync(log, '');
+    const preflight = hooks.preflight();
+    const stop = hooks.stop();
+    const stopCalls = calls();
+    const rider = hooks.rider();
+    hooks.transcript();
+    check('the owning session keeps the preflight and STATE, the Stop check, the rider and the transcript copy',
+      preflight.stdout.includes('## autoloop preflight') && preflight.stdout.includes('STATE-PROSE-MARK')
+        && stopCalls.includes('gh pr list') && stop.stdout.includes('no GitHub data was reachable')
+        && rider.stdout.includes('PushNotification') && existsSync(transcripts) && readdirSync(transcripts).length === 2);
+    check('the owning session keeps both guards: run state, a branch switch beside a reviewer, an unreadable payload',
+      bash('rm -rf .git/autoloop/run').status === 2 && edit(join(latches, 'x.json')).status === 2
+        && (process.platform !== 'linux' || bash('git switch main').stderr.includes('reading this checkout'))
+        && node('command-guard.mjs', 'not json').status === 2
+        && bash('rm -rf .git/autoloop/run', 'S-before-clear').status === 0);
+  } finally {
+    for (const child of readers) child.kill('SIGKILL');
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 const isMain = (() => {
@@ -242,9 +381,14 @@ const isMain = (() => {
 })();
 if (isMain) {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
-  // For the shell hooks (session-preflight): the root a hook acts in, or exit 1.
+  // For the shell hooks (session-preflight): the root a hook acts in, or
+  // exit 1. The hook's input arrives on stdin, as it does for every hook.
   if (process.argv.includes('--guarded-root')) {
-    const root = guardedRoot();
+    let sessionId;
+    try {
+      sessionId = JSON.parse(readFileSync(0, 'utf8'))?.session_id;
+    } catch { /* no hook input: no session, so no owner */ }
+    const root = guardedRoot(sessionId);
     if (root !== null) console.log(root);
     process.exit(root === null ? 1 : 0);
   }

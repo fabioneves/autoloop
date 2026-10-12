@@ -1,6 +1,7 @@
 ---
 name: queue-trace
-description: Reconcile a spec against the GitHub issue queue — which spec tasks have issues, which issues trace to a spec task, and the per-milestone exit accounting. Read-only; files nothing, labels nothing, edits nothing. Sits between autoloop:shape (spec → issues) and autoloop:dev (issues → PRs). An interactive, human-run skill; the loop never invokes it. Optional `annotate` mode emits (never runs) the gh commands to add a missing Task ID to an issue.
+description: Reconcile a spec against the GitHub issue queue — which spec tasks have issues, which issues trace to a spec task, and the per-milestone exit accounting. Read-only; files nothing, labels nothing, edits nothing. Sits between autoloop:shape and autoloop:dev. An interactive, human-run skill; the loop never invokes it. Optional `annotate` mode emits (never runs) the gh commands to add a missing Task ID to an issue.
+disable-model-invocation: true
 ---
 
 # autoloop:queue-trace — spec ⇄ queue reconciliation

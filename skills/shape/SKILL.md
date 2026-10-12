@@ -1,6 +1,7 @@
 ---
 name: shape
-description: Turn a feature description, spec/ADR, or brain-dump into PR-sized, loop-ready-candidate GitHub issues — or lint an existing issue against the loop's standards (shape lint #N). Interviews the human when underspecified, then runs one mandatory seven-axis rule check on every unit before anything is filed — premise, acceptance, coverage, proof-terminates, size, hard-defer, structure — the same axes both modes share. Verifies premises against the code, sizes units against the enforced split rule, requires each acceptance criterion to name a proof that terminates, maps every source clause onto a unit, chains dependencies via "Blocked by" derived from what each unit reads, and files issues UNLABELLED — applying loop-ready stays the maintainer's trust act. An interactive human-run skill; the loop never invokes it.
+description: Turn a feature description, spec/ADR, or brain-dump into PR-sized, loop-ready-candidate GitHub issues — or lint an existing issue against the loop's standards (shape lint #N). Interviews the human when underspecified, then runs one mandatory seven-axis rule check on every unit before anything is filed — premise, acceptance, coverage, proof-terminates, size, hard-defer, structure — the same axes both modes share. Verifies premises against the code, sizes units against the enforced split rule, requires each acceptance criterion to name a proof that terminates, maps every source clause onto a unit, chains dependencies via "Blocked by", and files issues UNLABELLED — applying loop-ready stays the maintainer's trust act. An interactive human-run skill; the loop never invokes it.
+disable-model-invocation: true
 ---
 
 # autoloop:shape — spec in, PR-sized issues out

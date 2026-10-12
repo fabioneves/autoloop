@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { guardedRoot } from './hook-root.mjs';
+import { processStart, sessionOwnerPid } from './run-markers.mjs';
 
 const KEEP_FILES = 40; // ISO-stamped names sort chronologically; oldest pruned first
 
@@ -74,11 +75,6 @@ export function normalizedMetadata(payload) {
 }
 
 function capture() {
-  // Runs from the plugin: the repository is CLAUDE_PROJECT_DIR, and only a
-  // devendored autoloop repository keeps transcripts.
-  const root = guardedRoot();
-  if (root === null) return;
-  const captureDir = resolveCaptureDirectory(root);
   let raw = '';
   try {
     raw = readFileSync(0, 'utf8');
@@ -86,9 +82,12 @@ function capture() {
   let payload = null;
   try {
     payload = JSON.parse(raw);
-  } catch {
-    process.stderr.write('autoloop: SubagentStop hook received unparseable stdin — payload not captured\n');
-  }
+  } catch { /* no session named: nothing is captured */ }
+  // Runs from the plugin: the repository is CLAUDE_PROJECT_DIR, and only the
+  // session that owns a run keeps transcripts (hook-root.mjs).
+  const root = guardedRoot(payload?.session_id);
+  if (root === null) return;
+  const captureDir = resolveCaptureDirectory(root);
   mkdirSync(captureDir, { recursive: true });
   const stamp = `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`;
   const plan = planCapture(payload, stamp, readdirSync(captureDir));
@@ -159,11 +158,10 @@ function selfTest() {
   // Git reports realpaths, so a macOS TMPDIR reached through /var -> /private/var
   // would make the fixture root and the CLI's resolved root disagree.
   // The hook runs from the plugin and captures into the repository named by
-  // CLAUDE_PROJECT_DIR — only a devendored autoloop repository.
+  // CLAUDE_PROJECT_DIR — only for the session that owns a run.
   const cliRoot = mkdtempSync(join(realpathSync(tmpdir()), 'autoloop-subagent-cli-'));
   const cliEntrypoint = fileURLToPath(import.meta.url);
-  const unrelatedRoot = mkdtempSync(join(realpathSync(tmpdir()), 'autoloop-subagent-unrelated-'));
-  execFileSync('git', ['init', '-q', unrelatedRoot], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 10000 });
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'autoloop-subagent-home-'));
   mkdirSync(join(cliRoot, '.autoloop'));
   writeFileSync(join(cliRoot, '.autoloop', 'config.json'), '{}');
   execFileSync('git', ['init', '-q', cliRoot], {
@@ -178,31 +176,32 @@ function selfTest() {
   const transcriptSource = join(cliRoot, 'child.jsonl');
   writeFileSync(transcriptSource, transcriptLines.map((line) => JSON.stringify(line)).join('\n') + '\n');
   try {
-    const stopPayload = JSON.stringify({
+    const stopPayload = (session) => JSON.stringify({
+      session_id: session,
       hook_event_name: 'SubagentStop',
       agent_type: 'autoloop-reviewer',
       transcript_path: transcriptSource,
     });
-    execFileSync(process.execPath, [cliEntrypoint], {
-      input: stopPayload,
+    const hook = (session) => execFileSync(process.execPath, [cliEntrypoint], {
+      input: stopPayload(session),
       encoding: 'utf8',
       cwd: tmpdir(),
-      env: { ...process.env, CLAUDE_PROJECT_DIR: unrelatedRoot },
+      env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: cliRoot },
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15000,
     });
-    if (existsSync(resolveCaptureDirectory(unrelatedRoot))) {
+    hook('S');
+    const owner = sessionOwnerPid(process.pid);
+    mkdirSync(join(home, '.claude', 'autoloop', 'run-latches'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'autoloop', 'run-latches', `${owner}.json`), JSON.stringify({
+      version: 2, owner, ownerStart: processStart(owner), baseBranch: 'main', scope: cliRoot, sessionId: 'S',
+    }));
+    hook('T');
+    if (existsSync(captureDir)) {
       ok = false;
-      console.log('self-test case failed: an unrelated repository captured a transcript');
+      console.log('self-test case failed: a session that owns no run captured a transcript');
     }
-    execFileSync(process.execPath, [cliEntrypoint], {
-      input: stopPayload,
-      encoding: 'utf8',
-      cwd: tmpdir(),
-      env: { ...process.env, CLAUDE_PROJECT_DIR: cliRoot },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 15000,
-    });
+    hook('S');
     const created = readdirSync(captureDir);
     const payloadFile = created.find((name) => name.endsWith('-payload.json'));
     const transcriptFile = created.find((name) =>
@@ -227,7 +226,7 @@ function selfTest() {
     console.log('self-test case failed: transcript-path CLI capture');
   } finally {
     rmSync(cliRoot, { recursive: true, force: true });
-    rmSync(unrelatedRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
   console.log(ok ? 'self-test OK' : 'self-test FAILED');
   return ok;

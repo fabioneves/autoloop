@@ -38,8 +38,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
-import { latchDirectory, recordLatch } from './run-markers.mjs';
-import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
+import { closeLatch, latchDirectory, processStart, recordLatch } from './run-markers.mjs';
+import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownedRun, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
 } from './config-contract.mjs';
@@ -200,8 +200,10 @@ export function primeDev({ cwd = process.cwd(), scanArgs = [], lift = liftWaits,
   // The run's second record, outside the repository and owned by the
   // session's Claude process (run-markers.mjs), written before the marker:
   // no command between opening the run and the guard's first look can hide
-  // the run, and a latch that cannot be written leaves no marker behind.
-  if (recordLatch({ baseBranch: config.baseBranch, scope: root }) === null) {
+  // the run, and a latch that cannot be written leaves no marker behind. It
+  // names this conversation: the hooks act for it alone.
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID || null;
+  if (recordLatch({ baseBranch: config.baseBranch, scope: root, sessionId }) === null) {
     return failure('run', 'RUN_LATCH_UNWRITABLE', `the session latch could not be written under ${latchDirectory()}; the run is not opened`);
   }
   const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch);
@@ -310,8 +312,11 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
   // openedAtMs: status views (step.mjs) list only units this run touched.
   // sessionId: the conversation that opened the run, so a fork of it (a
   // session moved to the background) is recognised as the same run.
+  // starts: each pid's start time, so a later process given the same pid is
+  // never taken for the run's.
   const sessionId = process.env.CLAUDE_CODE_SESSION_ID || null;
-  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, openedAtMs: nowMs, baseBranch, sessionId })}\n`);
+  const starts = Object.fromEntries(live.map((pid) => [pid, processStart(pid)]));
+  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, starts, openedAtMs: nowMs, baseBranch, sessionId })}\n`);
   return path;
 }
 
@@ -321,9 +326,9 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
 // live 0.49.58 session that stopped with thirteen eligible units is what the
 // distinction costs when it is left to inference.
 //
-// The marker itself stays exactly where it is, pids intact: a closed run keeps
-// issuing commands, and disarming the command guard at the close would trade
-// this defect for a worse one.
+// The marker itself stays exactly where it is, pids intact; the session's
+// latch closes with it (closeRun), which ends the session's ownership: from
+// then on no hook acts for it until a new prime (operator, 2026-10-12).
 export function closeRunMarkers(root = process.cwd(), now = new Date()) {
   const closed = [];
   for (const { path, marker } of ownRunMarkers(root)) {
@@ -336,6 +341,12 @@ export function closeRunMarkers(root = process.cwd(), now = new Date()) {
     }
   }
   return { ok: true, closed };
+}
+
+// --close-run: the run stops taking work, and the session stops owning it.
+export function closeRun(root = process.cwd(), { directory = latchDirectory(), now = new Date() } = {}) {
+  const outcome = closeRunMarkers(root, now);
+  return outcome.ok === true ? { ...outcome, latch: closeLatch({ directory, nowMs: now.getTime() }) } : outcome;
 }
 
 // A usage limit or a red base is a reason to WAIT, and the run used to have no
@@ -1036,6 +1047,8 @@ function selfTest() {
       && JSON.parse(readFileSync(markerPath, 'utf8')).baseBranch === 'trunk'
       // The run's start, so status views drop units an earlier run left open.
       && Number.isSafeInteger(JSON.parse(readFileSync(markerPath, 'utf8')).openedAtMs)
+      // Each pid's start time: a reused pid never matches the marker.
+      && JSON.parse(readFileSync(markerPath, 'utf8')).starts?.[process.ppid] === processStart(process.ppid)
       && (process.platform !== 'linux' || loopRunIsOpen(root) === true),
     );
 
@@ -1059,10 +1072,12 @@ function selfTest() {
       && JSON.parse(readFileSync(markerPath, 'utf8')).version === 1,
     );
 
-    const closed = closeRunMarkers(root);
+    const latches = join(scratch, 'latches');
+    recordLatch({ baseBranch: 'trunk', scope: root, sessionId: 'session-1', directory: latches });
+    const closed = closeRun(root, { directory: latches });
     const reclosed = closeRunMarkers(root);
     check(
-      'closing the run stamps closedAt, ends liveness, and leaves the guard armed',
+      'closing the run stamps closedAt, ends liveness and the session\'s ownership, and keeps the markers',
       closed.ok === true
       && closed.closed.includes(markerPath)
       && typeof JSON.parse(readFileSync(markerPath, 'utf8')).closedAt === 'string'
@@ -1070,7 +1085,9 @@ function selfTest() {
       && (process.platform !== 'linux' || loopRunIsLive(root) === false)
       && (process.platform !== 'linux' || loopRunIsOpen(root) === true)
       && reclosed.ok === true
-      && reclosed.closed.length === 0,
+      && reclosed.closed.length === 0
+      && typeof closed.latch === 'string'
+      && ownedRun({ sessionId: 'session-1', directory: latches }) === null,
     );
 
     const persisted = persistPrimeSnapshot({
@@ -1163,7 +1180,7 @@ function main() {
     process.exit(outcome.ok === true ? 0 : 1);
   }
   if (parsed.mode === 'close-run') {
-    const outcome = withDigest(closeRunMarkers(), digest);
+    const outcome = withDigest(closeRun(), digest);
     writeStdoutSync(`${JSON.stringify(outcome, null, 1)}\n`);
     process.exit(outcome.ok === true ? 0 : 1);
   }

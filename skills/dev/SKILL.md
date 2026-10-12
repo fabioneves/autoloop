@@ -1,6 +1,7 @@
 ---
 name: dev
 description: Run Autoloop's forward GitHub issue-to-PR workflow from Claude Code. One prime call, one dispatch call per role, no routing to choose.
+disable-model-invocation: true
 ---
 
 # autoloop:dev — forward path
@@ -127,7 +128,7 @@ Never in any command:
 ## The tools
 
 Every tool, brief and hook runs from the plugin: `<plugin-tools>` =
-`<this skill's real dir>/../../tools/` (the SessionStart preflight prints it), written as
+`<this skill's real dir>/../../tools/`, written as
 a literal absolute path, never a shell variable. A unit branch therefore runs the same guard as the
 base. Repository policy is data — `.autoloop/config.json`, read from the base; the gate is the
 repository's own `gate.command`, run on the unit's tree; the merge executor is
