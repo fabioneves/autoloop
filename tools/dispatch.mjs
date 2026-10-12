@@ -1973,14 +1973,14 @@ function selfTest() {
       (() => {
         resetModels();
         const want = {
-          plan: ['gpt-6-astra[1m]', 'xhigh', 'claude-opus-5-5[1m]'],
-          'plan-review': ['claude-fable-5-1[1m]', 'xhigh', 'claude-sonnet-5[1m]'],
-          implement: ['claude-opus-5-5[1m]', null, 'claude-fable-5-1[1m]'],
-          fix: ['claude-opus-5-5[1m]', null, 'claude-fable-5-1[1m]'],
-          simplify: ['claude-fable-5-1[1m]', null, 'claude-opus-5-5[1m]'],
-          'diff-review': ['gpt-6-astra[1m]', 'xhigh', 'claude-sonnet-5[1m]'],
-          'code-review': ['gpt-6-astra[1m]', 'xhigh', 'claude-sonnet-5[1m]'],
-          'doubt-review': ['gpt-6-astra[1m]', 'xhigh', 'claude-sonnet-5[1m]'],
+          plan: ['astra[1m]', 'high', 'opus[1m]'],
+          'plan-review': ['fable[1m]', 'high', 'sonnet[1m]'],
+          implement: ['opus[1m]', 'high', 'fable[1m]'],
+          fix: ['opus[1m]', 'high', 'fable[1m]'],
+          simplify: ['fable[1m]', 'high', 'opus[1m]'],
+          'diff-review': ['astra[1m]', 'high', 'sonnet[1m]'],
+          'code-review': ['astra[1m]', 'high', 'sonnet[1m]'],
+          'doubt-review': ['astra[1m]', 'high', 'sonnet[1m]'],
         };
         const resolved = ROLE_NAMES.every((role) => {
           const route = resolveRoute(role, repoScratch);
@@ -2068,18 +2068,41 @@ function selfTest() {
       ).includes('checkout: dirty'),
     );
     check(
-      'a configured effort pins a dispatch and reaches the engine argv; a writer without one passes none',
+      'default aliases and high effort reach reviewer and writer CLI argv unchanged',
       (() => {
         resetModels();
         writeEngineShim(shimDirectory, shimBody(resultEvent({ structured_output: PASSING_VERDICT })));
-        const pinned = runDispatch({
+        const reviewer = runDispatch({
           role: 'code-review', prompt: 'review', tools: reviewerTools, cwd: repoScratch,
           engine: join(shimDirectory, 'claude'),
         });
+        const reviewerArgv = readFileSync(argvPath, 'utf8');
+        writeEngineShim(shimDirectory, shimBody(`printf x > "effort-$$.txt"\n${resultEvent({ result: 'done' })}`));
+        const writer = runDispatch({
+          role: 'implement', prompt: 'implement', tools: writerTools, cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        const writerArgv = readFileSync(argvPath, 'utf8');
+        return reviewer.ok === true && reviewer.effort === 'high'
+          && reviewerArgv.includes('--model astra[1m]') && reviewerArgv.includes('--effort high')
+          && writer.ok === true && writer.effort === 'high'
+          && writerArgv.includes('--model opus[1m]') && writerArgv.includes('--effort high');
+      })(),
+    );
+    check(
+      'explicit null effort omits the CLI flag even when the writer default is high',
+      (() => {
+        setModels({ implement: { effort: null } });
+        writeEngineShim(shimDirectory, shimBody(`printf x > "null-effort-$$.txt"\n${resultEvent({ result: 'done' })}`));
+        const result = runDispatch({
+          role: 'implement', prompt: 'implement', tools: writerTools, cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
         const argv = readFileSync(argvPath, 'utf8');
-        return pinned.ok === true && pinned.effort === 'xhigh' && argv.includes('--effort xhigh')
-          && argv.includes('--model gpt-6-astra[1m]')
-          && resolveDefaultEffort('implement', repoScratch) === null;
+        const effort = resolveDefaultEffort('implement', repoScratch);
+        resetModels();
+        return result.ok === true && result.effort === undefined && effort === null
+          && argv.includes('--model opus[1m]') && !argv.includes('--effort');
       })(),
     );
     check(
@@ -2232,8 +2255,8 @@ function selfTest() {
         const review = routedEnv('code-review');
         const write = routedEnv('implement');
         return [plan, review, write].every(({ url }) => url === 'http://session-wide.invalid')
-          && plan.argv.includes('--model gpt-6-astra[1m]') && review.argv.includes('--model gpt-6-astra[1m]')
-          && write.argv.includes('--model claude-opus-5-5[1m]') && write.result.route === undefined;
+          && plan.argv.includes('--model astra[1m]') && review.argv.includes('--model astra[1m]')
+          && write.argv.includes('--model opus[1m]') && write.result.route === undefined;
       })(),
     );
     check(
@@ -2251,9 +2274,11 @@ function selfTest() {
           engine: join(shimDirectory, 'claude'), fallback: true,
         });
         resetModels();
-        return simplify.result.ok === true && simplify.argv.includes('--model claude-opus-5-5[1m]')
-          && simplify.result.fallback === true && simplify.result.model === 'claude-opus-5-5[1m]'
-          && planReview.argv.includes('--model claude-sonnet-5[1m]')
+        return simplify.result.ok === true && simplify.argv.includes('--model opus[1m]')
+          && simplify.argv.includes('--effort high')
+          && simplify.result.fallback === true && simplify.result.model === 'opus[1m]'
+          && planReview.argv.includes('--model sonnet[1m]')
+          && planReview.argv.includes('--effort high')
           && refused.ok === false && refused.error.code === 'ROUTE_FALLBACK_MISSING';
       })(),
     );
@@ -2275,7 +2300,7 @@ function selfTest() {
         });
         const noted = JSON.parse(readFileSync(stepsFile, 'utf8')).steps.at(-1).model;
         rmSync(stepsFile);
-        return result.ok === true && noted === 'claude-opus-5-5[1m]';
+        return result.ok === true && noted === 'opus[1m]';
       })(),
     );
     check(
@@ -2298,7 +2323,7 @@ function selfTest() {
         }));
         const invalid = resolveRoute('code-review', repoScratch);
         rmSync(join(repoScratch, '.autoloop'), { recursive: true, force: true });
-        return pinnedRoute.model === 'gpt-6-astra[1m]' && pinnedRoute.source === 'pinned'
+        return pinnedRoute.model === 'astra[1m]' && pinnedRoute.source === 'pinned'
           && unpinned.model === 'claude-haiku-4-5' && unpinned.source === 'config'
           && invalid.error?.code === 'MODELS_INVALID';
       })(),
@@ -2306,7 +2331,7 @@ function selfTest() {
     check(
       'the project config overrides the global one per field',
       (() => {
-        setModels({ implement: { effort: 'high' } });
+        setModels({ implement: { effort: 'medium' } });
         const projectConfig = join(repoScratch, '.autoloop', 'config.json');
         mkdirSync(dirname(projectConfig), { recursive: true });
         writeFileSync(projectConfig, JSON.stringify({
@@ -2316,8 +2341,8 @@ function selfTest() {
         const route = resolveRoute('implement', repoScratch);
         rmSync(join(repoScratch, '.autoloop'), { recursive: true, force: true });
         resetModels();
-        return route.model === 'claude-opus-5-5' && route.effort === 'high'
-          && route.fallback?.model === 'claude-fable-5-1[1m]';
+        return route.model === 'claude-opus-5-5' && route.effort === 'medium'
+          && route.fallback?.model === 'fable[1m]';
       })(),
     );
     check(
@@ -2361,7 +2386,7 @@ function selfTest() {
         const tail = readFileSync(logPath, 'utf8').trim().split('\n').slice(-2)
           .map((line) => JSON.parse(line));
         return result.ok === true && spawns === 2
-          && result.earlierAttempts?.[0] === 'ENGINE_EXIT_NONZERO on gpt-6-astra[1m]'
+          && result.earlierAttempts?.[0] === 'ENGINE_EXIT_NONZERO on astra[1m]'
           && tail[0].ok === false && tail[0].code === 'ENGINE_EXIT_NONZERO'
           && tail[1].ok === true && tail[1].code === undefined;
       })(),
@@ -2384,7 +2409,7 @@ function selfTest() {
         return result.ok === false && spawns === 1;
       }),
     );
-    const limitedOnAstra = 'case "$*" in *gpt-6-astra*) '
+    const limitedOnAstra = 'case " $* " in *" --model astra[1m] "*|*" --model gpt-6-astra "*) '
       + `printf 'You have hit your usage limit\\n' >&2; exit 1;; esac\n`
       + resultEvent({ structured_output: { title: 'Plan', prBody: 'p', body: 'b' } });
     check(
@@ -2393,21 +2418,21 @@ function selfTest() {
         const { result, spawns } = spawnsOf('plan', limitedOnAstra);
         const last = JSON.parse(readFileSync(logPath, 'utf8').trim().split('\n').at(-1));
         return result.ok === true && spawns === 2
-          && result.fallback === true && result.model === 'claude-opus-5-5[1m]'
-          && result.earlierAttempts[0] === 'ENGINE_EXIT_NONZERO (usage limit) on gpt-6-astra[1m]'
+          && result.fallback === true && result.model === 'opus[1m]'
+          && result.earlierAttempts[0] === 'ENGINE_EXIT_NONZERO (usage limit) on astra[1m]'
           && last.fallback === true;
       })(),
     );
     check(
       'a usage limit moves a reviewer to its configured fallback; a pinned model is not rerouted',
       (() => {
-        const limitedReview = 'case "$*" in *gpt-6-astra*) '
+        const limitedReview = 'case " $* " in *" --model astra[1m] "*) '
           + `printf 'You have hit your usage limit\\n' >&2; exit 1;; esac\n`
           + resultEvent({ structured_output: PASSING_VERDICT });
         const review = spawnsOf('code-review', limitedReview);
         const pinned = spawnsOf('plan', limitedOnAstra, { model: 'gpt-6-astra' });
         return review.result.ok === true && review.spawns === 2
-          && review.result.model === 'claude-sonnet-5[1m]' && review.result.fallback === true
+          && review.result.model === 'sonnet[1m]' && review.result.fallback === true
           // An explicit --model is the caller's choice; the tool does not reroute it.
           && pinned.result.ok === false && pinned.spawns === 1;
       })(),
@@ -2415,7 +2440,7 @@ function selfTest() {
     check(
       'a writer at its limit is flagged for the orchestrator, not rerouted',
       (() => {
-        const limitedOnOpus = 'case "$*" in *claude-opus-5-5*) '
+        const limitedOnOpus = 'case " $* " in *" --model opus[1m] "*) '
           + `printf 'You have hit your usage limit\\n' >&2; exit 1;; esac\n`
           + resultEvent({ result: 'done' });
         const { result, spawns } = spawnsOf('fix', limitedOnOpus);
@@ -2426,12 +2451,12 @@ function selfTest() {
     check(
       'two consecutive failures on a route move to its fallback, once',
       (() => {
-        const failsOnFable = 'case "$*" in *claude-fable-5-1*) exit 7;; esac\n'
+        const failsOnFable = 'case " $* " in *" --model fable[1m] "*) exit 7;; esac\n'
           + resultEvent({ structured_output: PASSING_VERDICT });
         const moved = spawnsOf('plan-review', failsOnFable);
         const nowhere = spawnsOf('plan-review', 'exit 7');
         return moved.result.ok === true && moved.spawns === 3
-          && moved.result.model === 'claude-sonnet-5[1m]' && moved.result.fallback === true
+          && moved.result.model === 'sonnet[1m]' && moved.result.fallback === true
           && nowhere.result.ok === false && nowhere.spawns === 3
           && nowhere.result.error.fallback === true;
       })(),
@@ -2480,27 +2505,27 @@ function selfTest() {
     // SPEC-model-config: a model the session cannot serve did nothing, so any
     // role, a writer too, moves to its fallback (measured: exit 1, zero
     // tokens, `"error":"model_not_found"`).
-    const unavailableOn = (model, success) => `case "$*" in *${model}*) `
+    const unavailableOn = (model, success) => `case " $* " in *" --model ${model} "*) `
       + `printf '[claude-code:unrecognized_model] {"model":"${model}"}\\n' >&2; `
       + `printf '%s\\n' '${JSON.stringify({ type: 'result', subtype: 'success', is_error: true, result: 'the selected model is unavailable' })}'; exit 1;; esac\n`
       + success;
     check(
       'an unavailable model moves any role, a writer too, to its fallback once, stamped',
       (() => {
-        const plan = spawnsOf('plan', unavailableOn('gpt-6-astra', resultEvent({ structured_output: { title: 'Plan', prBody: 'p', body: 'b' } })));
-        const writer = spawnsOf('fix', unavailableOn('claude-opus-5-5', `printf x > "fell-back-$$.txt"\n${resultEvent({ result: 'done' })}`));
-        const both = spawnsOf('fix', unavailableOn('claude-', resultEvent({ result: 'done' })));
-        return plan.result.ok === true && plan.spawns === 2 && plan.result.model === 'claude-opus-5-5[1m]'
+        const plan = spawnsOf('plan', unavailableOn('astra[1m]', resultEvent({ structured_output: { title: 'Plan', prBody: 'p', body: 'b' } })));
+        const writer = spawnsOf('fix', unavailableOn('opus[1m]', `printf x > "fell-back-$$.txt"\n${resultEvent({ result: 'done' })}`));
+        const both = spawnsOf('fix', unavailableOn('opus[1m]', unavailableOn('fable[1m]', resultEvent({ result: 'done' }))));
+        return plan.result.ok === true && plan.spawns === 2 && plan.result.model === 'opus[1m]'
           && plan.result.fallback === true
-          && plan.result.earlierAttempts[0] === 'ENGINE_EXIT_NONZERO (model unavailable) on gpt-6-astra[1m]'
-          && writer.result.ok === true && writer.spawns === 2 && writer.result.model === 'claude-fable-5-1[1m]'
+          && plan.result.earlierAttempts[0] === 'ENGINE_EXIT_NONZERO (model unavailable) on astra[1m]'
+          && writer.result.ok === true && writer.spawns === 2 && writer.result.model === 'fable[1m]'
           && both.result.ok === false && both.spawns === 2 && both.result.error.modelUnavailable === true;
       })(),
     );
     check(
       'a writer that changed the checkout is never sent to its fallback, whatever it reports',
       (() => {
-        const worked = `printf x > "worked-$$.txt"\n${unavailableOn('claude-opus-5-5', resultEvent({ result: 'done' })).replace(/^case/u, 'case')}`;
+        const worked = `printf x > "worked-$$.txt"\n${unavailableOn('opus[1m]', resultEvent({ result: 'done' })).replace(/^case/u, 'case')}`;
         const { result, spawns } = spawnsOf('fix', worked);
         return result.ok === false && spawns === 1 && result.error.modelUnavailable === undefined;
       })(),
