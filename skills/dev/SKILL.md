@@ -12,7 +12,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.67.0 · starting
+∞ dev · v0.68.0 · starting
 ```
 
 This session is the orchestrator: it plans, applies its own checklist pass and fixes, runs gates,

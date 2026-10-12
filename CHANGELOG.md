@@ -5,6 +5,8 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.68.0] - 2026-10-12
+
 ### Changed
 
 - Autoloop no longer invents, enforces, or reports work-size quotas. Plan and plan-review briefs
