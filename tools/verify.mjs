@@ -40,6 +40,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'dispatch-return-association.mjs',
   'dispatch.mjs',
   'escalate-paths.mjs',
+  'events-contract.mjs',
   'hook-root.mjs',
   'inherited-dispatch.mjs',
   'run-markers.mjs',
