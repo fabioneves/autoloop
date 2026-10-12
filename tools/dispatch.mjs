@@ -1891,13 +1891,13 @@ function selfTest() {
       `printf 'more\\n' > widened.txt\n${resultEvent({ result: widenReport })}`,
     ));
     const wideningWriter = runDispatch({
-      role: 'implement', prompt: 'implement the plan', tools: writerTools, cwd: repoScratch, engine,
+      timeoutMs: 15000, role: 'implement', prompt: 'implement the plan', tools: writerTools, cwd: repoScratch, engine,
     });
     writeEngineShim(shimDirectory, shimBody(
       `printf 'again\\n' > malformed.txt\n${resultEvent({ result: 'done\n```extra-paths\n[{"path":"x"}]\n```' })}`,
     ));
     const malformedWidening = runDispatch({
-      role: 'implement', prompt: 'implement the plan', tools: writerTools, cwd: repoScratch, engine,
+      timeoutMs: 15000, role: 'implement', prompt: 'implement the plan', tools: writerTools, cwd: repoScratch, engine,
     });
     check(
       'an implement result passes its extra-paths block through typed, and a malformed block is a typed failure that keeps the text',
@@ -2057,6 +2057,7 @@ function selfTest() {
           resultEvent({ structured_output: { title: 'feat: a', prBody: 'Closes #7', body: 'plan' } }),
         ));
         const unbounded = runDispatch({
+          timeoutMs: 15000,
           role: 'plan',
           prompt: 'plan issue #7',
           tools: resolveTools('plan'),
@@ -2069,6 +2070,7 @@ function selfTest() {
           } }),
         ));
         const bounded = runDispatch({
+          timeoutMs: 15000,
           role: 'plan',
           prompt: 'plan issue #7',
           tools: resolveTools('plan'),

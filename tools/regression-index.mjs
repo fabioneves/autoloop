@@ -38,6 +38,36 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // fails the audit, which is the point.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'flow-release-review-left-no-round-after-the-re-plan-and-no-pr-wait-cap',
+    date: '2026-10-12',
+    symptom: 'The 0.69.0 release review found a Critical first seen in the re-plan round could be '
+      + 'neither fixed nor decided (every later round was REVIEW_REPLAN_SPENT), a PR wait had no '
+      + 'cap while --minutes had one, the draft hand-off labelled human:decide by prose only, a '
+      + '0.68 retained snapshot failed verify as "unreadable", and the fix round budget lived in '
+      + 'two files with no check that they agree.',
+    cause: 'The round-budget rule, the PR-wait lift, the hand-off label, and the snapshot version '
+      + 'message were each written in one place and never exercised end to end.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'a Critical first seen in the re-plan round is fixed in one more round'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'a second fix round after the re-plan round is refused'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'a Critical still open after the admitted fix round blocks with the ledger'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'the append-round CLI builds the widened boundary, covers a widening by the delta, and hands off after the budget'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'the fix round budget and the round pattern agree with review-contract.mjs'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'the open-findings round labels human:decide and leaves the PR a draft'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a shipped card invalidates the retained snapshot as a PR mutation'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a retained snapshot of an older version is refused by its version'" }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "'a retained snapshot of an older version names its version and the re-prime remedy'" }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: "'a retained snapshot of an older version names its version in the authority detail'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a PR wait lifts after 720 minutes with a re-plan reason, and is resumed'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a lane entry without a trailing slash matches its exact path only'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'an overlap hit waits on the PR, the merge lifts it resumed, the re-check against the new snapshot is clear, and an older snapshot names its version'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'the PR body sections list open findings with predicate and raisings, and Minors, and are empty without entries'" }),
+      Object.freeze({ file: 'label-swap-reminder.mjs', anchor: "--role fix --prompt-file /tmp/p.md --json', /--to 08-fix --round fix-<n>/" }),
+      Object.freeze({ file: '../docs/specs/SPEC-review-rounds.md', anchor: 'contract admits exactly one round after it' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**After the re-plan round, one round.**' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'delivered-units-on-shared-files-conflicted-each-other',
     date: '2026-10-12',
     symptom: 'On one project nine open loop pull requests formed two conflict groups of four and '
@@ -78,7 +108,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a decision rebuts the finding and one closing full round over the same artifact closes it'," }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a second re-plan is refused'," }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a verified Critical past the budget is still fixed in the next round'," }),
-      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a Critical surviving the re-plan round blocks with the ledger'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a Critical still open after the admitted fix round blocks with the ledger'," }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'Minors never consume the budget and never hold delivery'," }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a Major surviving the re-plan round hands the unit off as a draft with its ledger'," }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'the builder refuses a fourth fix round and accepts one re-plan round with its new plan'," }),
@@ -88,7 +118,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'briefs/code-review.md', anchor: 'A re-raise on the same predicate is the same finding' }),
       Object.freeze({ file: 'briefs/fix.md', anchor: 'or a predicate has a Major in two consecutive rounds' }),
       Object.freeze({ file: 'briefs/plan.md', anchor: 'On a re-plan, the input is the code-review findings ledger' }),
-      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**After the re-plan round there is no further round.**' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**After the re-plan round, one round.**' }),
     ]),
   }),
   Object.freeze({

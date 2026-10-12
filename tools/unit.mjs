@@ -80,7 +80,8 @@ import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 import { updateStepRecord } from './dispatch-return-association.mjs';
 import { inLane } from './lane-contract.mjs';
 import {
-  SNAPSHOT_SECTIONS, completeSection, createSnapshot, deliveredPullRequests, invalidateSnapshot, verifySnapshot,
+  SNAPSHOT_SECTIONS, completeSection, createSnapshot, deliveredPullRequests, invalidateSnapshot, snapshotProblem,
+  verifySnapshot,
 } from './snapshot-contract.mjs';
 
 const TIMEOUT_MS = 30_000;
@@ -144,7 +145,9 @@ export function waitCondition(bodies) {
         else if (parsed?.on === 'base' && SHA_RE.test(parsed.oid ?? '')) newest = { on: 'base', oid: parsed.oid };
         else if (parsed?.on === 'time' && Number.isFinite(Date.parse(parsed.until))) newest = { on: 'time', until: parsed.until };
         else if (parsed?.on === 'pr' && positive(parsed.number) && pathList(parsed.paths) !== null) {
-          newest = { on: 'pr', number: parsed.number, paths: parsed.paths };
+          // `until` caps the wait (0.69.0); a marker without it holds until the PR settles.
+          newest = { on: 'pr', number: parsed.number, paths: parsed.paths,
+            ...(Number.isFinite(Date.parse(parsed.until)) ? { until: parsed.until } : {}) };
         }
       } catch {
         // An unparseable marker is not a condition; an earlier valid one still stands.
@@ -202,7 +205,12 @@ export function waitCleared(condition, facts) {
   }
   if (condition?.on === 'pr') {
     const state = facts?.prStates?.[condition.number];
-    return state === 'MERGED' || state === 'CLOSED' ? `PR #${condition.number} ${state.toLowerCase()}` : null;
+    if (state === 'MERGED' || state === 'CLOSED') return `PR #${condition.number} ${state.toLowerCase()}`;
+    // A PR wait is capped like a timed wait: a PR nobody merges must not hold
+    // the unit for ever. The lift is still a resume, so the unit re-plans.
+    return condition.until !== undefined && Number.isFinite(facts?.now) && facts.now >= Date.parse(condition.until)
+      ? `PR #${condition.number} still open after ${MAX_WAIT_MINUTES} min; re-plan`
+      : null;
   }
   return null;
 }
@@ -324,8 +332,8 @@ export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes 
     if (pathList(paths) === null) return refusal('INVALID_ARGS', '--paths: expected the overlapping paths, comma-separated');
     const state = prState(run, onPr);
     if (state !== 'OPEN') return refusal('NOTHING_TO_WAIT_ON', `PR #${onPr} is ${state === null ? 'unreadable' : 'not open'}`);
-    condition = { on: 'pr', number: onPr, paths };
-    reason = `waits on PR #${onPr}, which changes ${paths.join(', ')} inside this plan's boundary; the label is lifted when it merges or closes, and the unit re-plans on the new base`;
+    condition = { on: 'pr', number: onPr, paths, until: new Date(now + MAX_WAIT_MINUTES * 60_000).toISOString() };
+    reason = `waits on PR #${onPr}, which changes ${paths.join(', ')} inside this plan's boundary; the label is lifted when it merges or closes (or at ${condition.until}), and the unit re-plans on the new base`;
   } else if (onIssue !== null) {
     if (!positive(onIssue)) return refusal('INVALID_ARGS', '--on-issue: expected a positive issue number');
     if (onIssue === issue) return refusal('SELF_WAIT', `#${issue} cannot wait on itself`);
@@ -508,6 +516,23 @@ export function scopeChangesSection(scopeChanges) {
   if (!Array.isArray(scopeChanges) || scopeChanges.length === 0) return '';
   return ['## Scope changes', '', ...scopeChanges.map((change) =>
     `- ${change.findingId}: ${change.paths.join(', ')} — ${change.rationale}`)].join('\n');
+}
+
+/** Pure: the `## Open findings` section of a draft PR body, from the review
+ *  transition's `openFindings` ledger (SPEC-review-rounds §4); empty without entries. */
+export function openFindingsSection(openFindings) {
+  if (!Array.isArray(openFindings) || openFindings.length === 0) return '';
+  return ['## Open findings', '', ...openFindings.map((entry) =>
+    `- ${entry.id} (${entry.severity}, ${entry.predicate}, raised in ${entry.raisings} round${entry.raisings === 1 ? '' : 's'}): `
+    + `${entry.summary} — ${entry.evidence}`)].join('\n');
+}
+
+/** Pure: the `## Minor findings` section of a PR body (SPEC-review-rounds §6:
+ *  Minors ride into the PR, never hold it); empty without Minors. */
+export function minorFindingsSection(minors) {
+  const listed = (Array.isArray(minors) ? minors : []).filter((entry) => entry?.severity === 'Minor');
+  if (listed.length === 0) return '';
+  return ['## Minor findings', '', ...listed.map((entry) => `- ${entry.id}: ${entry.summary} — ${entry.evidence}`)].join('\n');
 }
 
 /** Every decision of one unit from GitHub, with the section the PR body carries. */
@@ -698,7 +723,7 @@ export function overlapCheck({ issue, boundaryFile, snapshotPath }) {
   } catch (error) {
     return refusal('INVALID_ARGS', `--snapshot: ${error.message}`);
   }
-  if (!verifySnapshot(snapshot)) return refusal('SNAPSHOT_INVALID', '--snapshot: not a verified snapshot');
+  if (!verifySnapshot(snapshot)) return refusal('SNAPSHOT_INVALID', `--snapshot: ${snapshotProblem(snapshot)}`);
   const delivered = deliveredPullRequests(snapshot);
   if (delivered === null) return refusal('SNAPSHOT_INCOMPLETE', 'openPrs or lifecycleMarkers is incomplete or invalidated; re-prime before the claim');
   const overlap = overlapWith(boundary, delivered.filter((entry) => entry.issue !== issue));
@@ -1075,15 +1100,31 @@ function selfTest() {
         const prWait = fakeRun([['gh pr view 70', 'OPEN'], ['gh issue comment 5', ''], ['gh issue edit 5 --add-label loop-waiting', ''], ['git rev-parse', scratch]]);
         const waited = markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs', 'src/b/'], base: 'main', run: prWait.run, now: 7000 });
         const last = JSON.parse(readFileSync(join(steps, '5.json'), 'utf8')).steps.at(-1);
+        const until = new Date(7000 + 720 * 60_000).toISOString();
         return waited.ok === true
-          && JSON.stringify(waited.condition) === '{"on":"pr","number":70,"paths":["src/a.mjs","src/b/"]}'
-          && prWait.calls[1].includes('autoloop-waiting-v1 {"on":"pr","number":70,"paths":["src/a.mjs","src/b/"]}')
+          && JSON.stringify(waited.condition) === `{"on":"pr","number":70,"paths":["src/a.mjs","src/b/"],"until":"${until}"}`
+          && prWait.calls[1].includes(`autoloop-waiting-v1 {"on":"pr","number":70,"paths":["src/a.mjs","src/b/"],"until":"${until}"}`)
           && prWait.calls[1].includes('waits on PR #70')
           && prWait.calls[1].includes('src/a.mjs, src/b/')
           && JSON.stringify(last.waiting) === JSON.stringify({ on: 'PR #70 (src/a.mjs, src/b/)', atMs: 7000 });
       } finally {
         rmSync(scratch, { recursive: true, force: true });
       }
+    })());
+  // Review of the flow release: `--minutes` is capped at 720 and `--on-pr` was
+  // not, so a PR nobody merged held its unit for ever.
+  check('a PR wait lifts after 720 minutes with a re-plan reason, and is resumed',
+    (() => {
+      const capped = { on: 'pr', number: 80, paths: ['src/a.mjs'], until: '2026-01-01T12:00:00.000Z' };
+      const marked = waitCondition([waitMarker(capped)]);
+      const listed = JSON.stringify([{ number: 9, comments: [{ body: waitMarker(capped) }] }]);
+      const lifting = fakeRun([['gh issue list', listed], ['git rev-parse', oid], ['gh pr view 80', 'OPEN'], ['gh issue edit', '']]);
+      const lift = liftWaits({ base: 'main', run: lifting.run, now: Date.parse('2026-01-01T12:00:00.000Z') });
+      return marked.until === '2026-01-01T12:00:00.000Z'
+        && waitCleared(capped, { prStates: { 80: 'OPEN' }, now: Date.parse('2026-01-01T11:59:59.000Z') }) === null
+        && waitCleared(capped, { prStates: { 80: 'OPEN' }, now: Date.parse('2026-01-01T12:00:00.000Z') }) === 'PR #80 still open after 720 min; re-plan'
+        && waitCleared(capped, { prStates: { 80: 'MERGED' }, now: Date.parse('2026-01-01T12:00:00.000Z') }) === 'PR #80 merged'
+        && JSON.stringify(lift.lifted) === JSON.stringify([{ number: 9, reason: 'PR #80 still open after 720 min; re-plan', resumed: true }]);
     })());
   check('a PR wait round-trips and clears when the PR merges or closes, not while it is open',
     JSON.stringify(waitCondition([waitMarker({ on: 'pr', number: 70, paths: ['src/a.mjs'] })])) === '{"on":"pr","number":70,"paths":["src/a.mjs"]}'
@@ -1116,32 +1157,36 @@ function selfTest() {
     && JSON.stringify(boundaryOf(['c'])) === '["c"]'
     && boundaryOf({ plan: {} }) === null
     && boundaryOf(['', 1]) === null);
+  const markerBody = (issue, pr) => '<!-- autoloop-lifecycle-v1\n' + JSON.stringify({
+    branch: `feat/gh-${issue}-unit`, headOid: oid, intentSource: 'invocation', issue, issueBodyHash: 'b'.repeat(64),
+    mergePolicy: 'manual', phase: 'ready-head', planHash: 'c'.repeat(64), plannedBaseOid: oid, pr,
+    runIntentHash: 'd'.repeat(64), selector: 'native', v: 1,
+  }) + '\n-->';
+  const prItem = (issue, number, files) => ({
+    number, title: 'unit', body: `Closes #${issue}`, isDraft: false, reviewDecision: null,
+    headRefName: `feat/gh-${issue}-unit`, headRefOid: oid, baseRefName: 'main', mergeStateStatus: 'CLEAN',
+    mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-01-01T00:00:00Z', author: 'autoloop',
+    headRepository: 'owner/repo', statusCheckState: null, statusCheckRollup: [], files, issue,
+    orphanCandidate: false, ownership: 'loop',
+  });
+  const markerItem = (issue, pr) => ({
+    issueNumber: issue, id: `IC_${issue}`, tipId: `IC_${issue}`, sequence: 0, author: 'autoloop', authorAssociation: 'MEMBER',
+    body: markerBody(issue, pr), createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', url: null,
+  });
+  // A verified snapshot whose delivered set is the given [issue, pr, files] rows.
+  const snapshotWith = (prs) => {
+    const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+    sections.repo = completeSection([{ owner: 'owner', name: 'repo', nameWithOwner: 'owner/repo', defaultBranch: 'main' }]);
+    sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: oid }]);
+    sections.openPrs = completeSection(prs.map(([issue, pr, files]) => prItem(issue, pr, files)));
+    sections.lifecycleMarkers = completeSection(prs.map(([issue, pr]) => markerItem(issue, pr)));
+    return createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z', sections });
+  };
   check('--overlap reads a plan result and a retained snapshot, skips the unit\'s own PR, and refuses an invalidated snapshot',
     (() => {
       const scratch = mkdtempSync(join(tmpdir(), 'unit-overlap-'));
       try {
-        const markerBody = (issue, pr) => '<!-- autoloop-lifecycle-v1\n' + JSON.stringify({
-          branch: `feat/gh-${issue}-unit`, headOid: oid, intentSource: 'invocation', issue, issueBodyHash: 'b'.repeat(64),
-          mergePolicy: 'manual', phase: 'ready-head', planHash: 'c'.repeat(64), plannedBaseOid: oid, pr,
-          runIntentHash: 'd'.repeat(64), selector: 'native', v: 1,
-        }) + '\n-->';
-        const prItem = (issue, number, files) => ({
-          number, title: 'unit', body: `Closes #${issue}`, isDraft: false, reviewDecision: null,
-          headRefName: `feat/gh-${issue}-unit`, headRefOid: oid, baseRefName: 'main', mergeStateStatus: 'CLEAN',
-          mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-01-01T00:00:00Z', author: 'autoloop',
-          headRepository: 'owner/repo', statusCheckState: null, statusCheckRollup: [], files, issue,
-          orphanCandidate: false, ownership: 'loop',
-        });
-        const markerItem = (issue, pr) => ({
-          issueNumber: issue, id: `IC_${issue}`, tipId: `IC_${issue}`, sequence: 0, author: 'autoloop', authorAssociation: 'MEMBER',
-          body: markerBody(issue, pr), createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', url: null,
-        });
-        const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
-        sections.repo = completeSection([{ owner: 'owner', name: 'repo', nameWithOwner: 'owner/repo', defaultBranch: 'main' }]);
-        sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: oid }]);
-        sections.openPrs = completeSection([prItem(7, 70, ['src/a.mjs']), prItem(8, 80, ['src/b/c.mjs'])]);
-        sections.lifecycleMarkers = completeSection([markerItem(7, 70), markerItem(8, 80)]);
-        const snapshot = createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z', sections });
+        const snapshot = snapshotWith([[7, 70, ['src/a.mjs']], [8, 80, ['src/b/c.mjs']]]);
         const snapshotPath = join(scratch, 'snapshot.json');
         const stalePath = join(scratch, 'stale.json');
         const planPath = join(scratch, 'plan.json');
@@ -1162,6 +1207,71 @@ function selfTest() {
         rmSync(scratch, { recursive: true, force: true });
       }
     })());
+
+  // The lane is exact or a `/` prefix: `src/x` never covers `src/xy/a.mjs`.
+  check('a lane entry without a trailing slash matches its exact path only',
+    !inLane('src/xy/a.mjs', ['src/x']) && inLane('src/x', ['src/x']) && inLane('src/x/a.mjs', ['src/x/']));
+  // SPEC-overlap-wait end to end with one fake run: the hit waits, the merge
+  // lifts it as resumed, and the re-check on the new delivered set claims.
+  check('an overlap hit waits on the PR, the merge lifts it resumed, the re-check against the new snapshot is clear, and an older snapshot names its version',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-overlap-chain-'));
+      try {
+        const before = join(scratch, 'before.json');
+        const after = join(scratch, 'after.json');
+        const planPath = join(scratch, 'plan.json');
+        writeFileSync(before, JSON.stringify(snapshotWith([[8, 80, ['src/b/c.mjs']]])));
+        writeFileSync(after, JSON.stringify(snapshotWith([])));
+        writeFileSync(planPath, JSON.stringify({ ok: true, plan: { boundary: ['src/b/'] } }));
+        const steps = join(scratch, 'autoloop', 'steps');
+        mkdirSync(steps, { recursive: true });
+        writeFileSync(join(steps, '9.json'), JSON.stringify({ issue: 9, steps: [{ step: '03-plan-review', startedAtMs: 1 }] }));
+        const calls = [];
+        let listed = '[]';
+        let prState80 = 'OPEN';
+        const run = (command, args) => {
+          const line = [command, ...args].join(' ');
+          calls.push(line);
+          if (line.startsWith('gh pr view 80')) return { ok: true, stdout: prState80, stderr: '' };
+          if (line.startsWith('gh issue list')) return { ok: true, stdout: listed, stderr: '' };
+          if (command === 'git') return { ok: true, stdout: args.includes('--git-common-dir') ? scratch : oid, stderr: '' };
+          return { ok: true, stdout: '', stderr: '' };
+        };
+        const hit = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath: before });
+        const waited = hit.ok === true && hit.overlap !== null
+          ? markWaiting({ issue: 9, onPr: hit.overlap.pr, paths: hit.overlap.paths, base: 'main', run, now: 7000 })
+          : { ok: false };
+        const comment = calls.find((call) => call.startsWith('gh issue comment 9 --body ')) ?? '';
+        listed = JSON.stringify([{ number: 9, comments: [{ body: comment.slice('gh issue comment 9 --body '.length) }] }]);
+        prState80 = 'MERGED';
+        const lift = liftWaits({ base: 'main', run, now: 8000 });
+        const clear = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath: after });
+        // A retained snapshot from 0.68 (version 2) is refused by its version.
+        const older = join(scratch, 'older.json');
+        writeFileSync(older, JSON.stringify({ ...snapshotWith([]), version: 2 }));
+        const refused = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath: older });
+        return refused.code === 'SNAPSHOT_INVALID' && refused.message === '--snapshot: snapshot version 2, expected 3; re-prime'
+          && JSON.stringify(hit.overlap) === '{"pr":80,"paths":["src/b/c.mjs"]}'
+          && waited.ok === true && waited.condition.number === 80
+          && JSON.stringify(lift.lifted) === JSON.stringify([{ number: 9, reason: 'PR #80 merged', resumed: true }])
+          && calls.includes('gh issue edit 9 --remove-label loop-waiting')
+          && clear.ok === true && clear.overlap === null;
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
+  check('the PR body sections list open findings with predicate and raisings, and Minors, and are empty without entries',
+    openFindingsSection([
+      { id: 'gate-null', severity: 'Major', predicate: 'rule:gate', raisings: 5, summary: 'The gate passes null', evidence: 'src/gate.mjs:9' },
+      { id: 'late-1', severity: 'Major', predicate: 'late-1', raisings: 1, summary: 'Off by one', evidence: 'src/x.mjs:3' },
+    ]) === '## Open findings\n\n- gate-null (Major, rule:gate, raised in 5 rounds): The gate passes null — src/gate.mjs:9\n'
+      + '- late-1 (Major, late-1, raised in 1 round): Off by one — src/x.mjs:3'
+    && openFindingsSection([]) === '' && openFindingsSection(undefined) === ''
+    && minorFindingsSection([
+      { id: 'minor-1', severity: 'Minor', summary: 'A nit', evidence: 'src/a.mjs:7' },
+      { id: 'major-1', severity: 'Major', summary: 'Not a minor', evidence: 'src/a.mjs:8' },
+    ]) === '## Minor findings\n\n- minor-1: A nit — src/a.mjs:7'
+    && minorFindingsSection([]) === '' && minorFindingsSection(null) === '');
 
   const unmerged = fakeRun([['gh issue view 5', 'OPEN'], ['gh pr view 9', '{"state":"OPEN","baseRefName":"main","url":"u"}']]);
   check('obsolete refuses an unmerged PR and touches nothing',

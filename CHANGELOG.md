@@ -109,6 +109,29 @@ Notable changes to Autoloop are recorded here. The format follows
   does not refuse a finding as out of scope. Repair limits are unchanged: at most three per
   parent, depth one, filed `loop-repair` with the parent's trusted `loop-ready` provenance.
 
+### Fixed
+
+- The review contract admits one round after the re-plan round: a fix round when every open
+  `fix` entry is Critical, or a closing round that only defers (naming the seam) or decides
+  (naming the decision comment); a Critical fix is followed by the closing full round. A Critical
+  still open after that round blocks `POLICY_DENIED`; a Major hands off as a draft. Before, a
+  finding the re-plan round was the first to see could neither be fixed nor decided.
+- `step.mjs --round open-findings` labels the issue `human:decide` in its own label edit and
+  leaves the PR a draft; `unit.mjs` composes `## Open findings` and `## Minor findings`.
+- A `--wait --on-pr` lifts after 720 minutes with `PR #M still open after 720 min; re-plan`, as
+  a timed wait does; the lift is still a resume.
+- A retained snapshot of an older version is refused as `snapshot version 2, expected 3;
+  re-prime` by the step, the parked view, and the overlap check, not as unreadable.
+- A shipped card invalidates the retained snapshot as a `PR_MUTATION`, so the delivered set is
+  re-read before the next overlap check.
+- The fix round budget is checked to agree between `review-contract.mjs` and `step.mjs`; the
+  `--append-round` usage names `<base>/.autoloop/config.json`; the label-swap rider knows the
+  `fix` and `simplify` roles and names `unit.mjs --block` instead of hand label removal.
+- The dev skill names every `unit.mjs` entry point, the `fix` role for fix dispatches, the full
+  `--repair` form, the repair child's wait on its parent's PR, and the one round after the
+  re-plan; the elastic-scope spec states which checks use the widened set; the premise-decisions
+  spec puts a dependency, a secret, or an irreversible act outside the loop's authority.
+
 ## [0.68.0] - 2026-10-12
 
 ### Changed

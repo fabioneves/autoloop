@@ -661,10 +661,12 @@ function raisingsOf(rounds, predicate, predicateOf) {
 // `fix` disposition is a fix round; any other round rebuts or defers over the
 // same artifact. The refusals name themselves: REVIEW_FIX_BUDGET_SPENT for a
 // fourth fix round, or a second decision on a predicate a fresh reviewer
-// already rejected; REVIEW_REPLAN_SPENT for any round after the re-plan round.
+// already rejected; REVIEW_REPLAN_SPENT for a round past the re-plan round's
+// one admitted round (and its closing round after a Critical fix).
 function roundBudget(rounds, predicateOf, gaps = []) {
   let fixRounds = 0;
   let replanRound = null;
+  let postReplanFix = false;
   const decided = new Set();
   const rejected = new Set();
   for (let index = 1; index < rounds.length; index += 1) {
@@ -676,18 +678,35 @@ function roundBudget(rounds, predicateOf, gaps = []) {
       if (rebut.status === 'rejected' && decided.has(predicate)) rejected.add(predicate);
     }
     if (replanRound !== null) {
-      gaps.push(
-        `${at}: round ${replanRound} re-planned the unit and was its last review — a Major `
-        + 'still open there hands the unit off as a draft, a Critical blocks',
-      );
-      return { code: 'REVIEW_REPLAN_SPENT' };
+      // SPEC-review-rounds §5: a finding first seen in the re-plan round still
+      // gets one round — fixing only Criticals, or deferring (naming the seam)
+      // and deciding (naming the decision comment) Majors — then the closing
+      // full round after a Critical fix. Nothing else follows the re-plan.
+      const fixes = [...openEntries(current, 'fix'), ...openEntries(current, 'widen')];
+      const admitted = current.planFingerprint === previous.planFingerprint && (
+        index === replanRound + 1
+          ? fixes.every(({ severity }) => severity === 'Critical')
+            && openEntries(current, 'defer').every(({ seam }) => seam !== undefined)
+            && openEntries(current, 'rebut').every(({ rationale }) => DECISION_LINK_RE.test(rationale))
+          : index === replanRound + 2 && postReplanFix && fixes.length === 0
+            && current.scope === REVIEW_SCOPES.get('full'));
+      if (!admitted) {
+        gaps.push(
+          `${at}: round ${rounds[replanRound].round} re-planned the unit; one round after it may `
+          + 'fix a Critical, defer a Major outside the seam or decide one, then the closing full '
+          + 'round — a Major still open hands the unit off as a draft, a Critical blocks',
+        );
+        return { code: 'REVIEW_REPLAN_SPENT' };
+      }
+      if (index === replanRound + 1 && fixes.length > 0) postReplanFix = true;
+      continue;
     }
     if (current.planFingerprint !== previous.planFingerprint) {
       if (current.scope !== REVIEW_SCOPES.get('full')) {
         gaps.push(`${at}: the re-plan round reviews the complete artifact (scope full)`);
         return { code: 'INVALID_REVIEW_EVIDENCE' };
       }
-      replanRound = current.round;
+      replanRound = index;
       continue;
     }
     const spent = fixRounds >= FIX_ROUND_BUDGET;
@@ -723,7 +742,7 @@ function roundBudget(rounds, predicateOf, gaps = []) {
       decided.add(predicate);
     }
   }
-  return { code: null, fixRounds, replanRound };
+  return { code: null, fixRounds, replanRound, afterReplan: replanRound !== null && replanRound < rounds.length - 1 };
 }
 
 export function reviewTransition(input) {
@@ -928,11 +947,12 @@ export function reviewTransition(input) {
     rejectedRebuts: rejectedRebuts.length,
     fixRounds,
   };
-  // The re-plan round was the last review. A Critical that survived it is
-  // the human's (POLICY_DENIED, the ledger in the block comment); a Major is
-  // filed as a repair and the unit goes out as a draft with `## Open
-  // findings` and `human:decide` — the one review path that waits for a human.
-  if (budget.replanRound !== null) {
+  // After the re-plan round a Critical gets one more fix round (the re-plan
+  // was the first to see it); still open after that round, it is the human's
+  // (POLICY_DENIED, the ledger in the block comment). A Major is filed as a
+  // repair and the unit goes out as a draft with `## Open findings` and
+  // `human:decide` — the one review path that waits for a human.
+  if (budget.replanRound !== null && (budget.afterReplan || !critical)) {
     const handoff = { ...detail, openFindings, reviewedHead: history.current.headOid };
     return critical
       ? decision('block', 'POLICY_DENIED', handoff)
@@ -1493,6 +1513,7 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
           evidence: prior.evidence,
           ...(predicate === undefined ? {} : { predicate }),
           ...(widened === undefined ? {} : { paths: widened }),
+          ...(deferred && overrides.seam !== undefined ? { seam: overrides.seam } : {}),
           disposition: rebutted ? 'rebut' : deferred ? 'defer' : widened ? 'widen' : 'fix',
           state: 'open',
           rationale: rebutted
@@ -1512,7 +1533,8 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
       dispatchId: overrides.dispatchId ?? `dispatch-${options.seed}-${counter}`,
       authorIdentity: overrides.authorIdentity ?? 'orchestrator',
       reviewerIdentity: overrides.reviewerIdentity ?? `reviewer-${counter}`,
-      planFingerprint: overrides.planFingerprint ?? planFingerprint,
+      // A re-plan's fingerprint carries into the rounds after it, as appendRound carries it.
+      planFingerprint: overrides.planFingerprint ?? previous?.planFingerprint ?? planFingerprint,
       repositoryFingerprint: overrides.repositoryFingerprint ?? repositoryFingerprint,
       configFingerprint: overrides.configFingerprint ?? configFingerprint,
       configuredBaseOid,
@@ -1755,10 +1777,33 @@ function selfTest() {
   const replanDeltaRound = replanDelta.factory(5, pass, {
     planFingerprint: hash('plan-replan-delta-v2'),
   });
+  // A Critical the re-plan round is the first to see gets one fix round and
+  // the closing full round; a second fix round is refused, and a Critical
+  // still open after the admitted round is the human's.
+  const criticalInReplan = { ...cumulativeFinding, id: 'critical-after-replan', severity: 'Critical' };
   const replanCritical = spentChain('replan-critical');
-  const replanStillCritical = replanCritical.factory(5, failWith([
-    { ...cumulativeFinding, id: 'critical-after-replan', severity: 'Critical' },
-  ]), { scope: 'full-artifact', planFingerprint: hash('plan-replan-critical-v2') });
+  const replanStillCritical = replanCritical.factory(5, failWith([criticalInReplan]),
+    { scope: 'full-artifact', planFingerprint: hash('plan-replan-critical-v2') });
+  const replanCriticalFixed = replanCritical.factory(6, pass);
+  const replanCriticalClose = replanCritical.factory(7, pass, sameArtifactAs(replanCriticalFixed));
+  const replanCriticalOpen = spentChain('replan-critical-open');
+  const replanCriticalOpenRounds = [
+    replanCriticalOpen.factory(5, failWith([criticalInReplan]),
+      { scope: 'full-artifact', planFingerprint: hash('plan-replan-critical-open-v2') }),
+    replanCriticalOpen.factory(6, failWith([criticalInReplan])),
+  ];
+  const replanCriticalSecondFix = replanCriticalOpen.factory(7, failWith([criticalInReplan]));
+  // A Major first seen in the re-plan round may be deferred outside the seam
+  // (or decided) in the closing round instead of handed off.
+  const replanDefer = spentChain('replan-defer');
+  const replanDeferMajor = { ...finding, id: 'major-after-replan' };
+  const replanDeferRounds = [
+    replanDefer.factory(5, failWith([replanDeferMajor]),
+      { scope: 'full-artifact', planFingerprint: hash('plan-replan-defer-v2') }),
+  ];
+  replanDeferRounds.push(replanDefer.factory(6, pass, {
+    ...sameArtifactAs(replanDeferRounds[0]), defer: [replanDeferMajor.id], seam: 'services/billing',
+  }));
   // A Critical raised once the budget is spent is still fixed in the next round.
   const criticalFinding = { ...cumulativeFinding, id: 'critical-round-4', severity: 'Critical' };
   const lateCritical = spentChain('late-critical', failWith([{ ...finding, id: 'budget-late-critical' }, criticalFinding]));
@@ -2090,10 +2135,40 @@ function selfTest() {
       expectedGap: 're-plan round',
     },
     {
-      name: 'a Critical surviving the re-plan round blocks with the ledger',
+      name: 'a Critical first seen in the re-plan round is fixed in one more round',
       input: inputFor([...replanCritical.rounds, replanStillCritical], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FIX_DELTA_REQUIRED',
+    },
+    {
+      name: 'the fix round after the re-plan round closes on a full round',
+      input: inputFor([...replanCritical.rounds, replanStillCritical, replanCriticalFixed]),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
+    },
+    {
+      name: 'the closing round after the re-plan Critical fix delivers',
+      input: inputFor([...replanCritical.rounds, replanStillCritical, replanCriticalFixed, replanCriticalClose], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['clean', true],
+      expectedCode: 'REVIEW_CLEAN',
+    },
+    {
+      name: 'a Critical still open after the admitted fix round blocks with the ledger',
+      input: inputFor([...replanCriticalOpen.rounds, ...replanCriticalOpenRounds]),
       expected: ['block', false],
       expectedCode: 'POLICY_DENIED',
+    },
+    {
+      name: 'a second fix round after the re-plan round is refused',
+      input: inputFor([...replanCriticalOpen.rounds, ...replanCriticalOpenRounds, replanCriticalSecondFix]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REPLAN_SPENT',
+    },
+    {
+      name: 'a Major first seen in the re-plan round may be deferred outside the seam in the closing round',
+      input: inputFor([...replanDefer.rounds, ...replanDeferRounds], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['clean', true],
+      expectedCode: 'REVIEW_CLEAN',
     },
     {
       name: 'a verified Critical past the budget is still fixed in the next round',
@@ -2896,6 +2971,105 @@ function selfTest() {
       })(),
       expected: true,
     },
+    {
+      // The CLI on a scratch repository: the first round takes the plan
+      // boundary widened by the implementer, a delta round covers a widening
+      // only when the fix delta changes the widened path, and three fix rounds
+      // then a re-plan round with the Major still open hand the unit off.
+      name: 'the append-round CLI builds the widened boundary, covers a widening by the delta, and hands off after the budget',
+      actual: (() => {
+        const root = mkdtempSync(join(tmpdir(), 'review-contract-cli-'));
+        const scratch = mkdtempSync(join(tmpdir(), 'review-contract-cli-in-'));
+        try {
+          const git = (...args) => {
+            const ran = spawnSync('git', args, { cwd: root, encoding: 'utf8', timeout: 15000 });
+            if (ran.status !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr}`);
+            return ran.stdout.trim();
+          };
+          const file = (name, body) => {
+            mkdirSync(join(root, name, '..'), { recursive: true });
+            writeFileSync(join(root, name), body);
+          };
+          let dispatches = 0;
+          const cli = (...args) => {
+            dispatches += 1;
+            const ran = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--append-round',
+              '--dispatch-id', `cli-${dispatches}`, ...args], { cwd: root, encoding: 'utf8', timeout: 15000 });
+            try {
+              return JSON.parse(ran.stdout);
+            } catch {
+              return { ok: false, code: 'NO_JSON', stderr: ran.stderr };
+            }
+          };
+          git('init', '--quiet');
+          git('config', 'user.email', 'fixture@example.invalid');
+          git('config', 'user.name', 'fixture');
+          git('remote', 'add', 'origin', 'https://github.com/acme/widgets.git');
+          file('.autoloop/config.json', JSON.stringify(fixtureProjectConfig()));
+          file('src/a.mjs', 'one\n');
+          git('add', '.');
+          git('commit', '--quiet', '-m', 'one');
+          const input = (name, value) => {
+            writeFileSync(join(scratch, name), JSON.stringify(value));
+            return join(scratch, name);
+          };
+          const failing = input('fail.json', reviewed(failWith([finding])));
+          const passing = input('pass.json', reviewed(pass));
+          const annotations = input('annotations.json', [verifiedIn(finding.id)]);
+          const plan = input('plan.json', { ok: true, plan: { boundary: ['src/'] } });
+          const implemented = input('impl.json', { ok: true, extraPaths: [{ path: 'lib/a.mjs', reason: 'task 2 needs the helper' }] });
+          const config = join(root, '.autoloop', 'config.json');
+          const first = cli('--result-file', failing, '--first-round', '--plan-fingerprint', hash('plan-cli'),
+            '--author', 'claude:claude-opus-5-5', '--state', config, '--base-oid', git('rev-parse', 'HEAD'),
+            '--boundary-file', plan, '--implement-result-file', implemented, '--annotations-file', annotations,
+            '--out', join(scratch, 'ev1.json'));
+          const evidence = (name) => JSON.parse(readFileSync(join(scratch, name), 'utf8'));
+          const boundaryBuilt = first.ok === true
+            && JSON.stringify(evidence('ev1.json').boundary) === JSON.stringify(['src/', 'lib/a.mjs']);
+          const widen = input('widen.json', [{ findingId: finding.id, disposition: 'widen', paths: ['lib/b.mjs'], rationale: 'The guard lives in lib.' }]);
+          const delta = (out) => cli('--result-file', passing, '--evidence-file', join(scratch, 'ev1.json'),
+            '--scope', 'delta', '--dispositions-file', widen, '--out', join(scratch, out));
+          file('src/a.mjs', 'elsewhere\n');
+          git('commit', '--quiet', '-am', 'a fix that misses the widened path');
+          const uncovered = delta('ev-uncovered.json');
+          // The widened path, with the round-1 artifact restored beside it, so
+          // the delta since round 1 is that path alone.
+          file('src/a.mjs', 'one\n');
+          file('lib/b.mjs', 'guard\n');
+          git('add', '.');
+          git('commit', '--quiet', '-m', 'widen');
+          const covered = delta('ev2.json');
+          const coveredPaths = covered.ok === true
+            && JSON.stringify(evidence('ev2.json').reviewRounds[1].deltaPaths) === JSON.stringify(['lib/b.mjs']);
+          // Three fix rounds, then a re-plan round the Major survives.
+          const fixes = input('fix.json', [{ findingId: finding.id, disposition: 'fix', rationale: 'Fixed in the delta.' }]);
+          let last = 'ev1.json';
+          const codes = [];
+          for (const round of [2, 3, 4]) {
+            file('src/a.mjs', `fix ${round}\n`);
+            git('commit', '--quiet', '-am', `fix ${round}`);
+            const next = `ev-fix-${round}.json`;
+            codes.push(cli('--result-file', failing, '--evidence-file', join(scratch, last), '--scope', 'delta',
+              '--dispositions-file', fixes, '--annotations-file', annotations, '--out', join(scratch, next)).code);
+            last = next;
+          }
+          file('src/a.mjs', 're-planned\n');
+          git('commit', '--quiet', '-am', 're-plan');
+          const replan = cli('--result-file', failing, '--evidence-file', join(scratch, last), '--scope', 'full',
+            '--plan-fingerprint', hash('plan-cli-v2'), '--dispositions-file', fixes, '--annotations-file', annotations,
+            '--out', join(scratch, 'ev-replan.json'));
+          return boundaryBuilt
+            && uncovered.ok === false && uncovered.code === 'REVIEW_DELTA_SCOPE_INCOMPLETE'
+            && coveredPaths
+            && codes.join(',') === 'REVIEW_FIX_DELTA_REQUIRED,REVIEW_FIX_DELTA_REQUIRED,REVIEW_REPLAN'
+            && replan.ok === true && replan.code === 'REVIEW_OPEN_FINDINGS';
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+          rmSync(scratch, { recursive: true, force: true });
+        }
+      })(),
+      expected: true,
+    },
   ];
 
   const cleanInput = inputFor([clean]);
@@ -3068,7 +3242,7 @@ function writeEvidence(args, appended) {
 function appendRoundMain(args) {
   const usage = 'review-contract: --append-round --result-file <path> '
     + '(--first-round --plan-fingerprint <sha256> --author <engine:model> '
-    + '--state <base STATE.md> [--base-oid <oid>] [--boundary-file <plan-result.json>] '
+    + '--state <base>/.autoloop/config.json [--base-oid <oid>] [--boundary-file <plan-result.json>] '
     + '[--implement-result-file <implement-result.json>] | --evidence-file <path> '
     + '--scope full|delta [--dispositions-file <path>] '
     + '[--plan-fingerprint <sha256 of the re-plan>]) '

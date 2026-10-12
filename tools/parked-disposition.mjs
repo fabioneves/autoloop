@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { BLOCKING_LABELS } from './lifecycle-contract.mjs';
 import {
   completeSection, createSnapshot, incompleteSection, invalidateSnapshot, issueSnapshotItem,
-  SNAPSHOT_SECTIONS, unitCard, verifySnapshot,
+  SNAPSHOT_SECTIONS, snapshotProblem, unitCard, verifySnapshot,
 } from './snapshot-contract.mjs';
 
 // The sections a unit's labels are read from (unitCard reads queue, then open
@@ -39,9 +39,10 @@ export function stepAttempt(steps) {
 // (its retained items are dated observations); otherwise 'none'. No age
 // threshold: per-unit freshness is decided against the unit's own record.
 function snapshotAuthority({ snapshot, repository, nowMs }) {
-  const none = (reason, scannedAtMs = null) => ({ authority: 'none', reason, scannedAtMs });
+  const none = (reason, scannedAtMs = null, detail = undefined) => ({ authority: 'none', reason, scannedAtMs, ...(detail === undefined ? {} : { detail }) });
   if (snapshot === null || snapshot === undefined) return none('ABSENT');
-  if (!verifySnapshot(snapshot)) return none('UNVERIFIED');
+  // The detail names an older version's remedy (re-prime), not just "unverified".
+  if (!verifySnapshot(snapshot)) return none('UNVERIFIED', null, snapshotProblem(snapshot));
   const scannedAtMs = Date.parse(snapshot.scannedAt);
   if (!(scannedAtMs <= nowMs)) return none('FUTURE', scannedAtMs);
   const repo = snapshot.sections.repo;
@@ -339,6 +340,8 @@ function selfTest() {
         && [501, 502, 503, 504].every((number) => unit(projection, number)?.observed === null
           && unit(projection, number)?.local === 'mark')
         && JSON.stringify(projection.humanWaits) === '[]')],
+    ['a retained snapshot of an older version names its version in the authority detail',
+      project({ snapshot: { ...snapshot, version: 2 } })?.authority?.detail === 'snapshot version 2, expected 3; re-prime'],
     ['an invalidated snapshot is dated history, never current',
       history?.authority?.authority === 'history' && history.authority.reason === 'INVALIDATED'
         && observed(history, 501) === JSON.stringify({ disposition: 'blocked', labels: ['human:decide', 'loop-blocked'], atMs: scanMs, current: false })

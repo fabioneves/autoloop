@@ -68,7 +68,10 @@ reads the answer.
 
 - Always: record every decision on the issue before planning from it.
 - Ask first: adding a new block reason.
-- Never: decide a secret value, a dependency install, or an external irreversible action.
+- Never: decide a secret value, a dependency install, or an external irreversible action. Such
+  a decision is outside the loop's authority: it is a `POLICY_DENIED` or `IRREVERSIBLE_ACTION`
+  block. The merge gate's dependency-change check (`auto-merge.mjs`, `lane-contract.mjs`) is the
+  backstop when a decision of that kind is recorded by mistake.
 
 ## Success criteria
 

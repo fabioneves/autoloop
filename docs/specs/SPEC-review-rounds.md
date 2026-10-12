@@ -33,12 +33,17 @@ Majors in late rounds were raised on lines that earlier fixes added.
      unit (`REVIEW_REPLAN_SPENT` refuses a second);
    - `defer`: real and outside the unit (see [Elastic scope](SPEC-elastic-scope.md)); a repair
      issue, disposition `defer`.
-4. **After the re-plan round.** A Major that is still open is deferred as a repair and the unit
-   is delivered as a draft pull request with the ledger under `## Open findings`, labelled
+4. **After the re-plan round.** The re-plan round can be the first to see a finding, so the
+   contract admits exactly one round after it: a fix round when every open `fix` entry is
+   Critical, or a closing round whose only open entries are `defer` naming a `seam` or `rebut`
+   naming a decision link. A fix round is followed by the closing full round. Any other round
+   after the re-plan is `REVIEW_REPLAN_SPENT`. A Major still open at the re-plan round or at the
+   closing round is deferred as a repair and the unit is delivered as a draft pull request with
+   the ledger under `## Open findings`; `step.mjs --round open-findings` labels the issue
    `human:decide`. This is the only path that waits for a human, and the run record names it.
 5. **Critical.** A verified Critical blocks delivery at any round, as today. It is fixed in the
-   next round regardless of the budget; a Critical that survives the re-plan round blocks with
-   `POLICY_DENIED` and the ledger.
+   next round regardless of the budget, the re-plan round included (rule 4); a Critical still
+   open after that admitted fix round blocks with `POLICY_DENIED` and the ledger.
 6. **Minors.** Minors never consume the budget and never hold delivery. They ride into the PR
    body under `## Minor findings`.
 7. **Closing round.** The last review before delivery is `full` scope on the exact head, as today.
@@ -69,8 +74,9 @@ node tools/verify.mjs --plugin-root .
 Failing tests first: a fourth fix round is refused; a reworded Major on the same predicate keeps
 its count; `decide`, `re-plan`, and `defer` each produce the named transition; a second re-plan is
 refused; a Critical in round 4 still blocks; Minors do not count; a surviving Major after the
-re-plan round yields a draft delivery with `human:decide`. Use the existing synthetic ledger
-fixtures.
+re-plan round yields a draft delivery with `human:decide`; a Critical first seen in the re-plan
+round gets one fix round and the closing full round, a second fix round is refused. Use the
+existing synthetic ledger fixtures.
 
 ## Boundaries
 

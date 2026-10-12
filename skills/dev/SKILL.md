@@ -24,9 +24,10 @@ reviewer identities never collide. Run Pitcrew first in the same run, then take 
 **Base first, then prime.** Before prime:
 
 1. Dirty tree: only a lifecycle-bound, same-issue orphan with every dirty path in the plan boundary
-   and no human-authorization path may resume on its own branch. Anything else is human work —
-   stop; never stash, discard, or relocate it. Uncommitted setup artifacts (`.autoloop/**`) are
-   Setup's: stop with the Setup remedy; never commit them inside a Dev run.
+   (widened by its recorded `widen` dispositions) and no human-authorization path may resume on
+   its own branch. Anything else is human work — stop; never stash, discard, or relocate it.
+   Uncommitted setup artifacts (`.autoloop/**`) are Setup's: stop with the Setup remedy; never
+   commit them inside a Dev run.
 2. Clean tree: fetch, switch to the configured base (`baseBranch` from `.autoloop/config.json`;
    the remote default branch until it is readable), pull fast-forward. A non-fast-forward pull is
    human divergence — stop and report. Use the base's STATE, not a session injection.
@@ -203,16 +204,16 @@ bash <plugin-tools>/dispatch-stream.sh \
 ```
 
 Then stage or park; the completion notification wakes the run. Collect the typed result from the
-output file, never the stream. A bare `dispatch.mjs --role` in the background dies with its task
-when the host kills it; a sub-minute dispatch may run `dispatch.mjs` directly in the foreground.
+output file, never the stream. A bare background `dispatch.mjs --role` dies with its task when the
+host kills it; a sub-minute dispatch may run `dispatch.mjs` in the foreground.
 
 **A killed stream task is not a killed dispatch.** The dispatch runs detached (pid in
 `<result.json>.pid`). A task ending `[killed]` or without a result: never re-dispatch first — run
 `node <plugin-tools>/dispatch.mjs --wait-file <result.json> --timeout-seconds 7200`. Exit 0: collect.
 Exit 3: the dispatch died. Check effects (`git status --short`, branch log): effects → lifecycle
 reconciliation; none → re-dispatch unchanged, serially. **Three consecutive kills on one step**:
-push commits, post the kill evidence on the issue, `node <plugin-tools>/unit.mjs --wait --issue <N>
---minutes 60`, take the next unit. Never diagnose an external kill.
+push commits, post the kill evidence on the issue, `unit.mjs --wait --issue <N> --minutes 60`, take
+the next unit. Never diagnose an external kill.
 
 Prompts go in a file; never inline untrusted text into a shell command. The role's standing brief
 (`tools/briefs/<role>.md`) is prepended, so the prompt carries only unit facts (artifact
@@ -291,7 +292,7 @@ Plan review is dispatched exactly once; revisions never trigger another plan rev
 
 Code review round 1 is full; rounds 2+ cover the fix delta and open rebuts. A verified
 Critical/Major outside a later delta is fixed and the next round is `full`
-(`REVIEW_FULL_ROUND_REQUIRED`), never silently clean. Cap handling: step 8.
+(`REVIEW_FULL_ROUND_REQUIRED`), never silently clean. The budget: step 8.
 
 The staged unit overlaps only as read-only planning/review; Git/GitHub mutations, authoring,
 labels, branches, pushes, and lifecycle writes stay serialized.
@@ -365,9 +366,9 @@ prompt, PR body and run record. Challenge premises against current code and STAT
 - **Needs another open issue** → `node <plugin-tools>/unit.mjs --wait --issue <N> --on-issue <M>`
   (a machine comment, never a body edit); prime lifts it when #M closes.
 - Otherwise **Autonomy**: `fix` a stale premise in-unit or via `unit.mjs --repair --parent <N>
-  --blocks-parent`; `decide` a gap, a design or scope question, or duplicates of open work with
-  `unit.mjs --decide` before planning (a duplicate of delivered work is `--obsolete`); `human` →
-  `unit.mjs --block`. Never change scope silently.
+  --title "<…>" --body-file <path> --blocks-parent`; `decide` a gap, a design or scope question, or
+  duplicates of open work with `unit.mjs --decide` before planning (a duplicate of delivered work
+  is `--obsolete`); `human` → `unit.mjs --block`. Never change scope silently.
 
 Take the next unit after obsolete, wait, or block. Open the unit (adds `loop-started` and
 `loop:01-premise`):
@@ -426,7 +427,8 @@ to `loop:02-plan`; a Critical/Major the revision still carries rides into r1.
 the PR and paths: `node <plugin-tools>/unit.mjs --wait --issue <N> --on-pr <M> --paths <a,b/>`;
 take the next unit. Prime lifts it when #M merges or closes (`resumed: #N (PR #M merged)`):
 re-plan ONCE (one `--role plan` dispatch; frozen plan as input; new base; no plan review),
-re-check, claim. Premise never compares; an open issue stays `--on-issue`.
+re-check, claim. Premise never compares; an open issue stays `--on-issue`. A repair child whose
+boundary overlaps its parent's delivered PR waits on that PR the same way.
 
 ### 4. Persist intent and claim
 
@@ -482,8 +484,8 @@ count prose, or table re-padding).
 `step.mjs --to 07-diff-review`, then a `--role diff-review` dispatch briefed with the simplified
 diff, `config.checklistFile`, frozen plan, invariants, boundary, and untrusted-input model (no
 commands), plus code-review, security, and domain guidance. Disposition like step 8; fixes go to one
-`--role implement` dispatch carrying every verified finding. The orchestrator never edits the
-checkout here; step 8 covers the fixes.
+`--role fix` dispatch carrying every verified finding. The orchestrator never edits the checkout
+here; step 8 covers the fixes.
 
 **Convergence closes only on a full-artifact round**, so after a fix batch dispatch the next round
 **full-artifact and closing**; delta scope is for mid-storm (several Criticals). Typical: r1 full →
@@ -524,8 +526,7 @@ Give every Critical/Major a stable ID; pass all prior findings forward and tell 
 **a finding id is its defect AND its severity — re-opening one keeps both; a different severity is
 a NEW id** (prose may change). After fixes, record the reviewed HEAD and dispatch a fresh reviewer
 over the new delta plus open rebuts. A rebut closes only when a fresh reviewer accepts that exact
-ID. Fixes are dispatched (`WRITER_MADE_NO_CHANGE` refuses a fixer that did nothing); the writer's
-model fixes, the other reviews.
+ID. Fixes are dispatched (`WRITER_MADE_NO_CHANGE` refuses a fixer that did nothing).
 
 - **Annotate each verified finding's `predicate`** (rule, function); a Major re-raised, reworded
   or re-filed on one predicate is the same finding.
@@ -544,24 +545,24 @@ model fixes, the other reviews.
   is refused (`REVIEW_REPLAN_SPENT`); carving (below) is a re-plan. `defer` (outside the seam):
   `unit.mjs --repair --parent <N>` (summary, evidence, round history), disposition `defer` naming
   `seam` and `Filed as follow-up #<N>`; also for a Major raised in three rounds, never a
-  Critical; a re-raise is the same deferral. List `deferredFindings` under `## Deferred findings`
-  and `scopeChanges` under `## Scope changes` in the PR body.
-- **After the re-plan round there is no further round.** `REVIEW_OPEN_FINDINGS` (a Major
-  remains): file each `openFindings` entry as a repair, list them under `## Open findings` in the
-  PR body, push, keep the PR draft, and `unit.mjs --block --reason POLICY_DENIED --question
-  "<which finding to accept, rework or drop>"`; a Critical remaining (`POLICY_DENIED`) blocks the
-  same way. Take the next unit.
+  Critical; a re-raise is the same deferral. PR body: `deferredFindings` under `## Deferred
+  findings`, `scopeChanges` under `## Scope changes`.
+- **After the re-plan round, one round.** A Critical it raised: one fix round, then the closing
+  full round. A Major: `defer` (seam) or `decide` in the closing round, else `REVIEW_OPEN_FINDINGS`:
+  `step.mjs --to 08-code-review --round open-findings` (labels `human:decide`), a repair per
+  `openFindings` entry under `## Open findings`, push, PR stays draft, `unit.mjs --block --reason
+  POLICY_DENIED --question "<accept, rework or drop?>"`; a Critical still open blocks the same way.
 
 ### Carving out a predicate
 
 Honest only when the predicate is **separable** (no stub left), the remainder **independently
 valuable**, and the unit **no longer claims what it no longer does** — else re-plan. In one pass:
 file the new issue with `unit.mjs --repair --parent <N>` (complete invariant, open findings
-verbatim, round history, parent PR link); amend the frozen plan on the branch
-(carved behaviour → non-behaviour naming the issue); reduce the artifact, restoring touched code to
-its pre-unit state; state in the PR body what shipped, what did not, where the rest lives, and
-which acceptance criteria are not claimed; review the reduced artifact once more, full-artifact,
-carve out of scope (the unit's one re-plan round).
+verbatim, round history, parent PR link); amend the frozen plan on the branch (carved behaviour →
+non-behaviour naming the issue); reduce the artifact, restoring touched code to its pre-unit
+state; state in the PR body what shipped, what did not, where the rest lives, and which acceptance
+criteria are not claimed; review the reduced artifact once more, full-artifact, carve out of scope
+(the unit's one re-plan round).
 
 `reviewTransition()` is authoritative for clean/continue/draft/block. **Build every round with the
 tool, never by hand** (no `jq` program, skeleton, or script):
@@ -591,17 +592,16 @@ The tool derives identities, heads, fingerprints, versions and ledgers. Supply:
   `#<N>`, plus `seam` when the path is in another top-level package or service directory or
   named out of scope; a re-raise needs no new entry.
 
-Refusals: `CHECKOUT_DIRTY`, `DISPOSITION_REQUIRED`, `REBUTTAL_EVIDENCE_REQUIRED`,
-`FINDING_ANNOTATIONS_REQUIRED`, `REVIEW_DELTA_SCOPE_INCOMPLETE`. The output names the
-transition; re-read with `node <plugin-tools>/review-contract.mjs < <evidence-n.json>`.
+Every refusal names itself. The output names the transition; re-read with
+`node <plugin-tools>/review-contract.mjs < <evidence-n.json>`.
 
 Evidence rules: one `reviewRounds` entry per review dispatch; `artifactVersion` increases and
 `artifactFingerprint` changes except on a round that fixed nothing; author ≠ reviewer. Keep
 `verdict` as dispatch parsed it, unedited.
 
 **A clean delta round does not converge the unit.** It returns `REVIEW_FULL_CLOSE_REQUIRED`:
-dispatch one `full-artifact` round over the same head, commit nothing first, and record it as a
-scope escalation (same head/version/fingerprint, new `dispatchId`, empty delta) with the tool:
+dispatch one `full-artifact` round over the same head, commit nothing first, and record it with
+the tool:
 
 ```bash
 node <plugin-tools>/review-contract.mjs --append-escalation-round \
@@ -609,14 +609,15 @@ node <plugin-tools>/review-contract.mjs --append-escalation-round \
   [--annotations-file <annotations.json>] --out <next-evidence.json>
 ```
 
-It refuses unless the evidence is a clean delta awaiting its close; if the round raises findings
-it refuses `FINDING_ANNOTATIONS_REQUIRED`: verify each and pass them.
+It refuses unless the evidence is a clean delta awaiting its close; findings the round raises
+need annotations: verify each and pass them.
 
-**Every refusal names itself**: read `INVALID_REVIEW_EVIDENCE`'s `evidenceGap` before touching the
-artifact; an empty gap is a contract defect. Pass only orchestrator verification/scope
-annotations; caller-authored rebut statuses and unsealed dispositions have no authority. Retain
-the byte-exact clean input as review-verdict evidence; `reviewedHead` is artifact-attested. Re-read HEAD before the gate; the delivery contract enforces
-committed = reviewed = gated = fetched PR head, and the publisher requires the exact clean checkout.
+Read `INVALID_REVIEW_EVIDENCE`'s `evidenceGap` before touching the artifact; an empty gap is a
+contract defect. Pass only orchestrator verification/scope annotations; caller-authored rebut
+statuses and unsealed dispositions have no authority. Retain the byte-exact clean input as
+review-verdict evidence; `reviewedHead` is artifact-attested. Re-read HEAD before the gate; the
+delivery contract enforces committed = reviewed = gated = fetched PR head, and the publisher
+requires the exact clean checkout.
 
 ### 9. Gate
 
@@ -654,7 +655,8 @@ gate.
 After green, confirm the tree is clean. Red in the unit's own diff: load debugging guidance, fix via
 the delta-review path, re-gate; fixes not converging → re-plan as at `REVIEW_REPLAN`. Red
 outside the diff: re-gate once unchanged (a flake passes); red again → blocking repair
-(`unit.mjs --repair --parent <N> --blocks-parent`) taken next. Never weaken the gate.
+(`unit.mjs --repair --parent <N> --title "<…>" --body-file <path> --blocks-parent`) taken next.
+Never weaken the gate.
 
 ### 10. Publish, finalize, and submit
 
@@ -734,7 +736,7 @@ Invalidate, re-derive, and take the next unit unless: the queue is exhausted wit
 evidence (fresh full `scan.mjs`, every queue/lifecycle/dependency section complete); the context
 budget is spent; an invocation bound is reached; or a **run-scoped** guardrail failed (base dirty or
 diverged by human work, STATE/ProjectConfig unreadable, no model reachable for any remaining unit).
-A one-unit guardrail (protected path, refused predicate, failed premise, cap) blocks that unit.
+A one-unit guardrail (protected path, refused predicate, failed premise) blocks that unit.
 
 **Those four close the RUN: `node <plugin-tools>/prime.mjs --close-run`** — the Stop hook refuses a
 turn ending with eligible units and no close. A PARK is not a dark run: with a live dispatch stream
@@ -858,7 +860,8 @@ In prose: the 🧊 frozen plan, and model names UPPER-CASE in code spans (`` `CL
 
 Dev invokes exactly these entry points: `prime.mjs` (`--json` to open a run, `--close-run` to
 close it, `--park` to sleep it), `step.mjs` (`--to`, `--resumed`, `--card`, `--parked`; the
-SessionStart hook runs `--card-run`), `unit.mjs` (`--obsolete`/`--wait`), `dispatch.mjs`,
+SessionStart hook runs `--card-run`), `unit.mjs` (`--obsolete`, `--wait`, `--overlap`, `--block`,
+`--repair`, `--decide`, `--decisions`), `dispatch.mjs`,
 `scan.mjs`, `snapshot-contract.mjs` (invalidate/summary/section/`--unit`), `review-contract.mjs`,
 `publish-verdict.mjs`,
 `lifecycle-driver.mjs`, `escalate-paths.mjs`, and `auto-merge.mjs`, the terminal merge
@@ -895,8 +898,8 @@ remedy) stops the RUN; never improvise past a guardrail.
 
 ## Hard rules
 
-- Fix, decide, or block — in that order of preference. A verified late Critical/Major or an
-  unresolved cap finding stops the unit shipping as it stands, never the run.
+- Fix, decide, or block — in that order of preference. A verified late Critical/Major or an open
+  finding past the budget stops the unit shipping as it stands, never the run.
 - Never use an incomplete section to prove absence.
 - Read STATE once from a current un-compacted injection or from disk after the base switch.
 - One startup snapshot plus mutation-driven invalidation; the configured base for every

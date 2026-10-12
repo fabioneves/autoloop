@@ -35,8 +35,10 @@ defect one directory away, which the loop then queues as a new unit, or a block.
 5. **Repair limits unchanged.** At most three repairs per parent, depth one, and a repair is
    eligible on creation through its parent's `loop-ready` provenance, so the loop takes it next.
 6. **Lane proof.** `lane-contract.mjs` accepts the widened set as the unit's lane for exact-head
-   checks, protected-path checks, and the dirty-tree rule. A widening that adds a protected path
-   is a `human:authorize` label, not a block.
+   checks and protected-path checks (`widenLane`, `inLane`). The orchestrator's dirty-tree orphan
+   rule (dev skill, Prime) counts the widened set as the plan boundary; no tool applies it, and
+   the review contract's own dirty check is `checkout.clean`. A widening that adds a protected
+   path is a `human:authorize` label, not a block.
 
 ## Commands
 
@@ -62,7 +64,7 @@ node tools/verify.mjs --plugin-root .
 Failing tests first: a `widen` disposition adds a path to the evidence boundary and the next
 delta round must cover it; a widening into a protected path labels, does not block; an
 implementer result listing an extra path is recorded as `widen`; a path outside the seam yields
-`defer` with a repair; the dirty-tree rule accepts a widened path.
+`defer` with a repair.
 
 ## Boundaries
 

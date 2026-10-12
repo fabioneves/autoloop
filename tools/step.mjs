@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { loopRunIsLive, ownRunMarkers, sessionLatch } from './run-markers.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, issueSnapshotItem, SNAPSHOT_SECTIONS,
-  verifySnapshot,
+  snapshotProblem, verifySnapshot,
 } from './snapshot-contract.mjs';
 import { noteDecisionOnStep, realRun } from './unit.mjs';
 import { parseGitHubRemote } from './checkout-contract.mjs';
@@ -73,8 +73,8 @@ export function backwardStep(current, to) {
   const remedy = to === '02-plan' && LADDER[highest] === '03-plan-review'
     ? 'Plan review is ONE dispatch: the revision ships reviewed-once with its dispositions recorded '
       + 'and carried into code-review r1. Continue forward (claim).'
-    : `Work that answers this step's findings runs under \`${from}\`: dispatch the writer there and `
-      + 'let the round count against the step\'s cap.';
+    : `Work that answers this step's findings runs under \`${from}\`: dispatch the writer there as `
+      + 'a fix round of the budget.';
   return `step: step labels only climb: \`${from}\` → \`loop:${to}\` moves backward. ${remedy}`;
 }
 
@@ -133,16 +133,16 @@ function retainedSnapshotPath(dir) {
 // parked view.
 const QUEUE_COUNT = 'queue-count.json';
 
-function invalidateRetainedSnapshot(dir) {
+function invalidateRetainedSnapshot(dir, reason = 'ISSUE_MUTATION') {
   const path = retainedSnapshotPath(dir);
   if (path === null) return null;
   const snapshot = readJson(path, null);
-  if (!verifySnapshot(snapshot)) return `! retained snapshot ${path} is unreadable; re-prime before deciding`;
+  if (!verifySnapshot(snapshot)) return `! retained snapshot ${path}: ${snapshotProblem(snapshot)} before deciding`;
   const eligible = eligibleIssueNumbers(snapshot);
   if (eligible !== null) {
     writeAtomically(join(dir, QUEUE_COUNT), { eligible: eligible.length, scannedAtMs: Date.parse(snapshot.scannedAt) });
   }
-  writeAtomically(path, invalidateSnapshot(snapshot, 'ISSUE_MUTATION'));
+  writeAtomically(path, invalidateSnapshot(snapshot, reason));
   return null;
 }
 
@@ -294,7 +294,10 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
         delete record.pending;
         record.closed = { outcome, atMs: nowMs };
       }
-      return { ok: true, changed: true, record, lines: [card] };
+      // A merged PR changes the delivered set (SPEC-overlap-wait): the
+      // retained snapshot no longer speaks for open PRs.
+      const warning = outcome === 'shipped' ? invalidateRetainedSnapshot(dir, 'PR_MUTATION') : null;
+      return { ok: true, changed: true, record, lines: [card, ...(warning ? [warning] : [])] };
     });
   } catch (error) {
     return { ok: false, lines: [`step: could not close #${issue}: ${error.message}`] };
@@ -332,10 +335,15 @@ export function transition({
   const current = readJsonText(labels.stdout);
   const plan = staged ? null : swapPlan(current, to);
   const skipped = staged ? [] : skippedSteps(current, to);
-  if (plan !== null) {
+  // The draft hand-off (SPEC-review-rounds §4) is the one review path that
+  // waits for a human: its round labels `human:decide` in the same edit. The
+  // PR stays a draft; this tool never touches it.
+  const handoff = !staged && round === 'open-findings' && !current.includes('human:decide') ? ['human:decide'] : [];
+  const edit = plan === null && handoff.length === 0 ? null : { remove: plan?.remove ?? [], add: [...(plan?.add ?? []), ...handoff] };
+  if (edit !== null) {
     const argv = ['issue', 'edit', String(issue),
-      ...(plan.remove.length ? ['--remove-label', plan.remove.join(',')] : []),
-      ...(plan.add.length ? ['--add-label', plan.add.join(',')] : [])];
+      ...(edit.remove.length ? ['--remove-label', edit.remove.join(',')] : []),
+      ...(edit.add.length ? ['--add-label', edit.add.join(',')] : [])];
     const backward = backwardStep(current, to);
     if (backward !== null) return refuse(backward);
     const swapped = run('gh', argv);
@@ -823,6 +831,15 @@ function selfTest() {
         ribbon({ atMs: at(10, 2), issue: 350, step: '08-code-review', round: 're-plan', model: 'gpt-6-astra' }),
         ribbon({ atMs: at(10, 2), issue: 350, step: '08-code-review', round: 'open-findings', model: 'gpt-6-astra' }),
       ].map((line) => line.slice(29, 46)).join('|') === '▱▱▱ full         |▰▰▰ re-plan      |▰▰▰ open findings'],
+    // The budget lives in review-contract.mjs; this tool's copy and its round
+    // pattern agree with it, or a changed budget would print the wrong bar.
+    ['the fix round budget and the round pattern agree with review-contract.mjs', safely(() => {
+      const printed = spawnSync(process.execPath, ['--input-type=module', '-e',
+        `import { FIX_ROUND_BUDGET } from ${JSON.stringify(new URL('./review-contract.mjs', import.meta.url).href)};`
+        + 'process.stdout.write(String(FIX_ROUND_BUDGET));'], { encoding: 'utf8', timeout: 15000 });
+      const budget = Number(printed.stdout);
+      return budget === FIX_ROUND_BUDGET && ROUND_RE.test(`fix-${budget}`) && !ROUND_RE.test(`fix-${budget + 1}`);
+    }) === true],
     ['a fix round has its own glyph', ribbon({ atMs: at(10, 19), issue: 350, step: '08-fix', round: 'fix-2', badge: '🚧', model: 'claude-opus-5-5', note: 'x' })
       .startsWith('10:19 #350 🚧 🔧 FIX          ▰▰▱ fix 2/3        🟠 OPUS 5.5')],
     ['a fallback is marked beside the model',
@@ -1191,6 +1208,22 @@ function transitionChecks(at) {
     const fix = go({ to: '08-fix', round: 'fix-1', model: 'claude-opus-5-5' });
     results.push(['review and fix rounds are separate announcements under one label',
       round.ok === true && fix.ok === true && fix.lines[0].includes('🔧 FIX') && labels.includes('loop:08-code-review')]);
+    // SPEC-review-rounds §4: the draft hand-off labels `human:decide` through
+    // the step's own label edit and leaves the PR a draft.
+    const handoff = (() => {
+      const before = calls.length;
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:08-code-review'];
+      const result = go({ issue: 352, to: '08-code-review', round: 'open-findings', model: 'gpt-6-astra' });
+      const after = labels;
+      labels = saved;
+      return { result, after, calls: calls.slice(before) };
+    })();
+    results.push(['the open-findings round labels human:decide and leaves the PR a draft',
+      handoff.result.ok === true && handoff.result.lines[0].includes('open findings')
+        && handoff.calls.includes('gh issue edit 352 --add-label human:decide')
+        && handoff.after.includes('human:decide') && handoff.after.includes('loop:08-code-review')
+        && !handoff.calls.some((call) => call.startsWith('gh pr'))]);
     results.push(['a skipped step is printed under the ribbon and recorded',
       round.lines[1] === '⚠️ #350 skipped 07-diff-review'
         && readJson(join(root, '.git', 'autoloop', 'steps', '350.json'), { steps: [] })
@@ -1228,6 +1261,20 @@ function transitionChecks(at) {
     })();
     results.push(['a labelled step already in place still invalidates the snapshot',
       retried.invalidation?.reasonCodes?.includes('ISSUE_MUTATION') === true]);
+    // A retained snapshot from 0.68 (version 2) names its version, not "unreadable".
+    const olderSnapshot = (() => {
+      const current = JSON.parse(readFileSync(join(prime, 'a.snapshot.json'), 'utf8'));
+      writeFileSync(join(prime, 'a.snapshot.json'), JSON.stringify({ ...current, version: 2 }));
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:05-implement'];
+      const result = go({ issue: 363, to: '06-simplify', model: 'claude-fable-5-1' });
+      labels = saved;
+      writeFileSync(join(prime, 'a.snapshot.json'), JSON.stringify(current));
+      return result;
+    })();
+    results.push(['a retained snapshot of an older version is refused by its version',
+      olderSnapshot.ok === true
+        && olderSnapshot.lines.some((line) => line.includes('snapshot version 2, expected 3; re-prime'))]);
     const editsBefore = calls.filter((call) => call.startsWith('gh issue edit')).length;
     const staged = go({ issue: 356, to: '02-plan', staged: true, model: 'gpt-6-astra' });
     results.push(['a staged unit is announced and recorded, never labelled',
@@ -1292,6 +1339,11 @@ function transitionChecks(at) {
     results.push(['closing a unit prints its card with its decision count and drops it from the parked view',
       closed.ok === true && closed.lines[0].startsWith('╭─ ✅ #350 SHIPPED') && closed.lines[0].endsWith(' · 1 decision · PR #550')
         && !afterClose.includes('#350')]);
+    // SPEC-overlap-wait: a merged loop PR leaves the delivered set, so the
+    // shipped card is where the retained snapshot learns of the PR mutation.
+    results.push(['a shipped card invalidates the retained snapshot as a PR mutation',
+      closed.ok === true && closed.lines.length === 1
+        && JSON.parse(readFileSync(join(prime, 'a.snapshot.json'), 'utf8')).invalidation?.reasonCodes?.includes('PR_MUTATION') === true]);
     // Review of feat/status-first: a unit blocked at 01 and unblocked by a
     // human re-ran 01 as "already on", so loop-started never came back and
     // the unit was invisible to --parked and --card-run.

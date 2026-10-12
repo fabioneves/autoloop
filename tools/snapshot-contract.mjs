@@ -1065,6 +1065,17 @@ export function verifySnapshot(snapshot) {
   }
 }
 
+// Why a snapshot does not verify, for a refusal a host can act on: a retained
+// snapshot from an older plugin (0.68 wrote version 2) names its version and
+// the remedy, instead of reading as unreadable. Null when it verifies.
+export function snapshotProblem(snapshot) {
+  if (verifySnapshot(snapshot)) return null;
+  const version = snapshot?.version;
+  return snapshot?.kind === 'autoloop-repository-snapshot' && Number.isSafeInteger(version) && version !== SNAPSHOT_VERSION
+    ? `snapshot version ${version}, expected ${SNAPSHOT_VERSION}; re-prime`
+    : 'not a verified snapshot; re-prime';
+}
+
 export function invalidateSnapshot(snapshot, reasonCode) {
   if (!verifySnapshot(snapshot)) throw new TypeError('cannot invalidate an invalid snapshot');
   if (!SNAPSHOT_INVALIDATION_REASONS.includes(reasonCode)) {
@@ -2603,6 +2614,14 @@ async function selfTest() {
         { pr: 80, issue: 8, phase: 'premerge-record', files: ['src/b/c.mjs'] },
       ])
       && incomplete === null;
+  });
+  await check('a retained snapshot of an older version names its version and the re-prime remedy', () => {
+    const current = queueSnapshot();
+    const older = { ...current, version: 2 };
+    return snapshotProblem(current) === null
+      && snapshotProblem(older) === 'snapshot version 2, expected 3; re-prime'
+      && snapshotProblem({ kind: 'autoloop-repository-snapshot' }) === 'not a verified snapshot; re-prime'
+      && snapshotProblem(null) === 'not a verified snapshot; re-prime';
   });
   await check('a merged or closed loop PR is a PR_MUTATION, which invalidates the delivered set', () => {
     const invalidated = invalidateSnapshot(queueSnapshot(), 'PR_MUTATION');
