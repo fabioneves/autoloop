@@ -28,7 +28,8 @@ Notable changes to Autoloop are recorded here. The format follows
   Missing step evidence is no longer described as
   forgotten publication. Local reminder-storage failures do not block a session. Nonregular
   and oversized cache entries are ignored without replacement. Hard errors and other diagnostics
-  remain unchanged.
+  remain unchanged. A blocked draft names the issue's blocker labels instead of suggesting
+  publication. Changed or removed blockers allow a new notice; unrelated labels do not.
 
 ## [0.67.0] - 2026-10-10
 

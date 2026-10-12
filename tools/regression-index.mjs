@@ -1789,9 +1789,15 @@ export const INCIDENTS = Object.freeze([
     symptom: 'The Stop hook repeated the same draft-PR warning after several unrelated '
       + 'read-only replies.',
     cause: 'Draft classification had no session-local state. The hook now records only '
-      + 'draft-reminder fingerprints, while hard errors and other diagnostics remain active.',
+      + 'draft-reminder fingerprints, including known blocker labels. Blocked drafts name their '
+      + 'issue gate instead of suggesting publication; hard errors and other diagnostics stay active.',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'the real Stop hook emits an unchanged draft reminder once per session' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'blocked drafts identify issue blockers without publication advice' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'a standalone human gate is named even before the publication step' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'changing or removing a human gate emits one new accurate blocker notice' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'clearing all blockers permits publication advice and a standalone gate overrides mid-unit silence' }),
+      Object.freeze({ file: 'writeback-check.mjs', anchor: 'invalid ownership remains a hard gap even on a blocked draft' }),
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'a comment update stays silent but a new head gets one reminder' }),
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'Pitcrew revision drafts are expected and stay silent' }),
       Object.freeze({ file: 'writeback-check.mjs', anchor: 'unwritable reminder storage fails open on every Stop' }),

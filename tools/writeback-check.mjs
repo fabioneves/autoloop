@@ -60,6 +60,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { LOOP_BRANCH_RE, parseLoopClaim } from './claim-contract.mjs';
+import { BLOCKING_LABELS } from './lifecycle-contract.mjs';
 import { loopRunIsLive, loopRunIsOpen, ownRunMarkers, runMarkerDirectory } from './run-markers.mjs';
 import { guardedRoot, hookRoot } from './hook-root.mjs';
 import { blockedByIssueNumbers } from './snapshot-contract.mjs';
@@ -220,11 +221,12 @@ function draftFingerprint(pr, issue, issues) {
   const labels = (issues ?? []).find((entry) => entry.number === issue)?.labels;
   if (!Number.isSafeInteger(pr.number) || pr.number < 1
     || !/^[0-9a-f]{40}$/iu.test(pr.headRefOid ?? '') || !Array.isArray(labels)) return null;
-  const steps = labels.map((label) => label?.name ?? label)
-    .filter((name) => typeof name === 'string'
-      && (name.startsWith('loop:') || name === 'loop-delivered' || name === 'loop-blocked')).sort();
+  const names = labels.map((label) => label?.name ?? label);
+  const steps = names.filter((name) => typeof name === 'string'
+    && (name.startsWith('loop:') || name === 'loop-delivered' || name === 'loop-blocked')).sort();
+  const blockers = names.filter((name) => BLOCKING_LABELS.has(name)).sort();
   return createHash('sha256').update(JSON.stringify([
-    pr.headRefName, pr.headRefOid.toLowerCase(), steps,
+    pr.headRefName, pr.headRefOid.toLowerCase(), steps, ...(blockers.length ? [blockers] : []),
   ])).digest('hex');
 }
 
@@ -241,13 +243,17 @@ export function checkPrs(prs, issues = null) {
         `PR #${pr.number} (${pr.headRefName}) has invalid loop ownership (${claim.reasonCode}) — make its single closing claim match the branch issue`,
       );
     } else if (pr.isDraft) {
-      const labels = (issues ?? []).find((issue) => issue.number === claim.issue)?.labels ?? [];
-      if (labels.some((label) => (label?.name ?? label) === 'loop:revising')) continue;
+      const labels = ((issues ?? []).find((issue) => issue.number === claim.issue)?.labels ?? [])
+        .map((label) => label?.name ?? label);
+      const blockers = labels.filter((name) => BLOCKING_LABELS.has(name)).sort();
+      if (blockers.length === 0 && labels.includes('loop:revising')) continue;
       const step = unitStep(issues, claim.issue);
-      if (step !== null && step < 10) continue;
-      const message = `PR #${pr.number} (${pr.headRefName}) is still draft — `
-        + (step === null ? 'no publication step is recorded.'
-          : `step ${step} is recorded; check publication (autoloop:dev step 10).`);
+      if (blockers.length === 0 && step !== null && step < 10) continue;
+      const message = blockers.length > 0
+        ? `PR #${pr.number} (${pr.headRefName}) is still draft — issue #${claim.issue} has blocker label(s) ${blockers.join(', ')}; resolve the blocker before publication.`
+        : `PR #${pr.number} (${pr.headRefName}) is still draft — `
+          + (step === null ? 'no publication step is recorded.'
+            : `step ${step} is recorded; check publication (autoloop:dev step 10).`);
       reminders.push(message);
       drafts.push({ number: pr.number, fingerprint: draftFingerprint(pr, claim.issue, issues), message });
     }
@@ -970,7 +976,7 @@ function selfTest() {
     hardWire.stderr.includes('Write-back contract gaps') &&
     hardWire.stderr.includes('PR #3') &&
     renderHookResult(['gap'], []).stderr.includes('reminders') === false;
-  const gate = [...gateCases(), ...draftReminderCases()];
+  const gate = [...gateCases(), ...draftBlockerCases(), ...draftReminderCases()];
   for (const { name, ok: passed } of gate) if (!passed) console.error(`FAIL ${name}`);
   ok = ok && gate.every(({ ok: passed }) => passed);
   const answersSurface = answered.length === 1 && answered[0].includes('#562') && answered[0].includes('re-prime');
@@ -1006,6 +1012,34 @@ function gateCases() {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+function draftBlockerCases() {
+  const pr = { number: 3, headRefName: 'fix/gh-3-z', body: 'Closes #3', isDraft: true,
+    headRefOid: 'a'.repeat(40) };
+  const issue = (labels) => [{ number: 3, labels: labels.map((name) => ({ name })) }];
+  const publish = ['loop:10-publish'];
+  const blocked = checkPrs([pr], issue([...publish, 'loop-blocked', 'human:decide']));
+  const human = checkPrs([pr], issue(['loop:05-implement', 'human:authorize']));
+  const revised = checkPrs([pr], issue([...publish, 'loop-blocked', 'human:authorize']));
+  const changed = checkPrs([pr], issue([...publish, 'loop-blocked']));
+  const cleared = checkPrs([pr], issue(publish));
+  const unrelated = checkPrs([pr], issue([...publish, 'loop-blocked', 'human:decide', 'triage:minor']));
+  const invalid = checkPrs([{ ...pr, body: 'Closes #99' }], issue([...publish, 'loop-blocked']));
+  return [
+    { name: 'blocked drafts identify issue blockers without publication advice',
+      ok: blocked.hard.length === 0 && blocked.reminders.length === 1
+        && blocked.reminders[0].includes('loop-blocked') && blocked.reminders[0].includes('human:decide')
+        && !blocked.reminders[0].includes('check publication') && !blocked.reminders[0].includes('gh pr ready') },
+    { name: 'a standalone human gate is named even before the publication step',
+      ok: human.reminders.length === 1 && human.reminders[0].includes('human:authorize')
+        && checkPrs([pr], issue(['loop:05-implement'])).reminders.length === 0 },
+    { name: 'changed and cleared blocker labels change the draft reminder fingerprint',
+      ok: new Set([blocked, revised, changed, cleared].map((result) => result.drafts[0]?.fingerprint)).size === 4
+        && blocked.drafts[0]?.fingerprint === unrelated.drafts[0]?.fingerprint },
+    { name: 'invalid ownership remains a hard gap even on a blocked draft',
+      ok: invalid.hard.length === 1 && invalid.reminders.length === 0 },
+  ];
 }
 
 function draftReminderCases() {
@@ -1082,6 +1116,25 @@ process.stdout.write(JSON.stringify(result));
     const secondPr = { ...initial.prs[0], number: 4, headRefName: 'fix/gh-4-z', body: 'Closes #4' };
     save({ prs: [...initial.prs, secondPr], issues: [...publication, { number: 4, labels: [], body: '' }] });
     const addedPr = [hook(), hook()];
+    const blockedLabels = ['loop-blocked', 'human:decide'];
+    const blockerIssue = (labels) => ({ number: 3, labels: labels.map((name) => ({ name })), body: '' });
+    const blockedPr = (labels, patch = {}) => save({ issues: [blockerIssue(labels)], ...patch });
+    const blockedHook = () => hook({ session: 'blocker-tests' });
+    blockedPr(blockedLabels);
+    const blockedDraft = [blockedHook(), blockedHook()];
+    blockedPr([...blockedLabels, 'triage:minor'], { prs: [{ ...initial.prs[0], updatedAt: '2026-01-02T12:00:00Z' }] });
+    const unrelatedBlockedUpdate = blockedHook();
+    blockedPr(['loop-blocked', 'human:authorize']);
+    const changedGate = [blockedHook(), blockedHook()];
+    blockedPr(['loop-blocked']);
+    const removedGate = [blockedHook(), blockedHook()];
+    blockedPr(['loop:10-publish']);
+    const clearedBlocker = [blockedHook(), blockedHook()];
+    blockedPr(['loop:05-implement', 'human:decide']);
+    const standaloneGate = [blockedHook(), blockedHook()];
+    blockedPr(['loop:05-implement']);
+    const resumedMidUnit = blockedHook();
+    save();
     const otherRoot = join(scratch, 'other-project');
     execFileSync('git', ['init', '-q', otherRoot]);
     mkdirSync(join(otherRoot, '.autoloop'));
@@ -1152,6 +1205,22 @@ process.stdout.write(JSON.stringify(result));
       { name: 'each PR has independent reminder state',
         ok: addedPr[0].status === 0 && addedPr[0].stdout.includes('PR #4')
           && !addedPr[0].stdout.includes('PR #3') && silent(addedPr[1]) },
+      { name: 'the real Stop hook names blocked drafts and ignores unrelated updates',
+        ok: showsDraft(blockedDraft[0]) && blockedDraft[0].stdout.includes('loop-blocked')
+          && blockedDraft[0].stdout.includes('human:decide')
+          && !blockedDraft[0].stdout.includes('check publication')
+          && !blockedDraft[0].stdout.includes('gh pr ready')
+          && silent(blockedDraft[1]) && silent(unrelatedBlockedUpdate) },
+      { name: 'changing or removing a human gate emits one new accurate blocker notice',
+        ok: showsDraft(changedGate[0]) && changedGate[0].stdout.includes('human:authorize')
+          && !changedGate[0].stdout.includes('human:decide') && silent(changedGate[1])
+          && showsDraft(removedGate[0]) && removedGate[0].stdout.includes('loop-blocked')
+          && !removedGate[0].stdout.includes('human:authorize') && silent(removedGate[1]) },
+      { name: 'clearing all blockers permits publication advice and a standalone gate overrides mid-unit silence',
+        ok: showsDraft(clearedBlocker[0]) && clearedBlocker[0].stdout.includes('check publication')
+          && silent(clearedBlocker[1]) && showsDraft(standaloneGate[0])
+          && standaloneGate[0].stdout.includes('human:decide') && silent(standaloneGate[1])
+          && silent(resumedMidUnit) },
       { name: 'repositories isolate reminder state even with the same session ID',
         ok: showsDraft(otherRepository[0]) && silent(otherRepository[1]) },
       { name: 'the hook payload session ID takes precedence over the environment',
