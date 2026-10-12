@@ -3,15 +3,15 @@
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-const SHARED_GUARDRAIL_ROOTS = ['tools', '.claude', '.codex', '.opencode', '.agents', '.githooks'];
+// The loop's own control files: the project's loop config and policy
+// (config.json outranks STATE), the agent-tool settings and hooks, and the
+// git hooks. A writer changing one would reconfigure the gate.
+const SHARED_GUARDRAIL_ROOTS = ['.autoloop', '.claude', '.codex', '.opencode', '.agents', '.githooks'];
 
-export const DEPLOYMENT_GUARDRAIL_GLOBS = [
-  'Dockerfile*',
-  '**/Dockerfile*',
-  'docker-compose*',
-  '**/docker-compose*',
-];
-
+// The built-in protected families: secret and credential paths, CI workflows,
+// and the loop's control roots. Nothing else. Documentation, dependency
+// manifests, build configs, container files, and data are ordinary files; a
+// project that wants one protected lists it in `protectedPaths`.
 export const HUMAN_AUTHORIZATION_GLOBS = [
   '.env*',
   '**/.env*',
@@ -36,40 +36,50 @@ export const HUMAN_AUTHORIZATION_GLOBS = [
   'secrets/**',
   '**/secrets/**',
   '.github/workflows/**',
-  ...DEPLOYMENT_GUARDRAIL_GLOBS,
   ...SHARED_GUARDRAIL_ROOTS.map((root) => `${root}/**`),
-  'AGENTS.override.md',
-  'AGENTS.md',
-  'CLAUDE.md',
-  '**/AGENTS.override.md',
-  '**/AGENTS.md',
-  '**/CLAUDE.md',
-  'docs/agentic/STATE.md',
-  // Global install: the project's loop config and policy. config.json outranks
-  // STATE, so it carries the protection STATE had.
-  '.autoloop/**',
 ];
 
+// The built-in families protect secrets, CI workflows, and the loop's own
+// control files. Every other path is ordinary: a project that wants it
+// protected lists it in `protectedPaths`.
 export const PATH_POLICY_FIXTURES = [
-  { path: 'tools/agentic/gate.mjs', humanAuthorization: true, mergeProtected: true },
-  { path: '.claude/settings.json', humanAuthorization: true, mergeProtected: true },
   // The project's loop config and policy (global install): config.json
   // outranks STATE, so a writer changing it would reconfigure the gate.
   { path: '.autoloop/config.json', humanAuthorization: true, mergeProtected: true },
   { path: '.autoloop/STATE.md', humanAuthorization: true, mergeProtected: true },
+  { path: '.claude/settings.json', humanAuthorization: true, mergeProtected: true },
   { path: '.codex/hooks.json', humanAuthorization: true, mergeProtected: true },
   { path: '.opencode/plugins/autoloop.js', humanAuthorization: true, mergeProtected: true },
   { path: '.agents/plugins/marketplace.json', humanAuthorization: true, mergeProtected: true },
+  { path: '.githooks/pre-commit', humanAuthorization: true, mergeProtected: true },
   { path: '.githooks/pre-push', humanAuthorization: true, mergeProtected: true },
-  { path: 'config/credentials.yml', humanAuthorization: true, mergeProtected: true },
+  { path: '.github/workflows/ci.yml', humanAuthorization: true, mergeProtected: true },
+  { path: '.env.local', humanAuthorization: true, mergeProtected: true },
+  { path: 'keys/x.pem', humanAuthorization: true, mergeProtected: true },
   { path: 'certs/private-key.pem', humanAuthorization: true, mergeProtected: true },
-  { path: 'docker-compose.yaml', humanAuthorization: true, mergeProtected: true },
-  { path: 'deploy/docker-compose.prod.yml', humanAuthorization: true, mergeProtected: true },
-  { path: 'containers/Dockerfile.prod', humanAuthorization: true, mergeProtected: true },
-  { path: '.github/dependabot.yml', humanAuthorization: false, mergeProtected: true },
-  { path: 'package.json', humanAuthorization: false, mergeProtected: true },
+  { path: 'config/credentials.json', humanAuthorization: true, mergeProtected: true },
+  { path: 'config/credentials.yml', humanAuthorization: true, mergeProtected: true },
+  { path: 'secrets/a.txt', humanAuthorization: true, mergeProtected: true },
+  // Ordinary repository files.
+  { path: 'CLAUDE.md', humanAuthorization: false, mergeProtected: false },
+  { path: 'AGENTS.md', humanAuthorization: false, mergeProtected: false },
+  { path: 'AGENTS.override.md', humanAuthorization: false, mergeProtected: false },
+  { path: 'docs/agentic/checklist.md', humanAuthorization: false, mergeProtected: false },
+  { path: 'docs/agentic/STATE.md', humanAuthorization: false, mergeProtected: false },
   { path: 'docs/agentic/ARCH.md', humanAuthorization: false, mergeProtected: false },
   { path: 'docs/guide.md', humanAuthorization: false, mergeProtected: false },
+  { path: 'package.json', humanAuthorization: false, mergeProtected: false },
+  { path: 'pnpm-lock.yaml', humanAuthorization: false, mergeProtected: false },
+  { path: 'tsconfig.json', humanAuthorization: false, mergeProtected: false },
+  { path: 'vite.config.ts', humanAuthorization: false, mergeProtected: false },
+  { path: 'data/x.json', humanAuthorization: false, mergeProtected: false },
+  { path: 'Dockerfile', humanAuthorization: false, mergeProtected: false },
+  { path: 'docker-compose.yml', humanAuthorization: false, mergeProtected: false },
+  { path: 'deploy/docker-compose.prod.yml', humanAuthorization: false, mergeProtected: false },
+  { path: 'tools/x.mjs', humanAuthorization: false, mergeProtected: false },
+  { path: 'tools/agentic/gate.mjs', humanAuthorization: false, mergeProtected: false },
+  { path: '.editorconfig', humanAuthorization: false, mergeProtected: false },
+  { path: '.github/dependabot.yml', humanAuthorization: false, mergeProtected: false },
 ];
 
 export function globToRe(glob) {
@@ -106,8 +116,8 @@ export function matchHumanAuthorization(files, globs = HUMAN_AUTHORIZATION_GLOBS
   return hits;
 }
 
-const DEPLOYMENT_GUARDRAIL_RES = DEPLOYMENT_GUARDRAIL_GLOBS.map(globToRe);
-
+// The same families as HUMAN_AUTHORIZATION_GLOBS, matched by segment so a
+// nested secret path is caught wherever it sits.
 const MERGE_PROTECTED_PATH_FAMILIES = [
   { name: 'cryptographic credential paths', matches: (path) => /(^|\/)[^/]*crypt[^/]*(\/|$)/i.test(path) },
   { name: 'secret/credential path segments', matches: (path) => /(^|\/)[^/]*(secret|credential|token)[^/]*(\/|$)/i.test(path) },
@@ -123,20 +133,7 @@ const MERGE_PROTECTED_PATH_FAMILIES = [
     name: root,
     matches: (path) => new RegExp(`^${root.replace('.', '\\.')}\\/`, 'i').test(path),
   })),
-  { name: '.github', matches: (path) => /^\.github\//i.test(path) },
-  { name: 'root dotfile/dot-directory', matches: (path) => /^\./.test(path) },
-  { name: 'docs/agentic', matches: (path) => /^docs\/agentic\//i.test(path) && !/^docs\/agentic\/ARCH\.md$/i.test(path) },
-  { name: 'CLAUDE.md', matches: (path) => /(^|\/)CLAUDE\.md$/i.test(path) },
-  { name: 'AGENTS guidance', matches: (path) => /(^|\/)AGENTS(?:\.override)?\.md$/i.test(path) },
-  {
-    name: 'container build/compose',
-    matches: (path) => DEPLOYMENT_GUARDRAIL_RES.some((pattern) => pattern.test(path)),
-  },
-  { name: 'package.json', matches: (path) => path.split('/').some((part) => part.toLowerCase() === 'package.json') },
-  { name: 'lockfile', matches: (path) => path.split('/').some((part) => /^(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|.+\.lock)$/i.test(part)) },
-  { name: 'tsconfig', matches: (path) => /(^|\/)tsconfig[^/]*$/i.test(path) },
-  { name: 'build/test/lint config', matches: (path) => /(^|\/)(vite|vitest|eslint|postcss|tailwind|jest|webpack|rollup)\.config(\.[^/]+)?$/i.test(path) },
-  { name: 'data files', matches: (path) => /^data\//i.test(path) },
+  { name: '.github/workflows', matches: (path) => /^\.github\/workflows\//i.test(path) },
 ];
 
 export function matchMergeProtected(files, extraGlobs = []) {
@@ -154,6 +151,18 @@ export function matchMergeProtected(files, extraGlobs = []) {
     if (matched) hits.push({ file, family: matched.name });
   }
   return hits;
+}
+
+// A project glob that a built-in family already covers: the glob itself is a
+// built-in, or a path shaped like it hits a family with no extra globs. The
+// doctor names these; the union is unchanged.
+export function duplicateProtectedGlobs(globs) {
+  const builtIn = new Set(HUMAN_AUTHORIZATION_GLOBS);
+  return normalizedGlobs(globs).filter((glob) => {
+    if (builtIn.has(glob)) return true;
+    const sample = glob.split('/').map((segment) => (segment === '**' ? 'x/y' : segment.replace(/\*/g, 'x'))).join('/');
+    return matchMergeProtected([sample]).length > 0;
+  });
 }
 
 function stableJson(value) {
@@ -916,6 +925,17 @@ function selfTest() {
     ['path traversal source incomplete', traversalPlanned.decisionEvidence?.sourceComplete === false],
     ['opaque input fails closed', opaqueInput.lane === 'full' && verifyLaneProof(opaqueInput)],
     ['opaque policy paths fail closed', matchHumanAuthorization([null]).length === 1 && matchMergeProtected([null]).length === 1],
+    [
+      'a project protectedPaths glob protects an ordinary path',
+      matchMergeProtected(['spec/a.md'], ['spec/**']).length === 1
+        && matchMergeProtected(['spec/a.md']).length === 0
+        && matchHumanAuthorization(['spec/a.md'], [...HUMAN_AUTHORIZATION_GLOBS, 'spec/**']).length === 1,
+    ],
+    [
+      'project globs a built-in family covers are named as duplicates',
+      JSON.stringify(duplicateProtectedGlobs(['spec/**', '.env*', 'secrets/**', 'compose.y*ml', '.github/workflows/**', 'infra/**']))
+        === '[".env*",".github/workflows/**","secrets/**"]',
+    ],
   ];
   for (const fixture of PATH_POLICY_FIXTURES) {
     checks.push([

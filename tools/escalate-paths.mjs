@@ -268,19 +268,33 @@ function selfTest() {
     ['apps/web/.env.local', true],
     ['.ENV.local', true],
     ['.github/workflows/ci.yml', true],
-    ['Dockerfile', true],
-    ['deploy/Dockerfile.prod', true],
-    ['docker-compose.yml', true],
-    ['k8s/docker-compose.prod.yml', true],
-    ['AGENTS.override.md', true],
-    ['AGENTS.md', true],
-    ['CLAUDE.md', true],
-    ['src/AGENTS.md', true],
-    ['packages/web/CLAUDE.md', true],
-    ['deep/nested/dir/AGENTS.override.md', true],
+    ['.github/dependabot.yml', false],
+    ['keys/x.pem', true],
+    ['secrets/a.txt', true],
+    ['config/credentials.json', true],
+    ['.autoloop/config.json', true],
+    ['.githooks/pre-commit', true],
+    // Ordinary files: a project lists them in protectedPaths when it wants them.
+    ['Dockerfile', false],
+    ['deploy/Dockerfile.prod', false],
+    ['docker-compose.yml', false],
+    ['k8s/docker-compose.prod.yml', false],
+    ['AGENTS.override.md', false],
+    ['AGENTS.md', false],
+    ['CLAUDE.md', false],
+    ['src/AGENTS.md', false],
+    ['packages/web/CLAUDE.md', false],
     ['src/MYAGENTS.md', false],
-    ['docs/agentic/STATE.md', true],
+    ['docs/agentic/STATE.md', false],
+    ['docs/agentic/checklist.md', false],
     ['docs/agentic/LOOP.md', false],
+    ['package.json', false],
+    ['pnpm-lock.yaml', false],
+    ['tsconfig.json', false],
+    ['vite.config.ts', false],
+    ['data/x.json', false],
+    ['tools/x.mjs', false],
+    ['.editorconfig', false],
     ['src/index.ts', false],
     ['README.md', false],
     ...PATH_POLICY_FIXTURES.map(({ path, humanAuthorization }) => [path, humanAuthorization]),
@@ -420,11 +434,11 @@ function selfTest() {
       proven = null;
     }
     const mergeProof = run('--base', 'HEAD', '--artifact-version', '1', '--artifact-fingerprint', 'a'.repeat(64),
-      '--estimated-lines', '1', '--planned-path', 'tsconfig.json', '--content-read-all', '--json');
+      '--estimated-lines', '1', '--planned-path', '.env.production', '--content-read-all', '--json');
     diffChecks.push(['built-in merge-protected paths are reported at claim',
       (() => {
         try {
-          return JSON.parse(mergeProof.stdout).mergeProtectedHits.some(({ file, family }) => file === 'tsconfig.json' && family === 'tsconfig');
+          return JSON.parse(mergeProof.stdout).mergeProtectedHits.some(({ file, family }) => file === '.env.production' && family === 'env files');
         } catch {
           return false;
         }
@@ -567,8 +581,8 @@ function incompleteInputGuidance(mode, reasonCodes, args = []) {
 
 function outputResult(files, laneProof, args, sourceComplete, escalatePaths, error = null) {
   const hits = matchEscalate(files, escalatePaths);
-  // The executor's built-in merge-protected families (tsconfig, lockfiles,
-  // .github …): known at claim, so a unit that touches one is not surprised
+  // The executor's built-in merge-protected families (secrets, workflows,
+  // loop control files): known at claim, so a unit that touches one is not surprised
   // at merge (LFE #390 blamed the config, 2026-09-30). Information only.
   const mergeProtectedHits = matchMergeProtected(files);
   if (args.includes('--json')) {

@@ -29,8 +29,8 @@
 // acknowledgements above are committed.
 //
 // The policy is a pure AND-gate over independently fetched, SHA-bound GitHub
-// evidence. A repository's tools/** path is protected and can never be
-// authorized by this file.
+// evidence. The loop's own control files (.autoloop/**, .claude/** and the
+// other guardrail roots) are protected and can never be authorized by this file.
 //
 // Usage:
 //   node <plugin-tools>/auto-merge.mjs <prNumber> [--dry-run]
@@ -2346,58 +2346,57 @@ export const FIXTURES = [
   protectedFixture('protected private key material', 'certs/private-key.pem'),
   protectedFixture('protected nested .env file', 'apps/web/.env.local'),
   protectedFixture('protected CI requirements policy', '.autoloop/ci-policy.json'),
-  protectedFixture("the tool's own path with everything green", 'tools/agentic/auto-merge.mjs'),
-  protectedFixture('protected .github/**', '.github/workflows/ci.yml'),
+  protectedFixture('protected .autoloop/** with everything green', '.autoloop/STATE.md'),
+  protectedFixture('protected .github/workflows/**', '.github/workflows/ci.yml'),
   protectedFixture('protected .claude/**', '.claude/settings.json'),
   protectedFixture('protected .codex/**', '.codex/hooks.json'),
   protectedFixture('protected .agents/**', '.agents/plugins/marketplace.json'),
+  protectedFixture('protected .githooks/**', '.githooks/pre-commit'),
+  protectedFixture('protected root .env file', '.env.production'),
+  protectedFixture('protected keys/**', 'keys/deploy.pem'),
   // Crown-jewel fixtures derive from the config; absent config = no fixtures (loudly generic).
   ...REPO.EXTRA_PROTECTED_PATHS.map((glob) =>
     protectedFixture(`extra-protected ${glob}`, pathFromGlob(glob, 'selftest-jewel.ts')),
   ),
   protectedFixture('protected root dot-directory (.codex/x)', '.codex/x'),
-  protectedFixture('protected docs/agentic/**', 'docs/agentic/STATE.md'),
-  protectedFixture('protected docs/agentic/checklist.md', 'docs/agentic/checklist.md'),
-  {
-    // Carve-out: ARCH.md is DATA, not policy — a protected path would override Path A and block,
-    // so this proves the map no longer does. STATE.md above still blocks with the same label.
-    name: 'docs/agentic/ARCH.md is NOT protected (map carve-out) → allow',
-    input: makeInput({ files: ['docs/agentic/ARCH.md'], labels: ['risk:pure-deletion'] }),
+  // Ordinary files are not protected by the plugin: a project lists them in
+  // protectedPaths when it wants them. Path A carries no path-class
+  // requirement, so each of these merges on the label.
+  ...[
+    'CLAUDE.md',
+    'packages/web/CLAUDE.md',
+    'AGENTS.md',
+    'AGENTS.override.md',
+    'docs/agentic/ARCH.md',
+    'docs/agentic/STATE.md',
+    'docs/agentic/checklist.md',
+    'docker-compose.yml',
+    'containers/Dockerfile.prod',
+    'packages/server/package.json',
+    'packages/server/package-lock.json',
+    'packages/ui/tsconfig.build.json',
+    'packages/ui/vite.config.ts',
+    'data/state.sqlite',
+    'tools/agentic/auto-merge.mjs',
+    '.editorconfig',
+    '.github/dependabot.yml',
+  ].map((path) => ({
+    name: `ordinary file ${path} is NOT protected → allow`,
+    input: makeInput({ files: [path], labels: ['risk:pure-deletion'] }),
     expectExit: 0,
     expectCalls: 1,
     expectArgs: { sha: HEAD_SHA, squash: true },
-  },
+  })),
   {
-    // Surgical: a mixed PR touching ARCH.md AND a still-protected sibling stays blocked.
-    name: 'docs/agentic/ARCH.md + STATE.md together → still blocked (STATE protected)',
-    input: makeInput({ files: ['docs/agentic/ARCH.md', 'docs/agentic/STATE.md'], labels: ['risk:pure-deletion'] }),
+    // A mixed PR touching an ordinary file AND a protected sibling stays blocked.
+    name: 'docs/agentic/ARCH.md + .autoloop/STATE.md together → still blocked (STATE protected)',
+    input: makeInput({ files: ['docs/agentic/ARCH.md', '.autoloop/STATE.md'], labels: ['risk:pure-deletion'] }),
     expectExit: 1,
     expectCalls: 0,
   },
-  protectedFixture('protected CLAUDE.md', 'CLAUDE.md'),
-  protectedFixture('protected AGENTS.override.md', 'AGENTS.override.md'),
-  protectedFixture('protected AGENTS.md', 'AGENTS.md'),
-  protectedFixture('protected nested AGENTS.md', 'src/AGENTS.md'),
-  protectedFixture('protected nested CLAUDE.md', 'packages/web/CLAUDE.md'),
-  protectedFixture('protected nested AGENTS.override.md', 'a/b/AGENTS.override.md'),
-  protectedFixture('protected docker-compose.yml', 'docker-compose.yml'),
-  protectedFixture('protected docker-compose.yaml', 'docker-compose.yaml'),
-  protectedFixture('protected nested docker-compose', 'deploy/docker-compose.prod.yml'),
-  protectedFixture('protected Dockerfile*', 'Dockerfile.prod'),
-  protectedFixture('protected nested Dockerfile*', 'containers/Dockerfile.prod'),
-  protectedFixture('protected nested package.json', 'packages/server/package.json'),
-  protectedFixture('protected nested lockfile', 'packages/server/package-lock.json'),
-  protectedFixture('protected nested *.lock file', 'packages/server/cache.lock'),
-  protectedFixture('protected nested tsconfig*', 'packages/ui/tsconfig.build.json'),
-  protectedFixture('protected nested vite config', 'packages/ui/vite.config.ts'),
-  protectedFixture('protected nested vitest config', 'packages/ui/vitest.config.ts'),
-  protectedFixture('protected nested eslint config', 'packages/ui/eslint.config.js'),
-  protectedFixture('protected nested postcss config', 'packages/ui/postcss.config.js'),
-  protectedFixture('protected nested tailwind config', 'packages/ui/tailwind.config.js'),
-  protectedFixture('protected data/**', 'data/state.sqlite'),
   {
-    name: 'rename previous_filename=tools/agentic/auto-merge.mjs → an allowed path',
-    input: makeInput({ labels: [], fileEntries: [{ filename: ALLOWED_PATH, previous_filename: 'tools/agentic/auto-merge.mjs' }] }),
+    name: 'rename previous_filename=.claude/settings.json → an allowed path',
+    input: makeInput({ labels: [], fileEntries: [{ filename: ALLOWED_PATH, previous_filename: '.claude/settings.json' }] }),
     expectExit: 1,
     expectCalls: 0,
   },

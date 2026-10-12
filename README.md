@@ -159,7 +159,12 @@ defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `re
 optional `protectedPaths`. The repository owns it; plugin updates never overwrite it.
 
 `protectedPaths` lists the repository's own human-authorization globs (`*` and `**` only), added to
-the built-in families. A non-manual policy also sets `merge.loopLogin`, and `ratified` may set
+the built-in families. The plugin protects only secret and credential paths (`.env*`, key material,
+path segments that contain `secret`, `credential`, `token`, or `crypt`), `.github/workflows/**`,
+and the loop's control roots (`.autoloop`, `.claude`, `.codex`, `.opencode`, `.agents`,
+`.githooks`). Documentation, dependency manifests, lockfiles, build configs, container files, and
+data are ordinary files; list them in `protectedPaths` when the repository wants them protected.
+A non-manual policy also sets `merge.loopLogin`, and `ratified` may set
 `merge.reversiblePaths` (default `["docs/**"]`). The review checklist is `.autoloop/checklist.md`
 when the repository keeps one, else the plugin's.
 

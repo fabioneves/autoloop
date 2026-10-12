@@ -5,6 +5,20 @@ Notable changes to Autoloop are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The plugin protects only secret and credential paths (`.env*`, key material, path segments that
+  contain `secret`, `credential`, `token`, or `crypt`), `.github/workflows/**`, and the loop's
+  control roots (`.autoloop`, `.claude`, `.codex`, `.opencode`, `.agents`, `.githooks`).
+  `CLAUDE.md`, `AGENTS*.md`, `docs/agentic/**`, other root dotfiles, `.github` outside
+  `workflows`, `package.json`, lockfiles, `tsconfig*`, build and lint configs, `data/**`,
+  container build and compose files, and `tools/**` are ordinary files: they get no
+  `human:authorize` label and do not stop an automatic merge. A repository that wants them
+  protected lists them in `protectedPaths`; the project list and its validation are unchanged.
+  The doctor (`verify.mjs --project-root`) notes a `protectedPaths` entry that a built-in family
+  already covers. New dependencies, secret values, and production data writes stay a build-time
+  hard-defer.
+
 ## [0.68.0] - 2026-10-12
 
 ### Changed
