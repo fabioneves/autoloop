@@ -10,14 +10,16 @@ The operator observed Autoloop behavior in sessions that did not run it. The cau
 
 ## Operator decisions (2026-10-12)
 
-1. Ownership ends at `/clear` or `prime.mjs --close-run`, not only at process exit.
+1. Ownership ends at `/clear` or process exit. `prime.mjs --close-run` ends the Stop check, preflight, riders, and transcript capture, but the command and edit guards keep enforcing until `/clear` or process exit (amended 2026-10-12 after the security review: otherwise the loop could close its run and then merge).
 2. A session that does not own a run is not refused a branch switch while a loop reviewer reads that checkout. The loop's exact-head checks detect a changed checkout.
 3. Autoloop skills run only when invoked by name or by the loop. Pitcrew stays invocable by Dev; its description names Autoloop-owned PRs only.
+4. Writer workers can still edit the orchestrator's owner latch (an older attack class this change makes easier). An OS-level write sandbox for writer dispatches is a follow-up release, recorded as a known limitation.
 
 ## Required behavior
 
 1. **One ownership predicate.** A session owns a run when its owner latch exists, matches this Claude process (PID and start time, as today), records this conversation's session id, and is not closed. Hooks compare the latch session id with the `session_id` in the hook input. A missing or different session id is not ownership. The predicate reads no git state and starts no process when no latch exists.
-2. **Starting a run.** Prime records the session id in the latch (from `CLAUDE_CODE_SESSION_ID`) before it opens a run. `--close-run` marks the latch closed. A new `prime.mjs` call in the same conversation re-opens ownership. Compaction keeps the session id and keeps ownership.
+2. **Starting a run.** The session id comes from the host: the command guard reads `session_id` from the hook input of the prime command and hands it to prime; an environment value alone is not trusted. Prime refuses to open a run (typed failure) when the session id or the owner start time is unknown, and it reads the latch back to confirm ownership before writing a marker. An open latch is never rebound to another session id. `--close-run` marks the latch closed; a new `prime.mjs` call in the same conversation re-opens ownership. Compaction keeps the session id and keeps ownership.
+2a. **Closed runs.** A closed latch for this session keeps the command and edit guards enforcing. Only the Stop check, preflight, riders, and transcript capture stand down.
 3. **Hooks outside an owned run do nothing.** Without ownership, every hook exits 0 with no output, no GitHub call, no git call, no file write, and no context injection. This covers SessionStart preflight and STATE injection, the command and edit guards, the PostToolUse riders, SubagentStop transcript capture, and the Stop write-back check.
 4. **The one exception is starting Autoloop.** The command guard still checks a command that runs the plugin's own `prime.mjs`, because that command opens a run (for example, a prime compound that deletes run state, or a prime against a foreign repository). It does not apply other rules to that session until the run opens.
 5. **Crash fallback.** When the guard process crashes, `hooks.json` fails closed only if this session owns a run, decided by the latch file alone. Without ownership it allows the command.
