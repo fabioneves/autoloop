@@ -204,9 +204,16 @@ node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|dif
 ```
 
 Each role runs as a fresh, fixed-posture process. Reviewers are read-only and cannot be widened by
-a prompt. Untrusted text travels in files, never shell source. Vendored hooks block direct merges,
-unsafe force-pushes, self-applied authorization labels, release publication, and malformed step
-swaps. Protected paths stop for `human:authorize`. Dispatch failures are typed and recorded. A
+a prompt. Untrusted text travels in files, never shell source. The command guard refuses only an
+irreversible or unauthorized act, and NEVER: a merge (`gh pr merge`, the REST merge endpoint, a
+GraphQL merge mutation, or a hand-posted commit status); a commit on or a push to the base branch
+except through a pull request; `git push --force`/`-f` (`--force-with-lease` is allowed); a
+release-tag push or a GitHub release mutation; a branch-protection or ruleset mutation; `git add`
+or `git commit` naming a secret path; a `Co-Authored-By` trailer; `AskUserQuestion` while a run
+is live; a branch switch while a reviewer dispatch reads the checkout; a prime command that does
+anything else; and a hook payload it cannot read, for the session that owns a run. Every other
+command is allowed; `step.mjs` alone swaps step labels and keeps the ladder rules.
+Protected paths stop for `human:authorize`. Dispatch failures are typed and recorded. A
 read-only role retries a transient failure a bounded number of times and moves to its configured
 fallback on a usage limit; any role moves to it when its model is unavailable; a writer never
 retries blindly, and there is no "skip review" mode.
@@ -214,8 +221,9 @@ On restart the loop rebuilds state from Git and GitHub,
 adopts only proven orphans, and finishes or blocks them before taking new work. With nothing to do,
 it stops rather than polls.
 
-The command guard is not a sandbox and not a secrets boundary. Branch, tag, and release protection
-remain your server-side rules; give the loop a repository-scoped token without admin rights.
+The command guard is not a sandbox and not a secrets boundary: it keeps a secret path out of a
+commit, and reads nothing else. Branch, tag, and release protection remain your server-side
+rules; give the loop a repository-scoped token without admin rights.
 
 ## Releases
 

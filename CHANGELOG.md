@@ -18,6 +18,22 @@ Notable changes to Autoloop are recorded here. The format follows
   The doctor (`verify.mjs --project-root`) notes a `protectedPaths` entry that a built-in family
   already covers. New dependencies, secret values, and production data writes stay a build-time
   hard-defer.
+- The command guard refuses only an irreversible or unauthorized act
+  ([SPEC-guard-reduction](docs/specs/SPEC-guard-reduction.md)). Kept: a merge through `gh pr
+  merge`, the REST merge endpoint, a GraphQL merge mutation, or a hand-posted commit status; a
+  commit on or a push to the base branch except through a pull request; `git push --force`/`-f`;
+  a release-tag push or a GitHub release mutation; a branch-protection or ruleset mutation; a
+  `Co-Authored-By` trailer; `AskUserQuestion` while a run is live; a branch switch while a
+  reviewer dispatch reads the checkout; a prime compound command; and an unreadable hook payload
+  for the session that owns a run. New: `git add` or `git commit` naming a secret path (`.env*`,
+  key material, a credential or token path). Removed: inline `--body` and comment-body reading,
+  `/answer`, every `loop-ready`, `loop-halt`, `loop-repair`, lifecycle-label and label-API rule,
+  raw `gh pr ready`, every step-label ladder rule, the opaque-shell group (inline interpreters,
+  heredocs, command assembly, expansions, unknown subcommands, command-line git aliases and
+  config, grouped commit or push), the background-dispatch rule, and the 64 KB command limit. A
+  token the lexer cannot classify is allowed. Each refusal names its rule and one allowed form.
+  `step.mjs` keeps the ladder rules itself (a backward swap is refused there). Skill prose for
+  the removed rules is dropped; the README states the kept rules.
 
 ## [0.68.0] - 2026-10-12
 

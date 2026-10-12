@@ -20,7 +20,6 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { evaluate } from './command-guard.mjs';
 import { loopRunIsLive, ownRunMarkers, sessionLatch } from './run-markers.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, issueSnapshotItem, SNAPSHOT_SECTIONS,
@@ -58,11 +57,32 @@ export function swapPlan(current, to) {
   return { remove, add };
 }
 
-// Pure: the ladder steps a transition jumps over. The guard cannot see them:
-// swapPlan always names the predecessor, so a 03→09 swap reads as a proper
-// one. A fix round sits at 08; 10 and 11 come after 09. No ladder label yet
-// (a fresh or staged unit) skips nothing. A skip is noted, never refused:
-// step 06 is skipped by rule when no simplify engine is available.
+// Pure: the refusal of a swap that moves down the ladder, or null. The ladder
+// only climbs: a live run swapped 03 back to 02 to re-review a plan (plan
+// review is ONE dispatch), and 08 back to 05 for a fix round (a fix round
+// rides step 08's label). Since 0.69.0 the command guard no longer checks
+// label swaps; this tool is the only one that swaps them, and keeps the rule.
+export function backwardStep(current, to) {
+  if (!LADDER.includes(to)) return null;
+  const highest = current
+    .map((label) => /^loop:(0\d-[a-z-]+)$/u.exec(label)?.[1])
+    .filter((step) => step !== undefined)
+    .reduce((top, step) => Math.max(top, LADDER.indexOf(step)), -1);
+  if (highest === -1 || LADDER.indexOf(to) >= highest) return null;
+  const from = `loop:${LADDER[highest]}`;
+  const remedy = to === '02-plan' && LADDER[highest] === '03-plan-review'
+    ? 'Plan review is ONE dispatch: the revision ships reviewed-once with its dispositions recorded '
+      + 'and carried into code-review r1. Continue forward (claim).'
+    : `Work that answers this step's findings runs under \`${from}\`: dispatch the writer there and `
+      + 'let the round count against the step\'s cap.';
+  return `step: step labels only climb: \`${from}\` → \`loop:${to}\` moves backward. ${remedy}`;
+}
+
+// Pure: the ladder steps a transition jumps over. swapPlan always names the
+// predecessor, so a 03→09 swap reads as a proper one. A fix round sits at 08;
+// 10 and 11 come after 09. No ladder label yet (a fresh or staged unit) skips
+// nothing. A skip is noted, never refused: step 06 is skipped by rule when no
+// simplify engine is available.
 export function skippedSteps(current, to) {
   const position = (step) => {
     if (step === '08-fix') return LADDER.indexOf('08-code-review');
@@ -281,7 +301,7 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
 }
 
 export function transition({
-  root, run = realRun(root), evaluateCommand = evaluate, nowMs = Date.now(),
+  root, run = realRun(root), nowMs = Date.now(),
   issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false,
   markers = ownRunMarkers,
 }) {
@@ -315,9 +335,8 @@ export function transition({
     const argv = ['issue', 'edit', String(issue),
       ...(plan.remove.length ? ['--remove-label', plan.remove.join(',')] : []),
       ...(plan.add.length ? ['--add-label', plan.add.join(',')] : [])];
-    const branch = run('git', ['branch', '--show-current']).stdout || 'main';
-    const verdict = evaluateCommand(`gh ${argv.join(' ')}`, branch, { stepTool: true });
-    if (verdict.block) return refuse(verdict.reason);
+    const backward = backwardStep(current, to);
+    if (backward !== null) return refuse(backward);
     const swapped = run('gh', argv);
     if (!swapped.ok) return refuse(`step: label swap on #${issue} failed: ${swapped.stderr}`);
   }
@@ -1093,9 +1112,19 @@ function transitionChecks(at) {
       again.ok === true && again.lines.join('') === 'already on 06-simplify'
         && calls.filter((call) => call.startsWith('gh issue edit')).length === edits]);
     const backward = go({ to: '05-implement', model: 'claude-opus-5-5' });
-    results.push(['a swap the guard refuses is printed and changes nothing',
+    results.push(['a backward swap is refused by this tool, printed, and changes nothing',
       backward.ok === false && /step labels only climb/u.test(backward.lines.join(' '))
         && labels.includes('loop:06-simplify')]);
+    // The refusal names the pair it caught and a remedy for that step: the
+    // 08→05 refusal once carried the 03→02 plan-review remedy ("claim").
+    const reviewBack = backwardStep(['loop:08-code-review'], '05-implement') ?? '';
+    const planBack = backwardStep(['loop:03-plan-review'], '02-plan') ?? '';
+    results.push(['a backward-swap refusal names the caught pair and its own remedy',
+      reviewBack.includes('`loop:08-code-review` → `loop:05-implement`') && reviewBack.includes('under `loop:08-code-review`')
+        && !reviewBack.includes('claim') && planBack.includes('`loop:03-plan-review` → `loop:02-plan`')
+        && planBack.includes('Plan review is ONE dispatch')
+        && backwardStep(['loop:03-plan-review'], '04-claim') === null && backwardStep([], '02-plan') === null
+        && backwardStep(['loop:08-code-review'], '08-fix') === null && backwardStep(['loop:08-code-review'], '09-gate') === null]);
     const round = go({ to: '08-code-review', round: '1/5', model: 'gpt-6-astra' });
     const fix = go({ to: '08-fix', round: '1/5', model: 'claude-opus-5-5' });
     results.push(['review and fix rounds are separate announcements under one label',

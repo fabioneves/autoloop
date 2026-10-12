@@ -96,10 +96,9 @@ with the Setup remedy). Never continue past a failure. Then:
      or `error` in the run record. `MERGE_PENDING` on a unit without `loop-blocked`: run step 10's
      `auto-merge.mjs <PR>` once. Git/GitHub facts are lifecycle authority.
 
-### No improvised inspection
+### Typed reads
 
-The guard blocks inline interpreters (`node -e`, `python -c`, interpreter heredocs) by policy —
-never engineer around it. Sanctioned reads: the prime summary;
+Read run state through the typed accessors: the prime summary;
 `node <plugin-tools>/snapshot-contract.mjs --summary <snapshotPath>`;
 `node <plugin-tools>/snapshot-contract.mjs --section <name> <snapshotPath>`; and plain `jq` with a
 single-quoted filter on files prime names, projecting the CONTRACT's shape, not `gh`'s, with no
@@ -116,14 +115,12 @@ hedges:
 
 Never in any command:
 
-- `--body "$(…)"`: write the body to a file in its OWN earlier step (Write tool) and pass
-  `--body-file` (the guard must read it to prove it is not an `/answer`); commits use
-  `git commit -F -` with a quoted heredoc or `-F <path>`.
-- `$?` decoration; a shell variable for a known path (write the literal).
 - A commit SHA typed from memory: copy it from the tool result, or let the machine supply it. The
   dispatch's `autoloop-dispatch-context-v1` stamp is the authority for the reviewed head; a
   review prompt never states one.
-- `<(…)`: byte-compare with `cmp -l a b | head`, or diff files.
+
+Untrusted text (an issue body, a review, a comment) goes to a file first and is posted with
+`--body-file <path>`; a commit message goes through `git commit -F <path>` or a quoted heredoc.
 
 ## The tools
 
@@ -206,8 +203,8 @@ bash <plugin-tools>/dispatch-stream.sh \
 ```
 
 Then stage or park; the completion notification wakes the run. Collect the typed result from the
-output file, never the stream. The guard refuses only a bare `dispatch.mjs --role` in the
-background; a sub-minute dispatch may run `dispatch.mjs` directly in the foreground.
+output file, never the stream. A bare `dispatch.mjs --role` in the background dies with its task
+when the host kills it; a sub-minute dispatch may run `dispatch.mjs` directly in the foreground.
 
 **A killed stream task is not a killed dispatch.** The dispatch runs detached (pid in
 `<result.json>.pid`). A task ending `[killed]` or without a result: never re-dispatch first — run
@@ -305,7 +302,7 @@ Eligible: an open issue with `loop-ready` (or a loop repair), complete provenanc
 dependency. Select and stage only from prime's `eligible`, which applies:
 
 - the label event pre-exists this run; nothing in the loop may apply, create, or rename
-  `loop-ready` (guard-enforced);
+  `loop-ready`;
 - the last `loop-ready` event's actor currently has write/maintain/admin;
 - body hash/`lastEditedAt` unchanged since approval, unless a trusted actor re-applied the label;
 - `## Blocked by` parsed; `dependencies` evidence and `blockerResolutionDecision()` prove every

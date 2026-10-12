@@ -460,9 +460,9 @@ function checkSkillInvocation(root) {
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
   'codebase-design': 6442,
-  dev: 57167, // -103: work-size guidance removed; +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
+  dev: 56871, // -296 (0.69.0): removed-rule prose dropped; -103: work-size guidance removed; +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
   'lean-code': 3873,
-  pitcrew: 19784,
+  pitcrew: 19627, // -157 (0.69.0): removed-rule prose dropped
   'queue-trace': 6929,
   setup: 13860,
   shape: 26272,

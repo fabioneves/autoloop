@@ -58,13 +58,12 @@ Then, in order:
    `terminal-refused`. `REVISION_REQUIRED` starts revision, not a human block.
    Only the driver extends the successor chain; never change markers by hand.
 
-No improvised inspection: the command guard blocks inline interpreters (`node -e`, `python -c`,
-interpreter heredocs) by policy — a guard block is the policy working, never an error to engineer
-around. Read retained snapshots only through the typed accessors —
+A guard refusal is the policy working, never an error to engineer around. Read retained
+snapshots only through the typed accessors —
 `node <plugin-tools>/snapshot-contract.mjs --summary <snapshotPath>` for bounded per-section
 `{complete,items,error}` counts and `--section <name> <snapshotPath>` for one section's exact
 JSON (unknown names fail closed listing the valid catalog) — or with plain `jq` (single-quoted
-filter) on the exact file the prime summary names, which the guard sanctions.
+filter) on the exact file the prime summary names.
 
 ## Dispatch
 

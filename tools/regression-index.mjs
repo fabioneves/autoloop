@@ -31,6 +31,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // `anchor` is verbatim source text from `file`. Keep it short enough to survive
 // reformatting and specific enough that its presence really means the case is
 // still there.
+//
+// `retired` keeps an incident whose enforcer a release removed on purpose:
+// the entry stays, with the release and the reason ('<version>: <why>'), and
+// its enforcers are no longer checked. A rule removed without this note
+// fails the audit, which is the point.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
     id: 'decisions-invented-work-size-quotas-and-compressed-a-plan',
@@ -123,7 +128,9 @@ export const INCIDENTS = Object.freeze([
       + 'the dispatch down with its task. dispatch-stream.sh has since detached '
       + 'the dispatch, so a killed watcher no longer loses it (verified live).',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: "if (/dispatch-stream\\.sh/u.test(text)) return null;" }),
+      // 0.69.0: the guard no longer judges a launch shape; the ordinary
+      // corpus proves a background dispatch is allowed.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
     ]),
   }),
   Object.freeze({
@@ -148,7 +155,7 @@ export const INCIDENTS = Object.freeze([
     cause: 'Selection had no run-wide stop predicate.',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'snapshot-contract.mjs', anchor: "...(context.halted ? ['loop-halted'] : [])," }),
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function liftsHaltLabel(' }),
+      // 0.69.0: the guard's loop-halt rule is removed (SPEC-guard-reduction).
     ]),
   }),
   Object.freeze({
@@ -440,14 +447,9 @@ export const INCIDENTS = Object.freeze([
       + 'the background again and a killed watcher\'s result is collected with '
       + '--wait-file. Only a bare backgrounded dispatch.mjs is refused.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'export function backgroundDispatchProblem(command, runInBackground) {',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'FAIL [background dispatch launch rule]',
-      }),
+      // 0.69.0: the guard no longer judges a launch shape; the ordinary
+      // corpus proves a background dispatch is allowed.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({
         file: '../skills/dev/SKILL.md',
         anchor: '**Launch every dispatch in the background**',
@@ -596,14 +598,9 @@ export const INCIDENTS = Object.freeze([
       + 'message: the reader at 08 had to reverse-engineer the rule to learn '
       + 'that fix rounds run under the current step label.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'backward-swap refusal names the caught pair and its own remedy',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'The remedy must fit the swap the guard caught',
-      }),
+      // 0.69.0: the ladder rule and its remedy moved from the guard to step.mjs.
+      Object.freeze({ file: 'step.mjs', anchor: 'export function backwardStep(' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a backward-swap refusal names the caught pair and its own remedy' }),
       Object.freeze({
         file: 'guard-corpus.json',
         anchor: 'block was right, remedy was wrong',
@@ -838,14 +835,8 @@ export const INCIDENTS = Object.freeze([
       + 'predecessor to be retired in the same command, so an add-only swap '
       + 'and a skipped step both passed as progress.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'function addsStepWithoutRetiringPredecessor(',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: "['gh issue edit 298 --add-label loop:05-implement', 'feat/gh-298-x', true]",
-      }),
+      // 0.69.0: the guard's add-only rule is removed; step.mjs, the only
+      // label-swapping tool, always retires the predecessor.
       Object.freeze({
         file: 'step.mjs',
         anchor: 'the predecessor is named even when an earlier swap already lost it',
@@ -873,14 +864,9 @@ export const INCIDENTS = Object.freeze([
       + 'backward one — so re-review read as a round, and 0.49.49 had '
       + 'already raised a pitcrew cap in its name.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'function swapsStepLabelBackward(',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: '--add-label "loop:02-plan" --remove-label "loop:03-plan-review"',
-      }),
+      // 0.69.0: the ladder rule moved from the guard to step.mjs.
+      Object.freeze({ file: 'step.mjs', anchor: 'export function backwardStep(' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a backward swap is refused by this tool, printed, and changes nothing' }),
       Object.freeze({
         file: 'label-swap-reminder.mjs',
         anchor: 'This is the ONE plan review',
@@ -935,14 +921,10 @@ export const INCIDENTS = Object.freeze([
       + 'new loop:NN label" pattern-matched. The terminal finalizer owns the '
       + 'only swap after the gate, and no guard refused the invented label.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'function addsUnknownStepLabel(',
-      }),
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: '--add-label loop:10-publish 2>/dev/null',
-      }),
+      // 0.69.0: the guard's step-label rule is removed; step.mjs, the only
+      // label-swapping tool, refuses a step it does not know.
+      Object.freeze({ file: 'step.mjs', anchor: "'an unknown step is refused before anything moves'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "08's label; 00, 10 and 11 carry none." }),
       Object.freeze({
         file: '../skills/dev/SKILL.md',
         anchor: 'No label moves at this step, or step 11',
@@ -1070,7 +1052,9 @@ export const INCIDENTS = Object.freeze([
       + 'operation repeated. The printed remedy was the expansion the guard '
       + 'could perform itself.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function expandLiteralForLoops(' }),
+      // 0.69.0: loops are never judged; the ordinary corpus holds a literal
+      // loop, and a loop body that merges is still caught.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({
         file: 'command-guard.mjs',
         anchor: "['for f in 41 42; do gh pr merge $f; done', 'feat/gh-1-x', true]",
@@ -1087,7 +1071,8 @@ export const INCIDENTS = Object.freeze([
       + 'an invocation with no script argument, which is the stdin shape. '
       + '`-v`/`-V` make it a lookup that runs nothing.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function isLookupSegment(' }),
+      // 0.69.0: interpreters are never judged; the ordinary corpus holds the lookup.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({
         file: 'command-guard.mjs',
         anchor: "['command -v php', 'feat/gh-1-x', false]",
@@ -1173,6 +1158,7 @@ export const INCIDENTS = Object.freeze([
     cause: 'Named tokens were joined with `, ` and truncated at three with no '
       + 'remainder, so a long list also sent the reader back for a second '
       + 'refusal having fixed everything the first one mentioned.',
+    retired: '0.69.0: the guard no longer refuses an unresolved token, so no refusal names one (SPEC-guard-reduction).',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'command-guard.mjs', anchor: 'export function nameList(' }),
       Object.freeze({
@@ -1334,11 +1320,9 @@ export const INCIDENTS = Object.freeze([
       + 'required a closing sentence naming the sanctioned alternative, and '
       + 'generic prose satisfied it on shape while naming nothing.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'fanout refusal names the listing command to use instead',
-      }),
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'const ASSEMBLER_REMEDY' }),
+      // 0.69.0: the assembler rule is removed; every kept refusal names its
+      // rule and one allowed form.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'a refusal names its rule and one allowed form' }),
     ]),
   }),
   Object.freeze({
@@ -1389,6 +1373,7 @@ export const INCIDENTS = Object.freeze([
       + 'variable that actually defeated resolution.',
     cause: 'One generic message served every expansion shape. Wrong advice is '
       + 'worse than none: the reader fixes the half the message names.',
+    retired: '0.69.0: the guard no longer refuses an expansion, so no expansion refusal exists (SPEC-guard-reduction).',
     enforcedBy: Object.freeze([
       Object.freeze({
         file: 'command-guard.mjs',
@@ -1455,10 +1440,8 @@ export const INCIDENTS = Object.freeze([
       + 'now names the vehicle, and the dev skill and STATE template '
       + 'prescribe it where the label self-apply is described.',
     enforcedBy: Object.freeze([
-      Object.freeze({
-        file: 'command-guard.mjs',
-        anchor: 'avoids the Projects-classic GraphQL failure',
-      }),
+      // 0.69.0: the guard's label rules are removed; the skill and the STATE
+      // template still prescribe the vehicle.
       Object.freeze({
         file: '../skills/dev/SKILL.md',
         anchor: 'gh issue edit <pr-number> --add-label human:authorize',
@@ -1492,7 +1475,8 @@ export const INCIDENTS = Object.freeze([
       + 'a number that no position turns into a command. Since 0.50.0 special '
       + 'parameters are judged as a literal `0`, so the decoration is allowed.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'export function neutralizeSpecialParameters(' }),
+      // 0.69.0: no expansion is judged; the ordinary corpus holds `echo $?`.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({ file: 'guard-corpus.json', anchor: 'exit=$?' }),
     ]),
   }),
@@ -1504,6 +1488,7 @@ export const INCIDENTS = Object.freeze([
       + 'that never said how to get a LABELED count.',
     cause: 'The substitution remedy named the numbers but not the labeling '
       + 'spelling — run the counter bare and let prose carry the label.',
+    retired: '0.69.0: the guard no longer refuses a substitution, so the labeled count is allowed as typed (SPEC-guard-reduction).',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'command-guard.mjs', anchor: 'let prose carry the label' }),
       Object.freeze({ file: 'guard-corpus.json', anchor: '.test.ts tracked:' }),
@@ -1538,8 +1523,9 @@ export const INCIDENTS = Object.freeze([
       + 'Git/GitHub CLI environment, or a git/gh call other than a read-only git '
       + 'subcommand — and awk only runs anything through system/getline/pipes.',
     enforcedBy: Object.freeze([
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function markedPositionProblem(' }),
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function awkProgramCanRunCommands(' }),
+      // 0.69.0: opaque syntax is never judged (SPEC-guard-reduction); the
+      // ordinary corpus holds substitutions, `$?` and an awk pipe.
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'an ordinary command is never refused in the owning session' }),
       Object.freeze({ file: 'guard-corpus.json', anchor: 'find . $(cat args.txt)' }),
     ]),
   }),
@@ -1720,7 +1706,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'unit.mjs', anchor: 'export function markRepair(' }),
       Object.freeze({ file: 'snapshot-contract.mjs', anchor: 'function repairAuthorized(repair) {' }),
       Object.freeze({ file: 'scan.mjs', anchor: 'export function repairItemFacts(' }),
-      Object.freeze({ file: 'command-guard.mjs', anchor: 'function appliesRepairLabel(words) {' }),
+      // 0.69.0: the guard's loop-repair rule is removed (SPEC-guard-reduction).
     ]),
   }),
   Object.freeze({
@@ -1997,6 +1983,12 @@ export function auditIncidents(incidents = INCIDENTS, read = (file) =>
   readFileSync(join(HERE, file), 'utf8')) {
   return incidents.map((incident) => {
     const failures = [];
+    if (incident.retired !== undefined) {
+      if (!/^\d+\.\d+\.\d+: \S/u.test(String(incident.retired))) {
+        failures.push('retired without a "<version>: <why>" note');
+      }
+      return { id: incident.id, date: incident.date, ok: failures.length === 0, retired: incident.retired, failures };
+    }
     for (const enforcer of incident.enforcedBy) {
       let source;
       try {
@@ -2071,6 +2063,11 @@ function selfTest() {
     ['a guard case with no `why` is rejected', auditGuardCorpus({
       cases: [{ cmd: 'ls', expect: 'allow' }],
     }).length === 1],
+    ['a retired incident keeps its entry, is not checked, and must name its release and reason', (() => {
+      const [noted] = auditIncidents([{ id: 'x', date: '2026-01-01', retired: '0.69.0: the rule is removed', enforcedBy: [{ file: 'a.mjs', anchor: 'GONE' }] }], read);
+      const [bare] = auditIncidents([{ id: 'y', date: '2026-01-01', retired: 'gone', enforcedBy: [] }], read);
+      return noted.ok && noted.retired === '0.69.0: the rule is removed' && !bare.ok && bare.failures[0].includes('<version>: <why>');
+    })()],
     ['every incident states a symptom and a cause', INCIDENTS.every((entry) =>
       entry.symptom.length > 20 && entry.cause.length > 20)],
   ];
@@ -2094,7 +2091,7 @@ function main() {
     console.log(JSON.stringify({ ok: broken === 0, incidents: rows, guard }, null, 1));
   } else {
     for (const row of rows) {
-      console.log(`${row.ok ? 'PASS' : 'FAIL'} ${row.date} ${row.id}`);
+      console.log(`${row.ok ? (row.retired ? 'RETIRED' : 'PASS') : 'FAIL'} ${row.date} ${row.id}${row.retired ? ` (${row.retired})` : ''}`);
       for (const failure of row.failures) console.log(`     ${failure}`);
     }
     console.log(`${guard.length === 0 ? 'PASS' : 'FAIL'} guard corpus provenance`);

@@ -1,44 +1,41 @@
 #!/usr/bin/env node
-// PreToolUse(Bash) guard — converts the autoloop NEVER rules from prose into blocks.
-// Vendored by autoloop:setup and wired into the active host's project hooks
-// (.claude/settings.json).
+// PreToolUse(Bash) guard — refuses the acts that are irreversible or
+// unauthorized, and nothing else. Vendored by autoloop:setup and wired into
+// the active host's project hooks (.claude/settings.json).
 //
-//   BLOCK (exit 2)
-//     1. `gh pr merge` in any form            — L2: the loop/agent never merges (STATE.md).
-//     2. `git commit` while on a permanent branch — permanent branches take PRs only.
-//        Skipped when the same command switches branches first (git switch|checkout).
-//     3. a commit message carrying Co-Authored-By — commits carry no co-author trailer.
-//     4. `git push --force`/-f                — only --force-with-lease is allowed.
-//     5. inline --body/-b on gh pr create|comment|review|edit / gh issue comment —
-//        untrusted text never rides in shell source; use --body-file (STATE → Lessons).
-//     6. `gh api` reaching a merge endpoint, a GraphQL merge mutation, or a mutating
-//        call on branch protection — the REST/GraphQL bypass of rule 1 and of
-//        "never edit the protection yourself".
-//     7. creating, applying, or renaming `loop-ready`; release-tag pushes; and
-//        GitHub release mutations — prompt transport grants none of that authority.
-//     8. active shell expansion, inline interpreter source, and unknown Git/GitHub
-//        subcommands — opaque syntax can conceal any rule above.
-//     9. applying a `loop:*` label outside the step ladder (`loop:10-publish`) — steps
-//        10/11 carry no label; `loop:09-gate` stays until the terminal finalizer swaps it.
-//    10. swapping a step label backward (`--add-label loop:02-plan --remove-label
-//        loop:03-plan-review`) — the ladder only climbs; plan review is one dispatch.
-//    11. adding step N without removing step N-1 in the same command — an add-only swap
-//        strands the old label; a skipped step leaves no timeline trace.
+//   BLOCK (exit 2), in the session that owns a run
+//     1. a merge: `gh pr merge`, the REST merge endpoint, a GraphQL merge
+//        mutation, or a hand-posted commit status the merge gate trusts.
+//     2. a commit on, or a push to, the configured base branch — the base
+//        takes pull requests only. Skipped when the same command switches
+//        branches first (git switch|checkout).
+//     3. `git push --force`/-f or a `+<refspec>` — only --force-with-lease.
+//     4. a release-tag push or a GitHub release mutation — a maintainer act.
+//     5. a branch-protection or ruleset mutation — the human's baseline.
+//     6. `git add` or `git commit` naming a secret path (`.env*`, key
+//        material, a credential or token path).
+//     7. a commit message carrying Co-Authored-By.
+//     8. `AskUserQuestion` while a run is live.
+//     9. a branch switch of a checkout a reviewer dispatch is reading.
+//    10. a command that runs the plugin's prime and does anything else, or
+//        runs it outside the session's project (checked in every session).
+//    11. a hook payload the guard cannot read, while this process holds a
+//        latch (fail closed for the owner).
 //
-//   ALLOW other literal canonical commands (exit 0). The rules apply only to the
-//   session that owns a run (run-markers.mjs ownedRun), from its prime until
-//   /clear or exit — `--close-run` does not end them; a command that runs the
-//   plugin's prime is checked in every session, and hands prime the hook
-//   input's session id. A hook payload that is invalid or names no session
-//   fails closed while this process holds a latch: it cannot prove which
-//   command the host is about to execute. A guard that throws exits by the
-//   same ownership; one that cannot start falls back to hooks.json, which
-//   reads the latch of the shell's parent ($PPID, the Claude process).
+//   ALLOW everything else (exit 0). The kept rules match the literal command
+//   with the lexer below; a token the lexer cannot classify is allowed. The
+//   guard never refuses because it does not understand a command.
 //
-//   NOT a secrets boundary: reading the environment or a credential file is
-//   allowed. Secrets are protected by scoping them (a repo-scoped token without
-//   admin rights, no API key in the loop's environment), and dispatch.mjs sets
-//   no endpoint of its own (a dispatch inherits the session's), not by this guard.
+//   The rules apply only to the session that owns a run (run-markers.mjs
+//   ownedRun), from its prime until /clear or exit — `--close-run` does not
+//   end them. A guard that throws exits by the same ownership; one that
+//   cannot start falls back to hooks.json, which reads the latch of the
+//   shell's parent ($PPID, the Claude process).
+//
+//   NOT a sandbox: reading the environment or a credential file is allowed.
+//   Secrets are protected by scoping them (a repo-scoped token without admin
+//   rights, no API key in the loop's environment); rule 6 only keeps one out
+//   of a commit.
 //
 // Usage:  (hook) reads the PreToolUse payload on stdin
 //         node <plugin-tools>/command-guard.mjs --self-test
@@ -52,11 +49,10 @@ import {
   realpathSync,
   rmSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
@@ -68,7 +64,7 @@ import { hookRoot } from './hook-root.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
   procEntry, psEntry, commonDirOf, heldLatch, ownedRun, pinnedModelsPath, processStart, protectedPaths, pruneLatches, recordHostSession,
-  recordLatch, sessionLatch, sessionOwnerPid, PLUGIN_CODE_DIRS,
+  recordLatch, sessionLatch, sessionOwnerPid,
 } from './run-markers.mjs';
 import { ORDINARY, readsOnly, runStateProblem, TAMPERING } from './run-state-guard.mjs';
 import { boundedGit, gitStalled, setGitDeadline } from './git-budget.mjs';
@@ -89,102 +85,6 @@ const BULK_PUSH_FLAGS = new Set([
   '--follow-tags',
   '--mirror',
   '--tags',
-]);
-const GIT_COMMANDS = new Set([
-  'add',
-  'am',
-  'apply',
-  'archive',
-  'bisect',
-  'blame',
-  'branch',
-  'bundle',
-  'cat-file',
-  'checkout',
-  'cherry',
-  'cherry-pick',
-  'check-attr',
-  'check-ignore',
-  'clean',
-  'clone',
-  'commit',
-  'config',
-  'describe',
-  'diff',
-  'diff-tree',
-  'fetch',
-  'for-each-ref',
-  'format-patch',
-  'fsck',
-  'gc',
-  'grep',
-  'help',
-  'init',
-  'log',
-  'ls-files',
-  'ls-remote',
-  'ls-tree',
-  'merge',
-  'merge-base',
-  'merge-tree',
-  'mv',
-  'notes',
-  'pull',
-  'push',
-  'range-diff',
-  'rebase',
-  'reflog',
-  'remote',
-  'reset',
-  'restore',
-  'rev-list',
-  'rev-parse',
-  'revert',
-  'rm',
-  'shortlog',
-  'show',
-  'show-ref',
-  'sparse-checkout',
-  'stash',
-  'status',
-  'submodule',
-  'switch',
-  'tag',
-  'update-index',
-  'verify-commit',
-  'verify-tag',
-  'version',
-  'worktree',
-]);
-const GH_COMMANDS = new Set([
-  'alias',
-  'api',
-  'attestation',
-  'auth',
-  'browse',
-  'cache',
-  'codespace',
-  'completion',
-  'config',
-  'extension',
-  'gist',
-  'gpg-key',
-  'help',
-  'issue',
-  'label',
-  'org',
-  'pr',
-  'project',
-  'release',
-  'repo',
-  'ruleset',
-  'run',
-  'search',
-  'secret',
-  'ssh-key',
-  'status',
-  'variable',
-  'workflow',
 ]);
 
 // Strip heredoc bodies so text INSIDE a body (e.g. a PR description that quotes
@@ -353,42 +253,6 @@ function spacedRedirections(text) {
   return out;
 }
 
-function executableShellStructure(cmd) {
-  let quote = null;
-  let escaped = false;
-  for (let index = 0; index < cmd.length; index += 1) {
-    const char = cmd[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === '\\' && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote === "'") {
-      if (char === quote) quote = null;
-      continue;
-    }
-    if (quote === '"') {
-      if (char === quote) {
-        quote = null;
-        continue;
-      }
-      if (char === '`' || (char === '$' && cmd[index + 1] === '(')) return true;
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char;
-      continue;
-    }
-    if (char === '`' || char === '(' || char === ')' || char === '{' || char === '}') {
-      return true;
-    }
-  }
-  return false;
-}
-
 function decodeAnsiCBody(body) {
   const escapes = new Map([
     ['a', '\x07'],
@@ -495,572 +359,10 @@ function decodeAnsiC(cmd, quoted) {
   return out;
 }
 
-function decodeAnsiCQuotes(cmd) {
-  return decodeAnsiC(cmd, false);
-}
-
 // The same decoding, kept quoted, for the tokenizer: `$'\x2egit'` is `'.git'`.
 function quotedAnsiC(cmd) {
   return decodeAnsiC(cmd, true);
 }
-
-function executableLexicalText(cmd) {
-  const decoded = decodeAnsiCQuotes(cmd);
-  let output = '';
-  for (let index = 0; index < decoded.length; index += 1) {
-    const char = decoded[index];
-    if (char === '\\') {
-      if (decoded[index + 1] === '\r' && decoded[index + 2] === '\n') {
-        index += 2;
-      } else if (decoded[index + 1] === '\n') {
-        index += 1;
-      } else if (index + 1 < decoded.length) {
-        // An escaped quote is dropped like every quote here, and an escaped
-        // backslash stays escaped: emitted bare, either one re-opened a quote
-        // (or escaped the next character) for the reader of this text, so
-        // `echo it\'s && git push origin main` read as one quoted word.
-        const escaped = decoded[index + 1];
-        if (escaped === '\\') output += '\\\\';
-        else if (escaped !== "'" && escaped !== '"') output += escaped;
-        index += 1;
-      }
-      continue;
-    }
-    if (char === "'" || char === '"') continue;
-    if (
-      char === '$'
-      && (decoded[index + 1] === "'" || decoded[index + 1] === '"')
-    ) {
-      continue;
-    }
-    output += char;
-  }
-  return output;
-}
-
-function structuredGitMutation(cmd) {
-  if (!executableShellStructure(cmd)) return false;
-  const visible = executableLexicalText(cmd);
-  // The path prefix's components exclude `/`: `(?:\/[^…]+\/)*`, whose
-  // class matched `/` too, backtracked exponentially on a run of slashes.
-  return /(?:^|[\s;&|(`{}])(?:\/(?:[^\s;&|(`{}/]+\/)*)?git\b(?:(?![;&|\n]).)*\b(?:commit|push)\b/u
-    .test(visible);
-}
-
-function hasActiveShellExpansion(cmd) {
-  let quote = null;
-  let escaped = false;
-  for (let index = 0; index < cmd.length; index += 1) {
-    const char = cmd[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === '\\' && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote === "'") {
-      if (char === "'") quote = null;
-      continue;
-    }
-    // Inside double quotes a `'` is literal: taking it for a quote desynced
-    // the scan on the `'"'"'` idiom, and a quoted backquote later read as live.
-    if (char === "'" && quote === null) {
-      quote = "'";
-      continue;
-    }
-    if (char === '"') {
-      if (quote === '"') quote = null;
-      else if (quote === null) quote = '"';
-      continue;
-    }
-    if (
-      char === '`'
-      || char === '<' && cmd[index + 1] === '('
-      || char === '>' && cmd[index + 1] === '('
-      || (
-        char === '$'
-        && !new Set(["'", '"']).has(cmd[index + 1])
-        && /[({A-Za-z_0-9@*#?$!_-]/u.test(cmd[index + 1] ?? '')
-      )
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// A live run wrote `S=/tmp/x; sha256sum $S/plan.md` and was refused as opaque,
-// every session, because the guard cannot judge what it cannot read. Refusing
-// is not the only way to become able to read it: when a variable is assigned a
-// literal in the same command, the guard substitutes it and judges the REAL
-// command. That is strictly stronger than refusal — `verb=merge; gh pr $verb 42`
-// now blocks on the merge rule itself rather than on shape. Anything not
-// statically resolvable (command substitution, environment, values carrying
-// whitespace or metacharacters) stays opaque and stays blocked.
-const RESOLVABLE_VALUE = /^[A-Za-z0-9_./:@%+,=-]+$/u;
-
-function literalAssignments(cmd) {
-  const values = new Map();
-  // `m` is load-bearing: a newline separates commands exactly as `;` does, and
-  // without it `^` matched only the very start of the string — so an assignment
-  // was recognised on the first line and nowhere else. A live audit battery ran
-  // fine as `T=...` on line 1 and was refused as opaque the moment a `cd` was
-  // added above it.
-  const pattern = /(?:^|[;&|]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)=("[^"$`\\\n]*"|'[^'\n]*'|[^\s;&|()<>"'`$\\]*)/gmu;
-  for (const match of String(cmd).matchAll(pattern)) {
-    const [, name, raw] = match;
-    const value = /^["']/u.test(raw) ? raw.slice(1, -1) : raw;
-    if (!RESOLVABLE_VALUE.test(value)) {
-      values.set(name, null);
-      continue;
-    }
-    values.set(name, values.has(name) ? null : value);
-  }
-  return values;
-}
-
-// A `for` over a LITERAL word list is not opaque — it is N literal commands
-// written once. The guard already resolves `S=/tmp/x; sha256sum $S/plan.md` by
-// substituting and judging the real command; a loop is the same operation
-// repeated, and refusing it while accepting the assignment was inconsistent.
-//
-// Three live runs lost a round to this shape: `for n in 222 223 224; do gh issue
-// view $n …; done` and a spec sweep over eight named files. The advice they got
-// — "write the iterations as literal commands" — is correct and is exactly what
-// this does mechanically, so the guard was asking the reader to perform an
-// expansion the guard could perform itself.
-//
-// Only a fully literal list expands. A word carrying `$`, a command
-// substitution, or a glob stays unexpanded and the loop stays refused, because
-// what those iterate over is not knowable here. The bound keeps a pathological
-// list from turning one refusal into a thousand judgements.
-const MAX_LOOP_EXPANSION = 32;
-
-export function expandLiteralForLoops(cmd) {
-  const pattern =
-    /(^|[\s;&|])for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;\n]+?)\s*;\s*do\s+([\s\S]*?)\s*;?\s*done(?=$|[\s;&|\n])/u;
-  let text = String(cmd);
-  let changed = false;
-  for (let guard = 0; guard < 4; guard += 1) {
-    const match = pattern.exec(text);
-    if (match === null) break;
-    const [whole, lead, name, listText, body] = match;
-    const words = shellWords(listText);
-    if (words.length === 0 || words.length > MAX_LOOP_EXPANSION) return null;
-    if (!words.every((word) => RESOLVABLE_VALUE.test(word))) return null;
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-    const iterations = words.map((word) => body
-      .replace(new RegExp(`\\$\\{${escaped}\\}`, 'gu'), word)
-      .replace(new RegExp(`\\$${escaped}(?![A-Za-z0-9_])`, 'gu'), word)
-      .trim()
-      .replace(/;+$/u, ''));
-    text = text.slice(0, match.index)
-      + lead
-      + iterations.join('; ')
-      + text.slice(match.index + whole.length);
-    changed = true;
-  }
-  return changed ? text : null;
-}
-
-function resolveShellExpansions(cmd) {
-  const unrolled = expandLiteralForLoops(cmd);
-  const source = unrolled ?? String(cmd);
-  const values = literalAssignments(source);
-  if (values.size === 0) {
-    if (unrolled === null) return null;
-    return hasActiveShellExpansion(stripQuotedHeredocBodies(unrolled)) ? null : unrolled;
-  }
-  let resolved = source;
-  for (const [name, value] of values) {
-    if (value === null) continue;
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-    resolved = resolved
-      .replace(new RegExp(`\\$\\{${escaped}\\}`, 'gu'), value)
-      .replace(new RegExp(`\\$${escaped}(?![A-Za-z0-9_])`, 'gu'), value);
-  }
-  // Judge resolvability on the SAME text the detector judges: a quoted heredoc
-  // body is inert, so a `$?` or `$(date)` sitting in prose there must not defeat
-  // resolution. The detector was taught this (see stripQuotedHeredocBodies
-  // below) and this path was not, so `SP=/tmp/x` + `cat > $SP/msg.txt <<'EOF'`
-  // was refused whenever the MESSAGE mentioned a command substitution — which is
-  // exactly what a commit message describing shell work does. Same bug as the
-  // backticked-prose refusal that comment records, one call site later.
-  return hasActiveShellExpansion(stripQuotedHeredocBodies(resolved)) ? null : resolved;
-}
-
-// A heredoc whose delimiter is quoted (`<<'EOF'`, `<<"EOF"`) has a LITERAL body:
-// the shell performs no expansion and no command substitution inside it. Scanning
-// that body for expansion syntax therefore reads prose as code — a reconcile
-// commit message carrying backticks around `m` and `scaffold.mjs --reconcile` was
-// refused as command substitution, and the loop could not write its own commit.
-//
-// Only the quoted form is stripped. An UNQUOTED `<<EOF` body genuinely does
-// expand, so it stays in the text the expansion check sees; `stripHeredocs`
-// removes both kinds alike and is deliberately not reused here, because doing so
-// would turn `<<EOF` with `$(...)` into a blind spot.
-export function stripQuotedHeredocBodies(cmd) {
-  return String(cmd).replace(
-    /<<[-~]?[ \t]*(['"])([A-Za-z_][A-Za-z0-9_-]*)\1[^\n]*\r?\n[\s\S]*?\r?\n[ \t]*\2(?![A-Za-z0-9_-])/g,
-    (match) => match.slice(0, match.indexOf('\n')),
-  );
-}
-
-function opaqueMutationSyntax(cmd) {
-  return hasActiveShellExpansion(stripQuotedHeredocBodies(cmd));
-}
-
-function interpreterHeredoc(cmd) {
-  const interpreters =
-    /(?:^|[\s;&|])(?:\/(?:[^\s;&|/]+\/)*)?(?:ba|da|k|z)?sh(?:\s|$)|(?:^|[\s;&|])(?:\/(?:[^\s;&|/]+\/)*)?(?:node|nodejs|bun|deno|perl|php|ruby|python(?:\d+(?:\.\d+)?)?)(?:\s|$)/u;
-  const shellSources =
-    /(?:^|[\s;&|])(?:source(?=\s|$)|\.(?=\s|$))/u;
-  const logicalLines = String(cmd).replace(/\\\r?\n/gu, ' ');
-  return logicalLines.split(/\r?\n/u).some((line) =>
-    /<<[-~]?[ \t]*(?:['"]?)[A-Za-z_][A-Za-z0-9_-]*(?:['"]?)/u.test(line)
-    && (
-      interpreters.test(executableLexicalText(line))
-      || shellSources.test(executableLexicalText(line))
-    ));
-}
-
-// Remedy selection ONLY — never gating. `inlineInterpreterSource` decides
-// WHETHER to block; this decides which remedy fits, so a wrong answer costs a
-// less apt message and never a wrong verdict. Deliberately not threaded through
-// that detector: it is security-critical and this is prose.
-//
-// 2026-07-29: v0.49.38 gave the inline-interpreter refusal ONE remedy, written
-// from the `zsh -ic 'alias …'` case that produced it. A `python3 -c "import
-// json…"` then got told to read `~/.zshrc` and check that a file parses —
-// answering a question nobody asked, which is the exact defect that release
-// existed to fix. An inline program is usually reshaping data; an inline shell
-// is usually interrogating its own configuration. Different questions, so
-// different answers.
-const SHELL_INTERPRETERS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh', 'fish']);
-
-function inlineInterpreterKind(cmd) {
-  const named = shellWords(executableLexicalText(cmd))
-    .map((word) => word.slice(word.lastIndexOf('/') + 1));
-  const program = named.some((name) =>
-    /^python\d*(?:\.\d+)?$/u.test(name)
-    || ['node', 'nodejs', 'deno', 'bun', 'ruby', 'perl', 'php', 'lua', 'luajit',
-      'R', 'Rscript', 'tclsh', 'wish', 'osascript'].includes(name));
-  return program ? 'program' : 'shell';
-}
-
-function inlineInterpreterSource(cmd) {
-  const sourceFlags = new Set([
-    '-c',
-    '-e',
-    '-E',
-    '-p',
-    '-r',
-    '--eval',
-    '--print',
-  ]);
-  // Flags that make an interpreter print and exit without reading any source.
-  // Long forms only, and deliberately: `-v` is the version flag for node, ruby,
-  // php and perl but means "verbose" for python, where a script is still read
-  // from stdin. The long spelling is unambiguous for every interpreter below.
-  const terminalFlags = new Set(['--version', '--help']);
-  const interpreters = new Set([
-    'bash',
-    'bun',
-    'dash',
-    'deno',
-    'ksh',
-    'lua',
-    'luajit',
-    'node',
-    'nodejs',
-    'osascript',
-    'perl',
-    'php',
-    'python',
-    'python2',
-    'python3',
-    'ruby',
-    'R',
-    'Rscript',
-    'sh',
-    'tclsh',
-    'wish',
-    'zsh',
-  ]);
-  // The interpreters a quote-aware reading shows invoked: a `|bash` inside a
-  // quoted regex (`rg '^```(sh|bash)'`) is text, and only an interpreter the
-  // shell really runs can be reading stdin (LFE run, 2026-09-30).
-  const invokedForReal = new Set(shellSegments(quotedAnsiC(stripHeredocs(cmd))).flatMap(({ command }) => {
-    const words = shellWords(command);
-    return words.filter((word, index) => invokedAt(words, index)).map((word) => word.slice(word.lastIndexOf('/') + 1));
-  }));
-  return shellSegments(executableLexicalText(cmd)).some(({ command }) => {
-    const words = shellWords(command);
-    if (isLookupSegment(words)) return false;
-    const shellSource = words.findIndex((word) =>
-      word === 'source' || word === '.');
-    if (
-      shellSource !== -1
-      && words.slice(shellSource + 1).some((argument) =>
-        argument === '-'
-        || /^\/dev\/(?:stdin|fd\/[0-9]+)$/u.test(argument)
-        || /^\/proc\/(?:self|thread-self|[0-9]+)\/fd\/[0-9]+$/u.test(argument))
-    ) {
-      return true;
-    }
-    return words.some((word, index) => {
-      const executable = word.slice(word.lastIndexOf('/') + 1);
-      if (
-        !interpreters.has(executable)
-        && !/^python\d+(?:\.\d+)?$/u.test(executable)
-      ) {
-        return false;
-      }
-      const argumentsAfterExecutable = words.slice(index + 1);
-      // node running a plugin tool directly: what follows is the tool's
-      // arguments, not node's (a park note's `head -race` read as -r/-e,
-      // LFE run 2026-09-30). Anything before the tool (`--import x`) is not.
-      if ((executable === 'node' || executable === 'nodejs') && isPluginScript(words[index + 1])) return false;
-      if (argumentsAfterExecutable.some(
-        (argument) =>
-          sourceFlags.has(argument)
-          || argument === '-'
-          || /^\/dev\/(?:stdin|fd\/[0-9]+)$/u.test(argument)
-          || /^\/proc\/(?:self|thread-self|[0-9]+)\/fd\/[0-9]+$/u.test(argument)
-          || /^-[A-Za-z]*[ceEpr][A-Za-z]*$/u.test(argument),
-      )) {
-        return true;
-      }
-      // A word that merely NAMES an interpreter is data, not an invocation —
-      // `git log | grep node` searches for a string; refusing it reads a grep
-      // pattern as an interpreter waiting on stdin (same lesson as
-      // EXEC_WRAPPERS below). The source-flag shapes above stay position-
-      // blind, so `find . -exec node -e …` remains opaque wherever the name
-      // sits.
-      if (!invokedAt(words, index)) return false;
-      if (!invokedForReal.has(executable)) return false;
-      if (argumentsAfterExecutable.length === 0) return true;
-      // A probe that only prints a version or a usage banner executes nothing,
-      // so it is not the no-script-argument stdin shape the return below cat-
-      // ches. Checked after the source-flag test, so `node --version -e '...'`
-      // still blocks on the `-e`.
-      if (argumentsAfterExecutable.every((argument) => terminalFlags.has(argument))) {
-        return false;
-      }
-      return !argumentsAfterExecutable.some((argument) => !argument.startsWith('-'));
-    });
-  });
-}
-
-// Returns the SHAPE that fired, not just a boolean, so the refusal can name the
-// command to run instead. A refusal that names only its category makes the
-// reader reverse-engineer the guard: a live session lost a round to
-// `ls -d … | xargs -n1 basename` -- a plain listing -- because the advice
-// ("use literal canonical commands") never said which literal command that was.
-const AWK_NAMES = ['awk', 'gawk', 'mawk', 'nawk'];
-
-function invokingIndex(words, executable) {
-  const index = executableIndex(words, executable);
-  return index !== -1 && invokedAt(words, index) ? index : -1;
-}
-
-function opaqueCommandAssembler(cmd) {
-  let awkInvocations = 0;
-  const found = shellSegments(executableLexicalText(cmd)).reduce((shape, { command }) => {
-    if (shape !== null) return shape;
-    const words = shellWords(command);
-    if (isLookupSegment(words)) return shape;
-    // Positional for the same reason as inlineInterpreterSource: an assembler
-    // NAME in argument position is data (`git log --grep xargs`), not a fan-out.
-    if (invokingIndex(words, 'xargs') !== -1 || invokingIndex(words, 'parallel') !== -1) {
-      return 'fanout';
-    }
-    awkInvocations += AWK_NAMES.filter((name) => invokingIndex(words, name) !== -1).length;
-    return null;
-  }, null);
-  if (found !== null || awkInvocations === 0) return found;
-  // The lexical text above drops quotes, which splits an awk program at its own
-  // `|`; the programs are read from the quote-aware segments instead. When the
-  // two readings disagree on how many awk runs there are, the program is not
-  // known, and it stays refused.
-  let programsRead = 0;
-  for (const { command } of shellSegments(cmd)) {
-    const words = shellWords(command);
-    for (const name of AWK_NAMES) {
-      const index = invokingIndex(words, name);
-      if (index === -1) continue;
-      programsRead += 1;
-      if (awkProgramsOf(words.slice(index + 1)).some(awkProgramCanRunCommands)) return 'awk';
-    }
-  }
-  return programsRead === awkInvocations ? null : 'awk';
-}
-
-// 0.50.0: inline awk is refused only when its program can start a process.
-// Before, every inline program was refused, and ~13 live refusals in ten days
-// were ranges, sums and column picks — `awk '/^## Lessons/,0' STATE.md` — none
-// of which can run anything. awk reaches a process only through `system()`,
-// a `|` into or out of `getline`/`print`, or a loaded extension, so those
-// stay refused. A program file (`-f`) was always allowed and still is.
-function awkProgramsOf(argumentsAfterExecutable) {
-  const programs = [];
-  for (let index = 0; index < argumentsAfterExecutable.length; index += 1) {
-    const argument = argumentsAfterExecutable[index];
-    if (['-f', '--file', '-i', '--include', '-l', '--load'].includes(argument)) {
-      index += 1;
-      if (argument !== '-f' && argument !== '--file') programs.push('@include');
-      continue;
-    }
-    if (/^--(?:file|include|load)=/u.test(argument)) {
-      if (!argument.startsWith('--file=')) programs.push('@include');
-      continue;
-    }
-    if (argument === '-e' || argument === '--source') {
-      programs.push(argumentsAfterExecutable[index + 1] ?? '');
-      index += 1;
-      continue;
-    }
-    if (argument.startsWith('--source=')) {
-      programs.push(argument.slice('--source='.length));
-      continue;
-    }
-    if (argument === '-F' || argument === '-v' || argument === '--assign') {
-      index += 1;
-      continue;
-    }
-    if (argument.startsWith('-')) continue;
-    // The first operand is the program unless one arrived by flag.
-    if (programs.length === 0 && !argumentsAfterExecutable.slice(0, index)
-      .some((word) => ['-f', '--file'].includes(word) || word.startsWith('--file='))) {
-      programs.push(argument);
-    }
-    break;
-  }
-  return programs;
-}
-
-function awkProgramCanRunCommands(program) {
-  if (/\bsystem\s*\(|\bgetline\b|@(?:include|load)\b|\|&/u.test(program)) return true;
-  // A lone `|` outside strings and regex literals is a pipe to or from a
-  // command; `||` is logical or.
-  const code = program
-    .replace(/"(?:[^"\\]|\\.)*"/gu, '""')
-    .replace(/\/(?:[^/\\\n]|\\.)+\//gu, '//')
-    .replaceAll('||', '');
-  return code.includes('|');
-}
-
-// Names the token that defeated resolution, and the remedy for the SHAPE that
-// produced it. The old text said "can hide a mutation. Use literal canonical
-// commands; split discovery and mutation into separate tool calls." — generic,
-// and worse than generic on a read-only measurement: it warns about a mutation
-// that is not there while saying nothing about the loop variable that actually
-// blocked. A live run lost rounds to `for s in …; do sed …; done` reading it.
-const LOOP_KEYWORD = /(?:^|[\s;&|(])(?:for|while|until)(?=\s)/u;
-
-// Joins the named tokens as English, not as a comma-splice. A live refusal read
-// "`$p`, a command substitution cannot be resolved statically", which parses as
-// one garbled subject and buries the fact that TWO different things must be
-// fixed. The count is also stated rather than truncated: naming three of five
-// and stopping sends the reader back for a second refusal having fixed
-// everything the message mentioned — the same silent-cap failure the workflow
-// rules forbid elsewhere.
-const MAX_NAMED_TOKENS = 3;
-
-export function nameList(tokens) {
-  if (tokens.length === 0) return '';
-  const shown = tokens.slice(0, MAX_NAMED_TOKENS);
-  const hidden = tokens.length - shown.length;
-  if (hidden > 0) {
-    return `${shown.join(', ')} and ${hidden} more unresolved ${hidden === 1 ? 'token' : 'tokens'}`;
-  }
-  if (shown.length === 1) return shown[0];
-  return `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}`;
-}
-
-export function unresolvedExpansionReason(rawCmd) {
-  const text = stripQuotedHeredocBodies(String(rawCmd));
-  const assigned = new Set(
-    [...literalAssignments(text).keys()].filter((name) => literalAssignments(text).get(name) !== null),
-  );
-  const tokens = [...text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?|\$\(|`|\$([?$!*@#-]|\d)/gu)]
-    .map((match) => {
-      if (match[0].startsWith('$(') || match[0] === '`') return 'a command substitution';
-      if (match[2] !== undefined) return `\`$${match[2]}\``;
-      return assigned.has(match[1]) ? null : `\`$${match[1]}\``;
-    })
-    .filter((token) => token !== null);
-  const named = nameList([...new Set(tokens)]);
-  const what = named === ''
-    ? 'this command carries an expansion the guard cannot read'
-    : `${named} cannot be resolved statically`;
-  // 2026-07-29: `for f in <dir>/*.json; do jq -c <filter> "$f"; done` — the loop
-  // was pure ceremony, because jq (like rg, wc, cat, grep) takes many paths at
-  // once and the glob can simply be the argument. Advising "one tool call each"
-  // for a case that needs exactly one call is the shape-shaped advice the
-  // assembler remedies were already taught out of, so the no-loop spelling
-  // comes first and the per-iteration fallback stays for loops that need it.
-  if (LOOP_KEYWORD.test(text)) {
-    return `${what} — a loop variable takes a new value each iteration, so the guard `
-      + 'cannot know what runs. Most file loops need no loop at all: `jq`, `rg`, `grep`, `wc` and '
-      + '`cat` each take many paths at once, so pass the glob as the argument — '
-      + '`jq -c <filter> <dir>/*.json` reads every file in ONE call. Otherwise write the '
-      + 'iterations as literal commands (one tool call each is fine), or put the loop in a '
-      + 'reviewed program file and run that.';
-  }
-  // A command substitution has no literal to assign either — its value is
-  // whatever the inner command PRINTS, which is exactly what cannot be known
-  // before running it. Telling the reader to "assign it a literal" is advice
-  // they cannot follow.
-  // 2026-07-29: a session wanting one method body — grep for the signature, feed
-  // its line number to `sed -n` — had nowhere to go. Locating a definition and
-  // reading around it is the commonest reason to reach for a substitution at
-  // all, and it has an exact one-command answer, so it is named first.
-  // 2026-08-12: `echo ".test.ts tracked: $(git ls-files '*.test.ts' | wc -l)"` — a
-  // substitution whose only job was labeling a count, so the labeling spelling
-  // is stated. Work-size measurement advice was removed for LFE #506.
-  if (tokens.every((token) => token === 'a command substitution')) {
-    return `${what}, because its value is whatever the inner command prints and that is not `
-      + 'knowable before running it. Run the inner command as its own call and use the value it '
-      + 'returns, or pick a spelling that needs no substitution. To read the region around a '
-      + 'match — the usual reason to feed `grep -n` into `sed` — `rg -n -A<lines> <pattern> '
-      + '<file>` prints the match and what follows in one pass, and the host file-reading tool '
-      + 'takes an offset and a line count directly. To label a count, run the '
-      + 'counting command bare and let prose carry the label — two counts are two commands, '
-      + 'and their order says which is which. A real program goes in a file.';
-  }
-  return `${what}, so command policy cannot judge what would run. Assign it a literal in the `
-    + 'SAME command and the guard substitutes it and judges the real thing; otherwise use '
-    + 'literal canonical commands, or a reviewed program file.';
-}
-
-const ASSEMBLER_REMEDY = Object.freeze({
-  fanout: '`xargs` and `parallel` build commands out of data the guard cannot read. '
-    + 'To LIST, run the plain command alone (`ls -1 <dir>`) — the output is yours to '
-    + 'read directly. To ACT on each entry, write a reviewed program file and run it.',
-  // Naming only the file form made the remedy read as "do something absurd":
-  // authoring an awk FILE for a column or a tally is more ceremony than the
-  // task. The fanout remedy above already learned this — name the command to
-  // run instead. Work-size measurement advice was removed for LFE #506.
-  awk: 'This inline `awk` program can start a process (`system()`, `getline` or a `|` to or '
-    + 'from a command), and the guard cannot see what that process is. Most loop uses of it have a '
-    + 'plainer spelling: `cut -f<n>` for a column, `sort | uniq -c` for a tally. '
-    // 2026-07-29: `sed -n <range>p file | cat -n | awk '{print $1+<offset>, ...}'` — the awk
-    // existed only to undo `cat -n` renumbering from 1, which happens only because `sed` ran
-    // FIRST. Number before slicing and the arithmetic disappears, so the remedy names the
-    // pipeline order rather than a plainer measurement, none of which reads a region.
-    + 'To read a NUMBERED region, number before slicing — `cat -n <file> | sed -n <first>,<last>p` '
-    + 'keeps the real line numbers, while slicing first makes `cat -n` restart at 1 and is the '
-    + 'usual reason to reach for `awk` arithmetic here. The host file-reading tool takes an offset '
-    + 'and a line count directly. '
-    + 'To splice one file into another — a findings block into a prompt template — do not template '
-    + 'at all: write the parts and `cat head.md findings.md tail.md > prompt.md`, or for JSON use '
-    + '`jq -n --rawfile <name> <file>`. A placeholder line that has to be found and replaced is an '
-    + 'interpreter program; a file boundary is not. '
-    + 'For a real program, put it in a file and run `awk -f <file>`.',
-});
 
 function shellSegments(cmd) {
   const segments = [];
@@ -1142,19 +444,11 @@ function shellWords(command) {
   return words;
 }
 
-function executableIndex(words, executable) {
-  return words.findIndex(
-    (word) => word === executable || word.endsWith(`/${executable}`),
-  );
-}
-
 // Wrappers that pass execution through to their argument; anything else in
 // front of `git`/`gh` means the word is an ARGUMENT, not an invocation — a live
-// section banner (`echo "=== git diffstat ==="`) read as an unknown subcommand
-// because the executable was found anywhere in the segment.
-// Every entry runs the command that FOLLOWS it, so the word after one is still
-// an invocation. The list is load-bearing in both directions: too narrow and
-// `time xargs …` slips past the rules below by sitting one word off the front.
+// section banner (`echo "=== git diffstat ==="`) read as a command because the
+// executable was found anywhere in the segment. Every entry runs the command
+// that FOLLOWS it, so the word after one is still an invocation.
 const EXEC_WRAPPERS = new Set([
   'command',
   'doas',
@@ -1168,6 +462,7 @@ const EXEC_WRAPPERS = new Set([
   'sudo',
   'time',
   'timeout',
+  'xargs',
 ]);
 
 // find(1) hands the words after these flags to the kernel verbatim, so the
@@ -1179,26 +474,16 @@ function invokedAt(words, index) {
     || EXEC_FORWARDING_FLAGS.has(words[index - 1]);
 }
 
-// `command -v php` ASKS WHERE php IS. It does not run it — that is the entire
-// difference `-v`/`-V` make to the builtin. But `command` is a passthrough
-// wrapper, so without this the name behind it reads as an invocation with no
-// script argument, which is the stdin shape, and a discoverability probe gets
-// refused as inline interpreter source. A live setup lost a round to
-// `command -v php` while checking whether its configured gate still resolves —
-// the check this plugin's own setup skill asks for. `which php` and
-// `type -p python3` were never affected: neither is a wrapper, so the name
-// after them was already in argument position.
-function isLookupSegment(words) {
-  const index = executableIndex(words, 'command');
-  if (index === -1 || !inExecutablePosition(words, index)) return false;
-  return words.slice(index + 1).some((word) => /^-[A-Za-z]*[vV][A-Za-z]*$/u.test(word));
-}
+// Shell keywords that precede a command in its own position: `do gh pr merge`,
+// `then git push`, `! gh …`, `{ git push; }`. `eval` runs its arguments.
+const SHELL_KEYWORDS = new Set(['!', '{', '}', 'do', 'elif', 'else', 'eval', 'if', 'then', 'until', 'while']);
 
 function inExecutablePosition(words, position) {
   for (let index = 0; index < position; index += 1) {
     const word = words[index];
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;      // VAR=value prefix
     if (EXEC_WRAPPERS.has(word.slice(word.lastIndexOf('/') + 1))) continue;
+    if (SHELL_KEYWORDS.has(word)) continue;
     if (/^-/.test(word)) continue;                             // wrapper flags
     if (/^[0-9]+[smhd]?$/.test(word)) continue;                // timeout duration
     return false;
@@ -1206,52 +491,31 @@ function inExecutablePosition(words, position) {
   return true;
 }
 
-function commandAfterGlobalOptions(words, executable, optionsWithValues) {
-  const executablePosition = executableIndex(words, executable);
-  if (executablePosition === -1) return null;
-  if (!inExecutablePosition(words, executablePosition)) return null;
-  for (let index = executablePosition + 1; index < words.length; index += 1) {
+// The first invocation of `executable` in a segment, or -1: a word that only
+// names it (`rg -n "gh pr merge" docs`, `echo git push`) is data.
+function executableIndex(words, executable) {
+  return words.findIndex((word, index) =>
+    (word === executable || word.endsWith(`/${executable}`)) && invokedAt(words, index));
+}
+
+// gh's first two positional words after its global options, or null when the
+// segment does not invoke gh: `gh -R o/r pr merge 4` → ['pr', 'merge'].
+const GH_GLOBAL_OPTIONS = new Set(['-R', '--hostname', '--repo']);
+
+function ghPositionals(words) {
+  const gh = executableIndex(words, 'gh');
+  if (gh === -1) return null;
+  const positionals = [];
+  for (let index = gh + 1; index < words.length && positionals.length < 2; index += 1) {
     const word = words[index];
-    if (optionsWithValues.has(word)) {
+    if (GH_GLOBAL_OPTIONS.has(word)) {
       index += 1;
       continue;
     }
-    if (
-      [...optionsWithValues].some((option) => word.startsWith(`${option}=`))
-      || word.startsWith('-')
-    ) {
-      continue;
-    }
-    return word;
+    if ([...GH_GLOBAL_OPTIONS].some((option) => word.startsWith(`${option}=`)) || word.startsWith('-')) continue;
+    positionals.push(word);
   }
-  return null;
-}
-
-function unknownAmbientAliasSyntax(cmd) {
-  return shellSegments(cmd).some(({ command }) => {
-    const words = shellWords(command);
-    const gitCommand = commandAfterGlobalOptions(
-      words,
-      'git',
-      new Set([
-        '-C',
-        '-c',
-        '--config-env',
-        '--exec-path',
-        '--git-dir',
-        '--namespace',
-        '--super-prefix',
-        '--work-tree',
-      ]),
-    );
-    if (gitCommand !== null && !GIT_COMMANDS.has(gitCommand)) return true;
-    const ghCommand = commandAfterGlobalOptions(
-      words,
-      'gh',
-      new Set(['-R', '--hostname', '--repo']),
-    );
-    return ghCommand !== null && !GH_COMMANDS.has(ghCommand);
-  });
+  return positionals;
 }
 
 function gitSubcommandIndex(words, subcommand) {
@@ -1268,44 +532,6 @@ function gitSubcommandIndex(words, subcommand) {
     return word === subcommand ? i : -1;
   }
   return -1;
-}
-
-function hasCommandLineGitAlias(words) {
-  const git = executableIndex(words, 'git');
-  if (git === -1) return false;
-  for (let index = git + 1; index < words.length; index += 1) {
-    const word = words[index];
-    if (word === '-c') {
-      const setting = words[index + 1] ?? '';
-      if (/^(?:alias\.|include(?:if\..+)?\.path(?:=|$))/i.test(setting)) {
-        return true;
-      }
-      index += 1;
-      continue;
-    }
-    if (
-      /^-calias\./i.test(word)
-      || /^-cinclude(?:if\..+)?\.path(?:=|$)/i.test(word)
-      || /^--config-env=(?:alias\.|include(?:if\..+)?\.path=)/i.test(word)
-    ) {
-      return true;
-    }
-    if (!word.startsWith('-')) return false;
-  }
-  return false;
-}
-
-function hasCommandLineGitConfig(words) {
-  const git = executableIndex(words, 'git');
-  if (git === -1) return false;
-  return words.slice(0, git).some((word) => /^GIT_CONFIG(?:_|=)/u.test(word))
-    || words.slice(git + 1).some(
-      (word) =>
-        word === '-c'
-        || /^-c.+/u.test(word)
-        || word === '--config-env'
-        || word.startsWith('--config-env='),
-    );
 }
 
 function switchTarget(words, baseBranch) {
@@ -1428,279 +654,9 @@ function pushesReleaseTag(words) {
   });
 }
 
-function isInlineGhBody(words) {
-  const gh = executableIndex(words, 'gh');
-  if (gh === -1) return false;
-  const scope = words.findIndex((word, index) => index > gh && (word === 'pr' || word === 'issue'));
-  const action = words[scope + 1];
-  if (scope === -1 || !new Set(['create', 'comment', 'review', 'edit']).has(action)) return false;
-  return words.some(
-    (word) =>
-      word === '--body'
-      || word === '-b'
-      || /^-[^-]*b.*$/u.test(word)
-      || (word.startsWith('--body=') && !word.startsWith('--body-file=')),
-  );
-}
-
-// A comment whose first non-blank line starts with `/answer` is a human's
-// answer to a loop block (unit.mjs triageBlocks). Inline `--body` is already
-// refused (rule 5), so this reads the two shapes that remain: a comment body
-// file, and a `gh api` body field. An unreadable file is not proof of anything
-// and passes, as every other body file does.
-const ANSWER_LINE_RE = /^\s*\/answer(?:\s|$)/u;
-
-function startsWithAnswer(text) {
-  return ANSWER_LINE_RE.test(String(text).replace(/^(?:[ \t]*\r?\n)+/u, ''));
-}
-
-// The guard must be able to READ a comment's body to know it is not an
-// /answer, so a body it cannot read fails closed: stdin, a device, a file that
-// does not exist yet, a JSON --input, or a raw GraphQL comment mutation.
-const GRAPHQL_COMMENT_MUTATION_RE = /\b(?:addComment|addDiscussionComment|updateIssueComment|addPullRequestReviewComment)\b/u;
-
 export function expandHome(path) {
   if (path === '~') return homedir();
   return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
-}
-
-function readsCommentBodyFile(words) {
-  const comment = hasGhScopedAction(words, 'issue', 'comment') || hasGhScopedAction(words, 'pr', 'comment');
-  if (comment && optionValues(words, '--body-file', '-F').length > 0) return true;
-  const gh = executableIndex(words, 'gh');
-  return gh !== -1 && words[gh + 1] === 'api'
-    && githubApiFieldAssignments(words).some(({ name, value }) => name === 'body' && value.startsWith('@'));
-}
-
-export function commentBodyProblem(words, read = (path) => readFileSync(path, 'utf8').slice(0, 4096)) {
-  const body = (path) => {
-    if (path === '' || path === '-' || path.startsWith('/dev/')) return 'unverifiable';
-    try {
-      const text = read(path);
-      if (String(text).trim() === '') return 'unverifiable';
-      return startsWithAnswer(text) ? 'answer' : null;
-    } catch {
-      return 'unverifiable';
-    }
-  };
-  const worst = (problems) => problems.find((problem) => problem === 'answer')
-    ?? problems.find((problem) => problem === 'unverifiable') ?? null;
-  const comment = hasGhScopedAction(words, 'issue', 'comment') || hasGhScopedAction(words, 'pr', 'comment');
-  if (comment) return worst(optionValues(words, '--body-file', '-F').map(body));
-  const gh = executableIndex(words, 'gh');
-  if (gh === -1 || words[gh + 1] !== 'api') return null;
-  if (words.includes('graphql') && words.some((word) => GRAPHQL_COMMENT_MUTATION_RE.test(word))) return 'unverifiable';
-  if (hasInputOption(words) && githubApiEndpoints(words).some((segments) => segments.includes('comments'))) {
-    return 'unverifiable';
-  }
-  return worst(githubApiFieldAssignments(words).filter(({ name }) => name === 'body').map(({ value }) => {
-    if (value.startsWith('@')) return body(value.slice(1));
-    return startsWithAnswer(value) ? 'answer' : null;
-  }));
-}
-
-// A segment that only prints or runs one of the plugin's own tools carries
-// its words as text: a block question quoting the command a human should run
-// (`unit.mjs --block --question "… gh issue edit 5 --add-label loop-ready"`)
-// was refused in the LFE run (2026-09-30). Everything else stays
-// position-blind: a keyword, group or unlisted wrapper in front of gh must not
-// hide it (review of that fix). So the head is matched exactly: no path
-// (`./echo`), no assignment (`NODE_OPTIONS=…`), no node option (`--import`),
-// and the script is named by its absolute path.
-function textOnlySegment(words) {
-  const head = words[0] ?? '';
-  if (head === 'echo' || head === 'printf') return true;
-  return (head === 'node' || head === 'nodejs') && isPluginScript(words[1]);
-}
-
-// One of the plugin's own tools, named by an absolute path that exists: its
-// arguments are its own, and no plugin tool executes its argv.
-function isPluginScript(script) {
-  if (script === undefined || !isAbsolute(script) || !existsSync(script)) return false;
-  const real = realpathSync(script);
-  return PLUGIN_CODE_DIRS.some((dir) => real.startsWith(`${realOrSelf(dir)}/`));
-}
-
-function hasGhScopedAction(words, scope, action) {
-  if (textOnlySegment(words)) return false;
-  const gh = executableIndex(words, 'gh');
-  if (gh === -1) return false;
-  const scopeIndex = words.indexOf(scope, gh + 1);
-  return scopeIndex !== -1 && words.indexOf(action, scopeIndex + 1) !== -1;
-}
-
-function optionValues(words, option, shortOption) {
-  const values = [];
-  for (let index = 0; index < words.length; index += 1) {
-    const word = words[index];
-    if (word === option || word === shortOption) {
-      values.push(words[index + 1] ?? '');
-      index += 1;
-    } else if (word.startsWith(`${option}=`)) {
-      values.push(word.slice(option.length + 1));
-    } else if (
-      shortOption !== undefined
-      && word.startsWith(shortOption)
-      && word.length > shortOption.length
-    ) {
-      // pflag reads `-F=path` as `-F path`.
-      values.push(word.slice(shortOption.length).replace(/^=/u, ''));
-    }
-  }
-  return values;
-}
-
-const PROTECTED_LIFECYCLE_LABELS = new Set([
-  'loop-delivered',
-  'loop-ready',
-]);
-
-function protectedLifecycleLabel(value) {
-  return PROTECTED_LIFECYCLE_LABELS.has(value.trim().toLowerCase());
-}
-
-function addsProtectedLifecycleLabel(words) {
-  const protectedIn = (values) => values.some((value) => value.split(',').some(protectedLifecycleLabel));
-  const edit =
-    hasGhScopedAction(words, 'issue', 'edit')
-    || hasGhScopedAction(words, 'pr', 'edit');
-  const create =
-    hasGhScopedAction(words, 'issue', 'create')
-    || hasGhScopedAction(words, 'pr', 'create');
-  return (edit && protectedIn(optionValues(words, '--add-label')))
-    || (create && protectedIn(optionValues(words, '--label', '-l')));
-}
-
-// The step ladder ends at 09-gate: steps 10 PUBLISH and 11 RECORD carry no
-// label, and the terminal finalizer swaps `loop:09-gate` to `loop-delivered`
-// itself. A live 0.49.51 run invented `loop:10-publish` at the gate; gh removed
-// `09-gate`, failed on the unknown label behind a `2>/dev/null`, and left the
-// unit reading as freshly selected.
-const STEP_LABELS = new Set([
-  'loop:01-premise',
-  'loop:02-plan',
-  'loop:03-plan-review',
-  'loop:04-claim',
-  'loop:05-implement',
-  'loop:06-simplify',
-  'loop:07-diff-review',
-  'loop:08-code-review',
-  'loop:09-gate',
-  'loop:revising',
-]);
-
-function addsUnknownStepLabel(words) {
-  const edit =
-    hasGhScopedAction(words, 'issue', 'edit')
-    || hasGhScopedAction(words, 'pr', 'edit');
-  return edit && optionValues(words, '--add-label').some((value) =>
-    value.split(',').some((label) => {
-      const name = label.trim().toLowerCase();
-      return name.startsWith('loop:') && !STEP_LABELS.has(name);
-    }));
-}
-
-// The ladder only climbs. A live run swapped 03-plan-review back to 02-plan
-// twice to re-review a revised plan — plan review is one dispatch, and a step
-// label never moves backward; each swap hid a second review round as a step.
-function stepNumber(label) {
-  const match = label.trim().toLowerCase().match(/^loop:(\d{2})-/);
-  return match ? Number(match[1]) : null;
-}
-
-function handStepSwap(words) {
-  const onIssue = hasGhScopedAction(words, 'issue', 'edit');
-  if (!onIssue && !hasGhScopedAction(words, 'pr', 'edit')) return null;
-  const step = optionValues(words, '--add-label')
-    .flatMap((value) => value.split(','))
-    .map((label) => label.trim().toLowerCase())
-    .find((label) => /^loop:0\d-/u.test(label));
-  if (!step) return null;
-  const edit = words.indexOf('edit');
-  // A PR number is not the issue step.mjs swaps, so it is never offered as one.
-  const issue = onIssue && /^\d+$/u.test(words[edit + 1] ?? '') ? words[edit + 1] : '<N>';
-  return { issue, step: step.slice('loop:'.length) };
-}
-
-function swapsStepLabelBackward(words) {
-  const edit =
-    hasGhScopedAction(words, 'issue', 'edit')
-    || hasGhScopedAction(words, 'pr', 'edit');
-  if (!edit) return null;
-  const steps = (option) => optionValues(words, option)
-    .flatMap((value) => value.split(','))
-    .map((value) => ({ label: value.trim().toLowerCase(), step: stepNumber(value) }))
-    .filter(({ step }) => step !== null);
-  const added = steps('--add-label');
-  for (const remove of steps('--remove-label')) {
-    const add = added.find((candidate) => candidate.step < remove.step);
-    if (add !== undefined) return { added: add, removed: remove };
-  }
-  return null;
-}
-
-// A swap is add AND remove in one command. A live run's first model-driven
-// swap after the driver's claim was `--add-label loop:05-implement` alone, so
-// `loop:04-claim` rode to code review beside it; the next swap went 06→08 and
-// 07 never existed on the timeline. Step N must retire step N-1 in the same
-// command (01 has no predecessor; 04 is the driver's swap, never gh edit).
-// Removing a label that is not present is a no-op, so the rule holds when an
-// earlier label is already missing.
-function addsStepWithoutRetiringPredecessor(words) {
-  const edit =
-    hasGhScopedAction(words, 'issue', 'edit')
-    || hasGhScopedAction(words, 'pr', 'edit');
-  if (!edit) return false;
-  const numbers = (option) => optionValues(words, option)
-    .flatMap((value) => value.split(','))
-    .map(stepNumber)
-    .filter((number) => number !== null);
-  const removed = numbers('--remove-label');
-  return numbers('--add-label').some((add) =>
-    add >= 2 && add !== 4 && !removed.includes(add - 1));
-}
-
-// loop-repair makes an issue eligible through its parent's loop-ready, and the
-// provenance marker unit.mjs --repair writes is what that trust rests on — so
-// the label is only ever applied there, never by a raw edit or create.
-function appliesRepairLabel(words) {
-  const names = (values) => values.flatMap((value) => value.split(','))
-    .some((name) => name.trim().toLowerCase() === 'loop-repair');
-  const edit = hasGhScopedAction(words, 'issue', 'edit') || hasGhScopedAction(words, 'pr', 'edit');
-  if (edit && names(optionValues(words, '--add-label'))) return true;
-  const create = hasGhScopedAction(words, 'issue', 'create') || hasGhScopedAction(words, 'pr', 'create');
-  if (create && names(optionValues(words, '--label', '-l'))) return true;
-  return hasGhScopedAction(words, 'label', 'edit') && names(optionValues(words, '--name', '-n'));
-}
-
-// The whole-run kill switch (`loop-halt` on any open issue) is a human's to
-// lift: the loop may raise it, never remove, delete or rename it.
-function liftsHaltLabel(words) {
-  const halt = (values) => values.flatMap((value) => value.split(','))
-    .some((name) => name.trim().toLowerCase() === 'loop-halt');
-  const edit = hasGhScopedAction(words, 'issue', 'edit') || hasGhScopedAction(words, 'pr', 'edit');
-  if (edit && halt(optionValues(words, '--remove-label'))) return true;
-  if (hasGhScopedAction(words, 'label', 'delete') || hasGhScopedAction(words, 'label', 'edit')) {
-    return words.some((word) => word.toLowerCase() === 'loop-halt');
-  }
-  // The REST forms: removing it from an issue, deleting or renaming the label.
-  return mutatingGhApi(words) && githubApiEndpoints(words)
-    .some((segments) => segments.some((segment) => segment.toLowerCase() === 'loop-halt'));
-}
-
-function renamesProtectedLifecycleLabel(words) {
-  return hasGhScopedAction(words, 'label', 'edit')
-    && optionValues(words, '--name', '-n').some(
-      protectedLifecycleLabel,
-    );
-}
-
-function createsProtectedLifecycleLabel(words) {
-  if (!hasGhScopedAction(words, 'label', 'create')) return false;
-  const label = words.indexOf('label');
-  const create = words.indexOf('create', label + 1);
-  return create !== -1
-    && (words[create + 1] ?? '').trim().toLowerCase() === 'loop-ready';
 }
 
 function mutatingGhApi(words) {
@@ -1766,237 +722,6 @@ function githubApiEndpoints(words) {
     .filter((endpoint) => endpoint !== null);
 }
 
-function githubApiFieldAssignments(words) {
-  const gh = executableIndex(words, 'gh');
-  const api = words.indexOf('api', gh + 1);
-  if (gh === -1 || api === -1) return [];
-  const args = words.slice(api + 1);
-  const assignments = [];
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (['-f', '-F', '--field', '--raw-field'].includes(argument)) {
-      assignments.push(args[index + 1] ?? '');
-      index += 1;
-    } else if (/^-[fF].+/u.test(argument)) {
-      assignments.push(argument.slice(2));
-    } else {
-      const match = argument.match(/^--(?:field|raw-field)=(.*)$/u);
-      if (match) assignments.push(match[1]);
-    }
-  }
-  return assignments.map((assignment) => {
-    const separator = assignment.indexOf('=');
-    return {
-      name: separator === -1 ? assignment : assignment.slice(0, separator),
-      value: separator === -1 ? '' : assignment.slice(separator + 1),
-    };
-  });
-}
-
-function hasInputOption(words) {
-  return words.some(
-    (word) => word === '--input' || word.startsWith('--input='),
-  );
-}
-
-function opaqueIssueLabelApiMutation(words) {
-  if (!mutatingGhApi(words)) return false;
-  const endpoint = githubApiEndpoints(words).find((segments) =>
-    segments.length >= 5
-    && segments[0] === 'repos'
-    && segments[1].length > 0
-    && segments[2].length > 0
-    && segments[3] === 'issues'
-    && /^[1-9][0-9]*$/u.test(segments[4]));
-  const collection = githubApiEndpoints(words).some((segments) =>
-    segments.length === 4
-    && segments[0] === 'repos'
-    && segments[1].length > 0
-    && segments[2].length > 0
-    && segments[3] === 'issues');
-  if (collection && (hasInputOption(words) || githubApiFieldAssignments(words).some(
-    ({ name }) => name === 'labels' || name === 'labels[]',
-  ))) return true;
-  if (!endpoint) return false;
-  if (endpoint.length === 6 && endpoint[5] === 'labels') return true;
-  if (endpoint.length !== 5) return false;
-  return hasInputOption(words)
-    || githubApiFieldAssignments(words).some(
-      ({ name }) => name === 'labels' || name === 'labels[]',
-    )
-    || words.some((word) => word.toLowerCase().includes('loop-delivered'));
-}
-
-function terminalLabelApiRename(words) {
-  if (!mutatingGhApi(words)) return false;
-  const endpoint = githubApiEndpoints(words).some((segments) =>
-    segments.length === 5
-    && segments[0] === 'repos'
-    && segments[1].length > 0
-    && segments[2].length > 0
-    && segments[3] === 'labels'
-    && segments[4].length > 0);
-  if (!endpoint) return false;
-  if (hasInputOption(words)) return true;
-  return githubApiFieldAssignments(words).some(
-    ({ name, value }) =>
-      name === 'new_name'
-      && (
-        protectedLifecycleLabel(value)
-        || value.trim().toLowerCase() === 'loop-repair'
-        || value.startsWith('@')
-      ),
-  );
-}
-
-function protectedLabelApiCreate(words) {
-  if (!mutatingGhApi(words)) return false;
-  const endpoint = githubApiEndpoints(words).some((segments) =>
-    segments.length === 4
-    && segments[0] === 'repos'
-    && segments[1].length > 0
-    && segments[2].length > 0
-    && segments[3] === 'labels');
-  if (!endpoint) return false;
-  if (hasInputOption(words)) return true;
-  return githubApiFieldAssignments(words).some(
-    ({ name, value }) =>
-      name === 'name'
-      && (
-        value.startsWith('@')
-        || value.trim().toLowerCase() === 'loop-ready'
-      ),
-  );
-}
-
-function decodeUnicodeEscapes(value) {
-  const decode = (match, digits) => {
-    const codePoint = Number.parseInt(digits, 16);
-    return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : match;
-  };
-  return value
-    .replace(/\\?u\{([0-9a-fA-F]{1,6})\}/gu, decode)
-    .replace(/\\?u([0-9a-fA-F]{4})/gu, decode);
-}
-
-function terminalGraphqlMutation(command) {
-  const words = shellWords(command);
-  const gh = executableIndex(words, 'gh');
-  const api = words.indexOf('api', gh + 1);
-  const graphql = words.indexOf('graphql', api + 1);
-  if (gh === -1 || api === -1 || graphql === -1) return false;
-  const fields = githubApiFieldAssignments(words);
-  const decodedCommand = decodeUnicodeEscapes(command);
-  const updateIssueLabels = /\bupdateIssue\b/u.test(command)
-    && (
-      /\b(?:labels|labelIds)\s*:/u.test(command)
-      || /\$(?:labels|labelIds)\b/u.test(command)
-      || fields.some(({ name }) => name === 'labels' || name === 'labelIds')
-    );
-  const updateLabelName = /\bupdateLabel\b/u.test(command)
-    && (
-      /\bloop-(?:delivered|ready|repair)\b/iu.test(decodedCommand)
-      || fields.some(
-        ({ name, value }) =>
-          name === 'name'
-          && (
-            protectedLifecycleLabel(value)
-            || value.startsWith('@')
-          ),
-      )
-    );
-  const createReadyLabel = /\bcreateLabel\b/u.test(command)
-    && (
-      /\bloop-ready\b/iu.test(decodedCommand)
-      || fields.some(
-        ({ name, value }) =>
-          name === 'name'
-          && (
-            value.trim().toLowerCase() === 'loop-ready'
-            || value.startsWith('@')
-          ),
-      )
-    );
-  const createIssueLabels = /\bcreateIssue\b/u.test(command)
-    && (
-      /\b(?:labels|labelIds)\s*:/u.test(command)
-      || /\$(?:labels|labelIds)\b/u.test(command)
-      || fields.some(({ name }) => name === 'labels' || name === 'labelIds')
-    );
-  return updateIssueLabels || updateLabelName || createReadyLabel || createIssueLabels;
-}
-
-function hasOpaqueGraphqlInput(words) {
-  const gh = executableIndex(words, 'gh');
-  const api = words.indexOf('api', gh + 1);
-  const graphql = words.indexOf('graphql', api + 1);
-  if (gh === -1 || api === -1 || graphql === -1) return false;
-  const args = words.slice(api + 1);
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === '--input' || argument.startsWith('--input=')) return true;
-    if (
-      ['-F', '--field'].includes(argument)
-      && /^query=@/u.test(args[index + 1] ?? '')
-    ) {
-      return true;
-    }
-    if (/^(?:-F|--field=)query=@/u.test(argument)) return true;
-  }
-  return false;
-}
-
-/**
- * Pure rule evaluation — returns { block: boolean, reason?: string }.
- * `branch` is the current Git branch; null keeps branch-sensitive mutations fail-closed.
- */
-// 0.50.0 guard-friction. The guard exists to see git/gh mutations, and it
-// refused 128 live commands in ten days, most of them reads: ~29 command
-// substitutions, ~21 `$?`, ~13 inline awk. Each refusal cost a turn and none
-// was hiding anything. What follows narrows refusal to the shapes that CAN hide
-// a mutation, and keeps every one of those refused.
-//
-// Special parameters are numbers — an exit status, a pid, an argument count —
-// so no position makes them a command. They are judged as a literal `0`.
-export function neutralizeSpecialParameters(cmd) {
-  let out = '';
-  let quote = null;
-  for (let index = 0; index < cmd.length; index += 1) {
-    const char = cmd[index];
-    if (quote === "'") {
-      out += char;
-      if (char === "'") quote = null;
-      continue;
-    }
-    if (char === '\\') {
-      out += cmd.slice(index, index + 2);
-      index += 1;
-      continue;
-    }
-    if (char === "'" && quote === null) quote = "'";
-    else if (char === '"') quote = quote === '"' ? null : '"';
-    if (char === '$') {
-      const braced = /^\$\{([?$#!])\}/u.exec(cmd.slice(index));
-      if (braced !== null) {
-        out += '0';
-        index += braced[0].length - 1;
-        continue;
-      }
-      if (/[?$#!]/u.test(cmd[index + 1] ?? '')) {
-        out += '0';
-        index += 1;
-        continue;
-      }
-    }
-    out += char;
-  }
-  return out;
-}
-
-const SUBSTITUTION_MARK = 'AUTOLOOPSUBSTITUTION';
-const VARIABLE_MARK = 'AUTOLOOPVARIABLE';
-const MAX_SUBSTITUTION_DEPTH = 4;
-
 // End of a `$(` body starting at `start`, honouring quotes and nesting; -1 when
 // the body is not one this reader can delimit with certainty.
 function substitutionEnd(cmd, start) {
@@ -2031,522 +756,174 @@ function substitutionEnd(cmd, start) {
   return -1;
 }
 
-// Replaces every top-level substitution with one mark and every unassigned
-// `$name` with another, returning the marked text and the substitution bodies.
-// Anything it cannot delimit with certainty — process substitution, arithmetic,
-// `${…}` operators, positional parameters, ANSI-C quoting, a `case` or heredoc
-// inside a body — returns null, and the command stays refused as before.
-function markExpansions(cmd) {
-  if (cmd.includes("$'")) return null;
-  const bodies = [];
-  let out = '';
-  let quote = null;
-  for (let index = 0; index < cmd.length; index += 1) {
-    const char = cmd[index];
-    if (quote === "'") {
-      out += char;
-      if (char === "'") quote = null;
-      continue;
-    }
-    if (char === '\\') {
-      out += cmd.slice(index, index + 2);
-      index += 1;
-      continue;
-    }
-    if (char === "'" && quote === null) quote = "'";
-    else if (char === '"') quote = quote === '"' ? null : '"';
-    if ((char === '<' || char === '>') && cmd[index + 1] === '(' && quote === null) return null;
-    if (char === '`') {
-      const close = cmd.indexOf('`', index + 1);
-      if (close === -1) return null;
-      bodies.push(cmd.slice(index + 1, close));
-      out += SUBSTITUTION_MARK;
-      index = close;
-      continue;
-    }
-    if (char === '$') {
-      const rest = cmd.slice(index);
-      if (rest.startsWith('$((')) return null;
-      if (rest.startsWith('$(')) {
-        const close = substitutionEnd(cmd, index + 2);
-        if (close === -1) return null;
-        const body = cmd.slice(index + 2, close);
-        if (/<<|(?:^|[\s;&|(])case\s/u.test(body)) return null;
-        bodies.push(body);
-        out += SUBSTITUTION_MARK;
-        index = close;
-        continue;
-      }
-      const variable = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/u.exec(rest);
-      // A variable's value was set out of view, so it must at least be one
-      // word: unquoted, it splits and globs into words no one has read.
-      if (variable !== null) {
-        if (quote !== '"') return null;
-        out += VARIABLE_MARK;
-        index += variable[0].length - 1;
-        continue;
-      }
-      if (/[{@*0-9#?$!-]/u.test(cmd[index + 1] ?? '')) return null;
-    }
-    out += char;
-  }
-  return { text: out, bodies };
-}
-
-const SHELL_KEYWORDS = new Set([
-  '!', '(', '{', 'do', 'elif', 'else', 'if', 'then', 'time', 'until', 'while',
-]);
-// Commands whose arguments are code: a mark there is an opaque program.
-const CODE_TAKING = new Set(['.', 'alias', 'builtin', 'eval', 'source', 'trap']);
-// Commands that can run another command named in their arguments. No mark may
-// reach them: `find . $(cat args)` becomes `-exec git push ;` when it splits.
-const COMMAND_RUNNING = new Set([
-  'bunx', 'busybox', 'chroot', 'docker', 'entr', 'find', 'flock', 'gdb',
-  'kubectl', 'ltrace', 'make', 'nodemon', 'npm', 'npx', 'nsenter', 'pnpm',
-  'podman', 'rsync', 'runuser', 'script', 'ssh', 'strace', 'su', 'tar',
-  'unshare', 'uvx', 'valgrind', 'watch', 'yarn',
-]);
-// Program-taking tools: a substitution here is a program read from a file the
-// body names — what `sed -f`/`awk -f` already do — but a variable's value was
-// set out of view, and `sed` runs commands through its `e` flag.
-const PROGRAM_TAKING = new Set([...AWK_NAMES, 'sed']);
-const INTERPRETER_NAMES = /^(?:bash|bun|dash|deno|fish|ksh|lua|luajit|node|nodejs|osascript|perl|php|python\d*(?:\.\d+)?|R|Rscript|ruby|sh|tclsh|wish|zsh)$/u;
-// Subcommands that read the repository and cannot move a ref or a remote.
-const READ_ONLY_GIT = new Set([
-  'blame', 'cat-file', 'describe', 'diff', 'log', 'ls-files', 'ls-tree',
-  'merge-base', 'rev-list', 'rev-parse', 'shortlog', 'show', 'status',
-]);
+const MAX_SUBSTITUTION_DEPTH = 4;
 
 function isAssignmentWord(word) {
   return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word);
 }
 
-function commandPosition(words, position) {
-  for (let index = 0; index < position; index += 1) {
-    const word = words[index];
-    if (isAssignmentWord(word) || SHELL_KEYWORDS.has(word)) continue;
-    if (EXEC_WRAPPERS.has(word.slice(word.lastIndexOf('/') + 1))) continue;
-    if (/^-/u.test(word) || /^[0-9]+[smhd]?$/u.test(word)) continue;
-    return false;
+// A path that holds a secret, as a commit must never: an `.env*` file, key
+// material by extension, or a path segment that is (or is joined from) the
+// word secret, credential, token or keys. Whole words only: `tokenizer.ts` is
+// source. The lane contract's human-authorization globs are wider (CLAUDE.md,
+// workflows, Dockerfiles) and stop a merge, not a commit, so they stay there.
+const SECRET_PATH_FAMILIES = Object.freeze([
+  /(^|\/)\.env[^/]*$/iu,
+  /\.(?:jks|key|keystore|p12|pem|pfx)$/iu,
+  /(^|\/)keys(\/|$)/iu,
+  /(^|\/)[^/]*(?:^|[^a-z0-9])(?:secrets?|credentials?|tokens?)(?:[^a-z0-9]|$)[^/]*(\/|$)/iu,
+]);
+
+export function isSecretPath(path) {
+  return SECRET_PATH_FAMILIES.some((family) => family.test(path));
+}
+
+// Options of `git add` and `git commit` that take a value, so the value is
+// never read as a path.
+const STAGING_VALUE_OPTIONS = new Set([
+  '-m', '--message', '-F', '--file', '-C', '--reuse-message', '-c', '--reedit-message', '--author', '--date',
+  '-t', '--template', '--cleanup', '--trailer', '--fixup', '--squash', '--chmod', '--pathspec-from-file',
+]);
+
+// The secret paths a segment stages: `git add <paths>` and `git commit
+// [-a] <paths>`, from the segment's quoted words (a commit message is one
+// word, whatever it says). `git add .` names no path and is allowed.
+export function stagedSecretPaths(words) {
+  const index = [gitSubcommandIndex(words, 'add'), gitSubcommandIndex(words, 'commit')].find((at) => at !== -1);
+  if (index === undefined) return [];
+  const paths = [];
+  let literal = false;
+  for (let at = index + 1; at < words.length; at += 1) {
+    const word = words[at];
+    if (literal) {
+      paths.push(word);
+      continue;
+    }
+    if (word === '--') {
+      literal = true;
+      continue;
+    }
+    if (STAGING_VALUE_OPTIONS.has(word)) {
+      at += 1;
+      continue;
+    }
+    if (word.startsWith('-')) continue;
+    paths.push(word);
   }
-  return true;
+  return paths.filter(isSecretPath);
 }
 
-function commandHead(words) {
-  const index = words.findIndex((word, position) =>
-    !isAssignmentWord(word) && commandPosition(words, position)
-    && !SHELL_KEYWORDS.has(word)
-    && !EXEC_WRAPPERS.has(word.slice(word.lastIndexOf('/') + 1)));
-  return index === -1 ? { index: -1, name: '' } : {
-    index,
-    name: words[index].slice(words[index].lastIndexOf('/') + 1),
-  };
-}
+const MERGE_MUTATION_RE = /\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch|enqueuePullRequest)\b/u;
+const PROTECTION_MUTATION_RE = /\b(?:create|update|delete)(?:RepositoryRuleset|BranchProtectionRule)\b/u;
+const MAX_EVALUATE_DEPTH = 4;
 
-function markedPositionProblem(text) {
-  const marked = (word) => word.includes(SUBSTITUTION_MARK) || word.includes(VARIABLE_MARK);
-  const segments = shellSegments(text).map(({ command }) => shellWords(command));
-  const invokesGitOrGh = segments.some((words) => ['git', 'gh'].includes(commandHead(words).name));
-  for (const words of segments) {
-    const positions = words.flatMap((word, index) => (marked(word) ? [index] : []));
-    if (positions.length === 0) continue;
-    if (positions.some((index) => /^(?:GIT|GH)_[A-Za-z0-9_]*=/u.test(words[index]))) {
-      return 'sets a Git or GitHub CLI environment variable';
-    }
-    if (positions.some((index) =>
-      (!isAssignmentWord(words[index]) && commandPosition(words, index))
-      || EXEC_FORWARDING_FLAGS.has(words[index - 1]))) {
-      return 'sits where a command name goes';
-    }
-    const head = commandHead(words);
-    const variable = positions.some((index) => words[index].includes(VARIABLE_MARK));
-    if (
-      CODE_TAKING.has(head.name)
-      || INTERPRETER_NAMES.test(head.name)
-      || COMMAND_RUNNING.has(head.name)
-      || (variable && PROGRAM_TAKING.has(head.name))
-    ) {
-      return `reaches \`${head.name}\`, which can run it as code`;
-    }
-    if (!invokesGitOrGh) continue;
-    const readOnly = head.name === 'git'
-      && !variable
-      && READ_ONLY_GIT.has(words[head.index + 1])
-      && positions.every((index) => index > head.index + 1);
-    if (!readOnly) {
-      return 'sits in a command that also runs git or gh, outside the arguments '
-        + 'of a read-only git subcommand, where it could steer a mutation';
-    }
+const MERGE_REASON = 'autoloop guard — no merge: the loop never merges a pull request, through `gh pr merge`, '
+  + 'the REST merge endpoint or a GraphQL merge mutation. Allowed: `gh pr view <N> --json '
+  + 'mergeStateStatus`; a human, or `auto-merge.mjs <PR>` where the repository config enables it, merges.';
+const RELEASE_REASON = 'autoloop guard — no release publication: a release-tag push or a GitHub release '
+  + 'mutation is a maintainer act. Allowed: `gh release view <tag>`; report release readiness and '
+  + 'leave publication to the maintainer.';
+
+// The refusals of a `gh api` segment: the merge endpoint, a merge mutation,
+// a hand-posted commit status, a release or tag mutation, and a protection
+// or ruleset mutation. Reads pass, whatever they name.
+function ghApiProblem(words) {
+  if (ghPositionals(words)?.[0] !== 'api') return null;
+  const endpoints = githubApiEndpoints(words);
+  const mutating = mutatingGhApi(words);
+  const text = words.join(' ');
+  if (endpoints.some((path) => (path[3] === 'pulls' && path[5] === 'merge') || path[3] === 'merges')
+    || MERGE_MUTATION_RE.test(text)) {
+    return MERGE_REASON;
+  }
+  if (mutating && endpoints.some((path) => path[0] === 'repos' && path[3] === 'statuses')) {
+    return 'autoloop guard — no hand-posted commit status: verdict evidence comes only from '
+      + '`publish-verdict.mjs`, bound to the gate or review it ran on the exact head. Allowed: '
+      + '`gh api repos/<o>/<r>/commits/<sha>/status` to read one.';
+  }
+  if (mutating && endpoints.some((path) =>
+    path.length >= 4 && path[0] === 'repos'
+    && (path[3] === 'releases' || (path[3] === 'git' && ['refs', 'tags'].includes(path[4]))))) {
+    return RELEASE_REASON;
+  }
+  if ((mutating && endpoints.some((path) => path.includes('protection') || path.includes('rulesets')))
+    || PROTECTION_MUTATION_RE.test(text)) {
+    return 'autoloop guard — no branch-protection mutation: the protection and ruleset baseline is '
+      + 'the human\'s. Allowed: `gh api repos/<o>/<r>/branches/<base>/protection` to read it; '
+      + 'report a mismatch instead of changing it.';
   }
   return null;
 }
 
-// An unresolvable expansion is tolerated when every substitution body passes
-// the guard on its own and no marked value can steer execution — see
-// `markedPositionProblem`. Returns `{ verdict }`, or `{ problem }` (possibly
-// null) to fall through to the refusal the guard gave before 0.50.0.
-function tolerateExpansions(rawCmd, branch, options) {
-  const depth = options.substitutionDepth ?? 0;
-  if (depth >= MAX_SUBSTITUTION_DEPTH) return { problem: null };
-  const subject = expandLiteralForLoops(rawCmd) ?? rawCmd;
-  const marked = markExpansions(stripQuotedHeredocBodies(subject));
-  if (marked === null || hasActiveShellExpansion(marked.text)) return { problem: null };
-  const problem = markedPositionProblem(marked.text);
-  if (problem !== null) return { problem };
-  for (const body of marked.bodies) {
-    const inner = evaluate(body, branch, {
-      ...options,
-      expansionResolved: false,
-      substitutionDepth: depth + 1,
-    });
-    if (inner.block) {
-      return {
-        verdict: {
-          block: true,
-          reason: `autoloop guard — inside a command substitution: ${
-            String(inner.reason).replace(/^autoloop guard — /u, '')}`,
-        },
-      };
-    }
-  }
-  return { verdict: evaluate(marked.text, branch, { ...options, expansionResolved: true }) };
+// The command's segments as words: heredoc bodies and comments out, ANSI-C
+// quotes decoded, line continuations joined, subshell parentheses trimmed,
+// quotes kept until the words are split (so `;` in a message splits nothing).
+function segmentWords(cmd) {
+  const text = quotedAnsiC(stripHeredocs(cmd)).replace(/\\\r?\n/gu, '');
+  return shellSegments(text).map((segment) => ({ ...segment, words: shellWords(trimSubshell(segment.command)) }));
 }
 
 export function evaluate(inputCmd, branch, options = {}) {
   if (typeof inputCmd !== 'string' || inputCmd.length === 0) return { block: false };
-  const rawCmd = neutralizeSpecialParameters(inputCmd);
-  if (interpreterHeredoc(rawCmd)) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — a shell or language interpreter reading a heredoc is opaque to '
-        + 'command policy. Write the script to a file and run it, or use the typed tool commands.',
-    };
-  }
-  // "Write the script to a file" names no command, which is the shape-shaped
-  // advice the assembler remedies were already taught out of: authoring a file
-  // to inspect an alias is more ceremony than the question. 2026-07-29:
-  // `zsh -ic 'alias | grep -i <name>; whence -w <name>'` — asking a live
-  // interactive shell what a name resolves to, when the definition is sitting
-  // in a file that can simply be read.
-  if (inlineInterpreterSource(rawCmd)) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — inline shell or language-interpreter source is opaque to command '
-        + 'policy. '
-        + (inlineInterpreterKind(rawCmd) === 'program'
-          ? 'Most inline programs are reading or reshaping data, which a typed tool does '
-            + 'without putting source in an argument: `jq` for JSON — `jq -r <filter> <file>`, '
-            + 'and it accepts many files at once — `rg` to find, `cut -f<n>` for a column, '
-            + '`sort | uniq -c` for a tally. To check a file parses, the interpreter does it '
-            + 'directly: `node --check <file>`, `python3 -m json.tool <file>`. For a real '
-            + 'program, write it to a file and run that.'
-          : 'To learn what a shell name resolves to or what a startup file does, read the '
-            + 'file — `rg -n <name> ~/.zshrc` — instead of starting an interactive shell to ask '
-            + 'it. To check that a file parses, the interpreter does it directly: '
-            + '`zsh -n <file>`. For a real program, write it to a file and run that.'),
-    };
-  }
-  const assembler = opaqueCommandAssembler(rawCmd);
-  if (assembler !== null) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — inline command assembly is opaque to command policy. '
-        + ASSEMBLER_REMEDY[assembler],
-    };
-  }
-  if (opaqueMutationSyntax(rawCmd)) {
-    // Resolve literal assignments once and judge the substituted command. The
-    // recursion cannot loop: the resolved text carries no expansion left to
-    // resolve (resolveShellExpansions returns null otherwise).
-    const resolved = options.expansionResolved ? null : resolveShellExpansions(rawCmd);
-    if (resolved !== null) {
-      return evaluate(resolved, branch, { ...options, expansionResolved: true });
-    }
-    const tolerated = options.expansionResolved
-      ? { problem: null }
-      : tolerateExpansions(rawCmd, branch, options);
-    if (tolerated.verdict !== undefined) return tolerated.verdict;
-    // Report on what is ACTUALLY unresolvable. A literal loop expands, so a
-    // refusal that still names its loop variable sends the reader to fix the
-    // one part that was never the problem: `for d in a b; do echo $(wc -l $d);
-    // done` blocks on the command substitution alone, and naming `$d` beside it
-    // — with the loop remedy attached — describes a command the guard would
-    // otherwise have accepted. Expansion is best-effort here: if it cannot
-    // unroll, the raw text is still the honest subject.
-    const reportSubject = expandLiteralForLoops(rawCmd) ?? rawCmd;
-    return {
-      block: true,
-      reason: `autoloop guard — ${unresolvedExpansionReason(reportSubject)}${
-        tolerated.problem ? ` Refused here because the unreadable value ${tolerated.problem}.` : ''}`,
-    };
-  }
-  const cmd = stripHeredocs(rawCmd);
-  const lexicalCmd = executableLexicalText(cmd);
+  const depth = options.depth ?? 0;
   const baseBranch = options.baseBranch ?? 'main';
+  const segments = segmentWords(inputCmd);
 
-  if (unknownAmbientAliasSyntax(lexicalCmd)) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — an unknown Git or GitHub CLI command may resolve through an ambient '
-        + 'alias. Use a canonical built-in subcommand.',
-    };
-  }
-
-  if (structuredGitMutation(cmd)) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — grouped or substituted Git commit/push syntax can hide branch and '
-        + 'destination state. Run the canonical Git command without shell grouping or '
-        + 'substitution.',
-    };
-  }
-
-  // 1. never merge — structural: `pr` then `merge` must be gh's positional
-  // subcommand words. A free-text scan also matched option arguments, so a PR
-  // *title* containing "merge policy" tripped L2 (live run 3bdd6e5e). Expansion,
-  // substitution, and inline-interpreter evasions are blocked before this rule.
-  const ghPrMergeInvocation = shellSegments(lexicalCmd).some(({ command }) => {
-    const words = shellWords(command);
-    const options = new Set(['-R', '--hostname', '--repo']);
-    const executablePosition = executableIndex(words, 'gh');
-    if (executablePosition === -1) return false;
-    const positionals = [];
-    for (
-      let index = executablePosition + 1;
-      index < words.length && positionals.length < 2;
-      index += 1
-    ) {
-      const word = words[index];
-      if (options.has(word)) {
-        index += 1;
-        continue;
-      }
-      if (
-        [...options].some((option) => word.startsWith(`${option}=`))
-        || word.startsWith('-')
-      ) {
-        continue;
-      }
-      positionals.push(word);
+  // A script a segment runs as text (`eval`, `sh -c`), and every command
+  // substitution, is judged as the commands it holds. A literal evasion of a
+  // rule below is caught here; a script the lexer cannot take apart is allowed.
+  if (depth < MAX_EVALUATE_DEPTH) {
+    const nested = [
+      ...segments.map(({ words }) => nestedScript(words)?.script).filter((script) => script !== undefined),
+      ...substitutionBodies(quotedAnsiC(stripHeredocs(inputCmd))),
+    ];
+    for (const script of nested) {
+      const inner = evaluate(script, branch, { ...options, depth: depth + 1 });
+      if (inner.block) return inner;
     }
-    return positionals[0] === 'pr' && positionals[1] === 'merge';
-  });
-  if (ghPrMergeInvocation) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — `gh pr merge` is outside loop authority: the loop/agent never '
-        + 'merges directly (STATE.md → Autonomy). Leave the merge to a human, or '
-        + 'to the auto-merge.mjs policy gate the repository config enables.',
-    };
   }
 
-  const segments = shellSegments(lexicalCmd);
-  // `--undo` REMOVES readiness: it returns a pull request to draft, which is the
-  // state the loop is supposed to hold — one draft opened at claim, kept draft
-  // until the terminal finalizer marks it ready under an exact-head binding. So
-  // blocking it was direction-blind, the same defect as the `+<refspec>` force
-  // test: the safe direction refused, with the message for the unsafe one. A
-  // draft cannot be merged, so drafting can never deliver anything, and
-  // returning a PR to draft is exactly what servicing one after a red check
-  // wants. Matched as the exact token rather than a prefix: an abbreviation gh
-  // rejects is a command that does nothing, but an abbreviation gh accepts and
-  // this test misses would be a readiness mutation waved through.
-  if (segments.some(({ command }) => {
-    const words = shellWords(command);
-    return hasGhScopedAction(words, 'pr', 'ready') && !words.includes('--undo');
+  // 1. never merge — structural: `pr` then `merge` are gh's positional words.
+  // A free-text scan also matched option arguments, so a PR *title* containing
+  // "merge policy" tripped the rule (live run 3bdd6e5e).
+  if (segments.some(({ words }) => {
+    const positionals = ghPositionals(words);
+    return positionals?.[0] === 'pr' && positionals[1] === 'merge';
   })) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — raw pull-request readiness mutation is outside loop authority. '
-        + 'Use the exact-head Autoloop terminal finalizer. Returning a PR to draft is allowed '
-        + '(`gh pr ready <N> --undo`) — it removes readiness rather than granting it.',
-    };
+    return { block: true, reason: MERGE_REASON };
   }
-  if (segments.some(({ command }) => liftsHaltLabel(shellWords(command)))) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — `loop-halt` is the whole-run kill switch, and only a human lifts it. '
-        + 'Stop taking new units: finish what is in flight, then close the run '
-        + '(`prime.mjs --close-run`).',
-    };
+
+  // 4. releases: `gh release create|delete|edit|upload` and a tag push.
+  if (segments.some(({ words }) => {
+    const positionals = ghPositionals(words);
+    return (positionals?.[0] === 'release' && ['create', 'delete', 'edit', 'upload'].includes(positionals[1]))
+      || pushesReleaseTag(words);
+  })) {
+    return { block: true, reason: RELEASE_REASON };
   }
-  if (segments.some(({ command }) => appliesRepairLabel(shellWords(command)))) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — `loop-repair` makes an issue eligible through its parent\'s '
-        + '`loop-ready`, so only `unit.mjs --repair --parent <N>` applies it, together with the '
-        + 'provenance marker that trust rests on. File the repair with that command.',
-    };
+
+  // 1 and 5 through `gh api`.
+  for (const { words } of segments) {
+    const problem = ghApiProblem(words);
+    if (problem !== null) return { block: true, reason: problem };
   }
-  // Only a regular file the guard can read now proves what will be posted: not
-  // a device, a /proc or /sys entry, a FIFO (which would hang the read), or a
-  // file an earlier segment of the same command may rewrite.
-  // The body is read where the post runs: the command's own `cd` steps are
-  // followed, over quote-aware segments (a quoted jq filter's `|` is not a
-  // pipe). The LFE run lost a PR-body PATCH to both (2026-09-30).
-  // ANSI-C and locale quotes decoded first: `-f body=$'/answer yes'` posts an
-  // /answer (review of the LFE fixes).
-  // A `cd` is followed only where it certainly runs in this shell: first, or
-  // after `;` or a newline, and not piped or backgrounded (a subshell). After
-  // any other `cd` the directory is unknown and a relative body path cannot be
-  // read. The directory is kept logically, as the shell does, and the file is
-  // resolved by the kernel, which reads `..` physically (review of the LFE fixes).
-  const bodySegments = shellSegments(quotedAnsiC(cmd));
-  const plainCd = (words) => (words[0] === 'cd' || words[0] === 'pushd') && words.length === 2;
-  const cdPathSet = process.env.CDPATH !== undefined || /\bCDPATH\b/u.test(cmd);
-  let bodyDir = options.cwd ?? process.cwd();
-  const bodyProblems = bodySegments.map(({ command, raw }, index) => {
-    const words = shellWords(command);
-    if (plainCd(words)) {
-      const before = index === 0 ? ';' : bodySegments[index - 1].raw;
-      const inThisShell = (before === ';' || before === '\n') && raw !== '|' && raw !== '&';
-      const known = inThisShell && bodyDir !== null && !cdPathSet && !/^[-+]|[$`]/u.test(words[1]);
-      bodyDir = known ? resolve(bodyDir, expandHome(words[1])) : null;
-      return null;
+
+  // 6. a secret path staged (a message is one word, whatever it says).
+  for (const { words } of segments) {
+    const [path] = stagedSecretPaths(words);
+    if (path !== undefined) {
+      return {
+        block: true,
+        reason:
+          `autoloop guard — no secret path in a commit: \`${path}\` is an .env file, key material or a `
+          + 'credential path. Allowed: `git add <source path>` for the other files; leave the secret '
+          + 'file unstaged and name it in the report.',
+      };
     }
-    const at = bodyDir;
-    return commentBodyProblem(words, (path) => {
-      const expanded = expandHome(path);
-      if (at === null && !isAbsolute(expanded)) throw new Error('directory unknown');
-      const real = realpathSync.native(isAbsolute(expanded) ? expanded : `${realpathSync.native(at)}/${expanded}`);
-      if (/^\/(?:dev|proc|sys)\//u.test(real) || !statSync(real).isFile()) throw new Error('not a regular file');
-      return readFileSync(real, 'utf8').slice(0, 4096);
-    });
-  });
-  // A body file can be rewritten only by a segment that runs before or beside
-  // the post: an earlier one not on this list of harmless ones (a plain `cd`,
-  // a redirect-free reader named exactly, `gh … view/list`), or a pipe or
-  // background `&` after the post. Whatever follows a sequential operator runs
-  // after the post and cannot. A script, any git command (`status` runs a
-  // repo-configured fsmonitor), a path-qualified `./cat` or an `rg --pre` can.
-  const HARMLESS = new Set(['cat', 'echo', 'grep', 'head', 'jq', 'ls', 'printf', 'pwd', 'rg', 'tail', 'test', 'true', 'wc']);
-  const mayWrite = (command) => {
-    const words = shellWords(command);
-    if (plainCd(words)) return false;
-    if (/[<>]/u.test(command)) return true;
-    const head = words[0] ?? '';
-    if (head === 'rg' && words.some((word) => word.startsWith('--pre'))) return true;
-    if (HARMLESS.has(head)) return false;
-    if (head === 'gh') return !['view', 'list'].includes(words[2]);
-    return true;
-  };
-  if (bodySegments.length > 1 && bodySegments.some(({ command, raw }, index) =>
-    readsCommentBodyFile(shellWords(command))
-      && (bodySegments.slice(0, index).some((earlier) => mayWrite(earlier.command)) || raw === '|' || raw === '&'))) {
-    bodyProblems.push('unverifiable');
   }
-  if (bodyProblems.includes('unverifiable')) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — this comment\'s body cannot be read before it is posted (stdin, a '
-        + 'device, a file that does not exist yet, a JSON --input, or a raw GraphQL comment '
-        + 'mutation), so the guard cannot prove it is not an `/answer` — the reply that lifts a '
-        + 'loop block. Write the body to a file first, then post it in its own command: '
-        + '`gh issue comment <N> --body-file <path>`.',
-    };
-  }
-  if (bodyProblems.includes('answer')) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — a comment starting with `/answer` is how a human answers a loop '
-        + 'block, and in a solo repository the loop shares their login: writing one would '
-        + 'answer its own question. A judgment call is yours to record with `unit.mjs '
-        + '--decide`; a genuine human decision stays blocked until a human answers it.',
-    };
-  }
-  if (segments.some(({ command }) =>
-    addsProtectedLifecycleLabel(shellWords(command))
-    || renamesProtectedLifecycleLabel(shellWords(command))
-    || createsProtectedLifecycleLabel(shellWords(command)))) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — raw protected lifecycle-label mutation is outside loop authority. '
-        + 'Ask a maintainer to apply `loop-ready`; deliver `loop-delivered` through the '
-        + 'exact-head Autoloop terminal finalizer.',
-    };
-  }
-  if (segments.some(({ command }) => addsUnknownStepLabel(shellWords(command)))) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — that is not a step label. The ladder ends at `loop:09-gate`: steps '
-        + '10 PUBLISH and 11 RECORD carry no label, and the terminal finalizer swaps '
-        + '`loop:09-gate` to `loop-delivered` itself. Leave `loop:09-gate` on the issue and run '
-        + 'publish-verdict.mjs terminal-finalize.',
-    };
-  }
-  const backwardSwap = segments
-    .map(({ command }) => swapsStepLabelBackward(shellWords(command)))
-    .find((pair) => pair !== null);
-  if (backwardSwap !== undefined) {
-    const { added, removed } = backwardSwap;
-    // The remedy must fit the swap the guard caught, not the incident that
-    // motivated the rule: a live 08→05 refusal advised "continue forward
-    // (claim)" — the plan-review remedy — at a step long past claim.
-    const remedy = added.step === 2 && removed.step === 3
-      ? 'Re-reviewing a revised plan is not a step: plan review is ONE dispatch, the revision '
-        + 'ships reviewed-once with dispositions recorded and carried into code-review r1. '
-        + 'Leave the current step label and continue forward (claim).'
-      : `Work that answers this step's findings runs under this step's label: keep `
-        + `\`${removed.label}\`, dispatch the writer there, and let the round count against `
-        + `the step's cap — the ladder never returns to \`${added.label}\`.`;
-    return {
-      block: true,
-      reason:
-        `autoloop guard — step labels only climb: \`${removed.label}\` → \`${added.label}\` `
-        + `moves backward. ${remedy}`,
-    };
-  }
-  if (segments.some(({ command }) => addsStepWithoutRetiringPredecessor(shellWords(command)))) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — a step swap retires the previous step in the same command: '
-        + '`--remove-label loop:<N-1>-… --add-label loop:<N>-…`. An add-only swap strands the '
-        + 'old label beside the new one, and a skipped step (06→08) leaves no trace that it ran. '
-        + 'Removing a label that is not present is a no-op, so always name the predecessor.',
-    };
-  }
-  // 0.54: one call per step — the swap, the snapshot invalidation, the timing
-  // and the ribbon — so a hand swap is the one path that skips all but the
-  // first. step.mjs asks this same function about its own swap, with
-  // `stepTool`, and so still meets every ladder rule above.
-  const handStep = segments.map(({ command }) => handStepSwap(shellWords(command))).find(Boolean);
-  if (handStep && options.stepTool !== true) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — step labels move through step.mjs, which also invalidates the '
-        + 'retained snapshot, records the step and prints its status line: '
-        + `\`node <plugin-tools>/step.mjs --issue ${handStep.issue} --to ${handStep.step}\`.`,
-    };
-  }
-  if (segments.some(({ command }) =>
-    hasGhScopedAction(shellWords(command), 'release', 'create')
-    || hasGhScopedAction(shellWords(command), 'release', 'delete')
-    || hasGhScopedAction(shellWords(command), 'release', 'edit')
-    || hasGhScopedAction(shellWords(command), 'release', 'upload')
-    || pushesReleaseTag(shellWords(command)))) {
-    return {
-      block: true,
-      reason:
-        'autoloop guard — release and tag publication require an independent maintainer '
-        + 'action; best-effort Autoloop invocation intent grants no release authority. '
-        + 'Report release readiness and leave publication to the maintainer.',
-    };
-  }
+
+  // 2. the base branch takes pull requests only: the branch each segment runs
+  // on is followed through `git switch|checkout` and the `&&`/`||`/`;` operators.
   let states = [{ branch: branch ?? null, succeeded: null }];
   let previousOperator = null;
   for (const segment of segments) {
@@ -2559,26 +936,7 @@ export function evaluate(inputCmd, branch, options = {}) {
     const possibleBranches = new Set(
       executes.map((state) => state.branch).filter(Boolean),
     );
-    const words = shellWords(segment.command);
-    if (hasCommandLineGitAlias(words)) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — command-scoped Git aliases or config includes can hide a protected '
-          + 'mutation. Run the canonical Git subcommand without an alias override.',
-      };
-    }
-    if (
-      gitSubcommandIndex(words, 'push') !== -1
-      && hasCommandLineGitConfig(words)
-    ) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — command-scoped Git configuration can hide push destinations or '
-          + 'force semantics. Run canonical `git push` without configuration overrides.',
-      };
-    }
+    const { words } = segment;
     if (
       gitSubcommandIndex(words, 'commit') !== -1
       && (
@@ -2589,18 +947,17 @@ export function evaluate(inputCmd, branch, options = {}) {
       return {
         block: true,
         reason:
-          `autoloop guard — \`git commit\` may target configured base "${baseBranch}"; the `
-          + 'base takes PRs only and the current branch must be proven. Create a working '
-          + 'branch first: <type>/gh-<N>-<slug> (autoloop:dev step 4).',
+          `autoloop guard — no commit on the base branch: "${baseBranch}" takes pull requests only, `
+          + 'and the current branch must be known. Allowed: `git switch -c <type>/gh-<N>-<slug>` '
+          + 'first, then the same commit there.',
       };
     }
     if (pushTargetsBase(words, possibleBranches, baseBranch)) {
       return {
         block: true,
         reason:
-          `autoloop guard — \`git push\` targets or can resolve to configured base `
-          + `"${baseBranch}"; the base takes PRs only. Push an explicit non-base refspec `
-          + 'instead.',
+          `autoloop guard — no push to the base branch: "${baseBranch}" takes pull requests only. `
+          + 'Allowed: `git push origin HEAD:refs/heads/<unit-branch>`, an explicit non-base refspec.',
       };
     }
     const target = switchTarget(words, baseBranch);
@@ -2621,190 +978,36 @@ export function evaluate(inputCmd, branch, options = {}) {
     previousOperator = segment.next;
   }
 
-  // 3. no co-author trailers (checked on the RAW command: the trailer rides in -m text)
+  // 7. no co-author trailers (checked on the whole command: the trailer rides
+  // in -m text or a heredoc message).
   if (
-    segments.some(
-      ({ command }) => gitSubcommandIndex(shellWords(command), 'commit') !== -1,
-    )
-    && /Co-Authored-By:/i.test(executableLexicalText(rawCmd))
+    segments.some(({ words }) => gitSubcommandIndex(words, 'commit') !== -1)
+    && /Co-Authored-By:/iu.test(inputCmd)
   ) {
     return {
       block: true,
       reason:
-        'autoloop guard — this repo forbids Co-Authored-By trailers on commits (autoloop '
-        + 'hard rules). Re-run the same commit without the trailer.',
+        'autoloop guard — no Co-Authored-By trailer: commits carry no co-author. Allowed: '
+        + '`git commit -m "<subject>"` with the same message and no trailer.',
     };
   }
 
-  // 4. force pushes: only --force-with-lease. Catches both the `--force`/`-f` flags AND the
+  // 3. force pushes: only --force-with-lease. Catches both the `--force`/`-f` flags AND the
   //    `+<refspec>` force syntax (`git push origin +main`, incl. a quoted `'+refs/…'`), which
-  //    force-updates a ref with neither flag.
-  if (/\bgit\b[^\n]*\bpush\b/.test(lexicalCmd)) {
-    const flagForce = segments.some(({ command }) => {
-      const words = shellWords(command);
-      const push = gitSubcommandIndex(words, 'push');
-      return push !== -1 && words.slice(push + 1).some(
-        (word) =>
-          longOptionPrefix(word, '--force')
-          || /^-[^-]*f[^-]*$/u.test(word),
-      );
-    });
-    // Scoped to the words AFTER `push`, exactly as flagForce above is. Testing
-    // the whole command line meant any `+`-prefixed token in ANY segment read as
-    // a force refspec: 2026-07-29 a plain
-    // `git push origin HEAD:refs/heads/<branch>; …; date +%H:%M` was refused as
-    // destructive, because `+%H:%M` matched. shellWords strips quotes, so a
-    // quoted `'+refs/…'` still resolves to a `+`-leading word and is still caught.
-    const refspecForce = segments.some(({ command }) => {
-      const words = shellWords(command);
-      const push = gitSubcommandIndex(words, 'push');
-      return push !== -1 && words.slice(push + 1).some((word) => /^\+\S/u.test(word));
-    });
-    if (flagForce || refspecForce) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — force pushes (`--force`/-f or a `+<refspec>` force-update) are '
-          + 'destructive and outside policy. Use --force-with-lease, and only on loop '
-          + 'branches after a rebase (autoloop:pitcrew step 7).',
-      };
-    }
-  }
-
-  // 5. gh bodies go via --body-file, never inline
-  if (segments.some(({ command }) => isInlineGhBody(shellWords(command)))) {
+  //    force-updates a ref with neither flag. Scoped to the words AFTER `push`: testing the
+  //    whole command line read `date +%H:%M` as a force refspec (2026-07-29).
+  if (segments.some(({ words }) => {
+    const push = gitSubcommandIndex(words, 'push');
+    return push !== -1 && words.slice(push + 1).some(
+      (word) => longOptionPrefix(word, '--force') || /^-[^-]*f[^-]*$/u.test(word) || /^\+\S/u.test(word),
+    );
+  })) {
     return {
       block: true,
       reason:
-        'autoloop guard — untrusted text never rides inline in shell source (STATE → '
-        + 'Lessons), so --body/-b on gh commands is out of policy. Write the body to a '
-        + 'scratch file with the host\'s safe file-editing surface and pass --body-file.',
+        'autoloop guard — no force push: `--force`, `-f` and a `+<refspec>` rewrite history. Allowed: '
+        + '`git push --force-with-lease origin <unit-branch>`, after a rebase.',
     };
-  }
-
-  // 6. `gh api` must not merge or mutate branch protection. Reads stay allowed —
-  //    issue timeline, collaborator role_name, and GraphQL queries/resolveReviewThread
-  //    are all read-shaped and pass.
-  if (/\bgh\b[^\n]*\bapi\b/.test(lexicalCmd)) {
-    if (segments.some(({ command }) =>
-      hasOpaqueGraphqlInput(shellWords(command)))) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — GraphQL query input from a file or stdin is opaque to the merge '
-          + 'guard. Pass a visible read-only query inline.',
-      };
-    }
-    if (/\/(pulls\/[^\s/]+\/merge|merges)\b/.test(lexicalCmd)) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — the `gh api` merge endpoint is outside loop authority: the '
-          + 'loop/agent never merges directly, via any raw surface (STATE.md → '
-          + 'Autonomy). Leave the merge to a human or the repo-ratified policy gate.',
-      };
-    }
-    // Verdict statuses are PAT-writable, so a hand-typed POST would forge
-    // delivery evidence the merge gate trusts. Reads (/commits/<sha>/status)
-    // stay allowed; only the mutating status endpoint is fenced.
-    if (
-      /\/statuses\//.test(lexicalCmd)
-      && segments.some(({ command }) => mutatingGhApi(shellWords(command)))
-    ) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — posting a commit status by hand forges verdict evidence: '
-          + 'agentic statuses come only from publish-verdict.mjs, which binds '
-          + 'them to the gate/review it actually executed on the exact clean head.',
-      };
-    }
-    if (
-      /\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|enqueuePullRequest)\b/
-        .test(lexicalCmd)
-    ) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — GraphQL merge mutations are outside loop authority: the '
-          + 'loop/agent never merges directly, via any raw surface (STATE.md → '
-          + 'Autonomy). Leave the merge to a human or the repo-ratified policy gate.',
-      };
-    }
-    if (
-      /\bmarkPullRequestReadyForReview\b/u.test(lexicalCmd)
-      || /\baddLabelsToLabelable\b/u.test(lexicalCmd)
-      || segments.some(({ command }) => terminalGraphqlMutation(command))
-    ) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — raw terminal GraphQL mutation is outside loop authority. '
-          + 'Use the exact-head Autoloop terminal finalizer.',
-      };
-    }
-    if (segments.some(({ command }) =>
-      opaqueIssueLabelApiMutation(shellWords(command))
-      || terminalLabelApiRename(shellWords(command))
-      || protectedLabelApiCreate(shellWords(command)))) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — raw issue or label mutation could bypass terminal delivery '
-          + 'policy. Apply labels with `gh issue edit <number> --add-label <label>` — '
-          + 'canonical, works on PRs too, and avoids the Projects-classic GraphQL failure '
-          + 'that breaks `gh pr edit` on older gh — or use the Autoloop terminal finalizer.',
-      };
-    }
-    if (segments.some(({ command }) => {
-      const words = shellWords(command);
-      if (!mutatingGhApi(words)) return false;
-      return githubApiEndpoints(words).some((path) =>
-        path.length >= 4
-        && path[0] === 'repos'
-        && (
-          path[3] === 'releases'
-          || (
-            path[3] === 'git'
-            && ['refs', 'tags'].includes(path[4])
-          )
-        ));
-    })) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — raw release/tag API mutation requires an independent maintainer '
-          + 'release action. Report release readiness and leave publication to the maintainer.',
-      };
-    }
-    if (
-      /\/(?:protection|rulesets?(?:\/|\b))/.test(lexicalCmd) &&
-      (
-        /(^|\s)(-X|--method|-f|-F|--field|--raw-field|--input)(\s|=)/
-          .test(lexicalCmd)
-        || /(^|\s)-X(?:DELETE|PATCH|POST|PUT)(?:\s|$)/iu.test(lexicalCmd)
-        || /(^|\s)-[fF]\S+/u.test(lexicalCmd)
-      )
-    ) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — the branch/ruleset protection baseline is the human\'s control; '
-          + 'the loop only reads it (STATE.md → Autonomy). Report the mismatch '
-          + 'instead of mutating protection.',
-      };
-    }
-    if (
-      /\b(?:create|update|delete)(?:RepositoryRuleset|BranchProtectionRule)\b/u
-        .test(lexicalCmd)
-    ) {
-      return {
-        block: true,
-        reason:
-          'autoloop guard — the branch/ruleset protection baseline is the human\'s control; '
-          + 'the loop only reads it. Report the mismatch instead of mutating protection.',
-      };
-    }
   }
 
   return { block: false };
@@ -2874,7 +1077,6 @@ function trimSubshell(segment) {
 // prime segment cost two git spawns, and a padded command outran the timeout
 // (security audit after 0.60.0); common dirs are now resolved once each.
 export const GUARD_DEADLINE_MS = 10_000;
-export const MAX_COMMAND_BYTES = 64 * 1024;
 const MAX_PRIME_TARGETS = 64;
 const OVER_BUDGET = 'autoloop guard — this command is too large to check within the guard\'s time '
   + 'budget, so it cannot be proven safe. Split it into smaller commands.';
@@ -3034,28 +1236,6 @@ export function replayCorpus() {
   return { total, failures };
 }
 
-// The 0.49.64 skill said "launch dispatches foreground while the host sweep
-// stands" and the very next live run launched every dispatch with
-// `run_in_background: true` anyway — one new paragraph lost to years of
-// background idiom in the same file, and three proxied reviews died mid-stream
-// with bare `[killed]`. A rule every run must remember is a rule the guard
-// should enforce: the PreToolUse payload carries `run_in_background`, so the
-// launch shape is checkable mechanically. Scoped to dispatches — gates,
-// pollers, and every other background use are untouched.
-export function backgroundDispatchProblem(command, runInBackground) {
-  if (runInBackground !== true) return null;
-  const text = String(command);
-  // 0.56.0: dispatch-stream.sh double-forks the dispatch into its own session,
-  // so a host kill of the background task leaves it running and its result
-  // still lands (verified live 2026-09-29). Only a bare dispatch dies with it.
-  if (/dispatch-stream\.sh/u.test(text)) return null;
-  if (!/dispatch\.mjs\b[^\n]*--role/u.test(text)) return null;
-  return 'autoloop guard — a bare dispatch launched with `run_in_background` dies with its task '
-    + 'when the host kills it (`[killed]`, no result). Launch it through `dispatch-stream.sh '
-    + '<live-file> <output-file> <dispatch args>`, which detaches the dispatch so it survives, and '
-    + 'collect a killed watcher\'s result with `dispatch.mjs --wait-file <output-file>`.';
-}
-
 // A question asked mid-run waits on a human who is, by design, not there:
 // three AskUserQuestion calls in live LFE runs idled 2.2h, 23.2h and more,
 // every other unit in the queue waiting behind one unit's decision. The
@@ -3080,204 +1260,116 @@ function selfTest() {
     return { ...process.env, HOME: homes.at(-1) };
   };
   let corpusCount = 0;
+  const tools = dirname(fileURLToPath(import.meta.url));
   const cases = [
     // [cmd, branch, expectBlock, baseBranch]
     // 2026-09-30, the LFE run: quoted text read as commands. A quoted jq
     // filter's `|`, a quoted regex's backquotes and `(sh|bash)`, a block
     // question quoting the command a human should run, the `'"'"'` idiom and
     // PHP's ` . ` concatenation are all text.
-    [`node ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} --block --issue 5 --question "May #5 be finalized? A human runs: gh issue edit 5 --add-label loop-ready"`, 'feat/gh-1-x', false],
-    // Only the plugin's own tools carry quoted text: any other script does not.
-    ['node /tmp/x.mjs --question "gh issue edit 5 --add-label loop-ready"', 'feat/gh-1-x', true],
-    // LFE run 2026-09-30: a park note's `head -race` read as node's -r/-e.
-    // A plugin tool's arguments are its own; any other script's are not.
-    [`node ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} --park "#396 race evidence (base contracts + head -race suite)" --minutes 60`, 'feat/gh-1-x', false],
-    ['node /tmp/x.mjs --park "head -race suite"', 'feat/gh-1-x', true],
-    [`node --import /tmp/evil.mjs ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} -e x`, 'feat/gh-1-x', true],
+    [`node ${join(tools, 'unit.mjs')} --block --issue 5 --question "May #5 be finalized? A human runs: gh pr merge 5"`, 'feat/gh-1-x', false],
+    [`node ${join(tools, 'prime.mjs')} --park "#396 race evidence (base contracts + head -race suite)" --minutes 60`, 'feat/gh-1-x', false],
     ["rg -n '^```(sh|bash|shell)' b.md", 'feat/gh-1-x', false],
     ["sed -i 's/a/it'\"'\"'s `x`/' f", 'feat/gh-1-x', false],
     ["ddev wp eval '$a = \"x\" . \"y\"; $b = $c - 7; echo $a;'", 'feat/gh-1-x', false],
     ["rg -c '^Closes #388$' f; node x.mjs", 'feat/gh-1-x', false],
     // Review of the LFE fixes: a keyword, group or unlisted wrapper in front
-    // of gh, an eval'd script, an escaped quote or backslash, and `.`/source
-    // behind a keyword — none may hide a refused command.
+    // of gh, an eval'd script, an escaped quote or backslash — none may hide
+    // a refused command.
     ["echo it\\'s && git push origin main", 'feat/gh-1-x', true],
     ["echo \"\\\\'\" && git push origin main", 'feat/gh-1-x', true],
     ["echo \"\\\\'\" && gh pr merge 5", 'feat/gh-1-x', true],
-    ["echo \"\\\\'\" ; gh issue edit 5 --add-label loop-ready", 'feat/gh-1-x', true],
     ["echo \\\\\\\" && git push origin main", 'feat/gh-1-x', true],
     ["echo \"a\\\\\\\"b\" ; gh pr merge 5", 'feat/gh-1-x', true],
     ["printf '%s\\\\' \"\\\\'\" && git push origin main", 'feat/gh-1-x', true],
-    ["{ gh issue edit 5 --add-label loop-ready; }", 'feat/gh-1-x', true],
-    ["if true; then gh pr ready 5; fi", 'feat/gh-1-x', true],
-    ["flock /tmp/l gh issue edit 5 --remove-label loop-halt", 'feat/gh-1-x', true],
-    ["! gh issue edit 5 --add-label loop-ready", 'feat/gh-1-x', true],
-    ["for i in 1; do gh issue edit 5 --add-label loop-ready; done", 'feat/gh-1-x', true],
-    ["if true; then gh release create v1; fi", 'feat/gh-1-x', true],
-    ["eval \"x; gh pr ready 5\"", 'feat/gh-1-x', true],
-    ["eval 'echo; gh issue edit 5 --add-label loop-ready'", 'feat/gh-1-x', true],
-    ["eval \"x; gh issue edit 5 --remove-label loop-halt\"", 'feat/gh-1-x', true],
-    ["{ . /dev/stdin; }", 'feat/gh-1-x', true],
-    ["if true; then . /dev/stdin; fi", 'feat/gh-1-x', true],
-    ["! source /dev/stdin", 'feat/gh-1-x', true],
-    ["curl -s x | { source /dev/stdin; }", 'feat/gh-1-x', true],
-    ["echo \"x\" | bash", 'feat/gh-1-x', true],
-    ["(( x = 1<<EOF ))\ngit push origin main\nEOF", 'feat/gh-1-x', true],
-    // Second review: a decoded ANSI-C backslash escaping the newline, and a
-    // look-alike or optioned head standing in for echo, printf or node.
-    ["echo $'\\\\'\ngh issue edit 5 --add-label loop-ready", 'feat/gh-1-x', true],
+    ['{ gh pr merge 5; }', 'feat/gh-1-x', true],
+    ['if true; then gh release create v1; fi', 'feat/gh-1-x', true],
+    ['! gh pr merge 5', 'feat/gh-1-x', true],
+    ['for i in 1; do gh pr merge 5; done', 'feat/gh-1-x', true],
+    ['eval "x; gh pr merge 5"', 'feat/gh-1-x', true],
+    ["eval 'gh pr merge 5'", 'feat/gh-1-x', true],
+    ["bash -c 'gh pr merge 5'", 'feat/gh-1-x', true],
+    ["sh -c 'git push origin HEAD:main'", 'feat/gh-1-x', true],
+    ['(( x = 1<<EOF ))\ngit push origin main\nEOF', 'feat/gh-1-x', true],
+    // Second review: a decoded ANSI-C backslash escaping the newline.
     ["echo $'\\x5c'\ngh release create v1", 'feat/gh-1-x', true],
-    ["true $'x\\\\'\ngh pr ready 5", 'feat/gh-1-x', true],
-    ['./echo gh pr ready 5', 'feat/gh-1-x', true],
-    ['A=1 ./printf gh release create v1', 'feat/gh-1-x', true],
-    [`node --import ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} ./evil.mjs gh issue edit 5 --add-label loop-ready`, 'feat/gh-1-x', true],
-    [`NODE_OPTIONS=--require=./evil.js node ${join(dirname(fileURLToPath(import.meta.url)), 'unit.mjs')} gh pr ready 5`, 'feat/gh-1-x', true],
-    [`node ${join(dirname(fileURLToPath(import.meta.url)), '../../../../no-such-dir/evil.mjs')} gh pr ready 5`, 'feat/gh-1-x', true],
+    ["echo $'\\\\'\ngh pr merge 5", 'feat/gh-1-x', true],
     // ...and none of that may hide a real command: a quote inside the other
     // kind (or escaped) left bare turned the rest of the line into one word.
     ['git commit -qm "it\'s" && git push origin main', 'feat/gh-1-x', true],
     ['git commit -qm \'a "b\' && git push origin main', 'feat/gh-1-x', true],
-    ["echo it\\'s && git push origin main", 'feat/gh-1-x', true],
     ["rg -c '^x$' f; gh pr merge 5 --squash", 'feat/gh-1-x', true],
-    ['gh issue edit 5 --add-label loop-ready', 'feat/gh-1-x', true],
-    ["eval 'gh issue edit 5 --add-label loop-ready'", 'feat/gh-1-x', true],
-    ['python3 -c "import json; print(1)"', 'feat/gh-1-x', true],
-    ['. /dev/stdin', 'feat/gh-1-x', true],
-    // 2026-07-28: a live `scaffold.mjs --reconcile` pipeline was refused as
-    // inline interpreter source. A word that merely NAMES an interpreter or an
-    // assembler in argument position is data, not an invocation.
+    // SPEC-guard-reduction: a word that only names git or gh is data. A
+    // search for a refused command, a banner, a log grep, a quoted question.
+    ['rg -n "gh pr merge" docs', 'feat/gh-1-x', false],
+    ['rg -n "git push --force" docs', 'feat/gh-1-x', false],
+    ['git log --grep "git push origin main" --oneline', 'feat/gh-1-x', false],
+    ['echo "=== git diffstat ==="', 'feat/gh-1-x', false],
+    ['echo "gh pr merge 42"', 'feat/gh-1-x', false],
+    ['node /tmp/x.mjs --question "gh pr merge 5"', 'feat/gh-1-x', false],
     ['cd /r\nnode /p/scaffold.mjs --reconcile . 2>&1 | head -80', 'feat/gh-1-x', false],
     ['git log --oneline | grep node', 'feat/gh-1-x', false],
-    ['rg -c sh docs/agentic/STATE.md', 'feat/gh-1-x', false],
-    ['git log --grep xargs --oneline', 'feat/gh-1-x', false],
-    ['rg -n awk templates/tools/command-guard.mjs', 'feat/gh-1-x', false],
-    // Forwarded execution is still an invocation, wherever the name sits.
-    ['find . -name "*.js" -exec node -e "x" {} +', 'feat/gh-1-x', true],
-    ['find . -exec awk "{system(1)}" {} +', 'feat/gh-1-x', true],
-    ['sudo node -e "x"', 'feat/gh-1-x', true],
-    ['echo data | node', 'feat/gh-1-x', true],
-    ['env node', 'feat/gh-1-x', true],
-    // 2026-07-29: `command -v php` ASKS WHERE php is; `-v` is the whole
-    // difference. A live setup lost a round to it while checking that its
-    // configured gate still resolves — the probe this plugin's setup skill
-    // asks for. `command` without `-v` still launders nothing.
+    // The removed rules' former triggers are allowed: inline interpreters,
+    // heredocs, loops, expansions, unknown subcommands, inline bodies,
+    // readiness, labels, a long command.
+    ['python3 -c "import json; print(1)"', 'feat/gh-1-x', false],
+    ["node -e 'console.log(1)'", 'feat/gh-1-x', false],
+    ['node', 'feat/gh-1-x', false],
+    ['echo data | node', 'feat/gh-1-x', false],
+    ["zsh -ic 'alias | grep x'", 'feat/gh-1-x', false],
+    ['bash <<\'EOF\'\nls\nEOF', 'feat/gh-1-x', false],
+    ['. /dev/stdin', 'feat/gh-1-x', false],
     ['command -v php', 'feat/gh-1-x', false],
-    ['command -v node', 'feat/gh-1-x', false],
-    ['command -v awk', 'feat/gh-1-x', false],
-    ['ls -d .ddev >/dev/null 2>&1 && echo present; command -v php', 'feat/gh-1-x', false],
-    ['which php', 'feat/gh-1-x', false],
-    ['type -p python3', 'feat/gh-1-x', false],
-    ['command php -r "x"', 'feat/gh-1-x', true],
-    ['command node', 'feat/gh-1-x', true],
-    // A passthrough wrapper must not launder the word behind it.
-    ['time xargs -n1 gh', 'feat/gh-1-x', true],
-    ['exec node -e "x"', 'feat/gh-1-x', true],
-    ['stdbuf -oL awk "{system(1)}"', 'feat/gh-1-x', true],
-    // 2026-07-29: three live runs lost a round to a `for` over a LITERAL list —
-    // `for n in 222 223 224` and a sweep over eight named spec files. A literal
-    // list is N literal commands written once, and the guard already resolves a
-    // literal assignment the same way; refusing one while accepting the other
-    // was inconsistent. The remedy it printed ("write the iterations as literal
-    // commands") is exactly what expansion does mechanically.
     ['for f in a.md b.md; do rg -n "^## " $f; done', 'feat/gh-1-x', false],
-    ['for n in 222 223 224; do gh issue view $n --json title; done', 'feat/gh-1-x', false],
-    ['for s in a b; do wc -c ${s}; done', 'feat/gh-1-x', false],
-    // Expansion is STRONGER than refusal: the real command becomes visible, so
-    // this blocks on merge authority rather than on shape.
-    ['for f in 41 42; do gh pr merge $f; done', 'feat/gh-1-x', true],
-    // A list that is not literal stays refused — what it iterates over is not
-    // knowable here.
-    ['for f in $(ls); do rm $f; done', 'feat/gh-1-x', true],
-    ['for f in *.md; do rm $f; done', 'feat/gh-1-x', true],
-    ['while read l; do echo $l; done', 'feat/gh-1-x', true],
+    ['for f in $(ls); do rm $f; done', 'feat/gh-1-x', false],
+    ['while read l; do echo $l; done', 'feat/gh-1-x', false],
+    ['S="/tmp/a b"; ls $S', 'feat/gh-1-x', false],
+    ['ls $UNSET_PATH/x', 'feat/gh-1-x', false],
+    ['verb=view; gh pr $verb 42', 'feat/gh-1-x', false],
+    ['git diffstat', 'feat/gh-1-x', false],
+    ['gh foo', 'feat/gh-1-x', false],
+    ['git -c alias.st=status st', 'feat/gh-1-x', false],
+    ['git commit -q -F - <<EOF\nmsg with $(pwd) live\nEOF', 'feat/gh-1-x', false],
+    ['gh pr create --draft --title "t" --body "inline"', 'feat/gh-2-y', false],
+    ['gh issue comment 5 -b "hi"', 'feat/gh-2-y', false],
+    ['gh issue comment 7 --body "/answer 128 chars"', 'feat/gh-2-y', false],
+    ['gh issue comment 7 --body-file /dev/stdin', 'feat/gh-2-y', false],
+    ['gh pr ready 42', 'feat/gh-2-y', false],
+    ['gh issue edit 7 --add-label loop-ready', 'feat/gh-2-y', false],
+    ['gh issue edit 40 --remove-label loop-halt', 'main', false],
+    ['gh issue edit 7 --add-label loop-repair', 'feat/gh-2-y', false],
+    ['gh label edit old-name --name loop-ready', 'feat/gh-2-y', false],
+    ['gh issue edit 298 --add-label "loop:02-plan" --remove-label "loop:03-plan-review"', 'main', false],
+    ['gh issue edit 298 --add-label loop:05-implement', 'feat/gh-298-x', false],
+    ['gh issue edit 296 --add-label loop:10-publish', 'feat/gh-296-x', false],
+    ['gh api repos/o/r/issues/7/labels -X POST --input /tmp/labels.json', 'feat/gh-2-y', false],
+    ["gh api graphql -f query='mutation{markPullRequestReadyForReview(input:{pullRequestId:\"x\"}){pullRequest{id}}}'", 'feat/gh-2-y', false],
+    ['gh api graphql --input /tmp/query.json', 'feat/gh-2-y', false],
+    [`echo ${'x'.repeat(70 * 1024)}`, 'feat/gh-1-x', false],
+    ["awk '{ print | \"sh\" }' f", 'feat/gh-1-x', false],
+    ['diff <(git show a:f) <(git show b:f)', 'feat/gh-1-x', false],
+    ['git push origin $(git branch --show-current)', 'feat/gh-1-x', false],
+    ['echo "${X:-$(cat f)}"', 'feat/gh-1-x', false],
+    // 1. merge, in every spelling the lexer resolves.
     ['gh pr merge 42', 'feat/gh-1-x', true],
-    // A literal path variable is resolvable, so the guard substitutes and judges
-    // the real command instead of refusing the shape (the friction every live
-    // run hit). Anything it cannot resolve stays blocked as opaque.
-    ['S=/tmp/scratch; sha256sum $S/plan.md', 'feat/gh-1-x', false],
-    ['S=/tmp/scratch; sha256sum ${S}/plan.md', 'feat/gh-1-x', false],
-    ['D=docs; rg -n autoloop $D/agentic/STATE.md', 'feat/gh-1-x', false],
-    // Substitution makes evasion detectable rather than merely refused: this
-    // now blocks on the merge rule itself.
-    ['verb=merge; gh pr $verb 42', 'feat/gh-1-x', true],
-    ['V=$(printf merge); gh pr $V 42', 'feat/gh-1-x', true],
-    ['S="/tmp/a b"; ls $S', 'feat/gh-1-x', true],
-    ['ls $UNSET_PATH/x', 'feat/gh-1-x', true],
-    ['B=main; git push origin --delete $B', 'feat/gh-1-x', true, 'main'],
     ['gh --repo o/r pr merge 42 --squash', 'feat/gh-1-x', true],
     ['gh pr merge --auto 42', 'feat/gh-1-x', true],
+    ['for f in 41 42; do gh pr merge $f; done', 'feat/gh-1-x', true],
+    ['g""h p""r m""erge 42', 'feat/gh-1-x', true],
+    ['g\\\nh pr merge 42', 'feat/gh-1-x', true],
+    ["$'g\\x68' pr merge 42", 'feat/gh-1-x', true],
+    ['timeout 30 gh pr merge 42', 'feat/gh-1-x', true],
+    ['xargs -n1 gh pr merge', 'feat/gh-1-x', true],
+    ['echo $(gh pr merge 42)', 'feat/gh-1-x', true],
+    ['echo "`gh pr merge 42`"', 'feat/gh-1-x', true],
     // The word "merge" inside an option argument is not a merge invocation: a PR
     // about merge policy must be creatable (live false positive, run 3bdd6e5e).
     ['gh pr create --fill --title "chore: migrate scaffold and enable auto merge policy"', 'chore/autoloop-migrate', false],
     ['gh pr edit 180 --title "enable auto merge policy"', 'feat/gh-2-y', false],
-    ['verb=merge; gh pr $verb 42', 'feat/gh-1-x', true],
-    ['gh pr m$(printf erge) 42', 'feat/gh-1-x', true],
-    ['a=g; b=h; c=m; d=erge; "$a$b" pr "$c$d" 42', 'feat/gh-1-x', true],
-    ['a=g; b=h; c=m; d=erge; eval "$a$b pr $c$d 42"', 'feat/gh-1-x', true],
-    ['x=$(printf \\\\147\\\\150); y=$(printf \\\\155\\\\145\\\\162\\\\147\\\\145); $x pr $y 42', 'feat/gh-1-x', true],
-    ["python3 -c 'import os; os.system(\"g\"+\"h pr m\"+\"erge 42\")'", 'feat/gh-1-x', true],
-    ["node -e 'require(\"child_process\").execFileSync(\"g\"+\"h\",[\"pr\",\"m\"+\"erge\",\"42\"])'", 'feat/gh-1-x', true],
-    ["perl -e 'system(\"g\".\"h\", \"pr\", \"m\".\"erge\", 42)'", 'feat/gh-1-x', true],
-    // A version or help probe runs no source at all. The rule below treats an
-    // interpreter with no script argument as reading from stdin, which is right
-    // for a bare `node` and wrong for `node --version` — and the setup audit
-    // battery is exactly `gh auth status && node --version`.
-    // A newline is a command separator like `;` is. The resolver anchored on
-    // `^` without the `m` flag, so only an assignment on the FIRST line counted:
-    // a live battery worked as `T=...` on line 1 and was refused the moment a
-    // `cd` was added above it, with the expansion reported as opaque.
-    ['T=/tmp/x\nnode $T/a.mjs --audit .', 'feat/gh-1-x', false],
-    ['cd /repo\nT=/tmp/x\nnode $T/a.mjs --audit .', 'feat/gh-1-x', false],
-    ['cd /repo\nverb=merge\ngh pr $verb 42', 'feat/gh-1-x', true],
-    // A QUOTED heredoc body is literal by shell semantics — no expansion, no
-    // command substitution. The expansion check ran on the raw command, so a
-    // commit message containing backticks (`m` flag, `scaffold.mjs --reconcile`)
-    // was read as command substitution and the whole commit refused. Observed
-    // live: the loop could not write its own reconcile commit message.
-    ["git commit -q -F - <<'EOF'\nmsg with `m` backticks\nEOF", 'feat/gh-1-x', false],
-    ["git add -A && git commit -q -F - <<'EOF' && git log --oneline -1\nmsg `x` and $(pwd) literal\nEOF", 'feat/gh-1-x', false],
-    // An UNQUOTED heredoc body really does expand, so it stays opaque. Stripping
-    // both kinds alike before the check would have opened exactly this hole.
-    ['git commit -q -F - <<EOF\nmsg with $(pwd) live\nEOF', 'feat/gh-1-x', true],
-    ['git commit -q -F - <<EOF\nmsg with `pwd` live\nEOF', 'feat/gh-1-x', true],
-    // `git` as an ARGUMENT is data, not an invocation: the alias rule found
-    // `git` anywhere in a segment, so quote-stripped prose — a live run's
-    // `echo "=== git diffstat ==="` section banner — read as an unknown
-    // subcommand and sank an innocent compound. Executable position only.
-    ['echo "=== git diffstat ==="', 'feat/gh-1-x', false],
-    ['echo "gh pr-mangle is not a thing"', 'feat/gh-1-x', false],
-    ['git diffstat', 'feat/gh-1-x', true],
-    ['env git diffstat', 'feat/gh-1-x', true],
-    ['A=1 git status --short', 'feat/gh-1-x', false],
-    ['timeout 30 git fetch origin main', 'feat/gh-1-x', false],
-    ['node --version', 'feat/gh-1-x', false],
-    ['python3 --version', 'feat/gh-1-x', false],
-    ['deno --help', 'feat/gh-1-x', false],
-    ['echo probe && gh auth status && node --version', 'feat/gh-1-x', false],
-    // Short forms stay opaque on purpose: `-v` is the version flag for node and
-    // ruby but means "verbose" for python, where it still reads a script from
-    // stdin. The long form is unambiguous everywhere and costs nothing to write.
-    ['node -v', 'feat/gh-1-x', true],
-    ['node', 'feat/gh-1-x', true],
-    ["node --version -e 'require(\"child_process\").execFileSync(\"g\"+\"h\")'", 'feat/gh-1-x', true],
-    ["printf '\\\\147\\\\150\\\\040\\\\160\\\\162\\\\040\\\\155\\\\145\\\\162\\\\147\\\\145\\\\040\\\\064\\\\062\\\\012' | sh", 'feat/gh-1-x', true],
-    ["printf '\\\\147\\\\151\\\\164\\\\040\\\\160\\\\165\\\\163\\\\150\\\\040\\\\157\\\\162\\\\151\\\\147\\\\151\\\\156\\\\040\\\\110\\\\105\\\\101\\\\104\\\\072\\\\164\\\\162\\\\165\\\\156\\\\153\\\\012' | bash", 'feat/gh-1-x', true],
-    ["printf 'import os\\\\nos.system(chr(103)+chr(104)+\" pr \"+\"merge 42\")\\\\n' | python3", 'feat/gh-1-x', true],
-    ["printf 'require(\"child_process\").execFileSync(String.fromCharCode(103,104),[\"pr\",\"merge\",\"42\"])\\\\n' | node", 'feat/gh-1-x', true],
-    ["printf '\\\\147\\\\150\\\\040\\\\160\\\\162\\\\040\\\\155\\\\145\\\\162\\\\147\\\\145\\\\040\\\\064\\\\062\\\\012' | sh /dev/stdin", 'feat/gh-1-x', true],
-    ["printf '\\\\147\\\\151\\\\164\\\\040\\\\160\\\\165\\\\163\\\\150\\\\040\\\\157\\\\162\\\\151\\\\147\\\\151\\\\156\\\\040\\\\110\\\\105\\\\101\\\\104\\\\072\\\\164\\\\162\\\\165\\\\156\\\\153\\\\012' | bash /dev/fd/0", 'feat/gh-1-x', true],
-    ["printf 'import os\\\\nos.system(chr(103)+chr(104)+\" pr \"+\"merge 42\")\\\\n' | python3 /dev/stdin", 'feat/gh-1-x', true],
-    ["printf 'require(\"child_process\").execFileSync(String.fromCharCode(103,104),[\"pr\",\"merge\",\"42\"])\\\\n' | node /dev/stdin", 'feat/gh-1-x', true],
-    ["awk 'BEGIN { system(sprintf(\"%c%c\",103,104) \" pr \" \"merge 42\") }'", 'feat/gh-1-x', true],
-    ["printf '\\\\147\\\\150\\\\0pr\\\\0merge\\\\00042\\\\0' | xargs -0", 'feat/gh-1-x', true],
-    ['gh m 42', 'feat/gh-1-x', true],
     ["gh pr view 42 --jq '$.mergeable'", 'feat/gh-1-x', false],
-    ["printf '%s\\n' '$HOME'", 'feat/gh-1-x', false],
-    ['g""h p""r m""erge 42', 'feat/gh-1-x', true],
-    ['g\\\nh pr merge 42', 'feat/gh-1-x', true],
-    ["$'g\\x68' pr merge 42", 'feat/gh-1-x', true],
-    ['gh pr view 42 --json mergeStateStatus,mergeable', 'develop', false], // no \bmerge\b
+    ['gh pr view 42 --json mergeStateStatus,mergeable', 'develop', false],
     ['gh pr list --search draft:false', 'main', false],
+    // 2. the base branch takes pull requests only.
     ['git commit -m "feat: x"', 'develop', true, 'develop'],
     ['git commit -m "feat: x"', 'main', true],
     ['git commit -m "feat: x"', 'master', true, 'master'],
@@ -3287,16 +1379,10 @@ function selfTest() {
     ["$'g\\151t' commit -m \"unsafe encoded token\"", 'trunk', true, 'trunk'],
     ['(git commit -m "unsafe grouped")', 'trunk', true, 'trunk'],
     ['$(git commit -m "unsafe substitution")', 'trunk', true, 'trunk'],
-    ['$("git" commit -m "unsafe quoted substitution")', 'trunk', true, 'trunk'],
     ['`git commit -m "unsafe backtick"`', 'trunk', true, 'trunk'],
-    ['("git" commit -m "unsafe quoted group")', 'trunk', true, 'trunk'],
-    ['`"git" commit -m "unsafe quoted backtick"`', 'trunk', true, 'trunk'],
     ['echo "$(git commit -m unsafe)"', 'trunk', true, 'trunk'],
     ['{ git commit -m "unsafe brace"; }', 'trunk', true, 'trunk'],
-    ['(git \\\ncommit -m "unsafe continued")', 'trunk', true, 'trunk'],
-    ["('git' commit -m \"unsafe quoted executable\")", 'trunk', true, 'trunk'],
-    ['(g\\it commit -m "unsafe escaped executable")', 'trunk', true, 'trunk'],
-    ['(git switch -c feat/gh-3-z && git commit -m "opaque")', 'trunk', true, 'trunk'],
+    ['(git switch -c feat/gh-3-z && git commit -m "safe grouped")', 'trunk', false, 'trunk'],
     ['git switch -c feat/gh-3-z && git commit --allow-empty -m "chore: claim #3"', 'main', false],
     ['git commit -m "unsafe first" && git switch feat/gh-3-z', 'trunk', true, 'trunk'],
     ['git switch trunk && git commit -m "unsafe target"', 'feat/gh-3-z', true, 'trunk'],
@@ -3317,20 +1403,6 @@ function selfTest() {
     ['git switch --track origin/trunk && git commit -m "unsafe tracked base"', 'feat/gh-3-z', true, 'trunk'],
     ['git switch --track origin/feat/gh-3-z && git commit -m "safe tracked unit"', 'trunk', false, 'trunk'],
     ['git commit -m "allowed on main"', 'main', false, 'trunk'],
-    ['git commit -m "fix: y" -m "Co-Authored-By: Claude <n@a.com>"', 'feat/gh-2-y', true],
-    ['git push --force origin feat/gh-2-y', 'feat/gh-2-y', true],
-    ['git push --fo""rce origin feat/gh-2-y', 'feat/gh-2-y', true],
-    ['git push --fo\\\nrce origin feat/gh-2-y', 'feat/gh-2-y', true],
-    ["git push --$'f\\x6frce' origin feat/gh-2-y", 'feat/gh-2-y', true],
-    ['git push --for origin feat/gh-2-y', 'feat/gh-2-y', true],
-    ['git push -uf origin feat/gh-2-y', 'feat/gh-2-y', true],
-    ['git push -fq origin feat/gh-2-y', 'feat/gh-2-y', true],
-    ['git push -f', 'feat/gh-2-y', true],
-    ['git push --force-with-lease origin feat/gh-2-y', 'feat/gh-2-y', false],
-    ['git push origin +main', 'feat/gh-2-y', true], // +refspec force
-    ["git push origin '+refs/heads/main'", 'main', true], // quoted +refspec force
-    ['git push origin feat/gh-2-y', 'feat/gh-2-y', false], // normal push, no force
-    ['git push --set-upstream origin feat/gh-2-y', 'feat/gh-2-y', false],
     ['git push origin HEAD', 'trunk', true, 'trunk'],
     ['git push origin @', 'trunk', true, 'trunk'],
     ['git push origin HEAD', 'feat/gh-2-y', false, 'trunk'],
@@ -3342,23 +1414,12 @@ function selfTest() {
     ['git push --branches origin', 'feat/gh-2-y', true, 'trunk'],
     ['git push --bra origin', 'feat/gh-2-y', true, 'trunk'],
     ['git push --mirror origin', 'feat/gh-2-y', true, 'trunk'],
-    ['git push --tags origin', 'feat/gh-2-y', true, 'trunk'],
-    ['git push --follow-tags origin feat/gh-2-y', 'feat/gh-2-y', true, 'trunk'],
-    ['git push origin v0.40.0', 'feat/gh-2-y', true, 'trunk'],
-    ['git push origin refs/tags/v0.40.0', 'feat/gh-2-y', true, 'trunk'],
-    ['git push origin HEAD:refs/tags/v0.40.0', 'feat/gh-2-y', true, 'trunk'],
     ['git push --mi origin', 'feat/gh-2-y', true, 'trunk'],
     ['git push origin :', 'feat/gh-2-y', true, 'trunk'],
     ["git push origin 'refs/heads/*:refs/heads/*'", 'feat/gh-2-y', true, 'trunk'],
     ["git push origin 'refs/heads/feat/*:refs/heads/feat/*'", 'feat/gh-2-y', false, 'trunk'],
     ['git push origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
     ['git push origin HEAD:refs/heads/trunk', 'feat/gh-2-y', true, 'trunk'],
-    ['verb=push; git $verb origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
-    ['git p$(printf ush) origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
-    ['g=git; $g push origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
-    ['a=g; b=it; c=p; d=ush; "$a$b" "$c$d" origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
-    ['git ship origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
-    ['git ci -m x', 'trunk', true, 'trunk'],
     ['(git push origin HEAD:trunk)', 'feat/gh-2-y', true, 'trunk'],
     ['$(git push origin HEAD:trunk)', 'feat/gh-2-y', true, 'trunk'],
     ['echo "`git push origin HEAD:trunk`"', 'feat/gh-2-y', true, 'trunk'],
@@ -3368,184 +1429,58 @@ function selfTest() {
     ['git push --repo origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
     ['git push --repo=origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
     ['git push --rep=origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
-    ['git -c alias.ship=push ship origin HEAD:trunk', 'feat/gh-2-y', true, 'trunk'],
-    ['git -c remote.origin.push=HEAD:trunk push origin', 'feat/gh-2-y', true, 'trunk'],
-    ['git -c remote.origin.push=+HEAD:trunk push origin', 'feat/gh-2-y', true, 'trunk'],
-    ['git -c push.default=matching push origin', 'feat/gh-2-y', true, 'trunk'],
     ['git push origin :trunk', 'feat/gh-2-y', true, 'trunk'],
     ['git push --delete origin trunk', 'feat/gh-2-y', true, 'trunk'],
-    ['gh pr create --draft --title "t" --body "inline"', 'feat/gh-2-y', true],
-    ['gh --repo o/r pr create --title "t" --body "inline"', 'feat/gh-2-y', true],
-    ['gh --hostname github.example pr comment 4 -b "inline"', 'feat/gh-2-y', true],
-    ['gh issue comment 5 -b "hi"', 'feat/gh-2-y', true],
-    ['gh pr create --title "t" -binline', 'feat/gh-2-y', true],
-    ['gh pr create -dbinline --title "t"', 'feat/gh-2-y', true],
-    ['gh pr comment 4 -binline', 'feat/gh-2-y', true],
-    ['gh issue comment 5 -binline', 'feat/gh-2-y', true],
-    ['/usr/bin/gh issue comment 5 -b "hi"', 'feat/gh-2-y', true],
-    ['gh pr create --draft --title "t" --body-file /tmp/b.md', 'feat/gh-2-y', false],
-    ['gh pr review 5 --request-changes --body-file /tmp/r.md', 'main', false],
-    ['gh pr ready 42', 'feat/gh-2-y', true],
-    ['gh --repo o/r pr ready 42', 'feat/gh-2-y', true],
-    ['gh issue edit 7 --add-label loop-delivered', 'feat/gh-2-y', true],
-    ['gh issue edit 7 --add-label loop-ready,loop-delivered', 'feat/gh-2-y', true],
-    // 2026-09-25: `/answer` is how a human resumes a loop block, and in a solo
-    // repository the runner shares the human's login — the loop must never
-    // write one, or it answers its own question.
-    ['gh issue comment 7 --body "/answer 128 chars"', 'feat/gh-2-y', true],
-    ['gh issue comment 7 -b "  /answer go"', 'feat/gh-2-y', true],
-    ['gh pr comment 9 --body=/answer', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/issues/7/comments -f body="/answer yes"', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/issues/7/comments -f body="resumed; reply /answer to change it"', 'feat/gh-2-y', false],
-    // 2026-09-25: loop-repair makes an issue eligible through its parent's
-    // loop-ready; only unit.mjs --repair may apply it, with the provenance marker.
-    // The whole-run kill switch is a human's: the loop never lifts it.
-    ['gh issue edit 40 --remove-label loop-halt', 'main', true],
-    ['gh issue edit 40 --remove-label bug,LOOP-HALT', 'main', true],
-    ['gh label delete loop-halt --yes', 'main', true],
-    ['gh label edit loop-halt --name loop-paused', 'main', true],
-    ['gh issue edit 40 --add-label loop-halt', 'main', false],
-    // Review of 0.55.5: the REST forms lift it too.
-    ['gh api -X DELETE repos/o/r/issues/40/labels/loop-halt', 'main', true],
-    ['gh api --method DELETE repos/o/r/labels/loop-halt', 'main', true],
-    ['gh api -X PATCH repos/o/r/labels/Loop-Halt -f new_name=x', 'main', true],
-    ['gh api repos/o/r/labels/loop-halt', 'main', false],
-    ['gh issue edit 7 --add-label loop-repair', 'feat/gh-2-y', true],
-    ['gh issue create --title t --body-file /tmp/b.md --label loop-repair', 'main', true],
-    ['gh issue create --title t --body-file /tmp/b.md -l bug,loop-repair', 'main', true],
-    ['gh api repos/o/r/issues/7/labels -f "labels[]=loop-repair"', 'main', true],
-    ['gh issue edit 7 --remove-label loop-repair', 'main', false],
-    ['gh issue list --label loop-repair --state open', 'main', false],
-    ['node tools/agentic/unit.mjs --repair --parent 7 --title t --body-file /tmp/b.md', 'main', false],
-    // 2026-09-25 security review of the initiative branch: every shape below
-    // passed the guard. A comment body it cannot read, stdin, a JSON --input, or
-    // a GraphQL comment mutation could carry an /answer; an issue created with
-    // loop-ready or loop-delivered, or a label renamed to loop-repair, mints
-    // authorization the loop may never grant itself.
-    ['gh issue comment 7 -F=/nonexistent/answer.md', 'feat/gh-2-y', true],
-    ['gh issue comment 7 --body-file -', 'feat/gh-2-y', true],
-    ['gh pr comment 9 --body-file /dev/stdin', 'feat/gh-2-y', true],
-    ['gh issue comment 7 --body-file /nonexistent/later.md', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/issues/7/comments --input /tmp/c.json', 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{addComment(input:{subjectId:\"I_x\",body:\"x\"}){clientMutationId}}'", 'feat/gh-2-y', true],
-    ['gh issue create --title t --body-file /tmp/b.md --label loop-ready', 'main', true],
-    ['gh issue create --title t --body-file /tmp/b.md -l=loop-ready', 'main', true],
-    ['gh pr create --draft --title t --body-file /tmp/b.md --label loop-delivered', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/issues -f title=t -f "labels[]=loop-ready"', 'main', true],
-    ['gh api repos/o/r/issues --input /tmp/issue.json', 'main', true],
-    ["gh api graphql -f query='mutation{createIssue(input:{repositoryId:\"R\",title:\"t\",labelIds:[\"L\"]}){issue{number}}}'", 'main', true],
-    ['gh label edit bug --name loop-repair', 'main', true],
-    // 2026-09-25 security re-audit: the joined short field form, a body file the
-    // same command rewrites, a /proc fd, and a REST label rename.
-    ['gh api repos/o/r/issues/7/comments -fbody="/answer yes"', 'feat/gh-2-y', true],
-    ['cp /tmp/a.md /tmp/p2.md && gh issue comment 7 --body-file /tmp/p2.md', 'feat/gh-2-y', true],
-    ['gh issue comment 7 --body-file /proc/self/fd/0', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/labels/bug -X PATCH -f new_name=loop-repair', 'main', true],
-    ['gh issue create --title t --body-file /tmp/b.md --label bug', 'main', false],
-    ['gh issue edit 7 --add-label loop-ready', 'feat/gh-2-y', true],
-    ['gh issue edit 7 --add-label=LOOP-READY', 'feat/gh-2-y', true],
-    ['gh pr edit 42 --add-label=loop-delivered', 'feat/gh-2-y', true],
-    ['gh issue edit 7 --remove-label loop-ready', 'feat/gh-2-y', false],
-    ['gh issue edit 7 --remove-label loop-delivered', 'feat/gh-2-y', false],
-    ['gh issue edit 218 --add-label human:authorize', 'feat/gh-2-y', false],
-    ['gh pr edit 218 --add-label human:authorize', 'feat/gh-2-y', false],
-    // The step ladder ends at 09-gate; an invented 10/11 label strands the unit.
-    ['gh issue edit 296 --remove-label loop:09-gate --add-label loop:10-publish 2>/dev/null', 'feat/gh-296-x', true],
-    ['gh issue edit 296 --add-label loop:11-record', 'feat/gh-296-x', true],
-    ['gh issue edit 296 --add-label=loop-started,loop:10-publish', 'feat/gh-296-x', true],
-    ['gh issue edit 296 --remove-label loop:08-code-review --add-label loop:09-gate', 'feat/gh-296-x', false, undefined, { stepTool: true }],
-    ['gh issue edit 296 --remove-label loop-delivered --add-label loop:revising', 'feat/gh-296-x', false],
-    ['gh issue edit 296 --remove-label loop:10-publish', 'feat/gh-296-x', false],
-    // The ladder only climbs: a live run swapped 03 back to 02 to re-review a plan.
-    ['gh issue edit 298 --add-label "loop:02-plan" --remove-label "loop:03-plan-review" 2>&1 | tail -1', 'main', true],
-    ['gh issue edit 298 --remove-label loop:08-code-review --add-label loop:05-implement', 'feat/gh-298-x', true],
-    ['gh issue edit 298 --remove-label loop:02-plan --add-label loop:03-plan-review', 'main', false, undefined, { stepTool: true }],
-    // 0.54: by hand, even a correct swap is refused — step.mjs is the path.
-    ['gh issue edit 298 --remove-label loop:02-plan --add-label loop:03-plan-review', 'main', true],
-    // The step labels live on the issue; a PR carrying one is the same hand swap.
-    ['gh pr edit 551 --remove-label loop:04-claim --add-label loop:05-implement', 'feat/gh-356-x', true],
-    ['gh issue edit 298 --remove-label loop:09-gate,loop-started', 'main', false],
-    ['gh issue edit 298 --remove-label loop-delivered --add-label loop:revising', 'main', false],
-    // A swap is add AND remove: the live 04→05 add-only stranded 04-claim, and 06→08 skipped 07.
-    ['gh issue edit 298 --add-label loop:05-implement', 'feat/gh-298-x', true],
-    ['gh issue edit 298 --remove-label loop:06-simplify --add-label loop:08-code-review', 'feat/gh-298-x', true],
-    ['gh issue edit 298 --remove-label loop:04-claim --add-label loop:05-implement', 'feat/gh-298-x', false, undefined, { stepTool: true }],
-    ['gh issue edit 298 --remove-label loop:06-simplify --add-label loop:07-diff-review', 'feat/gh-298-x', false, undefined, { stepTool: true }],
-    ['gh issue edit 298 --remove-label=loop:07-diff-review --add-label=loop:08-code-review', 'feat/gh-298-x', false, undefined, { stepTool: true }],
-    ['gh issue edit 298 --remove-label loop:03-plan-review --add-label loop:04-claim', 'main', false, undefined, { stepTool: true }],
-    ['gh issue edit 298 --add-label loop-started,loop:01-premise', 'main', false, undefined, { stepTool: true }],
-    ['gh issue edit 298 --add-label loop:02-plan', 'main', true],
-    ['gh issue edit 298 --remove-label loop:01-premise --add-label loop:02-plan', 'main', false, undefined, { stepTool: true }],
-    ['gh label edit old-name --name loop-delivered', 'feat/gh-2-y', true],
-    ['gh label edit old-name --name loop-ready', 'feat/gh-2-y', true],
-    ['gh label edit old-name -nloop-delivered', 'feat/gh-2-y', true],
-    ['gh label create loop-ready --description authority', 'feat/gh-2-y', true],
-    ['gh label create loop-delivered --description terminal', 'feat/gh-2-y', false],
+    ['git push origin feat/gh-2-y', 'feat/gh-2-y', false],
+    ['git push --set-upstream origin feat/gh-2-y', 'feat/gh-2-y', false],
+    ['A=1 git status --short', 'feat/gh-1-x', false],
+    ['timeout 30 git fetch origin main', 'feat/gh-1-x', false],
+    // 3. force pushes.
+    ['git push --force origin feat/gh-2-y', 'feat/gh-2-y', true],
+    ['git push --fo""rce origin feat/gh-2-y', 'feat/gh-2-y', true],
+    ['git push --fo\\\nrce origin feat/gh-2-y', 'feat/gh-2-y', true],
+    ["git push --$'f\\x6frce' origin feat/gh-2-y", 'feat/gh-2-y', true],
+    ['git push --for origin feat/gh-2-y', 'feat/gh-2-y', true],
+    ['git push -uf origin feat/gh-2-y', 'feat/gh-2-y', true],
+    ['git push -fq origin feat/gh-2-y', 'feat/gh-2-y', true],
+    ['git push -f', 'feat/gh-2-y', true],
+    ['git push --force-with-lease origin feat/gh-2-y', 'feat/gh-2-y', false],
+    ['git push origin +main', 'feat/gh-2-y', true],
+    ["git push origin '+refs/heads/main'", 'main', true],
+    ['git push origin HEAD:refs/heads/feat/gh-2-y; date +%H:%M', 'feat/gh-2-y', false],
+    // 4. releases and tags.
+    ['git push --tags origin', 'feat/gh-2-y', true, 'trunk'],
+    ['git push --follow-tags origin feat/gh-2-y', 'feat/gh-2-y', true, 'trunk'],
+    ['git push origin v0.40.0', 'feat/gh-2-y', true, 'trunk'],
+    ['git push origin refs/tags/v0.40.0', 'feat/gh-2-y', true, 'trunk'],
+    ['git push origin HEAD:refs/tags/v0.40.0', 'feat/gh-2-y', true, 'trunk'],
     ['gh release create v0.40.0 --notes-file /tmp/notes.md', 'feat/gh-2-y', true],
     ['gh release edit v0.40.0 --title changed', 'feat/gh-2-y', true],
     ['gh release delete v0.40.0 --yes', 'feat/gh-2-y', true],
     ['gh release upload v0.40.0 /tmp/asset.tgz', 'feat/gh-2-y', true],
     ['gh release view v0.40.0', 'feat/gh-2-y', false],
     ['gh release list', 'feat/gh-2-y', false],
-    // gh api: merge/protection mutations blocked, reads pass
-    ['gh api repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/pulls/42/mer\\\nge -X PUT', 'feat/gh-2-y', true],
-    ["gh api repos/o/r/pulls/42/$'m\\x65rge' -X PUT", 'feat/gh-2-y', true],
-    ['gh api repos/o/r/merges -f base=main -f head=feat/gh-2-y', 'feat/gh-2-y', true],
-    // commit statuses: hand-posting forges verdict evidence; reads pass
-    [`gh api repos/o/r/statuses/${'a'.repeat(40)} -f state=success -f context=agentic/gate`, 'feat/gh-2-y', true],
-    [`gh api repos/o/r/statuses/${'a'.repeat(40)} --method POST --input /tmp/s.json`, 'feat/gh-2-y', true],
-    [`gh api repos/o/r/commits/${'a'.repeat(40)}/status`, 'feat/gh-2-y', false],
-    [`gh api repos/o/r/commits/${'a'.repeat(40)}/statuses`, 'feat/gh-2-y', false],
-    ["gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"})}'", 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'", 'feat/gh-2-y', true],
-    ['gh api graphql --input /tmp/merge.json', 'feat/gh-2-y', true],
-    ['gh api graphql --input=/tmp/merge.json', 'feat/gh-2-y', true],
-    ['gh api graphql -Fquery=@/tmp/merge.graphql', 'feat/gh-2-y', true],
-    ['gh api --input /tmp/merge.json graphql', 'feat/gh-2-y', true],
-    ['gh api --input=/tmp/merge.json graphql', 'feat/gh-2-y', true],
-    ['gh api -Fquery=@/tmp/merge.graphql graphql', 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:\"x\"})}'", 'feat/gh-2-y', false],
-    ["gh api graphql -f query='mutation{markPullRequestReadyForReview(input:{pullRequestId:\"x\"}){pullRequest{id}}}'", 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{addLabelsToLabelable(input:{labelableId:\"I_x\",labelIds:[\"LA_x\"]}){clientMutationId}}'", 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{updateIssue(input:{id:\"I_x\",labelIds:[\"LA_x\"]}){issue{id}}}'", 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{updateIssue(input:{id:\"I_x\",title:\"x\"}){issue{labels{nodes{id}}}}}'", 'feat/gh-2-y', false],
-    ["gh api graphql -f query='mutation{updateLabel(input:{id:\"LA_x\",name:\"loop-delivered\"}){label{id}}}'", 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{updateLabel(input:{id:\"LA_x\",name:\"loop-ready\"}){label{id}}}'", 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{updateLabel(input:{id:\"LA_x\",name:\"loop\\u002ddelivered\"}){label{id}}}'", 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation($name:String!){updateLabel(input:{id:\"LA_x\",name:$name}){label{id}}}' -Fname=@/tmp/name.txt", 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{createLabel(input:{repositoryId:\"R_x\",name:\"loop-ready\",color:\"fff\"}){label{id}}}'", 'feat/gh-2-y', true],
-    ["gh api graphql -f query='mutation{updateLabel(input:{id:\"LA_x\",name:\"ordinary\"}){label{id}}}'", 'feat/gh-2-y', false],
-    ["gh api graphql -f query='mutation{clearLabelsFromLabelable(input:{labelableId:\"I_x\"}){clientMutationId}}'", 'feat/gh-2-y', false],
-    ['gh api repos/o/r/issues/7/labels -X POST --input /tmp/labels.json', 'feat/gh-2-y', true],
-    ['gh api /repos/o/r/issues/7/labels -X POST --input /tmp/labels.json', 'feat/gh-2-y', true],
-    ['gh api https://api.github.com/repos/o/r/issues/7/labels -X POST --input /tmp/labels.json', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/issues/7/labels?per_page=100 -X POST --input /tmp/labels.json', 'feat/gh-2-y', true],
-    ["gh api /repos/o/r/issues/7/labels?per_page=100 --jq '.[].name'", 'feat/gh-2-y', false],
-    ['gh api repos/o/r/issues/7 -X PATCH --input /tmp/issue.json', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/issues/7 -X PATCH -f labels[]=loop-delivered', 'feat/gh-2-y', true],
-    ["gh api repos/o/r/issues/7 -X PATCH -F 'labels[]=@/tmp/label.txt'", 'feat/gh-2-y', true],
-    ["gh api repos/o/r/issues/7 -X PATCH --field 'labels=@/tmp/labels.json'", 'feat/gh-2-y', true],
-    ['gh api repos/o/r/issues/7 -X PATCH -Flabels[]=@/tmp/label.txt', 'feat/gh-2-y', true],
-    ["gh api /repos/o/r/issues/7 -X PATCH -F 'labels[]=@/tmp/label.txt'", 'feat/gh-2-y', true],
-    ["gh api https://api.github.com/repos/o/r/issues/7 -X PATCH --field 'labels=@/tmp/labels.json'", 'feat/gh-2-y', true],
-    ['gh api repos/o/r/issues/7?state=open -X PATCH -Flabels[]=@/tmp/label.txt', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/issues/7/labels/loop-delivered -X DELETE', 'feat/gh-2-y', false],
-    ['gh api repos/o/r/labels/old-name -X PATCH -f new_name=loop-delivered', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/labels/old-name -X PATCH -f new_name=loop-ready', 'feat/gh-2-y', true],
-    ['gh api /repos/o/r/labels/old%20name -X PATCH -f new_name=loop-delivered', 'feat/gh-2-y', true],
-    ['gh api %72epos/o/r/labels/old-name -X PATCH -Fnew_name=@/tmp/name.txt', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/labels/old-name?locale=en -X PATCH -f new_name=loop-delivered', 'feat/gh-2-y', true],
-    ['gh api https://api.github.com/repos/o/r/labels/old-name -X PATCH -f new_name=loop-delivered', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/labels/old-name -X PATCH -f color=ffffff', 'feat/gh-2-y', false],
-    ['gh api repos/o/r/labels -X POST -f name=loop-ready -f color=ffffff', 'feat/gh-2-y', true],
-    ['gh api repos/o/r/labels -X POST -f name=ordinary -f color=ffffff', 'feat/gh-2-y', false],
     ['gh api repos/o/r/releases -X POST --input /tmp/release.json', 'feat/gh-2-y', true],
     ['gh api repos/o/r/releases/7 -X PATCH --input /tmp/release.json', 'feat/gh-2-y', true],
     ['gh api repos/o/r/releases/7 -X DELETE', 'feat/gh-2-y', true],
     ['gh api repos/o/r/releases/7/assets -X POST --input /tmp/asset.json', 'feat/gh-2-y', true],
     ['gh api repos/o/r/releases/assets/9 -X DELETE', 'feat/gh-2-y', true],
     ['gh api repos/o/r/git/refs -X POST -f ref=refs/tags/v0.40.0 -f sha=abc', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/releases', 'feat/gh-2-y', false],
+    // 1 and 5 through gh api: merge, status, protection mutations; reads pass.
+    ['gh api repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true],
+    ['gh api repos/o/r/pulls/42/mer\\\nge -X PUT', 'feat/gh-2-y', true],
+    ["gh api repos/o/r/pulls/42/$'m\\x65rge' -X PUT", 'feat/gh-2-y', true],
+    ['gh api repos/o/r/merges -f base=main -f head=feat/gh-2-y', 'feat/gh-2-y', true],
+    ['gh api /repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true],
+    ['gh api https://api.github.com/repos/o/r/pulls/42/merge -X PUT', 'feat/gh-2-y', true],
+    [`gh api repos/o/r/statuses/${'a'.repeat(40)} -f state=success -f context=agentic/gate`, 'feat/gh-2-y', true],
+    [`gh api repos/o/r/statuses/${'a'.repeat(40)} --method POST --input /tmp/s.json`, 'feat/gh-2-y', true],
+    [`gh api repos/o/r/commits/${'a'.repeat(40)}/status`, 'feat/gh-2-y', false],
+    [`gh api repos/o/r/commits/${'a'.repeat(40)}/statuses`, 'feat/gh-2-y', false],
+    ["gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"})}'", 'feat/gh-2-y', true],
+    ["gh api graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'", 'feat/gh-2-y', true],
+    ["gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:\"x\"})}'", 'feat/gh-2-y', false],
     ['gh api repos/o/r/branches/main/protection -X DELETE', 'main', true],
     ['gh api repos/o/r/branches/main/protection -XDELETE', 'main', true],
     ['gh api repos/o/r/branches/main/protection -f enforce_admins=false', 'main', true],
@@ -3555,200 +1490,78 @@ function selfTest() {
     ['gh api repos/o/r/rulesets/123 -X PATCH -f enforcement=disabled', 'main', true],
     ["gh api graphql -f query='mutation{deleteRepositoryRuleset(input:{repositoryRulesetId:\"x\"}){clientMutationId}}'", 'main', true],
     ["gh api repos/o/r/branches/main/protection --jq '.enforce_admins.enabled'", 'main', false],
+    ['gh api repos/o/r/rulesets', 'main', false],
     ["gh api repos/o/r/issues/5/timeline --jq '.[]'", 'main', false],
     ['gh api repos/o/r/collaborators/alice/permission --jq .role_name', 'main', false],
+    ['gh api repos/o/r/issues/7 -X PATCH -f title=x', 'feat/gh-2-y', false],
+    // 6. secret paths staged; source and messages pass.
+    ['git add .env', 'feat/gh-2-y', true],
+    ['git add .env.local src/app.mjs', 'feat/gh-2-y', true],
+    ['git add config/.env.production', 'feat/gh-2-y', true],
+    ['git add certs/server.pem', 'feat/gh-2-y', true],
+    ['git add id_rsa.key', 'feat/gh-2-y', true],
+    ['git add keys/deploy', 'feat/gh-2-y', true],
+    ['git add config/credentials.yml', 'feat/gh-2-y', true],
+    ['git add secrets/api.json', 'feat/gh-2-y', true],
+    ['git add github-token.txt', 'feat/gh-2-y', true],
+    ['git add -- .env', 'feat/gh-2-y', true],
+    ['git commit -a .env -m x', 'feat/gh-2-y', true],
+    ['git commit -m "x" .env', 'feat/gh-2-y', true],
+    ['git commit -m "x" -- secrets/api.json', 'feat/gh-2-y', true],
+    ['git add -A && git commit -m "x" -- .env', 'feat/gh-2-y', true],
+    ['git add src/app.mjs', 'feat/gh-2-y', false],
+    ['git add .', 'feat/gh-2-y', false],
+    ['git add -A', 'feat/gh-2-y', false],
+    ['git add src/tokenizer.ts lib/environment.mjs', 'feat/gh-2-y', false],
+    ['git commit -m "rotate the deploy token in secrets/"', 'feat/gh-2-y', false],
+    ['git commit -a -m "fix: read .env at boot"', 'feat/gh-2-y', false],
+    ['git commit -F - <<\'MSG\'\nfeat: .env loader\nMSG', 'feat/gh-2-y', false],
+    ['cat .env', 'feat/gh-2-y', false],
+    ['git diff -- .env', 'feat/gh-2-y', false],
+    ['git rm --cached .env', 'feat/gh-2-y', false],
+    // 7. the co-author trailer.
+    ['git commit -m "fix: y" -m "Co-Authored-By: Claude <n@a.com>"', 'feat/gh-2-y', true],
+    ['git commit -F - <<\'MSG\'\nfix: y\n\nCo-Authored-By: Claude <n@a.com>\nMSG', 'feat/gh-2-y', true],
+    ['rg -n Co-Authored-By docs', 'feat/gh-2-y', false],
     // heredoc body quoting a forbidden command must NOT trip the guard
     ['cat <<\'EOF\' > /tmp/x\ngh pr merge 42\nEOF', 'main', false],
     ['git commit -F - <<\'MSG\'\nfeat: x\nMSG', 'feat/gh-2-y', false],
-    ['bash <<\'EOF\'\ngh pr merge 42\nEOF', 'feat/gh-2-y', true],
-    ['sh <<\'EOF\'\ngit push origin HEAD:trunk\nEOF', 'feat/gh-2-y', true, 'trunk'],
-    ['source /dev/stdin <<\'EOF\'\ngh pr ready 42\nEOF', 'feat/gh-2-y', true],
-    ['. /dev/stdin <<\'EOF\'\ngh issue edit 7 --add-label loop-delivered\nEOF', 'feat/gh-2-y', true],
-    ['source /dev/stdin \\\n<<\'EOF\'\ngh pr ready 42\nEOF', 'feat/gh-2-y', true],
-    ['bash \\\n<<\'EOF\'\ngh pr ready 42\nEOF', 'feat/gh-2-y', true],
-    ["printf '\\x67\\x68 pr ready 42\\n' | source /dev/stdin", 'feat/gh-2-y', true],
-    ['. /dev/fd/0 < /tmp/opaque.sh', 'feat/gh-2-y', true],
-    ['source scripts/reviewed.sh', 'feat/gh-2-y', false],
-    // 0.50.0 guard-friction: the guard refuses only what can hide a git/gh
-    // mutation. 128 live refusals were mostly harmless reads — ~29 command
-    // substitutions, ~21 `$?`, ~13 inline awk.
-    // Special parameters are numbers: inert wherever they sit.
+    ["git commit -q -F - <<'EOF'\nmsg with `m` backticks\nEOF", 'feat/gh-1-x', false],
+    ["git add -A && git commit -q -F - <<'EOF' && git log --oneline -1\nmsg `x` and $(pwd) literal\nEOF", 'feat/gh-1-x', false],
+    // The heredoc tail: text after `<<EOF` on its line is command text, for
+    // every rule (it hid `gh pr merge` before this fix).
+    ['cat <<EOF && gh pr merge 5 --squash\nx\nEOF', 'feat/x', true],
+    ["echo '<<EOF'\ngh pr merge 5 --squash\nEOF", 'feat/x', true],
+    ['# <<EOF\ngh pr merge 5 --squash\nEOF', 'feat/x', true],
+    ["echo x # it's\ngh pr merge 5 --squash", 'feat/x', true],
+    // 0.50.0 guard-friction: special parameters and substitutions are reads.
     ['git status --short; echo "exit=$?"', 'feat/gh-1-x', false],
     ['kill $!', 'feat/gh-1-x', false],
     ['echo "pid $$ args $#"', 'feat/gh-1-x', false],
-    // A substitution whose body passes, in argument position, outside git/gh.
     ['sed -n "$(rg -n \'private function credentials(\' a.php | cut -d: -f1),+40p" a.php', 'feat/gh-1-x', false],
     ['echo "count: $(wc -l < a.txt)"', 'feat/gh-1-x', false],
     ['for f in docs/*.md; do wc -l "$f"; done', 'feat/gh-1-x', false],
     ['ls "$HOME/.claude"', 'feat/gh-1-x', false],
     ['echo "files: `ls | wc -l`"', 'feat/gh-1-x', false],
-    // Read-only git takes a substituted argument after its literal subcommand.
     ['git diff --stat $(git merge-base HEAD origin/main) -- src', 'feat/gh-1-x', false],
     ['git log --oneline "$(git merge-base HEAD origin/main)..HEAD"', 'feat/gh-1-x', false],
-    // Everything that can hide a mutation stays refused.
-    ['$(echo git) push origin feat/gh-1-x', 'feat/gh-1-x', true],
-    ['x=$(cat f); $x', 'feat/gh-1-x', true],
-    ['sudo $(cat cmd)', 'feat/gh-1-x', true],
-    ['find . -exec $(cat c) {} +', 'feat/gh-1-x', true],
-    ['git push origin $(git branch --show-current)', 'feat/gh-1-x', true],
-    ['git -C $(pwd) log --oneline', 'feat/gh-1-x', true],
-    ['GIT_DIR=$X git log', 'feat/gh-1-x', true],
-    ['export GIT_DIR=$(mktemp -d); ls', 'feat/gh-1-x', true],
-    ['cd "$(git rev-parse --show-toplevel)" && git push origin feat/gh-1-x', 'feat/gh-1-x', true],
-    ['gh issue edit 5 --add-label "$(cat label.txt)"', 'feat/gh-1-x', true],
+    ["echo '$?' $(git push origin HEAD:main)", 'feat/gh-1-x', true],
     ['echo $(git push origin HEAD:main)', 'feat/gh-1-x', true],
-    ['eval "$(cat script.sh)"', 'feat/gh-1-x', true],
-    ['trap "$(cat hook)" EXIT', 'feat/gh-1-x', true],
-    ['node "$(cat path.txt)"', 'feat/gh-1-x', true],
-    ['diff <(git show a:f) <(git show b:f)', 'feat/gh-1-x', true],
-    ['echo "${X:-$(cat f)}"', 'feat/gh-1-x', true],
-    ['echo "$@"', 'feat/gh-1-x', true],
-    // awk is refused only when its program can run a command.
     ["awk '/^## Lessons/,0' docs/agentic/STATE.md", 'feat/gh-1-x', false],
-    ["awk '{s+=$1} END {print s}' nums.txt", 'feat/gh-1-x', false],
-    ["awk -F: 'NR==1 || /x/ {print $2}' f", 'feat/gh-1-x', false],
-    ["awk '{ print | \"sh\" }' f", 'feat/gh-1-x', true],
-    ["awk '{ \"date\" | getline d; print d }' f", 'feat/gh-1-x', true],
-    ["awk '@include \"x.awk\"' f", 'feat/gh-1-x', true],
-    ["awk 'BEGIN { system(\"true\") }'", 'feat/gh-1-x', true],
+    ['node --version', 'feat/gh-1-x', false],
+    ['echo probe && gh auth status && node --version', 'feat/gh-1-x', false],
   ];
   let ok = true;
   for (const [cmd, branch, expect, baseBranch, extra] of cases) {
     const got = evaluate(cmd, branch, { baseBranch, ...(extra ?? {}) }).block;
     if (got !== expect) {
-      console.error(`FAIL [expect block=${expect}, got ${got}]: ${cmd.split('\n')[0]}`);
+      console.error(`FAIL [expect block=${expect}, got ${got}]: ${cmd.split('\n')[0].slice(0, 100)}`);
       ok = false;
     }
   }
-  // Every refusal must read as policy: a consistent guard identity prefix and a
-  // closing sentence naming the sanctioned alternative, never an error dump.
+  // Every refusal must read as policy: a consistent guard identity prefix and
+  // a closing sentence naming the sanctioned alternative, never an error dump.
   let messageChecks = 0;
-  {
-    messageChecks += 1;
-    // 0.56.0: dispatch-stream.sh double-forks the dispatch into its own
-    // session, so a killed background task leaves it running and its result
-    // lands (verified live 2026-09-29: TaskStop mid-run, the Haiku dispatch
-    // finished ok in 36 s, --wait-file collected it). Only a bare dispatch.mjs
-    // dies with its task.
-    const dispatchBg = backgroundDispatchProblem(
-      'node /x/tools/agentic/dispatch.mjs --role implement --prompt-file /tmp/p.md --json',
-      true,
-    );
-    const launchCases =
-      typeof dispatchBg === 'string'
-      && dispatchBg.startsWith('autoloop guard — ')
-      && dispatchBg.includes('dispatch-stream.sh')
-      && dispatchBg.trimEnd().endsWith('.')
-      && backgroundDispatchProblem(
-        'bash /x/templates/tools/dispatch-stream.sh /tmp/l.jsonl /tmp/r.json --role code-review --prompt-file /tmp/p.md',
-        true,
-      ) === null
-      // The same command foreground is the remedy, never a refusal.
-      && backgroundDispatchProblem(
-        'bash /x/templates/tools/dispatch-stream.sh /tmp/l.jsonl /tmp/r.json --role plan --prompt-file /tmp/p.md',
-        false,
-      ) === null
-      && backgroundDispatchProblem('docker compose run --rm verify', true) === null
-      && backgroundDispatchProblem('while kill -0 123 2>/dev/null; do sleep 20; done', true) === null
-      && backgroundDispatchProblem('node /x/tools/agentic/dispatch.mjs --self-test', true) === null;
-    if (!launchCases) {
-      console.error('FAIL [background dispatch launch rule]');
-      ok = false;
-    }
-  }
-  {
-    messageChecks += 1;
-    const files = { '/s/answer.md': '\n  /answer yes\nmore', '/s/plain.md': 'resumed\n/answer later' };
-    const read = (path) => {
-      if (!(path in files)) throw new Error('ENOENT');
-      return files[path];
-    };
-    const answerFileCases =
-      commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/answer.md'), read) === 'answer'
-      && commentBodyProblem(shellWords('gh api repos/o/r/issues/7/comments -F body=@/s/answer.md'), read) === 'answer'
-      && commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/plain.md'), read) === null
-      && commentBodyProblem(shellWords('gh issue comment 7 --body-file /s/missing.md'), read) === 'unverifiable'
-      && commentBodyProblem(shellWords('gh issue comment 7 -F=/s/answer.md'), read) === 'answer'
-      && commentBodyProblem(shellWords('gh issue view 7 --comments'), read) === null;
-    if (!answerFileCases) {
-      console.error('FAIL [a body file starting with /answer is refused]');
-      ok = false;
-    }
-    // The body is read where the post runs (a `cd` first is followed), and a
-    // quoted jq filter's `|` is not a pipe; an earlier writer still refuses
-    // (LFE run 2026-09-30: a PR-body PATCH and a run record were refused).
-    {
-      // bodyDir/body.md is evidence; an /answer sits where a `cd` that did
-      // not run, or a physical `..`, would lead a lexical reading astray.
-      const bodyDir = mkdtempSync(join(tmpdir(), 'guard-body-'));
-      writeFileSync(join(bodyDir, 'body.md'), 'evidence\n');
-      mkdirSync(join(bodyDir, 'benign'));
-      writeFileSync(join(bodyDir, 'benign', 'body.md'), '/answer yes\n');
-      mkdirSync(join(bodyDir, 'deep', 'dir'), { recursive: true });
-      writeFileSync(join(bodyDir, 'deep', 'body.md'), '/answer yes\n');
-      symlinkSync(join(bodyDir, 'deep', 'dir'), join(bodyDir, 'link'));
-      const verdict = (command) => evaluate(command, 'feat/gh-1-x', { baseBranch: 'main', cwd: '/' }).block;
-      const post = `gh issue comment 5 --body-file ${bodyDir}/body.md`;
-      const bodyCases = [
-        verdict(`cd ${bodyDir}; gh issue comment 5 --body-file body.md; gh issue view 5 --json state --jq '{state}'`) === false,
-        verdict(`cd ${bodyDir} && gh issue comment 5 --body-file body.md`) === false,
-        verdict(`gh api --method PATCH repos/o/r/pulls/5 -F body=@${bodyDir}/body.md --jq '.body | length'`) === false,
-        verdict(`echo /answer > ${bodyDir}/body.md; ${post}`) === true,
-        verdict(`${post} | tee x`) === true,
-        verdict(`./gen.sh; ${post}`) === true,
-        verdict(`git pull -q; ${post}`) === true,
-        verdict(`gh issue view 5; ${post}`) === false,
-        verdict("gh api repos/o/r/issues/5/comments -f body=$'/answer yes'") === true,
-        verdict("gh api repos/o/r/issues/5/comments -f body=$'\\x2fanswer yes'") === true,
-        verdict('gh api repos/o/r/issues/5/comments -f body=$"/answer yes"') === true,
-        // Second review: a `cd` in a pipe, after `||`, or to `-` may not move
-        // the post; the kernel reads `..` after a symlink physically; and a
-        // path-qualified head, an assignment, `rg --pre` or any git command
-        // (fsmonitor) may rewrite the body first.
-        verdict(`cd ${bodyDir}/benign; cd .. | true; gh issue comment 5 --body-file body.md`) === true,
-        verdict(`cd ${bodyDir}/benign; true || cd ..; gh issue comment 5 --body-file body.md`) === true,
-        verdict(`cd ${bodyDir}/benign; cd -; gh issue comment 5 --body-file body.md`) === true,
-        verdict(`cd ${bodyDir}/link; gh issue comment 5 --body-file ../body.md`) === true,
-        verdict(`gh issue comment 5 --body-file ${bodyDir}/link/../body.md`) === true,
-        verdict(`./cat x; ${post}`) === true,
-        verdict(`X=/true cp a b; ${post}`) === true,
-        verdict(`rg --pre ./gen.sh x .; ${post}`) === true,
-        verdict(`git status; ${post}`) === true,
-      ];
-      rmSync(bodyDir, { recursive: true, force: true });
-      if (bodyCases.includes(false)) {
-        console.error(`FAIL [a comment body is read where the post runs, and only a writer makes it unverifiable]: ${JSON.stringify(bodyCases)}`);
-        ok = false;
-      }
-    }
-  }
-  {
-    messageChecks += 1;
-    const dir = mkdtempSync(join(tmpdir(), 'guard-body-'));
-    try {
-      const plain = join(dir, 'plain.md');
-      const empty = join(dir, 'empty.md');
-      const device = join(dir, 'device.md');
-      const fifo = join(dir, 'fifo.md');
-      writeFileSync(plain, 'resumed\n');
-      writeFileSync(empty, '');
-      symlinkSync('/dev/null', device);
-      const fifoMade = spawnSync('mkfifo', [fifo]).status === 0;
-      const verdict = (path) => evaluate(`gh issue comment 7 --body-file ${path}`, 'feat/gh-2-y', { baseBranch: 'main', cwd: dir }).block;
-      const tildeExpanded = expandHome('~/notes/x.md') === join(homedir(), 'notes/x.md')
-        && expandHome('~') === homedir() && expandHome('a/~/b') === 'a/~/b';
-      const rewritten = evaluate(`cp ${empty} ${plain} && gh issue comment 7 --body-file ${plain}`, 'feat/gh-2-y', { baseBranch: 'main', cwd: dir }).block;
-      const bodyFileCases = !verdict(plain) && !verdict('plain.md')
-        && verdict(empty) && verdict(device) && verdict('/proc/self/fd/0') && rewritten && tildeExpanded
-        && (!fifoMade || verdict(fifo));
-      if (!bodyFileCases) {
-        console.error('FAIL [a body file must be a readable, non-empty regular file]');
-        ok = false;
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
   {
     messageChecks += 1;
     const asked = askUserQuestionProblem(true);
@@ -3766,291 +1579,61 @@ function selfTest() {
     }
   }
   {
-    messageChecks += 1;
-    const offPolicy = cases
+    const reasons = cases
       .filter(([, , expect]) => expect)
-      .map(([cmd, branch, , baseBranch]) => [
-        cmd,
-        evaluate(cmd, branch, { baseBranch }).reason ?? '',
-      ])
-      .filter(([, reason]) =>
-        !reason.startsWith('autoloop guard — ') || !reason.trimEnd().endsWith('.'));
-    for (const [cmd] of offPolicy) {
-      console.error(`FAIL [block reason is not policy-shaped]: ${cmd.split('\n')[0]}`);
-      ok = false;
-    }
+      .map(([cmd, branch, , baseBranch]) => [cmd, evaluate(cmd, branch, { baseBranch }).reason ?? '']);
     messageChecks += 1;
-    const inlineReason = evaluate(
-      "node -e 'console.log(1)'",
-      'feat/gh-1-x',
-    ).reason;
-    const expectedInlineReason =
-      'autoloop guard — inline shell or language-interpreter source is opaque to command '
-      + 'policy. Most inline programs are reading or reshaping data, which a typed tool does '
-      + 'without putting source in an argument: `jq` for JSON — `jq -r <filter> <file>`, '
-      + 'and it accepts many files at once — `rg` to find, `cut -f<n>` for a column, '
-      + '`sort | uniq -c` for a tally. To check a file parses, the interpreter does it '
-      + 'directly: `node --check <file>`, `python3 -m json.tool <file>`. For a real '
-      + 'program, write it to a file and run that.';
-    if (inlineReason !== expectedInlineReason) {
-      console.error('FAIL [inline-interpreter block is the exact policy message]');
-      ok = false;
-    }
-    // 2026-07-29: v0.49.38 wrote ONE remedy for this refusal, from the zsh case
-    // that produced it, so `python3 -c "import json…"` was told to read
-    // ~/.zshrc. An inline program reshapes data; an inline shell interrogates
-    // its config. The remedy must match which was asked.
-    messageChecks += 1;
-    const pyReason = evaluate('python3 -c "import json; print(1)"', 'feat/gh-1-x').reason ?? '';
-    if (
-      !pyReason.includes('`jq` for JSON')
-      || pyReason.includes('~/.zshrc')
-    ) {
-      console.error('FAIL [an inline PROGRAM refusal answers data reshaping, not shell config]');
-      ok = false;
-    }
-    messageChecks += 1;
-    const shReason = evaluate("zsh -ic 'alias | grep x'", 'feat/gh-1-x').reason ?? '';
-    if (
-      !shReason.includes('~/.zshrc')
-      || shReason.includes('`jq` for JSON')
-    ) {
-      console.error('FAIL [an inline SHELL refusal keeps the config-reading remedy]');
-      ok = false;
-    }
-    // 2026-07-29: `zsh -ic 'alias | grep -i <name>; whence -w <name>'` was told to
-    // write a script file to inspect an alias. The remedy must name a command.
-    messageChecks += 1;
-    const shellIntrospection = evaluate(
-      "zsh -ic 'alias | grep -i claudep; whence -w claudep'",
-      'feat/gh-1-x',
-    ).reason ?? '';
-    if (
-      !shellIntrospection.includes('rg -n <name> ~/.zshrc')
-      || !shellIntrospection.includes('zsh -n <file>')
-    ) {
-      console.error('FAIL [an inline-interpreter refusal names a command, not just a file]');
-      ok = false;
-    }
-    // 2026-07-29: `sed -n <range>p f | cat -n | awk '{print $1+<offset>}'` got only
-    // measurement spellings back, none of which reads a region. The awk was undoing
-    // `cat -n` renumbering caused by slicing first; naming the order removes it.
-    messageChecks += 1;
-    const regionAwk = evaluate(
-      "sed -n '160,215p' /home/dev/.zshrc | cat -n | awk '{print $1+159, $0 | \"cat\"}'",
-      'feat/gh-1-x',
-    ).reason ?? '';
-    if (
-      !regionAwk.includes('cat -n <file> | sed -n <first>,<last>p')
-      || !regionAwk.includes('restart at 1')
-    ) {
-      console.error('FAIL [an inline-awk refusal names the numbered-region spelling]');
-      ok = false;
-    }
-    // 2026-07-28: a live refusal read "`$p`, a command substitution cannot be
-    // resolved statically" -- a comma splice that parses as one garbled subject
-    // and hides that TWO things need fixing. Named tokens join as English, and
-    // an over-long list states its remainder rather than truncating silently,
-    // which would send the reader back for a second refusal having already
-    // fixed everything the first one mentioned.
-    messageChecks += 1;
-    const listCases = [
-      [[], ''],
-      [['`$p`'], '`$p`'],
-      [['`$p`', 'a command substitution'], '`$p` and a command substitution'],
-      [['`$p`', '`$q`', 'a command substitution'], '`$p`, `$q` and a command substitution'],
-      [['`$a`', '`$b`', '`$c`', '`$d`'], '`$a`, `$b`, `$c` and 1 more unresolved token'],
-      [['`$a`', '`$b`', '`$c`', '`$d`', '`$e`'], '`$a`, `$b`, `$c` and 2 more unresolved tokens'],
-    ];
-    for (const [tokens, expected] of listCases) {
-      if (nameList(tokens) !== expected) {
-        console.error(`FAIL [named-token list reads as English]: got ${nameList(tokens)}`);
+    for (const [cmd, reason] of reasons) {
+      if (!reason.startsWith('autoloop guard — ') || !reason.trimEnd().endsWith('.')) {
+        console.error(`FAIL [block reason is not policy-shaped]: ${cmd.split('\n')[0]}`);
         ok = false;
       }
     }
+    // SPEC-guard-reduction: each refusal names its rule and one allowed form.
     messageChecks += 1;
-    if (!unresolvedExpansionReason('ls $p $(date)')
-      .startsWith('`$p` and a command substitution cannot be resolved statically')) {
-      console.error('FAIL [two unresolved tokens are joined, not comma-spliced]');
-      ok = false;
-    }
-    // 2026-07-28: a live session lost a round to `ls -d … | xargs -n1 basename`
-    // -- a plain listing -- because the refusal named its category and left the
-    // reader to guess the command. Shape-shaped advice is not advice; each
-    // assembler shape must name the command to run instead.
-    // 2026-07-28: the expansion refusal said "can hide a mutation. Use literal
-    // canonical commands; split discovery and mutation into separate tool
-    // calls." on a read-only `for s in …; do sed …; done` byte count — warning
-    // about a mutation that was not there, silent about the loop variable that
-    // actually blocked. Each shape must name its own token and its own remedy.
-    messageChecks += 1;
-    // 2026-07-29: `for d in kernel field …; do echo "$(wc -l …)"; done` was
-    // refused naming `$d` AND the substitution, with the loop remedy attached —
-    // but the loop expands fine and the substitution is the only blocker, so
-    // the message sent the reader to fix the one part that was never wrong.
-    messageChecks += 1;
-    // 0.50.0: that command is now allowed outright (the substitution body is a
-    // read), so the check moves to one the guard still refuses — the value
-    // reaches `find`, which can run it.
-    const mixedReason = evaluate(
-      'for d in a b; do find "$(wc -l $d)"; done',
-      'feat/gh-1-x',
-    ).reason ?? '';
-    if (
-      mixedReason.includes('`$d`')
-      || mixedReason.includes('loop variable')
-      || !mixedReason.includes('command substitution')
-      || !mixedReason.includes('inner command prints')
-      || !mixedReason.includes('reaches `find`')
-    ) {
-      console.error('FAIL [an expandable loop is not blamed for its body\'s substitution]');
-      ok = false;
-    }
-    // A GLOB list, deliberately: a literal list expands and is judged, so the
-    // loop remedy only has to read well for the loops that stay unresolvable.
-    const loopReason = evaluate(
-      'for s in *.md; do wc -c $s; done',
-      'feat/gh-1-x',
-    ).reason ?? '';
-    if (
-      !loopReason.includes('`$s`')
-      || !loopReason.includes('loop variable')
-      || !loopReason.includes('reviewed program file')
-      || loopReason.includes('hide a mutation')
-    ) {
-      console.error('FAIL [a loop refusal names the loop variable and the loop remedy]');
-      ok = false;
-    }
-    // 2026-07-29: a session wanting the body of one PHP method wrote
-    // `sed -n "$(grep -n '<signature>' f | cut -d: -f1),+40p" f` and the remedy
-    // offered only measurements, when the reader was navigating. A region read
-    // has an exact spelling; name it.
-    // 0.50.0: the region read itself is now allowed; the remedy still has to
-    // read well where a substitution stays refused.
-    messageChecks += 1;
-    const regionReason = evaluate(
-      'git -C "$(grep -n \'private function credentials(\' a.php | cut -d: -f1)" log',
-      'feat/gh-1-x',
-    ).reason ?? '';
-    if (
-      !regionReason.includes('command substitution')
-      || !regionReason.includes('-A<lines>')
-      || !regionReason.includes('offset')
-      || evaluate(
-        'sed -n "$(grep -n \'private function credentials(\' a.php | cut -d: -f1),+40p" a.php',
-        'feat/gh-1-x',
-      ).block
-    ) {
-      console.error('FAIL [a substitution refusal names the region-read spelling]');
-      ok = false;
-    }
-    // 2026-07-29: `for f in <dir>/*.json; do jq -c <filter> "$f"; done` was told to
-    // write one tool call per iteration, when jq takes the glob and needs exactly one.
-    // 0.50.0: a quoted loop variable is one word and jq cannot run it, so that
-    // loop is allowed; the remedy is checked on the unquoted spelling.
-    messageChecks += 1;
-    const fileLoop = evaluate(
-      'for f in .git/autoloop/run/*.json; do jq -c \'{pid}\' $f; done',
-      'feat/gh-1-x',
-    ).reason ?? '';
-    if (
-      !fileLoop.includes('take many paths at once')
-      || !fileLoop.includes('reviewed program file')
-      || evaluate(
-        'for f in .git/autoloop/run/*.json; do jq -c \'{pid}\' "$f"; done',
-        'feat/gh-1-x',
-      ).block
-    ) {
-      console.error('FAIL [a file loop is offered the no-loop multi-path spelling]');
-      ok = false;
-    }
-    // 0.50.0: an exit status is a number and is judged as `0`, so the trailing
-    // echo that used to take the typed front down is simply allowed.
-    messageChecks += 1;
-    if (
-      evaluate('node x.mjs; echo $?', 'feat/gh-1-x').block
-      || evaluate('echo "exit=${?}"', 'feat/gh-1-x').block
-      || !evaluate("echo '$?' $(git push origin HEAD:main)", 'feat/gh-1-x').block
-    ) {
-      console.error('FAIL [an exit status is inert, and it never masks a mutation beside it]');
-      ok = false;
-    }
-    // 2026-08-12: a substitution used only to label a count was answered with the
-    // measuring remedies and no labeling spelling, so the labeled-echo shape kept
-    // coming back.
-    // 0.50.0: that labeled echo is now allowed (the body is a read); the
-    // labeling remedy is checked where a substitution stays refused.
-    messageChecks += 1;
-    const labelReason = evaluate(
-      'find ".test.ts tracked: $(git ls-files \'*.test.ts\' | wc -l)"',
-      'feat/gh-1-x',
-    ).reason ?? '';
-    if (
-      !labelReason.includes('label')
-      || !labelReason.includes('bare')
-      || evaluate(
-        'echo ".test.ts tracked: $(git ls-files \'*.test.ts\' | wc -l)"',
-        'feat/gh-1-x',
-      ).block
-    ) {
-      console.error('FAIL [a label-only substitution is offered the bare-count spelling]');
-      ok = false;
-    }
-    messageChecks += 1;
-    const varReason = evaluate('wc -c $TARGET/x.md', 'feat/gh-1-x').reason ?? '';
-    if (
-      !varReason.includes('`$TARGET`')
-      || !varReason.includes('SAME command')
-      || varReason.includes('loop variable')
-    ) {
-      console.error('FAIL [a bare-variable refusal names the variable and the substitution path]');
-      ok = false;
-    }
-    messageChecks += 1;
-    const fanout = evaluate('ls -d /x/*/ | xargs -n1 basename', 'feat/gh-1-x').reason ?? '';
-    if (!fanout.includes('ls -1 <dir>') || !fanout.includes('reviewed program file')) {
-      console.error('FAIL [fanout refusal names the listing command to use instead]');
-      ok = false;
-    }
-    messageChecks += 1;
-    const awkReason = evaluate("ps aux | awk 'NR==1 {system(\"true\")}'", 'feat/gh-1-x').reason ?? '';
-    // 2026-07-28: a live run was told to author an awk FILE — more ceremony
-    // than the task. A remedy that is absurd for the common case is not a
-    // remedy, so the plainer spellings are named before the file form.
-    if (
-      !awkReason.includes('awk -f <file>')
-      || !awkReason.includes('cut -f<n>')
-    ) {
-      console.error('FAIL [inline-awk refusal names plainer spellings and the file-backed form]');
-      ok = false;
+    for (const [cmd, reason] of reasons) {
+      if (!/^autoloop guard — no [A-Za-z -]+:/u.test(reason) || !/Allowed: `[^`]+`/u.test(reason)) {
+        console.error(`FAIL [a refusal names its rule and one allowed form]: ${cmd.split('\n')[0]}`);
+        ok = false;
+      }
     }
     // LFE #506: no refusal recommends a work-size measurement.
     messageChecks += 1;
-    if ([awkReason, regionReason, labelReason].some((reason) =>
-      /--shortstat|wc -l|insert\/delete|production-line|To measure/u.test(reason))) {
+    if ([...reasons.map(([, reason]) => reason), askUserQuestionProblem(true)].some((reason) =>
+      /--shortstat|wc -l|insert\/delete|production-line|To measure|\d+ (?:bytes|lines|KB)/u.test(reason))) {
       console.error('FAIL [no refusal remedy recommends a work-size measurement]');
       ok = false;
     }
+  }
+  {
+    // 6. the secret-path families, and the words a message or option hides.
     messageChecks += 1;
-    if (fanout === awkReason) {
-      console.error('FAIL [distinct assembler shapes give distinct remedies]');
-      ok = false;
-    }
-    messageChecks += 1;
-    const reviewBack = evaluate(
-      'gh issue edit 339 --remove-label loop:08-code-review --add-label loop:05-implement',
-      'feat/gh-339-x',
-    ).reason ?? '';
-    const planBack = evaluate(
-      'gh issue edit 298 --add-label "loop:02-plan" --remove-label "loop:03-plan-review"',
-      'main',
-    ).reason ?? '';
-    if (!(reviewBack.includes('`loop:08-code-review` → `loop:05-implement`')
-      && reviewBack.includes('keep `loop:08-code-review`')
-      && !reviewBack.includes('claim')
-      && planBack.includes('`loop:03-plan-review` → `loop:02-plan`')
-      && planBack.includes('plan review is ONE dispatch'))) {
-      console.error('FAIL [backward-swap refusal names the caught pair and its own remedy]');
+    const secretCases = [
+      ['.env', true], ['.env.local', true], ['a/b/.env.production', true], ['.environment', true],
+      ['environment.ts', false], ['lib/env.mjs', false],
+      ['server.pem', true], ['x/id.key', true], ['store.p12', true], ['cert.pfx', true], ['app.jks', true], ['java.keystore', true],
+      ['keys/deploy', true], ['x/keys/a', true], ['keys', true], ['monkeys/a', false], ['hotkeys.json', false],
+      ['secrets/a.json', true], ['secret.txt', true], ['config/credentials.yml', true], ['credential-store/x', true],
+      ['token.json', true], ['github_token', true], ['api-tokens.md', true],
+      ['src/tokenizer.ts', false], ['secretary.md', false], ['credentialing.md', false], ['tokens-doc/readme.md', true],
+    ];
+    const wrongFamily = secretCases.filter(([path, expected]) => isSecretPath(path) !== expected);
+    const staged = [
+      ['git add .env', ['.env']],
+      ['git add src/a.mjs .env.local', ['.env.local']],
+      ['git commit -m "touch .env" src/a.mjs', []],
+      ['git commit -m secrets/x src/a.mjs', []],
+      ['git commit --author "token <t@x>" -- .env', ['.env']],
+      ['git add -p .env', ['.env']],
+      ['git add --chmod=+x .env', ['.env']],
+      ['git add --pathspec-from-file .env', []],
+      ['git rm .env', []],
+      ['git status .env', []],
+    ];
+    const wrongStaging = staged.filter(([command, expected]) =>
+      JSON.stringify(stagedSecretPaths(shellWords(command))) !== JSON.stringify(expected));
+    if (wrongFamily.length > 0 || wrongStaging.length > 0) {
+      console.error(`FAIL [a secret path is told apart from source, in git add and git commit]: ${JSON.stringify([wrongFamily, wrongStaging])}`);
       ok = false;
     }
   }
@@ -4132,6 +1715,43 @@ function selfTest() {
       });
       if (merge.status !== 2 || !merge.stderr.includes('autoloop guard')) {
         console.error(`FAIL [an open run keeps the guard on after its config is removed]: ${merge.status} ${merge.stderr}`);
+        ok = false;
+      }
+      // SPEC-guard-reduction: an ordinary command is never refused in the
+      // owning session. Fifty read, test, inspection and loop commands, the
+      // former triggers of the removed rules among them, each through the
+      // hook as the host sends it, on a unit branch.
+      execFileSync('git', ['-C', scratch, 'switch', '-q', '-c', 'feat/gh-1-x']);
+      execFileSync('git', ['-C', scratch, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x']);
+      const ordinary = [
+        'ls', 'ls -la tools', 'cat README.md', 'sed -n 1,40p tools/prime.mjs', 'head -20 CHANGELOG.md',
+        'tail -5 /tmp/log', 'wc -l tools/*.mjs', 'rg -n TODO tools', "rg -n 'import\\s+(os|sys)' tools/",
+        'grep node file', 'grep -rn "gh pr" docs', 'find . -name "*.mjs"', "find . -name '*.mjs' -exec grep -l foo {} +",
+        'for f in a b; do echo $f; done', 'for n in 1 2 3; do gh issue view $n --json title; done',
+        'command -v node', 'which gh', 'echo $?', 'node x.mjs; echo "exit=$?"', 'x=1; echo $x',
+        'D=docs; rg -n autoloop $D/specs', 'eval echo hi', "python3 -c 'print(1)'", "python3 -c 'import json; print(1)'",
+        "node -e 'console.log(1)'", "bash -c 'ls'", "zsh -ic 'alias | grep x'", 'cat <<EOF\nx\nEOF',
+        "git commit -q -F - <<'EOF'\nmsg with `m` backticks\nEOF", 'git log --oneline | head', 'git status', 'git diff',
+        'git diff --stat $(git merge-base HEAD origin/main) -- src', 'git switch -c feat/x', 'git commit -m "x"',
+        'git push --force-with-lease origin feat/gh-1-x', 'git push origin feat/gh-1-x', 'git foo-unknown-subcommand', 'gh foo',
+        'gh pr comment 1 --body "x"', 'gh pr create --title t --body "inline"', 'gh pr ready 1', 'gh pr ready 1 --undo',
+        'gh issue edit 1 --add-label loop-ready', 'gh issue edit 1 --remove-label loop-halt',
+        'gh issue edit 1 --add-label loop:02-plan --remove-label loop:03-plan-review', 'gh issue edit 1 --add-label loop:03-plan-review',
+        'gh issue comment 1 --body "/answer yes"', 'node --test', 'npm test', 'ls -d /x/*/ | xargs -n1 basename',
+        "awk '{ print | \"sh\" }' f", 'diff <(cat a) <(cat b)', 'ls $UNSET_PATH/x', `echo ${'x'.repeat(70 * 1024)}`,
+        'node tools/dispatch.mjs --role plan --prompt-file /tmp/p.md --json',
+      ];
+      const ordinaryEnv = { ...ownedEnv(), CLAUDE_PROJECT_DIR: scratch };
+      const refusedOrdinary = ordinary.filter((command) => {
+        const background = command.includes('dispatch.mjs');
+        const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+          input: JSON.stringify({ session_id: 'S', tool_name: 'Bash', cwd: scratch, tool_input: { command, ...(background ? { run_in_background: true } : {}) } }),
+          encoding: 'utf8', cwd: scratch, timeout: 30000, env: ordinaryEnv,
+        });
+        return result.status !== 0;
+      });
+      if (ordinary.length < 50 || refusedOrdinary.length > 0) {
+        console.error(`FAIL [an ordinary command is never refused in the owning session]: ${refusedOrdinary.length}/${ordinary.length} refused: ${JSON.stringify(refusedOrdinary.map((command) => command.split('\n')[0].slice(0, 60)))}`);
         ok = false;
       }
       // Security re-audit: a legacy install's own prime writes markers with no
@@ -4461,7 +2081,6 @@ function selfTest() {
       writeFileSync(join(scratch, '.autoloop', 'config.json'), JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' } }));
       rmSync(join(markers, 'run.json'), { force: true });
       const primeAndDelete = latchHook(`node ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} --json && rm -rf .git/autoloop/run`, 'session-p');
-      const oversized = latchHook(`echo ${'x'.repeat(MAX_COMMAND_BYTES)}`);
       // Refused by the run-opening rule alone (the script's text is not visible).
       const primeAndScript = latchHook(`node ${join(dirname(fileURLToPath(import.meta.url)), 'prime.mjs')} --json && sh /tmp/x.sh`);
       const stalled = join(scratch, 'stalled');
@@ -4479,10 +2098,10 @@ function selfTest() {
       writeFileSync(join(markers, 'run.json'), JSON.stringify({ version: 1, pids: [process.pid], openedAtMs: Date.now(), baseBranch: 'main' }));
       rmSync(join(scratch, '.autoloop'), { recursive: true, force: true });
       if (primeAndDelete.status !== 2 || primeAndScript.status !== 2 || !primeAndScript.stderr.includes('opens a run')
-        || oversized.status !== 2 || stalledHook.status !== 2 || stalledElapsed > 8000
+        || stalledHook.status !== 2 || stalledElapsed > 8000
         || !stalledHook.stderr.includes('git')) {
-        console.error(`FAIL [prime-then-delete, an oversized command and a stalled git all refuse]: ${JSON.stringify({
-          primeAndDelete: primeAndDelete.status, primeAndScript: primeAndScript.status, oversized: oversized.status, stalled: stalledHook.status, stalledElapsed, stalledErr: stalledHook.stderr.slice(0, 120),
+        console.error(`FAIL [prime-then-delete and a stalled git both refuse]: ${JSON.stringify({
+          primeAndDelete: primeAndDelete.status, primeAndScript: primeAndScript.status, stalled: stalledHook.status, stalledElapsed, stalledErr: stalledHook.stderr.slice(0, 120),
         })}`);
         ok = false;
       }
@@ -4690,26 +2309,6 @@ function selfTest() {
           console.error('FAIL [an unrecognised closedAt counts as closed]');
           ok = false;
         }
-        // LFE, 2026-09-28: `gh issue comment N --body-file <record> && date`
-        // was refused as unverifiable although nothing after a post can change
-        // what it posted. Only a segment that can run before or alongside the
-        // post (an earlier segment, a pipe, a background &) can.
-        const bodyDir = mkdtempSync(join(tmpdir(), 'guard-body-'));
-        const bodyFile = join(bodyDir, 'record.md');
-        writeFileSync(bodyFile, '## record\n');
-        const bodyVerdicts = [
-          [`gh issue comment 350 --body-file ${bodyFile} && date +%H:%M`, false],
-          [`gh issue comment 350 --body-file ${bodyFile}; echo done`, false],
-          [`date +%H:%M && gh issue comment 350 --body-file ${bodyFile}`, true],
-          [`echo /answer > ${bodyFile} && gh issue comment 350 --body-file ${bodyFile}`, true],
-          [`gh issue comment 350 --body-file ${bodyFile} | tee /tmp/x`, true],
-          [`gh issue comment 350 --body-file ${bodyFile} & date`, true],
-        ].map(([command, expected]) => evaluate(command, 'main').block === expected);
-        rmSync(bodyDir, { recursive: true, force: true });
-        if (!bodyVerdicts.every(Boolean)) {
-          console.error(`FAIL [a post can only be rewritten by what runs before or beside it]: ${bodyVerdicts.join(',')}`);
-          ok = false;
-        }
         // LFE, 2026-09-28: markers carried the tmux server's pid, so every
         // session under that server read as the loop's own run in that repo.
         const tree = {
@@ -4912,12 +2511,6 @@ function refuse(reason) {
   process.exit(2);
 }
 
-function oversizedCommand(cmd) {
-  return `autoloop guard — this command is ${Buffer.byteLength(cmd)} bytes, over the ${MAX_COMMAND_BYTES}-byte `
-    + 'limit the guard can check within its time budget. Write long content to a file first '
-    + '(the Write tool) and pass the file.';
-}
-
 // A command that runs the plugin's prime opens a run, so it is checked in
 // every session: prime anywhere but the session's project would leave the
 // hooks guarding the wrong repository (only a hook sees CLAUDE_PROJECT_DIR),
@@ -4930,7 +2523,6 @@ function primeCommandProblems(cmd, cwd, projectRoot, deadline, sessionId) {
   const foreign = foreignPrimeProblem(cmd, cwd, projectRoot, undefined, deadline);
   if (foreign !== null) refuse(foreign);
   if (!opensRun(cmd, cwd)) return;
-  if (Buffer.byteLength(cmd) > MAX_COMMAND_BYTES) refuse(oversizedCommand(cmd));
   if (!guardSegments(cmd).every((segment) => readsOnly(segment.words) || primeSegment(segment.words, cwd))) {
     refuse(
       'autoloop guard — this command opens a run (prime.mjs) and does more than read besides. Run '
@@ -5061,11 +2653,6 @@ function main() {
   }
   primeCommandProblems(cmd, cwd, projectRoot, deadline, sessionId);
 
-  // Parts of the check grow faster than linearly in the command's length
-  // (3.2 s at this cap, measured); twice the longest command recorded across
-  // 26,980 real Bash calls (32 KB) keeps every check inside the budget.
-  if (Buffer.byteLength(cmd) > MAX_COMMAND_BYTES) refuse(oversizedCommand(cmd));
-
   // The run's own state and the guard's own code are off limits.
   const segments = guardSegments(cmd);
   const paths = protectedPaths({ projectRoot, cwd, runOpen: true });
@@ -5089,12 +2676,6 @@ function main() {
     }
   }
   pruneLatches();
-
-  const launchProblem = backgroundDispatchProblem(
-    cmd,
-    payload?.tool_input?.run_in_background,
-  );
-  if (launchProblem !== null) refuse(launchProblem);
 
   // While a plugin run is open its recorded bases are the authority, whatever
   // the checkout now says (a missing, unreadable or different config): the
