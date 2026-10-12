@@ -275,8 +275,7 @@ waits and any identity mismatch blocks.
 Under manual policy, stop after current-head delivery and the pre-merge record.
 
 Only a human matter uses `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE>
---question "<one line>"`: `TRUST_REQUIRED`, `IRREVERSIBLE_ACTION`, `UNSPECIFIED_VALUE`, or
-`POLICY_DENIED` (Dev's Autonomy rules). It records `/answer`, keeps `loop-ready`, and stops that PR.
+--question "<one line>"`: `IRREVERSIBLE_ACTION` or `POLICY_DENIED` (Dev's Autonomy rules). It records `/answer`, keeps `loop-ready`, and stops that PR.
 Tool faults and incomplete evidence are not human decisions. Keep the refusal; fix or decide.
 Never rename a fault to a human reason or clear an existing human gate.
 

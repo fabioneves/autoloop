@@ -83,7 +83,7 @@ with the Setup remedy). Never continue past a failure. Then:
      and the runner still has write. Ignore other identities; fail closed on incomplete role
      evidence.
    - Invalid trusted markers stop **their unit, never the run**. Only a human trust choice uses
-     `unit.mjs --block --reason TRUST_REQUIRED`; name the choice and quote the refusal as `--note`.
+     `unit.mjs --block --reason POLICY_DENIED`; name the choice and quote the refusal as `--note`.
      Other faults are `fix` or `decide`. TERMINAL units: record the defect, no label or post.
      The driver seals unrepairable refusals as `terminal-refused`; the scan drops them.
    - `REVISION_REQUIRED` routes to Pitcrew, not a human block. A is historical; B is unreviewed.
@@ -346,19 +346,18 @@ closing round → take the `REVIEW_CAP_REACHED` decision (carve or re-plan, step
 
 **Blocking never strips `loop-ready`**; it removes `loop-started` and the `loop:*` step label only.
 **The unblock is equally one human action, and equally irreversible by the loop**: a trusted actor
-removing `loop-blocked` is the decision. Never re-block from an old block comment (read it as
-context); the only `loop-blocked` apply is a unit THIS run blocks, with a new reason comment.
+removing `loop-blocked` is the decision. Never re-block from an old block comment; the only
+`loop-blocked` apply is a unit THIS run blocks, with a new reason comment.
 
-**An answered block resumes itself.** Blocks end with `/answer <decision>`; prime lifts a block when a
-trusted actor (write/maintain/admin) posted `/answer` after the marker and prints `resumed: #N
-(@login: <answer>)`; it HOLDS (never lifts) a block with no loop marker or whose marker predates
-the current block (`held:`) — never hand-lift a held unit. The loop
-never writes `/answer`. The answer settles that one question in premise and plan (a plan
-contradicting it is wrong), nothing else.
+**An answered block resumes itself.** Blocks end with `/answer <decision>`; prime lifts a block when
+a trusted actor (write/maintain/admin) posted `/answer` after the marker and prints `resumed: #N
+(@login: <answer>)`; it HOLDS a block with no loop marker or whose marker predates the current
+block (`held:`) — never hand-lift a held unit. The loop never writes `/answer`. The answer settles
+that one question in premise and plan (a plan contradicting it is wrong), nothing else.
 
-Read the unit's `autoloop-decision-v1` and `autoloop-resumed-v1` comments first; a later trusted
-`/answer` reverses a decision — plan from it, never re-take it. Challenge premises against current
-code and STATE:
+`node <plugin-tools>/unit.mjs --decisions --issue <N> --out <path>` lists the unit's decisions
+with any later `/answer` (an answer reverses one; plan from it); its section goes in the plan
+prompt, PR body and run record. Challenge premises against current code and STATE:
 
 - **Already delivered** → `node <plugin-tools>/unit.mjs --obsolete --issue <N> --pr <M>` (or
   `--commit <sha>`, `--note "<line>"`); refused unless merged into / contained in the base; closes
@@ -366,9 +365,9 @@ code and STATE:
 - **Needs another open issue** → `node <plugin-tools>/unit.mjs --wait --issue <N> --on-issue <M>`
   (a machine comment, never a body edit); prime lifts it when #M closes.
 - Otherwise **Autonomy**: `fix` a stale premise in-unit or via `unit.mjs --repair --parent <N>
-  --blocks-parent`; `decide` ambiguity, duplicates of open work, open design choices, or oversized
-  scope with `unit.mjs --decide` before planning (a duplicate of delivered work is `--obsolete`);
-  `human` → `unit.mjs --block`. Never change scope silently.
+  --blocks-parent`; `decide` a gap, a design or scope question, or duplicates of open work with
+  `unit.mjs --decide` before planning (a duplicate of delivered work is `--obsolete`); `human` →
+  `unit.mjs --block`. Never change scope silently.
 
 Take the next unit after obsolete, wait, or block. Open the unit (adds `loop-started` and
 `loop:01-premise`):
@@ -870,21 +869,22 @@ a contract module directly.
 
 Every obstacle is exactly one class; only `human` stops the unit:
 
-- **`human`** — trust/authorization (`TRUST_REQUIRED`), irreversible acts (`IRREVERSIBLE_ACTION`),
-  an actual denial (`POLICY_DENIED`), or an unstated product/contract value with no better choice
-  (`UNSPECIFIED_VALUE`). Trust includes merge, credentials, protected paths, branch protection,
-  and `loop-ready`; irreversible acts include data/history destruction.
+- **`human`** — an authorization only a human gives: an irreversible external act
+  (`IRREVERSIBLE_ACTION`: production write, provisioning, message sent, data/history destruction)
+  or a denial (`POLICY_DENIED`: a secret, a dependency install, a permission — merge, credentials,
+  protected paths, branch protection, `loop-ready` — or a STATE exception).
   `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question "<one line>"`
   (`--gate human:authorize` for protected paths) records `/answer`, swaps labels, and keeps
-  `loop-ready`. Unknown codes are refused; never rename a tool fault to a human reason.
+  `loop-ready`. Other codes are refused; a specification gap is a `decide`, never a block.
 - **`fix`** — code, tests, docs, CI config, a dependency, or a correctable premise. In the unit's
   lane fix it in-unit; otherwise `node <plugin-tools>/unit.mjs --repair --parent <N> --title "<…>"
   --body-file <path>` (`--blocks-parent` when the unit needs it) and take it next, or carry on if
   the unit does not depend on it.
-- **`decide`** — a judgment call with a recommendable option (ambiguity, scope correction, design
-  choice, oversized work, a Critical open at the cap). Record it FIRST with
-  `node <plugin-tools>/unit.mjs --decide --issue <N> --choice "<…>" --why "<evidence>" --alternatives
-  "<a>; <b>"`, then continue. A human reverses one with `/answer <what instead>`; never re-take it.
+- **`decide`** — a judgment call with a recommendable option: an issue/spec contradiction, a
+  missing value the loop can choose, a design, ratification or scope question, oversized work, a
+  Critical open at the cap. Record it FIRST with
+  `node <plugin-tools>/unit.mjs --decide --issue <N> --question "<one line>" --choice "<…>" --why
+  "<evidence>" --alternatives "<a>; <b>"`, then continue. A human reverses one with `/answer`.
 
 The `human` list is closed: anything else (an unexplained refusal, an unnamed state, a loop defect)
 is `fix` or `decide` — never "when unsure, block". Never take a `decide` touching a `human` matter;

@@ -125,7 +125,9 @@ export function projectParked({ records, snapshot = null, repository = null, now
     const seen = lastSeen(step, pending);
     const kept = latest.get(record.issue);
     if (kept && (kept.lastSeenAtMs ?? -Infinity) >= (seen ?? -Infinity)) continue;
-    latest.set(record.issue, { issue: record.issue, ...step, attempt: stepAttempt(record.steps), lastSeenAtMs: seen, pending });
+    // Decisions the loop took on the unit (unit.mjs --decide), counted on the record.
+    const decisions = Number.isSafeInteger(record.decisions) && record.decisions > 0 ? record.decisions : 0;
+    latest.set(record.issue, { issue: record.issue, ...step, attempt: stepAttempt(record.steps), lastSeenAtMs: seen, pending, decisions });
   }
   const units = [...latest.values()].sort((left, right) => left.issue - right.issue).map((unit) => {
     const delivered = unit.pending !== null && !(unit.startedAtMs > unit.pending.atMs);
@@ -243,6 +245,8 @@ function selfTest() {
       deepFreeze({ issue: 532, steps: [{ step: '05-implement', startedAtMs: at(12, 9, 0) }],
         closed: { outcome: 'shipped', atMs: at(12, 9, 30) } }),
       record(533, { step: '05-implement', model: 'claude-opus-5-5', startedAtMs: at(12, 9, 0) }),
+      deepFreeze({ issue: 534, decisions: 2, steps: [{ step: '02-plan', startedAtMs: at(12, 9, 0) }] }),
+      deepFreeze({ issue: 535, decisions: 'two', steps: [{ step: '02-plan', startedAtMs: at(12, 9, 0) }] }),
     ],
   });
   const duplicated = project({
@@ -341,7 +345,11 @@ function selfTest() {
       unit(visible, 530)?.local === 'earlier-run' && unit(visible, 530)?.round === '1/5'
         && unit(visible, 531)?.local === 'mark' && unit(visible, 531)?.step === '11-record'
         && unit(visible, 532) === null
-        && JSON.stringify(visible.units.map((entry) => entry.issue)) === '[530,531,533]'],
+        && JSON.stringify(visible.units.map((entry) => entry.issue)) === '[530,531,533,534,535]'],
+    // Flow release: a decision the loop took (unit.mjs --decide) is counted on
+    // the record; the card shows the count, and a malformed count reads as none.
+    ['a unit carries its recorded decision count; none or a malformed count is zero',
+      unit(visible, 534)?.decisions === 2 && unit(visible, 533)?.decisions === 0 && unit(visible, 535)?.decisions === 0],
     ['one entry per unit, and a blocked unit is not repeated as a human wait',
       JSON.stringify(duplicated?.units?.map((entry) => entry.issue)) === '[501,502,503,504,533]'
         && unit(duplicated, 501)?.lastSeenAtMs === at(11, 8, 0)

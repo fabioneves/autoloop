@@ -199,8 +199,8 @@ function selfTest() {
     ['gh issue edit 4 --add-label loop-blocked', /KEEP `loop-ready`/],
     ['gh issue edit 4 --add-label loop-blocked', /reversed a human unblock/],
     ['gh issue edit 293 --add-label loop-blocked,human:decide', /unlabeled` events after the block comment/],
-    ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /--outcome human/],
-    ['node tools/agentic/unit.mjs --block --issue 12 --reason UNSPECIFIED_VALUE --question "q?"', /PushNotification `✖ #12/],
+    ['node tools/agentic/unit.mjs --block --issue 12 --reason POLICY_DENIED --question "q?"', /--outcome human/],
+    ['node tools/agentic/unit.mjs --block --issue 12 --reason POLICY_DENIED --question "q?"', /PushNotification `✖ #12/],
     ['node tools/agentic/unit.mjs --decide --issue 12 --choice c --why w', null],
     // The run frame rides prime; the terminal riders ride terminal-finalize,
     // whose label mutations never pass through gh edit.

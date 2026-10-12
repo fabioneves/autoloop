@@ -38,6 +38,27 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // fails the audit, which is the point.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'premise-blocks-waited-on-decisions-the-loop-can-take',
+    date: '2026-10-12',
+    symptom: 'On one project 33 units blocked at premise for a human decision, ten of them in one '
+      + 'hour on a batch of decision-shaped issues; most were specification gaps on issues written '
+      + 'weeks before they were built.',
+    cause: 'The planner read a contradiction between an issue and the specification as '
+      + 'TRUST_REQUIRED or UNSPECIFIED_VALUE and blocked. The briefs asked for a named human question, '
+      + 'and no record made the loop\'s own decisions visible in the pull request.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'unit.mjs', anchor: 'is refused as retired, names --decide, and makes no GitHub call' }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a decision marker without a question (before 0.69.0) still parses'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'the PR body section lists every decision under ## Decisions with its link, and is empty without decisions'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a resumed block whose reason is now retired is listed as decided by the /answer that lifted it'" }),
+      Object.freeze({ file: 'step.mjs', anchor: 'decisions when it has any, and says nothing when it has none' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: "'a unit carries its recorded decision count; none or a malformed count is zero'" }),
+      Object.freeze({ file: 'briefs/plan.md', anchor: 'Do not request ratification or approval' }),
+      Object.freeze({ file: 'briefs/plan-review.md', anchor: 'A decision is never a finding because no human approved it.' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'a specification gap is a `decide`, never a block' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'decisions-invented-work-size-quotas-and-compressed-a-plan',
     date: '2026-10-12',
     symptom: 'LFE #506: decisions invented a 16000-character plan cap and a six-path, 987-line '

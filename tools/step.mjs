@@ -25,7 +25,7 @@ import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, issueSnapshotItem, SNAPSHOT_SECTIONS,
   verifySnapshot,
 } from './snapshot-contract.mjs';
-import { realRun } from './unit.mjs';
+import { noteDecisionOnStep, realRun } from './unit.mjs';
 import { parseGitHubRemote } from './checkout-contract.mjs';
 import { mergeCaption, projectParked, stepAttempt } from './parked-disposition.mjs';
 import { resolveProjectConfig } from './config-contract.mjs';
@@ -284,7 +284,8 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
         return { ok: false, changed: false, lines: [`step: #${issue} is closed as ${stored.closed.outcome}; a delivered card cannot reopen it`] };
       }
       const record = stored ?? { issue, steps: [] };
-      const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, question, policy, reason });
+      const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, question, policy, reason,
+        decisions: Number.isSafeInteger(record.decisions) ? record.decisions : 0 });
       if (outcome === 'delivered') {
         const since = record.pending?.pr === pr && Number.isFinite(record.pending.atMs) ? record.pending.atMs : nowMs;
         delete record.closed;
@@ -413,8 +414,13 @@ function stepTimes(steps, nowMs) {
   return { times, rounds, round };
 }
 
+// The decisions the loop took on a unit, for a card or a parked line.
+function decisionsFact(decisions) {
+  return Number.isSafeInteger(decisions) && decisions > 0 ? [`${decisions} decision${decisions === 1 ? '' : 's'}`] : [];
+}
+
 // The time-only closing card, one per unit.
-export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null, question = '', policy = null, reason = '' }) {
+export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null, question = '', policy = null, reason = '', decisions = 0 }) {
   const head = (OUTCOMES[outcome] ?? `${outcome} #{n}`).replace('{n}', String(issue)).replace('{merge}', mergeCaption(policy));
   const { times, rounds, round } = stepTimes(steps, nowMs);
   const longest = Math.max(1, ...times.values());
@@ -427,6 +433,7 @@ export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null
   const total = minutes(nowMs - (steps[0]?.startedAtMs ?? nowMs));
   const facts = [total,
     ...(rounds > 0 ? [`${rounds} round${rounds === 1 ? '' : 's'}`] : []),
+    ...decisionsFact(decisions),
     ...(Number.isFinite(pr) ? [`PR #${pr}`] : [])];
   return [
     `╭─ ${head}${title ? ` · ${oneLine(title, 70)}` : ''}`,
@@ -446,7 +453,7 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
   return [
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
     ...units.map((unit) => {
-      const local = parkedLocal(unit, nowMs);
+      const local = [parkedLocal(unit, nowMs), ...decisionsFact(unit.decisions)].join(' · ');
       const note = dispositionNote(unit, nowMs);
       return note ? `├ #${unit.issue} · ${note.join(' ')} · local ${local}` : `├ #${unit.issue} · ${local}`;
     }),
@@ -908,11 +915,12 @@ function selfTest() {
   ];
   const card = safely(() => renderCard({
     issue: 350, title: 'Axis B playback state machine', outcome: 'delivered', steps: history,
-    nowMs: start + 77 * minute, pr: 550, lines: 393, policy: 'manual',
+    nowMs: start + 77 * minute, pr: 550, lines: 393, policy: 'manual', decisions: 2,
   }));
   checks.push(
     // LFE #506: a card names time, rounds and PR, never a changed-line total, even when a caller passes one.
-    ['a closing card shows each step\'s time with bars scaled to the longest, rounds folded into review',
+    // Flow release: the card counts the decisions the loop took (unit.mjs --decide).
+    ['a closing card shows each step\'s time with bars scaled to the longest, rounds folded into review, and its decisions',
       card === [
         '╭─ ⚠️ #350 DELIVERED · awaits human merge · Axis B playback state machine',
         '│  🧭 premise         1m  ▰',
@@ -921,8 +929,20 @@ function selfTest() {
         '│  🧹 simplify        6m  ▰▰',
         '│  🔍 code-review    42m  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰  r2/5',
         '│  🚦 gate            9m  ▰▰▰',
-        '╰─ 1h 17m · 2 rounds · PR #550',
-      ].join('\n')],
+        '╰─ 1h 17m · 2 rounds · 2 decisions · PR #550',
+      ].join('\n')
+      && safely(() => renderCard({ issue: 351, outcome: 'shipped', steps: history.slice(0, 1), nowMs: start + minute, decisions: 0 })).endsWith('╰─ 1m')
+      && safely(() => renderCard({ issue: 351, outcome: 'shipped', steps: history.slice(0, 1), nowMs: start + minute, decisions: 1 })).endsWith('╰─ 1m · 1 decision')],
+    ['a parked line counts the unit\'s decisions when it has any, and says nothing when it has none',
+      safely(() => renderParked({
+        nowMs: at(10, 30), eligible: 5, units: [
+          { issue: 398, step: '08-code-review', model: 'gpt-6-astra', round: '2/20', startedAtMs: at(10, 29), decisions: 2 },
+          { issue: 427, step: '02-plan', model: 'gpt-6-astra', startedAtMs: at(10, 20), decisions: 1 },
+          { issue: 430, step: '07-diff-review', model: 'gpt-6-astra', startedAtMs: at(10, 25), decisions: 0 },
+          { issue: 431, step: '07-diff-review', model: 'gpt-6-astra', startedAtMs: at(10, 25) },
+        ],
+      }).split('\n').slice(1, 5).join('|')) === '├ #398 · 08 code-review r2 on 🟢 ASTRA 6 · 1m · 2 decisions|'
+        + '├ #427 · 02 plan on 🟢 ASTRA 6 · 10m · 1 decision|├ #430 · 07 diff-review on 🟢 ASTRA 6 · 5m|├ #431 · 07 diff-review on 🟢 ASTRA 6 · 5m'],
     ['a blocked card ends on its question', (() => {
       const blocked = safely(() => renderCard({
         issue: 349, outcome: 'human', steps: history.slice(0, 1), nowMs: start + minute,
@@ -1201,6 +1221,18 @@ function transitionChecks(at) {
         && scoped[1].includes('├ #350 · 08 fix r1 on 🟠 OPUS 5.5')
         && scoped[2].includes('- #350 at 08 fix r1/5 last seen 09:51 (earlier run)')
         && !scoped[2].includes('#350 at 08 fix r1/5 on')]);
+    // Flow release: a decision recorded by unit.mjs --decide reaches the
+    // parked line and the closing card from the unit's record.
+    const decided = (() => {
+      try {
+        const noted = noteDecisionOnStep({ commonDir: join(root, '.git'), issue: 350 });
+        return { noted, view: parkedView({ root, run, nowMs: at(10, 30) }) };
+      } catch (error) {
+        return { noted: false, view: `THREW ${error.message}` };
+      }
+    })();
+    results.push(['a recorded decision is counted on the unit\'s parked line',
+      decided.noted === true && decided.view.includes('├ #350 · 08 fix r1 on 🟠 OPUS 5.5 · 39m · 1 decision')]);
     const closed = (() => {
       try {
         return closeUnit({ root, run, nowMs: at(10, 30), issue: 350, outcome: 'shipped', pr: 550 });
@@ -1215,8 +1247,9 @@ function transitionChecks(at) {
         return `THREW ${error.message}`;
       }
     })();
-    results.push(['closing a unit prints its card and drops it from the parked view',
-      closed.ok === true && closed.lines[0].startsWith('╭─ ✅ #350 SHIPPED') && !afterClose.includes('#350')]);
+    results.push(['closing a unit prints its card with its decision count and drops it from the parked view',
+      closed.ok === true && closed.lines[0].startsWith('╭─ ✅ #350 SHIPPED') && closed.lines[0].endsWith(' · 1 decision · PR #550')
+        && !afterClose.includes('#350')]);
     // Review of feat/status-first: a unit blocked at 01 and unblocked by a
     // human re-ran 01 as "already on", so loop-started never came back and
     // the unit was invisible to --parked and --card-run.

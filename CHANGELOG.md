@@ -34,6 +34,19 @@ Notable changes to Autoloop are recorded here. The format follows
   token the lexer cannot classify is allowed. Each refusal names its rule and one allowed form.
   `step.mjs` keeps the ladder rules itself (a backward swap is refused there). Skill prose for
   the removed rules is dropped; the README states the kept rules.
+- A specification gap is decided by the loop, not blocked for a human. `unit.mjs --block` accepts
+  only `IRREVERSIBLE_ACTION` and `POLICY_DENIED`; `TRUST_REQUIRED` and `UNSPECIFIED_VALUE` are
+  refused as `BLOCK_REASON_RETIRED` with a remedy that names `--decide`. A contradiction between
+  the issue and the specification, a missing value the loop can choose, a design choice, a
+  ratification question, or a scope question is recorded with `unit.mjs --decide`, which now
+  takes `--question` and records the question, the choice, the alternatives, and the evidence
+  (`autoloop-decision-v1` markers without a question still parse). `unit.mjs --decisions --issue
+  <N> [--out <path>]` lists a unit's decisions with their comment links and composes the
+  `## Decisions` section the PR body and the run record carry; a lifted block whose reason is now
+  retired is listed as decided by the `/answer` that lifted it, and such blocks still lift. The
+  parked line and the closing card count a unit's decisions. The plan brief decides and carries
+  each decision into the premises instead of requesting ratification; the plan-review brief checks
+  that each decision is recorded with evidence, not that it was approved.
 
 ## [0.68.0] - 2026-10-12
 
