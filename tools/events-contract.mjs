@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
 export const EVENT_VERSION = 1;
 export const EVENTS_FILE = 'events.jsonl';
@@ -244,6 +245,17 @@ export function takeControls(commonDir, kinds, { nowMs = Date.now() } = {}) {
     });
   }
   return taken;
+}
+
+// The common git directory of a checkout (a worktree's shares its main's),
+// or null outside a repository. What every writer passes to emitEvent.
+export function resolveCommonDir(root) {
+  try {
+    const result = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8' });
+    return result.status === 0 ? String(result.stdout).trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 // The run id every writer stamps: prime writes it at run.start and clears it

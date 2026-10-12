@@ -54,7 +54,7 @@ import {
 } from './snapshot-contract.mjs';
 import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
-import { currentRunId, emitEvent, readEvents, setRunId } from './events-contract.mjs';
+import { currentRunId, emitEvent, readEvents, resolveCommonDir, setRunId } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
 // Bumped by every release together with the other version literals; the
@@ -379,12 +379,7 @@ export function closeRunMarkers(root = process.cwd(), now = new Date()) {
 // first prime that opens it, and cleared when the run closes. Every prime of
 // the same run keeps the id, so the UI reads one run across unit boundaries.
 // Fail-open: an unwritable file leaves the prime result as it is.
-export function eventsCommonDir(root) {
-  const result = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8' });
-  return result.status === 0 ? String(result.stdout).trim() : null;
-}
-
-export function openRunEvents(root, { nowMs = Date.now(), commonDir = eventsCommonDir(root) } = {}) {
+export function openRunEvents(root, { nowMs = Date.now(), commonDir = resolveCommonDir(root) } = {}) {
   if (commonDir === null || currentRunId(commonDir) !== 'unknown') return null;
   const id = String(nowMs);
   if (!setRunId(commonDir, id).ok) return null;
@@ -392,7 +387,7 @@ export function openRunEvents(root, { nowMs = Date.now(), commonDir = eventsComm
   return id;
 }
 
-export function closeRunEvents(root, { nowMs = Date.now(), reason = undefined, commonDir = eventsCommonDir(root) } = {}) {
+export function closeRunEvents(root, { nowMs = Date.now(), reason = undefined, commonDir = resolveCommonDir(root) } = {}) {
   if (commonDir === null || currentRunId(commonDir) === 'unknown') return false;
   emitEvent(commonDir, { by: 'prime', kind: 'run.end', reason }, { nowMs });
   setRunId(commonDir, null);
