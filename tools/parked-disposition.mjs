@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { BLOCKING_LABELS } from './lifecycle-contract.mjs';
 import {
   completeSection, createSnapshot, incompleteSection, invalidateSnapshot, issueSnapshotItem,
-  SNAPSHOT_SECTIONS, unitCard, verifySnapshot,
+  SNAPSHOT_SECTIONS, snapshotProblem, unitCard, verifySnapshot,
 } from './snapshot-contract.mjs';
 
 // The sections a unit's labels are read from (unitCard reads queue, then open
@@ -39,9 +39,10 @@ export function stepAttempt(steps) {
 // (its retained items are dated observations); otherwise 'none'. No age
 // threshold: per-unit freshness is decided against the unit's own record.
 function snapshotAuthority({ snapshot, repository, nowMs }) {
-  const none = (reason, scannedAtMs = null) => ({ authority: 'none', reason, scannedAtMs });
+  const none = (reason, scannedAtMs = null, detail = undefined) => ({ authority: 'none', reason, scannedAtMs, ...(detail === undefined ? {} : { detail }) });
   if (snapshot === null || snapshot === undefined) return none('ABSENT');
-  if (!verifySnapshot(snapshot)) return none('UNVERIFIED');
+  // The detail names an older version's remedy (re-prime), not just "unverified".
+  if (!verifySnapshot(snapshot)) return none('UNVERIFIED', null, snapshotProblem(snapshot));
   const scannedAtMs = Date.parse(snapshot.scannedAt);
   if (!(scannedAtMs <= nowMs)) return none('FUTURE', scannedAtMs);
   const repo = snapshot.sections.repo;
@@ -125,7 +126,9 @@ export function projectParked({ records, snapshot = null, repository = null, now
     const seen = lastSeen(step, pending);
     const kept = latest.get(record.issue);
     if (kept && (kept.lastSeenAtMs ?? -Infinity) >= (seen ?? -Infinity)) continue;
-    latest.set(record.issue, { issue: record.issue, ...step, attempt: stepAttempt(record.steps), lastSeenAtMs: seen, pending });
+    // Decisions the loop took on the unit (unit.mjs --decide), counted on the record.
+    const decisions = Number.isSafeInteger(record.decisions) && record.decisions > 0 ? record.decisions : 0;
+    latest.set(record.issue, { issue: record.issue, ...step, attempt: stepAttempt(record.steps), lastSeenAtMs: seen, pending, decisions });
   }
   const units = [...latest.values()].sort((left, right) => left.issue - right.issue).map((unit) => {
     const delivered = unit.pending !== null && !(unit.startedAtMs > unit.pending.atMs);
@@ -161,7 +164,7 @@ function selfTest() {
     number, title: 'loop unit', body: `Closes #${issueNumber}`, isDraft: false, reviewDecision: 'APPROVED',
     headRefName: `feat/gh-${issueNumber}-loop-unit`, headRefOid: 'b'.repeat(40), baseRefName: 'main',
     mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-10-12T08:00:00Z',
-    author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [],
+    author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [], files: [],
     issue: issueNumber, orphanCandidate: false, ownership: 'loop',
   });
   const snapshotOf = ({ scannedAtMs, issues, owner = repo, openIssues = null, openPrs = completeSection([]) }) => {
@@ -238,11 +241,15 @@ function selfTest() {
   const history = project({ snapshot: invalidateSnapshot(snapshot, 'ISSUE_MUTATION') });
   const visible = project({
     records: [
-      record(530, { step: '08-fix', round: '1/5', model: 'claude-opus-5-5', startedAtMs: at(10, 9, 51) }),
+      record(530, { step: '08-fix', round: 'fix-1', model: 'claude-opus-5-5', startedAtMs: at(10, 9, 51) }),
       record(531, { step: '09-gate', startedAtMs: at(12, 9, 0) }, { step: '11-record', startedAtMs: at(12, 9, 40) }),
       deepFreeze({ issue: 532, steps: [{ step: '05-implement', startedAtMs: at(12, 9, 0) }],
         closed: { outcome: 'shipped', atMs: at(12, 9, 30) } }),
       record(533, { step: '05-implement', model: 'claude-opus-5-5', startedAtMs: at(12, 9, 0) }),
+      deepFreeze({ issue: 534, decisions: 2, steps: [{ step: '02-plan', startedAtMs: at(12, 9, 0) }] }),
+      deepFreeze({ issue: 535, decisions: 'two', steps: [{ step: '02-plan', startedAtMs: at(12, 9, 0) }] }),
+      record(536, { step: '08-code-review', round: 're-plan', model: 'gpt-6-astra', startedAtMs: at(12, 9, 0) }),
+      record(537, { step: '08-code-review', round: 'open-findings', model: 'gpt-6-astra', startedAtMs: at(12, 9, 0) }),
     ],
   });
   const duplicated = project({
@@ -333,15 +340,25 @@ function selfTest() {
         && [501, 502, 503, 504].every((number) => unit(projection, number)?.observed === null
           && unit(projection, number)?.local === 'mark')
         && JSON.stringify(projection.humanWaits) === '[]')],
+    ['a retained snapshot of an older version names its version in the authority detail',
+      project({ snapshot: { ...snapshot, version: 2 } })?.authority?.detail === 'snapshot version 2, expected 3; re-prime'],
     ['an invalidated snapshot is dated history, never current',
       history?.authority?.authority === 'history' && history.authority.reason === 'INVALIDATED'
         && observed(history, 501) === JSON.stringify({ disposition: 'blocked', labels: ['human:decide', 'loop-blocked'], atMs: scanMs, current: false })
         && JSON.stringify(history.humanWaits) === '[]'],
     ['earlier-run units and record steps stay visible as last seen; only a card closes a unit',
-      unit(visible, 530)?.local === 'earlier-run' && unit(visible, 530)?.round === '1/5'
+      unit(visible, 530)?.local === 'earlier-run' && unit(visible, 530)?.round === 'fix-1'
         && unit(visible, 531)?.local === 'mark' && unit(visible, 531)?.step === '11-record'
         && unit(visible, 532) === null
-        && JSON.stringify(visible.units.map((entry) => entry.issue)) === '[530,531,533]'],
+        && JSON.stringify(visible.units.map((entry) => entry.issue)) === '[530,531,533,534,535,536,537]'],
+    // SPEC-review-rounds: the projection carries the round as step.mjs named
+    // it (fix-N, re-plan, open-findings) for the parked view to render.
+    ['a review step keeps its named round: a fix round, the re-plan round, the open-findings hand-off',
+      [530, 536, 537].map((number) => unit(visible, number)?.round).join('|') === 'fix-1|re-plan|open-findings'],
+    // Flow release: a decision the loop took (unit.mjs --decide) is counted on
+    // the record; the card shows the count, and a malformed count reads as none.
+    ['a unit carries its recorded decision count; none or a malformed count is zero',
+      unit(visible, 534)?.decisions === 2 && unit(visible, 533)?.decisions === 0 && unit(visible, 535)?.decisions === 0],
     ['one entry per unit, and a blocked unit is not repeated as a human wait',
       JSON.stringify(duplicated?.units?.map((entry) => entry.issue)) === '[501,502,503,504,533]'
         && unit(duplicated, 501)?.lastSeenAtMs === at(11, 8, 0)

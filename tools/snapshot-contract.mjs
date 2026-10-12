@@ -25,7 +25,7 @@ export function writeStdoutSync(payload) {
   }
 }
 
-export const SNAPSHOT_VERSION = 2;
+export const SNAPSHOT_VERSION = 3;
 export const QUEUE_EVIDENCE_VERSION = 1;
 export const SNAPSHOT_SECTIONS = Object.freeze([
   'repo',
@@ -153,6 +153,7 @@ const PULL_REQUEST_ITEM_KEYS = [
   'headRepository',
   'statusCheckState',
   'statusCheckRollup',
+  'files',
   'issue',
   'orphanCandidate',
   'ownership',
@@ -492,6 +493,8 @@ function validPullRequestItem(item, _complete, repositoryNameWithOwner) {
     && (item.statusCheckState === null || STATUS_STATES.has(item.statusCheckState))
     && isDenseJsonArray(item.statusCheckRollup)
     && item.statusCheckRollup.every(validCheckContext)
+    && isDenseJsonArray(item.files)
+    && item.files.every(nonEmptyString)
     && (item.issue === null || positiveInteger(item.issue))
     && typeof item.orphanCandidate === 'boolean'
     && ['human', 'loop'].includes(item.ownership)
@@ -1062,6 +1065,17 @@ export function verifySnapshot(snapshot) {
   }
 }
 
+// Why a snapshot does not verify, for a refusal a host can act on: a retained
+// snapshot from an older plugin (0.68 wrote version 2) names its version and
+// the remedy, instead of reading as unreadable. Null when it verifies.
+export function snapshotProblem(snapshot) {
+  if (verifySnapshot(snapshot)) return null;
+  const version = snapshot?.version;
+  return snapshot?.kind === 'autoloop-repository-snapshot' && Number.isSafeInteger(version) && version !== SNAPSHOT_VERSION
+    ? `snapshot version ${version}, expected ${SNAPSHOT_VERSION}; re-prime`
+    : 'not a verified snapshot; re-prime';
+}
+
 export function invalidateSnapshot(snapshot, reasonCode) {
   if (!verifySnapshot(snapshot)) throw new TypeError('cannot invalidate an invalid snapshot');
   if (!SNAPSHOT_INVALIDATION_REASONS.includes(reasonCode)) {
@@ -1275,6 +1289,23 @@ export function unitCard(snapshot, number) {
     marker: marker === null ? null : markerFacts(marker),
     pullRequest: pr === null ? null : { number: pr.number, draft: pr.isDraft === true, head: pr.headRefName ?? null },
   };
+}
+
+const DELIVERED_PHASES = new Set(['ready-head', 'premerge-record']);
+
+// The delivered set: every open loop PR whose lifecycle marker is at
+// ready-head or premerge-record, with its changed paths. A plan boundary that
+// intersects one waits for that PR (unit.mjs --overlap). Null while either
+// section is incomplete or invalidated: an unknown set is never an empty one.
+export function deliveredPullRequests(snapshot) {
+  const openPrs = snapshot?.sections?.openPrs;
+  const markers = snapshot?.sections?.lifecycleMarkers;
+  if (openPrs?.complete !== true || markers?.complete !== true) return null;
+  const phases = new Map(markers.items.map((marker) => [marker.issueNumber, markerFacts(marker).phase]));
+  return openPrs.items
+    .filter((pr) => pr.ownership === 'loop' && DELIVERED_PHASES.has(phases.get(pr.issue)))
+    .map((pr) => ({ pr: pr.number, issue: pr.issue, phase: phases.get(pr.issue), files: [...pr.files] }))
+    .sort((left, right) => left.pr - right.pr);
 }
 
 // A surfaced marker gates selection only while its issue is open; a closed
@@ -1604,6 +1635,7 @@ async function selfTest() {
       conclusion: 'SUCCESS',
       detailsUrl: null,
     }],
+    files: [],
     issue: 7,
     orphanCandidate: false,
     ownership: 'loop',
@@ -2332,6 +2364,7 @@ async function selfTest() {
       headRepository: 'owner/repo',
       statusCheckState: null,
       statusCheckRollup: [],
+      files: [],
       issue: 7,
       orphanCandidate: false,
       ownership: 'loop',
@@ -2530,6 +2563,71 @@ async function selfTest() {
       && waiting.ineligibleBecause.includes('waiting')
       && unqueued.eligible === false && stableJson(unqueued.ineligibleBecause) === stableJson(['not-in-queue'])
       && unknown.eligible === null;
+  });
+  // Flow 2026-10: delivered loop PRs on shared files conflicted each other.
+  // The delivered set is what a plan boundary is compared with before a claim.
+  await check('an open PR item carries its changed paths, and a snapshot without them is rejected', () => {
+    const { sections } = queueSnapshot();
+    const withFiles = createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z',
+      sections: { ...sections, openPrs: completeSection([pullRequestItem({ files: ['src/a.mjs', 'src/b/c.mjs'] })]) } });
+    const bare = { ...pullRequestItem() };
+    delete bare.files;
+    const withoutFiles = createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z',
+      sections: { ...sections, openPrs: completeSection([bare]) } });
+    const badFiles = createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z',
+      sections: { ...sections, openPrs: completeSection([pullRequestItem({ files: ['', 'x'] })]) } });
+    return SNAPSHOT_VERSION === 3
+      && withFiles.sections.openPrs.complete === true
+      && withoutFiles.sections.openPrs.complete === false
+      && badFiles.sections.openPrs.complete === false;
+  });
+  await check('the delivered set is every open loop PR at ready-head or premerge-record, with its paths', () => {
+    const base = queueSnapshot();
+    const markerAt = (issue, phase, pr) => lifecycleMarkerItem({
+      issueNumber: issue, id: `IC_${issue}`, tipId: `IC_${issue}`,
+      body: lifecycleMarkerItem().body
+        .replace('"issue":7', `"issue":${issue}`).replace('gh-7-', `gh-${issue}-`)
+        .replace('"phase":"intent-recorded"', `"phase":"${phase}"`)
+        .replace('"runIntentHash"', `"pr":${pr},"runIntentHash"`),
+      url: `https://example.test/issues/${issue}#issuecomment-1`,
+    });
+    const prOf = (issue, number, files) => pullRequestItem({
+      number, issue, body: `Closes #${issue}`, headRefName: `feat/gh-${issue}-loop-unit`, files,
+    });
+    const snapshot = createSnapshot({
+      scannedAt: '2026-01-01T00:00:02.000Z',
+      sections: {
+        ...base.sections,
+        openPrs: completeSection([prOf(7, 70, ['src/a.mjs']), prOf(8, 80, ['src/b/c.mjs']), prOf(9, 90, ['src/d.mjs'])]),
+        lifecycleMarkers: completeSection([markerAt(7, 'ready-head', 70), markerAt(8, 'premerge-record', 80), markerAt(9, 'intent-recorded', 90)]),
+      },
+    });
+    const delivered = deliveredPullRequests(snapshot);
+    const incomplete = deliveredPullRequests(createSnapshot({
+      scannedAt: '2026-01-01T00:00:02.000Z',
+      sections: { ...snapshot.sections, lifecycleMarkers: incompleteSection('PAGE_FETCH_FAILED', 'offline') },
+    }));
+    return snapshot.sections.openPrs.complete === true
+      && snapshot.sections.lifecycleMarkers.complete === true
+      && stableJson(delivered) === stableJson([
+        { pr: 70, issue: 7, phase: 'ready-head', files: ['src/a.mjs'] },
+        { pr: 80, issue: 8, phase: 'premerge-record', files: ['src/b/c.mjs'] },
+      ])
+      && incomplete === null;
+  });
+  await check('a retained snapshot of an older version names its version and the re-prime remedy', () => {
+    const current = queueSnapshot();
+    const older = { ...current, version: 2 };
+    return snapshotProblem(current) === null
+      && snapshotProblem(older) === 'snapshot version 2, expected 3; re-prime'
+      && snapshotProblem({ kind: 'autoloop-repository-snapshot' }) === 'not a verified snapshot; re-prime'
+      && snapshotProblem(null) === 'not a verified snapshot; re-prime';
+  });
+  await check('a merged or closed loop PR is a PR_MUTATION, which invalidates the delivered set', () => {
+    const invalidated = invalidateSnapshot(queueSnapshot(), 'PR_MUTATION');
+    return invalidated.sections.openPrs.complete === false
+      && invalidated.sections.lifecycleMarkers.complete === false
+      && deliveredPullRequests(invalidated) === null;
   });
   await check('summary splits surfaced markers into gating (open issue) and deferred', () => {
     const base = queueSnapshot();

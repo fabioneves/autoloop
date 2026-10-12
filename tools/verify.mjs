@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_VERSION, effectiveChecklistPath, resolveProjectConfig } from './config-contract.mjs';
 import { vendoredLeftovers } from './hook-root.mjs';
+import { duplicateProtectedGlobs } from './lane-contract.mjs';
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const SELF_TEST_PATTERN = /(?:async\s+)?function\s+selfTest\s*\(/;
@@ -459,9 +460,9 @@ function checkSkillInvocation(root) {
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
   'codebase-design': 6442,
-  dev: 57167, // -103: work-size guidance removed; +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
+  dev: 56932, // -235 (0.69.0): removed-rule prose dropped, decisions prose added; -103: work-size guidance removed; +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
   'lean-code': 3873,
-  pitcrew: 19784,
+  pitcrew: 19587, // -197 (0.69.0): removed-rule prose dropped, retired block reasons
   'queue-trace': 6929,
   setup: 13860,
   shape: 26272,
@@ -549,6 +550,21 @@ export function checkCompaction(env = process.env) {
     };
 }
 
+// A project protectedPaths glob that a built-in family already covers is
+// redundant, not broken: the union is unchanged, so this is a note.
+function checkProtectedPathsOverlap(root) {
+  const resolved = resolveProjectConfig(root);
+  if (!resolved?.ok) return { ok: false, detail: 'ProjectConfig is invalid' };
+  const duplicates = duplicateProtectedGlobs(resolved.config.protectedPaths ?? []);
+  return duplicates.length === 0
+    ? { ok: true, detail: '' }
+    : {
+      ok: true,
+      note: `protectedPaths ${duplicates.join(', ')}: a built-in family (secrets, .github/workflows, `
+        + 'the loop control roots) already protects these; the entry can be removed',
+    };
+}
+
 // A gate command naming a repository script (a relative path with an
 // extension) that is not there fails every gate; say so before a run does.
 function checkGateScripts(root) {
@@ -577,6 +593,7 @@ function projectChecks(root) {
     { name: 'configured review checklist', execute: () => checkConfiguredChecklist(root) },
     { name: 'retired CI policy absent', execute: () => checkRetiredCiPolicy(root) },
     { name: 'gate scripts present', execute: () => checkGateScripts(root) },
+    { name: 'protectedPaths overlap', execute: () => checkProtectedPathsOverlap(root) },
     { name: 'no vendored layout', execute: () => checkNoVendoredLayout(root) },
     { name: 'session compaction', execute: () => checkCompaction() },
   ];
@@ -656,6 +673,7 @@ async function selfTest() {
   let vendoredToolsFail;
   let vendoredWiringFails;
   let missingChecklistFails;
+  let duplicateProtectedPathNoted;
   let repositoryFilePasses;
   let missingGateScriptFails;
   try {
@@ -693,6 +711,13 @@ async function selfTest() {
       review: { checklistPath: 'docs/review-checklist.md' },
     }));
     missingChecklistFails = doctor().some((result) => result.name === 'configured review checklist' && !result.ok);
+    // A project glob a built-in family covers is noted, never failed.
+    writeFileSync(join(projectRoot, '.autoloop', 'config.json'), JSON.stringify({
+      version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' },
+      protectedPaths: ['spec/**', '.env*'],
+    }));
+    const overlap = doctor().find((result) => result.name === 'protectedPaths overlap');
+    duplicateProtectedPathNoted = overlap?.ok === true && overlap.note?.includes('.env*') && !overlap.note.includes('spec/**');
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
   }
@@ -803,6 +828,7 @@ async function selfTest() {
     ['a repository\'s own file in tools/agentic passes the doctor', repositoryFilePasses],
     ['a gate command whose repository script is missing fails the doctor', missingGateScriptFails],
     ['a missing explicitly configured checklist fails the doctor', missingChecklistFails],
+    ['a protectedPaths entry a built-in family covers is noted by the doctor', duplicateProtectedPathNoted],
     ['unset compaction settings are a note, never a failure; either setting satisfies it',
       checkCompaction({}).ok === true && /CLAUDE_CODE_AUTO_COMPACT_WINDOW/u.test(checkCompaction({}).note ?? '')
         && checkCompaction({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '60' }).note === undefined

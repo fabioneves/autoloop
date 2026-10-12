@@ -29,8 +29,8 @@
 // acknowledgements above are committed.
 //
 // The policy is a pure AND-gate over independently fetched, SHA-bound GitHub
-// evidence. A repository's tools/** path is protected and can never be
-// authorized by this file.
+// evidence. The loop's own control files (.autoloop/**, .claude/** and the
+// other guardrail roots) are protected and can never be authorized by this file.
 //
 // Usage:
 //   node <plugin-tools>/auto-merge.mjs <prNumber> [--dry-run]
@@ -619,9 +619,183 @@ function fetchChangedFiles(number) {
     fileEntries: entries.map((file) => ({
       filename: file.filename,
       previous_filename: file.previous_filename ?? null,
+      status: file.status ?? null,
     })),
     filePaginationComplete: true,
   };
+}
+
+// SPEC-protected-path-reduction 4: a dependency change is a hard-defer. The
+// merge gate reads the base and head contents of every changed manifest and
+// lockfile (bounded: the contents API serves a file up to 1 MB, and at most
+// MAX_MANIFESTS of them), and `decide` refuses a gained dependency, a gained
+// install script or an added package as a `human:authorize` hit.
+const MAX_MANIFESTS = 20;
+const MANIFEST_RE = /(^|\/)(?:package\.json|composer\.json)$/u;
+const LOCKFILE_RE = /(^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|composer\.lock|Cargo\.lock|poetry\.lock|uv\.lock|pdm\.lock|Pipfile\.lock|Gemfile\.lock|go\.sum|go\.mod)$/u;
+const DEPENDENCY_MAPS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies', 'require', 'require-dev'];
+const INSTALL_SCRIPTS = new Set(['preinstall', 'install', 'postinstall', 'prepare']);
+
+export function isDependencyManifest(path) {
+  return typeof path === 'string' && (MANIFEST_RE.test(path) || LOCKFILE_RE.test(path));
+}
+
+function fetchFileContent(path, ref) {
+  const file = ghJson(ghApiArgs(`repos/${REPO_SLUG}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`));
+  if (file?.type !== 'file' || typeof file.content !== 'string' || file.encoding !== 'base64') {
+    throw new Error(`${path}@${ref.slice(0, 12)} is not a readable file (${file?.encoding ?? file?.type ?? 'unknown'})`);
+  }
+  return Buffer.from(file.content, 'base64').toString('utf8');
+}
+
+function fetchManifestChanges(entries, baseRefOid, headRefOid) {
+  const manifests = [];
+  for (const entry of entries) {
+    if (!isDependencyManifest(entry.filename)) continue;
+    if (manifests.length === MAX_MANIFESTS) throw new Error(`more than ${MAX_MANIFESTS} manifests changed`);
+    const status = entry.status ?? 'modified';
+    manifests.push({
+      path: entry.filename,
+      status,
+      base: status === 'added' ? null : fetchFileContent(entry.previous_filename ?? entry.filename, baseRefOid),
+      head: status === 'removed' ? null : fetchFileContent(entry.filename, headRefOid),
+    });
+  }
+  return { manifests, manifestsComplete: true };
+}
+
+function parsedJson(text, path) {
+  try {
+    const value = JSON.parse(text);
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('not an object');
+    return value;
+  } catch (error) {
+    throw new Error(`${path} is not valid JSON (${error.message})`);
+  }
+}
+
+const keysOf = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : []);
+
+// The package names a lockfile pins, by format. An unknown or binary format
+// throws, and the caller fails closed.
+function lockfilePackages(path, text) {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  const lines = text.split(/\r?\n/u);
+  const names = new Set();
+  const collect = (re) => {
+    for (const line of lines) {
+      const match = re.exec(line);
+      if (match) names.add(match[1]);
+    }
+  };
+  switch (name) {
+    case 'package-lock.json':
+    case 'npm-shrinkwrap.json': {
+      const lock = parsedJson(text, path);
+      for (const key of keysOf(lock.packages)) if (key !== '') names.add(key.slice(key.lastIndexOf('node_modules/') + 'node_modules/'.length));
+      const walk = (tree) => {
+        for (const [dependency, entry] of Object.entries(tree ?? {})) {
+          names.add(dependency);
+          walk(entry?.dependencies);
+        }
+      };
+      walk(lock.dependencies);
+      break;
+    }
+    case 'bun.lock': {
+      const lock = parsedJson(text, path);
+      for (const key of keysOf(lock.packages)) names.add(key);
+      break;
+    }
+    case 'composer.lock': {
+      const lock = parsedJson(text, path);
+      for (const list of [lock.packages, lock['packages-dev']]) {
+        for (const entry of Array.isArray(list) ? list : []) if (typeof entry?.name === 'string') names.add(entry.name);
+      }
+      break;
+    }
+    case 'Pipfile.lock': {
+      const lock = parsedJson(text, path);
+      for (const key of [...keysOf(lock.default), ...keysOf(lock.develop)]) names.add(key);
+      break;
+    }
+    case 'pnpm-lock.yaml':
+      collect(/^ {2}['"]?\/?(@?[^@'"\s/][^@'"\s]*)@[^:]*['"]?:\s*$/u);
+      break;
+    case 'yarn.lock':
+      for (const line of lines) {
+        if (/^[#\s]/u.test(line) || !line.endsWith(':') || line.startsWith('__metadata')) continue;
+        for (const entry of line.slice(0, -1).split(/,\s*/u)) {
+          const match = /^"?(@?[^@"]+)@/u.exec(entry.trim());
+          if (match) names.add(match[1]);
+        }
+      }
+      break;
+    case 'Cargo.lock':
+    case 'poetry.lock':
+    case 'uv.lock':
+    case 'pdm.lock':
+      collect(/^name\s*=\s*"([^"]+)"/u);
+      break;
+    case 'Gemfile.lock':
+      collect(/^ {4}(\S+) \(/u);
+      break;
+    case 'go.sum':
+      collect(/^(\S+) v/u);
+      break;
+    case 'go.mod':
+      collect(/^(?:require\s+)?\s*([A-Za-z0-9.-]+\.[A-Za-z0-9.\-/_~]+) v[0-9]/u);
+      break;
+    default:
+      throw new Error(`${name} has no readable package list`);
+  }
+  return names;
+}
+
+// What a manifest or lockfile change gains: `dependencies.<key>` for a key
+// gained in a dependency map, `scripts.<key>` for a gained install script,
+// `package <name>` for a package a lockfile adds. A version bump, a removal
+// or a deleted file gains nothing. Unreadable contents throw.
+export function dependencyChanges(path, base, head) {
+  if (head === null || head === undefined) return [];
+  if (MANIFEST_RE.test(path)) {
+    const before = base === null || base === undefined ? {} : parsedJson(base, path);
+    const after = parsedJson(head, path);
+    const gained = [];
+    for (const map of DEPENDENCY_MAPS) {
+      const previous = new Set(keysOf(before[map]));
+      for (const key of keysOf(after[map])) if (!previous.has(key)) gained.push(`${map}.${key}`);
+    }
+    const scripts = new Set(keysOf(before.scripts));
+    for (const key of keysOf(after.scripts)) if (INSTALL_SCRIPTS.has(key) && !scripts.has(key)) gained.push(`scripts.${key}`);
+    return gained;
+  }
+  const previous = base === null || base === undefined ? new Set() : lockfilePackages(path, base);
+  return [...lockfilePackages(path, head)].filter((name) => !previous.has(name)).map((name) => `package ${name}`);
+}
+
+// The `human:authorize` hits a dependency change earns at the merge gate.
+// A changed manifest the executor could not read, or did not fetch, is a
+// hit too (fail closed).
+function dependencyChangeReasons(pr, entries) {
+  const reasons = [];
+  const manifests = Array.isArray(pr.manifests) ? pr.manifests : [];
+  const current = entries.map((entry) => (typeof entry === 'string' ? entry : entry?.filename ?? entry?.path));
+  for (const path of [...new Set(current)].filter(isDependencyManifest)) {
+    const entry = manifests.find((manifest) => manifest?.path === path);
+    if (pr.manifestsComplete !== true || entry === undefined) {
+      reasons.push(`dependency change (human:authorize): ${path} changed and its base and head contents were not read`);
+      continue;
+    }
+    try {
+      for (const change of dependencyChanges(path, entry.base, entry.head)) {
+        reasons.push(`dependency change (human:authorize): ${path} gains ${change}`);
+      }
+    } catch (error) {
+      reasons.push(`dependency change (human:authorize): ${path} cannot be read: ${errorMessage(error)}`);
+    }
+  }
+  return reasons;
 }
 
 function fetchReviewThreads(number) {
@@ -1349,6 +1523,8 @@ function emptyInputs() {
     mergeStateStatus: null,
     fileEntries: [],
     filePaginationComplete: false,
+    manifests: [],
+    manifestsComplete: false,
     reviewThreads: [],
     threadPaginationComplete: false,
     statuses: [],
@@ -1378,6 +1554,14 @@ function fetchInputs(number) {
     Object.assign(inputs, fetchChangedFiles(number));
   } catch (error) {
     inputs.fetchReasons.push(`changed-files fetch failed: ${errorMessage(error)}`);
+  }
+
+  if (inputs.filePaginationComplete === true && inputs.baseRefOid && inputs.headRefOid) {
+    try {
+      Object.assign(inputs, fetchManifestChanges(inputs.fileEntries, inputs.baseRefOid, inputs.headRefOid));
+    } catch (error) {
+      inputs.fetchReasons.push(`manifest contents fetch failed: ${errorMessage(error)}`);
+    }
   }
 
   try {
@@ -1721,6 +1905,7 @@ export function decide(pr, config = engineConfig()) {
   for (const hit of matchMergeProtected(paths, REPO.EXTRA_PROTECTED_PATHS)) {
     reasons.push(`protected path (${hit.family}): ${hit.file}`);
   }
+  reasons.push(...dependencyChangeReasons(pr, entries));
 
   const pathA = SAFE_LABELS.some((label) => labels.includes(label));
   const pathBFiles = entries.length > 0 && paths.length > 0 && paths.every(pathBAllowed);
@@ -1992,6 +2177,11 @@ function makeInput({
     mergeStateStatus: 'CLEAN',
     fileEntries: entries,
     filePaginationComplete: true,
+    // A manifest a fixture changes without saying how is unchanged in
+    // content: the dependency check sees nothing gained.
+    manifests: entries.filter(({ filename }) => isDependencyManifest(filename))
+      .map(({ filename }) => ({ path: filename, status: 'modified', base: '{}', head: '{}' })),
+    manifestsComplete: true,
     reviewThreads: [],
     threadPaginationComplete: true,
     statuses: makeVerdictStatuses(),
@@ -2099,6 +2289,122 @@ function protectedFixture(name, path) {
     expectCalls: 0,
     expectReason: (reason) => reason.startsWith('protected path (') && reason.endsWith(`): ${path}`),
   };
+}
+
+// A changed manifest or lockfile, with the base and head contents the
+// executor fetched, under a Path A label (so only the dependency check can
+// refuse).
+function manifestFixture(name, path, base, head, expectRefusal, status = 'modified') {
+  return {
+    name,
+    input: makeInput({
+      files: [path],
+      labels: ['risk:pure-deletion'],
+      manifests: [{ path, status, base, head }],
+      manifestsComplete: true,
+    }),
+    expectExit: expectRefusal ? 1 : 0,
+    expectCalls: expectRefusal ? 0 : 1,
+    ...(expectRefusal ? { expectReason: (reason) => reason.startsWith(`dependency change (human:authorize): ${path} `) } : {}),
+  };
+}
+
+function dependencyFixtures() {
+  const manifest = (object) => JSON.stringify(object, null, 2);
+  return [
+    manifestFixture('package.json gains a dependency → human:authorize', 'package.json',
+      manifest({ dependencies: { a: '^1' } }), manifest({ dependencies: { a: '^1', b: '^2' } }), true),
+    manifestFixture('nested package.json gains a devDependency → human:authorize', 'packages/web/package.json',
+      manifest({ devDependencies: {} }), manifest({ devDependencies: { vitest: '^3' } }), true),
+    manifestFixture('package.json gains a peerDependency → human:authorize', 'package.json',
+      manifest({}), manifest({ peerDependencies: { react: '*' } }), true),
+    manifestFixture('package.json gains an optionalDependency → human:authorize', 'package.json',
+      manifest({ optionalDependencies: {} }), manifest({ optionalDependencies: { fsevents: '*' } }), true),
+    manifestFixture('package.json gains a postinstall script → human:authorize', 'package.json',
+      manifest({ scripts: { test: 'x' } }), manifest({ scripts: { test: 'x', postinstall: 'node evil.js' } }), true),
+    manifestFixture('package.json gains a prepare script → human:authorize', 'package.json',
+      manifest({}), manifest({ scripts: { prepare: 'husky' } }), true),
+    manifestFixture('a new package.json with dependencies → human:authorize', 'tools/package.json',
+      null, manifest({ dependencies: { a: '^1' } }), true, 'added'),
+    manifestFixture('package.json version bump stays ordinary', 'package.json',
+      manifest({ dependencies: { a: '^1' } }), manifest({ dependencies: { a: '^2' } }), false),
+    manifestFixture('package.json dropping a dependency stays ordinary', 'package.json',
+      manifest({ dependencies: { a: '^1', b: '^1' } }), manifest({ dependencies: { a: '^1' } }), false),
+    manifestFixture('package.json gaining a test script stays ordinary', 'package.json',
+      manifest({ scripts: {} }), manifest({ scripts: { test: 'node --test' } }), false),
+    manifestFixture('package.json removed stays ordinary', 'package.json',
+      manifest({ dependencies: { a: '^1' } }), null, false, 'removed'),
+    manifestFixture('unparsable package.json → human:authorize (fail closed)', 'package.json',
+      manifest({}), '{ not json', true),
+    manifestFixture('composer.json gains a require → human:authorize', 'composer.json',
+      manifest({ require: { 'php': '^8' } }), manifest({ require: { php: '^8', 'vendor/pkg': '^1' } }), true),
+    manifestFixture('package-lock.json adds a package → human:authorize', 'package-lock.json',
+      manifest({ packages: { '': {}, 'node_modules/a': { version: '1.0.0' } } }),
+      manifest({ packages: { '': {}, 'node_modules/a': { version: '1.0.0' }, 'node_modules/b': { version: '2.0.0' } } }), true),
+    manifestFixture('package-lock.json version bump stays ordinary', 'package-lock.json',
+      manifest({ packages: { '': {}, 'node_modules/a': { version: '1.0.0' } } }),
+      manifest({ packages: { '': {}, 'node_modules/a': { version: '1.1.0' } } }), false),
+    manifestFixture('pnpm-lock.yaml adds a package → human:authorize', 'pnpm-lock.yaml',
+      'packages:\n  a@1.0.0:\n    resolution: {}\n', 'packages:\n  a@1.0.0:\n    resolution: {}\n  b@2.0.0:\n    resolution: {}\n', true),
+    manifestFixture('pnpm-lock.yaml version bump stays ordinary', 'pnpm-lock.yaml',
+      'packages:\n  /a@1.0.0:\n    resolution: {}\n', 'packages:\n  /a@1.1.0:\n    resolution: {}\n', false),
+    manifestFixture('yarn.lock adds a package → human:authorize', 'yarn.lock',
+      '"a@^1.0.0":\n  version "1.0.0"\n', '"a@^1.0.0":\n  version "1.0.0"\n\n"@scope/b@^2.0.0", "@scope/b@^2.1.0":\n  version "2.1.0"\n', true),
+    manifestFixture('composer.lock adds a package → human:authorize', 'composer.lock',
+      manifest({ packages: [{ name: 'vendor/a' }], 'packages-dev': [] }),
+      manifest({ packages: [{ name: 'vendor/a' }], 'packages-dev': [{ name: 'vendor/b' }] }), true),
+    manifestFixture('Cargo.lock adds a package → human:authorize', 'Cargo.lock',
+      '[[package]]\nname = "a"\nversion = "1.0.0"\n', '[[package]]\nname = "a"\nversion = "1.0.0"\n\n[[package]]\nname = "b"\nversion = "0.1.0"\n', true),
+    manifestFixture('Gemfile.lock adds a gem → human:authorize', 'Gemfile.lock',
+      'GEM\n  specs:\n    a (1.0.0)\n', 'GEM\n  specs:\n    a (1.0.0)\n    b (2.0.0)\n', true),
+    manifestFixture('go.sum adds a module → human:authorize', 'go.sum',
+      'example.com/a v1.0.0 h1:x\n', 'example.com/a v1.0.0 h1:x\nexample.com/b v1.0.0 h1:y\n', true),
+    manifestFixture('binary bun.lockb change → human:authorize (fail closed)', 'bun.lockb', 'x', 'y', true),
+    {
+      name: 'a changed manifest without fetched contents → human:authorize (fail closed)',
+      input: makeInput({ files: ['package.json'], labels: ['risk:pure-deletion'], manifests: [], manifestsComplete: false }),
+      expectExit: 1,
+      expectCalls: 0,
+      expectReason: (reason) => reason.startsWith('dependency change (human:authorize): package.json '),
+    },
+  ];
+}
+
+function dependencyChangeCases() {
+  const manifest = (object) => JSON.stringify(object);
+  const same = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
+  return [
+    {
+      name: 'isDependencyManifest names package.json in any directory and the known lockfiles only',
+      ok: ['package.json', 'a/b/package.json', 'composer.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml',
+        'yarn.lock', 'composer.lock', 'Cargo.lock', 'poetry.lock', 'uv.lock', 'Gemfile.lock', 'go.sum', 'go.mod', 'Pipfile.lock',
+        'bun.lock', 'bun.lockb'].every(isDependencyManifest)
+        && ['package.json.bak', 'src/package.jsonx', 'docs/lockfile.md', 'yarn.lock.txt'].every((path) => !isDependencyManifest(path)),
+    },
+    {
+      name: 'dependencyChanges names the gained keys and packages, and nothing for a bump or a removal',
+      ok: same(dependencyChanges('package.json', manifest({ dependencies: { a: '1' }, scripts: { test: 'x' } }),
+        manifest({ dependencies: { a: '2', b: '1' }, devDependencies: { c: '1' }, scripts: { test: 'y', preinstall: 'z' } })),
+      ['dependencies.b', 'devDependencies.c', 'scripts.preinstall'])
+        && same(dependencyChanges('package.json', manifest({ dependencies: { a: '1' } }), manifest({ dependencies: { a: '2' } })), [])
+        && same(dependencyChanges('package.json', manifest({ dependencies: { a: '1' } }), null), [])
+        && same(dependencyChanges('package.json', null, manifest({ dependencies: { a: '1' } })), ['dependencies.a'])
+        && same(dependencyChanges('go.mod', 'module m\n\nrequire (\n\texample.com/a v1.0.0\n)\n', 'module m\n\nrequire (\n\texample.com/a v1.0.0\n\texample.com/b v1.2.0 // indirect\n)\n'), ['package example.com/b'])
+        && same(dependencyChanges('poetry.lock', '[[package]]\nname = "a"\n', '[[package]]\nname = "a"\n\n[[package]]\nname = "b"\n'), ['package b'])
+        && same(dependencyChanges('Pipfile.lock', manifest({ default: { a: {} }, develop: {} }), manifest({ default: { a: {} }, develop: { b: {} } })), ['package b']),
+    },
+    {
+      name: 'dependencyChanges fails closed on an unreadable manifest or lockfile',
+      ok: ['package.json', 'package-lock.json', 'composer.lock', 'bun.lock'].every((path) => {
+        try {
+          dependencyChanges(path, '{}', '{ not json');
+          return false;
+        } catch {
+          return true;
+        }
+      }),
+    },
+  ];
 }
 
 function invalidClaimFixture(name, mutate) {
@@ -2338,66 +2644,81 @@ export const FIXTURES = [
   { name: 'kill-switch active', input: makeInput({ killSwitch: { known: true, active: true } }), expectExit: 1, expectCalls: 0 },
   { name: 'kill-switch query failure', input: makeInput({ killSwitch: { known: false, active: false } }), expectExit: 1, expectCalls: 0 },
 
-  protectedFixture('protected crypt path segment', 'lib/utils/crypt-helper.ts'),
-  protectedFixture('protected secret path segment', 'lib/utils/secret-store.ts'),
-  protectedFixture('protected token path segment', 'lib/utils/api-token.ts'),
-  protectedFixture('protected credential path segment', 'lib/services/credentialVault.ts'),
+  // 0.69.0 review: one secret-path rule (lane-contract isSecretPath): a
+  // segment that IS the word, with any extension; a name that contains it
+  // is source.
+  protectedFixture('protected crypt path segment', 'lib/utils/crypt/helper.ts'),
+  protectedFixture('protected secret path segment', 'lib/utils/secret.ts'),
+  protectedFixture('protected token path segment', 'lib/utils/token.json'),
+  protectedFixture('protected credential path segment', 'lib/services/credentials/vault.json'),
   protectedFixture('protected credential storage', 'config/credentials.yml'),
+  protectedFixture('protected certificate', 'certs/server.crt'),
+  protectedFixture('protected ssh key', '.ssh/id_rsa'),
+  protectedFixture('protected .github/** (CODEOWNERS)', '.github/CODEOWNERS'),
+  protectedFixture('protected .github/** (composite action)', '.github/actions/setup/action.yml'),
+  protectedFixture('protected .github/** (dependabot)', '.github/dependabot.yml'),
+  // M3b: a dependency change is a human:authorize hit at the merge gate.
+  ...dependencyFixtures(),
   protectedFixture('protected private key material', 'certs/private-key.pem'),
   protectedFixture('protected nested .env file', 'apps/web/.env.local'),
   protectedFixture('protected CI requirements policy', '.autoloop/ci-policy.json'),
-  protectedFixture("the tool's own path with everything green", 'tools/agentic/auto-merge.mjs'),
-  protectedFixture('protected .github/**', '.github/workflows/ci.yml'),
+  protectedFixture('protected .autoloop/** with everything green', '.autoloop/STATE.md'),
+  protectedFixture('protected .github/workflows/**', '.github/workflows/ci.yml'),
   protectedFixture('protected .claude/**', '.claude/settings.json'),
   protectedFixture('protected .codex/**', '.codex/hooks.json'),
   protectedFixture('protected .agents/**', '.agents/plugins/marketplace.json'),
+  protectedFixture('protected .githooks/**', '.githooks/pre-commit'),
+  protectedFixture('protected root .env file', '.env.production'),
+  protectedFixture('protected keys/**', 'keys/deploy.pem'),
   // Crown-jewel fixtures derive from the config; absent config = no fixtures (loudly generic).
   ...REPO.EXTRA_PROTECTED_PATHS.map((glob) =>
     protectedFixture(`extra-protected ${glob}`, pathFromGlob(glob, 'selftest-jewel.ts')),
   ),
   protectedFixture('protected root dot-directory (.codex/x)', '.codex/x'),
-  protectedFixture('protected docs/agentic/**', 'docs/agentic/STATE.md'),
-  protectedFixture('protected docs/agentic/checklist.md', 'docs/agentic/checklist.md'),
-  {
-    // Carve-out: ARCH.md is DATA, not policy — a protected path would override Path A and block,
-    // so this proves the map no longer does. STATE.md above still blocks with the same label.
-    name: 'docs/agentic/ARCH.md is NOT protected (map carve-out) → allow',
-    input: makeInput({ files: ['docs/agentic/ARCH.md'], labels: ['risk:pure-deletion'] }),
+  // Ordinary files are not protected by the plugin: a project lists them in
+  // protectedPaths when it wants them. Path A carries no path-class
+  // requirement, so each of these merges on the label.
+  ...[
+    'CLAUDE.md',
+    'packages/web/CLAUDE.md',
+    'AGENTS.md',
+    'AGENTS.override.md',
+    'docs/agentic/ARCH.md',
+    'docs/agentic/STATE.md',
+    'docs/agentic/checklist.md',
+    'docker-compose.yml',
+    'containers/Dockerfile.prod',
+    'packages/server/package.json',
+    'packages/server/package-lock.json',
+    'packages/ui/tsconfig.build.json',
+    'packages/ui/vite.config.ts',
+    'data/state.sqlite',
+    'tools/agentic/auto-merge.mjs',
+    '.editorconfig',
+    'lib/utils/crypt-helper.ts',
+    'lib/utils/secret-store.ts',
+    'lib/utils/api-token.ts',
+    'lib/services/credentialVault.ts',
+    'src/tokenizer.ts',
+    'auth/token-refresh.ts',
+    'lib/encryption.ts',
+  ].map((path) => ({
+    name: `ordinary file ${path} is NOT protected → allow`,
+    input: makeInput({ files: [path], labels: ['risk:pure-deletion'] }),
     expectExit: 0,
     expectCalls: 1,
     expectArgs: { sha: HEAD_SHA, squash: true },
-  },
+  })),
   {
-    // Surgical: a mixed PR touching ARCH.md AND a still-protected sibling stays blocked.
-    name: 'docs/agentic/ARCH.md + STATE.md together → still blocked (STATE protected)',
-    input: makeInput({ files: ['docs/agentic/ARCH.md', 'docs/agentic/STATE.md'], labels: ['risk:pure-deletion'] }),
+    // A mixed PR touching an ordinary file AND a protected sibling stays blocked.
+    name: 'docs/agentic/ARCH.md + .autoloop/STATE.md together → still blocked (STATE protected)',
+    input: makeInput({ files: ['docs/agentic/ARCH.md', '.autoloop/STATE.md'], labels: ['risk:pure-deletion'] }),
     expectExit: 1,
     expectCalls: 0,
   },
-  protectedFixture('protected CLAUDE.md', 'CLAUDE.md'),
-  protectedFixture('protected AGENTS.override.md', 'AGENTS.override.md'),
-  protectedFixture('protected AGENTS.md', 'AGENTS.md'),
-  protectedFixture('protected nested AGENTS.md', 'src/AGENTS.md'),
-  protectedFixture('protected nested CLAUDE.md', 'packages/web/CLAUDE.md'),
-  protectedFixture('protected nested AGENTS.override.md', 'a/b/AGENTS.override.md'),
-  protectedFixture('protected docker-compose.yml', 'docker-compose.yml'),
-  protectedFixture('protected docker-compose.yaml', 'docker-compose.yaml'),
-  protectedFixture('protected nested docker-compose', 'deploy/docker-compose.prod.yml'),
-  protectedFixture('protected Dockerfile*', 'Dockerfile.prod'),
-  protectedFixture('protected nested Dockerfile*', 'containers/Dockerfile.prod'),
-  protectedFixture('protected nested package.json', 'packages/server/package.json'),
-  protectedFixture('protected nested lockfile', 'packages/server/package-lock.json'),
-  protectedFixture('protected nested *.lock file', 'packages/server/cache.lock'),
-  protectedFixture('protected nested tsconfig*', 'packages/ui/tsconfig.build.json'),
-  protectedFixture('protected nested vite config', 'packages/ui/vite.config.ts'),
-  protectedFixture('protected nested vitest config', 'packages/ui/vitest.config.ts'),
-  protectedFixture('protected nested eslint config', 'packages/ui/eslint.config.js'),
-  protectedFixture('protected nested postcss config', 'packages/ui/postcss.config.js'),
-  protectedFixture('protected nested tailwind config', 'packages/ui/tailwind.config.js'),
-  protectedFixture('protected data/**', 'data/state.sqlite'),
   {
-    name: 'rename previous_filename=tools/agentic/auto-merge.mjs → an allowed path',
-    input: makeInput({ labels: [], fileEntries: [{ filename: ALLOWED_PATH, previous_filename: 'tools/agentic/auto-merge.mjs' }] }),
+    name: 'rename previous_filename=.claude/settings.json → an allowed path',
+    input: makeInput({ labels: [], fileEntries: [{ filename: ALLOWED_PATH, previous_filename: '.claude/settings.json' }] }),
     expectExit: 1,
     expectCalls: 0,
   },
@@ -3386,6 +3707,7 @@ function selfTest() {
     ...liveEvidenceCases(),
     ...soloTranscriptionCases(),
     ...configSettingsCases(),
+    ...dependencyChangeCases(),
   ]) {
     if (check.ok) passed += 1;
     else failed += 1;

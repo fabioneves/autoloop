@@ -17,20 +17,20 @@
   {
    "cmd": "node -v",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "-v means verbose for python; short probes stay opaque"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: -v means verbose for python; short probes stay opaque"
   },
   {
    "cmd": "node",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "bare interpreter reads stdin"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: bare interpreter reads stdin"
   },
   {
    "cmd": "node --version -e 'require(\"child_process\")'",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "probe flag must not launder -e"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: probe flag must not launder -e"
   },
   {
    "cmd": "T=/tmp/templates\nnode $T/tools/scaffold.mjs --audit .",
@@ -47,14 +47,14 @@
   {
    "cmd": "cd /repo\nverb=merge\ngh pr $verb 42",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "resolved evasion must block on the merge rule"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: resolved evasion must block on the merge rule"
   },
   {
    "cmd": "cd /repo\nT=$(pwd)\nnode $T/a.mjs",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "command substitution stays opaque"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: command substitution stays opaque"
   },
   {
    "cmd": "git add -A && git commit -q -F - <<'EOF' && git log --oneline -1\nchore: reconcile scaffold\n\nuses the `m` flag and `scaffold.mjs --reconcile`\nEOF",
@@ -65,8 +65,8 @@
   {
    "cmd": "git commit -q -F - <<EOF\nmsg with $(pwd) live\nEOF",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "unquoted heredoc genuinely expands"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: unquoted heredoc genuinely expands"
   },
   {
    "cmd": "git commit -q -F - <<'EOF'\nx\nEOF\ngh pr merge 42",
@@ -83,14 +83,14 @@
   {
    "cmd": "git diffstat",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "a real unknown subcommand may resolve through an alias"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: a real unknown subcommand may resolve through an alias"
   },
   {
    "cmd": "env git diffstat",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "wrappers do not launder unknown subcommands"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: wrappers do not launder unknown subcommands"
   },
   {
    "cmd": "timeout 30 git fetch origin main",
@@ -113,14 +113,14 @@
   {
    "cmd": "node -e \"import('/t/a.mjs').then(m=>m.x())\"",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "inline interpreter source, live setup follow-up"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: inline interpreter source, live setup follow-up"
   },
   {
    "cmd": "jq '.properties.decidedBy' schema.json; python3 -c \"import json; print(1)\"",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "one forbidden segment sinks the compound"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: one forbidden segment sinks the compound"
   },
   {
    "cmd": "awk '/^## Lessons/,0' docs/agentic/STATE.md | wc -c",
@@ -203,8 +203,8 @@
   {
    "cmd": "gh pr create --base main --title t --body \"$(cat /tmp/b.md)\"",
    "branch": "chore/x",
-   "expect": "block",
-   "why": "inline body is substitution; the shape 0.45.1 prescribes against"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: inline body is substitution; the shape 0.45.1 prescribes against"
   },
   {
    "cmd": "git fetch origin feat/gh-78-x --quiet && git log --oneline origin/main..origin/feat/gh-78-x && git diff --stat origin/main...origin/feat/gh-78-x",
@@ -245,8 +245,8 @@
   {
    "cmd": "ls -d /cache/*/ 2>/dev/null | xargs -n1 basename | node /tmp/templates/tools/release-verify.mjs --sort-versions",
    "branch": "main",
-   "expect": "block",
-   "why": "0.48.0 live: xargs improvised into the version pipe; xargs executes its arguments"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.48.0 live: xargs improvised into the version pipe; xargs executes its arguments"
   },
   {
    "cmd": "gh api repos/o/r/statuses/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -f state=success -f context=agentic/gate -f description='autoloop gate verified'",
@@ -269,8 +269,8 @@
   {
    "cmd": "timeout 600 bash -c 'until [ -f /tmp/s/code-review-1.json ]; do sleep 5; done'",
    "branch": "feat/gh-149-x",
-   "expect": "block",
-   "why": "0.49.3: inline interpreter source stays blocked even as the skill's old wait idiom; the typed replacement is dispatch.mjs --wait-file"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.49.3: inline interpreter source stays blocked even as the skill's old wait idiom; the typed replacement is dispatch.mjs --wait-file"
   },
   {
    "cmd": "node tools/agentic/dispatch.mjs --wait-file /tmp/s/code-review-1.json --timeout-seconds 600",
@@ -281,8 +281,8 @@
   {
    "cmd": "diff <(cat -A /tmp/s/a.md) <(cat -A /tmp/s/b.md) | head -20",
    "branch": "feat/gh-135-x",
-   "expect": "block",
-   "why": "0.49.5: process substitution is opaque expansion by design; byte-compare via cmp -l or two plain files"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.49.5: process substitution is opaque expansion by design; byte-compare via cmp -l or two plain files"
   },
   {
    "cmd": "cmp -l /tmp/s/plan-135.md /tmp/s/plan-135-frozen.md | head -5",
@@ -299,20 +299,20 @@
   {
    "cmd": "SP=/tmp/claude-1000/-home-dev-dev-private-x/ed01b2cb/scratchpad\ncat > $OTHER/commit-msg.txt <<'EOF'\nmsg\nEOF",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.49.21: the fix above must not become a blanket allow -- an expansion with no literal assignment in the same command stays unresolvable and stays refused."
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.49.21: the fix above must not become a blanket allow -- an expansion with no literal assignment in the same command stays unresolvable and stays refused."
   },
   {
    "cmd": "for s in \"## Components\" \"## Key paths\"; do printf \"%-24s \" \"$s\"; sed -n \"/^$s/,/^## /p\" docs/agentic/ARCH.md | wc -c; done",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.49.22: correctly blocked (a loop variable is unresolvable) but the message warned about hiding a MUTATION on a read-only byte count and never mentioned the loop, so a live run kept rewriting the wrong half. The block stays; the refusal now names $s and the loop remedy."
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.49.22: correctly blocked (a loop variable is unresolvable) but the message warned about hiding a MUTATION on a read-only byte count and never mentioned the loop, so a live run kept rewriting the wrong half. The block stays; the refusal now names $s and the loop remedy."
   },
   {
    "cmd": "gh api repos/o/r/issues/244/labels -f 'labels[]=human:authorize' --jq '[.[].name]'",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.49.25: the REST fallback seventeen runs reached after gh pr edit died on Projects-classic cards. The block stays; the refusal now names gh issue edit."
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.49.25: the REST fallback seventeen runs reached after gh pr edit died on Projects-classic cards. The block stays; the refusal now names gh issue edit."
   },
   {
    "cmd": "gh issue edit 244 --repo o/r --add-label 'human:authorize' 2>&1 | tail -1",
@@ -347,8 +347,8 @@
   {
    "cmd": "gh pr ready 264 --undo; gh pr ready 265",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "the carve-out is per SEGMENT: an undo beside a bare ready must not launder the ready."
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: the carve-out is per SEGMENT: an undo beside a bare ready must not launder the ready."
   },
   {
    "cmd": "node tools/agentic/escalate-paths.mjs --base main --base-oid cafecafecafecafecafecafecafecafecafecafe --artifact-version 1 --json; echo \"exit=$?\"",
@@ -365,50 +365,50 @@
   {
    "cmd": "gh issue edit 296 --remove-label loop:09-gate --add-label loop:10-publish 2>/dev/null; jq -c '.intent.plannedBaseOid' /tmp/autoloop-scratch/lifecycle-request-296.json",
    "branch": "feat/gh-296-entity-assignment",
-   "expect": "block",
-   "why": "0.49.51: invented loop:10-publish at the gate; gh stripped 09-gate and the add failed silently"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.49.51: invented loop:10-publish at the gate; gh stripped 09-gate and the add failed silently"
   },
   {
    "cmd": "gh issue edit 298 --add-label \"loop:02-plan\" --remove-label \"loop:03-plan-review\" 2>&1 | tail -1",
    "branch": "main",
-   "expect": "block",
-   "why": "0.49.53: plan review re-dispatched three times for one plan; each round swapped 03 back to 02"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.49.53: plan review re-dispatched three times for one plan; each round swapped 03 back to 02"
   },
   {
    "cmd": "gh issue edit 339 --remove-label loop:08-code-review --add-label loop:05-implement",
    "branch": "feat/gh-339-x",
-   "expect": "block",
-   "why": "0.49.60: block was right, remedy was wrong — a live 08→05 refusal advised 'continue forward (claim)'; the reason now names the caught pair"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.49.60: block was right, remedy was wrong — a live 08→05 refusal advised 'continue forward (claim)'; the reason now names the caught pair"
   },
   {
    "cmd": "gh issue edit 298 --add-label loop:05-implement",
    "branch": "feat/gh-298-period-routing",
-   "expect": "block",
-   "why": "0.49.54: add-only swap after the driver's claim stranded loop:04-claim through code review"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.49.54: add-only swap after the driver's claim stranded loop:04-claim through code review"
   },
   {
    "cmd": "$(echo git) push origin feat/gh-1-x",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.50.0: a substitution in command position stays refused"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.50.0: a substitution in command position stays refused"
   },
   {
    "cmd": "git push origin $(git branch --show-current)",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.50.0: a substitution feeding a git mutation stays refused; only read-only git subcommands take one"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.50.0: a substitution feeding a git mutation stays refused; only read-only git subcommands take one"
   },
   {
    "cmd": "cd \"$(git rev-parse --show-toplevel)\" && git push origin feat/gh-1-x",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.50.0: a substitution anywhere in a command that also mutates through git stays refused"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.50.0: a substitution anywhere in a command that also mutates through git stays refused"
   },
   {
    "cmd": "find . $(cat args.txt)",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.50.0: find can run what an unquoted value splits into (-exec)"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.50.0: find can run what an unquoted value splits into (-exec)"
   },
   {
    "cmd": "echo $(git push origin HEAD:main)",
@@ -419,8 +419,8 @@
   {
    "cmd": "awk '{ print | \"sh\" }' f",
    "branch": "feat/gh-1-x",
-   "expect": "block",
-   "why": "0.50.0: an awk pipe to a command stays refused"
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.50.0: an awk pipe to a command stays refused"
   },
   {
    "cmd": "sed -n \"$(rg -n 'function credentials(' a.php | cut -d: -f1),+40p\" a.php",
@@ -437,8 +437,332 @@
   {
    "cmd": "ls $UNSET_PATH/x",
    "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: this rule is removed, the command is allowed. Was: 0.50.0: an unquoted variable set out of view splits into unread words; quote it"
+  },
+  {
+   "cmd": "git add .env src/app.mjs",
+   "branch": "feat/gh-1-x",
    "expect": "block",
-   "why": "0.50.0: an unquoted variable set out of view splits into unread words; quote it"
+   "why": "0.69.0 guard reduction: a secret path staged is the one new rule (SPEC-guard-reduction)"
+  },
+  {
+   "cmd": "git commit -m \"feat: read .env at boot\" src/app.mjs",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: a message naming a secret path stages nothing"
+  },
+  {
+   "cmd": "rg -n \"gh pr merge\" docs/specs",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 guard reduction: a search for a refused command is an inspection (128 refused reads in ten days on one project)"
+  },
+  {
+   "cmd": "gh api -X PUT repos/o/r/contents/README.md -f branch=main -f message=x -f content=eA==",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H1 a contents PUT commits on the base past the checkout"
+  },
+  {
+   "cmd": "gh api graphql -f query='mutation{createCommitOnBranch(input:{branch:{repositoryNameWithOwner:\"o/r\",branchName:\"main\"}}){clientMutationId}}'",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H1 createCommitOnBranch commits on the base"
+  },
+  {
+   "cmd": "gh api graphql -f query='mutation{updateRef(input:{refId:\"x\",oid:\"y\",force:true}){clientMutationId}}'",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H1 updateRef force-moves a ref"
+  },
+  {
+   "cmd": "gh api graphql -f query='mutation{updateRefs(input:{repositoryId:\"x\",refUpdates:[]}){clientMutationId}}'",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H1 updateRefs moves refs"
+  },
+  {
+   "cmd": "gh api graphql -f query='mutation{createRef(input:{repositoryId:\"x\",name:\"refs/tags/v1\",oid:\"y\"}){clientMutationId}}'",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H1 createRef makes a tag"
+  },
+  {
+   "cmd": "gh api graphql -f query='mutation{deleteRef(input:{refId:\"x\"}){clientMutationId}}'",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H1 deleteRef deletes a ref"
+  },
+  {
+   "cmd": "gh api repos/o/r/git/commits -X POST -f message=x -f tree=y",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H1 a commit object through the API"
+  },
+  {
+   "cmd": "gh api repos/o/r/git/trees -X POST --input /tmp/tree.json",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H1 a tree object through the API"
+  },
+  {
+   "cmd": "gh api repos/o/r/git/refs/heads/main -X PATCH -f sha=abc",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H1 a ref write through the API"
+  },
+  {
+   "cmd": "gh api repos/o/r/contents/README.md",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: H1 a contents read stays allowed"
+  },
+  {
+   "cmd": "curl -X PUT https://api.github.com/repos/o/r/pulls/4/merge",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H2 raw HTTP to the merge endpoint"
+  },
+  {
+   "cmd": "curl -XDELETE https://api.github.com/repos/o/r/git/refs/heads/main",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H2 raw HTTP ref delete"
+  },
+  {
+   "cmd": "wget --method=PUT -O- HTTPS://API.GITHUB.COM:443/repos/o/r/pulls/4/merge",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H2 the host in any case, with a port"
+  },
+  {
+   "cmd": "xh PUT https://user:tok@api.github.com/repos/o/r/pulls/4/merge",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H2 the host behind userinfo"
+  },
+  {
+   "cmd": "http PUT api.github.com/repos/o/r/pulls/4/merge",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H2 httpie without a scheme"
+  },
+  {
+   "cmd": "curl -d '{\"base\":\"main\"}' https://api.github.com/repos/o/r/merges",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H2 a data option is a write"
+  },
+  {
+   "cmd": "curl -X POST https://api.github.com/repos/o/r/issues/5/comments -d @body.json",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H2 a raw write to any endpoint; gh is the allowed form"
+  },
+  {
+   "cmd": "curl -s https://api.github.com/repos/o/r/pulls/4",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: H2 a plain GET is a read"
+  },
+  {
+   "cmd": "curl -sI https://api.github.com/rate_limit",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: H2 HEAD is a read"
+  },
+  {
+   "cmd": "git -c alias.m='push --force' m origin feat/gh-1-x",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H3 an alias runs its value: a force push"
+  },
+  {
+   "cmd": "git -c alias.x='!gh pr merge 1' x",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H3 a ! alias runs a shell script: a merge"
+  },
+  {
+   "cmd": "git -c alias.p=push p origin HEAD:main",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H3 an alias runs its value: a base push"
+  },
+  {
+   "cmd": "git --config-env=alias.m=M m origin feat/gh-1-x",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H3 an alias from the environment is hidden"
+  },
+  {
+   "cmd": "git -c include.path=/tmp/aliases m",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H3 a config include can define any alias"
+  },
+  {
+   "cmd": "git -c alias.st=status st",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: H3 a readable alias is judged as its value"
+  },
+  {
+   "cmd": "gh alias set m 'pr merge' && gh m 1",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H4 a gh alias runs gh <value>"
+  },
+  {
+   "cmd": "gh alias set --shell m 'gh pr merge $1'",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H4 a gh shell alias is a script"
+  },
+  {
+   "cmd": "f() { gh pr merge 1; }; f",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H4 a function body is commands"
+  },
+  {
+   "cmd": "function f { gh pr merge 1; }; f",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H4 a function keyword body is commands"
+  },
+  {
+   "cmd": "case x in x) gh pr merge 1;; esac",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H4 a case branch is commands"
+  },
+  {
+   "cmd": "trap 'gh pr merge 1' EXIT",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H4 a trap action is a script"
+  },
+  {
+   "cmd": "gh workflow run ci.yml --ref feat/gh-1-x",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H5 a workflow run on an unmerged branch has the repository secrets"
+  },
+  {
+   "cmd": "gh workflow enable ci.yml",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H5 enabling a workflow"
+  },
+  {
+   "cmd": "gh api repos/o/r/actions/workflows/ci.yml/dispatches -f ref=feat/gh-1-x",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H5 the dispatch endpoint"
+  },
+  {
+   "cmd": "gh api repos/o/r/dispatches -f event_type=deploy",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: H5 the repository dispatch endpoint"
+  },
+  {
+   "cmd": "gh workflow list",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: H5 a workflow read"
+  },
+  {
+   "cmd": "bash <<EOF\ngh pr merge 4\nEOF",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: a shell fed by a heredoc runs the body"
+  },
+  {
+   "cmd": "bash -s <<'EOF'\ngh pr merge 4\nEOF",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: a shell fed by a quoted heredoc runs the body"
+  },
+  {
+   "cmd": "sh <<< 'gh pr merge 1'",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: a here-string is the script"
+  },
+  {
+   "cmd": "echo \"gh pr merge 4\" | sh",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: a literal echo piped into a shell is the script"
+  },
+  {
+   "cmd": "cat <<EOF | sh\ngh pr merge 4\nEOF",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: a heredoc piped through cat into a shell is the script"
+  },
+  {
+   "cmd": "sudo -u dev gh pr merge 4",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: a wrapper option value (-u dev) is not the command"
+  },
+  {
+   "cmd": "xargs -I {} gh pr merge {}",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: a wrapper option value (-I {}) is not the command"
+  },
+  {
+   "cmd": "GH=gh; $GH pr merge 4",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: a literal same-command assignment names the head"
+  },
+  {
+   "cmd": "GH=gh $GH pr merge 4",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: an assignment prefix does not reach its own head: $GH is empty"
+  },
+  {
+   "cmd": "bash <<EOF\nls\nEOF",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: a shell fed a harmless body is allowed"
+  },
+  {
+   "cmd": "python3 -c \"import os; os.system('gh pr merge 1')\"",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: accepted by design, SPEC-guard-reduction required behavior 2 (removed rules: inline interpreters) and 3 (a token the lexer cannot classify is allowed)"
+  },
+  {
+   "cmd": "node -e \"require('child_process').execSync('gh pr merge 1')\"",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: accepted by design, SPEC-guard-reduction required behavior 2 (removed rules: inline interpreters)"
+  },
+  {
+   "cmd": "gh pr\\ merge 4",
+   "branch": "feat/gh-1-x",
+   "expect": "allow",
+   "why": "0.69.0 review of the guard reduction: not an evasion: a backslash-space joins one argv word \"pr merge\", which gh rejects as an unknown command"
+  },
+  {
+   "cmd": "gh api http://api.github.com/repos/o/r/pulls/42/merge -X PUT",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: M6 the API host over http normalises"
+  },
+  {
+   "cmd": "gh api https://user:tok@api.github.com/repos/o/r/pulls/42/merge?x=1 -X PUT",
+   "branch": "feat/gh-1-x",
+   "expect": "block",
+   "why": "0.69.0 review of the guard reduction: M6 userinfo and a query normalise"
   }
  ]
 }

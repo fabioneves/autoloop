@@ -109,6 +109,7 @@ query($owner:String!,$name:String!,$states:[PullRequestState!],$cursor:String){
         id number title body isDraft reviewDecision headRefName headRefOid
         baseRefName mergeStateStatus mergeable mergedAt updatedAt
         author{login} headRepository{nameWithOwner}
+        files(first:100){nodes{path}pageInfo{hasNextPage endCursor}}
         commits(last:1){
           nodes{
             commit{
@@ -129,6 +130,15 @@ query($owner:String!,$name:String!,$states:[PullRequestState!],$cursor:String){
         }
       }
       pageInfo{hasNextPage endCursor}
+    }
+  }
+}`;
+
+const PR_FILES_QUERY = `
+query($owner:String!,$name:String!,$number:Int!,$cursor:String){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      files(first:100,after:$cursor){nodes{path}pageInfo{hasNextPage endCursor}}
     }
   }
 }`;
@@ -391,6 +401,7 @@ export function normalizePullRequest(
   pr = {},
   statusContexts = undefined,
   repositoryNameWithOwner = null,
+  changedFiles = undefined,
 ) {
   const value = pr && typeof pr === 'object' && !Array.isArray(pr) ? pr : {};
   const { claim, loopOwned } = loopOwnership(value, repositoryNameWithOwner);
@@ -398,6 +409,7 @@ export function normalizePullRequest(
   const contexts = Array.isArray(statusContexts)
     ? statusContexts
     : commit?.statusCheckRollup?.contexts?.nodes ?? [];
+  const files = Array.isArray(changedFiles) ? changedFiles : value.files?.nodes ?? [];
   return {
     number: Number.isSafeInteger(value.number) && value.number > 0 ? value.number : null,
     title: typeof value.title === 'string' ? value.title : '',
@@ -434,6 +446,9 @@ export function normalizePullRequest(
         `${left.kind}\0${left.name ?? ''}`,
         `${right.kind}\0${right.name ?? ''}`,
       )),
+    // The changed paths, for the overlap check against a plan boundary.
+    files: [...new Set(files.map((file) => file?.path).filter((path) => typeof path === 'string' && path.length > 0))]
+      .sort(compareText),
     issue: loopOwned ? claim.issue : null,
     orphanCandidate: loopOwned && pr.isDraft === true,
     ownership: loopOwned ? 'loop' : 'human',
@@ -494,9 +509,9 @@ function fetchTree() {
   }
 }
 
-async function fetchPullRequests(repo, states) {
+export async function fetchPullRequests(repo, states, { graphql = ghGraphql } = {}) {
   const section = await collectPaginated(async (cursor) => {
-    const data = await ghGraphql(PULL_REQUESTS_QUERY, {
+    const data = await graphql(PULL_REQUESTS_QUERY, {
       owner: repo.owner,
       name: repo.name,
       states,
@@ -506,7 +521,7 @@ async function fetchPullRequests(repo, states) {
   }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
   if (!states.includes('OPEN')) {
     const items = section.items
-      .map((pr) => normalizePullRequest(pr, [], repo.nameWithOwner))
+      .map((pr) => normalizePullRequest(pr, [], repo.nameWithOwner, []))
       .sort((left, right) => left.number - right.number);
     return section.complete
       ? completeSection(items)
@@ -514,13 +529,14 @@ async function fetchPullRequests(repo, states) {
   }
   const checks = await mapBounded(section.items, MAX_CONCURRENCY, async (pr) => ({
     pr,
-    section: await fetchCheckContexts(repo, pr),
+    section: await fetchCheckContexts(repo, pr, graphql),
+    files: await fetchChangedFiles(repo, pr, graphql),
   }));
   const items = checks
-    .map(({ pr, section: checkSection }) =>
-      normalizePullRequest(pr, checkSection.items, repo.nameWithOwner))
+    .map(({ pr, section: checkSection, files }) =>
+      normalizePullRequest(pr, checkSection.items, repo.nameWithOwner, files.items))
     .sort((left, right) => left.number - right.number);
-  const dependencies = [section, ...checks.map(({ section: value }) => value)];
+  const dependencies = [section, ...checks.flatMap(({ section: value, files }) => [value, files])];
   return dependencies.every((value) => value.complete)
     ? completeSection(items)
     : incompleteSection(
@@ -530,7 +546,26 @@ async function fetchPullRequests(repo, states) {
     );
 }
 
-async function fetchCheckContexts(repo, pr) {
+// The first page of changed paths rides on the PR node; a PR with more than
+// 100 changed files is paged to completion, so an overlap is never missed.
+async function fetchChangedFiles(repo, pr, graphql) {
+  let initial = true;
+  return collectPaginated(async (cursor) => {
+    if (initial) {
+      initial = false;
+      return connectionPage(pr.files, `PR #${pr.number} changed files`);
+    }
+    const data = await graphql(PR_FILES_QUERY, {
+      owner: repo.owner,
+      name: repo.name,
+      number: pr.number,
+      cursor,
+    });
+    return connectionPage(data.repository?.pullRequest?.files, `PR #${pr.number} changed files`);
+  }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
+}
+
+async function fetchCheckContexts(repo, pr, graphql = ghGraphql) {
   const commit = pr.commits?.nodes?.at(-1)?.commit;
   if (!commit?.statusCheckRollup) return completeSection([]);
   let initial = true;
@@ -542,7 +577,7 @@ async function fetchCheckContexts(repo, pr) {
         `PR #${pr.number} status checks`,
       );
     }
-    const data = await ghGraphql(CHECK_CONTEXTS_QUERY, {
+    const data = await graphql(CHECK_CONTEXTS_QUERY, {
       owner: repo.owner,
       name: repo.name,
       oid: commit.oid,
@@ -1738,6 +1773,7 @@ async function selfTest() {
     headRepository: 'owner/repo',
     statusCheckState: 'SUCCESS',
     statusCheckRollup: [],
+    files: [],
     issue: 7,
     orphanCandidate: false,
     ownership: 'loop',
@@ -2077,7 +2113,36 @@ async function selfTest() {
     ...Array.from({ length: 25 }, (unused, index) => ({ number: index + 42, parts: ['comments'] })),
     { number: 100, parts: ['comments'] },
   ], { graphql: fakeGraphql });
+  // Flow 2026-10: delivered loop PRs on shared files conflicted each other.
+  // The overlap check reads each open PR's changed paths from the scan.
+  const filesCalls = [];
+  const fakePrGraphql = async (query, variables) => {
+    filesCalls.push({ query, variables });
+    if (query.includes('files(first:100,after:$cursor)')) {
+      return { repository: { pullRequest: { files: page([{ path: 'src/b/c.mjs' }]) } } };
+    }
+    return { repository: { pullRequests: page([{
+      number: 3, title: 'loop', body: 'Closes #8', isDraft: false, headRefName: 'feat/gh-8-loop',
+      headRefOid: 'a'.repeat(40), baseRefName: 'main', mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE',
+      mergedAt: null, updatedAt: '2026-01-01T00:00:00Z', author: { login: 'autoloop' },
+      headRepository: { nameWithOwner: 'o/r' },
+      files: page([{ path: 'src/a.mjs' }, { path: 'src/a.mjs' }], 'f1'),
+      commits: { nodes: [{ commit: { oid: 'a'.repeat(40), statusCheckRollup: null } }] },
+    }]) } };
+  };
+  const withFiles = await fetchPullRequests({ owner: 'o', name: 'r', nameWithOwner: 'o/r' }, ['OPEN'], { graphql: fakePrGraphql });
   const checks = [
+    [
+      'the PR query fetches changed paths, pages past 100, and the normalized PR carries them sorted and unique',
+      PULL_REQUESTS_QUERY.includes('files(first:100){nodes{path}pageInfo{hasNextPage endCursor}}')
+        && withFiles.complete === true
+        && withFiles.items.length === 1
+        && JSON.stringify(withFiles.items[0].files) === '["src/a.mjs","src/b/c.mjs"]'
+        && withFiles.items[0].ownership === 'loop'
+        && filesCalls.length === 2
+        && filesCalls[1].variables.cursor === 'f1'
+        && JSON.stringify(normalizedPr.files) === '[]',
+    ],
     [
       // A single 502 during prime used to end the run before any unit started.
       'transient gh reads retry with backoff; auth and bounded outages fail',

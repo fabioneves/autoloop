@@ -11,7 +11,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ pitcrew · v0.68.0 · starting
+∞ pitcrew · v0.69.0 · starting
 ```
 
 Pitcrew is the return path: review/CI/conflict feedback on an existing loop PR becomes a revised,
@@ -58,13 +58,12 @@ Then, in order:
    `terminal-refused`. `REVISION_REQUIRED` starts revision, not a human block.
    Only the driver extends the successor chain; never change markers by hand.
 
-No improvised inspection: the command guard blocks inline interpreters (`node -e`, `python -c`,
-interpreter heredocs) by policy — a guard block is the policy working, never an error to engineer
-around. Read retained snapshots only through the typed accessors —
+A guard refusal is the policy working, never an error to engineer around. Read retained
+snapshots only through the typed accessors —
 `node <plugin-tools>/snapshot-contract.mjs --summary <snapshotPath>` for bounded per-section
 `{complete,items,error}` counts and `--section <name> <snapshotPath>` for one section's exact
 JSON (unknown names fail closed listing the valid catalog) — or with plain `jq` (single-quoted
-filter) on the exact file the prime summary names, which the guard sanctions.
+filter) on the exact file the prime summary names.
 
 ## Dispatch
 
@@ -202,10 +201,9 @@ skipped.
      verdict accepts that exact ID;
    - verified Critical/Major in the delta is fixed or rebutted;
    - verified out-of-delta Critical/Major is fixed and the next round is full;
-   - a gating cap round earns one closing full round. If only Majors gate there under manual policy,
-     the result is `REVIEW_CAP_HANDOFF`: file each Major as a repair and list it in the PR body.
-     A Critical, or a non-manual policy, is `REVIEW_CAP_REACHED`: the dev skill's re-plan decide
-     applies, not a human block.
+   - a Major open after three fix rounds is decided, re-planned once, or deferred
+     (`REVIEW_REPLAN`, dev skill step 8); after the re-plan round a Major is `REVIEW_OPEN_FINDINGS`
+     (draft, `human:decide`) and a Critical blocks `POLICY_DENIED`.
 
    Invoke `node <plugin-tools>/review-contract.mjs` on stdin with
    `{round,scope,projectConfig,expected:{planFingerprint,repositoryFingerprint,configuredBaseOid,artifactVersion,artifactFingerprint,headOid},findingAnnotations:[{id,verified,inScope}],reviewRounds:[...]}`
@@ -213,7 +211,7 @@ skipped.
    records one dispatched round: its unique `dispatchId`, differing `authorIdentity` and
    `reviewerIdentity`, scope, delta base, the complete prior gating ledger with `fix`/`rebut`
    dispositions and `state: closed` for resolved entries, the open rebuttals, and the exact verdict
-   `dispatch.mjs` parsed. The contract applies its own fixed 20-round cap; the input carries none.
+   `dispatch.mjs` parsed. The contract applies its own fix budget; the input carries none.
    Treat the returned `reviewedHead` and checkout as artifact-attested, not live-worktree
    authority; re-read HEAD, let the live delivery contract enforce committed = reviewed = gated =
    the independently fetched PR head, and require the exact clean live checkout when publishing
@@ -276,8 +274,7 @@ waits and any identity mismatch blocks.
 Under manual policy, stop after current-head delivery and the pre-merge record.
 
 Only a human matter uses `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE>
---question "<one line>"`: `TRUST_REQUIRED`, `IRREVERSIBLE_ACTION`, `UNSPECIFIED_VALUE`, or
-`POLICY_DENIED` (Dev's Autonomy rules). It records `/answer`, keeps `loop-ready`, and stops that PR.
+--question "<one line>"`: `IRREVERSIBLE_ACTION` or `POLICY_DENIED` (Dev's Autonomy rules). It records `/answer`, keeps `loop-ready`, and stops that PR.
 Tool faults and incomplete evidence are not human decisions. Keep the refusal; fix or decide.
 Never rename a fault to a human reason or clear an existing human gate.
 
@@ -306,7 +303,7 @@ ignore the one line that matters:
 Step glyphs are the same closed set Dev uses, for the same kinds of work — 🧭 diagnose ·
 📌 prepare · 🔨 implement · 👓 orchestrator pass · 🔍 review · 🚦 gate · 📦 publish · ✅ finalize —
 between the counter and the name. Round-scoped steps keep their counter and add the round
-(`05/8 🔍 REVIEW r2/3`), cells counting rounds against the cap.
+(`05/8 🔍 REVIEW r2/3`), cells counting fix rounds of the budget.
 
 Every timeline line leads with `[HH:MM][#<N>]` — the wall clock at step start
 (`date +%H:%M`, 24-hour) and the unit it serves — so a reader scans

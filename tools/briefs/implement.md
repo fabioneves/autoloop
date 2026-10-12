@@ -12,6 +12,7 @@ You are the sole writer for one unit, or one revision of its PR, on its branch.
 - No co-author trailer.
 - Check staged content for secrets before every commit: no .env, auth.json, tokens or keys.
 - Smallest change inside the boundary; no unrelated cleanup, dependency, config, tooling or policy change.
+- An edit outside the boundary is allowed only when a plan task cannot pass its test without it. List each such path with its reason in a fenced `extra-paths` block of your report (the fence info string is `extra-paths`; the body is a JSON array of `{"path": "<repository-relative path>", "reason": "<the task and why>"}`). Never a secret path (`.env*`, keys, credentials).
 - Delete nothing the plan does not name.
 - Never add or update a progress counter or task-status mirror in protected guidance such as CLAUDE.md or AGENTS.md. If the frozen plan names such an edit, leave that edit pending and report it for an orchestrator ruling; do not make, drop or replan it yourself.
 - Never push, open or edit a PR, label, merge, release, or run the objective gate.

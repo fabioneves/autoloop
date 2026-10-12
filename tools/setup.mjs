@@ -620,6 +620,14 @@ async function selfTest() {
         && existsSync(join(fresh, '.autoloop', 'STATE.md')) && existsSync(join(fresh, 'docs/agentic/LESSONS.md'))
         && readFileSync(join(fresh, 'docs/agentic/ARCH.md'), 'utf8') === '# existing ARCH\n'
         && resolveProjectConfig(fresh)?.ok === true && doctor(fresh).status === 0);
+    // The seeded policy: the dependency/secret hard-defer is a build-time
+    // invariant, not a path family, and the protected ground names the
+    // built-in list.
+    const seededState = readFileSync(join(fresh, '.autoloop', 'STATE.md'), 'utf8');
+    check('the seeded STATE keeps the hard-defer invariant and names the built-in protected families',
+      seededState.includes('**New dependencies and secrets hard-defer.**')
+        && seededState.includes('`.github/workflows/**`') && seededState.includes('`.githooks`')
+        && seededState.includes('Every other path is ordinary unless `protectedPaths` names it.'));
     check('init refuses a configured or a legacy repository',
       init(fresh, { base: 'main', gate: 'x' }).code === 'ALREADY_CONFIGURED'
         && init(repo, { base: 'main', gate: 'x' }).code === 'LEGACY_INSTALL');

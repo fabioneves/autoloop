@@ -3,7 +3,150 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
-## [Unreleased]
+## [0.69.0] - 2026-10-12
+
+### Changed
+
+- The plugin protects only secret and credential paths (one rule, `isSecretPath` in
+  `lane-contract.mjs`: a path segment that is the word `secret`, `credential`, `token`, or `crypt`,
+  key material, and `.env*` files; `src/tokenizer.ts` is source), `.github/**` (workflows,
+  composite actions, CODEOWNERS, and dependabot all run in CI), and the loop's control roots
+  (`.autoloop`, `.claude`, `.codex`, `.opencode`, `.agents`, `.githooks`).
+  `CLAUDE.md`, `AGENTS*.md`, `docs/agentic/**`, other root dotfiles, `.github` outside
+  `workflows`, `package.json`, lockfiles, `tsconfig*`, build and lint configs, `data/**`,
+  container build and compose files, and `tools/**` are ordinary files: they get no
+  `human:authorize` label and do not stop an automatic merge. A repository that wants them
+  protected lists them in `protectedPaths`; the project list and its validation are unchanged.
+  The doctor (`verify.mjs --project-root`) notes a `protectedPaths` entry that a built-in family
+  already covers. New dependencies, secret values, and production data writes stay a build-time
+  hard-defer.
+- The command guard refuses only an irreversible or unauthorized act
+  ([SPEC-guard-reduction](docs/specs/SPEC-guard-reduction.md)). Kept: a merge through `gh pr
+  merge`, the REST merge endpoint, a GraphQL merge mutation, or a hand-posted commit status; a
+  commit on or a push to the base branch except through a pull request; `git push --force`/`-f`;
+  a release-tag push or a GitHub release mutation; a branch-protection or ruleset mutation; a
+  `Co-Authored-By` trailer; `AskUserQuestion` while a run is live; a branch switch while a
+  reviewer dispatch reads the checkout; a prime compound command; and an unreadable hook payload
+  for the session that owns a run. New: `git add` or `git commit` naming a secret path (`.env*`,
+  key material, a credential or token path). Removed: inline `--body` and comment-body reading,
+  `/answer`, every `loop-ready`, `loop-halt`, `loop-repair`, lifecycle-label and label-API rule,
+  raw `gh pr ready`, every step-label ladder rule, the opaque-shell group (inline interpreters,
+  heredocs, command assembly, expansions, unknown subcommands, command-line git aliases and
+  config, grouped commit or push), the background-dispatch rule, and the 64 KB command limit. A
+  token the lexer cannot classify is allowed. Each refusal names its rule and one allowed form.
+  `step.mjs` keeps the ladder rules itself (a backward swap is refused there). Skill prose for
+  the removed rules is dropped; the README states the kept rules.
+- A specification gap is decided by the loop, not blocked for a human. `unit.mjs --block` accepts
+  only `IRREVERSIBLE_ACTION` and `POLICY_DENIED`; `TRUST_REQUIRED` and `UNSPECIFIED_VALUE` are
+  refused as `BLOCK_REASON_RETIRED` with a remedy that names `--decide`. A contradiction between
+  the issue and the specification, a missing value the loop can choose, a design choice, a
+  ratification question, or a scope question is recorded with `unit.mjs --decide`, which now
+  takes `--question` and records the question, the choice, the alternatives, and the evidence
+  (`autoloop-decision-v1` markers without a question still parse). `unit.mjs --decisions --issue
+  <N> [--out <path>]` lists a unit's decisions with their comment links and composes the
+  `## Decisions` section the PR body and the run record carry; a lifted block whose reason is now
+  retired is listed as decided by the `/answer` that lifted it, and such blocks still lift. The
+  parked line and the closing card count a unit's decisions. The plan brief decides and carries
+  each decision into the premises instead of requesting ratification; the plan-review brief checks
+  that each decision is recorded with evidence, not that it was approved.
+- A unit does not open a second pull request on files that a delivered, unmerged loop pull request
+  already changes ([SPEC-overlap-wait](docs/specs/SPEC-overlap-wait.md)). The `plan` result
+  carries `boundary: string[]` (repository-relative paths or directory prefixes that end in `/`);
+  a plan without it is `INVALID_PLAN_RESULT`. The scan fetches each open pull request's changed
+  paths (`files`, paged past 100) and the snapshot item carries them (snapshot version 3); the
+  delivered set is every open loop pull request whose marker is at `ready-head` or
+  `premerge-record`, invalidated by `PR_MUTATION` when one merges or closes. After the plan review
+  and before the claim, `unit.mjs --overlap --issue <N> --boundary-file <plan-result.json>
+  --snapshot <path>` compares the boundary with the delivered set; a hit is recorded with
+  `unit.mjs --wait --issue <N> --on-pr <M> --paths <a,b/>`, and the parked card reads
+  `waits on PR #M (paths)`. Prime lifts the wait when #M merges or closes, prints
+  `lifted: #N (PR #M merged)` and `resumed: #N`, and the unit re-plans once on the new base (one
+  `plan` dispatch with the frozen plan as input, no new plan review) before it claims. The premise
+  step does not compare; `--on-issue`, `--on-base-red`, and `--minutes` are unchanged.
+- A code review converges in at most three fix rounds
+  ([SPEC-review-rounds](docs/specs/SPEC-review-rounds.md)). `review-contract.mjs` gives a unit
+  round 1 plus three fix rounds (`FIX_ROUND_BUDGET`) and refuses a fourth with
+  `REVIEW_FIX_BUDGET_SPENT`. A Major still open then returns `REVIEW_REPLAN`: the host decides it
+  (a rebut whose rationale names the decision comment, then one closing full round over the same
+  artifact; a rejected decision is not decided again), re-plans once (a full round recorded with
+  `--append-round --plan-fingerprint <new plan>`; a second is refused `REVIEW_REPLAN_SPENT`), or
+  defers it to a repair (allowed for any Major once the budget is spent). A Major surviving the
+  re-plan round returns `REVIEW_OPEN_FINDINGS` (state `draft`, the `openFindings` ledger, no
+  review status): the unit goes out as a draft pull request with `## Open findings` and
+  `human:decide`. A Critical surviving the re-plan round returns `POLICY_DENIED` (state `block`);
+  before that a verified Critical is fixed in the next round regardless of the budget. Minors
+  never count and never hold delivery. Findings are keyed by stable id plus `predicate`
+  (annotations and ledger entries carry it): a Major re-raised, reworded, or re-filed on the same
+  predicate keeps its raisings. A full round over an unchanged artifact is valid whenever the round
+  fixed nothing, and `--append-round` keeps the artifact version then. Retired:
+  `REVIEW_ROUND_CAP`, `REVIEW_CAP_HANDOFF`, `REVIEW_CAP_REACHED`, `REVIEW_CLOSING_ROUND_REQUIRED`,
+  and the `cap-reached` state. `step.mjs --round` takes `full`, `fix-<1..3>`, `re-plan`, or
+  `open-findings`; the ribbon, the parked view, the run card, and the closing card show
+  `fix 2/3`, `re-plan`, or `open findings` instead of a round number up to 20. The code-review
+  brief keys findings by predicate and keeps a re-raise under its id; the fix brief covers the whole
+  invariant after two consecutive Majors on one predicate; the plan brief takes the findings
+  ledger as its re-plan input. The dev skill's step 8 states the budget rules.
+- A verified finding is fixed where the defect is, inside the unit, when the file is outside the
+  frozen plan boundary but inside the unit's seam
+  ([SPEC-elastic-scope](docs/specs/SPEC-elastic-scope.md)). `review-contract.mjs` accepts the
+  disposition `widen` (`{findingId, disposition: "widen", paths, rationale}`): the ledger entry
+  carries `paths`, the evidence carries the widened `boundary` (from the plan `boundary`) and the
+  `scopeChanges` record, and the next delta round must change every widened path
+  (`REVIEW_DELTA_SCOPE_INCOMPLETE` otherwise; `--append-round --scope delta` reads the changed
+  paths from git). A widen without a verified finding (`WIDEN_UNVERIFIED_FINDING`), without
+  paths (`WIDEN_PATHS_REQUIRED`), into a secret path (`WIDEN_SECRET_PATH`), or with a malformed
+  path (`WIDEN_PATH_INVALID`) is refused; a widening into a protected path is accepted and
+  returned under `authorize` for the `human:authorize` label. A widen round counts as a fix
+  round; the closing round stays full. A `defer` may name the `seam` the path belongs to and is
+  then accepted at any round; `outsideSeam(path, plan)` is the test (another top-level package
+  or service directory, or a path the plan names out of scope). An `implement` result may carry
+  `extraPaths: [{path, reason}]`, parsed from a fenced `extra-paths` block of the writer's report
+  (`INVALID_EXTRA_PATHS` keeps the text); `widenFromImplementer(result, boundary)` records them
+  as scope changes before round 1 (`--append-round --first-round --boundary-file
+  <plan-result.json> --implement-result-file <implement-result.json>`). `lane-contract.mjs`
+  exports `inLane`, `laneCovers`, and `widenLane` for the dirty-tree and exact-head checks over
+  the widened lane. `unit.mjs` exports `scopeChangesSection` for `## Scope changes` in the PR
+  body. The implement brief allows an edit outside the boundary that a plan task needs and
+  requires it in `extra-paths`; the fix brief fixes where the defect is; the code-review brief
+  does not refuse a finding as out of scope. Repair limits are unchanged: at most three per
+  parent, depth one, filed `loop-repair` with the parent's trusted `loop-ready` provenance.
+
+### Fixed
+
+- The command guard refuses the literal evasions of its kept rules: GitHub API commit and ref
+  writes (`contents`, `git/commits|trees|refs`, `createCommitOnBranch`, `updateRef(s)`,
+  `createRef`, `deleteRef`), raw HTTP writes to `api.github.com`, `gh workflow run|enable` and the
+  actions dispatch endpoints, in-command git aliases (a readable alias is judged as its value; a
+  hidden one is refused), `gh alias set` values, function, case, and trap bodies, and shells fed
+  by a heredoc, a here-string, or a literal `echo`. Wrapper option values (`sudo -u dev`) are not
+  read as the command. An inline interpreter's program (`python3 -c`, `node -e`) stays accepted
+  by design and is recorded in the guard corpus.
+- The merge gate enforces the dependency hard-defer: a `package.json` or `composer.json` that
+  gains a dependency or an install script, or a lockfile that adds a package, is refused as
+  `human:authorize` (`dependency change`).
+- `widenLane` refuses a prefix widening at or under a guardrail root (`WIDEN_GUARDRAIL_ROOT`) and
+  labels a prefix widening into a project-protected directory. `terminal-finalize` applies
+  `human:authorize` to the pull request when a recorded widening reached a protected path.
+- The review contract admits one round after the re-plan round: a fix round when every open
+  `fix` entry is Critical, or a closing round that only defers (naming the seam) or decides
+  (naming the decision comment); a Critical fix is followed by the closing full round. A Critical
+  still open after that round blocks `POLICY_DENIED`; a Major hands off as a draft. Before, a
+  finding the re-plan round was the first to see could neither be fixed nor decided.
+- `step.mjs --round open-findings` labels the issue `human:decide` in its own label edit and
+  leaves the PR a draft; `unit.mjs` composes `## Open findings` and `## Minor findings`.
+- A `--wait --on-pr` lifts after 720 minutes with `PR #M still open after 720 min; re-plan`, as
+  a timed wait does; the lift is still a resume.
+- A retained snapshot of an older version is refused as `snapshot version 2, expected 3;
+  re-prime` by the step, the parked view, and the overlap check, not as unreadable.
+- A shipped card invalidates the retained snapshot as a `PR_MUTATION`, so the delivered set is
+  re-read before the next overlap check.
+- The fix round budget is checked to agree between `review-contract.mjs` and `step.mjs`; the
+  `--append-round` usage names `<base>/.autoloop/config.json`; the label-swap rider knows the
+  `fix` and `simplify` roles and names `unit.mjs --block` instead of hand label removal.
+- The dev skill names every `unit.mjs` entry point, the `fix` role for fix dispatches, the full
+  `--repair` form, the repair child's wait on its parent's PR, and the one round after the
+  re-plan; the elastic-scope spec states which checks use the widened set; the premise-decisions
+  spec puts a dependency, a secret, or an irreversible act outside the loop's authority.
 
 ## [0.68.0] - 2026-10-12
 

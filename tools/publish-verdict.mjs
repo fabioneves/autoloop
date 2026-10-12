@@ -16,6 +16,8 @@
 //   - gate executes the configured command itself on the exact clean checkout
 //   - review requires authenticated convergence plus the exact clean live checkout
 //   - details arrive through a file, never shell arguments
+//   - terminal-finalize labels the pull request `human:authorize` when the
+//     review ledger's widenings (scopeChanges) reached a protected path
 //
 // Usage: node <plugin-tools>/publish-verdict.mjs <gate|review> <40-hex sha>
 //        [--review-evidence-file <path>]
@@ -73,6 +75,7 @@ import {
   serializeLifecycleMarker,
   serializeLifecycleSuccessor,
 } from './lifecycle-contract.mjs';
+import { HUMAN_AUTHORIZATION_GLOBS, matchHumanAuthorization } from './lane-contract.mjs';
 import { authorizeReviewPublication } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 
@@ -1566,6 +1569,31 @@ function markPullRequestReady(repository, state) {
   }
 }
 
+// The protected paths the review ledger's widenings reached (review-contract
+// appendRound records each widening in `scopeChanges`; its `authorize` list
+// is the same paths matched again here, with the project's protectedPaths).
+export function reviewAuthorizeHits(reviewEvidence, protectedPaths = []) {
+  const paths = (Array.isArray(reviewEvidence?.scopeChanges) ? reviewEvidence.scopeChanges : [])
+    .flatMap((change) => (Array.isArray(change?.paths) ? change.paths : []));
+  return matchHumanAuthorization(paths, [...HUMAN_AUTHORIZATION_GLOBS, ...(Array.isArray(protectedPaths) ? protectedPaths : [])]);
+}
+
+// The `human:authorize` label on the pull request, as `gh pr edit --add-label`
+// posts it: one POST on the pull request's issue labels, idempotent. The
+// merge gate refuses the label; a human removes it.
+export function markPullRequestAuthorize(repository, state, hits) {
+  const response = githubRestMutation(
+    repository,
+    `repos/${repository.owner}/${repository.repo}/issues/${state.pullRequest}/labels`,
+    'POST',
+    { labels: ['human:authorize'] },
+  );
+  if (!Array.isArray(response) || !response.some((label) => label?.name === 'human:authorize')) {
+    throw new Error(`human:authorize mutation postcondition is invalid (${hits.map(({ file }) => file).join(', ')})`);
+  }
+  return true;
+}
+
 function markIssueDelivered(repository, state) {
   const remove = state.labels.filter(
     (label) => label === 'loop-started' || label.startsWith('loop:'),
@@ -2073,6 +2101,13 @@ export function finalizeTerminalDelivery(input, context = {}) {
         terminalStateGaps(state, input).join('; ')}`,
     );
   }
+  // A widening into a protected path (SPEC-elastic-scope) earns the pull
+  // request `human:authorize`, applied before it goes ready so the merge
+  // gate and the human see it on the first read (0.69.0 review, M2).
+  const authorize = reviewAuthorizeHits(input.reviewEvidence, config.protectedPaths);
+  if (authorize.length > 0) {
+    (adapters.markAuthorize ?? markPullRequestAuthorize)(snapshot.repository, state, authorize);
+  }
   if (state.draft) {
     (adapters.markReady ?? markPullRequestReady)(snapshot.repository, state);
     state = fetchState(
@@ -2244,6 +2279,7 @@ export function finalizeTerminalDelivery(input, context = {}) {
       code: finalDelivery.code,
       evidenceFingerprint: record.ci.evidenceHash,
     },
+    ...(authorize.length > 0 ? { authorize } : {}),
   };
 }
 
@@ -3696,6 +3732,102 @@ function selfTest() {
   } catch {
     readinessRaceRejected = true;
   }
+  // 0.69.0 review (M2): a review ledger whose widenings reached a protected
+  // path labels the pull request `human:authorize` before it goes ready; an
+  // ordinary ledger labels nothing. The label mutation is one `gh api` POST
+  // on the pull request's labels, asserted through a fake gh on PATH.
+  {
+    const authorizeCalls = [];
+    const authorizeAdapters = {
+      ...terminalAdapters,
+      terminalState: () => ({
+        complete: true,
+        issue: premerge.issue,
+        pullRequest: premerge.pullRequest,
+        headOid: premerge.headOid,
+        draft: terminalDraft,
+        labels: [...terminalLabels],
+      }),
+      markReady: () => {
+        terminalDraft = false;
+      },
+      markDelivered: () => {
+        terminalLabels = ['loop-ready', 'loop-delivered'];
+      },
+      markAuthorize: (_repository, state, hits) => {
+        authorizeCalls.push({ pullRequest: state.pullRequest, draft: state.draft, hits });
+      },
+    };
+    terminalDraft = true;
+    terminalLabels = ['loop-ready', 'loop-started', 'loop:09-gate'];
+    const widened = finalizeTerminalDelivery({
+      ...terminalInput,
+      reviewEvidence: {
+        ...terminalInput.reviewEvidence,
+        scopeChanges: [
+          { findingId: 'r1-f1', paths: ['src/x.mjs'], rationale: 'r' },
+          { findingId: 'r1-f2', paths: ['.github/workflows/ci.yml', 'spec/a.md'], rationale: 'r' },
+        ],
+      },
+    }, {
+      repositoryRoot: '/repo',
+      adapters: { ...authorizeAdapters, config: () => ({ ...structuredClone(gateConfig), protectedPaths: ['spec/**'] }) },
+    });
+    terminalDraft = true;
+    terminalLabels = ['loop-ready', 'loop-started', 'loop:09-gate'];
+    const ordinary = finalizeTerminalDelivery({
+      ...terminalInput,
+      reviewEvidence: { ...terminalInput.reviewEvidence, scopeChanges: [{ findingId: 'r1-f1', paths: ['src/x.mjs'], rationale: 'r' }] },
+    }, { repositoryRoot: '/repo', adapters: authorizeAdapters });
+    if (
+      widened.delivered === true
+      && widened.authorize?.length === 2
+      && ordinary.delivered === true
+      && ordinary.authorize === undefined
+      && authorizeCalls.length === 1
+      && authorizeCalls[0].pullRequest === premerge.pullRequest
+      && authorizeCalls[0].draft === true
+      && JSON.stringify(authorizeCalls[0].hits.map(({ file, glob }) => `${file}:${glob}`))
+        === '[".github/workflows/ci.yml:.github/workflows/**","spec/a.md:spec/**"]'
+    ) {
+      passed += 1;
+    } else {
+      console.error('FAIL a review ledger widened into a protected path labels the pull request human:authorize before readiness');
+    }
+    const fakeBin = mkdtempSync(resolve(tmpdir(), 'publish-verdict-gh-'));
+    const argsFile = resolve(fakeBin, 'args.json');
+    writeFileSync(resolve(fakeBin, 'gh'), [
+      '#!/bin/sh',
+      `printf '%s\\n' "$@" > '${argsFile}'`,
+      'cat > /dev/null',
+      'echo \'[{"id":1,"name":"human:authorize"}]\'',
+      '',
+    ].join('\n'), { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    let labelled = false;
+    let ghArgs = '';
+    try {
+      process.env.PATH = `${fakeBin}:${previousPath}`;
+      labelled = markPullRequestAuthorize({ host: 'github.com', owner: 'o', repo: 'r' }, { pullRequest: 9 }, [{ file: 'spec/a.md', glob: 'spec/**' }]);
+      ghArgs = readFileSync(argsFile, 'utf8');
+    } catch (error) {
+      ghArgs = `error: ${error.message}`;
+    } finally {
+      process.env.PATH = previousPath;
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+    const ghLines = ghArgs.split('\n');
+    if (
+      labelled === true
+      && ghLines[0] === 'api'
+      && ghLines.includes('repos/o/r/issues/9/labels')
+      && ghLines.includes('POST')
+    ) {
+      passed += 1;
+    } else {
+      console.error(`FAIL the human:authorize label is one gh api POST on the pull request's labels: ${ghArgs.replace(/\n/g, ' ')}`);
+    }
+  }
   if (readinessRaceRejected && !racedDelivered) {
     passed += 1;
   } else {
@@ -4076,7 +4208,7 @@ function selfTest() {
   } else {
     console.error(`FAIL a config.json repository publishes from it: ${JSON.stringify(jsonState)}`);
   }
-  const total = cases.length + 55;
+  const total = cases.length + 57;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }

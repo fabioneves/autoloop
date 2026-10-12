@@ -49,8 +49,11 @@ login cannot separate writer from approver. Without both, the finalizer refuses 
 ## Protected ground
 
 Changes to these paths are built but flagged `human:authorize`, and no comment or issue body can
-widen the list: the plugin's protected-path families (`lane-contract.mjs`, authoritative) plus this
-repository's own `protectedPaths` in `config.json`.
+widen the list: the plugin's built-in families (`lane-contract.mjs`, authoritative) plus this
+repository's own `protectedPaths` in `config.json`. The built-in families are secret and credential
+paths (`.env*`, key material, path segments that contain `secret`, `credential`, `token`, or
+`crypt`), `.github/workflows/**`, and the loop's control roots (`.autoloop`, `.claude`, `.codex`,
+`.opencode`, `.agents`, `.githooks`). Every other path is ordinary unless `protectedPaths` names it.
 
 Self-apply the label with `gh issue edit <pr-number> --add-label human:authorize` — it works on PRs,
 while `gh pr edit` fails where gh still queries deprecated Projects-classic cards and raw `gh api`
