@@ -14,8 +14,9 @@ Repair Autoloop recovery and status reporting. A changed delivered head must hav
 | `dispatch-return-association` | Bind each return to its dispatch attempt and step instance. | — | [Dispatch return association](SPEC-dispatch-return-association.md) |
 | `parked-disposition` | Show known waiting, blocked, repair, and merge-pending states without hiding open work. | `dispatch-return-association` | [Parked disposition](SPEC-parked-disposition.md) |
 | `work-size-removal` | Remove artificial work-size quotas and informational character, file, and changed-line reporting. | — | [Work-size removal](SPEC-work-size-removal.md) |
+| `session-ownership` | Act only in the session that owns a running loop. | — | [Session ownership](SPEC-session-ownership.md) |
 
-Build order: `revision-recovery` → `block-classification` → `draft-warning-suppression` → `dispatch-return-association` → `parked-disposition` → `work-size-removal`.
+Build order: `revision-recovery` → `block-classification` → `draft-warning-suppression` → `dispatch-return-association` → `parked-disposition` → `session-ownership` → `work-size-removal`.
 
 ## Shared boundaries
 
@@ -26,7 +27,7 @@ Build order: `revision-recovery` → `block-classification` → `draft-warning-s
 - Use test-driven tasks, simplify before independent review, and run the full repository gate.
 
 The recovery/status capability map, module specifications, and implementation plan are approved.
-The operator subsequently requested `work-size-removal`; review that specification and its plan
-extension before its implementation. Use `tasks/plan-session-recovery-release.md` and
+The operator subsequently requested `work-size-removal` and `session-ownership` and answered the
+ownership decisions; both specifications record those requirements. Use `tasks/plan-session-recovery-release.md` and
 `tasks/todo-session-recovery-release.md`. Preserve the original recovery plan and unrelated
 task files.
