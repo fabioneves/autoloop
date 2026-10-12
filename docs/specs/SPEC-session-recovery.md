@@ -2,7 +2,7 @@
 
 ## Objective
 
-Repair three Autoloop defects: a delivered PR cannot enter revision after its head changes, a tool recovery fault can become a human decision, and an unchanged draft reminder repeats after unrelated replies.
+Repair Autoloop recovery and status reporting. A changed delivered head must have a safe revision path. Tool faults must not become human decisions. Draft warnings must respect blocked work. Dispatch returns and parked displays must describe the correct work.
 
 ## Modules
 
@@ -10,9 +10,11 @@ Repair three Autoloop defects: a delivered PR cannot enter revision after its he
 |---|---|---|---|
 | `revision-recovery` | Recover a changed delivered head without transferring old approval. | — | [Revision recovery](SPEC-revision-recovery.md) |
 | `block-classification` | Restrict new human blocks to the closed human class. | `revision-recovery` | [Block classification](SPEC-block-classification.md) |
-| `draft-warning-suppression` | Suppress unchanged draft reminders within one session. | — | [Draft warning suppression](SPEC-draft-warning-suppression.md) |
+| `draft-warning-suppression` | Suppress unchanged draft reminders within one session and identify blocked work. | — | [Draft warning suppression](SPEC-draft-warning-suppression.md) |
+| `dispatch-return-association` | Bind each return to its dispatch attempt and step instance. | — | [Dispatch return association](SPEC-dispatch-return-association.md) |
+| `parked-disposition` | Show known waiting, blocked, repair, and merge-pending states without hiding open work. | `dispatch-return-association` | [Parked disposition](SPEC-parked-disposition.md) |
 
-Build order: `revision-recovery` → `block-classification` → `draft-warning-suppression`.
+Build order: `revision-recovery` → `block-classification` → `draft-warning-suppression` → `dispatch-return-association` → `parked-disposition`.
 
 ## Shared boundaries
 
@@ -22,5 +24,7 @@ Build order: `revision-recovery` → `block-classification` → `draft-warning-s
 - Make no live repository intervention, remote publication, release, installation, permission change, dependency addition, or file deletion without separate approval.
 - Use test-driven tasks, simplify before independent review, and run the full repository gate.
 
-The module map, build order, module specs, and implementation plan are approved. Use
-`tasks/plan-session-recovery.md` and `tasks/todo-session-recovery.md`; leave the existing task files unchanged.
+The capability map, build order, and module specifications are approved. Review the release
+implementation plan before code changes. Use `tasks/plan-session-recovery-release.md` and
+`tasks/todo-session-recovery-release.md`. Preserve the original recovery plan and unrelated
+task files.

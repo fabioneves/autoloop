@@ -22,6 +22,7 @@ Use the existing Node.js ESM Stop hook and repository-local Git metadata. Add no
 6. A missing, malformed, or unwritable reminder file must not block the hook. Emit the reminder normally when suppression cannot be established safely. Use an atomic write pattern so interrupted writes cannot create false suppression.
 7. Suppress only draft reminders. Keep invalid ownership, unpushed work, stalled steps, unanswered writeback gaps, query failures, human answers, and dark-run checks unchanged. A hard Stop must still display its hard errors even if a draft reminder was already seen.
 8. Preserve the existing `stop_hook_active` recursion rule. It is separate from unchanged-state suppression.
+9. When the owning issue has a human gate or `loop-blocked`, identify that blocker instead of suggesting publication. A blocked draft is not evidence that `gh pr ready` was forgotten. Preserve invalid-ownership and other hard checks. Include blocker changes in the reminder fingerprint so clearing or changing a blocker can produce the correct new reminder. Use only the existing issue observation; do not add a GitHub call or clear a gate.
 
 ## Commands
 
@@ -65,6 +66,7 @@ First reproduce duplicate draft reminders across two Stops. Cover:
 - New session or different repository: independent first reminder.
 - Relevant head/step/draft changes: a new reminder; unrelated updates: no repeat.
 - Expected mid-unit draft and absent step evidence.
+- Blocked drafts, standalone human gates, changed blocker labels, and resumed publication after the gate clears.
 - Multiple PRs with independent state.
 - Missing identity, corrupt cache, write failure, and interrupted atomic publication.
 - Hard errors and other reminder classes remain visible on repeated Stops.
