@@ -3,6 +3,25 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.70.0] - 2026-10-12
+
+### Added
+
+- A status band above the prompt in the session that owns a run: the loop (phase, issue, role,
+  round, model), the work (active, waiting, needs you), and the model proxy (ON or OFF, active
+  requests by model) when `ANTHROPIC_BASE_URL` names a loopback proxy that answers `GET /status`.
+  A phase row and a needs-you row show a unit in flight and the oldest unit that waits for a
+  human. `/autoloop` opens a pane (needs you, active, waiting, delivered, proxy requests);
+  `/autoloop close` closes it; the band's `expand` button opens it. The band reads one projection,
+  `status.mjs --json --session <id>` (schema `autoloop.status/1`), bound to the session id by the
+  run latch, and the proxy endpoint. It never calls GitHub and never writes. A session that owns
+  no run sees nothing; `/clear` ends the band. A read failure keeps the last value and marks the
+  band stale after 30 s.
+- `ui.status` in `.autoloop/config.json` turns the band off for a project. Optional, no default
+  key, outside the review fingerprint.
+- `step.mjs` exports `statusProjection` and `PHASES`; `status.mjs --fixtures` prints the mod's
+  test fixtures from the self-test builders, and its self-test refuses a drift.
+
 ## [0.69.0] - 2026-10-12
 
 ### Changed

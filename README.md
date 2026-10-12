@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.69.0" src="https://img.shields.io/badge/release-v0.69.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.70.0" src="https://img.shields.io/badge/release-v0.70.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -152,11 +152,24 @@ it installed from its own marketplace, keep either copy.
 | [`lean-code`](skills/lean-code/SKILL.md) | Source stays lean; rationale lives in commits and PRs. |
 | [`codebase-design`](skills/codebase-design/SKILL.md) | Deep-module and seam vocabulary for planners and reviewers. |
 
+## Status band
+
+In a session that owns a run, a band above the prompt shows the loop (phase, issue, role, round,
+model), the work (active, waiting, needs you), and, when `ANTHROPIC_BASE_URL` names a loopback
+proxy that answers `GET /status`, the proxy (ON or OFF, active requests by model). A phase row
+and a needs-you row appear when there is a unit in flight or a unit that waits for a human.
+`/autoloop` opens a pane with the same facts in full; `/autoloop close` closes it; the band's
+`expand` button (hotkey `e`) opens it too. The band reads one projection,
+`node <plugin-tools>/status.mjs --json --session <id>` (schema `autoloop.status/1`), and the
+proxy endpoint; it never calls GitHub and never writes. A session that owns no run sees nothing.
+A project turns the band off with `"ui": { "status": false }` in `.autoloop/config.json`; turning
+it back on takes effect at the next session start.
+
 ## Configuration and merge policy
 
-v0.69.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
+v0.70.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
 defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
-optional `protectedPaths`. The repository owns it; plugin updates never overwrite it.
+optional `protectedPaths` and `ui`. The repository owns it; plugin updates never overwrite it.
 
 `protectedPaths` lists the repository's own human-authorization globs (`*` and `**` only), added to
 the built-in families. The plugin protects only secret and credential paths (`.env*`, key material,
@@ -200,7 +213,7 @@ kill switch stay enforced regardless.
 
 ## How it stays safe
 
-v0.69.0 dispatches every role through one call:
+v0.70.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>
