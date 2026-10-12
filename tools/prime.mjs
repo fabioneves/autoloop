@@ -210,6 +210,13 @@ export function primeDev({
       + 'the prime command\'s hook input, so run `node <plugin-tools>/prime.mjs --json` on its own through Bash in a Claude '
       + 'Code session with the plugin enabled; the run is not opened');
   }
+  // The environment can only add a refusal: a hand-off left by another
+  // conversation in this process (after /clear) is not this run's (N1f).
+  const envSession = process.env.CLAUDE_CODE_SESSION_ID;
+  if (envSession && envSession !== sessionId) {
+    return failure('run', 'RUN_SESSION_UNKNOWN', 'the handed-over session id belongs to another conversation of this '
+      + 'Claude process; run `node <plugin-tools>/prime.mjs --json` again on its own; the run is not opened');
+  }
 
   const base = baseSyncFacts(root, config.baseBranch);
   pruneDeadRunMarkers(root);
@@ -1081,6 +1088,18 @@ function selfTest() {
           unrecognised.error?.code === 'RUN_SESSION_UNKNOWN' && stale.error?.code === 'RUN_SESSION_UNKNOWN'
           && afterStale?.sessionId === 'S-host' && typeof afterStale?.closedAt === 'string'
           && recognised.error?.code === 'SCAN_FAILED' && latchOf()?.sessionId === 'S2' && latchOf()?.closedAt === undefined,
+        );
+        // Re-audit N1f: a fresh hand-off from a recognised prime that never
+        // ran, then /clear and an unrecognised prime within its lifetime. A
+        // set environment id that differs from the hand-off refuses.
+        closeLatch({ directory: latches });
+        recordHostSession({ sessionId: 'S2', directory: latches });
+        const crossed = primeWith('S3');
+        const afterCrossed = latchOf();
+        check(
+          'a hand-off from another conversation is refused when the environment names a different session',
+          crossed.ok === false && crossed.error.code === 'RUN_SESSION_UNKNOWN'
+          && afterCrossed?.sessionId === 'S2' && typeof afterCrossed?.closedAt === 'string',
         );
       } finally {
         if (envBefore === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;

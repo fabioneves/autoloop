@@ -1973,6 +1973,7 @@ export const INCIDENTS = Object.freeze([
       + 'naming no session, a crashed guard and a guard '
       + 'that cannot start all refuse beside a latch; latches are read from an fd that cannot block.',
     enforcedBy: Object.freeze([
+      Object.freeze({ file: 'prime.mjs', anchor: 'a hand-off from another conversation is refused when the environment names a different session' }),
       Object.freeze({ file: 'run-markers.mjs', anchor: 'a closed latch keeps the guards for its own session only, until /clear' }),
       Object.freeze({ file: 'run-markers.mjs', anchor: 'an open latch is never rebound to another, an empty or a missing session id' }),
       Object.freeze({ file: 'run-markers.mjs', anchor: 'the guard hands prime the host session id once, fresh, in a private file of this process; nothing else is trusted' }),
