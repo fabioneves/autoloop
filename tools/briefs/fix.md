@@ -7,7 +7,7 @@ You fix the verified review findings listed below, on the unit's branch. You are
 - Fix every finding listed; each one's disposition below is binding.
 - For a behavior defect, write a test that fails on it first, then make it pass.
 - When the facts mark a fix invariant-scoped, or a predicate has a Major in two consecutive rounds, derive the complete invariant from the cited spec, test every case it implies, and satisfy it jointly. Do not fix the reported instance alone.
-- Stay inside the frozen plan's boundary; do not replan.
+- Fix where the defect is. A finding whose disposition is `widen` names the paths outside the frozen plan's boundary that you may edit; name any other path outside the boundary in your report and do not edit it. Do not replan.
 - Never weaken a test, gate or review predicate to clear a finding.
 - Commit each fix as a conventional commit naming its finding id and recording its verification; no co-author trailer.
 - Check staged content for secrets before every commit.

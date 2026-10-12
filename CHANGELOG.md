@@ -84,6 +84,30 @@ Notable changes to Autoloop are recorded here. The format follows
   brief keys findings by predicate and keeps a re-raise under its id; the fix brief covers the whole
   invariant after two consecutive Majors on one predicate; the plan brief takes the findings
   ledger as its re-plan input. The dev skill's step 8 states the budget rules.
+- A verified finding is fixed where the defect is, inside the unit, when the file is outside the
+  frozen plan boundary but inside the unit's seam
+  ([SPEC-elastic-scope](docs/specs/SPEC-elastic-scope.md)). `review-contract.mjs` accepts the
+  disposition `widen` (`{findingId, disposition: "widen", paths, rationale}`): the ledger entry
+  carries `paths`, the evidence carries the widened `boundary` (from the plan `boundary`) and the
+  `scopeChanges` record, and the next delta round must change every widened path
+  (`REVIEW_DELTA_SCOPE_INCOMPLETE` otherwise; `--append-round --scope delta` reads the changed
+  paths from git). A widen without a verified finding (`WIDEN_UNVERIFIED_FINDING`), without
+  paths (`WIDEN_PATHS_REQUIRED`), into a secret path (`WIDEN_SECRET_PATH`), or with a malformed
+  path (`WIDEN_PATH_INVALID`) is refused; a widening into a protected path is accepted and
+  returned under `authorize` for the `human:authorize` label. A widen round counts as a fix
+  round; the closing round stays full. A `defer` may name the `seam` the path belongs to and is
+  then accepted at any round; `outsideSeam(path, plan)` is the test (another top-level package
+  or service directory, or a path the plan names out of scope). An `implement` result may carry
+  `extraPaths: [{path, reason}]`, parsed from a fenced `extra-paths` block of the writer's report
+  (`INVALID_EXTRA_PATHS` keeps the text); `widenFromImplementer(result, boundary)` records them
+  as scope changes before round 1 (`--append-round --first-round --boundary-file
+  <plan-result.json> --implement-result-file <implement-result.json>`). `lane-contract.mjs`
+  exports `inLane`, `laneCovers`, and `widenLane` for the dirty-tree and exact-head checks over
+  the widened lane. `unit.mjs` exports `scopeChangesSection` for `## Scope changes` in the PR
+  body. The implement brief allows an edit outside the boundary that a plan task needs and
+  requires it in `extra-paths`; the fix brief fixes where the defect is; the code-review brief
+  does not refuse a finding as out of scope. Repair limits are unchanged: at most three per
+  parent, depth one, filed `loop-repair` with the parent's trusted `loop-ready` provenance.
 
 ## [0.68.0] - 2026-10-12
 

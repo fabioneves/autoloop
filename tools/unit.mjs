@@ -502,6 +502,14 @@ export function decisionsSection(decisions) {
   ].join('; '))].join('\n');
 }
 
+/** Pure: the `## Scope changes` section of a PR body, from the review
+ *  evidence's `scopeChanges` (SPEC-elastic-scope); empty without widenings. */
+export function scopeChangesSection(scopeChanges) {
+  if (!Array.isArray(scopeChanges) || scopeChanges.length === 0) return '';
+  return ['## Scope changes', '', ...scopeChanges.map((change) =>
+    `- ${change.findingId}: ${change.paths.join(', ')} — ${change.rationale}`)].join('\n');
+}
+
 /** Every decision of one unit from GitHub, with the section the PR body carries. */
 export function collectUnitDecisions({ issue, run }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
@@ -1334,6 +1342,14 @@ function selfTest() {
     && section.includes('reversed by @owner: 128 characters')
     && !section.includes('forged')
     && decisionsSection([]) === '');
+  // SPEC-elastic-scope: the PR body lists each widening with its finding id.
+  check('the PR body section lists every widening under ## Scope changes with its finding id, and is empty without widenings',
+    scopeChangesSection([
+      { findingId: 'implement:extra-1', paths: ['lib/shared.mjs'], rationale: 'task 2 cannot pass its test without the helper' },
+      { findingId: 'guard-null', paths: ['lib/guard.mjs', 'lib/guard.test.mjs'], rationale: 'the guard lives in lib' },
+    ]) === '## Scope changes\n\n- implement:extra-1: lib/shared.mjs — task 2 cannot pass its test without the helper\n- guard-null: lib/guard.mjs, lib/guard.test.mjs — the guard lives in lib'
+    && scopeChangesSection([]) === ''
+    && scopeChangesSection(undefined) === '');
   const retiredBlockAt = '2026-09-20T10:00:00.000Z';
   const liftedByAnswer = unitDecisions([
     { viewerDidAuthor: true, url: 'https://github.com/o/r/issues/5#issuecomment-60', createdAt: retiredBlockAt,

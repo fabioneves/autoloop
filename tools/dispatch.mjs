@@ -189,7 +189,7 @@ const PLAN_KEYS = Object.freeze(['title', 'prBody', 'body', 'boundary']);
 
 // A boundary entry is a path inside the repository: no leading slash, no `.`
 // or `..` segment, no backslash. A trailing slash names a directory prefix.
-function boundaryEntryProblem(entry) {
+export function boundaryEntryProblem(entry) {
   if (typeof entry !== 'string' || entry.length < 1 || entry.length > 1024) {
     return 'each boundary entry must be a 1-1024 character string';
   }
@@ -338,6 +338,42 @@ export function reviewVerdictProblem(value) {
     }
   }
   return 'structured output is not a valid review verdict';
+}
+
+// SPEC-elastic-scope: a writer may edit outside the plan boundary when a plan
+// task cannot pass its test without it, and lists each such path with its
+// reason in a fenced `extra-paths` block of its report:
+//
+//   ```extra-paths
+//   [{"path":"lib/shared.mjs","reason":"task 2 needs the helper"}]
+//   ```
+//
+// `extraPaths` is null without a block, the parsed list with one, and a
+// malformed block names its problem: a silently dropped widening would leave
+// the review narrower than the change.
+export function extraPathsIn(text) {
+  const block = /(?:^|\n)```extra-paths[ \t]*\n([\s\S]*?)\n```/u.exec(String(text ?? ''));
+  if (block === null) return { extraPaths: null };
+  let parsed;
+  try {
+    parsed = JSON.parse(block[1]);
+  } catch {
+    return { problem: 'the extra-paths block is not JSON' };
+  }
+  if (!Array.isArray(parsed) || parsed.length > 100) {
+    return { problem: 'the extra-paths block must hold an array of at most 100 {path, reason} entries' };
+  }
+  for (const entry of parsed) {
+    if (!hasExactKeys(entry, ['path', 'reason'])) {
+      return { problem: 'each extra-paths entry must be exactly {path, reason}' };
+    }
+    const problem = boundaryEntryProblem(entry.path);
+    if (problem !== null) return { problem: problem.replace('boundary entry', 'extra path') };
+    if (typeof entry.reason !== 'string' || entry.reason.length < 1 || entry.reason.length > 4096) {
+      return { problem: `extra path ${JSON.stringify(entry.path)} needs a reason of 1-4096 characters` };
+    }
+  }
+  return { extraPaths: parsed.map(({ path, reason }) => ({ path, reason })) };
 }
 
 // A headless engine asks before its first read outside its working directory,
@@ -1221,6 +1257,17 @@ function runEngine({
       { ms, startupMs, stderr, ...limited },
     );
   }
+  const widening = extraPathsIn(text);
+  if (widening.problem !== undefined) {
+    return failure(
+      'result',
+      'INVALID_EXTRA_PATHS',
+      `${role}: ${widening.problem}`,
+      // The work is on the branch and the report is here: record the
+      // widening by hand from the text, do NOT re-run the dispatch.
+      { ms, startupMs, stderr, text },
+    );
+  }
   if (checkoutBefore !== null && checkoutFingerprint(cwd) === checkoutBefore) {
     return failure(
       'result',
@@ -1229,7 +1276,10 @@ function runEngine({
       { ms, startupMs, stderr, text },
     );
   }
-  return { ok: true, role, tools, startupMs, ms, text };
+  return {
+    ok: true, role, tools, startupMs, ms, text,
+    ...(widening.extraPaths === null ? {} : { extraPaths: widening.extraPaths }),
+  };
 }
 
 export function parseArgs(args) {
@@ -1829,7 +1879,39 @@ function selfTest() {
     });
     check(
       'an implement that moves the checkout still succeeds',
-      busyWriter.ok === true && busyWriter.text === 'implemented the slice',
+      busyWriter.ok === true && busyWriter.text === 'implemented the slice'
+      && busyWriter.extraPaths === undefined,
+    );
+    // SPEC-elastic-scope: a writer that had to edit outside the plan boundary
+    // lists each path with its reason in an `extra-paths` block of its report;
+    // the typed result passes them through for the host to record as `widen`.
+    const extraPaths = [{ path: 'lib/shared.mjs', reason: 'task 2 cannot pass its test without the helper' }];
+    const widenReport = `implemented the slice\n\n\`\`\`extra-paths\n${JSON.stringify(extraPaths)}\n\`\`\`\n`;
+    writeEngineShim(shimDirectory, shimBody(
+      `printf 'more\\n' > widened.txt\n${resultEvent({ result: widenReport })}`,
+    ));
+    const wideningWriter = runDispatch({
+      role: 'implement', prompt: 'implement the plan', tools: writerTools, cwd: repoScratch, engine,
+    });
+    writeEngineShim(shimDirectory, shimBody(
+      `printf 'again\\n' > malformed.txt\n${resultEvent({ result: 'done\n```extra-paths\n[{"path":"x"}]\n```' })}`,
+    ));
+    const malformedWidening = runDispatch({
+      role: 'implement', prompt: 'implement the plan', tools: writerTools, cwd: repoScratch, engine,
+    });
+    check(
+      'an implement result passes its extra-paths block through typed, and a malformed block is a typed failure that keeps the text',
+      wideningWriter.ok === true
+      && JSON.stringify(wideningWriter.extraPaths) === JSON.stringify(extraPaths)
+      && wideningWriter.text === widenReport
+      && malformedWidening.ok === false
+      && malformedWidening.error.code === 'INVALID_EXTRA_PATHS'
+      && malformedWidening.error.text.startsWith('done')
+      && JSON.stringify(extraPathsIn('no block')) === '{"extraPaths":null}'
+      && extraPathsIn('```extra-paths\n[]\n```').extraPaths.length === 0
+      && typeof extraPathsIn('```extra-paths\n[{"path":"../x","reason":"r"}]\n```').problem === 'string'
+      && typeof extraPathsIn('```extra-paths\n[{"path":"a","reason":""}]\n```').problem === 'string'
+      && typeof extraPathsIn('```extra-paths\nnot json\n```').problem === 'string',
     );
     // Codex was a second engine until 0.51.0; naming it is refused, typed,
     // never silently run on claude.
@@ -2309,7 +2391,7 @@ function selfTest() {
     );
     check(
       'every dispatch records its own window in the dispatch log',
-      logged.length === 3
+      logged.length === 5
       && logged.every((entry) =>
         Number.isSafeInteger(entry.startedAtMs)
         && entry.startedAtMs > 0
@@ -2319,7 +2401,8 @@ function selfTest() {
       // Roles, engines and outcomes are all recorded, so overlap accounting can
       // tell a review apart from a writer after the fact.
       && logged.map(({ role, engine, ok }) => `${role}/${engine}/${ok}`).join(' ')
-        === 'implement/claude/false implement/claude/true plan-review/codex/false',
+        === 'implement/claude/false implement/claude/true implement/claude/true '
+          + 'implement/claude/false plan-review/codex/false',
     );
     // The branch ties a dispatch to its unit (a loop branch names its issue), so
     // the run record can itemize a unit's dispatches from this log alone.

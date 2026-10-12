@@ -458,9 +458,10 @@ lifecycle root comment is not canonical`). Never append a marker outside the dri
 `step.mjs --to 05-implement`, then dispatch `--role implement` (same wrapper shape). Give only the
 frozen plan, relevant STATE invariants, evidence, and named skills. Require TDD, lean
 self-documenting code, conventional commits, **one commit per completed plan task**, no co-author
-trailer, no PR/merge, no objective gate. A quick gate may run once after collection. A timed-out
-writer: inspect the branch against the plan's tasks and dispatch only the remainder — never retry
-blindly.
+trailer, no PR/merge, no objective gate. `extraPaths` (edits a plan task needed outside the
+boundary) reach round 1 via `--boundary-file <plan-result.json> --implement-result-file
+<implement-result.json>`. A quick gate may run once after collection. A timed-out writer: inspect
+the branch against the plan's tasks and dispatch only the remainder — never retry blindly.
 
 ### 6. Simplify
 
@@ -540,11 +541,11 @@ model fixes, the other reviews.
   `--scope full` round on the same head; a rejected decision is final. `re-plan` (regressing
   fixes, or a plan defect), once: `plan` (input: the `openFindings` ledger and round history),
   `implement`, one `--scope full` round recorded with `--plan-fingerprint <new plan>`; a second
-  is refused (`REVIEW_REPLAN_SPENT`); carving (below) is a re-plan. `defer` (real and outside the
-  unit): `unit.mjs --repair --parent <N>` (summary, evidence, round history), disposition `defer`
-  with `Filed as follow-up #<N>`; also allowed for a Major raised in three rounds, never a
+  is refused (`REVIEW_REPLAN_SPENT`); carving (below) is a re-plan. `defer` (outside the seam):
+  `unit.mjs --repair --parent <N>` (summary, evidence, round history), disposition `defer` naming
+  `seam` and `Filed as follow-up #<N>`; also for a Major raised in three rounds, never a
   Critical; a re-raise is the same deferral. List `deferredFindings` under `## Deferred findings`
-  in the PR body.
+  and `scopeChanges` under `## Scope changes` in the PR body.
 - **After the re-plan round there is no further round.** `REVIEW_OPEN_FINDINGS` (a Major
   remains): file each `openFindings` entry as a repair, list them under `## Open findings` in the
   PR body, push, keep the PR draft, and `unit.mjs --block --reason POLICY_DENIED --question
@@ -583,22 +584,20 @@ The tool derives identities, heads, fingerprints, versions and ledgers. Supply:
 
 - `annotations.json`: `[{id,verified,inScope,predicate?}]` for every current finding.
   `inScope` is review scope, not edit authorization. Round 1: every finding is `inScope:true`.
-  A fix outside the frozen boundary needs a separate scope decision; `true` grants no edit authority.
-- `dispositions.json`: `[{findingId,disposition:"fix"|"rebut"|"defer",rationale,claim?,evidence?}]`
-  for each previous gating finding. Rebut needs `claim` and `evidence`; `defer` names `#<N>`;
-  a re-raised deferral needs no new entry.
+  A verified fix outside the boundary is a `widen` disposition.
+- `dispositions.json`: `[{findingId,disposition:"fix"|"widen"|"rebut"|"defer",rationale,claim?,
+  evidence?,paths?,seam?}]` for each previous gating finding. Rebut needs `claim` and `evidence`.
+  `widen` names `paths` (the next delta must change them; no secret path). `defer` names
+  `#<N>`, plus `seam` when the path is in another top-level package or service directory or
+  named out of scope; a re-raise needs no new entry.
 
 Refusals: `CHECKOUT_DIRTY`, `DISPOSITION_REQUIRED`, `REBUTTAL_EVIDENCE_REQUIRED`,
-`FINDING_ANNOTATIONS_REQUIRED`. The output names the transition; re-read with
-`node <plugin-tools>/review-contract.mjs < <evidence-n.json>`.
+`FINDING_ANNOTATIONS_REQUIRED`, `REVIEW_DELTA_SCOPE_INCOMPLETE`. The output names the
+transition; re-read with `node <plugin-tools>/review-contract.mjs < <evidence-n.json>`.
 
 Evidence rules: one `reviewRounds` entry per review dispatch; `artifactVersion` increases and
-`artifactFingerprint` changes except on a round that fixed nothing; unique `dispatchId`; author ≠ reviewer;
-round 1 is `full-artifact`. Closing `scope`: `full` = `full-artifact`, `delta` =
-`fix-delta-and-open-rebuttals`. `deltaBaseOid`: base for round 1, previous head thereafter.
-`priorFindings`: full Critical/Major ledger, resolved as `state: closed`, only open rebuts
-actionable. Keep `verdict` as dispatch parsed it, unedited; `projectConfig`/`configFingerprint` paired
-from prime (canonical: `jq -S -c -j`); no input cap.
+`artifactFingerprint` changes except on a round that fixed nothing; author ≠ reviewer. Keep
+`verdict` as dispatch parsed it, unedited.
 
 **A clean delta round does not converge the unit.** It returns `REVIEW_FULL_CLOSE_REQUIRED`:
 dispatch one `full-artifact` round over the same head, commit nothing first, and record it as a

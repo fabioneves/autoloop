@@ -92,6 +92,37 @@ export const INCIDENTS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    id: 'fixes-outside-the-plan-boundary-became-repair-issues',
+    date: '2026-10-12',
+    symptom: 'On one project a verified Major whose fix was one directory outside the frozen file '
+      + 'boundary became a repair issue, which the loop queued behind the stopped run, or a block.',
+    cause: 'The frozen boundary was edit authority: a fix outside it needed a separate scope '
+      + 'decision, the implementer was told to stay inside it, and nothing distinguished a path in '
+      + 'the unit\'s own seam from one in another subsystem. Since 0.69.0 a verified finding is '
+      + 'fixed where the defect is under a recorded `widen` disposition, the next delta round must '
+      + 'change the widened paths, a writer lists `extraPaths` that a plan task needed and round 1 '
+      + 'records them, a widening into a protected path labels human:authorize and into a secret '
+      + 'path is refused, and only a path outside the seam is deferred to a repair.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a widen disposition adds its paths to the evidence boundary, the delta covers them, and the close lists the scope change'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a delta round that omits a widened path is refused REVIEW_DELTA_SCOPE_INCOMPLETE'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a widen without a verified finding, without paths, or into a secret path is refused'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a widening into a protected path labels human:authorize and does not refuse'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'an implement result listing extra paths is recorded as widenings before round 1'," }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a finding outside the seam is deferred to a repair at any round; one inside it is widened'," }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widened path is in the unit lane for the dirty-tree and exact-head checks'," }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widening into a protected path is a human:authorize hit, not a refusal'," }),
+      Object.freeze({ file: 'lane-contract.mjs', anchor: "'a widening into a secret path is refused WIDEN_SECRET_PATH'," }),
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'an implement result passes its extra-paths block through typed, and a malformed block is a typed failure that keeps the text'," }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'the PR body section lists every widening under ## Scope changes with its finding id, and is empty without widenings'," }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a repair is filed with the parent provenance, loop-repair and never loop-ready, then the parent waits on it'," }),
+      Object.freeze({ file: 'briefs/implement.md', anchor: 'An edit outside the boundary is allowed only when a plan task cannot pass its test without it.' }),
+      Object.freeze({ file: 'briefs/fix.md', anchor: 'Fix where the defect is.' }),
+      Object.freeze({ file: 'briefs/code-review.md', anchor: 'do not refuse it as out of scope' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'A verified fix outside the boundary is a `widen` disposition.' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'premise-blocks-waited-on-decisions-the-loop-can-take',
     date: '2026-10-12',
     symptom: 'On one project 33 units blocked at premise for a human decision, ten of them in one '
@@ -161,7 +192,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`inScope` is review scope, not edit authorization.' }),
       Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'Round 1: every finding is `inScope:true`.' }),
-      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'A fix outside the frozen boundary needs a separate scope decision; `true` grants no edit authority.' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'A verified fix outside the boundary is a `widen` disposition.' }),
       Object.freeze({ file: 'review-contract.mjs', anchor: "name: 'a full review cannot classify a finding out of scope'," }),
     ]),
   }),

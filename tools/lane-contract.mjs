@@ -118,17 +118,20 @@ export function matchHumanAuthorization(files, globs = HUMAN_AUTHORIZATION_GLOBS
 
 // The same families as HUMAN_AUTHORIZATION_GLOBS, matched by segment so a
 // nested secret path is caught wherever it sits.
+// The `secret` families hold secret values or key material: a unit never
+// widens its lane into one (SPEC-elastic-scope); the others label it.
 const MERGE_PROTECTED_PATH_FAMILIES = [
-  { name: 'cryptographic credential paths', matches: (path) => /(^|\/)[^/]*crypt[^/]*(\/|$)/i.test(path) },
-  { name: 'secret/credential path segments', matches: (path) => /(^|\/)[^/]*(secret|credential|token)[^/]*(\/|$)/i.test(path) },
+  { name: 'cryptographic credential paths', secret: true, matches: (path) => /(^|\/)[^/]*crypt[^/]*(\/|$)/i.test(path) },
+  { name: 'secret/credential path segments', secret: true, matches: (path) => /(^|\/)[^/]*(secret|credential|token)[^/]*(\/|$)/i.test(path) },
   {
     name: 'key material',
+    secret: true,
     matches: (path) =>
       /(^|\/)(?:keys?|certs?)(\/|$)/i.test(path)
       || /(^|\/)[^/]*(?:private[-_]?key|keypair)[^/]*(\/|$)/i.test(path)
       || /\.(?:jks|key|keystore|p12|pem|pfx)$/i.test(path),
   },
-  { name: 'env files', matches: (path) => /(^|\/)\.env[^/]*$/i.test(path) },
+  { name: 'env files', secret: true, matches: (path) => /(^|\/)\.env[^/]*$/i.test(path) },
   ...SHARED_GUARDRAIL_ROOTS.map((root) => ({
     name: root,
     matches: (path) => new RegExp(`^${root.replace('.', '\\.')}\\/`, 'i').test(path),
@@ -297,6 +300,42 @@ function normalizedPath(value) {
   const parts = value.split('/');
   if (parts.some((part) => part.length === 0 || part === '.' || part === '..')) return null;
   return value;
+}
+
+// SPEC-elastic-scope: the unit's lane is the plan boundary plus every recorded
+// widening, as one list of repository-relative paths or directory prefixes
+// that end in `/`. The dirty-tree rule and the exact-head check ask the same
+// question of it: is every path in the lane?
+export function inLane(path, lane) {
+  return (Array.isArray(lane) ? lane : []).some((entry) =>
+    entry === path || (entry.endsWith('/') && path.startsWith(entry)));
+}
+
+export function laneCovers(paths, lane) {
+  return (Array.isArray(paths) ? paths : []).every((path) => inLane(path, lane));
+}
+
+// Widens a lane by the given paths. A path in a secret family is refused
+// (`WIDEN_SECRET_PATH`) and a malformed one too (`WIDEN_PATH_INVALID`); any
+// other protected path (a workflow, a loop control file, a project
+// `protectedPaths` glob) is accepted and reported in `authorize`, which earns
+// the unit its `human:authorize` label rather than a block.
+export function widenLane(lane, paths, extraGlobs = []) {
+  const widened = [...(Array.isArray(lane) ? lane : [])];
+  const authorize = [];
+  const globs = normalizedGlobs([...HUMAN_AUTHORIZATION_GLOBS, ...(extraGlobs ?? [])]);
+  for (const raw of Array.isArray(paths) ? paths : []) {
+    const path = normalizedPath(typeof raw === 'string' ? raw.replace(/\/$/, '') : raw);
+    if (path === null) return { ok: false, code: 'WIDEN_PATH_INVALID', path: raw };
+    const entry = typeof raw === 'string' && raw.endsWith('/') ? `${path}/` : path;
+    if (MERGE_PROTECTED_PATH_FAMILIES.some(({ secret, matches }) => secret === true && matches(path))) {
+      return { ok: false, code: 'WIDEN_SECRET_PATH', path: entry };
+    }
+    if (inLane(entry, widened)) continue;
+    widened.push(entry);
+    authorize.push(...matchHumanAuthorization([path], globs));
+  }
+  return { ok: true, lane: widened, authorize };
 }
 
 function plannedEvidence(raw, reasonCodes) {
@@ -935,6 +974,43 @@ function selfTest() {
       'project globs a built-in family covers are named as duplicates',
       JSON.stringify(duplicateProtectedGlobs(['spec/**', '.env*', 'secrets/**', 'compose.y*ml', '.github/workflows/**', 'infra/**']))
         === '[".env*",".github/workflows/**","secrets/**"]',
+    ],
+    // SPEC-elastic-scope: the unit's lane is the plan boundary plus every
+    // recorded widening, for the dirty-tree and exact-head checks alike.
+    [
+      'a widened path is in the unit lane for the dirty-tree and exact-head checks',
+      typeof widenLane === 'function'
+        && laneCovers(['src/a.mjs', 'lib/b.mjs'], widenLane(['src/'], ['lib/b.mjs']).lane)
+        && !laneCovers(['lib/c.mjs'], ['src/'])
+        && inLane('src/x/y.mjs', ['src/'])
+        && !inLane('srcx/y.mjs', ['src/'])
+        && !inLane('src', ['src/']),
+    ],
+    [
+      'a widening into a protected path is a human:authorize hit, not a refusal',
+      (() => {
+        if (typeof widenLane !== 'function') return false;
+        const workflow = widenLane(['src/'], ['.github/workflows/ci.yml']);
+        const project = widenLane(['src/'], ['spec/a.md'], ['spec/**']);
+        return workflow.ok === true
+          && workflow.lane.includes('.github/workflows/ci.yml')
+          && JSON.stringify(workflow.authorize) === '[{"file":".github/workflows/ci.yml","glob":".github/workflows/**"}]'
+          && project.ok === true
+          && project.authorize.length === 1
+          && widenLane(['src/'], ['src/b.mjs']).authorize.length === 0;
+      })(),
+    ],
+    [
+      'a widening into a secret path is refused WIDEN_SECRET_PATH',
+      typeof widenLane === 'function'
+        && ['.env.local', 'keys/x.pem', 'config/credentials.json', 'certs/private-key.pem']
+          .every((path) => widenLane(['src/'], [path]).code === 'WIDEN_SECRET_PATH')
+        && widenLane(['src/'], ['src/ok.mjs', '.env']).code === 'WIDEN_SECRET_PATH',
+    ],
+    [
+      'a widening into a path outside the repository is refused WIDEN_PATH_INVALID',
+      typeof widenLane === 'function'
+        && ['../x.mjs', '/etc/passwd', 'a/../b', ''].every((path) => widenLane(['src/'], [path]).code === 'WIDEN_PATH_INVALID'),
     ],
   ];
   for (const fixture of PATH_POLICY_FIXTURES) {

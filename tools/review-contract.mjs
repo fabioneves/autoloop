@@ -33,7 +33,8 @@ import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { snapshotExecutionCheckout } from './checkout-contract.mjs';
 import { currentProjectConfig, NO_CONFIG, resolveProjectConfig, reviewedConfig } from './config-contract.mjs';
-import { validReviewVerdict } from './dispatch.mjs';
+import { boundaryEntryProblem, validReviewVerdict } from './dispatch.mjs';
+import { inLane, widenLane } from './lane-contract.mjs';
 import { sameModel } from './models-config.mjs';
 
 const GATING_SEVERITIES = new Set(['Critical', 'Major']);
@@ -50,7 +51,11 @@ const FINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/[\]-]{0,127}$/;
 const DISPATCH_ID_RE = IDENTITY_RE;
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
-const DISPOSITIONS = new Set(['fix', 'rebut', 'defer']);
+// `widen` is a fix whose paths lie outside the plan boundary but inside the
+// unit's seam (SPEC-elastic-scope): the ledger entry carries the added
+// `paths`, and the evidence boundary grows by them. A `defer` may name the
+// `seam` the path belongs to; such a finding is a repair at any round.
+const DISPOSITIONS = new Set(['fix', 'rebut', 'defer', 'widen']);
 // A Major the fixes keep missing is not worth another round of the same fix:
 // after this many raisings it may be deferred to a filed follow-up issue, which
 // the PR body lists, so the human still sees it at merge. A Critical never is.
@@ -105,7 +110,10 @@ const LEDGER_KEYS = [
 // reworded or re-filed under a new id on the same predicate is the same
 // finding: its raisings count under the predicate. Optional, so evidence
 // recorded before 0.69.0 still validates; absent, the finding id is the key.
-const LEDGER_OPTIONAL_KEYS = ['predicate'];
+const LEDGER_OPTIONAL_KEYS = ['predicate', 'paths', 'seam'];
+const ROUND_OPTIONAL_KEYS = ['deltaPaths'];
+const SCOPE_CHANGE_KEYS = ['findingId', 'paths', 'rationale'];
+const MAX_BOUNDARY_ENTRIES = 1000;
 const REBUTTAL_KEYS = ['findingId', 'claim', 'evidence'];
 
 function isPlainObject(value) {
@@ -127,6 +135,25 @@ function hasKeys(value, required, optional) {
 
 function validPredicate(value) {
   return value === undefined || boundedText(value, 1, 256);
+}
+
+function validBoundary(value, maximum = MAX_BOUNDARY_ENTRIES) {
+  return Array.isArray(value)
+    && value.length <= maximum
+    && new Set(value).size === value.length
+    && value.every((entry) => boundaryEntryProblem(entry) === null);
+}
+
+function validScopeChanges(value, boundary) {
+  return Array.isArray(value)
+    && value.length <= 100
+    && value.every((change) =>
+      hasExactKeys(change, SCOPE_CHANGE_KEYS)
+      && FINDING_ID_RE.test(change.findingId)
+      && validBoundary(change.paths, 100)
+      && change.paths.length >= 1
+      && change.paths.every((path) => inLane(path, boundary))
+      && boundedText(change.rationale, 1, 4096));
 }
 
 function canonicalize(value) {
@@ -217,7 +244,12 @@ function validLedgerEntry(entry) {
     && LEDGER_STATES.has(entry.state)
     && boundedText(entry.rationale, 1, 4096)
     && (entry.disposition !== 'defer'
-      || (entry.severity === 'Major' && FOLLOW_UP_RE.test(entry.rationale)));
+      || (entry.severity === 'Major' && FOLLOW_UP_RE.test(entry.rationale)))
+    && (entry.seam === undefined
+      || (entry.disposition === 'defer' && boundedText(entry.seam, 1, 1024)))
+    && (entry.disposition === 'widen'
+      ? validBoundary(entry.paths, 100) && entry.paths.length >= 1
+      : entry.paths === undefined);
 }
 
 function validRebuttal(rebuttal) {
@@ -244,7 +276,8 @@ function sameIdentity(left, right) {
 }
 
 export function validReviewRound(record) {
-  return hasExactKeys(record, ROUND_KEYS)
+  return hasKeys(record, ROUND_KEYS, ROUND_OPTIONAL_KEYS)
+    && (record.deltaPaths === undefined || validBoundary(record.deltaPaths, 10000))
     && Number.isSafeInteger(record.round)
     && record.round >= 1
     && record.round <= 100
@@ -382,7 +415,8 @@ function sameArtifactRound(previous, current) {
     && current.artifactFingerprint === previous.artifactFingerprint
     && current.artifactVersion === previous.artifactVersion
     && current.headOid === previous.headOid
-    && openEntries(current, 'fix').length === 0;
+    && openEntries(current, 'fix').length === 0
+    && openEntries(current, 'widen').length === 0;
 }
 
 // A prior ledger entry leaves the gating set once it is closed, fixed,
@@ -390,8 +424,30 @@ function sameArtifactRound(previous, current) {
 function ledgerEntryCloses(entry, rebutsById) {
   return entry.state === 'closed'
     || entry.disposition === 'fix'
+    || entry.disposition === 'widen'
     || entry.disposition === 'defer'
     || rebutsById.get(entry.findingId)?.status === 'accepted';
+}
+
+// SPEC-elastic-scope: the delta round after a widening reviews the added
+// paths. A delta whose changed paths miss one did not see the fix it records.
+function widenCoverage(rounds, gaps = []) {
+  for (const record of rounds) {
+    if (record.scope !== REVIEW_SCOPES.get('delta')) continue;
+    const delta = record.deltaPaths ?? [];
+    for (const entry of openEntries(record, 'widen')) {
+      const missed = entry.paths.find((path) => !delta.some((changed) => inLane(changed, [path])));
+      if (missed !== undefined) {
+        gaps.push(
+          `round ${record.round}: finding ${entry.findingId} widened the boundary by `
+          + `${missed} but the delta reviewed does not change it — review the widened `
+          + 'paths in this round, or make it a full round',
+        );
+        return { code: 'REVIEW_DELTA_SCOPE_INCOMPLETE' };
+      }
+    }
+  }
+  return { code: null };
 }
 
 // Fingerprints and OIDs are unreadable at full length in a one-line gap, and a
@@ -635,7 +691,7 @@ function roundBudget(rounds, predicateOf, gaps = []) {
       continue;
     }
     const spent = fixRounds >= FIX_ROUND_BUDGET;
-    const fixes = openEntries(current, 'fix');
+    const fixes = [...openEntries(current, 'fix'), ...openEntries(current, 'widen')];
     if (fixes.length > 0) {
       if (spent && !fixes.some(({ severity }) => severity === 'Critical')) {
         gaps.push(
@@ -672,14 +728,19 @@ function roundBudget(rounds, predicateOf, gaps = []) {
 
 export function reviewTransition(input) {
   if (
-    !hasExactKeys(input, [
+    !hasKeys(input, [
       'round',
       'scope',
       'projectConfig',
       'expected',
       'findingAnnotations',
       'reviewRounds',
-    ])
+    ], ['boundary', 'scopeChanges'])
+    // The unit's boundary (the plan's, widened) and the record of each
+    // widening; evidence recorded before 0.69.0 carries neither.
+    || (input.boundary !== undefined && !validBoundary(input.boundary))
+    || (input.scopeChanges !== undefined
+      && !validScopeChanges(input.scopeChanges, input.boundary ?? []))
     || !Number.isSafeInteger(input.round)
     || input.round < 1
     || !REVIEW_SCOPES.has(input.scope)
@@ -715,6 +776,10 @@ export function reviewTransition(input) {
     return decision('error', 'INVALID_REVIEW_EVIDENCE', evidenceGaps.length > 0
       ? { evidenceGap: evidenceGaps[0] }
       : {});
+  }
+  const coverage = widenCoverage(history.rounds, evidenceGaps);
+  if (coverage.code !== null) {
+    return decision('error', coverage.code, { evidenceGap: evidenceGaps.at(-1) });
   }
   const predicateOf = predicateIndex(history.rounds, input.findingAnnotations);
   const budget = roundBudget(history.rounds, predicateOf, evidenceGaps);
@@ -763,11 +828,12 @@ export function reviewTransition(input) {
     const raisings = raisingsOf(
       history.rounds.slice(0, -1), predicateOf(entry.findingId), predicateOf,
     );
-    if (raisings < DEFER_AFTER_RAISINGS && !budgetSpent) {
+    if (raisings < DEFER_AFTER_RAISINGS && !budgetSpent && entry.seam === undefined) {
       return decision('error', 'INVALID_REVIEW_EVIDENCE', {
         evidenceGap: `finding ${entry.findingId} is deferred after ${raisings} raising(s); `
-          + `only a Major raised in ${DEFER_AFTER_RAISINGS} rounds, or any Major once the fix `
-          + 'budget is spent, may be deferred — fix or rebut it',
+          + `only a Major raised in ${DEFER_AFTER_RAISINGS} rounds, any Major once the fix `
+          + 'budget is spent, or a Major outside the seam (the deferral names it) may be '
+          + 'deferred — fix, widen or rebut it',
       });
     }
   }
@@ -776,6 +842,10 @@ export function reviewTransition(input) {
   const closedEvidence = () => ({
     ...(deferred.length === 0 ? {} : {
       deferredFindings: deferred.map(({ findingId, rationale }) => ({ findingId, rationale })),
+    }),
+    // Every widening, for `## Scope changes` in the PR body.
+    ...((input.scopeChanges?.length ?? 0) === 0 ? {} : {
+      scopeChanges: structuredClone(input.scopeChanges),
     }),
     reviewedHead: history.current.headOid,
     reviewedCheckout: structuredClone(history.current.checkout),
@@ -961,6 +1031,8 @@ export function appendEscalationRound(evidence, result, options = {}) {
       + 'accepted, so the preceding round did not close it',
     );
   }
+  // The closing round is full scope: a delta's changed paths do not carry.
+  const { deltaPaths: _deltaPaths, ...inherited } = structuredClone(previous);
   const appended = {
     ...evidence,
     round: evidence.round + 1,
@@ -969,7 +1041,7 @@ export function appendEscalationRound(evidence, result, options = {}) {
     reviewRounds: [
       ...evidence.reviewRounds,
       {
-        ...structuredClone(previous),
+        ...inherited,
         round: previous.round + 1,
         scope: REVIEW_SCOPES.get('full'),
         dispatchId: options.dispatchId,
@@ -1004,7 +1076,64 @@ function dispositionLedgerEntry(finding, disposition, predicate) {
     disposition: disposition.disposition,
     state: 'open',
     rationale: disposition.rationale,
+    ...(disposition.disposition === 'widen' ? { paths: [...disposition.paths] } : {}),
+    ...(disposition.disposition === 'defer' && disposition.seam !== undefined
+      ? { seam: disposition.seam }
+      : {}),
   };
+}
+
+// SPEC-elastic-scope: a path is outside the unit's seam when its top-level
+// package or service directory differs from every boundary entry's, or the
+// plan names it out of scope. A monorepo container (`packages/a`) counts as
+// the package; a root-level file belongs to the project, never to another
+// subsystem. Outside the seam the finding is a repair (`defer` naming the
+// seam); inside it the fix is made in the unit (`widen`).
+const PACKAGE_CONTAINERS = new Set(['apps', 'libs', 'modules', 'packages', 'services']);
+
+function seamOf(path) {
+  const segments = String(path).replace(/\/$/u, '').split('/');
+  if (segments.length < 2) return null;
+  return PACKAGE_CONTAINERS.has(segments[0]) && segments.length > 2
+    ? segments.slice(0, 2).join('/')
+    : segments[0];
+}
+
+export function outsideSeam(path, plan) {
+  const boundary = Array.isArray(plan?.boundary) ? plan.boundary : [];
+  const outOfScope = Array.isArray(plan?.outOfScope) ? plan.outOfScope : [];
+  if (inLane(path, outOfScope)) return true;
+  const seam = seamOf(path);
+  if (seam === null) return false;
+  return !boundary.some((entry) => seamOf(entry) === seam);
+}
+
+// The implementer's own widening (`extraPaths` on an implement result):
+// each path outside the plan boundary becomes a scope change recorded before
+// round 1, under an `implement:extra-<n>` id. A path already inside the
+// boundary is no widening. Refusals are the lane's own.
+export function widenFromImplementer(result, boundary) {
+  if (result?.ok !== true || (result.extraPaths !== undefined && !Array.isArray(result.extraPaths))) {
+    return { ok: false, code: 'INVALID_DISPATCH_RESULT', reason: 'the result is not a successful implement dispatch' };
+  }
+  if (!validBoundary(boundary)) {
+    return { ok: false, code: 'WIDEN_PATH_INVALID', reason: 'the plan boundary is not a list of repository-relative paths' };
+  }
+  const scopeChanges = [];
+  let lane = [...boundary];
+  for (const extra of result.extraPaths ?? []) {
+    if (!isPlainObject(extra) || typeof extra.path !== 'string' || !boundedText(extra.reason, 1, 4096)) {
+      return { ok: false, code: 'WIDEN_PATH_INVALID', reason: 'each extra path needs a path and a reason' };
+    }
+    if (inLane(extra.path, lane)) continue;
+    const widened = widenLane(lane, [extra.path]);
+    if (widened.ok !== true) return { ok: false, code: widened.code, reason: `extra path ${extra.path}` };
+    lane = widened.lane;
+    scopeChanges.push({
+      findingId: `implement:extra-${scopeChanges.length + 1}`, paths: [extra.path], rationale: extra.reason,
+    });
+  }
+  return { ok: true, boundary: lane, scopeChanges };
 }
 
 export function appendRound(evidence, result, options = {}) {
@@ -1048,6 +1177,8 @@ export function appendRound(evidence, result, options = {}) {
   let base;
   let priorFindings = [];
   let openRebuttals = [];
+  // Protected paths a widening added: the unit's `human:authorize` label.
+  const authorize = [];
   if (evidence === null || evidence === undefined) {
     const first = options.first;
     if (
@@ -1063,6 +1194,13 @@ export function appendRound(evidence, result, options = {}) {
         + 'authorIdentity and configuredBaseOid',
       );
     }
+    if (first.boundary !== undefined && !validBoundary(first.boundary)) {
+      return refuse('WIDEN_PATH_INVALID', 'the plan boundary is not a list of repository-relative paths');
+    }
+    if (first.scopeChanges !== undefined
+      && !validScopeChanges(first.scopeChanges, first.boundary ?? [])) {
+      return refuse('WIDEN_PATH_INVALID', 'scopeChanges must name paths inside the boundary, each with a finding id and a rationale');
+    }
     base = {
       round: 1,
       scope: 'full',
@@ -1074,6 +1212,8 @@ export function appendRound(evidence, result, options = {}) {
       authorIdentity: first.authorIdentity,
       artifactVersion: 1,
       reviewRounds: [],
+      boundary: first.boundary,
+      scopeChanges: first.scopeChanges,
     };
   } else {
     const previous = evidence?.reviewRounds?.at(-1);
@@ -1107,6 +1247,10 @@ export function appendRound(evidence, result, options = {}) {
       }
     }
     const previousGating = gatingFindings(previous.verdict);
+    const verified = new Set((evidence.findingAnnotations ?? [])
+      .filter((annotation) => annotation?.verified === true).map(({ id }) => id));
+    let boundary = evidence.boundary === undefined ? undefined : [...evidence.boundary];
+    const scopeChanges = [...(evidence.scopeChanges ?? [])];
     for (const finding of previousGating) {
       const disposition = dispositions.get(finding.id);
       if (!DISPOSITIONS.has(disposition?.disposition)
@@ -1114,8 +1258,9 @@ export function appendRound(evidence, result, options = {}) {
         return refuse(
           'DISPOSITION_REQUIRED',
           `finding ${finding.id} gated the previous round; dispose it as fix, `
-          + 'rebut, or (a Major raised in 3 rounds, or any Major once the fix budget '
-          + 'is spent) defer naming its follow-up #N, with a rationale',
+          + 'widen (naming the paths outside the boundary), rebut, or defer naming its '
+          + 'follow-up #N (a Major raised in 3 rounds, any Major once the fix budget is '
+          + 'spent, or a Major outside the seam, naming it), with a rationale',
         );
       }
       if (disposition.disposition === 'rebut'
@@ -1126,6 +1271,24 @@ export function appendRound(evidence, result, options = {}) {
           'REBUTTAL_EVIDENCE_REQUIRED',
           `the rebuttal of ${finding.id} needs a claim and evidence`,
         );
+      }
+      if (disposition.disposition === 'widen') {
+        if (!Array.isArray(disposition.paths) || disposition.paths.length === 0) {
+          return refuse('WIDEN_PATHS_REQUIRED', `the widening for ${finding.id} names no path`);
+        }
+        if (!verified.has(finding.id)) {
+          return refuse(
+            'WIDEN_UNVERIFIED_FINDING',
+            `finding ${finding.id} is not annotated verified; a widening needs a verified finding`,
+          );
+        }
+        const widened = widenLane(boundary ?? [], disposition.paths, options.extraHumanAuthorizationGlobs);
+        if (widened.ok !== true) {
+          return refuse(widened.code, `the widening for ${finding.id}: ${widened.code} at ${widened.path}`);
+        }
+        boundary = widened.lane;
+        authorize.push(...widened.authorize);
+        scopeChanges.push({ findingId: finding.id, paths: [...disposition.paths], rationale: disposition.rationale });
       }
     }
     const previousRebuts = new Map(
@@ -1156,6 +1319,12 @@ export function appendRound(evidence, result, options = {}) {
       round: evidence.round + 1,
       scope: options.scope,
       projectConfig: evidence.projectConfig,
+      boundary,
+      // Absent stays absent: evidence recorded before 0.69.0 gains no key.
+      scopeChanges: evidence.scopeChanges === undefined && scopeChanges.length === 0
+        ? undefined
+        : scopeChanges,
+      deltaPaths: options.scope === 'delta' ? options.deltaPaths : undefined,
       planFingerprint,
       configFingerprint: previous.configFingerprint,
       configuredBaseOid: previous.configuredBaseOid,
@@ -1188,11 +1357,14 @@ export function appendRound(evidence, result, options = {}) {
     priorFindings,
     openRebuttals,
     verdict: structuredClone(verdict),
+    ...(base.deltaPaths === undefined ? {} : { deltaPaths: [...base.deltaPaths] }),
   };
   const appended = {
     round: base.round,
     scope: base.scope,
     projectConfig: structuredClone(base.projectConfig),
+    ...(base.boundary === undefined ? {} : { boundary: [...base.boundary] }),
+    ...(base.scopeChanges === undefined ? {} : { scopeChanges: structuredClone(base.scopeChanges) }),
     expected: {
       planFingerprint: record.planFingerprint,
       repositoryFingerprint: record.repositoryFingerprint,
@@ -1204,7 +1376,17 @@ export function appendRound(evidence, result, options = {}) {
     findingAnnotations: structuredClone(annotations),
     reviewRounds: [...structuredClone(base.reviewRounds), record],
   };
-  return validatedAppend(appended);
+  const built = validatedAppend(appended);
+  return built.ok && authorize.length > 0 ? { ...built, authorize } : built;
+}
+
+// The paths a fix delta changed, for the widening coverage of a delta round.
+export function deltaPathsOf(root, fromOid) {
+  const diff = spawnSync('git', ['diff', '--name-only', '-z', `${fromOid}..HEAD`], {
+    cwd: root, encoding: 'utf8', timeout: 15000,
+  });
+  if (diff.status !== 0) return null;
+  return String(diff.stdout ?? '').split('\0').filter((path) => path.length > 0);
 }
 
 // The reviewed artifact is its tree: an empty commit or a rebase that
@@ -1302,6 +1484,7 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
           ({ findingId }) => findingId === prior.id,
         );
         const deferred = (overrides.defer ?? []).includes(prior.id);
+        const widened = overrides.widen?.[prior.id];
         const predicate = options.predicates?.[prior.id];
         ledger.set(prior.id, {
           findingId: prior.id,
@@ -1309,13 +1492,16 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
           summary: prior.summary,
           evidence: prior.evidence,
           ...(predicate === undefined ? {} : { predicate }),
-          disposition: rebutted ? 'rebut' : deferred ? 'defer' : 'fix',
+          ...(widened === undefined ? {} : { paths: widened }),
+          disposition: rebutted ? 'rebut' : deferred ? 'defer' : widened ? 'widen' : 'fix',
           state: 'open',
           rationale: rebutted
             ? overrides.rebutRationale ?? 'The author supplied a bounded rebuttal with evidence.'
             : deferred
               ? overrides.deferRationale ?? 'Deferred to follow-up #99.'
-              : 'The exact fix delta contains the bounded fix.',
+              : widened
+                ? 'The fix is one directory away; the boundary is widened.'
+                : 'The exact fix delta contains the bounded fix.',
         });
       }
     }
@@ -1346,6 +1532,7 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
         clean: true,
       },
       priorFindings: overrides.priorFindings ?? [...ledger.values()],
+      ...(overrides.deltaPaths === undefined ? {} : { deltaPaths: overrides.deltaPaths }),
       openRebuttals: overrides.openRebuttals ?? verdict.rebuts.map(({ findingId }) => ({
         findingId,
         claim: `Re-evaluate ${findingId} against the fix delta.`,
@@ -1482,6 +1669,19 @@ function selfTest() {
     2,
     failWith([finding], [reject(finding.id, 'The evidence does not close it.')]),
   );
+
+  // SPEC-elastic-scope: a widen disposition is a fix in a widened boundary;
+  // the delta round after it must cover the added paths.
+  const widenFactory = roundFactory(fixtureProjectConfig(), { seed: 'widen' });
+  const widenFirst = widenFactory(1, failWith([finding]));
+  const widenCovered = widenFactory(2, pass, {
+    widen: { [finding.id]: ['lib/b.mjs'] }, deltaPaths: ['src/reviewed.mjs', 'lib/b.mjs'],
+  });
+  const uncoveredFactory = roundFactory(fixtureProjectConfig(), { seed: 'uncovered' });
+  const uncoveredFirst = uncoveredFactory(1, failWith([finding]));
+  const widenUncovered = uncoveredFactory(2, pass, {
+    widen: { [finding.id]: ['lib/'] }, deltaPaths: ['src/reviewed.mjs'],
+  });
 
   const lateFactory = roundFactory(fixtureProjectConfig(), { seed: 'late' });
   const lateClean = lateFactory(1, pass);
@@ -2142,6 +2342,32 @@ function selfTest() {
     && validReviewRound({ ...respelled, reviewerIdentity: 'claude:gpt-6-astra[1m]' });
   if (!respelledCheck) cases.push({ name: 'the writer\'s model spelled another way is not an independent reviewer', input: null, expected: ['never', false] });
 
+  cases.push(
+    {
+      name: 'a delta round covering the widened paths continues to the closing full round',
+      input: inputFor([widenFirst, widenCovered]),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
+    },
+    {
+      name: 'a delta round that omits a widened path is refused REVIEW_DELTA_SCOPE_INCOMPLETE',
+      input: inputFor([uncoveredFirst, widenUncovered]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_DELTA_SCOPE_INCOMPLETE',
+      expectedGap: 'lib/',
+    },
+    {
+      name: 'a widen ledger entry without paths is not valid evidence',
+      input: (() => {
+        const rounds = structuredClone([widenFirst, widenCovered]);
+        delete rounds[1].priorFindings[0].paths;
+        return inputFor(rounds);
+      })(),
+      expected: ['error', false],
+      expectedCode: 'INVALID_REVIEW_EVIDENCE',
+    },
+  );
+
   let passed = 0;
   for (const fixture of cases) {
     const actual = reviewTransition(fixture.input);
@@ -2260,6 +2486,7 @@ function selfTest() {
     planFingerprint: hash('plan-builder'),
     authorIdentity: 'claude:claude-opus-5-5',
     configuredBaseOid: oid('base-builder'),
+    boundary: ['src/'],
   };
   const reviewed = (verdict) => ({
     ok: true, role: 'code-review', engine: 'claude', model: 'gpt-6-astra', verdict,
@@ -2463,6 +2690,140 @@ function selfTest() {
       expected: true,
     },
     {
+      // SPEC-elastic-scope: a verified finding whose fix is one directory
+      // away is fixed in the unit; the widening is the record.
+      name: 'a widen disposition adds its paths to the evidence boundary, the delta covers them, and the close lists the scope change',
+      actual: (() => {
+        if (!builtFirst.ok) return false;
+        const widen = (overrides = {}) => appendRound(builtFirst.evidence, reviewed(pass), secondOptions({
+          deltaPaths: ['src/reviewed.mjs', 'lib/b.mjs'],
+          dispositions: [{
+            findingId: finding.id, disposition: 'widen', paths: ['lib/b.mjs'],
+            rationale: 'The guard lives in lib/b.mjs; the finding is verified there.',
+          }],
+          ...overrides,
+        }));
+        const widened = widen();
+        if (widened.ok !== true) return false;
+        const closed = appendEscalationRound(widened.evidence, reviewed(pass), { dispatchId: 'builder-widen-3' });
+        const transition = closed.ok ? reviewTransition(closed.evidence) : null;
+        return widened.code === 'REVIEW_FULL_CLOSE_REQUIRED'
+          && JSON.stringify(widened.evidence.boundary) === '["src/","lib/b.mjs"]'
+          && widened.evidence.reviewRounds[1].priorFindings[0].disposition === 'widen'
+          && JSON.stringify(widened.evidence.reviewRounds[1].priorFindings[0].paths) === '["lib/b.mjs"]'
+          && widened.evidence.reviewRounds[1].artifactVersion === 2
+          && widen({ deltaPaths: ['src/reviewed.mjs'] }).code === 'REVIEW_DELTA_SCOPE_INCOMPLETE'
+          && widen({ scope: 'full' }).ok === true
+          && closed.code === 'REVIEW_CLEAN'
+          && JSON.stringify(transition.scopeChanges)
+            === JSON.stringify([{ findingId: finding.id, paths: ['lib/b.mjs'], rationale: 'The guard lives in lib/b.mjs; the finding is verified there.' }]);
+      })(),
+      expected: true,
+    },
+    {
+      name: 'a widen without a verified finding, without paths, or into a secret path is refused',
+      actual: (() => {
+        if (!builtFirst.ok) return false;
+        const widen = (disposition, evidence = builtFirst.evidence) => appendRound(evidence, reviewed(pass), secondOptions({
+          deltaPaths: ['src/reviewed.mjs', 'lib/b.mjs', '.env'],
+          dispositions: [{ findingId: finding.id, disposition: 'widen', rationale: 'Widen.', ...disposition }],
+        })).code;
+        const unverified = structuredClone(builtFirst.evidence);
+        unverified.findingAnnotations[0].verified = false;
+        return widen({ paths: [] }) === 'WIDEN_PATHS_REQUIRED'
+          && widen({}) === 'WIDEN_PATHS_REQUIRED'
+          && widen({ paths: ['.env'] }) === 'WIDEN_SECRET_PATH'
+          && widen({ paths: ['../lib/b.mjs'] }) === 'WIDEN_PATH_INVALID'
+          && widen({ paths: ['lib/b.mjs'] }, unverified) === 'WIDEN_UNVERIFIED_FINDING';
+      })(),
+      expected: true,
+    },
+    {
+      name: 'a widening into a protected path labels human:authorize and does not refuse',
+      actual: (() => {
+        if (!builtFirst.ok) return false;
+        const widened = appendRound(builtFirst.evidence, reviewed(pass), secondOptions({
+          deltaPaths: ['.github/workflows/ci.yml'],
+          dispositions: [{
+            findingId: finding.id, disposition: 'widen', paths: ['.github/workflows/ci.yml'], rationale: 'The job name is wrong.',
+          }],
+        }));
+        return widened.ok === true
+          && JSON.stringify(widened.authorize) === '[{"file":".github/workflows/ci.yml","glob":".github/workflows/**"}]';
+      })(),
+      expected: true,
+    },
+    {
+      // The implementer's own widening: a plan task that cannot pass its
+      // test without a path outside the boundary, recorded before round 1.
+      name: 'an implement result listing extra paths is recorded as widenings before round 1',
+      actual: (() => {
+        const implemented = (extraPaths) => ({ ok: true, role: 'implement', text: 'done', ...(extraPaths === undefined ? {} : { extraPaths }) });
+        const recorded = widenFromImplementer(implemented([
+          { path: 'lib/shared.mjs', reason: 'task 2 cannot pass its test without the helper' },
+          { path: 'src/inside.mjs', reason: 'already inside' },
+        ]), ['src/']);
+        if (recorded.ok !== true) return false;
+        const first = appendRound(null, reviewed(failWith([finding])), {
+          first: { ...builderFirst, boundary: recorded.boundary, scopeChanges: recorded.scopeChanges },
+          scope: 'full',
+          checkout: builderCheckout('b-widen-1'),
+          artifactFingerprint: hash('tree-widen-1'),
+          dispatchId: 'builder-widen-1',
+          findingAnnotations: [verifiedIn(finding.id)],
+        });
+        return JSON.stringify(recorded.boundary) === '["src/","lib/shared.mjs"]'
+          && JSON.stringify(recorded.scopeChanges)
+            === JSON.stringify([{ findingId: 'implement:extra-1', paths: ['lib/shared.mjs'], rationale: 'task 2 cannot pass its test without the helper' }])
+          && widenFromImplementer(implemented(undefined), ['src/']).scopeChanges.length === 0
+          && widenFromImplementer(implemented([{ path: '.env.local', reason: 'r' }]), ['src/']).code === 'WIDEN_SECRET_PATH'
+          && widenFromImplementer({ ok: false }, ['src/']).code === 'INVALID_DISPATCH_RESULT'
+          && first.ok === true
+          && JSON.stringify(first.evidence.boundary) === '["src/","lib/shared.mjs"]'
+          && first.evidence.scopeChanges.length === 1
+          && reviewTransition(first.evidence).code === 'REVIEW_FIX_DELTA_REQUIRED';
+      })(),
+      expected: true,
+    },
+    {
+      // The seam test decides widen or defer: another top-level package or
+      // service directory, or a path the plan names out of scope, is a repair.
+      name: 'a finding outside the seam is deferred to a repair at any round; one inside it is widened',
+      actual: (() => {
+        if (!builtFirst.ok) return false;
+        const plan = { boundary: ['services/orders/api.mjs', 'src/api/'], outOfScope: ['docs/'] };
+        const seam = outsideSeam('services/billing/x.mjs', plan) === true
+          && outsideSeam('services/orders/lib/y.mjs', plan) === false
+          && outsideSeam('src/util/x.mjs', plan) === false
+          && outsideSeam('lib/x.mjs', plan) === true
+          && outsideSeam('docs/x.md', plan) === true
+          && outsideSeam('package.json', plan) === false
+          && outsideSeam('packages/a/x.mjs', { boundary: ['packages/b/'] }) === true
+          && outsideSeam('packages/b/x.mjs', { boundary: ['packages/b/y.mjs'] }) === false;
+        const defer = (seamName) => appendRound(builtFirst.evidence, reviewed(pass), secondOptions({
+          scope: 'full',
+          checkout: builderCheckout('b-1'),
+          artifactFingerprint: hash('tree-1'),
+          dispositions: [{
+            findingId: finding.id, disposition: 'defer', rationale: 'Filed as follow-up #77.',
+            ...(seamName === undefined ? {} : { seam: seamName }),
+          }],
+        }));
+        const deferred = defer('services/billing');
+        const widened = appendRound(builtFirst.evidence, reviewed(pass), secondOptions({
+          deltaPaths: ['services/orders/lib/y.mjs'],
+          dispositions: [{ findingId: finding.id, disposition: 'widen', paths: ['services/orders/lib/y.mjs'], rationale: 'Inside the seam.' }],
+        }));
+        return seam
+          && deferred.ok === true && deferred.code === 'REVIEW_CLEAN'
+          && deferred.evidence.reviewRounds[1].priorFindings[0].seam === 'services/billing'
+          && reviewTransition(deferred.evidence).deferredFindings[0].findingId === finding.id
+          && defer(undefined).ok === false
+          && widened.ok === true && widened.code === 'REVIEW_FULL_CLOSE_REQUIRED';
+      })(),
+      expected: true,
+    },
+    {
       name: 'a rebut without its claim and evidence is refused',
       actual: builtFirst.ok
         ? appendRound(builtFirst.evidence, reviewed(pass), secondOptions({
@@ -2522,10 +2883,13 @@ function selfTest() {
           const first = artifactFingerprintOf(root);
           git('commit', '--quiet', '--allow-empty', '-m', 'same tree');
           const same = artifactFingerprintOf(root);
+          const headBefore = git('rev-parse', 'HEAD').stdout.trim();
           writeFileSync(join(root, 'a.txt'), 'two\n');
           git('commit', '--quiet', '-am', 'two');
           const changed = artifactFingerprintOf(root);
-          return HASH_RE.test(first) && first === same && changed !== first;
+          return HASH_RE.test(first) && first === same && changed !== first
+            && JSON.stringify(deltaPathsOf(root, headBefore)) === '["a.txt"]'
+            && deltaPathsOf(root, 'f'.repeat(40)) === null;
         } finally {
           rmSync(root, { recursive: true, force: true });
         }
@@ -2704,7 +3068,8 @@ function writeEvidence(args, appended) {
 function appendRoundMain(args) {
   const usage = 'review-contract: --append-round --result-file <path> '
     + '(--first-round --plan-fingerprint <sha256> --author <engine:model> '
-    + '--state <base STATE.md> [--base-oid <oid>] | --evidence-file <path> '
+    + '--state <base STATE.md> [--base-oid <oid>] [--boundary-file <plan-result.json>] '
+    + '[--implement-result-file <implement-result.json>] | --evidence-file <path> '
     + '--scope full|delta [--dispositions-file <path>] '
     + '[--plan-fingerprint <sha256 of the re-plan>]) '
     + '[--annotations-file <path>] [--checkout <dir>] [--out <path>]\n';
@@ -2752,8 +3117,30 @@ function appendRoundMain(args) {
         authorIdentity: flagValue(args, '--author'),
         configuredBaseOid: baseOid,
       };
+      // The plan boundary, widened by the implementer's extra paths
+      // (SPEC-elastic-scope); the refusal is the widening's own.
+      const boundaryFile = flagValue(args, '--boundary-file');
+      if (boundaryFile !== null) {
+        const planResult = readJsonFile(boundaryFile);
+        const boundary = Array.isArray(planResult) ? planResult : planResult?.plan?.boundary ?? planResult?.boundary;
+        const implementFile = flagValue(args, '--implement-result-file');
+        const widened = widenFromImplementer(
+          implementFile === null ? { ok: true } : readJsonFile(implementFile), boundary,
+        );
+        if (widened.ok !== true) {
+          process.stdout.write(`${JSON.stringify(widened)}\n`);
+          process.exit(1);
+        }
+        options.first.boundary = widened.boundary;
+        options.first.scopeChanges = widened.scopeChanges;
+      }
     } else {
       evidence = readJsonFile(evidenceFile);
+      // The fix delta's changed paths, for the widening coverage of a delta round.
+      if (options.scope === 'delta') {
+        const previousHead = evidence?.reviewRounds?.at(-1)?.headOid;
+        options.deltaPaths = OID_RE.test(previousHead ?? '') ? deltaPathsOf(checkout.root, previousHead) ?? [] : [];
+      }
     }
   } catch (error) {
     process.stderr.write(`review-contract: unreadable input: ${error.message}\n`);
