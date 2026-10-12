@@ -1340,6 +1340,13 @@ function transitionChecks(at) {
           return false;
         }
       })()]);
+    // Flow 2026-10: a unit held by overlap names the delivered PR and the
+    // shared paths (unit.mjs --wait --on-pr records them on the step).
+    results.push(['a unit held by overlap reads "waits on PR #M (paths)"',
+      renderParked({
+        nowMs: at(10, 30), eligible: 1,
+        units: [{ issue: 14, step: '03-plan-review', model: 'gpt-6-astra', returnedAtMs: at(10, 0), waiting: { on: 'PR #70 (src/a.mjs, src/b/)', atMs: at(10, 0) }, startedAtMs: at(9, 50) }],
+      }).split('\n')[1] === '├ #14 · waits on PR #70 (src/a.mjs, src/b/) · 30m']);
     // A waiting unit reads as waiting, aged from the wait; a dispatch clears it.
     results.push(['a waiting unit reads "waits on", and a dispatch clears it',
       (() => {
@@ -1585,7 +1592,7 @@ function dispositionChecks() {
       number, title: 'loop unit', body: `Closes #${issueNumber}`, isDraft: false, reviewDecision: 'APPROVED',
       headRefName: `feat/gh-${issueNumber}-loop-unit`, headRefOid: 'b'.repeat(40), baseRefName: 'main',
       mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-10-12T08:00:00Z',
-      author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [],
+      author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [], files: [],
       issue: issueNumber, orphanCandidate: false, ownership: 'loop',
     })));
     sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: 'a'.repeat(40) }]);

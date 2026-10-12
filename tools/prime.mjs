@@ -608,9 +608,14 @@ export function inheritedLines(dispatches) {
   ];
 }
 
-export function waitLines(waits) {
+export function waitLines(waits, halted = null) {
+  // A lifted PR wait (overlap) is resumed: one plan dispatch on the merged
+  // base, no new plan review, then the claim; first in line unless halted.
+  const next = (halted ?? []).length > 0 ? '; waits behind loop-halt' : ', then take it first';
   return [
     ...(waits?.lifted ?? []).map((entry) => `lifted: #${entry.number} (${entry.reason})`),
+    ...(waits?.lifted ?? []).filter((entry) => entry.resumed === true)
+      .map((entry) => `resumed: #${entry.number} (${entry.reason}) — re-plan once on the new base${next}`),
     ...(waits?.waiting ?? []).map((entry) => `waiting: #${entry.number} (${entry.reason})`),
     ...(waits?.errors ?? []).map((error) => `wait-lift error: ${error}`),
   ];
@@ -650,7 +655,7 @@ function report(summary) {
     ...knownRefusedLines(summary.markers),
     ...modelSourceLines(summary),
     ...inheritedLines(summary.dispatches),
-    ...waitLines(summary.waits),
+    ...waitLines(summary.waits, summary.halted),
     ...blockLines(summary.blocks, summary.halted),
     'section                    items  complete',
   ];
@@ -839,6 +844,17 @@ function selfTest() {
       errors: ['list: offline'],
     }).join('|') === 'lifted: #10 (#4 is closed)|waiting: #13 (no parseable waiting marker)|wait-lift error: list: offline'
     && waitLines(undefined).length === 0,
+  );
+
+  check(
+    // Flow 2026-10: a unit held by overlap re-plans on the merged base once
+    // its PR wait lifts; the host takes it first, unless a halt stands.
+    'a lifted PR wait is printed lifted and resumed, and is not pointed past a halt',
+    waitLines({ lifted: [{ number: 14, reason: 'PR #70 merged', resumed: true }] }).join('|')
+      === 'lifted: #14 (PR #70 merged)|resumed: #14 (PR #70 merged) — re-plan once on the new base, then take it first'
+    && waitLines({ lifted: [{ number: 14, reason: 'PR #70 closed', resumed: true }] }, [40]).join('|')
+      === 'lifted: #14 (PR #70 closed)|resumed: #14 (PR #70 closed) — re-plan once on the new base; waits behind loop-halt'
+    && waitLines({ lifted: [{ number: 10, reason: '#4 is closed' }] }).join('|') === 'lifted: #10 (#4 is closed)',
   );
 
   check(

@@ -164,19 +164,41 @@ export const REVIEW_VERDICT_SCHEMA = Object.freeze({
   additionalProperties: false,
 });
 
-// The plan a dispatched planner returns, in exactly the shape the lifecycle
-// driver's request wants: `title` printable-ASCII like the driver's own check,
-// `body` the frozen plan the orchestrator hashes, `prBody` carrying the claim.
+// The plan a dispatched planner returns: `title` printable-ASCII like the
+// lifecycle driver's own check, `body` the frozen plan the orchestrator hashes,
+// `prBody` carrying the claim, and `boundary` the complete file boundary as
+// data (repository-relative paths, or directory prefixes ending in `/`), which
+// the overlap check compares with delivered pull requests before the claim.
 export const PLAN_SCHEMA = Object.freeze({
   type: 'object',
   properties: {
     title: { type: 'string', minLength: 1, maxLength: 256 },
     prBody: { type: 'string', minLength: 1, maxLength: 65535 },
     body: { type: 'string', minLength: 1, maxLength: 65535 },
+    boundary: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 1000,
+      items: { type: 'string', minLength: 1, maxLength: 1024 },
+    },
   },
-  required: ['title', 'prBody', 'body'],
+  required: ['title', 'prBody', 'body', 'boundary'],
   additionalProperties: false,
 });
+const PLAN_KEYS = Object.freeze(['title', 'prBody', 'body', 'boundary']);
+
+// A boundary entry is a path inside the repository: no leading slash, no `.`
+// or `..` segment, no backslash. A trailing slash names a directory prefix.
+function boundaryEntryProblem(entry) {
+  if (typeof entry !== 'string' || entry.length < 1 || entry.length > 1024) {
+    return 'each boundary entry must be a 1-1024 character string';
+  }
+  const segments = entry.replace(/\/$/u, '').split('/');
+  if (entry.startsWith('/') || entry.includes('\\') || segments.some((segment) => ['', '.', '..'].includes(segment))) {
+    return `boundary entry ${JSON.stringify(entry)} must be repository-relative (no leading slash, no . or .. segment)`;
+  }
+  return null;
+}
 
 // Names the field and the reason, because "not a valid plan" made a live run
 // spend ~40 minutes of opus rediscovering that an em-dash in the TITLE was the
@@ -184,8 +206,8 @@ export const PLAN_SCHEMA = Object.freeze({
 // ASCII rule naturally.
 export function planResultProblem(value) {
   if (!isPlainObject(value)) return 'result is not an object';
-  if (!hasExactKeys(value, ['title', 'prBody', 'body'])) {
-    return `keys must be exactly title, prBody, body (got ${
+  if (!hasExactKeys(value, PLAN_KEYS)) {
+    return `keys must be exactly ${PLAN_KEYS.join(', ')} (got ${
       Object.keys(value).sort().join(', ') || 'none'})`;
   }
   for (const field of ['title', 'prBody', 'body']) {
@@ -207,6 +229,13 @@ export function planResultProblem(value) {
       return `${field} must be at most 65535 characters (got ${value[field].length})`;
     }
   }
+  if (!Array.isArray(value.boundary) || value.boundary.length < 1 || value.boundary.length > 1000) {
+    return 'boundary must be a non-empty array of at most 1000 repository-relative paths or directory prefixes ending in /';
+  }
+  for (const entry of value.boundary) {
+    const problem = boundaryEntryProblem(entry);
+    if (problem !== null) return problem;
+  }
   return null;
 }
 
@@ -221,7 +250,7 @@ export function validPlanResult(value) {
 // Discarding a sound 48 KB body over a punctuation mark in a field the
 // orchestrator is supposed to author anyway inverts that split.
 export function planIsSalvageableByRetitling(value) {
-  if (!isPlainObject(value) || !hasExactKeys(value, ['title', 'prBody', 'body'])) return false;
+  if (!isPlainObject(value) || !hasExactKeys(value, PLAN_KEYS)) return false;
   const problem = planResultProblem(value);
   return problem !== null && problem.startsWith('title must be printable ASCII');
 }
@@ -1896,6 +1925,7 @@ function selfTest() {
             title: 'feat: enforce replay cadence',
             prBody: 'Closes #7',
             body: '## Plan\n\n1. slice one',
+            boundary: ['src/replay.mjs'],
           } }),
         ));
         const planned = runDispatch({
@@ -1922,7 +1952,7 @@ function selfTest() {
         const body = Array.from({ length: 400 }, (_, index) =>
           `## Task ${index + 1}\n\nWrite the failing test first, then the code.\n`).join('\n');
         writeEngineShim(shimDirectory, shimBody(
-          resultEvent({ structured_output: { title: 'feat: keep the whole plan', prBody: 'Closes #506', body } }),
+          resultEvent({ structured_output: { title: 'feat: keep the whole plan', prBody: 'Closes #506', body, boundary: ['src/'] } }),
         ));
         const planned = runDispatch({
           timeoutMs: 15000,
@@ -1934,6 +1964,38 @@ function selfTest() {
         });
         return body.length > 16000 && body.length < 65535
           && planned.ok === true && planned.plan.body === body;
+      })(),
+    );
+    check(
+      // Flow 2026-10: two delivered loop PRs on the same files conflicted each
+      // other. The overlap check needs the boundary as data, not prose.
+      'a plan without a structured boundary is refused, and a boundary passes through',
+      (() => {
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: { title: 'feat: a', prBody: 'Closes #7', body: 'plan' } }),
+        ));
+        const unbounded = runDispatch({
+          role: 'plan',
+          prompt: 'plan issue #7',
+          tools: resolveTools('plan'),
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        writeEngineShim(shimDirectory, shimBody(
+          resultEvent({ structured_output: {
+            title: 'feat: a', prBody: 'Closes #7', body: 'plan', boundary: ['src/a.mjs', 'src/b/'],
+          } }),
+        ));
+        const bounded = runDispatch({
+          role: 'plan',
+          prompt: 'plan issue #7',
+          tools: resolveTools('plan'),
+          cwd: repoScratch,
+          engine: join(shimDirectory, 'claude'),
+        });
+        return unbounded.ok === false && unbounded.error.code === 'INVALID_PLAN_RESULT'
+          && unbounded.error.message.includes('boundary')
+          && bounded.ok === true && bounded.plan.boundary.join(',') === 'src/a.mjs,src/b/';
       })(),
     );
     check(
@@ -2212,7 +2274,7 @@ function selfTest() {
       // that an em-dash in the TITLE was the whole problem.
       'a rejected plan names the field, the reason, and the offending character',
       (() => {
-        const sound = { title: 'feat: a thing', prBody: 'pr', body: 'plan' };
+        const sound = { title: 'feat: a thing', prBody: 'pr', body: 'plan', boundary: ['src/a.mjs', 'src/b/'] };
         const emdash = { ...sound, title: 'feat: a thing — with prose' };
         const titleProblem = planResultProblem(emdash) ?? '';
         return planResultProblem(sound) === null
@@ -2220,6 +2282,10 @@ function selfTest() {
           && titleProblem.includes('U+2014')
           && (planResultProblem({ title: 'a', body: 'b' }) ?? '').startsWith('keys must be exactly')
           && planResultProblem({ ...sound, body: '' }) === 'body must not be empty'
+          && (planResultProblem({ ...sound, boundary: [] }) ?? '').startsWith('boundary must be')
+          && (planResultProblem({ ...sound, boundary: ['/etc/x'] }) ?? '').includes('repository-relative')
+          && (planResultProblem({ ...sound, boundary: ['../x'] }) ?? '').includes('repository-relative')
+          && (planResultProblem({ ...sound, boundary: 'src/' }) ?? '').startsWith('boundary must be')
           && (planResultProblem({ ...sound, prBody: 'x'.repeat(65536) }) ?? '')
             .includes('65536');
       })(),
@@ -2229,7 +2295,7 @@ function selfTest() {
       // model's, so a punctuation mark in the title must not cost the artifact.
       'only a non-ASCII title is salvageable by retitling, and it keeps the body',
       (() => {
-        const sound = { title: 'feat: a thing', prBody: 'pr', body: 'plan' };
+        const sound = { title: 'feat: a thing', prBody: 'pr', body: 'plan', boundary: ['src/'] };
         return planIsSalvageableByRetitling({ ...sound, title: 'a — b' })
           && !planIsSalvageableByRetitling(sound)
           && !planIsSalvageableByRetitling({ ...sound, body: '' })
@@ -2278,7 +2344,7 @@ function selfTest() {
       writeEngineShim(shimDirectory, shimBody(ROLES[role].result === 'text'
         ? `printf x > "routed-$$.txt"\n${resultEvent({ result: 'done' })}`
         : resultEvent({ structured_output: role === 'plan'
-          ? { title: 'Plan', prBody: 'p', body: 'b' }
+          ? { title: 'Plan', prBody: 'p', body: 'b', boundary: ['b.md'] }
           : PASSING_VERDICT })));
       const saved = process.env.ANTHROPIC_BASE_URL;
       process.env.ANTHROPIC_BASE_URL = 'http://session-wide.invalid';
@@ -2553,7 +2619,7 @@ function selfTest() {
     );
     const limitedOnAstra = 'case " $* " in *" --model astra[1m] "*|*" --model gpt-6-astra "*) '
       + `printf 'You have hit your usage limit\\n' >&2; exit 1;; esac\n`
-      + resultEvent({ structured_output: { title: 'Plan', prBody: 'p', body: 'b' } });
+      + resultEvent({ structured_output: { title: 'Plan', prBody: 'p', body: 'b', boundary: ['b.md'] } });
     check(
       'a usage limit moves an effect-free role straight to its fallback, stamped',
       (() => {
@@ -2654,7 +2720,7 @@ function selfTest() {
     check(
       'an unavailable model moves any role, a writer too, to its fallback once, stamped',
       (() => {
-        const plan = spawnsOf('plan', unavailableOn('astra[1m]', resultEvent({ structured_output: { title: 'Plan', prBody: 'p', body: 'b' } })));
+        const plan = spawnsOf('plan', unavailableOn('astra[1m]', resultEvent({ structured_output: { title: 'Plan', prBody: 'p', body: 'b', boundary: ['b.md'] } })));
         const writer = spawnsOf('fix', unavailableOn('opus[1m]', `printf x > "fell-back-$$.txt"\n${resultEvent({ result: 'done' })}`));
         const both = spawnsOf('fix', unavailableOn('opus[1m]', unavailableOn('fable[1m]', resultEvent({ result: 'done' }))));
         return plan.result.ok === true && plan.spawns === 2 && plan.result.model === 'opus[1m]'

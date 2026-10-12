@@ -38,6 +38,29 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // fails the audit, which is the point.
 export const INCIDENTS = Object.freeze([
   Object.freeze({
+    id: 'delivered-units-on-shared-files-conflicted-each-other',
+    date: '2026-10-12',
+    symptom: 'On one project nine open loop pull requests formed two conflict groups of four and '
+      + 'three: merging any one of them conflicted the others.',
+    cause: 'Selection took the next eligible issue while an earlier unit was delivered and unmerged, '
+      + 'and nothing compared the new plan\'s file boundary with the delivered pull requests\' changed '
+      + 'paths. The boundary was prose, the scan did not fetch changed paths, and no wait named a PR.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'dispatch.mjs', anchor: "'a plan without a structured boundary is refused, and a boundary passes through'" }),
+      Object.freeze({ file: 'scan.mjs', anchor: "'the PR query fetches changed paths, pages past 100, and the normalized PR carries them sorted and unique'" }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "'the delivered set is every open loop PR at ready-head or premerge-record, with its paths'" }),
+      Object.freeze({ file: 'snapshot-contract.mjs', anchor: "'a merged or closed loop PR is a PR_MUTATION, which invalidates the delivered set'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'overlapWith names the first delivered PR whose files intersect the boundary, and the paths'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a PR wait round-trips and clears when the PR merges or closes, not while it is open'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'prime lifts a PR wait on merge, marks it resumed for a re-plan, and holds it while the PR is open'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'--overlap reads a plan result and a retained snapshot, skips the unit\\'s own PR, and refuses an invalidated snapshot'" }),
+      Object.freeze({ file: 'prime.mjs', anchor: "'a lifted PR wait is printed lifted and resumed, and is not pointed past a halt'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a unit held by overlap reads \"waits on PR #M (paths)\"'" }),
+      Object.freeze({ file: 'briefs/plan.md', anchor: 'boundary: the complete file boundary' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**Overlap check before the claim**' }),
+    ]),
+  }),
+  Object.freeze({
     id: 'premise-blocks-waited-on-decisions-the-loop-can-take',
     date: '2026-10-12',
     symptom: 'On one project 33 units blocked at premise for a human decision, ten of them in one '

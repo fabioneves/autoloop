@@ -47,6 +47,20 @@ Notable changes to Autoloop are recorded here. The format follows
   parked line and the closing card count a unit's decisions. The plan brief decides and carries
   each decision into the premises instead of requesting ratification; the plan-review brief checks
   that each decision is recorded with evidence, not that it was approved.
+- A unit does not open a second pull request on files that a delivered, unmerged loop pull request
+  already changes ([SPEC-overlap-wait](docs/specs/SPEC-overlap-wait.md)). The `plan` result
+  carries `boundary: string[]` (repository-relative paths or directory prefixes that end in `/`);
+  a plan without it is `INVALID_PLAN_RESULT`. The scan fetches each open pull request's changed
+  paths (`files`, paged past 100) and the snapshot item carries them (snapshot version 3); the
+  delivered set is every open loop pull request whose marker is at `ready-head` or
+  `premerge-record`, invalidated by `PR_MUTATION` when one merges or closes. After the plan review
+  and before the claim, `unit.mjs --overlap --issue <N> --boundary-file <plan-result.json>
+  --snapshot <path>` compares the boundary with the delivered set; a hit is recorded with
+  `unit.mjs --wait --issue <N> --on-pr <M> --paths <a,b/>`, and the parked card reads
+  `waits on PR #M (paths)`. Prime lifts the wait when #M merges or closes, prints
+  `lifted: #N (PR #M merged)` and `resumed: #N`, and the unit re-plans once on the new base (one
+  `plan` dispatch with the frozen plan as input, no new plan review) before it claims. The premise
+  step does not compare; `--on-issue`, `--on-base-red`, and `--minutes` are unchanged.
 
 ## [0.68.0] - 2026-10-12
 

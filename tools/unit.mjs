@@ -7,12 +7,20 @@
 //               evidence (a PR merged into the configured base, or a commit
 //               the remote base contains), then comments it, labels the issue
 //               `loop-obsolete` and closes it as not planned. Reopening undoes it.
-//   --wait      The unit waits on another issue, on a red base, or for a time
-//               (a step the host keeps killing backs off instead of blocking). A machine
-//               comment records the condition and the issue is labelled
-//               `loop-waiting`, which the queue skips. Prime calls liftWaits
-//               before every scan and removes the label once the condition has
-//               cleared, so the unit comes back without a human.
+//   --wait      The unit waits on another issue, on a red base, for a time
+//               (a step the host keeps killing backs off instead of blocking),
+//               or on a delivered pull request whose changed paths overlap the
+//               plan boundary. A machine comment records the condition and the
+//               issue is labelled `loop-waiting`, which the queue skips. Prime
+//               calls liftWaits before every scan and removes the label once
+//               the condition has cleared, so the unit comes back without a
+//               human; a lifted PR wait is reported `resumed`, and the unit
+//               re-plans once on the merged base.
+//
+//   --overlap   The pure check before a claim: the plan boundary against the
+//               delivered set (open loop PRs at ready-head or premerge-record,
+//               with their changed paths, from the retained snapshot). A hit
+//               names the PR and the overlapping paths for `--wait --on-pr`.
 //
 //   --block     An authorization only the human can give: an irreversible
 //               external act (IRREVERSIBLE_ACTION) or a secret, dependency,
@@ -53,7 +61,8 @@
 //
 // Usage:
 //   node <plugin-tools>/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
-//   node <plugin-tools>/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720>) [--note <text>]
+//   node <plugin-tools>/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720> | --on-pr <M> --paths <a,b/>) [--note <text>]
+//   node <plugin-tools>/unit.mjs --overlap --issue <N> --boundary-file <path> --snapshot <path>
 //   node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>]
 //   node <plugin-tools>/unit.mjs --repair --parent <N> --title <text> --body-file <path> [--blocks-parent]
 //   node <plugin-tools>/unit.mjs --decide --issue <N> --question <one line> --choice <text> --why <text> [--alternatives "<a>; <b>"]
@@ -69,6 +78,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 import { updateStepRecord } from './dispatch-return-association.mjs';
+import {
+  SNAPSHOT_SECTIONS, completeSection, createSnapshot, deliveredPullRequests, invalidateSnapshot, verifySnapshot,
+} from './snapshot-contract.mjs';
 
 const TIMEOUT_MS = 30_000;
 const WAIT_MARKER_RE = /<!-- autoloop-waiting-v1 (\{[^\n]*?\}) -->/gu;
@@ -130,6 +142,9 @@ export function waitCondition(bodies) {
         if (parsed?.on === 'issue' && positive(parsed.number)) newest = { on: 'issue', number: parsed.number };
         else if (parsed?.on === 'base' && SHA_RE.test(parsed.oid ?? '')) newest = { on: 'base', oid: parsed.oid };
         else if (parsed?.on === 'time' && Number.isFinite(Date.parse(parsed.until))) newest = { on: 'time', until: parsed.until };
+        else if (parsed?.on === 'pr' && positive(parsed.number) && pathList(parsed.paths) !== null) {
+          newest = { on: 'pr', number: parsed.number, paths: pathList(parsed.paths) };
+        }
       } catch {
         // An unparseable marker is not a condition; an earlier valid one still stands.
       }
@@ -140,6 +155,32 @@ export function waitCondition(bodies) {
 
 export function waitMarker(condition) {
   return `<!-- autoloop-waiting-v1 ${JSON.stringify(condition)} -->`;
+}
+
+/** Pure: a non-empty list of non-empty path strings, or null. */
+function pathList(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((path) => typeof path === 'string' && path.length > 0)
+    ? value
+    : null;
+}
+
+/** Pure: the first delivered PR whose changed files intersect the boundary,
+ *  with the intersecting paths, or null. A boundary entry ending in `/` is a
+ *  directory prefix; any other entry matches one path exactly. */
+export function overlapWith(boundary, deliveredPrs) {
+  const entries = (Array.isArray(boundary) ? boundary : []).filter((entry) => typeof entry === 'string' && entry.length > 0);
+  const inside = (path) => entries.some((entry) => (entry.endsWith('/') ? path.startsWith(entry) : path === entry));
+  for (const delivered of Array.isArray(deliveredPrs) ? deliveredPrs : []) {
+    const paths = (delivered?.files ?? []).filter(inside);
+    if (paths.length > 0) return { pr: delivered.pr, paths };
+  }
+  return null;
+}
+
+/** Pure: the boundary inside a plan dispatch result, a plan, or a bare list; null when absent. */
+export function boundaryOf(value) {
+  const found = Array.isArray(value) ? value : value?.plan?.boundary ?? value?.boundary;
+  return pathList(found);
 }
 
 /** Pure: the reason a condition has cleared, or null while it still holds.
@@ -158,6 +199,10 @@ export function waitCleared(condition, facts) {
     return Number.isFinite(facts?.now) && facts.now >= Date.parse(condition.until)
       ? `its wait ended at ${condition.until}`
       : null;
+  }
+  if (condition?.on === 'pr') {
+    const state = facts?.prStates?.[condition.number];
+    return state === 'MERGED' || state === 'CLOSED' ? `PR #${condition.number} ${state.toLowerCase()}` : null;
   }
   return null;
 }
@@ -184,6 +229,11 @@ function issueFacts(run, number, fields) {
 
 function issueState(run, number) {
   const result = run('gh', ['issue', 'view', String(number), '--json', 'state', '--jq', '.state']);
+  return result.ok ? result.stdout : null;
+}
+
+function prState(run, number) {
+  const result = run('gh', ['pr', 'view', String(number), '--json', 'state', '--jq', '.state']);
   return result.ok ? result.stdout : null;
 }
 
@@ -262,14 +312,21 @@ function commonDirOf(run) {
   return result?.ok ? String(result.stdout).trim() : null;
 }
 
-export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes = null, note = '', base, run, now = Date.now() }) {
+export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes = null, onPr = null, paths = [], note = '', base, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
-  if ([onIssue !== null, onBaseRed, minutes !== null].filter(Boolean).length !== 1) {
-    return refusal('INVALID_ARGS', 'expected exactly one of --on-issue, --on-base-red or --minutes');
+  if ([onIssue !== null, onBaseRed, minutes !== null, onPr !== null].filter(Boolean).length !== 1) {
+    return refusal('INVALID_ARGS', 'expected exactly one of --on-issue, --on-base-red, --minutes or --on-pr');
   }
   let condition;
   let reason;
-  if (onIssue !== null) {
+  if (onPr !== null) {
+    if (!positive(onPr)) return refusal('INVALID_ARGS', '--on-pr: expected a positive PR number');
+    if (pathList(paths) === null) return refusal('INVALID_ARGS', '--paths: expected the overlapping paths, comma-separated');
+    const state = prState(run, onPr);
+    if (state !== 'OPEN') return refusal('NOTHING_TO_WAIT_ON', `PR #${onPr} is ${state === null ? 'unreadable' : 'not open'}`);
+    condition = { on: 'pr', number: onPr, paths };
+    reason = `waits on PR #${onPr}, which changes ${paths.join(', ')} inside this plan's boundary; the label is lifted when it merges or closes, and the unit re-plans on the new base`;
+  } else if (onIssue !== null) {
     if (!positive(onIssue)) return refusal('INVALID_ARGS', '--on-issue: expected a positive issue number');
     if (onIssue === issue) return refusal('SELF_WAIT', `#${issue} cannot wait on itself`);
     const state = issueState(run, onIssue);
@@ -299,7 +356,9 @@ export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes 
   if (!label.ok) return refusal('GH_FAILED', `label on #${issue} failed: ${label.stderr}`);
   try {
     const commonDir = commonDirOf(run);
-    const what = condition.on === 'issue' ? `#${condition.number}` : condition.on === 'time' ? `${minutes} min` : `a green ${base}`;
+    const what = condition.on === 'issue' ? `#${condition.number}`
+      : condition.on === 'pr' ? `PR #${condition.number} (${condition.paths.join(', ')})`
+        : condition.on === 'time' ? `${minutes} min` : `a green ${base}`;
     if (commonDir !== null) noteWaitOnStep({ commonDir, issue, what, nowMs: now });
   } catch {
     // The parked view is a courtesy; the wait stands.
@@ -585,6 +644,7 @@ export function liftWaits({ base, run, now = Date.now() }) {
   const errors = [];
   const baseOid = remoteBaseOid(run, base);
   const issueStates = {};
+  const prStates = {};
   for (const issue of issues) {
     const condition = waitCondition((issue.comments ?? []).map((comment) => comment.body));
     if (condition === null) {
@@ -594,17 +654,47 @@ export function liftWaits({ base, run, now = Date.now() }) {
     if (condition.on === 'issue' && !(condition.number in issueStates)) {
       issueStates[condition.number] = issueState(run, condition.number);
     }
-    const cleared = waitCleared(condition, { issueStates, baseOid, now });
+    if (condition.on === 'pr' && !(condition.number in prStates)) {
+      prStates[condition.number] = prState(run, condition.number);
+    }
+    const cleared = waitCleared(condition, { issueStates, prStates, baseOid, now });
     if (cleared === null) {
-      const holding = { issue: `#${condition.number} is open`, base: 'the base has not moved', time: `until ${condition.until}` };
+      const holding = { issue: `#${condition.number} is open`, base: 'the base has not moved', time: `until ${condition.until}`, pr: `PR #${condition.number} is open` };
       waiting.push({ number: issue.number, reason: holding[condition.on] });
       continue;
     }
     const removed = run('gh', ['issue', 'edit', String(issue.number), '--remove-label', 'loop-waiting']);
-    if (removed.ok) lifted.push({ number: issue.number, reason: cleared });
+    // A lifted PR wait is resumed: the unit re-plans once on the merged base
+    // before it claims, and prime points the host at it first.
+    if (removed.ok) lifted.push({ number: issue.number, reason: cleared, ...(condition.on === 'pr' ? { resumed: true } : {}) });
     else errors.push(`#${issue.number}: ${removed.stderr}`);
   }
   return { lifted, waiting, errors };
+}
+
+/** The overlap check for one unit: the boundary against the delivered set of
+ *  a verified, complete snapshot. The unit's own PR (a re-plan) never overlaps
+ *  itself. Refuses, rather than claims, when the delivered set is unknown. */
+export function overlapCheck({ issue, boundaryFile, snapshotPath }) {
+  if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
+  let boundary;
+  let snapshot;
+  try {
+    boundary = boundaryOf(JSON.parse(readFileSync(boundaryFile ?? '', 'utf8')));
+  } catch (error) {
+    return refusal('INVALID_ARGS', `--boundary-file: ${error.message}`);
+  }
+  if (boundary === null) return refusal('INVALID_ARGS', '--boundary-file: expected a plan result with a non-empty boundary');
+  try {
+    snapshot = JSON.parse(readFileSync(snapshotPath ?? '', 'utf8'));
+  } catch (error) {
+    return refusal('INVALID_ARGS', `--snapshot: ${error.message}`);
+  }
+  if (!verifySnapshot(snapshot)) return refusal('SNAPSHOT_INVALID', '--snapshot: not a verified snapshot');
+  const delivered = deliveredPullRequests(snapshot);
+  if (delivered === null) return refusal('SNAPSHOT_INCOMPLETE', 'openPrs or lifecycleMarkers is incomplete or invalidated; re-prime before the claim');
+  const overlap = overlapWith(boundary, delivered.filter((entry) => entry.issue !== issue));
+  return { ok: true, issue, overlap, delivered: delivered.map((entry) => entry.pr) };
 }
 
 /** Pure: the newest `/answer` a trusted actor posted after the block, or null. */
@@ -815,11 +905,11 @@ export function postDigest({ run, now = Date.now() }) {
 }
 
 export function parseArgs(args) {
-  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, out: null, error: null };
+  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, onPr: null, paths: [], boundaryFile: null, snapshot: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, out: null, error: null };
   const value = (index) => args[index + 1];
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
-    if (['--obsolete', '--wait', '--block', '--repair', '--decide', '--decisions', '--lift', '--digest', '--self-test'].includes(flag)) {
+    if (['--obsolete', '--wait', '--block', '--repair', '--decide', '--decisions', '--lift', '--digest', '--overlap', '--self-test'].includes(flag)) {
       if (parsed.mode !== null) return { ...parsed, error: 'expected one mode' };
       parsed.mode = flag.slice(2);
     } else if (flag === '--on-base-red') {
@@ -828,24 +918,24 @@ export function parseArgs(args) {
       parsed.post = true;
     } else if (flag === '--blocks-parent') {
       parsed.blocksParent = true;
-    } else if (['--issue', '--pr', '--on-issue', '--minutes', '--parent'].includes(flag)) {
+    } else if (['--issue', '--pr', '--on-issue', '--minutes', '--parent', '--on-pr'].includes(flag)) {
       const number = positive(value(index));
       if (number === null) return { ...parsed, error: `${flag}: expected a positive number` };
-      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes', '--parent': 'parent' }[flag]] = number;
+      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes', '--parent': 'parent', '--on-pr': 'onPr' }[flag]] = number;
       index += 1;
-    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate', '--title', '--body-file', '--out'].includes(flag)) {
+    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate', '--title', '--body-file', '--out', '--boundary-file', '--snapshot'].includes(flag)) {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
-      parsed[flag === '--body-file' ? 'bodyFile' : flag.slice(2)] = value(index);
+      parsed[{ '--body-file': 'bodyFile', '--boundary-file': 'boundaryFile' }[flag] ?? flag.slice(2)] = value(index);
       index += 1;
-    } else if (flag === '--alternatives') {
+    } else if (flag === '--alternatives' || flag === '--paths') {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
-      parsed.alternatives = value(index).split(';').map((entry) => entry.trim()).filter(Boolean);
+      parsed[flag.slice(2)] = value(index).split(flag === '--paths' ? ',' : ';').map((entry) => entry.trim()).filter(Boolean);
       index += 1;
     } else {
       return { ...parsed, error: `unknown argument ${flag}` };
     }
   }
-  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --repair, --decide, --decisions, --lift, --digest or --self-test' };
+  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --repair, --decide, --decisions, --lift, --digest, --overlap or --self-test' };
   return parsed;
 }
 
@@ -946,6 +1036,124 @@ function selfTest() {
   check('a missing label is created and the add retried once',
     markWaiting({ issue: 5, onIssue: 4, base: 'main', run: missingLabel.run.bind(missingLabel) }).ok
     && missingLabel.calls.some((call) => call.startsWith('gh label create loop-waiting')));
+
+  // Flow 2026-10: on one project nine open loop PRs formed two conflict groups
+  // because units on the same files were planned while an earlier one was
+  // delivered and unmerged. A boundary that overlaps a delivered PR waits.
+  const delivered = [
+    { pr: 70, issue: 7, phase: 'ready-head', files: ['src/a.mjs', 'docs/x.md'] },
+    { pr: 80, issue: 8, phase: 'premerge-record', files: ['src/b/c.mjs', 'src/b/d.mjs'] },
+  ];
+  check('overlapWith names the first delivered PR whose files intersect the boundary, and the paths',
+    JSON.stringify(overlapWith(['src/a.mjs', 'src/b/d.mjs'], delivered)) === '{"pr":70,"paths":["src/a.mjs"]}'
+    && JSON.stringify(overlapWith(['src/b/'], delivered)) === '{"pr":80,"paths":["src/b/c.mjs","src/b/d.mjs"]}'
+    && overlapWith(['src/b', 'src/a.mjs.bak', 'src/'.slice(0, 3)], delivered) === null
+    && overlapWith(['src/z.mjs', 'lib/'], delivered) === null
+    && overlapWith([], delivered) === null
+    && overlapWith(['src/a.mjs'], []) === null
+    && overlapWith(['src/a.mjs'], null) === null);
+  const prWaitClosed = fakeRun([['gh pr view 70', 'MERGED']]);
+  check('waiting on a PR that is not open is refused',
+    markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs'], base: 'main', run: prWaitClosed.run }).code === 'NOTHING_TO_WAIT_ON'
+    && markWaiting({ issue: 5, onPr: 70, paths: [], base: 'main', run: fakeRun([]).run }).code === 'INVALID_ARGS'
+    && markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs'], onIssue: 4, base: 'main', run: fakeRun([]).run }).code === 'INVALID_ARGS');
+  check('a PR wait is recorded on the step as "PR #M (paths)", which the parked card prints as "waits on PR #M (paths)"',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-pr-wait-'));
+      try {
+        const steps = join(scratch, 'autoloop', 'steps');
+        mkdirSync(steps, { recursive: true });
+        writeFileSync(join(steps, '5.json'), JSON.stringify({ issue: 5, steps: [{ step: '03-plan-review', startedAtMs: 1 }] }));
+        const prWait = fakeRun([['gh pr view 70', 'OPEN'], ['gh issue comment 5', ''], ['gh issue edit 5 --add-label loop-waiting', ''], ['git rev-parse', scratch]]);
+        const waited = markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs', 'src/b/'], base: 'main', run: prWait.run, now: 7000 });
+        const last = JSON.parse(readFileSync(join(steps, '5.json'), 'utf8')).steps.at(-1);
+        return waited.ok === true
+          && JSON.stringify(waited.condition) === '{"on":"pr","number":70,"paths":["src/a.mjs","src/b/"]}'
+          && prWait.calls[1].includes('autoloop-waiting-v1 {"on":"pr","number":70,"paths":["src/a.mjs","src/b/"]}')
+          && prWait.calls[1].includes('waits on PR #70')
+          && prWait.calls[1].includes('src/a.mjs, src/b/')
+          && JSON.stringify(last.waiting) === JSON.stringify({ on: 'PR #70 (src/a.mjs, src/b/)', atMs: 7000 });
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
+  check('a PR wait round-trips and clears when the PR merges or closes, not while it is open',
+    JSON.stringify(waitCondition([waitMarker({ on: 'pr', number: 70, paths: ['src/a.mjs'] })])) === '{"on":"pr","number":70,"paths":["src/a.mjs"]}'
+    && waitCondition([waitMarker({ on: 'pr', number: 70, paths: 'src/a.mjs' })]) === null
+    && waitCleared({ on: 'pr', number: 70, paths: ['src/a.mjs'] }, { prStates: { 70: 'MERGED' } }) === 'PR #70 merged'
+    && waitCleared({ on: 'pr', number: 70, paths: ['src/a.mjs'] }, { prStates: { 70: 'CLOSED' } }) === 'PR #70 closed'
+    && waitCleared({ on: 'pr', number: 70, paths: ['src/a.mjs'] }, { prStates: { 70: 'OPEN' } }) === null
+    && waitCleared({ on: 'pr', number: 70, paths: ['src/a.mjs'] }, { prStates: {} }) === null);
+  const prList = JSON.stringify([
+    { number: 14, comments: [{ body: waitMarker({ on: 'pr', number: 70, paths: ['src/a.mjs'] }) }] },
+    { number: 15, comments: [{ body: waitMarker({ on: 'pr', number: 80, paths: ['src/b/'] }) }] },
+    { number: 16, comments: [{ body: waitMarker({ on: 'issue', number: 4 }) }] },
+  ]);
+  const prLifting = fakeRun([
+    ['gh issue list', prList], ['git rev-parse', oid],
+    ['gh pr view 70', 'MERGED'], ['gh pr view 80', 'OPEN'], ['gh issue view 4', 'CLOSED'], ['gh issue edit', ''],
+  ]);
+  const prLift = liftWaits({ base: 'main', run: prLifting.run });
+  check('prime lifts a PR wait on merge, marks it resumed for a re-plan, and holds it while the PR is open',
+    JSON.stringify(prLift.lifted) === JSON.stringify([
+      { number: 14, reason: 'PR #70 merged', resumed: true },
+      { number: 16, reason: '#4 is closed' },
+    ])
+    && JSON.stringify(prLift.waiting) === JSON.stringify([{ number: 15, reason: 'PR #80 is open' }])
+    && prLift.errors.length === 0
+    && prLifting.calls.filter((call) => call.startsWith('gh pr view')).length === 2);
+  check('the overlap check reads the boundary from a plan result file or a bare list',
+    JSON.stringify(boundaryOf({ ok: true, plan: { boundary: ['a'] } })) === '["a"]'
+    && JSON.stringify(boundaryOf({ boundary: ['b'] })) === '["b"]'
+    && JSON.stringify(boundaryOf(['c'])) === '["c"]'
+    && boundaryOf({ plan: {} }) === null
+    && boundaryOf(['', 1]) === null);
+  check('--overlap reads a plan result and a retained snapshot, skips the unit\'s own PR, and refuses an invalidated snapshot',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-overlap-'));
+      try {
+        const markerBody = (issue, pr) => '<!-- autoloop-lifecycle-v1\n' + JSON.stringify({
+          branch: `feat/gh-${issue}-unit`, headOid: oid, intentSource: 'invocation', issue, issueBodyHash: 'b'.repeat(64),
+          mergePolicy: 'manual', phase: 'ready-head', planHash: 'c'.repeat(64), plannedBaseOid: oid, pr,
+          runIntentHash: 'd'.repeat(64), selector: 'native', v: 1,
+        }) + '\n-->';
+        const prItem = (issue, number, files) => ({
+          number, title: 'unit', body: `Closes #${issue}`, isDraft: false, reviewDecision: null,
+          headRefName: `feat/gh-${issue}-unit`, headRefOid: oid, baseRefName: 'main', mergeStateStatus: 'CLEAN',
+          mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-01-01T00:00:00Z', author: 'autoloop',
+          headRepository: 'owner/repo', statusCheckState: null, statusCheckRollup: [], files, issue,
+          orphanCandidate: false, ownership: 'loop',
+        });
+        const markerItem = (issue, pr) => ({
+          issueNumber: issue, id: `IC_${issue}`, tipId: `IC_${issue}`, sequence: 0, author: 'autoloop', authorAssociation: 'MEMBER',
+          body: markerBody(issue, pr), createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', url: null,
+        });
+        const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+        sections.repo = completeSection([{ owner: 'owner', name: 'repo', nameWithOwner: 'owner/repo', defaultBranch: 'main' }]);
+        sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: oid }]);
+        sections.openPrs = completeSection([prItem(7, 70, ['src/a.mjs']), prItem(8, 80, ['src/b/c.mjs'])]);
+        sections.lifecycleMarkers = completeSection([markerItem(7, 70), markerItem(8, 80)]);
+        const snapshot = createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z', sections });
+        const snapshotPath = join(scratch, 'snapshot.json');
+        const stalePath = join(scratch, 'stale.json');
+        const planPath = join(scratch, 'plan.json');
+        writeFileSync(snapshotPath, JSON.stringify(snapshot));
+        writeFileSync(stalePath, JSON.stringify(invalidateSnapshot(snapshot, 'PR_MUTATION')));
+        writeFileSync(planPath, JSON.stringify({ ok: true, role: 'plan', plan: { title: 't', prBody: 'Closes #9', body: 'b', boundary: ['src/b/'] } }));
+        const hit = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath });
+        const own = overlapCheck({ issue: 8, boundaryFile: planPath, snapshotPath });
+        const stale = overlapCheck({ issue: 9, boundaryFile: planPath, snapshotPath: stalePath });
+        const missing = overlapCheck({ issue: 9, boundaryFile: join(scratch, 'none.json'), snapshotPath });
+        return snapshot.sections.openPrs.complete === true && snapshot.sections.lifecycleMarkers.complete === true
+          && hit.ok === true && JSON.stringify(hit.overlap) === '{"pr":80,"paths":["src/b/c.mjs"]}'
+          && JSON.stringify(hit.delivered) === '[70,80]'
+          && own.ok === true && own.overlap === null
+          && stale.code === 'SNAPSHOT_INCOMPLETE'
+          && missing.code === 'INVALID_ARGS';
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
 
   const unmerged = fakeRun([['gh issue view 5', 'OPEN'], ['gh pr view 9', '{"state":"OPEN","baseRefName":"main","url":"u"}']]);
   check('obsolete refuses an unmerged PR and touches nothing',
@@ -1403,6 +1611,9 @@ function selfTest() {
     && parseArgs(['--decide', '--issue', '5', '--question', 'q?', '--choice', 'c', '--why', 'w', '--alternatives', 'a; b']).alternatives.join('|') === 'a|b'
     && parseArgs(['--decisions', '--issue', '5', '--out', 'd.md']).out === 'd.md'
     && parseArgs(['--wait', '--issue', '5', '--on-issue', '4']).onIssue === 4
+    && parseArgs(['--wait', '--issue', '5', '--on-pr', '70', '--paths', 'src/a.mjs, src/b/']).paths.join('|') === 'src/a.mjs|src/b/'
+    && parseArgs(['--wait', '--issue', '5', '--on-pr', '70', '--paths', 'src/a.mjs']).onPr === 70
+    && parseArgs(['--overlap', '--issue', '5', '--boundary-file', 'plan.json', '--snapshot', 'snap.json']).snapshot === 'snap.json'
     && parseArgs(['--obsolete', '--issue', '5', '--commit', 'abc1234']).commit === 'abc1234'
     && parseArgs(['--wait', '--issue', '5', '--minutes', '60']).minutes === 60
     && parseArgs(['--digest', '--post']).post === true
@@ -1419,11 +1630,16 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`unit: ${parsed.error}`);
-    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720) [--note T] | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --question T --choice T --why T [--alternatives "A; B"] | --decisions --issue N [--out PATH] | --lift | --digest [--post] | --self-test');
+    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720 | --on-pr M --paths A,B/) [--note T] | --overlap --issue N --boundary-file PATH --snapshot PATH | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --question T --choice T --why T [--alternatives "A; B"] | --decisions --issue N [--out PATH] | --lift | --digest [--post] | --self-test');
     console.error(`human block reasons: ${[...HUMAN_BLOCK_REASONS].join(', ')}; retired (use --decide): ${[...RETIRED_BLOCK_REASONS].join(', ')}`);
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+  if (parsed.mode === 'overlap') {
+    const outcome = overlapCheck({ issue: parsed.issue, boundaryFile: parsed.boundaryFile, snapshotPath: parsed.snapshot });
+    console.log(JSON.stringify(outcome, null, 1));
+    process.exit(outcome.ok ? 0 : 1);
+  }
   const root = realRun(process.cwd())('git', ['rev-parse', '--show-toplevel']).stdout || process.cwd();
   const run = realRun(root);
   if (parsed.mode === 'repair') {

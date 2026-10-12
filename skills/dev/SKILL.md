@@ -161,7 +161,7 @@ moves any role to its fallback, stamped `(model unavailable)`.
 - Postures: `implement`, `simplify`, `fix` write (`Bash,Edit,Glob,Grep,Read,Write`,
   `acceptEdits`); the rest are read-only (`Glob,Grep,Read`, mode `plan`). `--tools` narrows, never
   widens.
-- Success: `{ok:true, role, tools, startupMs, ms, <payload>}` — `.plan` `{title, prBody, body}`,
+- Success: `{ok:true, role, tools, startupMs, ms, <payload>}` — `.plan` `{title, prBody, body, boundary}`,
   `.verdict` `{verdict, findings, rebuts}` (reviews), `.text` (writers). Failure:
   `{ok:false, step, error}` with stderr. Project fields (`jq '{ok, ms}'`,
   `jq -r .verdict.verdict`); never `cat` a result.
@@ -188,7 +188,7 @@ Premise, finding verification, and disposition are in-session judgment, no `--mo
 
 **Plan prompts state the contract**: `title` is plain ASCII `<type>: <summary>`, imperative,
 describing the change, never the artifact (no `plan(#N) v2`). A revision restates the WHOLE
-`{title, prBody, body}` contract, including exactly one `Closes #<N>` for the branch's issue
+`{title, prBody, body, boundary}` contract, including exactly one `Closes #<N>` for the branch's issue
 (`parseLoopClaim`) — check with `^(Closes|Fixes|Resolves) #<N>`, never a substring count.
 `INVALID_PLAN_TITLE`: take `rejectedPlan`'s body, write a compliant title yourself, proceed — never
 re-dispatch. `INVALID_PLAN_RESULT` means re-dispatch.
@@ -381,7 +381,7 @@ A staged unit uses `--staged` and gets no labels until its claim.
 ### 2. Plan
 
 `step.mjs --to 02-plan`, then dispatch `--role plan` (wrapper shape; typed `{title, prBody,
-body}`). The prompt carries the FULL issue (never an excerpt), lane constraints, and paths to STATE, the
+body, boundary}`). The prompt carries the FULL issue (never an excerpt), lane constraints, and paths to STATE, the
 checklist, and the spec. The orchestrator keeps premise, selection, `planHash`, intent, and claim.
 **Never ask a read-only role to run a command; hand it the base as FILES**:
 `git worktree add --detach <scratchpad>/base-<sha8> origin/<base>` (`<sha8>`: the commit
@@ -412,45 +412,46 @@ authorized path identities (a total of six files is not a list of six permitted 
 ### 3. Review the plan once
 
 `full` lane: no claim until the verdict. Small and docs lanes: claim and implement concurrently; a
-Critical stops the implement dispatch for the revision path; Minors ride into code-review r1.
+Critical stops the implement dispatch for the revision; Minors ride into r1.
 
 `step.mjs --to 03-plan-review`, then exactly one fresh `--role plan-review` dispatch (wrapper
-shape), given the same base directory. It checks premises, scope, interface depth, tests, invariants, risk, and issue fitness, and
-explicitly **invariant completeness** (an incomplete invariant is a plan-level Major). Verify each
-Critical/Major; record fix/rebut/defer dispositions in-session; narrate as in step 8. **The
-revision is one `--role plan` dispatch** (with the base directory) carrying the plan, every
-verified finding, and its disposition. **A second plan-review dispatch is a loop defect, not a round**
-— never swap back to `loop:02-plan`; a Critical/Major the revision still carries rides into
-code-review r1 as context.
+shape, same base directory; an incomplete invariant is a plan-level Major). Verify each
+Critical/Major; record fix/rebut/defer dispositions; narrate as in step 8. **The revision is one
+`--role plan` dispatch** (with the base directory) carrying the plan, every verified finding, and
+its disposition. **A second plan-review dispatch is a loop defect, not a round** — never swap back
+to `loop:02-plan`; a Critical/Major the revision still carries rides into r1.
+
+**Overlap check before the claim** (full lane: after the verdict): `node <plugin-tools>/unit.mjs
+--overlap --issue <N> --boundary-file <plan-result.json> --snapshot <snapshotPath>`. A hit names
+the PR and paths: `node <plugin-tools>/unit.mjs --wait --issue <N> --on-pr <M> --paths <a,b/>`;
+take the next unit. Prime lifts it when #M merges or closes (`resumed: #N (PR #M merged)`):
+re-plan ONCE (one `--role plan` dispatch; frozen plan as input; new base; no plan review),
+re-check, claim. Premise never compares; an open issue stays `--on-issue`.
 
 ### 4. Persist intent and claim
 
-`step.mjs --to 04-claim`. Before the first external mutation, durably post the lifecycle intent
-marker binding issue and body hash, plan hash/reference, branch, planned base OID, merge policy,
-and phase. Write the closed request
+`step.mjs --to 04-claim`. The driver posts the lifecycle intent marker before any other mutation.
+Write the closed request
 `{schemaVersion:1,intent,baseBranch,lifecycleCommentId:null,plan:{body,title,prBody},premergeRecordDraft:null}`
-to a bounded file:
+to a file:
 
 ```bash
 node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
 ```
 
-Compose it from `node <plugin-tools>/lifecycle-driver.mjs --example-request` plus
-`jq -n --rawfile` over the real values — never read the driver's source. Run it from the repository
-root. **`plan.body` is the frozen artifact, byte for byte**: once posted, fetch it from GitHub
-(`jq -j .body <response.json> > body.md`; `--jq`/`jq -r` add a newline); `sha256(plan.body)` must
-equal `intent.planHash`.
+Compose it from `lifecycle-driver.mjs --example-request` with `jq -n --rawfile` (no `boundary`);
+never read the driver's source; run at the repository root.
+**`plan.body` is the frozen artifact, byte for byte**: once posted, fetch it from GitHub
+(`jq -j .body`; `--jq`/`jq -r` add a newline); `sha256(plan.body)` must equal `intent.planHash`.
 
-**Never hand-query a unit's merge state** — the driver reports `phase`, `merged`, and the merge
-commit (raw `gh pr view --json` spells it `mergedAt`, plus `state`).
+**Never hand-query a unit's merge state**: the driver reports `phase`, `merged`, and the merge
+commit (`gh pr view --json` spells it `mergedAt`).
 
-The driver persists epoch 1, swaps `loop-started`/`loop:04-claim`, creates the planned-base branch
-and `chore: claim #N`, publishes it, posts the hash-bound frozen plan, opens one draft passing
-`parseLoopClaim()`, binds every identity into the marker, and returns `ACTIVE_DRAFT_RECOVERED` after
-stable readback. Retain its `lifecycleCommentId` (a node id, `IC_…`; never a numeric REST comment
-id) for every later call — it is the chain's ROOT and stays the captured ID for the unit's
-life; a newer marker's ID is refused (`captured lifecycle root comment is not canonical`).
-Never append a marker or perform these effects outside the driver.
+The driver claims (labels, branch, `chore: claim #N`, push, frozen plan comment, one draft passing
+`parseLoopClaim()`, marker) and returns `ACTIVE_DRAFT_RECOVERED` after stable readback. Retain its
+`lifecycleCommentId` (`IC_…` node id, never a REST id) for every later call:
+it is the chain's ROOT and stays the captured ID; a newer marker's ID is refused (`captured
+lifecycle root comment is not canonical`). Never append a marker outside the driver.
 
 ### 5. Implement
 

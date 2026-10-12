@@ -163,7 +163,7 @@ function selfTest() {
     number, title: 'loop unit', body: `Closes #${issueNumber}`, isDraft: false, reviewDecision: 'APPROVED',
     headRefName: `feat/gh-${issueNumber}-loop-unit`, headRefOid: 'b'.repeat(40), baseRefName: 'main',
     mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-10-12T08:00:00Z',
-    author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [],
+    author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [], files: [],
     issue: issueNumber, orphanCandidate: false, ownership: 'loop',
   });
   const snapshotOf = ({ scannedAtMs, issues, owner = repo, openIssues = null, openPrs = completeSection([]) }) => {
