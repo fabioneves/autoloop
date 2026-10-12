@@ -1,0 +1,9 @@
+{
+  "//": "Extends the tsconfig the engine lays at .claude-plugin/types/ (git-ignored) when it loads the mod; before the first load, type-check with the plugin-authoring skill's header tsconfig outside the repository over hooks/status and types.",
+  "extends": "./.claude-plugin/types/tsconfig.json",
+  "include": [
+    ".claude-plugin/types",
+    "hooks/status",
+    "types"
+  ]
+}

@@ -1,5 +1,8 @@
 {
   "description": "autoloop hooks. Every hook runs the plugin's own copy, finds the project from CLAUDE_PROJECT_DIR, and acts only for the session that owns a run (its latch names the conversation; after --close-run only the command and edit guards act): every other session sees no hook effect.",
+  "modules": [
+    "./status/register.tsx"
+  ],
   "hooks": {
     "SessionStart": [
       {

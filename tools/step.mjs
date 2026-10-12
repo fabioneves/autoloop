@@ -20,7 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loopRunIsLive, ownRunMarkers, sessionLatch } from './run-markers.mjs';
+import { latchDirectory, loopRunIsLive, ownedRun, ownRunMarkers, processStart, sessionLatch, sessionOwnerPid } from './run-markers.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, issueSnapshotItem, SNAPSHOT_SECTIONS,
   snapshotProblem, verifySnapshot,
@@ -28,7 +28,8 @@ import {
 import { noteDecisionOnStep, realRun } from './unit.mjs';
 import { parseGitHubRemote } from './checkout-contract.mjs';
 import { mergeCaption, projectParked, stepAttempt } from './parked-disposition.mjs';
-import { resolveProjectConfig } from './config-contract.mjs';
+import { resolveProjectConfig, statusBandEnabled } from './config-contract.mjs';
+import { readPinnedModels } from './models-config.mjs';
 import { newAssociationId, readStepBinding, updateStepRecord, validReceipt } from './dispatch-return-association.mjs';
 
 const LADDER = Object.freeze([
@@ -606,6 +607,158 @@ export function runCard({ root, run = realRun(root), nowMs = Date.now(), live = 
   return renderRunCard({ nowMs, units, park, snapshot });
 }
 
+// SPEC-status-mod: the status mod reads one JSON projection, built from the
+// reads the text card makes (projectedUnits, the run markers, the retained
+// snapshot, the pinned models, the project config). Its schema is the mod's
+// contract; a later producer keeps the schema and replaces the reads.
+export const STATUS_SCHEMA = 'autoloop.status/1';
+
+// A round as --round names it, as a fact: n and the budget only for a fix round.
+function roundFacts(round) {
+  if (typeof round !== 'string' || !ROUND_RE.test(round)) return null;
+  return round.startsWith('fix-') ? { kind: 'fix', n: Number(round.slice(4)), budget: FIX_ROUND_BUDGET } : { kind: round };
+}
+
+// unit.mjs --wait notes what a unit waits for on its step as the parked line
+// prints it: `#N`, `PR #N (paths)`, `N min` or `a green <base>`. The
+// condition itself lives in the issue's wait marker; this reads the note back.
+function waitingFacts(waiting) {
+  if (typeof waiting?.on !== 'string') return null;
+  const on = waiting.on;
+  const issue = /^#(\d+)$/u.exec(on);
+  if (issue) return { kind: 'issue', number: Number(issue[1]), paths: null, until: null };
+  const pr = /^PR #(\d+) \((.+)\)$/u.exec(on);
+  if (pr) return { kind: 'pr', number: Number(pr[1]), paths: pr[2].split(', '), until: null };
+  const timed = /^(\d+) min$/u.exec(on);
+  if (timed) {
+    const until = Number.isFinite(waiting.atMs) ? new Date(waiting.atMs + Number(timed[1]) * 60_000).toISOString() : null;
+    return { kind: 'time', number: null, paths: null, until };
+  }
+  return on.startsWith('a green ') ? { kind: 'base', number: null, paths: null, until: null } : null;
+}
+
+// The parked line's precedence (dispositionNote, then parkedLocal) as one
+// word: a human gate, a pending merge, a wait, a step last seen rather than
+// running, a staged step not yet dispatched, a returned dispatch, else work.
+function unitDisposition(unit) {
+  if (unit.observed?.disposition === 'blocked') return 'blocked';
+  if (unit.pending) return 'delivered';
+  if (unit.waiting?.on || unit.observed?.disposition === 'waiting') return 'waiting';
+  if (unit.local !== 'current') return 'returned';
+  if (unit.staged && !unit.model) return 'waiting';
+  return Number.isFinite(unit.returnedAtMs) ? 'returned' : 'active';
+}
+
+// The qualifying words the parked line prints for that disposition.
+function unitDetail(unit, nowMs) {
+  const { observed, pending, waiting, staged, model, returnedAtMs } = unit;
+  if (observed && (observed.disposition === 'blocked' || !pending)) return observation(observed, nowMs);
+  if (pending) return `${mergeCaption(pending.policy)}${pending.reason ? ` (${oneLine(pending.reason, 80)})` : ''}`;
+  if (waiting?.on) return `waits on ${waiting.on}`;
+  const seen = lastSeenNote(unit, nowMs);
+  if (seen) return seen;
+  if (Number.isFinite(returnedAtMs)) return staged ? 'returned · staged, waits its turn' : 'returned';
+  return staged && !model ? 'staged, not dispatched' : null;
+}
+
+// What a human must do, from the labels the scan observed (a block gate rides
+// loop-blocked; the draft hand-off and an authorization carry their gate
+// alone) or from the open-findings round the hand-off recorded locally. The
+// block's question is in the issue's comment, not in local state: the text
+// is the issue's title when the snapshot has it.
+function needsYouFacts(unit, title) {
+  const labels = unit.observed?.disposition === 'blocked' ? unit.observed.labels : null;
+  if (labels !== null) {
+    const kind = labels.includes('loop-blocked') ? 'block'
+      : labels.includes('human:authorize') ? 'authorize'
+        : labels.includes('human:decide') ? 'decide' : 'block';
+    return { kind, text: title ?? labels.join(', ') };
+  }
+  return unit.round === 'open-findings' ? { kind: 'decide', text: title ?? 'open findings' } : null;
+}
+
+export function statusProjection({
+  root, run = realRun(root), nowMs = Date.now(), sessionId, home,
+  live = loopRunIsLive, markers = ownRunMarkers,
+  owned = (id) => ownedRun({ sessionId: id, directory: latchDirectory(home) }),
+}) {
+  const none = { schema: STATUS_SCHEMA, owned: false };
+  // SPEC-session-ownership: this process's open latch naming the session, and
+  // an open run marker. Pid ancestry alone is not ownership.
+  const latch = owned(sessionId);
+  if (latch === null || latch.unreadable || !live(root)) return none;
+  const { dir } = autoloopDir(root, run);
+  if (dir === null) return none;
+  const own = markers(root);
+  const park = own.map(({ marker }) => marker.park).find((value) => value?.until) ?? null;
+  const resolved = resolveProjectConfig(root);
+  const openedAtMs = runStartMs(own);
+  const { snapshot, authority, units, humanWaits } = projectedUnits(dir, run, nowMs, openedAtMs);
+  const spoken = authority.authority !== 'none';
+  const titleOf = (issue) => (spoken ? snapshot.sections.openIssues.items.find((item) => item.number === issue)?.title ?? null : null);
+  const pinned = readPinnedModels(join(dir, 'models.json'));
+  const models = pinned?.ok ? Object.fromEntries(Object.entries(pinned.models).map(([role, entry]) => [role, entry.model])) : {};
+  const phaseOf = (unit) => PHASES[unit.step] ?? null;
+  const roleOf = (unit) => unit.role ?? STEP_ROLES[unit.step] ?? null;
+  // A staged step without a model was announced, not launched: no model ran.
+  const modelOf = (unit) => unit.model ?? (unit.staged ? null : models[roleOf(unit)] ?? null);
+  // The unit's open PR as the scan saw it (the card's pending PR first).
+  const openPrs = spoken && snapshot.sections.openPrs.complete === true ? snapshot.sections.openPrs.items : [];
+  const projected = units.map((unit) => {
+    const title = titleOf(unit.issue);
+    return {
+      issue: unit.issue, title, disposition: unitDisposition(unit), phase: phaseOf(unit), role: roleOf(unit),
+      model: modelOf(unit), round: roundFacts(unit.round), detail: unitDetail(unit, nowMs), waitingOn: waitingFacts(unit.waiting),
+      pr: unit.pending?.pr ?? openPrs.find((item) => item.issue === unit.issue)?.number ?? null,
+      decisions: unit.decisions, needsYou: needsYouFacts(unit, title),
+    };
+  });
+  // A blocked issue with no open record (its card closed it) is still a
+  // human's to answer: the parked view lists it as awaiting /answer.
+  const answered = humanWaits.map((issue) => ({
+    issue, title: titleOf(issue), disposition: 'blocked', phase: null, role: null, model: null, round: null, detail: 'awaits /answer',
+    waitingOn: null, pr: null, decisions: 0, needsYou: { kind: 'block', text: titleOf(issue) ?? `#${issue}` },
+  }));
+  const all = [...projected, ...answered];
+  // The worked unit: the newest unstaged step of this run that is neither
+  // waiting, delivered nor a human's.
+  const worked = units
+    .filter((unit) => unit.local === 'current' && !unit.staged && !unit.waiting?.on && !unit.pending
+      && unit.observed?.disposition !== 'blocked')
+    .sort((left, right) => right.startedAtMs - left.startedAtMs)[0] ?? null;
+  const eligible = eligibleIssueNumbers(snapshot);
+  const count = (disposition) => all.filter((unit) => unit.disposition === disposition).length;
+  return {
+    schema: STATUS_SCHEMA,
+    owned: true,
+    enabled: statusBandEnabled(resolved?.ok ? resolved.config : null),
+    run: {
+      openedAtMs,
+      parkedUntil: park?.until ?? null,
+      // Null while owned: ownership needs an open marker (`live`), and a
+      // close stamps every marker. Kept in the shape for a later producer.
+      closedAt: null,
+      snapshotScannedAt: spoken ? snapshot.scannedAt : null,
+      snapshotAuthority: authority.authority,
+    },
+    phases: [...PHASE_ORDER],
+    unit: worked === null ? null : {
+      issue: worked.issue, title: titleOf(worked.issue), phase: phaseOf(worked), role: roleOf(worked),
+      model: modelOf(worked), fallback: worked.fallback === true, round: roundFacts(worked.round),
+      inFlight: typeof worked.dispatchId === 'string' && !Number.isFinite(worked.returnedAtMs),
+      startedAtMs: worked.startedAtMs, returnedAtMs: Number.isFinite(worked.returnedAtMs) ? worked.returnedAtMs : null,
+      waitingOn: null, decisions: worked.decisions,
+    },
+    units: all,
+    counts: {
+      active: count('active'), waiting: count('waiting'), blocked: all.filter((unit) => unit.needsYou !== null).length,
+      delivered: count('delivered'),
+      eligible: eligible !== null ? eligible.length : readJson(join(dir, QUEUE_COUNT), null)?.eligible ?? null,
+    },
+    models,
+  };
+}
+
 function readJsonText(text) {
   try {
     const value = JSON.parse(text);
@@ -630,6 +783,24 @@ export const STEPS = Object.freeze({
   '09-gate': ['GATE', '🚦'],
   '10-publish': ['PUBLISH', '📦'],
   '11-record': ['RECORD', '📝'],
+});
+
+// The band's ladder (SPEC-status-mod): each step's phase, in the loop's real
+// order (gate is after review). The reconcile mark is no phase.
+export const PHASE_ORDER = Object.freeze(['plan', 'build', 'simplify', 'review', 'gate', 'deliver']);
+export const PHASES = Object.freeze({
+  '01-premise': 'plan',
+  '02-plan': 'plan',
+  '03-plan-review': 'plan',
+  '04-claim': 'plan',
+  '05-implement': 'build',
+  '06-simplify': 'simplify',
+  '07-diff-review': 'review',
+  '08-code-review': 'review',
+  '08-fix': 'review',
+  '09-gate': 'gate',
+  '10-publish': 'deliver',
+  '11-record': 'deliver',
 });
 
 // Colour comes from colour emoji: raw ANSI does not survive the markdown
@@ -955,6 +1126,7 @@ function selfTest() {
   checks.push(...transitionChecks(at));
   checks.push(...dispositionChecks());
   checks.push(...pendingMergeChecks());
+  checks.push(...projectionChecks(at));
   const minute = 60_000;
   const start = at(9, 9);
   const history = [
@@ -1933,6 +2105,251 @@ function pendingMergeChecks() {
     results.push([`pending merge checks ran (${error.message})`, false]);
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+  return results;
+}
+
+// SPEC-status-mod: the status mod reads one JSON projection, built from the
+// reads the text card makes. The fixture holds one unit per fact the band
+// draws; the card's text is the one captured before the projection existed.
+// SPEC-status-mod: the projection's fixture, one scratch checkout shared by
+// projectionChecks and `status.mjs --fixtures` (which prints the mod's
+// hooks/status/fixtures/projection.ts from it, so the mod's tests read what
+// this producer prints). The clock stands at 10:30 on 2026-09-28; the
+// snapshot, scanned at 10:10, names every issue; one step record per fact.
+// `write(shown)` lays the records of the issues named and lists among the
+// snapshot's blocked issues only those named (#430 is blocked with no
+// record), so a case holds the units it names and nothing else. `at(hh, mm)`
+// is the caller's clock: the self-test's local one, --fixtures's UTC one.
+export function statusFixture(at) {
+  const nowMs = at(10, 30);
+  const scratch = mkdtempSync(join(tmpdir(), 'step-projection-'));
+  const root = join(scratch, 'repo');
+  const home = join(scratch, 'home');
+  const autoloop = join(root, '.git', 'autoloop');
+  const issue = (number, title, labels) => issueSnapshotItem({
+    number, title, body: '', updatedAt: '2026-09-27T08:00:00Z', labels: labels.map((name) => ({ name })),
+  });
+  const issues = [
+    issue(412, 'Session recovery', ['loop-started', 'loop:08-code-review']),
+    issue(413, 'Simplify the guard', ['loop-started', 'loop:06-simplify']),
+    issue(414, 'Waits on an issue', ['loop-started', 'loop-waiting']),
+    issue(415, 'Waits on a PR', ['loop-started', 'loop-waiting']),
+    issue(416, 'Delivered, merge pending', ['loop-delivered']),
+    issue(417, 'Needs a policy answer', ['loop-blocked', 'human:decide']),
+    issue(418, 'Draft with open findings', ['loop-started', 'human:decide']),
+    issue(419, 'Draft handed off after the scan', ['loop-started', 'loop:08-code-review']),
+    issue(420, 'Staged plan', ['loop-ready']),
+    issue(421, 'Fix round in flight', ['loop-started', 'loop:08-code-review']),
+    issue(422, 'Re-plan round returned', ['loop-started', 'loop:08-code-review']),
+    issue(423, 'Needs an authorization', ['loop-blocked', 'human:authorize']),
+    issue(424, 'PR awaiting authorization', ['loop-delivered', 'human:authorize']),
+    issue(425, 'Seen in an earlier run', ['loop-started', 'loop:05-implement']),
+    issue(426, 'Waits on time', ['loop-started', 'loop-waiting']),
+    issue(427, 'Waits on the base', ['loop-started', 'loop-waiting']),
+    issue(430, 'Blocked without a record', ['loop-blocked', 'human:decide']),
+  ];
+  const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+  sections.repo = completeSection([{ owner: 'acme', name: 'widgets', nameWithOwner: 'acme/widgets', defaultBranch: 'main' }]);
+  sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: 'a'.repeat(40) }]);
+  sections.openIssues = completeSection(issues);
+  const scannedAt = new Date(at(10, 10)).toISOString();
+  const records = [
+    { issue: 412, decisions: 2, steps: [{ step: '08-code-review', stepId: 's412', dispatchId: 'd412', round: 'fix-2',
+      model: 'gpt-6-astra', role: 'code-review', reviewRound: 2, startedAtMs: at(10, 27) }] },
+    { issue: 413, steps: [{ step: '06-simplify', model: 'claude-opus-5-5', fallback: true, startedAtMs: at(10, 20), returnedAtMs: at(10, 29) }] },
+    { issue: 414, steps: [{ step: '05-implement', model: 'claude-opus-5-5', startedAtMs: at(9, 50), waiting: { on: '#399', atMs: at(10, 0) } }] },
+    { issue: 415, steps: [{ step: '05-implement', model: 'claude-opus-5-5', startedAtMs: at(9, 55),
+      waiting: { on: 'PR #204 (src/a.mjs, src/b.mjs)', atMs: at(10, 5) } }] },
+    { issue: 416, steps: [{ step: '09-gate', startedAtMs: at(9, 0) }, { step: '11-record', startedAtMs: at(9, 45) }],
+      pending: { outcome: 'delivered', pr: 700, policy: 'auto', reason: 'checks pending', atMs: at(9, 40) } },
+    { issue: 417, steps: [{ step: '00-reconcile', startedAtMs: at(8, 40) }] },
+    { issue: 418, steps: [{ step: '08-code-review', round: 'open-findings', model: 'gpt-6-astra', startedAtMs: at(10, 0), returnedAtMs: at(10, 8) }] },
+    { issue: 419, steps: [{ step: '08-code-review', round: 'open-findings', model: 'gpt-6-astra', startedAtMs: at(10, 15), returnedAtMs: at(10, 25) }] },
+    { issue: 420, steps: [{ step: '02-plan', staged: true, model: null, startedAtMs: at(10, 12) }] },
+    { issue: 421, steps: [{ step: '08-fix', stepId: 's421', dispatchId: 'd421', round: 'fix-1', model: 'claude-opus-5-5', role: 'fix', startedAtMs: at(9, 30) }] },
+    { issue: 422, steps: [{ step: '08-code-review', round: 're-plan', model: 'gpt-6-astra', startedAtMs: at(9, 20), returnedAtMs: at(9, 25) }] },
+    { issue: 423, steps: [{ step: '00-reconcile', startedAtMs: at(8, 40) }] },
+    { issue: 424, steps: [{ step: '11-record', startedAtMs: at(9, 50) }],
+      pending: { outcome: 'delivered', pr: 701, policy: 'manual', reason: null, atMs: at(9, 48) } },
+    { issue: 425, steps: [{ step: '05-implement', model: 'claude-opus-5-5', startedAtMs: at(8, 0) }] },
+    // Beyond the run: one wait per remaining kind (status.mjs --fixtures WAITS).
+    { issue: 426, steps: [{ step: '05-implement', model: 'claude-opus-5-5', startedAtMs: at(10, 0), waiting: { on: '30 min', atMs: at(10, 20) } }] },
+    { issue: 427, steps: [{ step: '05-implement', model: 'claude-opus-5-5', startedAtMs: at(10, 5), waiting: { on: 'a green main', atMs: at(10, 20) } }] },
+  ];
+  // The run: fifteen records and the blocked issue without one.
+  const runIssues = [...records.map((record) => record.issue).filter((number) => number <= 425), 430];
+  const calls = [];
+  const run = (command, args) => {
+    calls.push([command, ...args].join(' '));
+    if (command === 'git' && args.includes('--git-common-dir')) return { ok: true, stdout: join(root, '.git'), stderr: '' };
+    if (command === 'git' && args.join(' ') === 'config --get-all remote.origin.url') return { ok: true, stdout: 'git@github.com:acme/widgets.git', stderr: '' };
+    return { ok: false, stdout: '', stderr: `unexpected ${command}` };
+  };
+  const markers = () => [{ marker: { version: 1, pids: [1], openedAtMs: at(8, 30), baseBranch: 'main',
+    park: { reason: 'operator message', until: new Date(at(11, 0)).toISOString() } } }];
+  const owner = sessionOwnerPid();
+  const latches = latchDirectory(home);
+  const latch = (fields) => {
+    mkdirSync(latches, { recursive: true });
+    writeFileSync(join(latches, `${owner}.json`), JSON.stringify({ version: 2, owner, ownerStart: processStart(owner),
+      baseBranch: 'main', scope: root, latchedAtMs: at(8, 30), sessionId: 'S-1', ...fields }));
+  };
+  mkdirSync(join(autoloop, 'prime'), { recursive: true });
+  mkdirSync(join(root, '.autoloop'), { recursive: true });
+  writeFileSync(join(autoloop, 'models.json'), JSON.stringify({ version: 1, models: {
+    'code-review': { model: 'gpt-6-astra' }, implement: { model: 'claude-opus-5-5' }, fix: { model: 'claude-opus-5-5' } } }));
+  const write = (shown = runIssues) => {
+    rmSync(join(autoloop, 'steps'), { recursive: true, force: true });
+    mkdirSync(join(autoloop, 'steps'), { recursive: true });
+    for (const record of records.filter((entry) => shown.includes(entry.issue))) {
+      writeFileSync(join(autoloop, 'steps', `${record.issue}.json`), JSON.stringify(record));
+    }
+    const blocked = issues.filter((item) => item.labels.includes('loop-blocked') && shown.includes(item.number));
+    writeFileSync(join(autoloop, 'prime', 'a.snapshot.json'),
+      JSON.stringify(createSnapshot({ scannedAt, sections: { ...sections, blockedIssues: completeSection(blocked) } })));
+  };
+  const project = (options = {}) => statusProjection({ root, run, nowMs, sessionId: 'S-1', home, live: () => true, markers, ...options });
+  const files = () => [...readdirSync(join(autoloop, 'steps')).sort().map((name) => readFileSync(join(autoloop, 'steps', name), 'utf8')),
+    readFileSync(join(autoloop, 'prime', 'a.snapshot.json'), 'utf8'), String(existsSync(join(autoloop, QUEUE_COUNT)))].join('\n');
+  const dispose = () => rmSync(scratch, { recursive: true, force: true });
+  return { root, autoloop, nowMs, scannedAt, records, runIssues, calls, run, markers, latch, write, project, files, dispose };
+}
+
+function projectionChecks(at) {
+  const fixture = statusFixture(at);
+  const { root, nowMs, scannedAt, runIssues, calls, run, markers, latch, write, files } = fixture;
+  const project = (options = {}) => {
+    try {
+      return fixture.project(options);
+    } catch (error) {
+      return { threw: error.message };
+    }
+  };
+  const unit = (projection, number) => projection?.units?.find((entry) => entry.issue === number) ?? null;
+  const results = [];
+  try {
+    write();
+    results.push(['the phase map names every step but the reconcile mark, in the loop\'s order', (() => {
+      try {
+        return JSON.stringify(PHASE_ORDER) === JSON.stringify(['plan', 'build', 'simplify', 'review', 'gate', 'deliver'])
+          && Object.keys(STEPS).filter((step) => step !== '00-reconcile').every((step) => PHASE_ORDER.includes(PHASES[step]))
+          && PHASES['00-reconcile'] === undefined
+          && ['01-premise', '02-plan', '03-plan-review', '04-claim'].every((step) => PHASES[step] === 'plan')
+          && PHASES['05-implement'] === 'build' && PHASES['06-simplify'] === 'simplify'
+          && ['07-diff-review', '08-code-review', '08-fix'].every((step) => PHASES[step] === 'review')
+          && PHASES['09-gate'] === 'gate' && PHASES['10-publish'] === 'deliver' && PHASES['11-record'] === 'deliver';
+      } catch {
+        return false;
+      }
+    })()]);
+    const none = '{"schema":"autoloop.status/1","owned":false}';
+    const unowned = [project()];
+    latch({ sessionId: 'S-other' });
+    unowned.push(project());
+    latch({ closedAt: new Date(at(10, 0)).toISOString() });
+    unowned.push(project());
+    latch({});
+    unowned.push(project({ live: () => false }), project({ sessionId: '' }));
+    results.push(['no latch, another session\'s latch, a closed latch, no live marker or no session id is no ownership: owned false and nothing else',
+      unowned.every((projection) => JSON.stringify(projection) === none)]);
+    const before = files();
+    calls.length = 0;
+    const owned = project();
+    const unchanged = files() === before && calls.every((call) => !call.startsWith('gh'));
+    results.push(['an owned run projects the spec keys, its run facts, the phase list and the pinned models',
+      Object.keys(owned).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models'
+        && owned.owned === true && owned.enabled === true
+        && JSON.stringify(owned.run) === JSON.stringify({ openedAtMs: at(8, 30), parkedUntil: new Date(at(11, 0)).toISOString(),
+          closedAt: null, snapshotScannedAt: scannedAt, snapshotAuthority: 'current' })
+        && JSON.stringify(owned.phases) === JSON.stringify(PHASE_ORDER)
+        && JSON.stringify(owned.models) === JSON.stringify({ plan: 'astra[1m]', 'plan-review': 'fable[1m]', implement: 'claude-opus-5-5',
+          fix: 'claude-opus-5-5', simplify: 'fable[1m]', 'diff-review': 'astra[1m]', 'code-review': 'gpt-6-astra', 'doubt-review': 'astra[1m]' })]);
+    writeFileSync(join(root, '.autoloop', 'config.json'), JSON.stringify({ version: '0.28.0', baseBranch: 'main',
+      gate: { command: 'npm test' }, ui: { status: false } }));
+    const off = project();
+    writeFileSync(join(root, '.autoloop', 'config.json'), JSON.stringify({ version: '0.28.0', baseBranch: 'main', gate: { command: 'npm test' } }));
+    const on = project();
+    results.push(['ui.status false reports enabled false with the rest present; a config without it is enabled',
+      off.owned === true && off.enabled === false && off.unit?.issue === 412 && on.enabled === true]);
+    results.push(['the worked unit is the newest unstaged current step: in flight, with its phase, role, model, fix round and decisions',
+      JSON.stringify(owned.unit) === JSON.stringify({ issue: 412, title: 'Session recovery', phase: 'review', role: 'code-review',
+        model: 'gpt-6-astra', fallback: false, round: { kind: 'fix', n: 2, budget: 3 }, inFlight: true, startedAtMs: at(10, 27),
+        returnedAtMs: null, waitingOn: null, decisions: 2 })]);
+    // Without #412 the simplify step is the worked unit: returned, so not in
+    // flight, on its fallback model.
+    write(runIssues.filter((number) => number !== 412));
+    const fallback = project();
+    write();
+    results.push(['a returned step is not in flight; a fallback model says so; a re-plan and an open-findings round name their kind',
+      unit(owned, 413)?.disposition === 'returned' && unit(owned, 413)?.model === 'claude-opus-5-5' && unit(owned, 413)?.detail === 'returned'
+        && unit(owned, 413)?.phase === 'simplify' && unit(owned, 413)?.role === 'simplify'
+        && fallback.unit?.issue === 413 && fallback.unit.fallback === true && fallback.unit.inFlight === false
+        && fallback.unit.returnedAtMs === at(10, 29) && fallback.unit.round === null
+        && JSON.stringify(unit(owned, 422)?.round) === '{"kind":"re-plan"}'
+        && JSON.stringify(unit(owned, 419)?.round) === '{"kind":"open-findings"}'
+        && unit(owned, 421)?.disposition === 'active' && JSON.stringify(unit(owned, 421)?.round) === '{"kind":"fix","n":1,"budget":3}'
+        && unit(owned, 421)?.phase === 'review' && unit(owned, 421)?.role === 'fix']);
+    results.push(['a wait on an issue, or on a PR with paths, is read back from the step\'s wait note',
+      unit(owned, 414)?.disposition === 'waiting'
+        && JSON.stringify(unit(owned, 414)?.waitingOn) === JSON.stringify({ kind: 'issue', number: 399, paths: null, until: null })
+        && unit(owned, 415)?.disposition === 'waiting'
+        && JSON.stringify(unit(owned, 415)?.waitingOn) === JSON.stringify({ kind: 'pr', number: 204, paths: ['src/a.mjs', 'src/b.mjs'], until: null })
+        && unit(owned, 420)?.disposition === 'waiting' && unit(owned, 420)?.detail === 'staged, not dispatched'
+        && unit(owned, 420)?.model === null && unit(owned, 420)?.waitingOn === null]);
+    results.push(['a pending merge is delivered with its PR and caption; an earlier run\'s step is seen, not active',
+      unit(owned, 416)?.disposition === 'delivered' && unit(owned, 416)?.pr === 700 && unit(owned, 416)?.phase === 'deliver'
+        && unit(owned, 416)?.detail === 'automatic merge pending (checks pending)'
+        && unit(owned, 425)?.disposition === 'returned' && unit(owned, 425)?.detail === 'last seen 08:00 (earlier run)']);
+    const needs = (number) => JSON.stringify(unit(owned, number)?.needsYou ?? null);
+    results.push(['a block, a draft hand-off and an authorize label each need a human, with the issue\'s title; a blocked issue with no record is listed',
+      needs(417) === '{"kind":"block","text":"Needs a policy answer"}' && unit(owned, 417)?.disposition === 'blocked'
+        && needs(423) === '{"kind":"block","text":"Needs an authorization"}'
+        && needs(418) === '{"kind":"decide","text":"Draft with open findings"}' && unit(owned, 418)?.disposition === 'blocked'
+        && needs(419) === '{"kind":"decide","text":"Draft handed off after the scan"}' && unit(owned, 419)?.disposition === 'returned'
+        && needs(424) === '{"kind":"authorize","text":"PR awaiting authorization"}' && unit(owned, 424)?.pr === 701
+        && needs(430) === '{"kind":"block","text":"Blocked without a record"}' && unit(owned, 430)?.disposition === 'blocked'
+        && unit(owned, 430)?.phase === null
+        && [412, 413, 414, 415, 416, 420, 421, 422, 425].every((number) => needs(number) === 'null')]);
+    results.push(['the counts agree with the units, and eligible comes from the snapshot',
+      JSON.stringify(owned.counts) === JSON.stringify({ active: 2, waiting: 3, blocked: 6, delivered: 1, eligible: 0 })
+        && owned.counts.active === owned.units.filter((entry) => entry.disposition === 'active').length
+        && owned.counts.blocked === owned.units.filter((entry) => entry.needsYou !== null).length]);
+    const card = (() => {
+      try {
+        return runCard({ root, run, nowMs, live: () => true, markers }).replaceAll(root, '<root>');
+      } catch (error) {
+        return `THREW ${error.message}`;
+      }
+    })();
+    results.push(['the text card is byte-identical to the one captured before the projection existed, and both modes list the same units',
+      card === [
+        '## autoloop run state after compaction — facts as of 10:30, re-prime before deciding',
+        '- parked until 11:00: operator message',
+        '- retained snapshot <root>/.git/autoloop/prime/a.snapshot.json, <1m old',
+        '- #412 at 08 code-review fix 2/3 on 🟢 ASTRA 6 since 10:27',
+        '- #413 at 06 simplify on 🟠 OPUS 5.5 since 10:20',
+        '- #414 waiting per scan 10:10; local 05 implement on 🟠 OPUS 5.5 since 09:50',
+        '- #415 waiting per scan 10:10; local 05 implement on 🟠 OPUS 5.5 since 09:55',
+        '- #416 PR #700 automatic merge pending (checks pending) since 09:40; local 11 record last seen 09:45',
+        '- #417 blocked (human:decide, loop-blocked) per scan 10:10; local 00 reconcile last seen 08:40',
+        '- #418 blocked (human:decide) per scan 10:10; local 08 code-review open findings on 🟢 ASTRA 6 since 10:00',
+        '- #419 at 08 code-review open findings on 🟢 ASTRA 6 since 10:15',
+        '- #420 at 02 plan on ⚪ ENGINE since 10:12',
+        '- #421 at 08 fix 1/3 on 🟠 OPUS 5.5 since 09:30',
+        '- #422 at 08 code-review re-plan on 🟢 ASTRA 6 since 09:20',
+        '- #423 blocked (human:authorize, loop-blocked) per scan 10:10; local 00 reconcile last seen 08:40',
+        '- #424 blocked (human:authorize) per scan 10:10; local 11 record last seen 09:50',
+        '- #425 at 05 implement last seen 08:00 (earlier run)',
+      ].join('\n')
+        && JSON.stringify(card.split('\n').map((line) => /^- #(\d+) /u.exec(line)?.[1]).filter(Boolean).map(Number))
+          === JSON.stringify(runIssues.filter((number) => number !== 430))
+        && JSON.stringify(owned.units.map((entry) => entry.issue)) === JSON.stringify(runIssues)]);
+    results.push(['the projection makes no GitHub call and changes no file', unchanged]);
+  } catch (error) {
+    results.push([`projection checks ran (${error.message})`, false]);
+  } finally {
+    fixture.dispose();
   }
   return results;
 }
