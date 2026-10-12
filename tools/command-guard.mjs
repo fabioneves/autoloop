@@ -765,8 +765,8 @@ function isAssignmentWord(word) {
 // A path that holds a secret, as a commit must never: an `.env*` file, key
 // material by extension, or a path segment that is (or is joined from) the
 // word secret, credential, token or keys. Whole words only: `tokenizer.ts` is
-// source. The lane contract's human-authorization globs are wider (CLAUDE.md,
-// workflows, Dockerfiles) and stop a merge, not a commit, so they stay there.
+// source. The lane contract's protected families are wider (workflows, the
+// loop's control roots) and stop a merge, not a commit, so they stay there.
 const SECRET_PATH_FAMILIES = Object.freeze([
   /(^|\/)\.env[^/]*$/iu,
   /\.(?:jks|key|keystore|p12|pem|pfx)$/iu,

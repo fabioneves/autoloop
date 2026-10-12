@@ -78,6 +78,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 import { updateStepRecord } from './dispatch-return-association.mjs';
+import { inLane } from './lane-contract.mjs';
 import {
   SNAPSHOT_SECTIONS, completeSection, createSnapshot, deliveredPullRequests, invalidateSnapshot, verifySnapshot,
 } from './snapshot-contract.mjs';
@@ -143,7 +144,7 @@ export function waitCondition(bodies) {
         else if (parsed?.on === 'base' && SHA_RE.test(parsed.oid ?? '')) newest = { on: 'base', oid: parsed.oid };
         else if (parsed?.on === 'time' && Number.isFinite(Date.parse(parsed.until))) newest = { on: 'time', until: parsed.until };
         else if (parsed?.on === 'pr' && positive(parsed.number) && pathList(parsed.paths) !== null) {
-          newest = { on: 'pr', number: parsed.number, paths: pathList(parsed.paths) };
+          newest = { on: 'pr', number: parsed.number, paths: parsed.paths };
         }
       } catch {
         // An unparseable marker is not a condition; an earlier valid one still stands.
@@ -165,13 +166,12 @@ function pathList(value) {
 }
 
 /** Pure: the first delivered PR whose changed files intersect the boundary,
- *  with the intersecting paths, or null. A boundary entry ending in `/` is a
- *  directory prefix; any other entry matches one path exactly. */
+ *  with the intersecting paths, or null. The boundary is a lane: an entry
+ *  ending in `/` is a directory prefix; any other entry matches one path exactly. */
 export function overlapWith(boundary, deliveredPrs) {
-  const entries = (Array.isArray(boundary) ? boundary : []).filter((entry) => typeof entry === 'string' && entry.length > 0);
-  const inside = (path) => entries.some((entry) => (entry.endsWith('/') ? path.startsWith(entry) : path === entry));
+  const lane = (Array.isArray(boundary) ? boundary : []).filter((entry) => typeof entry === 'string' && entry.length > 0);
   for (const delivered of Array.isArray(deliveredPrs) ? deliveredPrs : []) {
-    const paths = (delivered?.files ?? []).filter(inside);
+    const paths = (delivered?.files ?? []).filter((path) => inLane(path, lane));
     if (paths.length > 0) return { pr: delivered.pr, paths };
   }
   return null;

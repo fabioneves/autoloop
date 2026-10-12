@@ -979,8 +979,7 @@ function selfTest() {
     // recorded widening, for the dirty-tree and exact-head checks alike.
     [
       'a widened path is in the unit lane for the dirty-tree and exact-head checks',
-      typeof widenLane === 'function'
-        && laneCovers(['src/a.mjs', 'lib/b.mjs'], widenLane(['src/'], ['lib/b.mjs']).lane)
+      laneCovers(['src/a.mjs', 'lib/b.mjs'], widenLane(['src/'], ['lib/b.mjs']).lane)
         && !laneCovers(['lib/c.mjs'], ['src/'])
         && inLane('src/x/y.mjs', ['src/'])
         && !inLane('srcx/y.mjs', ['src/'])
@@ -989,7 +988,6 @@ function selfTest() {
     [
       'a widening into a protected path is a human:authorize hit, not a refusal',
       (() => {
-        if (typeof widenLane !== 'function') return false;
         const workflow = widenLane(['src/'], ['.github/workflows/ci.yml']);
         const project = widenLane(['src/'], ['spec/a.md'], ['spec/**']);
         return workflow.ok === true
@@ -1002,15 +1000,13 @@ function selfTest() {
     ],
     [
       'a widening into a secret path is refused WIDEN_SECRET_PATH',
-      typeof widenLane === 'function'
-        && ['.env.local', 'keys/x.pem', 'config/credentials.json', 'certs/private-key.pem']
-          .every((path) => widenLane(['src/'], [path]).code === 'WIDEN_SECRET_PATH')
+      ['.env.local', 'keys/x.pem', 'config/credentials.json', 'certs/private-key.pem']
+        .every((path) => widenLane(['src/'], [path]).code === 'WIDEN_SECRET_PATH')
         && widenLane(['src/'], ['src/ok.mjs', '.env']).code === 'WIDEN_SECRET_PATH',
     ],
     [
       'a widening into a path outside the repository is refused WIDEN_PATH_INVALID',
-      typeof widenLane === 'function'
-        && ['../x.mjs', '/etc/passwd', 'a/../b', ''].every((path) => widenLane(['src/'], [path]).code === 'WIDEN_PATH_INVALID'),
+      ['../x.mjs', '/etc/passwd', 'a/../b', ''].every((path) => widenLane(['src/'], [path]).code === 'WIDEN_PATH_INVALID'),
     ],
   ];
   for (const fixture of PATH_POLICY_FIXTURES) {
