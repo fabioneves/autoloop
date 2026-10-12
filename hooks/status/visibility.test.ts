@@ -66,6 +66,7 @@ function band($: Engine, hasSurvey = false) {
 }
 
 function texts(tree: RenderElement): string {
+  if (tree.type === 'Button') return `[${tree.props.label}]`
   const children = 'children' in tree ? tree.children ?? [] : []
   return children.map((child) => (typeof child === 'string' ? child : texts(child))).join('')
 }
@@ -86,13 +87,13 @@ test('an owned run with ui.status false: the band passes', async ($, on) => {
   expect(h.passed()).toBe(1)
 })
 
-test('an owned, enabled run draws the placeholder line with the phase and issue', async ($, on) => {
+test('an owned, enabled run draws the band with the phase and issue', async ($, on) => {
   const h = host(on, () => ({ stdout: OWNED }))
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
   expect(h.passed()).toBe(0)
-  expect(texts(drawn)).toBe('◆ autoloop · review #412')
+  expect(texts(drawn)).toMatch(/^◆ autoloop · checked 0s ago · \[expand\]● review #412/u)
 })
 
 test('a wrong schema is not drawable: the read is refused and the band passes', async ($, on) => {
@@ -157,7 +158,7 @@ test('a rejected run keeps the last projection and marks it stale', async ($, on
   await h.clock.advance(30_000)
   expect(isStale(held?.lastOkAtMs ?? null, h.clock.now())).toBe(true)
   // The band still draws the kept projection.
-  expect(texts(await band($))).toBe('◆ autoloop · review #412')
+  expect(texts(await band($))).toMatch(/^◆ autoloop · checked 33s ago · \[expand\]● review #412/u)
 })
 
 test('/autoloop answers that this session owns no run before the pane exists', async ($, on) => {
