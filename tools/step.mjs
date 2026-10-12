@@ -1459,10 +1459,7 @@ function transitionChecks(at) {
       go({ issue: 407, to: '02-plan' });
       const path = join(root, '.git', 'autoloop', 'steps', '407.json');
       const dead = spawnSync(process.execPath, ['-e', '0'], { timeout: 10000 }).pid;
-      const plant = (owner) => {
-        mkdirSync(`${path}.lock`);
-        writeFileSync(join(`${path}.lock`, 'owner'), JSON.stringify(owner));
-      };
+      const plant = (owner) => writeFileSync(`${path}.lock`, JSON.stringify(owner), { flag: 'wx' });
       plant({ pid: dead, start: null });
       const moved = go({ issue: 407, to: '03-plan-review' });
       plant({ pid: process.pid, start: 'an-earlier-process' });

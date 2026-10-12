@@ -38,7 +38,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
-import { closeLatch, hostSessionId, latchDirectory, processStart, recordHostSession, recordLatch, sessionOwnerPid } from './run-markers.mjs';
+import { closeLatch, latchDirectory, processStart, recordHostSession, recordLatch, sessionOwnerPid, takeHostSession } from './run-markers.mjs';
 import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownedRun, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
@@ -159,6 +159,9 @@ export function primeDev({
   cwd = process.cwd(), scanArgs = [], lift = liftWaits, triage = triageBlocks, elsewhere = liveRunsElsewhere,
   latches = latchDirectory(), owner = sessionOwnerPid(),
 } = {}) {
+  // Taken first, so every prime run uses up the guard's hand-off, even one
+  // that stops below; the next prime command gets a new one.
+  const sessionId = takeHostSession({ owner, directory: latches });
   if (!validateScanArgs(scanArgs)) {
     return failure(
       'input',
@@ -202,10 +205,10 @@ export function primeDev({
   if (processStart(owner) === null) {
     return failure('run', 'RUN_SESSION_UNKNOWN', `the start time of this session's Claude process (pid ${owner}) cannot be read; the run is not opened`);
   }
-  const sessionId = hostSessionId({ owner, directory: latches });
   if (sessionId === null) {
-    return failure('run', 'RUN_SESSION_UNKNOWN', 'the host session id is unknown: the command guard records it from the prime '
-      + 'command\'s hook input, so run prime through Bash in a Claude Code session with the plugin enabled; the run is not opened');
+    return failure('run', 'RUN_SESSION_UNKNOWN', 'the host session id is unknown: the command guard hands it over, once, from '
+      + 'the prime command\'s hook input, so run `node <plugin-tools>/prime.mjs --json` on its own through Bash in a Claude '
+      + 'Code session with the plugin enabled; the run is not opened');
   }
 
   const base = baseSyncFacts(root, config.baseBranch);
@@ -932,6 +935,8 @@ function selfTest() {
   const scratch = mkdtempSync(join(tmpdir(), 'autoloop-prime-'));
   try {
     const root = buildFixtureRepository(scratch, fixtureConfig());
+    // Never the operator's latch directory: prime takes the guard's hand-off from it.
+    const scratchLatches = join(scratch, 'scratch-latches');
     const base = baseSyncFacts(root, 'main');
     check(
       'base facts report the live branch and a missing remote base honestly',
@@ -946,6 +951,7 @@ function selfTest() {
     const invalid = primeDev({
       cwd: root,
       scanArgs: ['x'.repeat(300)],
+      latches: scratchLatches,
     });
     check(
       'an invalid scan argument fails closed before any child runs',
@@ -954,7 +960,7 @@ function selfTest() {
       && invalid.error.code === 'INVALID_SCAN_ARGS',
     );
 
-    const outsideRepository = primeDev({ cwd: scratch });
+    const outsideRepository = primeDev({ cwd: scratch, latches: scratchLatches });
     check(
       'a directory outside a checkout is a typed checkout failure',
       outsideRepository.ok === false
@@ -963,7 +969,7 @@ function selfTest() {
     );
 
     writeFileSync(join(root, '.autoloop', 'config.json'), '{"version":"0.0.0"}\n');
-    const badConfig = primeDev({ cwd: root });
+    const badConfig = primeDev({ cwd: root, latches: scratchLatches });
     check(
       'an invalid ProjectConfig is a typed config failure that names every error',
       badConfig.ok === false
@@ -977,7 +983,7 @@ function selfTest() {
     // opens; one that lets a reviewer judge its writer's model starts nothing.
     writeFileSync(join(root, '.autoloop', 'config.json'),
       `${JSON.stringify({ ...fixtureConfig(), models: { 'code-review': { model: 'claude-opus-5-5[1m]' } } })}\n`);
-    const clashing = primeDev({ cwd: root });
+    const clashing = primeDev({ cwd: root, latches: scratchLatches });
     const resolvedModels = primeModels(fixtureConfig(), root);
     const pinnedModels = readPinnedModels(pinnedModelsPath(root));
     check(
@@ -1001,7 +1007,7 @@ function selfTest() {
     writeFileSync(join(root, '.autoloop', 'config.json'), `${JSON.stringify(fixtureConfig())}\n`);
     const markerDirectory = runMarkerDirectory(root);
     rmSync(markerDirectory, { recursive: true, force: true });
-    const refusedElsewhere = primeDev({ cwd: root, elsewhere: () => [{ pid: 4242, openedAtMs: Date.UTC(2026, 8, 30, 13, 4), parked: false }] });
+    const refusedElsewhere = primeDev({ cwd: root, latches: scratchLatches, elsewhere: () => [{ pid: 4242, openedAtMs: Date.UTC(2026, 8, 30, 13, 4), parked: false }] });
     check(
       'a run another live session holds open on this checkout refuses before anything is written',
       refusedElsewhere.ok === false && refusedElsewhere.step === 'run'
@@ -1039,6 +1045,9 @@ function selfTest() {
         recordHostSession({ sessionId: 'S-host', directory: latches });
         const opened = primeWith('S-host');
         const bound = latchOf()?.sessionId;
+        // Re-audit N1: the hand-off is single-use. A prime the guard did not
+        // recognise (env -u …, sh -c …, node --stack-size …, a script) gets
+        // no fresh hand-off and opens nothing.
         const attempts = [primeWith(undefined), primeWith(''), primeWith('S-foreign')].map((result) => result.error?.code);
         recordHostSession({ sessionId: 'S-after-clear', directory: latches });
         rmSync(markerDirectory, { recursive: true, force: true });
@@ -1052,9 +1061,26 @@ function selfTest() {
           unknown.ok === false && unknown.error.code === 'RUN_SESSION_UNKNOWN' && !unknownWrote
           && noStart.ok === false && noStart.error.code === 'RUN_SESSION_UNKNOWN'
           && opened.error?.code === 'SCAN_FAILED' && bound === 'S-host'
-          && JSON.stringify(attempts) === '["SCAN_FAILED","SCAN_FAILED","SCAN_FAILED"]' && latchOf()?.sessionId === 'S-host'
+          && JSON.stringify(attempts) === '["RUN_SESSION_UNKNOWN","RUN_SESSION_UNKNOWN","RUN_SESSION_UNKNOWN"]'
+          && latchOf()?.sessionId === 'S-host'
           && rebinding.ok === false && rebinding.error.code === 'RUN_LATCH_UNCONFIRMED' && !existsSync(markerDirectory)
           && latchOf()?.sessionId === 'S-host' && guard.status === 2,
+        );
+        // After --close-run and /clear (session S2): an unrecognised prime
+        // finds no hand-off, nor a stale one, and reopens nothing; a prime the
+        // guard saw in S2 opens S2's run.
+        closeLatch({ directory: latches });
+        const unrecognised = primeWith('S2');
+        recordHostSession({ sessionId: 'S-host', directory: latches, nowMs: Date.now() - 60_000 });
+        const stale = primeWith('S2');
+        const afterStale = latchOf();
+        recordHostSession({ sessionId: 'S2', directory: latches });
+        const recognised = primeWith('S2');
+        check(
+          'after /clear an unrecognised or stale prime opens and reopens nothing; a prime the guard saw opens the new session\'s run',
+          unrecognised.error?.code === 'RUN_SESSION_UNKNOWN' && stale.error?.code === 'RUN_SESSION_UNKNOWN'
+          && afterStale?.sessionId === 'S-host' && typeof afterStale?.closedAt === 'string'
+          && recognised.error?.code === 'SCAN_FAILED' && latchOf()?.sessionId === 'S2' && latchOf()?.closedAt === undefined,
         );
       } finally {
         if (envBefore === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
@@ -1095,7 +1121,7 @@ function selfTest() {
     rmSync(markerDirectory, { recursive: true, force: true });
 
     rmSync(join(root, '.autoloop'), { recursive: true, force: true });
-    const missingConfig = primeDev({ cwd: root });
+    const missingConfig = primeDev({ cwd: root, latches: scratchLatches });
     check(
       'a repository without .autoloop/config.json is a typed config failure',
       missingConfig.ok === false

@@ -1835,7 +1835,9 @@ export const INCIDENTS = Object.freeze([
     cause: 'Collection stamped the latest step before it read the result. Each dispatch now carries '
       + 'a step and attempt receipt; only an exact current match marks a return, and a retry or '
       + 'fallback counts no new review round. The record lock names its holder, so a lock a killed '
-      + 'writer left is reclaimed instead of wedging every later step write (review R1).',
+      + 'writer left is reclaimed instead of wedging every later step write (review R1); a writer '
+      + 'commits and releases only while the lock still carries its nonce, and a moved lock is never '
+      + 'put back (re-audit N2).',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'step.mjs', anchor: 'a late review cannot mark a later gate returned' }),
       Object.freeze({ file: 'step.mjs', anchor: 'same-role attempts reject old results, and duplicates keep the first return time' }),
@@ -1848,6 +1850,7 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'a lock whose holder is dead, or whose pid now names another process, is reclaimed' }),
       Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'a lock left by a SIGKILLed writer no longer wedges the next one' }),
       Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'two writers reclaiming one stale lock both land, one at a time' }),
+      Object.freeze({ file: 'dispatch-return-association.mjs', anchor: 'a writer whose live lock was moved aside writes nothing over the next writer and removes no other lock' }),
       Object.freeze({ file: 'step.mjs', anchor: 'a lock left by a dead writer, or a reused pid, wedges no transition, dispatch note or close' }),
       Object.freeze({ file: 'step.mjs', anchor: 'a corrupt step record is reported by transition and never replaced' }),
       Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'only its own step returned' }),
@@ -1965,12 +1968,16 @@ export const INCIDENTS = Object.freeze([
       + 'environment, which a command can change. A closed latch now keeps both guards for its own '
       + 'session until /clear or exit; prime reads the session id the command guard took from the '
       + 'prime command\'s hook input, refuses without it, never rebinds an open latch, and confirms '
-      + 'the latch before writing a marker. A payload naming no session, a crashed guard and a guard '
+      + 'the latch before writing a marker. The hand-off is single-use and expires in seconds, so a '
+      + 'prime the guard did not recognise (after /clear) opens nothing (re-audit N1). A payload '
+      + 'naming no session, a crashed guard and a guard '
       + 'that cannot start all refuse beside a latch; latches are read from an fd that cannot block.',
     enforcedBy: Object.freeze([
       Object.freeze({ file: 'run-markers.mjs', anchor: 'a closed latch keeps the guards for its own session only, until /clear' }),
       Object.freeze({ file: 'run-markers.mjs', anchor: 'an open latch is never rebound to another, an empty or a missing session id' }),
-      Object.freeze({ file: 'run-markers.mjs', anchor: 'the guard hands prime the host session id in a private file of this process; nothing else is trusted' }),
+      Object.freeze({ file: 'run-markers.mjs', anchor: 'the guard hands prime the host session id once, fresh, in a private file of this process; nothing else is trusted' }),
+      Object.freeze({ file: 'prime.mjs', anchor: 'after /clear an unrecognised or stale prime opens and reopens nothing' }),
+      Object.freeze({ file: 'command-guard.mjs', anchor: 'a prime command prunes the latches of exited sessions; no other command does' }),
       Object.freeze({ file: 'run-markers.mjs', anchor: 'a latch swapped for a FIFO mid-read never hangs the reader' }),
       Object.freeze({ file: 'command-guard.mjs', anchor: 'a closed run keeps the guard for its own session until /clear, and a payload naming no session is refused beside a latch' }),
       Object.freeze({ file: 'command-guard.mjs', anchor: 'the guard hands prime the hook input' }),

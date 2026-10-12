@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync,
+  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { processAlive, processStart } from './run-markers.mjs';
 import { tmpdir } from 'node:os';
@@ -44,17 +44,20 @@ export function readStepBinding(path, issue) {
 }
 
 // A writer that died holding the lock (a SIGKILLed dispatch) wedged every
-// later step write (review R1). The lock names its holder, pid and start
-// time, and a lock whose holder is dead, or whose pid now names another
-// process, is moved aside and removed: a rename has one winner, and the
-// winner checks it moved that same stale lock. A lock with no holder yet is
-// another writer's first instant, stale only after LOCK_GRACE_MS.
+// later step write (review R1). The lock is a file naming its holder — pid,
+// start time and a nonce — linked into place whole, so no lock is ever seen
+// without its holder. A lock whose holder is dead, or whose pid now names
+// another process, is moved aside and removed. A move that caught a live
+// lock instead (it was reclaimed and retaken since the holder was read) is
+// never put back over a newer one: the writer that lost it finds its nonce
+// gone and writes nothing, and a writer releases only its own lock (re-audit
+// N2). A legacy lock with no holder is stale only after LOCK_GRACE_MS.
 const LOCK_GRACE_MS = 5_000;
 const MAX_RECLAIMS = 3;
 
 function lockHolder(lock) {
   try {
-    return readFileSync(join(lock, 'owner'), 'utf8');
+    return readFileSync(lock, 'utf8');
   } catch {
     return null;
   }
@@ -64,7 +67,7 @@ function staleLock(lock, holder) {
   let owner = null;
   try {
     owner = JSON.parse(holder);
-  } catch { /* no holder yet */ }
+  } catch { /* a legacy lock, or no holder */ }
   if (!Number.isSafeInteger(owner?.pid) || owner.pid < 1) {
     try {
       return Date.now() - statSync(lock).mtimeMs > LOCK_GRACE_MS;
@@ -77,46 +80,49 @@ function staleLock(lock, holder) {
   return typeof owner.start === 'string' && start !== null && start !== owner.start;
 }
 
-function reclaimLock(lock, holder) {
+export function reclaimStaleLock(lock) {
   const aside = `${lock}.${randomUUID()}.stale`;
   try {
     renameSync(lock, aside);
   } catch {
     return;
   }
-  if (lockHolder(aside) === holder) {
-    rmSync(aside, { recursive: true, force: true });
-    return;
-  }
+  rmSync(aside, { recursive: true, force: true });
+}
+
+function takeLock(lock, holder) {
+  const prepared = `${lock}.${randomUUID()}.new`;
+  writeFileSync(prepared, holder, { flag: 'wx' });
   try {
-    renameSync(aside, lock);
-  } catch { /* a live writer took the lock meanwhile */ }
+    linkSync(prepared, lock);
+  } finally {
+    unlinkSync(prepared);
+  }
 }
 
 export function updateStepRecord(path, change, { waitMs = 300 } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const lock = `${path}.lock`;
+  const mine = JSON.stringify({ pid: process.pid, start: processStart(process.pid), nonce: randomUUID() });
   const deadline = Date.now() + waitMs;
   let reclaims = 0;
   for (;;) {
     try {
-      mkdirSync(lock);
+      takeLock(lock, mine);
       break;
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       const holder = lockHolder(lock);
       if (reclaims < MAX_RECLAIMS && staleLock(lock, holder)) {
         reclaims += 1;
-        reclaimLock(lock, holder);
+        reclaimStaleLock(lock);
         continue;
       }
       if (Date.now() >= deadline) throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
     }
   }
-  const owner = join(lock, 'owner');
   try {
-    writeFileSync(owner, JSON.stringify({ pid: process.pid, start: processStart(process.pid), nonce: randomUUID() }));
     let record = null;
     try {
       record = JSON.parse(readFileSync(path, 'utf8'));
@@ -128,6 +134,7 @@ export function updateStepRecord(path, change, { waitMs = 300 } = {}) {
       const staged = `${path}.${process.pid}.${randomUUID()}.tmp`;
       try {
         writeFileSync(staged, `${JSON.stringify(outcome.record, null, 1)}\n`);
+        if (lockHolder(lock) !== mine) throw new Error(`the step record lock was taken over; ${path} is not written`);
         renameSync(staged, path);
       } catch (error) {
         try { unlinkSync(staged); } catch { /* No staged file to remove. */ }
@@ -136,8 +143,7 @@ export function updateStepRecord(path, change, { waitMs = 300 } = {}) {
     }
     return outcome;
   } finally {
-    try { unlinkSync(owner); } catch { /* never written */ }
-    try { rmdirSync(lock); } catch { /* reclaimed or replaced: no longer this writer's */ }
+    if (lockHolder(lock) === mine) unlinkSync(lock);
   }
 }
 
@@ -170,10 +176,7 @@ async function selfTest() {
     checks.push(['a later writer preserves earlier data', current.steps.length === 2
       && current.steps[0].stepId === earlier.steps[0].stepId && current.steps[1].waiting === 'newer']);
     const before = readFileSync(path, 'utf8');
-    const plantLock = (target, owner) => {
-      mkdirSync(`${target}.lock`);
-      if (owner !== undefined) writeFileSync(join(`${target}.lock`, 'owner'), JSON.stringify(owner));
-    };
+    const plantLock = (target, owner) => writeFileSync(`${target}.lock`, JSON.stringify(owner), { flag: 'wx' });
     plantLock(path, { pid: process.pid, start: processStart(process.pid) });
     try {
       let blocked = false;
@@ -182,7 +185,7 @@ async function selfTest() {
       checks.push(['an owned lock blocks a second writer without being reclaimed', blocked
         && readFileSync(path, 'utf8') === before]);
     } finally {
-      rmSync(`${path}.lock`, { recursive: true, force: true });
+      rmSync(`${path}.lock`, { force: true });
     }
     // Review R1/L5: a lock whose holder died wedged every later step write.
     const dead = await worker(['-e', '0']);
@@ -193,7 +196,7 @@ async function selfTest() {
         return updateStepRecord(path, (record) => ({ changed: true, record: { ...record, reclaimed: owner.pid } }), { waitMs: 0 }).changed
           && JSON.parse(readFileSync(path, 'utf8')).reclaimed === owner.pid;
       } catch {
-        rmSync(`${path}.lock`, { recursive: true, force: true });
+        rmSync(`${path}.lock`, { force: true });
         return false;
       }
     });
@@ -224,6 +227,33 @@ async function selfTest() {
     const racers = await Promise.all([worker([...MODULE_EVAL, RACER, self, raced]), worker([...MODULE_EVAL, RACER, self, raced])]);
     checks.push(['two writers reclaiming one stale lock both land, one at a time', racers.every(({ code }) => code === 0)
       && JSON.parse(readFileSync(raced, 'utf8')).counter === 2]);
+    // Re-audit N2: B read a stale holder, C reclaimed it and took the lock,
+    // then B moved C's live lock aside and renamed it back over D's. Here B's
+    // late move lands while C holds the lock, D then writes, and E holds the
+    // lock when C finishes: C must not overwrite D, nor remove E's lock.
+    const fenced = join(root, 'steps', '11.json');
+    updateStepRecord(fenced, () => ({ changed: true, record: { issue: 11, steps: [] } }));
+    const staleHolder = JSON.stringify({ pid: dead.pid, start: null, nonce: 'stale' });
+    plantLock(fenced, JSON.parse(staleHolder));
+    const eHolder = JSON.stringify({ pid: process.pid, start: processStart(process.pid), nonce: 'e' });
+    let cOutcome = 'returned';
+    let dLanded = false;
+    try {
+      updateStepRecord(fenced, (record) => {
+        reclaimStaleLock(`${fenced}.lock`);
+        dLanded = updateStepRecord(fenced, (latest) => ({ changed: true, record: { ...latest, d: true } }), { waitMs: 0 }).changed;
+        writeFileSync(`${fenced}.lock`, eHolder, { flag: 'wx' });
+        return { changed: true, record: { ...record, c: true } };
+      }, { waitMs: 0 });
+    } catch (error) {
+      cOutcome = error.message;
+    }
+    const fencedRecord = JSON.parse(readFileSync(fenced, 'utf8'));
+    let eKept = false;
+    try { eKept = readFileSync(`${fenced}.lock`, 'utf8') === eHolder; } catch { /* removed */ }
+    checks.push(['a writer whose live lock was moved aside writes nothing over the next writer and removes no other lock',
+      dLanded && fencedRecord.d === true && fencedRecord.c === undefined && /lock was taken over/u.test(cOutcome) && eKept]);
+    rmSync(`${fenced}.lock`, { force: true });
     let invalid = false;
     writeFileSync(join(root, 'steps', '8.json'), 'not JSON');
     try { updateStepRecord(join(root, 'steps', '8.json'), () => ({ changed: true, record: {} })); }

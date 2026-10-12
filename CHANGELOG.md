@@ -29,13 +29,15 @@ Notable changes to Autoloop are recorded here. The format follows
   reviewer reads the checkout. The `statusMessage` hook text is removed. Run markers record process
   start times, so a reused PID is not an owner.
 - Prime binds the run to the session id in the prime command's hook input, which the command guard
-  records. It does not use `CLAUDE_CODE_SESSION_ID`. Prime refuses with `RUN_SESSION_UNKNOWN` when
-  the session id or the Claude process start time is unknown. It refuses with
+  hands over. It does not use `CLAUDE_CODE_SESSION_ID`. The hand-off is used once and is valid for
+  10 seconds, so a prime command that the guard does not recognize opens no run. Prime refuses with
+  `RUN_SESSION_UNKNOWN` when the session id or the Claude process start time is unknown. It refuses with
   `RUN_LATCH_UNCONFIRMED`, and writes no marker, when this process holds an open latch for another
   session; an open latch is never rebound. While this process holds a latch, the guards refuse a hook
   payload that is unreadable or names no session. A guard that throws refuses only for the owning
   session. A guard that cannot start refuses while any latch of the shell's parent (`$PPID`) exists.
-  Latch files are read without following links or blocking on a FIFO.
+  Latch files are read without following links or blocking on a FIFO. A prime command also removes
+  the latches of Claude processes that have exited.
   `dev`, `shape`, `setup`, `queue-trace`, `lean-code`, and `codebase-design` run only when
   invoked by name, and `pitcrew` is limited to Autoloop-owned pull requests. Vendored
   pre-plugin installs (`tools/agentic/*`) are not changed by this fix; devendor them.
@@ -59,8 +61,10 @@ Notable changes to Autoloop are recorded here. The format follows
 - A collected dispatch result marks only the step and attempt that launched it. A late, duplicate,
   mismatched, unreadable, or legacy result prints a plain collection line and no longer marks a
   later step, such as the gate, as returned. Retries and fallbacks keep their original step and
-  count as one review round. A step-record lock names its writer; a lock left by a dead writer, or
-  by a PID that now names another process, is reclaimed instead of blocking every later step write.
+  count as one review round. A step-record lock is a file that names its writer; a lock left by a
+  dead writer, or by a PID that now names another process, is reclaimed instead of blocking every
+  later step write. A writer whose lock was taken over writes nothing, and a writer removes only its
+  own lock.
   A corrupt step record is reported, not replaced.
 - A delivered card names the configured merge policy: "awaits human merge" only under `manual`,
   and a neutral caption when the policy is unknown. A delivered unit stays in the parked view and

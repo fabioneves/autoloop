@@ -7,6 +7,7 @@
 // self-test exercises it.
 
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
   readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
@@ -430,14 +431,18 @@ export function ownedRun({ sessionId, includeClosed = false, ...where } = {}) {
 // The host's session id for prime. Bash sees only the environment, which a
 // command can change; the command guard reads `session_id` from the hook
 // input of the prime command and leaves it here, beside the latch, with the
-// owner's start time so a reused pid never inherits it.
+// owner's start time so a reused pid never inherits it. It is single-use and
+// short-lived: a prime the guard did not recognise as one (after /clear, it
+// would open the old session's run) finds nothing to take (re-audit N1).
+export const HOST_SESSION_MAX_AGE_MS = 10_000;
+
 function sessionPath(owner, directory) {
   return join(directory, `${owner}.session`);
 }
 
 // A prime whose input names no session clears an earlier one: prime then
 // refuses rather than open the run for a conversation that did not ask.
-export function recordHostSession({ owner = currentOwner(), sessionId, directory = latchDirectory() } = {}) {
+export function recordHostSession({ owner = currentOwner(), sessionId, directory = latchDirectory(), nowMs = Date.now() } = {}) {
   if (!Number.isSafeInteger(owner) || owner < 1) return null;
   const path = sessionPath(owner, directory);
   const ownerStart = processStart(owner);
@@ -452,7 +457,7 @@ export function recordHostSession({ owner = currentOwner(), sessionId, directory
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try {
-      writeFileSync(fd, `${JSON.stringify({ sessionId, ownerStart })}\n`);
+      writeFileSync(fd, `${JSON.stringify({ sessionId, ownerStart, atMs: nowMs, nonce: randomUUID() })}\n`);
     } finally {
       closeSync(fd);
     }
@@ -467,14 +472,28 @@ export function recordHostSession({ owner = currentOwner(), sessionId, directory
   }
 }
 
-export function hostSessionId({ owner = currentOwner(), directory = latchDirectory() } = {}) {
+// Takes the hand-off: renamed aside first, so one prime alone can read it,
+// then removed whatever it holds. Only a fresh one of this process counts.
+export function takeHostSession({ owner = currentOwner(), directory = latchDirectory(), nowMs = Date.now() } = {}) {
   if (!Number.isSafeInteger(owner) || owner < 1) return null;
+  const taken = `${sessionPath(owner, directory)}.${process.pid}.tmp`;
   try {
-    const { sessionId, ownerStart } = JSON.parse(readRegularFile(sessionPath(owner, directory)));
-    const start = processStart(owner);
-    return typeof sessionId === 'string' && sessionId !== '' && start !== null && ownerStart === start ? sessionId : null;
+    renameSync(sessionPath(owner, directory), taken);
   } catch {
     return null;
+  }
+  try {
+    const { sessionId, ownerStart, atMs } = JSON.parse(readRegularFile(taken));
+    const start = processStart(owner);
+    const age = nowMs - atMs;
+    return typeof sessionId === 'string' && sessionId !== '' && start !== null && ownerStart === start
+      && Number.isFinite(age) && age >= -1000 && age <= HOST_SESSION_MAX_AGE_MS ? sessionId : null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      unlinkSync(taken);
+    } catch { /* already gone */ }
   }
 }
 
@@ -669,16 +688,24 @@ function selfTest() {
     const sessionFile = join(directory, `${owner}.session`);
     const recorded = recordHostSession({ sessionId: 's-host', directory });
     const mode = lstatSync(sessionFile).mode & 0o777;
-    const hostRead = hostSessionId({ directory });
-    writeFileSync(sessionFile, JSON.stringify({ sessionId: 's-host', ownerStart: 'another-process' }));
-    const reused = hostSessionId({ directory });
-    rmSync(sessionFile);
+    const written = JSON.parse(readFileSync(sessionFile, 'utf8'));
+    const hostRead = takeHostSession({ directory });
+    const again = takeHostSession({ directory });
+    writeFileSync(sessionFile, JSON.stringify({ ...written, ownerStart: 'another-process' }));
+    const reused = takeHostSession({ directory });
+    recordHostSession({ sessionId: 's-host', directory, nowMs: Date.now() - 60_000 });
+    const stale = takeHostSession({ directory });
+    const staleGone = !existsSync(sessionFile);
     symlinkSync(latchFile, sessionFile);
-    const linked = hostSessionId({ directory }) === null && recordHostSession({ sessionId: 's-host', directory }) === null;
-    rmSync(sessionFile);
-    check('the guard hands prime the host session id in a private file of this process; nothing else is trusted',
-      recorded === sessionFile && mode === 0o600 && hostRead === 's-host' && reused === null && linked
-        && hostSessionId({ directory }) === null && recordHostSession({ sessionId: '', directory }) === null);
+    const linked = recordHostSession({ sessionId: 's-host', directory }) === null && takeHostSession({ directory }) === null
+      && readFileSync(latchFile, 'utf8').length > 0;
+    rmSync(sessionFile, { force: true });
+    // Re-audit N1: a hand-off read without being consumed let a later,
+    // unrecognised prime (after /clear) open the old session's run.
+    check('the guard hands prime the host session id once, fresh, in a private file of this process; nothing else is trusted',
+      recorded === sessionFile && mode === 0o600 && typeof written.nonce === 'string' && Number.isFinite(written.atMs)
+        && hostRead === 's-host' && again === null && reused === null && stale === null && staleGone && linked
+        && takeHostSession({ directory }) === null && recordHostSession({ sessionId: '', directory }) === null);
     // A latch swapped for a FIFO between the type check and the read once
     // could hang the guard past its timeout (review L4).
     if (process.platform === 'linux') {

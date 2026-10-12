@@ -4365,6 +4365,18 @@ function selfTest() {
           console.error(`FAIL [the guard hands prime the hook input's session id, never the environment's]: ${JSON.stringify({ handed: handed.status, recorded, afterRefusal, unnamed: unnamed.status, left: hostOf() })}`);
           ok = false;
         }
+        // Latches of exited sessions are pruned on a prime command (the one
+        // file work a session that owns no run permits), never on another.
+        const deadPid = spawnSync(process.execPath, ['-e', '0'], { timeout: 10000 }).pid;
+        const deadLatch = join(dirname(hostFile), `${deadPid}.json`);
+        writeFileSync(deadLatch, JSON.stringify({ version: 2, owner: deadPid, ownerStart: null, baseBranch: 'main' }));
+        primeHook({ session_id: 'S-host' }, 'ls');
+        const keptOnOrdinary = existsSync(deadLatch);
+        primeHook({ session_id: 'S-host' });
+        if (!keptOnOrdinary || existsSync(deadLatch)) {
+          console.error(`FAIL [a prime command prunes the latches of exited sessions; no other command does]: ${keptOnOrdinary} ${existsSync(deadLatch)}`);
+          ok = false;
+        }
       }
       // Review L1: a guard that throws decides by ownership, not by the
       // shell fallback alone: refuse for this session's run, allow otherwise.
@@ -4912,7 +4924,8 @@ function oversizedCommand(cmd) {
 // and a command that opens a run does only that (and reads) — a compound
 // could break git or remove the fresh records before the guard has ever seen
 // the run. Git is asked only about a command that runs prime.
-// A prime that passes hands prime the host's session id (spec exception 4).
+// A prime that passes hands prime the host's session id and prunes the
+// latches of exited sessions (spec exception 4: the one file work there).
 function primeCommandProblems(cmd, cwd, projectRoot, deadline, sessionId) {
   const foreign = foreignPrimeProblem(cmd, cwd, projectRoot, undefined, deadline);
   if (foreign !== null) refuse(foreign);
@@ -4925,6 +4938,7 @@ function primeCommandProblems(cmd, cwd, projectRoot, deadline, sessionId) {
     );
   }
   recordHostSession({ sessionId });
+  pruneLatches();
 }
 
 // What a guard that threw exits with: 2 for the session that owns a run (its
