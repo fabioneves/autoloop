@@ -68,36 +68,70 @@ export function observedDisposition(labels) {
   return null;
 }
 
+// The delivered card's caption, from the validated merge.policy. It names what
+// the delivery waits for and grants nothing; an unknown policy reads neutral.
+const MERGE_CAPTIONS = Object.freeze({
+  manual: 'awaits human merge', auto: 'automatic merge pending', ratified: 'ratified merge decision pending',
+});
+
+export function mergeCaption(policy) {
+  return typeof policy === 'string' && Object.hasOwn(MERGE_CAPTIONS, policy)
+    ? MERGE_CAPTIONS[policy] : 'merge disposition pending';
+}
+
 function latestStep(record) {
-  if (record === null || typeof record !== 'object' || record.closed
+  if (record === null || typeof record !== 'object'
     || !Number.isSafeInteger(record.issue) || record.issue < 1 || !Array.isArray(record.steps)) return null;
   const last = record.steps.at(-1);
   return last !== null && typeof last === 'object' && typeof last.step === 'string' ? last : null;
 }
 
-function lastSeen(step) {
-  const times = [step.startedAtMs, step.returnedAtMs, step.waiting?.atMs].filter(Number.isFinite);
+// A delivered card leaves its merge pending, not the unit closed. A legacy
+// record closed as delivered is pending only while a scan taken after its
+// card positively observes the issue's open PR; it is never rewritten.
+function pendingDelivery(record, snapshot, authority) {
+  const { pending, closed } = record;
+  if (!closed) {
+    return pending?.outcome === 'delivered' && Number.isFinite(pending.atMs)
+      && (pending.pr === null || (Number.isSafeInteger(pending.pr) && pending.pr > 0))
+      ? { pr: pending.pr, policy: typeof pending.policy === 'string' ? pending.policy : null,
+        reason: typeof pending.reason === 'string' && pending.reason ? pending.reason : null,
+        atMs: pending.atMs, observedAtMs: null }
+      : null;
+  }
+  if (closed.outcome !== 'delivered' || !Number.isFinite(closed.atMs) || authority.authority === 'none'
+    || authority.scannedAtMs < closed.atMs || snapshot.sections.openPrs.complete !== true) return null;
+  const pr = unitCard(snapshot, record.issue).pullRequest?.number ?? null;
+  return pr === null ? null : { pr, policy: null, reason: null, atMs: closed.atMs, observedAtMs: authority.scannedAtMs };
+}
+
+function lastSeen(step, pending) {
+  const times = [step.startedAtMs, step.returnedAtMs, step.waiting?.atMs, pending?.atMs].filter(Number.isFinite);
   return times.length ? Math.max(...times) : null;
 }
 
-// Every open record stays: only a card (record.closed) ends a unit. Age, a
-// record step, snapshot absence or an unreadable snapshot qualify the local
-// state; none hides it. Local work newer than the scan outranks it.
+// Every open record stays: only a terminal card (record.closed) ends a unit,
+// and a delivered card leaves it merge-pending. Age, a record step, snapshot
+// absence or an unreadable snapshot qualify the local state; none hides it.
+// Local work newer than the scan outranks it.
 export function projectParked({ records, snapshot = null, repository = null, nowMs, sinceMs = null }) {
   const authority = snapshotAuthority({ snapshot, repository, nowMs });
   const latest = new Map();
   for (const record of Array.isArray(records) ? records : []) {
     const step = latestStep(record);
     if (step === null) continue;
-    const seen = lastSeen(step);
+    const pending = pendingDelivery(record, snapshot, authority);
+    if (record.closed && pending === null) continue;
+    const seen = lastSeen(step, pending);
     const kept = latest.get(record.issue);
     if (kept && (kept.lastSeenAtMs ?? -Infinity) >= (seen ?? -Infinity)) continue;
-    latest.set(record.issue, { issue: record.issue, ...step, attempt: stepAttempt(record.steps), lastSeenAtMs: seen });
+    latest.set(record.issue, { issue: record.issue, ...step, attempt: stepAttempt(record.steps), lastSeenAtMs: seen, pending });
   }
   const units = [...latest.values()].sort((left, right) => left.issue - right.issue).map((unit) => {
+    const delivered = unit.pending !== null && !(unit.startedAtMs > unit.pending.atMs);
     const local = unit.lastSeenAtMs === null ? 'undated'
       : sinceMs !== null && unit.lastSeenAtMs < sinceMs ? 'earlier-run'
-        : MARK_STEPS.includes(unit.step) ? 'mark' : 'current';
+        : MARK_STEPS.includes(unit.step) || delivered ? 'mark' : 'current';
     const fresh = authority.authority !== 'none'
       && (unit.lastSeenAtMs === null || authority.scannedAtMs >= unit.lastSeenAtMs);
     const seen = fresh ? observedDisposition(unitCard(snapshot, unit.issue).labels) : null;
@@ -123,10 +157,18 @@ function selfTest() {
     number, title: `Issue ${number}`, body: '', updatedAt: '2026-10-11T08:00:00Z',
     labels: labels.map((name) => ({ name })),
   });
-  const snapshotOf = ({ scannedAtMs, issues, owner = repo, openIssues = null }) => {
+  const pullRequest = (issueNumber, number) => ({
+    number, title: 'loop unit', body: `Closes #${issueNumber}`, isDraft: false, reviewDecision: 'APPROVED',
+    headRefName: `feat/gh-${issueNumber}-loop-unit`, headRefOid: 'b'.repeat(40), baseRefName: 'main',
+    mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-10-12T08:00:00Z',
+    author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [],
+    issue: issueNumber, orphanCandidate: false, ownership: 'loop',
+  });
+  const snapshotOf = ({ scannedAtMs, issues, owner = repo, openIssues = null, openPrs = completeSection([]) }) => {
     const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
     sections.repo = completeSection([owner]);
     sections.tree = completeSection([tree]);
+    sections.openPrs = openPrs;
     sections.openIssues = openIssues ?? completeSection(issues);
     sections.blockedIssues = completeSection(issues.filter((item) => item.labels.includes('loop-blocked')));
     return createSnapshot({ scannedAt: iso(scannedAtMs), sections });
@@ -208,6 +250,31 @@ function selfTest() {
       record(501, { step: '00-reconcile', startedAtMs: at(10, 8, 0) }),
       record(533, { step: '05-implement', startedAtMs: at(12, 9, 0) })],
   });
+  const delivery = (pr, policy, reason, atMs) => ({ outcome: 'delivered', pr, policy, reason, atMs });
+  const delivered = project({
+    records: [
+      deepFreeze({ issue: 612, steps: [{ step: '09-gate', startedAtMs: at(12, 9, 0) },
+        { step: '11-record', startedAtMs: at(12, 9, 50) }], pending: delivery(700, 'auto', 'checks pending', at(12, 9, 45)) }),
+      deepFreeze({ issue: 613, steps: [{ step: '10-publish', startedAtMs: at(12, 9, 0) }],
+        pending: delivery(701, 'manual', null, at(12, 9, 30)) }),
+      deepFreeze({ issue: 614, steps: [{ step: '11-record', startedAtMs: at(12, 9, 0) }],
+        closed: { outcome: 'shipped', atMs: at(12, 9, 40) } }),
+      deepFreeze({ issue: 615, steps: [{ step: '09-gate', startedAtMs: at(12, 9, 0) }],
+        pending: { outcome: 'delivered', pr: 'x', atMs: 'later' } }),
+    ],
+  });
+  const legacyDelivered = deepFreeze({ issue: 640, steps: [{ step: '09-gate', startedAtMs: at(12, 9, 0) }],
+    closed: { outcome: 'delivered', atMs: at(12, 9, 30) } });
+  const legacyMerged = deepFreeze({ issue: 641, steps: [{ step: '09-gate', startedAtMs: at(12, 9, 0) }],
+    closed: { outcome: 'delivered', atMs: at(12, 9, 30) } });
+  const withPr = (options) => snapshotOf({ scannedAtMs: scanMs, issues, openPrs: completeSection([pullRequest(640, 740)]), ...options });
+  const legacyDeliveries = [
+    project({ records: [legacyDelivered, legacyMerged], snapshot: withPr({}) }),
+    project({ records: [legacyDelivered], snapshot: null }),
+    project({ records: [legacyDelivered], snapshot: withPr({ scannedAtMs: at(12, 9, 10) }) }),
+    project({ records: [legacyDelivered], snapshot: withPr({
+      openPrs: incompleteSection('SCAN_FAILED', 'open PRs failed', [pullRequest(640, 740)]) }) }),
+  ];
   const legacy = project({
     records: [
       record(540, { step: '05-implement', model: 'claude-opus-5-5', round: null, fallback: false, staged: false,
@@ -223,7 +290,8 @@ function selfTest() {
 
   const checks = [
     ['the snapshot fixtures are real, verified prime snapshots',
-      verifySnapshot(snapshot) && unitCard(snapshot, 501).labels.includes('human:decide')],
+      verifySnapshot(snapshot) && unitCard(snapshot, 501).labels.includes('human:decide')
+        && verifySnapshot(withPr({})) && unitCard(withPr({}), 640).pullRequest?.number === 740],
     ['a current snapshot from this repository is authority',
       JSON.stringify(safely(() => snapshotAuthority({ snapshot, repository: 'ACME/Widgets', nowMs })))
         === JSON.stringify({ authority: 'current', reason: 'CURRENT', scannedAtMs: scanMs })],
@@ -285,6 +353,24 @@ function selfTest() {
     ['the projection mutates nothing it is given', current?.threw === undefined && newer?.threw === undefined
       && history?.threw === undefined && legacy?.threw === undefined && Object.isFrozen(snapshot)
       && verifySnapshot(snapshot)],
+    ['the delivered caption follows the validated merge policy and is neutral when unknown',
+      JSON.stringify(safely(() => ['manual', 'auto', 'ratified', null, 'sometimes', 'constructor', undefined].map(mergeCaption)))
+        === JSON.stringify(['awaits human merge', 'automatic merge pending', 'ratified merge decision pending',
+          'merge disposition pending', 'merge disposition pending', 'merge disposition pending', 'merge disposition pending'])],
+    ['a pending delivery stays visible through its record step with its PR, policy and reason; a terminal card ends it',
+      JSON.stringify(unit(delivered, 612)?.pending)
+        === JSON.stringify({ pr: 700, policy: 'auto', reason: 'checks pending', atMs: at(12, 9, 45), observedAtMs: null })
+        && unit(delivered, 612)?.step === '11-record' && unit(delivered, 612)?.local === 'mark'
+        && unit(delivered, 613)?.pending?.policy === 'manual' && unit(delivered, 613)?.local === 'mark'
+        && unit(delivered, 613)?.lastSeenAtMs === at(12, 9, 30)
+        && unit(delivered, 614) === null
+        && unit(delivered, 615)?.pending === null && unit(delivered, 615)?.local === 'current'],
+    ['a legacy delivered card is pending only while a later scan positively observes its open PR',
+      JSON.stringify(unit(legacyDeliveries[0], 640)?.pending)
+        === JSON.stringify({ pr: 740, policy: null, reason: null, atMs: at(12, 9, 30), observedAtMs: scanMs })
+        && unit(legacyDeliveries[0], 640)?.step === '09-gate' && unit(legacyDeliveries[0], 641) === null
+        && legacyDeliveries.slice(1).every((projection) => projection?.threw === undefined
+          && unit(projection, 640) === null)],
     ['an attempt counts entries of the current step, not repeats',
       safely(() => stepAttempt([{ step: '02-plan' }, { step: '03-plan-review' }, { step: '02-plan' }, { step: '02-plan' }])) === 2
         && safely(() => stepAttempt([{ step: '07-diff-review' }])) === 1],

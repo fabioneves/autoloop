@@ -33,6 +33,11 @@ Notable changes to Autoloop are recorded here. The format follows
 - A collected dispatch result marks only the step and attempt that launched it. A late, duplicate,
   mismatched, unreadable, or legacy result prints a plain collection line and no longer marks a
   later step, such as the gate, as returned. Retries and fallbacks keep their original step.
+- A delivered card names the configured merge policy: "awaits human merge" only under `manual`,
+  and a neutral caption when the policy is unknown. A delivered unit stays in the parked view and
+  run card as merge pending, with its PR and any `--reason`, until a shipped, human, or blocked card
+  closes it. Status views do not merge or call GitHub. Legacy delivered records are not rewritten;
+  such a record shows as merge pending only while a later scan observes its open PR.
 - `verify.mjs` runs each self-test in its own process group. A timeout kills the whole group, a
   test that leaves processes behind fails, and cleanup is confirmed rather than assumed. The run
   prints its process counts and group IDs.

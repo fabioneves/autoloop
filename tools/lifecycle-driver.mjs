@@ -2892,6 +2892,46 @@ function selfTest() {
           && unmerged === null && blocked === null && calls.length === 0;
       })(),
     ],
+    // LFE, 2026-10-12: a delivered card left an automatic merge pending; the
+    // merged close-out is the verified outcome that ends it, once.
+    [
+      'a merged close-out supersedes a pending delivery once, and a reopened issue gets a human card',
+      (() => {
+        const base = mkdtempSync(join(tmpdir(), 'lifecycle-closeout-'));
+        try {
+          const run = (name, args) => (name === 'git' && args.includes('--git-common-dir')
+            ? { ok: true, stdout: join(base, '.git'), stderr: '' } : { ok: false, stdout: '', stderr: `unexpected ${name}` });
+          const stepsDir = join(base, '.git', 'autoloop', 'steps');
+          mkdirSync(stepsDir, { recursive: true });
+          for (const issue of [370, 371]) {
+            writeFileSync(join(stepsDir, `${issue}.json`), JSON.stringify({ issue,
+              steps: [{ step: '11-record', startedAtMs: 1000 }],
+              pending: { outcome: 'delivered', pr: 577, policy: 'auto', reason: null, atMs: 2000 } }));
+          }
+          const merged = { state: 'complete', code: 'LIFECYCLE_COMPLETE', marker: { pr: 577, mergeOid: 'e'.repeat(40) } };
+          const effects = (issue, state_reason) => ({
+            issueState: () => ({ state: state_reason === 'reopened' ? 'open' : 'closed', state_reason }),
+            prCloses: () => true,
+            closeIssue: () => {},
+            closeSteps: closeStepsFor(base, issue, run),
+          });
+          const first = closeOutMerged(merged, effects(370, 'completed'));
+          const again = closeOutMerged(merged, effects(370, 'completed'));
+          const reopened = closeOutMerged(merged, effects(371, 'reopened'));
+          const shipped = JSON.parse(readFileSync(join(stepsDir, '370.json'), 'utf8'));
+          const human = JSON.parse(readFileSync(join(stepsDir, '371.json'), 'utf8'));
+          return first.card.length === 1 && first.card[0].startsWith('╭─ ✅ #370 SHIPPED')
+            && again.card.length === 0 && again.error === undefined
+            && shipped.closed?.outcome === 'shipped' && shipped.pending === undefined
+            && reopened.card[0].startsWith('╭─ ⚠️ #371 NEEDS A HUMAN') && reopened.card[0].includes('reopened after PR #577 merged')
+            && human.closed?.outcome === 'human' && human.pending === undefined;
+        } catch {
+          return false;
+        } finally {
+          rmSync(base, { recursive: true, force: true });
+        }
+      })(),
+    ],
     // LFE run 2026-09-30 (twice): the terminal request was fed to
     // --reconcile-json; the refusal now names the command that takes it.
     [
@@ -3056,6 +3096,15 @@ function readCliInput() {
   return JSON.parse(readFileSync(0, 'utf8'));
 }
 
+// The unit's step close after a verified merge: SHIPPED, or NEEDS A HUMAN when
+// a human reopened the issue. ifOpen closes an open or merge-pending record
+// once and never re-renders a card already shown.
+export function closeStepsFor(root, issue, run) {
+  return (pr, reopened) => closeUnit(reopened
+    ? { root, run, issue, outcome: 'human', pr, question: `reopened after PR #${pr} merged`, ifOpen: true }
+    : { root, run, issue, outcome: 'shipped', pr, ifOpen: true }).lines;
+}
+
 // The close-out's effects, live. A failure is reported beside the result,
 // never in place of it: the lifecycle outcome stands either way.
 function withCloseOut(result, cwd, issue) {
@@ -3073,9 +3122,7 @@ function withCloseOut(result, cwd, issue) {
         mutate(repository, endpoint, 'PATCH', { state: 'closed', state_reason: 'completed' });
         mutate(repository, `${endpoint}/comments`, 'POST', { body });
       },
-      closeSteps: (pr, reopened) => closeUnit(reopened
-        ? { root, issue, outcome: 'human', pr, question: `reopened after PR #${pr} merged`, ifOpen: true }
-        : { root, issue, outcome: 'shipped', pr, ifOpen: true }).lines,
+      closeSteps: closeStepsFor(root, issue),
     });
     return closeOut === null ? result : { ...result, closeOut };
   } catch (error) {

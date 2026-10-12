@@ -832,10 +832,10 @@ Collecting a result: `node <plugin-tools>/step.mjs --issue <N> --resumed "<what 
 
 ```bash
 node <plugin-tools>/step.mjs --card --issue <N> --outcome <shipped|delivered|blocked|human> \
-  [--title "<safe title>"] [--pr <P>] [--lines <n>] [--question "<one line>"]
+  [--title "<safe title>"] [--pr <P>] [--lines <n>] [--question|--reason "<one line>"]
 ```
 
-`shipped` = merged; `delivered` = ready PR awaiting human merge; `human` carries a `❓` question.
+`shipped` = merged; `delivered` = ready PR, merge pending until a later card; `human` has a `❓` question.
 A delivered or blocked card is followed by its PushNotification (text per the hook's rider;
 load the deferred tool with `ToolSearch("select:PushNotification")` at run open).
 

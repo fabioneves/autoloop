@@ -1862,6 +1862,28 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'step.mjs', anchor: 'units an earlier run left open stay visible as last seen, never as running' }),
     ]),
   }),
+  Object.freeze({
+    id: 'delivered-card-hid-pending-automatic-merge',
+    date: '2026-10-12',
+    symptom: 'In a repository with automatic merge, a delivered unit left the parked view at its card '
+      + 'while its merge was still pending, and the card said a human must merge it.',
+    cause: 'The delivered caption was fixed text, and every card closed the step record. The caption now '
+      + 'follows the validated merge.policy; a delivered card records the pending merge apart from closure '
+      + 'until a shipped, human or blocked card supersedes it.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'the delivered caption follows the validated merge policy and is neutral when unknown' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'a pending delivery stays visible through its record step with its PR, policy and reason; a terminal card ends it' }),
+      Object.freeze({ file: 'parked-disposition.mjs', anchor: 'a legacy delivered card is pending only while a later scan positively observes its open PR' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a delivered card names the merge policy, human merge only under manual, neutral when unknown' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a delivered automatic merge stays pending through 11-record, a repeated card and the run card' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'rendering a pending merge makes no GitHub call, never merges and changes no record' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a human gate outranks a pending merge on the parked line' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a later verified shipped close-out supersedes the pending delivery exactly once' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a human or blocked card supersedes a pending delivery, and a delivered card cannot reopen a finished unit' }),
+      Object.freeze({ file: 'step.mjs', anchor: 'a legacy delivered record stays readable and unchanged, pending only while its open PR is observed' }),
+      Object.freeze({ file: 'lifecycle-driver.mjs', anchor: 'a merged close-out supersedes a pending delivery once, and a reopened issue gets a human card' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

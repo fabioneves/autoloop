@@ -27,7 +27,8 @@ import {
 } from './snapshot-contract.mjs';
 import { realRun } from './unit.mjs';
 import { parseGitHubRemote } from './checkout-contract.mjs';
-import { projectParked, stepAttempt } from './parked-disposition.mjs';
+import { mergeCaption, projectParked, stepAttempt } from './parked-disposition.mjs';
+import { resolveProjectConfig } from './config-contract.mjs';
 import { newAssociationId, readStepBinding, updateStepRecord, validReceipt } from './dispatch-return-association.mjs';
 
 const LADDER = Object.freeze([
@@ -233,19 +234,43 @@ export function markReturned({ root, run = realRun(root), nowMs = Date.now(), is
   });
 }
 
-export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '', ifOpen = false }) {
+// The repository's validated merge.policy, or null when it cannot be read.
+function mergePolicy(root) {
+  try {
+    const resolved = resolveProjectConfig(root);
+    return resolved?.ok ? resolved.config.merge.policy : null;
+  } catch {
+    return null;
+  }
+}
+
+// A delivered card records the pending merge and keeps the unit open; only a
+// shipped, human or blocked card closes it (the lifecycle driver's verified
+// merged close-out among them, with ifOpen, once).
+export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, lines = null, question = '', reason = '', ifOpen = false }) {
   const { dir } = autoloopDir(root, run);
   if (dir === null) return { ok: false, lines: ifOpen ? [] : [`step: no steps recorded for #${issue} (not in a git repository)`] };
   const path = join(dir, 'steps', `${issue}.json`);
+  const policy = outcome === 'delivered' ? mergePolicy(root) : null;
   try {
     return updateStepRecord(path, (stored) => {
       if (ifOpen && (!stored?.steps?.length || stored.closed)) return { ok: false, changed: false, lines: [] };
       if (!stored?.steps?.length && outcome !== 'blocked') {
         return { ok: false, changed: false, lines: [`step: no steps recorded for #${issue}`] };
       }
+      if (outcome === 'delivered' && stored.closed && stored.closed.outcome !== 'delivered') {
+        return { ok: false, changed: false, lines: [`step: #${issue} is closed as ${stored.closed.outcome}; a delivered card cannot reopen it`] };
+      }
       const record = stored ?? { issue, steps: [] };
-      const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, lines, question });
-      record.closed = { outcome, atMs: nowMs };
+      const card = renderCard({ issue, title, outcome, steps: record.steps ?? [], nowMs, pr, lines, question, policy, reason });
+      if (outcome === 'delivered') {
+        const since = record.pending?.pr === pr && Number.isFinite(record.pending.atMs) ? record.pending.atMs : nowMs;
+        delete record.closed;
+        record.pending = { outcome, pr, policy, reason: reason || null, atMs: since };
+      } else {
+        delete record.pending;
+        record.closed = { outcome, atMs: nowMs };
+      }
       return { ok: true, changed: true, record, lines: [card] };
     });
   } catch (error) {
@@ -333,7 +358,7 @@ export function transition({
 
 const OUTCOMES = Object.freeze({
   shipped: '✅ #{n} SHIPPED',
-  delivered: '⚠️ #{n} DELIVERED · awaits human merge',
+  delivered: '⚠️ #{n} DELIVERED · {merge}',
   blocked: '❌ #{n} BLOCKED',
   human: '⚠️ #{n} NEEDS A HUMAN',
 });
@@ -365,8 +390,8 @@ function stepTimes(steps, nowMs) {
 }
 
 // The time-only closing card, one per unit.
-export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null, lines = null, question = '' }) {
-  const head = (OUTCOMES[outcome] ?? `${outcome} #{n}`).replace('{n}', String(issue));
+export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null, lines = null, question = '', policy = null, reason = '' }) {
+  const head = (OUTCOMES[outcome] ?? `${outcome} #{n}`).replace('{n}', String(issue)).replace('{merge}', mergeCaption(policy));
   const { times, rounds, round } = stepTimes(steps, nowMs);
   const longest = Math.max(1, ...times.values());
   const rows = [...times.entries()].map(([key, ms]) => {
@@ -384,6 +409,7 @@ export function renderCard({ issue, title = '', outcome, steps, nowMs, pr = null
     `╭─ ${head}${title ? ` · ${oneLine(title, 70)}` : ''}`,
     ...rows,
     ...(question ? [`│  ❓ ${oneLine(question, 140)}`] : []),
+    ...(reason ? [`│  ⌛ ${oneLine(reason, 140)}`] : []),
     `╰─ ${facts.join(' · ')}`,
   ].join('\n');
 }
@@ -398,15 +424,26 @@ export function renderParked({ nowMs, units, eligible, waiting = [], asOfMs = nu
     `🅿️ ${rule} PARKED · ${clock(nowMs)} ${rule}`,
     ...units.map((unit) => {
       const local = parkedLocal(unit, nowMs);
-      return unit.observed
-        ? `├ #${unit.issue} · ${DISPOSITION_GLYPHS[unit.observed.disposition]} ${observation(unit.observed, nowMs)} · local ${local}`
-        : `├ #${unit.issue} · ${local}`;
+      const note = dispositionNote(unit, nowMs);
+      return note ? `├ #${unit.issue} · ${note.join(' ')} · local ${local}` : `├ #${unit.issue} · ${local}`;
     }),
     `└ ${queue}${human} · resumes on results`,
   ].join('\n');
 }
 
 const DISPOSITION_GLYPHS = Object.freeze({ blocked: '❌', waiting: '⌛', repair: '🩹' });
+
+// A human gate first, then a pending merge, then any other observation. A
+// pending merge is the card's fact: never "merged" from checks or elapsed time.
+function dispositionNote({ observed, pending }, nowMs) {
+  if (observed && (observed.disposition === 'blocked' || !pending)) {
+    return [DISPOSITION_GLYPHS[observed.disposition], observation(observed, nowMs)];
+  }
+  if (!pending) return null;
+  const { pr, policy, reason, atMs, observedAtMs } = pending;
+  return ['🔀', `${pr ? `PR #${pr} ` : ''}${mergeCaption(policy)}${reason ? ` (${oneLine(reason, 80)})` : ''}`
+    + ` since ${stamp(atMs, nowMs)}${observedAtMs === null ? '' : ` · PR open per scan ${stamp(observedAtMs, nowMs)}`}`];
+}
 
 // A clock time, with its date when it is not today: a time from yesterday is
 // dated history.
@@ -475,7 +512,8 @@ export function renderRunCard({ nowMs, units, park, snapshot }) {
       const seen = lastSeenNote(unit, nowMs);
       const local = `${step.slice(0, 2)} ${name.toLowerCase()}${round ? ` r${round}` : ''} `
         + `${seen ?? `on ${modelChip(model, step)} since ${clock(startedAtMs)}`}`;
-      return unit.observed ? `- #${issue} ${observation(unit.observed, nowMs)}; local ${local}` : `- #${issue} at ${local}`;
+      const note = dispositionNote(unit, nowMs);
+      return note ? `- #${issue} ${note[1]}; local ${local}` : `- #${issue} at ${local}`;
     }),
     ...(units.length === 0 ? ['- no unit in flight'] : []),
   ];
@@ -802,7 +840,8 @@ function selfTest() {
       // printed view was shown twice, the tool's copy and the repeat.
       && JSON.stringify(parsed(['--parked', '--out', '/t/parked.txt'])) === JSON.stringify({ mode: 'parked', out: '/t/parked.txt', error: null })
       && parsed(['--parked', '--out']).error !== null
-      && parsed(['--card', '--issue', '350', '--outcome', 'finished']).error !== null],
+      && parsed(['--card', '--issue', '350', '--outcome', 'finished']).error !== null
+      && parsed(['--card', '--issue', '350', '--outcome', 'delivered', '--reason', 'checks pending']).reason === 'checks pending'],
     ['a resumed call parses', parsed(['--issue', '78', '--resumed', 'plan returned', '--ms', '401000']).mode === 'resumed'],
     // LFE, 2026-09-29: a 0.55.3 setup ran all five phases and printed only
     // ribbons 1, 2 and 4 by hand. The call prints the skill's exact lines.
@@ -829,6 +868,7 @@ function selfTest() {
   );
   checks.push(...transitionChecks(at));
   checks.push(...dispositionChecks());
+  checks.push(...pendingMergeChecks());
   const minute = 60_000;
   const start = at(9, 9);
   const history = [
@@ -843,7 +883,7 @@ function selfTest() {
   ];
   const card = safely(() => renderCard({
     issue: 350, title: 'Axis B playback state machine', outcome: 'delivered', steps: history,
-    nowMs: start + 77 * minute, pr: 550, lines: 393,
+    nowMs: start + 77 * minute, pr: 550, lines: 393, policy: 'manual',
   }));
   checks.push(
     ['a closing card shows each step\'s time with bars scaled to the longest, rounds folded into review',
@@ -1127,7 +1167,7 @@ function transitionChecks(at) {
         && !scoped[2].includes('#350 at 08 fix r1/5 on')]);
     const closed = (() => {
       try {
-        return closeUnit({ root, run, nowMs: at(10, 30), issue: 350, outcome: 'delivered', pr: 550 });
+        return closeUnit({ root, run, nowMs: at(10, 30), issue: 350, outcome: 'shipped', pr: 550 });
       } catch (error) {
         return { ok: false, lines: [`THREW ${error.message}`] };
       }
@@ -1140,7 +1180,7 @@ function transitionChecks(at) {
       }
     })();
     results.push(['closing a unit prints its card and drops it from the parked view',
-      closed.ok === true && closed.lines[0].startsWith('╭─ ⚠️ #350 DELIVERED') && !afterClose.includes('#350')]);
+      closed.ok === true && closed.lines[0].startsWith('╭─ ✅ #350 SHIPPED') && !afterClose.includes('#350')]);
     // Review of feat/status-first: a unit blocked at 01 and unblocked by a
     // human re-ran 01 as "already on", so loop-started never came back and
     // the unit was invisible to --parked and --card-run.
@@ -1442,9 +1482,16 @@ function dispositionChecks() {
   const issue = (number, labels) => issueSnapshotItem({
     number, title: `Issue ${number}`, body: '', updatedAt: '2026-10-11T08:00:00Z', labels: labels.map((name) => ({ name })),
   });
-  const snapshotOf = (issues, scannedAtMs = scanMs) => {
+  const snapshotOf = (issues, scannedAtMs = scanMs, openPrs = []) => {
     const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
     sections.repo = completeSection([{ owner: 'acme', name: 'widgets', nameWithOwner: 'acme/widgets', defaultBranch: 'main' }]);
+    sections.openPrs = completeSection(openPrs.map(([issueNumber, number]) => ({
+      number, title: 'loop unit', body: `Closes #${issueNumber}`, isDraft: false, reviewDecision: 'APPROVED',
+      headRefName: `feat/gh-${issueNumber}-loop-unit`, headRefOid: 'b'.repeat(40), baseRefName: 'main',
+      mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE', mergedAt: null, updatedAt: '2026-10-12T08:00:00Z',
+      author: 'actor', headRepository: 'acme/widgets', statusCheckState: 'SUCCESS', statusCheckRollup: [],
+      issue: issueNumber, orphanCandidate: false, ownership: 'loop',
+    })));
     sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: 'a'.repeat(40) }]);
     sections.openIssues = completeSection(issues);
     sections.blockedIssues = completeSection(issues.filter((item) => item.labels.includes('loop-blocked')));
@@ -1552,8 +1599,126 @@ function dispositionChecks() {
     results.push(['the projected run card stays within its byte bound and keeps the park',
       Buffer.byteLength(crowded) <= 1500 && crowded.includes('- parked until 22:49: operator message')
         && crowded.includes('- #501 blocked (') && crowded.endsWith('\n…')]);
+    const legacyDelivered = [640, 641].map((number) => ({ issue: number,
+      steps: [{ step: '09-gate', startedAtMs: day(12, 9, 0) }], closed: { outcome: 'delivered', atMs: day(12, 9, 30) } }));
+    write(snapshotOf(issues, scanMs, [[640, 740]]), legacyDelivered);
+    const legacyBefore = files();
+    calls.length = 0;
+    const observedOpen = views();
+    const observedUnchanged = files() === legacyBefore && calls.every((call) => !call.startsWith('gh'));
+    write(snapshotOf(issues), legacyDelivered);
+    const unobserved = views();
+    results.push(['a legacy delivered record stays readable and unchanged, pending only while its open PR is observed',
+      observedOpen.parked.split('\n').includes(
+        '├ #640 · 🔀 PR #740 merge disposition pending since 09:30 · PR open per scan 10:20 · local 09 gate · last seen 09:30')
+        && observedOpen.card.includes('- #640 PR #740 merge disposition pending since 09:30 · PR open per scan 10:20; local 09 gate')
+        && !observedOpen.parked.includes('#641') && observedUnchanged
+        && !unobserved.parked.includes('#640') && !unobserved.parked.startsWith('THREW')]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+  return results;
+}
+
+// LFE, 2026-10-12: an automatically merged repository's delivered unit left
+// the parked view at its card while its merge was still pending, and the card
+// told a human to merge it.
+function pendingMergeChecks() {
+  const day = (hh, mm) => new Date(2026, 9, 12, hh, mm).getTime();
+  const base = mkdtempSync(join(tmpdir(), 'step-pending-'));
+  const stepsDir = join(base, '.git', 'autoloop', 'steps');
+  const calls = [];
+  const run = (command, args) => {
+    calls.push([command, ...args].join(' '));
+    if (command === 'git' && args.includes('--git-common-dir')) return { ok: true, stdout: join(base, '.git'), stderr: '' };
+    if (command === 'gh' && args[0] === 'issue' && args[1] === 'view') return { ok: true, stdout: '["loop-delivered"]', stderr: '' };
+    return { ok: false, stdout: '', stderr: `unexpected ${command}` };
+  };
+  // Each policy's checkout: its own .autoloop/config.json, read by the real resolver.
+  const checkout = (name, policy) => {
+    const dir = join(base, name);
+    mkdirSync(join(dir, '.autoloop'), { recursive: true });
+    if (policy !== null) {
+      writeFileSync(join(dir, '.autoloop', 'config.json'), JSON.stringify({
+        version: '0.28.0', baseBranch: 'main', gate: { command: 'npm test' }, merge: { policy },
+      }));
+    }
+    return dir;
+  };
+  const seed = (issue) => writeFileSync(join(stepsDir, `${issue}.json`),
+    JSON.stringify({ issue, steps: [{ step: '09-gate', startedAtMs: day(9, 0) }] }));
+  const record = (issue) => readJson(join(stepsDir, `${issue}.json`), null);
+  const head = (result) => result?.lines?.[0]?.split('\n')[0] ?? '';
+  const markers = () => [];
+  const results = [];
+  try {
+    mkdirSync(stepsDir, { recursive: true });
+    const checkouts = { manual: checkout('manual', 'manual'), auto: checkout('auto', 'auto'),
+      ratified: checkout('ratified', 'ratified'), missing: checkout('missing', null), invalid: checkout('invalid', 'sometimes') };
+    const captions = Object.entries(checkouts).map(([name, root], index) => {
+      seed(650 + index);
+      return head(closeUnit({ root, run, nowMs: day(9, 30), issue: 650 + index, outcome: 'delivered', pr: 750 + index }));
+    });
+    results.push(['a delivered card names the merge policy, human merge only under manual, neutral when unknown',
+      JSON.stringify(captions) === JSON.stringify([
+        '╭─ ⚠️ #650 DELIVERED · awaits human merge', '╭─ ⚠️ #651 DELIVERED · automatic merge pending',
+        '╭─ ⚠️ #652 DELIVERED · ratified merge decision pending', '╭─ ⚠️ #653 DELIVERED · merge disposition pending',
+        '╭─ ⚠️ #654 DELIVERED · merge disposition pending'])]);
+    seed(660);
+    const card = closeUnit({ root: checkouts.auto, run, nowMs: day(9, 30), issue: 660, outcome: 'delivered', pr: 760,
+      reason: 'required checks pending' });
+    transition({ root: checkouts.auto, run, nowMs: day(9, 31), issue: 660, to: '11-record', markers });
+    const repeated = closeUnit({ root: checkouts.auto, run, nowMs: day(9, 32), issue: 660, outcome: 'delivered', pr: 760,
+      reason: 'required checks pending' });
+    const stored = record(660);
+    const before = readFileSync(join(stepsDir, '660.json'), 'utf8');
+    calls.length = 0;
+    const parked = parkedView({ root: base, run, nowMs: day(10, 0), markers });
+    const runState = runCard({ root: base, run, nowMs: day(10, 0), live: () => true, markers });
+    const line = '├ #660 · 🔀 PR #760 automatic merge pending (required checks pending) since 09:30 · local 11 record · last seen 09:31';
+    results.push(['a delivered automatic merge stays pending through 11-record, a repeated card and the run card',
+      card.ok === true && card.lines[0].includes('│  ⌛ required checks pending') && head(repeated) === head(card)
+        && stored?.closed === undefined
+        && JSON.stringify(stored?.pending) === JSON.stringify({ outcome: 'delivered', pr: 760, policy: 'auto',
+          reason: 'required checks pending', atMs: day(9, 30) })
+        && parked.split('\n').includes(line) && parked.split('#660 ').length === 2
+        && runState.includes('- #660 PR #760 automatic merge pending (required checks pending) since 09:30; local 11 record last seen 09:31')
+        && runState.split('#660 ').length === 2 && !parked.includes('#650 · 🔀 PR #750 automatic')
+        && parked.includes('├ #650 · 🔀 PR #750 awaits human merge since 09:30')]);
+    results.push(['rendering a pending merge makes no GitHub call, never merges and changes no record',
+      calls.every((call) => !call.startsWith('gh')) && readFileSync(join(stepsDir, '660.json'), 'utf8') === before
+        && !/merged|SHIPPED/u.test(parked) && !/merged|SHIPPED/u.test(runState)]);
+    const gated = renderParked({ nowMs: day(10, 0), eligible: 0, units: [{ issue: 670, step: '11-record', local: 'mark',
+      lastSeenAtMs: day(9, 31), startedAtMs: day(9, 31),
+      observed: { disposition: 'blocked', labels: ['human:decide'], atMs: day(9, 50), current: true },
+      pending: { pr: 770, policy: 'auto', reason: null, atMs: day(9, 30), observedAtMs: null } }] }).split('\n')[1];
+    results.push(['a human gate outranks a pending merge on the parked line',
+      gated === '├ #670 · ❌ blocked (human:decide) per scan 09:50 · local 11 record · last seen 09:31']);
+    const shipped = closeUnit({ root: checkouts.auto, run, nowMs: day(10, 5), issue: 660, outcome: 'shipped', pr: 760, ifOpen: true });
+    const shippedAgain = closeUnit({ root: checkouts.auto, run, nowMs: day(10, 6), issue: 660, outcome: 'shipped', pr: 760, ifOpen: true });
+    results.push(['a later verified shipped close-out supersedes the pending delivery exactly once',
+      shipped.ok === true && head(shipped) === '╭─ ✅ #660 SHIPPED' && shippedAgain.ok === false && shippedAgain.lines.length === 0
+        && record(660)?.closed?.outcome === 'shipped' && record(660)?.pending === undefined
+        && !parkedView({ root: base, run, nowMs: day(10, 7), markers }).includes('#660')]);
+    for (const issue of [661, 662]) {
+      seed(issue);
+      closeUnit({ root: checkouts.auto, run, nowMs: day(9, 40), issue, outcome: 'delivered', pr: issue + 100 });
+    }
+    const human = closeUnit({ root: checkouts.auto, run, nowMs: day(10, 10), issue: 661, outcome: 'human', question: 'reopened' });
+    const blocked = closeUnit({ root: checkouts.auto, run, nowMs: day(10, 10), issue: 662, outcome: 'blocked' });
+    const shippedRecord = readFileSync(join(stepsDir, '660.json'), 'utf8');
+    const reopen = closeUnit({ root: checkouts.auto, run, nowMs: day(10, 11), issue: 660, outcome: 'delivered', pr: 760 });
+    const after = parkedView({ root: base, run, nowMs: day(10, 12), markers });
+    results.push(['a human or blocked card supersedes a pending delivery, and a delivered card cannot reopen a finished unit',
+      human.ok === true && blocked.ok === true
+        && record(661)?.closed?.outcome === 'human' && record(661)?.pending === undefined
+        && record(662)?.closed?.outcome === 'blocked' && record(662)?.pending === undefined
+        && !after.includes('#661') && !after.includes('#662') && !after.includes('#660')
+        && reopen.ok === false && readFileSync(join(stepsDir, '660.json'), 'utf8') === shippedRecord]);
+  } catch (error) {
+    results.push([`pending merge checks ran (${error.message})`, false]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
   return results;
 }
@@ -1602,7 +1767,7 @@ export function parseArgs(argv) {
   };
   const valued = { '--issue': 'issue', '--to': 'to', '--round': 'round', '--model': 'model', '--badge': 'badge',
     '--note': 'note', '--resumed': 'what', '--ms': 'ms', '--outcome': 'outcome', '--title': 'title',
-    '--pr': 'pr', '--lines': 'lines', '--question': 'question', '--result': 'result' };
+    '--pr': 'pr', '--lines': 'lines', '--question': 'question', '--reason': 'reason', '--result': 'result' };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === '--fallback') { out.fallback = true; continue; }
