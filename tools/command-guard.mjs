@@ -58,7 +58,6 @@ import { fileURLToPath } from 'node:url';
 import {
   CONFIG_VERSION,
   repositoryRoot,
-  resolveProjectConfig,
 } from './config-contract.mjs';
 import { LOOP_BRANCH_RE } from './claim-contract.mjs';
 import { hookRoot } from './hook-root.mjs';
@@ -2990,15 +2989,6 @@ export function opensRun(command, cwd, prime = PLUGIN_PRIME) {
   return false;
 }
 
-// The config comes from the one resolver: .autoloop/config.json over plugin
-// defaults. A repository without one has no base to guard here.
-export function loadConfiguredBase(root) {
-  const resolved = resolveProjectConfig(root);
-  if (resolved === null) throw new Error('no autoloop configuration in this repository');
-  if (!resolved.ok) throw new Error(`invalid ProjectConfig (${resolved.source}): ${resolved.errors.join('; ')}`);
-  return resolved.config.baseBranch;
-}
-
 // The plugin hook passes nothing (the root is CLAUDE_PROJECT_DIR); `--root`
 // names one explicitly (tests, smoke). A STATE path is never accepted: its
 // repository would have to be guessed from where the file sits.
@@ -3625,31 +3615,6 @@ function selfTest() {
       console.error(`FAIL [expect block=${expect}, got ${got}]: ${cmd.split('\n')[0]}`);
       ok = false;
     }
-  }
-  // Global install: the base branch comes from .autoloop/config.json
-  // (over plugin defaults), else nothing.
-  const baseCases = (() => {
-    const root = mkdtempSync(join(tmpdir(), 'guard-base-'));
-    const attempt = () => {
-      try {
-        return loadConfiguredBase(root);
-      } catch (error) {
-        return `THREW ${error.message}`;
-      }
-    };
-    try {
-      const none = attempt();
-      mkdirSync(join(root, '.autoloop'), { recursive: true });
-      writeFileSync(join(root, '.autoloop', 'config.json'),
-        JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'develop', gate: { command: 'true' } }));
-      return [none, attempt()];
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  })();
-  if (!(baseCases[0].startsWith('THREW') && baseCases[1] === 'develop')) {
-    console.error(`FAIL [the guard reads its base branch through the project config resolver]: ${baseCases.join(' | ')}`);
-    ok = false;
   }
   // Every refusal must read as policy: a consistent guard identity prefix and a
   // closing sentence naming the sanctioned alternative, never an error dump.
@@ -4981,7 +4946,7 @@ function main() {
       + 'hook wiring.',
     );
   }
-  primeCommandProblems(cmd, cwd, () => projectRoot, deadline);
+  primeCommandProblems(cmd, cwd, projectRoot, deadline);
 
   // Parts of the check grow faster than linearly in the command's length
   // (3.2 s at this cap, measured); twice the longest command recorded across

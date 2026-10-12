@@ -325,6 +325,7 @@ export function transition({
   let warning = null;
   try {
     if (!staged && LADDER.includes(to)) warning = invalidateRetainedSnapshot(dir);
+    const expected = stored?.steps?.at(-1);
     const saved = updateStepRecord(stepsPath, (latest) => {
       const previous = latest?.steps?.at(-1);
       if (latest !== null && (latest.issue !== issue || !Array.isArray(latest.steps))) {
@@ -332,17 +333,17 @@ export function transition({
       }
       if ((latest?.steps?.length ?? 0) !== (stored?.steps?.length ?? 0)
         || Boolean(latest?.closed) !== Boolean(stored?.closed)
-        || previous?.step !== stored?.steps?.at(-1)?.step
-        || previous?.stepId !== stored?.steps?.at(-1)?.stepId
-        || previous?.startedAtMs !== stored?.steps?.at(-1)?.startedAtMs) {
+        || previous?.step !== expected?.step
+        || previous?.stepId !== expected?.stepId
+        || previous?.startedAtMs !== expected?.startedAtMs) {
         return { ok: false, changed: false };
       }
-      const current = latest === null || latest.closed ? { issue, steps: [] } : latest;
-      current.steps.push({
+      const next = latest === null || latest.closed ? { issue, steps: [] } : latest;
+      next.steps.push({
         step: to, stepId: newAssociationId(), round, model, fallback, staged, startedAtMs: nowMs,
         ...(skipped.length ? { skipped } : {}),
       });
-      return { ok: true, changed: true, record: current };
+      return { ok: true, changed: true, record: next };
     });
     if (!saved.ok) warning = `! step: #${issue} moved to ${to} but newer step state was kept; re-prime before deciding`;
   } catch (error) {

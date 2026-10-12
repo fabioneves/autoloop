@@ -17,9 +17,9 @@ import {
 
 // The sections a unit's labels are read from (unitCard reads queue, then open
 // issues). An issue mutation invalidates both together.
-export const DISPOSITION_SECTIONS = Object.freeze(['openIssues', 'queue']);
+const DISPOSITION_SECTIONS = Object.freeze(['openIssues', 'queue']);
 // Bookkeeping marks, not running work: their age is not a running time.
-export const MARK_STEPS = Object.freeze(['00-reconcile', '11-record']);
+const MARK_STEPS = Object.freeze(['00-reconcile', '11-record']);
 
 // How many times the unit entered its current step: runs of that step in the
 // record, a re-announcement right after itself not counted (#427 went plan,
@@ -38,7 +38,7 @@ export function stepAttempt(steps) {
 // sections; 'history' when only an invalidation stands between it and current
 // (its retained items are dated observations); otherwise 'none'. No age
 // threshold: per-unit freshness is decided against the unit's own record.
-export function snapshotAuthority({ snapshot, repository, nowMs }) {
+function snapshotAuthority({ snapshot, repository, nowMs }) {
   const none = (reason, scannedAtMs = null) => ({ authority: 'none', reason, scannedAtMs });
   if (snapshot === null || snapshot === undefined) return none('ABSENT');
   if (!verifySnapshot(snapshot)) return none('UNVERIFIED');
@@ -59,7 +59,7 @@ export function snapshotAuthority({ snapshot, repository, nowMs }) {
 }
 
 // A human or dependency gate first, then a wait, then repair work.
-export function observedDisposition(labels) {
+function observedDisposition(labels) {
   if (!Array.isArray(labels)) return null;
   const blocking = labels.filter((label) => BLOCKING_LABELS.has(label)).sort();
   if (blocking.length) return { disposition: 'blocked', labels: blocking };

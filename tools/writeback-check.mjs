@@ -249,9 +249,8 @@ export function checkPrs(prs, issues = null) {
       const labels = ((issues ?? []).find((issue) => issue.number === claim.issue)?.labels ?? [])
         .map((label) => label?.name ?? label);
       const blockers = labels.filter((name) => BLOCKING_LABELS.has(name)).sort();
-      if (blockers.length === 0 && labels.includes('loop:revising')) continue;
       const step = unitStep(issues, claim.issue);
-      if (blockers.length === 0 && step !== null && step < 10) continue;
+      if (blockers.length === 0 && (labels.includes('loop:revising') || (step !== null && step < 10))) continue;
       const message = blockers.length > 0
         ? `PR #${pr.number} (${pr.headRefName}) is still draft — issue #${claim.issue} has blocker label(s) ${blockers.join(', ')}; resolve the blocker before publication.`
         : `PR #${pr.number} (${pr.headRefName}) is still draft — `
