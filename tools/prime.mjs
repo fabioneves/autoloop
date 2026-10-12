@@ -47,6 +47,8 @@ import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
   SNAPSHOT_SECTIONS,
+  completeSection,
+  createSnapshot,
   eligibleIssueNumbers,
   haltIssueNumbers,
   markerSchedule,
@@ -54,7 +56,7 @@ import {
 } from './snapshot-contract.mjs';
 import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
-import { currentRunId, emitEvent, readEvents, resolveCommonDir, setRunId } from './events-contract.mjs';
+import { currentRunId, emitEvent, isPaused, readEvents, resolveCommonDir, setPaused, setRunId, takeControls, writeControl } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
 // Bumped by every release together with the other version literals; the
@@ -69,6 +71,7 @@ const SCAN_TIMEOUT_MS = 20 * 60 * 1000;
 const GIT_TIMEOUT_MS = 15_000;
 const TOOL_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const SCAN_TOOL = join(TOOL_DIRECTORY, 'scan.mjs');
+const AUTO_MERGE_TOOL = join(TOOL_DIRECTORY, 'auto-merge.mjs');
 const PROCESS_START_MS = Date.now();
 
 function plainObject(value) {
@@ -238,6 +241,9 @@ export function primeDev({
   }
   const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch, sessionId);
   openRunEvents(root);
+  // The operator's controls (SPEC-events items 7 to 9), applied before the
+  // scan so a merge or a label swap is in the snapshot this run reads.
+  const controls = applyControls(root);
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });
@@ -294,9 +300,72 @@ export function primeDev({
     runMarker,
     waits,
     blocks,
+    controls,
+    paused: controls.paused,
     timings: { scanMs, primeMs: Date.now() - PROCESS_START_MS },
     snapshot,
   };
+}
+
+// The controls prime consumes: pause and unpause keep the paused marker;
+// label removes `human:authorize` from a pull request through gh; merge runs
+// the auto-merge executor, whose gate decides and writes the merge event. A
+// control the loop cannot apply goes to refused/ with the reason. The event
+// file gets one `control` line per applied control. Never throws.
+const CONTROL_LABEL = 'human:authorize';
+export function applyControls(root, {
+  nowMs = Date.now(),
+  commonDir = resolveCommonDir(root),
+  gh = (args) => spawnSync('gh', args, { cwd: root, encoding: 'utf8' }),
+  merge = (pr) => spawnSync(process.execPath, [AUTO_MERGE_TOOL, String(pr)], { cwd: root, encoding: 'utf8' }),
+} = {}) {
+  const applied = [];
+  const refused = [];
+  if (commonDir === null) return { applied, refused, paused: false };
+  let taken = [];
+  try {
+    taken = takeControls(commonDir, ['pause', 'unpause', 'label', 'merge', 'answer'], { nowMs });
+  } catch {
+    return { applied, refused, paused: isPaused(commonDir) };
+  }
+  for (const { control, done } of taken) {
+    const summary = `${control.kind}${control.pr ? ` PR #${control.pr}` : ''}${control.issue ? ` #${control.issue}` : ''}`;
+    const refuse = (reason) => {
+      try { done({ refused: reason }); } catch { /* the file stays for the next prime */ }
+      refused.push({ control: summary, reason });
+    };
+    const accept = () => {
+      try { done(); } catch { /* the file stays for the next prime */ }
+      emitEvent(commonDir, { by: 'prime', kind: 'control', pr: control.pr, issue: control.issue, text: summary }, { nowMs });
+      applied.push(summary);
+    };
+    try {
+      if (control.kind === 'pause' || control.kind === 'unpause') {
+        const set = setPaused(commonDir, control.kind === 'pause');
+        if (!set.ok) { refuse(`paused marker: ${set.error}`); continue; }
+        emitEvent(commonDir, { by: 'prime', kind: control.kind }, { nowMs });
+        accept();
+      } else if (control.kind === 'label') {
+        const edit = gh(['pr', 'edit', String(control.pr), '--remove-label', CONTROL_LABEL]);
+        if (edit.status !== 0) { refuse(`gh pr edit: ${String(edit.stderr ?? edit.error?.message ?? '').trim().slice(0, 200)}`); continue; }
+        emitEvent(commonDir, { by: 'prime', kind: 'label', pr: control.pr, text: `${CONTROL_LABEL} removed` }, { nowMs });
+        accept();
+      } else if (control.kind === 'merge') {
+        const ran = merge(control.pr);
+        if (ran.status !== 0) { refuse(`merge gate: ${String(ran.stdout ?? '').trim().split('\n').at(-1)?.trim().slice(0, 200) || 'refused'}`); continue; }
+        accept();
+      } else if (control.kind === 'answer') {
+        // The operator's answer, posted as the `/answer` comment a human
+        // would write; the block triage of this same prime lifts the block.
+        const posted = gh(['issue', 'comment', String(control.issue), '--body', `/answer ${control.text}`]);
+        if (posted.status !== 0) { refuse(`gh issue comment: ${String(posted.stderr ?? posted.error?.message ?? '').trim().slice(0, 200)}`); continue; }
+        accept();
+      }
+    } catch (error) {
+      refuse(String(error?.message ?? error));
+    }
+  }
+  return { applied, refused, paused: isPaused(commonDir) };
 }
 
 // The five summary fields are what a run decides with. `projectConfig` and
@@ -528,7 +597,8 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
     ...compact,
     snapshotPath,
     snapshotBytes: Buffer.byteLength(bytes, 'utf8'),
-    eligible: eligibleIssueNumbers(snapshot),
+    // Paused: nothing is eligible until an unpause control; `paused` says why.
+    eligible: result.paused === true ? [] : eligibleIssueNumbers(snapshot),
     halted: haltIssueNumbers(snapshot),
     markers: splitKnownRefused(
       markerSchedule(snapshot),
@@ -997,6 +1067,45 @@ function selfTest() {
           && opened[0].kind === 'run.start' && opened[0].run === '5000' && opened[0].by === 'prime'
           && closed === true && after.length === 2 && after[1].kind === 'run.end' && after[1].run === '5000' && after[1].at === 7000
           && currentRunId(common) === 'unknown' && again === false && after.length === readEvents(common).events.length;
+      })(),
+    );
+    check(
+      'controls: pause and unpause keep the paused marker, label and merge run their commands, a refusal keeps its reason, each applied one is an event',
+      (() => {
+        const common = join(root, '.git');
+        const ghCalls = [];
+        const mergeCalls = [];
+        const options = (over = {}) => ({
+          nowMs: 9000, commonDir: common,
+          gh: (args) => { ghCalls.push(args.join(' ')); return { status: args.includes('77') ? 1 : 0, stderr: 'no such pull request' }; },
+          merge: (pr) => { mergeCalls.push(pr); return { status: pr === 88 ? 0 : 1, stdout: `REFUSE #${pr} — leave for human merge:\n  - base moved` }; },
+          ...over,
+        });
+        let at = 0;
+        const control = (kind, fields = {}) => writeControl(common, { v: 1, at: (at += 1), kind, by: 'ui', session: 'S-1', ...fields });
+        control('pause');
+        const paused = applyControls(root, options());
+        const pausedEligible = persistPrimeSnapshot({ ok: true, paused: true, checkout: { headOid: 'c'.repeat(40) },
+          snapshot: createSnapshot({ scannedAt: new Date(9000).toISOString(), sections: Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])])) }) }, root);
+        control('unpause');
+        control('label', { pr: 66 });
+        control('label', { pr: 77 });
+        control('merge', { pr: 88 });
+        control('merge', { pr: 99 });
+        control('answer', { issue: 5, text: 'use the newer spec' });
+        const rest = applyControls(root, options());
+        const { events } = readEvents(common);
+        const kinds = events.filter((event) => event.at === 9000).map((event) => `${event.kind}${event.pr ? `:${event.pr}` : ''}`).join(' ');
+        const refusedDir = join(common, 'autoloop', 'control', 'refused');
+        const refusedFiles = existsSync(refusedDir) ? readdirSync(refusedDir) : [];
+        rmSync(join(common, 'autoloop', 'control'), { recursive: true, force: true });
+        return paused.paused === true && paused.applied.join() === 'pause' && pausedEligible.eligible.length === 0
+          && rest.paused === false && rest.applied.join('|') === 'unpause|label PR #66|merge PR #88|answer #5'
+          && rest.refused.map((entry) => `${entry.control}: ${entry.reason}`).join('|')
+            === 'label PR #77: gh pr edit: no such pull request|merge PR #99: merge gate: - base moved'
+          && ghCalls.join('|') === 'pr edit 66 --remove-label human:authorize|pr edit 77 --remove-label human:authorize|issue comment 5 --body /answer use the newer spec'
+          && mergeCalls.join() === '88,99' && refusedFiles.length === 2
+          && kinds === 'pause control unpause control label:66 control:66 control:88 control';
       })(),
     );
     const base = baseSyncFacts(root, 'main');

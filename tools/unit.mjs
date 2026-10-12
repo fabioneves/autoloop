@@ -837,6 +837,7 @@ export function triageBlocks({ run, now = Date.now() }) {
     const commented = run('gh', ['issue', 'comment', String(issue.number), '--body', body]);
     if (!commented.ok) errors.push(`#${issue.number}: resumed, but the record failed: ${commented.stderr}`);
     resumed.push({ number: issue.number, by: answer.by, answer: answer.text });
+    unitEvent(run, { kind: 'resume', issue: issue.number, reason: 'answer', text: eventText(answer.text) }, now);
   }
   return { resumed, waiting, held, errors };
 }
@@ -1693,6 +1694,7 @@ function selfTest() {
       comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 15, reason: 'TRUST_REQUIRED' }), createdAt: blockAt },
         { author: { login: 'owner' }, body: '/answer the issue text wins', createdAt: later(30) }] },
   ]);
+  const triageEvents = mkdtempSync(join(tmpdir(), 'unit-triage-events-'));
   const triaging = fakeRun([
     ['gh issue list --label loop-blocked', blockedList],
     ['gh api repos/{owner}/{repo}/issues/7/events', later(0.1)],
@@ -1711,8 +1713,14 @@ function selfTest() {
     ['gh api repos/{owner}/{repo}/collaborators/stranger/permission', 'read'],
     ['gh issue edit 7', ''],
     ['gh issue comment 7', ''],
+    ['git rev-parse', triageEvents],
   ]);
   const triage = triageBlocks({ run: triaging.run, now: Date.parse(later(60)) });
+  const resumedEvents = readEvents(triageEvents).events;
+  rmSync(triageEvents, { recursive: true, force: true });
+  check('a resumed block appends a resume event with the answer',
+    resumedEvents.map((event) => `${event.kind}:${event.issue}:${event.reason}:${event.text}`).join('|')
+      === 'resume:7:answer:128|resume:13:answer:64|resume:15:answer:the issue text wins');
   check('prime resumes an answered loop block, and holds the rest with their reason',
     triage.resumed.map((entry) => `${entry.number}:${entry.by}:${entry.answer}`).join(',') === '7:owner:128,13:owner:64,15:owner:the issue text wins'
     && triage.waiting.map((entry) => `${entry.number}:${entry.question}`).join(',') === '8:What length?,11:What length?'

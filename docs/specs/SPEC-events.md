@@ -67,11 +67,19 @@ operator answers on GitHub and the loop finds the answer at its next prime.
    runs its own merge gate; a refusal is reported, never bypassed); `label` (`pr`: the loop removes
    `human:authorize` from the PR, the one swap the merge gate reads; nothing else is relabelled).
    Nothing else.
-9. **Consumer today.** `prime.mjs` applies `pause`, `unpause`, `label`, and `merge` at its start
-   and before each selection; `unit.mjs --resume` is the consumer of `answer`; `dispatch.mjs
-   --wait-file` applies `cancel` to the pid it waits on. The UI wakes a parked session after it
-   writes a control (`$.prompt.submit` with the text `autoloop: control`), and the dev skill's
-   Prime section says that prompt means "run prime, which applies the control".
+9. **Consumer today.** `prime.mjs` applies `pause`, `unpause`, `label`, `merge`, and `answer`
+   at its start, before the scan: a pause keeps the marker `autoloop/control/paused` and prime
+   reports `eligible: []` with `paused: true` until an unpause; a label removes
+   `human:authorize` through `gh pr edit`; a merge runs the auto-merge executor, whose gate
+   decides and writes the `merge` event; an answer is posted as the `/answer <text>` comment a
+   human would write, and the block triage of the same prime lifts the block (`resume` event,
+   reason `answer`). `dispatch.mjs --wait-file` applies `cancel` to the dispatch whose
+   `dispatch.start` carries the pid it waits on: SIGTERM to the process group (the dispatch
+   leads one under `dispatch-stream.sh`), SIGKILL after 10 s, a `dispatch.end` with reason
+   `cancelled`, exit 3 as a died dispatch. Each applied control is a `control` event; a refused
+   one goes to `control/refused/` with its reason and prime reports it. The UI wakes a parked
+   session after it writes a control (`$.prompt.submit` with the text `autoloop: control`), and
+   the dev skill's Prime section says that prompt means "run prime, which applies the control".
 10. **Consumer later.** The scheduler polls the directory every second and is the only consumer.
 
 ### Who writes a control

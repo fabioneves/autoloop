@@ -20,7 +20,7 @@
 //
 // Exit 0 on a typed success, 1 on a typed failure, 2 on a usage error.
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   appendFileSync,
@@ -49,7 +49,7 @@ import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs'
 import { pinnedModelsPath, pluginRunMarkers } from './run-markers.mjs';
 import { noteDispatch, resumedLine, transition } from './step.mjs';
 import { readStepBinding } from './dispatch-return-association.mjs';
-import { emitEvent, readEvents } from './events-contract.mjs';
+import { appendEvent, emitEvent, readEvents, resolveCommonDir, takeControls, writeControl } from './events-contract.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -3019,6 +3019,42 @@ function selfTest() {
   }
 
   check(
+    'a cancel control for the open dispatch of the recorded pid ends it, writes a cancelled end event, and is taken once',
+    (() => {
+      const directory = mkdtempSync(join(tmpdir(), 'autoloop-cancel-'));
+      try {
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+        child.unref();
+        const pid = child.pid;
+        appendEvent(directory, { v: 1, at: 1000, run: 'r', by: 'dispatch', kind: 'dispatch.start', issue: 9, dispatch: 'd9', role: 'implement', pid });
+        const noControl = pendingCancel({ commonDir: directory, pid });
+        writeControl(directory, { v: 1, at: 2, kind: 'cancel', by: 'ui', session: 'S', dispatch: 'other' });
+        const otherControl = pendingCancel({ commonDir: directory, pid });
+        writeControl(directory, { v: 1, at: 3, kind: 'cancel', by: 'ui', session: 'S', dispatch: 'd9' });
+        const pending = pendingCancel({ commonDir: directory, pid });
+        const outcome = pending === null ? null : cancelDispatch({ commonDir: directory, pid, ...pending, graceMs: 2000, nowMs: 5000 });
+        // The child is this process's: unreaped while the test blocks the
+        // event loop, so a zombie (state Z) counts as ended.
+        const gone = () => {
+          const ps = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+          return ps.status !== 0 || /^Z/u.test(String(ps.stdout).trim());
+        };
+        const until = Date.now() + 3000;
+        while (!gone() && Date.now() < until) sleepMs(50);
+        const dead = gone();
+        const { events } = readEvents(directory);
+        const end = events.find((event) => event.kind === 'dispatch.end');
+        const again = pendingCancel({ commonDir: directory, pid });
+        return noControl === null && otherControl === null && pending !== null && outcome?.cancelled === true && dead
+          && end?.dispatch === 'd9' && end.ok === false && end.reason === 'cancelled' && end.ms === 4000
+          && events.some((event) => event.kind === 'control' && event.text === 'cancel implement d9')
+          && again === null;
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    })(),
+  );
+  check(
     'a wait ends early only when the recorded dispatch is gone without a result',
     (() => {
       const directory = mkdtempSync(join(tmpdir(), 'autoloop-wait-'));
@@ -3105,10 +3141,56 @@ function processAlive(pid) {
   }
 }
 
+// The cancel control (SPEC-events item 8), applied by the waiter: the one
+// process that knows the dispatch's pid and outlives a killed stream task.
+// A cancel names a dispatch id; the waiter matches it to the open
+// dispatch.start event that carries the recorded pid. The kill is of the
+// group when the pid leads one (dispatch-stream.sh runs it under setsid, so
+// the engine dies with it), else of the pid alone; SIGKILL after the grace.
+export function pendingCancel({ commonDir, pid, nowMs = Date.now() }) {
+  if (commonDir === null || !Number.isSafeInteger(pid)) return null;
+  const { events } = readEvents(commonDir, { limit: 2000 });
+  const ended = new Set(events.filter((event) => event.kind === 'dispatch.end').map((event) => event.dispatch));
+  const open = events.findLast((event) => event.kind === 'dispatch.start' && event.pid === pid && !ended.has(event.dispatch));
+  if (open === undefined) return null;
+  const taken = takeControls(commonDir, ['cancel'], { nowMs }).find(({ control }) => control.dispatch === open.dispatch);
+  return taken === undefined ? null : { ...taken, start: open };
+}
+
+export function cancelDispatch({ commonDir, pid, start, control, done, graceMs = 10_000, nowMs = Date.now(),
+  kill = (target, signal) => process.kill(target, signal), alive = processAlive, sleep = sleepMs, groupLeader = isGroupLeader }) {
+  const target = groupLeader(pid) ? -pid : pid;
+  try { kill(target, 'SIGTERM'); } catch { /* already gone */ }
+  const until = Date.now() + graceMs;
+  while (alive(pid) && Date.now() < until) sleep(100);
+  if (alive(pid)) { try { kill(target, 'SIGKILL'); } catch { /* already gone */ } }
+  emitEvent(commonDir, { by: 'dispatch', kind: 'dispatch.end', dispatch: start.dispatch, role: start.role, issue: start.issue,
+    ms: nowMs - start.at, ok: false, reason: 'cancelled' }, { nowMs });
+  emitEvent(commonDir, { by: 'dispatch', kind: 'control', issue: start.issue, text: `cancel ${start.role ?? 'dispatch'} ${start.dispatch}` }, { nowMs });
+  try { done(); } catch { /* the file stays; the next waiter finds no open dispatch for it */ }
+  return { cancelled: true, dispatch: start.dispatch, pid, signal: control.kind };
+}
+
+function isGroupLeader(pid) {
+  const result = spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' });
+  return result.status === 0 && Number(String(result.stdout).trim()) === pid;
+}
+
 function runWaitCli(parsed) {
   const deadline = Date.now() + parsed.timeoutSeconds * 1000;
+  const commonDir = resolveCommonDir(process.cwd());
   const poll = () => {
     const state = waitState(parsed.path);
+    if (state === 'waiting' && commonDir !== null) {
+      let pid = null;
+      try { pid = Number(readFileSync(`${parsed.path}.pid`, 'utf8').trim()); } catch { /* no pid yet */ }
+      const pending = pendingCancel({ commonDir, pid });
+      if (pending !== null) {
+        cancelDispatch({ commonDir, pid, ...pending });
+        console.error(`wait: the dispatch recorded in ${parsed.path}.pid was cancelled by the operator; treat it as died`);
+        process.exit(3);
+      }
+    }
     if (state === 'done') {
       console.log(`wait: ${parsed.path} exists`);
       process.exit(0);
