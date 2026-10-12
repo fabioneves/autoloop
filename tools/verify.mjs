@@ -19,7 +19,8 @@ import {
   join,
   resolve,
 } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_VERSION, effectiveChecklistPath, resolveProjectConfig } from './config-contract.mjs';
 import { vendoredLeftovers } from './hook-root.mjs';
@@ -161,6 +162,112 @@ function run(executable, args, cwd) {
       result.stderr?.trim(),
     ].filter(Boolean).join('\n'),
   };
+}
+
+// A self-test runs as its own process group, so its whole tree can be found
+// and killed: on 2026-10-12 a recursive self-test outlived its killed parent
+// and filled three 8 GiB session cgroups with orphans (PPid 1).
+const SELF_TEST_TIMEOUT_MS = 600000;
+const CLEANUP_WAIT_MS = 5000;
+// A descendant killed just before its test exits can still be dying, or be a
+// zombie init has not reaped yet; only what outlives this is a leftover.
+const SETTLE_MS = 1000;
+const RUN_ID = randomUUID();
+const selfTestProcesses = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
+let activeGroup = null;
+
+function groupAlive(pgid) {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== 'ESRCH';
+  }
+}
+
+function killGroup(pgid) {
+  try {
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    // Already gone.
+  }
+}
+
+async function groupGone(pgid, waitMs) {
+  const until = Date.now() + waitMs;
+  while (groupAlive(pgid)) {
+    if (Date.now() >= until) return false;
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  return true;
+}
+
+// A signal is no proof of exit: the group is polled until empty, within a
+// bound, and a group that will not empty is reported, never assumed gone.
+export function runSelfTest(path, cwd, {
+  timeoutMs = SELF_TEST_TIMEOUT_MS, cleanupWaitMs = CLEANUP_WAIT_MS, settleMs = SETTLE_MS, tally = selfTestProcesses,
+} = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path, '--self-test'], {
+      cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, AUTOLOOP_VERIFY_RUN_ID: RUN_ID },
+    });
+    const pgid = child.pid ?? null;
+    let output = '';
+    let timedOut = false;
+    let finished = false;
+    let closeWait = null;
+    const collect = (chunk) => {
+      if (output.length < MAX_OUTPUT_BYTES) output += chunk;
+    };
+    const finish = async (code, signal, closed) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(deadline);
+      clearTimeout(closeWait);
+      if (closed) tally.exited += 1;
+      const leftovers = closed && !timedOut && !(await groupGone(pgid, settleMs));
+      if (leftovers) {
+        tally.leftovers += 1;
+        killGroup(pgid);
+      }
+      const gone = await groupGone(pgid, cleanupWaitMs);
+      if (!gone) tally.uncleaned += 1;
+      if (activeGroup === pgid) activeGroup = null;
+      const problems = [
+        timedOut && `timed out after ${timeoutMs / 1000}s; its process group was killed`,
+        leftovers && 'exited but left processes in its group; they were killed',
+        !gone && `cleanup FAILED: process group ${pgid} still has members ${cleanupWaitMs}ms after SIGKILL`,
+      ].filter(Boolean);
+      const record = `process: run ${RUN_ID} pgid ${pgid} exit ${code ?? '-'} signal ${signal ?? '-'} `
+        + `timed-out ${timedOut} leftovers ${leftovers} cleanup ${gone ? 'confirmed' : 'FAILED'}`;
+      resolve({
+        ok: closed && code === 0 && problems.length === 0,
+        cleanupFailed: !gone,
+        detail: [output.trim(), ...problems, ...(problems.length || code !== 0 ? [record] : [])]
+          .filter(Boolean).join('\n'),
+      });
+    };
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      tally.timedOut += 1;
+      killGroup(pgid);
+      closeWait = setTimeout(() => finish(null, 'SIGKILL', false), cleanupWaitMs);
+    }, timeoutMs);
+    if (pgid === null) {
+      child.on('error', (error) => {
+        clearTimeout(deadline);
+        resolve({ ok: false, cleanupFailed: false, detail: error.message });
+      });
+      return;
+    }
+    tally.launched += 1;
+    tally.groups.push(pgid);
+    activeGroup = pgid;
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    child.on('close', (code, signal) => finish(code, signal, true));
+  });
 }
 
 function checkJson(path) {
@@ -330,7 +437,7 @@ function toolChecks(root, toolsDir, requiredFiles) {
     if (!SELF_TEST_PATTERN.test(readFileSync(path, 'utf8'))) continue;
     checks.push({
       name: `self-test ${name}`,
-      execute: () => run(process.execPath, [path, '--self-test'], root),
+      execute: () => runSelfTest(path, root),
     });
   }
   return checks;
@@ -405,7 +512,48 @@ function projectChecks(root) {
   ];
 }
 
-function selfTest() {
+// Each fixture starts at most one child, so a broken runner cannot multiply.
+async function processCases() {
+  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-verify-processes-'));
+  const fixture = (name, body) => {
+    const path = join(scratch, name);
+    writeFileSync(path, `import { spawn } from 'node:child_process';\n${body}\n`);
+    return path;
+  };
+  const lingering = "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });"
+    + ' child.unref(); console.log(`child ${child.pid}`);';
+  const pidOf = (detail) => Number(/child (\d+)/u.exec(detail)?.[1]);
+  const gone = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      return Number.isSafeInteger(pid) && error.code === 'ESRCH';
+    }
+  };
+  const tally = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
+  const options = { timeoutMs: 400, cleanupWaitMs: 2000, tally };
+  try {
+    const passed = await runSelfTest(fixture('pass.mjs', "console.log('self-test OK');"), scratch, options);
+    const failed = await runSelfTest(fixture('fail.mjs', 'process.exit(4);'), scratch, options);
+    const hung = await runSelfTest(fixture('hang.mjs', `${lingering} setInterval(() => {}, 1000);`), scratch, options);
+    const leaked = await runSelfTest(fixture('leak.mjs', lingering), scratch, options);
+    return [
+      ['a clean self-test passes with its cleanup confirmed', passed.ok && !passed.cleanupFailed],
+      ['a failing self-test fails with its process record', !failed.ok && /process: run .* exit 4 /u.test(failed.detail)],
+      ['a timed-out self-test loses its whole process group, child included', !hung.ok && !hung.cleanupFailed
+        && /timed out/u.test(hung.detail) && gone(pidOf(hung.detail))],
+      ['a self-test that leaves a descendant fails and the descendant is killed', !leaked.ok && !leaked.cleanupFailed
+        && /left processes/u.test(leaked.detail) && gone(pidOf(leaked.detail))],
+      ['every launched group is accounted for', tally.launched === 4 && tally.exited === 4 && tally.timedOut === 1
+        && tally.leftovers === 1 && tally.uncleaned === 0 && tally.groups.every((pgid) => !groupAlive(pgid))],
+    ];
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+async function selfTest() {
   const success = run(process.execPath, ['--version'], process.cwd());
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
   const toolsDir = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -518,7 +666,9 @@ function selfTest() {
   } finally {
     rmSync(crashRoot, { recursive: true, force: true });
   }
+  const processes = await processCases();
   const cases = [
+    ...processes,
     ['the plugin hook document passes its contract', pluginProblems(pluginHookDocument()).length === 0],
     ['a missing plugin hook is named',
       pluginProblems(pluginHookDocument(PLUGIN_HOOKS.slice(1))).some((problem) => problem.includes(PLUGIN_HOOKS[0].name))],
@@ -589,13 +739,35 @@ function parseArgs(args) {
   };
 }
 
-function main() {
+function selfTestProcessSummary() {
+  const { launched, exited, timedOut, leftovers, uncleaned, groups } = selfTestProcesses;
+  return `self-test processes: run ${RUN_ID}; launched ${launched}, exited ${exited}, timed out ${timedOut}, `
+    + `leftovers killed ${leftovers}, cleanup failures ${uncleaned}; process groups ${groups.join(' ') || 'none'}`;
+}
+
+// An interrupted verify takes its running self-test group with it; the exit
+// is reported as unconfirmed rather than assumed.
+function killActiveGroupOn(signal, code) {
+  process.once(signal, () => {
+    if (activeGroup !== null) {
+      killGroup(activeGroup);
+      console.error(`verify: ${signal}; killed self-test process group ${activeGroup} (exit not confirmed)`);
+    }
+    console.error(selfTestProcessSummary());
+    process.exit(code);
+  });
+}
+
+async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`verify: ${parsed.error}`);
     process.exit(2);
   }
-  if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
+  if (parsed.mode === 'self-test') process.exit(await selfTest() ? 0 : 1);
+  killActiveGroupOn('SIGINT', 130);
+  killActiveGroupOn('SIGTERM', 143);
+  killActiveGroupOn('SIGHUP', 129);
 
   const root = resolve(parsed.root);
   const checks = parsed.mode === 'plugin'
@@ -604,7 +776,7 @@ function main() {
   const failures = [];
   for (const check of checks) {
     const startedAt = process.hrtime.bigint();
-    const result = check.execute();
+    const result = await check.execute();
     const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
     // A check's duration prints on its own line, so a slow self-test names
     // itself instead of the log stalling on the previous check's PASS line.
@@ -622,8 +794,15 @@ function main() {
       console.error(`FAIL ${check.name}${timing}`);
       if (result.detail) console.error(result.detail);
       failures.push(check.name);
+      // A group that would not empty may still hold memory or processes:
+      // launching the next self-test on top of it is how orphans pile up.
+      if (result.cleanupFailed) {
+        console.error('verify: stopped; a self-test process group could not be confirmed gone');
+        break;
+      }
     }
   }
+  if (selfTestProcesses.launched > 0) console.log(selfTestProcessSummary());
   if (failures.length > 0) {
     console.error(`verification failed (${failures.length} check(s))`);
     process.exit(1);
@@ -640,4 +819,4 @@ function isMainModule() {
   }
 }
 
-if (isMainModule()) main();
+if (isMainModule()) await main();

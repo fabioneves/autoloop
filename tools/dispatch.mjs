@@ -2603,7 +2603,9 @@ function selfTest() {
       && exited.error.stderr.includes('engine blew up'),
     );
 
-    writeEngineShim(shimDirectory, shimBody('sleep 30'));
+    // exec: the timeout kills the engine itself; a shell's own sleep child
+    // would outlive it, and verify fails a self-test that leaves processes.
+    writeEngineShim(shimDirectory, shimBody('exec sleep 30'));
     const timedOut = runDispatch({
       role: 'implement',
       prompt: 'implement',
