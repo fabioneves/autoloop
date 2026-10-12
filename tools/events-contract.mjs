@@ -10,11 +10,11 @@
 // for a UI concern, so `appendEvent` and `writeControl` return `{ ok, error }`
 // and never throw.
 import {
-  appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync,
+  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { mkdtempSync, rmSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -114,12 +114,19 @@ export function validateEvent(event) {
   const result = validateShape(event, COMMON, OPTIONAL, EVENT_KINDS);
   if (!result.ok) return result;
   // The optional common fields may be absent, never null.
-  for (const name of ['issue', 'pr']) if (event[name] === null) return { ok: false, error: `${name} is absent, never null` };
+  for (const name of OPTIONAL) if (event[name] === null) return { ok: false, error: `${name} is absent, never null` };
   return result;
 }
 
 export function validateControl(control) {
   return validateShape(control, CONTROL_COMMON, [], CONTROL_KINDS, CONTROL_REQUIRED);
+}
+
+// An event's text field: one plain line, no glyphs added, cut at the limit.
+// Empty is undefined, so the field is absent from the record.
+export function eventText(value) {
+  const flat = String(value ?? '').replace(/\s+/gu, ' ').trim();
+  return flat.length === 0 ? undefined : [...flat].slice(0, MAX_TEXT_CHARS).join('');
 }
 
 const eventsDir = (commonDir) => join(commonDir, 'autoloop');
@@ -222,7 +229,8 @@ export function takeControls(commonDir, kinds, { nowMs = Date.now() } = {}) {
     let control;
     try {
       control = JSON.parse(readFileSync(path, 'utf8'));
-      if (!validateControl(control).ok) throw new Error(validateControl(control).error);
+      const checked = validateControl(control);
+      if (!checked.ok) throw new Error(checked.error);
     } catch (error) {
       mkdirSync(refused, { recursive: true });
       writeFileSync(join(refused, name), `${JSON.stringify({ name, reason: `unreadable: ${error.message}` })}\n`);

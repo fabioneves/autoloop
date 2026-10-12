@@ -589,12 +589,6 @@ export function resolveDispatchLogPath(cwd, readCommonDir = (directory) => spawn
 
 // One line per dispatch, so a run's idle wall-clock is a measurement rather than
 // a claim. Fail-open in every direction: accounting must never cost a dispatch.
-// The common git directory the event file lives under, or null outside a repo.
-function eventsCommonDir(cwd) {
-  const path = resolveDispatchLogPath(cwd);
-  return path === null ? null : dirname(dirname(path));
-}
-
 function recordDispatchWindow(cwd, entry) {
   try {
     const path = resolveDispatchLogPath(cwd);
@@ -832,7 +826,7 @@ function dispatchOnce(options, cwd, binding, previousDispatchId, newRound) {
       dispatchId,
     });
   if (route.error === undefined) {
-    emitEvent(eventsCommonDir(cwd), {
+    emitEvent(resolveCommonDir(cwd), {
       by: 'dispatch', kind: 'dispatch.end', dispatch: dispatchId, role: options.role, issue: options.issue,
       ms: Date.now() - windowStartedAtMs, ok: result.ok === true, reason: result.ok === true ? undefined : result.error?.code,
     });
@@ -1157,8 +1151,8 @@ function runEngine({
   // and which pid a cancel ends. The pid is this process: under
   // dispatch-stream.sh it leads its own group, so the group kill reaches the
   // engine; the engine's own pid is not known until spawnSync returns.
-  emitEvent(eventsCommonDir(cwd), {
-    by: 'dispatch', kind: 'dispatch.start', dispatch: dispatchId ?? undefined, role, issue, model: model ?? undefined,
+  emitEvent(resolveCommonDir(cwd), {
+    by: 'dispatch', kind: 'dispatch.start', dispatch: dispatchId, role, issue, model,
     liveFile: live === null ? undefined : resolve(live.path), pid: process.pid,
   }, { nowMs: started });
   const startupMs = started - startedAtMs;

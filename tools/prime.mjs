@@ -313,6 +313,7 @@ export function primeDev({
 // control the loop cannot apply goes to refused/ with the reason. The event
 // file gets one `control` line per applied control. Never throws.
 const CONTROL_LABEL = 'human:authorize';
+const commandError = (result) => String(result.stderr ?? result.error?.message ?? '').trim().slice(0, 200);
 export function applyControls(root, {
   nowMs = Date.now(),
   commonDir = resolveCommonDir(root),
@@ -322,48 +323,56 @@ export function applyControls(root, {
   const applied = [];
   const refused = [];
   if (commonDir === null) return { applied, refused, paused: false };
+  // One handler per kind: it applies the control and writes the kind's own
+  // event; it returns the refusal reason, or null when applied.
+  const keepPaused = (control) => {
+    const set = setPaused(commonDir, control.kind === 'pause');
+    if (!set.ok) return `paused marker: ${set.error}`;
+    emitEvent(commonDir, { by: 'prime', kind: control.kind }, { nowMs });
+    return null;
+  };
+  const handlers = {
+    pause: keepPaused,
+    unpause: keepPaused,
+    label: (control) => {
+      const edit = gh(['pr', 'edit', String(control.pr), '--remove-label', CONTROL_LABEL]);
+      if (edit.status !== 0) return `gh pr edit: ${commandError(edit)}`;
+      emitEvent(commonDir, { by: 'prime', kind: 'label', pr: control.pr, text: `${CONTROL_LABEL} removed` }, { nowMs });
+      return null;
+    },
+    merge: (control) => {
+      const ran = merge(control.pr);
+      return ran.status === 0 ? null : `merge gate: ${String(ran.stdout ?? '').trim().split('\n').at(-1)?.trim().slice(0, 200) || 'refused'}`;
+    },
+    // The operator's answer, posted as the `/answer` comment a human would
+    // write; the block triage of this same prime lifts the block.
+    answer: (control) => {
+      const posted = gh(['issue', 'comment', String(control.issue), '--body', `/answer ${control.text}`]);
+      return posted.status === 0 ? null : `gh issue comment: ${commandError(posted)}`;
+    },
+  };
   let taken = [];
   try {
-    taken = takeControls(commonDir, ['pause', 'unpause', 'label', 'merge', 'answer'], { nowMs });
+    taken = takeControls(commonDir, Object.keys(handlers), { nowMs });
   } catch {
     return { applied, refused, paused: isPaused(commonDir) };
   }
   for (const { control, done } of taken) {
     const summary = `${control.kind}${control.pr ? ` PR #${control.pr}` : ''}${control.issue ? ` #${control.issue}` : ''}`;
-    const refuse = (reason) => {
+    let reason;
+    try {
+      reason = handlers[control.kind](control);
+    } catch (error) {
+      reason = String(error?.message ?? error);
+    }
+    if (reason !== null) {
       try { done({ refused: reason }); } catch { /* the file stays for the next prime */ }
       refused.push({ control: summary, reason });
-    };
-    const accept = () => {
-      try { done(); } catch { /* the file stays for the next prime */ }
-      emitEvent(commonDir, { by: 'prime', kind: 'control', pr: control.pr, issue: control.issue, text: summary }, { nowMs });
-      applied.push(summary);
-    };
-    try {
-      if (control.kind === 'pause' || control.kind === 'unpause') {
-        const set = setPaused(commonDir, control.kind === 'pause');
-        if (!set.ok) { refuse(`paused marker: ${set.error}`); continue; }
-        emitEvent(commonDir, { by: 'prime', kind: control.kind }, { nowMs });
-        accept();
-      } else if (control.kind === 'label') {
-        const edit = gh(['pr', 'edit', String(control.pr), '--remove-label', CONTROL_LABEL]);
-        if (edit.status !== 0) { refuse(`gh pr edit: ${String(edit.stderr ?? edit.error?.message ?? '').trim().slice(0, 200)}`); continue; }
-        emitEvent(commonDir, { by: 'prime', kind: 'label', pr: control.pr, text: `${CONTROL_LABEL} removed` }, { nowMs });
-        accept();
-      } else if (control.kind === 'merge') {
-        const ran = merge(control.pr);
-        if (ran.status !== 0) { refuse(`merge gate: ${String(ran.stdout ?? '').trim().split('\n').at(-1)?.trim().slice(0, 200) || 'refused'}`); continue; }
-        accept();
-      } else if (control.kind === 'answer') {
-        // The operator's answer, posted as the `/answer` comment a human
-        // would write; the block triage of this same prime lifts the block.
-        const posted = gh(['issue', 'comment', String(control.issue), '--body', `/answer ${control.text}`]);
-        if (posted.status !== 0) { refuse(`gh issue comment: ${String(posted.stderr ?? posted.error?.message ?? '').trim().slice(0, 200)}`); continue; }
-        accept();
-      }
-    } catch (error) {
-      refuse(String(error?.message ?? error));
+      continue;
     }
+    try { done(); } catch { /* the file stays for the next prime */ }
+    emitEvent(commonDir, { by: 'prime', kind: 'control', pr: control.pr, issue: control.issue, text: summary }, { nowMs });
+    applied.push(summary);
   }
   return { applied, refused, paused: isPaused(commonDir) };
 }

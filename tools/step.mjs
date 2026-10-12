@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { latchDirectory, loopRunIsLive, ownedRun, ownRunMarkers, processAlive, processStart, sessionLatch, sessionOwnerPid } from './run-markers.mjs';
-import { appendEvent, currentRunId, emitEvent, readEvents, setRunId } from './events-contract.mjs';
+import { appendEvent, currentRunId, emitEvent, eventText, readEvents, setRunId } from './events-contract.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, issueSnapshotItem, SNAPSHOT_SECTIONS,
   snapshotProblem, verifySnapshot,
@@ -388,10 +388,8 @@ export function transition({
   }
   // The UI's copy of the transition (SPEC-events). Fail-open: a refused or
   // failed append is one stderr line and the ribbon still prints.
-  const knownPr = Number.isSafeInteger(pr) && pr > 0 ? pr : Number.isSafeInteger(record.pr) && record.pr > 0 ? record.pr : null;
-  emitEvent(dirname(dir), {
-    by: 'step', kind: 'step', issue, step: to, round, model, text: eventText(note), pr: knownPr ?? undefined,
-  }, { nowMs });
+  const knownPr = [pr, record.pr].find((number) => Number.isSafeInteger(number) && number > 0) ?? null;
+  emitEvent(dirname(dir), { by: 'step', kind: 'step', issue, step: to, round, model, text: eventText(note), pr: knownPr }, { nowMs });
   return {
     ok: true,
     lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note, pr: knownPr }),
@@ -904,12 +902,6 @@ function clock(atMs) {
 // The 🧊 frozen plan is named the same way on every line (operator ask,
 // 2026-09-28). Ice cube, not snowflake: ❄️ carries a variation selector and
 // would break the aligned columns.
-// An event's text: one plain line, no glyphs added, cut at the contract's limit.
-function eventText(text) {
-  const flat = String(text ?? '').replace(/\s+/gu, ' ').trim();
-  return flat.length === 0 ? undefined : [...flat].slice(0, 200).join('');
-}
-
 function oneLine(text, limit = 90) {
   const flat = String(text ?? '').replace(/\s+/gu, ' ').trim()
     .replace(/(?<!🧊 )\b(frozen plan)\b/giu, '🧊 $1');

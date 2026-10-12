@@ -79,7 +79,7 @@ import { fileURLToPath } from 'node:url';
 import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 import { updateStepRecord } from './dispatch-return-association.mjs';
 import { inLane } from './lane-contract.mjs';
-import { emitEvent, readEvents } from './events-contract.mjs';
+import { emitEvent, eventText, readEvents } from './events-contract.mjs';
 import {
   SNAPSHOT_SECTIONS, completeSection, createSnapshot, deliveredPullRequests, invalidateSnapshot, snapshotProblem,
   verifySnapshot,
@@ -316,26 +316,26 @@ export function noteWaitOnStep({ commonDir, issue, what, nowMs = Date.now() }) {
   }
 }
 
+// The common git directory, or null outside a repository; never throws.
 function commonDirOf(run) {
-  const result = run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  return result?.ok ? String(result.stdout).trim() : null;
+  try {
+    const result = run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    return result?.ok ? String(result.stdout).trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 // The UI's copy of a unit's change of state (SPEC-events). Never throws and
-// never changes the unit's result.
-function unitEvent(run, event, nowMs, commonDir = undefined) {
+// never changes the unit's result. A caller that resolved the common dir
+// earlier passes it; the rest resolve it here.
+function unitEvent(run, event, nowMs, commonDir = commonDirOf(run)) {
   try {
-    const dir = commonDir === undefined ? commonDirOf(run) : commonDir;
-    if (dir !== null) emitEvent(dir, { by: 'unit', ...event }, { nowMs });
+    if (commonDir !== null) emitEvent(commonDir, { by: 'unit', ...event }, { nowMs });
   } catch {
     // The event is a courtesy to the UI; the unit's state stands.
   }
 }
-
-const eventText = (value) => {
-  const flat = String(value ?? '').replace(/\s+/gu, ' ').trim();
-  return flat.length === 0 ? undefined : [...flat].slice(0, 200).join('');
-};
 
 export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes = null, onPr = null, paths = [], note = '', base, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
@@ -596,7 +596,7 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   const facts = issueFacts(run, issue, 'state,labels');
   if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
   // Resolved before the label edit: the edit is the call a caller checks last.
-  const commonDir = (() => { try { return commonDirOf(run); } catch { return null; } })();
+  const commonDir = commonDirOf(run);
   const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString() };
   const body = [
     blockMarker(block),
@@ -1150,7 +1150,8 @@ function selfTest() {
         markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs'], base: 'main', run: waits.run, now: 7000 });
         const decides = fakeRun([['gh issue view 5', 'OPEN'], ['gh issue comment 5', 'https://x/5#c1'], ['gh issue edit 5', ''], git]);
         markDecided({ issue: 5, question: 'Which spec wins?', choice: 'the newer', why: 'dated', run: decides.run, now: 8000 });
-        const blocks = fakeRun([['gh issue view 7', '{"state":"OPEN","labels":[]}'], ['gh issue comment 7', ''], ['gh issue edit 7', ''], git]);
+        const blockResponses = [['gh issue view 7', '{"state":"OPEN","labels":[]}'], ['gh issue comment 7', ''], ['gh issue edit 7', ''], git];
+        const blocks = fakeRun(blockResponses);
         const blocked = markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'May it proceed?', run: blocks.run, now: 9000 });
         const condition = { on: 'issue', number: 4 };
         const lifts = fakeRun([['gh issue list', JSON.stringify([{ number: 5, comments: [{ body: waitMarker(condition) }] }])],
@@ -1159,7 +1160,7 @@ function selfTest() {
         const { events } = readEvents(scratch);
         const kinds = events.map((event) => `${event.kind}:${event.issue}:${event.at}`).join(' ');
         chmodSync(join(scratch, 'autoloop', 'events.jsonl'), 0o400);
-        const again = markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'May it proceed?', run: fakeRun([['gh issue view 7', '{"state":"OPEN","labels":[]}'], ['gh issue comment 7', ''], ['gh issue edit 7', ''], git]).run, now: 9500 });
+        const again = markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'May it proceed?', run: fakeRun(blockResponses).run, now: 9500 });
         chmodSync(join(scratch, 'autoloop', 'events.jsonl'), 0o644);
         return blocked.ok === true && blocks.calls.at(-1).startsWith('gh issue edit 7 --add-label loop-blocked')
           && kinds === 'wait:5:7000 decision:5:8000 block:7:9000 resume:5:10000'
