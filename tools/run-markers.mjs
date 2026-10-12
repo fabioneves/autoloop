@@ -228,9 +228,19 @@ export function protectedPaths({
   projectRoot, cwd = projectRoot, runOpen, home = homedir(),
   configDir = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'),
 }) {
+  // The event file and the control directory (SPEC-events): the UI mod
+  // writes controls outside the hooks, so a guard refusal here means only
+  // the operator's pane, never the model, is `by: 'ui'`.
+  const eventsState = (root) => {
+    const run = runMarkerDirectory(root);
+    if (run === null) return [];
+    const autoloop = dirname(run);
+    return ['control', 'events.jsonl', 'events.1.jsonl', 'run-id'].map((name) => join(autoloop, name));
+  };
   const state = [
     runMarkerDirectory(projectRoot), runMarkerDirectory(cwd), latchDirectory(home),
     pinnedModelsPath(projectRoot), pinnedModelsPath(cwd),
+    ...eventsState(projectRoot), ...eventsState(cwd),
     join(home, '.claude', 'shell-snapshots'), join(home, '.claude', 'session-env'),
     ...(runOpen ? [
       ...['.claude/settings.json', '.claude/settings.local.json'].map((file) => join(projectRoot, file)),

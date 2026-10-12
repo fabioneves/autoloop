@@ -35,7 +35,9 @@ operator answers on GitHub and the loop finds the answer at its next prime.
    `issue` or `pr`, `paths`), `resume`, `block` (`reason`, `text`), `deliver` (`pr`), `merge`
    (`pr`, `ok`), `label` (`text`), `control` (`text`: the control the loop applied), `pause`,
    `unpause`.
-4. **Writers today.** `step.mjs` writes `step`; `dispatch.mjs` writes `dispatch.start` and
+4. **Writers today.** The run id is abandoned (`run.end`, reason `abandoned`) and a new one
+   opened when a prime finds no live own run marker: a session that ended without `--close-run`
+   never lends its id to the next run. `step.mjs` writes `step`; `dispatch.mjs` writes `dispatch.start` and
    `dispatch.end` (the live file path, whichever the caller chose, and its own pid, which leads
    the process group under `dispatch-stream.sh`); `unit.mjs` writes `wait`, `resume`,
    `decision`, `block`; `prime.mjs` writes `run.start` (once per run: the run id is kept in
@@ -50,8 +52,10 @@ operator answers on GitHub and the loop finds the answer at its next prime.
    step records it reads today for the card. A run without an event file (an older plugin wrote
    it) projects as today, with empty `log` and `dispatches`.
 6. **PR with the issue.** Every event and every projection row that names an issue with an open
-   loop pull request also names the PR: `issue` and `pr` together. The text card (`step.mjs`)
-   shows `#N · PR #M` once a PR exists.
+   loop pull request also names the PR: `issue` and `pr` together. In a `wait` event `pr` is the
+   pull request waited on and in a `control` event the one the operator named; the projection
+   takes a unit's own PR from `step`, `deliver`, `merge` and `label` events only. The text card
+   and the ribbon (`step.mjs`) show `PR #M` beside `#N` once a PR exists.
 
 ### The control directory
 
@@ -76,7 +80,9 @@ operator answers on GitHub and the loop finds the answer at its next prime.
    reason `answer`). `dispatch.mjs --wait-file` applies `cancel` to the dispatch whose
    `dispatch.start` carries the pid it waits on: SIGTERM to the process group (the dispatch
    leads one under `dispatch-stream.sh`), SIGKILL after 10 s, a `dispatch.end` with reason
-   `cancelled`, exit 3 as a died dispatch. Each applied control is a `control` event; a refused
+   `cancelled`, exit 3 as a died dispatch; a cancel is matched to the dispatch whose
+   `dispatch.start` carries the pid, over all recent events, since a dispatch inherited from an
+   ended session started under the earlier run id. Each applied control is a `control` event; a refused
    one goes to `control/refused/` with its reason and prime reports it. The UI wakes a parked
    session after it writes a control (`$.prompt.submit` with the text `autoloop: control`), and
    the dev skill's Prime section says that prompt means "run prime, which applies the control".
@@ -85,7 +91,19 @@ operator answers on GitHub and the loop finds the answer at its next prime.
 ### Who writes a control
 
 11. The UI alone, from a button or an input the operator used; never a hook on a model event,
-    never a timer. The control file carries `by: 'ui'` and the session id.
+    never a timer. The control file carries `by: 'ui'` and the session id. The trust boundary is
+    the file system: the control directory and the event files are guard-protected paths, so a
+    model's write there is refused and only the operator's pane, which runs outside the hooks,
+    writes a control. The loop does not compare the session id; it is recorded for the log. A
+    consumer takes only regular files, uses `done/` and `refused/` only as real directories, and
+    creates a refusal record only where no path exists, so a planted link never redirects a write.
+12. **`answer` is marked.** The loop posts the answer as `/answer <text>` followed by
+    `<!-- autoloop-answered-v1 <control name> -->`. The block triage accepts the loop's own
+    login as a trusted human only when that marker is present; the marker is stripped from the
+    answer text. A `label` control is applied only to a pull request that carries
+    `human:authorize`. A `cancel` is applied only when the recorded pid is still a dispatch
+    process (`/proc/<pid>/cmdline` names `dispatch.mjs`); one left behind by an ended dispatch is
+    refused by the next prime as `dispatch not running`.
 
 ## Commands
 
@@ -137,7 +155,7 @@ node tools/verify.mjs --plugin-root .
 **Never**
 - A control that bypasses a gate (merge without the merge gate, a label swap other than the one
   named).
-- Secrets, tokens, or host paths outside the checkout in an event.
+- Secrets or tokens in an event; a host path other than a dispatch's `liveFile`.
 
 ## Success criteria
 

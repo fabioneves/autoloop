@@ -689,14 +689,23 @@ function needsYouFacts(unit, title) {
 // the run's events. `pr` from the delivery path joins every row that names an
 // issue; a dispatch is running while its pid lives and died when it is gone.
 export const LOG_LIMIT = 50;
-export function eventFacts(events, { alive = processAlive } = {}) {
+// The newest lines a projection reads: a long run's earliest steps fall off
+// the timeline before its log does; a dispatch older than this cannot be
+// cancelled from the pane.
+export const EVENTS_READ_LIMIT = 5000;
+// The kinds whose `pr` is the unit's own pull request; a `wait` names the one
+// waited on, and a `control` the one the operator named.
+const OWN_PR_KINDS = new Set(['step', 'deliver', 'merge', 'label']);
+// `recent` is every event read, `events` the run's: a dispatch inherited from
+// an ended session started under the old run id and ends under the new one.
+export function eventFacts(events, { alive = processAlive, recent = events } = {}) {
   const prByIssue = new Map();
   for (const event of events) {
-    if (Number.isSafeInteger(event.issue) && Number.isSafeInteger(event.pr)) prByIssue.set(event.issue, event.pr);
+    if (OWN_PR_KINDS.has(event.kind) && Number.isSafeInteger(event.issue) && Number.isSafeInteger(event.pr)) prByIssue.set(event.issue, event.pr);
   }
   const withPr = (event) => (event.pr === undefined && prByIssue.has(event.issue) ? { ...event, pr: prByIssue.get(event.issue) } : event);
-  const ended = new Set(events.filter((event) => event.kind === 'dispatch.end').map((event) => event.dispatch));
-  const dispatches = events
+  const ended = new Set(recent.filter((event) => event.kind === 'dispatch.end').map((event) => event.dispatch));
+  const dispatches = recent
     .filter((event) => event.kind === 'dispatch.start' && typeof event.dispatch === 'string' && !ended.has(event.dispatch))
     .map((event) => ({
       dispatch: event.dispatch, issue: event.issue ?? null, pr: event.pr ?? prByIssue.get(event.issue) ?? null,
@@ -708,7 +717,13 @@ export function eventFacts(events, { alive = processAlive } = {}) {
     const steps = own.filter((event) => event.kind === 'step');
     return steps.map((event, index) => {
       const next = steps[index + 1]?.at ?? Infinity;
-      const returned = own.find((other) => other.kind === 'dispatch.end' && other.at >= event.at && other.at < next);
+      // The step's dispatches are the ones in its window. A retry or a
+      // fallback is a new pair: the step is returned by its LAST end, and
+      // not at all while a start of its window has no end.
+      const window = own.filter((other) => other.at >= event.at && other.at < next);
+      const endedIds = new Set(window.filter((other) => other.kind === 'dispatch.end').map((other) => other.dispatch));
+      const open = window.some((other) => other.kind === 'dispatch.start' && !endedIds.has(other.dispatch));
+      const returned = open ? undefined : window.findLast((other) => other.kind === 'dispatch.end');
       return {
         step: event.step, role: STEP_ROLES[event.step] ?? null, round: roundFacts(event.round ?? null), model: event.model ?? null,
         startedAtMs: event.at, returnedAtMs: returned?.at ?? null,
@@ -744,10 +759,10 @@ export function statusProjection({
   // opening time (an older plugin opened the run). No file: empty facts.
   const commonDir = dirname(dir);
   const runId = currentRunId(commonDir);
-  const recorded = readEvents(commonDir, { limit: 2000 }).events;
+  const recorded = readEvents(commonDir, { limit: EVENTS_READ_LIMIT }).events;
   const facts = eventFacts(runId === 'unknown'
     ? recorded.filter((event) => openedAtMs === null || event.at >= openedAtMs)
-    : recorded.filter((event) => event.run === runId), { alive });
+    : recorded.filter((event) => event.run === runId), { alive, recent: recorded });
   const spoken = authority.authority !== 'none';
   const titleOf = (issue) => (spoken ? snapshot.sections.openIssues.items.find((item) => item.number === issue)?.title ?? null : null);
   const pinned = readPinnedModels(join(dir, 'models.json'));
@@ -802,7 +817,7 @@ export function statusProjection({
       inFlight: typeof worked.dispatchId === 'string' && !Number.isFinite(worked.returnedAtMs),
       startedAtMs: worked.startedAtMs, returnedAtMs: Number.isFinite(worked.returnedAtMs) ? worked.returnedAtMs : null,
       waitingOn: null, decisions: worked.decisions,
-      pr: openPrs.find((item) => item.issue === worked.issue)?.number ?? facts.prByIssue.get(worked.issue) ?? null,
+      pr: worked.pending?.pr ?? openPrs.find((item) => item.issue === worked.issue)?.number ?? facts.prByIssue.get(worked.issue) ?? null,
       steps: facts.stepsOf(worked.issue),
     },
     units: all,
@@ -2415,8 +2430,53 @@ function projectionChecks(at) {
       JSON.stringify(owned.dispatches) === JSON.stringify([{ dispatch: 'd412', issue: 412, pr: null, role: 'code-review', model: 'gpt-6-astra',
         liveFile: '/tmp/live/412-code-review-r2.jsonl', pid: 4242, startedAtMs: at(10, 28), state: 'running' }])
         && project({ alive: () => false }).dispatches[0].state === 'died']);
-    results.push(['a unit takes its PR from the deliver event when the record and the scan have none',
-      unit(owned, 416)?.pr === 700 && unit(owned, 413)?.pr === 702 && unit(owned, 412)?.pr === null]);
+    results.push(['a unit takes its PR from the deliver event when the record and the scan have none; a waited-on PR is never the unit\'s',
+      unit(owned, 416)?.pr === 700 && unit(owned, 413)?.pr === 702 && unit(owned, 412)?.pr === null && unit(owned, 415)?.pr === null]);
+    results.push(['a dispatch started under an earlier run id and still open is listed; one ended under the new id is not',
+      (() => {
+        const base = { v: 1, by: 'dispatch', issue: 1 };
+        const recent = [
+          { ...base, at: 1, run: 'R0', kind: 'dispatch.start', dispatch: 'old-open', role: 'plan', pid: 1 },
+          { ...base, at: 2, run: 'R0', kind: 'dispatch.start', dispatch: 'old-ended', role: 'plan', pid: 1 },
+          { ...base, at: 3, run: 'R1', kind: 'dispatch.end', dispatch: 'old-ended', ok: true },
+          { ...base, at: 4, run: 'R1', kind: 'step', step: '02-plan' },
+        ];
+        const facts = eventFacts(recent.filter((event) => event.run === 'R1'), { alive: () => true, recent });
+        return facts.dispatches.map((entry) => entry.dispatch).join() === 'old-open' && facts.log.length === 2;
+      })()]);
+    results.push(['a step is returned by the last end of its window, not at all while a retry runs, and the log keeps 50',
+      (() => {
+        const base = { v: 1, run: 'R', by: 'x', issue: 1 };
+        const retried = eventFacts([
+          { ...base, at: 100, kind: 'step', step: '02-plan' },
+          { ...base, at: 110, kind: 'dispatch.start', dispatch: 'a', role: 'plan', pid: 1 },
+          { ...base, at: 200, kind: 'dispatch.end', dispatch: 'a', ok: false, reason: 'DISPATCH_TIMEOUT' },
+          { ...base, at: 210, kind: 'dispatch.start', dispatch: 'b', role: 'plan', pid: 1 },
+        ], { alive: () => false });
+        const settled = eventFacts([
+          { ...base, at: 100, kind: 'step', step: '02-plan' },
+          { ...base, at: 200, kind: 'dispatch.end', dispatch: 'a', ok: false, reason: 'DISPATCH_TIMEOUT' },
+          { ...base, at: 210, kind: 'dispatch.start', dispatch: 'b', role: 'plan', pid: 1 },
+          { ...base, at: 300, kind: 'dispatch.end', dispatch: 'b', ok: true },
+          { ...base, at: 400, kind: 'step', step: '05-implement' },
+        ], { alive: () => false });
+        const many = eventFacts(Array.from({ length: 60 }, (_, n) => ({ ...base, at: n, kind: 'step', step: '02-plan' })));
+        return retried.stepsOf(1)[0].returnedAtMs === null && retried.dispatches.length === 1 && retried.dispatches[0].state === 'died'
+          && settled.stepsOf(1)[0].returnedAtMs === 300 && settled.stepsOf(1)[1].returnedAtMs === null
+          && many.log.length === 50 && many.log[0].at === 59;
+      })()]);
+    results.push(['without a run id the run\'s events are the ones since the marker opened; without a file, empty facts',
+      (() => {
+        setRunId(join(root, '.git'), null);
+        appendEvent(join(root, '.git'), { v: 1, at: at(8, 35), run: 'R0', by: 'unit', kind: 'decision', issue: 425, text: 'late' });
+        const byTime = project();
+        rmSync(join(root, '.git', 'autoloop', 'events.jsonl'), { force: true });
+        const none = project();
+        write();
+        return byTime.log.length === 11 && !byTime.log.some((event) => event.at === at(8, 20))
+          && byTime.log.some((event) => event.text === 'late')
+          && none.log.length === 0 && none.dispatches.length === 0 && none.unit?.steps?.length === 0 && unit(none, 413)?.pr === null;
+      })()]);
     // Without #412 the simplify step is the worked unit: returned, so not in
     // flight, on its fallback model.
     write(runIssues.filter((number) => number !== 412));

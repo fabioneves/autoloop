@@ -2740,11 +2740,19 @@ function selfTest() {
       'a route without a fallback retries at most twice, then fails typed',
       (() => {
         setModels({ 'code-review': { fallback: null } });
+        const before = readEvents(join(repoScratch, '.git')).events.length;
         const { result, spawns } = spawnsOf('code-review', 'exit 7');
         resetModels();
+        // Each attempt is its own start/end pair, every end failed with the code.
+        const since = readEvents(join(repoScratch, '.git')).events.slice(before);
+        const starts = since.filter((event) => event.kind === 'dispatch.start');
+        const ends = since.filter((event) => event.kind === 'dispatch.end');
         return result.ok === false && spawns === 3
           && result.error.code === 'ENGINE_EXIT_NONZERO'
-          && result.error.earlierAttempts.length === 2;
+          && result.error.earlierAttempts.length === 2
+          && starts.length === 3 && ends.length === 3 && new Set(ends.map((event) => event.dispatch)).size === 3
+          && starts.every((event, index) => event.dispatch === ends[index].dispatch)
+          && ends.every((event) => event.ok === false && event.reason === 'ENGINE_EXIT_NONZERO');
       })(),
     );
     check(
@@ -3021,11 +3029,14 @@ function selfTest() {
         child.unref();
         const pid = child.pid;
         appendEvent(directory, { v: 1, at: 1000, run: 'r', by: 'dispatch', kind: 'dispatch.start', issue: 9, dispatch: 'd9', role: 'implement', pid });
-        const noControl = pendingCancel({ commonDir: directory, pid });
+        const identity = () => true;
+        const noControl = pendingCancel({ commonDir: directory, pid, identity });
         writeControl(directory, { v: 1, at: 2, kind: 'cancel', by: 'ui', session: 'S', dispatch: 'other' });
-        const otherControl = pendingCancel({ commonDir: directory, pid });
+        const otherControl = pendingCancel({ commonDir: directory, pid, identity });
         writeControl(directory, { v: 1, at: 3, kind: 'cancel', by: 'ui', session: 'S', dispatch: 'd9' });
-        const pending = pendingCancel({ commonDir: directory, pid });
+        // The real identity check: this child is `node -e`, not a dispatch, so a reused pid is never a target.
+        const reused = pendingCancel({ commonDir: directory, pid });
+        const pending = pendingCancel({ commonDir: directory, pid, identity });
         const outcome = pending === null ? null : cancelDispatch({ commonDir: directory, pid, ...pending, graceMs: 2000, nowMs: 5000 });
         // The child is this process's: unreaped while the test blocks the
         // event loop, so a zombie (state Z) counts as ended.
@@ -3038,11 +3049,35 @@ function selfTest() {
         const dead = gone();
         const { events } = readEvents(directory);
         const end = events.find((event) => event.kind === 'dispatch.end');
-        const again = pendingCancel({ commonDir: directory, pid });
-        return noControl === null && otherControl === null && pending !== null && outcome?.cancelled === true && dead
+        const again = pendingCancel({ commonDir: directory, pid, identity });
+        return noControl === null && otherControl === null && reused === null && pending !== null && outcome?.cancelled === true && dead
           && end?.dispatch === 'd9' && end.ok === false && end.reason === 'cancelled' && end.ms === 4000
           && events.some((event) => event.kind === 'control' && event.text === 'cancel implement d9')
           && again === null;
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    })(),
+  );
+  check(
+    'a cancel sends SIGTERM then SIGKILL after the grace, to the group when the pid leads one, else to the pid',
+    (() => {
+      const directory = mkdtempSync(join(tmpdir(), 'autoloop-cancel-seams-'));
+      try {
+        const start = { at: 1000, dispatch: 'd1', role: 'implement', issue: 3 };
+        const sequence = (groupLeader) => {
+          const calls = [];
+          cancelDispatch({ commonDir: directory, pid: 77, start, control: { kind: 'cancel' }, done() {}, graceMs: 0,
+            kill: (target, signal) => calls.push(`${target}:${signal}`), alive: () => true, sleep() {}, groupLeader: () => groupLeader });
+          return calls.join();
+        };
+        const stillAlive = (() => {
+          const calls = [];
+          cancelDispatch({ commonDir: directory, pid: 77, start, control: { kind: 'cancel' }, done() {}, graceMs: 0,
+            kill: (target, signal) => calls.push(signal), alive: () => false, sleep() {}, groupLeader: () => true });
+          return calls.join();
+        })();
+        return sequence(true) === '-77:SIGTERM,-77:SIGKILL' && sequence(false) === '77:SIGTERM,77:SIGKILL' && stillAlive === 'SIGTERM';
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -3141,9 +3176,32 @@ function processAlive(pid) {
 // dispatch.start event that carries the recorded pid. The kill is of the
 // group when the pid leads one (dispatch-stream.sh runs it under setsid, so
 // the engine dies with it), else of the pid alone; SIGKILL after the grace.
-export function pendingCancel({ commonDir, pid, nowMs = Date.now() }) {
-  if (commonDir === null || !Number.isSafeInteger(pid)) return null;
-  const { events } = readEvents(commonDir, { limit: 2000 });
+// A cancel file is named `<at>-cancel-…`: the directory is listed first and
+// the event file (up to 10 MiB) read only when one exists, since every
+// waiter polls every 2 s.
+function cancelPending(commonDir) {
+  try {
+    return readdirSync(join(commonDir, 'autoloop', 'control')).some((name) => name.includes('-cancel-') && !name.startsWith('.'));
+  } catch {
+    return false;
+  }
+}
+
+// The pid in `<out>.pid` is this dispatch's only while that process still
+// is one: a reused pid after a dead dispatch must never be the kill target.
+export function isDispatchProcess(pid) {
+  try {
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    return cmdline.includes('dispatch.mjs');
+  } catch {
+    return false;
+  }
+}
+
+export function pendingCancel({ commonDir, pid, nowMs = Date.now(), identity = isDispatchProcess }) {
+  if (commonDir === null || !Number.isSafeInteger(pid) || !cancelPending(commonDir)) return null;
+  if (!identity(pid)) return null;
+  const { events } = readEvents(commonDir, { limit: 5000 });
   const ended = new Set(events.filter((event) => event.kind === 'dispatch.end').map((event) => event.dispatch));
   const open = events.findLast((event) => event.kind === 'dispatch.start' && event.pid === pid && !ended.has(event.dispatch));
   if (open === undefined) return null;
@@ -3176,13 +3234,19 @@ function runWaitCli(parsed) {
   const poll = () => {
     const state = waitState(parsed.path);
     if (state === 'waiting' && commonDir !== null) {
-      let pid = null;
-      try { pid = Number(readFileSync(`${parsed.path}.pid`, 'utf8').trim()); } catch { /* no pid yet */ }
-      const pending = pendingCancel({ commonDir, pid });
-      if (pending !== null) {
-        cancelDispatch({ commonDir, pid, ...pending });
-        console.error(`wait: the dispatch recorded in ${parsed.path}.pid was cancelled by the operator; treat it as died`);
-        process.exit(3);
+      // A control the waiter cannot read is reported and the wait goes on:
+      // the wait's own exit codes stay 0, 1 or 3.
+      try {
+        let pid = null;
+        try { pid = Number(readFileSync(`${parsed.path}.pid`, 'utf8').trim()); } catch { /* no pid yet */ }
+        const pending = pendingCancel({ commonDir, pid });
+        if (pending !== null) {
+          cancelDispatch({ commonDir, pid, ...pending });
+          console.error(`wait: the dispatch recorded in ${parsed.path}.pid was cancelled by the operator; treat it as died`);
+          process.exit(3);
+        }
+      } catch (error) {
+        console.error(`wait: control check failed (${error.message}); waiting on`);
       }
     }
     if (state === 'done') {

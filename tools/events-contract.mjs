@@ -10,8 +10,8 @@
 // for a UI concern, so `appendEvent` and `writeControl` return `{ ok, error }`
 // and never throw.
 import {
-  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync,
-  writeFileSync,
+  appendFileSync, chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
+  renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -184,12 +184,28 @@ const controlName = (control) => `${String(control.at).padStart(13, '0')}-${cont
 
 // Written to a temporary name and renamed into place: a consumer never lists a
 // half-written control. The temporary name starts with a dot and is never taken.
+// A directory the contract uses must be a real directory: a symbolic link
+// planted there would redirect a rename or a write into any path as the
+// consumer's own user.
+function realDirectory(path) {
+  mkdirSync(path, { recursive: true });
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`${path} is not a directory`);
+  return path;
+}
+
+// A refusal record is created, never overwritten through a path that exists
+// (a link, a file): O_EXCL | O_NOFOLLOW.
+function createFile(path, text) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+  try { writeSync(fd, text); } finally { closeSync(fd); }
+}
+
 export function writeControl(commonDir, control) {
   const checked = validateControl(control);
   if (!checked.ok) return checked;
   try {
-    const directory = controlDir(commonDir);
-    mkdirSync(directory, { recursive: true });
+    const directory = realDirectory(controlDir(commonDir));
     const name = controlName(control);
     const staged = join(directory, `.tmp-${name}`);
     writeFileSync(staged, `${checked.line}\n`);
@@ -205,7 +221,7 @@ function prune(directory, nowMs) {
   for (const name of readdirSync(directory)) {
     const path = join(directory, name);
     try {
-      if (nowMs - statSync(path).mtimeMs > CONTROL_RETENTION_MS) unlinkSync(path);
+      if (nowMs - lstatSync(path).mtimeMs > CONTROL_RETENTION_MS) unlinkSync(path);
     } catch { /* pruning is best-effort */ }
   }
 }
@@ -216,25 +232,33 @@ function prune(directory, nowMs) {
 // two directories at 7 days rides on every take.
 export function takeControls(commonDir, kinds, { nowMs = Date.now() } = {}) {
   const directory = controlDir(commonDir);
-  const done = join(directory, 'done');
-  const refused = join(directory, 'refused');
+  if (!existsSync(directory)) return [];
+  const done = realDirectory(join(directory, 'done'));
+  const refused = realDirectory(join(directory, 'refused'));
   prune(done, nowMs);
   prune(refused, nowMs);
-  if (!existsSync(directory)) return [];
   const wanted = new Set(kinds);
   const taken = [];
   for (const name of readdirSync(directory).sort()) {
     if (name.startsWith('.') || !name.endsWith('.json')) continue;
     const path = join(directory, name);
+    // Only a regular file is a control: a link, a directory or a socket is
+    // left where it is, for the operator to look at.
+    try {
+      if (!lstatSync(path).isFile()) continue;
+    } catch {
+      continue;
+    }
     let control;
     try {
       control = JSON.parse(readFileSync(path, 'utf8'));
       const checked = validateControl(control);
       if (!checked.ok) throw new Error(checked.error);
     } catch (error) {
-      mkdirSync(refused, { recursive: true });
-      writeFileSync(join(refused, name), `${JSON.stringify({ name, reason: `unreadable: ${error.message}` })}\n`);
-      unlinkSync(path);
+      try {
+        createFile(join(refused, name), `${JSON.stringify({ name, reason: `unreadable: ${error.message}` })}\n`);
+        unlinkSync(path);
+      } catch { /* a racing consumer took it, or the record exists: the next take looks again */ }
       continue;
     }
     if (!wanted.has(control.kind)) continue;
@@ -242,11 +266,9 @@ export function takeControls(commonDir, kinds, { nowMs = Date.now() } = {}) {
       control,
       name,
       done: ({ refused: reason = null } = {}) => {
-        const target = reason === null ? done : refused;
-        mkdirSync(target, { recursive: true });
-        if (reason === null) renameSync(path, join(target, name));
+        if (reason === null) renameSync(path, join(done, name));
         else {
-          writeFileSync(join(target, name), `${JSON.stringify({ ...control, reason })}\n`);
+          createFile(join(refused, name), `${JSON.stringify({ ...control, reason })}\n`);
           unlinkSync(path);
         }
       },
@@ -374,7 +396,9 @@ function selfTest() {
       for (let n = 0; n < 5; n += 1) appendEvent(dir, base({ at: 1700000000000 + n }), { maxBytes: lineBytes * 3 });
       const rotated = existsSync(join(dir, 'autoloop', EVENTS_ROTATED_FILE));
       const { events } = readEvents(dir);
-      return rotated && events.length === 5 && events[4].at === 1700000000004 && readEvents(dir, { limit: 2 }).events.length === 2;
+      const crossing = readEvents(dir, { limit: 4 }).events.map((event) => event.at - 1700000000000).join();
+      return rotated && events.length === 5 && events[4].at === 1700000000004 && readEvents(dir, { limit: 2 }).events.length === 2
+        && crossing === '1,2,3,4';
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   check('a failed append returns ok false and never throws', () => {
@@ -428,6 +452,32 @@ function selfTest() {
       return taken.length === 1 && readdirSync(join(dir, 'autoloop', CONTROL_DIR, 'refused')).length === 1;
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+  check('a link in control/, a linked refused/ directory and an existing refusal record never redirect a write', () => {
+    const dir = fresh();
+    const victim = join(dir, 'victim.txt');
+    try {
+      writeFileSync(victim, 'keep');
+      const control = join(dir, 'autoloop', CONTROL_DIR);
+      mkdirSync(control, { recursive: true });
+      // A link where a control would be: left alone, never read, never moved.
+      symlinkSync(victim, join(control, '0000000000001-answer-x.json'));
+      const linked = takeControls(dir, ['answer']);
+      // A refusal record that already exists (a link to the victim): the garbage control stays, the victim keeps its text.
+      mkdirSync(join(control, 'refused'), { recursive: true });
+      symlinkSync(victim, join(control, 'refused', '0000000000002-garbage.json'));
+      writeFileSync(join(control, '0000000000002-garbage.json'), '{');
+      takeControls(dir, ['answer']);
+      const stillThere = existsSync(join(control, '0000000000002-garbage.json'));
+      // A linked done/ directory: the take refuses to use it.
+      rmSync(join(control, 'refused'), { recursive: true, force: true });
+      rmSync(join(control, 'done'), { recursive: true, force: true });
+      mkdirSync(join(dir, 'elsewhere'));
+      symlinkSync(join(dir, 'elsewhere'), join(control, 'done'));
+      let refusedDir = false;
+      try { takeControls(dir, ['answer']); } catch { refusedDir = true; }
+      return linked.length === 0 && readFileSync(victim, 'utf8') === 'keep' && stillThere && refusedDir;
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
   check('done and refused files older than 7 days are pruned on a take', () => {
     const dir = fresh();
     try {
@@ -469,6 +519,9 @@ function selfTest() {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  check('eventText collapses whitespace, cuts at the limit by code point, and is undefined when empty', () =>
+    eventText('  a \n b\t c ') === 'a b c' && eventText('') === undefined && eventText(null) === undefined
+      && [...eventText('é'.repeat(300))].length === MAX_TEXT_CHARS);
   check('the paused marker is set, read and cleared', () => {
     const dir = fresh();
     try {

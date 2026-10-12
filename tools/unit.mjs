@@ -759,6 +759,13 @@ export function overlapCheck({ issue, boundaryFile, snapshotPath }) {
   return { ok: true, issue, overlap, delivered: delivered.map((entry) => entry.pr) };
 }
 
+// The marker under an `/answer` the loop posted for the operator (a control
+// from the status pane): the loop's own login is a trusted human only then.
+const ANSWERED_MARKER_RE = /\n*<!-- autoloop-answered-v1 (\S+) -->\s*$/u;
+export function answeredMarker(name) {
+  return `<!-- autoloop-answered-v1 ${name} -->`;
+}
+
 /** Pure: the newest `/answer` a trusted actor posted after the block, or null. */
 export function answerAfter(block, comments, trusted) {
   let newest = null;
@@ -768,8 +775,12 @@ export function answerAfter(block, comments, trusted) {
     if (!match || !Number.isFinite(at) || at <= Date.parse(block.at)) continue;
     const by = comment.author?.login;
     if (typeof by !== 'string' || !trusted(by)) continue;
+    const marked = ANSWERED_MARKER_RE.test(match[1] ?? '');
+    // The loop's own comment counts only as the operator's control.
+    if (comment.viewerDidAuthor === true && !marked) continue;
+    const text = (match[1] ?? '').replace(ANSWERED_MARKER_RE, '').trim();
     if (newest === null || at >= Date.parse(newest.at)) {
-      newest = { by, text: (match[1] ?? '').trim(), at: comment.createdAt };
+      newest = { by, text, at: comment.createdAt };
     }
   }
   return newest;
@@ -1666,6 +1677,11 @@ function selfTest() {
     && answerAfter(marked, [{ author: { login: 'stranger' }, body: '/answer 64', createdAt: later(1) }], trustedOnly) === null
     && answerAfter(marked, [{ author: { login: 'owner' }, body: 'I think 64 /answer', createdAt: later(1) }], trustedOnly) === null
     && answerAfter(marked, [{ author: { login: 'owner' }, body: '/answers are hard', createdAt: later(1) }], trustedOnly) === null);
+  check('the loop\'s own /answer counts only with the control marker, which is stripped from the text',
+    answerAfter(marked, [{ author: { login: 'owner' }, viewerDidAuthor: true, body: '/answer 64', createdAt: later(1) }], trustedOnly) === null
+    && answerAfter(marked, [{ author: { login: 'owner' }, viewerDidAuthor: true,
+      body: `/answer 64\n\n${answeredMarker('0000000000003-answer-1-abc.json')}`, createdAt: later(1) }], trustedOnly).text === '64'
+    && answerAfter(marked, [{ author: { login: 'owner' }, body: `/answer 64\n${answeredMarker('x')}`, createdAt: later(1) }], trustedOnly).text === '64');
 
   const blockedList = JSON.stringify([
     { number: 7, title: 'Answered', labels: [{ name: 'loop-ready' }, { name: 'loop-blocked' }, { name: 'human:decide' }],

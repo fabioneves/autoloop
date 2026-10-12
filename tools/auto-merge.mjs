@@ -73,7 +73,7 @@ import {
 import { matchMergeProtected } from './lane-contract.mjs';
 import { authorizeMerge } from './merge-authorization-contract.mjs';
 import { parseRepair, repairMarker } from './unit.mjs';
-import { emitEvent, resolveCommonDir } from './events-contract.mjs';
+import { emitEvent, readEvents, resolveCommonDir } from './events-contract.mjs';
 import {
   authorizePolicyPublication,
   buildCommitStatus,
@@ -3707,6 +3707,19 @@ function mergeEventCases() {
       && refused.ok === false && refused.reason === 'base moved: head is stale' && refused.issue === 42 },
     { name: 'a merge event without a linked issue omits it; a dry run writes none', ok:
       orphan.issue === undefined && orphan.reason === 'refused' && mergeEventOf(7, inputs, { merged: true }, true) === null },
+    { name: 'recordMergeEvent appends the merge event to the common dir, skips a dry run, and reports a failed append', ok: (() => {
+      const dir = mkdtempSync(join(tmpdir(), 'auto-merge-events-'));
+      try {
+        const written = recordMergeEvent(7, inputs, { merged: false, reasons: ['base moved'] }, false, dir);
+        const dry = recordMergeEvent(7, inputs, { merged: true }, true, dir);
+        const { events } = readEvents(dir);
+        const failed = recordMergeEvent(7, inputs, { merged: true }, false, 'relative/dir');
+        return written.ok === true && dry.skipped === true && events.length === 1 && events[0].kind === 'merge' && events[0].ok === false
+          && events[0].reason === 'base moved' && events[0].pr === 7 && events[0].issue === 42 && failed.ok === false;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })() },
   ];
 }
 
@@ -3789,6 +3802,11 @@ export function mergeEventOf(number, inputs, result, dryRun) {
   };
 }
 
+export function recordMergeEvent(number, inputs, result, dryRun, commonDir = resolveCommonDir(repositoryRoot())) {
+  const event = mergeEventOf(number, inputs, result, dryRun);
+  return event === null ? { ok: true, skipped: true } : emitEvent(commonDir, event);
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args[0] === '--self-test' && (args.length === 1 || (args.length === 2 && args[1] === '--nested'))) {
@@ -3812,8 +3830,7 @@ function main() {
   inputs.prNumber = Number(number);
   const result = run(inputs, { dryRun });
   const { decision } = result;
-  const event = mergeEventOf(Number(number), inputs, result, dryRun);
-  if (event !== null) emitEvent(resolveCommonDir(repositoryRoot()), event);
+  recordMergeEvent(Number(number), inputs, result, dryRun);
 
   console.log(`#${number}: path=${decision.path} allow=${decision.allow}`);
   if (dryRun && decision.allow) console.log(`WOULD-MERGE #${number} (squash, sha=${inputs.headRefOid}) — dry-run, not merging`);
