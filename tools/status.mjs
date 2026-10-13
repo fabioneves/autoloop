@@ -24,26 +24,60 @@ import { fileURLToPath } from 'node:url';
 import { STATUS_SCHEMA, statusFixture, statusProjection } from './step.mjs';
 import { latchDirectory, processStart, sessionOwnerPid } from './run-markers.mjs';
 import { realRun } from './unit.mjs';
+import { resolveCommonDir, takeControls, writeControl } from './events-contract.mjs';
 
 /** The mod's test fixtures, printed by --fixtures and held to it by the self-test. */
 const FIXTURES_FILE = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'status', 'fixtures', 'projection.ts');
 
-const USAGE = 'usage: status.mjs --json --session <id> [--root <dir>]\n       status.mjs --fixtures\n       status.mjs --self-test';
+const USAGE = 'usage: status.mjs --json --session <id> [--root <dir>] [--log <n>]\n'
+  + '       status.mjs --control --session <id> --kind <pause|unpause|cancel|answer|merge|label> [--pr <n>] [--issue <n>] [--dispatch <id>] [--text <t>] [--root <dir>]\n'
+  + '       status.mjs --fixtures\n       status.mjs --self-test';
+export const LOG_MAX = 2000;
+const NUMBERS = new Set(['--pr', '--issue']);
 
 export function parseArgs(argv) {
-  const out = { json: false, session: null, root: null, error: null };
+  const out = { json: false, control: false, session: null, root: null, log: null, kind: null, pr: null, issue: null, dispatch: null, text: null, error: null };
+  const valued = ['--session', '--root', '--log', '--kind', '--pr', '--issue', '--dispatch', '--text'];
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === '--json') { out.json = true; continue; }
-    if (flag !== '--session' && flag !== '--root') return { ...out, error: `unknown argument ${flag}` };
+    if (flag === '--control') { out.control = true; continue; }
+    if (!valued.includes(flag)) return { ...out, error: `unknown argument ${flag}` };
     const value = argv[index + 1];
     if (value === undefined || value === '') return { ...out, error: `${flag} needs a value` };
-    out[flag.slice(2)] = value;
+    if (flag === '--log') {
+      // The Log tab asks for the whole run; the band keeps the default.
+      if (!/^[1-9]\d{0,3}$/u.test(value) || Number(value) > LOG_MAX) return { ...out, error: `--log: a whole number 1..${LOG_MAX}` };
+      out.log = Number(value);
+    } else if (NUMBERS.has(flag)) {
+      if (!/^[1-9]\d{0,8}$/u.test(value)) return { ...out, error: `${flag}: a positive number` };
+      out[flag.slice(2)] = Number(value);
+    } else out[flag.slice(2)] = value;
     index += 1;
   }
-  if (!out.json) return { ...out, error: '--json is the only mode' };
+  if (out.json === out.control) return { ...out, error: '--json or --control, one of them' };
   if (out.session === null) return { ...out, error: '--session <id> is required: ownership is the session\'s' };
+  if (out.control && out.kind === null) return { ...out, error: '--control needs --kind' };
   return out;
+}
+
+// The operator's control, written by the producer so the mod never holds a
+// path: the session must own the run (the same predicate as the projection),
+// the control is validated and written atomically by the contract, and the
+// answer says the file's name. Never throws.
+export function controlJson({ session, root, kind, pr, issue, dispatch, text, nowMs = Date.now() }) {
+  try {
+    const projection = statusProjection({ root, sessionId: session });
+    if (projection.owned !== true) return { ok: false, error: 'this session owns no run' };
+    const commonDir = resolveCommonDir(root);
+    if (commonDir === null) return { ok: false, error: 'no common git directory' };
+    const control = { v: 1, at: nowMs, kind, by: 'ui', session };
+    for (const [name, value] of Object.entries({ pr, issue, dispatch, text })) if (value !== null && value !== undefined) control[name] = value;
+    const written = writeControl(commonDir, control);
+    return written.ok ? { ok: true, name: written.name, kind } : { ok: false, error: written.error };
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) };
+  }
 }
 
 // Outside a repository the projection owns nothing; the root is the
@@ -52,9 +86,9 @@ function checkoutRoot(cwd) {
   return realRun(cwd)('git', ['rev-parse', '--show-toplevel']).stdout || cwd;
 }
 
-export function statusJson({ session, root }) {
+export function statusJson({ session, root, log = null }) {
   try {
-    return statusProjection({ root, sessionId: session });
+    return statusProjection({ root, sessionId: session, ...(log === null ? {} : { logLimit: log }) });
   } catch (error) {
     const code = typeof error?.code === 'string' && error.code !== '' ? error.code : 'PROJECTION_FAILED';
     return { schema: STATUS_SCHEMA, owned: false, error: code };
@@ -199,7 +233,7 @@ function selfTest() {
     })());
     const projected = call(['--json', '--session', 'S-1']);
     check('the session that holds the latch and a live marker owns the run: the spec keys, its unit and the models', projected.status === 0
-      && projected.json !== null && Object.keys(projected.json).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models,log,dispatches'
+      && projected.json !== null && Object.keys(projected.json).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models,log,dispatches,controls'
       && projected.json.schema === 'autoloop.status/1' && projected.json.owned === true && projected.json.enabled === true
       && projected.json.unit?.issue === 412 && projected.json.unit.phase === 'review' && projected.json.unit.inFlight === true
       && JSON.stringify(projected.json.unit.round) === '{"kind":"fix","n":2,"budget":3}' && projected.json.unit.decisions === 1
@@ -207,6 +241,22 @@ function selfTest() {
     check('another session, or --root outside the checkout, owns nothing',
       call(['--json', '--session', 'S-2']).json?.owned === false
       && call(['--json', '--session', 'S-1', '--root', owned.scratch]).json?.owned === false);
+    check('--control writes one validated control for the owning session and none for another', (() => {
+      const written = owned.call(['--control', '--session', 'S-1', '--kind', 'answer', '--issue', '412', '--text', 'use the spec']);
+      const foreign = owned.call(['--control', '--session', 'S-2', '--kind', 'pause']);
+      const bad = owned.call(['--control', '--session', 'S-1', '--kind', 'merge']);
+      const json = JSON.parse(written.stdout);
+      const taken = takeControls(dirname(owned.autoloop), ['answer', 'pause']);
+      return written.status === 0 && json.ok === true && typeof json.name === 'string'
+        && JSON.parse(foreign.stdout).ok === false && JSON.parse(bad.stdout).ok === false
+        && taken.length === 1 && taken[0].control.kind === 'answer' && taken[0].control.issue === 412 && taken[0].control.text === 'use the spec'
+        && taken[0].control.by === 'ui' && taken[0].control.session === 'S-1';
+    })());
+    check('--log sets the log length of the printed projection', (() => {
+      const printed = owned.call(['--json', '--session', 'S-1', '--log', '1']);
+      const json = JSON.parse(printed.stdout);
+      return printed.status === 0 && Array.isArray(json.log) && json.log.length <= 1;
+    })());
     // A fault past ownership (the steps directory is a file): the band
     // reads owned false with the fault's code, and the tool still exits 0.
     rmSync(join(autoloop, 'steps'), { recursive: true, force: true });
@@ -222,6 +272,10 @@ function selfTest() {
     })());
     check('arguments parse', parseArgs(['--json', '--session', 'S']).error === null
       && parseArgs(['--json', '--session', 'S', '--root', '/r']).root === '/r'
+      && parseArgs(['--json', '--session', 'S', '--log', '500']).log === 500 && parseArgs(['--json', '--session', 'S']).log === null
+      && parseArgs(['--json', '--session', 'S', '--log', '0']).error !== null && parseArgs(['--json', '--session', 'S', '--log', '2001']).error !== null
+      && parseArgs(['--control', '--session', 'S', '--kind', 'pause']).control === true && parseArgs(['--control', '--session', 'S']).error !== null
+      && parseArgs(['--json', '--control', '--session', 'S']).error !== null
       && parseArgs(['--session', 'S']).error !== null && parseArgs(['--json', '--session']).error !== null);
   } finally {
     owned.dispose();
@@ -245,7 +299,11 @@ function main() {
     process.exit(2);
   }
   const root = parsed.root ?? checkoutRoot(process.cwd());
-  process.stdout.write(`${JSON.stringify(statusJson({ session: parsed.session, root }))}\n`);
+  if (parsed.control) {
+    process.stdout.write(`${JSON.stringify(controlJson({ ...parsed, root }))}\n`);
+    return;
+  }
+  process.stdout.write(`${JSON.stringify(statusJson({ session: parsed.session, root, log: parsed.log }))}\n`);
 }
 
 const isMain = (() => {

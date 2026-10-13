@@ -698,7 +698,7 @@ export const EVENTS_READ_LIMIT = 5000;
 const OWN_PR_KINDS = new Set(['step', 'deliver', 'merge', 'label']);
 // `recent` is every event read, `events` the run's: a dispatch inherited from
 // an ended session started under the old run id and ends under the new one.
-export function eventFacts(events, { alive = processAlive, recent = events } = {}) {
+export function eventFacts(events, { alive = processAlive, recent = events, logLimit = LOG_LIMIT } = {}) {
   const prByIssue = new Map();
   for (const event of events) {
     if (OWN_PR_KINDS.has(event.kind) && Number.isSafeInteger(event.issue) && Number.isSafeInteger(event.pr)) prByIssue.set(event.issue, event.pr);
@@ -730,7 +730,7 @@ export function eventFacts(events, { alive = processAlive, recent = events } = {
       };
     });
   };
-  const log = events.slice(-LOG_LIMIT).reverse().map((event) => {
+  const log = events.slice(-logLimit).reverse().map((event) => {
     const { v, run, ...rest } = withPr(event);
     return rest;
   });
@@ -742,6 +742,7 @@ export function statusProjection({
   live = loopRunIsLive, markers = ownRunMarkers,
   owned = (id) => ownedRun({ sessionId: id, directory: latchDirectory(home) }),
   alive = processAlive,
+  logLimit = LOG_LIMIT,
 }) {
   const none = { schema: STATUS_SCHEMA, owned: false };
   // SPEC-session-ownership: this process's open latch naming the session, and
@@ -762,7 +763,13 @@ export function statusProjection({
   const recorded = readEvents(commonDir, { limit: EVENTS_READ_LIMIT }).events;
   const facts = eventFacts(runId === 'unknown'
     ? recorded.filter((event) => openedAtMs === null || event.at >= openedAtMs)
-    : recorded.filter((event) => event.run === runId), { alive, recent: recorded });
+    : recorded.filter((event) => event.run === runId), { alive, recent: recorded, logLimit });
+  // The controls the loop refused since the last take: the pane toasts them.
+  const refusedDir = join(dir, 'control', 'refused');
+  const refusedControls = existsSync(refusedDir) ? readdirSync(refusedDir).sort().slice(-20).map((name) => {
+    const record = readJson(join(refusedDir, name), null);
+    return record === null ? null : { name, kind: record.kind ?? null, pr: record.pr ?? null, issue: record.issue ?? null, reason: record.reason ?? 'refused' };
+  }).filter((entry) => entry !== null) : [];
   const spoken = authority.authority !== 'none';
   const titleOf = (issue) => (spoken ? snapshot.sections.openIssues.items.find((item) => item.number === issue)?.title ?? null : null);
   const pinned = readPinnedModels(join(dir, 'models.json'));
@@ -803,6 +810,7 @@ export function statusProjection({
     enabled: statusBandEnabled(resolved?.ok ? resolved.config : null),
     run: {
       openedAtMs,
+      paused: existsSync(join(dir, 'control', 'paused')),
       parkedUntil: park?.until ?? null,
       // Null while owned: ownership needs an open marker (`live`), and a
       // close stamps every marker. Kept in the shape for a later producer.
@@ -829,6 +837,7 @@ export function statusProjection({
     models,
     log: facts.log,
     dispatches: facts.dispatches,
+    controls: { refused: refusedControls },
   };
 }
 
@@ -2399,10 +2408,11 @@ function projectionChecks(at) {
     const owned = project();
     const unchanged = files() === before && calls.every((call) => !call.startsWith('gh'));
     results.push(['an owned run projects the spec keys, its run facts, the phase list and the pinned models',
-      Object.keys(owned).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models,log,dispatches'
+      Object.keys(owned).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models,log,dispatches,controls'
         && owned.owned === true && owned.enabled === true
-        && JSON.stringify(owned.run) === JSON.stringify({ openedAtMs: at(8, 30), parkedUntil: new Date(at(11, 0)).toISOString(),
-          closedAt: null, snapshotScannedAt: scannedAt, snapshotAuthority: 'current' })
+        && JSON.stringify(owned.run) === JSON.stringify({ openedAtMs: at(8, 30), paused: false,
+          parkedUntil: new Date(at(11, 0)).toISOString(), closedAt: null, snapshotScannedAt: scannedAt, snapshotAuthority: 'current' })
+        && JSON.stringify(owned.controls) === '{"refused":[]}'
         && JSON.stringify(owned.phases) === JSON.stringify(PHASE_ORDER)
         && JSON.stringify(owned.models) === JSON.stringify({ plan: 'astra[1m]', 'plan-review': 'fable[1m]', implement: 'claude-opus-5-5',
           fix: 'claude-opus-5-5', simplify: 'fable[1m]', 'diff-review': 'astra[1m]', 'code-review': 'gpt-6-astra', 'doubt-review': 'astra[1m]' })]);
@@ -2464,6 +2474,19 @@ function projectionChecks(at) {
         return retried.stepsOf(1)[0].returnedAtMs === null && retried.dispatches.length === 1 && retried.dispatches[0].state === 'died'
           && settled.stepsOf(1)[0].returnedAtMs === 300 && settled.stepsOf(1)[1].returnedAtMs === null
           && many.log.length === 50 && many.log[0].at === 59;
+      })()]);
+    results.push(['the log length is the caller\'s, a paused marker and a refused control are reported',
+      (() => {
+        const common = join(root, '.git');
+        const two = project({ logLimit: 2 });
+        mkdirSync(join(common, 'autoloop', 'control', 'refused'), { recursive: true });
+        writeFileSync(join(common, 'autoloop', 'control', 'paused'), '');
+        writeFileSync(join(common, 'autoloop', 'control', 'refused', '0000000000005-merge-x.json'),
+          JSON.stringify({ v: 1, at: 5, kind: 'merge', by: 'ui', session: 'S-1', pr: 99, reason: 'merge gate: base moved' }));
+        const paused = project();
+        rmSync(join(common, 'autoloop', 'control'), { recursive: true, force: true });
+        return two.log.length === 2 && two.log[0].at === at(10, 28) && paused.run.paused === true
+          && JSON.stringify(paused.controls.refused) === '[{"name":"0000000000005-merge-x.json","kind":"merge","pr":99,"issue":null,"reason":"merge gate: base moved"}]';
       })()]);
     results.push(['without a run id the run\'s events are the ones since the marker opened; without a file, empty facts',
       (() => {
