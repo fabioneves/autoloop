@@ -51,6 +51,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'models-config.mjs',
   'lifecycle-contract.mjs',
   'lifecycle-driver.mjs',
+  'loop-admission.mjs',
   'loop-scope.mjs',
   'loop-smoke.mjs',
   'overlap-report.mjs',
