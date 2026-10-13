@@ -12,7 +12,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.70.0 · starting
+∞ dev · v0.71.0 · starting
 ```
 
 This session is the orchestrator: it plans, applies its own checklist pass and fixes, runs gates,
@@ -40,12 +40,15 @@ remedy; never devendor inside a Dev run.
 node <plugin-tools>/prime.mjs --json
 ```
 
-`{ok,version,repository,checkout,config,base,runMarker,waits,timings,snapshotPath,snapshotBytes,eligible,markers,sections,dispatches}`:
+`{ok,version,repository,checkout,config,base,runMarker,waits,blocks,controls,paused,timings,snapshotPath,snapshotBytes,eligible,markers,sections,dispatches}`:
 
 - `markers` — lifecycle markers by issue: `gating` (issue open), `deferred` (issue closed),
   `knownRefused` (deferred markers the same driver already refused since they last changed).
   `null` when evidence is incomplete — re-prime.
 - `eligible` — issues selection may take ("Queue and trust" applied). `null` → re-prime first.
+  `paused: true` — the operator paused the loop: finish in-flight units, take none, park.
+- A prompt `autoloop: control` means the operator used the status pane: run prime, which applies
+  the control (pause, unpause, answer, merge, label), then act on its summary.
 - `dispatches` — `inherited`: an ended session's dispatch; its unit is yours and in flight, its
   resume this wait. Never stop or re-dispatch it; re-announce its step, background `dispatch.mjs
   --wait-file <outputFile> --timeout-seconds 9999` (exit 3: the kill drill), then the step's usual
@@ -272,11 +275,12 @@ The run record's `overlap:` line comes from `overlap-report.mjs`.
 - **Bounded reads only**: field projection, `tail -20` of logs, never a full read of dispatch
   output; a failure's stderr tail only.
 - **Narration is the delta**: say what CHANGED and what needs the human.
-  **A step is announced ONCE, by its ribbon**; extra detail is a `--note` suffix.
+  **A step is announced ONCE, by its ribbon**: the line `step.mjs` prints on its tool row. Never
+  repeat it in prose; extra detail is a `--note` suffix.
 - **The scratchpad is a write target, never a cwd**: never `cd <scratchpad> && …` (`git`, `gh`,
   the driver, the gate need the repo cwd).
 - **After compaction, re-fetch byte-exact values** (SHA, planHash, comment id, label) from GitHub
-  or disk; never recall them. Prefer handing off at a unit boundary over compacting mid-unit.
+  or disk; never recall them. Prefer a hand-off at a unit boundary over compacting mid-unit.
 
 ## Lane and convergence policy
 
@@ -657,8 +661,9 @@ Never weaken the gate.
 
 ### 10. Publish, finalize, and submit
 
-**No label moves at this step, or step 11.** Announce `step.mjs --to 10-publish` (and `11-record`);
-the finalizer swaps `loop:09-gate` to `loop-delivered`.
+**No label moves at this step, or step 11.** Announce `step.mjs --to 10-publish --pr <M>` (and
+`11-record`); the ribbon then names the PR beside the issue. The finalizer swaps `loop:09-gate`
+to `loop-delivered`.
 
 Push with `git push origin HEAD:refs/heads/<captured-loop-branch>` and verify the PR head equals the
 gated OID; only after a rebase,

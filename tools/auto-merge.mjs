@@ -73,6 +73,7 @@ import {
 import { matchMergeProtected } from './lane-contract.mjs';
 import { authorizeMerge } from './merge-authorization-contract.mjs';
 import { parseRepair, repairMarker } from './unit.mjs';
+import { emitEvent, readEvents, resolveCommonDir } from './events-contract.mjs';
 import {
   authorizePolicyPublication,
   buildCommitStatus,
@@ -3695,6 +3696,33 @@ function configSettingsCases() {
   }
 }
 
+function mergeEventCases() {
+  const inputs = { issue: { number: 42 } };
+  const merged = mergeEventOf(7, inputs, { merged: true, reasons: [] }, false);
+  const refused = mergeEventOf(7, inputs, { merged: false, reasons: ['base moved:  head is stale', 'second'] }, false);
+  const orphan = mergeEventOf(7, { issue: { number: null } }, { merged: false, reasons: [] }, false);
+  return [
+    { name: 'a merge event names the PR, its issue and the outcome; a refusal carries its first reason', ok:
+      JSON.stringify(merged) === '{"by":"publish","kind":"merge","pr":7,"ok":true,"issue":42}'
+      && refused.ok === false && refused.reason === 'base moved: head is stale' && refused.issue === 42 },
+    { name: 'a merge event without a linked issue omits it; a dry run writes none', ok:
+      orphan.issue === undefined && orphan.reason === 'refused' && mergeEventOf(7, inputs, { merged: true }, true) === null },
+    { name: 'recordMergeEvent appends the merge event to the common dir, skips a dry run, and reports a failed append', ok: (() => {
+      const dir = mkdtempSync(join(tmpdir(), 'auto-merge-events-'));
+      try {
+        const written = recordMergeEvent(7, inputs, { merged: false, reasons: ['base moved'] }, false, dir);
+        const dry = recordMergeEvent(7, inputs, { merged: true }, true, dir);
+        const { events } = readEvents(dir);
+        const failed = recordMergeEvent(7, inputs, { merged: true }, false, 'relative/dir');
+        return written.ok === true && dry.skipped === true && events.length === 1 && events[0].kind === 'merge' && events[0].ok === false
+          && events[0].reason === 'base moved' && events[0].pr === 7 && events[0].issue === 42 && failed.ok === false;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })() },
+  ];
+}
+
 function selfTest() {
   let passed = 0;
   let failed = 0;
@@ -3708,6 +3736,7 @@ function selfTest() {
     ...soloTranscriptionCases(),
     ...configSettingsCases(),
     ...dependencyChangeCases(),
+    ...mergeEventCases(),
   ]) {
     if (check.ok) passed += 1;
     else failed += 1;
@@ -3761,6 +3790,23 @@ function usage() {
   console.error('usage: node <plugin-tools>/auto-merge.mjs <prNumber> [--dry-run] | --self-test');
 }
 
+// The UI's copy of a merge attempt (SPEC-events): merged, or refused with the
+// first reason. A dry run is no attempt and writes nothing.
+export function mergeEventOf(number, inputs, result, dryRun) {
+  if (dryRun) return null;
+  const issue = inputs?.issue?.number;
+  const reason = result.merged === true ? undefined : String(result.reasons?.[0] ?? 'refused').replace(/\s+/gu, ' ').slice(0, 200);
+  return {
+    by: 'publish', kind: 'merge', pr: number, ok: result.merged === true, reason,
+    issue: Number.isSafeInteger(issue) && issue > 0 ? issue : undefined,
+  };
+}
+
+export function recordMergeEvent(number, inputs, result, dryRun, commonDir = resolveCommonDir(repositoryRoot())) {
+  const event = mergeEventOf(number, inputs, result, dryRun);
+  return event === null ? { ok: true, skipped: true } : emitEvent(commonDir, event);
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args[0] === '--self-test' && (args.length === 1 || (args.length === 2 && args[1] === '--nested'))) {
@@ -3784,6 +3830,7 @@ function main() {
   inputs.prNumber = Number(number);
   const result = run(inputs, { dryRun });
   const { decision } = result;
+  recordMergeEvent(Number(number), inputs, result, dryRun);
 
   console.log(`#${number}: path=${decision.path} allow=${decision.allow}`);
   if (dryRun && decision.allow) console.log(`WOULD-MERGE #${number} (squash, sha=${inputs.headRefOid}) — dry-run, not merging`);

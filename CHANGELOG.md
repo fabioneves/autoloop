@@ -3,6 +3,43 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.71.0] - 2026-10-12
+
+### Added
+
+- An append-only event file, `.git/autoloop/events.jsonl` (`docs/specs/SPEC-events.md`): one
+  line per state change, written by `step.mjs` (a transition), `dispatch.mjs` (a dispatch start
+  with its live file and pid, and its end), `unit.mjs` (a wait, a resume, a decision, a block),
+  `prime.mjs` (a run start and end, a pause), and the delivery path (a delivery, a merge, a
+  label). Every write is fail-open. `tools/events-contract.mjs` validates, appends with rotation
+  at 10 MiB, and reads with unparsable lines counted.
+- The projection (`status.mjs --json`) gains the worked unit's `steps` (with models and return
+  times), the run's `log` (the last 50 events, newest first, the PR beside the issue),
+  `dispatches` (a start without an end: running while its pid lives, died when gone), and a
+  unit's `pr` from the deliver event.
+- A control directory, `.git/autoloop/control/`: `pause`, `unpause`, `label` (removes
+  `human:authorize`), `merge` (through the auto-merge gate) and `answer` (posted as the `/answer`
+  comment, lifted by the block triage) are applied by prime at its start; `cancel` is applied by
+  `dispatch.mjs --wait-file` to the dispatch whose start event carries the pid it waits on. A
+  refused control lands in `control/refused/` with its reason. While paused, prime reports
+  `eligible: []` and `paused: true`.
+- `step.mjs --to <step> --pr <M>` keeps the pull request on the record; every later ribbon shows
+  ` PR #M` beside the issue.
+
+### Changed
+
+- The dev skill: the ribbon is the line `step.mjs` prints on its tool row and the model never
+  repeats it in prose (a step was shown twice); `paused`, `controls` and the `autoloop: control`
+  prompt; `--pr` on the publish step. The byte budget rises to 57266 (operator's decision): the
+  new rules are added, nothing else is trimmed.
+- The control directory, the event files and the run id are guard-protected state: only the
+  operator's pane, outside the hooks, writes a control. A consumer takes regular files only and
+  never writes through a planted link. A cancel is applied only to a pid that is still a
+  dispatch process; a label control needs the label on the pull request; the loop's own
+  `/answer` counts only with the `autoloop-answered` marker it posts for the operator.
+- A run id is abandoned when a prime finds no live own run marker, so a session that ended
+  without `--close-run` never lends its id to the next run.
+
 ## [0.70.0] - 2026-10-12
 
 ### Added

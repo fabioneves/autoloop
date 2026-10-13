@@ -78,6 +78,7 @@ import {
 import { HUMAN_AUTHORIZATION_GLOBS, matchHumanAuthorization } from './lane-contract.mjs';
 import { authorizeReviewPublication } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
+import { emitEvent, readEvents, resolveCommonDir } from './events-contract.mjs';
 
 const CONTEXTS = new Set([
   'gate',
@@ -2260,7 +2261,7 @@ export function finalizeTerminalDelivery(input, context = {}) {
   if (!samePublicationSnapshot(snapshot, completedSnapshot)) {
     throw new Error('checkout or publication repository changed during terminal effects');
   }
-  return {
+  const outcome = {
     schemaVersion: 2,
     mode: config.merge.policy,
     headOid: record.headOid,
@@ -2281,6 +2282,15 @@ export function finalizeTerminalDelivery(input, context = {}) {
     },
     ...(authorize.length > 0 ? { authorize } : {}),
   };
+  // The UI's copy (SPEC-events): the pull request is delivered, and labelled
+  // when a widening reached a protected path. After every postcondition, so
+  // an event never says what a thrown finalization did not do.
+  const commonDir = (adapters.eventsCommonDir ?? resolveCommonDir)(snapshot.checkout.root);
+  if (authorize.length > 0) {
+    emitEvent(commonDir, { by: 'publish', kind: 'label', issue: input.record.issue, pr: input.record.pullRequest, text: 'human:authorize' });
+  }
+  emitEvent(commonDir, { by: 'publish', kind: 'deliver', issue: input.record.issue, pr: input.record.pullRequest });
+  return outcome;
 }
 
 // Pure arg validation — closed context enum + lowercase 40-hex SHA. Exported for --self-test.
@@ -3738,8 +3748,10 @@ function selfTest() {
   // on the pull request's labels, asserted through a fake gh on PATH.
   {
     const authorizeCalls = [];
+    const eventsDir = mkdtempSync(resolve(tmpdir(), 'publish-verdict-events-'));
     const authorizeAdapters = {
       ...terminalAdapters,
+      eventsCommonDir: () => eventsDir,
       terminalState: () => ({
         complete: true,
         issue: premerge.issue,
@@ -3779,8 +3791,13 @@ function selfTest() {
       ...terminalInput,
       reviewEvidence: { ...terminalInput.reviewEvidence, scopeChanges: [{ findingId: 'r1-f1', paths: ['src/x.mjs'], rationale: 'r' }] },
     }, { repositoryRoot: '/repo', adapters: authorizeAdapters });
+    const delivered = readEvents(eventsDir).events;
+    rmSync(eventsDir, { recursive: true, force: true });
     if (
-      widened.delivered === true
+      delivered.map((event) => `${event.kind}:${event.pr}:${event.issue}:${event.text ?? ''}`).join(' ')
+        === `label:${premerge.pullRequest}:${premerge.issue}:human:authorize deliver:${premerge.pullRequest}:${premerge.issue}: deliver:${premerge.pullRequest}:${premerge.issue}:`
+      && delivered.every((event) => event.by === 'publish')
+      && widened.delivered === true
       && widened.authorize?.length === 2
       && ordinary.delivered === true
       && ordinary.authorize === undefined
@@ -3792,7 +3809,7 @@ function selfTest() {
     ) {
       passed += 1;
     } else {
-      console.error('FAIL a review ledger widened into a protected path labels the pull request human:authorize before readiness');
+      console.error('FAIL a review ledger widened into a protected path labels the pull request human:authorize before readiness, and the deliver and label events follow');
     }
     const fakeBin = mkdtempSync(resolve(tmpdir(), 'publish-verdict-gh-'));
     const argsFile = resolve(fakeBin, 'args.json');

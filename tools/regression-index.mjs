@@ -2159,6 +2159,21 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'publish-verdict.mjs', anchor: "the human:authorize label is one gh api POST on the pull request's labels" }),
     ]),
   }),
+  Object.freeze({
+    id: 'every-step-was-announced-twice-and-a-pr-was-not-tied-to-its-issue',
+    date: '2026-10-12',
+    symptom: 'The transcript showed every step line twice: the card the step tool printed on its tool '
+      + 'row, then the same line again as the model\'s own text. A delivered pull request in a list '
+      + 'could not be read back to its issue without a lookup.',
+    cause: 'The ribbon rule said a step is announced once, by its ribbon, and the model read the '
+      + 'ribbon as the line it had to write, while the tool row already carried it. The ribbon and '
+      + 'the card named the issue alone; no step passed the pull request number to the record.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: 'the line `step.mjs` prints on its tool row. Never\n  repeat it in prose' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '`step.mjs --to 10-publish --pr <M>`' }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a transition with --pr keeps the PR on the record, and every later ribbon names it beside the issue'" }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

@@ -20,8 +20,8 @@
 //
 // Exit 0 on a typed success, 1 on a typed failure, 2 on a usage error.
 
-import { execFileSync, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   chmodSync,
@@ -49,6 +49,7 @@ import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs'
 import { pinnedModelsPath, pluginRunMarkers } from './run-markers.mjs';
 import { noteDispatch, resumedLine, transition } from './step.mjs';
 import { readStepBinding } from './dispatch-return-association.mjs';
+import { appendEvent, emitEvent, readEvents, resolveCommonDir, takeControls, writeControl } from './events-contract.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -812,6 +813,9 @@ function dispatchOnce(options, cwd, binding, previousDispatchId, newRound) {
       process.stderr.write(`dispatch: step record unavailable: ${error.message}\n`);
     }
   }
+  // The event id of this attempt: the step record's receipt when there is
+  // one, else a fresh id, so the UI can pair start and end without a record.
+  const dispatchId = receipt?.dispatchId ?? randomUUID();
   const result = route.error !== undefined
     ? failure('route', route.error.code, route.error.message, { ms: 0, startupMs: 0, stderr: '' })
     : executeDispatch({
@@ -819,7 +823,14 @@ function dispatchOnce(options, cwd, binding, previousDispatchId, newRound) {
       engine: engineBinary,
       model: resolvedModel,
       effort: resolvedEffort,
+      dispatchId,
     });
+  if (route.error === undefined) {
+    emitEvent(resolveCommonDir(cwd), {
+      by: 'dispatch', kind: 'dispatch.end', dispatch: dispatchId, role: options.role, issue: options.issue,
+      ms: Date.now() - windowStartedAtMs, ok: result.ok === true, reason: result.ok === true ? undefined : result.error?.code,
+    });
+  }
   const engine = hostName(engineBinary);
   const model = resolvedModel;
   const effort = resolvedEffort;
@@ -1086,6 +1097,8 @@ function executeDispatch(options) {
   const result = runEngine({
     role, prompt: brief.prompt, tools, cwd, timeoutMs, engine, startedAtMs,
     liveFile: options.liveFile ?? null,
+    dispatchId: options.dispatchId ?? null,
+    issue: options.issue,
     model: options.model ?? null,
     effort: options.effort ?? null,
     readRoots: options.readRoots ?? [],
@@ -1127,13 +1140,21 @@ function openLiveEventLog(cwd, role, chosenPath = null) {
 }
 
 function runEngine({
-  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, readRoots, promptFile,
+  role, prompt, tools, cwd, timeoutMs, engine, startedAtMs, liveFile, model, effort, readRoots, promptFile, dispatchId = null, issue,
 }) {
   const argv = claudeArgv(role, tools, model ?? null, effort ?? null, readRoots ?? [], hookWiringRoots(cwd));
   const checkoutBefore =
     ROLES[role].posture === 'writer' ? checkoutFingerprint(cwd) : null;
   const live = openLiveEventLog(cwd, role, liveFile ?? null);
   const started = Date.now();
+  // The UI's view of a running dispatch (SPEC-events): where its stream is
+  // and which pid a cancel ends. The pid is this process: under
+  // dispatch-stream.sh it leads its own group, so the group kill reaches the
+  // engine; the engine's own pid is not known until spawnSync returns.
+  emitEvent(resolveCommonDir(cwd), {
+    by: 'dispatch', kind: 'dispatch.start', dispatch: dispatchId, role, issue, model,
+    liveFile: live === null ? undefined : resolve(live.path), pid: process.pid,
+  }, { nowMs: started });
   const startupMs = started - startedAtMs;
   let result;
   try {
@@ -2142,6 +2163,37 @@ function selfTest() {
       })(),
     );
     check(
+      'a dispatch appends a start event with its live file and pid, then an end event with the same id',
+      (() => {
+        const { events } = readEvents(join(repoScratch, '.git'));
+        const starts = events.filter((event) => event.kind === 'dispatch.start');
+        const start = starts.at(-1);
+        const end = events.filter((event) => event.kind === 'dispatch.end').at(-1);
+        return start !== undefined && end !== undefined
+          && start.by === 'dispatch' && start.role === 'plan-review' && start.pid === process.pid
+          && start.liveFile === join(repoScratch, 'chosen-live.jsonl') && typeof start.dispatch === 'string'
+          && end.dispatch === start.dispatch && end.ok === true && Number.isSafeInteger(end.ms) && !('reason' in end);
+      })(),
+    );
+    check(
+      'a dispatch whose event cannot be written still returns its result',
+      (() => {
+        const eventsPath = join(repoScratch, '.git', 'autoloop', 'events.jsonl');
+        const before = readEvents(join(repoScratch, '.git')).events.length;
+        writeEngineShim(shimDirectory, shimBody(resultEvent({ structured_output: PASSING_VERDICT })));
+        chmodSync(eventsPath, 0o400);
+        let routed;
+        try {
+          routed = runDispatch({
+            role: 'plan-review', prompt: 'review', tools: reviewerTools, cwd: repoScratch, engine: join(shimDirectory, 'claude'),
+          });
+        } finally {
+          chmodSync(eventsPath, 0o644);
+        }
+        return routed.ok === true && (process.getuid?.() === 0 || readEvents(join(repoScratch, '.git')).events.length === before);
+      })(),
+    );
+    check(
       'a dispatch streams its engine events to a live file while running',
       // A 13-minute codex review ran as a sealed box: spawnSync buffered the
       // event stream in memory and --ephemeral persisted nothing, so there was
@@ -2688,11 +2740,19 @@ function selfTest() {
       'a route without a fallback retries at most twice, then fails typed',
       (() => {
         setModels({ 'code-review': { fallback: null } });
+        const before = readEvents(join(repoScratch, '.git')).events.length;
         const { result, spawns } = spawnsOf('code-review', 'exit 7');
         resetModels();
+        // Each attempt is its own start/end pair, every end failed with the code.
+        const since = readEvents(join(repoScratch, '.git')).events.slice(before);
+        const starts = since.filter((event) => event.kind === 'dispatch.start');
+        const ends = since.filter((event) => event.kind === 'dispatch.end');
         return result.ok === false && spawns === 3
           && result.error.code === 'ENGINE_EXIT_NONZERO'
-          && result.error.earlierAttempts.length === 2;
+          && result.error.earlierAttempts.length === 2
+          && starts.length === 3 && ends.length === 3 && new Set(ends.map((event) => event.dispatch)).size === 3
+          && starts.every((event, index) => event.dispatch === ends[index].dispatch)
+          && ends.every((event) => event.ok === false && event.reason === 'ENGINE_EXIT_NONZERO');
       })(),
     );
     check(
@@ -2961,6 +3021,69 @@ function selfTest() {
   }
 
   check(
+    'a cancel control for the open dispatch of the recorded pid ends it, writes a cancelled end event, and is taken once',
+    (() => {
+      const directory = mkdtempSync(join(tmpdir(), 'autoloop-cancel-'));
+      try {
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+        child.unref();
+        const pid = child.pid;
+        appendEvent(directory, { v: 1, at: 1000, run: 'r', by: 'dispatch', kind: 'dispatch.start', issue: 9, dispatch: 'd9', role: 'implement', pid });
+        const identity = () => true;
+        const noControl = pendingCancel({ commonDir: directory, pid, identity });
+        writeControl(directory, { v: 1, at: 2, kind: 'cancel', by: 'ui', session: 'S', dispatch: 'other' });
+        const otherControl = pendingCancel({ commonDir: directory, pid, identity });
+        writeControl(directory, { v: 1, at: 3, kind: 'cancel', by: 'ui', session: 'S', dispatch: 'd9' });
+        // The real identity check: this child is `node -e`, not a dispatch, so a reused pid is never a target.
+        const reused = pendingCancel({ commonDir: directory, pid });
+        const pending = pendingCancel({ commonDir: directory, pid, identity });
+        const outcome = pending === null ? null : cancelDispatch({ commonDir: directory, pid, ...pending, graceMs: 2000, nowMs: 5000 });
+        // The child is this process's: unreaped while the test blocks the
+        // event loop, so a zombie (state Z) counts as ended.
+        const gone = () => {
+          const ps = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+          return ps.status !== 0 || /^Z/u.test(String(ps.stdout).trim());
+        };
+        const until = Date.now() + 3000;
+        while (!gone() && Date.now() < until) sleepMs(50);
+        const dead = gone();
+        const { events } = readEvents(directory);
+        const end = events.find((event) => event.kind === 'dispatch.end');
+        const again = pendingCancel({ commonDir: directory, pid, identity });
+        return noControl === null && otherControl === null && reused === null && pending !== null && outcome?.cancelled === true && dead
+          && end?.dispatch === 'd9' && end.ok === false && end.reason === 'cancelled' && end.ms === 4000
+          && events.some((event) => event.kind === 'control' && event.text === 'cancel implement d9')
+          && again === null;
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    })(),
+  );
+  check(
+    'a cancel sends SIGTERM then SIGKILL after the grace, to the group when the pid leads one, else to the pid',
+    (() => {
+      const directory = mkdtempSync(join(tmpdir(), 'autoloop-cancel-seams-'));
+      try {
+        const start = { at: 1000, dispatch: 'd1', role: 'implement', issue: 3 };
+        const sequence = (groupLeader) => {
+          const calls = [];
+          cancelDispatch({ commonDir: directory, pid: 77, start, control: { kind: 'cancel' }, done() {}, graceMs: 0,
+            kill: (target, signal) => calls.push(`${target}:${signal}`), alive: () => true, sleep() {}, groupLeader: () => groupLeader });
+          return calls.join();
+        };
+        const stillAlive = (() => {
+          const calls = [];
+          cancelDispatch({ commonDir: directory, pid: 77, start, control: { kind: 'cancel' }, done() {}, graceMs: 0,
+            kill: (target, signal) => calls.push(signal), alive: () => false, sleep() {}, groupLeader: () => true });
+          return calls.join();
+        })();
+        return sequence(true) === '-77:SIGTERM,-77:SIGKILL' && sequence(false) === '77:SIGTERM,77:SIGKILL' && stillAlive === 'SIGTERM';
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    })(),
+  );
+  check(
     'a wait ends early only when the recorded dispatch is gone without a result',
     (() => {
       const directory = mkdtempSync(join(tmpdir(), 'autoloop-wait-'));
@@ -3047,10 +3170,85 @@ function processAlive(pid) {
   }
 }
 
+// The cancel control (SPEC-events item 8), applied by the waiter: the one
+// process that knows the dispatch's pid and outlives a killed stream task.
+// A cancel names a dispatch id; the waiter matches it to the open
+// dispatch.start event that carries the recorded pid. The kill is of the
+// group when the pid leads one (dispatch-stream.sh runs it under setsid, so
+// the engine dies with it), else of the pid alone; SIGKILL after the grace.
+// A cancel file is named `<at>-cancel-…`: the directory is listed first and
+// the event file (up to 10 MiB) read only when one exists, since every
+// waiter polls every 2 s.
+function cancelPending(commonDir) {
+  try {
+    return readdirSync(join(commonDir, 'autoloop', 'control')).some((name) => name.includes('-cancel-') && !name.startsWith('.'));
+  } catch {
+    return false;
+  }
+}
+
+// The pid in `<out>.pid` is this dispatch's only while that process still
+// is one: a reused pid after a dead dispatch must never be the kill target.
+export function isDispatchProcess(pid) {
+  try {
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    return cmdline.includes('dispatch.mjs');
+  } catch {
+    return false;
+  }
+}
+
+export function pendingCancel({ commonDir, pid, nowMs = Date.now(), identity = isDispatchProcess }) {
+  if (commonDir === null || !Number.isSafeInteger(pid) || !cancelPending(commonDir)) return null;
+  if (!identity(pid)) return null;
+  const { events } = readEvents(commonDir, { limit: 5000 });
+  const ended = new Set(events.filter((event) => event.kind === 'dispatch.end').map((event) => event.dispatch));
+  const open = events.findLast((event) => event.kind === 'dispatch.start' && event.pid === pid && !ended.has(event.dispatch));
+  if (open === undefined) return null;
+  const taken = takeControls(commonDir, ['cancel'], { nowMs }).find(({ control }) => control.dispatch === open.dispatch);
+  return taken === undefined ? null : { ...taken, start: open };
+}
+
+export function cancelDispatch({ commonDir, pid, start, control, done, graceMs = 10_000, nowMs = Date.now(),
+  kill = (target, signal) => process.kill(target, signal), alive = processAlive, sleep = sleepMs, groupLeader = isGroupLeader }) {
+  const target = groupLeader(pid) ? -pid : pid;
+  try { kill(target, 'SIGTERM'); } catch { /* already gone */ }
+  const until = Date.now() + graceMs;
+  while (alive(pid) && Date.now() < until) sleep(100);
+  if (alive(pid)) { try { kill(target, 'SIGKILL'); } catch { /* already gone */ } }
+  emitEvent(commonDir, { by: 'dispatch', kind: 'dispatch.end', dispatch: start.dispatch, role: start.role, issue: start.issue,
+    ms: nowMs - start.at, ok: false, reason: 'cancelled' }, { nowMs });
+  emitEvent(commonDir, { by: 'dispatch', kind: 'control', issue: start.issue, text: `cancel ${start.role ?? 'dispatch'} ${start.dispatch}` }, { nowMs });
+  try { done(); } catch { /* the file stays; the next waiter finds no open dispatch for it */ }
+  return { cancelled: true, dispatch: start.dispatch, pid, signal: control.kind };
+}
+
+function isGroupLeader(pid) {
+  const result = spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' });
+  return result.status === 0 && Number(String(result.stdout).trim()) === pid;
+}
+
 function runWaitCli(parsed) {
   const deadline = Date.now() + parsed.timeoutSeconds * 1000;
+  const commonDir = resolveCommonDir(process.cwd());
   const poll = () => {
     const state = waitState(parsed.path);
+    if (state === 'waiting' && commonDir !== null) {
+      // A control the waiter cannot read is reported and the wait goes on:
+      // the wait's own exit codes stay 0, 1 or 3.
+      try {
+        let pid = null;
+        try { pid = Number(readFileSync(`${parsed.path}.pid`, 'utf8').trim()); } catch { /* no pid yet */ }
+        const pending = pendingCancel({ commonDir, pid });
+        if (pending !== null) {
+          cancelDispatch({ commonDir, pid, ...pending });
+          console.error(`wait: the dispatch recorded in ${parsed.path}.pid was cancelled by the operator; treat it as died`);
+          process.exit(3);
+        }
+      } catch (error) {
+        console.error(`wait: control check failed (${error.message}); waiting on`);
+      }
+    }
     if (state === 'done') {
       console.log(`wait: ${parsed.path} exists`);
       process.exit(0);

@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.70.0" src="https://img.shields.io/badge/release-v0.70.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.71.0" src="https://img.shields.io/badge/release-v0.71.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -165,9 +165,21 @@ proxy endpoint; it never calls GitHub and never writes. A session that owns no r
 A project turns the band off with `"ui": { "status": false }` in `.autoloop/config.json`; turning
 it back on takes effect at the next session start.
 
+## Events and control
+
+Every change of the loop's state is one line appended to `.git/autoloop/events.jsonl`: a run
+start or end, a step with its round and model, a dispatch start (with its live file and pid) and
+end, a decision, a wait, a resume, a block, a delivery, a merge, a label, a pause. The projection
+reads it to show the worked unit's steps, the run's log, and the running dispatches. The operator's
+controls are files under `.git/autoloop/control/`: `pause`, `unpause`, `answer`, `merge`, `label`
+(applied by prime at its start; a refused one lands in `control/refused/` with its reason) and
+`cancel` (applied by the dispatch waiter: the dispatch ends as died). While paused, prime reports
+`eligible: []` and `paused: true`. A step announced with `--pr <M>` names the pull request beside
+its issue on every later ribbon. The contract is `docs/specs/SPEC-events.md`.
+
 ## Configuration and merge policy
 
-v0.70.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
+v0.71.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
 defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
 optional `protectedPaths` and `ui`. The repository owns it; plugin updates never overwrite it.
 
@@ -208,12 +220,12 @@ kill switch stay enforced regardless.
 | `.autoloop/checklist.md` | Optional review criteria; the plugin's checklist when absent. |
 | `docs/agentic/ARCH.md`, `docs/agentic/LESSONS.md` | Architecture map and durable memory, yours to edit. |
 | The plugin | Every tool, role brief and hook (`hooks/hooks.json`). A hook acts only for the session that owns a run, from its prime to `/clear` or exit; `--close-run` ends all but the command and edit guards. Every other session sees no hook effect. |
-| `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch. Never committed. |
+| `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch: step records, the event file, the control directory. Never committed. |
 | Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked` / `loop-waiting` / `loop-obsolete` / `loop-decided` / `loop-repair`, the `loop-digest` issue; lifecycle markers, the frozen plan, and the run record. |
 
 ## How it stays safe
 
-v0.70.0 dispatches every role through one call:
+v0.71.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>

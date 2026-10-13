@@ -72,13 +72,14 @@
 //   node <plugin-tools>/unit.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
 import { updateStepRecord } from './dispatch-return-association.mjs';
 import { inLane } from './lane-contract.mjs';
+import { emitEvent, eventText, readEvents } from './events-contract.mjs';
 import {
   SNAPSHOT_SECTIONS, completeSection, createSnapshot, deliveredPullRequests, invalidateSnapshot, snapshotProblem,
   verifySnapshot,
@@ -315,9 +316,25 @@ export function noteWaitOnStep({ commonDir, issue, what, nowMs = Date.now() }) {
   }
 }
 
+// The common git directory, or null outside a repository; never throws.
 function commonDirOf(run) {
-  const result = run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  return result?.ok ? String(result.stdout).trim() : null;
+  try {
+    const result = run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    return result?.ok ? String(result.stdout).trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// The UI's copy of a unit's change of state (SPEC-events). Never throws and
+// never changes the unit's result. A caller that resolved the common dir
+// earlier passes it; the rest resolve it here.
+function unitEvent(run, event, nowMs, commonDir = commonDirOf(run)) {
+  try {
+    if (commonDir !== null) emitEvent(commonDir, { by: 'unit', ...event }, { nowMs });
+  } catch {
+    // The event is a courtesy to the UI; the unit's state stands.
+  }
 }
 
 export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes = null, onPr = null, paths = [], note = '', base, run, now = Date.now() }) {
@@ -371,6 +388,12 @@ export function markWaiting({ issue, onIssue = null, onBaseRed = false, minutes 
   } catch {
     // The parked view is a courtesy; the wait stands.
   }
+  unitEvent(run, {
+    kind: 'wait', issue, reason: condition.on,
+    pr: condition.on === 'pr' ? condition.number : undefined,
+    paths: condition.on === 'pr' ? condition.paths : undefined,
+    text: eventText(condition.on === 'issue' ? `#${condition.number}` : condition.on === 'time' ? `${minutes} min` : note),
+  }, now);
   return { ok: true, issue, disposition: 'waiting', condition };
 }
 
@@ -456,6 +479,7 @@ export function markDecided({ issue, question, choice, alternatives = [], why, r
     // The parked view is a courtesy; the decision stands.
   }
   const url = /https?:\/\/\S+/u.exec(String(comment.stdout ?? ''))?.[0] ?? null;
+  unitEvent(run, { kind: 'decision', issue, text: eventText(`${decision.question} → ${decision.choice}`) }, now);
   return { ok: true, issue, disposition: 'decided', decision, url };
 }
 
@@ -571,6 +595,8 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   }
   const facts = issueFacts(run, issue, 'state,labels');
   if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+  // Resolved before the label edit: the edit is the call a caller checks last.
+  const commonDir = commonDirOf(run);
   const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString() };
   const body = [
     blockMarker(block),
@@ -589,6 +615,7 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
     ...(stale.length > 0 ? ['--remove-label', stale.join(',')] : [])];
   const labelled = run('gh', edit);
   if (!labelled.ok) return refusal('GH_FAILED', `labels on #${issue} failed: ${labelled.stderr}`);
+  unitEvent(run, { kind: 'block', issue, reason: block.reason, text: eventText(block.question) }, now, commonDir);
   return { ok: true, issue, disposition: 'blocked', block };
 }
 
@@ -699,8 +726,10 @@ export function liftWaits({ base, run, now = Date.now() }) {
     const removed = run('gh', ['issue', 'edit', String(issue.number), '--remove-label', 'loop-waiting']);
     // A lifted PR wait is resumed: the unit re-plans once on the merged base
     // before it claims, and prime points the host at it first.
-    if (removed.ok) lifted.push({ number: issue.number, reason: cleared, ...(condition.on === 'pr' ? { resumed: true } : {}) });
-    else errors.push(`#${issue.number}: ${removed.stderr}`);
+    if (removed.ok) {
+      lifted.push({ number: issue.number, reason: cleared, ...(condition.on === 'pr' ? { resumed: true } : {}) });
+      unitEvent(run, { kind: 'resume', issue: issue.number, reason: condition.on, text: eventText(cleared) }, now);
+    } else errors.push(`#${issue.number}: ${removed.stderr}`);
   }
   return { lifted, waiting, errors };
 }
@@ -730,6 +759,13 @@ export function overlapCheck({ issue, boundaryFile, snapshotPath }) {
   return { ok: true, issue, overlap, delivered: delivered.map((entry) => entry.pr) };
 }
 
+// The marker under an `/answer` the loop posted for the operator (a control
+// from the status pane): the loop's own login is a trusted human only then.
+const ANSWERED_MARKER_RE = /\n*<!-- autoloop-answered-v1 (\S+) -->\s*$/u;
+export function answeredMarker(name) {
+  return `<!-- autoloop-answered-v1 ${name} -->`;
+}
+
 /** Pure: the newest `/answer` a trusted actor posted after the block, or null. */
 export function answerAfter(block, comments, trusted) {
   let newest = null;
@@ -739,8 +775,12 @@ export function answerAfter(block, comments, trusted) {
     if (!match || !Number.isFinite(at) || at <= Date.parse(block.at)) continue;
     const by = comment.author?.login;
     if (typeof by !== 'string' || !trusted(by)) continue;
+    const marked = ANSWERED_MARKER_RE.test(match[1] ?? '');
+    // The loop's own comment counts only as the operator's control.
+    if (comment.viewerDidAuthor === true && !marked) continue;
+    const text = (match[1] ?? '').replace(ANSWERED_MARKER_RE, '').trim();
     if (newest === null || at >= Date.parse(newest.at)) {
-      newest = { by, text: (match[1] ?? '').trim(), at: comment.createdAt };
+      newest = { by, text, at: comment.createdAt };
     }
   }
   return newest;
@@ -808,6 +848,7 @@ export function triageBlocks({ run, now = Date.now() }) {
     const commented = run('gh', ['issue', 'comment', String(issue.number), '--body', body]);
     if (!commented.ok) errors.push(`#${issue.number}: resumed, but the record failed: ${commented.stderr}`);
     resumed.push({ number: issue.number, by: answer.by, answer: answer.text });
+    unitEvent(run, { kind: 'resume', issue: issue.number, reason: 'answer', text: eventText(answer.text) }, now);
   }
   return { resumed, waiting, held, errors };
 }
@@ -1107,6 +1148,38 @@ function selfTest() {
           && prWait.calls[1].includes('waits on PR #70')
           && prWait.calls[1].includes('src/a.mjs, src/b/')
           && JSON.stringify(last.waiting) === JSON.stringify({ on: 'PR #70 (src/a.mjs, src/b/)', atMs: 7000 });
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
+  check('a wait, a decision, a block and a lift each append their event; an unwritable file changes none of them',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-events-'));
+      try {
+        const git = ['git rev-parse', scratch];
+        const waits = fakeRun([['gh pr view 70', 'OPEN'], ['gh issue comment 5', ''], ['gh issue edit 5 --add-label loop-waiting', ''], git]);
+        markWaiting({ issue: 5, onPr: 70, paths: ['src/a.mjs'], base: 'main', run: waits.run, now: 7000 });
+        const decides = fakeRun([['gh issue view 5', 'OPEN'], ['gh issue comment 5', 'https://x/5#c1'], ['gh issue edit 5', ''], git]);
+        markDecided({ issue: 5, question: 'Which spec wins?', choice: 'the newer', why: 'dated', run: decides.run, now: 8000 });
+        const blockResponses = [['gh issue view 7', '{"state":"OPEN","labels":[]}'], ['gh issue comment 7', ''], ['gh issue edit 7', ''], git];
+        const blocks = fakeRun(blockResponses);
+        const blocked = markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'May it proceed?', run: blocks.run, now: 9000 });
+        const condition = { on: 'issue', number: 4 };
+        const lifts = fakeRun([['gh issue list', JSON.stringify([{ number: 5, comments: [{ body: waitMarker(condition) }] }])],
+          ['gh issue view 4', 'CLOSED'], ['gh issue edit', ''], git]);
+        liftWaits({ base: 'main', run: lifts.run, now: 10000 });
+        const { events } = readEvents(scratch);
+        const kinds = events.map((event) => `${event.kind}:${event.issue}:${event.at}`).join(' ');
+        chmodSync(join(scratch, 'autoloop', 'events.jsonl'), 0o400);
+        const again = markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'May it proceed?', run: fakeRun(blockResponses).run, now: 9500 });
+        chmodSync(join(scratch, 'autoloop', 'events.jsonl'), 0o644);
+        return blocked.ok === true && blocks.calls.at(-1).startsWith('gh issue edit 7 --add-label loop-blocked')
+          && kinds === 'wait:5:7000 decision:5:8000 block:7:9000 resume:5:10000'
+          && events[0].pr === 70 && events[0].reason === 'pr' && events[0].paths.join() === 'src/a.mjs'
+          && events[1].text === 'Which spec wins? → the newer'
+          && events[2].reason === 'POLICY_DENIED' && events[2].text === 'May it proceed?'
+          && events[3].reason === 'issue' && events.every((event) => event.by === 'unit' && event.run === 'unknown')
+          && again.ok === true && (process.getuid?.() === 0 || readEvents(scratch).events.length === 4);
       } finally {
         rmSync(scratch, { recursive: true, force: true });
       }
@@ -1604,6 +1677,11 @@ function selfTest() {
     && answerAfter(marked, [{ author: { login: 'stranger' }, body: '/answer 64', createdAt: later(1) }], trustedOnly) === null
     && answerAfter(marked, [{ author: { login: 'owner' }, body: 'I think 64 /answer', createdAt: later(1) }], trustedOnly) === null
     && answerAfter(marked, [{ author: { login: 'owner' }, body: '/answers are hard', createdAt: later(1) }], trustedOnly) === null);
+  check('the loop\'s own /answer counts only with the control marker, which is stripped from the text',
+    answerAfter(marked, [{ author: { login: 'owner' }, viewerDidAuthor: true, body: '/answer 64', createdAt: later(1) }], trustedOnly) === null
+    && answerAfter(marked, [{ author: { login: 'owner' }, viewerDidAuthor: true,
+      body: `/answer 64\n\n${answeredMarker('0000000000003-answer-1-abc.json')}`, createdAt: later(1) }], trustedOnly).text === '64'
+    && answerAfter(marked, [{ author: { login: 'owner' }, body: `/answer 64\n${answeredMarker('x')}`, createdAt: later(1) }], trustedOnly).text === '64');
 
   const blockedList = JSON.stringify([
     { number: 7, title: 'Answered', labels: [{ name: 'loop-ready' }, { name: 'loop-blocked' }, { name: 'human:decide' }],
@@ -1633,6 +1711,7 @@ function selfTest() {
       comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker({ ...marked, issue: 15, reason: 'TRUST_REQUIRED' }), createdAt: blockAt },
         { author: { login: 'owner' }, body: '/answer the issue text wins', createdAt: later(30) }] },
   ]);
+  const triageEvents = mkdtempSync(join(tmpdir(), 'unit-triage-events-'));
   const triaging = fakeRun([
     ['gh issue list --label loop-blocked', blockedList],
     ['gh api repos/{owner}/{repo}/issues/7/events', later(0.1)],
@@ -1651,8 +1730,14 @@ function selfTest() {
     ['gh api repos/{owner}/{repo}/collaborators/stranger/permission', 'read'],
     ['gh issue edit 7', ''],
     ['gh issue comment 7', ''],
+    ['git rev-parse', triageEvents],
   ]);
   const triage = triageBlocks({ run: triaging.run, now: Date.parse(later(60)) });
+  const resumedEvents = readEvents(triageEvents).events;
+  rmSync(triageEvents, { recursive: true, force: true });
+  check('a resumed block appends a resume event with the answer',
+    resumedEvents.map((event) => `${event.kind}:${event.issue}:${event.reason}:${event.text}`).join('|')
+      === 'resume:7:answer:128|resume:13:answer:64|resume:15:answer:the issue text wins');
   check('prime resumes an answered loop block, and holds the rest with their reason',
     triage.resumed.map((entry) => `${entry.number}:${entry.by}:${entry.answer}`).join(',') === '7:owner:128,13:owner:64,15:owner:the issue text wins'
     && triage.waiting.map((entry) => `${entry.number}:${entry.question}`).join(',') === '8:What length?,11:What length?'

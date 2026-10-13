@@ -13,14 +13,15 @@
 //   node step.mjs --self-test
 
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
   statSync, writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { latchDirectory, loopRunIsLive, ownedRun, ownRunMarkers, processStart, sessionLatch, sessionOwnerPid } from './run-markers.mjs';
+import { latchDirectory, loopRunIsLive, ownedRun, ownRunMarkers, processAlive, processStart, sessionLatch, sessionOwnerPid } from './run-markers.mjs';
+import { appendEvent, currentRunId, emitEvent, eventText, readEvents, setRunId } from './events-contract.mjs';
 import {
   completeSection, createSnapshot, eligibleIssueNumbers, invalidateSnapshot, issueSnapshotItem, SNAPSHOT_SECTIONS,
   snapshotProblem, verifySnapshot,
@@ -307,7 +308,7 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
 
 export function transition({
   root, run = realRun(root), nowMs = Date.now(),
-  issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false,
+  issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false, pr = null,
   markers = ownRunMarkers,
 }) {
   const refuse = (message) => ({ ok: false, lines: [message] });
@@ -372,6 +373,9 @@ export function transition({
       const next = latest === null || latest.closed ? { issue, steps: [] } : latest;
       // Sent back to a ladder or fix step, the delivered head is no longer the unit's.
       if (LADDER.includes(to) || to === '08-fix') delete next.pending;
+      // The unit's pull request, once the publish step names it: every later
+      // ribbon and card shows it beside the issue (SPEC-events item 6).
+      if (Number.isSafeInteger(pr) && pr > 0) next.pr = pr;
       next.steps.push({
         step: to, stepId: newAssociationId(), round, model, fallback, staged, startedAtMs: nowMs,
         ...(skipped.length ? { skipped } : {}),
@@ -382,9 +386,13 @@ export function transition({
   } catch (error) {
     warning = `! step: #${issue} moved to ${to} but its record failed: ${error.message}; re-prime before deciding`;
   }
+  // The UI's copy of the transition (SPEC-events). Fail-open: a refused or
+  // failed append is one stderr line and the ribbon still prints.
+  const knownPr = [pr, record.pr].find((number) => Number.isSafeInteger(number) && number > 0) ?? null;
+  emitEvent(dirname(dir), { by: 'step', kind: 'step', issue, step: to, round, model, text: eventText(note), pr: knownPr }, { nowMs });
   return {
     ok: true,
-    lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note }),
+    lines: [renderRibbon({ atMs: nowMs, issue, step: to, round, badge, model, fallback, note, pr: knownPr }),
       ...(skipped.length ? [`⚠️ #${issue} skipped ${skipped.join(', ')}`] : []),
       ...(warning ? [warning] : [])],
   };
@@ -677,10 +685,63 @@ function needsYouFacts(unit, title) {
   return unit.round === 'open-findings' ? { kind: 'decide', text: title ?? 'open findings' } : null;
 }
 
+// The event file's part of the projection (SPEC-events item 5), pure over
+// the run's events. `pr` from the delivery path joins every row that names an
+// issue; a dispatch is running while its pid lives and died when it is gone.
+export const LOG_LIMIT = 50;
+// The newest lines a projection reads: a long run's earliest steps fall off
+// the timeline before its log does; a dispatch older than this cannot be
+// cancelled from the pane.
+export const EVENTS_READ_LIMIT = 5000;
+// The kinds whose `pr` is the unit's own pull request; a `wait` names the one
+// waited on, and a `control` the one the operator named.
+const OWN_PR_KINDS = new Set(['step', 'deliver', 'merge', 'label']);
+// `recent` is every event read, `events` the run's: a dispatch inherited from
+// an ended session started under the old run id and ends under the new one.
+export function eventFacts(events, { alive = processAlive, recent = events } = {}) {
+  const prByIssue = new Map();
+  for (const event of events) {
+    if (OWN_PR_KINDS.has(event.kind) && Number.isSafeInteger(event.issue) && Number.isSafeInteger(event.pr)) prByIssue.set(event.issue, event.pr);
+  }
+  const withPr = (event) => (event.pr === undefined && prByIssue.has(event.issue) ? { ...event, pr: prByIssue.get(event.issue) } : event);
+  const ended = new Set(recent.filter((event) => event.kind === 'dispatch.end').map((event) => event.dispatch));
+  const dispatches = recent
+    .filter((event) => event.kind === 'dispatch.start' && typeof event.dispatch === 'string' && !ended.has(event.dispatch))
+    .map((event) => ({
+      dispatch: event.dispatch, issue: event.issue ?? null, pr: event.pr ?? prByIssue.get(event.issue) ?? null,
+      role: event.role ?? null, model: event.model ?? null, liveFile: event.liveFile ?? null, pid: event.pid ?? null,
+      startedAtMs: event.at, state: Number.isSafeInteger(event.pid) && alive(event.pid) ? 'running' : 'died',
+    }));
+  const stepsOf = (issue) => {
+    const own = events.filter((event) => event.issue === issue);
+    const steps = own.filter((event) => event.kind === 'step');
+    return steps.map((event, index) => {
+      const next = steps[index + 1]?.at ?? Infinity;
+      // The step's dispatches are the ones in its window. A retry or a
+      // fallback is a new pair: the step is returned by its LAST end, and
+      // not at all while a start of its window has no end.
+      const window = own.filter((other) => other.at >= event.at && other.at < next);
+      const endedIds = new Set(window.filter((other) => other.kind === 'dispatch.end').map((other) => other.dispatch));
+      const open = window.some((other) => other.kind === 'dispatch.start' && !endedIds.has(other.dispatch));
+      const returned = open ? undefined : window.findLast((other) => other.kind === 'dispatch.end');
+      return {
+        step: event.step, role: STEP_ROLES[event.step] ?? null, round: roundFacts(event.round ?? null), model: event.model ?? null,
+        startedAtMs: event.at, returnedAtMs: returned?.at ?? null,
+      };
+    });
+  };
+  const log = events.slice(-LOG_LIMIT).reverse().map((event) => {
+    const { v, run, ...rest } = withPr(event);
+    return rest;
+  });
+  return { prByIssue, dispatches, stepsOf, log };
+}
+
 export function statusProjection({
   root, run = realRun(root), nowMs = Date.now(), sessionId, home,
   live = loopRunIsLive, markers = ownRunMarkers,
   owned = (id) => ownedRun({ sessionId: id, directory: latchDirectory(home) }),
+  alive = processAlive,
 }) {
   const none = { schema: STATUS_SCHEMA, owned: false };
   // SPEC-session-ownership: this process's open latch naming the session, and
@@ -694,6 +755,14 @@ export function statusProjection({
   const resolved = resolveProjectConfig(root);
   const openedAtMs = runStartMs(own);
   const { snapshot, authority, units, humanWaits } = projectedUnits(dir, run, nowMs, openedAtMs);
+  // The run's events: by run id once prime stamped one, else by the marker's
+  // opening time (an older plugin opened the run). No file: empty facts.
+  const commonDir = dirname(dir);
+  const runId = currentRunId(commonDir);
+  const recorded = readEvents(commonDir, { limit: EVENTS_READ_LIMIT }).events;
+  const facts = eventFacts(runId === 'unknown'
+    ? recorded.filter((event) => openedAtMs === null || event.at >= openedAtMs)
+    : recorded.filter((event) => event.run === runId), { alive, recent: recorded });
   const spoken = authority.authority !== 'none';
   const titleOf = (issue) => (spoken ? snapshot.sections.openIssues.items.find((item) => item.number === issue)?.title ?? null : null);
   const pinned = readPinnedModels(join(dir, 'models.json'));
@@ -709,7 +778,7 @@ export function statusProjection({
     return {
       issue: unit.issue, title, disposition: unitDisposition(unit), phase: phaseOf(unit), role: roleOf(unit),
       model: modelOf(unit), round: roundFacts(unit.round), detail: unitDetail(unit, nowMs), waitingOn: waitingFacts(unit.waiting),
-      pr: unit.pending?.pr ?? openPrs.find((item) => item.issue === unit.issue)?.number ?? null,
+      pr: unit.pending?.pr ?? openPrs.find((item) => item.issue === unit.issue)?.number ?? facts.prByIssue.get(unit.issue) ?? null,
       decisions: unit.decisions, needsYou: needsYouFacts(unit, title),
     };
   });
@@ -748,6 +817,8 @@ export function statusProjection({
       inFlight: typeof worked.dispatchId === 'string' && !Number.isFinite(worked.returnedAtMs),
       startedAtMs: worked.startedAtMs, returnedAtMs: Number.isFinite(worked.returnedAtMs) ? worked.returnedAtMs : null,
       waitingOn: null, decisions: worked.decisions,
+      pr: worked.pending?.pr ?? openPrs.find((item) => item.issue === worked.issue)?.number ?? facts.prByIssue.get(worked.issue) ?? null,
+      steps: facts.stepsOf(worked.issue),
     },
     units: all,
     counts: {
@@ -756,6 +827,8 @@ export function statusProjection({
       eligible: eligible !== null ? eligible.length : readJson(join(dir, QUEUE_COUNT), null)?.eligible ?? null,
     },
     models,
+    log: facts.log,
+    dispatches: facts.dispatches,
   };
 }
 
@@ -871,14 +944,17 @@ function progress(step, round) {
 
 // One status line with fixed columns. Only plain-width segments are padded;
 // every emoji sits alone in its own column, so the columns line up.
-export function renderRibbon({ atMs, issue, step, round = null, badge = '⏳', model = null, fallback = false, note = '', span = null }) {
+export function renderRibbon({ atMs, issue, step, round = null, badge = '⏳', model = null, fallback = false, note = '', span = null, pr = null }) {
   const unit = `#${issue}`.padEnd(4);
+  // The pull request beside the issue once one exists, so a PR in the list
+  // is read back to its unit without a lookup (operator, 2026-10-12).
+  const prChip = Number.isSafeInteger(pr) && pr > 0 ? `PR #${pr} ` : '';
   try {
     const [name, glyph] = STEPS[step];
     const chip = modelChip(model, step);
     const [dot, ...modelName] = chip.split(' ');
     return `${clock(atMs)} ${unit} ${badge} ${glyph} ${name.padEnd(12)} ${(span ?? progress(step, round)).padEnd(17)}  `
-      + `${dot} ${modelName.join(' ').padEnd(12)}${fallback ? '↪' : ' '} ${oneLine(note)}`.trimEnd();
+      + `${dot} ${modelName.join(' ').padEnd(12)}${fallback ? '↪' : ' '} ${prChip}${oneLine(note)}`.trimEnd();
   } catch {
     return `${clock(atMs)} ${unit} ${badge} ${step} ${oneLine(note)}`.trimEnd();
   }
@@ -1357,11 +1433,50 @@ function transitionChecks(at) {
         && snapshot.invalidation?.reasonCodes?.includes('ISSUE_MUTATION')
         && steps?.steps?.at(-1)?.step === '06-simplify' && steps.steps.at(-1).model === 'claude-fable-5-1'
         && first.lines.length === 1 && first.lines[0].startsWith('09:51 #350 ⏳ 🧹 SIMPLIFY')]);
+    const events = readEvents(join(root, '.git')).events;
+    results.push(['a transition appends one step event with the issue, the step, the model and the note',
+      events.length === 1 && events[0].kind === 'step' && events[0].by === 'step' && events[0].issue === 350
+        && events[0].step === '06-simplify' && events[0].model === 'claude-fable-5-1' && events[0].at === at(9, 51)
+        && !('round' in events[0]) && !('pr' in events[0])]);
     const edits = calls.filter((call) => call.startsWith('gh issue edit')).length;
     const again = go({ to: '06-simplify', model: 'claude-fable-5-1' });
     results.push(['the same step twice swaps nothing and says so',
       again.ok === true && again.lines.join('') === 'already on 06-simplify'
-        && calls.filter((call) => call.startsWith('gh issue edit')).length === edits]);
+        && calls.filter((call) => call.startsWith('gh issue edit')).length === edits
+        && readEvents(join(root, '.git')).events.length === 1]);
+    // Fail-open: the event file is the UI's; a write it refuses changes nothing
+    // of the transition (the labels, the record, the ribbon).
+    const unwritable = (() => {
+      const eventsPath = join(root, '.git', 'autoloop', 'events.jsonl');
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:05-implement'];
+      chmodSync(eventsPath, 0o400);
+      const result = go({ issue: 353, to: '06-simplify', model: 'claude-fable-5-1' });
+      chmodSync(eventsPath, 0o644);
+      const after = labels;
+      labels = saved;
+      return { result, after };
+    })();
+    results.push(['a transition whose event cannot be written still swaps, records and prints the ribbon',
+      unwritable.result.ok === true && unwritable.result.lines[0].startsWith('09:51 #353 ⏳ 🧹 SIMPLIFY')
+        && unwritable.after.includes('loop:06-simplify')
+        && readJson(join(root, '.git', 'autoloop', 'steps', '353.json'), null)?.steps?.at(-1)?.step === '06-simplify'
+        && (process.getuid?.() === 0 || readEvents(join(root, '.git')).events.length === 1)]);
+    const withPr = (() => {
+      const saved = labels;
+      labels = ['loop-ready', 'loop-started', 'loop:09-gate'];
+      const publish = go({ issue: 354, to: '10-publish', pr: 530 });
+      const record = go({ issue: 354, to: '11-record' });
+      const after = labels;
+      labels = saved;
+      return { publish, record, after, stored: readJson(join(root, '.git', 'autoloop', 'steps', '354.json'), null),
+        events: readEvents(join(root, '.git')).events.filter((event) => event.issue === 354) };
+    })();
+    results.push(['a transition with --pr keeps the PR on the record, and every later ribbon names it beside the issue',
+      withPr.publish.ok === true && withPr.publish.lines[0].includes('#354 ') && withPr.publish.lines[0].includes(' PR #530')
+        && withPr.record.lines[0].includes(' PR #530') && withPr.stored?.pr === 530
+        && withPr.events.length === 2 && withPr.events.every((event) => event.pr === 530)
+        && !renderRibbon({ atMs: at(9, 51), issue: 354, step: '11-record' }).includes('PR #')]);
     const backward = go({ to: '05-implement', model: 'claude-opus-5-5' });
     results.push(['a backward swap is refused by this tool, printed, and changes nothing',
       backward.ok === false && /step labels only climb/u.test(backward.lines.join(' '))
@@ -2199,21 +2314,47 @@ export function statusFixture(at) {
   mkdirSync(join(root, '.autoloop'), { recursive: true });
   writeFileSync(join(autoloop, 'models.json'), JSON.stringify({ version: 1, models: {
     'code-review': { model: 'gpt-6-astra' }, implement: { model: 'claude-opus-5-5' }, fix: { model: 'claude-opus-5-5' } } }));
+  // The run's events (SPEC-events): #412's plan returned and its fix round's
+  // review running on pid 4242 (alive in the fixture), #415's overlap wait,
+  // #416 delivered as PR #700, #417 blocked; one earlier run's event, stamped
+  // R0, that the projection leaves out.
+  const livePid = 4242;
+  const events = [
+    { at: at(8, 20), run: 'R0', by: 'step', kind: 'step', issue: 425, step: '05-implement', model: 'claude-opus-5-5' },
+    { at: at(8, 30), run: 'R1', by: 'prime', kind: 'run.start' },
+    { at: at(8, 40), run: 'R1', by: 'step', kind: 'step', issue: 412, step: '02-plan', model: 'gpt-6-astra', text: 'plan v1' },
+    { at: at(8, 41), run: 'R1', by: 'dispatch', kind: 'dispatch.start', issue: 412, dispatch: 'd412-plan', role: 'plan', model: 'gpt-6-astra',
+      liveFile: '/tmp/live/412-plan.jsonl', pid: 4100 },
+    { at: at(8, 55), run: 'R1', by: 'dispatch', kind: 'dispatch.end', issue: 412, dispatch: 'd412-plan', role: 'plan', ms: 840000, ok: true },
+    { at: at(9, 40), run: 'R1', by: 'publish', kind: 'deliver', issue: 416, pr: 700 },
+    { at: at(9, 41), run: 'R1', by: 'publish', kind: 'deliver', issue: 413, pr: 702 },
+    { at: at(10, 5), run: 'R1', by: 'unit', kind: 'wait', issue: 415, reason: 'pr', pr: 204, paths: ['src/a.mjs', 'src/b.mjs'] },
+    { at: at(10, 12), run: 'R1', by: 'unit', kind: 'block', issue: 417, reason: 'POLICY_DENIED', text: 'May the workflow change proceed?' },
+    { at: at(10, 27), run: 'R1', by: 'step', kind: 'step', issue: 412, step: '08-code-review', round: 'fix-2', model: 'gpt-6-astra', text: '2 Major open' },
+    { at: at(10, 28), run: 'R1', by: 'dispatch', kind: 'dispatch.start', issue: 412, dispatch: 'd412', role: 'code-review', model: 'gpt-6-astra',
+      liveFile: '/tmp/live/412-code-review-r2.jsonl', pid: livePid },
+  ];
   const write = (shown = runIssues) => {
     rmSync(join(autoloop, 'steps'), { recursive: true, force: true });
     mkdirSync(join(autoloop, 'steps'), { recursive: true });
     for (const record of records.filter((entry) => shown.includes(entry.issue))) {
       writeFileSync(join(autoloop, 'steps', `${record.issue}.json`), JSON.stringify(record));
     }
+    rmSync(join(autoloop, 'events.jsonl'), { force: true });
+    setRunId(join(root, '.git'), 'R1');
+    for (const event of events.filter((entry) => entry.issue === undefined || shown.includes(entry.issue))) {
+      appendEvent(join(root, '.git'), { v: 1, ...event });
+    }
     const blocked = issues.filter((item) => item.labels.includes('loop-blocked') && shown.includes(item.number));
     writeFileSync(join(autoloop, 'prime', 'a.snapshot.json'),
       JSON.stringify(createSnapshot({ scannedAt, sections: { ...sections, blockedIssues: completeSection(blocked) } })));
   };
-  const project = (options = {}) => statusProjection({ root, run, nowMs, sessionId: 'S-1', home, live: () => true, markers, ...options });
+  const project = (options = {}) => statusProjection({ root, run, nowMs, sessionId: 'S-1', home, live: () => true, markers,
+    alive: (pid) => pid === livePid, ...options });
   const files = () => [...readdirSync(join(autoloop, 'steps')).sort().map((name) => readFileSync(join(autoloop, 'steps', name), 'utf8')),
     readFileSync(join(autoloop, 'prime', 'a.snapshot.json'), 'utf8'), String(existsSync(join(autoloop, QUEUE_COUNT)))].join('\n');
   const dispose = () => rmSync(scratch, { recursive: true, force: true });
-  return { root, autoloop, nowMs, scannedAt, records, runIssues, calls, run, markers, latch, write, project, files, dispose };
+  return { root, autoloop, nowMs, scannedAt, records, runIssues, events, livePid, calls, run, markers, latch, write, project, files, dispose };
 }
 
 function projectionChecks(at) {
@@ -2258,7 +2399,7 @@ function projectionChecks(at) {
     const owned = project();
     const unchanged = files() === before && calls.every((call) => !call.startsWith('gh'));
     results.push(['an owned run projects the spec keys, its run facts, the phase list and the pinned models',
-      Object.keys(owned).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models'
+      Object.keys(owned).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models,log,dispatches'
         && owned.owned === true && owned.enabled === true
         && JSON.stringify(owned.run) === JSON.stringify({ openedAtMs: at(8, 30), parkedUntil: new Date(at(11, 0)).toISOString(),
           closedAt: null, snapshotScannedAt: scannedAt, snapshotAuthority: 'current' })
@@ -2275,7 +2416,67 @@ function projectionChecks(at) {
     results.push(['the worked unit is the newest unstaged current step: in flight, with its phase, role, model, fix round and decisions',
       JSON.stringify(owned.unit) === JSON.stringify({ issue: 412, title: 'Session recovery', phase: 'review', role: 'code-review',
         model: 'gpt-6-astra', fallback: false, round: { kind: 'fix', n: 2, budget: 3 }, inFlight: true, startedAtMs: at(10, 27),
-        returnedAtMs: null, waitingOn: null, decisions: 2 })]);
+        returnedAtMs: null, waitingOn: null, decisions: 2, pr: null, steps: [
+          { step: '02-plan', role: 'plan', round: null, model: 'gpt-6-astra', startedAtMs: at(8, 40), returnedAtMs: at(8, 55) },
+          { step: '08-code-review', role: 'code-review', round: { kind: 'fix', n: 2, budget: 3 }, model: 'gpt-6-astra', startedAtMs: at(10, 27), returnedAtMs: null },
+        ] })]);
+    results.push(['the log is the run\'s events newest first with the PR beside the issue, an earlier run\'s left out',
+      owned.log.length === 10 && owned.log[0].kind === 'dispatch.start' && owned.log[0].at === at(10, 28) && owned.log[0].dispatch === 'd412'
+        && owned.log.at(-1).kind === 'run.start' && owned.log.every((event) => event.run === undefined && event.v === undefined)
+        && !owned.log.some((event) => event.issue === 425)
+        && owned.log.find((event) => event.kind === 'block')?.text === 'May the workflow change proceed?'
+        && owned.log.find((event) => event.kind === 'wait')?.pr === 204]);
+    results.push(['a dispatch with a start and no end is running while its pid lives, died when it is gone',
+      JSON.stringify(owned.dispatches) === JSON.stringify([{ dispatch: 'd412', issue: 412, pr: null, role: 'code-review', model: 'gpt-6-astra',
+        liveFile: '/tmp/live/412-code-review-r2.jsonl', pid: 4242, startedAtMs: at(10, 28), state: 'running' }])
+        && project({ alive: () => false }).dispatches[0].state === 'died']);
+    results.push(['a unit takes its PR from the deliver event when the record and the scan have none; a waited-on PR is never the unit\'s',
+      unit(owned, 416)?.pr === 700 && unit(owned, 413)?.pr === 702 && unit(owned, 412)?.pr === null && unit(owned, 415)?.pr === null]);
+    results.push(['a dispatch started under an earlier run id and still open is listed; one ended under the new id is not',
+      (() => {
+        const base = { v: 1, by: 'dispatch', issue: 1 };
+        const recent = [
+          { ...base, at: 1, run: 'R0', kind: 'dispatch.start', dispatch: 'old-open', role: 'plan', pid: 1 },
+          { ...base, at: 2, run: 'R0', kind: 'dispatch.start', dispatch: 'old-ended', role: 'plan', pid: 1 },
+          { ...base, at: 3, run: 'R1', kind: 'dispatch.end', dispatch: 'old-ended', ok: true },
+          { ...base, at: 4, run: 'R1', kind: 'step', step: '02-plan' },
+        ];
+        const facts = eventFacts(recent.filter((event) => event.run === 'R1'), { alive: () => true, recent });
+        return facts.dispatches.map((entry) => entry.dispatch).join() === 'old-open' && facts.log.length === 2;
+      })()]);
+    results.push(['a step is returned by the last end of its window, not at all while a retry runs, and the log keeps 50',
+      (() => {
+        const base = { v: 1, run: 'R', by: 'x', issue: 1 };
+        const retried = eventFacts([
+          { ...base, at: 100, kind: 'step', step: '02-plan' },
+          { ...base, at: 110, kind: 'dispatch.start', dispatch: 'a', role: 'plan', pid: 1 },
+          { ...base, at: 200, kind: 'dispatch.end', dispatch: 'a', ok: false, reason: 'DISPATCH_TIMEOUT' },
+          { ...base, at: 210, kind: 'dispatch.start', dispatch: 'b', role: 'plan', pid: 1 },
+        ], { alive: () => false });
+        const settled = eventFacts([
+          { ...base, at: 100, kind: 'step', step: '02-plan' },
+          { ...base, at: 200, kind: 'dispatch.end', dispatch: 'a', ok: false, reason: 'DISPATCH_TIMEOUT' },
+          { ...base, at: 210, kind: 'dispatch.start', dispatch: 'b', role: 'plan', pid: 1 },
+          { ...base, at: 300, kind: 'dispatch.end', dispatch: 'b', ok: true },
+          { ...base, at: 400, kind: 'step', step: '05-implement' },
+        ], { alive: () => false });
+        const many = eventFacts(Array.from({ length: 60 }, (_, n) => ({ ...base, at: n, kind: 'step', step: '02-plan' })));
+        return retried.stepsOf(1)[0].returnedAtMs === null && retried.dispatches.length === 1 && retried.dispatches[0].state === 'died'
+          && settled.stepsOf(1)[0].returnedAtMs === 300 && settled.stepsOf(1)[1].returnedAtMs === null
+          && many.log.length === 50 && many.log[0].at === 59;
+      })()]);
+    results.push(['without a run id the run\'s events are the ones since the marker opened; without a file, empty facts',
+      (() => {
+        setRunId(join(root, '.git'), null);
+        appendEvent(join(root, '.git'), { v: 1, at: at(8, 35), run: 'R0', by: 'unit', kind: 'decision', issue: 425, text: 'late' });
+        const byTime = project();
+        rmSync(join(root, '.git', 'autoloop', 'events.jsonl'), { force: true });
+        const none = project();
+        write();
+        return byTime.log.length === 11 && !byTime.log.some((event) => event.at === at(8, 20))
+          && byTime.log.some((event) => event.text === 'late')
+          && none.log.length === 0 && none.dispatches.length === 0 && none.unit?.steps?.length === 0 && unit(none, 413)?.pr === null;
+      })()]);
     // Without #412 the simplify step is the worked unit: returned, so not in
     // flight, on its fallback model.
     write(runIssues.filter((number) => number !== 412));

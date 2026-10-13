@@ -47,18 +47,22 @@ import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
 import {
   SNAPSHOT_SECTIONS,
+  completeSection,
+  createSnapshot,
   eligibleIssueNumbers,
+  issueSnapshotItem,
   haltIssueNumbers,
   markerSchedule,
   writeStdoutSync,
 } from './snapshot-contract.mjs';
-import { liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
+import { answeredMarker, liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
+import { appendEvent, currentRunId, emitEvent, isPaused, readEvents, resolveCommonDir, setPaused, setRunId, takeControls, writeControl } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.70.0';
+const AUTOLOOP_VERSION = '0.71.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -68,6 +72,7 @@ const SCAN_TIMEOUT_MS = 20 * 60 * 1000;
 const GIT_TIMEOUT_MS = 15_000;
 const TOOL_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const SCAN_TOOL = join(TOOL_DIRECTORY, 'scan.mjs');
+const AUTO_MERGE_TOOL = join(TOOL_DIRECTORY, 'auto-merge.mjs');
 const PROCESS_START_MS = Date.now();
 
 function plainObject(value) {
@@ -235,7 +240,16 @@ export function primeDev({
     return failure('run', 'RUN_LATCH_UNCONFIRMED', 'this Claude process holds a run latch open for another conversation '
       + '(/clear started this one), so the run is not opened. Close it with `prime.mjs --close-run`, then prime again.');
   }
+  // A live own marker before this prime means the same run goes on; none
+  // means a new run, whose predecessor ended without --close-run (an exit,
+  // a kill, a restart): its id is abandoned so the new run's events are its own.
+  const continuing = ownRunMarkers(root).some(({ marker }) => marker.closedAt === undefined);
   const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch, sessionId);
+  if (!continuing) closeRunEvents(root, { reason: 'abandoned' });
+  openRunEvents(root);
+  // The operator's controls (SPEC-events items 7 to 9), applied before the
+  // scan so a merge or a label swap is in the snapshot this run reads.
+  const controls = applyControls(root);
   // Before the scan, so a unit whose wait just cleared is already eligible in
   // the snapshot this run chooses from.
   const waits = lift({ base: config.baseBranch, run: realRun(root) });
@@ -292,9 +306,105 @@ export function primeDev({
     runMarker,
     waits,
     blocks,
+    controls,
+    paused: controls.paused,
     timings: { scanMs, primeMs: Date.now() - PROCESS_START_MS },
     snapshot,
   };
+}
+
+// The controls prime consumes: pause and unpause keep the paused marker;
+// label removes `human:authorize` from a pull request through gh; merge runs
+// the auto-merge executor, whose gate decides and writes the merge event. A
+// control the loop cannot apply goes to refused/ with the reason. The event
+// file gets one `control` line per applied control. Never throws.
+const CONTROL_LABEL = 'human:authorize';
+// The operator's answer as a comment: the `/answer` line a human writes, then
+// the marker that names the control, so the block triage knows the loop's
+// own login posted it for the operator and not for itself.
+export function answerBody(text, name) {
+  return `/answer ${text}\n\n${answeredMarker(name)}`;
+}
+const commandError = (result) => String(result.stderr ?? result.error?.message ?? '').trim().slice(0, 200);
+export function applyControls(root, {
+  nowMs = Date.now(),
+  commonDir = resolveCommonDir(root),
+  gh = (args) => spawnSync('gh', args, { cwd: root, encoding: 'utf8' }),
+  merge = (pr) => spawnSync(process.execPath, [AUTO_MERGE_TOOL, String(pr)], { cwd: root, encoding: 'utf8' }),
+} = {}) {
+  const applied = [];
+  const refused = [];
+  if (commonDir === null) return { applied, refused, paused: false };
+  // One handler per kind: it applies the control and writes the kind's own
+  // event; it returns the refusal reason, or null when applied.
+  const keepPaused = (control) => {
+    const set = setPaused(commonDir, control.kind === 'pause');
+    if (!set.ok) return `paused marker: ${set.error}`;
+    emitEvent(commonDir, { by: 'prime', kind: control.kind }, { nowMs });
+    return null;
+  };
+  const handlers = {
+    pause: keepPaused,
+    unpause: keepPaused,
+    // The one swap the merge gate reads, on a pull request that carries the
+    // label: a mistyped number never strips a gate from another pull request.
+    label: (control) => {
+      const view = gh(['pr', 'view', String(control.pr), '--json', 'labels', '--jq', '[.labels[].name]']);
+      if (view.status !== 0) return `gh pr view: ${commandError(view)}`;
+      let labels = [];
+      try { labels = JSON.parse(String(view.stdout ?? '[]')); } catch { return 'gh pr view: unreadable labels'; }
+      if (!Array.isArray(labels) || !labels.includes(CONTROL_LABEL)) return `PR #${control.pr} does not carry ${CONTROL_LABEL}`;
+      const edit = gh(['pr', 'edit', String(control.pr), '--remove-label', CONTROL_LABEL]);
+      if (edit.status !== 0) return `gh pr edit: ${commandError(edit)}`;
+      emitEvent(commonDir, { by: 'prime', kind: 'label', pr: control.pr, text: `${CONTROL_LABEL} removed` }, { nowMs });
+      return null;
+    },
+    merge: (control) => {
+      const ran = merge(control.pr);
+      return ran.status === 0 ? null : `merge gate: ${String(ran.stdout ?? '').trim().split('\n').at(-1)?.trim().slice(0, 200) || 'refused'}`;
+    },
+    // The operator's answer, posted as the `/answer` comment a human would
+    // write; the block triage of this same prime lifts the block.
+    answer: (control, name) => {
+      const posted = gh(['issue', 'comment', String(control.issue), '--body', answerBody(control.text, name)]);
+      return posted.status === 0 ? null : `gh issue comment: ${commandError(posted)}`;
+    },
+    // A cancel is the waiter's to apply while its dispatch runs; one left
+    // behind (the dispatch ended first, or never started) is refused here,
+    // so no control file stays in the directory for ever.
+    cancel: () => 'dispatch not running',
+  };
+  const dispatchRunning = (id) => {
+    const { events } = readEvents(commonDir, { limit: 5000 });
+    return events.some((event) => event.kind === 'dispatch.start' && event.dispatch === id)
+      && !events.some((event) => event.kind === 'dispatch.end' && event.dispatch === id);
+  };
+  let taken = [];
+  try {
+    taken = takeControls(commonDir, Object.keys(handlers), { nowMs });
+  } catch {
+    return { applied, refused, paused: isPaused(commonDir) };
+  }
+  for (const { control, name, done } of taken) {
+    const summary = `${control.kind}${control.pr ? ` PR #${control.pr}` : ''}${control.issue ? ` #${control.issue}` : ''}`;
+    // A cancel of a running dispatch stays in place for the waiter.
+    if (control.kind === 'cancel' && dispatchRunning(control.dispatch)) continue;
+    let reason;
+    try {
+      reason = handlers[control.kind](control, name);
+    } catch (error) {
+      reason = String(error?.message ?? error);
+    }
+    if (reason !== null) {
+      try { done({ refused: reason }); } catch { /* the file stays for the next prime */ }
+      refused.push({ control: summary, reason });
+      continue;
+    }
+    try { done(); } catch { /* the file stays for the next prime */ }
+    emitEvent(commonDir, { by: 'prime', kind: 'control', pr: control.pr, issue: control.issue, text: summary }, { nowMs });
+    applied.push(summary);
+  }
+  return { applied, refused, paused: isPaused(commonDir) };
 }
 
 // The five summary fields are what a run decides with. `projectConfig` and
@@ -373,9 +483,29 @@ export function closeRunMarkers(root = process.cwd(), now = new Date()) {
   return { ok: true, closed };
 }
 
+// The event file's run (SPEC-events): a run id written once per run, at the
+// first prime that opens it, and cleared when the run closes. Every prime of
+// the same run keeps the id, so the UI reads one run across unit boundaries.
+// Fail-open: an unwritable file leaves the prime result as it is.
+export function openRunEvents(root, { nowMs = Date.now(), commonDir = resolveCommonDir(root) } = {}) {
+  if (commonDir === null || currentRunId(commonDir) !== 'unknown') return null;
+  const id = String(nowMs);
+  if (!setRunId(commonDir, id).ok) return null;
+  emitEvent(commonDir, { by: 'prime', kind: 'run.start' }, { nowMs });
+  return id;
+}
+
+export function closeRunEvents(root, { nowMs = Date.now(), reason = undefined, commonDir = resolveCommonDir(root) } = {}) {
+  if (commonDir === null || currentRunId(commonDir) === 'unknown') return false;
+  emitEvent(commonDir, { by: 'prime', kind: 'run.end', reason }, { nowMs });
+  setRunId(commonDir, null);
+  return true;
+}
+
 // --close-run: the run stops taking work; only the guards still act for the session.
 export function closeRun(root = process.cwd(), { directory = latchDirectory(), now = new Date() } = {}) {
   const outcome = closeRunMarkers(root, now);
+  if (outcome.ok === true) closeRunEvents(root, { nowMs: now.getTime() });
   return outcome.ok === true ? { ...outcome, latch: closeLatch({ directory, nowMs: now.getTime() }) } : outcome;
 }
 
@@ -506,7 +636,8 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
     ...compact,
     snapshotPath,
     snapshotBytes: Buffer.byteLength(bytes, 'utf8'),
-    eligible: eligibleIssueNumbers(snapshot),
+    // Paused: nothing is eligible until an unpause control; `paused` says why.
+    eligible: result.paused === true ? [] : eligibleIssueNumbers(snapshot),
     halted: haltIssueNumbers(snapshot),
     markers: splitKnownRefused(
       markerSchedule(snapshot),
@@ -960,6 +1091,100 @@ function selfTest() {
     const root = buildFixtureRepository(scratch, fixtureConfig());
     // Never the operator's latch directory: prime takes the guard's hand-off from it.
     const scratchLatches = join(scratch, 'scratch-latches');
+    check(
+      'a run opens its events once across primes, and closes them with run.end and a cleared id',
+      (() => {
+        const common = join(root, '.git');
+        const first = openRunEvents(root, { nowMs: 5000, commonDir: common });
+        const second = openRunEvents(root, { nowMs: 6000, commonDir: common });
+        const opened = readEvents(common).events;
+        const idWhileOpen = currentRunId(common);
+        const closed = closeRunEvents(root, { nowMs: 7000, commonDir: common });
+        const after = readEvents(common).events;
+        const again = closeRunEvents(root, { nowMs: 8000, commonDir: common });
+        return first === '5000' && second === null && idWhileOpen === '5000' && opened.length === 1
+          && opened[0].kind === 'run.start' && opened[0].run === '5000' && opened[0].by === 'prime'
+          && closed === true && after.length === 2 && after[1].kind === 'run.end' && after[1].run === '5000' && after[1].at === 7000
+          && currentRunId(common) === 'unknown' && again === false && after.length === readEvents(common).events.length;
+      })(),
+    );
+    check(
+      'controls: pause and unpause keep the paused marker, label and merge run their commands, a refusal keeps its reason, each applied one is an event',
+      (() => {
+        const common = join(root, '.git');
+        const ghCalls = [];
+        const mergeCalls = [];
+        const options = (over = {}) => ({
+          nowMs: 9000, commonDir: common,
+          gh: (args) => {
+            ghCalls.push(args.join(' '));
+            if (args[0] === 'pr' && args[1] === 'view') return { status: args.includes('77') ? 1 : 0, stdout: '["human:authorize"]', stderr: 'no such pull request' };
+            if (args[0] === 'pr' && args[1] === 'edit' && args.includes('55')) return { status: 0 };
+            return { status: 0, stderr: '' };
+          },
+          merge: (pr) => { mergeCalls.push(pr); return { status: pr === 88 ? 0 : 1, stdout: `REFUSE #${pr} — leave for human merge:\n  - base moved` }; },
+          ...over,
+        });
+        let at = 0;
+        const control = (kind, fields = {}) => writeControl(common, { v: 1, at: (at += 1), kind, by: 'ui', session: 'S-1', ...fields });
+        control('pause');
+        const paused = applyControls(root, options());
+        // A second prime with no new control is still paused, by the marker.
+        const stillPaused = applyControls(root, options());
+        // One eligible queued issue: paused hides it, unpaused shows it.
+        const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+        const queued = issueSnapshotItem({ number: 7, title: 'queued', body: 'b', updatedAt: '2026-01-01T00:00:00Z', lastEditedAt: null, labels: ['loop-ready'] });
+        sections.repo = completeSection([{ owner: 'o', name: 'r', nameWithOwner: 'o/r', defaultBranch: 'main' }]);
+        sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: 'a'.repeat(40) }]);
+        sections.queue = completeSection([{ ...queued, blockedBy: [], dependencies: [], provenance: { labeledBy: 'm', labeledAt: '2026-01-01T00:00:01Z' } }]);
+        sections.openIssues = completeSection([queued]);
+        sections.authorVerification = completeSection([{ login: 'm', roleName: 'maintain', permission: 'write', evidence: [{
+          kind: 'queue-label', issueNumber: 7, author: 'm', authorAssociation: null, body: '', createdAt: '2026-01-01T00:00:01Z', updatedAt: null, url: null }] }]);
+        const snapshotOf = () => createSnapshot({ scannedAt: '2026-01-01T00:00:02.000Z', sections });
+        const pausedEligible = persistPrimeSnapshot({ ok: true, paused: true, checkout: { headOid: 'c'.repeat(40) }, snapshot: snapshotOf() }, root);
+        const openEligible = persistPrimeSnapshot({ ok: true, paused: false, checkout: { headOid: 'c'.repeat(40) }, snapshot: snapshotOf() }, root);
+        control('unpause');
+        control('label', { pr: 66 });
+        control('label', { pr: 77 });
+        control('merge', { pr: 88 });
+        control('merge', { pr: 99 });
+        const answerName = control('answer', { issue: 5, text: 'use the newer spec' }).name;
+        control('cancel', { dispatch: 'gone' });
+        appendEvent(common, { v: 1, at: 1, run: 'x', by: 'dispatch', kind: 'dispatch.start', dispatch: 'live', role: 'plan', pid: 1 });
+        control('cancel', { dispatch: 'live' });
+        const rest = applyControls(root, options());
+        const leftForWaiter = readdirSync(join(common, 'autoloop', 'control')).filter((name) => name.includes('-cancel-')).length;
+        const { events } = readEvents(common);
+        const kinds = events.filter((event) => event.at === 9000).map((event) => `${event.kind}${event.pr ? `:${event.pr}` : ''}`).join(' ');
+        const refusedDir = join(common, 'autoloop', 'control', 'refused');
+        const refusedFiles = existsSync(refusedDir) ? readdirSync(refusedDir) : [];
+        rmSync(join(common, 'autoloop', 'control'), { recursive: true, force: true });
+        return paused.paused === true && paused.applied.join() === 'pause' && stillPaused.paused === true && stillPaused.applied.length === 0
+          && pausedEligible.eligible.length === 0 && openEligible.eligible.join() === '7'
+          && rest.paused === false && rest.applied.join('|') === 'unpause|label PR #66|merge PR #88|answer #5'
+          && rest.refused.map((entry) => `${entry.control}: ${entry.reason}`).join('|')
+            === 'label PR #77: gh pr view: no such pull request|merge PR #99: merge gate: - base moved|cancel: dispatch not running'
+          && leftForWaiter === 1
+          && ghCalls.join('|') === 'pr view 66 --json labels --jq [.labels[].name]|pr edit 66 --remove-label human:authorize'
+            + '|pr view 77 --json labels --jq [.labels[].name]'
+            + `|issue comment 5 --body ${answerBody('use the newer spec', answerName)}`
+          && /^\/answer use the newer spec\n\n<!-- autoloop-answered-v1 /u.test(answerBody('use the newer spec', answerName))
+          && mergeCalls.join() === '88,99' && refusedFiles.length === 3
+          && kinds === 'pause control unpause control label:66 control:66 control:88 control';
+      })(),
+    );
+    check(
+      'a merge control runs the real auto-merge executor, whose refusal reason comes back verbatim',
+      (() => {
+        const common = join(root, '.git');
+        writeControl(common, { v: 1, at: 1, kind: 'merge', by: 'ui', session: 'S-1', pr: 4242 });
+        const outcome = applyControls(root, { nowMs: 9500, commonDir: common });
+        rmSync(join(common, 'autoloop', 'control'), { recursive: true, force: true });
+        // The fixture repository has no origin, so the executor refuses before any GitHub call.
+        return outcome.applied.length === 0 && outcome.refused.length === 1
+          && outcome.refused[0].control === 'merge PR #4242' && outcome.refused[0].reason.startsWith('merge gate: ');
+      })(),
+    );
     const base = baseSyncFacts(root, 'main');
     check(
       'base facts report the live branch and a missing remote base honestly',

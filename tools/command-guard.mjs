@@ -2556,8 +2556,9 @@ function selfTest() {
         rmSync(pinRepo, { recursive: true, force: true });
         if (!(open.includes('/h/.claude/autoloop/config.json') && !closed.includes('/h/.claude/autoloop/config.json')
           && relocated.includes('/c/autoloop/config.json') && !relocated.includes('/h/.claude/autoloop/config.json')
-          && pin !== null && pin.endsWith('/autoloop/models.json') && pinned.includes(pin))) {
-          console.error('FAIL [the global model config is protected while a run is open, and only then; the pinned table always]');
+          && pin !== null && pin.endsWith('/autoloop/models.json') && pinned.includes(pin)
+          && ['control', 'events.jsonl', 'events.1.jsonl', 'run-id'].every((name) => pinned.includes(join(dirname(pin), name))))) {
+          console.error('FAIL [the global model config is protected while a run is open, and only then; the pinned table, the event file and the control directory always]');
           ok = false;
         }
       }
