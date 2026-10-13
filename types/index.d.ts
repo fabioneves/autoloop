@@ -95,6 +95,36 @@ export type StatusDispatch = {
   pid: number | null
   startedAtMs: number
   state: 'running' | 'died'
+  /** Daemon-only verified group observation. A legacy `died` bit does not prove absence. */
+  observation?: 'alive' | 'empty' | 'unknown'
+}
+
+/** A durable daemon control receipt. Acceptance does not mean application. */
+export type StatusControlResponse = {
+  requestId: string
+  runId: string
+  status: 'pending' | 'processing' | 'applied' | 'refused' | 'unknown'
+  outcome: null | {
+    schema: 'autoloop.control-outcome/2'
+    requestId: string
+    runId: string
+    requestHash: string
+    status: 'applied' | 'refused' | 'unknown'
+    code: string
+    appliedRevision: number | null
+    operationId: string | null
+    completedAt: number | null
+  }
+}
+export type StatusExecution = {
+  mode: 'daemon'
+  runId: string
+  generation: number
+  state: 'starting' | 'running' | 'paused' | 'draining' | 'recovering' | 'stopped' | 'failed'
+  queueEnabled: false
+  lastCheckpointAt: number
+  eventLogError: string | null
+  supportedControls: ('pause' | 'resume' | 'stop' | 'stop-now')[]
 }
 
 /**
@@ -123,7 +153,9 @@ export type StatusProjection = {
   /** The run's last 50 events, newest first. */
   log?: StatusEvent[]
   dispatches?: StatusDispatch[]
-  controls?: { refused: StatusRefused[] }
+  controls?: { refused: StatusRefused[]; requests?: StatusControlResponse[] }
+  execution?: StatusExecution
+  attachment?: { kind: 'viewer'; sessionId: string }
 }
 
 /** One active request as the proxy's `GET /status` lists it (its snake_case fields, read leniently). */

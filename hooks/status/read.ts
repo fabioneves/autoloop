@@ -14,14 +14,15 @@ export const STALE_AFTER_MS = 30_000
 
 export type Runner = (
   argv: readonly string[],
-  init: { timeoutMs: number },
+  init: { timeoutMs: number; stdin?: string },
 ) => Promise<{ exitCode: number; stdout: string }>
 
 export type ProjectionRead = { ok: true; projection: StatusProjection } | { ok: false }
 
 /** The producer's argv; `logLength` asks for that many log entries (the Log tab's 500), the producer's default otherwise. */
-export function projectionArgv(pluginRoot: string, sessionId: string, logLength: number | null = null): string[] {
-  return ['node', `${pluginRoot}/tools/status.mjs`, '--json', '--session', sessionId, ...(logLength === null ? [] : ['--log', String(logLength)])]
+export function projectionArgv(pluginRoot: string, sessionId: string, logLength: number | null = null, root: string | null = null): string[] {
+  return ['node', `${pluginRoot}/tools/status.mjs`, '--json', '--session', sessionId,
+    ...(logLength === null ? [] : ['--log', String(logLength)]), ...(root === null ? [] : ['--root', root])]
 }
 
 /** The text as one JSON object, or null when it is not one. */
@@ -48,9 +49,9 @@ export function parseProjection(text: string): StatusProjection | null {
  * or reports a fault (`owned: false` with `error`, exit 0: the producer never
  * throws) is a failed read, so the last projection is kept and goes stale.
  */
-export async function readProjection(run: Runner, pluginRoot: string, sessionId: string, logLength: number | null = null): Promise<ProjectionRead> {
+export async function readProjection(run: Runner, pluginRoot: string, sessionId: string, logLength: number | null = null, root: string | null = null): Promise<ProjectionRead> {
   try {
-    const result = await run(projectionArgv(pluginRoot, sessionId, logLength), { timeoutMs: READ_TIMEOUT_MS })
+    const result = await run(projectionArgv(pluginRoot, sessionId, logLength, root), { timeoutMs: READ_TIMEOUT_MS })
     if (result.exitCode !== 0) return { ok: false }
     const projection = parseProjection(result.stdout)
     return projection === null || projection.error !== undefined ? { ok: false } : { ok: true, projection }

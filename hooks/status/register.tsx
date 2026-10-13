@@ -12,6 +12,8 @@ import type { StatusProjection, StatusState, StatusStream, StatusTick } from '..
 import { LOG_LENGTH, PANE_ID, PANE_TITLE, autoOpenDue, liveRoom, liveScroll, pendingOffered, shownDispatch } from './central'
 import type { ControlHost } from './control'
 import { refusedText, sendControl } from './control'
+import type { DaemonHost } from './daemon'
+import { daemonClient } from './daemon'
 import { bandTree, paneTree } from './draw'
 import { empty, plain } from './kit'
 import type { ProxyFetch, Runner } from './read'
@@ -33,7 +35,11 @@ const EMPTY: StatusState = {
 }
 const NO_TICK: StatusTick = { lastOkAtMs: null, lastMs: null }
 /** The mod's state as last written, EMPTY before the first tick; a field an older module never wrote takes EMPTY's. */
-const readState = async ($: EngineInterface): Promise<StatusState> => ({ ...EMPTY, ...(await $.state.get(STATUS)).value })
+const readState = async ($: EngineInterface): Promise<StatusState> => {
+  const state = { ...EMPTY, ...(await $.state.get(STATUS)).value }
+  if (state.last?.attachment !== undefined && state.last.attachment.sessionId !== await $.session.id()) return { ...state, last: null }
+  return state
+}
 const readTick = async ($: EngineInterface): Promise<StatusTick> => ({ ...NO_TICK, ...(await $.state.get(TICK)).value })
 /**
  * One write of the mod's state: `change` sees the state as last written
@@ -62,6 +68,23 @@ const controlHost = ($: EngineInterface): ControlHost => ({
   submit: (text) => $.prompt.submit({ text }),
   pluginRoot: $.plugin.root,
   sessionId: () => $.session.id(),
+})
+/** The host adapter keeps every $ call at a documented literal call site. */
+const daemonHost = ($: EngineInterface): DaemonHost => ({
+  pluginRoot: $.plugin.root,
+  sessionId: () => $.session.id(),
+  root: () => $.session.root(),
+  now: () => $.clock.now(),
+  run: (argv, init) => $.process.run(argv, init),
+  resolve: async (path) => {
+    const stat = await $.fs.stat(path, { resolve: true })
+    if (stat.realPath === undefined) throw new Error('HOST_AUTH_REQUIRED: the host path cannot be resolved')
+    return stat.realPath
+  },
+  read: async () => (await readState($)).last,
+  project: async (projection) => { await editState($, () => ({ last: projection, pending: null })) },
+  toast: (text) => toast($, text),
+  log: (text) => $.ui.log(text),
 })
 /** Why the pane and the command stay quiet while the projection is not drawable: not the owner, or the band turned off. */
 function quietReason(projection: StatusProjection | null): string {
@@ -101,10 +124,23 @@ export const register: Register = (on) => {
   let liveBusy = false
   let liveTimer: Timer | null = null
   const chunks = new Map<string, string>()
+  const daemon = daemonClient()
+  // Separate hook frames are required: plugin provenance alone never admits a
+  // helper/backend call. The client consumes an exact private gesture first.
+  on('process.run', async ($, e, next) => {
+    if (!daemon.guarded(e.argv)) return next(e)
+    if (!await daemon.admitProcess(daemonHost($), e, next.origin)) return { deny: 'HOST_AUTH_REQUIRED: no matching operator gesture' }
+    return next(e)
+  }).catch(() => ({ deny: 'HOST_AUTH_REQUIRED: process admission failed' }))
+  on('ui.press', { plugin: 'autoloop', component: 'Pane', requestId: 'autoloop' }, async ($, e, next) => {
+    return await daemon.press(daemonHost($), e) ? {} : next(e)
+  }).catch(() => ({}))
 
   on('session.start', async ($, e, next) => {
     generation += 1
-    await $.command.register({ name: 'autoloop', description: 'Show the state of the run this session owns.' })
+    daemon.reset()
+    daemon.observe((await readState($)).last)
+    await $.command.register({ name: 'autoloop', description: 'Show, attach or control an Autoloop run.' })
     // The proxy is optional: without the variable the cell does not exist
     // and nothing is fetched; a base that is not a loopback URL counts as
     // unset. `claudeproxy` sets it before the session starts.
@@ -235,7 +271,10 @@ export const register: Register = (on) => {
           if (started !== generation) return
           await setPaneOpen($, opened.isPlaced)
         }
-        if (read.ok) syncLive(isDrawable(read.projection) ? read.projection : null)
+        if (read.ok) {
+          daemon.observe(read.projection)
+          syncLive(isDrawable(read.projection) ? read.projection : null)
+        }
         // ui.status false turns the mod off for the project: the tick stops
         // until the next session.start (spec item 6). An unowned projection
         // keeps it, since the session may come to own a run.
@@ -275,8 +314,10 @@ export const register: Register = (on) => {
     liveTimer?.cancel()
     liveTimer = null
     chunks.clear()
+    const ending = daemon.end(daemonHost($), e.sessionId)
     await $.state.set(STATUS, EMPTY)
     await $.state.set(TICK, NO_TICK)
+    await ending
     return next(e)
   })
 
@@ -284,6 +325,8 @@ export const register: Register = (on) => {
   // draws one row, so the facts are not drawn twice (SPEC-central item 7).
   on('command.run', { command: 'autoloop' }, async ($, e) => {
     const args = e.args.trim()
+    const daemonAnswer = await daemon.command(daemonHost($), e)
+    if (daemonAnswer !== null) return daemonAnswer
     if (args === 'close') {
       await $.ui.close({ id: PANE_ID })
       await setPaneOpen($, false)
@@ -291,7 +334,10 @@ export const register: Register = (on) => {
     }
     if (args !== '') return { text: `autoloop: unknown argument "${args}"; use /autoloop or /autoloop close` }
     const { last } = await readState($)
-    if (!isDrawable(last)) return { text: quietReason(last) }
+    if (!isDrawable(last)) {
+      const candidate = last?.owned === true ? null : await daemon.candidateText(daemonHost($))
+      return { text: candidate ?? quietReason(last) }
+    }
     const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE })
     await setPaneOpen($, opened.isPlaced)
     return { text: opened.isPlaced ? 'autoloop: status pane opened' : `autoloop: status pane waits (${opened.reason})` }

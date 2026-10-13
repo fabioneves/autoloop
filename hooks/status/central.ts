@@ -55,6 +55,7 @@ const row = (glyph: string, text: string, right: string | null = null, dim = fal
 
 /** The header's status line: the Loop cell's text, `paused` after it while the run is paused. */
 export function statusLine(projection: StatusProjection): string {
+  if (projection.execution?.mode === 'daemon') return loopColumn(projection, true).head
   return parts([loopColumn(projection, true).head, projection.run?.paused === true ? 'paused' : null])
 }
 
@@ -84,6 +85,7 @@ const utcMinute = (iso: string): string => `${iso.slice(11, 16)} UTC`
 
 /** What the Now section says without a unit: the next selection when the run is parked until a known time. */
 export function noUnitText(projection: StatusProjection): string {
+  if (projection.execution?.mode === 'daemon') return 'module 1 · queue disabled · no production units'
   const until = projection.run?.parkedUntil ?? null
   return until === null ? 'no unit in flight' : `no unit in flight · next selection at ${utcMinute(until)}`
 }
@@ -98,6 +100,7 @@ function unitElapsed(unit: StatusWorkedUnit, nowMs: number): string | null {
 export function dispatchRows(projection: StatusProjection, nowMs: number): Row[] {
   return runningDispatches(projection).map((dispatch) => {
     const name = dispatchName(dispatch, dispatch.dispatch)
+    if (projection.execution?.mode === 'daemon') return row(GLYPH.play, parts([name, dispatch.model === null ? null : shortModel(dispatch.model)]))
     return row(GLYPH.play, parts([name, dispatch.model === null ? null : shortModel(dispatch.model), duration(nowMs - dispatch.startedAtMs)]), null, false,
       { kind: 'cancel', dispatch: dispatch.dispatch, issue: dispatch.issue, name })
   })
@@ -117,6 +120,7 @@ export const stepName = (step: string): string => step.replace(/^\d+-/u, '')
 
 /** Timeline: one row per step of the worked unit, `✓` returned or `●` in flight; names only when narrow. */
 export function timelineSection(projection: StatusProjection, nowMs: number, narrow: boolean): Section {
+  if (projection.execution?.mode === 'daemon') return { title: 'Timeline', rows: [] }
   const steps = projection.unit?.steps ?? []
   return {
     title: 'Timeline',
@@ -217,6 +221,14 @@ export function runTab(projection: StatusProjection, proxy: ProxyRead | null, se
     nowSection(projection, nowMs), timelineSection(projection, nowMs, narrow), needsYouSection(projection), waitingSection(projection),
     deliveredSection(projection), ...(narrow ? [] : [proxySection(proxy, sessionId)]),
   ].filter((section) => section.rows.length > 0)
+  if (projection.execution?.mode === 'daemon') {
+    const requests = projection.controls?.requests ?? []
+    if (requests.length > 0) sections.push({ title: 'Controls', rows: requests.map((request) => row(
+      request.status === 'refused' ? GLYPH.failed : request.status === 'applied' ? GLYPH.done : GLYPH.waiting,
+      parts([`${request.requestId} · ${request.status}`, request.outcome?.code]),
+    )) })
+    if (projection.execution.eventLogError !== null) sections.push({ title: 'History', rows: [row(GLYPH.waiting, projection.execution.eventLogError)] })
+  }
   return { sections, empty: (projection.unit ?? null) === null ? noUnitText(projection) : null }
 }
 
@@ -369,6 +381,13 @@ function dispatchName(dispatch: { issue: number | null; role: string | null }, i
 export function liveTitle(projection: StatusProjection, id: string, stream: StatusStream | undefined, nowMs: number, narrow: boolean): string {
   const log = projection.log ?? []
   const listed = (projection.dispatches ?? []).find((dispatch) => dispatch.dispatch === id) ?? null
+  if (projection.execution?.mode === 'daemon') {
+    // An event line cannot establish a daemon worker result. Absence from the
+    // checkpoint is not success; uncertain process identity is not a dead worker.
+    return listed === null ? `${id} · not in checkpoint · outcome unknown`
+      : parts([dispatchName(listed, id), listed.model === null ? null : shortModel(listed.model),
+        listed.state === 'running' ? 'running' : listed.observation === 'empty' ? 'process group exited · outcome unknown' : 'process identity unknown'])
+  }
   const started = log.find((event) => event.kind === 'dispatch.start' && event.dispatch === id)
   const end = log.find((event) => event.kind === 'dispatch.end' && event.dispatch === id)
   // An ended dispatch is named by its start event, or by its end event when the log no longer holds the start.

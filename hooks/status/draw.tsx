@@ -140,6 +140,16 @@ export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderE
   // The mobile surface draws no field: a block or decide row then stands without its input.
   const Input = kit.Input ?? null
   const projection = state.last
+  const daemon = projection.execution?.mode === 'daemon'
+  const daemonButtons = (
+    <Box gap={1}>
+      {(projection.execution?.supportedControls ?? []).filter((kind) => kind !== 'pause' || projection.execution?.state !== 'paused')
+        .filter((kind) => kind !== 'resume' || projection.execution?.state === 'paused').map((kind) => (
+          <Button key={`daemon-${kind}`} label={kind === 'stop-now' ? 'stop now' : kind} plain onPress={() => undefined} />
+        ))}
+      <Button key="daemon-disconnect" label="disconnect" plain onPress={() => undefined} />
+    </Box>
+  )
   const setPending = (pending: StatusPending | null) => host.edit(() => ({ pending }))
   const paused = projection.run?.paused === true
   // The press reads the run as last written, not as this drawing saw it: a
@@ -164,7 +174,7 @@ export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderE
   )
   // The element a row's action draws: a button at the right that asks y or n, or an Input on the row under.
   const actionButton = (action: RowAction): RenderElement | null => {
-    if (action.kind === 'answer') return null
+    if (daemon || action.kind === 'answer') return null
     const key = action.kind === 'cancel' ? `cancel-${action.dispatch}` : `${action.kind}-${action.pr}`
     return <Button key={key} label={action.kind} plain onPress={() => setPending(action)} />
   }
@@ -179,7 +189,7 @@ export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderE
         {r.action !== null && actionButton(r.action)}
       </Box>
     )
-    if (r.action?.kind !== 'answer' || Input === null) return line
+    if (daemon || r.action?.kind !== 'answer' || Input === null) return line
     const issue = r.action.issue
     return (
       <Box flexDirection="column">
@@ -225,7 +235,7 @@ export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderE
         ))}
         <Button key="follow" label="follow" hotkey="f" plain {...(state.follow ? { variant: 'primary' as const } : {})}
           onPress={() => host.edit((written) => ({ follow: !written.follow }))} />
-        {shown.cancel !== null && <Button key="cancel" label="cancel" hotkey="x" plain onPress={() => setPending(shown.cancel)} />}
+        {!daemon && shown.cancel !== null && <Button key="cancel" label="cancel" hotkey="x" plain onPress={() => setPending(shown.cancel)} />}
       </Box>,
       <Text color={PALETTE.ink} wrap="truncate-end">{plain(shown.title)}</Text>,
       ...shown.lines.map((line) => <Text color={line.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">{plain(line.text)}</Text>),
@@ -236,10 +246,10 @@ export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderE
       <Box flexDirection="column">
         <Box justifyContent="space-between">
           <Text color={PALETTE.ink} wrap="truncate-end"><Text color={PALETTE.accent}>{GLYPH.brand}</Text> autoloop · {plain(statusLine(projection))}</Text>
-          {pauseButton}
+          {daemon ? daemonButtons : pauseButton}
         </Box>
         {tabs(kit, TABS.map(({ tab, label, hotkey }) => ({ label, hotkey, active: state.tab === tab, onPress: () => host.edit(() => ({ tab })) })))}
-        {state.pending !== null && confirmRow(state.pending)}
+        {!daemon && state.pending !== null && confirmRow(state.pending)}
       </Box>
       <Box flexDirection="column" {...(state.tab === 'run' ? { gap: 1 } : {})}>{body()}</Box>
     </Box>
