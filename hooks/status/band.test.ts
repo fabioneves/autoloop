@@ -15,7 +15,7 @@ import type { StatusState } from '../../types'
 import { BLOCKED_THREE, DISABLED, FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, RUN, UNOWNED } from './fixtures/projection'
 import { PERIOD_MS, band, buttons, findColor, findText, projection, ran, rows, start, texts } from './fixtures/testing'
 import { PALETTE } from './kit'
-import { PANE_ID } from './pane'
+import { PANE_ID } from './central'
 import { needsYouRow, phaseRow, toastText } from './view'
 
 const BASE = 'http://127.0.0.1:8787'

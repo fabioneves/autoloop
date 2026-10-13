@@ -2,16 +2,17 @@
 // a band above the prompt and, on request, a pane for the session that owns
 // a run. This module holds the hooks; the reads (the projection, the proxy,
 // the live tails) are in read.ts, the stream's renderer in render.ts, the
-// band's text in view.ts, the pane's sections in pane.ts, the palette,
+// band's text in view.ts, the pane's tabs in central.ts, the palette,
 // glyphs and element builders in kit.ts. The band draws only from a projection that is
 // owned and enabled, so every other session sees no change; the pane opens
 // only on /autoloop.
-import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, RenderElement, Timer } from 'claude-code'
 import { update } from 'claude-code'
 
 import type { StatusProjection, StatusState, StatusStream } from '../../types'
-import { GLYPH, PALETTE, cell, header, rule, strip } from './kit'
-import { PANE_ID, PANE_TITLE, paneSections } from './pane'
+import type { Row, Section } from './central'
+import { LOG_FILTERS, LOG_LENGTH, PANE_ID, PANE_TITLE, TABS, glyphTone, logTab, runTab, statusLine, unitsTab } from './central'
+import { GLYPH, PALETTE, cell, empty, header, rule, section, strip, tabs } from './kit'
 import type { ProxyFetch, Runner } from './read'
 import {
   LIVE_PERIOD_MS, STREAM_LINES_MAX, isDrawable, isStale, proxyBase, pruneStreams, readProjection, readProxy, runningDispatches, tailLive,
@@ -25,9 +26,12 @@ const STATUS = { plugin: 'autoloop', key: 'status' } as const
 const PERIOD_MS = 3000
 /** A tick past this is reported once: the period is not raised by itself (tasks/plan-status-mod.md, risks). */
 const SLOW_TICK_MS = 500
-const EMPTY: StatusState = { last: null, lastOkAtMs: null, lastMs: null, proxy: null, seenBlocked: [], paneOpen: false, streams: {} }
-/** The mod's state as last written; EMPTY before the first tick. */
-const heldState = async ($: EngineInterface): Promise<StatusState> => (await $.state.get(STATUS)).value ?? EMPTY
+const EMPTY: StatusState = {
+  last: null, lastOkAtMs: null, lastMs: null, proxy: null, seenBlocked: [], paneOpen: false, streams: {},
+  tab: 'run', logFilter: 'all', selected: null, follow: true, liveOffset: 0,
+}
+/** The mod's state as last written, EMPTY before the first tick; a field an older module never wrote takes EMPTY's. */
+const heldState = async ($: EngineInterface): Promise<StatusState> => ({ ...EMPTY, ...(await $.state.get(STATUS)).value })
 /** Whether the pane is open, written where the pane opens or closes; the band reads it to draw one row. */
 const setPaneOpen = ($: EngineInterface, paneOpen: boolean) =>
   update($, STATUS, (held) => ({ ...(held ?? EMPTY), paneOpen }))
@@ -126,8 +130,11 @@ export const register: Register = (on) => {
         // tick, since after a /clear the process goes on under a new id with
         // no session.start.
         const sessionId = await $.session.id()
+        // The Log tab is the whole log: 500 entries while it shows, the
+        // producer's default otherwise.
+        const logLength = (await heldState($)).tab === 'log' ? LOG_LENGTH : null
         const [read, proxy] = await Promise.all([
-          readProjection(run, $.plugin.root, sessionId),
+          readProjection(run, $.plugin.root, sessionId, logLength),
           base === null ? null : readProxy(fetch, base),
         ])
         const nowMs = await $.clock.now()
@@ -304,27 +311,53 @@ export const register: Register = (on) => {
     )
   })
 
-  // The literal, so `claude plugin validate` lists the pane's id (pane.test.ts holds PANE_ID to it).
+  // The literal, so `claude plugin validate` lists the pane's id (central.test.ts holds PANE_ID to it).
   on('ui.render', { component: 'Pane', requestId: 'autoloop' }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const kit = $.ui.resolve(e)
+    const { Box, Text, Button } = kit
     const held = await heldState($)
     if (!isDrawable(held.last)) return <Text color={PALETTE.ink2}>{quietReason(held.last)}</Text>
-    const sections = paneSections(held.last, held.proxy, await $.session.id(), await $.clock.now())
-    const glyphColor = (glyph: string) => (glyph === GLYPH.needsYou ? PALETTE.crit : glyph === GLYPH.waiting ? PALETTE.warn : PALETTE.good)
-    return (
-      <Box flexDirection="column">
-        {sections.map((section) => (
-          <Box flexDirection="column" marginBottom={1}>
-            <Text color={PALETTE.ink2} bold>{section.title}</Text>
-            {section.rows.map((row) => (
-              <Text color={PALETTE.ink}>
-                <Text color={glyphColor(row.glyph)}>{row.glyph}</Text> {row.text}
-                {row.chips.map((chip) => <Text color={PALETTE.info}>  {chip}</Text>)}
-                {row.mark !== null && <Text> · <Text color={PALETTE.accent}>{row.mark}</Text></Text>}
-              </Text>
+    const projection = held.last
+    const nowMs = await $.clock.now()
+    const sessionId = await $.session.id()
+    const setTab = (tab: StatusState['tab']) => update($, STATUS, (value) => ({ ...EMPTY, ...value, tab }))
+    const setFilter = (logFilter: StatusState['logFilter']) => update($, STATUS, (value) => ({ ...EMPTY, ...value, logFilter }))
+    const drawRow = (r: Row): RenderElement => (
+      <Box justifyContent="space-between">
+        <Text color={r.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">
+          {r.lead !== null && <Text color={PALETTE.ink2}>{r.lead}  </Text>}
+          {r.glyph !== '' && <Text color={PALETTE[glyphTone(r.glyph)]}>{r.glyph}</Text>}{r.glyph !== '' && ' '}{r.text}
+        </Text>
+        {r.right !== null && <Text color={PALETTE.ink2}> {r.right}</Text>}
+      </Box>
+    )
+    const drawSection = (s: Section) => section(kit, s.title, s.rows.map(drawRow))
+    const body = (): RenderChildren[] => {
+      if (held.tab === 'run') {
+        const run = runTab(projection, held.proxy, sessionId, nowMs, e.props.bodyColumns)
+        return [run.empty !== null && section(kit, 'Now', [empty(kit, run.empty)]), ...run.sections.map(drawSection)]
+      }
+      if (held.tab === 'units') return unitsTab(projection, nowMs).map(drawRow)
+      if (held.tab === 'log') {
+        return [
+          <Box gap={1}>
+            {LOG_FILTERS.map(({ filter, label }) => (
+              <Button key={`filter-${filter}`} label={label} plain {...(held.logFilter === filter ? { variant: 'primary' as const } : {})} onPress={() => setFilter(filter)} />
             ))}
-          </Box>
-        ))}
+            <Text color={PALETTE.ink2}>UTC</Text>
+          </Box>,
+          ...logTab(projection, held.logFilter).map(drawRow),
+        ]
+      }
+      return [empty(kit, 'no dispatch has run yet')]
+    }
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column">
+          {header(kit, <Text color={PALETTE.ink}><Text color={PALETTE.accent}>{GLYPH.brand}</Text> autoloop · {statusLine(projection)}</Text>)}
+          {tabs(kit, TABS.map(({ tab, label, hotkey }) => ({ label, hotkey, active: held.tab === tab, onPress: () => setTab(tab) })))}
+        </Box>
+        {held.tab === 'run' ? <Box flexDirection="column" gap={1}>{body()}</Box> : <Box flexDirection="column">{body()}</Box>}
       </Box>
     )
   })

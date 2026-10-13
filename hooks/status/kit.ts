@@ -37,6 +37,12 @@ export const GLYPH = Object.freeze({
   thinking: '⋯',
   /** Between the band's cells. */
   rule: '│',
+  /** A step announced, in the log. */
+  step: '→',
+  /** The run paused. */
+  paused: '⏸',
+  /** A log event with no state of its own: a label, a control. */
+  dot: '·',
 })
 
 /** The three elements every builder draws with, as `$.ui.resolve(e)` hands them out. */

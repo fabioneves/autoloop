@@ -159,6 +159,16 @@ export type StatusState = {
   paneOpen: boolean
   /** The live tails by dispatch id: every running dispatch's, and the last ended one's until session.end. */
   streams: Record<string, StatusStream>
+  /** The central pane's tab, kept across a redraw (SPEC-central item 8). */
+  tab: 'run' | 'live' | 'units' | 'log'
+  /** The Log tab's filter. */
+  logFilter: 'all' | 'steps' | 'dispatches' | 'needsYou' | 'controls'
+  /** The Live tab's dispatch, by id; null means the first running one. */
+  selected: string | null
+  /** The Live tab follows the stream's end; a scroll turns it off. */
+  follow: boolean
+  /** The first stream line the Live tab shows while not following. */
+  liveOffset: number
 }
 
 declare module 'claude-code' {
