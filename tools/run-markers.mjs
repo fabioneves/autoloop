@@ -16,7 +16,7 @@ import { homedir, tmpdir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boundedGit, setGitDeadline } from './git-budget.mjs';
-import { canonicalGuardPath, executionCommandProblemFor, fallbackGuardSegments, knownExecutionStatePath, runStateProblem } from './run-state-guard.mjs';
+import { guardPathForms, executionCommandProblemFor, fallbackGuardSegments, knownExecutionStatePath, runStateProblem } from './run-state-guard.mjs';
 
 // The guard is defense-in-depth for commands a run issues; repository rules are
 // the enforcement boundary. Applying it to every Bash call in the project turns
@@ -390,10 +390,9 @@ export function toolGuardFallbackProblem(payload, { workerDirectory = workerGuar
   if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(payload?.tool_name)) {
     const file = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
     if (typeof file === 'string') {
-      const literal = resolve(cwd, file);
-      const real = canonicalGuardPath(literal);
-      if ([literal, real].some(knownExecutionStatePath)
-        || [...paths.state, ...paths.code].some((path) => [literal, real].some((target) => target === path || target.startsWith(`${path}/`)))) {
+      const targets = guardPathForms(file, cwd);
+      if (targets.some(knownExecutionStatePath)
+        || [...paths.state, ...paths.code].some((path) => targets.some((target) => target === path || target.startsWith(`${path}/`)))) {
         return 'autoloop guard — the primary edit guard failed for protected execution state or code.';
       }
     }

@@ -25,7 +25,7 @@
 //
 //   node <plugin-tools>/run-state-guard.mjs --self-test
 
-import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { lstatSync, opendirSync, realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -273,23 +273,34 @@ function expansions(word, at, home, env) {
   return results;
 }
 
-// The real location of a path whose leading part exists: symlinks made by an
-// earlier command are followed, glob segments are kept as they are.
+// Keep raw components until the OS follows symlinks. resolve/join (and the
+// JavaScript realpath implementation) can collapse hop/.. before that lookup.
+export function rawGuardAbsolutePath(path, cwd = process.cwd()) {
+  return isAbsolute(path) ? path : `${cwd}/${path}`;
+}
+
+// Resolve the existing prefix physically, including a symlink before '..'.
+// New leaves and glob suffixes retain the location of that physical prefix.
 function canonical(path) {
+  try { return realpathSync.native(path); } catch { /* missing leaf or glob */ }
   const parts = path.split('/');
-  const globAt = parts.findIndex((part) => /[*?[]/u.test(part));
-  let prefix = globAt === -1 ? path : parts.slice(0, globAt).join('/') || '/';
-  const rest = globAt === -1 ? [] : parts.slice(globAt);
-  const tail = [];
-  for (let guard = 0; guard < 256 && prefix !== '/' && !existsSync(prefix); guard += 1) {
-    tail.unshift(basename(prefix));
-    prefix = dirname(prefix);
+  let prefix = isAbsolute(path) ? '/' : process.cwd();
+  let index = 0;
+  for (; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part === '') continue;
+    if (/[*?[]/u.test(part)) break;
+    try { prefix = realpathSync.native(`${prefix}/${part}`); }
+    catch { break; }
   }
-  try {
-    return join(realpathSync(prefix), ...tail, ...rest);
-  } catch {
-    return path;
-  }
+  return index === parts.length ? prefix : `${prefix === '/' ? '' : prefix}/${parts.slice(index).join('/')}`;
+}
+
+// The lexical spelling is checked separately: an installed dev-mod alias is
+// protected even when its physical target is an ordinary source checkout.
+export function guardPathForms(path, cwd = process.cwd()) {
+  const raw = rawGuardAbsolutePath(path, cwd);
+  return [...new Set([resolve(raw), canonical(raw)])];
 }
 
 export { canonical as canonicalGuardPath };
@@ -308,6 +319,46 @@ export function knownExecutionStatePath(path) {
   } catch { return false; }
 }
 
+// A wildcard before '..' can select a symlink. Resolve its actual matches
+// before parent traversal, rather than normalize the wildcard away. This is
+// only for this physical-path case; ordinary globs keep symbolic matching.
+// null means the physical targets cannot be proven within the guard budget.
+function physicalParentGlobPaths(path) {
+  const parts = path.split('/').filter(Boolean);
+  const globAt = parts.findIndex((part) => /[*?[]/u.test(part));
+  if (globAt === -1 || !parts.slice(globAt + 1).includes('..')) return [];
+  if (parts.includes('**')) return null; // recursive glob semantics cannot be proven here
+  let candidates = ['/'];
+  for (const part of parts) {
+    if (!/[*?[]/u.test(part)) {
+      candidates = candidates.map((prefix) => `${prefix}/${part}`);
+      continue;
+    }
+    const matches = [];
+    for (const prefix of candidates) {
+      let directory;
+      try {
+        directory = opendirSync(prefix);
+        let entry;
+        let scanned = 0;
+        while ((entry = directory.readSync()) !== null) {
+          scanned += 1;
+          if (scanned > MAX_TRACKED_WORDS) return null;
+          if (!segmentMatches(part, entry.name)) continue;
+          matches.push(`${prefix}/${entry.name}`);
+          if (matches.length > MAX_ALTERNATIVES) return null;
+        }
+      } catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return null;
+      } finally { directory?.closeSync(); }
+    }
+    candidates = matches;
+  }
+  return candidates.map((candidate) => {
+    try { return realpathSync.native(candidate); } catch { return canonical(candidate); }
+  });
+}
+
 // What a word names where a segment runs: the concrete paths (and their real
 // locations), and the texts that stay unknown — an unresolved expansion, or a
 // relative path after a cd the guard could not follow. null past the cap.
@@ -316,18 +367,67 @@ function resolveWord(word, at, home, env) {
   if (alternatives === null) return null;
   const paths = [];
   const unknowns = [];
+  let physicalUnknown = false;
   for (const text of alternatives) {
     if (text === '') continue;
     if (EXPANSION.test(text) || (!isAbsolute(text) && at.dir === null)) {
       unknowns.push(text);
     } else {
-      const path = isAbsolute(text) ? resolve(text) : resolve(at.dir, text);
-      paths.push(path);
-      const real = canonical(path);
-      if (real !== path) paths.push(real);
+      paths.push(...guardPathForms(text, at.dir));
+      const physical = physicalParentGlobPaths(rawGuardAbsolutePath(text, at.dir));
+      if (physical === null) physicalUnknown = true;
+      else paths.push(...physical);
     }
   }
-  return { paths, unknowns };
+  return { paths, unknowns, physicalUnknown };
+}
+
+const POSIX_GLOB_CLASSES = Object.freeze({
+  alnum: 'A-Za-z0-9', alpha: 'A-Za-z', ascii: '\x00-\x7f', blank: ' \t', cntrl: '\x00-\x1f\x7f',
+  digit: '0-9', graph: '!-~', lower: 'a-z', print: ' -~', punct: '!-/:-@[-`{-~',
+  space: '\t-\r ', upper: 'A-Z', xdigit: 'A-Fa-f0-9',
+});
+function globTokens(pattern) {
+  const tokens = [];
+  for (let index = 0; index < pattern.length; index += 1) {
+    let token = pattern[index];
+    if (token === '\\' && index + 1 < pattern.length) {
+      tokens.push(token + pattern[++index]);
+      continue;
+    }
+    if (token === '[') {
+      let end = index + 1;
+      if (['!', '^'].includes(pattern[end])) end += 1;
+      if (pattern[end] === ']') end += 1;
+      for (; end < pattern.length && pattern[end] !== ']'; end += 1) {
+        if (pattern[end] === '\\' && end + 1 < pattern.length) { end += 1; continue; }
+        const marker = pattern[end + 1];
+        if (pattern[end] === '[' && [':', '.', '='].includes(marker)) {
+          const close = pattern.indexOf(`${marker}]`, end + 2);
+          if (close !== -1) end = close + 1;
+        }
+      }
+      if (end < pattern.length) {
+        token = pattern.slice(index, end + 1)
+          .replace(/\[:(\w+):\]/gu, (text, name) => POSIX_GLOB_CLASSES[name] ?? text)
+          .replace(/\[([.=])([^\]]+)\1\]/gu, (text, marker, char) => char.length === 1 ? char : text);
+        index = end;
+      }
+    }
+    if (token !== '*' || tokens.at(-1) !== '*') tokens.push(token);
+  }
+  return tokens;
+}
+function globTokenSource(token) {
+  if (token === '*') return '.*';
+  if (token === '?') return '.';
+  if (token.startsWith('[') && token.endsWith(']')) {
+    const source = token.replace(/^\[!/u, '[^').replace(/^\[(\^?)\]/u, '[$1\\]')
+      .replace(/\\([^\\\]\-^])/gu, '$1');
+    try { new RegExp(source, 'u'); return source; } catch { /* literal invalid class */ }
+  }
+  const literal = token.startsWith('\\') && token.length === 2 ? token.slice(1) : token;
+  return literal.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
 // A glob segment against one name. Runs of `*` collapse, and a segment with
@@ -340,16 +440,9 @@ function segmentMatches(pattern, name, extglob = false) {
   // may match. (Elsewhere — code or SQL handed to a program — they are text.)
   if (extglob && /[(|]/u.test(pattern)) return true;
   if (!/[*?[]/u.test(pattern)) return pattern === name;
-  const collapsed = pattern.replace(/\*+/gu, '*');
-  if ((collapsed.match(/[*?]/gu) ?? []).length > 8) return true;
-  // `[!x]` is the shell's negated class; after quoting, it becomes `[^x]`.
-  const source = collapsed.replace(/[.+^${}()|\\]/gu, '\\$&').replace(/\*/gu, '.*').replace(/\?/gu, '.')
-    .replace(/\[!/gu, '[^').replace(/\[\\\^/gu, '[^');
-  try {
-    return new RegExp(`^${source}$`, 'u').test(name);
-  } catch {
-    return pattern === name; // not a glob the shell could expand either
-  }
+  const tokens = globTokens(pattern);
+  if (tokens.filter((token) => token === '*' || token === '?').length > 8) return true;
+  return new RegExp(`^${tokens.map(globTokenSource).join('')}$`, 'u').test(name);
 }
 
 // How a path (possibly a glob) relates to a protected directory: 'inside'
@@ -706,13 +799,64 @@ function executionScriptIndex(words, head) {
   }
   return -1;
 }
+// Intersect a literal unit glob with the complete Autoloop unit language,
+// not one example hash. Each hash position can be any hexadecimal digit.
+// Dynamic programming bounds the work by pattern length times unit length.
+export function selectsAutoloopService(pattern) {
+  const tokens = globTokens(pattern);
+  const prefix = [...'autoloop-'];
+  const hash = Array(64).fill('0123456789abcdef');
+  return ['', '.service'].some((suffix) => {
+    const alphabet = [...prefix, ...hash, ...suffix];
+    let reachable = Array(alphabet.length + 1).fill(false);
+    reachable[0] = true;
+    for (const token of tokens) {
+      const match = new RegExp(`^${globTokenSource(token)}$`, 'u');
+      const next = Array(alphabet.length + 1).fill(false);
+      if (token === '*') next[0] = reachable[0];
+      for (let at = 1; at <= alphabet.length; at += 1) {
+        next[at] = token === '*' ? reachable[at] || next[at - 1]
+          : reachable[at - 1] && [...alphabet[at - 1]].some((char) => match.test(char));
+      }
+      reachable = next;
+    }
+    return reachable.at(-1);
+  });
+}
+
+const SYSTEMCTL_MUTATIONS = new Set(['start', 'stop', 'reload', 'restart', 'try-restart', 'reload-or-restart',
+  'try-reload-or-restart', 'isolate', 'kill', 'clean', 'freeze', 'thaw', 'set-property', 'bind', 'mount-image',
+  'reset-failed', 'enable', 'link', 'disable', 'reenable', 'preset', 'mask', 'unmask', 'revert', 'add-wants', 'add-requires', 'edit']);
+const SYSTEMCTL_VALUED_OPTIONS = new Set(['--capsule', '-C', '--host', '-H', '--machine', '-M', '--type', '-t',
+  '--state', '--property', '-p', '-P', '--signal', '-s', '--root', '--image', '--lines', '-n', '--output', '-o',
+  '--job-mode', '--kill-whom', '--kill-value', '--what', '--timestamp', '--drop-in', '--preset-mode',
+  '--check-inhibitors', '--legend', '--image-policy', '--message', '--boot-loader-menu', '--boot-loader-entry', '--reboot-argument', '--when']);
+function systemctlArguments(words, from) {
+  const args = [];
+  let options = true;
+  for (let index = from; index < words.length; index += 1) {
+    const word = words[index];
+    if (options && word === '--') { options = false; continue; }
+    if (options && word.startsWith('-')) {
+      const shortValue = word.startsWith('--') ? -1 : [...word.slice(1)].findIndex((letter) => 'CHMtpPsno'.includes(letter));
+      const takesNext = SYSTEMCTL_VALUED_OPTIONS.has(word) || (shortValue !== -1 && shortValue === word.length - 2);
+      if (takesNext) index += 1;
+    } else args.push(word);
+  }
+  return args;
+}
+
 function executionCommandProblem(words, head, at, { pluginRoot, home, env }, depth = 0) {
   if (head < 0 || depth > 4) return null;
   const name = basename(words[head]);
   const rest = words.slice(head + 1);
-  if (name === 'systemctl' && rest.some((word) => ['start', 'stop', 'restart', 'try-restart', 'reload-or-restart', 'kill', 'reset-failed', 'enable', 'disable', 'mask', 'unmask'].includes(word))
-    && rest.some((word) => /^autoloop-[0-9a-f]{64}(?:\.service)?$/u.test(word))) {
-    return 'autoloop guard — model tools cannot change an Autoloop service.';
+  if (name === 'systemctl') {
+    const [verb, ...targets] = systemctlArguments(words, head + 1);
+    const selectors = ['enable', 'link'].includes(verb) ? targets.map((target) => basename(target)) : targets;
+    const loggingMutation = ['service-log-level', 'service-log-target'].includes(verb) && targets.length > 1;
+    if ((SYSTEMCTL_MUTATIONS.has(verb) || loggingMutation) && selectors.some(selectsAutoloopService)) {
+      return 'autoloop guard — model tools cannot change an Autoloop service.';
+    }
   }
   if (name === 'systemd-run') {
     if (rest.some((word) => /^(?:--unit=)?autoloop-[0-9a-f]{64}(?:\.service)?$/u.test(word))) {
@@ -748,6 +892,18 @@ function executionCommandProblem(words, head, at, { pluginRoot, home, env }, dep
   const args = words.slice(index + 1);
   if (args.length === 1 && args[0] === '--self-test') return null;
   const tool = basename(target);
+  // Operator-approved development checks only. These exact modes cannot
+  // select a repository/run or issue a control. Installed spellings stay
+  // protected even when a cache entry points at the development checkout.
+  let sourceCheckout = false;
+  if (!target.includes('/.claude/plugins/cache/') && !pluginRoot.includes('/.claude/plugins/cache/')) {
+    try {
+      const git = lstatSync(join(pluginRoot, '.git'));
+      sourceCheckout = git.isDirectory() || git.isFile();
+    } catch { /* not the source checkout */ }
+  }
+  if (sourceCheckout && ((tool === 'loop-viewer.mjs' && args.length === 1 && args[0] === '--fixtures')
+    || (tool === 'loop-supervisor.mjs' && args.length === 2 && args[0] === '--self-test' && args[1] === '--require-supervision'))) return null;
   if (tool === 'loop.mjs' && ['status', 'request-status'].includes(args[0])) return null;
   if (tool === 'status.mjs' && !args.some((word) => /^(?:--attach|--disconnect|--control|--viewer-ended)(?:=|$)/u.test(word))) return null;
   return `autoloop guard — model tools cannot call the scheduler mutation or host helper entry (${tool}). Use a trusted operator command.`;
@@ -847,8 +1003,11 @@ export function readsOnly(words) {
 function judge(claim, at, dirs, home, env, knownOnly = false) {
   const resolved = claim.word === null ? null : resolveWord(claim.word, at, home, env);
   if (resolved === null) return claim.prove && !knownOnly ? unproven(claim.word) : null;
+  // A literal glob with parent traversal has real physical targets. Failure
+  // to enumerate them must not grant a mutation, including the early fallback.
+  if (resolved.physicalUnknown) return unproven(claim.word);
   for (const path of resolved.paths) {
-    if (knownOnly && claim.prove && claim.relations.includes('inside') && knownExecutionStatePath(path)) {
+    if (knownOnly && claim.relations.includes('inside') && knownExecutionStatePath(path)) {
       return refusal(path, 'scheduler execution state');
     }
     for (const protectedDir of dirs) {

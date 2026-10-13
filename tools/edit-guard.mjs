@@ -25,10 +25,10 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve, sep } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { heldLatch, ownedRun, processStart, protectedPaths, sessionOwnerPid, executionProtectedPaths } from './run-markers.mjs';
-import { canonicalGuardPath as canonical, knownExecutionStatePath } from './run-state-guard.mjs';
+import { canonicalGuardPath as canonical, guardPathForms, rawGuardAbsolutePath, knownExecutionStatePath } from './run-state-guard.mjs';
 import { workerToolContext } from './loop-execution-admission.mjs';
 import { hookRoot } from './hook-root.mjs';
 import { gitStalled, setGitDeadline } from './git-budget.mjs';
@@ -39,7 +39,7 @@ const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.lo
 export function hookWiringEditProblem(filePath, repoRoot, live) {
   if (!live || typeof filePath !== 'string' || filePath.length === 0) return null;
   const root = canonical(repoRoot);
-  const target = canonical(resolve(repoRoot, filePath));
+  const target = canonical(rawGuardAbsolutePath(filePath, repoRoot));
   const relativePath = relative(root, target).split(sep).join('/');
   if (!HOOK_WIRING.includes(relativePath.toLowerCase())) return null;
   return `autoloop guard — ${relativePath} is this session's hook wiring, and a session that ran `
@@ -49,11 +49,11 @@ export function hookWiringEditProblem(filePath, repoRoot, live) {
 
 export function runStateEditProblem(filePath, repoRoot, protectedDirs, live, { codeAliases = true } = {}) {
   if (!live || typeof filePath !== 'string' || filePath.length === 0) return null;
-  const literal = resolve(repoRoot, filePath);
-  const target = canonical(literal);
+  const targets = guardPathForms(filePath, repoRoot);
+  const target = targets.at(-1);
   const hit = protectedDirs.filter((dir) => typeof dir === 'string')
     .find((dir) => (codeAliases ? [dir, canonical(dir)] : [dir])
-      .some((form) => [literal, target].some((path) => path === form || path.startsWith(`${form}${sep}`))));
+      .some((form) => targets.some((path) => path === form || path.startsWith(`${form}${sep}`))));
   if (hit === undefined) return null;
   return `autoloop guard — ${target} is this run's own state (${hit}): the run markers and the session `
     + 'latch are how the guard knows a run is open, so a run never writes them.';
@@ -185,7 +185,7 @@ export function runEditGuard({ workerDirectory, inputText, observe = () => {} } 
   if (!EDIT_TOOLS.includes(payload?.tool_name) && sessionId !== null) process.exit(0);
   const earlyRoot = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
   const filePath = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
-  if (typeof filePath === 'string' && [resolve(payload?.cwd ?? earlyRoot, filePath), canonical(resolve(payload?.cwd ?? earlyRoot, filePath))].some(knownExecutionStatePath)) {
+  if (typeof filePath === 'string' && guardPathForms(filePath, payload?.cwd ?? earlyRoot).some(knownExecutionStatePath)) {
     console.error('autoloop guard — model tools cannot change named scheduler execution state.'); process.exit(2);
   }
   const executionPaths = executionProtectedPaths({ projectRoot: earlyRoot, cwd: payload?.cwd ?? earlyRoot });
