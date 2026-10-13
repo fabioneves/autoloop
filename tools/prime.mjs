@@ -34,7 +34,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
@@ -59,7 +59,7 @@ import { answeredMarker, liftWaits, postDigest, realRun, triageBlocks } from './
 import { dispatchInheritance } from './inherited-dispatch.mjs';
 import { appendEvent, currentRunId, emitEvent, isPaused, readEvents, resolveCommonDir, setPaused, setRunId, takeControls, writeControl } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
-import { assertNoKnownLegacyOwner, assertNoSchedulerOwner, readProcessIdentity, resolveRepository, withExecutionAdmission } from './scheduler-contract.mjs';
+import { assertNoKnownLegacyOwner, assertNoSchedulerOwner, createSchedulerTestAccount, readProcessIdentity, resolveRepository, withExecutionAdmission } from './scheduler-contract.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
@@ -1297,7 +1297,9 @@ function selfTest() {
     // latch and switched the session's guards off. The id is the hook
     // input's, handed over by the guard; an open latch is never rebound.
     {
-      const home = join(scratch, 'home');
+      // The scoped external account preload is shared with the guard child;
+      // HOME alone must not point that child at a different authority store.
+      const home = userInfo().homedir;
       const latches = join(home, '.claude', 'autoloop', 'run-latches');
       const quiet = { cwd: root, elsewhere: () => [], lift: () => ({ ok: true, lifted: [] }), triage: () => ({ ok: true, resumed: [] }),
         scanArgs: ['--pr', 'x'], latches };
@@ -1333,6 +1335,7 @@ function selfTest() {
           input: JSON.stringify({ session_id: 'S-host', tool_name: 'Bash', cwd: root, tool_input: { command: 'gh pr merge 42 --squash' } }),
           encoding: 'utf8', cwd: root, timeout: 30000, env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: root },
         });
+        if (guard.status !== 2) console.error(`ownership guard fixture: ${JSON.stringify({ status: guard.status, stderr: guard.stderr, home, latch: latchOf()?.sessionId })}`);
         check(
           'prime opens a run only for the host session the guard handed it, refuses without one, and never rebinds an open latch',
           unknown.ok === false && unknown.error.code === 'RUN_SESSION_UNKNOWN' && !unknownWrote
@@ -1375,6 +1378,7 @@ function selfTest() {
         if (envBefore === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
         else process.env.CLAUDE_CODE_SESSION_ID = envBefore;
         rmSync(markerDirectory, { recursive: true, force: true });
+        rmSync(latches, { recursive: true, force: true });
       }
     }
     const claude = [1, 'claude', '/u/.local/share/claude/versions/2.1.284'];
@@ -1552,11 +1556,26 @@ function main() {
   if (parsed.mode === 'self-test') {
     // Resolving models writes the global config when missing: a self-test
     // must never write the operator's own.
-    const configDir = mkdtempSync(join(tmpdir(), 'prime-config-'));
-    process.env.CLAUDE_CONFIG_DIR = configDir;
-    const passed = selfTest();
-    rmSync(configDir, { recursive: true, force: true });
-    process.exit(passed ? 0 : 1);
+    void (async () => {
+      const configDir = realpathSync(mkdtempSync(join(tmpdir(), 'prime-config-')));
+      const previous = process.env.CLAUDE_CONFIG_DIR;
+      let account;
+      try {
+        process.env.CLAUDE_CONFIG_DIR = configDir;
+        account = await createSchedulerTestAccount(configDir);
+        if (!userInfo().homedir.startsWith(`${configDir}/`)) throw new Error('The prime self-test must isolate its OS account before admission.');
+        return selfTest();
+      } finally {
+        account?.restore();
+        if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+        else process.env.CLAUDE_CONFIG_DIR = previous;
+        rmSync(configDir, { recursive: true, force: true });
+      }
+    })().then((passed) => process.exit(passed ? 0 : 1), (error) => {
+      console.error(`prime self-test: ${error.message}`);
+      process.exit(1);
+    });
+    return;
   }
   const digest = () => postDigest({ run: realRun(process.cwd()) });
   if (parsed.mode === 'park') {

@@ -16,7 +16,7 @@ import { isatty } from 'node:tty';
 import { fileURLToPath } from 'node:url';
 import { ancestorChain, isClaudeProcess, procEntry } from './run-markers.mjs';
 import {
-  readCurrentCheckpoint, readProcessIdentity, resolveRepository, schedulerDigest, SchedulerError,
+  createSchedulerTestAccount, readCurrentCheckpoint, readProcessIdentity, resolveRepository, schedulerDigest, SchedulerError,
 } from './scheduler-contract.mjs';
 
 export const HOST_INVOCATION_SCHEMA = 'autoloop.host-invocation/1';
@@ -192,12 +192,19 @@ export async function admitOperatorTerminal(command) {
 }
 
 async function selfTest() {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-admission-')));
+  const account = await createSchedulerTestAccount(scratch);
+  try { return await admissionTestCases(scratch); }
+  finally { account.restore(); }
+}
+
+async function admissionTestCases(scratch) {
   const cases = [];
   const check = async (name, run) => {
     try { await run(); cases.push([name, true]); }
     catch (error) { cases.push([name, false]); console.error(`FAIL ${name}: ${error.message}`); }
   };
-  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-admission-')));
+  assert(userInfo().homedir.startsWith(`${scratch}/`), 'The admission self-test must isolate its OS account before acquiring state.');
   const runHost = async (command, mode = 'valid') => {
     const runtimeRoot = join(scratch, randomUUID());
     mkdirSync(runtimeRoot, { mode: 0o700 });

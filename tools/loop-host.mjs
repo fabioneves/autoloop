@@ -5,10 +5,10 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireScheduler, commitTransition, createPins, readCheckpoint, readCurrentCheckpoint, readProcessIdentity, releaseScheduler,
+import { acquireScheduler, commitTransition, createPins, createSchedulerTestAccount, readCheckpoint, readCurrentCheckpoint, readProcessIdentity, releaseScheduler,
   resolveRepository, SchedulerError } from './scheduler-contract.mjs';
 import { CONFIG_VERSION, resolveConfigText } from './config-contract.mjs';
 import { DEFAULT_MODELS, mergeModels } from './models-config.mjs';
@@ -65,19 +65,16 @@ export function publishHostRequest(request) {
 
 async function selfTest() {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-host-')));
+  const account = await createSchedulerTestAccount(scratch);
+  try { return await hostTestCases(scratch, account); }
+  finally { account.restore(); }
+}
+
+async function hostTestCases(scratch, { accountHome }) {
   console.error(`Retained test scratch: ${scratch}`);
   const root = join(scratch, 'repo');
-  const accountHome = join(scratch, 'account');
-  mkdirSync(accountHome, { mode: 0o700 });
-  // Replace only the external OS-account location for the fake host and its
-  // real backend children. Production still derives its fixed store itself.
-  const preload = join(scratch, 'fixture-account.mjs');
-  writeFileSync(preload, `import os from 'node:os'; import { syncBuiltinESMExports } from 'node:module';
-const account = os.userInfo;
-os.userInfo = (...args) => ({ ...account(...args), homedir: ${JSON.stringify(accountHome)} });
-os.homedir = () => ${JSON.stringify(accountHome)};
-syncBuiltinESMExports();\n`);
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', root], { timeout: 15000 }).status, 0);
+  assert.equal(userInfo().homedir, accountHome, 'The helper self-test parent must use the same fixture account as its children before acquisition.');
   const repository = resolveRepository(root);
   const config = resolveConfigText(JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'node --version' } })).config;
   const pins = createPins(repository, { pluginRoot: dirname(dirname(fileURLToPath(import.meta.url))),
@@ -233,7 +230,7 @@ syncBuiltinESMExports();\n`);
   let hostResult;
   await check('real direct external host publishes a bound helper receipt and consumes it through status', async () => {
     const child = spawn(fakeClaude, ['--input-type=module', '-e', hostScript, root, pins.pluginRoot, acquired.runId, pins.nodePath, accountHome], {
-      env: { ...process.env, NODE_OPTIONS: `--import=${preload}` },
+      env: { ...process.env },
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'], detached: true,
     });
     const closed = new Promise((done) => child.once('close', done));
