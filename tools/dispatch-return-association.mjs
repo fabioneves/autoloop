@@ -3,11 +3,11 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
-  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync,
+  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { processAlive, processStart } from './run-markers.mjs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -43,15 +43,15 @@ export function readStepBinding(path, issue) {
   };
 }
 
-// A writer that died holding the lock (a SIGKILLed dispatch) wedged every
-// later step write (review R1). The lock is a file naming its holder — pid,
-// start time and a nonce — linked into place whole, so no lock is ever seen
-// without its holder. A lock whose holder is dead, or whose pid now names
-// another process, is moved aside and removed. A move that caught a live
-// lock instead (it was reclaimed and retaken since the holder was read) is
-// never put back over a newer one: the writer that lost it finds its nonce
-// gone and writes nothing, and a writer releases only its own lock (re-audit
-// N2). A legacy lock with no holder is stale only after LOCK_GRACE_MS.
+// A dead writer's lock can be reclaimed. Each acquisition attempt publishes
+// a unique intent before it can read or remove an older lock. A new holder
+// drains those intents and checks its nonce before it calls change. Thus a
+// delayed stale read can remove a new lock only before its callback starts.
+// A failed acquisition removes its intent before waiting; a displaced holder
+// stops draining as soon as its nonce is gone. Neither can form a wait cycle.
+// Dead intents have unique paths and are removed by pid/start identity, not
+// age. Unreadable intents block. Legacy locks without a holder retain a grace
+// period. The final nonce check also fences uncoordinated lock removal.
 const LOCK_GRACE_MS = 5_000;
 const MAX_RECLAIMS = 3;
 
@@ -100,27 +100,77 @@ function takeLock(lock, holder) {
   }
 }
 
+function reclaimInProgress(lock, ownIntent) {
+  const prefix = `${basename(lock)}.`;
+  for (const name of readdirSync(dirname(lock))) {
+    if (!name.startsWith(prefix) || !name.endsWith('.reclaim')) continue;
+    // Preserve kernel path resolution: join() would collapse a symlink/..
+    // pair lexically and read a different directory from the one listed.
+    const intent = `${dirname(lock)}/${name}`;
+    if (name === basename(ownIntent)) continue;
+    const holder = lockHolder(intent);
+    if (holder === null) {
+      if (existsSync(intent)) return true;
+      continue;
+    }
+    let owner;
+    try { owner = JSON.parse(holder); } catch { return true; }
+    if (!Number.isSafeInteger(owner?.pid) || owner.pid < 1) return true;
+    if (!staleLock(intent, holder)) return true;
+    // This generation's path is never reused, so unlink cannot remove a new
+    // intent published after the dead holder was read.
+    try { unlinkSync(intent); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return false;
+}
+
 export function updateStepRecord(path, change, { waitMs = 300 } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const lock = `${path}.lock`;
   const mine = JSON.stringify({ pid: process.pid, start: processStart(process.pid), nonce: randomUUID() });
   const deadline = Date.now() + waitMs;
   let reclaims = 0;
+  const busy = () => Object.assign(new Error(`the step record lock is busy; ${path} is not written`), { code: 'EEXIST' });
   for (;;) {
+    const intent = `${lock}.${randomUUID()}.reclaim`;
+    takeLock(intent, mine);
+    let acquired = false;
+    let secured = false;
     try {
-      takeLock(lock, mine);
-      break;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      const holder = lockHolder(lock);
-      if (reclaims < MAX_RECLAIMS && staleLock(lock, holder)) {
-        reclaims += 1;
-        reclaimStaleLock(lock);
-        continue;
+      try {
+        takeLock(lock, mine);
+        acquired = true;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        const holder = lockHolder(lock);
+        if (reclaims < MAX_RECLAIMS && staleLock(lock, holder)) {
+          reclaims += 1;
+          reclaimStaleLock(lock);
+          continue;
+        }
+        if (Date.now() >= deadline) throw error;
       }
-      if (Date.now() >= deadline) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      if (acquired) {
+        while (lockHolder(lock) === mine && reclaimInProgress(lock, intent)) {
+          if (Date.now() >= deadline) throw busy();
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        }
+        // An intent published after the drain reads this live holder and
+        // cannot reclaim it. No callback has run if ownership was lost here.
+        secured = lockHolder(lock) === mine;
+        if (secured) break;
+      }
+    } finally {
+      // Keep the intent through pre-callback cleanup. If another reclaimer
+      // swaps this lock during cleanup, its new holder must still drain us.
+      try {
+        if (acquired && !secured && lockHolder(lock) === mine) unlinkSync(lock);
+      } finally {
+        unlinkSync(intent);
+      }
     }
+    if (Date.now() >= deadline) throw busy();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
   }
   try {
     let record = null;
@@ -156,6 +206,33 @@ async function selfTest() {
   const path = join(root, 'steps', '7.json');
   const checks = [];
   try {
+    checks.push(['a path containing a dot segment never waits on its own reclaim intent', (() => {
+      const dotted = `${root}/./steps/13.json`;
+      try {
+        const result = updateStepRecord(dotted, () => ({ changed: true, record: { counter: 1 } }), { waitMs: 0 });
+        return result.changed && JSON.parse(readFileSync(dotted, 'utf8')).counter === 1;
+      } catch {
+        return false;
+      }
+    })()]);
+    checks.push(['a symlink followed by a parent segment retains the physical intent directory', (() => {
+      mkdirSync(join(root, 'target', 'child'), { recursive: true });
+      mkdirSync(join(root, 'target', 'steps'));
+      symlinkSync(join(root, 'target', 'child'), join(root, 'link'));
+      const target = `${root}/link/../steps/14.json`;
+      const intent = `${target}.lock.${randomUUID()}.reclaim`;
+      writeFileSync(intent, JSON.stringify({ pid: process.pid, start: processStart(process.pid) }), { flag: 'wx' });
+      let called = false;
+      let blocked = false;
+      try {
+        updateStepRecord(target, () => { called = true; return { changed: true, record: {} }; }, { waitMs: 0 });
+      } catch (error) {
+        blocked = error.code === 'EEXIST';
+      }
+      const kept = existsSync(intent);
+      unlinkSync(intent);
+      return blocked && !called && kept && !existsSync(target);
+    })()]);
     const stepId = newAssociationId();
     const dispatchId = newAssociationId();
     const result = { ok: false, role: 'fix', receipt: { issue: 7, stepId, dispatchId, role: 'fix' } };
@@ -202,6 +279,35 @@ async function selfTest() {
     });
     checks.push(['a lock whose holder is dead, or whose pid now names another process, is reclaimed',
       reclaimed.every(Boolean) && !existsSync(`${path}.lock`)]);
+    const intentTarget = join(root, 'steps', '12.json');
+    updateStepRecord(intentTarget, () => ({ changed: true, record: { counter: 0 } }));
+    const deadIntents = reclaimable.map((owner) => {
+      const intent = `${intentTarget}.lock.${randomUUID()}.reclaim`;
+      writeFileSync(intent, JSON.stringify(owner), { flag: 'wx' });
+      updateStepRecord(intentTarget, (record) => ({ changed: true, record: { counter: record.counter + 1 } }), { waitMs: 0 });
+      return !existsSync(intent);
+    });
+    checks.push(['dead and reused-process reclaim intents do not block a writer', deadIntents.every(Boolean)
+      && JSON.parse(readFileSync(intentTarget, 'utf8')).counter === 2]);
+    for (const [name, holder] of [
+      ['a live', JSON.stringify({ pid: process.pid, start: processStart(process.pid) })],
+      ['an unreadable', 'not JSON'],
+    ]) {
+      const intent = `${intentTarget}.lock.${randomUUID()}.reclaim`;
+      writeFileSync(intent, holder, { flag: 'wx' });
+      const saved = readFileSync(intentTarget, 'utf8');
+      let called = false;
+      let blocked = false;
+      try {
+        updateStepRecord(intentTarget, () => { called = true; return { changed: true, record: {} }; }, { waitMs: 0 });
+      } catch (error) {
+        blocked = error.code === 'EEXIST';
+      }
+      checks.push([`${name} reclaim intent blocks before callback effects and is not removed`, blocked && !called
+        && readFileSync(intentTarget, 'utf8') === saved && existsSync(intent) && !existsSync(`${intentTarget}.lock`),
+        JSON.stringify({ blocked, called, intentPresent: existsSync(intent), lockPresent: existsSync(`${intentTarget}.lock`) })]);
+      rmSync(intent, { force: true });
+    }
     const ready = join(root, 'holding');
     const killAbort = new AbortController();
     const holding = worker([...MODULE_EVAL, `const { writeFileSync } = await import('node:fs');
@@ -213,6 +319,16 @@ async function selfTest() {
       });`, self, path, ready], { signal: killAbort.signal });
     const readyBy = Date.now() + 5000;
     while (!existsSync(ready) && Date.now() < readyBy) await new Promise((done) => setTimeout(done, 20));
+    const heldRecord = readFileSync(path, 'utf8');
+    let peerCalled = false;
+    let peerBlocked = false;
+    try {
+      updateStepRecord(path, () => { peerCalled = true; return { changed: true, record: {} }; }, { waitMs: 0 });
+    } catch (error) {
+      peerBlocked = error.code === 'EEXIST';
+    }
+    checks.push(['an intent published after callback entry cannot reclaim the live holder', existsSync(ready)
+      && peerBlocked && !peerCalled && readFileSync(path, 'utf8') === heldRecord]);
     killAbort.abort();
     const killed = await holding;
     let afterKill = false;
@@ -224,9 +340,76 @@ async function selfTest() {
     const raced = join(root, 'steps', '10.json');
     updateStepRecord(raced, () => ({ changed: true, record: { issue: 10, steps: [], counter: 0 } }));
     plantLock(raced, { pid: dead.pid, start: null });
-    const racers = await Promise.all([worker([...MODULE_EVAL, RACER, self, raced]), worker([...MODULE_EVAL, RACER, self, raced])]);
-    checks.push(['two writers reclaiming one stale lock both land, one at a time', racers.every(({ code }) => code === 0)
-      && JSON.parse(readFileSync(raced, 'utf8')).counter === 2]);
+    const randomRacers = await Promise.all([worker([...MODULE_EVAL, RACER, self, raced]), worker([...MODULE_EVAL, RACER, self, raced])]);
+    const randomCounter = JSON.parse(readFileSync(raced, 'utf8')).counter;
+    checks.push(['two writers reclaiming one stale lock both land, one at a time', randomRacers.every(({ code }) => code === 0)
+      && randomCounter === 2, JSON.stringify({ counter: randomCounter, racers: randomRacers })]);
+    updateStepRecord(raced, (record) => ({ changed: true, record: { ...record, counter: 0 } }));
+    plantLock(raced, { pid: dead.pid, start: null });
+    // Pause the real rename after B reads the stale holder. A then takes a
+    // live lock before B completes that rename. No scheduling delay is assumed.
+    const staleRead = join(root, 'stale-read');
+    const liveTaken = join(root, 'live-taken');
+    const phaseReady = join(root, 'phase-ready');
+    const releaseReclaim = join(root, 'release-reclaim');
+    const moved = join(root, 'live-moved');
+    const effects = [join(root, 'b-effect'), join(root, 'a-effect')];
+    const lateReclaimer = worker([...MODULE_EVAL, `${RACE_BARRIER}
+      const rename = fs.renameSync;
+      let paused = false;
+      fs.renameSync = (from, to) => {
+        if (!paused && from === process.argv[2] + '.lock' && to.endsWith('.stale')) {
+          paused = true;
+          fs.writeFileSync(process.argv[3], '');
+          waitForBarrier(process.argv[4]);
+          rename(from, to);
+          fs.writeFileSync(process.argv[5], '');
+          return;
+        }
+        return rename(from, to);
+      };
+      syncBuiltinESMExports();
+      ${RACER}`, self, raced, staleRead, releaseReclaim, moved, effects[0]]);
+    const readSeen = await waitForFile(staleRead);
+    const liveWriter = worker([...MODULE_EVAL, `${RACE_BARRIER}
+      const link = fs.linkSync;
+      const readDirectory = fs.readdirSync;
+      const append = fs.appendFileSync;
+      let taken = false;
+      let paused = false;
+      function pauseAt(phase) {
+        paused = true;
+        fs.writeFileSync(process.argv[4], phase);
+        waitForBarrier(process.argv[5]);
+      }
+      fs.linkSync = (from, to) => {
+        link(from, to);
+        if (!taken && to === process.argv[2] + '.lock') {
+          taken = true;
+          fs.writeFileSync(process.argv[3], '');
+        }
+      };
+      fs.readdirSync = (...args) => {
+        const names = readDirectory(...args);
+        if (taken && !paused) pauseAt('drain');
+        return names;
+      };
+      fs.appendFileSync = (...args) => {
+        append(...args);
+        if (taken && !paused && args[0] === process.argv[6]) pauseAt('callback');
+      };
+      syncBuiltinESMExports();
+      ${RACER}`, self, raced, liveTaken, phaseReady, moved, effects[1]]);
+    const takenSeen = await waitForFile(liveTaken);
+    const phaseSeen = await waitForFile(phaseReady);
+    writeFileSync(releaseReclaim, '');
+    const racers = await Promise.all([lateReclaimer, liveWriter]);
+    const racedCounter = JSON.parse(readFileSync(raced, 'utf8')).counter;
+    const once = effects.every((effect) => existsSync(effect) && readFileSync(effect, 'utf8') === 'effect\n');
+    checks.push(['a delayed stale reclaim does not lose an update or repeat a callback effect', readSeen && takenSeen && phaseSeen
+      && existsSync(moved) && racers.every(({ code }) => code === 0) && racedCounter === 2 && once,
+      JSON.stringify({ readSeen, takenSeen, phaseSeen, phase: phaseSeen ? readFileSync(phaseReady, 'utf8') : null,
+        moved: existsSync(moved), counter: racedCounter, once, racers })]);
     // Re-audit N2: B read a stale holder, C reclaimed it and took the lock,
     // then B moved C's live lock aside and renamed it back over D's. Here B's
     // late move lands while C holds the lock, D then writes, and E holds the
@@ -286,12 +469,17 @@ async function selfTest() {
     const unlaunched = await worker([], { executable: join(root, 'missing-node') });
     checks.push(['a failing or unlaunchable worker is reported, not replaced', failed.code === 3 && failed.closed
       && unlaunched.error === 'ENOENT' && unlaunched.closed && tally.launched === tally.settled]);
+    checks.push(['acquisition, timeout, and callback exit leave no reclaim intent behind',
+      readdirSync(join(root, 'steps')).every((name) => !name.endsWith('.reclaim'))]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
   checks.push(['every worker was accounted for and none needed cleanup it could not confirm',
     tally.launched === WORKER_BUDGET && tally.settled === tally.launched && tally.uncleaned === 0]);
-  for (const [name, passed] of checks) if (!passed) console.error(`FAIL ${name}`);
+  for (const [name, passed, detail] of checks) if (!passed) {
+    console.error(`FAIL ${name}`);
+    if (detail) console.error(detail);
+  }
   const failures = checks.filter(([, passed]) => !passed).length;
   const workers = `workers launched ${tally.launched}, settled ${tally.settled}, timed out ${tally.timedOut}, `
     + `cancelled ${tally.cancelled}, uncleaned ${tally.uncleaned}`;
@@ -301,11 +489,28 @@ async function selfTest() {
 }
 
 const WORKER_ENV = 'AUTOLOOP_ASSOCIATION_WORKER';
-const WORKER_BUDGET = 12;
+const WORKER_BUDGET = 14;
+// The barriers observe and delay real filesystem operations only in workers.
+const RACE_BARRIER = `const fs = (await import('node:fs')).default;
+  const { syncBuiltinESMExports } = await import('node:module');
+  function waitForBarrier(path) {
+    const deadline = Date.now() + 2000;
+    while (!fs.existsSync(path)) {
+      if (Date.now() >= deadline) throw new Error('race barrier timed out: ' + path);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }`;
+async function waitForFile(path) {
+  const deadline = Date.now() + 2000;
+  while (!existsSync(path) && Date.now() < deadline) await new Promise((done) => setTimeout(done, 20));
+  return existsSync(path);
+}
 // A writer that reads, waits, then increments: two of them lose an update
 // unless the lock serialises them.
 const RACER = `const { updateStepRecord } = await import(process.argv[1]);
+  const { appendFileSync } = await import('node:fs');
   updateStepRecord(process.argv[2], (record) => {
+    if (process.argv[6]) appendFileSync(process.argv[6], 'effect\\n');
     const counter = record.counter;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     return { changed: true, record: { ...record, counter: counter + 1 } };
