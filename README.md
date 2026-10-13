@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.71.0" src="https://img.shields.io/badge/release-v0.71.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.72.0" src="https://img.shields.io/badge/release-v0.72.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -152,18 +152,37 @@ it installed from its own marketplace, keep either copy.
 | [`lean-code`](skills/lean-code/SKILL.md) | Source stays lean; rationale lives in commits and PRs. |
 | [`codebase-design`](skills/codebase-design/SKILL.md) | Deep-module and seam vocabulary for planners and reviewers. |
 
-## Status band
+## Central
 
-In a session that owns a run, a band above the prompt shows the loop (phase, issue, role, round,
-model), the work (active, waiting, needs you), and, when `ANTHROPIC_BASE_URL` names a loopback
-proxy that answers `GET /status`, the proxy (ON or OFF, active requests by model). A phase row
-and a needs-you row appear when there is a unit in flight or a unit that waits for a human.
-`/autoloop` opens a pane with the same facts in full; `/autoloop close` closes it; the band's
-`expand` button (hotkey `e`) opens it too. The band reads one projection,
-`node <plugin-tools>/status.mjs --json --session <id>` (schema `autoloop.status/1`), and the
-proxy endpoint; it never calls GitHub and never writes. A session that owns no run sees nothing.
-A project turns the band off with `"ui": { "status": false }` in `.autoloop/config.json`; turning
-it back on takes effect at the next session start.
+In a session that owns a run, the plugin draws autoloop's own workplace inside Claude Code.
+
+- **The band** above the prompt is one card: the loop (phase, `#N · PR #M`, role, round, model),
+  the work (active, waiting, needs you) and the proxy (`● ON · n requests`, `◐ UP · no status`
+  when the loopback proxy answers without a status endpoint, `○ OFF` when it does not answer),
+  a phase row under a unit in flight, and a highlighted needs-you strip. While the pane is open
+  the band is one row.
+- **The pane** (`/autoloop`, or opened unasked once per session under the fullscreen renderer)
+  has four tabs, digits `1`..`4`: **Run** (now, timeline of the unit's steps with models and
+  times, needs you, waiting, delivered, proxy requests), **Live** (the stream of any running
+  dispatch, `a`..`e` to pick one, `f` to follow, newest at the bottom), **Units** (every unit of
+  the run with its PR, disposition and last step) and **Log** (the autoloop log, every event with
+  its timestamp, newest first, with a filter row). The log is the loop's, apart from the agent's
+  transcript.
+- **Controls**: `p` pauses and resumes the loop; `x` cancels the shown dispatch after a `y`;
+  an input under a needs-you row sends an answer; `merge` and `authorize` buttons sit on a
+  delivered pull request when the loop's gate may act. Each control is one file the loop
+  consumes (see Events and control) and one queued prompt, `autoloop: control`, that wakes a
+  parked session. A refused control is toasted with its reason.
+- The spinner names the loop's state while a run is owned, and `/autoloop` draws the card in the
+  transcript.
+
+Hotkeys work while the pane or the band holds the keyboard (`ctrl+x tab`, or a click); from the
+prompt they type. The pane docks beside the transcript under the fullscreen renderer
+(`/tui fullscreen` or `CLAUDE_CODE_NO_FLICKER=1`) and opens inline above the prompt otherwise.
+The mod reads one projection, `node <plugin-tools>/status.mjs --json --session <id>`, the live
+files it names, and the proxy's `GET /status`; it never calls GitHub and never writes a file: a
+control goes through `status.mjs --control`. A session that owns no run sees nothing. A project
+turns it off with `"ui": { "status": false }` in `.autoloop/config.json`.
 
 ## Events and control
 
@@ -179,7 +198,7 @@ its issue on every later ribbon. The contract is `docs/specs/SPEC-events.md`.
 
 ## Configuration and merge policy
 
-v0.71.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
+v0.72.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
 defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
 optional `protectedPaths` and `ui`. The repository owns it; plugin updates never overwrite it.
 
@@ -225,7 +244,7 @@ kill switch stay enforced regardless.
 
 ## How it stays safe
 
-v0.71.0 dispatches every role through one call:
+v0.72.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>
