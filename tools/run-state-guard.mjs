@@ -601,7 +601,9 @@ function gitClaims(words, head) {
   // settings), git matters only when it writes; aimed inside it, always.
   // A read-only `git -C <root> worktree list` was refused (LFE run 2026-09-30).
   const aimed = aims.map((word) => ({ word, relations: writes ? ['inside', 'near'] : ['inside'], prove: true }));
-  if (!writes) return aimed;
+  const generated = ['diff', 'log', 'show'].includes(subcommand)
+    ? optionValues(words, index + 1, new Set(['--output'])).map((word) => ({ word, relations: ['inside'], prove: true })) : [];
+  if (!writes) return [...aimed, ...generated];
   const paths = config ? optionValues(words, index, new Set(['--file', '-f']))
     : subcommand === 'archive' ? optionValues(words, index, new Set(['-o', '--output']))
       : operands(words, index + 1, new Set(['-b', '-B', '--orphan', '--reason', '-m', '--message']));
@@ -812,8 +814,10 @@ export function workerReadOnlyProblem(segments, { cwd, pluginRoot = dirname(dirn
         index += GIT_VALUED.has(at.argv[index]) ? 2 : 1;
       }
       const verb = at.argv[index];
-      if (['status', 'diff', 'show', 'log', 'rev-parse', 'rev-list', 'ls-files', 'ls-tree', 'cat-file', 'merge-base', 'blame', 'check-attr', 'check-ignore'].includes(verb)
-        || (verb === 'worktree' && at.argv[index + 1] === 'list')) continue;
+      const generatesOutput = ['diff', 'log', 'show'].includes(verb)
+        && at.argv.slice(index + 1).some((word) => word === '--output' || word.startsWith('--output='));
+      if (!generatesOutput && (['status', 'diff', 'show', 'log', 'rev-parse', 'rev-list', 'ls-files', 'ls-tree', 'cat-file', 'merge-base', 'blame', 'check-attr', 'check-ignore'].includes(verb)
+        || (verb === 'worktree' && at.argv[index + 1] === 'list'))) continue;
     }
     const scriptIndex = executionScriptIndex(at.argv, at.head);
     if (scriptIndex >= 0) {

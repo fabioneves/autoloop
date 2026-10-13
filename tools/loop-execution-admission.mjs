@@ -365,6 +365,29 @@ async function selfTest() {
       writeFileSync(gitFile, originalGitFile);
       assert.equal(readFileSync(log, 'utf8'), '', 'Unowned guard checks must not call Git.');
     });
+    await check('Git diff/log/show output flags are writes, while ordinary unowned output stays allowed without probes', () => {
+      const repo = repository(); const tools = dirname(fileURLToPath(import.meta.url));
+      const bin = join(scratch, 'output-probe-bin'); mkdirSync(bin);
+      const log = join(scratch, 'output-probes.log'); writeFileSync(log, '');
+      writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf 'git\\n' >> '${log}'\nexit 7\n`, { mode: 0o700 });
+      const hook = (command) => spawnSync(process.execPath, [join(tools, 'loop-execution-admission.mjs'), '--guard-entry', 'command'], {
+        cwd: repo.coordinatorRoot, input: JSON.stringify({ session_id: randomUUID(), cwd: repo.coordinatorRoot, tool_name: 'Bash', tool_input: { command } }),
+        encoding: 'utf8', timeout: 15000, env: { ...process.env, HOME: join(scratch, 'output-home'), CLAUDE_PROJECT_DIR: repo.coordinatorRoot,
+          PATH: `${bin}:${process.env.PATH ?? ''}` },
+      });
+      for (const verb of ['diff', 'log', 'show']) {
+        for (const target of [join(repo.commonDir, 'autoloop', 'scheduler', 'current.json'),
+          join(repo.commonDir, 'autoloop', 'control', 'v2', 'requests', 'f.json')]) {
+          for (const flag of [`--output=${target}`, `--output ${target}`]) {
+            const result = hook(`git ${verb} ${flag}`); assert.equal(result.status, 2, `${verb} ${flag}: ${result.stderr}`);
+          }
+        }
+        for (const flag of ['--output=ordinary.patch', '--output ordinary.patch', '']) {
+          assert.equal(hook(`git ${verb} ${flag}`).status, 0, `${verb} ${flag}`);
+        }
+      }
+      assert.equal(readFileSync(log, 'utf8'), '', 'Unowned output classification must not call Git.');
+    });
     await check('primary guard syntax failure retains no-latch helper/state denials and permits an unrelated read', () => {
       const repo = repository(); const copied = join(scratch, 'failed-guard-plugin');
       cpSync(dirname(fileURLToPath(import.meta.url)), join(copied, 'tools'), { recursive: true });
@@ -478,7 +501,9 @@ async function selfTest() {
           writeFileSync(indexPath, '{corrupt');
           assert.equal((await bash('git status')).status, 2, 'A known corrupt worker locator must not become unowned.');
           writeFileSync(indexPath, indexText);
-          for (const command of ['printf changed > source.ts', 'git add source.ts', `node ${join(tools, 'loop-host.mjs')}`,
+          for (const command of ['printf changed > source.ts', 'git add source.ts',
+            ...['diff', 'log', 'show'].flatMap((verb) => [`git ${verb} --output=source.patch`, `git ${verb} --output source.patch`]),
+            `node ${join(tools, 'loop-host.mjs')}`,
             `node ${join(tools, 'status.mjs')} --control --run ${acquired.runId} --by ui`,
             `echo forged > ${repo.commonDir}/autoloop/scheduler/current.json`]) {
             const result = await bash(command); assert.equal(result.status, 2, `${posture}: ${command}: ${result.stderr}`);
