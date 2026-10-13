@@ -147,16 +147,21 @@ function ownedFixture() {
 // run fixture of step.mjs's self-test (statusFixture) projected in process
 // with the issues each case names. Printed under UTC, so the file is the
 // same wherever it is printed.
+// Each case names the issues it holds and, past them, the fixture's write
+// options (a paused marker, a refused control, a second running dispatch).
 const RUN_CASES = Object.freeze({
-  RUN: (runIssues) => runIssues,
-  FALLBACK: (runIssues) => runIssues.filter((number) => number !== 412),
-  REPLAN: () => [416, 422],
-  OPEN_FINDINGS: () => [416, 419],
-  WAITING: () => [414, 415],
-  IDLE_DELIVERED: () => [416, 424],
-  IDLE: () => [420],
-  BLOCKED_THREE: () => [412, 417, 418, 424],
-  WAITS: () => [414, 415, 426, 427],
+  RUN: (runIssues) => [runIssues],
+  FALLBACK: (runIssues) => [runIssues.filter((number) => number !== 412)],
+  REPLAN: () => [[416, 422]],
+  OPEN_FINDINGS: () => [[416, 419]],
+  WAITING: () => [[414, 415]],
+  IDLE_DELIVERED: () => [[416, 424]],
+  IDLE: () => [[420]],
+  BLOCKED_THREE: () => [[412, 417, 418, 424]],
+  WAITS: () => [[414, 415, 426, 427]],
+  PAUSED: (runIssues) => [runIssues, { paused: true }],
+  REFUSED: (runIssues) => [runIssues, { refused: true }],
+  TWO_DISPATCHES: (runIssues) => [runIssues, { secondDispatch: true }],
 });
 
 export function fixturesText() {
@@ -180,8 +185,8 @@ export function fixturesText() {
   const fixture = statusFixture((hh, mm) => Date.UTC(2026, 8, 28, hh, mm));
   try {
     fixture.latch({});
-    for (const [name, issues] of Object.entries(RUN_CASES)) {
-      fixture.write(issues(fixture.runIssues));
+    for (const [name, held] of Object.entries(RUN_CASES)) {
+      fixture.write(...held(fixture.runIssues));
       lines.push(`export const ${name} = ${JSON.stringify(JSON.stringify(fixture.project()))};`);
     }
   } finally {
@@ -207,7 +212,10 @@ export function fixturesText() {
     '// waiting units and no worked unit; IDLE_DELIVERED holds a delivered unit',
     '// and an authorization; IDLE holds one staged plan; BLOCKED_THREE holds',
     '// #412 in flight beside one unit per needs-you kind (a block, a decide, an',
-    '// authorize with its PR); WAITS holds one waiting unit per wait kind.',
+    '// authorize with its PR); WAITS holds one waiting unit per wait kind;',
+    '// PAUSED is RUN with the pause marker; REFUSED is RUN with one refused',
+    '// merge control; TWO_DISPATCHES is RUN with #421\'s fix dispatch running',
+    '// beside #412\'s review.',
     ...lines, ''].join('\n');
 }
 
@@ -252,6 +260,12 @@ function selfTest() {
         && taken.length === 1 && taken[0].control.kind === 'answer' && taken[0].control.issue === 412 && taken[0].control.text === 'use the spec'
         && taken[0].control.by === 'ui' && taken[0].control.session === 'S-1';
     })());
+    check('--control --kind cancel carries the dispatch and the issue beside it (SPEC-events item 6)', (() => {
+      const written = owned.call(['--control', '--session', 'S-1', '--kind', 'cancel', '--dispatch', 'd', '--issue', '412']);
+      const taken = takeControls(dirname(owned.autoloop), ['cancel']);
+      return written.status === 0 && JSON.parse(written.stdout).ok === true
+        && taken.length === 1 && taken[0].control.kind === 'cancel' && taken[0].control.dispatch === 'd' && taken[0].control.issue === 412;
+    })());
     check('--log sets the log length of the printed projection', (() => {
       const printed = owned.call(['--json', '--session', 'S-1', '--log', '1']);
       const json = JSON.parse(printed.stdout);
@@ -266,9 +280,18 @@ function selfTest() {
       faulted.status === 0 && JSON.stringify(faulted.json) === JSON.stringify({ schema: 'autoloop.status/1', owned: false, error: 'ENOTDIR' }));
     // The mod's fixtures are this tool's own print: a hand edit, or a
     // producer change not reprinted, fails here.
-    check('--fixtures prints hooks/status/fixtures/projection.ts byte for byte (regenerate: node status.mjs --fixtures > that file)', (() => {
-      const printed = call(['--fixtures']);
-      return printed.status === 0 && printed.stdout === readFileSync(FIXTURES_FILE, 'utf8');
+    const printed = call(['--fixtures']);
+    check('--fixtures prints hooks/status/fixtures/projection.ts byte for byte (regenerate: node status.mjs --fixtures > that file)',
+      printed.status === 0 && printed.stdout === readFileSync(FIXTURES_FILE, 'utf8'));
+    check('the PAUSED, REFUSED and TWO_DISPATCHES fixtures carry the paused run, one refused merge and two running dispatches', (() => {
+      const exported = Object.fromEntries([...printed.stdout.matchAll(/^export const (\w+) = (".*");$/gmu)]
+        .map(([, name, json]) => [name, JSON.parse(JSON.parse(json))]));
+      const { RUN, PAUSED, REFUSED, TWO_DISPATCHES } = exported;
+      return RUN?.run.paused === false && RUN.controls.refused.length === 0 && RUN.dispatches.length === 1
+        && PAUSED?.run.paused === true && PAUSED.unit?.issue === 412
+        && REFUSED?.controls.refused.length === 1 && REFUSED.controls.refused[0].kind === 'merge' && REFUSED.controls.refused[0].pr === 700
+        && TWO_DISPATCHES?.dispatches.length === 2 && TWO_DISPATCHES.dispatches.every((entry) => entry.state === 'running' && entry.liveFile !== null)
+        && TWO_DISPATCHES.dispatches.some((entry) => entry.dispatch === 'd421' && entry.issue === 421);
     })());
     check('arguments parse', parseArgs(['--json', '--session', 'S']).error === null
       && parseArgs(['--json', '--session', 'S', '--root', '/r']).root === '/r'

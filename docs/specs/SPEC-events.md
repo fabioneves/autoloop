@@ -65,11 +65,12 @@ operator answers on GitHub and the loop finds the answer at its next prime.
    file it refuses goes to `control/refused/` with a `reason` added. Files older than 7 days in
    `done/` and `refused/` are pruned by the consumer.
 8. **Kinds.** `pause` and `unpause` (no new selection while paused; running dispatches finish);
-   `cancel` (`dispatch`: the loop ends it with SIGTERM, then SIGKILL after 10 s, and treats it as
-   died); `answer` (`issue`, `text`: posted as an issue comment by the loop with the `answered:`
-   marker, which lifts a `human:decide` wait as a human comment does); `merge` (`pr`: the loop
-   runs its own merge gate; a refusal is reported, never bypassed); `label` (`pr`: the loop removes
-   `human:authorize` from the PR, the one swap the merge gate reads; nothing else is relabelled).
+   `cancel` (`dispatch`, and the `issue` it serves when known: the loop ends it with SIGTERM,
+   then SIGKILL after 10 s, and treats it as died); `answer` (`issue`, `text`: posted as an issue
+   comment by the loop with the `answered:` marker, which lifts a `human:decide` wait as a human
+   comment does); `merge` (`pr`: the loop runs its own merge gate; a refusal is reported, never
+   bypassed); `label` (`pr`: the loop removes `human:authorize` from the PR, the one swap the merge
+   gate reads; nothing else is relabelled).
    Nothing else.
 9. **Consumer today.** `prime.mjs` applies `pause`, `unpause`, `label`, `merge`, and `answer`
    at its start, before the scan: a pause keeps the marker `autoloop/control/paused` and prime
