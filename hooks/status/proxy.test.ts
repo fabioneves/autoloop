@@ -1,7 +1,8 @@
-// The Proxy column (docs/specs/SPEC-status-mod.md, items 3, 4, 7 and 12):
-// no column without ANTHROPIC_BASE_URL; with it, each tick fetches
-// <base>/status without auth and with a 2 s timeout, ON groups the active
-// requests by requested model, and any failure is OFF, a fact, not stale.
+// The Proxy cell (docs/specs/SPEC-status-mod.md, items 3, 4, 7, 10 and 12):
+// no cell without ANTHROPIC_BASE_URL; with it, each tick fetches
+// <base>/status without auth and with a 2 s timeout. Three states: ON (200
+// and a parsed body) groups the active requests by requested model, UP is
+// any other answer, OFF is no answer within 2 s; each a fact, not stale.
 // The proxy is an external service, so its bodies are hand-written here;
 // the projection is the producer's own (fixtures/projection.ts).
 import { expect, mock, test } from 'claude-code/testing'
@@ -11,7 +12,7 @@ import type { StatusState } from '../../types'
 import { OWNED } from './fixtures/projection'
 import { PERIOD_MS, band, findColor, ran, rows, start, texts } from './fixtures/testing'
 import { PROXY_TIMEOUT_MS, parseProxyStatus, proxyBase, proxyUrl, readProxy } from './read'
-import { PALETTE } from './theme'
+import { PALETTE } from './kit'
 import { modelCounts, proxyColumn } from './view'
 
 const BASE = 'http://127.0.0.1:8787'
@@ -64,11 +65,11 @@ function host(on: On, env: Record<string, string>, answer: () => Answer, options
   return { clock, fetches, runs: () => runs, held: () => held }
 }
 
-/** The column Boxes of the band's second row. */
+/** The cell Boxes of the band's second row (the rules between them are Boxes too, one `│` per row). */
 function columnBoxes(tree: RenderElement): RenderElement[] {
   const body = tree.type === 'Box' ? tree.children?.[1] : undefined
   if (body === undefined || typeof body === 'string' || body.type !== 'Box') return []
-  return (body.children ?? []).filter((child): child is RenderElement => typeof child !== 'string' && child.type === 'Box')
+  return (body.children ?? []).filter((child): child is RenderElement => typeof child !== 'string' && child.type === 'Box' && !/^│+$/u.test(texts(child)))
 }
 
 function columns(tree: RenderElement): number[] {
@@ -81,24 +82,26 @@ function proxyRows(tree: RenderElement): string[] {
   return last === undefined ? [] : rows(last)
 }
 
-test('readProxy: ON with the active requests, OFF on a rejection, a non-200, a body that does not parse, or ok false', async () => {
+test('readProxy: ON with the active requests on a 200 and a parsed body; UP on a 404, a 500, a body that does not parse, or ok false; OFF on a rejection', async () => {
   const calls: { url: string; timeoutMs: number }[] = []
   const fetcher = (text: string, status = 200) => async (url: string, init: { timeoutMs: number }) => {
     calls.push({ url, timeoutMs: init.timeoutMs })
     return response(text, status)
   }
   const on = await readProxy(fetcher(THREE), `${BASE}/`)
-  expect(on.on).toBe(true)
-  expect(on.on ? on.requests.map((entry) => entry.requestedModel) : []).toEqual(['claude-opus-5-5', 'gpt-6-astra', 'claude-opus-5-5'])
-  expect(on.on ? on.requests[0] : null).toEqual({ id: 'r1', startedAt: '2026-09-28T10:29:00.000Z', elapsedMs: 1200,
+  expect(on.state).toBe('on')
+  expect(on.requests.map((entry) => entry.requestedModel)).toEqual(['claude-opus-5-5', 'gpt-6-astra', 'claude-opus-5-5'])
+  expect(on.requests[0]).toEqual({ id: 'r1', startedAt: '2026-09-28T10:29:00.000Z', elapsedMs: 1200,
     requestedModel: 'claude-opus-5-5', model: 'anthropic-gateway-opus[1m]', sessionId: 'S-test' })
   expect(calls[0]).toEqual({ url: `${BASE}/status`, timeoutMs: PROXY_TIMEOUT_MS })
   expect(PROXY_TIMEOUT_MS).toBe(2000)
   expect(proxyUrl(BASE)).toBe(`${BASE}/status`)
-  expect(await readProxy(async () => { throw new Error('refused') }, BASE)).toEqual({ on: false })
-  expect(await readProxy(fetcher(THREE, 500), BASE)).toEqual({ on: false })
-  expect(await readProxy(fetcher('<html>'), BASE)).toEqual({ on: false })
-  expect(await readProxy(fetcher(JSON.stringify({ ok: false, active_requests: [] })), BASE)).toEqual({ on: false })
+  expect(await readProxy(async () => { throw new Error('refused') }, BASE)).toEqual({ state: 'off', requests: [] })
+  expect(await readProxy(async () => { throw new Error('no answer within 2000 ms') }, BASE)).toEqual({ state: 'off', requests: [] })
+  expect(await readProxy(fetcher('not found', 404), BASE)).toEqual({ state: 'up', requests: [] })
+  expect(await readProxy(fetcher(THREE, 500), BASE)).toEqual({ state: 'up', requests: [] })
+  expect(await readProxy(fetcher('<html>'), BASE)).toEqual({ state: 'up', requests: [] })
+  expect(await readProxy(fetcher(JSON.stringify({ ok: false, active_requests: [] })), BASE)).toEqual({ state: 'up', requests: [] })
   expect(parseProxyStatus(JSON.stringify({ ok: true, active_requests: 'none' }))).toBeNull()
   expect(parseProxyStatus(JSON.stringify({ ok: true, active_requests: [{ id: 'x' }] }))).toEqual([
     { id: 'x', startedAt: null, elapsedMs: null, requestedModel: null, model: null, sessionId: null },
@@ -130,8 +133,8 @@ for (const base of ['https://gateway.example.com', 'http://10.0.0.5:8787', '::1:
     expect(h.fetches.length).toBe(0)
     expect(h.held()?.proxy).toBeNull()
     const drawn = await band($)
-    expect(columns(drawn)).toEqual([80, 80])
-    expect(texts(drawn)).not.toMatch(/ON|OFF/u)
+    expect(columns(drawn)).toEqual([78, 79])
+    expect(texts(drawn)).not.toMatch(/ON|UP|OFF/u)
   })
 }
 
@@ -140,16 +143,18 @@ test('ANTHROPIC_BASE_URL on a loopback host with a port: the column, fetched at 
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(h.fetches[0]?.url).toBe('http://[::1]:8787/status')
-  expect(columns(await band($))).toEqual([53, 53, 54])
+  expect(columns(await band($))).toEqual([52, 52, 52])
 })
 
-test('the proxy column groups requests by model, sorted by count then name, and collapses when narrow', async () => {
+test('the proxy cell groups requests by model, sorted by count then name, and collapses when narrow; UP and OFF carry their words', async () => {
   const proxy = await readProxy(async () => response(THREE), BASE)
-  expect(modelCounts(proxy.on ? proxy.requests : [])).toEqual([{ model: 'OPUS 5.5', count: 2 }, { model: 'ASTRA 6', count: 1 }])
-  expect(proxyColumn(proxy, false)).toEqual({ on: true, word: 'ON', tail: ' · 3 active requests', rows: ['OPUS 5.5 ×2', 'ASTRA 6 ×1'] })
-  expect(proxyColumn(proxy, true)).toEqual({ on: true, word: 'ON', tail: ' · 3 req', rows: [] })
-  expect(proxyColumn({ on: false }, false)).toEqual({ on: false, word: 'OFF', tail: ' · 0 requests', rows: [] })
-  expect(proxyColumn({ on: false }, true)).toEqual({ on: false, word: 'OFF', tail: ' · 0 req', rows: [] })
+  expect(modelCounts(proxy.requests)).toEqual([{ model: 'OPUS 5.5', count: 2 }, { model: 'ASTRA 6', count: 1 }])
+  expect(proxyColumn(proxy, false)).toEqual({ state: 'on', glyph: '●', word: 'ON', tail: ' · 3 requests', rows: ['OPUS 5.5 ×2', 'ASTRA 6 ×1'] })
+  expect(proxyColumn(proxy, true)).toEqual({ state: 'on', glyph: '●', word: 'ON', tail: ' · 3 req', rows: [] })
+  expect(proxyColumn({ state: 'up', requests: [] }, false)).toEqual({ state: 'up', glyph: '◐', word: 'UP', tail: ' · no status', rows: [] })
+  expect(proxyColumn({ state: 'up', requests: [] }, true)).toEqual({ state: 'up', glyph: '◐', word: 'UP', tail: ' · no status', rows: [] })
+  expect(proxyColumn({ state: 'off', requests: [] }, false)).toEqual({ state: 'off', glyph: '○', word: 'OFF', tail: '', rows: [] })
+  expect(proxyColumn({ state: 'off', requests: [] }, true)).toEqual({ state: 'off', glyph: '○', word: 'OFF', tail: '', rows: [] })
   // Ties sort by name; a null requested model is grouped as unknown.
   expect(modelCounts([request('a', 'gpt-6-astra'), request('b', null), request('c', 'claude-opus-5-5')].map((entry) => ({
     id: entry.id, startedAt: null, elapsedMs: null, requestedModel: entry.requested_model, model: null, sessionId: null,
@@ -163,8 +168,8 @@ test('ANTHROPIC_BASE_URL unset: no fetch, no column, two columns share the body'
   expect(h.fetches.length).toBe(0)
   expect(h.held()?.proxy).toBeNull()
   const drawn = await band($)
-  expect(columns(drawn)).toEqual([80, 80])
-  expect(texts(drawn)).not.toMatch(/ON|OFF/u)
+  expect(columns(drawn)).toEqual([78, 79])
+  expect(texts(drawn)).not.toMatch(/ON|UP|OFF/u)
 })
 
 test('ANTHROPIC_BASE_URL set: each tick fetches <base>/status without auth; ON draws the count and one row per model', async ($, on) => {
@@ -174,32 +179,39 @@ test('ANTHROPIC_BASE_URL set: each tick fetches <base>/status without auth; ON d
   expect(h.fetches.length).toBe(1)
   expect(h.fetches[0]?.url).toBe(`${BASE}/status`)
   expect(h.fetches[0]?.init?.auth).toBeUndefined()
-  expect(h.held()?.proxy?.on).toBe(true)
+  expect(h.held()?.proxy?.state).toBe('on')
   const drawn = await band($)
-  expect(columns(drawn)).toEqual([53, 53, 54])
-  expect(proxyRows(drawn)).toEqual(['● ON · 3 active requests', 'OPUS 5.5 ×2', 'ASTRA 6 ×1'])
+  expect(columns(drawn)).toEqual([52, 52, 52])
+  expect(proxyRows(drawn)).toEqual(['PROXY', '● ON · 3 requests', 'OPUS 5.5 ×2', 'ASTRA 6 ×1'])
   expect(findColor(drawn, 'ON')).toBe(PALETTE.good)
   await h.clock.advance(PERIOD_MS)
   expect(h.fetches.length).toBe(2)
 })
 
-test('each OFF cause draws OFF and drops the last ON value: a rejection, a 500, a body that does not parse, ok false', async ($, on) => {
-  const answers: Answer[] = [{ body: THREE }, { deny: 'connection refused' }, { body: THREE }, { body: 'oops', status: 500 },
-    { body: THREE }, { body: '<html>' }, { body: THREE }, { body: JSON.stringify({ ok: false }) }]
+test('three fetch outcomes, three states: a 200 with a body is ON, a 404 or a 500 or a body that does not parse is UP, a rejection is OFF; each drops the last value', async ($, on) => {
+  const answers: Answer[] = [{ body: THREE }, { deny: 'connection refused' }, { body: THREE }, { body: 'not found', status: 404 },
+    { body: THREE }, { body: 'oops', status: 500 }, { body: THREE }, { body: '<html>' }, { body: THREE }, { body: JSON.stringify({ ok: false }) }]
+  const expected: { state: string; rows: string[]; word: string; color: string }[] = [
+    { state: 'off', rows: ['PROXY', '○ OFF'], word: 'OFF', color: PALETTE.warn },
+    { state: 'up', rows: ['PROXY', '◐ UP · no status'], word: 'UP', color: PALETTE.warn },
+    { state: 'up', rows: ['PROXY', '◐ UP · no status'], word: 'UP', color: PALETTE.warn },
+    { state: 'up', rows: ['PROXY', '◐ UP · no status'], word: 'UP', color: PALETTE.warn },
+    { state: 'up', rows: ['PROXY', '◐ UP · no status'], word: 'UP', color: PALETTE.warn },
+  ]
   let index = 0
   const h = host(on, { ANTHROPIC_BASE_URL: BASE }, () => answers[index++] ?? { deny: 'out of answers' })
   await start($)
-  for (let round = 0; round < 4; round += 1) {
+  for (const want of expected) {
     await h.clock.advance(PERIOD_MS)
-    expect(h.held()?.proxy?.on).toBe(true)
+    expect(h.held()?.proxy?.state).toBe('on')
     await h.clock.advance(PERIOD_MS)
-    expect(h.held()?.proxy).toEqual({ on: false })
+    expect(h.held()?.proxy).toEqual({ state: want.state, requests: [] })
     const drawn = await band($)
-    expect(proxyRows(drawn)).toEqual(['○ OFF · 0 requests'])
-    expect(findColor(drawn, 'OFF')).toBe(PALETTE.warn)
+    expect(proxyRows(drawn)).toEqual(want.rows)
+    expect(findColor(drawn, want.word)).toBe(want.color)
   }
   // The projection read went on through every proxy failure.
-  expect(h.held()?.lastOkAtMs).toBe(8 * PERIOD_MS)
+  expect(h.held()?.lastOkAtMs).toBe(10 * PERIOD_MS)
 })
 
 test('a proxy that does not answer within 2 s reads OFF; the tick ends then', async ($, on) => {
@@ -210,7 +222,7 @@ test('a proxy that does not answer within 2 s reads OFF; the tick ends then', as
   await h.clock.advance(PROXY_TIMEOUT_MS - 1)
   expect(h.held()).toBeNull()
   await h.clock.advance(1)
-  expect(h.held()?.proxy).toEqual({ on: false })
+  expect(h.held()?.proxy).toEqual({ state: 'off', requests: [] })
   expect(h.held()?.lastMs).toBe(PROXY_TIMEOUT_MS)
   expect(h.held()?.last?.owned).toBe(true)
 })
@@ -228,14 +240,14 @@ test('one tick runs both reads; a tick still running is skipped by the next peri
   await h.clock.advance(PERIOD_MS)
   expect(h.runs()).toBe(2)
   expect(h.fetches.length).toBe(2)
-  expect(proxyRows(await band($))).toEqual(['● ON · 0 active requests'])
+  expect(proxyRows(await band($))).toEqual(['PROXY', '● ON · 0 requests'])
 })
 
-test('under 120 columns the proxy column reads ON · n req with no model rows', async ($, on) => {
+test('under 120 columns the proxy cell reads ON · n req with no model rows', async ($, on) => {
   const h = host(on, { ANTHROPIC_BASE_URL: BASE }, () => ({ body: THREE }))
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($, 100)
-  expect(columnBoxes(drawn).slice(1).flatMap(rows)).toEqual(['1 active · 0 waiting', '● ON · 3 req'])
-  expect(columns(drawn)).toEqual([33, 33, 34])
+  expect(columnBoxes(drawn).slice(1).flatMap(rows)).toEqual(['WORK', '1 active · 0 waiting', 'PROXY', '● ON · 3 req'])
+  expect(columns(drawn)).toEqual([32, 32, 32])
 })

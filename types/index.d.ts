@@ -98,6 +98,8 @@ export type StatusProjection = {
   enabled?: boolean
   run?: {
     openedAtMs: number
+    /** True while the operator's pause control holds the next selection. */
+    paused: boolean
     parkedUntil: string | null
     closedAt: string | null
     snapshotScannedAt: string | null
@@ -124,11 +126,12 @@ export type ProxyRequest = {
 }
 
 /**
- * The proxy read: ON with the active requests, or OFF. OFF is a fact, not a
- * stale value: a failed fetch, a non-200 or a body that does not parse drops
- * the last ON read.
+ * The proxy read, three states (SPEC-status-mod release two, item 10): `on`
+ * is a 200 with a parsed body and carries the active requests; `up` is any
+ * other answer (a 404, a body that does not parse); `off` is no answer within
+ * 2 s. Each is a fact, not a stale value: a read drops the last one.
  */
-export type ProxyRead = { on: true; requests: ProxyRequest[] } | { on: false }
+export type ProxyRead = { state: 'on' | 'up' | 'off'; requests: ProxyRequest[] }
 
 /** The mod's session state: the last reads and what it has already shown. */
 export type StatusState = {
@@ -142,6 +145,8 @@ export type StatusState = {
   proxy: ProxyRead | null
   /** Issues whose needs-you toast was shown in this session. */
   seenBlocked: number[]
+  /** True while the pane `autoloop` is open and placed: the band then draws one row. */
+  paneOpen: boolean
 }
 
 declare module 'claude-code' {

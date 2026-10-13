@@ -40,13 +40,25 @@ export function texts(tree: RenderElement): string {
   return children.map((child) => (typeof child === 'string' ? child : texts(child))).join('')
 }
 
-/** The drawing's rows: a column Box, or a row Box of Boxes, lists its children's rows; a row Box of texts is one row. */
+/** A rule between two cells (kit `rule`): `│` glyphs and nothing else; left out of the rows. */
+function isRule(tree: RenderElement): boolean {
+  return tree.type === 'Box' && /^│+$/u.test(texts(tree))
+}
+
+/** The drawing's rows: a column Box, or a row Box of Boxes, lists its children's rows; a row Box of texts is one row; rules are skipped. */
 export function rows(tree: RenderElement): string[] {
   const children = 'children' in tree ? tree.children ?? [] : []
   const column = tree.type === 'Box' && tree.props?.['flexDirection'] === 'column'
   const holdsBoxes = children.some((child) => typeof child !== 'string' && child.type === 'Box')
   if (tree.type !== 'Box' || (!column && !holdsBoxes)) return [texts(tree)]
-  return children.flatMap((child) => (typeof child === 'string' ? [child] : rows(child)))
+  return children.flatMap((child) => (typeof child === 'string' ? [child] : isRule(child) ? [] : rows(child)))
+}
+
+/** The Buttons anywhere in the tree. */
+export function buttons(tree: RenderElement): Extract<RenderElement, { type: 'Button' }>[] {
+  if (tree.type === 'Button') return [tree]
+  const children = 'children' in tree ? tree.children ?? [] : []
+  return children.flatMap((child) => (typeof child === 'string' ? [] : buttons(child)))
 }
 
 type TextElement = Extract<RenderElement, { type: 'Text' }>

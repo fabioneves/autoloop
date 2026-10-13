@@ -4,12 +4,12 @@
 // with a doubled host. The header counts from the mock clock; the tick's
 // duration is read back from state.
 import { expect, mock, test } from 'claude-code/testing'
-import type { On, RenderElement } from 'claude-code'
+import type { On } from 'claude-code'
 import type { StatusState } from '../../types'
 
 import { FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, REPLAN, RUN, WAITING } from './fixtures/projection'
-import { PERIOD_MS, band, findColor, projection, ran, rows, start, texts } from './fixtures/testing'
-import { PALETTE } from './theme'
+import { PERIOD_MS, band, buttons, findColor, projection, ran, rows, start, texts } from './fixtures/testing'
+import { PALETTE } from './kit'
 import { checkedAgo, columnWidths, isNarrow, loopColumn, shortModel, workColumn } from './view'
 
 /** Seats the host beneath the mod: the clock, the session id, the registry, no proxy, and the producer. */
@@ -55,11 +55,17 @@ test('the Loop column: a re-plan round, an open-findings round, and a returned u
   expect(loopColumn(projection(OPEN_FINDINGS), false).detail).toBe('code-review · open findings · ASTRA 6')
   const returned = loopColumn(projection(FALLBACK), false)
   expect(returned.glyph).toBe('●')
-  expect(returned.head).toBe('simplify #413 · Simplify the guard')
+  expect(returned.head).toBe('simplify #413 · PR #702 · Simplify the guard')
 })
 
 test('the Loop column: a fallback model says so, named as the one that ran', () => {
   expect(loopColumn(projection(FALLBACK), false).detail).toBe('simplify · OPUS 5.5 (fallback)')
+})
+
+test('the Loop column names the PR beside the issue once one exists, before the title; narrow keeps the PR', () => {
+  expect(loopColumn(projection(FALLBACK), false).head).toBe('simplify #413 · PR #702 · Simplify the guard')
+  expect(loopColumn(projection(FALLBACK), true).head).toBe('simplify #413 · PR #702')
+  expect(loopColumn(projection(RUN), false).head).toBe('review #412 · Session recovery')
 })
 
 test('the Loop column: idle with the newest delivered unit, idle with none, and a unit without a title', () => {
@@ -91,10 +97,10 @@ test('the header counts from the last successful read', () => {
   expect(checkedAgo(null, 7400)).toBe('not checked yet')
 })
 
-test('column widths share the body: two columns without the proxy, three with it', () => {
-  expect(columnWidths(160, 2)).toEqual([80, 80])
-  expect(columnWidths(160, 3)).toEqual([53, 53, 54])
-  expect(columnWidths(100, 3)).toEqual([33, 33, 34])
+test('cell widths share the body inside the border and the rules: two cells without the proxy, three with it', () => {
+  expect(columnWidths(160, 2)).toEqual([78, 79])
+  expect(columnWidths(160, 3)).toEqual([52, 52, 52])
+  expect(columnWidths(100, 3)).toEqual([32, 32, 32])
 })
 
 test('the band draws the header, the Loop column and the Work column from the projection', async ($, on) => {
@@ -104,9 +110,11 @@ test('the band draws the header, the Loop column and the Work column from the pr
   await h.clock.advance(2000)
   const drawn = await band($)
   expect(rows(drawn)).toEqual([
-    '◆ autoloop · checked 2s ago · [expand]',
+    '◆ autoloop · checked 2s ago/autoloop: central',
+    'LOOP',
     '● review #412 · Session recovery',
     'code-review · fix 2/3 · ASTRA 6',
+    'WORK',
     '2 active · 3 waiting · 6 needs you',
     '✓ plan  ✓ build  ✓ simplify  ● review  ○ gate  ○ deliver',
     '! #417 Needs a policy answeranswer on #417 · +5 more',
@@ -119,17 +127,19 @@ test('no `needs you` while nothing is blocked', async ($, on) => {
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
-  expect(rows(drawn)[3]).toBe('1 active · 0 waiting')
+  expect(rows(drawn)[5]).toBe('1 active · 0 waiting')
   expect(texts(drawn)).not.toMatch(/needs you/u)
 })
 
-test('quiet minimum: the header plus one row per column when nothing is in flight or blocked', async ($, on) => {
+test('quiet minimum: the header plus the labelled cells when nothing is in flight or blocked', async ($, on) => {
   const h = host(on, () => IDLE)
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(rows(await band($))).toEqual([
-    '◆ autoloop · checked 0s ago · [expand]',
+    '◆ autoloop · checked 0s ago/autoloop: central',
+    'LOOP',
     '○ Idle',
+    'WORK',
     '0 active · 1 waiting',
   ])
 })
@@ -138,28 +148,17 @@ test('under 120 columns the Loop column drops the title', async ($, on) => {
   const h = host(on, () => RUN)
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect(rows(await band($, 100))[1]).toBe('● review #412')
-  expect(rows(await band($, 120))[1]).toBe('● review #412 · Session recovery')
+  expect(rows(await band($, 100))[2]).toBe('● review #412')
+  expect(rows(await band($, 120))[2]).toBe('● review #412 · Session recovery')
 })
 
-test('expand is a Button with hotkey e', async ($, on) => {
-  // What the press opens is pane.test.ts's.
+test('the band holds no Button: a hotkey from the prompt would be typed (release two, item 9)', async ($, on) => {
   const h = host(on, () => RUN)
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
-  const button = (function find(tree: RenderElement): RenderElement | null {
-    if (tree.type === 'Button') return tree
-    const children = 'children' in tree ? tree.children ?? [] : []
-    for (const child of children) {
-      if (typeof child === 'string') continue
-      const found = find(child)
-      if (found !== null) return found
-    }
-    return null
-  })(drawn)
-  expect(button?.type).toBe('Button')
-  expect(button?.type === 'Button' ? button.props.hotkey : null).toBe('e')
+  expect(buttons(drawn)).toEqual([])
+  expect(texts(drawn)).not.toMatch(/\be: /u)
   expect(h.held()?.last?.unit?.issue).toBe(412)
 })
 

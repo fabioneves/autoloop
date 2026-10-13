@@ -9,7 +9,7 @@ import type { On, RenderElement } from 'claude-code'
 import type { StatusState } from '../../types'
 
 import { DISABLED, OWNED, UNOWNED } from './fixtures/projection'
-import { PERIOD_MS, band, ran, start, texts } from './fixtures/testing'
+import { PERIOD_MS, band, ran, rows, start } from './fixtures/testing'
 import { STATUS_SCHEMA, isDrawable, isStale, parseProjection, readProjection } from './read'
 
 /** What the producer prints on a fault past ownership (status.mjs --self-test): owned false with the fault's code, exit 0. */
@@ -82,7 +82,7 @@ test('an owned, enabled run draws the band with the phase and issue', async ($, 
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($, 120)
   expect(h.passed()).toBe(0)
-  expect(texts(drawn)).toMatch(/^◆ autoloop · checked 0s ago · \[expand\]● review #412/u)
+  expect(rows(drawn).slice(0, 3)).toEqual(['◆ autoloop · checked 0s ago/autoloop: central', 'LOOP', '● review #412'])
 })
 
 test('a wrong schema is not drawable: the read is refused and the band passes', async ($, on) => {
@@ -175,7 +175,7 @@ test('a rejected run keeps the last projection and marks it stale', async ($, on
   await h.clock.advance(30_000)
   expect(isStale(held?.lastOkAtMs ?? null, h.clock.now())).toBe(true)
   // The band still draws the kept projection, marked stale with hollow glyphs.
-  expect(texts(await band($, 120))).toMatch(/^◆ autoloop · stale · checked 33s ago · \[expand\]○ review #412/u)
+  expect(rows(await band($, 120)).slice(0, 3)).toEqual(['◆ autoloop · checked 33s ago · stale/autoloop: central', 'LOOP', '○ review #412'])
 })
 
 test('a producer fault (owned false with an error) is a failed read: the last projection is kept and goes stale', async ($, on) => {
@@ -188,9 +188,9 @@ test('a producer fault (owned false with an error) is a failed read: the last pr
   expect(h.runs.length).toBe(2)
   expect(h.held()?.last?.unit?.issue).toBe(412)
   expect(h.held()?.lastOkAtMs).toBe(PERIOD_MS)
-  expect(texts(await band($, 120))).toMatch(/^◆ autoloop · checked 3s ago · \[expand\]● review #412/u)
+  expect(rows(await band($, 120)).slice(0, 3)).toEqual(['◆ autoloop · checked 3s ago/autoloop: central', 'LOOP', '● review #412'])
   await h.clock.advance(30_000)
-  expect(texts(await band($, 120))).toMatch(/^◆ autoloop · stale · /u)
+  expect(rows(await band($, 120))[0]).toMatch(/^◆ autoloop · checked 33s ago · stale/u)
 })
 
 test('a host call that rejects inside the tick is caught: logged once, the last state kept, and the next tick runs', async ($, on) => {

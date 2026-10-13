@@ -125,14 +125,18 @@ export function parseProxyStatus(text: string): ProxyRequest[] | null {
   return requests
 }
 
-/** One proxy read: a rejected fetch, a non-200 or a body that does not parse is OFF. */
+/**
+ * One proxy read: a 200 with a parsed body is `on`; any other answer (a
+ * non-200, a body that does not parse) is `up`, the port answers without a
+ * status; a rejected or timed-out fetch is `off`.
+ */
 export async function readProxy(fetch: ProxyFetch, base: string): Promise<ProxyRead> {
+  let result: { status: number; text: string }
   try {
-    const result = await fetch(proxyUrl(base), { timeoutMs: PROXY_TIMEOUT_MS })
-    if (result.status !== 200) return { on: false }
-    const requests = parseProxyStatus(result.text)
-    return requests === null ? { on: false } : { on: true, requests }
+    result = await fetch(proxyUrl(base), { timeoutMs: PROXY_TIMEOUT_MS })
   } catch {
-    return { on: false }
+    return { state: 'off', requests: [] }
   }
+  const requests = result.status === 200 ? parseProxyStatus(result.text) : null
+  return requests === null ? { state: 'up', requests: [] } : { state: 'on', requests }
 }

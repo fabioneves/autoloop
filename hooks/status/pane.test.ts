@@ -1,7 +1,6 @@
 // The pane and /autoloop (docs/specs/SPEC-status-mod.md, items 14 and 15):
-// the command opens pane `autoloop-status` for the session that owns a run
-// and answers otherwise; `/autoloop close` closes it; the band's `expand`
-// press opens it; nothing opens it unasked. The sections are pure builders
+// the command opens pane `autoloop` for the session that owns a run and
+// answers otherwise; `/autoloop close` closes it; nothing opens it unasked. The sections are pure builders
 // over the producer's own projection (fixtures/projection.ts) and a
 // hand-written proxy body; empty sections are not drawn.
 import { expect, mock, test } from 'claude-code/testing'
@@ -14,7 +13,7 @@ import {
   PANE_ID, activeSection, deliveredSection, needsYouSection, paneSections, proxySection, waitingSection,
 } from './pane'
 import { readProxy } from './read'
-import { PALETTE } from './theme'
+import { PALETTE } from './kit'
 
 const BASE = 'http://127.0.0.1:8787'
 /** The fixture's clock: 10:30 on 2026-09-28, three minutes after #412's fix round started. */
@@ -117,7 +116,7 @@ test('the Proxy section: one row per request, requested → served (or requested
     ['●', 'ASTRA 6 · 30s', null],
     ['●', 'unknown · 1s', null],
   ])
-  expect(proxySection({ on: false }, 'S-test').rows).toEqual([])
+  expect(proxySection({ state: 'off', requests: [] }, 'S-test').rows).toEqual([])
   expect(proxySection(null, 'S-test').rows).toEqual([])
 })
 
@@ -126,11 +125,11 @@ test('paneSections keeps the order and drops the empty ones', async () => {
   expect(paneSections(projection(RUN), proxy, 'S-test', AT_10_30).map((section) => section.title))
     .toEqual(['Needs you', 'Active', 'Waiting', 'Delivered', 'Proxy'])
   expect(paneSections(projection(IDLE), null, 'S-test', AT_10_30).map((section) => section.title)).toEqual(['Waiting'])
-  expect(paneSections(projection(OWNED), { on: false }, 'S-test', AT_10_30).map((section) => section.title)).toEqual(['Active'])
+  expect(paneSections(projection(OWNED), { state: 'up', requests: [] }, 'S-test', AT_10_30).map((section) => section.title)).toEqual(['Active'])
 })
 
 test('the pane id is the literal the Pane matcher names', () => {
-  expect(PANE_ID).toBe('autoloop-status')
+  expect(PANE_ID).toBe('autoloop')
 })
 
 test('/autoloop from a session that owns no run answers so and opens nothing', async ($, on) => {
@@ -141,7 +140,7 @@ test('/autoloop from a session that owns no run answers so and opens nothing', a
   expect(h.opens).toEqual([])
 })
 
-test('/autoloop opens the pane autoloop-status for the owner; /autoloop close closes it', async ($, on) => {
+test('/autoloop opens the pane autoloop for the owner; /autoloop close closes it', async ($, on) => {
   const h = host(on, () => RUN)
   await start($)
   await h.clock.advance(PERIOD_MS)
@@ -162,14 +161,12 @@ test('/autoloop in a project with ui.status false opens nothing and says so', as
   expect(h.opens).toEqual([])
 })
 
-test('the band\'s expand press opens the pane; nothing opens it on session.start or a tick', async ($, on) => {
+test('nothing opens the pane on session.start, a tick or a draw of the band', async ($, on) => {
   const h = host(on, () => RUN, { ANTHROPIC_BASE_URL: BASE })
   await start($)
   await h.clock.advance(3 * PERIOD_MS)
-  expect(h.opens).toEqual([])
   await band($)
-  await $.ui.press({ plugin: 'autoloop', key: 'expand' })
-  expect(h.opens.map((open) => open.id)).toEqual([PANE_ID])
+  expect(h.opens).toEqual([])
 })
 
 test('the pane draws each section from the last reads, with the this-session mark', async ($, on) => {

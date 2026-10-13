@@ -4,10 +4,10 @@
 // drawn. Each row hands back its glyph apart from its text, so status is
 // carried by the glyph and the words.
 import type { ProxyRead, StatusProjection, StatusUnit, StatusWait } from '../../types'
-import { GLYPH } from './theme'
+import { GLYPH } from './kit'
 import { blockedUnits, duration, modelName, prToAuthorize, requestedName, roundLabel, shortModel } from './view'
 
-export const PANE_ID = 'autoloop-status'
+export const PANE_ID = 'autoloop'
 export const PANE_TITLE = 'autoloop'
 
 export type PaneRow = {
@@ -80,7 +80,7 @@ export function deliveredSection(projection: StatusProjection): PaneSection {
 
 /** One row per active request: requested → served (requested alone while the served model is null), elapsed, this session. */
 export function proxySection(proxy: ProxyRead | null, sessionId: string): PaneSection {
-  const requests = proxy === null || !proxy.on ? [] : proxy.requests
+  const requests = proxy === null ? [] : proxy.requests
   return {
     title: 'Proxy',
     rows: requests.map((request) => {
