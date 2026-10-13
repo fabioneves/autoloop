@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveConfigText, validateConfig } from './config-contract.mjs';
 import { DEFAULT_MODELS, invariantProblems, mergeModels, MODEL_ROLES, modelsShapeProblems } from './models-config.mjs';
 import { isClaudeProcess, processAlive, processStart, procEntry, readRegularFile } from './run-markers.mjs';
+import { runningDispatches } from './inherited-dispatch.mjs';
 
 export const CHECKPOINT_SCHEMA = 'autoloop.scheduler-checkpoint/1';
 export const PINS_SCHEMA = 'autoloop.scheduler-pins/1';
@@ -94,7 +95,7 @@ export function resolveRepository(root) {
   }
 }
 
-export function assertNoKnownLegacyOwner(repository) {
+export function assertNoKnownLegacyOwner(repository, { owner = null, sessionId = null } = {}) {
   const parent = join(repository.commonDir, 'autoloop');
   if (!present(parent)) return;
   requireCondition(lstatSync(parent).isDirectory() && realpathSync(parent) === parent,
@@ -109,6 +110,16 @@ export function assertNoKnownLegacyOwner(repository) {
     catch { throw new SchedulerError('LEGACY_RUN_ACTIVE', 'A legacy owner record cannot be read.'); }
     requireCondition(marker?.version === 1 && Array.isArray(marker.pids), 'LEGACY_RUN_ACTIVE', 'A legacy owner record is invalid.');
     if (marker.closedAt !== undefined) continue;
+    if (marker.owner !== undefined) {
+      requireCondition(validProcess(marker.owner), 'OWNER_UNVERIFIED', 'Legacy owner identity is invalid.');
+      const state = ownerState(marker.owner);
+      if (state === 'dead') continue;
+      requireCondition(state !== 'unknown', 'OWNER_UNVERIFIED', 'Legacy owner identity is unknown.');
+      if (owner !== null && schedulerDigest(owner) === schedulerDigest(marker.owner) && sessionId === marker.sessionId) continue;
+      const error = new SchedulerError('LEGACY_RUN_ACTIVE', 'A legacy loop still owns this repository.');
+      Object.assign(error, { owner: marker.owner, sessionId: marker.sessionId, markerPath: join(directory, name) });
+      throw error;
+    }
     for (const pid of marker.pids) {
       if (!Number.isSafeInteger(pid) || pid < 1 || !processAlive(pid)) continue;
       const entry = procEntry(pid);
@@ -117,7 +128,11 @@ export function assertNoKnownLegacyOwner(repository) {
       const start = processStart(pid);
       const recorded = marker.starts?.[pid];
       if (recorded !== undefined && recorded !== null && start !== null && start !== recorded) continue;
-      throw new SchedulerError('LEGACY_RUN_ACTIVE', 'A known legacy loop still owns this repository.');
+      if (owner?.pid === pid && owner.start === start && sessionId === marker.sessionId) continue;
+      const error = new SchedulerError('LEGACY_RUN_ACTIVE', 'A known legacy loop still owns this repository. Drain old runs before migration.');
+      Object.assign(error, { owner: start === null ? { pid, start: null, bootId: readBootIdentity() } : readProcessIdentity(pid),
+        sessionId: marker.sessionId ?? null, markerPath: join(directory, name) });
+      throw error;
     }
   }
 }
@@ -527,7 +542,108 @@ function newCheckpoint(repository, pins, initiator, owner, generation) {
     createdAt: now, updatedAt: now, stoppedAt: null, error: null,
   };
 }
-export function acquireScheduler(repository, pins, initiator, { observe = () => {} } = {}) {
+// Both upgraded start paths hold this short gate until lifetime ownership is
+// published. The immutable link election is the same primitive as the scheduler
+// lease: no stale rename, age threshold or unknown-owner takeover is used.
+export function withExecutionAdmission(repository, establish, { observe = () => {} } = {}) {
+  verifyRepository(repository);
+  const directory = childDirectory(stateDirectory(repository, true), 'admission', true);
+  const owner = readProcessIdentity();
+  const until = Date.now() + 10_000;
+  let identity;
+  for (;;) {
+    const names = readdirSync(directory).filter((name) => !/^\.[0-9a-f-]+\.tmp$/u.test(name));
+    requireCondition(names.every((name) => /^[1-9]\d*(?:\.released)?\.json$/u.test(name)), 'STATE_INVALID', 'The admission ledger has an unknown entry.');
+    const sequences = names.filter((name) => /^\d+\.json$/u.test(name)).map((name) => Number(name.split('.')[0])).sort((a, b) => a - b);
+    requireCondition(sequences.every((sequence, index) => sequence === index + 1), 'STATE_INVALID', 'The admission ledger is not contiguous.');
+    let previous = null;
+    for (const sequence of sequences) {
+      const item = stateJson(join(directory, `${sequence}.json`));
+      requireCondition(exactKeys(item, ['schema', 'sequence', 'leaseId', 'repositoryKey', 'owner', 'createdAt'])
+        && item.schema === 'autoloop.execution-admission/1' && item.sequence === sequence && uuid(item.leaseId)
+        && item.repositoryKey === repository.repositoryKey && validProcess(item.owner) && timestamp(item.createdAt),
+      'STATE_INVALID', 'An admission record is invalid.');
+      const release = stateJson(join(directory, `${sequence}.released.json`), true);
+      requireCondition(release === null || validRelease(release, item), 'STATE_INVALID', 'An admission release is invalid.');
+      previous = { item, released: release !== null };
+    }
+    requireCondition(names.filter((name) => name.endsWith('.released.json')).every((name) => Number(name.split('.')[0]) <= sequences.length),
+      'STATE_INVALID', 'An admission release has no owner.');
+    if (previous && !previous.released) {
+      const state = ownerState(previous.item.owner);
+      requireCondition(state !== 'unknown', 'OWNER_UNVERIFIED', 'The admission owner cannot be verified.');
+      if (state === 'alive') {
+        const error = new SchedulerError('ADMISSION_BUSY', 'Repository admission is held by another process.');
+        error.owner = previous.item.owner;
+        if (schedulerDigest(owner) === schedulerDigest(previous.item.owner) || Date.now() >= until) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        continue;
+      }
+    }
+    identity = { schema: 'autoloop.execution-admission/1', sequence: sequences.length + 1, leaseId: randomUUID(),
+      repositoryKey: repository.repositoryKey, owner, createdAt: Date.now() };
+    try {
+      durableWrite(join(directory, `${identity.sequence}.json`), identity, { exclusive: true, observe });
+      break;
+    } catch (error) {
+      if (error.code !== 'STATE_CONFLICT') throw error;
+    }
+  }
+  const fence = () => {
+    const later = join(directory, `${identity.sequence + 1}.json`);
+    requireCondition(!present(later) && schedulerDigest(readProcessIdentity()) === schedulerDigest(owner)
+      && schedulerDigest(stateJson(join(directory, `${identity.sequence}.json`))) === schedulerDigest(identity),
+    'LEASE_INVALID', 'Repository admission was superseded.');
+  };
+  try {
+    fence();
+    const result = establish(fence);
+    requireCondition(!result || typeof result.then !== 'function', 'INVALID_INPUT', 'Repository admission must be synchronous.');
+    fence();
+    return result;
+  } finally {
+    fence();
+    durableWrite(join(directory, `${identity.sequence}.released.json`), { schema: RELEASE_SCHEMA, sequence: identity.sequence,
+      leaseId: identity.leaseId, owner, releasedAt: Date.now() }, { exclusive: true, observe });
+  }
+}
+
+export function assertNoSchedulerOwner(repository) {
+  const held = readSchedulerOwner(repository);
+  const refuse = (code, message) => {
+    const error = new SchedulerError(code, message);
+    Object.assign(error, { owner: held.lease?.owner ?? null, runId: held.lease?.runId ?? null });
+    throw error;
+  };
+  if (held.state === 'unknown') refuse('OWNER_UNVERIFIED', 'The scheduler owner cannot be verified.');
+  if (held.state === 'alive') refuse('SCHEDULER_ACTIVE', 'A scheduler owns this repository.');
+  if (held.lease === null) return;
+  const current = readCurrentCheckpoint(repository);
+  if (!current || current.state !== 'stopped' || retainedWorkers(current) || unsettledEffects(current) || pendingRequests(repository, current)) {
+    refuse('SCHEDULER_ACTIVE', 'The scheduler run needs recovery before legacy admission.');
+  }
+}
+function assertNoLegacyWorkers(repository) {
+  const workers = runningDispatches(repository.coordinatorRoot);
+  // A platform without /proc cannot inspect legacy detached dispatches. Legacy
+  // runs must be drained before migration; absence here is not all-version proof.
+  if (workers === null) return;
+  const worker = workers[0];
+  if (worker) {
+    const error = new SchedulerError('LEGACY_RUN_ACTIVE', 'A legacy dispatch still occupies this repository.');
+    Object.assign(error, { owner: readProcessIdentity(worker.pid), workerPid: worker.pid });
+    throw error;
+  }
+}
+export function acquireScheduler(repository, pins, initiator, options = {}) {
+  return withExecutionAdmission(repository, () => {
+    assertNoKnownLegacyOwner(repository);
+    assertNoLegacyWorkers(repository);
+    options.admissionObserve?.('daemon-admission-checked');
+    return acquireSchedulerWithinAdmission(repository, pins, initiator, options);
+  });
+}
+function acquireSchedulerWithinAdmission(repository, pins, initiator, { observe = () => {} } = {}) {
   verifyRepository(repository);
   assertPinsLive(repository, pins);
   requireCondition(validInitiator(initiator), 'INVALID_INPUT', 'The initiating identity is invalid.');
@@ -536,7 +652,11 @@ export function acquireScheduler(repository, pins, initiator, { observe = () => 
   if (previous && !previous.released) {
     const state = ownerState(previous.record.owner, observe);
     requireCondition(state !== 'unknown', 'OWNER_UNVERIFIED', 'The preceding owner cannot be verified.');
-    requireCondition(state === 'dead', 'SCHEDULER_ACTIVE', 'A scheduler already owns this repository.');
+    if (state !== 'dead') {
+      const error = new SchedulerError('SCHEDULER_ACTIVE', 'A scheduler already owns this repository.');
+      Object.assign(error, { owner: previous.record.owner, runId: previous.record.runId });
+      throw error;
+    }
   }
   const pointer = currentPointer(repository);
   if (pointer && !ledger.some(({ record: item }) => item.runId === pointer.runId)) {
