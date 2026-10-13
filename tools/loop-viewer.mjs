@@ -5,16 +5,16 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync,
   openSync, readFileSync, readdirSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir, userInfo } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireScheduler, boundGroupState, commitTransition, createPins, listControlRequests, readCheckpoint,
+import { acquireScheduler, boundGroupState, commitTransition, createPins, createSchedulerTestAccount, listControlRequests, readCheckpoint,
   readCurrentCheckpoint, readPins, readProcessIdentity, readRequest, readSchedulerOwner, registerWorker,
   releaseScheduler, resolveRepository, schedulerDigest, SchedulerError, submitControl, validateCheckpoint } from './scheduler-contract.mjs';
 import { CONFIG_VERSION, resolveConfigText, resolveProjectConfig, statusBandEnabled } from './config-contract.mjs';
 import { DEFAULT_MODELS, mergeModels } from './models-config.mjs';
 import { LOOP_COMMAND_SCHEMA, validateLoopCommand } from './loop-admission.mjs';
-import { isClaudeProcess, procEntry } from './run-markers.mjs';
+import { executionAdmissionGuardDirectory, isClaudeProcess, procEntry } from './run-markers.mjs';
 import { appendEvent, readEvents } from './events-contract.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -249,13 +249,21 @@ export function daemonProjection(repository, checkpoint, viewer, { logLimit = 50
     attachment: { kind: 'viewer', sessionId: viewer.sessionId } };
 }
 
+function assertFixtureAuthority(repository, runId, accountHome) {
+  const directory = executionAdmissionGuardDirectory();
+  assert.equal(directory, join(accountHome, '.claude', 'autoloop', 'execution-admission'));
+  const marker = readPrivateJson(join(directory, repository.repositoryKey, 'daemon-authority.json'));
+  assert.equal(marker.repositoryKey, repository.repositoryKey);
+  assert.equal(marker.runId, runId);
+}
+
 // A real group leader retains its group after its registered worker exits.
 // IPC orders registration before exit; all guard state stays in test scratch.
 async function workerGroupFixture(repository, acquired, scratch, run) {
   const leader = spawn(process.execPath, ['-e', `
     const { spawn } = require('node:child_process');
     const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
-    worker.once('spawn', () => process.send({ pid: worker.pid }));
+    worker.once('spawn', () => process.send({ pid: worker.pid, home: require('node:os').homedir() }));
     process.on('message', () => worker.kill('SIGTERM'));
     worker.once('close', () => process.send({ exited: true }));
     process.on('SIGTERM', () => { worker.kill('SIGTERM'); process.exit(0); });
@@ -267,7 +275,8 @@ async function workerGroupFixture(repository, acquired, scratch, run) {
     leader.once('message', (value) => { clearTimeout(timer); done(value); });
   });
   try {
-    const { pid } = await message();
+    const { pid, home } = await message();
+    assert.equal(home, homedir(), 'Fixture children must use the temporary OS account.');
     const attemptId = '44444444-4444-4444-8444-444444444444';
     const worker = { schema: 'autoloop.worker-binding/1', runId: acquired.runId, generation: 1,
       unitId: '55555555-5555-4555-8555-555555555555', unitGeneration: 1, attemptId,
@@ -289,9 +298,16 @@ async function workerGroupFixture(repository, acquired, scratch, run) {
   }
 }
 
+// Fixture admission uses fixed OS-account storage, not only the scratch Git directory.
 export async function daemonFixturesText() {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-viewer-fixtures-')));
   console.error(`Retained test scratch: ${scratch}`);
+  const account = await createSchedulerTestAccount(scratch);
+  try { return await daemonFixturesInAccount(scratch, account.accountHome); }
+  finally { account.restore(); }
+}
+
+async function daemonFixturesInAccount(scratch, accountHome) {
   const root = join(scratch, 'repo');
   // Test Git-admin state must be private even with a group-writable host umask.
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', '--shared=0700', root], { timeout: 15000 }).status, 0);
@@ -303,7 +319,10 @@ export async function daemonFixturesText() {
     const pins = createPins(repository, { runId: '22222222-2222-4222-8222-222222222222', pluginRoot: ROOT,
       enginePath: process.execPath, config, models: mergeModels(DEFAULT_MODELS) });
     const actor = { kind: 'terminal', sessionId: null, host: readProcessIdentity(), invocationId: randomUUID() };
+    assert.equal(homedir(), accountHome, 'Fixture admission must not use the real OS-account home.');
+    assert.equal(userInfo().homedir, homedir());
     const acquired = acquireScheduler(repository, pins, { kind: actor.kind, sessionId: null, process: actor.host });
+    assertFixtureAuthority(repository, acquired.runId, accountHome);
     const viewer = { sessionId: '11111111-1111-4111-8111-111111111111' };
     const lines = ['// Generated by tools/loop-viewer.mjs --fixtures from real scheduler state.'];
     let checkpoint = readCheckpoint(repository, acquired.runId);
@@ -350,6 +369,12 @@ export async function daemonFixturesText() {
 async function selfTest() {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-viewer-')));
   console.error(`Retained test scratch: ${scratch}`);
+  const account = await createSchedulerTestAccount(scratch);
+  try { return await selfTestInAccount(scratch, account.accountHome); }
+  finally { account.restore(); }
+}
+
+async function selfTestInAccount(scratch, accountHome) {
   const root = join(scratch, 'repo');
   // Test Git-admin state must be private even with a group-writable host umask.
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', '--shared=0700', root], { timeout: 15000 }).status, 0);
@@ -357,6 +382,8 @@ async function selfTest() {
   const config = resolveConfigText(JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'node --version' } })).config;
   const pins = createPins(repository, { pluginRoot: dirname(dirname(fileURLToPath(import.meta.url))),
     enginePath: realpathSync(process.execPath), config, models: mergeModels(DEFAULT_MODELS) });
+  assert.equal(homedir(), accountHome, 'Fixture admission must not use the real OS-account home.');
+  assert.equal(userInfo().homedir, homedir());
   const acquired = acquireScheduler(repository, pins, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
   const failures = [];
   let cases = 0;
@@ -365,6 +392,9 @@ async function selfTest() {
     try { await run(); }
     catch (error) { failures.push(name); console.error(`FAIL ${name}: ${error.message}`); }
   };
+  await check('daemon admission authority is stored in the temporary OS account', () => {
+    assertFixtureAuthority(repository, acquired.runId, accountHome);
+  });
   await check('viewer normalization uses status entrypoint and exact schema, not the loop parser', () => {
     const sessionId = randomUUID();
     const prepared = prepareViewerCommand({ operation: 'attach', root, sessionId, runId: acquired.runId,
@@ -453,8 +483,14 @@ async function selfTest() {
       assert.equal(exited.counts.waiting, 0);
     });
   });
-  await check('daemon plugin fixtures are generated from the real producer contract', async () => {
-    assert.equal(await daemonFixturesText(), readFileSync(join(ROOT, 'hooks', 'status', 'fixtures', 'daemon.ts'), 'utf8'));
+  await check('daemon plugin fixtures use a temporary OS account and restore the caller before returning', async () => {
+    const callerHome = homedir();
+    const callerOptions = process.env.NODE_OPTIONS;
+    const fixtures = await daemonFixturesText();
+    assert.equal(homedir(), callerHome);
+    assert.equal(userInfo().homedir, callerHome);
+    assert.equal(process.env.NODE_OPTIONS, callerOptions);
+    assert.equal(fixtures, readFileSync(join(ROOT, 'hooks', 'status', 'fixtures', 'daemon.ts'), 'utf8'));
   });
   let checkpoint = readCheckpoint(repository, acquired.runId);
   checkpoint = commitTransition(acquired.lease, checkpoint.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' }));
