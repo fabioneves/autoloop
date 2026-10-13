@@ -34,8 +34,10 @@ export function band($: Engine, bodyColumns = 160, hasSurvey = false) {
   })
 }
 
+/** A tree's text, a Button as `[label]` and an Input as `(placeholder)`. */
 export function texts(tree: RenderElement): string {
   if (tree.type === 'Button') return `[${tree.props.label}]`
+  if (tree.type === 'Input') return `(${tree.props.placeholder ?? tree.props.key})`
   const children = 'children' in tree ? tree.children ?? [] : []
   return children.map((child) => (typeof child === 'string' ? child : texts(child))).join('')
 }

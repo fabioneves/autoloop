@@ -9,11 +9,13 @@
 import type { EngineInterface, Register, RenderChildren, RenderElement, Timer } from 'claude-code'
 import { update } from 'claude-code'
 
-import type { StatusProjection, StatusState, StatusStream } from '../../types'
-import type { Row, Section } from './central'
+import type { StatusPending, StatusProjection, StatusState, StatusStream } from '../../types'
+import type { Row, RowAction, Section } from './central'
 import {
   LOG_FILTERS, LOG_LENGTH, PANE_ID, PANE_TITLE, TABS, glyphTone, liveRoom, liveScroll, liveTab, logTab, runTab, shownDispatch, statusLine, unitsTab,
 } from './central'
+import type { Control, ControlHost } from './control'
+import { refusedText, sendControl } from './control'
 import { GLYPH, PALETTE, cell, empty, header, rule, section, strip, tabs } from './kit'
 import type { ProxyFetch, Runner } from './read'
 import {
@@ -29,7 +31,7 @@ const PERIOD_MS = 3000
 /** A tick past this is reported once: the period is not raised by itself (tasks/plan-status-mod.md, risks). */
 const SLOW_TICK_MS = 500
 const EMPTY: StatusState = {
-  last: null, lastOkAtMs: null, lastMs: null, proxy: null, seenBlocked: [], paneOpen: false, streams: {},
+  last: null, lastOkAtMs: null, lastMs: null, proxy: null, seenBlocked: [], seenRefused: [], pending: null, paneOpen: false, streams: {},
   tab: 'run', logFilter: 'all', selected: null, follow: true, liveOffset: 0,
 }
 /** The mod's state as last written, EMPTY before the first tick; a field an older module never wrote takes EMPTY's. */
@@ -37,6 +39,14 @@ const heldState = async ($: EngineInterface): Promise<StatusState> => ({ ...EMPT
 /** Whether the pane is open, written where the pane opens or closes; the band reads it to draw one row. */
 const setPaneOpen = ($: EngineInterface, paneOpen: boolean) =>
   update($, STATUS, (held) => ({ ...(held ?? EMPTY), paneOpen }))
+/** The host beneath a control (control.ts holds no `$`): the producer as a child, the toasts, the prompt queue. */
+const controlHost = ($: EngineInterface): ControlHost => ({
+  run: (argv, init) => $.process.run(argv, init),
+  toast: (text) => $.ui.toast(text),
+  submit: (text) => $.prompt.submit({ text }),
+  pluginRoot: $.plugin.root,
+  sessionId: () => $.session.id(),
+})
 /** Why the pane and the command stay quiet while the projection is not drawable: not the owner, or the band turned off. */
 function quietReason(projection: StatusProjection | null): string {
   return projection === null || projection.owned !== true
@@ -147,15 +157,23 @@ export const register: Register = (on) => {
         // is kept. A failed projection read keeps the last projection;
         // lastOkAtMs not moving is what marks it stale. The proxy read is
         // taken as it came: UP and OFF are facts.
+        // A control the loop refused is toasted once the same way, by the
+        // control file's name (SPEC-central item 16).
         let fresh: ReturnType<typeof blockedUnits> = []
+        let refused: NonNullable<StatusProjection['controls']>['refused'] = []
         await update($, STATUS, (value) => {
           const held = value ?? EMPTY
           if (!read.ok) return { ...held, lastMs, proxy }
-          fresh = isDrawable(read.projection)
-            ? blockedUnits(read.projection).filter((unit) => !held.seenBlocked.includes(unit.issue)) : []
-          return { ...held, last: read.projection, lastOkAtMs: nowMs, lastMs, proxy, seenBlocked: [...held.seenBlocked, ...fresh.map((unit) => unit.issue)] }
+          const drawable = isDrawable(read.projection)
+          fresh = drawable ? blockedUnits(read.projection).filter((unit) => !held.seenBlocked.includes(unit.issue)) : []
+          refused = drawable ? (read.projection.controls?.refused ?? []).filter((entry) => !held.seenRefused.includes(entry.name)) : []
+          return {
+            ...held, last: read.projection, lastOkAtMs: nowMs, lastMs, proxy,
+            seenBlocked: [...held.seenBlocked, ...fresh.map((unit) => unit.issue)], seenRefused: [...held.seenRefused, ...refused.map((entry) => entry.name)],
+          }
         })
         for (const unit of fresh) $.ui.toast(toastText({ issue: unit.issue, text: unit.needsYou.text }))
+        for (const entry of refused) $.ui.toast(refusedText(entry))
         if (read.ok) syncLive(isDrawable(read.projection) ? read.projection : null)
         // ui.status false turns the mod off for the project: the tick stops
         // until the next session.start (spec item 6). An unowned projection
@@ -329,10 +347,15 @@ export const register: Register = (on) => {
     return {}
   })
 
+  // The controls (SPEC-central item 16) are buttons and inputs of the pane:
+  // each sends one control through control.ts. A cancel is held as
+  // `pending` in $.state until its y or n, so the question survives a redraw.
   // The literal, so `claude plugin validate` lists the pane's id (central.test.ts holds PANE_ID to it).
   on('ui.render', { component: 'Pane', requestId: 'autoloop' }, async ($, e) => {
     const kit = $.ui.resolve(e)
     const { Box, Text, Button } = kit
+    // The mobile surface draws no field: a block or decide row then stands without its input.
+    const Input = 'Input' in kit ? kit.Input : null
     const held = await heldState($)
     if (!isDrawable(held.last)) return <Text color={PALETTE.ink2}>{quietReason(held.last)}</Text>
     const projection = held.last
@@ -340,20 +363,60 @@ export const register: Register = (on) => {
     const sessionId = await $.session.id()
     const setTab = (tab: StatusState['tab']) => update($, STATUS, (value) => ({ ...EMPTY, ...value, tab }))
     const setFilter = (logFilter: StatusState['logFilter']) => update($, STATUS, (value) => ({ ...EMPTY, ...value, logFilter }))
-    const drawRow = (r: Row): RenderElement => (
-      <Box justifyContent="space-between">
-        <Text color={r.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">
-          {r.lead !== null && <Text color={PALETTE.ink2}>{r.lead}  </Text>}
-          {r.glyph !== '' && <Text color={PALETTE[glyphTone(r.glyph)]}>{r.glyph}</Text>}{r.glyph !== '' && ' '}{r.text}
-        </Text>
-        {r.right !== null && <Text color={PALETTE.ink2}> {r.right}</Text>}
+    const setPending = (pending: StatusPending | null) => update($, STATUS, (value) => ({ ...EMPTY, ...value, pending }))
+    const send = (control: Control) => sendControl(controlHost($), control)
+    const paused = projection.run?.paused === true
+    const pauseButton = (
+      <Button key="pause" label={paused ? `${GLYPH.play} resume` : `${GLYPH.paused} pause`} hotkey="p" plain
+        onPress={() => send({ kind: paused ? 'unpause' : 'pause' })} />
+    )
+    const confirmRow = (pending: StatusPending) => (
+      <Box gap={1}>
+        <Text color={PALETTE.ink}>cancel {pending.name}?</Text>
+        <Button key="confirm-yes" label="yes" hotkey="y" plain onPress={async () => {
+          await setPending(null)
+          await send({ kind: 'cancel', dispatch: pending.dispatch, issue: pending.issue })
+        }} />
+        <Button key="confirm-no" label="no" hotkey="n" plain onPress={() => setPending(null)} />
       </Box>
     )
+    // The element a row's action draws: a button at the right, or an Input on the row under.
+    const actionButton = (action: RowAction): RenderElement | null => {
+      if (action.kind === 'cancel') return <Button key={`cancel-${action.dispatch}`} label="cancel" plain onPress={() => setPending(action)} />
+      if (action.kind === 'merge') return <Button key={`merge-${action.pr}`} label="merge" plain onPress={() => send({ kind: 'merge', pr: action.pr })} />
+      if (action.kind === 'authorize') return <Button key={`authorize-${action.pr}`} label="authorize" plain onPress={() => send({ kind: 'label', pr: action.pr })} />
+      return null
+    }
+    const drawRow = (r: Row): RenderElement => {
+      const line = (
+        <Box justifyContent="space-between">
+          <Text color={r.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">
+            {r.lead !== null && <Text color={PALETTE.ink2}>{r.lead}  </Text>}
+            {r.glyph !== '' && <Text color={PALETTE[glyphTone(r.glyph)]}>{r.glyph}</Text>}{r.glyph !== '' && ' '}{r.text}
+          </Text>
+          {r.right !== null && <Text color={PALETTE.ink2}> {r.right}</Text>}
+          {r.action !== null && actionButton(r.action)}
+        </Box>
+      )
+      if (r.action?.kind !== 'answer' || Input === null) return line
+      const issue = r.action.issue
+      return (
+        <Box flexDirection="column">
+          {line}
+          <Input key={`answer-${issue}`} placeholder="answer…" onSubmit={(value) => {
+            const text = value.trim()
+            if (text !== '') void send({ kind: 'answer', issue, text })
+          }} />
+        </Box>
+      )
+    }
     const drawSection = (s: Section) => section(kit, s.title, s.rows.map(drawRow))
     const body = (): RenderChildren[] => {
       if (held.tab === 'run') {
         const run = runTab(projection, held.proxy, sessionId, nowMs, e.props.bodyColumns)
-        return [run.empty !== null && section(kit, 'Now', [empty(kit, run.empty)]), ...run.sections.map(drawSection)]
+        // The Now section holds the no-unit text and the running dispatches together.
+        const now = [...(run.empty === null ? [] : [empty(kit, run.empty)]), ...(run.sections.find((s) => s.title === 'Now')?.rows ?? []).map(drawRow)]
+        return [now.length > 0 && section(kit, 'Now', now), ...run.sections.filter((s) => s.title !== 'Now').map(drawSection)]
       }
       if (held.tab === 'units') return unitsTab(projection, nowMs).map(drawRow)
       if (held.tab === 'log') {
@@ -370,7 +433,8 @@ export const register: Register = (on) => {
       // Live: a button per running dispatch, `f` for follow, the shown
       // dispatch's title and its lines in the window.
       const view = liveTab(projection, held.streams, held, nowMs, e.props.scroll.bodyRows, e.props.bodyColumns)
-      if (view.shown === null) return [empty(kit, 'no dispatch has run yet')]
+      const shown = view.shown
+      if (shown === null) return [empty(kit, 'no dispatch has run yet')]
       const select = (selected: string) => update($, STATUS, (value) => ({ ...EMPTY, ...value, selected }))
       const toggleFollow = () => update($, STATUS, (value) => ({ ...EMPTY, ...value, follow: !(value?.follow ?? true) }))
       return [
@@ -380,16 +444,21 @@ export const register: Register = (on) => {
               {...(button.active ? { variant: 'primary' as const } : {})} onPress={() => select(button.id)} />
           ))}
           <Button key="follow" label="follow" hotkey="f" plain {...(held.follow ? { variant: 'primary' as const } : {})} onPress={toggleFollow} />
+          {shown.cancel !== null && <Button key="cancel" label="cancel" hotkey="x" plain onPress={() => setPending(shown.cancel)} />}
         </Box>,
-        <Text color={PALETTE.ink} wrap="truncate-end">{view.shown.title}</Text>,
-        ...view.shown.lines.map((line) => <Text color={line.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">{line.text}</Text>),
+        <Text color={PALETTE.ink} wrap="truncate-end">{shown.title}</Text>,
+        ...shown.lines.map((line) => <Text color={line.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">{line.text}</Text>),
       ]
     }
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
-          {header(kit, <Text color={PALETTE.ink}><Text color={PALETTE.accent}>{GLYPH.brand}</Text> autoloop · {statusLine(projection)}</Text>)}
+          <Box justifyContent="space-between">
+            <Text color={PALETTE.ink} wrap="truncate-end"><Text color={PALETTE.accent}>{GLYPH.brand}</Text> autoloop · {statusLine(projection)}</Text>
+            {pauseButton}
+          </Box>
           {tabs(kit, TABS.map(({ tab, label, hotkey }) => ({ label, hotkey, active: held.tab === tab, onPress: () => setTab(tab) })))}
+          {held.pending !== null && confirmRow(held.pending)}
         </Box>
         {held.tab === 'run' ? <Box flexDirection="column" gap={1}>{body()}</Box> : <Box flexDirection="column">{body()}</Box>}
       </Box>

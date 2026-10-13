@@ -74,6 +74,16 @@ export type StatusEvent = {
   paths?: string[]
 }
 
+/** A control the loop refused, as the producer lists it from `control/refused/` (SPEC-events item 9). */
+export type StatusRefused = {
+  /** The control file's name, the key the mod toasts it once by. */
+  name: string
+  kind: string | null
+  pr: number | null
+  issue: number | null
+  reason: string
+}
+
 /** A dispatch with a start and no end: running while its pid lives, died when it is gone. */
 export type StatusDispatch = {
   dispatch: string
@@ -113,6 +123,7 @@ export type StatusProjection = {
   /** The run's last 50 events, newest first. */
   log?: StatusEvent[]
   dispatches?: StatusDispatch[]
+  controls?: { refused: StatusRefused[] }
 }
 
 /** One active request as the proxy's `GET /status` lists it (its snake_case fields, read leniently). */
@@ -143,6 +154,9 @@ export type StatusStream = {
   lastGrewAtMs: number
 }
 
+/** A cancel awaiting its y or n (SPEC-central item 16): the dispatch, its issue and its name as the question says it. */
+export type StatusPending = { kind: 'cancel'; dispatch: string; issue: number | null; name: string }
+
 /** The mod's session state: the last reads and what it has already shown. */
 export type StatusState = {
   /** The last projection that parsed, kept through failed reads. */
@@ -155,6 +169,10 @@ export type StatusState = {
   proxy: ProxyRead | null
   /** Issues whose needs-you toast was shown in this session. */
   seenBlocked: number[]
+  /** Refused controls (by file name) whose toast was shown in this session. */
+  seenRefused: string[]
+  /** A cancel the operator pressed and has not confirmed or dropped. */
+  pending: StatusPending | null
   /** True while the pane `autoloop` is open and placed: the band then draws one row. */
   paneOpen: boolean
   /** The live tails by dispatch id: every running dispatch's, and the last ended one's until session.end. */

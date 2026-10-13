@@ -3,7 +3,7 @@
 // to row models per tab. They hold no `$`; register.tsx draws what they
 // return with the kit. Each row hands back its glyph apart from its text,
 // so status is carried by the glyph and the words, never by color alone.
-import type { ProxyRead, StatusEvent, StatusProjection, StatusState, StatusStream, StatusUnit, StatusWait, StatusWorkedUnit } from '../../types'
+import type { ProxyRead, StatusEvent, StatusPending, StatusProjection, StatusState, StatusStream, StatusUnit, StatusWait, StatusWorkedUnit } from '../../types'
 import { GLYPH } from './kit'
 import { isQuiet, runningDispatches } from './read'
 import { blockedUnits, duration, loopColumn, modelName, prToAuthorize, requestedName, roundLabel, shortModel } from './view'
@@ -26,6 +26,18 @@ export const LOG_LENGTH = 500
 /** A unit's title is cut past this many characters on the Units tab. */
 const TITLE_MAX = 40
 
+/**
+ * The control a row offers (item 16): a `cancel` button beside a running
+ * dispatch, an `answer` input under a block or decide, `merge` or
+ * `authorize` on a unit with a PR. register.tsx draws the element and sends
+ * the control; the row holds only the facts.
+ */
+export type RowAction =
+  | StatusPending
+  | { kind: 'answer'; issue: number }
+  | { kind: 'merge'; pr: number }
+  | { kind: 'authorize'; pr: number }
+
 export type Row = {
   /** Drawn dim before the glyph: the Log tab's time. */
   lead: string | null
@@ -36,11 +48,13 @@ export type Row = {
   right: string | null
   /** A dim row: a blocked unit's needs-you text under its row. */
   dim: boolean
+  action: RowAction | null
 }
 
 export type Section = { title: string; rows: Row[] }
 
-const row = (glyph: string, text: string, right: string | null = null, dim = false): Row => ({ lead: null, glyph, text, right, dim })
+const row = (glyph: string, text: string, right: string | null = null, dim = false, action: RowAction | null = null): Row =>
+  ({ lead: null, glyph, text, right, dim, action })
 
 const parts = (list: (string | null | undefined)[]): string => list.filter((part): part is string => typeof part === 'string' && part !== '').join(' · ')
 
@@ -78,12 +92,22 @@ function unitElapsed(unit: StatusWorkedUnit, nowMs: number): string | null {
   return unit.returnedAtMs === null ? null : `returned ${duration(nowMs - unit.returnedAtMs)} ago`
 }
 
-/** Now: the phase, unit, PR and title on one row; the role, round, model and elapsed on the next. */
+/** One row per running dispatch: `▶ #517 implement · OPUS 5.5 · 4m 0s`, with its cancel (item 16). */
+export function dispatchRows(projection: StatusProjection, nowMs: number): Row[] {
+  return runningDispatches(projection).map((dispatch) => {
+    const name = dispatchName(dispatch, dispatch.dispatch)
+    return row(GLYPH.play, parts([name, dispatch.model === null ? null : shortModel(dispatch.model), duration(nowMs - dispatch.startedAtMs)]), null, false,
+      { kind: 'cancel', dispatch: dispatch.dispatch, issue: dispatch.issue, name })
+  })
+}
+
+/** Now: the phase, unit, PR and title on one row; the role, round, model and elapsed on the next; then the running dispatches. */
 export function nowSection(projection: StatusProjection, nowMs: number): Section {
   const unit = projection.unit ?? null
-  if (unit === null) return { title: 'Now', rows: [] }
+  const dispatches = dispatchRows(projection, nowMs)
+  if (unit === null) return { title: 'Now', rows: dispatches }
   const loop = loopColumn(projection, false)
-  return { title: 'Now', rows: [row(GLYPH.active, loop.head), row('', parts([loop.detail, unitElapsed(unit, nowMs)]))] }
+  return { title: 'Now', rows: [row(GLYPH.active, loop.head), row('', parts([loop.detail, unitElapsed(unit, nowMs)])), ...dispatches] }
 }
 
 /** `08-code-review` as `code-review`: the step's name less its order. */
@@ -111,11 +135,23 @@ function answerText(unit: StatusUnit): string {
   return pr === null ? `answer on #${unit.issue}` : `merge or label PR #${pr}`
 }
 
-/** Needs you: every unit a human must answer, oldest first, its text and what answers it. */
+/**
+ * The control a unit with a PR offers (item 16): `merge` only when the
+ * loop's own gate may merge it (delivered, no human to answer), `authorize`
+ * only when it carries `human:authorize`; nothing otherwise.
+ */
+export function prAction(unit: StatusUnit): RowAction | null {
+  if (unit.pr === null) return null
+  if (unit.needsYou?.kind === 'authorize') return { kind: 'authorize', pr: unit.pr }
+  return unit.needsYou === null && unit.disposition === 'delivered' ? { kind: 'merge', pr: unit.pr } : null
+}
+
+/** Needs you: every unit a human must answer, oldest first, its text and what answers it: an answer input, or the authorize button. */
 export function needsYouSection(projection: StatusProjection): Section {
   return {
     title: 'Needs you',
-    rows: blockedUnits(projection).map((unit) => row(GLYPH.needsYou, parts([ref(unit.issue, unit.pr), unit.needsYou.text]), answerText(unit))),
+    rows: blockedUnits(projection).map((unit) => row(GLYPH.needsYou, parts([ref(unit.issue, unit.pr), unit.needsYou.text]), answerText(unit), false,
+      unit.needsYou.kind === 'authorize' ? prAction(unit) : { kind: 'answer', issue: unit.issue })),
   }
 }
 
@@ -140,7 +176,7 @@ export function deliveredSection(projection: StatusProjection): Section {
   return {
     title: 'Delivered',
     rows: (projection.units ?? []).filter((unit) => unit.disposition === 'delivered')
-      .map((unit) => row(GLYPH.done, parts([ref(unit.issue, unit.pr), unit.detail ?? 'merge pending']))),
+      .map((unit) => row(GLYPH.done, parts([ref(unit.issue, unit.pr), unit.detail ?? 'merge pending']), null, false, prAction(unit))),
   }
 }
 
@@ -276,7 +312,7 @@ const BY_WIDTH = 8
 export function logRow(event: StatusEvent): Row {
   const { glyph, what } = eventText(event)
   const issue = event.issue === undefined ? null : `#${event.issue}${event.pr === undefined ? '' : ` PR #${event.pr}`}`
-  return { lead: clockText(event.at), glyph, text: [event.by.padEnd(BY_WIDTH), issue, what].filter((part) => part !== null).join('  '), right: null, dim: false }
+  return { lead: clockText(event.at), glyph, text: [event.by.padEnd(BY_WIDTH), issue, what].filter((part) => part !== null).join('  '), right: null, dim: false, action: null }
 }
 
 /** The Log tab: the projection's log as it comes (newest first), those the filter passes. */
@@ -294,8 +330,8 @@ export type LiveLine = { text: string; dim: boolean }
 export type LiveView = {
   /** One per running dispatch: `#517 implement`, hotkeys `a`..`e` in order (none past the fifth), the selected one active. */
   buttons: { id: string; label: string; hotkey: string | null; active: boolean }[]
-  /** The dispatch shown with its title row and the lines in the window; null when none has run. */
-  shown: { id: string; title: string; lines: LiveLine[] } | null
+  /** The dispatch shown with its title row and the lines in the window; null when none has run; `cancel` while it runs (item 16). */
+  shown: { id: string; title: string; lines: LiveLine[]; cancel: StatusPending | null } | null
 }
 
 export type LiveState = Pick<StatusState, 'selected' | 'follow' | 'liveOffset'>
@@ -352,10 +388,13 @@ export function liveTab(
   projection: StatusProjection, streams: Record<string, StatusStream>, state: LiveState, nowMs: number, bodyRows: number, bodyColumns: number,
 ): LiveView {
   const id = shownDispatch(projection, streams, state.selected)
-  const buttons = runningDispatches(projection).map((dispatch, index) => ({
+  const running = runningDispatches(projection)
+  const buttons = running.map((dispatch, index) => ({
     id: dispatch.dispatch, label: dispatchName(dispatch, dispatch.dispatch), hotkey: LIVE_HOTKEYS[index] ?? null, active: dispatch.dispatch === id,
   }))
   if (id === null) return { buttons, shown: null }
+  const runs = running.find((dispatch) => dispatch.dispatch === id)
+  const cancel: StatusPending | null = runs === undefined ? null : { kind: 'cancel', dispatch: id, issue: runs.issue, name: dispatchName(runs, id) }
   const stream = streams[id]
   const lines = stream?.lines ?? []
   const room = liveRoom(bodyRows)
@@ -366,6 +405,7 @@ export function liveTab(
       id,
       title: liveTitle(projection, id, stream, nowMs, bodyColumns < NARROW_COLUMNS),
       lines: lines.slice(offset, offset + room).map((text) => ({ text, dim: text.startsWith(GLYPH.thinking) })),
+      cancel,
     },
   }
 }

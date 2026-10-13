@@ -82,7 +82,7 @@ function pane($: Engine, bodyColumns = 90) {
 
 const press = ($: Engine, key: string) => $.ui.press({ plugin: 'autoloop', key, requestId: PANE_ID })
 
-const HEADER = ['◆ autoloop · review #412', '[Run][Live][Units][Log]']
+const HEADER = ['◆ autoloop · review #412[⏸ pause]', '[Run][Live][Units][Log]']
 
 test('the header names the loop state and marks a paused run', () => {
   expect(statusLine(projection(RUN))).toBe('review #412')
@@ -96,7 +96,7 @@ test('the Run tab at 90 columns: Now, Timeline, Needs you, Waiting, Delivered an
   const run = runTab(projection(RUN), proxy, 'S-test', AT_10_30, 90)
   expect(run.empty).toBeNull()
   expect(run.sections.map((section) => [section.title, ...section.rows.map(line)])).toEqual([
-    ['Now', '● review #412 · Session recovery', 'code-review · fix 2/3 · ASTRA 6 · 3m 0s'],
+    ['Now', '● review #412 · Session recovery', 'code-review · fix 2/3 · ASTRA 6 · 3m 0s', '▶ #412 code-review · ASTRA 6 · 2m 0s'],
     ['Timeline', '✓ plan · 15m 0s · ASTRA 6', '● code-review · fix 2/3 · 3m 0s · ASTRA 6'],
     ['Needs you',
       '! #417 · Needs a policy answer answer on #417',
@@ -282,22 +282,23 @@ test('the pane draws the header, the four tabs and the Run tab from the last rea
     'NOW',
     '● review #412 · Session recovery',
     'code-review · fix 2/3 · ASTRA 6 · 3m 3s',
+    '▶ #412 code-review · ASTRA 6 · 2m 3s[cancel]',
     'TIMELINE',
     '✓ plan · 15m 0s · ASTRA 6',
     '● code-review · fix 2/3 · 3m 3s · ASTRA 6',
     'NEEDS YOU',
-    '! #417 · Needs a policy answer answer on #417',
-    '! #418 · Draft with open findings answer on #418',
-    '! #419 · Draft handed off after the scan answer on #419',
-    '! #423 · Needs an authorization answer on #423',
-    '! #424 · PR #701 · PR awaiting authorization merge or label PR #701',
-    '! #430 · Blocked without a record answer on #430',
+    '! #417 · Needs a policy answer answer on #417', '(answer…)',
+    '! #418 · Draft with open findings answer on #418', '(answer…)',
+    '! #419 · Draft handed off after the scan answer on #419', '(answer…)',
+    '! #423 · Needs an authorization answer on #423', '(answer…)',
+    '! #424 · PR #701 · PR awaiting authorization merge or label PR #701[authorize]',
+    '! #430 · Blocked without a record answer on #430', '(answer…)',
     'WAITING',
     '◷ #414 waits on #399',
     '◷ #415 waits on PR #204 · src/a.mjs, src/b.mjs',
     '◷ #420 · staged, not dispatched',
     'DELIVERED',
-    '✓ #416 · PR #700 · automatic merge pending (checks pending)',
+    '✓ #416 · PR #700 · automatic merge pending (checks pending)[merge]',
     'PROXY',
     '● OPUS 5.5 → OPUS · 1m 1s this session',
     '● ASTRA 6 · 30s',
@@ -321,7 +322,7 @@ test('the pane without a unit says so, leaves empty sections out, and says when 
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(rows(await pane($))).toEqual([
-    '◆ autoloop · Idle', '[Run][Live][Units][Log]', 'NOW', 'no unit in flight · next selection at 11:00 UTC', 'WAITING', '◷ #420 · staged, not dispatched',
+    '◆ autoloop · Idle[⏸ pause]', '[Run][Live][Units][Log]', 'NOW', 'no unit in flight · next selection at 11:00 UTC', 'WAITING', '◷ #420 · staged, not dispatched',
   ])
   await h.clock.advance(PERIOD_MS)
   expect(rows(await pane($))).toEqual(['autoloop: this session owns no run'])
@@ -427,7 +428,7 @@ test('the Live tab follows the stream\'s end; f turns follow off and the window 
   await pane($)
   await press($, 'tab-2')
   // 10 body rows less the four of header, tabs, buttons and title: six lines, the newest last.
-  expect((await live($, 10)).slice(2)).toEqual(['[#412 code-review][follow]', '#412 code-review · ASTRA 6 · 2m 4s · 14 lines', ...RENDERED.slice(-6)])
+  expect((await live($, 10)).slice(2)).toEqual(['[#412 code-review][follow][cancel]', '#412 code-review · ASTRA 6 · 2m 4s · 14 lines', ...RENDERED.slice(-6)])
   expect((await live($, 40)).slice(4)).toEqual(RENDERED)
   await press($, 'follow')
   expect(buttons(await pane($)).find((button) => button.props.key === 'follow')?.props.variant).toBeUndefined()
