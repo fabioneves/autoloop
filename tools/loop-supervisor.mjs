@@ -12,7 +12,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   acquireScheduler, assertNoKnownLegacyOwner, boundGroupState, commitTransition, createPins, DEFAULT_SUPERVISOR_PROFILE,
-  listControlRequests, markEffectInFlight, prepareEffect, processIdentityState, readCheckpoint, readCurrentCheckpoint,
+  hasUnresolvedEffects, listControlRequests, markEffectInFlight, prepareEffect, processIdentityState, readCheckpoint, readCurrentCheckpoint,
   readProcessIdentity, readSchedulerOwner, releaseScheduler, resolveRepository, schedulerDigest, SchedulerError,
   submitControl, validatePins,
 } from './scheduler-contract.mjs';
@@ -232,7 +232,7 @@ export async function startSupervised({ repository, pins, initiator, systemdRunP
   requireCondition(owner.state !== 'unknown', 'OWNER_UNVERIFIED', 'The preceding scheduler cannot be verified.');
   requireCondition(previous.MainPID === '0' && previous.ActiveState !== 'active', 'SCHEDULER_ACTIVE', 'The named service is already active.');
   const requiresRecovery = current && (current.state !== 'stopped' || current.workers.some((worker) => boundGroupState(worker) !== 'empty')
-    || Object.values(current.outbox).some((effect) => ['in-flight', 'unknown'].includes(effect.phase))
+    || hasUnresolvedEffects(current)
     || listControlRequests(repository, current.runId).length > 0);
   requireCondition(!requiresRecovery || current.runId === pins.runId, 'RUN_MISMATCH', 'Recover the retained run before launching another.');
   const launchId = randomUUID();
@@ -658,6 +658,30 @@ const output={};try{
         assert.equal(JSON.parse(readFileSync(setup.state)).MainPID, '0');
         assert.equal(readCheckpoint(setup.repository, ready.runId).state, 'stopped');
         assert.equal(readCheckpoint(setup.repository, ready.runId).generation, 2);
+      });
+      if (containedFixture) await check('supervisor retains stopped prepared intent until leased abandonment', async () => {
+        const setup = await fixture();
+        const owner = acquireScheduler(setup.repository, setup.pins, initiator());
+        commitTransition(owner.lease, 1, (value) => ({ ...value, state: 'running' }));
+        const operationId = randomUUID();
+        prepareEffect(owner.lease, 2, { operationId, requestId: null, runId: setup.pins.runId, unitId: null, unitGeneration: null,
+          kind: 'external.fixture', target: { type: 'external', id: randomUUID() }, inputDigest: schedulerDigest({ unstarted: true }),
+          expectedHead: null, phase: 'prepared', attempt: 1, receipt: null, error: null });
+        commitTransition(owner.lease, 3, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(owner.lease);
+        const fresh = createPins(setup.repository, { pluginRoot, enginePath: setup.pins.enginePath, config: setup.pins.config, models: setup.pins.models });
+        await assert.rejects(launch(setup, { pins: fresh }), (error) => error.code === 'RUN_MISMATCH');
+        assert.equal(readCheckpoint(setup.repository, setup.pins.runId).outbox[operationId].phase, 'prepared');
+        try { assert.equal((await launch(setup)).state, 'recovering'); }
+        catch (error) { assert.equal(error.code, 'READINESS_FAILED'); }
+        await waitFor(() => JSON.parse(readFileSync(setup.state)).MainPID === '0', 'Prepared stopped recovery did not finish.');
+        const retained = readCheckpoint(setup.repository, setup.pins.runId);
+        assert.equal(retained.generation, 2);
+        assert.equal(retained.outbox[operationId].phase, 'failed');
+        assert.equal(retained.outbox[operationId].error.code, 'STOPPED_BEFORE_LAUNCH');
+        const ready = await launch(setup, { pins: fresh });
+        submitControl(setup.repository, actor(), { schema: 'autoloop.control/2', requestId: randomUUID(), runId: ready.runId,
+          kind: 'stop', target: { type: 'run', generation: ready.generation }, payload: {}, submittedAt: Date.now() });
+        await waitFor(() => JSON.parse(readFileSync(setup.state)).MainPID === '0', 'The fresh fixture run did not stop.');
       });
       if (containedFixture) await check('supervisor recovers stopped unknown work and refuses premature fresh-run launch', async () => {
         const setup = await fixture();

@@ -146,6 +146,20 @@ async function selfTest() {
       stop(repo, acquired);
       assert.equal(legacy(repo).ok, true);
     });
+    await check('legacy admission waits for leased prepared-intent accounting', () => {
+      const repo = repository(); const pins = pinsOf(repo); const acquired = start(repo, pins);
+      scheduler.commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const operationId = randomUUID();
+      scheduler.prepareEffect(acquired.lease, 2, { operationId, requestId: null, runId: pins.runId, unitId: null, unitGeneration: null,
+        kind: 'external.fixture', target: { type: 'external', id: randomUUID() }, inputDigest: scheduler.schedulerDigest({ unstarted: true }),
+        expectedHead: null, phase: 'prepared', attempt: 1, receipt: null, error: null });
+      stop(repo, acquired);
+      assert.equal(legacy(repo).error?.code, 'SCHEDULER_ACTIVE');
+      const resumed = start(repo, pins);
+      scheduler.abandonPreparedEffect(resumed.lease, operationId); stop(repo, resumed);
+      assert.equal(legacy(repo).ok, true);
+      assert.equal(scheduler.readCheckpoint(repo, pins.runId).outbox[operationId].error.code, 'STOPPED_BEFORE_LAUNCH');
+    });
     await check('a live legacy dispatch in a linked worktree refuses daemon admission after its launcher has ended', async () => {
       if (process.platform !== 'linux') { console.log('capability skip: legacy dispatch inventory requires /proc'); return; }
       const repo = repository(); const linked = join(scratch, randomUUID());

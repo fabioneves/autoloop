@@ -607,7 +607,7 @@ export function assertNoSchedulerOwner(repository) {
   if (held.state === 'alive') refuse('SCHEDULER_ACTIVE', 'A scheduler owns this repository.');
   if (held.lease === null) return;
   const current = readCurrentCheckpoint(repository);
-  if (!current || current.state !== 'stopped' || retainedWorkers(current) || unsettledEffects(current) || pendingRequests(repository, current)) {
+  if (!current || current.state !== 'stopped' || retainedWorkers(current) || hasUnresolvedEffects(current) || pendingRequests(repository, current)) {
     refuse('SCHEDULER_ACTIVE', 'The scheduler run needs recovery before legacy admission.');
   }
 }
@@ -656,12 +656,12 @@ function acquireSchedulerWithinAdmission(repository, pins, initiator, { observe 
   if (previousId !== null) {
     const path = join(stateDirectory(repository), 'runs', previousId);
     if (present(path) && present(join(safeDirectory(path), 'checkpoint.json'))) recovered = rawCheckpoint(repository, previousId);
-    if (recovered === null || recovered.state !== 'stopped' || retainedWorkers(recovered) || unsettledEffects(recovered) || pendingRequests(repository, recovered)) {
+    if (recovered === null || recovered.state !== 'stopped' || retainedWorkers(recovered) || hasUnresolvedEffects(recovered) || pendingRequests(repository, recovered)) {
       requireCondition(previousId === pins.runId, 'RUN_MISMATCH', 'Recover the preceding run before starting another.');
     }
   }
   if (recovered && recovered.runId === pins.runId) {
-    requireCondition(recovered.state !== 'stopped' || retainedWorkers(recovered) || unsettledEffects(recovered) || pendingRequests(repository, recovered),
+    requireCondition(recovered.state !== 'stopped' || retainedWorkers(recovered) || hasUnresolvedEffects(recovered) || pendingRequests(repository, recovered),
       'RUN_ENDED', 'A completed stopped run cannot be reopened.');
     requireCondition(schedulerDigest(readPins(repository, pins.runId)) === schedulerDigest(pins), 'PINS_CHANGED', 'The run pins changed.');
   } else requireCondition(!ledger.some(({ record: item }) => item.runId === pins.runId) || recovered === null,
@@ -749,7 +749,7 @@ function writeTransition(lease, binding, expectedRevision, transition) {
     }
   }
   requireCondition(!(current.state === 'recovering' && ['running', 'paused'].includes(updated.state)
-    && (unsettledEffects(updated) || updated.workers.some((worker) => worker.generation < updated.generation && boundGroupState(worker) !== 'empty'))),
+    && (hasUnresolvedEffects(updated) || updated.workers.some((worker) => worker.generation < updated.generation && boundGroupState(worker) !== 'empty'))),
     'RECOVERY_REQUIRED', 'Uncertain effects and workers must be reconciled first.');
   // Recheck after the reducer and before publication; nested writes are refused.
   heldLease(lease, true);
@@ -788,8 +788,8 @@ function recoverEffects(checkpoint) {
   }));
   return { ...checkpoint, outbox, requests };
 }
-function unsettledEffects(checkpoint) {
-  return Object.values(checkpoint.outbox).some((effect) => ['in-flight', 'unknown'].includes(effect.phase));
+export function hasUnresolvedEffects(checkpoint) {
+  return Object.values(checkpoint.outbox ?? {}).some((effect) => ['prepared', 'in-flight', 'unknown'].includes(effect.phase));
 }
 
 function retainedWorkers(checkpoint) {
@@ -1078,7 +1078,7 @@ function refuseForeignControl(lease, binding, control) {
   if (previous && ['applied', 'refused'].includes(previous.status)) return { ...responseOf(previous), claimedNow: false };
   requireCondition(['stopped', 'failed'].includes(current.state), 'RUN_MISMATCH', 'The request belongs to another active run.');
   requireCondition(!Object.values(current.outbox).some((effect) => effect.requestId === control.requestId
-    && ['in-flight', 'unknown'].includes(effect.phase)), 'OUTCOME_UNKNOWN', 'The historical request needs effect readback.');
+    && ['prepared', 'in-flight', 'unknown'].includes(effect.phase)), 'OUTCOME_UNKNOWN', 'The historical request needs effect reconciliation.');
   claimTransport(binding, control);
   const claimed = previous ?? { requestHash: controlDigest(control), request: control, status: 'processing',
     claimedGeneration: current.generation, outcome: null };
@@ -1136,8 +1136,8 @@ export function completeControl(lease, requestId, result, transition = (value) =
     return current;
   }
   const linked = Object.values(current.outbox).filter((effect) => effect.requestId === requestId);
-  requireCondition(linked.every((effect) => !['in-flight', 'unknown'].includes(effect.phase)),
-    'OUTCOME_UNKNOWN', 'The request has an uncertain effect.');
+  requireCondition(linked.every((effect) => !['prepared', 'in-flight', 'unknown'].includes(effect.phase)),
+    'OUTCOME_UNKNOWN', 'The request has an unresolved effect.');
   if (result.status === 'applied') requireCondition(linked.every((effect) => effect.phase === 'succeeded'),
     'OUTCOME_UNKNOWN', 'The request has incomplete effects.');
   const outcome = outcomeFor(request, result.status, result.code, current.revision + 1, result.operationId);
@@ -1209,8 +1209,12 @@ function validatePersistentTransition(binding, current, updated) {
     requireCondition(kept.attempt === effect.attempt || (kept.attempt === effect.attempt + 1 && kept.phase === 'prepared'
       && kept.error?.code === 'NOT_APPLIED' && kept.receipt !== null), 'STATE_INVALID', 'A retry needs verified not-applied evidence.');
     if (kept.phase !== effect.phase) {
-      const next = { prepared: ['in-flight', 'succeeded'], 'in-flight': ['unknown', 'prepared', 'succeeded', 'failed'],
+      const next = { prepared: ['in-flight', 'succeeded', 'failed'], 'in-flight': ['unknown', 'prepared', 'succeeded', 'failed'],
         unknown: ['prepared', 'succeeded', 'failed'], succeeded: [], failed: [] };
+      if (effect.phase === 'prepared' && kept.phase === 'failed') requireCondition(canAbandonPreparedEffect(current, effect)
+        && kept.error?.code === 'STOPPED_BEFORE_LAUNCH' && kept.attempt === effect.attempt
+        && canonicalJson(kept.receipt) === canonicalJson(effect.receipt),
+      'STATE_INVALID', 'Only stopped unstarted intent can be abandoned.');
       if (effect.phase === 'prepared' && kept.phase === 'succeeded') requireCondition(preparedCancellationExited(current, effect)
         && validAbsentGroupReceipt(current, effect, kept.receipt), 'STATE_INVALID', 'Only confirmed absent cancellation targets can settle before execution.');
       requireCondition(next[effect.phase].includes(kept.phase), 'STATE_INVALID', 'The effect phase transition is invalid.');
@@ -1272,7 +1276,8 @@ export function markEffectInFlight(lease, operationId) {
   requireCondition((!['starting', 'recovering', 'stopped', 'failed'].includes(current.state)
     && !Object.values(current.outbox).some((item) => item.phase === 'unknown')) || explicitRecoveryCancellation(current, effect),
   'RECOVERY_REQUIRED', 'Reconcile uncertain work first.');
-  requireCondition(!(current.desiredState === 'stopped' && effect.kind === 'process.start'), 'RUN_ACTIVE', 'Stopped work cannot restart automatically.');
+  requireCondition(current.desiredState !== 'stopped' || explicitRecoveryCancellation(current, effect),
+    'RUN_ACTIVE', 'Stopped intent cannot launch an effect.');
   assertPinsLive(binding.repository, readPins(binding.repository, current.runId));
   return commitTransition(lease, current.revision, (value) => ({ ...value, outbox: { ...value.outbox,
     [operationId]: { ...effect, phase: 'in-flight', receipt: null, error: null } } }));
@@ -1295,6 +1300,38 @@ function validAbsentGroupReceipt(checkpoint, effect, receipt) {
 }
 function cancellationGroupsExited(checkpoint) {
   return checkpoint.workers.every((worker) => worker.cancelledByOperator && boundGroupState(worker) === 'empty');
+}
+function canAbandonPreparedEffect(checkpoint, effect) {
+  // Cancellation retains its desired group exit; it must use exact readback.
+  return checkpoint.desiredState === 'stopped' && effect.phase === 'prepared' && effect.kind !== 'process.cancel';
+}
+export function abandonPreparedEffect(lease, operationId) {
+  const binding = heldLease(lease);
+  requireCondition(uuid(operationId), 'INVALID_INPUT', 'An operation ID is invalid.');
+  const current = readCheckpoint(binding.repository, binding.identity.runId);
+  const effect = current.outbox[operationId];
+  requireCondition(effect, 'EFFECT_NOT_FOUND', 'The effect does not exist.');
+  requireCondition(current.desiredState === 'stopped', 'RUN_ACTIVE', 'Stopped intent is required before abandonment.');
+  requireCondition(canAbandonPreparedEffect(current, effect), 'EFFECT_SETTLED', 'The effect needs execution readback, not abandonment.');
+  let outcome = null;
+  const updated = commitTransition(lease, current.revision, (value) => {
+    const outbox = { ...value.outbox, [operationId]: { ...effect, phase: 'failed',
+      error: { code: 'STOPPED_BEFORE_LAUNCH', message: 'Stopped intent prevented effect invocation.' } } };
+    const requests = { ...value.requests };
+    if (effect.requestId !== null) {
+      const request = requests[effect.requestId];
+      requireCondition(!['applied', 'refused'].includes(request.status), 'REQUEST_SETTLED', 'The linked request is already settled.');
+      const linked = Object.values(outbox).filter((item) => item.requestId === effect.requestId);
+      if (linked.every((item) => ['succeeded', 'failed'].includes(item.phase))
+        && (request.request.kind !== 'stop-now' || cancellationGroupsExited(value))) {
+        outcome = outcomeFor(request, 'refused', 'STOPPED_BEFORE_LAUNCH', current.revision + 1, operationId);
+        requests[effect.requestId] = { ...request, status: 'refused', outcome };
+      }
+    }
+    return { ...value, outbox, requests };
+  });
+  if (outcome) publishOutcome(binding.repository, outcome, binding.observe);
+  return updated;
 }
 export function settleEffect(lease, operationId, observation) {
   const binding = heldLease(lease);
@@ -1623,6 +1660,51 @@ async function selfTest() {
       commitTransition(acquired.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' }));
       releaseScheduler(acquired.lease);
     };
+    await check('prepared intents block fresh and legacy admission until stopped-before-launch accounting', () => {
+      for (const linked of [false, true]) {
+        const { repository, pins, initiator } = fixture();
+        const acquired = acquireScheduler(repository, pins, initiator);
+        commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+        const control = linked ? request(pins.runId) : null;
+        if (control) { submitControl(repository, actor(), control); claimControl(acquired.lease, control.requestId); }
+        const operation = effect(pins.runId, control?.requestId ?? null);
+        prepareEffect(acquired.lease, readCheckpoint(repository, pins.runId).revision, operation);
+        finish(repository, acquired);
+        const nextPins = { ...pins, runId: randomUUID(), createdAt: Date.now() };
+        refuses('RUN_MISMATCH', () => acquireScheduler(repository, nextPins, initiator));
+        refuses('SCHEDULER_ACTIVE', () => assertNoSchedulerOwner(repository));
+        assert.equal(readCheckpoint(repository, pins.runId).outbox[operation.operationId].phase, 'prepared');
+        const resumed = acquireScheduler(repository, pins, initiator);
+        refuses('LEASE_INVALID', () => abandonPreparedEffect(acquired.lease, operation.operationId));
+        const settled = abandonPreparedEffect(resumed.lease, operation.operationId);
+        assert.equal(settled.outbox[operation.operationId].phase, 'failed');
+        assert.equal(settled.outbox[operation.operationId].error.code, 'STOPPED_BEFORE_LAUNCH');
+        assert.equal(settled.outbox[operation.operationId].attempt, 1);
+        assert.equal(settled.outbox[operation.operationId].receipt, null);
+        if (control) {
+          assert.equal(settled.requests[control.requestId].status, 'refused');
+          assert.equal(readRequest(repository, pins.runId, control.requestId).outcome.code, 'STOPPED_BEFORE_LAUNCH');
+        }
+        finish(repository, resumed);
+        assert.doesNotThrow(() => assertNoSchedulerOwner(repository));
+        const fresh = acquireScheduler(repository, nextPins, initiator); finish(repository, fresh);
+      }
+    });
+    await check('abandonment requires stopped intent and cannot discard an invoked effect', () => {
+      const { repository, pins, initiator } = fixture();
+      const acquired = acquireScheduler(repository, pins, initiator);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const prepared = effect(pins.runId); prepareEffect(acquired.lease, 2, prepared);
+      refuses('RUN_ACTIVE', () => abandonPreparedEffect(acquired.lease, prepared.operationId));
+      const invoked = effect(pins.runId); prepareEffect(acquired.lease, 3, invoked); markEffectInFlight(acquired.lease, invoked.operationId);
+      let current = readCheckpoint(repository, pins.runId);
+      commitTransition(acquired.lease, current.revision, (value) => ({ ...value, desiredState: 'stopped', state: 'draining' }));
+      refuses('EFFECT_SETTLED', () => abandonPreparedEffect(acquired.lease, invoked.operationId));
+      settleEffect(acquired.lease, invoked.operationId, { attempt: 1, status: 'unknown', code: 'OUTCOME_UNKNOWN', receipt: null });
+      refuses('EFFECT_SETTLED', () => abandonPreparedEffect(acquired.lease, invoked.operationId));
+      assert.equal(readCheckpoint(repository, pins.runId).outbox[invoked.operationId].phase, 'unknown');
+      finish(repository, acquired);
+    });
     await check('immutable request IDs survive claims and duplicate payloads cannot replace intent', () => {
       const { repository, pins, initiator } = fixture();
       const acquired = acquireScheduler(repository, pins, initiator);
@@ -1970,7 +2052,7 @@ async function selfTest() {
       assert.equal(gated.requests[control.requestId].status, 'refused');
       finish(repository, acquired);
     });
-    await check('crash before an external call leaves prepared intent and can execute only after recovery', async () => {
+    await check('crash before an external call retains prepared intent until explicit stopped abandonment', async () => {
       const { repository, pins, initiator, home } = fixture();
       const operation = effect(pins.runId);
       const externalFile = join(home, 'external-before-call.json');
@@ -1986,13 +2068,12 @@ async function selfTest() {
       const checkpoint = readCheckpoint(repository, pins.runId);
       assert.equal(checkpoint.outbox[operation.operationId].phase, 'prepared');
       refuses('RECOVERY_REQUIRED', () => markEffectInFlight(recovered.lease, operation.operationId));
-      commitTransition(recovered.lease, checkpoint.revision, (value) => ({ ...value, state: 'running' }));
-      markEffectInFlight(recovered.lease, operation.operationId);
-      const applied = spawnSync(process.execPath, ['-e',
-        "require('node:fs').writeFileSync(process.argv[1], JSON.stringify({ applied: true }));", externalFile], { timeout: 5000 });
-      assert.equal(applied.status, 0);
-      const receipt = { externalId: operation.target.id, observationDigest: schedulerDigest(JSON.parse(readFileSync(externalFile, 'utf8'))), observedAt: Date.now() };
-      assert.equal(settleEffect(recovered.lease, operation.operationId, { attempt: 1, status: 'applied', code: 'DONE', receipt }).outbox[operation.operationId].phase, 'succeeded');
+      refuses('RECOVERY_REQUIRED', () => commitTransition(recovered.lease, checkpoint.revision, (value) => ({ ...value, state: 'running' })));
+      refuses('RUN_ACTIVE', () => abandonPreparedEffect(recovered.lease, operation.operationId));
+      commitTransition(recovered.lease, checkpoint.revision, (value) => ({ ...value, desiredState: 'stopped', state: 'draining' }));
+      abandonPreparedEffect(recovered.lease, operation.operationId);
+      assert.equal(readCheckpoint(repository, pins.runId).outbox[operation.operationId].phase, 'failed');
+      assert.equal(existsSync(externalFile), false);
       finish(repository, recovered);
     });
   } finally {

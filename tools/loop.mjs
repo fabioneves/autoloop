@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  acquireScheduler, assertNoKnownLegacyOwner, boundGroupState, claimControl, commitTransition, completeControl, createPins, DEFAULT_SUPERVISOR_PROFILE,
+  abandonPreparedEffect, acquireScheduler, assertNoKnownLegacyOwner, boundGroupState, claimControl, commitTransition, completeControl, createPins, DEFAULT_SUPERVISOR_PROFILE,
+  hasUnresolvedEffects as unresolvedEffects,
   listControlRequests, markEffectInFlight, prepareEffect, processGroupOf, processIdentityState,
   readCheckpoint, readCurrentCheckpoint, readPins, readProcessIdentity, readRequest, readSchedulerOwner,
   releaseScheduler, resolveRepository, schedulerDigest, SchedulerError, settleEffect, submitControl, registerWorker,
@@ -97,9 +98,6 @@ export function loopStatus(repository) {
 }
 
 export { assertNoKnownLegacyOwner } from './scheduler-contract.mjs';
-function unresolvedEffects(checkpoint) {
-  return Object.values(checkpoint.outbox).some((effect) => ['in-flight', 'unknown'].includes(effect.phase));
-}
 function liveWorkers(checkpoint) {
   return checkpoint.workers.filter((worker) => boundGroupState(worker) !== 'empty');
 }
@@ -263,7 +261,10 @@ function observeRecovery(context) {
     ? 'draining' : value.desiredState, error: null }));
 }
 function stoppedError(checkpoint, waitingGroup) {
-  if (unresolvedEffects(checkpoint)) return { code: 'OUTCOME_UNKNOWN', message: 'The run stopped with effects that need readback.' };
+  if (Object.values(checkpoint.outbox).some((effect) => ['in-flight', 'unknown'].includes(effect.phase))) {
+    return { code: 'OUTCOME_UNKNOWN', message: 'The run stopped with effects that need readback.' };
+  }
+  if (unresolvedEffects(checkpoint)) return { code: 'PREPARED_INTENT_RETAINED', message: 'The run retains unstarted cancellation intent.' };
   if (waitingGroup) return { code: 'OWNER_UNVERIFIED', message: 'The run stopped with a group that needs readback.' };
   return checkpoint.error;
 }
@@ -290,6 +291,12 @@ export async function runLoop({ repository, pins, initiator, tickMs = 1000, onRe
       }
       for (const requestId of listControlRequests(repository)) applyLocalControl(context, requestId);
       reconcileCancellationEffects(context);
+      checkpoint = readCheckpoint(repository, context.runId);
+      if (checkpoint.desiredState === 'stopped') {
+        for (const effect of Object.values(checkpoint.outbox)) {
+          if (effect.phase === 'prepared' && effect.kind !== 'process.cancel') abandonPreparedEffect(context.lease, effect.operationId);
+        }
+      }
       if (context.failure) throw context.failure;
       observeRecovery(context);
       checkpoint = readCheckpoint(repository, context.runId);
@@ -345,7 +352,7 @@ export function prepareLoopCommand(options) {
   const launching = ['start', 'foreground'].includes(options.operation);
   const recovering = launching && stored && (stored.state !== 'stopped'
     || (stored.workers ?? []).some((worker) => boundGroupState(worker) !== 'empty')
-    || Object.values(stored.outbox ?? {}).some((effect) => ['in-flight', 'unknown'].includes(effect.phase))
+    || unresolvedEffects(stored)
     || listControlRequests(repository, stored.runId).length > 0);
   let pins;
   if (recovering) pins = readPins(repository, stored.runId);
@@ -740,6 +747,7 @@ async function selfTest() {
         prepareEffect(owner.lease, current.revision, { operationId, requestId: stop.requestId, runId: setup.pins.runId,
           unitId: binding.unitId, unitGeneration: 1, kind: 'process.cancel', target: { type: 'process', attemptId },
           inputDigest: schedulerDigest({ binding }), expectedHead: null, phase: 'prepared', attempt: 1, receipt: null, error: null });
+        assert.throws(() => abandonPreparedEffect(owner.lease, operationId), (error) => error.code === 'EFFECT_SETTLED');
         worker.kill('SIGTERM');
         await worker.closed;
         assert.throws(() => markEffectInFlight(owner.lease, operationId), (error) => error.code === 'OWNER_UNVERIFIED');
@@ -776,6 +784,48 @@ async function selfTest() {
         current = readCheckpoint(setup.repository, setup.pins.runId);
         commitTransition(owner.lease, current.revision, (value) => ({ ...value, state: 'failed' }));
         releaseScheduler(owner.lease);
+      });
+      await check('orderly stop and SIGTERM account for request-independent and linked prepared intents', async () => {
+        for (const linked of [false, true]) for (const stopping of ['control', 'signal']) {
+          const setup = fixture();
+          const owner = acquireScheduler(setup.repository, setup.pins, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
+          commitTransition(owner.lease, 1, (value) => ({ ...value, state: 'running' }));
+          const request = linked ? control(setup.pins.runId, 'pause') : null;
+          if (request) { submitControl(setup.repository, actor(), request); claimControl(owner.lease, request.requestId); }
+          const operationId = randomUUID();
+          prepareEffect(owner.lease, readCheckpoint(setup.repository, setup.pins.runId).revision, { operationId,
+            requestId: request?.requestId ?? null, runId: setup.pins.runId, unitId: null, unitGeneration: null,
+            kind: 'external.fixture', target: { type: 'external', id: randomUUID() }, inputDigest: schedulerDigest({ unstarted: true }),
+            expectedHead: null, phase: 'prepared', attempt: 1, receipt: null, error: null });
+          let current = readCheckpoint(setup.repository, setup.pins.runId);
+          commitTransition(owner.lease, current.revision, (value) => ({ ...value, state: 'failed' })); releaseScheduler(owner.lease);
+          const runtime = await startRuntime(setup);
+          assert.equal(readCheckpoint(setup.repository, setup.pins.runId).state, 'recovering');
+          if (stopping === 'signal') runtime.kill('SIGTERM');
+          else submitControl(setup.repository, actor(), control(setup.pins.runId, 'stop', 2));
+          assert.equal((await runtime.closed).code, 0);
+          current = readCheckpoint(setup.repository, setup.pins.runId);
+          assert.equal(current.state, 'stopped');
+          assert.equal(current.outbox[operationId].phase, 'failed');
+          assert.equal(current.outbox[operationId].error.code, 'STOPPED_BEFORE_LAUNCH');
+          if (request) assert.equal(readRequest(setup.repository, setup.pins.runId, request.requestId).status, 'refused');
+          const next = createPins(setup.repository, { pluginRoot: ROOT, enginePath: setup.pins.enginePath,
+            config: setup.pins.config, models: setup.pins.models });
+          const fresh = acquireScheduler(setup.repository, next, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
+          commitTransition(fresh.lease, 1, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(fresh.lease);
+        }
+      });
+      await check('launch selection retains stopped prepared intents before accounting', () => {
+        const setup = fixture();
+        const owner = acquireScheduler(setup.repository, setup.pins, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
+        commitTransition(owner.lease, 1, (value) => ({ ...value, state: 'running' }));
+        prepareEffect(owner.lease, 2, { operationId: randomUUID(), requestId: null, runId: setup.pins.runId, unitId: null, unitGeneration: null,
+          kind: 'external.fixture', target: { type: 'external', id: randomUUID() }, inputDigest: schedulerDigest({ unstarted: true }),
+          expectedHead: null, phase: 'prepared', attempt: 1, receipt: null, error: null });
+        commitTransition(owner.lease, 3, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(owner.lease);
+        const prepared = prepareLoopCommand(parseLoopArgs(['run', '--foreground', '--root', setup.repository.coordinatorRoot, '--operator-terminal']));
+        assert.equal(prepared.pins.runId, setup.pins.runId);
+        assert.equal(prepared.command.runId, setup.pins.runId);
       });
       await check('launch selection recovers stopped unknown work but starts a new completed run', () => {
         const setup = fixture();
