@@ -222,8 +222,8 @@ export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderE
         ...logTab(projection, state.logFilter).map(drawRow),
       ]
     }
-    // Live: a button per running dispatch, `f` for follow, the shown
-    // dispatch's title and its lines in the window.
+    // Live: a button per visible binding, `f` for follow, the shown
+    // dispatch's title and its retained lines in the window.
     const view = liveTab(projection, state.streams, state, host.nowMs, host.bodyRows, host.bodyColumns)
     const shown = view.shown
     if (shown === null) return [empty(kit, 'no dispatch has run yet')]
@@ -238,6 +238,7 @@ export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderE
         {!daemon && shown.cancel !== null && <Button key="cancel" label="cancel" hotkey="x" plain onPress={() => setPending(shown.cancel)} />}
       </Box>,
       <Text color={PALETTE.ink} wrap="truncate-end">{plain(shown.title)}</Text>,
+      ...(daemon && shown.lines.length === 0 ? [empty(kit, 'no retained output available')] : []),
       ...shown.lines.map((line) => <Text color={line.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">{plain(line.text)}</Text>),
     ]
   }

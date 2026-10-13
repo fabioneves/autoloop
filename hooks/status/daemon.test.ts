@@ -3,13 +3,111 @@
 import { expect, test } from 'claude-code/testing'
 import type { On, ProcessRunInit } from 'claude-code'
 import { commandDigest } from './daemon'
-import { DAEMON_ACCEPTED, DAEMON_HOST_COMMAND, DAEMON_PAUSED, DAEMON_RUNNING } from './fixtures/daemon'
-import { autoloopCommand, band, buttons, pane, press, projection, ran, rows, seat, start } from './fixtures/testing'
-import { phaseRow } from './view'
+import { DAEMON_ACCEPTED, DAEMON_EXITED_GROUP, DAEMON_HOST_COMMAND, DAEMON_PAUSED, DAEMON_RUNNING, DAEMON_RUNNING_GROUP, DAEMON_UNKNOWN_GROUP } from './fixtures/daemon'
+import { PERIOD_MS, autoloopCommand, band, buttons, pane, press, projection, ran, rows, seat, start } from './fixtures/testing'
+import { dispatchRows, liveTab, liveTitle, pendingOffered, shownDispatch } from './central'
+import { GLYPH } from './kit'
+import { LIVE_PERIOD_MS, isQuiet, parseProjection, runningDispatches } from './read'
+import { phaseRow, spinnerWord, workColumn } from './view'
 
 const SESSION = '11111111-1111-4111-8111-111111111111'
 const RUN = '22222222-2222-4222-8222-222222222222'
 const NOW = 1791849600000
+const ATTEMPT = '44444444-4444-4444-8444-444444444444'
+
+// These projections come from registration and exit of real OS processes.
+test('a retained unknown group has a row and Live selection without an event or cached stream', async ($, on) => {
+  const h = seat(on, { projection: DAEMON_UNKNOWN_GROUP, now: NOW })
+  h.setSession(SESSION)
+  const p = projection(DAEMON_UNKNOWN_GROUP)
+  expect(p.log).toEqual([])
+  expect(parseProjection(DAEMON_UNKNOWN_GROUP)?.dispatches?.[0]?.state).toBe('unknown')
+  expect(workColumn(p).counts).toBe('0 active · 1 waiting')
+  expect(spinnerWord(p)).toBeNull()
+  expect(runningDispatches(p)).toEqual([])
+  expect(pendingOffered(p, { kind: 'cancel', dispatch: ATTEMPT, issue: null, name: 'implement' })).toBe(false)
+  const dispatches = dispatchRows(p, NOW)
+  expect(dispatches.length).toBe(1)
+  const dispatch = dispatches[0]!
+  expect(dispatch.text).toContain('process identity unknown')
+  expect(dispatch.glyph).toBe(GLYPH.waiting)
+  expect(dispatch.action).toBeNull()
+  expect(isQuiet({ lines: [], lastGrewAtMs: 0 }, p.dispatches![0]!, NOW)).toBe(false)
+  expect(shownDispatch(p, {}, null)).toBe(ATTEMPT)
+  await start($)
+  await h.clock.advance(PERIOD_MS + LIVE_PERIOD_MS)
+  expect(rows(await pane($)).join(' ')).toContain('process identity unknown')
+  expect(rows(await band($)).join(' ')).toContain('0 active · 1 waiting')
+  expect(h.held()?.streams).toEqual({})
+  expect(h.tails).toEqual([])
+  await press($, 'tab-2')
+  const drawn = await pane($)
+  expect(buttons(drawn).some((button) => button.props.key === `live-${ATTEMPT}`)).toBe(true)
+  expect(buttons(drawn).some((button) => button.props.key === 'cancel')).toBe(false)
+  expect(rows(drawn).join(' ')).toContain('process identity unknown')
+  expect(rows(drawn).join(' ')).toContain('no retained output available')
+  expect(rows(drawn).join(' ')).not.toContain('no dispatch has run yet')
+  await press($, `live-${ATTEMPT}`)
+  expect(h.held()?.selected).toBe(ATTEMPT)
+})
+
+test('checkpoint refresh changes an unknown group to running or exited without log-based outcomes', async ($, on) => {
+  let text = DAEMON_UNKNOWN_GROUP
+  const h = seat(on, { projection: () => text, now: NOW })
+  h.setSession(SESSION)
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  await pane($)
+  await press($, 'tab-2')
+  expect(rows(await pane($)).join(' ')).toContain('process identity unknown')
+  text = DAEMON_RUNNING_GROUP
+  await h.clock.advance(PERIOD_MS + LIVE_PERIOD_MS)
+  expect(rows(await pane($)).join(' ')).toContain('running')
+  expect(h.tails.length).toBeGreaterThan(0)
+  expect(dispatchRows(projection(text), NOW)[0]!.glyph).toBe(GLYPH.play)
+  text = DAEMON_UNKNOWN_GROUP
+  await h.clock.advance(PERIOD_MS)
+  const tails = h.tails.length
+  await h.clock.advance(LIVE_PERIOD_MS)
+  const unknown = rows(await pane($)).join(' ')
+  expect(unknown).toContain('process identity unknown')
+  expect(unknown).not.toContain('no retained output')
+  expect(h.tails.length).toBe(tails)
+  text = DAEMON_EXITED_GROUP
+  await h.clock.advance(PERIOD_MS)
+  expect(rows(await pane($)).join(' ')).toContain('process group exited · outcome unknown')
+  expect(workColumn(projection(text)).counts).toBe('0 active · 0 waiting')
+  expect(runningDispatches(projection(text))).toEqual([])
+})
+
+test('a fresh viewer can select an exited checkpoint binding and uncertainty keeps retained output', () => {
+  const state = { selected: null, follow: true, liveOffset: 0, pending: null }
+  const exited = liveTab(projection(DAEMON_EXITED_GROUP), {}, state, NOW, 40, 90)
+  expect(exited.shown?.id).toBe(ATTEMPT)
+  expect(exited.shown?.title).toContain('process group exited · outcome unknown')
+  expect(exited.shown?.cancel).toBeNull()
+  const stream = { lines: ['retained worker output'], lastGrewAtMs: NOW - 1000 }
+  const unknown = liveTab(projection(DAEMON_UNKNOWN_GROUP), { [ATTEMPT]: stream }, state, NOW, 40, 90)
+  expect(unknown.shown?.lines).toEqual([{ text: 'retained worker output', dim: false }])
+  expect(unknown.shown?.title).toContain('process identity unknown')
+  expect(unknown.shown?.cancel).toBeNull()
+  expect(liveTitle(projection(DAEMON_UNKNOWN_GROUP), ATTEMPT, stream, NOW, false)).not.toContain('died')
+})
+
+test('new daemon state values remain visible and do not authorize tails, cancel or success', () => {
+  // Compatibility input cannot be emitted by this producer version.
+  const input = JSON.parse(DAEMON_UNKNOWN_GROUP)
+  input.dispatches[0].state = 'future-state'
+  input.extension = { version: 2 }
+  const p = parseProjection(JSON.stringify(input))!
+  expect(p).not.toBeNull()
+  expect(shownDispatch(p, {}, null)).toBe(ATTEMPT)
+  expect(dispatchRows(p, NOW)[0]!.glyph).toBe(GLYPH.waiting)
+  expect(liveTitle(p, ATTEMPT, undefined, NOW, false)).toContain('process identity unknown')
+  expect(runningDispatches(p)).toEqual([])
+  expect(pendingOffered(p, { kind: 'cancel', dispatch: ATTEMPT, issue: null, name: 'implement' })).toBe(false)
+})
+
 function daemonHost(on: On, projectionText = DAEMON_RUNNING, options: { holdHelper?: boolean; failBackend?: boolean; refusal?: boolean; refusalCode?: string; alter?: string } = {}) {
   const calls: { argv: readonly string[]; init?: ProcessRunInit }[] = []
   let plugin = ''

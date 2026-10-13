@@ -232,25 +232,69 @@ export function daemonProjection(repository, checkpoint, viewer, { logLimit = 50
   const requests = [...requestIds].sort().map((id) => readRequest(repository, checkpoint.runId, id));
   const dispatches = checkpoint.workers.map((worker) => {
     const observation = boundGroupState(worker);
+    let dispatchState = 'unknown';
+    if (observation === 'alive') dispatchState = 'running';
+    else if (observation === 'empty') dispatchState = 'died';
     return { dispatch: worker.attemptId, issue: null, pr: null, role: worker.role, model: worker.actualModel,
       liveFile: worker.liveFile, pid: worker.process.pid, startedAtMs: 0,
-      state: observation === 'alive' ? 'running' : 'died', observation };
+      state: dispatchState, observation };
   });
   return { schema: 'autoloop.status/1', owned: true, enabled: statusBandEnabled(config?.ok ? config.config : null),
     run: { openedAtMs: checkpoint.createdAt, paused: checkpoint.desiredState === 'paused', parkedUntil: null,
       closedAt: checkpoint.stoppedAt === null ? null : new Date(checkpoint.stoppedAt).toISOString(), snapshotScannedAt: null, snapshotAuthority: 'none' },
     phases: [], unit: null, units: [], counts: { active: dispatches.filter((entry) => entry.state === 'running').length,
-      waiting: 0, blocked: 0, delivered: 0, eligible: null }, models: {}, log, dispatches, controls: { refused: [], requests },
+      waiting: dispatches.filter((entry) => entry.state === 'unknown').length, blocked: 0, delivered: 0, eligible: null }, models: {}, log, dispatches, controls: { refused: [], requests },
     execution: { mode: 'daemon', runId: checkpoint.runId, generation: checkpoint.generation, state, queueEnabled: false,
       lastCheckpointAt: checkpoint.updatedAt, eventLogError, supportedControls: [...SUPPORTED_CONTROLS] },
     attachment: { kind: 'viewer', sessionId: viewer.sessionId } };
 }
 
-export function daemonFixturesText() {
+// A real group leader retains its group after its registered worker exits.
+// IPC orders registration before exit; all guard state stays in test scratch.
+async function workerGroupFixture(repository, acquired, scratch, run) {
+  const leader = spawn(process.execPath, ['-e', `
+    const { spawn } = require('node:child_process');
+    const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+    worker.once('spawn', () => process.send({ pid: worker.pid }));
+    process.on('message', () => worker.kill('SIGTERM'));
+    worker.once('close', () => process.send({ exited: true }));
+    process.on('SIGTERM', () => { worker.kill('SIGTERM'); process.exit(0); });
+    setInterval(() => {}, 1000);
+  `], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+  const closed = new Promise((done) => leader.once('close', done));
+  const message = () => new Promise((done, reject) => {
+    const timer = setTimeout(() => reject(new Error('The fixture group did not respond.')), 5000);
+    leader.once('message', (value) => { clearTimeout(timer); done(value); });
+  });
+  try {
+    const { pid } = await message();
+    const attemptId = '44444444-4444-4444-8444-444444444444';
+    const worker = { schema: 'autoloop.worker-binding/1', runId: acquired.runId, generation: 1,
+      unitId: '55555555-5555-4555-8555-555555555555', unitGeneration: 1, attemptId,
+      sessionId: '66666666-6666-4666-8666-666666666666', worktreeGitDir: repository.commonDir,
+      process: readProcessIdentity(pid), pgid: leader.pid, groupLeader: readProcessIdentity(leader.pid),
+      role: 'implement', posture: 'writer', actualModel: 'external-fixture',
+      liveFile: join(repository.commonDir, 'autoloop', 'scheduler', 'runs', acquired.runId, 'streams', `${attemptId}.jsonl`),
+      cancelledByOperator: false };
+    const checkpoint = registerWorker(acquired.lease, readCheckpoint(repository, acquired.runId).revision, worker,
+      { guardDirectory: join(scratch, 'workers') });
+    await run(checkpoint, async () => {
+      const exited = message();
+      leader.send({ exitWorker: true });
+      assert.deepEqual(await exited, { exited: true });
+    }, async () => { leader.kill('SIGTERM'); await closed; });
+  } finally {
+    leader.kill('SIGTERM');
+    await closed;
+  }
+}
+
+export async function daemonFixturesText() {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-viewer-fixtures-')));
   console.error(`Retained test scratch: ${scratch}`);
   const root = join(scratch, 'repo');
-  assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', root], { timeout: 15000 }).status, 0);
+  // Test Git-admin state must be private even with a group-writable host umask.
+  assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', '--shared=0700', root], { timeout: 15000 }).status, 0);
   const originalClock = Date.now;
   Date.now = () => 1791849600000;
   try {
@@ -282,6 +326,21 @@ export function daemonFixturesText() {
       repositoryKey: createHash('sha256').update('/fixture-repo/.git').digest('hex'),
       entrypoint: '/fixture-plugin/tools/status.mjs', nodePath: '/fixture-node', pluginDigest: 'a'.repeat(64) };
     lines.push(`export const DAEMON_HOST_COMMAND = ${JSON.stringify(JSON.stringify(command))};`);
+    await workerGroupFixture(repository, acquired, scratch, async (bound, exitWorker, stopLeader) => {
+      const fixture = (name) => {
+        const projected = daemonProjection(repository, bound, viewer);
+        // Replace only volatile OS/path fields, not state, counts or observations.
+        projected.dispatches = projected.dispatches.map((entry) => ({ ...entry, pid: 123,
+          liveFile: `/fixture-repo/.git/autoloop/scheduler/runs/${acquired.runId}/streams/${entry.dispatch}.jsonl` }));
+        lines.push(`export const DAEMON_${name} = ${JSON.stringify(JSON.stringify(projected))};`);
+      };
+      fixture('RUNNING_GROUP');
+      await exitWorker();
+      fixture('UNKNOWN_GROUP');
+      await stopLeader();
+      fixture('EXITED_GROUP');
+    });
+    checkpoint = readCheckpoint(repository, acquired.runId);
     checkpoint = commitTransition(acquired.lease, checkpoint.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' }));
     releaseScheduler(acquired.lease);
     return `${lines.join('\n')}\n`;
@@ -292,7 +351,8 @@ async function selfTest() {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-viewer-')));
   console.error(`Retained test scratch: ${scratch}`);
   const root = join(scratch, 'repo');
-  assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', root], { timeout: 15000 }).status, 0);
+  // Test Git-admin state must be private even with a group-writable host umask.
+  assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', '--shared=0700', root], { timeout: 15000 }).status, 0);
   const repository = resolveRepository(root);
   const config = resolveConfigText(JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'node --version' } })).config;
   const pins = createPins(repository, { pluginRoot: dirname(dirname(fileURLToPath(import.meta.url))),
@@ -368,8 +428,33 @@ async function selfTest() {
       await closed;
     }
   });
-  await check('daemon plugin fixtures are generated from the real producer contract', () => {
-    assert.equal(daemonFixturesText(), readFileSync(join(ROOT, 'hooks', 'status', 'fixtures', 'daemon.ts'), 'utf8'));
+  await check('a dead worker with a live group leader stays unknown and waiting until confirmed group exit', async () => {
+    await workerGroupFixture(repository, acquired, scratch, async (checkpoint, exitWorker, stopLeader) => {
+      const worker = checkpoint.workers.find((entry) => entry.attemptId === '44444444-4444-4444-8444-444444444444');
+      const viewer = { sessionId: randomUUID() };
+      assert.equal(boundGroupState(worker), 'alive');
+      const before = daemonProjection(repository, checkpoint, viewer);
+      assert.equal(before.dispatches.find((entry) => entry.dispatch === worker.attemptId).state, 'running');
+      await exitWorker();
+      assert.equal(boundGroupState(worker), 'unknown');
+      const uncertain = daemonProjection(repository, checkpoint, viewer);
+      const dispatch = uncertain.dispatches.find((entry) => entry.dispatch === worker.attemptId);
+      assert.equal(dispatch.state, 'unknown');
+      assert.equal(dispatch.observation, 'unknown');
+      assert.equal(uncertain.counts.active, 0);
+      assert.equal(uncertain.counts.waiting, 1);
+      assert.equal(uncertain.execution.queueEnabled, false);
+      assert.equal(uncertain.counts.delivered, 0);
+      await stopLeader();
+      assert.equal(boundGroupState(worker), 'empty');
+      const exited = daemonProjection(repository, checkpoint, viewer);
+      assert.equal(exited.dispatches.find((entry) => entry.dispatch === worker.attemptId).state, 'died');
+      assert.equal(exited.counts.active, 0);
+      assert.equal(exited.counts.waiting, 0);
+    });
+  });
+  await check('daemon plugin fixtures are generated from the real producer contract', async () => {
+    assert.equal(await daemonFixturesText(), readFileSync(join(ROOT, 'hooks', 'status', 'fixtures', 'daemon.ts'), 'utf8'));
   });
   let checkpoint = readCheckpoint(repository, acquired.runId);
   checkpoint = commitTransition(acquired.lease, checkpoint.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' }));
@@ -385,7 +470,7 @@ const isMain = (() => {
 if (isMain) {
   if (process.argv.length === 3 && process.argv[2] === '--self-test') process.exit(await selfTest() ? 0 : 1);
   if (process.argv.length === 3 && process.argv[2] === '--fixtures') {
-    process.stdout.write(daemonFixturesText());
+    process.stdout.write(await daemonFixturesText());
   } else {
     console.error('usage: loop-viewer.mjs --self-test | --fixtures');
     process.exit(2);

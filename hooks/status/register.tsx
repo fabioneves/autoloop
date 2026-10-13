@@ -18,7 +18,7 @@ import { bandTree, paneTree } from './draw'
 import { empty, plain } from './kit'
 import type { ProxyFetch, Runner } from './read'
 import {
-  LIVE_PERIOD_MS, STREAM_LINES_MAX, isDrawable, proxyBase, pruneStreams, readProjection, readProxy, runningDispatches, tailLive,
+  LIVE_PERIOD_MS, STREAM_LINES_MAX, isDrawable, proxyBase, pruneStreams, readProjection, readProxy, runningDispatches, tailLive, visibleDispatches,
 } from './read'
 import { blockedUnits, spinnerWord, toastText } from './view'
 
@@ -184,7 +184,7 @@ export const register: Register = (on) => {
             changed = true
             streams[id] = { lines, lastGrewAtMs: grew || before === undefined ? nowMs : before.lastGrewAtMs }
           }
-          const kept = pruneStreams(streams, running.map((dispatch) => dispatch.dispatch))
+          const kept = pruneStreams(streams, visibleDispatches(state.last).map((dispatch) => dispatch.dispatch))
           return changed || !same(Object.keys(kept), Object.keys(state.streams)) ? { streams: kept } : null
         })
       } catch (error) {

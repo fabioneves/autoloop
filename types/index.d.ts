@@ -95,9 +95,15 @@ export type StatusDispatch = {
   pid: number | null
   startedAtMs: number
   state: 'running' | 'died'
-  /** Daemon-only verified group observation. A legacy `died` bit does not prove absence. */
-  observation?: 'alive' | 'empty' | 'unknown'
+  observation?: never
 }
+
+/** Daemon-only checkpoint binding. Unknown is retained, not running or dead. */
+export type StatusDaemonDispatch = Omit<StatusDispatch, 'state' | 'observation'> & {
+  state: 'running' | 'died' | 'unknown'
+  observation: 'alive' | 'empty' | 'unknown'
+}
+export type StatusProjectedDispatch = StatusDispatch | StatusDaemonDispatch
 
 /** A durable daemon control receipt. Acceptance does not mean application. */
 export type StatusControlResponse = {
@@ -152,7 +158,8 @@ export type StatusProjection = {
   models?: Record<string, string>
   /** The run's last 50 events, newest first. */
   log?: StatusEvent[]
-  dispatches?: StatusDispatch[]
+  /** Legacy dispatches retain their old fields; daemon mode adds uncertain bindings. */
+  dispatches?: StatusProjectedDispatch[]
   controls?: { refused: StatusRefused[]; requests?: StatusControlResponse[] }
   execution?: StatusExecution
   attachment?: { kind: 'viewer'; sessionId: string }
@@ -227,13 +234,13 @@ export type StatusState = {
   paneOpen: boolean
   /** True once the pane was opened unasked in this session (SPEC-central item 13): never twice. */
   autoOpened: boolean
-  /** The live tails by dispatch id: every running dispatch's, and the last ended one's until session.end. */
+  /** Kept output for visible checkpoint bindings (legacy: running), plus the last other stream until session.end. */
   streams: Record<string, StatusStream>
   /** The central pane's tab, kept across a redraw (SPEC-central item 8). */
   tab: 'run' | 'live' | 'units' | 'log'
   /** The Log tab's filter. */
   logFilter: 'all' | 'steps' | 'dispatches' | 'needsYou' | 'controls'
-  /** The Live tab's dispatch, by id; null means the first running one. */
+  /** The Live tab's visible binding, by id; null selects the first. */
   selected: string | null
   /** The Live tab follows the stream's end; a scroll turns it off. */
   follow: boolean
