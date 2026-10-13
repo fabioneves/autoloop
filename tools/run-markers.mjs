@@ -270,6 +270,10 @@ export function workerGuardDirectory() {
   return join(userInfo().homedir, '.claude', 'autoloop', 'worker-bindings');
 }
 
+export function executionAdmissionGuardDirectory() {
+  return join(userInfo().homedir, '.claude', 'autoloop', 'execution-admission');
+}
+
 export function readBootIdentity() {
   try {
     if (process.platform === 'linux') {
@@ -435,7 +439,7 @@ function executionCommonDir(root) {
 // This narrow protection applies before a legacy latch exists. HOME and
 // CLAUDE_CONFIG_DIR cannot select the host/worker authority directories.
 export function executionProtectedPaths({ projectRoot, cwd = projectRoot, entrypoint = process.argv[1], pluginRoot = process.env.CLAUDE_PLUGIN_ROOT } = {}) {
-  const state = [join(userInfo().homedir, '.claude', 'autoloop', 'host-invocations'), workerGuardDirectory()];
+  const state = [join(userInfo().homedir, '.claude', 'autoloop', 'host-invocations'), workerGuardDirectory(), executionAdmissionGuardDirectory()];
   for (const root of new Set([projectRoot, cwd])) {
     if (typeof root !== 'string') continue;
     const common = executionCommonDir(root);
