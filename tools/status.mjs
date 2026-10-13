@@ -3,13 +3,11 @@
 //
 // The run's status as one JSON object, for the status mod
 // (docs/specs/SPEC-status-mod.md). This is the stable entry the mod calls:
-// today it delegates to step.mjs's projection of the card's reads; a later
-// producer keeps the schema and replaces the reads. It reads local files and
-// two read-only git facts, never GitHub, and never writes.
-//
-// The band must never fall: a usage error exits 2 with one line, and any
-// fault inside the projection is reported in the JSON (owned: false, error)
-// with exit 0.
+// Legacy reads delegate to step.mjs. Daemon reads use verified viewer bindings
+// and the authoritative checkpoint. Host-admitted mutations attach/disconnect
+// viewers or submit durable controls; they never change worker ownership.
+// Read faults remain JSON errors with exit 0, so a display keeps its last good
+// state. Mutations use the autoloop.loop/1 envelope and typed refusal codes.
 //
 // Usage:
 //   node status.mjs --json --session <id> [--root <dir>]
@@ -25,27 +23,44 @@ import { STATUS_SCHEMA, statusFixture, statusProjection } from './step.mjs';
 import { latchDirectory, processStart, sessionOwnerPid } from './run-markers.mjs';
 import { realRun } from './unit.mjs';
 import { resolveCommonDir, takeControls, writeControl } from './events-contract.mjs';
+import { admitHostInvocation } from './loop-admission.mjs';
+import { parseLoopArgs, prepareLoopCommand } from './loop.mjs';
+import { readCheckpoint, resolveRepository, SchedulerError, submitControl } from './scheduler-contract.mjs';
+import { attachViewer, daemonProjection, directViewerHost, discoverViewer, disconnectViewer, endViewer,
+  prepareViewerCommand, readViewer } from './loop-viewer.mjs';
 
 /** The mod's test fixtures, printed by --fixtures and held to it by the self-test. */
 const FIXTURES_FILE = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'status', 'fixtures', 'projection.ts');
 
 const USAGE = 'usage: status.mjs --json --session <id> [--root <dir>] [--log <n>]\n'
   + '       status.mjs --control --session <id> --kind <pause|unpause|cancel|answer|merge|label> [--pr <n>] [--issue <n>] [--dispatch <id>] [--text <t>] [--root <dir>]\n'
+  + '       status.mjs --discover --session <id> --root <dir>\n'
+  + '       status.mjs --attach --session <id> --run <uuid> --root <dir> --host-request\n'
+  + '       status.mjs --disconnect --session <id> --root <dir> --host-request\n'
+  + '       status.mjs --control --session <id> --run <uuid> --request <uuid> --kind <pause|resume|stop|stop-now> --root <dir> --host-request\n'
   + '       status.mjs --fixtures\n       status.mjs --self-test';
 export const LOG_MAX = 2000;
 const NUMBERS = new Set(['--pr', '--issue']);
 
 export function parseArgs(argv) {
-  const out = { json: false, control: false, session: null, root: null, log: null, kind: null, pr: null, issue: null, dispatch: null, text: null, error: null };
-  const valued = ['--session', '--root', '--log', '--kind', '--pr', '--issue', '--dispatch', '--text'];
+  const out = { json: false, control: false, discover: false, attach: false, disconnect: false, viewerEnded: false, hostRequest: false,
+    session: null, root: null, run: null, request: null, generation: null, log: null, kind: null, pr: null, issue: null, dispatch: null, text: null, error: null };
+  const valued = ['--session', '--root', '--run', '--request', '--generation', '--log', '--kind', '--pr', '--issue', '--dispatch', '--text'];
+  const modes = { '--json': 'json', '--control': 'control', '--discover': 'discover', '--attach': 'attach',
+    '--disconnect': 'disconnect', '--viewer-ended': 'viewerEnded', '--host-request': 'hostRequest' };
+  const seen = new Set();
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
-    if (flag === '--json') { out.json = true; continue; }
-    if (flag === '--control') { out.control = true; continue; }
+    if (seen.has(flag)) return { ...out, error: `repeated argument ${flag}` };
+    seen.add(flag);
+    if (flag in modes) { out[modes[flag]] = true; continue; }
     if (!valued.includes(flag)) return { ...out, error: `unknown argument ${flag}` };
     const value = argv[index + 1];
-    if (value === undefined || value === '') return { ...out, error: `${flag} needs a value` };
-    if (flag === '--log') {
+    if (value === undefined || value === '' || value.startsWith('--')) return { ...out, error: `${flag} needs a value` };
+    if (flag === '--generation') {
+      if (!/^[1-9]\d*$/u.test(value) || !Number.isSafeInteger(Number(value))) return { ...out, error: '--generation needs a positive integer' };
+      out.generation = Number(value);
+    } else if (flag === '--log') {
       // The Log tab asks for the whole run; the band keeps the default.
       if (!/^[1-9]\d{0,3}$/u.test(value) || Number(value) > LOG_MAX) return { ...out, error: `--log: a whole number 1..${LOG_MAX}` };
       out.log = Number(value);
@@ -55,9 +70,17 @@ export function parseArgs(argv) {
     } else out[flag.slice(2)] = value;
     index += 1;
   }
-  if (out.json === out.control) return { ...out, error: '--json or --control, one of them' };
+  if (['json', 'control', 'discover', 'attach', 'disconnect', 'viewerEnded'].filter((key) => out[key]).length !== 1)
+    return { ...out, error: '--json, --control, --discover, --attach, --disconnect or --viewer-ended: choose one' };
   if (out.session === null) return { ...out, error: '--session <id> is required: ownership is the session\'s' };
   if (out.control && out.kind === null) return { ...out, error: '--control needs --kind' };
+  if ((out.attach || out.disconnect) && !out.hostRequest) return { ...out, error: 'viewer mutations require --host-request' };
+  if (out.attach && out.run === null) return { ...out, error: '--attach needs --run' };
+  if (out.hostRequest && !(out.attach || out.disconnect || (out.control && out.run !== null))) return { ...out, error: '--host-request requires a daemon mutation' };
+  if (out.control && out.run !== null && (!out.hostRequest || out.request === null)) return { ...out, error: 'daemon controls need --host-request and --request' };
+  if (!(out.control || out.attach) && (out.run !== null || out.request !== null || out.generation !== null)) return { ...out, error: 'this operation cannot select a run or request' };
+  if (!out.control && [out.kind, out.pr, out.issue, out.dispatch, out.text].some((value) => value !== null)) return { ...out, error: 'control fields require --control' };
+  if (!out.json && out.log !== null) return { ...out, error: '--log requires --json' };
   return out;
 }
 
@@ -88,6 +111,12 @@ function checkoutRoot(cwd) {
 
 export function statusJson({ session, root, log = null }) {
   try {
+    let repository = null;
+    try { repository = resolveRepository(root); }
+    catch (error) { if (error.code !== 'REPOSITORY_INVALID') throw error; }
+    const viewer = repository === null ? null : readViewer(repository, session);
+    if (viewer !== null) return daemonProjection(repository, readCheckpoint(repository, viewer.runId), viewer,
+      log === null ? {} : { logLimit: log });
     return statusProjection({ root, sessionId: session, ...(log === null ? {} : { logLimit: log }) });
   } catch (error) {
     const code = typeof error?.code === 'string' && error.code !== '' ? error.code : 'PROJECTION_FAILED';
@@ -310,7 +339,40 @@ function selfTest() {
   return failures.length === 0;
 }
 
-function main() {
+// All status mutations normalize their own entrypoint, then consume host admission.
+export function prepareStatusCommand(options) {
+  const root = options.root;
+  if (options.attach || options.disconnect) return prepareViewerCommand({ operation: options.attach ? 'attach' : 'disconnect',
+    root, sessionId: options.session, runId: options.run, requestId: options.request, generation: options.generation });
+  const operation = options.kind === 'unpause' ? 'resume' : options.kind;
+  if (!['pause', 'resume', 'stop', 'stop-now'].includes(operation)) {
+    throw new SchedulerError('UNSUPPORTED_ACTION', 'Unit actions are not available in this module.');
+  }
+  if ([options.pr, options.issue, options.dispatch, options.text].some((value) => value !== null)) {
+    throw new SchedulerError('INVALID_INPUT', 'Run controls have no payload.');
+  }
+  const argv = [operation === 'stop-now' ? 'stop' : operation, ...(operation === 'stop-now' ? ['--now'] : []),
+    '--root', root, '--run', options.run, '--request', options.request, '--host-request', '--json',
+    ...(options.generation === null ? [] : ['--generation', String(options.generation)])];
+  const prepared = prepareLoopCommand(parseLoopArgs(argv));
+  return { ...prepared, command: { ...prepared.command, entrypoint: realpathSync(fileURLToPath(import.meta.url)) } };
+}
+export async function executeStatusCommand(options, envelope = null) {
+  const repository = resolveRepository(options.root);
+  if (options.discover) return discoverViewer(repository);
+  if (options.viewerEnded) return endViewer(repository, options.session, directViewerHost());
+  const prepared = prepareStatusCommand(options);
+  if (envelope?.sessionId !== options.session) throw new SchedulerError('HOST_AUTH_REQUIRED', 'The host session does not match.');
+  const actor = await admitHostInvocation(prepared.command, envelope);
+  if (options.attach) return attachViewer(repository, actor, prepared.command.runId, prepared.command.generation, envelope.issuedAt);
+  if (options.disconnect) return disconnectViewer(repository, actor);
+  const viewer = readViewer(repository, options.session);
+  if (viewer?.runId !== prepared.command.runId) throw new SchedulerError('HOST_AUTH_REQUIRED', 'This viewer is not attached to the target run.');
+  return { ...submitControl(repository, actor, { schema: 'autoloop.control/2', requestId: prepared.command.requestId,
+    runId: prepared.command.runId, kind: prepared.command.operation, target: { type: 'run', generation: prepared.command.generation },
+    payload: {}, submittedAt: Date.now() }), accepted: true };
+}
+async function main() {
   if (process.argv[2] === '--self-test') process.exit(selfTest() ? 0 : 1);
   if (process.argv[2] === '--fixtures' && process.argv.length === 3) {
     process.stdout.write(fixturesText());
@@ -322,6 +384,25 @@ function main() {
     process.exit(2);
   }
   const root = parsed.root ?? checkoutRoot(process.cwd());
+  if (parsed.discover || parsed.attach || parsed.disconnect || parsed.viewerEnded || parsed.hostRequest) {
+    try {
+      let envelope = null;
+      if (parsed.hostRequest) {
+        let text = '';
+        for await (const chunk of process.stdin) text += chunk;
+        try { envelope = JSON.parse(text); }
+        catch { throw new SchedulerError('HOST_AUTH_REQUIRED', 'The host envelope is invalid.'); }
+      }
+      const data = await executeStatusCommand({ ...parsed, root }, envelope);
+      process.stdout.write(`${JSON.stringify({ schema: 'autoloop.loop/1', ok: true, data })}\n`);
+    } catch (error) {
+      const code = error instanceof SchedulerError ? error.code : 'STATE_IO_FAILED';
+      process.stdout.write(`${JSON.stringify({ schema: 'autoloop.loop/1', ok: false,
+        error: { code, message: error instanceof SchedulerError ? error.message : 'The viewer operation failed.' } })}\n`);
+      process.exitCode = code === 'INVALID_INPUT' ? 2 : ['STATE_INVALID', 'STATE_IO_FAILED', 'RECOVERY_REQUIRED'].includes(code) ? 5 : 3;
+    }
+    return;
+  }
   if (parsed.control) {
     process.stdout.write(`${JSON.stringify(controlJson({ ...parsed, root }))}\n`);
     return;
@@ -337,4 +418,4 @@ const isMain = (() => {
     return false;
   }
 })();
-if (isMain) main();
+if (isMain) await main();
