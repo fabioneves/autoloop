@@ -205,6 +205,12 @@ worktrees by common-directory identity, not only a foreign owner's current check
 A daemon cannot start while a legacy loop is active. Legacy prime cannot open/reopen a run while
 an active or recovering daemon owns it. Legacy `--close-run` cannot close the daemon.
 
+The atomic exclusion guarantee applies to upgraded entry points that use this gate. An older
+installed binary does not become cooperative when a new plugin is installed. Before live activation,
+drain old-version legacy runs and their detached dispatches, verify their process groups have exited,
+and restart participating sessions on the upgraded plugin. Known live or unresolved legacy workers
+still refuse admission. Do not claim that the gate can prevent an old binary from starting later.
+
 On dead-owner recovery, acquire exclusion first, validate boot/start identities, increase generation
 and persist `recovering` before effects. Old-generation results cannot advance the run.
 Retain live or uncertain children, reservations and occupied slots until reconciled. A live verified
@@ -396,6 +402,17 @@ This is a local receipt, not an API credential or a secret-management service. D
 in a shared environment or model transcript. The admitted subprocess consumes it atomically
 and verifies its own trusted host process ancestry. JSON `actor`, `--host-request` and
 `CLAUDE_CODE_SESSION_ID` alone cannot mint or validate one.
+A private `tools/loop-host.mjs` helper creates the receipt with Node filesystem operations;
+the mod does not depend on undocumented file-mode behavior in `$.fs.write`. The request has
+exactly `{ schema: autoloop.host-request/1, route, invocationId, sessionId, root, operation,
+runId, requestId, generation }`. `route` is a closed enum: `status` permits attach, disconnect,
+pause, resume, stop and stop-now; `loop` permits start, pause, resume, stop and stop-now.
+The helper derives executable paths, process identity, runtime storage and command digests.
+A caller cannot supply any of those values. A one-use host gesture binds the complete request
+and permits the helper through a separate `process.run` origin check. A second bound call
+invokes the normalized backend directly, not as a child of the helper. The backend checks the
+actual entrypoint, so a receipt issued for one route cannot authorize another route.
+
 The stdin envelope is `{ schema: autoloop.host-invocation/1, invocationId, sessionId,
 commandDigest, host: ProcessIdentity, issuedAt, expiresAt }`. Its exact values must match the
 single-use runtime handoff. The command digest binds the executable/plugin identity, parsed
@@ -424,6 +441,13 @@ OS credentials can alter files outside the model harness. Do not claim OS isolat
 
 Viewer records bind host session/process, repository and explicit run, separately from workers.
 `session.end` and `/clear` end attachment, not the daemon. Compaction keeps the same attachment.
+Viewer records are private append-only revisions under
+`<commonDir>/autoloop/viewers/<pid>-<host-identity-digest>/<session>/`.
+`status.mjs --viewer-ended` records a reduction-only tombstone for the exact verified direct
+host/session. It cannot create or restore attachment, revoke another host/session, enqueue a
+control, or change daemon state. The mod invokes it only from its trusted session-end path,
+without inventing an operator gesture. An absent or already-ended attachment is unchanged.
+Ordinary unrelated session ends create no viewer state.
 Two viewers can attach. Closing the initiator does not transfer writer ownership to either.
 `--discover` returns an unattached candidate without private streams/control authority:
 `{ schema: autoloop.loop/1, ok: true, data: { candidate: null|{ runId, generation, state,

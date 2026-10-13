@@ -114,6 +114,8 @@ with these proofs. Never weaken v1 schemas to accept v2. Unknown/incomplete reco
 Inventory legacy runs, live/inherited dispatches, worktrees and lifecycle evidence before routing
 changes. Module 1 mutual exclusion still applies, including simultaneous starts from linked
 worktrees. Do not start both schedulers for one common directory.
+Old-version runs and detached dispatches must be drained before activation, and participating
+sessions must use upgraded entry points. The shared gate cannot retroactively coordinate old binaries.
 
 Drain legacy work or use its existing supported recovery. Retain legacy published-plan/hash
 validation and old record readers. Unsupported legacy phases remain refused with a reason,
