@@ -3,65 +3,23 @@
 // <base>/status without auth and with a 2 s timeout. Three states: ON (200
 // and a parsed body) groups the active requests by requested model, UP is
 // any other answer, OFF is no answer within 2 s; each a fact, not stale.
-// The proxy is an external service, so its bodies are hand-written here;
-// the projection is the producer's own (fixtures/projection.ts).
-import { expect, mock, test } from 'claude-code/testing'
-import type { HttpInit, HttpResponse, On, RenderElement } from 'claude-code'
-import type { StatusState } from '../../types'
+// The proxy is an external service, so its bodies are hand-written; the
+// projection is the producer's own (fixtures/projection.ts); the host is
+// doubled (fixtures/testing.ts `seat`).
+import { expect, test } from 'claude-code/testing'
+import type { HttpResponse, RenderElement } from 'claude-code'
 
 import { OWNED } from './fixtures/projection'
-import { BASE, PERIOD_MS, band, findColor, ran, rows, start, texts } from './fixtures/testing'
+import { BASE, PERIOD_MS, THREE, band, findColor, request, rows, seat, start, texts } from './fixtures/testing'
+import type { ProxyAnswer } from './fixtures/testing'
 import { PROXY_TIMEOUT_MS, parseProxyStatus, proxyBase, proxyUrl, readProxy } from './read'
 import { PALETTE } from './kit'
 import { modelCounts, proxyColumn } from './view'
 
-
-const request = (id: string, requested_model: string | null, model: string | null = null) => ({
-  id, started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model, model, session_id: 'S-test',
-})
-const THREE = JSON.stringify({ ok: true, active_requests: [
-  request('r1', 'claude-opus-5-5', 'anthropic-gateway-opus[1m]'),
-  request('r2', 'gpt-6-astra'),
-  request('r3', 'claude-opus-5-5'),
-] })
 const NONE = JSON.stringify({ ok: true, active_requests: [] })
 
 function response(text: string, status = 200): HttpResponse {
   return { status, ok: status >= 200 && status < 300, headers: {}, text }
-}
-
-type Answer = { body: string; status?: number } | { deny: string } | { holdMs: number }
-
-/** Seats the host beneath the mod: the clock, the environment, the session id, the producer and the proxy. */
-function host(on: On, env: Record<string, string>, answer: () => Answer, options: { holdRunMs?: number } = {}) {
-  const clock = mock.clock(on)
-  mock.env(on, env)
-  const fetches: { url: string; init: HttpInit | undefined }[] = []
-  let runs = 0
-  let held: StatusState | null = null
-  on('session.id', () => ({ value: 'S-test' }))
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('process.run', async () => {
-    runs += 1
-    if (options.holdRunMs !== undefined) await clock.sleep(options.holdRunMs)
-    return { value: ran(OWNED) }
-  })
-  on('http.fetch', async ($, e) => {
-    fetches.push({ url: e.url, init: e.init })
-    const next = answer()
-    if ('deny' in next) return { deny: next.deny }
-    if ('holdMs' in next) {
-      await clock.sleep(next.holdMs)
-      return { value: response(THREE) }
-    }
-    return { value: response(next.body, next.status) }
-  })
-  on('state.set', { plugin: 'autoloop', key: 'status' }, ($, e, next) => {
-    held = e.value
-    return next(e)
-  })
-  return { clock, fetches, runs: () => runs, held: () => held }
 }
 
 /** The cell Boxes of the band's second row (the rules between them are Boxes too, one `│` per row). */
@@ -126,7 +84,7 @@ test('proxyBase takes an http or https loopback URL and refuses everything else 
 // read never leaves this machine.
 for (const base of ['https://gateway.example.com', 'http://10.0.0.5:8787', '::1:8787']) {
   test(`ANTHROPIC_BASE_URL ${base}: no fetch and no column`, async ($, on) => {
-    const h = host(on, { ANTHROPIC_BASE_URL: base }, () => ({ body: THREE }))
+    const h = seat(on, { projection: OWNED, env: { ANTHROPIC_BASE_URL: base } })
     await start($)
     await h.clock.advance(PERIOD_MS)
     expect(h.fetches.length).toBe(0)
@@ -138,7 +96,7 @@ for (const base of ['https://gateway.example.com', 'http://10.0.0.5:8787', '::1:
 }
 
 test('ANTHROPIC_BASE_URL on a loopback host with a port: the column, fetched at <base>/status', async ($, on) => {
-  const h = host(on, { ANTHROPIC_BASE_URL: 'http://[::1]:8787' }, () => ({ body: THREE }))
+  const h = seat(on, { projection: OWNED, env: { ANTHROPIC_BASE_URL: 'http://[::1]:8787' } })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(h.fetches[0]?.url).toBe('http://[::1]:8787/status')
@@ -161,7 +119,7 @@ test('the proxy cell groups requests by model, sorted by count then name, and co
 })
 
 test('ANTHROPIC_BASE_URL unset: no fetch, no column, two columns share the body', async ($, on) => {
-  const h = host(on, {}, () => ({ body: THREE }))
+  const h = seat(on, { projection: OWNED })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(h.fetches.length).toBe(0)
@@ -172,7 +130,7 @@ test('ANTHROPIC_BASE_URL unset: no fetch, no column, two columns share the body'
 })
 
 test('ANTHROPIC_BASE_URL set: each tick fetches <base>/status without auth; ON draws the count and one row per model', async ($, on) => {
-  const h = host(on, { ANTHROPIC_BASE_URL: BASE }, () => ({ body: THREE }))
+  const h = seat(on, { projection: OWNED, env: { ANTHROPIC_BASE_URL: BASE } })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(h.fetches.length).toBe(1)
@@ -188,7 +146,7 @@ test('ANTHROPIC_BASE_URL set: each tick fetches <base>/status without auth; ON d
 })
 
 test('three fetch outcomes, three states: a 200 with a body is ON, a 404 or a 500 or a body that does not parse is UP, a rejection is OFF; each drops the last value', async ($, on) => {
-  const answers: Answer[] = [{ body: THREE }, { deny: 'connection refused' }, { body: THREE }, { body: 'not found', status: 404 },
+  const answers: ProxyAnswer[] = [{ body: THREE }, { deny: 'connection refused' }, { body: THREE }, { body: 'not found', status: 404 },
     { body: THREE }, { body: 'oops', status: 500 }, { body: THREE }, { body: '<html>' }, { body: THREE }, { body: JSON.stringify({ ok: false }) }]
   const expected: { state: string; rows: string[]; word: string; color: string }[] = [
     { state: 'off', rows: ['PROXY', '○ OFF'], word: 'OFF', color: PALETTE.warn },
@@ -198,7 +156,7 @@ test('three fetch outcomes, three states: a 200 with a body is ON, a 404 or a 50
     { state: 'up', rows: ['PROXY', '◐ UP · no status'], word: 'UP', color: PALETTE.warn },
   ]
   let index = 0
-  const h = host(on, { ANTHROPIC_BASE_URL: BASE }, () => answers[index++] ?? { deny: 'out of answers' })
+  const h = seat(on, { projection: OWNED, env: { ANTHROPIC_BASE_URL: BASE }, proxy: () => answers[index++] ?? { deny: 'out of answers' } })
   await start($)
   for (const want of expected) {
     await h.clock.advance(PERIOD_MS)
@@ -214,7 +172,7 @@ test('three fetch outcomes, three states: a 200 with a body is ON, a 404 or a 50
 })
 
 test('a proxy that does not answer within 2 s reads OFF; the tick ends then', async ($, on) => {
-  const h = host(on, { ANTHROPIC_BASE_URL: BASE }, () => ({ holdMs: 5000 }))
+  const h = seat(on, { projection: OWNED, env: { ANTHROPIC_BASE_URL: BASE }, proxy: () => ({ holdMs: 5000, body: THREE }) })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(h.held()).toBeNull()
@@ -227,23 +185,23 @@ test('a proxy that does not answer within 2 s reads OFF; the tick ends then', as
 })
 
 test('one tick runs both reads; a tick still running is skipped by the next period', async ($, on) => {
-  const h = host(on, { ANTHROPIC_BASE_URL: BASE }, () => ({ body: NONE }), { holdRunMs: 2 * PERIOD_MS + 1000 })
+  const h = seat(on, { projection: () => ({ holdMs: 2 * PERIOD_MS + 1000, stdout: OWNED }), env: { ANTHROPIC_BASE_URL: BASE }, proxy: () => ({ body: NONE }) })
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect(h.runs()).toBe(1)
+  expect(h.runs.length).toBe(1)
   expect(h.fetches.length).toBe(1)
   await h.clock.advance(PERIOD_MS)
   await h.clock.advance(PERIOD_MS)
-  expect(h.runs()).toBe(1)
+  expect(h.runs.length).toBe(1)
   expect(h.fetches.length).toBe(1)
   await h.clock.advance(PERIOD_MS)
-  expect(h.runs()).toBe(2)
+  expect(h.runs.length).toBe(2)
   expect(h.fetches.length).toBe(2)
   expect(proxyRows(await band($))).toEqual(['PROXY', '● ON · 0 requests'])
 })
 
 test('under 120 columns the proxy cell reads ON · n req with no model rows', async ($, on) => {
-  const h = host(on, { ANTHROPIC_BASE_URL: BASE }, () => ({ body: THREE }))
+  const h = seat(on, { projection: OWNED, env: { ANTHROPIC_BASE_URL: BASE } })
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($, 100)

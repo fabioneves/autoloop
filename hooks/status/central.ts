@@ -28,15 +28,12 @@ const TITLE_MAX = 40
 
 /**
  * The control a row offers (item 16): a `cancel` button beside a running
- * dispatch, an `answer` input under a block or decide, `merge` or
- * `authorize` on a unit with a PR. register.tsx draws the element and sends
- * the control; the row holds only the facts.
+ * dispatch, `merge` or `authorize` on a unit with a PR (each asked y or n
+ * as a pending control), an `answer` input under a block or decide (Enter
+ * is its confirmation). draw.tsx draws the element and sends the control;
+ * the row holds only the facts.
  */
-export type RowAction =
-  | StatusPending
-  | { kind: 'answer'; issue: number }
-  | { kind: 'merge'; pr: number }
-  | { kind: 'authorize'; pr: number }
+export type RowAction = StatusPending | { kind: 'answer'; issue: number }
 
 export type Row = {
   /** Drawn dim before the glyph: the Log tab's time. */
@@ -139,7 +136,7 @@ export function timelineSection(projection: StatusProjection, nowMs: number, nar
  * loop's own gate may merge it (delivered, no human to answer), `authorize`
  * only when it carries `human:authorize`; nothing otherwise.
  */
-export function prAction(unit: StatusUnit): RowAction | null {
+export function prAction(unit: StatusUnit): StatusPending | null {
   if (unit.pr === null) return null
   if (unit.needsYou?.kind === 'authorize') return { kind: 'authorize', pr: unit.pr }
   return unit.needsYou === null && unit.disposition === 'delivered' ? { kind: 'merge', pr: unit.pr } : null
@@ -152,6 +149,24 @@ export function needsYouSection(projection: StatusProjection): Section {
     rows: blockedUnits(projection).map((unit) => row(GLYPH.needsYou, parts([ref(unit.issue, unit.pr), unit.needsYou.text]), answerText(unit), false,
       unit.needsYou.kind === 'authorize' ? prAction(unit) : { kind: 'answer', issue: unit.issue })),
   }
+}
+
+/** The question a pending control asks: `cancel #517 implement?`, `merge PR #700?`, `authorize PR #701?`. */
+export function pendingQuestion(pending: StatusPending): string {
+  return pending.kind === 'cancel' ? `cancel ${pending.name}?` : `${pending.kind} PR #${pending.pr}?`
+}
+
+/**
+ * Whether the projection still offers a pending control: its dispatch
+ * still runs, or a unit still offers that merge or authorize. A pending
+ * control the run outgrew is dropped by the tick, so its y sends nothing.
+ */
+export function pendingOffered(projection: StatusProjection, pending: StatusPending): boolean {
+  if (pending.kind === 'cancel') return runningDispatches(projection).some((dispatch) => dispatch.dispatch === pending.dispatch)
+  return (projection.units ?? []).some((unit) => {
+    const action = prAction(unit)
+    return action !== null && action.kind === pending.kind && action.pr === pending.pr
+  })
 }
 
 /** What a unit waits for: `waits on #399`, `waits on PR #204 · src/a.mjs`, `waits until 10:50 UTC`, `waits on a green base`. */
@@ -319,8 +334,8 @@ export function logTab(projection: StatusProjection, filter: LogFilter): Row[] {
 
 // The Live tab (item 10).
 
-/** The rows the tab draws over the lines: the header, the tabs, the buttons row and the title. */
-const LIVE_CHROME_ROWS = 4
+/** The rows the tab draws over the lines: the header, the tabs, the gap under them, the buttons row and the title; one more while a question shows. */
+const LIVE_CHROME_ROWS = 5
 const LIVE_HOTKEYS = ['a', 'b', 'c', 'd', 'e']
 
 export type LiveLine = { text: string; dim: boolean }
@@ -331,7 +346,7 @@ export type LiveView = {
   shown: { id: string; title: string; lines: LiveLine[]; cancel: StatusPending | null } | null
 }
 
-export type LiveState = Pick<StatusState, 'selected' | 'follow' | 'liveOffset'>
+export type LiveState = Pick<StatusState, 'selected' | 'follow' | 'liveOffset' | 'pending'>
 
 /** `14 lines`, `2.1k lines` from a thousand. */
 export const linesText = (count: number): string => (count >= 1000 ? `${(count / 1000).toFixed(1)}k lines` : `${count} lines`)
@@ -366,12 +381,12 @@ export function liveTitle(projection: StatusProjection, id: string, stream: Stat
     const quiet = stream !== undefined && isQuiet(stream, listed, nowMs) ? `quiet ${duration(nowMs - stream.lastGrewAtMs)}` : null
     return parts([name, model, duration(nowMs - listed.startedAtMs), lines, quiet])
   }
-  if (end !== undefined) return parts([name, model, `ended ${duration(nowMs - end.at)} ago`, end.ok === true ? 'ok' : 'failed'])
+  if (end !== undefined) return parts([name, model, `ended ${duration(nowMs - end.at)} ago`, end.ok === true ? 'ok' : end.reason ?? 'failed'])
   return parts([name, model, 'died', stream === undefined ? null : `last wrote ${duration(nowMs - stream.lastGrewAtMs)} ago`])
 }
 
-/** The window's rows for the lines: the body less the tab's chrome, one at least. */
-export const liveRoom = (bodyRows: number): number => Math.max(1, bodyRows - LIVE_CHROME_ROWS)
+/** The window's rows for the lines: the body less the tab's chrome (and the question's row while one shows), one at least. */
+export const liveRoom = (bodyRows: number, pendingShown: boolean): number => Math.max(1, bodyRows - LIVE_CHROME_ROWS - (pendingShown ? 1 : 0))
 
 /** A scroll by `by` rows: follow goes off, and the window moves from where it stands, clamped to the lines. */
 export function liveScroll(state: Pick<LiveState, 'follow' | 'liveOffset'>, by: number, lineCount: number, room: number): Pick<LiveState, 'follow' | 'liveOffset'> {
@@ -394,7 +409,7 @@ export function liveTab(
   const cancel: StatusPending | null = runs === undefined ? null : { kind: 'cancel', dispatch: id, issue: runs.issue, name: dispatchName(runs, id) }
   const stream = streams[id]
   const lines = stream?.lines ?? []
-  const room = liveRoom(bodyRows)
+  const room = liveRoom(bodyRows, state.pending !== null)
   const offset = state.follow ? Math.max(0, lines.length - room) : Math.min(state.liveOffset, Math.max(0, lines.length - room))
   return {
     buttons,

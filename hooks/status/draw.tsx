@@ -5,17 +5,19 @@
 // come from view.ts and central.ts; the small builders from kit.ts.
 import type { Elements, RenderChildren, RenderElement } from 'claude-code'
 
-import type { StatusPending, StatusProjection, StatusState } from '../../types'
+import type { StatusPending, StatusProjection, StatusState, StatusTick } from '../../types'
 import type { Row, RowAction, Section } from './central'
-import { LOG_FILTERS, TABS, glyphTone, liveTab, logTab, runTab, statusLine, unitsTab } from './central'
+import { LOG_FILTERS, TABS, glyphTone, liveTab, logTab, pendingQuestion, runTab, statusLine, unitsTab } from './central'
 import type { Control } from './control'
 import type { Kit } from './kit'
-import { GLYPH, PALETTE, cell, empty, header, rule, section, strip, tabs } from './kit'
+import { GLYPH, PALETTE, cell, empty, header, plain, rule, section, strip, tabs } from './kit'
 import { isStale } from './read'
 import { HINT, checkedAgo, columnWidths, headerMarks, isNarrow, loopColumn, needsYouRow, phaseRow, proxyColumn, workColumn } from './view'
 
 /** The state while the band or the pane draws: its last projection is drawable (read.ts `isDrawable`). */
 export type Drawable = StatusState & { last: StatusProjection }
+/** The band draws the tick's clock too: `checked Ns ago` and the stale mark. */
+export type BandState = Drawable & StatusTick
 
 /**
  * The band's card (SPEC-central item 7): the header, the three cells, the
@@ -23,7 +25,7 @@ export type Drawable = StatusState & { last: StatusProjection }
  * `oneRow`, as while the pane is open. Drawn above the prompt and, for the
  * /autoloop output row, in the transcript.
  */
-export function bandTree(kit: Kit, state: Drawable, nowMs: number, bodyColumns: number, oneRow: boolean): RenderElement {
+export function bandTree(kit: Kit, state: BandState, nowMs: number, bodyColumns: number, oneRow: boolean): RenderElement {
   const { Box, Text } = kit
   // Stale: the glyphs that mean "running now" draw hollow, since nothing
   // confirms it (spec item 11).
@@ -44,7 +46,7 @@ export function bandTree(kit: Kit, state: Drawable, nowMs: number, bodyColumns: 
   )
   const loopHead = (
     <Text color={PALETTE.ink} wrap="truncate-end">
-      <Text color={PALETTE.good}>{live(loop.glyph)}</Text> {loop.head}
+      <Text color={PALETTE.good}>{live(loop.glyph)}</Text> {plain(loop.head)}
     </Text>
   )
   const workText = (
@@ -68,7 +70,7 @@ export function bandTree(kit: Kit, state: Drawable, nowMs: number, bodyColumns: 
     )
   }
   const bodies: { title: string; rows: RenderChildren[] }[] = [
-    { title: 'loop', rows: [loopHead, loop.detail === null ? null : <Text color={PALETTE.ink2}>{loop.detail}</Text>] },
+    { title: 'loop', rows: [loopHead, loop.detail === null ? null : <Text color={PALETTE.ink2}>{plain(loop.detail)}</Text>] },
     { title: 'work', rows: [workText] },
     ...(proxy === null ? [] : [{ title: 'proxy', rows: [proxyHead, ...proxy.rows.map((row) => <Text color={PALETTE.ink2}>{row}</Text>)] }]),
   ]
@@ -102,7 +104,7 @@ export function bandTree(kit: Kit, state: Drawable, nowMs: number, bodyColumns: 
         </Box>
       )}
       {needsYou !== null && strip(kit,
-        [<Text color={PALETTE.crit} bold>{GLYPH.needsYou}</Text>, ' #', needsYou.issue, ' ', needsYou.text],
+        [<Text color={PALETTE.crit} bold>{GLYPH.needsYou}</Text>, ' #', needsYou.issue, ' ', plain(needsYou.text)],
         `${needsYou.right}${needsYou.more > 0 ? ` · +${needsYou.more} more` : ''}`)}
     </Box>
   )
@@ -117,6 +119,8 @@ export type PaneHost = {
   sessionId: string
   bodyColumns: number
   bodyRows: number
+  /** The state as written now: a handler reads it before it acts, never the value the drawing captured. */
+  read: () => Promise<StatusState>
   /** One write of the mod's state: the fields `change` returns replace the state's. */
   edit: (change: (state: StatusState) => Partial<StatusState>) => Promise<StatusState>
   /** One control, sent through control.ts. */
@@ -125,10 +129,11 @@ export type PaneHost = {
 
 /**
  * The pane (items 8 to 14): the header with the pause button, the tabs, a
- * pending cancel's question, and the tab's body. The controls (item 16) are
- * its buttons and inputs: each sends one control through `host.send`. A
- * cancel is held as `pending` in the state until its y or n, so the question
- * survives a redraw.
+ * pending control's question, and the tab's body. The controls (item 16)
+ * are its buttons and inputs: each sends one control through `host.send`.
+ * A cancel, a merge or an authorize is held as `pending` in the state until
+ * its y or n, so the question survives a redraw and a double press asks
+ * once; an answer's Enter is its confirmation.
  */
 export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderElement {
   const { Box, Text, Button } = kit
@@ -137,35 +142,40 @@ export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderE
   const projection = state.last
   const setPending = (pending: StatusPending | null) => host.edit(() => ({ pending }))
   const paused = projection.run?.paused === true
+  // The press reads the run as last written, not as this drawing saw it: a
+  // tick between the draw and the press may have flipped it.
   const pauseButton = (
     <Button key="pause" label={paused ? `${GLYPH.play} resume` : `${GLYPH.paused} pause`} hotkey="p" plain
-      onPress={() => host.send({ kind: paused ? 'unpause' : 'pause' })} />
+      onPress={async () => host.send({ kind: (await host.read()).last?.run?.paused === true ? 'unpause' : 'pause' })} />
   )
+  const confirmed = (pending: StatusPending): Control => {
+    if (pending.kind === 'cancel') return { kind: 'cancel', dispatch: pending.dispatch, issue: pending.issue }
+    return pending.kind === 'merge' ? { kind: 'merge', pr: pending.pr } : { kind: 'label', pr: pending.pr }
+  }
   const confirmRow = (pending: StatusPending) => (
     <Box gap={1}>
-      <Text color={PALETTE.ink}>cancel {pending.name}?</Text>
+      <Text color={PALETTE.ink}>{plain(pendingQuestion(pending))}</Text>
       <Button key="confirm-yes" label="yes" hotkey="y" plain onPress={async () => {
         await setPending(null)
-        await host.send({ kind: 'cancel', dispatch: pending.dispatch, issue: pending.issue })
+        await host.send(confirmed(pending))
       }} />
       <Button key="confirm-no" label="no" hotkey="n" plain onPress={() => setPending(null)} />
     </Box>
   )
-  // The element a row's action draws: a button at the right, or an Input on the row under.
+  // The element a row's action draws: a button at the right that asks y or n, or an Input on the row under.
   const actionButton = (action: RowAction): RenderElement | null => {
-    if (action.kind === 'cancel') return <Button key={`cancel-${action.dispatch}`} label="cancel" plain onPress={() => setPending(action)} />
-    if (action.kind === 'merge') return <Button key={`merge-${action.pr}`} label="merge" plain onPress={() => host.send({ kind: 'merge', pr: action.pr })} />
-    if (action.kind === 'authorize') return <Button key={`authorize-${action.pr}`} label="authorize" plain onPress={() => host.send({ kind: 'label', pr: action.pr })} />
-    return null
+    if (action.kind === 'answer') return null
+    const key = action.kind === 'cancel' ? `cancel-${action.dispatch}` : `${action.kind}-${action.pr}`
+    return <Button key={key} label={action.kind} plain onPress={() => setPending(action)} />
   }
   const drawRow = (r: Row): RenderElement => {
     const line = (
       <Box justifyContent="space-between">
         <Text color={r.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">
           {r.lead !== null && <Text color={PALETTE.ink2}>{r.lead}  </Text>}
-          {r.glyph !== '' && <Text color={PALETTE[glyphTone(r.glyph)]}>{r.glyph}</Text>}{r.glyph !== '' && ' '}{r.text}
+          {r.glyph !== '' && <Text color={PALETTE[glyphTone(r.glyph)]}>{r.glyph}</Text>}{r.glyph !== '' && ' '}{plain(r.text)}
         </Text>
-        {r.right !== null && <Text color={PALETTE.ink2}> {r.right}</Text>}
+        {r.right !== null && <Text color={PALETTE.ink2}> {plain(r.right)}</Text>}
         {r.action !== null && actionButton(r.action)}
       </Box>
     )
@@ -210,22 +220,22 @@ export function paneTree(kit: PaneKit, state: Drawable, host: PaneHost): RenderE
     return [
       <Box gap={1}>
         {view.buttons.map((button) => (
-          <Button key={`live-${button.id}`} label={button.label} plain {...(button.hotkey === null ? {} : { hotkey: button.hotkey })}
+          <Button key={`live-${button.id}`} label={plain(button.label)} plain {...(button.hotkey === null ? {} : { hotkey: button.hotkey })}
             {...(button.active ? { variant: 'primary' as const } : {})} onPress={() => host.edit(() => ({ selected: button.id }))} />
         ))}
         <Button key="follow" label="follow" hotkey="f" plain {...(state.follow ? { variant: 'primary' as const } : {})}
           onPress={() => host.edit((written) => ({ follow: !written.follow }))} />
         {shown.cancel !== null && <Button key="cancel" label="cancel" hotkey="x" plain onPress={() => setPending(shown.cancel)} />}
       </Box>,
-      <Text color={PALETTE.ink} wrap="truncate-end">{shown.title}</Text>,
-      ...shown.lines.map((line) => <Text color={line.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">{line.text}</Text>),
+      <Text color={PALETTE.ink} wrap="truncate-end">{plain(shown.title)}</Text>,
+      ...shown.lines.map((line) => <Text color={line.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">{plain(line.text)}</Text>),
     ]
   }
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="column">
         <Box justifyContent="space-between">
-          <Text color={PALETTE.ink} wrap="truncate-end"><Text color={PALETTE.accent}>{GLYPH.brand}</Text> autoloop · {statusLine(projection)}</Text>
+          <Text color={PALETTE.ink} wrap="truncate-end"><Text color={PALETTE.accent}>{GLYPH.brand}</Text> autoloop · {plain(statusLine(projection))}</Text>
           {pauseButton}
         </Box>
         {tabs(kit, TABS.map(({ tab, label, hotkey }) => ({ label, hotkey, active: state.tab === tab, onPress: () => host.edit(() => ({ tab })) })))}

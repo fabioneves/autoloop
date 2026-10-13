@@ -1,40 +1,14 @@
 // The band's Loop and Work columns (docs/specs/SPEC-status-mod.md, items 7,
 // 10, 12, 13 and 17): the pure view functions over the producer's own
 // projections (fixtures/projection.ts), and the band drawn through the mod
-// with a doubled host. The header counts from the mock clock; the tick's
-// duration is read back from state.
-import { expect, mock, test } from 'claude-code/testing'
-import type { On } from 'claude-code'
-import type { StatusState } from '../../types'
+// with a doubled host (fixtures/testing.ts `seat`). The header counts from
+// the mock clock; the tick's duration is read back from state.
+import { expect, test } from 'claude-code/testing'
 
 import { FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, REPLAN, RUN, WAITING } from './fixtures/projection'
-import { PERIOD_MS, band, buttons, findColor, projection, ran, rows, start, texts } from './fixtures/testing'
+import { PERIOD_MS, band, buttons, findColor, projection, rows, seat, start, texts } from './fixtures/testing'
 import { PALETTE } from './kit'
 import { checkedAgo, columnWidths, isNarrow, loopColumn, shortModel, workColumn } from './view'
-
-/** Seats the host beneath the mod: the clock, the session id, the registry, no proxy, and the producer. */
-function host(on: On, stdout: () => string, options: { holdMs?: number } = {}) {
-  const clock = mock.clock(on)
-  mock.env(on, {})
-  let held: StatusState | null = null
-  const logged: string[] = []
-  on('session.id', () => ({ value: 'S-test' }))
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('process.run', async () => {
-    if (options.holdMs !== undefined) await clock.sleep(options.holdMs)
-    return { value: ran(stdout()) }
-  })
-  on('ui.log', ($, e) => {
-    logged.push(e.text)
-    return { value: undefined }
-  })
-  on('state.set', { plugin: 'autoloop', key: 'status' }, ($, e, next) => {
-    held = e.value
-    return next(e)
-  })
-  return { clock, held: () => held, logged }
-}
 
 test('shortModel names a model as step.mjs does', () => {
   // The expected names are step.mjs shortModel's own output on this list
@@ -104,7 +78,7 @@ test('cell widths share the body inside the border and the rules: two cells with
 })
 
 test('the band draws the header, the Loop column and the Work column from the projection', async ($, on) => {
-  const h = host(on, () => RUN)
+  const h = seat(on, { projection: RUN })
   await start($)
   await h.clock.advance(PERIOD_MS)
   await h.clock.advance(2000)
@@ -123,7 +97,7 @@ test('the band draws the header, the Loop column and the Work column from the pr
 })
 
 test('no `needs you` while nothing is blocked', async ($, on) => {
-  const h = host(on, () => OWNED)
+  const h = seat(on, { projection: OWNED })
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
@@ -132,7 +106,7 @@ test('no `needs you` while nothing is blocked', async ($, on) => {
 })
 
 test('quiet minimum: the header plus the labelled cells when nothing is in flight or blocked', async ($, on) => {
-  const h = host(on, () => IDLE)
+  const h = seat(on, { projection: IDLE })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(rows(await band($))).toEqual([
@@ -145,7 +119,7 @@ test('quiet minimum: the header plus the labelled cells when nothing is in fligh
 })
 
 test('under 120 columns the Loop column drops the title', async ($, on) => {
-  const h = host(on, () => RUN)
+  const h = seat(on, { projection: RUN })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(rows(await band($, 100))[2]).toBe('● review #412')
@@ -153,7 +127,7 @@ test('under 120 columns the Loop column drops the title', async ($, on) => {
 })
 
 test('the band holds no Button: a hotkey from the prompt would be typed (release two, item 9)', async ($, on) => {
-  const h = host(on, () => RUN)
+  const h = seat(on, { projection: RUN })
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
@@ -163,7 +137,7 @@ test('the band holds no Button: a hotkey from the prompt would be typed (release
 })
 
 test('the tick records its duration; one over 500 ms is logged once', async ($, on) => {
-  const h = host(on, () => RUN, { holdMs: 700 })
+  const h = seat(on, { projection: () => ({ holdMs: 700, stdout: RUN }) })
   await start($)
   await h.clock.advance(PERIOD_MS)
   await h.clock.advance(700)

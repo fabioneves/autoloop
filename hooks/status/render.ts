@@ -2,13 +2,17 @@
 // line for line, in the mod's own environment. The host lets a hooks
 // module import its own files and `claude-code` only, and dispatch-render
 // imports node:child_process for its `--follow` mode, so the renderer is
-// held here and live.test.ts holds it to the tool's output on one stream
-// (fixtures/stream.ts). One difference: a path is shortened against the
+// held here, and both sides are held to one stream (fixtures/stream.ts):
+// live.test.ts holds this renderer to RENDERED, the tool's self-test holds
+// the tool to it. Two differences: a path is shortened against the
 // stream's own `cwd` or to its last three segments, never against a git
-// checkout, since the mod reads no file system.
+// checkout, since the mod reads no file system; and a text's control
+// sequences are removed (kit.ts `plain`), since the lines go to a Text
+// and not to a terminal of the person's own.
 //
 // Contract, as the tool's: never throw. An unknown shape degrades to a
 // compact type marker, and garbage passes through truncated.
+import { plain } from './kit'
 
 /** A reasoning tick is printed every this many estimated tokens. */
 const THINKING_TICK = 2000
@@ -20,12 +24,12 @@ const isRecord = (value: unknown): value is Record => typeof value === 'object' 
 
 function compact(value: unknown, limit = 160): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value) ?? ''
-  const flat = text.replace(/\s+/gu, ' ').trim()
+  const flat = plain(text).replace(/\s+/gu, ' ').trim()
   return flat.length > limit ? `${flat.slice(0, limit)}…` : flat
 }
 
 function textLines(text: unknown, prefix: string): string[] {
-  return String(text)
+  return plain(String(text))
     .split('\n')
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0)
@@ -67,7 +71,7 @@ function toolLine(name: unknown, input: Record, cwd: string | null): string {
       ? `■ verdict ${input['verdict']}${Array.isArray(findings) ? ` · ${findings.length} findings` : ''}`
       : '■ structured output'
   }
-  return `▸ ${typeof name === 'string' ? name : 'tool'} ${compact(input, 100)}`
+  return `▸ ${String(name ?? 'tool')} ${compact(input, 100)}`
 }
 
 /** Stateful, so thinking ticks throttle across lines and paths shorten against the stream's cwd. Returns the rendered lines for one raw line. */
@@ -133,7 +137,7 @@ export function createRenderer(): (raw: string) => string[] {
       if (event['type'] === 'error') return [`✖ ${compact(event['message'] ?? event, 200)}`]
       if (event['type'] === 'rate_limit_event' || event['type'] === 'system') return []
 
-      const label = [event['type'], event['subtype']].filter((part) => typeof part === 'string' && part !== '').join('/')
+      const label = [event['type'], event['subtype']].filter(Boolean).map(String).join('/')
       return label ? [`· ${label}`] : []
     } catch {
       return []

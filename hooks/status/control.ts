@@ -7,7 +7,10 @@
 // git or a loop tool for a control.
 import type { Runner } from './read'
 
-export const CONTROL_TIMEOUT_MS = 2000
+/** The producer reads the projection (the ownership check) before it writes: longer than a read's 2 s. */
+export const CONTROL_TIMEOUT_MS = 10_000
+/** What the toast says when the producer gave no answer in time: the file may be written, and the loop applies it then. */
+export const NO_ANSWER = 'no answer: applied at the next prime if written'
 /** The prompt that wakes a parked session: the dev skill reads it as "run prime, which applies the control". */
 export const WAKE_PROMPT = 'autoloop: control'
 
@@ -47,7 +50,7 @@ export function parseControlAnswer(result: { exitCode: number; stdout: string })
   try {
     parsed = JSON.parse(result.stdout)
   } catch {
-    return { ok: false, error: result.exitCode === 0 ? 'the producer printed no answer' : `the producer exited ${result.exitCode}` }
+    return { ok: false, error: result.exitCode === 0 ? NO_ANSWER : `the producer exited ${result.exitCode}` }
   }
   const record = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {}
   if (record['ok'] === true && typeof record['name'] === 'string') return { ok: true, name: record['name'] }
@@ -64,13 +67,23 @@ export type ControlHost = {
 }
 
 /**
+ * The controls the producer is running now, by kind and target: a repeat
+ * (an Enter twice on an answer) is dropped while the first runs. Module
+ * state: a reload drops the set with the runs it names.
+ */
+const inFlight = new Set<string>()
+
+/**
  * One control: run the producer, toast the outcome, and on success queue
  * the wake prompt (a turn of its own once the session is idle, so a parked
  * loop primes and applies the control). Never throws: a host call that
- * rejects is the toast's text.
+ * rejects (the producer killed at the timeout) is toasted as no answer,
+ * since the file may be written.
  */
 export async function sendControl(host: ControlHost, control: Control): Promise<void> {
   const name = controlName(control)
+  if (inFlight.has(name)) return
+  inFlight.add(name)
   try {
     const answer = parseControlAnswer(await host.run(controlArgv(host.pluginRoot, await host.sessionId(), control), { timeoutMs: CONTROL_TIMEOUT_MS }))
     if (!answer.ok) {
@@ -82,6 +95,8 @@ export async function sendControl(host: ControlHost, control: Control): Promise<
     // waits on a running turn.
     host.submit(WAKE_PROMPT).catch(() => undefined)
   } catch (error) {
-    host.toast(`✗ ${name}: ${error instanceof Error ? error.message : String(error)}`)
+    host.toast(`✗ ${name}: ${NO_ANSWER} (${error instanceof Error ? error.message : String(error)})`)
+  } finally {
+    inFlight.delete(name)
   }
 }

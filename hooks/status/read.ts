@@ -157,8 +157,9 @@ export const QUIET_AFTER_MS = 120_000
 /** Rendered lines kept per dispatch. */
 export const STREAM_LINES_MAX = 200
 
+/** `tail -c 65536 -- <file>`: the `--` so a path can never read as a flag. */
 export function tailArgv(liveFile: string): string[] {
-  return ['tail', '-c', String(TAIL_BYTES), liveFile]
+  return ['tail', '-c', String(TAIL_BYTES), '--', liveFile]
 }
 
 const BYTES = new TextEncoder()
@@ -191,10 +192,10 @@ export async function tailLive(run: Runner, liveFile: string): Promise<Tailed | 
   }
 }
 
-/** The dispatches whose live file the mod tails: running, with a file. */
+/** The dispatches whose live file the mod tails: running, with an absolute file path (a relative one is not a dispatch's). */
 export function runningDispatches(projection: StatusProjection | null): (StatusDispatch & { liveFile: string })[] {
   return (projection?.dispatches ?? []).filter((dispatch): dispatch is StatusDispatch & { liveFile: string } =>
-    dispatch.state === 'running' && dispatch.liveFile !== null)
+    dispatch.state === 'running' && dispatch.liveFile !== null && dispatch.liveFile.startsWith('/'))
 }
 
 /**

@@ -5,62 +5,18 @@
 // newly blocked unit kept in $.state through a reload, hollow glyphs and
 // `stale` past 30 s, `paused`, the one-row form while the pane is open, the
 // narrow rules at 119 and 120 columns, and the tick stopping on
-// `enabled: false` until the next session.start. The host is doubled; the
-// projection text is the producer's own (fixtures/projection.ts); the proxy
-// body is hand-written (an external service).
-import { expect, mock, test } from 'claude-code/testing'
-import type { HttpResponse, On, PaneOpenArgs, RenderElement } from 'claude-code'
-import type { StatusState } from '../../types'
+// `enabled: false` until the next session.start. The host is doubled
+// (fixtures/testing.ts `seat`); the projection text is the producer's own
+// (fixtures/projection.ts); the proxy body is hand-written (an external
+// service).
+import { expect, test } from 'claude-code/testing'
+import type { RenderElement } from 'claude-code'
 
-import { BLOCKED_THREE, DISABLED, FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, RUN, UNOWNED } from './fixtures/projection'
-import { BASE, PERIOD_MS, band, buttons, findColor, findText, projection, ran, rows, start, texts } from './fixtures/testing'
+import { BLOCKED_THREE, DISABLED, FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, PAUSED, RUN, UNOWNED } from './fixtures/projection'
+import { BASE, PERIOD_MS, autoloopCommand, band, buttons, findColor, findText, projection, rows, seat, start, texts } from './fixtures/testing'
 import { PALETTE } from './kit'
 import { PANE_ID } from './central'
 import { needsYouRow, phaseRow, toastText } from './view'
-
-const THREE = JSON.stringify({ ok: true, active_requests: [
-  { id: 'r1', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model: 'claude-opus-5-5', model: 'anthropic-gateway-opus[1m]', session_id: 'S-test' },
-  { id: 'r2', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model: 'gpt-6-astra', model: null, session_id: 'S-other' },
-  { id: 'r3', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model: 'claude-opus-5-5', model: null, session_id: 'S-test' },
-] })
-
-type Answer = { stdout: string } | { deny: string }
-
-/** Seats the host beneath the mod: the clock, the environment, the session id, the registry, the producer, the proxy, and the toasts. */
-function host(on: On, answer: () => Answer, env: Record<string, string> = {}) {
-  const clock = mock.clock(on)
-  mock.env(on, env)
-  let runs = 0
-  let held: StatusState | null = null
-  const toasts: string[] = []
-  const opens: PaneOpenArgs[] = []
-  on('session.id', () => ({ value: 'S-test' }))
-  on('ui.open', ($, e) => {
-    opens.push(e)
-    return { value: { isPlaced: true as const } }
-  })
-  on('ui.close', () => ({ value: undefined }))
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('process.run', () => {
-    runs += 1
-    const next = answer()
-    return 'deny' in next ? { deny: next.deny } : { value: ran(next.stdout) }
-  })
-  on('http.fetch', () => {
-    const response: HttpResponse = { status: 200, ok: true, headers: {}, text: THREE }
-    return { value: response }
-  })
-  on('ui.toast', ($, e) => {
-    toasts.push(e.text)
-    return { value: undefined }
-  })
-  on('state.set', { plugin: 'autoloop', key: 'status' }, ($, e, next) => {
-    held = e.value
-    return next(e)
-  })
-  return { clock, runs: () => runs, held: () => held, toasts, opens }
-}
 
 const HEADER = '◆ autoloop · checked 0s ago/autoloop: central'
 
@@ -95,7 +51,7 @@ test('the needs-you row names the oldest unit a human must answer, with the answ
 })
 
 test('the drawn card: one round box; the header with the command hint; labelled cells; the phase row; the needs-you strip with a bold `!`', async ($, on) => {
-  const h = host(on, () => ({ stdout: RUN }))
+  const h = seat(on, { projection: RUN })
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
@@ -120,7 +76,7 @@ test('the drawn card: one round box; the header with the command hint; labelled 
 })
 
 test('no Button and no hotkey hint anywhere: the hint names the command', async ($, on) => {
-  const h = host(on, () => ({ stdout: RUN }))
+  const h = seat(on, { projection: RUN })
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
@@ -130,7 +86,7 @@ test('no Button and no hotkey hint anywhere: the hint names the command', async 
 })
 
 test('the Loop cell names the PR beside the issue once one exists', async ($, on) => {
-  const h = host(on, () => ({ stdout: FALLBACK }))
+  const h = seat(on, { projection: FALLBACK })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(rows(await band($)).slice(1, 4)).toEqual(['LOOP', '● simplify #413 · PR #702 · Simplify the guard', 'simplify · OPUS 5.5 (fallback)'])
@@ -138,7 +94,7 @@ test('the Loop cell names the PR beside the issue once one exists', async ($, on
 })
 
 test('the header says paused while the run is paused', async ($, on) => {
-  const h = host(on, () => ({ stdout: RUN.replace('"paused":false', '"paused":true') }))
+  const h = seat(on, { projection: PAUSED })
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
@@ -147,11 +103,11 @@ test('the header says paused while the run is paused', async ($, on) => {
 })
 
 test('while the pane is open the band is one row: the header and the three cells, no labels, no phase row, no strip', async ($, on) => {
-  const h = host(on, () => ({ stdout: RUN }), { ANTHROPIC_BASE_URL: BASE })
+  const h = seat(on, { projection: RUN, env: { ANTHROPIC_BASE_URL: BASE } })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(rows(await band($)).length).toBe(12)
-  await $.command.run({ command: 'autoloop', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  await autoloopCommand($, '')
   expect(h.opens.map((open) => open.id)).toEqual([PANE_ID])
   expect(h.held()?.paneOpen).toBe(true)
   const one = await band($)
@@ -161,7 +117,7 @@ test('while the pane is open the band is one row: the header and the three cells
   // /autoloop close: the full card comes back. The person's own close (the
   // close mark, ctrl+x x) reaches the mod as `ui.close`, which the test
   // engine's `$.ui` cannot raise; `claude plugin validate` lists the hook.
-  await $.command.run({ command: 'autoloop', args: 'close', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  await autoloopCommand($, 'close')
   expect(h.held()?.paneOpen).toBe(false)
   expect(rows(await band($)).length).toBe(12)
 })
@@ -169,7 +125,7 @@ test('while the pane is open the band is one row: the header and the three cells
 test('one needs-you unit draws no `+n more`; no phase row without a unit; no needs-you row without a blocked unit', async ($, on) => {
   const answers = [IDLE_DELIVERED, OWNED, IDLE]
   let index = 0
-  const h = host(on, () => ({ stdout: answers[index++] ?? IDLE }))
+  const h = seat(on, { projection: () => answers[index++] ?? IDLE })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(rows(await band($)).slice(1)).toEqual([
@@ -194,7 +150,7 @@ test('one needs-you unit draws no `+n more`; no phase row without a unit; no nee
 
 test('a long title cannot add rows: the Loop head and the needs-you row truncate at the edge', async ($, on) => {
   const long = 'x'.repeat(200)
-  const h = host(on, () => ({ stdout: RUN.replaceAll('Session recovery', long).replaceAll('Needs a policy answer', long) }))
+  const h = seat(on, { projection: RUN.replaceAll('Session recovery', long).replaceAll('Needs a policy answer', long) })
   await start($)
   await h.clock.advance(PERIOD_MS)
   const drawn = await band($)
@@ -211,7 +167,7 @@ test('toastText shortens the question', () => {
 test('one toast per unit the first time it is blocked: not again on the next tick, nor after a reload, and a new one when a unit joins', async ($, on) => {
   const answers = [OPEN_FINDINGS, OPEN_FINDINGS, BLOCKED_THREE, BLOCKED_THREE]
   let index = 0
-  const h = host(on, () => ({ stdout: answers[index++] ?? BLOCKED_THREE }))
+  const h = seat(on, { projection: () => answers[index++] ?? BLOCKED_THREE })
   await start($)
   await h.clock.advance(PERIOD_MS)
   expect(h.toasts).toEqual(['#419 needs you: Draft handed off after the scan'])
@@ -235,7 +191,7 @@ test('one toast per unit the first time it is blocked: not again on the next tic
 test('no toast while the band is off (ui.status false) or the session owns no run', async ($, on) => {
   const answers = [DISABLED, UNOWNED]
   let index = 0
-  const h = host(on, () => ({ stdout: answers[index++] ?? UNOWNED }))
+  const h = seat(on, { projection: () => answers[index++] ?? UNOWNED })
   await start($)
   await h.clock.advance(PERIOD_MS)
   await start($)
@@ -245,7 +201,7 @@ test('no toast while the band is off (ui.status false) or the session owns no ru
 
 test('past 30 s without a successful read the header says stale and the glyphs turn hollow', async ($, on) => {
   let calls = 0
-  const h = host(on, () => (calls++ === 0 ? { stdout: RUN } : { deny: 'the producer could not start' }))
+  const h = seat(on, { projection: () => (calls++ === 0 ? RUN : { deny: 'the producer could not start' }) })
   await start($)
   await h.clock.advance(PERIOD_MS)
   await h.clock.advance(30_000)
@@ -261,7 +217,7 @@ test('past 30 s without a successful read the header says stale and the glyphs t
 })
 
 test('narrow: at 119 columns the Loop column drops the title and the proxy collapses; 120 is not narrow', async ($, on) => {
-  const h = host(on, () => ({ stdout: RUN }), { ANTHROPIC_BASE_URL: BASE })
+  const h = seat(on, { projection: RUN, env: { ANTHROPIC_BASE_URL: BASE } })
   await start($)
   await h.clock.advance(PERIOD_MS)
   const narrow = rows(await band($, 119))
@@ -274,19 +230,19 @@ test('narrow: at 119 columns the Loop column drops the title and the proxy colla
 
 test('a projection with enabled false stops the tick until the next session.start; an unowned one keeps it', async ($, on) => {
   let first = true
-  const h = host(on, () => {
+  const h = seat(on, { projection: () => {
     const stdout = first ? DISABLED : UNOWNED
     first = false
-    return { stdout }
-  })
+    return stdout
+  } })
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect(h.runs()).toBe(1)
+  expect(h.runs.length).toBe(1)
   await h.clock.advance(3 * PERIOD_MS)
-  expect(h.runs()).toBe(1)
+  expect(h.runs.length).toBe(1)
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect(h.runs()).toBe(2)
+  expect(h.runs.length).toBe(2)
   await h.clock.advance(3 * PERIOD_MS)
-  expect(h.runs()).toBe(5)
+  expect(h.runs.length).toBe(5)
 })

@@ -2,46 +2,18 @@
 // the session owns a run the spinner's word is the loop's state; the
 // `/autoloop` output row draws the band's card; the pane opens unasked once
 // per session when a tick first sees an owned run under the fullscreen
-// renderer, never on the classic one. The host is doubled; the projection
-// text is the producer's own (fixtures/projection.ts).
-import { expect, mock, test } from 'claude-code/testing'
+// renderer, never on the classic one; an open the host does not place
+// leaves the band its card. The host is doubled (fixtures/testing.ts
+// `seat`); the projection text is the producer's own
+// (fixtures/projection.ts).
+import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { On, PaneOpenArgs, RenderViewport } from 'claude-code'
+import type { RenderViewport } from 'claude-code'
 
 import { FALLBACK, RUN, UNOWNED, WAITING } from './fixtures/projection'
-import { ENGINE_DRAWS, PERIOD_MS, band, findText, projection, ran, rows, start } from './fixtures/testing'
+import { ENGINE_DRAWS, PERIOD_MS, band, findText, projection, rows, seat, start } from './fixtures/testing'
 import { PANE_ID, autoOpenDue } from './central'
 import { spinnerWord } from './view'
-
-/** Seats the host: the clock, the producer, the panes, and the engine's own drawing beneath the spinner and the output row. */
-function host(on: On, stdout: () => string) {
-  const clock = mock.clock(on)
-  mock.env(on, {})
-  const opens: PaneOpenArgs[] = []
-  const words: string[] = []
-  let outputPassed = 0
-  on('session.id', () => ({ value: 'S-test' }))
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  // The producer's calls alone take an answer; a running dispatch's tail is live.test.ts's.
-  on('process.run', ($, e) => ({ value: ran(e.argv[0] === 'node' ? stdout() : '') }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('ui.log', () => ({ value: undefined }))
-  on('ui.open', ($, e) => {
-    opens.push(e)
-    return { value: { isPlaced: true as const } }
-  })
-  on('ui.render', { component: 'AbovePrompt' }, () => ENGINE_DRAWS)
-  on('ui.render', { component: 'Spinner' }, ($, e) => {
-    words.push(e.props.word)
-    return ENGINE_DRAWS
-  })
-  on('ui.render', { component: 'CommandOutput' }, () => {
-    outputPassed += 1
-    return ENGINE_DRAWS
-  })
-  return { clock, opens, words, outputPassed: () => outputPassed }
-}
 
 const spinner = ($: Engine) => $.ui.render({
   surface: 'terminal', component: 'Spinner', requestId: 'spinner',
@@ -63,7 +35,7 @@ test('spinnerWord names the phase, the issue, the PR and the role; null without 
 test('the spinner word is the loop\'s state while the session owns a run with a unit, and untouched otherwise', async ($, on) => {
   const answers = [RUN, FALLBACK, WAITING, UNOWNED]
   let index = 0
-  const h = host(on, () => answers[index++] ?? UNOWNED)
+  const h = seat(on, { projection: () => answers[index++] ?? UNOWNED })
   await start($)
   await spinner($)
   expect(h.words).toEqual(['Sauteing'])
@@ -84,7 +56,7 @@ test('the spinner word is the loop\'s state while the session owns a run with a 
 test('the /autoloop output row draws the band\'s card for the owner; its other answers and an unowned session keep the engine\'s row', async ($, on) => {
   const answers = [RUN, UNOWNED]
   let index = 0
-  const h = host(on, () => answers[index++] ?? UNOWNED)
+  const h = seat(on, { projection: () => answers[index++] ?? UNOWNED })
   await start($)
   expect(await output($)).toEqual(ENGINE_DRAWS)
   expect(h.outputPassed()).toBe(1)
@@ -112,7 +84,7 @@ test('autoOpenDue: once, under fullscreen, while the pane is not open', () => {
 const FULLSCREEN: RenderViewport = { columns: 160, rows: 40, isFullscreen: true }
 
 test('the pane opens unasked once when a tick first sees an owned run after the band drew under fullscreen', async ($, on) => {
-  const h = host(on, () => RUN)
+  const h = seat(on, { projection: RUN })
   await start($)
   await band($, 160, false, FULLSCREEN)
   expect(h.opens).toEqual([])
@@ -126,7 +98,7 @@ test('the pane opens unasked once when a tick first sees an owned run after the 
 })
 
 test('the pane never opens unasked on the classic renderer (isFullscreen false) or where the surface has not said', async ($, on) => {
-  const h = host(on, () => RUN)
+  const h = seat(on, { projection: RUN })
   await start($)
   await band($, 160, false, { columns: 160, rows: 40, isFullscreen: false })
   await h.clock.advance(2 * PERIOD_MS)
@@ -141,4 +113,26 @@ test('the pane never opens unasked on the classic renderer (isFullscreen false) 
   await band($, 160, false, FULLSCREEN)
   await h.clock.advance(PERIOD_MS)
   expect(h.opens.length).toBe(1)
+})
+
+test('an unasked open the host does not place leaves the band its card and is not asked again; the tick takes the pane as placed once the host lists it so', async ($, on) => {
+  const h = seat(on, { projection: RUN, placed: false })
+  await start($)
+  await band($, 160, false, FULLSCREEN)
+  await h.clock.advance(PERIOD_MS)
+  expect(h.opens.length).toBe(1)
+  expect(h.held()?.autoOpened).toBe(true)
+  expect(h.held()?.paneOpen).toBe(false)
+  expect(rows(await band($, 160, false, FULLSCREEN)).length).toBe(8)
+  await h.clock.advance(2 * PERIOD_MS)
+  expect(h.opens.length).toBe(1)
+  // The terminal widens: the host's own record lists the pane as placed, and the next tick reads it.
+  h.panes[0]!.isPlaced = true
+  await h.clock.advance(PERIOD_MS)
+  expect(h.held()?.paneOpen).toBe(true)
+  expect(rows(await band($, 160, false, FULLSCREEN)).length).toBe(1)
+  // The person closes it by hand: the host no longer lists it.
+  h.panes.length = 0
+  await h.clock.advance(PERIOD_MS)
+  expect(h.held()?.paneOpen).toBe(false)
 })

@@ -1,29 +1,30 @@
 // The central pane (docs/specs/SPEC-central.md, items 8, 9, 11, 12, 13 and
 // 14): /autoloop opens pane `autoloop` for the session that owns a run and
-// answers otherwise, `/autoloop close` closes it, nothing opens it unasked.
-// The pane draws a header, the four tabs and the shown tab's rows: Run's
-// sections, Units' rows, Log's rows with a UTC time and a filter. The tab
-// and the filter live in $.state, so a redraw keeps them and a press
-// changes them; while the Log tab shows, the tick asks the producer for
-// 500 entries. The row builders are pure over the producer's own
-// projection (fixtures/projection.ts) and a hand-written proxy body; the
-// host is doubled.
-import { expect, mock, test } from 'claude-code/testing'
+// answers otherwise, `/autoloop close` closes it, nothing opens it unasked
+// without a fullscreen viewport. The pane draws a header, the four tabs
+// and the shown tab's rows: Run's sections, Units' rows, Log's rows with a
+// UTC time and a filter. The tab and the filter live in $.state, so a
+// redraw keeps them and a press changes them; while the Log tab shows, the
+// tick asks the producer for 500 entries. The row builders are pure over
+// the producer's own projection (fixtures/projection.ts) and a hand-written
+// proxy body; the host is doubled (fixtures/testing.ts `seat`).
+import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { HttpResponse, On, PaneOpenArgs } from 'claude-code'
 import type { StatusEvent, StatusProjection } from '../../types'
 
-import { DISABLED, FALLBACK, IDLE, OWNED, RUN, UNOWNED, WAITING, WAITS } from './fixtures/projection'
-import { AT_10_30, BASE, PERIOD_MS, band, buttons, findColor, pane, press, projection, ran, rows, start } from './fixtures/testing'
+import { DISABLED, FALLBACK, IDLE, OWNED, PAUSED, RUN, TWO_DISPATCHES, UNOWNED, WAITING, WAITS } from './fixtures/projection'
+import { AT_10_30, BASE, PERIOD_MS, autoloopCommand, band, buttons, findColor, pane, press, projection, rowCount, rows, seat, start } from './fixtures/testing'
 import { RENDERED, STREAM } from './fixtures/stream'
 import {
-  LOG_LENGTH, PANE_ID, clockText, eventText, linesText, liveScroll, liveTab, liveTitle, logRow, logTab, noUnitText, runTab, statusLine, unitsTab, waitText,
+  LOG_LENGTH, PANE_ID, clockText, eventText, linesText, liveRoom, liveScroll, liveTab, liveTitle, logRow, logTab, noUnitText, passesFilter, runTab,
+  statusLine, unitsTab, waitText,
 } from './central'
-import type { Row } from './central'
-import { PALETTE } from './kit'
+import type { LogFilter, Row } from './central'
+import { PALETTE, plain } from './kit'
 import { LIVE_PERIOD_MS, QUIET_AFTER_MS, projectionArgv, readProxy } from './read'
 
-const THREE = JSON.stringify({ ok: true, active_requests: [
+/** The proxy's body for the Proxy section: one request of this session served, one of another requested only, one unknown. */
+const SERVED = JSON.stringify({ ok: true, active_requests: [
   { id: 'r1', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 61_000, requested_model: 'claude-opus-5-5', model: 'anthropic-gateway-opus[1m]', session_id: 'S-test' },
   { id: 'r2', started_at: '2026-09-28T10:29:30.000Z', elapsed_ms: 30_000, requested_model: 'gpt-6-astra', model: null, session_id: 'S-other' },
   { id: 'r3', started_at: '2026-09-28T10:29:59.000Z', elapsed_ms: 1_000, requested_model: null, model: null, session_id: null },
@@ -33,52 +34,20 @@ const THREE = JSON.stringify({ ok: true, active_requests: [
 const line = (row: Row): string =>
   `${row.lead === null ? '' : `${row.lead}  `}${row.glyph === '' ? '' : `${row.glyph} `}${row.text}${row.right === null ? '' : ` ${row.right}`}`
 
-/** Seats the host beneath the mod: the clock at 10:30, the environment, the session id, the registry, the producer, the proxy, the panes and the toasts. */
-function host(on: On, stdout: () => string, env: Record<string, string> = {}) {
-  const clock = mock.clock(on, { now: AT_10_30 })
-  mock.env(on, env)
-  const opens: PaneOpenArgs[] = []
-  const closes: string[] = []
-  const argvs: (readonly string[])[] = []
-  on('session.id', () => ({ value: 'S-test' }))
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('process.run', ($, e) => {
-    // The producer's calls alone; a running dispatch's tail is live.test.ts's.
-    if (e.argv[0] === 'node') argvs.push(e.argv)
-    return { value: ran(e.argv[0] === 'node' ? stdout() : '') }
-  })
-  on('http.fetch', () => {
-    const response: HttpResponse = { status: 200, ok: true, headers: {}, text: THREE }
-    return { value: response }
-  })
-  on('ui.toast', () => ({ value: undefined }))
-  on('ui.open', ($, e) => {
-    opens.push(e)
-    return { value: { isPlaced: true as const } }
-  })
-  on('ui.close', ($, e) => {
-    closes.push(e.id)
-    return { value: undefined }
-  })
-  return { clock, opens, closes, argvs }
-}
-
-function command($: Engine, args: string) {
-  return $.command.run({ command: 'autoloop', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
-}
+/** Seats the host at 10:30 with the producer's text from `stdout()` and the served proxy body. */
+const host = (on: Parameters<typeof seat>[0], stdout: () => string, env: Record<string, string> = {}) =>
+  seat(on, { now: AT_10_30, projection: stdout, env, proxy: () => ({ body: SERVED }) })
 
 const HEADER = ['◆ autoloop · review #412[⏸ pause]', '[Run][Live][Units][Log]']
 
 test('the header names the loop state and marks a paused run', () => {
   expect(statusLine(projection(RUN))).toBe('review #412')
   expect(statusLine(projection(WAITING))).toBe('Idle')
-  const paused: StatusProjection = { ...projection(RUN), run: { ...projection(RUN).run!, paused: true } }
-  expect(statusLine(paused)).toBe('review #412 · paused')
+  expect(statusLine(projection(PAUSED))).toBe('review #412 · paused')
 })
 
 test('the Run tab at 90 columns: Now, Timeline, Needs you, Waiting, Delivered and Proxy, each with its rows', async () => {
-  const proxy = await readProxy(async () => ({ status: 200, text: THREE }), BASE)
+  const proxy = await readProxy(async () => ({ status: 200, text: SERVED }), BASE)
   const run = runTab(projection(RUN), proxy, 'S-test', AT_10_30, 90)
   expect(run.empty).toBeNull()
   expect(run.sections.map((section) => [section.title, ...section.rows.map(line)])).toEqual([
@@ -97,12 +66,13 @@ test('the Run tab at 90 columns: Now, Timeline, Needs you, Waiting, Delivered an
   ])
 })
 
-test('the Run tab at 50 columns drops the Proxy section and keeps the Timeline to glyphs and names', async () => {
-  const proxy = await readProxy(async () => ({ status: 200, text: THREE }), BASE)
-  const run = runTab(projection(RUN), proxy, 'S-test', AT_10_30, 50)
-  expect(run.sections.map((section) => section.title)).toEqual(['Now', 'Timeline', 'Needs you', 'Waiting', 'Delivered'])
-  expect(run.sections[1]?.rows.map(line)).toEqual(['✓ plan', '● code-review'])
-  expect(runTab(projection(RUN), proxy, 'S-test', AT_10_30, 60).sections.map((section) => section.title)).toContain('Proxy')
+test('the Run tab at 59 columns drops the Proxy section and keeps the Timeline to glyphs and names; 60 is not narrow', async () => {
+  const proxy = await readProxy(async () => ({ status: 200, text: SERVED }), BASE)
+  const titles = (columns: number) => runTab(projection(RUN), proxy, 'S-test', AT_10_30, columns).sections.map((section) => section.title)
+  expect(titles(59)).toEqual(['Now', 'Timeline', 'Needs you', 'Waiting', 'Delivered'])
+  expect(runTab(projection(RUN), proxy, 'S-test', AT_10_30, 59).sections[1]?.rows.map(line)).toEqual(['✓ plan', '● code-review'])
+  expect(titles(60)).toEqual(['Now', 'Timeline', 'Needs you', 'Waiting', 'Delivered', 'Proxy'])
+  expect(runTab(projection(RUN), proxy, 'S-test', AT_10_30, 60).sections[1]?.rows.map(line)).toEqual(['✓ plan · 15m 0s · ASTRA 6', '● code-review · fix 2/3 · 3m 0s · ASTRA 6'])
 })
 
 test('the Run tab without a unit says so and names the next selection; a returned unit says when it returned', () => {
@@ -202,19 +172,23 @@ test('the Log tab prints the kinds the fixtures lack: a failed dispatch, a decis
   expect(eventText({ at, by: 'dispatch', kind: 'dispatch.end', ok: true, ms: 1000 })).toEqual({ glyph: '✓', what: 'dispatch returned · 1s' })
 })
 
-test('the Log filter keeps steps, dispatches, needs-you and control kinds apart', () => {
-  const kinds = (filter: Parameters<typeof logTab>[1]) => logTab(projection(RUN), filter).map((row) => row.lead)
+/** Every event kind the contract names (tools/events-contract.mjs EVENT_KINDS). */
+const KINDS = ['run.start', 'run.end', 'select', 'step', 'dispatch.start', 'dispatch.end', 'decision', 'wait', 'resume', 'block', 'deliver', 'merge', 'label', 'control', 'pause', 'unpause']
+
+test('the Log filter keeps steps, dispatches, needs-you and control kinds apart, and `all` keeps every kind', () => {
+  const kinds = (filter: LogFilter) => logTab(projection(RUN), filter).map((row) => row.lead)
   expect(kinds('steps')).toEqual(['10:27:00', '08:40:00'])
   expect(kinds('dispatches')).toEqual(['10:28:00', '08:55:00', '08:41:00'])
   expect(kinds('needsYou')).toEqual(['10:12:00', '10:05:00'])
   expect(kinds('controls')).toEqual([])
-  const controls: StatusProjection = { ...projection(RUN), log: [
-    { at: AT_10_30, by: 'prime', kind: 'pause' }, { at: AT_10_30, by: 'unit', kind: 'decision', issue: 1, text: 'x' },
-    { at: AT_10_30, by: 'prime', kind: 'control', text: 'pause' }, { at: AT_10_30, by: 'publish', kind: 'merge', pr: 1, ok: true },
-    { at: AT_10_30, by: 'publish', kind: 'label', pr: 1, text: 'x' }, { at: AT_10_30, by: 'prime', kind: 'unpause' },
-  ] }
-  expect(logTab(controls, 'controls').map((row) => row.glyph)).toEqual(['⏸', '·', '✓', '·', '▶'])
-  expect(logTab(controls, 'steps').map((row) => row.glyph)).toEqual(['●'])
+  const every: StatusProjection = { ...projection(RUN), log: KINDS.map((kind) => ({ at: AT_10_30, by: 'prime', kind })) }
+  const passing = (filter: LogFilter) => every.log!.filter((event) => passesFilter(event, filter)).map((event) => event.kind)
+  expect(passing('all')).toEqual(KINDS)
+  expect(passing('steps')).toEqual(['step', 'decision', 'resume'])
+  expect(passing('dispatches')).toEqual(['dispatch.start', 'dispatch.end'])
+  expect(passing('needsYou')).toEqual(['wait', 'block'])
+  expect(passing('controls')).toEqual(['merge', 'label', 'control', 'pause', 'unpause'])
+  expect(logTab(every, 'controls').map((row) => row.glyph)).toEqual(['✗', '·', '·', '⏸', '▶'])
 })
 
 test('the pane id is the literal the Pane matcher names', () => {
@@ -225,7 +199,7 @@ test('/autoloop from a session that owns no run answers so and opens nothing', a
   const h = host(on, () => UNOWNED)
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect((await command($, '')).text).toBe('autoloop: this session owns no run')
+  expect((await autoloopCommand($, '')).text).toBe('autoloop: this session owns no run')
   expect(h.opens).toEqual([])
 })
 
@@ -233,12 +207,12 @@ test('/autoloop opens the pane autoloop for the owner; /autoloop close closes it
   const h = host(on, () => RUN)
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect((await command($, '')).text).toBe('autoloop: status pane opened')
+  expect((await autoloopCommand($, '')).text).toBe('autoloop: status pane opened')
   expect(h.opens.map((open) => open.id)).toEqual([PANE_ID])
   expect(h.closes).toEqual([])
-  expect((await command($, 'close')).text).toBe('autoloop: status pane closed')
+  expect((await autoloopCommand($, 'close')).text).toBe('autoloop: status pane closed')
   expect(h.closes).toEqual([PANE_ID])
-  expect((await command($, 'other')).text).toBe('autoloop: unknown argument "other"; use /autoloop or /autoloop close')
+  expect((await autoloopCommand($, 'other')).text).toBe('autoloop: unknown argument "other"; use /autoloop or /autoloop close')
   expect(h.opens.length).toBe(1)
 })
 
@@ -246,11 +220,11 @@ test('/autoloop in a project with ui.status false opens nothing and says so', as
   const h = host(on, () => DISABLED)
   await start($)
   await h.clock.advance(PERIOD_MS)
-  expect((await command($, '')).text).toBe('autoloop: the status band is off (ui.status is false in .autoloop/config.json)')
+  expect((await autoloopCommand($, '')).text).toBe('autoloop: the status band is off (ui.status is false in .autoloop/config.json)')
   expect(h.opens).toEqual([])
 })
 
-test('nothing opens the pane on session.start, a tick or a draw of the band', async ($, on) => {
+test('nothing opens the pane on session.start, a tick or a draw of the band without a fullscreen viewport', async ($, on) => {
   const h = host(on, () => RUN, { ANTHROPIC_BASE_URL: BASE })
   await start($)
   await h.clock.advance(3 * PERIOD_MS)
@@ -295,10 +269,13 @@ test('the pane draws the header, the four tabs and the Run tab from the last rea
   const tabRow = buttons(drawn).filter((button) => button.props.key?.startsWith('tab-'))
   expect(tabRow.map((button) => [button.props.hotkey, button.props.label, button.props.variant ?? null, button.props.plain ?? null]))
     .toEqual([['1', 'Run', 'primary', true], ['2', 'Live', null, true], ['3', 'Units', null, true], ['4', 'Log', null, true]])
-  // At 50 columns the Proxy section goes and the Timeline keeps names.
-  const narrow = rows(await pane($, 50))
+  // At 59 columns the Proxy section goes and the Timeline keeps names; at 60 both stay.
+  const narrow = rows(await pane($, 59))
   expect(narrow).not.toContain('PROXY')
   expect(narrow).toContain('✓ plan')
+  const wide = rows(await pane($, 60))
+  expect(wide).toContain('PROXY')
+  expect(wide).toContain('✓ plan · 15m 0s · ASTRA 6')
 })
 
 test('the pane without a unit says so, leaves empty sections out, and says when the session owns no run', async ($, on) => {
@@ -320,14 +297,13 @@ test('a press on a tab changes it, a redraw keeps it, and the Units and Log tabs
   await h.clock.advance(PERIOD_MS)
   await pane($)
   await press($, 'tab-3')
-  const units = rows(await pane($))
-  expect(units.slice(0, 3)).toEqual([...HEADER, '● #412 · Session recovery · active · 2m 3s'])
-  expect(units.length).toBe(2 + 21)
+  // The drawn rows are the builders' rows at the clock of the draw, 3 s past the fixture's.
+  expect(rows(await pane($))).toEqual([...HEADER, ...unitsTab(projection(RUN), AT_10_30 + PERIOD_MS).map(line)])
+  expect(rows(await pane($))[2]).toBe('● #412 · Session recovery · active · 2m 3s')
   expect(buttons(await pane($)).find((button) => button.props.key === 'tab-3')?.props.variant).toBe('primary')
   await press($, 'tab-4')
-  const log = rows(await pane($))
-  expect(log.slice(0, 4)).toEqual([...HEADER, '[all][steps][dispatches][needs you][controls]UTC', '10:28:00  ▶ dispatch  #412  code-review · ASTRA 6'])
-  expect(log.length).toBe(3 + 10)
+  expect(rows(await pane($))).toEqual([...HEADER, '[all][steps][dispatches][needs you][controls]UTC', ...logTab(projection(RUN), 'all').map(line)])
+  expect(rows(await pane($))[3]).toBe('10:28:00  ▶ dispatch  #412  code-review · ASTRA 6')
   await press($, 'filter-needsYou')
   const filtered = rows(await pane($))
   expect(filtered.slice(3)).toEqual([
@@ -343,48 +319,58 @@ test('while the Log tab shows, the tick asks the producer for 500 entries; the o
   const h = host(on, () => RUN)
   await start($)
   await h.clock.advance(PERIOD_MS)
-  const root = String(h.argvs[0]?.[1]).replace(/\/tools\/status\.mjs$/u, '')
-  expect(h.argvs[0]).toEqual(projectionArgv(root, 'S-test'))
-  expect(h.argvs[0]).not.toContain('--log')
+  const root = String(h.argvs()[0]?.[1]).replace(/\/tools\/status\.mjs$/u, '')
+  expect(h.argvs()[0]).toEqual(projectionArgv(root, 'S-test'))
+  expect(h.argvs()[0]).not.toContain('--log')
   await pane($)
   await press($, 'tab-4')
   await h.clock.advance(PERIOD_MS)
   expect(LOG_LENGTH).toBe(500)
-  expect(h.argvs[1]).toEqual(projectionArgv(root, 'S-test', LOG_LENGTH))
-  expect(h.argvs[1]?.slice(-2)).toEqual(['--log', '500'])
+  expect(h.argvs()[1]).toEqual(projectionArgv(root, 'S-test', LOG_LENGTH))
+  expect(h.argvs()[1]?.slice(-2)).toEqual(['--log', '500'])
   await press($, 'tab-3')
   await h.clock.advance(PERIOD_MS)
-  expect(h.argvs[2]).not.toContain('--log')
+  expect(h.argvs()[2]).not.toContain('--log')
+})
+
+// A text from outside the mod (an issue title, an event's text) reaches
+// the pane and the band with its control sequences removed.
+
+test('a needs-you title with a C0 character, and a log text with a bidi override, are drawn without them', async ($, on) => {
+  const hostile = RUN.replaceAll('Needs a policy answer', 'Needs\\u0007 a \\u001b[31mpolicy answer').replaceAll('May the workflow change proceed?', 'May the \\u202eworkflow\\u202c proceed?')
+  const h = host(on, () => hostile)
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  const drawn = rows(await pane($))
+  expect(drawn).toContain('! #417 · Needs a policy answer answer on #417')
+  expect(drawn.join('\n')).not.toMatch(/[\u0007\u001b]/u)
+  expect(rows(await band($))).toContain('! #417 Needs a policy answeranswer on #417 · +5 more')
+  expect(h.toasts).toContain('#417 needs you: Needs a policy answer')
+  await press($, 'tab-4')
+  const log = rows(await pane($))
+  expect(log).toContain('10:12:00  ! unit      #417  blocked POLICY_DENIED · May the workflow proceed?')
+  expect(log.join('\n')).not.toMatch(/[‪-‮]/u)
+  expect(plain('a\u001b]52;c;aGVsbG8=\u0007b\u001b[1mc\u001b[0m\td\u0085e​f')).toBe('abc\tdef')
 })
 
 // The Live tab (SPEC-central item 10): a button per running dispatch
 // (`a`..`e`), the selected one primary; `f` toggles follow; the title
 // row's three states; the window over the lines; the empty state.
 
-/** RUN with its dispatches and log replaced: a second running dispatch, or an ended one. */
+/** RUN with its dispatches and log replaced: an ended one. */
 function withDispatches(dispatches: unknown[], log: unknown[] = projection(RUN).log ?? []): string {
   return JSON.stringify({ ...projection(RUN), dispatches, log })
 }
 const D412 = projection(RUN).dispatches![0]!
-const D413 = { ...D412, dispatch: 'd413', issue: 413, pr: 702, role: 'implement', model: 'claude-opus-5-5', liveFile: '/tmp/live/413-implement.jsonl', pid: 4300 }
 
 /** Seats the host with a producer and a tail: the producer's text from `stdout()`, every tail the synthetic stream. */
-function liveHost(on: On, stdout: () => string) {
-  const clock = mock.clock(on, { now: AT_10_30 })
-  mock.env(on, {})
-  on('session.id', () => ({ value: 'S-test' }))
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('process.run', ($, e) => ({ value: ran(e.argv[0] === 'node' ? stdout() : STREAM) }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('ui.log', () => ({ value: undefined }))
-  return { clock }
-}
+const liveHost = (on: Parameters<typeof seat>[0], stdout: () => string) => seat(on, { now: AT_10_30, projection: stdout, tail: () => ({ stdout: STREAM }) })
 
 const live = async ($: Engine, bodyRows = 40, bodyColumns = 90) => rows(await pane($, bodyColumns, bodyRows))
+const LIVE = { selected: null, follow: true, liveOffset: 0, pending: null }
 
 test('the Live tab lists a button per running dispatch with the hotkeys a and b, the selected one primary, and a press selects', async ($, on) => {
-  const h = liveHost(on, () => withDispatches([D412, D413]))
+  const h = liveHost(on, () => TWO_DISPATCHES)
   await start($)
   await h.clock.advance(PERIOD_MS + LIVE_PERIOD_MS)
   await pane($)
@@ -392,42 +378,79 @@ test('the Live tab lists a button per running dispatch with the hotkeys a and b,
   const drawn = await pane($)
   const row = buttons(drawn).filter((button) => button.props.key?.startsWith('live-') || button.props.key === 'follow')
   expect(row.map((button) => [button.props.key, button.props.label, button.props.hotkey, button.props.variant ?? null]))
-    .toEqual([['live-d412', '#412 code-review', 'a', 'primary'], ['live-d413', '#413 implement', 'b', null], ['follow', 'follow', 'f', 'primary']])
-  expect((await live($))[3]).toBe('#412 code-review · ASTRA 6 · 2m 4s · 14 lines')
-  await press($, 'live-d413')
-  expect((await live($))[3]).toBe('#413 implement · OPUS 5.5 · 2m 4s · 14 lines')
-  expect(buttons(await pane($)).find((button) => button.props.key === 'live-d413')?.props.variant).toBe('primary')
-  // The selection stays on d413 while it runs; when it ends the first running one is shown again.
-  expect(liveTab(projection(withDispatches([D412, D413])), {}, { selected: 'd413', follow: true, liveOffset: 0 }, AT_10_30, 40, 90).shown?.id).toBe('d413')
-  expect(liveTab(projection(withDispatches([D412])), {}, { selected: 'd413', follow: true, liveOffset: 0 }, AT_10_30, 40, 90).shown?.id).toBe('d412')
+    .toEqual([['live-d421', '#421 fix', 'a', 'primary'], ['live-d412', '#412 code-review', 'b', null], ['follow', 'follow', 'f', 'primary']])
+  expect((await live($))[3]).toBe('#421 fix · OPUS 5.5 · 59m 4s · 20 lines')
+  await press($, 'live-d412')
+  expect((await live($))[3]).toBe('#412 code-review · ASTRA 6 · 2m 4s · 20 lines')
+  expect(buttons(await pane($)).find((button) => button.props.key === 'live-d412')?.props.variant).toBe('primary')
+  // The selection stays on d412 while it runs; when it ends the first running one is shown again.
+  expect(liveTab(projection(TWO_DISPATCHES), {}, { ...LIVE, selected: 'd412' }, AT_10_30, 40, 90).shown?.id).toBe('d412')
+  expect(liveTab(projection(RUN), {}, { ...LIVE, selected: 'd421' }, AT_10_30, 40, 90).shown?.id).toBe('d412')
 })
 
-test('the Live tab follows the stream\'s end; f turns follow off and the window starts at the offset; a scroll moves it and turns follow off', async ($, on) => {
+test('the Live tab follows the stream\'s end; f turns follow off and the window starts at the offset; the window fits the body', async ($, on) => {
   const h = liveHost(on, () => RUN)
   await start($)
   await h.clock.advance(PERIOD_MS + LIVE_PERIOD_MS)
   await pane($)
   await press($, 'tab-2')
-  // 10 body rows less the four of header, tabs, buttons and title: six lines, the newest last.
-  expect((await live($, 10)).slice(2)).toEqual(['[#412 code-review][follow][cancel]', '#412 code-review · ASTRA 6 · 2m 4s · 14 lines', ...RENDERED.slice(-6)])
+  // 10 body rows less the five of header, tabs, the gap, buttons and title: five lines, the newest last.
+  expect(liveRoom(10, false)).toBe(5)
+  const small = await pane($, 90, 10)
+  expect(rows(small).slice(2)).toEqual(['[#412 code-review][follow][cancel]', '#412 code-review · ASTRA 6 · 2m 4s · 20 lines', ...RENDERED.slice(-5)])
+  expect(rowCount(small)).toBe(10)
   expect((await live($, 40)).slice(4)).toEqual(RENDERED)
   await press($, 'follow')
   expect(buttons(await pane($)).find((button) => button.props.key === 'follow')?.props.variant).toBeUndefined()
-  expect((await live($, 10)).slice(4)).toEqual(RENDERED.slice(0, 6))
+  expect((await live($, 10)).slice(4)).toEqual(RENDERED.slice(0, 5))
   await press($, 'follow')
-  expect((await live($, 10)).slice(4)).toEqual(RENDERED.slice(-6))
-  // The scroll hook's rule: from the window's place, by the rows asked, clamped; follow goes off.
-  expect(liveScroll({ follow: true, liveOffset: 0 }, -2, 14, 6)).toEqual({ follow: false, liveOffset: 6 })
+  expect((await live($, 10)).slice(4)).toEqual(RENDERED.slice(-5))
+  // While the cancel question shows, its row takes one more.
+  await press($, 'cancel')
+  expect(liveRoom(10, true)).toBe(4)
+  const asked = await pane($, 90, 10)
+  expect(rows(asked)[2]).toBe('cancel #412 code-review?[yes][no]')
+  expect(rows(asked).slice(5)).toEqual(RENDERED.slice(-4))
+  expect(rowCount(asked)).toBe(10)
+  await press($, 'confirm-no')
+  expect(rowCount(await pane($, 90, 10))).toBe(10)
+  // A reasoning tick draws dim.
+  const view = liveTab(projection(RUN), { d412: { lines: RENDERED, lastGrewAtMs: AT_10_30 } }, LIVE, AT_10_30, 40, 90)
+  expect(view.shown?.lines.filter((line) => line.dim).map((line) => line.text)).toEqual(['⋯ thinking ~2k tok'])
+})
+
+test('a scroll over the pane while the Live tab shows moves the window by the rows asked and turns follow off', async ($, on) => {
+  const h = liveHost(on, () => RUN)
+  await start($)
+  await h.clock.advance(PERIOD_MS + LIVE_PERIOD_MS)
+  await pane($)
+  await press($, 'tab-2')
+  // Following: the window ends at line 20 of 20, five rows; two up lands at offset 13.
+  const scroll = (by: number) => $.ui.scroll({ component: 'Pane', requestId: PANE_ID, offset: 0, by, bodyRows: 10, contentRows: 20, origin: { kind: 'person' } })
+  expect(await scroll(-2)).toEqual({})
+  expect(h.held()?.follow).toBe(false)
+  expect(h.held()?.liveOffset).toBe(13)
+  expect((await live($, 10)).slice(4)).toEqual(RENDERED.slice(13, 18))
+  await scroll(-30)
+  expect(h.held()?.liveOffset).toBe(0)
+  await scroll(3)
+  expect(h.held()?.liveOffset).toBe(3)
+  expect((await live($, 10)).slice(4)).toEqual(RENDERED.slice(3, 8))
+  // The rule the hook applies: from the window's place, by the rows asked, clamped; follow goes off.
+  expect(liveScroll({ follow: true, liveOffset: 0 }, -2, 20, 5)).toEqual({ follow: false, liveOffset: 13 })
   expect(liveScroll({ follow: false, liveOffset: 6 }, 3, 14, 6)).toEqual({ follow: false, liveOffset: 8 })
   expect(liveScroll({ follow: false, liveOffset: 6 }, 30, 14, 6)).toEqual({ follow: false, liveOffset: 8 })
   expect(liveScroll({ follow: false, liveOffset: 6 }, -30, 14, 6)).toEqual({ follow: false, liveOffset: 0 })
   expect(liveScroll({ follow: true, liveOffset: 0 }, 1, 3, 6)).toEqual({ follow: false, liveOffset: 0 })
-  // A reasoning tick draws dim.
-  const view = liveTab(projection(RUN), { d412: { lines: RENDERED, bytes: 1, lastGrewAtMs: AT_10_30 } }, { selected: null, follow: true, liveOffset: 0 }, AT_10_30, 40, 90)
-  expect(view.shown?.lines.filter((line) => line.dim).map((line) => line.text)).toEqual(['⋯ thinking ~2k tok'])
+  // On another tab the scroll is the engine's.
+  expect(h.scrolls()).toBe(0)
+  await press($, 'tab-1')
+  await scroll(-2)
+  expect(h.scrolls()).toBe(1)
+  expect(h.held()?.liveOffset).toBe(3)
 })
 
-test('the Live title says quiet after 120 s without growth, ended with the outcome from the log, or died when the dispatch is gone; narrow drops the line count', async ($, on) => {
+test('the Live title says quiet after 120 s without growth, ended with the outcome from the log, or died when the dispatch is gone; 59 columns drops the line count', async ($, on) => {
   let text = RUN
   const h = liveHost(on, () => text)
   await start($)
@@ -435,23 +458,30 @@ test('the Live title says quiet after 120 s without growth, ended with the outco
   await pane($)
   await press($, 'tab-2')
   await h.clock.advance(QUIET_AFTER_MS)
-  expect((await live($))[3]).toBe('#412 code-review · ASTRA 6 · 4m 4s · 14 lines · quiet 2m 0s')
-  expect((await live($, 40, 50))[3]).toBe('#412 code-review · ASTRA 6 · 4m 4s · quiet 2m 0s')
+  expect((await live($))[3]).toBe('#412 code-review · ASTRA 6 · 4m 4s · 20 lines · quiet 2m 0s')
+  expect((await live($, 40, 60))[3]).toBe('#412 code-review · ASTRA 6 · 4m 4s · 20 lines · quiet 2m 0s')
+  expect((await live($, 40, 59))[3]).toBe('#412 code-review · ASTRA 6 · 4m 4s · quiet 2m 0s')
   // The dispatch ends well: the log's dispatch.end names the outcome and the time.
   const endedAt = h.clock.now()
   text = withDispatches([], [{ at: endedAt, by: 'dispatch', kind: 'dispatch.end', issue: 412, dispatch: 'd412', role: 'code-review', ms: 250_000, ok: true }, ...(projection(RUN).log ?? [])])
   await h.clock.advance(PERIOD_MS + 30_000)
   expect((await live($)).slice(2, 4)).toEqual(['[follow]', '#412 code-review · ASTRA 6 · ended 33s ago · ok'])
   expect((await live($)).slice(4)).toEqual(RENDERED)
-  // A failed end.
+  // A failed end names its reason; a cancel is not a failure.
   text = withDispatches([], [{ at: endedAt, by: 'dispatch', kind: 'dispatch.end', issue: 412, dispatch: 'd412', role: 'code-review', ms: 250_000, ok: false, reason: 'DISPATCH_TIMEOUT' }])
   await h.clock.advance(PERIOD_MS)
   // The log holds no start for it: the end event names the issue and the role, and no model is claimed.
-  expect((await live($))[3]).toBe('#412 code-review · ended 36s ago · failed')
+  expect((await live($))[3]).toBe('#412 code-review · ended 36s ago · DISPATCH_TIMEOUT')
+  text = withDispatches([], [{ at: endedAt, by: 'dispatch', kind: 'dispatch.end', issue: 412, dispatch: 'd412', role: 'code-review', ms: 250_000, ok: false, reason: 'cancelled' }])
+  await h.clock.advance(PERIOD_MS)
+  expect((await live($))[3]).toBe('#412 code-review · ended 39s ago · cancelled')
+  text = withDispatches([], [{ at: endedAt, by: 'dispatch', kind: 'dispatch.end', issue: 412, dispatch: 'd412', role: 'code-review', ok: false }])
+  await h.clock.advance(PERIOD_MS)
+  expect((await live($))[3]).toBe('#412 code-review · ended 42s ago · failed')
   // Gone from the dispatches with no end recorded: died, dated by the last growth; an empty log leaves only the id to name it.
   text = withDispatches([], [])
   await h.clock.advance(PERIOD_MS)
-  expect((await live($))[3]).toBe('d412 · died · last wrote 2m 39s ago')
+  expect((await live($))[3]).toBe('d412 · died · last wrote 2m 45s ago')
   expect(liveTitle(projection(withDispatches([{ ...D412, state: 'died' }], [])), 'd412', undefined, AT_10_30, false)).toBe('#412 code-review · ASTRA 6 · died')
   expect(linesText(999)).toBe('999 lines')
   expect(linesText(2140)).toBe('2.1k lines')

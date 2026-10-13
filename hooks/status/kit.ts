@@ -44,6 +44,24 @@ export const GLYPH = Object.freeze({
   dot: '·',
 })
 
+// What the text it draws may not carry (an operand of an event, a stream
+// line, an issue title: none is the mod's own): the escape sequences a
+// terminal would act on, and the controls that move or hide text.
+const STRINGS = /\u001b[\]PX^_][^\u0007\u001b]*(?:\u0007|\u001b\\)?/gu
+const CSI = /\u001b\[[0-?]*[ -/]*[@-~]/gu
+const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu
+const BIDI = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069]/gu
+
+/**
+ * The text with its control sequences removed, nothing in their place: the
+ * OSC, DCS, APC, PM and SOS strings, the CSI sequences, the C0 set but the
+ * tab, DEL, the C1 set, and the bidi and zero-width controls. Applied where
+ * a text from outside the mod reaches a Text or a toast.
+ */
+export function plain(text: string): string {
+  return text.replace(STRINGS, '').replace(CSI, '').replace(CONTROLS, '').replace(BIDI, '')
+}
+
 /** The three elements every builder draws with, as `$.ui.resolve(e)` hands them out. */
 export type Kit = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button'>
 

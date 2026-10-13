@@ -144,34 +144,52 @@ export type ProxyRequest = {
  */
 export type ProxyRead = { state: 'on' | 'up' | 'off'; requests: ProxyRequest[] }
 
-/** One dispatch's live tail as the mod keeps it (SPEC-central item 2). */
+/**
+ * One dispatch's live tail as the mod keeps it (SPEC-central item 2). Growth
+ * is the tail's chunk differing from the last one, held in the tick's own
+ * memory: the chunk's length is no test of it, since at the 64 KiB cap every
+ * tail is the same length.
+ */
 export type StatusStream = {
   /** The last 200 rendered lines of the live file, oldest first. */
   lines: string[]
-  /** The length of the last chunk tail printed. */
-  bytes: number
   /** When the chunk last differed from the one before: quiet 120 s past it while the dispatch runs. */
   lastGrewAtMs: number
 }
 
-/** A cancel awaiting its y or n (SPEC-central item 16): the dispatch, its issue and its name as the question says it. */
-export type StatusPending = { kind: 'cancel'; dispatch: string; issue: number | null; name: string }
+/**
+ * A control awaiting its y or n (SPEC-central item 16): a cancel with the
+ * dispatch, its issue and its name as the question says it; a merge or an
+ * authorize (the `label` control) with its PR.
+ */
+export type StatusPending =
+  | { kind: 'cancel'; dispatch: string; issue: number | null; name: string }
+  | { kind: 'merge'; pr: number }
+  | { kind: 'authorize'; pr: number }
+
+/**
+ * The tick's clock, written on every tick under its own key so the state
+ * below is written only when a read changed it: the band draws `checked
+ * Ns ago` and the stale mark from here.
+ */
+export type StatusTick = {
+  /** When the last successful read finished; stale past 30 s. */
+  lastOkAtMs: number | null
+  /** How long the last tick took, successful or not. */
+  lastMs: number | null
+}
 
 /** The mod's session state: the last reads and what it has already shown. */
 export type StatusState = {
   /** The last projection that parsed, kept through failed reads. */
   last: StatusProjection | null
-  /** When the last successful read finished; stale past 30 s. */
-  lastOkAtMs: number | null
-  /** How long the last tick took, successful or not. */
-  lastMs: number | null
   /** The last proxy read; null while ANTHROPIC_BASE_URL is unset (no column) or before the first tick. */
   proxy: ProxyRead | null
   /** Issues whose needs-you toast was shown in this session. */
   seenBlocked: number[]
   /** Refused controls (by file name) whose toast was shown in this session. */
   seenRefused: string[]
-  /** A cancel the operator pressed and has not confirmed or dropped. */
+  /** A control the operator pressed and has not confirmed or dropped. */
   pending: StatusPending | null
   /** True while the pane `autoloop` is open and placed: the band then draws one row. */
   paneOpen: boolean
@@ -193,6 +211,6 @@ export type StatusState = {
 
 declare module 'claude-code' {
   interface PluginState {
-    autoloop: { status: StatusState }
+    autoloop: { status: StatusState; tick: StatusTick }
   }
 }
