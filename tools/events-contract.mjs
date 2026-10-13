@@ -54,7 +54,7 @@ const CONTROL_COMMON = Object.freeze(['v', 'at', 'kind', 'by', 'session']);
 export const CONTROL_KINDS = Object.freeze({
   pause: Object.freeze([]),
   unpause: Object.freeze([]),
-  cancel: Object.freeze(['dispatch']),
+  cancel: Object.freeze(['dispatch', 'issue']),
   answer: Object.freeze(['issue', 'text']),
   merge: Object.freeze(['pr']),
   label: Object.freeze(['pr']),

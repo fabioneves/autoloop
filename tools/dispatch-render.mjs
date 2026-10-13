@@ -17,7 +17,7 @@
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -233,10 +233,29 @@ export function createCompactRenderer() {
   return { renderLine, finish };
 }
 
+// The status mod's renderer (hooks/status/render.ts) is this one line for
+// line, held on both sides to hooks/status/fixtures/stream.ts: STREAM_LINES
+// and RENDERED, one single-quoted string per line. Read here as text, since
+// the tool runs without TypeScript.
+const STREAM_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'status', 'fixtures', 'stream.ts');
+export function fixtureStrings(source, name) {
+  const match = new RegExp(`^export const ${name} = \\[\n([\\s\\S]*?)\n\\]`, 'mu').exec(source);
+  if (match === null) return null;
+  return [...match[1].matchAll(/^\s*'((?:[^'\\]|\\.)*)',?$/gmu)].map(([, body]) => body.replace(/\\(.)/gu, '$1'));
+}
+
 function selfTest() {
   const render = createRenderer();
   const feed = (value) => render(typeof value === 'string' ? value : JSON.stringify(value));
   const cases = [
+    ['the mod\'s stream fixture renders to its RENDERED lines (hooks/status/fixtures/stream.ts)', (() => {
+      const source = readFileSync(STREAM_FIXTURE, 'utf8');
+      const lines = fixtureStrings(source, 'STREAM_LINES');
+      const rendered = fixtureStrings(source, 'RENDERED');
+      if (lines === null || rendered === null || lines.length === 0 || rendered.length === 0) return false;
+      const own = createRenderer();
+      return JSON.stringify(lines.flatMap(own)) === JSON.stringify(rendered);
+    })()],
     ['first thinking tick renders', feed({
       type: 'system', subtype: 'thinking_tokens', estimated_tokens: 2400,
     }).join('') === '⋯ thinking ~2k tok'],

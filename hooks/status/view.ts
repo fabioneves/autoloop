@@ -1,10 +1,10 @@
-// The band's view (docs/specs/SPEC-status-mod.md, items 7 to 13, 16 and
-// 17): pure functions from the projection and the proxy read to column and
-// row text. They hold no `$`; register.tsx draws what they return. Status is
-// carried by a glyph and a word, so each column hands back its glyph apart
-// from its text.
+// The band's view (docs/specs/SPEC-status-mod.md, items 7 to 12, 16 and 17,
+// and release two items 8, 10 and 13): pure functions from the projection
+// and the proxy read to cell and row text. They hold no `$`; register.tsx
+// draws what they return. Status is carried by a glyph and a word, so each
+// cell hands back its glyph apart from its text.
 import type { ProxyRead, ProxyRequest, StatusProjection, StatusRound, StatusUnit, StatusWorkedUnit } from '../../types'
-import { GLYPH } from './theme'
+import { GLYPH } from './kit'
 
 /** Under this many body columns the band drops its wider texts (spec item 12). */
 export const NARROW_COLUMNS = 120
@@ -12,6 +12,16 @@ export const NARROW_COLUMNS = 120
 export function isNarrow(bodyColumns: number): boolean {
   return bodyColumns < NARROW_COLUMNS
 }
+
+/** The parts that are text, joined with ` · `. */
+export const parts = (list: (string | null | undefined)[]): string =>
+  list.filter((part): part is string => typeof part === 'string' && part !== '').join(' · ')
+
+/** `#412 · PR #702`, or `#412` without a PR. */
+export const ref = (issue: number, pr: number | null | undefined): string => (pr === null || pr === undefined ? `#${issue}` : `#${issue} · PR #${pr}`)
+
+/** The text cut to `max` characters, an ellipsis as the last. */
+export const truncate = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
 
 /**
  * A model id as a short name: tools/step.mjs `shortModel`, kept identical
@@ -42,6 +52,15 @@ export function checkedAgo(lastOkAtMs: number | null, nowMs: number): string {
   return `checked ${Math.max(0, Math.floor((nowMs - lastOkAtMs) / 1000))}s ago`
 }
 
+/** The header's marks after the age, each drawn in the warning color: `stale`, `paused`. */
+export function headerMarks(projection: StatusProjection, stale: boolean): string[] {
+  return [stale ? 'stale' : null, projection.run?.paused === true ? 'paused' : null]
+    .filter((mark): mark is string => mark !== null)
+}
+
+/** The command the hint on the right names. */
+export const HINT = '/autoloop: central'
+
 /** The round as the `--round` grammar names it: `fix 2/3`, `re-plan`, `open findings`, `full`; null without one. */
 export function roundLabel(round: StatusRound | null): string | null {
   if (round === null) return null
@@ -68,7 +87,7 @@ function modelLabel(unit: StatusWorkedUnit, models: Record<string, string>): str
 
 export type LoopColumn = {
   glyph: string
-  /** `review #412 · Session recovery`, or `Idle · last delivered #416`. */
+  /** `review #412 · PR #702 · Session recovery`, or `Idle · last delivered #416`. */
   head: string
   /** `code-review · fix 2/3 · ASTRA 6`; null while idle. */
   detail: string | null
@@ -85,9 +104,15 @@ export function loopColumn(projection: StatusProjection, narrow: boolean): LoopC
     return { glyph: GLYPH.notYet, head: last === null ? 'Idle' : `Idle · last delivered #${last}`, detail: null }
   }
   const title = narrow || unit.title === null ? '' : ` · ${unit.title}`
-  const detail = [unit.role, roundLabel(unit.round), modelLabel(unit, projection.models ?? {})]
-    .filter((part): part is string => part !== null)
-  return { glyph: GLYPH.active, head: `${unit.phase} #${unit.issue}${title}`, detail: detail.length === 0 ? null : detail.join(' · ') }
+  const detail = parts([unit.role, roundLabel(unit.round), modelLabel(unit, projection.models ?? {})])
+  return { glyph: GLYPH.active, head: `${unit.phase} ${ref(unit.issue, unit.pr)}${title}`, detail: detail === '' ? null : detail }
+}
+
+/** The spinner's word while the session owns a run with a unit (SPEC-central item 4): `autoloop · build #517 · PR #530 · implement`; null without a unit. */
+export function spinnerWord(projection: StatusProjection): string | null {
+  const unit = projection.unit ?? null
+  if (unit === null) return null
+  return parts(['autoloop', `${unit.phase} ${ref(unit.issue, unit.pr)}`, unit.role])
 }
 
 export type WorkColumn = {
@@ -104,10 +129,11 @@ export function workColumn(projection: StatusProjection): WorkColumn {
   }
 }
 
-/** The body shared over the columns in cells, the last one taking the remainder. */
+/** The body less the box's two border columns and one rule between each pair of cells, shared over the cells, the last one taking the remainder. */
 export function columnWidths(bodyColumns: number, count: number): number[] {
-  const each = Math.floor(bodyColumns / count)
-  return Array.from({ length: count }, (_, index) => (index === count - 1 ? bodyColumns - each * (count - 1) : each))
+  const inner = Math.max(count, bodyColumns - 2 - (count - 1))
+  const each = Math.floor(inner / count)
+  return Array.from({ length: count }, (_, index) => (index === count - 1 ? inner - each * (count - 1) : each))
 }
 
 /** The requests grouped by requested model, most first, ties by name; a request with no model is `unknown`. */
@@ -122,21 +148,24 @@ export function modelCounts(requests: ProxyRequest[]): { model: string; count: n
 }
 
 export type ProxyColumn = {
-  on: boolean
-  word: 'ON' | 'OFF'
-  /** After the word: ` · 3 active requests`, ` · 0 requests`, or narrow ` · 3 req`. */
+  state: ProxyRead['state']
+  /** `●` ON, `◐` UP, `○` OFF. */
+  glyph: string
+  word: 'ON' | 'UP' | 'OFF'
+  /** After the word: ` · 3 requests` (narrow ` · 3 req`), ` · no status`, or nothing. */
   tail: string
-  /** `OPUS 5.5 ×2`, one per model; none while OFF or narrow. */
+  /** `OPUS 5.5 ×2`, one per model; none unless ON and not narrow. */
   rows: string[]
 }
 
+/** The three states of release two, item 10: `● ON · n requests`, `◐ UP · no status`, `○ OFF`. */
 export function proxyColumn(proxy: ProxyRead, narrow: boolean): ProxyColumn {
-  const count = proxy.on ? proxy.requests.length : 0
-  if (narrow) return { on: proxy.on, word: proxy.on ? 'ON' : 'OFF', tail: ` · ${count} req`, rows: [] }
-  if (!proxy.on) return { on: false, word: 'OFF', tail: ' · 0 requests', rows: [] }
+  if (proxy.state === 'off') return { state: 'off', glyph: GLYPH.notYet, word: 'OFF', tail: '', rows: [] }
+  if (proxy.state === 'up') return { state: 'up', glyph: GLYPH.half, word: 'UP', tail: ' · no status', rows: [] }
+  const count = proxy.requests.length
   return {
-    on: true, word: 'ON', tail: ` · ${count} active requests`,
-    rows: modelCounts(proxy.requests).map(({ model, count: n }) => `${model} ×${n}`),
+    state: 'on', glyph: GLYPH.active, word: 'ON', tail: narrow ? ` · ${count} req` : ` · ${count} requests`,
+    rows: narrow ? [] : modelCounts(proxy.requests).map(({ model, count: n }) => `${model} ×${n}`),
   }
 }
 
@@ -164,6 +193,12 @@ export function prToAuthorize(unit: StatusUnit): number | null {
   return unit.needsYou?.kind === 'authorize' ? unit.pr : null
 }
 
+/** What answers a unit that needs a human: `answer on #N`, or `merge or label PR #M` for an authorization with its PR. */
+export function answerText(unit: StatusUnit): string {
+  const pr = prToAuthorize(unit)
+  return pr === null ? `answer on #${unit.issue}` : `merge or label PR #${pr}`
+}
+
 export type NeedsYouRow = {
   issue: number
   text: string
@@ -177,15 +212,12 @@ export type NeedsYouRow = {
 export function needsYouRow(projection: StatusProjection): NeedsYouRow | null {
   const [oldest, ...rest] = blockedUnits(projection)
   if (oldest === undefined) return null
-  const pr = prToAuthorize(oldest)
-  const right = pr === null ? `answer on #${oldest.issue}` : `merge or label PR #${pr}`
-  return { issue: oldest.issue, text: oldest.needsYou.text, right, more: rest.length }
+  return { issue: oldest.issue, text: oldest.needsYou.text, right: answerText(oldest), more: rest.length }
 }
 
 const TOAST_TEXT_MAX = 60
 
 /** The toast for a unit newly blocked (spec item 16): `#N needs you: <short>`. */
 export function toastText(unit: { issue: number; text: string }): string {
-  const short = unit.text.length > TOAST_TEXT_MAX ? `${unit.text.slice(0, TOAST_TEXT_MAX - 1)}…` : unit.text
-  return `#${unit.issue} needs you: ${short}`
+  return `#${unit.issue} needs you: ${truncate(unit.text, TOAST_TEXT_MAX)}`
 }

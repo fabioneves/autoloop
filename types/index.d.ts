@@ -74,6 +74,16 @@ export type StatusEvent = {
   paths?: string[]
 }
 
+/** A control the loop refused, as the producer lists it from `control/refused/` (SPEC-events item 9). */
+export type StatusRefused = {
+  /** The control file's name, the key the mod toasts it once by. */
+  name: string
+  kind: string | null
+  pr: number | null
+  issue: number | null
+  reason: string
+}
+
 /** A dispatch with a start and no end: running while its pid lives, died when it is gone. */
 export type StatusDispatch = {
   dispatch: string
@@ -98,6 +108,8 @@ export type StatusProjection = {
   enabled?: boolean
   run?: {
     openedAtMs: number
+    /** True while the operator's pause control holds the next selection. */
+    paused: boolean
     parkedUntil: string | null
     closedAt: string | null
     snapshotScannedAt: string | null
@@ -111,6 +123,7 @@ export type StatusProjection = {
   /** The run's last 50 events, newest first. */
   log?: StatusEvent[]
   dispatches?: StatusDispatch[]
+  controls?: { refused: StatusRefused[] }
 }
 
 /** One active request as the proxy's `GET /status` lists it (its snake_case fields, read leniently). */
@@ -124,28 +137,80 @@ export type ProxyRequest = {
 }
 
 /**
- * The proxy read: ON with the active requests, or OFF. OFF is a fact, not a
- * stale value: a failed fetch, a non-200 or a body that does not parse drops
- * the last ON read.
+ * The proxy read, three states (SPEC-status-mod release two, item 10): `on`
+ * is a 200 with a parsed body and carries the active requests; `up` is any
+ * other answer (a 404, a body that does not parse); `off` is no answer within
+ * 2 s. Each is a fact, not a stale value: a read drops the last one.
  */
-export type ProxyRead = { on: true; requests: ProxyRequest[] } | { on: false }
+export type ProxyRead = { state: 'on' | 'up' | 'off'; requests: ProxyRequest[] }
+
+/**
+ * One dispatch's live tail as the mod keeps it (SPEC-central item 2). Growth
+ * is the tail's chunk differing from the last one, held in the tick's own
+ * memory: the chunk's length is no test of it, since at the 64 KiB cap every
+ * tail is the same length.
+ */
+export type StatusStream = {
+  /** The last 200 rendered lines of the live file, oldest first. */
+  lines: string[]
+  /** When the chunk last differed from the one before: quiet 120 s past it while the dispatch runs. */
+  lastGrewAtMs: number
+}
+
+/**
+ * A control awaiting its y or n (SPEC-central item 16): a cancel with the
+ * dispatch, its issue and its name as the question says it; a merge or an
+ * authorize (the `label` control) with its PR.
+ */
+export type StatusPending =
+  | { kind: 'cancel'; dispatch: string; issue: number | null; name: string }
+  | { kind: 'merge'; pr: number }
+  | { kind: 'authorize'; pr: number }
+
+/**
+ * The tick's clock, written on every tick under its own key so the state
+ * below is written only when a read changed it: the band draws `checked
+ * Ns ago` and the stale mark from here.
+ */
+export type StatusTick = {
+  /** When the last successful read finished; stale past 30 s. */
+  lastOkAtMs: number | null
+  /** How long the last tick took, successful or not. */
+  lastMs: number | null
+}
 
 /** The mod's session state: the last reads and what it has already shown. */
 export type StatusState = {
   /** The last projection that parsed, kept through failed reads. */
   last: StatusProjection | null
-  /** When the last successful read finished; stale past 30 s. */
-  lastOkAtMs: number | null
-  /** How long the last tick took, successful or not. */
-  lastMs: number | null
   /** The last proxy read; null while ANTHROPIC_BASE_URL is unset (no column) or before the first tick. */
   proxy: ProxyRead | null
   /** Issues whose needs-you toast was shown in this session. */
   seenBlocked: number[]
+  /** Refused controls (by file name) whose toast was shown in this session. */
+  seenRefused: string[]
+  /** A control the operator pressed and has not confirmed or dropped. */
+  pending: StatusPending | null
+  /** True while the pane `autoloop` is open and placed: the band then draws one row. */
+  paneOpen: boolean
+  /** True once the pane was opened unasked in this session (SPEC-central item 13): never twice. */
+  autoOpened: boolean
+  /** The live tails by dispatch id: every running dispatch's, and the last ended one's until session.end. */
+  streams: Record<string, StatusStream>
+  /** The central pane's tab, kept across a redraw (SPEC-central item 8). */
+  tab: 'run' | 'live' | 'units' | 'log'
+  /** The Log tab's filter. */
+  logFilter: 'all' | 'steps' | 'dispatches' | 'needsYou' | 'controls'
+  /** The Live tab's dispatch, by id; null means the first running one. */
+  selected: string | null
+  /** The Live tab follows the stream's end; a scroll turns it off. */
+  follow: boolean
+  /** The first stream line the Live tab shows while not following. */
+  liveOffset: number
 }
 
 declare module 'claude-code' {
   interface PluginState {
-    autoloop: { status: StatusState }
+    autoloop: { status: StatusState; tick: StatusTick }
   }
 }

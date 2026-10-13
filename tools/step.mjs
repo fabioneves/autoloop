@@ -698,7 +698,7 @@ export const EVENTS_READ_LIMIT = 5000;
 const OWN_PR_KINDS = new Set(['step', 'deliver', 'merge', 'label']);
 // `recent` is every event read, `events` the run's: a dispatch inherited from
 // an ended session started under the old run id and ends under the new one.
-export function eventFacts(events, { alive = processAlive, recent = events } = {}) {
+export function eventFacts(events, { alive = processAlive, recent = events, logLimit = LOG_LIMIT } = {}) {
   const prByIssue = new Map();
   for (const event of events) {
     if (OWN_PR_KINDS.has(event.kind) && Number.isSafeInteger(event.issue) && Number.isSafeInteger(event.pr)) prByIssue.set(event.issue, event.pr);
@@ -730,7 +730,7 @@ export function eventFacts(events, { alive = processAlive, recent = events } = {
       };
     });
   };
-  const log = events.slice(-LOG_LIMIT).reverse().map((event) => {
+  const log = events.slice(-logLimit).reverse().map((event) => {
     const { v, run, ...rest } = withPr(event);
     return rest;
   });
@@ -742,6 +742,7 @@ export function statusProjection({
   live = loopRunIsLive, markers = ownRunMarkers,
   owned = (id) => ownedRun({ sessionId: id, directory: latchDirectory(home) }),
   alive = processAlive,
+  logLimit = LOG_LIMIT,
 }) {
   const none = { schema: STATUS_SCHEMA, owned: false };
   // SPEC-session-ownership: this process's open latch naming the session, and
@@ -762,7 +763,20 @@ export function statusProjection({
   const recorded = readEvents(commonDir, { limit: EVENTS_READ_LIMIT }).events;
   const facts = eventFacts(runId === 'unknown'
     ? recorded.filter((event) => openedAtMs === null || event.at >= openedAtMs)
-    : recorded.filter((event) => event.run === runId), { alive, recent: recorded });
+    : recorded.filter((event) => event.run === runId), { alive, recent: recorded, logLimit });
+  // The controls the loop refused in this run: the pane toasts each once. A
+  // refusal from before the run opened (the directory keeps 7 days) is an
+  // earlier run's; a record without `at` is dated by its file.
+  const refusedDir = join(dir, 'control', 'refused');
+  const refusedAt = (name, record) => {
+    if (Number.isSafeInteger(record.at)) return record.at;
+    try { return statSync(join(refusedDir, name)).mtimeMs; } catch { return 0; }
+  };
+  const refusedControls = existsSync(refusedDir) ? readdirSync(refusedDir).sort().map((name) => {
+    const record = readJson(join(refusedDir, name), null);
+    if (record === null || (openedAtMs !== null && refusedAt(name, record) < openedAtMs)) return null;
+    return { name, kind: record.kind ?? null, pr: record.pr ?? null, issue: record.issue ?? null, reason: record.reason ?? 'refused' };
+  }).filter((entry) => entry !== null).slice(-20) : [];
   const spoken = authority.authority !== 'none';
   const titleOf = (issue) => (spoken ? snapshot.sections.openIssues.items.find((item) => item.number === issue)?.title ?? null : null);
   const pinned = readPinnedModels(join(dir, 'models.json'));
@@ -803,6 +817,7 @@ export function statusProjection({
     enabled: statusBandEnabled(resolved?.ok ? resolved.config : null),
     run: {
       openedAtMs,
+      paused: existsSync(join(dir, 'control', 'paused')),
       parkedUntil: park?.until ?? null,
       // Null while owned: ownership needs an open marker (`live`), and a
       // close stamps every marker. Kept in the shape for a later producer.
@@ -829,6 +844,7 @@ export function statusProjection({
     models,
     log: facts.log,
     dispatches: facts.dispatches,
+    controls: { refused: refusedControls },
   };
 }
 
@@ -2319,6 +2335,10 @@ export function statusFixture(at) {
   // #416 delivered as PR #700, #417 blocked; one earlier run's event, stamped
   // R0, that the projection leaves out.
   const livePid = 4242;
+  // A second dispatch, #421's fix round on pid 4300 (alive too), written on request.
+  const secondPid = 4300;
+  const second = { at: at(9, 31), run: 'R1', by: 'dispatch', kind: 'dispatch.start', issue: 421, dispatch: 'd421', role: 'fix', model: 'claude-opus-5-5',
+    liveFile: '/tmp/live/421-fix-r1.jsonl', pid: secondPid };
   const events = [
     { at: at(8, 20), run: 'R0', by: 'step', kind: 'step', issue: 425, step: '05-implement', model: 'claude-opus-5-5' },
     { at: at(8, 30), run: 'R1', by: 'prime', kind: 'run.start' },
@@ -2334,7 +2354,19 @@ export function statusFixture(at) {
     { at: at(10, 28), run: 'R1', by: 'dispatch', kind: 'dispatch.start', issue: 412, dispatch: 'd412', role: 'code-review', model: 'gpt-6-astra',
       liveFile: '/tmp/live/412-code-review-r2.jsonl', pid: livePid },
   ];
-  const write = (shown = runIssues) => {
+  // `paused` lays the pause marker, `refused` one refused merge control from
+  // this run, `secondDispatch` #421's running fix dispatch beside #412's.
+  const write = (shown = runIssues, { paused = false, refused = false, secondDispatch = false } = {}) => {
+    rmSync(join(autoloop, 'control'), { recursive: true, force: true });
+    if (paused) {
+      mkdirSync(join(autoloop, 'control'), { recursive: true });
+      writeFileSync(join(autoloop, 'control', 'paused'), '');
+    }
+    if (refused) {
+      mkdirSync(join(autoloop, 'control', 'refused'), { recursive: true });
+      writeFileSync(join(autoloop, 'control', 'refused', `${String(at(10, 20)).padStart(13, '0')}-merge.json`),
+        JSON.stringify({ v: 1, at: at(10, 20), kind: 'merge', by: 'ui', session: 'S-1', pr: 700, reason: 'merge gate: checks pending' }));
+    }
     rmSync(join(autoloop, 'steps'), { recursive: true, force: true });
     mkdirSync(join(autoloop, 'steps'), { recursive: true });
     for (const record of records.filter((entry) => shown.includes(entry.issue))) {
@@ -2342,7 +2374,8 @@ export function statusFixture(at) {
     }
     rmSync(join(autoloop, 'events.jsonl'), { force: true });
     setRunId(join(root, '.git'), 'R1');
-    for (const event of events.filter((entry) => entry.issue === undefined || shown.includes(entry.issue))) {
+    const written = [...events, ...(secondDispatch ? [second] : [])].sort((left, right) => left.at - right.at);
+    for (const event of written.filter((entry) => entry.issue === undefined || shown.includes(entry.issue))) {
       appendEvent(join(root, '.git'), { v: 1, ...event });
     }
     const blocked = issues.filter((item) => item.labels.includes('loop-blocked') && shown.includes(item.number));
@@ -2350,7 +2383,7 @@ export function statusFixture(at) {
       JSON.stringify(createSnapshot({ scannedAt, sections: { ...sections, blockedIssues: completeSection(blocked) } })));
   };
   const project = (options = {}) => statusProjection({ root, run, nowMs, sessionId: 'S-1', home, live: () => true, markers,
-    alive: (pid) => pid === livePid, ...options });
+    alive: (pid) => pid === livePid || pid === secondPid, ...options });
   const files = () => [...readdirSync(join(autoloop, 'steps')).sort().map((name) => readFileSync(join(autoloop, 'steps', name), 'utf8')),
     readFileSync(join(autoloop, 'prime', 'a.snapshot.json'), 'utf8'), String(existsSync(join(autoloop, QUEUE_COUNT)))].join('\n');
   const dispose = () => rmSync(scratch, { recursive: true, force: true });
@@ -2399,10 +2432,11 @@ function projectionChecks(at) {
     const owned = project();
     const unchanged = files() === before && calls.every((call) => !call.startsWith('gh'));
     results.push(['an owned run projects the spec keys, its run facts, the phase list and the pinned models',
-      Object.keys(owned).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models,log,dispatches'
+      Object.keys(owned).join(',') === 'schema,owned,enabled,run,phases,unit,units,counts,models,log,dispatches,controls'
         && owned.owned === true && owned.enabled === true
-        && JSON.stringify(owned.run) === JSON.stringify({ openedAtMs: at(8, 30), parkedUntil: new Date(at(11, 0)).toISOString(),
-          closedAt: null, snapshotScannedAt: scannedAt, snapshotAuthority: 'current' })
+        && JSON.stringify(owned.run) === JSON.stringify({ openedAtMs: at(8, 30), paused: false,
+          parkedUntil: new Date(at(11, 0)).toISOString(), closedAt: null, snapshotScannedAt: scannedAt, snapshotAuthority: 'current' })
+        && JSON.stringify(owned.controls) === '{"refused":[]}'
         && JSON.stringify(owned.phases) === JSON.stringify(PHASE_ORDER)
         && JSON.stringify(owned.models) === JSON.stringify({ plan: 'astra[1m]', 'plan-review': 'fable[1m]', implement: 'claude-opus-5-5',
           fix: 'claude-opus-5-5', simplify: 'fable[1m]', 'diff-review': 'astra[1m]', 'code-review': 'gpt-6-astra', 'doubt-review': 'astra[1m]' })]);
@@ -2430,6 +2464,17 @@ function projectionChecks(at) {
       JSON.stringify(owned.dispatches) === JSON.stringify([{ dispatch: 'd412', issue: 412, pr: null, role: 'code-review', model: 'gpt-6-astra',
         liveFile: '/tmp/live/412-code-review-r2.jsonl', pid: 4242, startedAtMs: at(10, 28), state: 'running' }])
         && project({ alive: () => false }).dispatches[0].state === 'died']);
+    results.push(['write takes a paused marker, one refused control and a second running dispatch for #421 (status.mjs --fixtures)',
+      (() => {
+        write(runIssues, { paused: true, refused: true, secondDispatch: true });
+        const marked = project();
+        write();
+        const plain = project();
+        return marked.run.paused === true && marked.controls.refused.length === 1 && marked.controls.refused[0].kind === 'merge'
+          && marked.dispatches.length === 2 && marked.dispatches.every((entry) => entry.state === 'running')
+          && marked.dispatches.some((entry) => entry.dispatch === 'd421' && entry.issue === 421 && entry.role === 'fix')
+          && plain.run.paused === false && plain.controls.refused.length === 0 && plain.dispatches.length === 1;
+      })()]);
     results.push(['a unit takes its PR from the deliver event when the record and the scan have none; a waited-on PR is never the unit\'s',
       unit(owned, 416)?.pr === 700 && unit(owned, 413)?.pr === 702 && unit(owned, 412)?.pr === null && unit(owned, 415)?.pr === null]);
     results.push(['a dispatch started under an earlier run id and still open is listed; one ended under the new id is not',
@@ -2464,6 +2509,34 @@ function projectionChecks(at) {
         return retried.stepsOf(1)[0].returnedAtMs === null && retried.dispatches.length === 1 && retried.dispatches[0].state === 'died'
           && settled.stepsOf(1)[0].returnedAtMs === 300 && settled.stepsOf(1)[1].returnedAtMs === null
           && many.log.length === 50 && many.log[0].at === 59;
+      })()]);
+    results.push(['the log length is the caller\'s, a paused marker and a refused control are reported',
+      (() => {
+        const common = join(root, '.git');
+        const two = project({ logLimit: 2 });
+        mkdirSync(join(common, 'autoloop', 'control', 'refused'), { recursive: true });
+        writeFileSync(join(common, 'autoloop', 'control', 'paused'), '');
+        writeFileSync(join(common, 'autoloop', 'control', 'refused', '0000000000005-merge-x.json'),
+          JSON.stringify({ v: 1, at: at(10, 0), kind: 'merge', by: 'ui', session: 'S-1', pr: 99, reason: 'merge gate: base moved' }));
+        const paused = project();
+        rmSync(join(common, 'autoloop', 'control'), { recursive: true, force: true });
+        return two.log.length === 2 && two.log[0].at === at(10, 28) && paused.run.paused === true
+          && JSON.stringify(paused.controls.refused) === '[{"name":"0000000000005-merge-x.json","kind":"merge","pr":99,"issue":null,"reason":"merge gate: base moved"}]';
+      })()]);
+    results.push(['a refusal from before the run opened is not reported: only those refused since openedAtMs',
+      (() => {
+        const refusedDir = join(root, '.git', 'autoloop', 'control', 'refused');
+        mkdirSync(refusedDir, { recursive: true });
+        // The run opened at 8:30: a refusal at 8:00 is an earlier run's, one at 9:00 is this run's.
+        writeFileSync(join(refusedDir, `${String(at(8, 0)).padStart(13, '0')}-merge.json`),
+          JSON.stringify({ v: 1, at: at(8, 0), kind: 'merge', by: 'ui', session: 'S-1', pr: 98, reason: 'old' }));
+        writeFileSync(join(refusedDir, `${String(at(9, 0)).padStart(13, '0')}-merge.json`),
+          JSON.stringify({ v: 1, at: at(9, 0), kind: 'merge', by: 'ui', session: 'S-1', pr: 99, reason: 'new' }));
+        // A record without `at` (an unreadable control's refusal) is dated by its file's mtime, here after the open.
+        writeFileSync(join(refusedDir, 'zzz-garbage.json'), JSON.stringify({ name: 'zzz-garbage.json', reason: 'unreadable: x' }));
+        const seen = project().controls.refused;
+        rmSync(join(root, '.git', 'autoloop', 'control'), { recursive: true, force: true });
+        return seen.length === 2 && seen[0].pr === 99 && seen[0].reason === 'new' && seen[1].name === 'zzz-garbage.json';
       })()]);
     results.push(['without a run id the run\'s events are the ones since the marker opened; without a file, empty facts',
       (() => {

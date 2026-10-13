@@ -3,7 +3,43 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
-## [0.71.0] - 2026-10-12
+## [0.72.0] - 2026-10-13
+
+### Added
+
+- The central (`docs/specs/SPEC-central.md`): one pane, `/autoloop`, with four tabs. Run (now,
+  the unit's timeline with models and times, needs you, waiting, delivered, proxy requests),
+  Live (the stream of each running dispatch, tailed every second from its live file, follow or
+  scroll), Units (every unit with its PR, disposition and last step) and Log (the autoloop log,
+  every event with its timestamp, newest first, filtered by kind). Opened unasked once per
+  session under the fullscreen renderer.
+- Controls from the pane: pause and resume (`p`), cancel a dispatch (`x`, then `y`), answer a
+  block or a decision (an input under the row), merge or authorize a delivered pull request. Each
+  is one control file written by `status.mjs --control` for the owning session and one queued
+  prompt, `autoloop: control`, that wakes a parked session; a refused control is toasted with its
+  reason.
+- The spinner names the loop's state (`autoloop · review #412 · PR #702 · code-review`), and
+  `/autoloop` draws the band's card in the transcript.
+- `status.mjs --json --log <n>` sets the log length; the projection reports `run.paused` and
+  `controls.refused`.
+
+### Changed
+
+- The band is one bordered card with labelled cells (`LOOP`, `WORK`, `PROXY`), the pull request
+  beside the issue, and a highlighted needs-you strip; one row while the pane is open. The
+  `expand` button and its `e` hint are gone (a band hotkey never fires from the prompt).
+- The proxy column has three states: `● ON · n requests`, `◐ UP · no status` (the port answers
+  without a status endpoint), `○ OFF` (no answer). It read OFF for a running proxy before.
+- The pane's drawing and the dispatch stream renderer live in the mod (`draw.tsx`,
+  `render.ts`); the host refuses a mod import of a tool. The renderer's parity with
+  `dispatch-render.mjs` is held by the tool's self-test over one shared stream fixture.
+- Every text the mod draws from a stream, an event or an issue title passes `plain()`: escape
+  sequences, control characters and bidi overrides are removed before they reach the terminal.
+- A `cancel` control names its issue; refusals are listed for the current run only; a merge or
+  an authorize asks `yes` or `no` as a cancel does; a second press while a control is in flight
+  is dropped; a live file is tailed only by an absolute path, after `--`.
+
+## [0.71.0] - 2026-10-13
 
 ### Added
 

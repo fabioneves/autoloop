@@ -122,7 +122,11 @@ matters most: today the transcript shows a text card and then nothing.
       `answer` control with the issue and the text.
     - `merge` and `authorize`: buttons on a Delivered row; `merge` is shown only when the
       projection says the PR is mergeable by the loop's own gate (`disposition: delivered`,
-      no `human:authorize`); `authorize` only when it carries the label.
+      no `human:authorize`); `authorize` only when it carries the label. Each asks once as a
+      cancel does (`merge PR #700? y/n`), since the control is not undone.
+    A pending question the run outgrew (its dispatch ended, its PR no longer offers the
+    control) is dropped at the next tick. A repeat of a control while its producer runs is
+    dropped.
     A control the loop refuses (`control/refused/`) is shown as a toast with the reason at the
     next tick.
 
@@ -155,7 +159,8 @@ node tools/verify.mjs --plugin-root .
   `pane.ts` removed; `fixtures/`: projection fixtures from `status.mjs --fixtures` and a
   synthetic stream.
 - `types/index.d.ts`: `PluginState` gains `streams`, `tab`, `follow`, `selected`, `pending`
-  (a cancel awaiting its y/n).
+  (a cancel, a merge or an authorize awaiting its y/n), and the `tick` key (the tick's clock,
+  written every tick so `status` is written only when a read changed it).
 - `README.md` `## Status band` becomes `## Central`; `CHANGELOG.md`; `skills/dev/SKILL.md`
   unchanged (the loop does not learn about the UI).
 
