@@ -217,6 +217,10 @@ function ownerState(owner, observe = () => {}) {
     return start === null ? 'unknown' : start === owner.start ? 'alive' : 'dead';
   } catch { return 'unknown'; }
 }
+export function processIdentityState(identity) {
+  requireCondition(validProcess(identity), 'INVALID_INPUT', 'The process identity is invalid.');
+  return ownerState(identity);
+}
 function safeValues(value) {
   if (typeof value === 'string') return !/sk-ant-[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+|-----BEGIN .*PRIVATE KEY-----/u.test(value);
   if (value === null || typeof value === 'boolean') return true;
@@ -599,14 +603,17 @@ function writeTransition(lease, binding, expectedRevision, transition) {
   validatePersistentTransition(binding, current, updated);
   for (const worker of current.workers) {
     const kept = updated.workers.find((item) => item.attemptId === worker.attemptId);
-    requireCondition(kept !== undefined || ownerState(worker.process) === 'dead', 'OWNER_UNVERIFIED', 'A live or uncertain worker binding cannot be erased.');
+    requireCondition(kept !== undefined || boundGroupState(worker) === 'empty', 'OWNER_UNVERIFIED', 'A live or uncertain worker binding cannot be erased.');
+    if (current.desiredState === 'stopped' && current.stopMode === 'immediate' && worker.cancelledByOperator) {
+      requireCondition(kept !== undefined, 'STATE_INVALID', 'Immediate stop must retain its complete target set.');
+    }
     if (kept) {
       requireCondition(canonicalJson({ ...kept, cancelledByOperator: worker.cancelledByOperator }) === canonicalJson(worker)
         && (!worker.cancelledByOperator || kept.cancelledByOperator), 'STATE_INVALID', 'A worker binding changed identity or cancellation.');
     }
   }
   requireCondition(!(current.state === 'recovering' && ['running', 'paused'].includes(updated.state)
-    && (unsettledEffects(updated) || updated.workers.some((worker) => worker.generation < updated.generation && ownerState(worker.process) !== 'dead'))),
+    && (unsettledEffects(updated) || updated.workers.some((worker) => worker.generation < updated.generation && boundGroupState(worker) !== 'empty'))),
     'RECOVERY_REQUIRED', 'Uncertain effects and workers must be reconciled first.');
   // Recheck after the reducer and before publication; nested writes are refused.
   heldLease(lease, true);
@@ -650,9 +657,21 @@ function unsettledEffects(checkpoint) {
 }
 
 function retainedWorkers(checkpoint) {
-  return checkpoint.workers.some((worker) => ownerState(worker.process) !== 'dead');
+  return checkpoint.workers.some((worker) => boundGroupState(worker) !== 'empty');
 }
-function processGroupOf(pid) {
+export function boundGroupState(worker) {
+  requireCondition(validWorker(worker), 'INVALID_INPUT', 'The worker binding is invalid.');
+  const leader = ownerState(worker.groupLeader);
+  const processState = ownerState(worker.process);
+  if (leader === 'dead' && processState === 'dead') {
+    try { process.kill(-worker.pgid, 0); }
+    catch (error) { if (error.code === 'ESRCH') return 'empty'; }
+  }
+  if (leader !== 'alive' || processState !== 'alive') return 'unknown';
+  return processGroupOf(worker.groupLeader.pid) === worker.pgid && processGroupOf(worker.process.pid) === worker.pgid
+    && worker.groupLeader.pid === worker.pgid ? 'alive' : 'unknown';
+}
+export function processGroupOf(pid) {
   try {
     if (process.platform === 'linux') {
       const stat = readRegularFile(`/proc/${pid}/stat`);
@@ -984,6 +1003,8 @@ export function completeControl(lease, requestId, result, transition = (value) =
   const outcome = outcomeFor(request, result.status, result.code, current.revision + 1, result.operationId);
   const updated = commitTransition(lease, current.revision, (value) => {
     const changed = transition(value);
+    if (request.request.kind === 'stop-now' && result.status === 'applied') requireCondition(changed.desiredState === 'stopped'
+      && changed.stopMode === 'immediate' && cancellationGroupsExited(changed), 'OUTCOME_UNKNOWN', 'Immediate stop has unconfirmed target groups.');
     return { ...changed, requests: { ...changed.requests, [requestId]: { ...request, status: result.status, outcome } } };
   });
   publishOutcome(binding.repository, outcome, binding.observe);
@@ -1048,8 +1069,10 @@ function validatePersistentTransition(binding, current, updated) {
     requireCondition(kept.attempt === effect.attempt || (kept.attempt === effect.attempt + 1 && kept.phase === 'prepared'
       && kept.error?.code === 'NOT_APPLIED' && kept.receipt !== null), 'STATE_INVALID', 'A retry needs verified not-applied evidence.');
     if (kept.phase !== effect.phase) {
-      const next = { prepared: ['in-flight'], 'in-flight': ['unknown', 'prepared', 'succeeded', 'failed'],
+      const next = { prepared: ['in-flight', 'succeeded'], 'in-flight': ['unknown', 'prepared', 'succeeded', 'failed'],
         unknown: ['prepared', 'succeeded', 'failed'], succeeded: [], failed: [] };
+      if (effect.phase === 'prepared' && kept.phase === 'succeeded') requireCondition(preparedCancellationExited(current, effect)
+        && validAbsentGroupReceipt(current, effect, kept.receipt), 'STATE_INVALID', 'Only confirmed absent cancellation targets can settle before execution.');
       requireCondition(next[effect.phase].includes(kept.phase), 'STATE_INVALID', 'The effect phase transition is invalid.');
       if (kept.phase === 'prepared') requireCondition(kept.attempt === effect.attempt + 1 && kept.receipt !== null
         && kept.error?.code === 'NOT_APPLIED', 'STATE_INVALID', 'An uncertain effect cannot reset without readback.');
@@ -1059,6 +1082,19 @@ function validatePersistentTransition(binding, current, updated) {
     if (!current.outbox[id]) requireCondition(effect.phase === 'prepared' && effect.attempt === 1 && effect.receipt === null && effect.error === null,
       'STATE_INVALID', 'An effect must be prepared before execution.');
   }
+}
+function explicitRecoveryCancellation(checkpoint, effect) {
+  if (['starting', 'stopped', 'failed'].includes(checkpoint.state) || checkpoint.desiredState !== 'stopped'
+    || checkpoint.stopMode !== 'immediate' || effect.kind !== 'process.cancel' || effect.attempt !== 1
+    || effect.target.type !== 'process' || effect.requestId === null) return false;
+  const record = checkpoint.requests[effect.requestId];
+  if (!record || record.status !== 'processing' || record.claimedGeneration !== checkpoint.generation
+    || record.request.runId !== checkpoint.runId || record.request.kind !== 'stop-now'
+    || record.request.target.type !== 'run' || record.request.target.generation !== checkpoint.generation) return false;
+  const worker = checkpoint.workers.find((binding) => binding.attemptId === effect.target.attemptId);
+  if (!worker || !checkpoint.workers.every((binding) => binding.cancelledByOperator)
+    || effect.unitId !== worker.unitId || effect.unitGeneration !== worker.unitGeneration) return false;
+  return boundGroupState(worker) === 'alive';
 }
 export function prepareEffect(lease, expectedRevision, effect) {
   const binding = heldLease(lease);
@@ -1071,8 +1107,8 @@ export function prepareEffect(lease, expectedRevision, effect) {
     requireCondition(canonicalJson(effectIntent(previous)) === canonicalJson(effectIntent(effect)), 'EFFECT_ID_CONFLICT', 'The operation ID has another intent.');
     return current;
   }
-  requireCondition(!['starting', 'recovering'].includes(current.state) && !Object.values(current.outbox).some((item) => item.phase === 'unknown'),
-    'RECOVERY_REQUIRED', 'Recover uncertain effects before preparing new work.');
+  requireCondition((!['starting', 'recovering'].includes(current.state) && !Object.values(current.outbox).some((item) => item.phase === 'unknown'))
+    || explicitRecoveryCancellation(current, effect), 'RECOVERY_REQUIRED', 'Recover uncertain effects before preparing new work.');
   requireCondition(!['stopped', 'failed'].includes(current.state)
     && !(current.desiredState === 'stopped' && effect.kind === 'process.start'), 'RUN_ACTIVE', 'This run cannot start new work.');
   if (effect.requestId !== null) requireCondition(['processing', 'unknown'].includes(current.requests[effect.requestId]?.status),
@@ -1088,12 +1124,37 @@ export function markEffectInFlight(lease, operationId) {
   requireCondition(effect, 'EFFECT_NOT_FOUND', 'The effect does not exist.');
   requireCondition(effect.phase !== 'unknown', 'OUTCOME_UNKNOWN', 'Reconcile this effect before retry.');
   requireCondition(effect.phase === 'prepared', 'EFFECT_SETTLED', 'The effect cannot start again.');
-  requireCondition(!['starting', 'recovering', 'stopped', 'failed'].includes(current.state)
-    && !Object.values(current.outbox).some((item) => item.phase === 'unknown'), 'RECOVERY_REQUIRED', 'Reconcile uncertain work first.');
+  if (effect.kind === 'process.cancel') {
+    const worker = current.workers.find((value) => value.attemptId === effect.target.attemptId);
+    requireCondition(worker && worker.unitId === effect.unitId && worker.unitGeneration === effect.unitGeneration
+      && boundGroupState(worker) === 'alive', 'OWNER_UNVERIFIED', 'The cancellation target cannot be verified.');
+  }
+  requireCondition((!['starting', 'recovering', 'stopped', 'failed'].includes(current.state)
+    && !Object.values(current.outbox).some((item) => item.phase === 'unknown')) || explicitRecoveryCancellation(current, effect),
+  'RECOVERY_REQUIRED', 'Reconcile uncertain work first.');
   requireCondition(!(current.desiredState === 'stopped' && effect.kind === 'process.start'), 'RUN_ACTIVE', 'Stopped work cannot restart automatically.');
   assertPinsLive(binding.repository, readPins(binding.repository, current.runId));
   return commitTransition(lease, current.revision, (value) => ({ ...value, outbox: { ...value.outbox,
     [operationId]: { ...effect, phase: 'in-flight', receipt: null, error: null } } }));
+}
+function preparedCancellationExited(checkpoint, effect) {
+  if (effect.kind !== 'process.cancel' || effect.phase !== 'prepared' || effect.attempt !== 1
+    || effect.runId !== checkpoint.runId || effect.requestId === null || effect.target.type !== 'process'
+    || checkpoint.desiredState !== 'stopped' || checkpoint.stopMode !== 'immediate') return false;
+  const request = checkpoint.requests[effect.requestId];
+  const worker = checkpoint.workers.find((value) => value.attemptId === effect.target.attemptId);
+  return request && ['processing', 'unknown'].includes(request.status) && request.request.runId === effect.runId
+    && request.request.kind === 'stop-now' && request.request.target.type === 'run'
+    && request.request.target.generation === request.claimedGeneration && worker && worker.cancelledByOperator
+    && worker.unitId === effect.unitId && worker.unitGeneration === effect.unitGeneration && boundGroupState(worker) === 'empty';
+}
+function validAbsentGroupReceipt(checkpoint, effect, receipt) {
+  const worker = checkpoint.workers.find((value) => value.attemptId === effect.target.attemptId);
+  return worker && receipt?.externalId === worker.attemptId && receipt.observationDigest === schedulerDigest({
+    process: worker.process, groupLeader: worker.groupLeader, pgid: worker.pgid, groupAlive: false });
+}
+function cancellationGroupsExited(checkpoint) {
+  return checkpoint.workers.every((worker) => worker.cancelledByOperator && boundGroupState(worker) === 'empty');
 }
 export function settleEffect(lease, operationId, observation) {
   const binding = heldLease(lease);
@@ -1115,7 +1176,10 @@ export function settleEffect(lease, operationId, observation) {
       && effect.receipt.observationDigest === observation.receipt.observationDigest, 'EFFECT_SETTLED', 'The effect already has another receipt.');
     return current;
   }
-  requireCondition(['in-flight', 'unknown'].includes(effect.phase), 'EFFECT_SETTLED', 'The effect has no unresolved attempt.');
+  const absentCancellation = observation.status === 'applied' && observation.code === 'GROUP_ALREADY_EXITED'
+    && preparedCancellationExited(current, effect) && validAbsentGroupReceipt(current, effect, observation.receipt);
+  requireCondition(['in-flight', 'unknown'].includes(effect.phase) || absentCancellation,
+    'EFFECT_SETTLED', 'The effect has no unresolved attempt.');
   const conclusions = {
     applied: { phase: 'succeeded', error: null },
     'not-applied': { phase: 'prepared', error: { code: 'NOT_APPLIED', message: 'Readback proves the effect was not applied.' } },
@@ -1135,7 +1199,8 @@ export function settleEffect(lease, operationId, observation) {
       const linked = Object.values(outbox).filter((item) => item.requestId === effect.requestId);
       let status = 'processing';
       if (linked.some((item) => item.phase === 'unknown')) status = 'unknown';
-      else if (linked.every((item) => item.phase === 'succeeded')) status = 'applied';
+      else if (linked.every((item) => item.phase === 'succeeded')
+        && (request.request.kind !== 'stop-now' || cancellationGroupsExited(value))) status = 'applied';
       else if (linked.every((item) => ['succeeded', 'failed'].includes(item.phase)) && linked.some((item) => item.phase === 'failed')) status = 'refused';
       outcome = status === 'processing' ? null : outcomeFor(request, status,
         status === 'unknown' ? 'OUTCOME_UNKNOWN' : observation.code, current.revision + 1, operationId);

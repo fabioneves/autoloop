@@ -206,7 +206,10 @@ an active or recovering daemon owns it. Legacy `--close-run` cannot close the da
 On dead-owner recovery, acquire exclusion first, validate boot/start identities, increase generation
 and persist `recovering` before effects. Old-generation results cannot advance the run.
 Retain live or uncertain children, reservations and occupied slots until reconciled. A live verified
-child is observed or cancelled by its binding, not duplicated. An unknown group is not killed.
+child is observed or cancelled by its binding, not duplicated. A dead worker or leader does not
+release its binding while its recorded group is alive or unknown. Group existence alone does not
+authorize a signal after stored leader identity is lost. Cleanup requires confirmed process and
+group absence. An unknown group is not killed.
 Never infer a worker from an event line. No state reconstruction from logs.
 
 ### Controls, claims and outbox
@@ -255,6 +258,28 @@ Persist `prepared`, then `in-flight`, before the external call. A crash after th
 readback of the actual target. Reconcile `applied|not-applied|unknown`; only verified not-applied
 permits retry. Persist the receipt and linked outcome in one checkpoint transaction.
 Local pause/stop intent can be replayed by reduction. Remote effects cannot.
+
+Recovery has one narrow exception for a new explicit `stop-now` intent. A new `process.cancel`
+effect at attempt 1 may be prepared and started while other effects are unknown only when:
+- The stored request is processing, belongs to the current run, and was claimed in the current
+  daemon generation. Its run target names that same generation. An old unknown request does
+  not qualify.
+- The checkpoint already records desired stopped and immediate mode. The complete registered
+  worker target set is marked operator-cancelled and retained before the first signal.
+- The effect binds one exact registered unit/generation/attempt and its process group. Actual
+  process start, boot identity and group leadership match the binding before admission and
+  immediately before each signal.
+
+Starting, stopped and failed states still refuse new effects. `process.start`, ordinary cancel,
+all other effects and unknown-operation retries remain blocked. No general recovery bypass flag
+is permitted. Prior unknown operations retain their intents and outcomes until verified readback.
+A stop-now outcome is applied only after every retained target group has confirmed exit. Unknown
+or live targets keep the outcome processing/unknown; the first settled effect cannot complete it.
+If an exact retained cancellation target exits after preparation but before execution, reconcile
+its desired state from confirmed process and group absence. Record `GROUP_ALREADY_EXITED`, not
+successful signal delivery. This permits only prepared `process.cancel` attempt 1 with the same
+stored run/request/unit/attempt binding and operator-cancelled intent. It does not permit a call,
+retry, wrong binding, ordinary prepared effect, or a conclusion from unknown group state.
 
 Module 1 supplies the outbox mechanism and process-effect reconciliation. External fake effect
 integration tests exercise the crash-before-call, crash-after-effect and crash-before-ack cases.
