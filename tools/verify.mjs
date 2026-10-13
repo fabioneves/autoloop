@@ -83,30 +83,22 @@ const PLUGIN_TOOL_FILES = Object.freeze([
   'auto-merge.mjs',
   'merge-authorization-contract.mjs',
 ]);
-// Global install: the plugin ships these hooks in hooks/hooks.json, each
-// running the plugin's own copy. Exactly one handler per tool, on its event
-// and matcher, with exactly this command, and no statusMessage (it prints in
-// every session). The command guard fails closed only for a session that owns
-// a run: a crashed guard refuses there, while a broken plugin never refuses
-// commands in any other session.
+// Global install: each hook runs the plugin's own copy exactly once. The
+// guarded bootstrap retains stdin in shell memory for an independent fallback.
+// Registered workers and known scheduler mutations fail closed on startup
+// errors; unrelated unowned reads retain the existing silent path.
 const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/tools';
+function toolGuardCommand(kind) {
+  return `payload=$(cat); printf '%s' "$payload" | node "${PLUGIN_TOOLS}/loop-execution-admission.mjs" --guard-entry ${kind}; `
+    + 's=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; '
+    + `printf '%s' "$payload" | node "${PLUGIN_TOOLS}/run-markers.mjs" --tool-guard-fallback; [ $? -eq 2 ] && exit 2; `
+    + 'l="$HOME/.claude/autoloop/run-latches/$PPID.json"; '
+    + 'if [ -e "$l" ] || [ -L "$l" ]; then exit 2; fi; exit 0';
+}
 export const PLUGIN_HOOKS = Object.freeze([
   { name: 'session-preflight.sh', event: 'SessionStart', matcher: null, command: `bash "${PLUGIN_TOOLS}/session-preflight.sh"` },
-  { name: 'edit-guard.mjs', event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|NotebookEdit', command: `node "${PLUGIN_TOOLS}/edit-guard.mjs"` },
-  {
-    name: 'command-guard.mjs',
-    event: 'PreToolUse',
-    matcher: 'Bash|AskUserQuestion',
-    // The guard's own verdict (0 or 2) is final; a guard that throws decides
-    // by ownership itself. Anything else is a guard that could not start: it
-    // refuses while the session's Claude process — $PPID, the hook shell's
-    // parent — holds a latch, decided by the latch file alone with no git
-    // call. Closed or not: the shell cannot read the hook input's session,
-    // and a closed run stays guarded until /clear.
-    command: `node "${PLUGIN_TOOLS}/command-guard.mjs"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; `
-      + 'l="$HOME/.claude/autoloop/run-latches/$PPID.json"; '
-      + 'if [ -e "$l" ] || [ -L "$l" ]; then exit 2; fi; exit 0',
-  },
+  { name: 'edit-guard.mjs', event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|NotebookEdit', command: toolGuardCommand('edit') },
+  { name: 'command-guard.mjs', event: 'PreToolUse', matcher: 'Bash|AskUserQuestion', command: toolGuardCommand('command') },
   { name: 'label-swap-reminder.mjs', event: 'PostToolUse', matcher: 'Bash', command: `node "${PLUGIN_TOOLS}/label-swap-reminder.mjs"` },
   { name: 'subagent-transcript.mjs', event: 'SubagentStop', matcher: null, command: `node "${PLUGIN_TOOLS}/subagent-transcript.mjs"` },
   { name: 'writeback-check.mjs', event: 'Stop', matcher: null, command: `node "${PLUGIN_TOOLS}/writeback-check.mjs"` },
@@ -756,7 +748,7 @@ async function selfTest() {
   let crashOddLatch;
   let refusalKept;
   try {
-    const stub = join(crashRoot, 'plugin', 'tools', 'command-guard.mjs');
+    const stub = join(crashRoot, 'plugin', 'tools', 'loop-execution-admission.mjs');
     mkdirSync(dirname(stub), { recursive: true });
     mkdirSync(join(crashRoot, 'project', '.autoloop'), { recursive: true });
     writeFileSync(join(crashRoot, 'project', '.autoloop', 'config.json'), '{}');
@@ -793,6 +785,7 @@ async function selfTest() {
       scheduled.includes(`self-test ${basename(own)}`) && !nested.ok && /never runs its own self-test/u.test(nested.detail)
         && !selfTestProcesses.groups.length],
     ['the plugin hook document passes its contract', pluginProblems(pluginHookDocument()).length === 0],
+    ['the shipped hook document matches the declared contract', pluginProblems(JSON.parse(readFileSync(join(toolsDir, '..', 'hooks', 'hooks.json'), 'utf8'))).length === 0],
     ['a missing plugin hook is named',
       pluginProblems(pluginHookDocument(PLUGIN_HOOKS.slice(1))).some((problem) => problem.includes(PLUGIN_HOOKS[0].name))],
     ['a plugin hook on the wrong matcher is refused',
