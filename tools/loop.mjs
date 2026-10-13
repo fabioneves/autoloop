@@ -479,16 +479,16 @@ async function selfTest() {
       }
     };
     const children = new Set();
-    const startRuntime = async ({ repository, pins }) => {
+    const startRuntime = async ({ repository, pins }, { tickMs = 25 } = {}) => {
       const script = `const api = await import(process.argv[1]); const core = await import(process.argv[2]);
-        const root = process.argv[3]; const pins = JSON.parse(process.argv[4]);
+        const root = process.argv[3]; const pins = JSON.parse(process.argv[4]); const tickMs = Number(process.argv[5]);
         process.on('disconnect', () => process.kill(process.pid, 'SIGTERM'));
         const result = await api.runLoop({ repository: core.resolveRepository(root), pins,
-          initiator: { kind: 'terminal', sessionId: null, process: core.readProcessIdentity() }, tickMs: 25,
-          onReady: (value) => process.send({ ready: true, ...value }) });
+          initiator: { kind: 'terminal', sessionId: null, process: core.readProcessIdentity() }, tickMs,
+          onReady: (value) => process.send({ ready: true, tickMs, ...value }) });
         process.exit(result.exitCode);`;
       const child = spawn(process.execPath, ['--input-type=module', '-e', script, import.meta.url,
-        new URL('./scheduler-contract.mjs', import.meta.url).href, repository.coordinatorRoot, JSON.stringify(pins)], {
+        new URL('./scheduler-contract.mjs', import.meta.url).href, repository.coordinatorRoot, JSON.stringify(pins), String(tickMs)], {
         cwd: repository.coordinatorRoot, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       });
       child.identity = readProcessIdentity(child.pid);
@@ -503,6 +503,7 @@ async function selfTest() {
         child.closed.then(({ code, signal }) => { clearTimeout(timer); fail(new Error(`Runtime ended: ${code ?? signal} ${child.errors}`)); });
       });
       assert.equal(ready.ready, true);
+      child.readiness = ready;
       return child;
     };
     try {
@@ -595,6 +596,93 @@ async function selfTest() {
         assert.equal(readCheckpoint(setup.repository, setup.pins.runId).state, 'stopped');
         assert.equal(readRequest(setup.repository, setup.pins.runId, stop.requestId).status, 'applied');
         assert.equal(readSchedulerOwner(setup.repository).state, 'released');
+      });
+      await check('production control ticks claim timestamped controls within two ticks during a long child and delayed external effect', async () => {
+        const setup = fixture(); const tickMs = 1000;
+        const startChild = async (script, args = [], detached = false) => {
+          const child = spawn(process.execPath, ['-e', script, ...args], { detached, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+          child.identity = readProcessIdentity(child.pid); child.closed = new Promise((done) => child.once('close', done));
+          children.add(child); child.closed.then(() => children.delete(child));
+          await new Promise((done) => child.once('message', done)); return child;
+        };
+        const worker = await startChild("process.on('disconnect', () => process.exit(0)); process.on('message', () => process.exit(0)); setInterval(() => {}, 1000); process.send({ready:true});", [], true);
+        const externalPath = join(setup.home, 'delayed-external-effect.json');
+        const external = await startChild("const fs = require('node:fs'); process.on('disconnect', () => process.exit(0)); process.on('message', () => { fs.writeFileSync(process.argv[1], '{\"applied\":true}'); process.exit(0); }); setInterval(() => {}, 1000); process.send({ready:true});", [externalPath]);
+        const owner = acquireScheduler(setup.repository, setup.pins, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
+        const attemptId = randomUUID();
+        registerFixtureWorker(owner.lease, 1, { schema: 'autoloop.worker-binding/1', runId: setup.pins.runId, generation: 1,
+          unitId: randomUUID(), unitGeneration: 1, attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir,
+          process: worker.identity, pgid: worker.pid, groupLeader: worker.identity, role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
+          liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false });
+        commitTransition(owner.lease, 2, (value) => ({ ...value, state: 'running' }));
+        const operationId = randomUUID();
+        prepareEffect(owner.lease, 3, { operationId, requestId: null, runId: setup.pins.runId, unitId: null, unitGeneration: null,
+          kind: 'external.fixture', target: { type: 'external', id: randomUUID() }, inputDigest: schedulerDigest({ pending: externalPath }),
+          expectedHead: null, phase: 'prepared', attempt: 1, receipt: null, error: null });
+        markEffectInFlight(owner.lease, operationId);
+        commitTransition(owner.lease, 5, (value) => ({ ...value, state: 'failed' })); releaseScheduler(owner.lease);
+        const runtime = await startRuntime(setup, { tickMs });
+        assert.equal(runtime.readiness.tickMs, tickMs, 'Response proof must run at the production tick, not the fast test tick.');
+        const requests = [];
+        for (const kind of ['pause', 'resume', 'stop']) {
+          const request = control(setup.pins.runId, kind, 2); requests.push(request);
+          const submitted = Date.now(); request.submittedAt = submitted;
+          submitControl(setup.repository, actor(), request);
+          const deadline = submitted + 2 * tickMs;
+          let claimed;
+          do {
+            claimed = readCheckpoint(setup.repository, setup.pins.runId).requests[request.requestId];
+            if (claimed?.claimedGeneration) break;
+            await new Promise((done) => setTimeout(done, 10));
+          } while (Date.now() <= deadline);
+          const elapsed = Date.now() - submitted;
+          assert(claimed?.claimedGeneration && elapsed <= 2 * tickMs, `${kind} durable claim took ${elapsed}ms.`);
+          assert(['processing', 'applied'].includes(claimed.status));
+          assert.equal(processIdentityState(worker.identity), 'alive');
+          assert.equal(processIdentityState(external.identity), 'alive');
+          assert.equal(existsSync(externalPath), false, 'The delayed external effect must still be pending.');
+          console.error(`Response proof: ${kind} claimed in ${elapsed}ms at tick ${tickMs}ms.`);
+        }
+        external.send('finish'); await external.closed;
+        worker.send('finish'); await worker.closed;
+        assert.equal((await runtime.closed).code, 0);
+        for (const request of requests) assert.equal(readRequest(setup.repository, setup.pins.runId, request.requestId).status, 'applied');
+        assert.equal(readCheckpoint(setup.repository, setup.pins.runId).outbox[operationId].phase, 'unknown');
+      });
+      await check('production ticks admit other controls while an asynchronous cancellation is pending', async () => {
+        const setup = fixture(); const tickMs = 1000;
+        const worker = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); process.on('disconnect', () => process.exit(0)); process.on('message', () => process.exit(0)); setInterval(() => {}, 1000); process.send({ready:true});"], {
+          detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+        });
+        worker.identity = readProcessIdentity(worker.pid); worker.closed = new Promise((done) => worker.once('close', done));
+        children.add(worker); worker.closed.then(() => children.delete(worker));
+        await new Promise((done) => worker.once('message', done));
+        const owner = acquireScheduler(setup.repository, setup.pins, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
+        const attemptId = randomUUID();
+        registerFixtureWorker(owner.lease, 1, { schema: 'autoloop.worker-binding/1', runId: setup.pins.runId, generation: 1,
+          unitId: randomUUID(), unitGeneration: 1, attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir,
+          process: worker.identity, pgid: worker.pid, groupLeader: worker.identity, role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
+          liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false });
+        commitTransition(owner.lease, 2, (value) => ({ ...value, state: 'failed' })); releaseScheduler(owner.lease);
+        const runtime = await startRuntime(setup, { tickMs }); assert.equal(runtime.readiness.tickMs, tickMs);
+        const stop = control(setup.pins.runId, 'stop-now', 2); submitControl(setup.repository, actor(), stop);
+        await waitFor(() => Object.values(readCheckpoint(setup.repository, setup.pins.runId).outbox).some((effect) => effect.phase === 'in-flight'), 'Cancellation did not start.');
+        const pause = control(setup.pins.runId, 'pause', 2); const submitted = Date.now(); pause.submittedAt = submitted;
+        submitControl(setup.repository, actor(), pause);
+        let claimed;
+        do {
+          claimed = readCheckpoint(setup.repository, setup.pins.runId).requests[pause.requestId];
+          if (claimed?.claimedGeneration) break;
+          await new Promise((done) => setTimeout(done, 10));
+        } while (Date.now() <= submitted + 2 * tickMs);
+        const elapsed = Date.now() - submitted;
+        assert(claimed?.claimedGeneration && elapsed <= 2 * tickMs, `Pending effect blocked control for ${elapsed}ms.`);
+        assert(['processing', 'refused'].includes(claimed.status)); assert.equal(processIdentityState(worker.identity), 'alive');
+        assert.equal(readRequest(setup.repository, setup.pins.runId, stop.requestId).status, 'processing');
+        console.error(`Response proof: pending cancellation admitted pause in ${elapsed}ms at tick ${tickMs}ms.`);
+        worker.send('finish'); await worker.closed; assert.equal((await runtime.closed).code, 0);
+        assert.equal(readRequest(setup.repository, setup.pins.runId, pause.requestId).status, 'refused');
+        assert.equal(readRequest(setup.repository, setup.pins.runId, stop.requestId).status, 'applied');
       });
       await check('graceful stop keeps polling while a real long-running group drains', async () => {
         const setup = fixture();
