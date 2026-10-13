@@ -29,8 +29,9 @@ Notable changes to Autoloop are recorded here. The format follows
 ### Changed
 
 - The dev skill: the ribbon is the line `step.mjs` prints on its tool row and the model never
-  repeats it in prose (a step was shown twice); `paused` and the `autoloop: control` prompt;
-  `--pr` on the publish step. Skill budget 56918.
+  repeats it in prose (a step was shown twice); `paused`, `controls` and the `autoloop: control`
+  prompt; `--pr` on the publish step. The byte budget rises to 57266 (operator's decision): the
+  new rules are added, nothing else is trimmed.
 - The control directory, the event files and the run id are guard-protected state: only the
   operator's pane, outside the hooks, writes a control. A consumer takes regular files only and
   never writes through a planted link. A cancel is applied only to a pid that is still a
