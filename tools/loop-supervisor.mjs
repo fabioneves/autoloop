@@ -109,20 +109,26 @@ function verifyServiceProcess(service, pins, expectedProcess = null) {
     'READINESS_FAILED', 'The service owner changed during verification.');
   return identity;
 }
-function privateDirectory(path, create = false) {
+function launchStorageDirectory(path, create = false, privateMode = true) {
   if (create) {
     try { mkdirSync(path, { mode: 0o700 }); }
     catch (error) { if (error.code !== 'EEXIST') throw new SchedulerError('STATE_IO_FAILED', 'The launch directory cannot be created.'); }
   }
-  const stat = lstatSync(path);
-  requireCondition(stat.isDirectory() && realpathSync(path) === path && stat.uid === userInfo().uid && (stat.mode & 0o077) === 0,
-    'HOST_AUTH_REQUIRED', 'The launch directory is not private.');
+  requireCondition(lstatSync(path).isDirectory() && realpathSync(path) === path,
+    'HOST_AUTH_REQUIRED', 'The launch storage is not a real directory.');
+  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    requireCondition(stat.isDirectory() && stat.uid === userInfo().uid && (!privateMode || (stat.mode & 0o077) === 0),
+      'HOST_AUTH_REQUIRED', 'The launch directory ownership or mode is invalid.');
+  } finally { closeSync(fd); }
   return path;
 }
 function launchDirectory(repository, create = false) {
-  let path = repository.commonDir;
-  requireCondition(realpathSync(path) === path && lstatSync(path).isDirectory(), 'REPOSITORY_INVALID', 'The common Git directory changed.');
-  for (const name of ['autoloop', 'scheduler', 'launches']) path = privateDirectory(join(path, name), create);
+  // Git and legacy models share these ancestors. Do not change their modes.
+  let path = launchStorageDirectory(repository.commonDir, false, false);
+  path = launchStorageDirectory(join(path, 'autoloop'), create, false);
+  for (const name of ['scheduler', 'launches']) path = launchStorageDirectory(join(path, name), create);
   return path;
 }
 function publishLaunch(repository, value) {
@@ -427,6 +433,54 @@ for(const key of args.filter((arg)=>arg.startsWith('--property=')).map((arg)=>ar
           && readRegularFile(join(path, 'memory.swap.max')).trim() === '0' && readRegularFile(join(path, 'pids.max')).trim() === '2048';
       } catch { /* no verified test containment */ }
       if (!containedFixture) console.error('SKIP positive supervised lifecycle: run the test under MemoryMax=6G, MemorySwapMax=0 and TasksMax=2048.');
+      if (containedFixture) await check('a drained legacy 0755 autoloop directory starts without changing its mode', async () => {
+        const setup = await fixture();
+        const legacy = join(setup.repository.commonDir, 'autoloop');
+        const { chmodSync } = await import('node:fs');
+        mkdirSync(legacy, { mode: 0o755 }); chmodSync(legacy, 0o755);
+        writeFileSync(join(legacy, 'models.json'), '{"legacy":"retained"}\n');
+        const ready = await launch(setup);
+        assert.equal(ready.state, 'running');
+        assert.equal(lstatSync(legacy).mode & 0o777, 0o755);
+        assert.equal(readFileSync(join(legacy, 'models.json'), 'utf8'), '{"legacy":"retained"}\n');
+        for (const name of ['scheduler', 'scheduler/launches']) assert.equal(lstatSync(join(legacy, name)).mode & 0o777, 0o700);
+        submitControl(setup.repository, actor(), { schema: 'autoloop.control/2', requestId: randomUUID(), runId: ready.runId,
+          kind: 'stop', target: { type: 'run', generation: ready.generation }, payload: {}, submittedAt: Date.now() });
+        await waitFor(() => JSON.parse(readFileSync(setup.state)).MainPID === '0', 'The legacy fixture daemon did not stop.');
+      });
+      await check('launch namespaces reject links and loose private scheduler directories', async () => {
+        const { symlinkSync, chmodSync } = await import('node:fs');
+        for (const name of ['autoloop', 'autoloop/scheduler', 'autoloop/scheduler/launches']) {
+          const setup = await fixture();
+          const path = join(setup.repository.commonDir, name);
+          mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+          const outside = join(setup.home, 'outside'); mkdirSync(outside, { mode: 0o700 });
+          symlinkSync(outside, path);
+          await assert.rejects(launch(setup), (error) => ['HOST_AUTH_REQUIRED', 'LEGACY_RUN_ACTIVE', 'STATE_INVALID'].includes(error.code));
+          assert.equal(readFileSync(setup.log, 'utf8').includes('"tool":"run"'), false);
+        }
+        for (const name of ['autoloop/scheduler', 'autoloop/scheduler/launches']) {
+          const setup = await fixture();
+          const path = join(setup.repository.commonDir, name);
+          mkdirSync(path, { recursive: true, mode: 0o700 }); chmodSync(path, 0o755);
+          await assert.rejects(launch(setup), (error) => error.code === 'HOST_AUTH_REQUIRED');
+          assert.equal(lstatSync(path).mode & 0o777, 0o755);
+          assert.equal(readFileSync(setup.log, 'utf8').includes('"tool":"run"'), false);
+        }
+      });
+      await check('launch storage refuses directories owned by a different OS account', async () => {
+        const setup = await fixture();
+        const os = (await import('node:os')).default;
+        const { syncBuiltinESMExports } = await import('node:module');
+        const original = os.userInfo;
+        try {
+          // External account fault injection; filesystem ownership stays real.
+          os.userInfo = (...args) => ({ ...original(...args), uid: original(...args).uid + 1 });
+          syncBuiltinESMExports();
+          await assert.rejects(launch(setup), (error) => error.code === 'HOST_AUTH_REQUIRED');
+          assert.equal(readFileSync(setup.log, 'utf8').includes('"tool":"run"'), false);
+        } finally { os.userInfo = original; syncBuiltinESMExports(); }
+      });
       if (containedFixture) await check('fake systemd starts a real contained daemon and actual checkpoint readiness is required', async () => {
         const setup = await fixture();
         const ready = await launch(setup);
