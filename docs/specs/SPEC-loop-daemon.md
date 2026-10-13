@@ -45,7 +45,7 @@ node tools/status.mjs --disconnect --session <viewer-session-id> --root /workspa
 node tools/status.mjs --control --session <viewer-session-id> --run <run-id> --request <request-id> --kind pause --root /workspace/widgets --host-request
 node tools/loop.mjs --self-test
 node tools/scheduler-contract.mjs --self-test
-node tools/scheduler-supervisor.mjs --self-test
+node tools/loop-supervisor.mjs --self-test
 node tools/run-markers.mjs --self-test
 node tools/events-contract.mjs --self-test
 node tools/status.mjs --self-test
@@ -97,7 +97,7 @@ Named refusal codes include `LEGACY_RUN_ACTIVE`, `SCHEDULER_ACTIVE`, `OWNER_UNVE
 - `tools/loop.mjs`: argument parsing, trusted operator entry, foreground event loop and lifecycle.
 - `tools/scheduler-contract.mjs`: canonical identity, exclusive acquisition, reducers, schemas,
   checkpoint transactions, durable requests, outbox and recovery. Embedded self-tests.
-- `tools/scheduler-supervisor.mjs`: systemd launch/readiness/process containment. Embedded tests.
+- `tools/loop-supervisor.mjs`: systemd launch/readiness/process containment. Embedded tests.
 - `tools/run-markers.mjs`, `tools/command-guard.mjs`, `tools/edit-guard.mjs`,
   `tools/run-state-guard.mjs`: separate daemon/worker/viewer predicates and protected state.
 - `tools/prime.mjs`: mutual start exclusion only. Retain legacy scheduling and readers.
@@ -117,6 +117,8 @@ current.json                 { schema, runId } pointer
 runs/<run-id>/checkpoint.json authoritative transaction, including outbox and receipts
 runs/<run-id>/pins.json       immutable non-secret launch/config/model pins
 runs/<run-id>/streams/        validated worker stream paths, when workers exist
+launches/<launch-id>.json    immutable, private internal service handoff
+launches/staged-<id>.json    retained publication link; no automatic pruning
 ```
 
 Daemon controls use `<common-dir>/autoloop/control/v2/{requests,pending,processing,outcomes}/`.
@@ -292,6 +294,11 @@ remote execution.
 
 ```text
 resolveRepository(root) -> { repositoryKey, commonDir, coordinatorRoot }
+readProcessIdentity(pid?) -> ProcessIdentity
+processIdentityState(identity) -> alive|dead|unknown
+processGroupOf(pid) -> pgid|null
+boundGroupState(worker) -> alive|empty|unknown
+assertNoKnownLegacyOwner(repository) -> void or LEGACY_RUN_ACTIVE
 acquireScheduler(repository, pins, initiator) -> { runId, generation, lease }
 readCheckpoint(repository, runId) -> Checkpoint
 commitTransition(lease, expectedRevision, transition) -> Checkpoint
@@ -323,6 +330,31 @@ Retain resource containment with the resolved memory/swap/task profile. The laun
 Do not copy the verification job's finite `RuntimeMaxSec` into the daemon. No implicit unlimited
 fallback, shell background task or tmux supervision. No service activation during this spec task.
 
+The backend provider is `startSupervised({ repository, pins, initiator })`. It returns the common
+run/generation/state data plus `unit` and `alreadyRunning`. This internal provider receives an
+already-admitted initiating identity; it is not a mutation CLI or an authority issuer. Keep public
+`loop.mjs start` closed until shared legacy admission and the model-tool guards are connected.
+
+The service executes `run --supervised --run <run-id> --launch-receipt <launch-id>` with the pinned
+absolute paths and root. `verifySupervisedLaunch({ repository, runId, launchReceipt })` returns
+`{ repository, pins, initiator }` only after actual service verification. Then the CLI calls
+`runLoop`. The supervisor does not import the CLI or write its checkpoint.
+
+`autoloop.supervisor-launch/1` contains exactly `launchId`, `repositoryKey`, `runId`, `unit`, `pins`,
+`initiator`, `launcher`, `systemctlPath`, `argv`, `minimumGeneration`, `createdAt`, `commandDigest`
+and `schema`. Its digest covers the complete record without `commandDigest`. `launcher` is a
+verified `ProcessIdentity`; `initiator` is historical. The private record can be read on a systemd
+restart only with the same exact argv and verified named service identity. It is not an operator
+receipt. Flags, environment variables and possession of a launch ID alone give no authority.
+
+Readiness checks `systemctl` MainPID and service state, the actual process start/boot identity,
+its `/proc/<pid>/cgroup` membership, and the cgroup's `memory.max`, `memory.swap.max` and
+`pids.max`. The values must match the resolved pins. The authoritative lease/checkpoint must
+name that same owner, run and generation. A copied service property cannot replace kernel
+readback. Use `KillMode=process` and `TimeoutStopSec=infinity`: the runtime owns worker drain,
+and an unexpected daemon exit must not erase workers before recovery. Transient unit collection
+releases the service name after a completed exit; it does not prune durable scheduler state.
+
 `start` refuses on an unsupported host, absent user manager, failed lock backend or ineffective
 resource containment. It never falls back to foreground. `run --foreground` is explicit, stays
 attached to its terminal, uses the same lock/recovery/reducer, and can be used for portable tests.
@@ -340,6 +372,7 @@ ticks when disk and supervisor respond. Run status can show ongoing reconciliati
 - `stop --now`: persist stopped intent, then SIGTERM each verified group; after ten seconds,
   SIGKILL only if its leader start/boot identity and group ownership still match. Reconcile Git
   effects, store `cancelledByOperator`, and stop. Never signal unrelated reused PIDs/groups.
+  Refuse signals when the daemon's own process group cannot be verified.
 - An unexpected worker exit can enter recoverable waiting. Operator cancellation cannot become
   an automatic retry. Only a later explicitly authorized continuation can clear that disposition.
 - SIGTERM requests graceful drain. SIGINT on the foreground runner requests drain. Supervisor
@@ -437,6 +470,11 @@ Embedded Node self-tests use real temporary Git repositories, linked worktrees, 
 and child processes. Fake only external `claude`, `gh`, supervisor/host APIs or an external effect.
 Use existing verification process-group cleanup and resource-capped test units. Never launch
 recursive self-tests or target a live service. Test resources have unique names and scratch roots.
+Supervisor positive lifecycle tests require the real default test cgroup cap. Without that cap,
+they report a capability skip; refusal tests still run. macOS reports Linux-supervision skips.
+Runtime and supervisor tests stop verified owned processes and retain scratch files when removal
+is not permitted in the execution context. Each retained path is reported. Never remove projects,
+live state, real worktrees, plugin caches or unrelated temporary data.
 
 1. Concurrent daemon starts across main/linked worktrees yield one owner. Boot/start mismatch,
    reused PID, dead owner, uncertain child, corrupt checkpoint and interrupted write are tested.

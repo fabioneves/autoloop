@@ -15,7 +15,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveConfigText, validateConfig } from './config-contract.mjs';
 import { DEFAULT_MODELS, invariantProblems, mergeModels, MODEL_ROLES, modelsShapeProblems } from './models-config.mjs';
-import { processAlive, processStart, readRegularFile } from './run-markers.mjs';
+import { isClaudeProcess, processAlive, processStart, procEntry, readRegularFile } from './run-markers.mjs';
 
 export const CHECKPOINT_SCHEMA = 'autoloop.scheduler-checkpoint/1';
 export const PINS_SCHEMA = 'autoloop.scheduler-pins/1';
@@ -91,6 +91,34 @@ export function resolveRepository(root) {
   } catch (error) {
     if (error instanceof SchedulerError) throw error;
     throw new SchedulerError('REPOSITORY_INVALID', 'The repository cannot be verified.');
+  }
+}
+
+export function assertNoKnownLegacyOwner(repository) {
+  const parent = join(repository.commonDir, 'autoloop');
+  if (!present(parent)) return;
+  requireCondition(lstatSync(parent).isDirectory() && realpathSync(parent) === parent,
+    'LEGACY_RUN_ACTIVE', 'Legacy ownership storage cannot be verified.');
+  const directory = join(parent, 'run');
+  if (!present(directory)) return;
+  requireCondition(lstatSync(directory).isDirectory() && realpathSync(directory) === directory,
+    'LEGACY_RUN_ACTIVE', 'Legacy ownership cannot be verified.');
+  for (const name of readdirSync(directory).filter((value) => value.endsWith('.json'))) {
+    let marker;
+    try { marker = JSON.parse(readRegularFile(join(directory, name))); }
+    catch { throw new SchedulerError('LEGACY_RUN_ACTIVE', 'A legacy owner record cannot be read.'); }
+    requireCondition(marker?.version === 1 && Array.isArray(marker.pids), 'LEGACY_RUN_ACTIVE', 'A legacy owner record is invalid.');
+    if (marker.closedAt !== undefined) continue;
+    for (const pid of marker.pids) {
+      if (!Number.isSafeInteger(pid) || pid < 1 || !processAlive(pid)) continue;
+      const entry = procEntry(pid);
+      if (entry === null) throw new SchedulerError('LEGACY_RUN_ACTIVE', 'Legacy process identity is unknown.');
+      if (!isClaudeProcess(entry[1], entry[2])) continue;
+      const start = processStart(pid);
+      const recorded = marker.starts?.[pid];
+      if (recorded !== undefined && recorded !== null && start !== null && start !== recorded) continue;
+      throw new SchedulerError('LEGACY_RUN_ACTIVE', 'A known legacy loop still owns this repository.');
+    }
   }
 }
 

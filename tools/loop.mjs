@@ -6,14 +6,14 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
-  copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, readdirSync,
-  rmSync, symlinkSync, writeFileSync,
+  copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync,
+  symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  acquireScheduler, boundGroupState, claimControl, commitTransition, completeControl, createPins, DEFAULT_SUPERVISOR_PROFILE,
+  acquireScheduler, assertNoKnownLegacyOwner, boundGroupState, claimControl, commitTransition, completeControl, createPins, DEFAULT_SUPERVISOR_PROFILE,
   listControlRequests, markEffectInFlight, prepareEffect, processGroupOf, processIdentityState,
   readCheckpoint, readCurrentCheckpoint, readPins, readProcessIdentity, readRequest, readSchedulerOwner,
   releaseScheduler, resolveRepository, schedulerDigest, SchedulerError, settleEffect, submitControl, registerWorker,
@@ -21,7 +21,7 @@ import {
 import { admitHostInvocation, admitOperatorTerminal, LOOP_COMMAND_SCHEMA } from './loop-admission.mjs';
 import { CONFIG_VERSION, resolveConfigText, resolveProjectConfig } from './config-contract.mjs';
 import { DEFAULT_MODELS, mergeModels, resolveModels } from './models-config.mjs';
-import { isClaudeProcess, processAlive, processStart, procEntry, readRegularFile } from './run-markers.mjs';
+import { readRegularFile } from './run-markers.mjs';
 
 export const LOOP_SCHEMA = 'autoloop.loop/1';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -96,29 +96,7 @@ export function loopStatus(repository) {
     owner: checkpoint.owner, error: checkpoint.error };
 }
 
-export function assertNoKnownLegacyOwner(repository) {
-  const directory = join(repository.commonDir, 'autoloop', 'run');
-  if (!existsSync(directory)) return;
-  requireCondition(lstatSync(directory).isDirectory() && realpathSync(directory) === directory,
-    'LEGACY_RUN_ACTIVE', 'Legacy ownership cannot be verified.');
-  for (const name of readdirSync(directory).filter((value) => value.endsWith('.json'))) {
-    let marker;
-    try { marker = JSON.parse(readRegularFile(join(directory, name))); }
-    catch { throw new SchedulerError('LEGACY_RUN_ACTIVE', 'A legacy owner record cannot be read.'); }
-    requireCondition(marker?.version === 1 && Array.isArray(marker.pids), 'LEGACY_RUN_ACTIVE', 'A legacy owner record is invalid.');
-    if (marker.closedAt !== undefined) continue;
-    for (const pid of marker.pids) {
-      if (!Number.isSafeInteger(pid) || pid < 1 || !processAlive(pid)) continue;
-      const entry = procEntry(pid);
-      if (entry === null) throw new SchedulerError('LEGACY_RUN_ACTIVE', 'Legacy process identity is unknown.');
-      if (!isClaudeProcess(entry[1], entry[2])) continue;
-      const start = processStart(pid);
-      const recorded = marker.starts?.[pid];
-      if (recorded !== undefined && recorded !== null && start !== null && start !== recorded) continue;
-      throw new SchedulerError('LEGACY_RUN_ACTIVE', 'A known legacy loop still owns this repository.');
-    }
-  }
-}
+export { assertNoKnownLegacyOwner } from './scheduler-contract.mjs';
 function unresolvedEffects(checkpoint) {
   return Object.values(checkpoint.outbox).some((effect) => ['in-flight', 'unknown'].includes(effect.phase));
 }
@@ -131,8 +109,11 @@ function reduceStop(value, mode) {
     workers: stopMode === 'immediate' ? value.workers.map((worker) => ({ ...worker, cancelledByOperator: true })) : value.workers };
 }
 export { boundGroupState } from './scheduler-contract.mjs';
+function separateOwnedGroup(workerGroup, ownGroup) {
+  return Number.isSafeInteger(ownGroup) && ownGroup > 0 && workerGroup > 1 && workerGroup !== ownGroup;
+}
 function signalBoundGroup(worker, signal) {
-  requireCondition(worker.pgid > 1 && worker.pgid !== processGroupOf(process.pid) && boundGroupState(worker) === 'alive',
+  requireCondition(separateOwnedGroup(worker.pgid, processGroupOf(process.pid)) && boundGroupState(worker) === 'alive',
     'OWNER_UNVERIFIED', 'The worker group cannot be verified for signalling.');
   process.kill(-worker.pgid, signal);
 }
@@ -400,11 +381,15 @@ export async function executeLoopCommand(options) {
   const repository = resolveRepository(options.root);
   if (options.operation === 'status') return loopStatus(repository);
   if (options.operation === 'request-status') return readRequest(repository, options.runId, options.requestId);
-  if (options.operation === 'supervised') throw new SchedulerError('HOST_AUTH_REQUIRED', 'A verified supervisor launch provider is required.');
+  if (options.operation === 'supervised') {
+    const { verifySupervisedLaunch } = await import('./loop-supervisor.mjs');
+    const context = await verifySupervisedLaunch({ repository, runId: options.runId, launchReceipt: options.launchReceipt });
+    return runLoop(context);
+  }
   const prepared = prepareLoopCommand(options);
   const actor = options.hostRequest ? await admitHostInvocation(prepared.command, await stdinEnvelope())
     : await admitOperatorTerminal(prepared.command);
-  if (options.operation === 'start') throw new SchedulerError('SUPERVISOR_UNAVAILABLE', 'The supervisor launch provider is not available.');
+  if (options.operation === 'start') throw new SchedulerError('HOST_AUTH_REQUIRED', 'Shared legacy and model-tool admission must be connected before public start.');
   if (options.operation === 'foreground') return runLoop({ repository: prepared.repository, pins: prepared.pins,
     initiator: { kind: actor.kind, sessionId: actor.sessionId, process: actor.host },
     onReady: (data) => process.stdout.write(`${JSON.stringify({ schema: LOOP_SCHEMA, ok: true, data })}\n`) });
@@ -443,6 +428,12 @@ async function selfTest() {
       assert.throws(() => parseLoopArgs(['run', '--supervised', '--root', root]), (error) => error.code === 'HOST_AUTH_REQUIRED');
       assert.throws(() => parseLoopArgs(['merge', '--root', root]), (error) => error.code === 'UNSUPPORTED_ACTION');
       assert.equal(reduceStop({ stopMode: 'immediate', workers: [] }, 'graceful').stopMode, 'immediate');
+    });
+    await check('an unknown daemon group cannot admit a worker-group signal', () => {
+      assert.equal(separateOwnedGroup(123, null), false);
+      assert.equal(separateOwnedGroup(123, 123), false);
+      assert.equal(separateOwnedGroup(1, 456), false);
+      assert.equal(separateOwnedGroup(123, 456), true);
     });
     const fixture = () => {
       const home = join(scratch, randomUUID());
@@ -533,6 +524,17 @@ async function selfTest() {
         submitControl(setup.repository, actor(), stop);
         assert.equal((await terminal.closed).code, 0);
         assert.equal(readCheckpoint(setup.repository, checkpoint.runId).state, 'stopped');
+      });
+      await check('broken legacy ownership links are not treated as absent state', () => {
+        const setup = fixture();
+        assert.doesNotThrow(() => assertNoKnownLegacyOwner(setup.repository));
+        const alias = join(setup.home, 'checkout-alias');
+        symlinkSync(setup.repository.coordinatorRoot, alias, 'dir');
+        assert.doesNotThrow(() => assertNoKnownLegacyOwner(resolveRepository(alias)));
+        mkdirSync(join(setup.repository.commonDir, 'autoloop'), { mode: 0o700 });
+        symlinkSync(join(setup.home, 'missing-owner-directory'), join(setup.repository.commonDir, 'autoloop', 'run'));
+        assert.throws(() => assertNoKnownLegacyOwner(setup.repository), (error) => error.code === 'LEGACY_RUN_ACTIVE');
+        assert.throws(() => assertNoKnownLegacyOwner(resolveRepository(alias)), (error) => error.code === 'LEGACY_RUN_ACTIVE');
       });
       await check('a known live legacy Claude owner refuses runtime acquisition across its common directory', async () => {
         const setup = fixture();
@@ -989,7 +991,8 @@ finally:
       }));
     }
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    // Retain test files until removal is permitted in this execution context.
+    console.error(`Retained runtime test files: ${scratch}`);
   }
   const failed = results.filter(([, passed]) => !passed);
   console.log(failed.length === 0 ? `self-test OK (${results.length} cases)` : `self-test FAILED (${failed.length}/${results.length})`);
