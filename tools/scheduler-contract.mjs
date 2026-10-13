@@ -1340,7 +1340,7 @@ export function abandonPreparedEffect(lease, operationId) {
   if (outcome) publishOutcome(binding.repository, outcome, binding.observe);
   return updated;
 }
-export function settleEffect(lease, operationId, observation) {
+export function settleEffect(lease, operationId, observation, { deferControl = false } = {}) {
   const binding = heldLease(lease);
   requireCondition(uuid(operationId) && exactKeys(observation, ['attempt', 'status', 'code', 'receipt'])
     && positive(observation.attempt) && ['applied', 'not-applied', 'unknown', 'failed'].includes(observation.status)
@@ -1362,6 +1362,14 @@ export function settleEffect(lease, operationId, observation) {
   }
   const absentCancellation = observation.status === 'applied' && observation.code === 'GROUP_ALREADY_EXITED'
     && preparedCancellationExited(current, effect) && validAbsentGroupReceipt(current, effect, observation.receipt);
+  requireCondition(typeof deferControl === 'boolean', 'INVALID_INPUT', 'The control settlement option is invalid.');
+  if (deferControl) {
+    const request = current.requests[effect.requestId];
+    requireCondition(effect.kind === 'process.cancel' && request?.status === 'processing' && request.request.kind === 'stop-now'
+      && request.claimedGeneration === current.generation && request.request.target.generation === current.generation
+      && current.desiredState === 'stopped' && current.stopMode === 'immediate',
+    'TARGET_MISMATCH', 'Only the current immediate-stop pass can defer its aggregate outcome.');
+  }
   requireCondition(['in-flight', 'unknown'].includes(effect.phase) || absentCancellation,
     'EFFECT_SETTLED', 'The effect has no unresolved attempt.');
   const conclusions = {
@@ -1377,7 +1385,7 @@ export function settleEffect(lease, operationId, observation) {
   const updated = commitTransition(lease, current.revision, (value) => {
     const outbox = { ...value.outbox, [operationId]: settled };
     const requests = { ...value.requests };
-    if (effect.requestId !== null) {
+    if (effect.requestId !== null && !deferControl) {
       const request = requests[effect.requestId];
       requireCondition(request && !['applied', 'refused'].includes(request.status), 'REQUEST_SETTLED', 'The linked request is already settled.');
       const linked = Object.values(outbox).filter((item) => item.requestId === effect.requestId);

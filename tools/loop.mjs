@@ -135,7 +135,7 @@ function emptyGroupReceipt(worker) {
   return { externalId: worker.attemptId, observationDigest: schedulerDigest({ process: worker.process,
     groupLeader: worker.groupLeader, pgid: worker.pgid, groupAlive: false }), observedAt: Date.now() };
 }
-function reconcileCancellationEffects(context) {
+function reconcileCancellationEffects(context, deferredRequestId = null) {
   let current = readCheckpoint(context.repository, context.runId);
   for (const effect of Object.values(current.outbox)) {
     if (effect.kind !== 'process.cancel' || !['prepared', 'in-flight', 'unknown'].includes(effect.phase)) continue;
@@ -147,7 +147,8 @@ function reconcileCancellationEffects(context) {
       && request.request.target.generation === request.claimedGeneration)) continue;
     if (worker && boundGroupState(worker) === 'empty') {
       settleEffect(context.lease, effect.operationId, { attempt: effect.attempt, status: 'applied',
-        code: effect.phase === 'prepared' ? 'GROUP_ALREADY_EXITED' : 'GROUP_EXIT_CONFIRMED', receipt: emptyGroupReceipt(worker) });
+        code: effect.phase === 'prepared' ? 'GROUP_ALREADY_EXITED' : 'GROUP_EXIT_CONFIRMED', receipt: emptyGroupReceipt(worker) },
+      { deferControl: (deferredRequestId !== null && effect.requestId === deferredRequestId) || context.cancellations.has(effect.requestId) });
       current = readCheckpoint(context.repository, context.runId);
     }
   }
@@ -157,19 +158,22 @@ async function cancelWorkers(context, requestId) {
   if (!(current.desiredState === 'stopped' && current.stopMode === 'immediate')) {
     current = commitTransition(context.lease, current.revision, (value) => reduceStop(value, 'immediate'));
   }
+  // Keep this request processing through the complete target pass. An early
+  // unknown group must not revoke the same pass's later verified cancellations.
+  let uncertain = null;
   for (const worker of current.workers) {
     const state = boundGroupState(worker);
     if (state === 'empty') continue;
     if (state === 'unknown') {
-      markRequestUnknown(context, requestId, 'OWNER_UNVERIFIED');
-      return;
+      uncertain ??= { code: 'OWNER_UNVERIFIED', operationId: null };
+      continue;
     }
     const operationId = cancellationId(context.runId, requestId, worker.attemptId);
     current = readCheckpoint(context.repository, context.runId);
     const previous = current.outbox[operationId];
     if (previous && ['in-flight', 'unknown'].includes(previous.phase)) {
-      markRequestUnknown(context, requestId, 'OUTCOME_UNKNOWN', operationId);
-      return;
+      uncertain ??= { code: 'OUTCOME_UNKNOWN', operationId };
+      continue;
     }
     if (previous?.phase === 'succeeded') continue;
     const effect = { operationId, requestId, runId: context.runId, unitId: worker.unitId, unitGeneration: worker.unitGeneration,
@@ -189,22 +193,29 @@ async function cancelWorkers(context, requestId) {
         await new Promise((done) => setTimeout(done, 25));
       }
       if (boundGroupState(worker) !== 'empty') {
-        settleEffect(context.lease, operationId, { attempt: 1, status: 'unknown', code: 'OUTCOME_UNKNOWN', receipt: null });
-        return;
+        settleEffect(context.lease, operationId, { attempt: 1, status: 'unknown', code: 'OUTCOME_UNKNOWN', receipt: null }, { deferControl: true });
+        uncertain ??= { code: 'OUTCOME_UNKNOWN', operationId };
+        continue;
       }
-      settleEffect(context.lease, operationId, { attempt: 1, status: 'applied', code: 'GROUP_EXIT_CONFIRMED', receipt: emptyGroupReceipt(worker) });
+      settleEffect(context.lease, operationId, { attempt: 1, status: 'applied', code: 'GROUP_EXIT_CONFIRMED', receipt: emptyGroupReceipt(worker) },
+        { deferControl: true });
     } catch (error) {
       const latest = readCheckpoint(context.repository, context.runId);
       if (['OWNER_UNVERIFIED', 'RECOVERY_REQUIRED', 'ESRCH'].includes(error.code) && boundGroupState(worker) === 'empty') {
-        reconcileCancellationEffects(context);
+        reconcileCancellationEffects(context, requestId);
         continue;
       }
-      if (latest.outbox[operationId]?.phase === 'in-flight') settleEffect(context.lease, operationId,
-        { attempt: 1, status: 'unknown', code: 'OUTCOME_UNKNOWN', receipt: null });
-      else if (['OWNER_UNVERIFIED', 'RECOVERY_REQUIRED'].includes(error.code)) markRequestUnknown(context, requestId, 'OWNER_UNVERIFIED');
-      else throw error;
-      return;
+      if (latest.outbox[operationId]?.phase === 'in-flight') {
+        settleEffect(context.lease, operationId, { attempt: 1, status: 'unknown', code: 'OUTCOME_UNKNOWN', receipt: null }, { deferControl: true });
+        uncertain ??= { code: 'OUTCOME_UNKNOWN', operationId };
+      } else if (['OWNER_UNVERIFIED', 'RECOVERY_REQUIRED'].includes(error.code)) {
+        uncertain ??= { code: 'OWNER_UNVERIFIED', operationId: null };
+      } else throw error;
     }
+  }
+  if (uncertain) {
+    markRequestUnknown(context, requestId, uncertain.code, uncertain.operationId);
+    return;
   }
   current = readCheckpoint(context.repository, context.runId);
   if (!['applied', 'refused', 'unknown'].includes(current.requests[requestId].status)) completeControl(context.lease, requestId,
@@ -663,6 +674,60 @@ async function selfTest() {
         unrelated.kill('SIGTERM');
         await unrelated.closed;
       });
+      await check('mixed immediate-stop targets cancel verified groups in either order and retain unknown groups across restart', async () => {
+        for (const unknownFirst of [true, false]) for (const loseDuringCancel of [false, true]) {
+          const setup = fixture();
+          const launchWorker = (script) => {
+            const child = spawn(process.execPath, ['-e', script], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+            child.identity = readProcessIdentity(child.pid); child.closed = new Promise((done) => child.once('close', done));
+            children.add(child); child.closed.then(() => children.delete(child)); return child;
+          };
+          const leader = launchWorker(`const { spawn } = require('node:child_process');
+            const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+            worker.once('close', () => process.send({ workerExited: true }));
+            process.on('message', () => worker.kill('SIGTERM')); process.on('SIGTERM', () => {});
+            process.on('disconnect', () => { worker.kill('SIGKILL'); process.exit(0); });
+            process.send({ workerPid: worker.pid }); setInterval(() => {}, 1000);`);
+          const { workerPid } = await new Promise((done) => leader.once('message', done));
+          const known = launchWorker("process.on('disconnect', () => process.exit(0)); setInterval(() => {}, 1000); process.send({ready:true});");
+          await new Promise((done) => known.once('message', done));
+          const owner = acquireScheduler(setup.repository, setup.pins, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
+          const bindings = [
+            { process: readProcessIdentity(workerPid), groupLeader: leader.identity, pgid: leader.pid },
+            { process: known.identity, groupLeader: known.identity, pgid: known.pid },
+          ].map((identity) => {
+            const attemptId = randomUUID();
+            return { schema: 'autoloop.worker-binding/1', runId: setup.pins.runId, generation: 1, unitId: randomUUID(), unitGeneration: 1,
+              attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir, ...identity, role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
+              liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false };
+          });
+          const targets = unknownFirst ? bindings : [...bindings].reverse(); let revision = 1;
+          for (const binding of targets) revision = registerFixtureWorker(owner.lease, revision, binding).revision;
+          if (!loseDuringCancel) {
+            const exited = new Promise((done) => leader.once('message', done)); leader.send('exit-worker'); await exited;
+          }
+          assert.equal(boundGroupState(bindings[0]), loseDuringCancel ? 'alive' : 'unknown');
+          assert.equal(boundGroupState(bindings[1]), 'alive');
+          commitTransition(owner.lease, revision, (value) => ({ ...value, state: 'failed' })); releaseScheduler(owner.lease);
+          const runtime = await startRuntime(setup);
+          const stop = control(setup.pins.runId, 'stop-now', 2); submitControl(setup.repository, actor(), stop);
+          await runtime.closed;
+          const final = readCheckpoint(setup.repository, setup.pins.runId);
+          assert.equal(processIdentityState(known.identity), 'dead', 'A verified target after an unknown target must be cancelled.');
+          await known.closed;
+          assert.equal(readRequest(setup.repository, setup.pins.runId, stop.requestId).status, 'unknown');
+          assert.equal(processIdentityState(leader.identity), 'alive');
+          assert.deepEqual(final.workers.map((worker) => worker.attemptId), targets.map((worker) => worker.attemptId));
+          assert(final.workers.every((worker) => worker.cancelledByOperator));
+          if (loseDuringCancel) assert.equal(final.outbox[cancellationId(setup.pins.runId, stop.requestId, bindings[0].attemptId)].phase, 'unknown');
+          assert.equal(final.outbox[cancellationId(setup.pins.runId, stop.requestId, bindings[1].attemptId)].phase, 'succeeded');
+          const restarted = await startRuntime(setup); await restarted.closed;
+          assert.deepEqual(readCheckpoint(setup.repository, setup.pins.runId).workers, final.workers);
+          assert.equal(readRequest(setup.repository, setup.pins.runId, stop.requestId).status, 'unknown');
+          assert.equal(processIdentityState(leader.identity), 'alive');
+          leader.kill('SIGKILL'); await leader.closed;
+        }
+      });
       await check('multi-group stop retains targets across restart and cannot complete after the first exit', async () => {
         const setup = fixture();
         const makeWorker = (ignoreTerm) => {
@@ -702,7 +767,7 @@ async function selfTest() {
           .some((effect) => effect.target.attemptId === bindings[0].attemptId && effect.phase === 'succeeded'), 'First cancellation was not settled.');
         const mid = readCheckpoint(setup.repository, setup.pins.runId);
         assert.equal(processIdentityState(secondWorker.identity), 'alive');
-        assert.notEqual(mid.requests[stop.requestId].status, 'applied');
+        assert.equal(mid.requests[stop.requestId].status, 'processing');
         assert.deepEqual(mid.workers.map((worker) => worker.attemptId), bindings.map((worker) => worker.attemptId));
         runtime.kill('SIGKILL');
         await runtime.closed;
