@@ -309,7 +309,28 @@ export async function verifySupervisedLaunch({ repository, runId, launchReceipt 
   return { repository, pins: launch.pins, initiator: launch.initiator };
 }
 
-async function selfTest() {
+function parseSupervisorSelfTestArgs(argv) {
+  requireCondition(argv[0] === '--self-test' && (argv.length === 1 || (argv.length === 2 && argv[1] === '--require-supervision')),
+    'INVALID_INPUT', 'The supervisor self-test arguments are invalid.');
+  return { requireSupervision: argv.length === 2 };
+}
+function supervisionTestContained() {
+  if (process.platform !== 'linux') return false;
+  try {
+    const cgroup = readRegularFile('/proc/self/cgroup').trim().split('\n').find((line) => line.startsWith('0::')).slice(3);
+    const path = join('/sys/fs/cgroup', cgroup);
+    return realpathSync(path) === path && readRegularFile(join(path, 'memory.max')).trim() === '6442450944'
+      && readRegularFile(join(path, 'memory.swap.max')).trim() === '0' && readRegularFile(join(path, 'pids.max')).trim() === '2048';
+  } catch { return false; }
+}
+function requireSupervisionCapability(required, contained) {
+  requireCondition(!required || contained, 'SUPERVISION_TEST_REQUIRED',
+    'Required supervision tests need Linux with MemoryMax=6G, MemorySwapMax=0 and TasksMax=2048.');
+}
+async function selfTest({ requireSupervision = false } = {}) {
+  const containedFixture = supervisionTestContained();
+  try { requireSupervisionCapability(requireSupervision, containedFixture); }
+  catch (error) { console.error(`FAIL required supervision: ${error.message}`); return false; }
   const results = [];
   const check = async (name, run) => {
     try { await run(); results.push([name, true]); }
@@ -431,18 +452,36 @@ for(const key of args.filter((arg)=>arg.startsWith('--property=')).map((arg)=>ar
     initiator: initiator(), systemdRunPath: setup.systemdRunPath, systemctlPath: setup.systemctlPath,
     readinessTimeoutMs: 2000, pollMs: 25, ...extra });
   try {
+    await check('required supervision self-test arguments and missing containment fail closed', () => {
+      assert.deepEqual(parseSupervisorSelfTestArgs(['--self-test']), { requireSupervision: false });
+      assert.deepEqual(parseSupervisorSelfTestArgs(['--self-test', '--require-supervision']), { requireSupervision: true });
+      assert.throws(() => parseSupervisorSelfTestArgs(['--require-supervision']), (error) => error.code === 'INVALID_INPUT');
+      assert.throws(() => parseSupervisorSelfTestArgs(['--self-test', '--require-supervision', '--extra']), (error) => error.code === 'INVALID_INPUT');
+      assert.throws(() => requireSupervisionCapability(true, false), (error) => error.code === 'SUPERVISION_TEST_REQUIRED');
+      assert.doesNotThrow(() => requireSupervisionCapability(false, false));
+      assert.doesNotThrow(() => requireSupervisionCapability(true, true));
+    });
+    await check('unreadable kernel containment cannot satisfy required supervision', async () => {
+      const fs = (await import('node:fs')).default;
+      const { syncBuiltinESMExports } = await import('node:module'); const original = fs.openSync;
+      try {
+        // External filesystem failure, not a replacement supervisor predicate.
+        fs.openSync = (path, ...args) => {
+          if (typeof path === 'string' && path.startsWith('/sys/fs/cgroup/') && path.endsWith('/pids.max')) {
+            throw Object.assign(new Error('kernel cap read denied'), { code: 'EACCES' });
+          }
+          return original(path, ...args);
+        };
+        syncBuiltinESMExports();
+        assert.equal(supervisionTestContained(), false);
+        assert.throws(() => requireSupervisionCapability(true, supervisionTestContained()), (error) => error.code === 'SUPERVISION_TEST_REQUIRED');
+      } finally { fs.openSync = original; syncBuiltinESMExports(); }
+    });
     await check('stable supervisor names use canonical common-directory identity', () => {
       assert.equal(supervisorUnit({ repositoryKey: 'a'.repeat(64) }), `autoloop-${'a'.repeat(64)}.service`);
       assert.throws(() => supervisorUnit({ repositoryKey: '../bad' }), (error) => error.code === 'INVALID_INPUT');
     });
     if (process.platform === 'linux') {
-      let containedFixture = false;
-      try {
-        const cgroup = readRegularFile('/proc/self/cgroup').trim().split('\n').find((line) => line.startsWith('0::')).slice(3);
-        const path = join('/sys/fs/cgroup', cgroup);
-        containedFixture = readRegularFile(join(path, 'memory.max')).trim() === '6442450944'
-          && readRegularFile(join(path, 'memory.swap.max')).trim() === '0' && readRegularFile(join(path, 'pids.max')).trim() === '2048';
-      } catch { /* no verified test containment */ }
       if (!containedFixture) console.error('SKIP positive supervised lifecycle: run the test under MemoryMax=6G, MemorySwapMax=0 and TasksMax=2048.');
       if (containedFixture) await check('launch directory parent flushes precede handoff publication and fsync failure refuses launch', async () => {
         const setup = await fixture(); const operations = [];
@@ -816,7 +855,10 @@ const isMain = (() => {
   catch { return false; }
 })();
 if (isMain) {
-  if (process.argv.length === 3 && process.argv[2] === '--self-test') process.exit(await selfTest() ? 0 : 1);
-  console.error('usage: loop-supervisor.mjs --self-test');
+  if (process.argv[2] === '--self-test') {
+    try { process.exit(await selfTest(parseSupervisorSelfTestArgs(process.argv.slice(2))) ? 0 : 1); }
+    catch (error) { console.error(error.message); }
+  }
+  console.error('usage: loop-supervisor.mjs --self-test [--require-supervision]');
   process.exit(2);
 }
