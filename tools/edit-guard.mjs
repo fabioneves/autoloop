@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { heldLatch, ownedRun, processStart, protectedPaths, sessionOwnerPid, executionProtectedPaths } from './run-markers.mjs';
-import { canonicalGuardPath as canonical } from './run-state-guard.mjs';
+import { canonicalGuardPath as canonical, knownExecutionStatePath } from './run-state-guard.mjs';
 import { workerToolContext } from './loop-execution-admission.mjs';
 import { hookRoot } from './hook-root.mjs';
 import { gitStalled, setGitDeadline } from './git-budget.mjs';
@@ -183,11 +183,14 @@ export function runEditGuard({ workerDirectory, inputText, observe = () => {} } 
   // while this process holds a latch (open or closed): refused, as the
   // command guard refuses it.
   if (!EDIT_TOOLS.includes(payload?.tool_name) && sessionId !== null) process.exit(0);
-  const repoRoot = hookRoot();
+  const earlyRoot = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
   const filePath = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
-  const executionPaths = executionProtectedPaths({ projectRoot: repoRoot, cwd: payload?.cwd ?? repoRoot });
-  const earlyProblem = runStateEditProblem(filePath, repoRoot, executionPaths.state, true)
-    ?? runStateEditProblem(filePath, repoRoot, executionPaths.code, true, { codeAliases: false });
+  if (typeof filePath === 'string' && [resolve(payload?.cwd ?? earlyRoot, filePath), canonical(resolve(payload?.cwd ?? earlyRoot, filePath))].some(knownExecutionStatePath)) {
+    console.error('autoloop guard — model tools cannot change named scheduler execution state.'); process.exit(2);
+  }
+  const executionPaths = executionProtectedPaths({ projectRoot: earlyRoot, cwd: payload?.cwd ?? earlyRoot });
+  const earlyProblem = runStateEditProblem(filePath, payload?.cwd ?? earlyRoot, executionPaths.state, true)
+    ?? runStateEditProblem(filePath, payload?.cwd ?? earlyRoot, executionPaths.code, true, { codeAliases: false });
   if (earlyProblem !== null) { console.error(earlyProblem); process.exit(2); }
   if (sessionId === null) {
     if (heldLatch() === null) process.exit(0);
@@ -199,6 +202,7 @@ export function runEditGuard({ workerDirectory, inputText, observe = () => {} } 
   // closed run too — before any git call, and then whatever the checkout
   // says (an unreadable latch of its own too).
   if (ownedRun({ sessionId, includeClosed: true }) === null) process.exit(0);
+  const repoRoot = hookRoot();
   // The same paths the command guard protects (run-markers.mjs protectedPaths).
   const paths = protectedPaths({ projectRoot: repoRoot, cwd: payload?.cwd ?? repoRoot, runOpen: true });
   const problem = hookWiringEditProblem(filePath, repoRoot, true)

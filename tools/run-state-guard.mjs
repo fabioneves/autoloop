@@ -25,7 +25,7 @@
 //
 //   node <plugin-tools>/run-state-guard.mjs --self-test
 
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -293,6 +293,20 @@ function canonical(path) {
 }
 
 export { canonical as canonicalGuardPath };
+
+// A malformed Git pointer cannot hide an obvious named runtime store. This
+// filesystem shape permits only denial; it cannot establish repository/worker
+// identity or grant an operation. Ordinary source directories are not stores.
+export function knownExecutionStatePath(path) {
+  const match = /^(.*)\/autoloop\/(?:scheduler|viewers|control\/v2)(?:\/|$)/u.exec(path);
+  if (match === null) return false;
+  const admin = match[1];
+  if (basename(admin) === '.git') return true;
+  try {
+    return lstatSync(join(admin, 'HEAD')).isFile() && lstatSync(join(admin, 'objects')).isDirectory()
+      && lstatSync(join(admin, 'refs')).isDirectory();
+  } catch { return false; }
+}
 
 // What a word names where a segment runs: the concrete paths (and their real
 // locations), and the texts that stay unknown — an unresolved expansion, or a
@@ -830,6 +844,9 @@ function judge(claim, at, dirs, home, env, knownOnly = false) {
   const resolved = claim.word === null ? null : resolveWord(claim.word, at, home, env);
   if (resolved === null) return claim.prove && !knownOnly ? unproven(claim.word) : null;
   for (const path of resolved.paths) {
+    if (knownOnly && claim.prove && claim.relations.includes('inside') && knownExecutionStatePath(path)) {
+      return refusal(path, 'scheduler execution state');
+    }
     for (const protectedDir of dirs) {
       const found = relation(path, protectedDir, claim.prove);
       if (found === null) continue;

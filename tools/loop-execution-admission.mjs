@@ -3,11 +3,11 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ancestorChain, procEntry, workerGuardClaims, workerGuardDirectory, workerGuardProcessKey, toolGuardFallbackProblem as fallbackToolProblem } from './run-markers.mjs';
+import { ancestorChain, procEntry, workerGuardClaims, workerGuardDirectory, workerGuardProcessKey, executionProtectedPaths, toolGuardFallbackProblem as fallbackToolProblem } from './run-markers.mjs';
 import { boundedGit } from './git-budget.mjs';
 // The hook bootstrap must remain loadable if a primary guard's scheduler/prime
 // dependency fails before payload parsing. Load that graph only inside its try.
@@ -311,6 +311,59 @@ async function selfTest() {
         for (const target of [join(tools, 'loop-host.mjs'), join(repo.coordinatorRoot, 'src', 'ordinary.ts'),
           join(repo.coordinatorRoot, '.claude', 'settings.json')]) assert.equal(hook(tool, target).status, 0, `${tool} ${target}`);
       }
+    });
+    await check('unowned guards resolve linked Git metadata without Git calls and retain denial on malformed metadata', () => {
+      const root = join(scratch, 'metadata-repo'); mkdirSync(root);
+      const admin = join(scratch, 'separate-admin');
+      git(root, ['init', '-q', '-b', 'main', '--separate-git-dir', admin]);
+      git(root, ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'fixture']);
+      const linked = join(scratch, 'metadata-linked'); git(root, ['worktree', 'add', '-q', '-b', 'metadata-linked', linked]);
+      const alias = join(scratch, 'metadata-alias'); symlinkSync(linked, alias);
+      const observed = spawnSync('git', ['-C', linked, 'rev-parse', '--absolute-git-dir'], { encoding: 'utf8', timeout: 15000 });
+      assert.equal(observed.status, 0); const linkedAdmin = realpathSync(observed.stdout.trim());
+      const bin = join(scratch, 'metadata-bin'); mkdirSync(bin);
+      const log = join(scratch, 'metadata-calls.log'); writeFileSync(log, '');
+      const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8', timeout: 5000 }).stdout.trim();
+      writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf 'git\\n' >> '${log}'\nexec '${realGit}' "$@"\n`, { mode: 0o700 });
+      const tools = dirname(fileURLToPath(import.meta.url));
+      const invoke = (kind, cwd, tool_name, tool_input) => spawnSync(process.execPath, [join(tools, 'loop-execution-admission.mjs'), '--guard-entry', kind], {
+        cwd, input: JSON.stringify({ session_id: randomUUID(), cwd, tool_name, tool_input }), encoding: 'utf8', timeout: 15000,
+        env: { ...process.env, HOME: join(scratch, 'metadata-home'), CLAUDE_PROJECT_DIR: cwd, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      });
+      const state = join(admin, 'autoloop', 'scheduler', 'current.json');
+      for (const cwd of [root, linked, alias]) {
+        assert.equal(invoke('command', cwd, 'Bash', { command: 'git status --porcelain' }).status, 0);
+        assert.equal(invoke('edit', cwd, 'Edit', { file_path: join(cwd, 'ordinary.ts') }).status, 0);
+        assert.equal(invoke('command', cwd, 'Bash', { command: `printf corrupt > ${state}` }).status, 2);
+        assert.equal(invoke('edit', cwd, 'Write', { file_path: state }).status, 2);
+      }
+      const commonFile = join(linkedAdmin, 'commondir'); const originalCommon = readFileSync(commonFile, 'utf8');
+      const physicalHop = join(admin, 'physical', 'hop'); mkdirSync(physicalHop, { recursive: true });
+      symlinkSync(physicalHop, join(linkedAdmin, 'metadata-hop'));
+      writeFileSync(commonFile, 'metadata-hop/../..\n');
+      assert(executionProtectedPaths({ projectRoot: linked, cwd: linked }).state.includes(join(admin, 'autoloop', 'scheduler')),
+        'A symlink is resolved before its following parent components.');
+      for (const damaged of ['not-a-directory\n', '']) {
+        writeFileSync(commonFile, damaged);
+        assert.equal(invoke('command', linked, 'Bash', { command: `printf corrupt > ${state}` }).status, 2);
+        assert.equal(invoke('edit', linked, 'Write', { file_path: state }).status, 2);
+        assert.equal(invoke('edit', linked, 'Write', { file_path: join(userInfo().homedir, '.claude', 'autoloop', 'host-invocations', 'f.json') }).status, 2);
+        assert.equal(invoke('edit', linked, 'Edit', { file_path: join(linked, 'ordinary.ts') }).status, 0);
+      }
+      writeFileSync(commonFile, originalCommon);
+      const savedCommon = `${commonFile}.saved-fixture`; renameSync(commonFile, savedCommon);
+      assert.equal(spawnSync('mkfifo', [commonFile], { encoding: 'utf8', timeout: 5000 }).status, 0);
+      const fifoAt = Date.now();
+      assert.equal(invoke('edit', linked, 'Write', { file_path: state }).status, 2);
+      assert.equal(invoke('command', linked, 'Bash', { command: 'git status' }).status, 0);
+      assert(Date.now() - fifoAt < 8000, 'An unreadable nonregular Git pointer must not block the guard.');
+      renameSync(commonFile, `${commonFile}.fifo-fixture`); renameSync(savedCommon, commonFile);
+      const gitFile = join(linked, '.git'); const originalGitFile = readFileSync(gitFile, 'utf8');
+      writeFileSync(gitFile, 'malformed Git pointer\n');
+      assert.equal(invoke('edit', linked, 'Write', { file_path: state }).status, 2);
+      assert.equal(invoke('command', linked, 'Bash', { command: `node ${join(tools, 'loop-host.mjs')}` }).status, 2);
+      writeFileSync(gitFile, originalGitFile);
+      assert.equal(readFileSync(log, 'utf8'), '', 'Unowned guard checks must not call Git.');
     });
     await check('primary guard syntax failure retains no-latch helper/state denials and permits an unrelated read', () => {
       const repo = repository(); const copied = join(scratch, 'failed-guard-plugin');

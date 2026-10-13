@@ -16,7 +16,7 @@ import { homedir, tmpdir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boundedGit, setGitDeadline } from './git-budget.mjs';
-import { canonicalGuardPath, executionCommandProblemFor, fallbackGuardSegments, runStateProblem } from './run-state-guard.mjs';
+import { canonicalGuardPath, executionCommandProblemFor, fallbackGuardSegments, knownExecutionStatePath, runStateProblem } from './run-state-guard.mjs';
 
 // The guard is defense-in-depth for commands a run issues; repository rules are
 // the enforcement boundary. Applying it to every Bash call in the project turns
@@ -388,12 +388,48 @@ export function toolGuardFallbackProblem(payload, { workerDirectory = workerGuar
     if (typeof file === 'string') {
       const literal = resolve(cwd, file);
       const real = canonicalGuardPath(literal);
-      if ([...paths.state, ...paths.code].some((path) => [literal, real].some((target) => target === path || target.startsWith(`${path}/`)))) {
+      if ([literal, real].some(knownExecutionStatePath)
+        || [...paths.state, ...paths.code].some((path) => [literal, real].some((target) => target === path || target.startsWith(`${path}/`)))) {
         return 'autoloop guard — the primary edit guard failed for protected execution state or code.';
       }
     }
   }
   return null;
+}
+
+// Filesystem metadata is used only to find paths to deny, never to establish
+// repository ownership. No Git process is started for an unrelated session.
+function executionCommonDir(root) {
+  let directory;
+  try { directory = realpathSync.native(root); } catch { directory = resolve(root); }
+  for (;;) {
+    const gitFile = join(directory, '.git');
+    try {
+      const physical = realpathSync.native(gitFile);
+      const info = lstatSync(physical);
+      let admin = physical;
+      if (info.isFile()) {
+        const match = /^gitdir: (.+)$/u.exec(readRegularFile(physical).trimEnd());
+        if (match === null) return null;
+        // Concatenation is intentional: resolve/join would collapse '..'
+        // before the OS follows any symlink in this metadata path.
+        admin = realpathSync.native(isAbsolute(match[1]) ? match[1] : `${directory}/${match[1]}`);
+      } else if (!info.isDirectory()) return null;
+      if (!lstatSync(admin).isDirectory()) return null;
+      const commonFile = join(admin, 'commondir');
+      try {
+        const common = readRegularFile(commonFile).trimEnd();
+        if (common === '') return null;
+        const path = realpathSync.native(isAbsolute(common) ? common : `${admin}/${common}`);
+        return lstatSync(path).isDirectory() ? path : null;
+      } catch (error) { return error.code === 'ENOENT' ? admin : null; }
+    } catch (error) {
+      if (error.code !== 'ENOENT') return null;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) return null;
+    directory = parent;
+  }
 }
 
 // This narrow protection applies before a legacy latch exists. HOME and
@@ -402,7 +438,7 @@ export function executionProtectedPaths({ projectRoot, cwd = projectRoot, entryp
   const state = [join(userInfo().homedir, '.claude', 'autoloop', 'host-invocations'), workerGuardDirectory()];
   for (const root of new Set([projectRoot, cwd])) {
     if (typeof root !== 'string') continue;
-    const common = commonDirOf(root);
+    const common = executionCommonDir(root);
     // Keep literal Git-admin paths too. This does not make an unreadable Git
     // directory a reason to block ordinary unrelated source edits.
     for (const base of new Set([common, join(root, '.git')])) {

@@ -3053,7 +3053,8 @@ export function runCommandGuard({ workerDirectory, argv = process.argv.slice(2),
     const executionProblem = executionCommandProblemFor(earlySegments, { cwd });
     if (executionProblem !== null) refuse(executionProblem);
     crashExecution = /autoloop\/(?:scheduler|control\/v2|viewers)|host-invocations|worker-bindings/u.test(cmd);
-    const earlyPaths = executionProtectedPaths({ projectRoot: projectDir(), cwd });
+    const earlyRoot = parsed.root ?? (process.env.CLAUDE_PROJECT_DIR || cwd);
+    const earlyPaths = executionProtectedPaths({ projectRoot: earlyRoot, cwd });
     const earlyProblem = runStateProblem(earlySegments, { cwd, protectedDirs: earlyPaths.state, codeDirs: earlyPaths.code, knownOnly: true });
     if (earlyProblem !== null) refuse(earlyProblem);
     crashExecution = false;
