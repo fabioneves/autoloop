@@ -138,7 +138,7 @@ export function assertNoKnownLegacyOwner(repository, { owner = null, sessionId =
   }
 }
 
-function safeDirectory(path, create = false) {
+function safeDirectory(path, create = false, observe = () => {}) {
   if (create) {
     try {
       mkdirSync(path, { mode: 0o700 });
@@ -155,20 +155,26 @@ function safeDirectory(path, create = false) {
     } finally {
       closeSync(fd);
     }
+    if (create) {
+      // Flush even an existing entry: a preceding mkdir may have failed its flush.
+      observe('directory-parent-sync', path);
+      syncDirectory(dirname(path));
+      observe('directory-parent-flushed', path);
+    }
   } catch (error) {
     if (error instanceof SchedulerError) throw error;
-    throw new SchedulerError('STATE_IO_FAILED', 'A state directory cannot be read.');
+    throw new SchedulerError('STATE_IO_FAILED', 'A state directory cannot be read or flushed.');
   }
   return path;
 }
-function stateDirectory(repository, create = false) {
+function stateDirectory(repository, create = false, observe = () => {}) {
   let directory = safeDirectory(repository.commonDir);
-  for (const name of ['autoloop', 'scheduler']) directory = safeDirectory(join(directory, name), create);
+  for (const name of ['autoloop', 'scheduler']) directory = safeDirectory(join(directory, name), create, observe);
   return directory;
 }
-function childDirectory(parent, name, create = false) {
+function childDirectory(parent, name, create = false, observe = () => {}) {
   requireCondition(nonempty(name) && !name.includes('/') && name !== '.' && name !== '..', 'INVALID_INPUT', 'A state component is invalid.');
-  return safeDirectory(join(safeDirectory(parent), name), create);
+  return safeDirectory(join(safeDirectory(parent), name), create, observe);
 }
 function stateJson(path, optional = false) {
   try {
@@ -183,6 +189,7 @@ function stateJson(path, optional = false) {
 function syncDirectory(path) {
   const fd = openSync(safeDirectory(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
+    requireCondition(fstatSync(fd).isDirectory(), 'STATE_INVALID', 'A flush target is not a directory.');
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -413,8 +420,8 @@ function validRelease(value, lease) {
 // Lease records are never removed or replaced. Contenders for the same next
 // sequence link a complete immutable record; one link wins. A successor needs
 // a verified dead/released predecessor. There is no stale-directory rename race.
-function readLedger(repository, create = false) {
-  const state = create ? stateDirectory(repository, true) : existingState(repository);
+function readLedger(repository, create = false, observe = () => {}) {
+  const state = create ? stateDirectory(repository, true, observe) : existingState(repository);
   if (state === null) return [];
   const path = join(state, 'lock');
   if (!create && !present(path)) {
@@ -422,7 +429,7 @@ function readLedger(repository, create = false) {
       'STATE_INVALID', 'Retained run state has no authoritative lease ledger.');
     return [];
   }
-  const directory = childDirectory(state, 'lock', create);
+  const directory = childDirectory(state, 'lock', create, observe);
   const names = readdirSync(directory);
   const sequences = [];
   for (const name of names) {
@@ -453,12 +460,12 @@ function readLedger(repository, create = false) {
   }
   return ledger;
 }
-function runDirectory(repository, runId, create = false) {
+function runDirectory(repository, runId, create = false, observe = () => {}) {
   requireCondition(uuid(runId), 'INVALID_INPUT', 'A run ID is invalid.');
-  const state = create ? stateDirectory(repository, true) : existingState(repository);
+  const state = create ? stateDirectory(repository, true, observe) : existingState(repository);
   requireCondition(state !== null, 'RUN_NOT_FOUND', 'The run does not exist.');
-  const runs = childDirectory(state, 'runs', create);
-  return childDirectory(runs, runId, create);
+  const runs = childDirectory(state, 'runs', create, observe);
+  return childDirectory(runs, runId, create, observe);
 }
 export function readPins(repository, runId) {
   const pins = stateJson(join(runDirectory(repository, runId), 'pins.json'));
@@ -535,7 +542,7 @@ function newCheckpoint(repository, pins, initiator, owner, generation) {
 // lease: no stale rename, age threshold or unknown-owner takeover is used.
 export function withExecutionAdmission(repository, establish, { observe = () => {} } = {}) {
   verifyRepository(repository);
-  const directory = childDirectory(stateDirectory(repository, true), 'admission', true);
+  const directory = childDirectory(stateDirectory(repository, true, observe), 'admission', true, observe);
   const owner = readProcessIdentity();
   const until = Date.now() + 10_000;
   let identity;
@@ -629,13 +636,13 @@ export function acquireScheduler(repository, pins, initiator, options = {}) {
     assertNoLegacyWorkers(repository);
     options.admissionObserve?.('daemon-admission-checked');
     return acquireSchedulerWithinAdmission(repository, pins, initiator, options);
-  });
+  }, { observe: options.observe });
 }
 function acquireSchedulerWithinAdmission(repository, pins, initiator, { observe = () => {} } = {}) {
   verifyRepository(repository);
   assertPinsLive(repository, pins);
   requireCondition(validInitiator(initiator), 'INVALID_INPUT', 'The initiating identity is invalid.');
-  const ledger = readLedger(repository, true);
+  const ledger = readLedger(repository, true, observe);
   const previous = ledger.at(-1);
   if (previous && !previous.released) {
     const state = ownerState(previous.record.owner, observe);
@@ -682,8 +689,8 @@ function acquireSchedulerWithinAdmission(repository, pins, initiator, { observe 
   const binding = { repository: Object.freeze({ ...repository }), identity, active: true, observe, writing: false };
   leases.set(lease, binding);
   try {
-    const directory = runDirectory(repository, pins.runId, true);
-    childDirectory(directory, 'streams', true);
+    const directory = runDirectory(repository, pins.runId, true, observe);
+    childDirectory(directory, 'streams', true, observe);
     const pinPath = join(directory, 'pins.json');
     if (present(pinPath)) requireCondition(schedulerDigest(readPins(repository, pins.runId)) === schedulerDigest(pins), 'PINS_CHANGED', 'The immutable pins changed.');
     else durableWrite(pinPath, pins, { exclusive: true, observe });
@@ -908,12 +915,12 @@ function validRequestRecord(value, checkpoint, id) {
     && (value.outcome.appliedRevision === null || value.outcome.appliedRevision <= checkpoint.revision)
     && (value.outcome.operationId === null || checkpoint.outbox?.[value.outcome.operationId]?.requestId === id);
 }
-function controlDirectory(repository, part, create = false) {
+function controlDirectory(repository, part, create = false, observe = () => {}) {
   let directory = safeDirectory(repository.commonDir);
   for (const name of ['autoloop', 'control', 'v2', part]) {
     const next = join(directory, name);
     if (!create && !present(next)) return null;
-    directory = childDirectory(directory, name, create);
+    directory = childDirectory(directory, name, create, observe);
   }
   return directory;
 }
@@ -1002,7 +1009,7 @@ export function submitControl(repository, admittedActor, request, { observe = ()
   requireCondition(control.runId === current.runId, 'RUN_MISMATCH', 'The request names another run.');
   requireCondition(RUN_CONTROLS.has(control.kind), 'UNSUPPORTED_ACTION', 'Unit actions are not available in this module.');
   requireCondition(current.state !== 'stopped', 'RUN_ENDED', 'The run is stopped.');
-  const requests = controlDirectory(repository, 'requests', true);
+  const requests = controlDirectory(repository, 'requests', true, observe);
   const path = join(requests, `${control.requestId}.json`);
   try {
     durableWrite(path, control, { exclusive: true, observe });
@@ -1012,8 +1019,8 @@ export function submitControl(repository, admittedActor, request, { observe = ()
     requireCondition(controlDigest(existing) === controlDigest(control), 'REQUEST_ID_CONFLICT', 'The request ID has another payload.');
   }
   const original = immutableControl(repository, control.requestId);
-  const pending = controlDirectory(repository, 'pending', true);
-  const processing = controlDirectory(repository, 'processing', true);
+  const pending = controlDirectory(repository, 'pending', true, observe);
+  const processing = controlDirectory(repository, 'processing', true, observe);
   const pendingPath = join(pending, `${control.requestId}.json`);
   const processingPath = join(processing, `${control.requestId}.json`);
   if (present(processingPath)) checkTransport(processingPath, original);
@@ -1035,7 +1042,7 @@ function outcomeFor(request, status, code, revision, operationId = null) {
     operationId, completedAt: status === 'unknown' ? null : Date.now() };
 }
 function publishOutcome(repository, outcome, observe = () => {}) {
-  const directory = controlDirectory(repository, 'outcomes', true);
+  const directory = controlDirectory(repository, 'outcomes', true, observe);
   const path = join(directory, `${outcome.requestId}.json`);
   const previous = stateJson(path, true);
   if (previous !== null) {
@@ -1053,11 +1060,11 @@ function checkTransport(path, control) {
 }
 function claimTransport(binding, control) {
   const requestId = control.requestId;
-  const processing = controlDirectory(binding.repository, 'processing', true);
+  const processing = controlDirectory(binding.repository, 'processing', true, binding.observe);
   const processingPath = join(processing, `${requestId}.json`);
   if (present(processingPath)) checkTransport(processingPath, control);
   else {
-    const pending = controlDirectory(binding.repository, 'pending', true);
+    const pending = controlDirectory(binding.repository, 'pending', true, binding.observe);
     const pendingPath = join(pending, `${requestId}.json`);
     if (present(pendingPath)) {
       checkTransport(pendingPath, control);
@@ -1478,6 +1485,67 @@ async function selfTest() {
       assert.notDeepEqual(validatePins({ ...pins, configDigest: '0'.repeat(64) }), []);
       refuses('INVALID_INPUT', () => createPins(repository, { pluginRoot: pins.pluginRoot, enginePath: pins.enginePath,
         config: { ...pins.config, apiKey: 'fixture' }, models: pins.models }));
+    });
+    await check('new authoritative directories flush their parents before lease and pointer publication', async () => {
+      const { repository, pins, initiator, state } = fixture();
+      const operations = [];
+      const directories = [repository.commonDir, join(repository.commonDir, 'autoloop'), state, join(state, 'lock'),
+        join(state, 'runs'), join(state, 'runs', pins.runId), join(state, 'runs', pins.runId, 'streams')];
+      // Test-only OS-operation instrumentation. Real mkdir and fsync still run.
+      const fs = (await import('node:fs')).default;
+      const { syncBuiltinESMExports } = await import('node:module');
+      let acquired;
+      const originalMkdir = fs.mkdirSync; const originalFsync = fs.fsyncSync;
+      try {
+        fs.mkdirSync = (...args) => { const result = originalMkdir(...args); operations.push(['mkdir', args[0]]); return result; };
+        fs.fsyncSync = (fd) => {
+          const result = originalFsync(fd); const stat = fstatSync(fd);
+          if (stat.isDirectory()) for (const path of directories) {
+            if (!existsSync(path)) continue;
+            const target = lstatSync(path);
+            if (target.dev === stat.dev && target.ino === stat.ino) operations.push(['fsync', path]);
+          }
+          return result;
+        };
+        syncBuiltinESMExports();
+        acquired = acquireScheduler(repository, pins, initiator, { observe: (phase, path) => operations.push([phase, path]) });
+      } finally { fs.mkdirSync = originalMkdir; fs.fsyncSync = originalFsync; syncBuiltinESMExports(); }
+      const before = (path, publication) => {
+        const created = operations.findIndex(([at, target]) => at === 'mkdir' && target === path);
+        const flush = operations.findIndex(([at, target], index) => index > created && at === 'fsync' && target === dirname(path));
+        const published = operations.findIndex(([at, target]) => at === 'published' && target === publication);
+        assert(created >= 0 && flush > created && published > flush, `Parent flush for ${path} must precede ${publication}.`);
+      };
+      before(join(state, 'lock'), join(state, 'lock', '1.json'));
+      for (const path of [join(repository.commonDir, 'autoloop'), state, join(state, 'runs'), join(state, 'runs', pins.runId),
+        join(state, 'runs', pins.runId, 'streams')]) before(path, join(state, 'current.json'));
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+    });
+    await check('directory parent fsync failure prevents dependent authoritative publication', async () => {
+      const fs = (await import('node:fs')).default;
+      const { syncBuiltinESMExports } = await import('node:module');
+      for (const component of ['lock', 'runs', 'run']) for (const code of ['EIO', 'EINVAL']) {
+        const { repository, pins, initiator, state } = fixture();
+        const failedPath = component === 'run' ? join(state, 'runs', pins.runId) : join(state, component);
+        const original = fs.fsyncSync; let armed = false;
+        try {
+          fs.fsyncSync = (fd) => {
+            if (armed) {
+              const actual = fstatSync(fd); const parent = lstatSync(dirname(failedPath));
+              if (actual.isDirectory() && actual.dev === parent.dev && actual.ino === parent.ino) {
+                throw Object.assign(new Error('directory fsync failure'), { code });
+              }
+            }
+            return original(fd);
+          };
+          syncBuiltinESMExports();
+          refuses('STATE_IO_FAILED', () => acquireScheduler(repository, pins, initiator, { observe: (phase, path) => {
+            if (phase === 'directory-parent-sync' && path === failedPath) armed = true;
+          } }));
+        } finally { fs.fsyncSync = original; syncBuiltinESMExports(); }
+        assert.equal(existsSync(join(state, 'current.json')), false);
+        if (component === 'lock') assert.equal(existsSync(join(state, 'lock', '1.json')), false);
+      }
     });
     await check('an exclusive lease precedes a schema-checked checkpoint and current pointer', () => {
       const { repository, pins, initiator, state } = fixture();

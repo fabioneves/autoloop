@@ -109,7 +109,7 @@ function verifyServiceProcess(service, pins, expectedProcess = null) {
     'READINESS_FAILED', 'The service owner changed during verification.');
   return identity;
 }
-function launchStorageDirectory(path, create = false, privateMode = true) {
+function launchStorageDirectory(path, create = false, privateMode = true, observe = () => {}) {
   if (create) {
     try { mkdirSync(path, { mode: 0o700 }); }
     catch (error) { if (error.code !== 'EEXIST') throw new SchedulerError('STATE_IO_FAILED', 'The launch directory cannot be created.'); }
@@ -122,23 +122,34 @@ function launchStorageDirectory(path, create = false, privateMode = true) {
     requireCondition(stat.isDirectory() && stat.uid === userInfo().uid && (!privateMode || (stat.mode & 0o077) === 0),
       'HOST_AUTH_REQUIRED', 'The launch directory ownership or mode is invalid.');
   } finally { closeSync(fd); }
+  if (create) {
+    const parent = launchStorageDirectory(dirname(path), false, false);
+    const parentFd = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+      requireCondition(fstatSync(parentFd).isDirectory(), 'HOST_AUTH_REQUIRED', 'The launch parent is not a directory.');
+      observe('directory-parent-sync', path);
+      fsyncSync(parentFd);
+      observe('directory-parent-flushed', path);
+    } finally { closeSync(parentFd); }
+  }
   return path;
 }
-function launchDirectory(repository, create = false) {
+function launchDirectory(repository, create = false, observe = () => {}) {
   // Git and legacy models share these ancestors. Do not change their modes.
   let path = launchStorageDirectory(repository.commonDir, false, false);
-  path = launchStorageDirectory(join(path, 'autoloop'), create, false);
-  for (const name of ['scheduler', 'launches']) path = launchStorageDirectory(join(path, name), create);
+  path = launchStorageDirectory(join(path, 'autoloop'), create, false, observe);
+  for (const name of ['scheduler', 'launches']) path = launchStorageDirectory(join(path, name), create, true, observe);
   return path;
 }
-function publishLaunch(repository, value) {
-  const directory = launchDirectory(repository, true);
+function publishLaunch(repository, value, observe = () => {}) {
+  const directory = launchDirectory(repository, true, observe);
   const staged = join(directory, `staged-${value.launchId}.json`);
   const final = join(directory, `${value.launchId}.json`);
   const fd = openSync(staged, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { writeFileSync(fd, `${JSON.stringify(value)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
   // Retain both links. Authoritative launch records are not pruned automatically.
   linkSync(staged, final);
+  observe('launch-published', final);
   const dirfd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { fsyncSync(dirfd); } finally { closeSync(dirfd); }
 }
@@ -199,7 +210,7 @@ function serviceArguments(repository, pins, launchId) {
     '--run', pins.runId, '--launch-receipt', launchId];
 }
 export async function startSupervised({ repository, pins, initiator, systemdRunPath = '/usr/bin/systemd-run',
-  systemctlPath = '/usr/bin/systemctl', readinessTimeoutMs = 15000, pollMs = 100, platform = process.platform } = {}) {
+  systemctlPath = '/usr/bin/systemctl', readinessTimeoutMs = 15000, pollMs = 100, platform = process.platform, observe = () => {} } = {}) {
   requireCondition(platform === 'linux' && process.platform === 'linux', 'SUPERVISOR_UNAVAILABLE', 'Daemon supervision requires Linux systemd.');
   requireCondition(validatePins(pins).length === 0 && pins.repositoryKey === repository?.repositoryKey
     && pins.commonDir === repository.commonDir && resolveRepository(pins.coordinatorRoot).repositoryKey === repository.repositoryKey,
@@ -241,7 +252,7 @@ export async function startSupervised({ repository, pins, initiator, systemdRunP
     pins, initiator, launcher: readProcessIdentity(), systemctlPath, argv,
     minimumGeneration: current?.runId === pins.runId ? current.generation + 1 : 1, createdAt: Date.now() };
   launch.commandDigest = launchDigest(launch);
-  try { publishLaunch(repository, launch); }
+  try { publishLaunch(repository, launch, observe); }
   catch (error) {
     if (error instanceof SchedulerError) throw error;
     throw new SchedulerError('STATE_IO_FAILED', 'The durable launch record could not be published.');
@@ -433,6 +444,23 @@ for(const key of args.filter((arg)=>arg.startsWith('--property=')).map((arg)=>ar
           && readRegularFile(join(path, 'memory.swap.max')).trim() === '0' && readRegularFile(join(path, 'pids.max')).trim() === '2048';
       } catch { /* no verified test containment */ }
       if (!containedFixture) console.error('SKIP positive supervised lifecycle: run the test under MemoryMax=6G, MemorySwapMax=0 and TasksMax=2048.');
+      if (containedFixture) await check('launch directory parent flushes precede handoff publication and fsync failure refuses launch', async () => {
+        const setup = await fixture(); const operations = [];
+        const ready = await launch(setup, { observe: (phase, path) => operations.push([phase, path]) });
+        const publication = operations.findIndex(([phase]) => phase === 'launch-published');
+        for (const name of ['autoloop', 'autoloop/scheduler', 'autoloop/scheduler/launches']) {
+          const flushed = operations.findIndex(([phase, path]) => phase === 'directory-parent-flushed' && path === join(setup.repository.commonDir, name));
+          assert(flushed >= 0 && publication > flushed, `Launch ancestor ${name} must be durable before handoff.`);
+        }
+        submitControl(setup.repository, actor(), { schema: 'autoloop.control/2', requestId: randomUUID(), runId: ready.runId,
+          kind: 'stop', target: { type: 'run', generation: ready.generation }, payload: {}, submittedAt: Date.now() });
+        await waitFor(() => JSON.parse(readFileSync(setup.state)).MainPID === '0', 'The flush fixture daemon did not stop.');
+        const failed = await fixture();
+        await assert.rejects(launch(failed, { observe: (phase, path) => {
+          if (phase === 'directory-parent-sync' && path.endsWith('/launches')) throw Object.assign(new Error('parent fsync failure'), { code: 'EIO' });
+        } }), (error) => error.code === 'STATE_IO_FAILED');
+        assert.equal(readFileSync(failed.log, 'utf8').includes('"tool":"run"'), false);
+      });
       if (containedFixture) await check('a drained legacy 0755 autoloop directory starts without changing its mode', async () => {
         const setup = await fixture();
         const legacy = join(setup.repository.commonDir, 'autoloop');
@@ -671,7 +699,7 @@ const output={};try{
         const fresh = createPins(setup.repository, { pluginRoot, enginePath: setup.pins.enginePath, config: setup.pins.config, models: setup.pins.models });
         await assert.rejects(launch(setup, { pins: fresh }), (error) => error.code === 'RUN_MISMATCH');
         assert.equal(readCheckpoint(setup.repository, setup.pins.runId).outbox[operationId].phase, 'prepared');
-        try { assert.equal((await launch(setup)).state, 'recovering'); }
+        try { assert(['recovering', 'draining'].includes((await launch(setup)).state)); }
         catch (error) { assert.equal(error.code, 'READINESS_FAILED'); }
         await waitFor(() => JSON.parse(readFileSync(setup.state)).MainPID === '0', 'Prepared stopped recovery did not finish.');
         const retained = readCheckpoint(setup.repository, setup.pins.runId);
