@@ -6,14 +6,12 @@
 // text is the producer's own (fixtures/projection.ts).
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { On, PaneOpenArgs, RenderElement, RenderViewport } from 'claude-code'
+import type { On, PaneOpenArgs, RenderViewport } from 'claude-code'
 
 import { FALLBACK, RUN, UNOWNED, WAITING } from './fixtures/projection'
-import { PERIOD_MS, band, findText, projection, ran, rows, start } from './fixtures/testing'
+import { ENGINE_DRAWS, PERIOD_MS, band, findText, projection, ran, rows, start } from './fixtures/testing'
 import { PANE_ID, autoOpenDue } from './central'
 import { spinnerWord } from './view'
-
-const ENGINE_DRAWS: RenderElement = { type: 'Text', children: ['engine'] }
 
 /** Seats the host: the clock, the producer, the panes, and the engine's own drawing beneath the spinner and the output row. */
 function host(on: On, stdout: () => string) {

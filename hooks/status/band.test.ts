@@ -13,12 +13,11 @@ import type { HttpResponse, On, PaneOpenArgs, RenderElement } from 'claude-code'
 import type { StatusState } from '../../types'
 
 import { BLOCKED_THREE, DISABLED, FALLBACK, IDLE, IDLE_DELIVERED, OPEN_FINDINGS, OWNED, RUN, UNOWNED } from './fixtures/projection'
-import { PERIOD_MS, band, buttons, findColor, findText, projection, ran, rows, start, texts } from './fixtures/testing'
+import { BASE, PERIOD_MS, band, buttons, findColor, findText, projection, ran, rows, start, texts } from './fixtures/testing'
 import { PALETTE } from './kit'
 import { PANE_ID } from './central'
 import { needsYouRow, phaseRow, toastText } from './view'
 
-const BASE = 'http://127.0.0.1:8787'
 const THREE = JSON.stringify({ ok: true, active_requests: [
   { id: 'r1', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model: 'claude-opus-5-5', model: 'anthropic-gateway-opus[1m]', session_id: 'S-test' },
   { id: 'r2', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model: 'gpt-6-astra', model: null, session_id: 'S-other' },

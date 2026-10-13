@@ -5,17 +5,15 @@
 // The host is doubled (process.run, session.id, the clock); the projection
 // text is what the producer printed (fixtures/projection.ts).
 import { expect, mock, test } from 'claude-code/testing'
-import type { On, RenderElement } from 'claude-code'
+import type { On } from 'claude-code'
 import type { StatusState } from '../../types'
 
 import { DISABLED, OWNED, UNOWNED } from './fixtures/projection'
-import { PERIOD_MS, band, ran, rows, start } from './fixtures/testing'
+import { ENGINE_DRAWS, PERIOD_MS, band, ran, rows, start } from './fixtures/testing'
 import { STATUS_SCHEMA, isDrawable, isStale, parseProjection, readProjection } from './read'
 
 /** What the producer prints on a fault past ownership (status.mjs --self-test): owned false with the fault's code, exit 0. */
 const FAULT = JSON.stringify({ schema: STATUS_SCHEMA, owned: false, error: 'ENOTDIR' })
-
-const ENGINE_DRAWS: RenderElement = { type: 'Text', children: ['engine'] }
 
 type Answer = { stdout: string; exitCode?: number } | { deny: string } | { holdMs: number }
 

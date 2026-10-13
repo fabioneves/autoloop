@@ -2,31 +2,24 @@
 // a band above the prompt and, on request, a pane for the session that owns
 // a run. This module holds the hooks; the reads (the projection, the proxy,
 // the live tails) are in read.ts, the stream's renderer in render.ts, the
-// band's text in view.ts, the pane's tabs in central.ts, the palette,
-// glyphs and element builders in kit.ts. The band draws only from a projection that is
-// owned and enabled, so every other session sees no change; the pane opens
-// only on /autoloop.
-import type { EngineInterface, Register, RenderChildren, RenderElement, Timer } from 'claude-code'
+// band's text in view.ts, the pane's tabs in central.ts, the drawings in
+// draw.tsx, the palette, glyphs and element builders in kit.ts. The band
+// draws only from a projection that is owned and enabled, so every other
+// session sees no change; the pane opens only on /autoloop.
+import type { EngineInterface, Register, Timer } from 'claude-code'
 import { update } from 'claude-code'
 
-import type { StatusPending, StatusProjection, StatusState, StatusStream } from '../../types'
-import type { Row, RowAction, Section } from './central'
-import {
-  LOG_FILTERS, LOG_LENGTH, PANE_ID, PANE_TITLE, TABS, autoOpenDue, glyphTone, liveRoom, liveScroll, liveTab, logTab, runTab, shownDispatch, statusLine,
-  unitsTab,
-} from './central'
-import type { Control, ControlHost } from './control'
+import type { StatusProjection, StatusState, StatusStream } from '../../types'
+import { LOG_LENGTH, PANE_ID, PANE_TITLE, autoOpenDue, liveRoom, liveScroll, shownDispatch } from './central'
+import type { ControlHost } from './control'
 import { refusedText, sendControl } from './control'
-import type { Kit } from './kit'
-import { GLYPH, PALETTE, cell, empty, header, rule, section, strip, tabs } from './kit'
+import { bandTree, paneTree } from './draw'
+import { empty } from './kit'
 import type { ProxyFetch, Runner } from './read'
 import {
-  LIVE_PERIOD_MS, STREAM_LINES_MAX, isDrawable, isStale, proxyBase, pruneStreams, readProjection, readProxy, runningDispatches, tailLive,
+  LIVE_PERIOD_MS, STREAM_LINES_MAX, isDrawable, proxyBase, pruneStreams, readProjection, readProxy, runningDispatches, tailLive,
 } from './read'
-import {
-  HINT, blockedUnits, checkedAgo, columnWidths, headerMarks, isNarrow, loopColumn, needsYouRow, phaseRow, proxyColumn, spinnerWord, toastText,
-  workColumn,
-} from './view'
+import { blockedUnits, spinnerWord, toastText } from './view'
 
 const STATUS = { plugin: 'autoloop', key: 'status' } as const
 const PERIOD_MS = 3000
@@ -37,10 +30,15 @@ const EMPTY: StatusState = {
   tab: 'run', logFilter: 'all', selected: null, follow: true, liveOffset: 0,
 }
 /** The mod's state as last written, EMPTY before the first tick; a field an older module never wrote takes EMPTY's. */
-const heldState = async ($: EngineInterface): Promise<StatusState> => ({ ...EMPTY, ...(await $.state.get(STATUS)).value })
+const readState = async ($: EngineInterface): Promise<StatusState> => ({ ...EMPTY, ...(await $.state.get(STATUS)).value })
+/** One write of the mod's state: `change` sees the state as last written (EMPTY's fields under it), and the fields it returns replace. */
+const editState = ($: EngineInterface, change: (state: StatusState) => Partial<StatusState>) =>
+  update($, STATUS, (value) => {
+    const state = { ...EMPTY, ...value }
+    return { ...state, ...change(state) }
+  })
 /** Whether the pane is open, written where the pane opens or closes; the band reads it to draw one row. */
-const setPaneOpen = ($: EngineInterface, paneOpen: boolean) =>
-  update($, STATUS, (held) => ({ ...(held ?? EMPTY), paneOpen }))
+const setPaneOpen = ($: EngineInterface, paneOpen: boolean) => editState($, () => ({ paneOpen }))
 /** The host beneath a control (control.ts holds no `$`): the producer as a child, the toasts, the prompt queue. */
 const controlHost = ($: EngineInterface): ControlHost => ({
   run: (argv, init) => $.process.run(argv, init),
@@ -49,96 +47,6 @@ const controlHost = ($: EngineInterface): ControlHost => ({
   pluginRoot: $.plugin.root,
   sessionId: () => $.session.id(),
 })
-/**
- * The band's card (SPEC-central item 7): the header, the three cells, the
- * phase row and the needs-you strip; one row (the header and the cells) when
- * `oneRow`, as while the pane is open. Drawn above the prompt and, for the
- * /autoloop output row, in the transcript.
- */
-function bandTree(kit: Kit, held: StatusState & { last: StatusProjection }, nowMs: number, bodyColumns: number, oneRow: boolean): RenderElement {
-  const { Box, Text } = kit
-  // Stale: the glyphs that mean "running now" draw hollow, since nothing
-  // confirms it (spec item 11).
-  const stale = isStale(held.lastOkAtMs, nowMs)
-  const live = (glyph: string) => (stale && glyph === GLYPH.active ? GLYPH.notYet : glyph)
-  // The one-row form takes the narrow texts whatever the width.
-  const narrow = isNarrow(bodyColumns) || oneRow
-  const loop = loopColumn(held.last, narrow)
-  const work = workColumn(held.last)
-  const proxy = held.proxy === null ? null : proxyColumn(held.proxy, narrow)
-  // ON is good; UP and OFF are warnings: the glyph and the word wear the same color.
-  const proxyColor = proxy?.state === 'on' ? PALETTE.good : PALETTE.warn
-  const brand = (
-    <Text color={PALETTE.ink}>
-      <Text color={PALETTE.accent}>{GLYPH.brand}</Text> autoloop · {checkedAgo(held.lastOkAtMs, nowMs)}
-      {headerMarks(held.last, stale).map((mark) => <Text> · <Text color={PALETTE.warn}>{mark}</Text></Text>)}
-    </Text>
-  )
-  const loopHead = (
-    <Text color={PALETTE.ink} wrap="truncate-end">
-      <Text color={PALETTE.good}>{live(loop.glyph)}</Text> {loop.head}
-    </Text>
-  )
-  const workText = (
-    <Text color={PALETTE.ink}>
-      {work.counts}{work.needsYou !== null && <Text> · <Text color={PALETTE.crit}>{work.needsYou}</Text></Text>}
-    </Text>
-  )
-  const proxyHead = proxy === null ? null : (
-    <Text color={PALETTE.ink}>
-      <Text color={proxyColor}>{live(proxy.glyph)}</Text> <Text color={proxyColor}>{proxy.word}</Text>{proxy.tail}
-    </Text>
-  )
-  const sep = <Text color={PALETTE.ink3}> {GLYPH.rule} </Text>
-  if (oneRow) {
-    return (
-      <Box borderStyle="round" borderColor={PALETTE.ink3} paddingX={1}>
-        <Text color={PALETTE.ink} wrap="truncate-end">
-          {brand}{sep}{loopHead}{sep}{workText}{proxyHead !== null && <Text>{sep}{proxyHead}</Text>} · <Text color={PALETTE.ink2}>{HINT}</Text>
-        </Text>
-      </Box>
-    )
-  }
-  const bodies: { title: string; rows: RenderChildren[] }[] = [
-    { title: 'loop', rows: [loopHead, loop.detail === null ? null : <Text color={PALETTE.ink2}>{loop.detail}</Text>] },
-    { title: 'work', rows: [workText] },
-    ...(proxy === null ? [] : [{ title: 'proxy', rows: [proxyHead, ...proxy.rows.map((row) => <Text color={PALETTE.ink2}>{row}</Text>)] }]),
-  ]
-  const height = 1 + Math.max(...bodies.map((body) => body.rows.filter((row) => row !== null).length))
-  const widths = columnWidths(bodyColumns, bodies.length)
-  const phases = phaseRow(held.last)
-  const needsYou = needsYouRow(held.last)
-  const phaseGlyph = (state: 'done' | 'current' | 'notYet') =>
-    (state === 'done' ? GLYPH.done : state === 'current' ? live(GLYPH.active) : GLYPH.notYet)
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor={PALETTE.ink3}>
-      <Box paddingX={1}>{header(kit, brand, HINT)}</Box>
-      <Box>
-        {bodies.flatMap((body, index) => [
-          index === 0 ? null : rule(kit, height),
-          cell(kit, body.title, body.rows, widths[index] ?? 0),
-        ])}
-      </Box>
-      {phases !== null && (
-        <Box paddingX={1}>
-          <Text color={PALETTE.ink}>
-            {phases.map((phase, index) => {
-              const notYet = phase.state === 'notYet'
-              return (
-                <Text color={notYet ? PALETTE.ink3 : PALETTE.ink}>
-                  {index === 0 ? '' : '  '}<Text color={notYet ? PALETTE.ink3 : PALETTE.good}>{phaseGlyph(phase.state)}</Text> {phase.label}
-                </Text>
-              )
-            })}
-          </Text>
-        </Box>
-      )}
-      {needsYou !== null && strip(kit,
-        [<Text color={PALETTE.crit} bold>{GLYPH.needsYou}</Text>, ' #', needsYou.issue, ' ', needsYou.text],
-        `${needsYou.right}${needsYou.more > 0 ? ` · +${needsYou.more} more` : ''}`)}
-    </Box>
-  )
-}
 /** Why the pane and the command stay quiet while the projection is not drawable: not the owner, or the band turned off. */
 function quietReason(projection: StatusProjection | null): string {
   return projection === null || projection.owned !== true
@@ -185,7 +93,7 @@ export const register: Register = (on) => {
       if (liveBusy) return
       liveBusy = true
       try {
-        const running = runningDispatches((await heldState($)).last)
+        const running = runningDispatches((await readState($)).last)
         if (running.length === 0) return
         const nowMs = await $.clock.now()
         const tailed = await Promise.all(running.map(async (dispatch) => ({ id: dispatch.dispatch, tail: await tailLive(run, dispatch.liveFile) })))
@@ -195,14 +103,13 @@ export const register: Register = (on) => {
           grown.push({ id, grew: chunks.get(id) !== tail.chunk, stream: { lines: tail.lines.slice(-STREAM_LINES_MAX), bytes: tail.chunk.length } })
           chunks.set(id, tail.chunk)
         }
-        await update($, STATUS, (value) => {
-          const held = value ?? EMPTY
-          const streams = { ...held.streams }
+        await editState($, (state) => {
+          const streams = { ...state.streams }
           for (const { id, stream, grew } of grown) {
-            const before = held.streams[id]
+            const before = state.streams[id]
             streams[id] = { ...stream, lastGrewAtMs: grew || before === undefined ? nowMs : before.lastGrewAtMs }
           }
-          return { ...held, streams: pruneStreams(streams, running.map((dispatch) => dispatch.dispatch)) }
+          return { streams: pruneStreams(streams, running.map((dispatch) => dispatch.dispatch)) }
         })
       } catch (error) {
         if (!faultReported) {
@@ -238,7 +145,7 @@ export const register: Register = (on) => {
         const sessionId = await $.session.id()
         // The Log tab is the whole log: 500 entries while it shows, the
         // producer's default otherwise.
-        const logLength = (await heldState($)).tab === 'log' ? LOG_LENGTH : null
+        const logLength = (await readState($)).tab === 'log' ? LOG_LENGTH : null
         const [read, proxy] = await Promise.all([
           readProjection(run, $.plugin.root, sessionId, logLength),
           base === null ? null : readProxy(fetch, base),
@@ -255,15 +162,14 @@ export const register: Register = (on) => {
         // control file's name (SPEC-central item 16).
         let fresh: ReturnType<typeof blockedUnits> = []
         let refused: NonNullable<StatusProjection['controls']>['refused'] = []
-        await update($, STATUS, (value) => {
-          const held = value ?? EMPTY
-          if (!read.ok) return { ...held, lastMs, proxy }
+        await editState($, (state) => {
+          if (!read.ok) return { lastMs, proxy }
           const drawable = isDrawable(read.projection)
-          fresh = drawable ? blockedUnits(read.projection).filter((unit) => !held.seenBlocked.includes(unit.issue)) : []
-          refused = drawable ? (read.projection.controls?.refused ?? []).filter((entry) => !held.seenRefused.includes(entry.name)) : []
+          fresh = drawable ? blockedUnits(read.projection).filter((unit) => !state.seenBlocked.includes(unit.issue)) : []
+          refused = drawable ? (read.projection.controls?.refused ?? []).filter((entry) => !state.seenRefused.includes(entry.name)) : []
           return {
-            ...held, last: read.projection, lastOkAtMs: nowMs, lastMs, proxy,
-            seenBlocked: [...held.seenBlocked, ...fresh.map((unit) => unit.issue)], seenRefused: [...held.seenRefused, ...refused.map((entry) => entry.name)],
+            last: read.projection, lastOkAtMs: nowMs, lastMs, proxy,
+            seenBlocked: [...state.seenBlocked, ...fresh.map((unit) => unit.issue)], seenRefused: [...state.seenRefused, ...refused.map((entry) => entry.name)],
           }
         })
         for (const unit of fresh) $.ui.toast(toastText({ issue: unit.issue, text: unit.needsYou.text }))
@@ -272,8 +178,8 @@ export const register: Register = (on) => {
         // owned run under a surface that docks a pane (item 13), never with
         // focus. The host holds the width rule: under its floor the open
         // waits undrawn, and the band keeps its card until the pane draws.
-        if (read.ok && isDrawable(read.projection) && autoOpenDue(await heldState($), isFullscreen)) {
-          await update($, STATUS, (value) => ({ ...EMPTY, ...value, autoOpened: true }))
+        if (read.ok && isDrawable(read.projection) && autoOpenDue(await readState($), isFullscreen)) {
+          await editState($, () => ({ autoOpened: true }))
           const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE })
           await setPaneOpen($, opened.isPlaced)
         }
@@ -329,7 +235,7 @@ export const register: Register = (on) => {
       return { text: 'autoloop: status pane closed' }
     }
     if (args !== '') return { text: `autoloop: unknown argument "${args}"; use /autoloop or /autoloop close` }
-    const { last } = await heldState($)
+    const { last } = await readState($)
     if (!isDrawable(last)) return { text: quietReason(last) }
     const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE })
     await setPaneOpen($, opened.isPlaced)
@@ -349,16 +255,16 @@ export const register: Register = (on) => {
     // read on every draw, since a remote surface reports it once attached.
     isFullscreen = e.viewport?.isFullscreen ?? null
     if (e.props.hasSurvey) return next(e)
-    const held = await heldState($)
-    if (!isDrawable(held.last)) return next(e)
-    return bandTree($.ui.resolve(e), { ...held, last: held.last }, await $.clock.now(), e.props.bodyColumns, held.paneOpen)
+    const state = await readState($)
+    if (!isDrawable(state.last)) return next(e)
+    return bandTree($.ui.resolve(e), { ...state, last: state.last }, await $.clock.now(), e.props.bodyColumns, state.paneOpen)
   })
 
   // The spinner's word while the session owns a run with a unit (item 4):
   // the engine's suffix and time stay; without a unit the word is the engine's.
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
-    const held = await heldState($)
-    const word = isDrawable(held.last) ? spinnerWord(held.last) : null
+    const state = await readState($)
+    const word = isDrawable(state.last) ? spinnerWord(state.last) : null
     return word === null ? next(e) : next({ ...e, props: { ...e.props, word } })
   })
 
@@ -367,9 +273,9 @@ export const register: Register = (on) => {
   // keep their text. The transcript row has no body width: the viewport's.
   on('ui.render', { component: 'CommandOutput', props: { command: 'autoloop' } }, async ($, e, next) => {
     if (e.props.args.trim() !== '' || e.props.isErrored) return next(e)
-    const held = await heldState($)
-    if (!isDrawable(held.last)) return next(e)
-    return bandTree($.ui.resolve(e), { ...held, last: held.last }, await $.clock.now(), e.viewport?.columns ?? 80, false)
+    const state = await readState($)
+    if (!isDrawable(state.last)) return next(e)
+    return bandTree($.ui.resolve(e), { ...state, last: state.last }, await $.clock.now(), e.viewport?.columns ?? 80, false)
   })
 
   // The person's scroll over the pane while the Live tab shows moves the
@@ -379,130 +285,29 @@ export const register: Register = (on) => {
   // `$.ui.scroll` argument, not the person's input, so central.test.ts holds
   // `liveScroll` to the rule and not this hook.)
   on('ui.scroll', { requestId: 'autoloop' }, async ($, e, next) => {
-    const held = await heldState($)
-    if (held.tab !== 'live' || !isDrawable(held.last)) return next(e)
-    const id = shownDispatch(held.last, held.streams, held.selected)
-    const lineCount = id === null ? 0 : held.streams[id]?.lines.length ?? 0
-    const moved = liveScroll(held, e.by, lineCount, liveRoom(e.bodyRows))
-    await update($, STATUS, (value) => ({ ...EMPTY, ...value, ...moved }))
+    const state = await readState($)
+    if (state.tab !== 'live' || !isDrawable(state.last)) return next(e)
+    const id = shownDispatch(state.last, state.streams, state.selected)
+    const lineCount = id === null ? 0 : state.streams[id]?.lines.length ?? 0
+    const moved = liveScroll(state, e.by, lineCount, liveRoom(e.bodyRows))
+    await editState($, () => moved)
     return {}
   })
 
-  // The controls (SPEC-central item 16) are buttons and inputs of the pane:
-  // each sends one control through control.ts. A cancel is held as
-  // `pending` in $.state until its y or n, so the question survives a redraw.
-  // The literal, so `claude plugin validate` lists the pane's id (central.test.ts holds PANE_ID to it).
+  // The pane (SPEC-central items 8 to 16), drawn by draw.tsx from the state
+  // and the handlers given here. The literal, so `claude plugin validate`
+  // lists the pane's id (central.test.ts holds PANE_ID to it).
   on('ui.render', { component: 'Pane', requestId: 'autoloop' }, async ($, e) => {
     const kit = $.ui.resolve(e)
-    const { Box, Text, Button } = kit
-    // The mobile surface draws no field: a block or decide row then stands without its input.
-    const Input = 'Input' in kit ? kit.Input : null
-    const held = await heldState($)
-    if (!isDrawable(held.last)) return <Text color={PALETTE.ink2}>{quietReason(held.last)}</Text>
-    const projection = held.last
-    const nowMs = await $.clock.now()
-    const sessionId = await $.session.id()
-    const setTab = (tab: StatusState['tab']) => update($, STATUS, (value) => ({ ...EMPTY, ...value, tab }))
-    const setFilter = (logFilter: StatusState['logFilter']) => update($, STATUS, (value) => ({ ...EMPTY, ...value, logFilter }))
-    const setPending = (pending: StatusPending | null) => update($, STATUS, (value) => ({ ...EMPTY, ...value, pending }))
-    const send = (control: Control) => sendControl(controlHost($), control)
-    const paused = projection.run?.paused === true
-    const pauseButton = (
-      <Button key="pause" label={paused ? `${GLYPH.play} resume` : `${GLYPH.paused} pause`} hotkey="p" plain
-        onPress={() => send({ kind: paused ? 'unpause' : 'pause' })} />
-    )
-    const confirmRow = (pending: StatusPending) => (
-      <Box gap={1}>
-        <Text color={PALETTE.ink}>cancel {pending.name}?</Text>
-        <Button key="confirm-yes" label="yes" hotkey="y" plain onPress={async () => {
-          await setPending(null)
-          await send({ kind: 'cancel', dispatch: pending.dispatch, issue: pending.issue })
-        }} />
-        <Button key="confirm-no" label="no" hotkey="n" plain onPress={() => setPending(null)} />
-      </Box>
-    )
-    // The element a row's action draws: a button at the right, or an Input on the row under.
-    const actionButton = (action: RowAction): RenderElement | null => {
-      if (action.kind === 'cancel') return <Button key={`cancel-${action.dispatch}`} label="cancel" plain onPress={() => setPending(action)} />
-      if (action.kind === 'merge') return <Button key={`merge-${action.pr}`} label="merge" plain onPress={() => send({ kind: 'merge', pr: action.pr })} />
-      if (action.kind === 'authorize') return <Button key={`authorize-${action.pr}`} label="authorize" plain onPress={() => send({ kind: 'label', pr: action.pr })} />
-      return null
-    }
-    const drawRow = (r: Row): RenderElement => {
-      const line = (
-        <Box justifyContent="space-between">
-          <Text color={r.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">
-            {r.lead !== null && <Text color={PALETTE.ink2}>{r.lead}  </Text>}
-            {r.glyph !== '' && <Text color={PALETTE[glyphTone(r.glyph)]}>{r.glyph}</Text>}{r.glyph !== '' && ' '}{r.text}
-          </Text>
-          {r.right !== null && <Text color={PALETTE.ink2}> {r.right}</Text>}
-          {r.action !== null && actionButton(r.action)}
-        </Box>
-      )
-      if (r.action?.kind !== 'answer' || Input === null) return line
-      const issue = r.action.issue
-      return (
-        <Box flexDirection="column">
-          {line}
-          <Input key={`answer-${issue}`} placeholder="answer…" onSubmit={(value) => {
-            const text = value.trim()
-            if (text !== '') void send({ kind: 'answer', issue, text })
-          }} />
-        </Box>
-      )
-    }
-    const drawSection = (s: Section) => section(kit, s.title, s.rows.map(drawRow))
-    const body = (): RenderChildren[] => {
-      if (held.tab === 'run') {
-        const run = runTab(projection, held.proxy, sessionId, nowMs, e.props.bodyColumns)
-        // The Now section holds the no-unit text and the running dispatches together.
-        const now = [...(run.empty === null ? [] : [empty(kit, run.empty)]), ...(run.sections.find((s) => s.title === 'Now')?.rows ?? []).map(drawRow)]
-        return [now.length > 0 && section(kit, 'Now', now), ...run.sections.filter((s) => s.title !== 'Now').map(drawSection)]
-      }
-      if (held.tab === 'units') return unitsTab(projection, nowMs).map(drawRow)
-      if (held.tab === 'log') {
-        return [
-          <Box gap={1}>
-            {LOG_FILTERS.map(({ filter, label }) => (
-              <Button key={`filter-${filter}`} label={label} plain {...(held.logFilter === filter ? { variant: 'primary' as const } : {})} onPress={() => setFilter(filter)} />
-            ))}
-            <Text color={PALETTE.ink2}>UTC</Text>
-          </Box>,
-          ...logTab(projection, held.logFilter).map(drawRow),
-        ]
-      }
-      // Live: a button per running dispatch, `f` for follow, the shown
-      // dispatch's title and its lines in the window.
-      const view = liveTab(projection, held.streams, held, nowMs, e.props.scroll.bodyRows, e.props.bodyColumns)
-      const shown = view.shown
-      if (shown === null) return [empty(kit, 'no dispatch has run yet')]
-      const select = (selected: string) => update($, STATUS, (value) => ({ ...EMPTY, ...value, selected }))
-      const toggleFollow = () => update($, STATUS, (value) => ({ ...EMPTY, ...value, follow: !(value?.follow ?? true) }))
-      return [
-        <Box gap={1}>
-          {view.buttons.map((button) => (
-            <Button key={`live-${button.id}`} label={button.label} plain {...(button.hotkey === null ? {} : { hotkey: button.hotkey })}
-              {...(button.active ? { variant: 'primary' as const } : {})} onPress={() => select(button.id)} />
-          ))}
-          <Button key="follow" label="follow" hotkey="f" plain {...(held.follow ? { variant: 'primary' as const } : {})} onPress={toggleFollow} />
-          {shown.cancel !== null && <Button key="cancel" label="cancel" hotkey="x" plain onPress={() => setPending(shown.cancel)} />}
-        </Box>,
-        <Text color={PALETTE.ink} wrap="truncate-end">{shown.title}</Text>,
-        ...shown.lines.map((line) => <Text color={line.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">{line.text}</Text>),
-      ]
-    }
-    return (
-      <Box flexDirection="column" gap={1}>
-        <Box flexDirection="column">
-          <Box justifyContent="space-between">
-            <Text color={PALETTE.ink} wrap="truncate-end"><Text color={PALETTE.accent}>{GLYPH.brand}</Text> autoloop · {statusLine(projection)}</Text>
-            {pauseButton}
-          </Box>
-          {tabs(kit, TABS.map(({ tab, label, hotkey }) => ({ label, hotkey, active: held.tab === tab, onPress: () => setTab(tab) })))}
-          {held.pending !== null && confirmRow(held.pending)}
-        </Box>
-        {held.tab === 'run' ? <Box flexDirection="column" gap={1}>{body()}</Box> : <Box flexDirection="column">{body()}</Box>}
-      </Box>
-    )
+    const state = await readState($)
+    if (!isDrawable(state.last)) return empty(kit, quietReason(state.last))
+    return paneTree(kit, { ...state, last: state.last }, {
+      nowMs: await $.clock.now(),
+      sessionId: await $.session.id(),
+      bodyColumns: e.props.bodyColumns,
+      bodyRows: e.props.scroll.bodyRows,
+      edit: (change) => editState($, change),
+      send: (control) => sendControl(controlHost($), control),
+    })
   })
 }

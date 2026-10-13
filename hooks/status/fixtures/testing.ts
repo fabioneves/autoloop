@@ -1,15 +1,22 @@
-// What the five test files share: the producer's text as a projection, the
-// host's answer shapes, the band drawn through the engine, and the drawn
-// tree read back as rows and colors. The hosts themselves stay in each file:
+// What the test files share: the producer's text as a projection, the
+// host's answer shapes, the band and the pane drawn through the engine, and
+// the drawn tree read back as rows and colors. The hosts themselves stay in each file:
 // each test file doubles what it exercises.
 import type { Engine } from 'claude-code/testing'
 import type { ProcessRunResult, RenderElement, RenderViewport } from 'claude-code'
 import type { StatusProjection } from '../../../types'
 
+import { PANE_ID } from '../central'
 import { parseProjection } from '../read'
 
 /** The mod's tick period, as register.tsx holds it. */
 export const PERIOD_MS = 3000
+/** The proxy base the tests set: a loopback URL. */
+export const BASE = 'http://127.0.0.1:8787'
+/** The fixture's clock: 10:30 on 2026-09-28, three minutes after #412's fix round started. */
+export const AT_10_30 = Date.UTC(2026, 8, 28, 10, 30)
+/** What the engine draws beneath the mod, so a test sees the mod stand aside. */
+export const ENGINE_DRAWS: RenderElement = { type: 'Text', children: ['engine'] }
 
 export function projection(text: string): StatusProjection {
   const parsed = parseProjection(text)
@@ -35,6 +42,19 @@ export function band($: Engine, bodyColumns = 160, hasSurvey = false, viewport?:
     props: { hasSurvey, isWorking: false, maxRows: 8, bodyColumns, scroll: { offset: 0, bodyRows: 7 }, view: {} },
   })
 }
+
+/** Draws the pane docked and unfocused. */
+export function pane($: Engine, bodyColumns = 90, bodyRows = 40) {
+  return $.ui.render({
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: PANE_ID,
+    props: { title: 'autoloop', isFocused: false, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows }, view: {} },
+  })
+}
+
+/** A press on the pane's element `key`. */
+export const press = ($: Engine, key: string) => $.ui.press({ plugin: 'autoloop', key, requestId: PANE_ID })
 
 /** A tree's text, a Button as `[label]` and an Input as `(placeholder)`. */
 export function texts(tree: RenderElement): string {

@@ -12,13 +12,12 @@ import type { On } from 'claude-code'
 import type { StatusProjection } from '../../types'
 
 import { OWNED, RUN } from './fixtures/projection'
-import { PERIOD_MS, buttons, projection, ran, rows, start } from './fixtures/testing'
+import { AT_10_30, PERIOD_MS, buttons, pane, press, projection, ran, rows, start } from './fixtures/testing'
 import { PANE_ID, runTab } from './central'
 import { WAKE_PROMPT, controlArgv, controlName, parseControlAnswer, refusedText } from './control'
 import { LIVE_PERIOD_MS } from './read'
 import { STREAM } from './fixtures/stream'
 
-const AT_10_30 = Date.UTC(2026, 8, 28, 10, 30)
 
 /** Seats the host: the producer answers the projection, or a control's answer; the prompts and toasts are recorded. */
 function host(on: On, stdout: () => string, control: () => string = () => JSON.stringify({ ok: true, name: '1-x.json', kind: 'x' })) {
@@ -51,13 +50,6 @@ function host(on: On, stdout: () => string, control: () => string = () => JSON.s
   return { clock, controls, prompts, toasts }
 }
 
-const pane = ($: Engine, bodyColumns = 90) => $.ui.render({
-  surface: 'terminal',
-  component: 'Pane',
-  requestId: PANE_ID,
-  props: { title: 'autoloop', isFocused: false, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
-})
-const press = ($: Engine, key: string) => $.ui.press({ plugin: 'autoloop', key, requestId: PANE_ID })
 const type = ($: Engine, key: string, text: string) => $.ui.input({ plugin: 'autoloop', key, text, requestId: PANE_ID })
 
 /** The argv the mod must run for a control, less the plugin root the test cannot know. */

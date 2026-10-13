@@ -10,12 +10,11 @@ import type { HttpInit, HttpResponse, On, RenderElement } from 'claude-code'
 import type { StatusState } from '../../types'
 
 import { OWNED } from './fixtures/projection'
-import { PERIOD_MS, band, findColor, ran, rows, start, texts } from './fixtures/testing'
+import { BASE, PERIOD_MS, band, findColor, ran, rows, start, texts } from './fixtures/testing'
 import { PROXY_TIMEOUT_MS, parseProxyStatus, proxyBase, proxyUrl, readProxy } from './read'
 import { PALETTE } from './kit'
 import { modelCounts, proxyColumn } from './view'
 
-const BASE = 'http://127.0.0.1:8787'
 
 const request = (id: string, requested_model: string | null, model: string | null = null) => ({
   id, started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 1200, requested_model, model, session_id: 'S-test',

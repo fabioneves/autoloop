@@ -14,7 +14,7 @@ import type { HttpResponse, On, PaneOpenArgs } from 'claude-code'
 import type { StatusEvent, StatusProjection } from '../../types'
 
 import { DISABLED, FALLBACK, IDLE, OWNED, RUN, UNOWNED, WAITING, WAITS } from './fixtures/projection'
-import { PERIOD_MS, band, buttons, findColor, projection, ran, rows, start } from './fixtures/testing'
+import { AT_10_30, BASE, PERIOD_MS, band, buttons, findColor, pane, press, projection, ran, rows, start } from './fixtures/testing'
 import { RENDERED, STREAM } from './fixtures/stream'
 import {
   LOG_LENGTH, PANE_ID, clockText, eventText, linesText, liveScroll, liveTab, liveTitle, logRow, logTab, noUnitText, runTab, statusLine, unitsTab, waitText,
@@ -23,9 +23,6 @@ import type { Row } from './central'
 import { PALETTE } from './kit'
 import { LIVE_PERIOD_MS, QUIET_AFTER_MS, projectionArgv, readProxy } from './read'
 
-const BASE = 'http://127.0.0.1:8787'
-/** The fixture's clock: 10:30 on 2026-09-28, three minutes after #412's fix round started. */
-const AT_10_30 = Date.UTC(2026, 8, 28, 10, 30)
 const THREE = JSON.stringify({ ok: true, active_requests: [
   { id: 'r1', started_at: '2026-09-28T10:29:00.000Z', elapsed_ms: 61_000, requested_model: 'claude-opus-5-5', model: 'anthropic-gateway-opus[1m]', session_id: 'S-test' },
   { id: 'r2', started_at: '2026-09-28T10:29:30.000Z', elapsed_ms: 30_000, requested_model: 'gpt-6-astra', model: null, session_id: 'S-other' },
@@ -70,17 +67,6 @@ function host(on: On, stdout: () => string, env: Record<string, string> = {}) {
 function command($: Engine, args: string) {
   return $.command.run({ command: 'autoloop', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
 }
-
-function pane($: Engine, bodyColumns = 90) {
-  return $.ui.render({
-    surface: 'terminal',
-    component: 'Pane',
-    requestId: PANE_ID,
-    props: { title: 'autoloop', isFocused: false, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
-  })
-}
-
-const press = ($: Engine, key: string) => $.ui.press({ plugin: 'autoloop', key, requestId: PANE_ID })
 
 const HEADER = ['◆ autoloop · review #412[⏸ pause]', '[Run][Live][Units][Log]']
 
@@ -395,12 +381,7 @@ function liveHost(on: On, stdout: () => string) {
   return { clock }
 }
 
-const live = async ($: Engine, bodyRows = 40, bodyColumns = 90) => rows(await $.ui.render({
-  surface: 'terminal',
-  component: 'Pane',
-  requestId: PANE_ID,
-  props: { title: 'autoloop', isFocused: false, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows }, view: {} },
-}))
+const live = async ($: Engine, bodyRows = 40, bodyColumns = 90) => rows(await pane($, bodyColumns, bodyRows))
 
 test('the Live tab lists a button per running dispatch with the hotkeys a and b, the selected one primary, and a press selects', async ($, on) => {
   const h = liveHost(on, () => withDispatches([D412, D413]))

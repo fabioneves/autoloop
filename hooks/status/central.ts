@@ -6,7 +6,7 @@
 import type { ProxyRead, StatusEvent, StatusPending, StatusProjection, StatusState, StatusStream, StatusUnit, StatusWait, StatusWorkedUnit } from '../../types'
 import { GLYPH } from './kit'
 import { isQuiet, runningDispatches } from './read'
-import { blockedUnits, duration, loopColumn, modelName, prToAuthorize, requestedName, roundLabel, shortModel } from './view'
+import { answerText, blockedUnits, duration, loopColumn, parts, ref, requestedName, roundLabel, shortModel, truncate } from './view'
 
 export const PANE_ID = 'autoloop'
 export const PANE_TITLE = 'autoloop'
@@ -55,11 +55,6 @@ export type Section = { title: string; rows: Row[] }
 
 const row = (glyph: string, text: string, right: string | null = null, dim = false, action: RowAction | null = null): Row =>
   ({ lead: null, glyph, text, right, dim, action })
-
-const parts = (list: (string | null | undefined)[]): string => list.filter((part): part is string => typeof part === 'string' && part !== '').join(' · ')
-
-/** `#412 · PR #702`, or `#412` without a PR. */
-const ref = (issue: number, pr: number | null | undefined): string => (pr === null || pr === undefined ? `#${issue}` : `#${issue} · PR #${pr}`)
 
 /** The header's status line: the Loop cell's text, `paused` after it while the run is paused. */
 export function statusLine(projection: StatusProjection): string {
@@ -139,12 +134,6 @@ export function timelineSection(projection: StatusProjection, nowMs: number, nar
   }
 }
 
-/** What answers a unit that needs a human: `answer on #N`, or `merge or label PR #M` for an authorization with its PR. */
-function answerText(unit: StatusUnit): string {
-  const pr = prToAuthorize(unit)
-  return pr === null ? `answer on #${unit.issue}` : `merge or label PR #${pr}`
-}
-
 /**
  * The control a unit with a PR offers (item 16): `merge` only when the
  * loop's own gate may merge it (delivered, no human to answer), `authorize`
@@ -221,8 +210,6 @@ export function runTab(projection: StatusProjection, proxy: ProxyRead | null, se
 const UNIT_GLYPH: Record<StatusUnit['disposition'], string> = {
   active: GLYPH.active, waiting: GLYPH.waiting, blocked: GLYPH.needsYou, returned: GLYPH.done, delivered: GLYPH.done,
 }
-
-const truncate = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
 
 /** When a unit last changed: its newest log event, else the worked unit's start; null when the run recorded none. */
 export function lastChangeMs(projection: StatusProjection, issue: number): number | null {

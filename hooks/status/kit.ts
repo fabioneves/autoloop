@@ -15,7 +15,6 @@ export const PALETTE = Object.freeze({
   accent: 'claude',
   good: 'success',
   warn: 'warning',
-  info: 'suggestion',
   crit: 'error',
 })
 

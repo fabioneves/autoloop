@@ -13,6 +13,16 @@ export function isNarrow(bodyColumns: number): boolean {
   return bodyColumns < NARROW_COLUMNS
 }
 
+/** The parts that are text, joined with ` · `. */
+export const parts = (list: (string | null | undefined)[]): string =>
+  list.filter((part): part is string => typeof part === 'string' && part !== '').join(' · ')
+
+/** `#412 · PR #702`, or `#412` without a PR. */
+export const ref = (issue: number, pr: number | null | undefined): string => (pr === null || pr === undefined ? `#${issue}` : `#${issue} · PR #${pr}`)
+
+/** The text cut to `max` characters, an ellipsis as the last. */
+export const truncate = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
+
 /**
  * A model id as a short name: tools/step.mjs `shortModel`, kept identical
  * so the band and the card name a model the same way (view.test.ts holds
@@ -93,19 +103,16 @@ export function loopColumn(projection: StatusProjection, narrow: boolean): LoopC
     const last = delivered.length === 0 ? null : Math.max(...delivered)
     return { glyph: GLYPH.notYet, head: last === null ? 'Idle' : `Idle · last delivered #${last}`, detail: null }
   }
-  const pr = unit.pr === null || unit.pr === undefined ? '' : ` · PR #${unit.pr}`
   const title = narrow || unit.title === null ? '' : ` · ${unit.title}`
-  const detail = [unit.role, roundLabel(unit.round), modelLabel(unit, projection.models ?? {})]
-    .filter((part): part is string => part !== null)
-  return { glyph: GLYPH.active, head: `${unit.phase} #${unit.issue}${pr}${title}`, detail: detail.length === 0 ? null : detail.join(' · ') }
+  const detail = parts([unit.role, roundLabel(unit.round), modelLabel(unit, projection.models ?? {})])
+  return { glyph: GLYPH.active, head: `${unit.phase} ${ref(unit.issue, unit.pr)}${title}`, detail: detail === '' ? null : detail }
 }
 
 /** The spinner's word while the session owns a run with a unit (SPEC-central item 4): `autoloop · build #517 · PR #530 · implement`; null without a unit. */
 export function spinnerWord(projection: StatusProjection): string | null {
   const unit = projection.unit ?? null
   if (unit === null) return null
-  return ['autoloop', `${unit.phase} #${unit.issue}`, unit.pr === null || unit.pr === undefined ? null : `PR #${unit.pr}`, unit.role]
-    .filter((part): part is string => part !== null).join(' · ')
+  return parts(['autoloop', `${unit.phase} ${ref(unit.issue, unit.pr)}`, unit.role])
 }
 
 export type WorkColumn = {
@@ -186,6 +193,12 @@ export function prToAuthorize(unit: StatusUnit): number | null {
   return unit.needsYou?.kind === 'authorize' ? unit.pr : null
 }
 
+/** What answers a unit that needs a human: `answer on #N`, or `merge or label PR #M` for an authorization with its PR. */
+export function answerText(unit: StatusUnit): string {
+  const pr = prToAuthorize(unit)
+  return pr === null ? `answer on #${unit.issue}` : `merge or label PR #${pr}`
+}
+
 export type NeedsYouRow = {
   issue: number
   text: string
@@ -199,15 +212,12 @@ export type NeedsYouRow = {
 export function needsYouRow(projection: StatusProjection): NeedsYouRow | null {
   const [oldest, ...rest] = blockedUnits(projection)
   if (oldest === undefined) return null
-  const pr = prToAuthorize(oldest)
-  const right = pr === null ? `answer on #${oldest.issue}` : `merge or label PR #${pr}`
-  return { issue: oldest.issue, text: oldest.needsYou.text, right, more: rest.length }
+  return { issue: oldest.issue, text: oldest.needsYou.text, right: answerText(oldest), more: rest.length }
 }
 
 const TOAST_TEXT_MAX = 60
 
 /** The toast for a unit newly blocked (spec item 16): `#N needs you: <short>`. */
 export function toastText(unit: { issue: number; text: string }): string {
-  const short = unit.text.length > TOAST_TEXT_MAX ? `${unit.text.slice(0, TOAST_TEXT_MAX - 1)}…` : unit.text
-  return `#${unit.issue} needs you: ${short}`
+  return `#${unit.issue} needs you: ${truncate(unit.text, TOAST_TEXT_MAX)}`
 }
