@@ -3,16 +3,87 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import * as scheduler from './scheduler-contract.mjs';
-import * as prime from './prime.mjs';
-import { CONFIG_VERSION, resolveConfigText } from './config-contract.mjs';
-import { DEFAULT_MODELS, mergeModels } from './models-config.mjs';
+import { ancestorChain, procEntry, workerGuardClaims, workerGuardDirectory, workerGuardProcessKey, toolGuardFallbackProblem as fallbackToolProblem } from './run-markers.mjs';
+import { boundedGit } from './git-budget.mjs';
+// The hook bootstrap must remain loadable if a primary guard's scheduler/prime
+// dependency fails before payload parsing. Load that graph only inside its try.
+const bootstrap = process.argv[2] === '--guard-entry';
+let scheduler = bootstrap ? null : await import('./scheduler-contract.mjs');
+
+// The immutable runtime locator names a known process, but the current lease
+// and checkpoint must corroborate the complete attempt before tools are admitted.
+export function workerToolContext({ sessionId, cwd, workerDirectory = workerGuardDirectory(), startPid = process.ppid } = {}) {
+  const identities = [];
+  const unverifiedPids = [];
+  for (const pid of new Set([startPid, ...ancestorChain(startPid, procEntry)])) {
+    try { identities.push(scheduler.readProcessIdentity(pid)); }
+    catch { unverifiedPids.push(pid); }
+  }
+  const found = workerGuardClaims(identities, { directory: workerDirectory, unverifiedPids });
+  if (found.unreadable) return found;
+  if (found.length === 0) return null;
+  try {
+    const records = [...new Map(found.map((claim) => [scheduler.schedulerDigest(claim.record), claim])).values()];
+    assert.equal(records.length, 1, 'The process has more than one worker attempt.');
+    const { record, identity } = records[0];
+    assert.deepEqual(Object.keys(record).sort(), ['baseBranch', 'pinsDigest', 'repository', 'schema', 'worker']);
+    assert.equal(record.schema, 'autoloop.worker-guard/1');
+    const { worker } = record;
+    assert([worker.process, worker.groupLeader].some((process) => scheduler.schedulerDigest(process) === scheduler.schedulerDigest(identity)));
+    assert.equal(worker.sessionId, sessionId, 'The worker hook names another session.');
+    const repository = scheduler.resolveRepository(record.repository.coordinatorRoot);
+    assert.deepEqual(repository, record.repository);
+    const held = scheduler.readSchedulerOwner(repository);
+    assert.equal(held.state, 'alive', 'The worker scheduler owner is not live.');
+    assert.equal(held.released, false);
+    assert.equal(held.lease.runId, worker.runId);
+    assert.equal(held.lease.generation, worker.generation);
+    const checkpoint = scheduler.readCheckpoint(repository, worker.runId);
+    assert.equal(checkpoint.generation, worker.generation);
+    assert.equal(checkpoint.pinsDigest, record.pinsDigest);
+    const current = checkpoint.workers.find((item) => item.attemptId === worker.attemptId);
+    assert.deepEqual(current, worker, 'The worker binding changed or ended.');
+    assert(!['stopped', 'failed'].includes(checkpoint.state) && checkpoint.desiredState !== 'stopped' && !worker.cancelledByOperator);
+    assert.equal(scheduler.boundGroupState(worker), 'alive', 'The worker group cannot be verified.');
+    const pins = scheduler.readPins(repository, worker.runId);
+    scheduler.assertPinsLive(repository, pins);
+    assert.equal(pins.baseBranch, record.baseBranch);
+    const git = boundedGit(['-C', cwd, 'rev-parse', '--absolute-git-dir']);
+    assert.equal(git.status, 0, 'The worker checkout cannot be verified.');
+    assert.equal(realpathSync(git.stdout.trim()), worker.worktreeGitDir, 'The hook names another worker checkout.');
+    return { worker, repository, baseBranch: record.baseBranch, directory: workerDirectory, path: records[0].path };
+  } catch (error) {
+    return { unreadable: true, path: found[0].path, message: error.message };
+  }
+}
+
+export { toolGuardFallbackProblem as fallbackToolProblem } from './run-markers.mjs';
+async function runGuardEntry(kind) {
+  // Keep the complete input only in this process's memory. No transcript,
+  // environment handoff or temporary file contains the tool payload.
+  const inputText = readFileSync(0, 'utf8');
+  let payload = null;
+  try { payload = JSON.parse(inputText); } catch { /* ownership decides failure */ }
+  try {
+    scheduler ??= await import('./scheduler-contract.mjs');
+    const module = await import(kind === 'command' ? './command-guard.mjs' : './edit-guard.mjs');
+    if (kind === 'command') module.runCommandGuard({ inputText, argv: [] });
+    else module.runEditGuard({ inputText });
+  } catch {
+    const reason = fallbackToolProblem(payload, { entrypoint: join(dirname(fileURLToPath(import.meta.url)), `${kind}-guard.mjs`) });
+    if (reason !== null) { console.error(reason); process.exit(2); }
+    process.exit(0);
+  }
+}
 
 async function selfTest() {
+  const prime = await import('./prime.mjs');
+  const { CONFIG_VERSION, resolveConfigText } = await import('./config-contract.mjs');
+  const { DEFAULT_MODELS, mergeModels } = await import('./models-config.mjs');
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-execution-admission-')));
   const cases = [];
   const check = async (name, run) => {
@@ -170,6 +241,234 @@ async function selfTest() {
         }
       }
     });
+    await check('no-latch Bash entry rejects direct and known wrapped scheduler/helper operations but permits reads', () => {
+      const repo = repository(); const tools = dirname(fileURLToPath(import.meta.url));
+      const hook = (command) => spawnSync(process.execPath, [join(tools, 'command-guard.mjs')], {
+        input: JSON.stringify({ session_id: randomUUID(), cwd: repo.coordinatorRoot, tool_name: 'Bash', tool_input: { command } }),
+        cwd: repo.coordinatorRoot, encoding: 'utf8', timeout: 15000,
+        env: { ...process.env, HOME: join(scratch, 'unowned-home'), CLAUDE_PROJECT_DIR: repo.coordinatorRoot },
+      });
+      const loop = join(tools, 'loop.mjs'); const status = join(tools, 'status.mjs'); const host = join(tools, 'loop-host.mjs');
+      const denied = [
+        `node ${loop} start --root ${repo.coordinatorRoot} --operator-terminal --json`,
+        `env -u HOME timeout -s TERM 5s node ${loop} run --foreground --operator-terminal --root ${repo.coordinatorRoot}`,
+        `sudo -u fixture command node ${loop} pause --root ${repo.coordinatorRoot}`,
+        `sh -c 'node ${loop} stop --root ${repo.coordinatorRoot}'`,
+        `TOOL=${host}; node "$TOOL"`,
+        `env -C ${dirname(tools)} node tools/loop-host.mjs`,
+        `env --chdir=${dirname(tools)} node tools/loop-host.mjs`,
+        `env --chdir=${repo.coordinatorRoot} node ${host}`,
+        `${host}`,
+        `node ${status} --attach --host-request --root ${repo.coordinatorRoot}`,
+        `node ${status} --disconnect --host-request --root ${repo.coordinatorRoot}`,
+        `node ${status} --control --run ${randomUUID()} --by ui --root ${repo.coordinatorRoot}`,
+        `node ${status} --viewer-ended --root ${repo.coordinatorRoot}`,
+        `systemctl --user stop autoloop-${repo.repositoryKey}.service`,
+        `systemd-run --user --unit=autoloop-${repo.repositoryKey} node ${loop} run --supervised`,
+        `echo corrupt > ${repo.commonDir}/autoloop/scheduler/current.json`,
+        `cp source ${repo.commonDir}/autoloop/control/v2/requests/f.json`,
+        `rm -rf ${repo.commonDir}/autoloop/viewers`,
+        `printf forged > ${join(userInfo().homedir, '.claude', 'autoloop', 'host-invocations', 'f.json')}`,
+      ];
+      for (const command of denied) assert.equal(hook(command).status, 2, command);
+      const allowed = [
+        `node ${loop} status --root ${repo.coordinatorRoot} --json`,
+        `node ${loop} request-status --root ${repo.coordinatorRoot} --run ${randomUUID()} --request ${randomUUID()} --json`,
+        `node ${status} --discover --root ${repo.coordinatorRoot}`,
+        `node ${status} --json --root ${repo.coordinatorRoot}`,
+        `node ${host} --self-test`,
+        `cat ${repo.commonDir}/autoloop/scheduler/current.json`,
+        `git -C ${repo.coordinatorRoot} status`,
+        `env -C ${repo.coordinatorRoot} git status`,
+        `env --chdir=${repo.coordinatorRoot} cat README.md`,
+        `systemctl --user status autoloop-${repo.repositoryKey}.service`,
+        `node -e 'const x = "loop.mjs start"; console.log(x)'`,
+        'rm "$UNKNOWN_UNRELATED_PATH"',
+        `printf source > ${join(tools, 'loop-host.mjs')}`,
+      ];
+      for (const command of allowed) assert.equal(hook(command).status, 0, command);
+    });
+    await check('no-latch edit entry protects scheduler/control/viewer/host paths with aliases and permits ordinary source work', () => {
+      const repo = repository(); const tools = dirname(fileURLToPath(import.meta.url));
+      const alias = join(scratch, randomUUID()); symlinkSync(repo.commonDir, alias);
+      const installed = join(scratch, '.claude', 'plugins', 'cache', 'autoloop', 'autoloop', 'fixture');
+      mkdirSync(installed, { recursive: true }); symlinkSync(tools, join(installed, 'tools'));
+      const entry = join(installed, 'tools', 'edit-guard.mjs');
+      const hook = (tool_name, target) => spawnSync(process.execPath, [entry], {
+        input: JSON.stringify({ session_id: randomUUID(), cwd: repo.coordinatorRoot, tool_name,
+          tool_input: tool_name === 'NotebookEdit' ? { notebook_path: target } : { file_path: target } }),
+        cwd: repo.coordinatorRoot, encoding: 'utf8', timeout: 15000,
+        env: { ...process.env, HOME: join(scratch, 'unowned-home'), CLAUDE_PROJECT_DIR: repo.coordinatorRoot },
+      });
+      for (const tool of ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']) {
+        for (const target of [join(alias, 'autoloop', 'scheduler', 'runs', randomUUID(), 'checkpoint.json'),
+          join(repo.commonDir, 'autoloop', 'control', 'v2', 'requests', 'f.json'),
+          join(repo.commonDir, 'autoloop', 'viewers', 'f.json'),
+          join(userInfo().homedir, '.claude', 'autoloop', 'host-invocations', 'f.json'),
+          join(installed, 'tools', 'loop-host.mjs')]) {
+          assert.equal(hook(tool, target).status, 2, `${tool} ${target}`);
+        }
+        for (const target of [join(tools, 'loop-host.mjs'), join(repo.coordinatorRoot, 'src', 'ordinary.ts'),
+          join(repo.coordinatorRoot, '.claude', 'settings.json')]) assert.equal(hook(tool, target).status, 0, `${tool} ${target}`);
+      }
+    });
+    await check('primary guard syntax failure retains no-latch helper/state denials and permits an unrelated read', () => {
+      const repo = repository(); const copied = join(scratch, 'failed-guard-plugin');
+      cpSync(dirname(fileURLToPath(import.meta.url)), join(copied, 'tools'), { recursive: true });
+      for (const kind of ['command', 'edit']) {
+        const primary = join(copied, 'tools', `${kind}-guard.mjs`);
+        writeFileSync(primary, `${readFileSync(primary, 'utf8')}\nThis is a deliberate primary guard syntax failure.\n`);
+      }
+      const invoke = (kind, tool_name, tool_input) => spawnSync(process.execPath,
+        [join(copied, 'tools', 'loop-execution-admission.mjs'), '--guard-entry', kind], {
+          cwd: repo.coordinatorRoot, input: JSON.stringify({ session_id: randomUUID(), cwd: repo.coordinatorRoot, tool_name, tool_input }),
+          encoding: 'utf8', timeout: 15000, env: { ...process.env, HOME: join(scratch, 'bootstrap-home'), CLAUDE_PROJECT_DIR: repo.coordinatorRoot },
+        });
+      const host = join(copied, 'tools', 'loop-host.mjs');
+      for (const command of [`node ${host}`, `env -u HOME timeout 5 node ${host}`, `sh -c 'node ${host}'`,
+        `node ${join(copied, 'tools', 'loop.mjs')} start --operator-terminal --root ${repo.coordinatorRoot}`,
+        `echo corrupt>${repo.commonDir}/autoloop/scheduler/current.json`]) {
+        const result = invoke('command', 'Bash', { command }); assert.equal(result.status, 2, `${command}: ${result.stderr}`);
+      }
+      for (const command of ['git status --porcelain', 'cat README.md', `node ${join(copied, 'tools', 'loop.mjs')} status --root ${repo.coordinatorRoot}`,
+        `node -e 'console.log("loop-host.mjs")'`]) assert.equal(invoke('command', 'Bash', { command }).status, 0, command);
+      for (const tool of ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']) {
+        const key = tool === 'NotebookEdit' ? 'notebook_path' : 'file_path';
+        assert.equal(invoke('edit', tool, { [key]: join(repo.commonDir, 'autoloop', 'control', 'v2', 'requests', 'f.json') }).status, 2, tool);
+        assert.equal(invoke('edit', tool, { [key]: join(repo.coordinatorRoot, 'ordinary.ts') }).status, 0, tool);
+      }
+      // The actual outer hook must also retain the payload if its bootstrap
+      // cannot load at all. Input stays in memory and is never printed/exported.
+      const bootstrapFile = join(copied, 'tools', 'loop-execution-admission.mjs');
+      writeFileSync(bootstrapFile, `${readFileSync(bootstrapFile, 'utf8')}\nDeliberate bootstrap syntax failure.\n`);
+      const hooks = JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8')).hooks.PreToolUse;
+      const recipe = (kind) => hooks.find((hook) => hook.matcher.includes(kind === 'command' ? 'Bash' : 'Edit')).hooks[0].command;
+      const invokeRecipe = (kind, tool_name, tool_input) => spawnSync('sh', ['-c', recipe(kind)], {
+        cwd: repo.coordinatorRoot, input: JSON.stringify({ session_id: randomUUID(), cwd: repo.coordinatorRoot, tool_name,
+          tool_input: { ...tool_input, opaque: 'fixture-private-payload-value' } }), encoding: 'utf8', timeout: 15000,
+        env: { ...process.env, CLAUDE_PLUGIN_ROOT: copied, CLAUDE_PROJECT_DIR: repo.coordinatorRoot, HOME: join(scratch, 'outer-hook-home') },
+      });
+      for (const command of [`node ${host}`, `env -u HOME timeout 5 node ${host}`,
+        `node ${join(copied, 'tools', 'loop.mjs')} start --operator-terminal --root ${repo.coordinatorRoot}`]) {
+        const result = invokeRecipe('command', 'Bash', { command });
+        assert.equal(result.status, 2, `${command}: ${result.stderr}`);
+        assert(!result.stderr.includes('fixture-private-payload-value') && !result.stdout.includes('fixture-private-payload-value'));
+      }
+      assert.equal(invokeRecipe('command', 'Bash', { command: 'git status --porcelain' }).status, 0);
+      for (const tool of ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']) {
+        const key = tool === 'NotebookEdit' ? 'notebook_path' : 'file_path';
+        assert.equal(invokeRecipe('edit', tool, { [key]: join(repo.commonDir, 'autoloop', 'scheduler', 'current.json') }).status, 2);
+        assert.equal(invokeRecipe('edit', tool, { [key]: join(repo.coordinatorRoot, 'ordinary.ts') }).status, 0);
+      }
+    });
+    await check('registered worker attempts remain guarded when the guard throws or its bootstrap cannot load', async () => {
+      const workerHome = join(scratch, 'worker-account');
+      const workerDirectory = join(workerHome, '.claude', 'autoloop', 'worker-bindings');
+      const shim = join(scratch, 'worker-account-api.mjs');
+      writeFileSync(shim, `import os from 'node:os'; import { syncBuiltinESMExports } from 'node:module';
+        const original = os.userInfo; os.userInfo = (...args) => ({ ...original(...args), homedir: ${JSON.stringify(workerHome)} });
+        os.homedir = () => ${JSON.stringify(workerHome)}; syncBuiltinESMExports();`);
+      const copied = join(scratch, 'worker-failed-bootstrap');
+      cpSync(dirname(fileURLToPath(import.meta.url)), join(copied, 'tools'), { recursive: true });
+      const bootstrapFile = join(copied, 'tools', 'loop-execution-admission.mjs');
+      writeFileSync(bootstrapFile, `${readFileSync(bootstrapFile, 'utf8')}\nDeliberate worker bootstrap syntax failure.\n`);
+      const wiring = JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8')).hooks.PreToolUse;
+      const recipeOf = (kind) => wiring.find((hook) => hook.matcher.includes(kind === 'edit' ? 'Edit' : 'Bash')).hooks[0].command;
+      const fakeClaude = join(scratch, 'claude'); copyFileSync(realpathSync(process.execPath), fakeClaude);
+      const entry = join(scratch, 'guard-entry.mjs');
+      writeFileSync(entry, `const api = await import(process.argv[2]);
+        const observe = () => { if (process.argv[5] === 'throw') throw new Error('OS guard failure fixture'); };
+        if (process.argv[3] === 'edit') api.runEditGuard({ workerDirectory: process.argv[4], observe });
+        else api.runCommandGuard({ workerDirectory: process.argv[4], argv: [], observe });`);
+      const script = `import { spawnSync } from 'node:child_process';
+        process.title = 'claude'; const core = await import(process.argv[1]); process.send(core.readProcessIdentity());
+        process.on('message', ({ payload, entry, guard, kind, directory, fault, recipe, shim, copied }) => {
+          const env = { ...process.env, CLAUDE_PROJECT_DIR: payload.cwd, HOME: process.argv[2], AUTOLOOP_WORKER: 'writer', CLAUDE_CODE_SESSION_ID: payload.session_id };
+          const options = { input: JSON.stringify(payload), encoding: 'utf8', timeout: 15000, env };
+          const result = kind === 'recipe' ? spawnSync('sh', ['-c', recipe], { ...options,
+            env: { ...env, NODE_OPTIONS: '--import=' + shim, CLAUDE_PLUGIN_ROOT: copied } })
+            : spawnSync(process.execPath, [entry, guard, kind, directory, fault ? 'throw' : 'normal'], options);
+          process.send({ status: result.status, stdout: result.stdout, stderr: result.stderr });
+        });`;
+      for (const posture of ['plan', 'read-only', 'writer']) {
+        const repo = repository(); const acquired = start(repo); const sessionId = randomUUID(); const tools = dirname(fileURLToPath(import.meta.url));
+        const child = spawn(fakeClaude, ['--input-type=module', '-e', script, new URL('./scheduler-contract.mjs', import.meta.url).href, join(scratch, 'worker-home')], {
+          cwd: repo.coordinatorRoot, detached: true, stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+        });
+        try {
+          const identity = await new Promise((done) => child.once('message', done));
+          const attemptId = randomUUID();
+          const binding = { schema: 'autoloop.worker-binding/1', runId: acquired.runId, generation: 1, unitId: randomUUID(), unitGeneration: 1,
+            attemptId, sessionId, worktreeGitDir: repo.commonDir, process: identity, pgid: identity.pid, groupLeader: identity,
+            role: posture === 'plan' ? 'plan' : posture === 'read-only' ? 'code-review' : 'implement', posture, actualModel: 'fixture-worker',
+            liveFile: join(repo.commonDir, 'autoloop', 'scheduler', 'runs', acquired.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false };
+          scheduler.registerWorker(acquired.lease, 1, binding, { guardDirectory: workerDirectory });
+          const tool = (payload, kind = 'bash', fault = false) => new Promise((done) => {
+            child.once('message', done);
+            child.send({ payload, entry, guard: new URL(kind === 'edit' ? './edit-guard.mjs' : './command-guard.mjs', import.meta.url).href,
+              kind, directory: workerDirectory, fault });
+          });
+          const recipeCall = (payload, kind) => new Promise((done) => {
+            child.once('message', done); child.send({ payload, kind: 'recipe', recipe: recipeOf(kind), copied, shim });
+          });
+          const bash = (command, session = sessionId, cwd = repo.coordinatorRoot) => tool({ session_id: session, cwd, tool_name: 'Bash', tool_input: { command } });
+          const read = await bash('git status --porcelain');
+          assert.equal(read.status, 0, read.stderr);
+          // Explicit OS-failure instrumentation: the real guard catches a throw,
+          // without replacing the first-party ownership predicate.
+          assert.equal((await tool({ session_id: sessionId, cwd: repo.coordinatorRoot, tool_name: 'Bash', tool_input: { command: 'git status' } }, 'bash', true)).status, 2);
+          assert.equal((await tool({ session_id: sessionId, cwd: repo.coordinatorRoot, tool_name: 'Edit', tool_input: { file_path: 'source.ts' } }, 'edit', true)).status, 2);
+          assert.equal((await recipeCall({ session_id: sessionId, cwd: repo.coordinatorRoot, tool_name: 'Bash', tool_input: { command: 'git status' } }, 'bash')).status, 2);
+          assert.equal((await recipeCall({ session_id: sessionId, cwd: repo.coordinatorRoot, tool_name: 'Edit', tool_input: { file_path: 'ordinary.ts' } }, 'edit')).status, 2);
+          const indexPath = join(workerDirectory, workerGuardProcessKey(identity), `${attemptId}.json`);
+          const indexText = readFileSync(indexPath, 'utf8');
+          writeFileSync(indexPath, '{corrupt');
+          assert.equal((await bash('git status')).status, 2, 'A known corrupt worker locator must not become unowned.');
+          writeFileSync(indexPath, indexText);
+          for (const command of ['printf changed > source.ts', 'git add source.ts', `node ${join(tools, 'loop-host.mjs')}`,
+            `node ${join(tools, 'status.mjs')} --control --run ${acquired.runId} --by ui`,
+            `echo forged > ${repo.commonDir}/autoloop/scheduler/current.json`]) {
+            const result = await bash(command); assert.equal(result.status, 2, `${posture}: ${command}: ${result.stderr}`);
+          }
+          assert.equal((await bash('git status --porcelain', randomUUID())).status, 2, 'A copied session cannot replace the registered process session.');
+          assert.equal((await bash('git status --porcelain', sessionId, scratch)).status, 2, 'A worker cannot escape its worktree by changing the payload cwd.');
+          for (const name of ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']) {
+            const result = await tool({ session_id: sessionId, cwd: repo.coordinatorRoot, tool_name: name,
+              tool_input: name === 'NotebookEdit' ? { notebook_path: join(repo.coordinatorRoot, 'source.ipynb') } : { file_path: join(repo.coordinatorRoot, 'source.ts') } }, 'edit');
+            assert.equal(result.status, 2, `${posture} ${name}: ${result.stderr}`);
+          }
+          const missing = await tool({ cwd: repo.coordinatorRoot, tool_name: 'Bash', tool_input: { command: 'git status' } });
+          assert.equal(missing.status, 2);
+          if (posture === 'writer') {
+            const checkpoint = join(repo.commonDir, 'autoloop', 'scheduler', 'runs', acquired.runId, 'checkpoint.json');
+            const saved = readFileSync(checkpoint, 'utf8'); writeFileSync(checkpoint, '{corrupt');
+            assert.equal((await bash('git status')).status, 2, 'A known worker fails closed on an unreadable authoritative checkpoint.');
+            const unrelated = spawnSync(process.execPath, [entry, new URL('./command-guard.mjs', import.meta.url).href, 'bash', workerDirectory], {
+              input: JSON.stringify({ session_id: sessionId, cwd: repo.coordinatorRoot, tool_name: 'Bash', tool_input: { command: 'git status' } }),
+              cwd: repo.coordinatorRoot, encoding: 'utf8', timeout: 15000, env: { ...process.env, HOME: join(scratch, 'unrelated-home') },
+            });
+            assert.equal(unrelated.status, 0, 'The copied worker session alone does not guard an unrelated process.');
+            const unrelatedRecipe = spawnSync('sh', ['-c', recipeOf('bash')], {
+              input: JSON.stringify({ session_id: sessionId, cwd: repo.coordinatorRoot, tool_name: 'Bash', tool_input: { command: 'git status' } }),
+              cwd: repo.coordinatorRoot, encoding: 'utf8', timeout: 15000, env: { ...process.env, HOME: join(scratch, 'unrelated-home'),
+                NODE_OPTIONS: `--import=${shim}`, CLAUDE_PLUGIN_ROOT: copied, CLAUDE_PROJECT_DIR: repo.coordinatorRoot },
+            });
+            assert.equal(unrelatedRecipe.status, 0, 'The independent hook fallback does not turn a copied session into a worker.');
+            for (const kind of ['bash', 'edit']) {
+              const failed = spawnSync(process.execPath, [entry, new URL(kind === 'edit' ? './edit-guard.mjs' : './command-guard.mjs', import.meta.url).href, kind, workerDirectory, 'throw'], {
+                input: JSON.stringify({ session_id: sessionId, cwd: repo.coordinatorRoot, tool_name: kind === 'edit' ? 'Edit' : 'Bash',
+                  tool_input: kind === 'edit' ? { file_path: 'ordinary.ts' } : { command: 'git status' } }),
+                cwd: repo.coordinatorRoot, encoding: 'utf8', timeout: 15000, env: { ...process.env, HOME: join(scratch, 'unrelated-home') },
+              });
+              assert.equal(failed.status, 0, 'An unrelated process does not acquire guard ownership when the guard throws.');
+            }
+            writeFileSync(checkpoint, saved);
+          }
+        } finally {
+          const closed = new Promise((done) => child.once('close', done)); child.kill('SIGTERM'); await closed;
+        }
+      }
+    });
     await check('simultaneous daemon and legacy start use one election in both orders', async () => {
       for (const first of ['legacy', 'daemon']) {
         const repo = repository(); const pins = pinsOf(repo);
@@ -220,8 +519,17 @@ async function selfTest() {
   console.log(failed.length ? `self-test FAILED (${failed.length}/${cases.length})` : `self-test OK (${cases.length} cases)`);
   return failed.length === 0;
 }
-const isMain = process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+})();
 if (isMain) {
-  if (process.argv.length === 3 && process.argv[2] === '--self-test') process.exit(await selfTest() ? 0 : 1);
-  console.error('usage: loop-execution-admission.mjs --self-test'); process.exit(2);
+  if (process.argv.length === 4 && process.argv[2] === '--guard-entry' && ['command', 'edit'].includes(process.argv[3])) {
+    runGuardEntry(process.argv[3]).catch(() => { console.error('autoloop guard — the bootstrap check failed.'); process.exit(1); });
+  } else if (process.argv.length === 3 && process.argv[2] === '--self-test') {
+    process.exit(await selfTest() ? 0 : 1);
+  } else {
+    console.error('usage: loop-execution-admission.mjs --self-test | --guard-entry command|edit'); process.exit(2);
+  }
 }

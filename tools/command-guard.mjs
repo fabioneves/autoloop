@@ -77,9 +77,10 @@ import { isSecretPath } from './lane-contract.mjs';
 import {
   runMarkerDirectory, loopRunIsOpen, loopRunIsLive, pluginRunMarkers, ancestorChain, isClaudeProcess,
   procEntry, psEntry, commonDirOf, heldLatch, ownedRun, pinnedModelsPath, processStart, protectedPaths, pruneLatches, recordHostSession,
-  recordLatch, sessionLatch, sessionOwnerPid,
+  recordLatch, sessionLatch, sessionOwnerPid, executionProtectedPaths,
 } from './run-markers.mjs';
-import { ORDINARY, readsOnly, runStateProblem, TAMPERING } from './run-state-guard.mjs';
+import { ORDINARY, readsOnly, runStateProblem, TAMPERING, executionCommandProblemFor, workerReadOnlyProblem } from './run-state-guard.mjs';
+import { workerToolContext } from './loop-execution-admission.mjs';
 import { boundedGit, gitStalled, setGitDeadline } from './git-budget.mjs';
 
 const BRANCH_CREATION_FLAGS = new Set([
@@ -2955,8 +2956,10 @@ function primeCommandProblems(cmd, cwd, projectRoot, deadline, sessionId) {
 // latch closed too), 0 for any other, and 1 — the hooks.json fallback then
 // decides from the latch file — when ownership cannot be read. A payload not
 // yet read names no session: any latch of this process refuses.
-export function crashExitCode(sessionId, where = {}) {
+export function crashExitCode(sessionId, { executionRelevant = false, workerDirectory, ...where } = {}) {
+  if (executionRelevant) return 2;
   try {
+    if (workerToolContext({ sessionId, cwd: process.cwd(), workerDirectory }) !== null) return 2;
     const owned = typeof sessionId === 'string' && sessionId !== ''
       ? ownedRun({ sessionId, includeClosed: true, ...where })
       : heldLatch(where);
@@ -2966,7 +2969,7 @@ export function crashExitCode(sessionId, where = {}) {
   }
 }
 
-function main() {
+export function runCommandGuard({ workerDirectory, argv = process.argv.slice(2), inputText, observe = () => {} } = {}) {
   // AUTOLOOP_GUARD_BUDGET_MS can only shorten the budget (the self-test's
   // stalled-git case); nothing can lengthen it past the host's timeout.
   const budget = Math.min(GUARD_DEADLINE_MS, Number(process.env.AUTOLOOP_GUARD_BUDGET_MS) || GUARD_DEADLINE_MS);
@@ -2979,7 +2982,7 @@ function main() {
       : `corpus FAILED (${failures.length}/${total})`);
     process.exit(failures.length === 0 ? 0 : 1);
   }
-  const parsed = parseArgs(process.argv.slice(2));
+  const parsed = parseArgs(argv);
   if (parsed.error) {
     refuse(
       `autoloop guard — invalid guard invocation (${parsed.error}), so no command can be `
@@ -2996,8 +2999,8 @@ function main() {
   // Every git call below shares the hook's budget; one that stalls or runs it
   // out makes the guard refuse rather than read "no answer" as "no run".
   setGitDeadline(deadline);
-  const allow = () => {
-    if (gitStalled()) {
+  const allow = (checkGit = true) => {
+    if (checkGit && gitStalled()) {
       refuse(
         'autoloop guard — a git call timed out (a stalled or unreadable git directory), so whether '
         + 'the command is safe cannot be proven. Fix or leave the stalled repository, then retry.',
@@ -3008,14 +3011,15 @@ function main() {
   let payload;
   let payloadError = null;
   let crashSession = null;
+  let crashExecution = false;
   const crashed = (error) => {
     process.stderr.write(`autoloop guard — the guard failed (${error?.message ?? error}), so the command cannot be proven safe.\n`);
-    process.exit(crashExitCode(crashSession));
+    process.exit(crashExitCode(crashSession, { executionRelevant: crashExecution, workerDirectory }));
   };
   process.on('uncaughtException', crashed);
   process.on('unhandledRejection', crashed);
   try {
-    payload = JSON.parse(readFileSync(0, 'utf8'));
+    payload = JSON.parse(inputText ?? readFileSync(0, 'utf8'));
   } catch (error) {
     payloadError = error;
   }
@@ -3024,6 +3028,36 @@ function main() {
   const cmd = payload?.tool_input?.command;
   const cwd = typeof payload?.cwd === 'string' ? payload.cwd : process.cwd();
   const projectDir = () => parsed.root ?? hookRoot();
+  const worker = workerToolContext({ sessionId, cwd, workerDirectory });
+  crashExecution = worker !== null;
+  observe('policy-ready');
+  if (worker !== null) {
+    if (worker.unreadable) refuse('autoloop guard — the registered worker identity or attempt cannot be verified.');
+    if (payload?.tool_name === 'Bash' || typeof cmd === 'string') {
+      if (typeof cmd !== 'string') refuse('autoloop guard — the worker Bash payload is unreadable.');
+      const workerSegments = guardSegments(cmd);
+      const paths = protectedPaths({ projectRoot: worker.repository.coordinatorRoot, cwd, runOpen: true });
+      const problem = executionCommandProblemFor(workerSegments, { cwd })
+        ?? runStateProblem(workerSegments, { cwd, protectedDirs: [...paths.state, worker.directory], codeDirs: paths.code })
+        ?? workerReadOnlyProblem(workerSegments, { cwd });
+      if (problem !== null) refuse(problem);
+      const verdict = evaluate(cmd, currentBranch(), { baseBranch: worker.baseBranch, cwd });
+      if (verdict.block) refuse(verdict.reason);
+    }
+    allow();
+  }
+  // These entry points and state stores are protected even before prime. This
+  // is a known-command/path check, not a global version of legacy run policy.
+  if (typeof cmd === 'string') {
+    const earlySegments = guardSegments(cmd);
+    const executionProblem = executionCommandProblemFor(earlySegments, { cwd });
+    if (executionProblem !== null) refuse(executionProblem);
+    crashExecution = /autoloop\/(?:scheduler|control\/v2|viewers)|host-invocations|worker-bindings/u.test(cmd);
+    const earlyPaths = executionProtectedPaths({ projectRoot: projectDir(), cwd });
+    const earlyProblem = runStateProblem(earlySegments, { cwd, protectedDirs: earlyPaths.state, codeDirs: earlyPaths.code, knownOnly: true });
+    if (earlyProblem !== null) refuse(earlyProblem);
+    crashExecution = false;
+  }
   const latched = ownedRun({ sessionId, includeClosed: true });
   if (latched === null) {
     // A payload that is unreadable or names no session may be the owner's
@@ -3037,7 +3071,7 @@ function main() {
       );
     }
     if (typeof cmd === 'string') primeCommandProblems(cmd, cwd, projectDir, deadline, sessionId);
-    allow();
+    allow(typeof cmd === 'string' && opensRun(cmd, cwd));
   }
   if (latched.unreadable) {
     refuse(
@@ -3118,4 +3152,4 @@ const isMain = (() => {
     return false;
   }
 })();
-if (isMain) main();
+if (isMain) runCommandGuard();

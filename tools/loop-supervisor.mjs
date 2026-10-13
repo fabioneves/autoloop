@@ -313,7 +313,7 @@ async function selfTest() {
       await new Promise((done) => setTimeout(done, 10));
     }
   };
-  const fixture = async () => {
+  const fixture = async ({ publicCli = false } = {}) => {
     const home = join(scratch, randomUUID());
     mkdirSync(home);
     const checkout = join(home, 'repo');
@@ -327,7 +327,27 @@ async function selfTest() {
     const log = join(home, 'calls.jsonl');
     writeFileSync(mode, '{}');
     writeFileSync(log, '');
-    const settings = { socket, state, mode, log, node: process.execPath };
+    const accountHome = join(home, 'account'); mkdirSync(accountHome);
+    const preload = join(home, 'external-platform.mjs');
+    // Only external OS-account location and exact supervisor calls are replaced.
+    // First-party admission, helper, CLI, checkpoint and kernel readback stay real.
+    writeFileSync(preload, `import os from 'node:os'; import cp from 'node:child_process'; import { syncBuiltinESMExports } from 'node:module';
+const actualAccount = os.userInfo; const actualSpawn = cp.spawn;
+os.userInfo = (...args) => ({ ...actualAccount(...args), homedir: ${JSON.stringify(accountHome)} });
+os.homedir = () => ${JSON.stringify(accountHome)};
+cp.spawn = (file, args, options) => {
+  if (file === '/usr/bin/systemctl') {
+    if (args[0] !== '--user' || args[1] !== 'show') throw Error('Unexpected supervisor fixture operation');
+    return actualSpawn(${JSON.stringify(join(home, 'systemctl'))}, args, options);
+  }
+  if (file === '/usr/bin/systemd-run') {
+    if (!args.includes('--user') || !args.some((arg) => /^--unit=autoloop-[0-9a-f]{64}\\.service$/u.test(arg))) throw Error('Unexpected supervisor fixture launch');
+    return actualSpawn(${JSON.stringify(join(home, 'systemd-run'))}, args, options);
+  }
+  if (/(?:^|\\/)(?:systemctl|systemd-run)$/u.test(file)) throw Error('Unexpected supervisor fixture executable');
+  return actualSpawn(file, args, options);
+}; syncBuiltinESMExports();\n`);
+    const settings = { socket, state, mode, log, node: process.execPath, preload: publicCli ? preload : null };
     const managerFile = join(home, 'manager.mjs');
     writeFileSync(managerFile, `import { createServer } from 'node:net'; import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
@@ -338,7 +358,7 @@ function start(args) {
   const unit = args.find((arg) => arg.startsWith('--unit=')).slice(7);
   const index = args.indexOf(settings.node); const command = args.slice(index);
   const cwd = args.find((arg) => arg.startsWith('--working-directory=')).slice(20);
-  const child = spawn(command[0], command.slice(1), {cwd,detached:true,stdio:['ignore','ignore','pipe']});
+  const child = spawn(command[0], [...(settings.preload ? ['--import', settings.preload] : []), ...command.slice(1)], {cwd,detached:true,stdio:['ignore','ignore','pipe']});
   children.add(child); let error=''; child.stderr.on('data',(chunk)=>{error+=chunk;});
   const stat=readFileSync('/proc/'+child.pid+'/stat','utf8'); const birth=stat.slice(stat.lastIndexOf(')')+2).split(' ')[19];
   appendFileSync(settings.log,JSON.stringify({tool:'spawn',identity:{pid:child.pid,start:birth,bootId:readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim()}})+'\\n');
@@ -386,7 +406,7 @@ if(mode.unavailable) process.exit(1);
 if(args.includes('--property=Version')) {console.log('Version=fixture'); process.exit(0);}
 const stored=JSON.parse(readFileSync(settings.state)); const value={...stored,...(stored.Id ? mode.properties??{} : {})};
 for(const key of args.filter((arg)=>arg.startsWith('--property=')).map((arg)=>arg.slice(11))) console.log(key+'='+(value[key]??''));\n`, { mode: 0o700 });
-    return { home, repository, pins, manager, state, mode, log, systemdRunPath, systemctlPath };
+    return { home, accountHome, preload, repository, pins, manager, state, mode, log, systemdRunPath, systemctlPath };
   };
   const initiator = () => ({ kind: 'terminal', sessionId: null, process: readProcessIdentity() });
   const actor = () => ({ kind: 'terminal', sessionId: null, host: readProcessIdentity(), invocationId: randomUUID() });
@@ -433,6 +453,92 @@ for(const key of args.filter((arg)=>arg.startsWith('--property=')).map((arg)=>ar
         submitControl(setup.repository, actor(), request);
         await waitFor(() => JSON.parse(readFileSync(setup.state)).MainPID === '0', 'The daemon did not stop.');
         assert.equal(readCheckpoint(setup.repository, ready.runId).state, 'stopped');
+      });
+      if (containedFixture) await check('public host start survives its launcher, attaches a viewer and applies pause/resume/stop through real CLIs', async () => {
+        const setup = await fixture({ publicCli: true });
+        mkdirSync(join(setup.repository.coordinatorRoot, '.autoloop'));
+        writeFileSync(join(setup.repository.coordinatorRoot, '.autoloop', 'config.json'), JSON.stringify(setup.pins.config));
+        const bin = join(setup.home, 'bin'); mkdirSync(bin);
+        // This is an external host executable, not a replacement admission gate.
+        const hostPath = join(setup.home, 'claude');
+        const { copyFileSync, symlinkSync } = await import('node:fs');
+        copyFileSync(realpathSync(process.execPath), hostPath); symlinkSync(process.execPath, join(bin, 'claude'));
+        const settings = { root: setup.repository.coordinatorRoot, pluginRoot, node: process.execPath, preload: setup.preload,
+          accountHome: setup.accountHome, path: `${bin}:${process.env.PATH ?? ''}` };
+        const script = `import assert from 'node:assert/strict'; import {spawn} from 'node:child_process';
+import {randomUUID} from 'node:crypto'; import {existsSync} from 'node:fs';
+process.title='claude'; const settings=JSON.parse(process.argv[1]); const sessionId=randomUUID();
+const call=(argv,input='')=>new Promise((done,fail)=>{const child=spawn(settings.node,['--import',settings.preload,...argv],
+  {cwd:settings.root,env:{...process.env,PATH:settings.path,HOME:settings.accountHome},stdio:['pipe','pipe','pipe']});
+  let stdout='',stderr='';child.stdout.on('data',chunk=>stdout+=chunk);child.stderr.on('data',chunk=>stderr+=chunk);
+  child.once('error',fail);child.once('close',code=>{let json=null;try{json=JSON.parse(stdout);}catch{}
+    done({code,json,stdout,stderr});});child.stdin.end(input);});
+const loop=settings.pluginRoot+'/tools/loop.mjs';const status=settings.pluginRoot+'/tools/status.mjs';
+let runId=null,generation=null;
+const helper=async(operation,route='loop')=>{const request={schema:'autoloop.host-request/1',route,invocationId:randomUUID(),sessionId,
+  root:settings.root,operation,runId:['start','disconnect'].includes(operation)?null:runId,
+  requestId:['pause','resume','stop'].includes(operation)?randomUUID():null,generation:['start','disconnect'].includes(operation)?null:generation};
+  const result=await call([settings.pluginRoot+'/tools/loop-host.mjs'],JSON.stringify(request));assert.equal(result.code,0,result.stdout+result.stderr);
+  return {request,...result.json};};
+const control=async(operation)=>{const issued=await helper(operation);const args=[loop,operation,'--root',settings.root,
+  '--run',runId,'--request',issued.request.requestId,'--generation',String(generation),'--host-request','--json'];
+  const accepted=await call(args,JSON.stringify(issued.envelope));assert.equal(accepted.code,0,accepted.stdout+accepted.stderr);
+  assert.equal(accepted.json.data.status,'pending');const until=Date.now()+10000;
+  while(Date.now()<until){const read=await call([loop,'request-status','--root',settings.root,'--run',runId,'--request',issued.request.requestId,'--json']);
+    if(read.json?.data?.status==='applied')return read.json.data;await new Promise(done=>setTimeout(done,50));}
+  throw Error('Control did not settle');};
+const output={};try{
+  output.unadmitted=await call([loop,'start','--root',settings.root,'--host-request','--json'],'{}');
+  assert.equal(output.unadmitted.json.error.code,'HOST_AUTH_REQUIRED');
+  output.model=await call([settings.pluginRoot+'/tools/loop-execution-admission.mjs','--guard-entry','command'],JSON.stringify({session_id:sessionId,
+    cwd:settings.root,tool_name:'Bash',tool_input:{command:'node '+loop+' start --root '+settings.root+' --operator-terminal --json'}}));
+  assert.equal(output.model.code,2);assert.equal(existsSync(settings.root+'/.git/autoloop/scheduler'),false);
+  const issued=await helper('start');output.start=await call([loop,'start','--root',settings.root,'--host-request','--json'],JSON.stringify(issued.envelope));
+  assert.equal(output.start.code,0,output.start.stdout+output.start.stderr);runId=output.start.json.data.runId;generation=output.start.json.data.generation;
+  const attached=await helper('attach','status');output.attach=await call([status,'--attach','--root',settings.root,'--session',sessionId,
+    '--run',runId,'--generation',String(generation),'--host-request'],JSON.stringify(attached.envelope));assert.equal(output.attach.code,0,output.attach.stdout+output.attach.stderr);
+  output.view=await call([status,'--json','--root',settings.root,'--session',sessionId]);assert.equal(output.view.json.execution.queueEnabled,false);
+  assert.equal(output.view.json.attachment.kind,'viewer');
+  output.crossRun=await call([loop,'pause','--root',settings.root,'--run',randomUUID(),'--request',randomUUID(),'--generation',String(generation),'--host-request','--json'],'{}');
+  assert.equal(output.crossRun.json.error.code,'RUN_MISMATCH');
+  output.pause=await control('pause');output.paused=await call([loop,'status','--root',settings.root,'--json']);assert.equal(output.paused.json.data.state,'paused');
+  output.resume=await control('resume');
+  output.ended=await call([status,'--viewer-ended','--root',settings.root,'--session',sessionId]);assert.equal(output.ended.json.data.attached,false);
+  output.surviving=await call([loop,'status','--root',settings.root,'--json']);assert.equal(output.surviving.json.data.state,'running');
+  assert.equal(existsSync(settings.accountHome+'/.claude/autoloop/run-latches'),false);
+  output.stop=await control('stop');process.send(output,()=>process.disconnect());
+}catch(error){process.send({error:error.message,output},()=>process.disconnect());}`;
+        const host = spawn(hostPath, ['--import', setup.preload, '--input-type=module', '-e', script, JSON.stringify(settings)], {
+          detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], env: { ...process.env, HOME: setup.accountHome },
+        });
+        const identity = readProcessIdentity(host.pid);
+        const closed = new Promise((done) => host.once('close', done));
+        let result;
+        try {
+          result = await new Promise((done, fail) => {
+            const timer = setTimeout(() => fail(new Error('Public host integration timed out.')), 60000);
+            let stderr = ''; host.stderr.on('data', (chunk) => { stderr += chunk; });
+            host.once('message', (value) => { clearTimeout(timer); done(value); });
+            host.once('close', (code) => { clearTimeout(timer); fail(new Error(`Host exited ${code}: ${stderr}`)); });
+          });
+          assert.equal(result.error, undefined, JSON.stringify(result));
+          assert.equal(await closed, 0);
+          const ready = result.start.json.data;
+          assert.equal(ready.queueEnabled, false); assert.equal(ready.state, 'running');
+          assert.equal(result.model.code, 2); assert.equal(result.attach.json.data.attached, true);
+          await waitFor(() => JSON.parse(readFileSync(setup.state)).MainPID === '0', 'The admitted public daemon did not stop.');
+          const checkpoint = readCheckpoint(setup.repository, ready.runId);
+          assert.equal(checkpoint.state, 'stopped'); assert.equal(checkpoint.queueEnabled, false);
+          assert.equal(checkpoint.initiator.process.pid, host.pid); assert.equal(checkpoint.initiator.kind, 'mod');
+          const calls = readFileSync(setup.log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+          assert.equal(calls.filter((call) => call.tool === 'run').length, 1);
+          assert.equal(calls.filter((call) => call.tool === 'spawn').length, 1);
+          assert(calls.filter((call) => call.tool === 'show').every((call) => call.args[0] === '--user' && call.args[1] === 'show'));
+          assert(existsSync(join(setup.accountHome, '.claude', 'autoloop', 'host-invocations')));
+        } finally {
+          if (processIdentityState(identity) === 'alive') host.kill('SIGKILL');
+          await closed;
+        }
       });
       if (containedFixture) await check('linked-worktree concurrent launches create only one named service owner', async () => {
         const setup = await fixture();

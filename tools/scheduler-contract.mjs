@@ -15,7 +15,8 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveConfigText, validateConfig } from './config-contract.mjs';
 import { DEFAULT_MODELS, invariantProblems, mergeModels, MODEL_ROLES, modelsShapeProblems } from './models-config.mjs';
-import { isClaudeProcess, processAlive, processStart, procEntry, readRegularFile } from './run-markers.mjs';
+import { isClaudeProcess, processAlive, processStart, procEntry, readRegularFile, publishWorkerGuard, readBootIdentity } from './run-markers.mjs';
+import { boundedGit } from './git-budget.mjs';
 import { runningDispatches } from './inherited-dispatch.mjs';
 
 export const CHECKPOINT_SCHEMA = 'autoloop.scheduler-checkpoint/1';
@@ -72,8 +73,8 @@ export function schedulerDigest(value) {
 }
 
 function gitFact(root, args) {
-  const result = spawnSync('git', ['-C', root, 'rev-parse', ...args], {
-    encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024,
+  const result = boundedGit(['-C', root, 'rev-parse', ...args], {
+    maxBuffer: 1024 * 1024,
   });
   requireCondition(result.status === 0 && !result.error, 'REPOSITORY_INVALID', 'The repository cannot be verified.');
   return result.stdout.trim();
@@ -221,20 +222,7 @@ function durableWrite(path, value, { exclusive = false, observe = () => {} } = {
   }
 }
 
-export function readBootIdentity() {
-  try {
-    if (process.platform === 'linux') {
-      const value = readRegularFile('/proc/sys/kernel/random/boot_id').trim();
-      return uuid(value) ? value : null;
-    }
-    if (process.platform === 'darwin') {
-      const result = spawnSync('sysctl', ['-n', 'kern.boottime'], { encoding: 'utf8', timeout: 5000 });
-      const match = /sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)/u.exec(result.stdout ?? '');
-      return result.status === 0 && match ? `darwin:${match[1]}:${match[2]}` : null;
-    }
-  } catch { /* unknown is not proof of death */ }
-  return null;
-}
+export { readBootIdentity } from './run-markers.mjs';
 function validProcess(value) {
   return exactKeys(value, ['pid', 'start', 'bootId']) && positive(value.pid) && nonempty(value.start) && nonempty(value.bootId)
     && ((uuid(value.bootId) && /^\d+$/u.test(value.start)) || (/^darwin:\d+:\d+$/u.test(value.bootId)
@@ -516,7 +504,7 @@ export function readCheckpoint(repository, runId) {
     && schedulerDigest(matching.record.owner) === schedulerDigest(checkpoint.owner), 'RECOVERY_REQUIRED', 'The checkpoint owner needs recovery.');
   return checkpoint;
 }
-function assertPinsLive(repository, pins) {
+export function assertPinsLive(repository, pins) {
   requireCondition(validatePins(pins).length === 0 && pins.repositoryKey === repository.repositoryKey && pins.commonDir === repository.commonDir,
     'INVALID_INPUT', 'The launch pins are invalid.');
   requireCondition(resolveRepository(pins.coordinatorRoot).repositoryKey === repository.repositoryKey,
@@ -833,7 +821,7 @@ export function processGroupOf(pid) {
 }
 // The trusted launcher supplies this binding, not a worker result or event line.
 // Tool guards must match the persisted binding before admitting model tools.
-export function registerWorker(lease, expectedRevision, worker) {
+export function registerWorker(lease, expectedRevision, worker, { guardDirectory } = {}) {
   const binding = heldLease(lease);
   requireCondition(validWorker(worker) && worker.runId === binding.identity.runId && worker.generation === binding.identity.generation,
     'TARGET_MISMATCH', 'The worker binding names another attempt or generation.');
@@ -860,7 +848,11 @@ export function registerWorker(lease, expectedRevision, worker) {
   requireCondition(!['stopped', 'failed'].includes(current.state) && current.desiredState !== 'stopped', 'RUN_ACTIVE', 'This run cannot start another worker.');
   requireCondition(!current.workers.some((item) => item.unitId === worker.unitId || item.sessionId === worker.sessionId),
     'TARGET_MISMATCH', 'The unit or session already has a worker binding.');
-  assertPinsLive(binding.repository, readPins(binding.repository, worker.runId));
+  const pins = readPins(binding.repository, worker.runId);
+  assertPinsLive(binding.repository, pins);
+  try {
+    publishWorkerGuard(binding.repository, worker, { baseBranch: pins.baseBranch, pinsDigest: current.pinsDigest }, { directory: guardDirectory });
+  } catch { throw new SchedulerError('STATE_IO_FAILED', 'The immutable worker guard binding cannot be published.'); }
   if (!present(worker.liveFile)) {
     const fd = openSync(worker.liveFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try { fsyncSync(fd); } finally { closeSync(fd); }
@@ -1577,8 +1569,8 @@ async function selfTest() {
       const owner = startChild(`const api = await import(process.argv[1]); const repository = api.resolveRepository(process.argv[2]);
         const pins = JSON.parse(process.argv[3]); const binding = JSON.parse(process.argv[4]);
         const acquired = api.acquireScheduler(repository, pins, { kind: 'terminal', sessionId: null, process: api.readProcessIdentity() });
-        api.registerWorker(acquired.lease, 1, binding); process.send({ ready: true }); setInterval(() => {}, 1000);`,
-      [moduleUrl, repository.coordinatorRoot, JSON.stringify(pins), JSON.stringify(binding)]);
+        api.registerWorker(acquired.lease, 1, binding, { guardDirectory: process.argv[5] }); process.send({ ready: true }); setInterval(() => {}, 1000);`,
+      [moduleUrl, repository.coordinatorRoot, JSON.stringify(pins), JSON.stringify(binding), join(scratch, 'workers')]);
       assert.equal((await message(owner)).ready, true);
       await endChild(owner, 'SIGKILL');
       const crashed = startChild(`const api = await import(process.argv[1]); const repository = api.resolveRepository(process.argv[2]);
@@ -1881,7 +1873,7 @@ async function selfTest() {
         role: 'implement', posture: 'writer', actualModel: 'fixture-writer',
         liveFile: join(state, 'runs', pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false,
       };
-      const bound = registerWorker(acquired.lease, 1, binding);
+      const bound = registerWorker(acquired.lease, 1, binding, { guardDirectory: join(scratch, 'workers') });
       assert.equal(readFileSync(binding.liveFile, 'utf8'), '');
       refuses('HOST_AUTH_REQUIRED', () => submitControl(repository,
         { kind: 'terminal', sessionId: null, host: binding.process, invocationId: randomUUID() }, request(pins.runId)));

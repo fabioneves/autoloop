@@ -389,7 +389,11 @@ export async function executeLoopCommand(options) {
   const prepared = prepareLoopCommand(options);
   const actor = options.hostRequest ? await admitHostInvocation(prepared.command, await stdinEnvelope())
     : await admitOperatorTerminal(prepared.command);
-  if (options.operation === 'start') throw new SchedulerError('HOST_AUTH_REQUIRED', 'Shared legacy and model-tool admission must be connected before public start.');
+  if (options.operation === 'start') {
+    const { startSupervised } = await import('./loop-supervisor.mjs');
+    return startSupervised({ repository: prepared.repository, pins: prepared.pins,
+      initiator: { kind: actor.kind, sessionId: actor.sessionId, process: actor.host } });
+  }
   if (options.operation === 'foreground') return runLoop({ repository: prepared.repository, pins: prepared.pins,
     initiator: { kind: actor.kind, sessionId: actor.sessionId, process: actor.host },
     onReady: (data) => process.stdout.write(`${JSON.stringify({ schema: LOOP_SCHEMA, ok: true, data })}\n`) });
@@ -411,6 +415,7 @@ async function selfTest() {
     catch (error) { results.push([name, false]); console.error(`FAIL ${name}: ${error.message}`); }
   };
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-runtime-')));
+  const registerFixtureWorker = (lease, revision, binding) => registerWorker(lease, revision, binding, { guardDirectory: join(scratch, 'workers') });
   try {
     const root = join(scratch, 'repo');
     const git = spawnSync('git', ['init', '-q', '-b', 'main', root], { encoding: 'utf8', timeout: 15000 });
@@ -584,7 +589,7 @@ async function selfTest() {
         worker.closed.then(() => children.delete(worker));
         const owner = acquireScheduler(setup.repository, setup.pins, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
         const attemptId = randomUUID();
-        registerWorker(owner.lease, 1, { schema: 'autoloop.worker-binding/1', runId: setup.pins.runId, generation: 1,
+        registerFixtureWorker(owner.lease, 1, { schema: 'autoloop.worker-binding/1', runId: setup.pins.runId, generation: 1,
           unitId: randomUUID(), unitGeneration: 1, attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir,
           process: worker.identity, pgid: worker.pid, groupLeader: worker.identity, role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
           liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false });
@@ -625,7 +630,7 @@ async function selfTest() {
           attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir,
           process: worker.identity, pgid: worker.pid, groupLeader: worker.identity, role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
           liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false };
-        registerWorker(old.lease, 1, binding);
+        registerFixtureWorker(old.lease, 1, binding);
         let value = commitTransition(old.lease, 2, (state) => ({ ...state, state: 'running' }));
         const unknownId = randomUUID();
         prepareEffect(old.lease, value.revision, { operationId: unknownId, requestId: null, runId: setup.pins.runId, unitId: null, unitGeneration: null,
@@ -677,7 +682,7 @@ async function selfTest() {
             unitId: randomUUID(), unitGeneration: 1, attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir,
             process: worker.identity, pgid: worker.pid, groupLeader: worker.identity, role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
             liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false };
-          revision = registerWorker(old.lease, revision, binding).revision;
+          revision = registerFixtureWorker(old.lease, revision, binding).revision;
           bindings.push(binding);
         }
         commitTransition(old.lease, revision, (value) => ({ ...value, state: 'failed' }));
@@ -723,7 +728,7 @@ async function selfTest() {
           unitId: randomUUID(), unitGeneration: 1, attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir,
           process: worker.identity, pgid: worker.pid, groupLeader: worker.identity, role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
           liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false };
-        registerWorker(owner.lease, 1, binding);
+        registerFixtureWorker(owner.lease, 1, binding);
         commitTransition(owner.lease, 2, (value) => ({ ...value, state: 'running' }));
         const stop = control(setup.pins.runId, 'stop-now');
         submitControl(setup.repository, actor(), stop);
@@ -830,7 +835,7 @@ async function selfTest() {
           unitId: randomUUID(), unitGeneration: 1, attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir,
           process: workerIdentity, pgid: leader.pid, groupLeader: leader.identity, role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
           liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false };
-        registerWorker(owner.lease, 1, binding);
+        registerFixtureWorker(owner.lease, 1, binding);
         const exited = new Promise((done) => leader.once('message', done));
         leader.send('finish-worker');
         await exited;
@@ -891,7 +896,7 @@ finally:
           unitId: randomUUID(), unitGeneration: 1, attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir,
           process: readProcessIdentity(ids.child), pgid: ids.leader, groupLeader: readProcessIdentity(ids.leader), role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
           liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false };
-        registerWorker(owner.lease, 1, binding);
+        registerFixtureWorker(owner.lease, 1, binding);
         reaper.stdin.write('exit-leader\n');
         await waitFor(() => output.includes('leader-exited'), 'The leader did not exit.');
         assert.equal(processIdentityState(binding.groupLeader), 'dead');
@@ -935,7 +940,7 @@ finally:
           attemptId, sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir,
           process: worker.identity, pgid: worker.pid, groupLeader: worker.identity, role: 'implement', posture: 'writer', actualModel: 'fixture-worker',
           liveFile: join(setup.repository.commonDir, 'autoloop', 'scheduler', 'runs', setup.pins.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false };
-        registerWorker(old.lease, 1, binding);
+        registerFixtureWorker(old.lease, 1, binding);
         const oldRequest = control(setup.pins.runId, 'stop-now');
         submitControl(setup.repository, actor(), oldRequest);
         claimControl(old.lease, oldRequest.requestId);

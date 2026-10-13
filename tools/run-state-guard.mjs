@@ -74,12 +74,12 @@ function isAssignment(word) {
 // `sudo -u root rm …` hid the rm). Options that move where or how the command
 // runs are beyond the guard: the operands they change cannot be proven.
 const WRAPPER_VALUED = Object.freeze({
-  env: new Set(['-u', '--unset']),
+  env: new Set(['-u', '--unset', '-C', '--chdir']),
   timeout: new Set(['-s', '--signal', '-k', '--kill-after']),
   nice: new Set(['-n', '--adjustment']),
   ionice: new Set(['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid']),
   sudo: new Set(['-u', '--user', '-g', '--group', '-U', '--other-user', '-h', '--host', '-p', '--prompt',
-    '-r', '--role', '-t', '--type', '-C', '--close-from', '-T', '--command-timeout']),
+    '-r', '--role', '-t', '--type', '-C', '--close-from', '-T', '--command-timeout', '-D', '--chdir']),
   doas: new Set(['-u']),
   stdbuf: new Set(['-i', '-o', '-e']),
 });
@@ -107,7 +107,7 @@ function walkWrappers(words, from, onOption) {
     }
     if (isAssignment(word) || /^\d+[smhd]?$/u.test(word)) continue;
     if (word.startsWith('-') && wrapper !== null) {
-      onOption(wrapper, word);
+      onOption(wrapper, word, index);
       if (WRAPPER_VALUED[wrapper]?.has(word)) index += 1;
       continue;
     }
@@ -291,6 +291,8 @@ function canonical(path) {
     return path;
   }
 }
+
+export { canonical as canonicalGuardPath };
 
 // What a word names where a segment runs: the concrete paths (and their real
 // locations), and the texts that stay unknown — an unresolved expansion, or a
@@ -613,22 +615,23 @@ function unproven(word) {
 // hold the run's state; codeDirs the guard's own code, which only a write
 // (not a program run with it) threatens. env is the session's environment,
 // which the command's variables fall back to.
-export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], home = homedir(), env = process.env }) {
+export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], home = homedir(), env = process.env, knownOnly = false }) {
   const absolute = (list) => [...new Set(list.filter((dir) => typeof dir === 'string' && isAbsolute(dir)))];
   const stateDirs = absolute(protectedDirs);
   const codeOnly = absolute(codeDirs).filter((dir) => !stateDirs.includes(dir));
   const dirs = absolute([...protectedDirs, ...codeDirs]);
   if (dirs.length === 0) return null;
-  if (segments.some((segment) => segment.opaque)) {
+  if (!knownOnly && segments.some((segment) => segment.opaque)) {
     return 'autoloop guard — this command nests more command substitutions than the guard can take '
       + 'apart, so what it changes cannot be proven. Split it into smaller commands.';
   }
   const unfollowable = segments.map((segment) => unfollowableWrapperOption(segment.words)).find((option) => option !== null);
-  if (unfollowable !== undefined) {
+  if (!knownOnly && unfollowable !== undefined) {
     return `autoloop guard — \`${unfollowable}\` changes where or how the command runs, so what it changes `
       + 'cannot be proven. Run the command without it (cd first in its own command).';
   }
   if (segments.reduce((total, segment) => total + segment.words.length, 0) > MAX_TRACKED_WORDS) {
+    if (knownOnly) return null;
     return 'autoloop guard — this command is too large to check for changes to the run\'s own '
       + 'state, so it cannot be proven safe. Split it into smaller commands.';
   }
@@ -636,7 +639,7 @@ export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], h
   for (const at of placed) {
     // Redirections write, whatever the command.
     for (const target of at.writes) {
-      const problem = judge({ word: target, relations: ['inside'], prove: true }, at, dirs, home, env);
+      const problem = judge({ word: target, relations: ['inside'], prove: true }, at, dirs, home, env, knownOnly);
       if (problem !== null) return problem;
     }
     if (at.head === -1) continue;
@@ -655,7 +658,7 @@ export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], h
     const runsPluginCode = script !== undefined && resolvesInside(script.word, at, codeOnly, home, env);
     for (const claim of list) {
       const judged = claim.script || (claim.interpreterArg && runsPluginCode) ? stateDirs : dirs;
-      const problem = judge(claim, at, judged, home, env);
+      const problem = judge(claim, at, judged, home, env, knownOnly);
       if (problem !== null) return problem;
     }
   }
@@ -668,6 +671,151 @@ function resolvesInside(word, at, dirs, home, env) {
     && resolved.paths.every((path) => dirs.some((dir) => relation(path, dir) === 'inside'));
 }
 
+const EXECUTION_TOOLS = new Set(['loop.mjs', 'loop-host.mjs', 'loop-viewer.mjs', 'loop-supervisor.mjs',
+  'loop-admission.mjs', 'loop-execution-admission.mjs', 'scheduler-contract.mjs', 'status.mjs']);
+const NODE_VALUED_OPTIONS = new Set(['--require', '-r', '--import', '--loader', '--experimental-loader', '--conditions', '-C', '--input-type']);
+function executionScriptIndex(words, head) {
+  const executable = basename(words[head] ?? '');
+  if (EXECUTION_TOOLS.has(executable)) return head;
+  if (!/^(?:node|nodejs|bun|deno)$/u.test(executable)) return -1;
+  let index = head + 1;
+  if (['bun', 'deno'].includes(executable) && words[index] === 'run') index += 1;
+  for (; index < words.length; index += 1) {
+    const word = words[index];
+    // Arbitrary inline programs remain outside the selective entry guarantee.
+    if (['-e', '--eval', '-p', '--print', '-'].includes(word) || /^--(?:eval|print)=/u.test(word)) return -1;
+    if (word === '--') return index + 1 < words.length ? index + 1 : -1;
+    if (!word.startsWith('-')) return index;
+    if (NODE_VALUED_OPTIONS.has(word)) index += 1;
+  }
+  return -1;
+}
+function executionCommandProblem(words, head, at, { pluginRoot, home, env }, depth = 0) {
+  if (head < 0 || depth > 4) return null;
+  const name = basename(words[head]);
+  const rest = words.slice(head + 1);
+  if (name === 'systemctl' && rest.some((word) => ['start', 'stop', 'restart', 'try-restart', 'reload-or-restart', 'kill', 'reset-failed', 'enable', 'disable', 'mask', 'unmask'].includes(word))
+    && rest.some((word) => /^autoloop-[0-9a-f]{64}(?:\.service)?$/u.test(word))) {
+    return 'autoloop guard — model tools cannot change an Autoloop service.';
+  }
+  if (name === 'systemd-run') {
+    if (rest.some((word) => /^(?:--unit=)?autoloop-[0-9a-f]{64}(?:\.service)?$/u.test(word))) {
+      return 'autoloop guard — model tools cannot launch an Autoloop service.';
+    }
+    let index = head + 1;
+    for (; index < words.length && words[index].startsWith('-'); index += 1) {
+      if (['--unit', '-u', '--property', '-p', '--working-directory', '--setenv', '--slice'].includes(words[index])) index += 1;
+    }
+    return executionCommandProblem(words, headIndex(words, index), at, { pluginRoot, home, env }, depth + 1);
+  }
+  if (['xargs', 'parallel'].includes(name)) {
+    let index = head + 1;
+    while (index < words.length && words[index].startsWith('-')) index += /^-[IndPLEs]$/u.test(words[index]) ? 2 : 1;
+    return executionCommandProblem(words, headIndex(words, index), at, { pluginRoot, home, env }, depth + 1);
+  }
+  if (name === 'find' || name === 'fd') {
+    const inner = name === 'find' ? findActionCommands(words, head + 1)
+      : words.flatMap((word, index) => ['-x', '-X', '--exec', '--exec-batch'].includes(word) ? [words.slice(index + 1)] : []);
+    for (const command of inner) {
+      const problem = executionCommandProblem(command, headIndex(command), at, { pluginRoot, home, env }, depth + 1);
+      if (problem !== null) return problem;
+    }
+  }
+  const index = executionScriptIndex(words, head);
+  if (index < 0) return null;
+  const script = resolveWord(words[index], at, home, env);
+  if (script === null) return null;
+  const target = script.paths.find((path) => EXECUTION_TOOLS.has(basename(path))
+    && (path === join(pluginRoot, 'tools', basename(path)) || canonical(path) === canonical(join(pluginRoot, 'tools', basename(path)))
+      || /\/\.claude\/plugins\/cache\/[^/]+\/autoloop\/[^/]+\/tools\/[^/]+$/u.test(path)));
+  if (target === undefined) return null;
+  const args = words.slice(index + 1);
+  if (args.length === 1 && args[0] === '--self-test') return null;
+  const tool = basename(target);
+  if (tool === 'loop.mjs' && ['status', 'request-status'].includes(args[0])) return null;
+  if (tool === 'status.mjs' && !args.some((word) => /^(?:--attach|--disconnect|--control|--viewer-ended)(?:=|$)/u.test(word))) return null;
+  return `autoloop guard — model tools cannot call the scheduler mutation or host helper entry (${tool}). Use a trusted operator command.`;
+}
+// Emergency tokenization covers literal direct/wrapped commands and quoted
+// shell -c bodies. Normal hooks still use command-guard's full lexer.
+export function fallbackGuardSegments(command, depth = 0) {
+  const segments = [];
+  let words = [];
+  let word = '';
+  let quote = null;
+  const flushWord = () => { if (word !== '') words.push(word); word = ''; };
+  const flushSegment = () => { flushWord(); if (words.length) segments.push({ words, opens: 0, closes: 0 }); words = []; };
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (char === '\\' && quote !== "'") { word += command[++index] ?? ''; continue; }
+    if (quote !== null) { if (char === quote) quote = null; else word += char; continue; }
+    if (char === '"' || char === "'") { quote = char; continue; }
+    if (char === '#' && word === '') { while (index < command.length && command[index] !== '\n') index += 1; flushSegment(); continue; }
+    if (char === '>') {
+      flushWord(); word = char;
+      if (['>', '|', '&'].includes(command[index + 1])) word += command[++index];
+      flushWord(); continue;
+    }
+    if (';|&()\n'.includes(char)) { flushSegment(); continue; }
+    if (/\s/u.test(char)) flushWord(); else word += char;
+  }
+  flushSegment();
+  if (depth < 4) {
+    for (const segment of [...segments]) {
+      const shell = segment.words.findIndex((word) => /^(?:ba|da|k|z)?sh$/u.test(word));
+      const flag = segment.words.findIndex((word, index) => index > shell && /^-[A-Za-z]*c[A-Za-z]*$/u.test(word));
+      if (shell >= 0 && flag >= 0 && segment.words[flag + 1]) segments.push(...fallbackGuardSegments(segment.words[flag + 1], depth + 1));
+    }
+  }
+  return segments;
+}
+
+// Uses the existing shell placement, wrappers and path expansion. It does not
+// parse inline JavaScript/Python, nor deny unknown unrelated command forms.
+export function executionCommandProblemFor(segments, { cwd, pluginRoot = dirname(dirname(fileURLToPath(import.meta.url))), home = homedir(), env = process.env } = {}) {
+  for (const at of placeSegments(segments, cwd, home, env)) {
+    const problem = executionCommandProblem(at.argv, at.head, at, { pluginRoot, home, env });
+    if (problem !== null) return problem;
+  }
+  return null;
+}
+
+// Module 1 has no admitted writer boundaries. All registered worker postures
+// therefore have a read-only tool ceiling. Later admission must grant a boundary
+// explicitly; a viewer or an environment flag cannot supply one.
+export function workerReadOnlyProblem(segments, { cwd, pluginRoot = dirname(dirname(fileURLToPath(import.meta.url))), home = homedir(), env = process.env } = {}) {
+  if (segments.some((segment) => segment.opaque)) return 'autoloop guard — the worker command cannot be checked.';
+  for (const at of placeSegments(segments, cwd, home, env)) {
+    if (at.writes.length > 0) return 'autoloop guard — this worker has no admitted write boundary.';
+    if (at.head < 0) continue;
+    const name = basename(at.argv[at.head]);
+    if (['cd', 'pushd', 'popd'].includes(name)) continue;
+    if (READ_ONLY.has(name) && claims(at.argv, at.head).length === 0) continue;
+    if (name === 'git') {
+      let index = at.head + 1;
+      while (index < at.argv.length && at.argv[index].startsWith('-')) {
+        if (at.argv[index] === '-c' || at.argv[index].startsWith('--config-env')) break;
+        index += GIT_VALUED.has(at.argv[index]) ? 2 : 1;
+      }
+      const verb = at.argv[index];
+      if (['status', 'diff', 'show', 'log', 'rev-parse', 'rev-list', 'ls-files', 'ls-tree', 'cat-file', 'merge-base', 'blame', 'check-attr', 'check-ignore'].includes(verb)
+        || (verb === 'worktree' && at.argv[index + 1] === 'list')) continue;
+    }
+    const scriptIndex = executionScriptIndex(at.argv, at.head);
+    if (scriptIndex >= 0) {
+      const script = resolveWord(at.argv[scriptIndex], at, home, env);
+      const tool = script?.paths.find((path) => path === join(pluginRoot, 'tools', basename(path))
+        || canonical(path) === canonical(join(pluginRoot, 'tools', basename(path))));
+      const args = at.argv.slice(scriptIndex + 1);
+      if (tool && ((basename(tool) === 'loop.mjs' && ['status', 'request-status'].includes(args[0]))
+        || (basename(tool) === 'status.mjs' && !args.some((word) => /^(?:--attach|--disconnect|--control|--viewer-ended)(?:=|$)/u.test(word))))) continue;
+    }
+    // No inference of write authority from a role name or copied session.
+    return 'autoloop guard — this worker has no admitted write boundary. Use read-only tools.';
+  }
+  return null;
+}
+
 // Whether a segment only reads: no claim on any path. A command that opens a
 // run may do nothing else (command-guard.mjs).
 export function readsOnly(words) {
@@ -678,9 +826,9 @@ export function readsOnly(words) {
   return claims(words, head).length === 0;
 }
 
-function judge(claim, at, dirs, home, env) {
+function judge(claim, at, dirs, home, env, knownOnly = false) {
   const resolved = claim.word === null ? null : resolveWord(claim.word, at, home, env);
-  if (resolved === null) return claim.prove ? unproven(claim.word) : null;
+  if (resolved === null) return claim.prove && !knownOnly ? unproven(claim.word) : null;
   for (const path of resolved.paths) {
     for (const protectedDir of dirs) {
       const found = relation(path, protectedDir, claim.prove);
@@ -699,7 +847,7 @@ function judge(claim, at, dirs, home, env) {
   }
   // What a destructive command names must be known: a value the guard cannot
   // see could be anything, `..` included.
-  if (claim.prove && resolved.unknowns.length > 0) return unproven(claim.word);
+  if (claim.prove && !knownOnly && resolved.unknowns.length > 0) return unproven(claim.word);
   return null;
 }
 
@@ -754,8 +902,14 @@ function placeSegments(segments, cwd, home, env) {
       if (named !== -1 && list[named + 1] !== undefined) unknown(list[named + 1]);
     }
     const scope = { dir, oldDir, vars: new Map(vars), tainted };
-    const chdir = list.findIndex((word, index) => index < head && (word === '-C' || word === '--chdir'));
-    const segmentDir = chdir === -1 ? dir : placeDir(list[chdir + 1] ?? '', scope, home, env);
+    let changedDir;
+    walkWrappers(list, 0, (wrapper, option, index) => {
+      const key = option.split('=')[0];
+      if ((wrapper === 'env' && ['-C', '--chdir'].includes(key)) || (wrapper === 'sudo' && ['-D', '--chdir'].includes(key))) {
+        changedDir = option.includes('=') ? option.slice(option.indexOf('=') + 1) : list[index + 1] ?? '';
+      }
+    });
+    const segmentDir = changedDir === undefined ? dir : placeDir(changedDir, scope, home, env);
     const argv = [];
     const writes = [];
     for (let index = 0; index < list.length; index += 1) {
