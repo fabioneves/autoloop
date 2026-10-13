@@ -225,7 +225,8 @@ async function selfTest() {
         core.registerWorker(acquired.lease, 1, { schema: 'autoloop.worker-binding/1', runId: pins.runId, generation: 1,
           unitId: randomUUID(), unitGeneration: 1, attemptId, sessionId: receipt.sessionId, worktreeGitDir: repository.commonDir,
           process: host, pgid: host.pid, groupLeader: host, role: 'implement', posture: 'writer', actualModel: 'fixture-host-worker',
-          liveFile: repository.commonDir + '/autoloop/scheduler/runs/' + pins.runId + '/streams/' + attemptId + '.jsonl', cancelledByOperator: false });
+          liveFile: repository.commonDir + '/autoloop/scheduler/runs/' + pins.runId + '/streams/' + attemptId + '.jsonl', cancelledByOperator: false },
+          { guardDirectory: runtimeRoot + '/workers' });
       }
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       if (mode === 'link') { writeFileSync(path + '.outside', JSON.stringify(receipt), { mode: 0o600 }); symlinkSync(path + '.outside', path); }

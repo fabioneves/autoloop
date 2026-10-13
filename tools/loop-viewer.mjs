@@ -342,7 +342,7 @@ async function selfTest() {
         unitId: randomUUID(), unitGeneration: 1, attemptId, sessionId: randomUUID(), worktreeGitDir: repository.commonDir,
         process: identity, pgid: child.pid, groupLeader: identity, role: 'implement', posture: 'writer', actualModel: 'external-fixture',
         liveFile: join(repository.commonDir, 'autoloop', 'scheduler', 'runs', acquired.runId, 'streams', `${attemptId}.jsonl`), cancelledByOperator: false };
-      const checkpoint = registerWorker(acquired.lease, current.revision, worker);
+      const checkpoint = registerWorker(acquired.lease, current.revision, worker, { guardDirectory: join(scratch, 'workers') });
       const viewer = { sessionId: randomUUID() };
       const before = daemonProjection(repository, checkpoint, viewer);
       assert.equal(before.dispatches[0].state, 'running');
