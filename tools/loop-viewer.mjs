@@ -208,10 +208,7 @@ export function discoverViewer(repository) {
   return { candidate: checkpoint === null ? null : { runId: checkpoint.runId, generation: checkpoint.generation,
     state: checkpointState(repository, checkpoint), queueEnabled: false }, attached: false };
 }
-export function daemonProjection(repository, checkpoint, viewer, { logLimit = 50 } = {}) {
-  requireCondition(validateCheckpoint(checkpoint).length === 0, 'STATE_INVALID', 'The daemon checkpoint is invalid.');
-  const state = checkpointState(repository, checkpoint);
-  const config = resolveProjectConfig(repository.coordinatorRoot);
+function readDaemonLog(repository, runId, logLimit) {
   let log = [];
   let eventLogError = null;
   try {
@@ -220,10 +217,17 @@ export function daemonProjection(repository, checkpoint, viewer, { logLimit = 50
       if (pathPresent(path)) requireCondition(lstatSync(path).isFile() && !lstatSync(path).isSymbolicLink(), 'EVENT_LOG_INVALID', 'The event history is not a regular file.');
     }
     const recorded = readEvents(repository.commonDir);
-    log = recorded.events.filter((event) => event.run === checkpoint.runId).slice(-logLimit).reverse()
+    log = recorded.events.filter((event) => event.run === runId).slice(-logLimit).reverse()
       .map(({ v, run, ...event }) => event);
     if (recorded.skipped > 0) eventLogError = 'EVENT_LOG_INVALID';
   } catch { eventLogError = 'EVENT_LOG_UNAVAILABLE'; }
+  return { log, eventLogError };
+}
+export function daemonProjection(repository, checkpoint, viewer, { logLimit = 50 } = {}) {
+  requireCondition(validateCheckpoint(checkpoint).length === 0, 'STATE_INVALID', 'The daemon checkpoint is invalid.');
+  const state = checkpointState(repository, checkpoint);
+  const config = resolveProjectConfig(repository.coordinatorRoot);
+  const { log, eventLogError } = readDaemonLog(repository, checkpoint.runId, logLimit);
   const requestIds = new Set([...Object.keys(checkpoint.requests), ...listControlRequests(repository, checkpoint.runId)]);
   const requests = [...requestIds].sort().map((id) => readRequest(repository, checkpoint.runId, id));
   const dispatches = checkpoint.workers.map((worker) => {
