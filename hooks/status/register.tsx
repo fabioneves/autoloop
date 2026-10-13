@@ -11,7 +11,9 @@ import { update } from 'claude-code'
 
 import type { StatusProjection, StatusState, StatusStream } from '../../types'
 import type { Row, Section } from './central'
-import { LOG_FILTERS, LOG_LENGTH, PANE_ID, PANE_TITLE, TABS, glyphTone, logTab, runTab, statusLine, unitsTab } from './central'
+import {
+  LOG_FILTERS, LOG_LENGTH, PANE_ID, PANE_TITLE, TABS, glyphTone, liveRoom, liveScroll, liveTab, logTab, runTab, shownDispatch, statusLine, unitsTab,
+} from './central'
 import { GLYPH, PALETTE, cell, empty, header, rule, section, strip, tabs } from './kit'
 import type { ProxyFetch, Runner } from './read'
 import {
@@ -311,6 +313,22 @@ export const register: Register = (on) => {
     )
   })
 
+  // The person's scroll over the pane while the Live tab shows moves the
+  // window over the lines and turns follow off; the mod draws the window
+  // itself, so the engine's own is left where it is. The other tabs scroll
+  // as a pane does. (The test engine raises `ui.scroll` with the
+  // `$.ui.scroll` argument, not the person's input, so central.test.ts holds
+  // `liveScroll` to the rule and not this hook.)
+  on('ui.scroll', { requestId: 'autoloop' }, async ($, e, next) => {
+    const held = await heldState($)
+    if (held.tab !== 'live' || !isDrawable(held.last)) return next(e)
+    const id = shownDispatch(held.last, held.streams, held.selected)
+    const lineCount = id === null ? 0 : held.streams[id]?.lines.length ?? 0
+    const moved = liveScroll(held, e.by, lineCount, liveRoom(e.bodyRows))
+    await update($, STATUS, (value) => ({ ...EMPTY, ...value, ...moved }))
+    return {}
+  })
+
   // The literal, so `claude plugin validate` lists the pane's id (central.test.ts holds PANE_ID to it).
   on('ui.render', { component: 'Pane', requestId: 'autoloop' }, async ($, e) => {
     const kit = $.ui.resolve(e)
@@ -349,7 +367,23 @@ export const register: Register = (on) => {
           ...logTab(projection, held.logFilter).map(drawRow),
         ]
       }
-      return [empty(kit, 'no dispatch has run yet')]
+      // Live: a button per running dispatch, `f` for follow, the shown
+      // dispatch's title and its lines in the window.
+      const view = liveTab(projection, held.streams, held, nowMs, e.props.scroll.bodyRows, e.props.bodyColumns)
+      if (view.shown === null) return [empty(kit, 'no dispatch has run yet')]
+      const select = (selected: string) => update($, STATUS, (value) => ({ ...EMPTY, ...value, selected }))
+      const toggleFollow = () => update($, STATUS, (value) => ({ ...EMPTY, ...value, follow: !(value?.follow ?? true) }))
+      return [
+        <Box gap={1}>
+          {view.buttons.map((button) => (
+            <Button key={`live-${button.id}`} label={button.label} plain {...(button.hotkey === null ? {} : { hotkey: button.hotkey })}
+              {...(button.active ? { variant: 'primary' as const } : {})} onPress={() => select(button.id)} />
+          ))}
+          <Button key="follow" label="follow" hotkey="f" plain {...(held.follow ? { variant: 'primary' as const } : {})} onPress={toggleFollow} />
+        </Box>,
+        <Text color={PALETTE.ink} wrap="truncate-end">{view.shown.title}</Text>,
+        ...view.shown.lines.map((line) => <Text color={line.dim ? PALETTE.ink2 : PALETTE.ink} wrap="truncate-end">{line.text}</Text>),
+      ]
     }
     return (
       <Box flexDirection="column" gap={1}>

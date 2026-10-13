@@ -15,12 +15,13 @@ import type { StatusEvent, StatusProjection } from '../../types'
 
 import { DISABLED, FALLBACK, IDLE, OWNED, RUN, UNOWNED, WAITING, WAITS } from './fixtures/projection'
 import { PERIOD_MS, band, buttons, findColor, projection, ran, rows, start } from './fixtures/testing'
+import { RENDERED, STREAM } from './fixtures/stream'
 import {
-  LOG_LENGTH, PANE_ID, clockText, eventText, logRow, logTab, noUnitText, runTab, statusLine, unitsTab, waitText,
+  LOG_LENGTH, PANE_ID, clockText, eventText, linesText, liveScroll, liveTab, liveTitle, logRow, logTab, noUnitText, runTab, statusLine, unitsTab, waitText,
 } from './central'
 import type { Row } from './central'
 import { PALETTE } from './kit'
-import { projectionArgv, readProxy } from './read'
+import { LIVE_PERIOD_MS, QUIET_AFTER_MS, projectionArgv, readProxy } from './read'
 
 const BASE = 'http://127.0.0.1:8787'
 /** The fixture's clock: 10:30 on 2026-09-28, three minutes after #412's fix round started. */
@@ -367,4 +368,118 @@ test('while the Log tab shows, the tick asks the producer for 500 entries; the o
   await press($, 'tab-3')
   await h.clock.advance(PERIOD_MS)
   expect(h.argvs[2]).not.toContain('--log')
+})
+
+// The Live tab (SPEC-central item 10): a button per running dispatch
+// (`a`..`e`), the selected one primary; `f` toggles follow; the title
+// row's three states; the window over the lines; the empty state.
+
+/** RUN with its dispatches and log replaced: a second running dispatch, or an ended one. */
+function withDispatches(dispatches: unknown[], log: unknown[] = projection(RUN).log ?? []): string {
+  return JSON.stringify({ ...projection(RUN), dispatches, log })
+}
+const D412 = projection(RUN).dispatches![0]!
+const D413 = { ...D412, dispatch: 'd413', issue: 413, pr: 702, role: 'implement', model: 'claude-opus-5-5', liveFile: '/tmp/live/413-implement.jsonl', pid: 4300 }
+
+/** Seats the host with a producer and a tail: the producer's text from `stdout()`, every tail the synthetic stream. */
+function liveHost(on: On, stdout: () => string) {
+  const clock = mock.clock(on, { now: AT_10_30 })
+  mock.env(on, {})
+  on('session.id', () => ({ value: 'S-test' }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('process.run', ($, e) => ({ value: ran(e.argv[0] === 'node' ? stdout() : STREAM) }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  return { clock }
+}
+
+const live = async ($: Engine, bodyRows = 40, bodyColumns = 90) => rows(await $.ui.render({
+  surface: 'terminal',
+  component: 'Pane',
+  requestId: PANE_ID,
+  props: { title: 'autoloop', isFocused: false, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows }, view: {} },
+}))
+
+test('the Live tab lists a button per running dispatch with the hotkeys a and b, the selected one primary, and a press selects', async ($, on) => {
+  const h = liveHost(on, () => withDispatches([D412, D413]))
+  await start($)
+  await h.clock.advance(PERIOD_MS + LIVE_PERIOD_MS)
+  await pane($)
+  await press($, 'tab-2')
+  const drawn = await pane($)
+  const row = buttons(drawn).filter((button) => button.props.key?.startsWith('live-') || button.props.key === 'follow')
+  expect(row.map((button) => [button.props.key, button.props.label, button.props.hotkey, button.props.variant ?? null]))
+    .toEqual([['live-d412', '#412 code-review', 'a', 'primary'], ['live-d413', '#413 implement', 'b', null], ['follow', 'follow', 'f', 'primary']])
+  expect((await live($))[3]).toBe('#412 code-review · ASTRA 6 · 2m 4s · 14 lines')
+  await press($, 'live-d413')
+  expect((await live($))[3]).toBe('#413 implement · OPUS 5.5 · 2m 4s · 14 lines')
+  expect(buttons(await pane($)).find((button) => button.props.key === 'live-d413')?.props.variant).toBe('primary')
+  // The selection stays on d413 while it runs; when it ends the first running one is shown again.
+  expect(liveTab(projection(withDispatches([D412, D413])), {}, { selected: 'd413', follow: true, liveOffset: 0 }, AT_10_30, 40, 90).shown?.id).toBe('d413')
+  expect(liveTab(projection(withDispatches([D412])), {}, { selected: 'd413', follow: true, liveOffset: 0 }, AT_10_30, 40, 90).shown?.id).toBe('d412')
+})
+
+test('the Live tab follows the stream\'s end; f turns follow off and the window starts at the offset; a scroll moves it and turns follow off', async ($, on) => {
+  const h = liveHost(on, () => RUN)
+  await start($)
+  await h.clock.advance(PERIOD_MS + LIVE_PERIOD_MS)
+  await pane($)
+  await press($, 'tab-2')
+  // 10 body rows less the four of header, tabs, buttons and title: six lines, the newest last.
+  expect((await live($, 10)).slice(2)).toEqual(['[#412 code-review][follow]', '#412 code-review · ASTRA 6 · 2m 4s · 14 lines', ...RENDERED.slice(-6)])
+  expect((await live($, 40)).slice(4)).toEqual(RENDERED)
+  await press($, 'follow')
+  expect(buttons(await pane($)).find((button) => button.props.key === 'follow')?.props.variant).toBeUndefined()
+  expect((await live($, 10)).slice(4)).toEqual(RENDERED.slice(0, 6))
+  await press($, 'follow')
+  expect((await live($, 10)).slice(4)).toEqual(RENDERED.slice(-6))
+  // The scroll hook's rule: from the window's place, by the rows asked, clamped; follow goes off.
+  expect(liveScroll({ follow: true, liveOffset: 0 }, -2, 14, 6)).toEqual({ follow: false, liveOffset: 6 })
+  expect(liveScroll({ follow: false, liveOffset: 6 }, 3, 14, 6)).toEqual({ follow: false, liveOffset: 8 })
+  expect(liveScroll({ follow: false, liveOffset: 6 }, 30, 14, 6)).toEqual({ follow: false, liveOffset: 8 })
+  expect(liveScroll({ follow: false, liveOffset: 6 }, -30, 14, 6)).toEqual({ follow: false, liveOffset: 0 })
+  expect(liveScroll({ follow: true, liveOffset: 0 }, 1, 3, 6)).toEqual({ follow: false, liveOffset: 0 })
+  // A reasoning tick draws dim.
+  const view = liveTab(projection(RUN), { d412: { lines: RENDERED, bytes: 1, lastGrewAtMs: AT_10_30 } }, { selected: null, follow: true, liveOffset: 0 }, AT_10_30, 40, 90)
+  expect(view.shown?.lines.filter((line) => line.dim).map((line) => line.text)).toEqual(['⋯ thinking ~2k tok'])
+})
+
+test('the Live title says quiet after 120 s without growth, ended with the outcome from the log, or died when the dispatch is gone; narrow drops the line count', async ($, on) => {
+  let text = RUN
+  const h = liveHost(on, () => text)
+  await start($)
+  await h.clock.advance(PERIOD_MS + LIVE_PERIOD_MS)
+  await pane($)
+  await press($, 'tab-2')
+  await h.clock.advance(QUIET_AFTER_MS)
+  expect((await live($))[3]).toBe('#412 code-review · ASTRA 6 · 4m 4s · 14 lines · quiet 2m 0s')
+  expect((await live($, 40, 50))[3]).toBe('#412 code-review · ASTRA 6 · 4m 4s · quiet 2m 0s')
+  // The dispatch ends well: the log's dispatch.end names the outcome and the time.
+  const endedAt = h.clock.now()
+  text = withDispatches([], [{ at: endedAt, by: 'dispatch', kind: 'dispatch.end', issue: 412, dispatch: 'd412', role: 'code-review', ms: 250_000, ok: true }, ...(projection(RUN).log ?? [])])
+  await h.clock.advance(PERIOD_MS + 30_000)
+  expect((await live($)).slice(2, 4)).toEqual(['[follow]', '#412 code-review · ASTRA 6 · ended 33s ago · ok'])
+  expect((await live($)).slice(4)).toEqual(RENDERED)
+  // A failed end.
+  text = withDispatches([], [{ at: endedAt, by: 'dispatch', kind: 'dispatch.end', issue: 412, dispatch: 'd412', role: 'code-review', ms: 250_000, ok: false, reason: 'DISPATCH_TIMEOUT' }])
+  await h.clock.advance(PERIOD_MS)
+  // The log holds no start for it: the end event names the issue and the role, and no model is claimed.
+  expect((await live($))[3]).toBe('#412 code-review · ended 36s ago · failed')
+  // Gone from the dispatches with no end recorded: died, dated by the last growth; an empty log leaves only the id to name it.
+  text = withDispatches([], [])
+  await h.clock.advance(PERIOD_MS)
+  expect((await live($))[3]).toBe('d412 · died · last wrote 2m 39s ago')
+  expect(liveTitle(projection(withDispatches([{ ...D412, state: 'died' }], [])), 'd412', undefined, AT_10_30, false)).toBe('#412 code-review · ASTRA 6 · died')
+  expect(linesText(999)).toBe('999 lines')
+  expect(linesText(2140)).toBe('2.1k lines')
+})
+
+test('the Live tab without any dispatch says that none has run', async ($, on) => {
+  const h = liveHost(on, () => OWNED)
+  await start($)
+  await h.clock.advance(PERIOD_MS)
+  await pane($)
+  await press($, 'tab-2')
+  expect((await live($)).slice(2)).toEqual(['no dispatch has run yet'])
 })

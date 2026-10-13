@@ -3,8 +3,9 @@
 // to row models per tab. They hold no `$`; register.tsx draws what they
 // return with the kit. Each row hands back its glyph apart from its text,
 // so status is carried by the glyph and the words, never by color alone.
-import type { ProxyRead, StatusEvent, StatusProjection, StatusUnit, StatusWait, StatusWorkedUnit } from '../../types'
+import type { ProxyRead, StatusEvent, StatusProjection, StatusState, StatusStream, StatusUnit, StatusWait, StatusWorkedUnit } from '../../types'
 import { GLYPH } from './kit'
+import { isQuiet, runningDispatches } from './read'
 import { blockedUnits, duration, loopColumn, modelName, prToAuthorize, requestedName, roundLabel, shortModel } from './view'
 
 export const PANE_ID = 'autoloop'
@@ -281,4 +282,90 @@ export function logRow(event: StatusEvent): Row {
 /** The Log tab: the projection's log as it comes (newest first), those the filter passes. */
 export function logTab(projection: StatusProjection, filter: LogFilter): Row[] {
   return (projection.log ?? []).filter((event) => passesFilter(event, filter)).map(logRow)
+}
+
+// The Live tab (item 10).
+
+/** The rows the tab draws over the lines: the header, the tabs, the buttons row and the title. */
+const LIVE_CHROME_ROWS = 4
+const LIVE_HOTKEYS = ['a', 'b', 'c', 'd', 'e']
+
+export type LiveLine = { text: string; dim: boolean }
+export type LiveView = {
+  /** One per running dispatch: `#517 implement`, hotkeys `a`..`e` in order (none past the fifth), the selected one active. */
+  buttons: { id: string; label: string; hotkey: string | null; active: boolean }[]
+  /** The dispatch shown with its title row and the lines in the window; null when none has run. */
+  shown: { id: string; title: string; lines: LiveLine[] } | null
+}
+
+export type LiveState = Pick<StatusState, 'selected' | 'follow' | 'liveOffset'>
+
+/** `14 lines`, `2.1k lines` from a thousand. */
+export const linesText = (count: number): string => (count >= 1000 ? `${(count / 1000).toFixed(1)}k lines` : `${count} lines`)
+
+/** The dispatch the tab shows: the selected running one, else the first running one, else the ended stream that grew last. */
+export function shownDispatch(projection: StatusProjection, streams: Record<string, StatusStream>, selected: string | null): string | null {
+  const running = runningDispatches(projection).map((dispatch) => dispatch.dispatch)
+  if (running.length > 0) return selected !== null && running.includes(selected) ? selected : running[0] ?? null
+  const ended = Object.entries(streams).sort(([, left], [, right]) => right.lastGrewAtMs - left.lastGrewAtMs)
+  return ended[0]?.[0] ?? null
+}
+
+/** `#517 implement`: the dispatch's issue and role; the id when the projection names neither. */
+function dispatchName(dispatch: { issue: number | null; role: string | null }, id: string): string {
+  const words = [dispatch.issue === null ? null : `#${dispatch.issue}`, dispatch.role].filter((word): word is string => word !== null)
+  return words.length === 0 ? id : words.join(' ')
+}
+
+/** The title row of a dispatch: running with its elapsed, lines and `quiet`; ended with its outcome from the log; died when gone. */
+export function liveTitle(projection: StatusProjection, id: string, stream: StatusStream | undefined, nowMs: number, narrow: boolean): string {
+  const log = projection.log ?? []
+  const listed = (projection.dispatches ?? []).find((dispatch) => dispatch.dispatch === id) ?? null
+  const started = log.find((event) => event.kind === 'dispatch.start' && event.dispatch === id)
+  const end = log.find((event) => event.kind === 'dispatch.end' && event.dispatch === id)
+  // An ended dispatch is named by its start event, or by its end event when the log no longer holds the start.
+  const named = started ?? end
+  const facts = listed ?? { issue: named?.issue ?? null, role: named?.role ?? null, model: started?.model ?? null }
+  const name = dispatchName(facts, id)
+  const model = facts.model === null ? null : shortModel(facts.model)
+  if (listed !== null && listed.state === 'running') {
+    const lines = stream === undefined || narrow ? null : linesText(stream.lines.length)
+    const quiet = stream !== undefined && isQuiet(stream, listed, nowMs) ? `quiet ${duration(nowMs - stream.lastGrewAtMs)}` : null
+    return parts([name, model, duration(nowMs - listed.startedAtMs), lines, quiet])
+  }
+  if (end !== undefined) return parts([name, model, `ended ${duration(nowMs - end.at)} ago`, end.ok === true ? 'ok' : 'failed'])
+  return parts([name, model, 'died', stream === undefined ? null : `last wrote ${duration(nowMs - stream.lastGrewAtMs)} ago`])
+}
+
+/** The window's rows for the lines: the body less the tab's chrome, one at least. */
+export const liveRoom = (bodyRows: number): number => Math.max(1, bodyRows - LIVE_CHROME_ROWS)
+
+/** A scroll by `by` rows: follow goes off, and the window moves from where it stands, clamped to the lines. */
+export function liveScroll(state: Pick<LiveState, 'follow' | 'liveOffset'>, by: number, lineCount: number, room: number): Pick<LiveState, 'follow' | 'liveOffset'> {
+  const last = Math.max(0, lineCount - room)
+  const from = state.follow ? last : state.liveOffset
+  return { follow: false, liveOffset: Math.min(last, Math.max(0, from + by)) }
+}
+
+/** The Live tab: the buttons, and the shown dispatch's title and lines in the window (the end while following, else from the offset). */
+export function liveTab(
+  projection: StatusProjection, streams: Record<string, StatusStream>, state: LiveState, nowMs: number, bodyRows: number, bodyColumns: number,
+): LiveView {
+  const id = shownDispatch(projection, streams, state.selected)
+  const buttons = runningDispatches(projection).map((dispatch, index) => ({
+    id: dispatch.dispatch, label: dispatchName(dispatch, dispatch.dispatch), hotkey: LIVE_HOTKEYS[index] ?? null, active: dispatch.dispatch === id,
+  }))
+  if (id === null) return { buttons, shown: null }
+  const stream = streams[id]
+  const lines = stream?.lines ?? []
+  const room = liveRoom(bodyRows)
+  const offset = state.follow ? Math.max(0, lines.length - room) : Math.min(state.liveOffset, Math.max(0, lines.length - room))
+  return {
+    buttons,
+    shown: {
+      id,
+      title: liveTitle(projection, id, stream, nowMs, bodyColumns < NARROW_COLUMNS),
+      lines: lines.slice(offset, offset + room).map((text) => ({ text, dim: text.startsWith(GLYPH.thinking) })),
+    },
+  }
 }
