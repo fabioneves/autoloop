@@ -175,6 +175,8 @@ export type StatusState = {
   pending: StatusPending | null
   /** True while the pane `autoloop` is open and placed: the band then draws one row. */
   paneOpen: boolean
+  /** True once the pane was opened unasked in this session (SPEC-central item 13): never twice. */
+  autoOpened: boolean
   /** The live tails by dispatch id: every running dispatch's, and the last ended one's until session.end. */
   streams: Record<string, StatusStream>
   /** The central pane's tab, kept across a redraw (SPEC-central item 8). */

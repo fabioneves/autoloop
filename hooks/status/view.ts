@@ -100,6 +100,14 @@ export function loopColumn(projection: StatusProjection, narrow: boolean): LoopC
   return { glyph: GLYPH.active, head: `${unit.phase} #${unit.issue}${pr}${title}`, detail: detail.length === 0 ? null : detail.join(' · ') }
 }
 
+/** The spinner's word while the session owns a run with a unit (SPEC-central item 4): `autoloop · build #517 · PR #530 · implement`; null without a unit. */
+export function spinnerWord(projection: StatusProjection): string | null {
+  const unit = projection.unit ?? null
+  if (unit === null) return null
+  return ['autoloop', `${unit.phase} #${unit.issue}`, unit.pr === null || unit.pr === undefined ? null : `PR #${unit.pr}`, unit.role]
+    .filter((part): part is string => part !== null).join(' · ')
+}
+
 export type WorkColumn = {
   counts: string
   /** `6 needs you`, drawn in the critical color; null while no unit needs a human (spec item 7). */

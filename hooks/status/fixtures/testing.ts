@@ -3,7 +3,7 @@
 // tree read back as rows and colors. The hosts themselves stay in each file:
 // each test file doubles what it exercises.
 import type { Engine } from 'claude-code/testing'
-import type { ProcessRunResult, RenderElement } from 'claude-code'
+import type { ProcessRunResult, RenderElement, RenderViewport } from 'claude-code'
 import type { StatusProjection } from '../../../types'
 
 import { parseProjection } from '../read'
@@ -25,11 +25,13 @@ export async function start($: Engine) {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
 }
 
-export function band($: Engine, bodyColumns = 160, hasSurvey = false) {
+/** Draws the band; `viewport` is what the surface measured, left out as a surface that has not measured. */
+export function band($: Engine, bodyColumns = 160, hasSurvey = false, viewport?: RenderViewport) {
   return $.ui.render({
     surface: 'terminal',
     component: 'AbovePrompt',
     requestId: 'band',
+    ...(viewport === undefined ? {} : { viewport }),
     props: { hasSurvey, isWorking: false, maxRows: 8, bodyColumns, scroll: { offset: 0, bodyRows: 7 }, view: {} },
   })
 }

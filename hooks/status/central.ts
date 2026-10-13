@@ -66,6 +66,16 @@ export function statusLine(projection: StatusProjection): string {
   return parts([loopColumn(projection, true).head, projection.run?.paused === true ? 'paused' : null])
 }
 
+/**
+ * Whether a tick that sees an owned run opens the pane unasked (item 13):
+ * once per session, only where the surface said it docks a pane
+ * (`isFullscreen` true; false or unknown never), and not while it is open.
+ * The width rule is the host's: an open under the floor waits undrawn.
+ */
+export function autoOpenDue(held: Pick<StatusState, 'autoOpened' | 'paneOpen'>, isFullscreen: boolean | null): boolean {
+  return !held.autoOpened && !held.paneOpen && isFullscreen === true
+}
+
 /** The color key a glyph wears, so the drawing and the tests agree on it. */
 export function glyphTone(glyph: string): 'good' | 'warn' | 'crit' | 'ink3' | 'accent' {
   if (glyph === GLYPH.needsYou || glyph === GLYPH.failed) return 'crit'
