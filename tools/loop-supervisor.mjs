@@ -11,7 +11,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  acquireScheduler, assertNoKnownLegacyOwner, boundGroupState, commitTransition, createPins, DEFAULT_SUPERVISOR_PROFILE,
+  acquireScheduler, assertNoKnownLegacyOwner, boundGroupState, commitTransition, createPins, createSchedulerTestAccount, DEFAULT_SUPERVISOR_PROFILE,
   hasUnresolvedEffects, listControlRequests, markEffectInFlight, prepareEffect, processIdentityState, readCheckpoint, readCurrentCheckpoint,
   readProcessIdentity, readSchedulerOwner, releaseScheduler, resolveRepository, schedulerDigest, SchedulerError,
   submitControl, validatePins,
@@ -119,7 +119,7 @@ function launchStorageDirectory(path, create = false, privateMode = true, observ
   const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);
-    requireCondition(stat.isDirectory() && stat.uid === userInfo().uid && (!privateMode || (stat.mode & 0o077) === 0),
+    requireCondition(stat.isDirectory() && stat.uid === userInfo().uid && (stat.mode & (privateMode ? 0o077 : 0o022)) === 0,
       'HOST_AUTH_REQUIRED', 'The launch directory ownership or mode is invalid.');
   } finally { closeSync(fd); }
   if (create) {
@@ -337,6 +337,7 @@ async function selfTest({ requireSupervision = false } = {}) {
     catch (error) { results.push([name, false]); console.error(`FAIL ${name}: ${error.message}`); }
   };
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-supervisor-')));
+  const fixtureAccount = await createSchedulerTestAccount(scratch);
   // Use actual installed code in a fixed snapshot, not first-party test doubles.
   const pluginRoot = join(scratch, 'plugin');
   mkdirSync(pluginRoot);
@@ -365,7 +366,7 @@ async function selfTest({ requireSupervision = false } = {}) {
     const log = join(home, 'calls.jsonl');
     writeFileSync(mode, '{}');
     writeFileSync(log, '');
-    const accountHome = join(home, 'account'); mkdirSync(accountHome);
+    const accountHome = fixtureAccount.accountHome;
     const preload = join(home, 'external-platform.mjs');
     // Only external OS-account location and exact supervisor calls are replaced.
     // First-party admission, helper, CLI, checkpoint and kernel readback stay real.
@@ -385,7 +386,7 @@ cp.spawn = (file, args, options) => {
   if (/(?:^|\\/)(?:systemctl|systemd-run)$/u.test(file)) throw Error('Unexpected supervisor fixture executable');
   return actualSpawn(file, args, options);
 }; syncBuiltinESMExports();\n`);
-    const settings = { socket, state, mode, log, node: process.execPath, preload: publicCli ? preload : null };
+    const settings = { socket, state, mode, log, node: process.execPath, preload: publicCli ? preload : fixtureAccount.preload };
     const managerFile = join(home, 'manager.mjs');
     writeFileSync(managerFile, `import { createServer } from 'node:net'; import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
@@ -515,6 +516,17 @@ for(const key of args.filter((arg)=>arg.startsWith('--property=')).map((arg)=>ar
           kind: 'stop', target: { type: 'run', generation: ready.generation }, payload: {}, submittedAt: Date.now() });
         await waitFor(() => JSON.parse(readFileSync(setup.state)).MainPID === '0', 'The legacy fixture daemon did not stop.');
       });
+      await check('shared launch ancestors refuse other-account write permission without chmod', async () => {
+        const { chmodSync } = await import('node:fs');
+        for (const mode of [0o775, 0o777]) {
+          const setup = await fixture(); const path = join(setup.repository.commonDir, 'autoloop');
+          mkdirSync(path, { mode: 0o755 }); chmodSync(path, mode);
+          assert.throws(() => launchStorageDirectory(path, false, false), (error) => error.code === 'HOST_AUTH_REQUIRED');
+          await assert.rejects(launch(setup), (error) => ['HOST_AUTH_REQUIRED', 'STATE_INVALID'].includes(error.code));
+          assert.equal(lstatSync(path).mode & 0o777, mode);
+          assert.equal(readFileSync(setup.log, 'utf8').includes('"tool":"run"'), false);
+        }
+      });
       await check('launch namespaces reject links and loose private scheduler directories', async () => {
         const { symlinkSync, chmodSync } = await import('node:fs');
         for (const name of ['autoloop', 'autoloop/scheduler', 'autoloop/scheduler/launches']) {
@@ -530,7 +542,7 @@ for(const key of args.filter((arg)=>arg.startsWith('--property=')).map((arg)=>ar
           const setup = await fixture();
           const path = join(setup.repository.commonDir, name);
           mkdirSync(path, { recursive: true, mode: 0o700 }); chmodSync(path, 0o755);
-          await assert.rejects(launch(setup), (error) => error.code === 'HOST_AUTH_REQUIRED');
+          await assert.rejects(launch(setup), (error) => ['HOST_AUTH_REQUIRED', 'STATE_INVALID'].includes(error.code));
           assert.equal(lstatSync(path).mode & 0o777, 0o755);
           assert.equal(readFileSync(setup.log, 'utf8').includes('"tool":"run"'), false);
         }
@@ -544,7 +556,9 @@ for(const key of args.filter((arg)=>arg.startsWith('--property=')).map((arg)=>ar
           // External account fault injection; filesystem ownership stays real.
           os.userInfo = (...args) => ({ ...original(...args), uid: original(...args).uid + 1 });
           syncBuiltinESMExports();
-          await assert.rejects(launch(setup), (error) => error.code === 'HOST_AUTH_REQUIRED');
+          assert.throws(() => launchStorageDirectory(setup.repository.commonDir, false, false), (error) => error.code === 'HOST_AUTH_REQUIRED');
+          // The scheduler can reject the same unsafe account before handoff validation.
+          await assert.rejects(launch(setup), (error) => ['HOST_AUTH_REQUIRED', 'STATE_INVALID'].includes(error.code));
           assert.equal(readFileSync(setup.log, 'utf8').includes('"tool":"run"'), false);
         } finally { os.userInfo = original; syncBuiltinESMExports(); }
       });
@@ -825,6 +839,7 @@ const output={};try{
       await assert.rejects(startSupervised({ platform: 'darwin' }), (error) => error.code === 'SUPERVISOR_UNAVAILABLE');
     });
   } finally {
+    fixtureAccount.restore();
     const stopped = await Promise.allSettled([...managers].map(async (manager) => {
       if (manager.connected) manager.send('stop');
       assert.equal(await manager.closed, 0, `The external test manager did not stop: ${manager.errors}`);

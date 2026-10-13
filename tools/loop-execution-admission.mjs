@@ -85,6 +85,7 @@ async function selfTest() {
   const { CONFIG_VERSION, resolveConfigText } = await import('./config-contract.mjs');
   const { DEFAULT_MODELS, mergeModels } = await import('./models-config.mjs');
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-execution-admission-')));
+  const fixtureAccount = await scheduler.createSchedulerTestAccount(scratch);
   const cases = [];
   const check = async (name, run) => {
     try { await run(); cases.push([name, true]); }
@@ -116,6 +117,19 @@ async function selfTest() {
     scheduler.releaseScheduler(acquired.lease);
   };
   try {
+    await check('upgraded legacy start and status keep ordinary 0775 Git-admin compatibility without chmod', async () => {
+      const repo = repository(); const { chmodSync, existsSync, lstatSync } = await import('node:fs'); chmodSync(repo.commonDir, 0o775);
+      const admission = join(fixtureAccount.accountHome, '.claude', 'autoloop', 'execution-admission', repo.repositoryKey);
+      assert.equal(scheduler.readCurrentCheckpoint(repo), null);
+      assert.equal(scheduler.readSchedulerOwner(repo).state, 'absent');
+      const { statusJson } = await import('./status.mjs');
+      assert.equal(statusJson({ root: repo.coordinatorRoot, session: randomUUID() }).error, undefined);
+      assert.equal(existsSync(admission), false, 'A legacy status read must not create admission authority.');
+      const result = legacy(repo);
+      assert.equal(result.ok, true, JSON.stringify(result.error));
+      assert.equal(lstatSync(repo.commonDir).mode & 0o777, 0o775);
+      assert.equal(existsSync(join(repo.commonDir, 'autoloop', 'scheduler')), false, 'Legacy admission must not create daemon storage.');
+    });
     await check('a legacy start publishes under common admission and prevents daemon acquisition', () => {
       const repo = repository();
       const result = legacy(repo);
@@ -263,6 +277,9 @@ async function selfTest() {
         env: { ...process.env, HOME: join(scratch, 'unowned-home'), CLAUDE_PROJECT_DIR: repo.coordinatorRoot },
       });
       const loop = join(tools, 'loop.mjs'); const status = join(tools, 'status.mjs'); const host = join(tools, 'loop-host.mjs');
+      const installedTests = join(scratch, '.claude', 'plugins', 'cache', 'autoloop', 'autoloop', 'test-modes');
+      mkdirSync(installedTests, { recursive: true });
+      symlinkSync(tools, join(installedTests, 'tools'));
       const denied = [
         `node ${loop} start --root ${repo.coordinatorRoot} --operator-terminal --json`,
         `env -u HOME timeout -s TERM 5s node ${loop} run --foreground --operator-terminal --root ${repo.coordinatorRoot}`,
@@ -273,6 +290,10 @@ async function selfTest() {
         `env --chdir=${dirname(tools)} node tools/loop-host.mjs`,
         `env --chdir=${repo.coordinatorRoot} node ${host}`,
         `${host}`,
+        `node ${join(installedTests, 'tools', 'loop-viewer.mjs')} --fixtures`,
+        `node ${join(installedTests, 'tools', 'loop-supervisor.mjs')} --self-test --require-supervision`,
+        `node ${join(tools, 'loop-viewer.mjs')} --fixtures --root ${repo.coordinatorRoot}`,
+        `node ${join(tools, 'loop-supervisor.mjs')} --self-test --require-supervision --json`,
         `node ${status} --attach --host-request --root ${repo.coordinatorRoot}`,
         `node ${status} --disconnect --host-request --root ${repo.coordinatorRoot}`,
         `node ${status} --control --run ${randomUUID()} --by ui --root ${repo.coordinatorRoot}`,
@@ -291,6 +312,8 @@ async function selfTest() {
         `node ${status} --discover --root ${repo.coordinatorRoot}`,
         `node ${status} --json --root ${repo.coordinatorRoot}`,
         `node ${host} --self-test`,
+        `node ${join(tools, 'loop-viewer.mjs')} --fixtures`,
+        `node ${join(tools, 'loop-supervisor.mjs')} --self-test --require-supervision`,
         `cat ${repo.commonDir}/autoloop/scheduler/current.json`,
         `git -C ${repo.coordinatorRoot} status`,
         `env -C ${repo.coordinatorRoot} git status`,
@@ -604,6 +627,7 @@ async function selfTest() {
       }
     });
   } finally {
+    fixtureAccount.restore();
     try { rmSync(scratch, { recursive: true, force: true }); }
     catch { console.error(`Retained test fixture: ${scratch}`); }
   }

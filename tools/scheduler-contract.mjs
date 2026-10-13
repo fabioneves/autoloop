@@ -10,12 +10,12 @@ import {
   mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync,
   symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveConfigText, validateConfig } from './config-contract.mjs';
 import { DEFAULT_MODELS, invariantProblems, mergeModels, MODEL_ROLES, modelsShapeProblems } from './models-config.mjs';
-import { isClaudeProcess, processAlive, processStart, procEntry, readRegularFile, publishWorkerGuard, readBootIdentity } from './run-markers.mjs';
+import { isClaudeProcess, processAlive, processStart, procEntry, readRegularFile, publishWorkerGuard, readBootIdentity, executionAdmissionGuardDirectory } from './run-markers.mjs';
 import { boundedGit } from './git-budget.mjs';
 import { runningDispatches } from './inherited-dispatch.mjs';
 
@@ -138,7 +138,16 @@ export function assertNoKnownLegacyOwner(repository, { owner = null, sessionId =
   }
 }
 
-function safeDirectory(path, create = false, observe = () => {}) {
+function checkStoragePermissions(stat, privateMode) {
+  // Shared Git/legacy ancestors may be readable, but not writable by other accounts.
+  // Null is only a read-only probe for never-daemon legacy storage. It still
+  // requires an owned real directory, and cannot publish daemon authority.
+  const prohibited = privateMode === null ? 0 : privateMode ? 0o077 : 0o022;
+  requireCondition(stat.uid === userInfo().uid && (stat.mode & prohibited) === 0,
+    'STATE_INVALID', 'State storage ownership or permissions are invalid.');
+}
+function safeDirectory(path, create = false, observe = () => {}, privateMode = false) {
+  requireCondition(!create || privateMode !== null, 'INVALID_INPUT', 'An absence probe cannot create storage.');
   if (create) {
     try {
       mkdirSync(path, { mode: 0o700 });
@@ -151,7 +160,9 @@ function safeDirectory(path, create = false, observe = () => {}) {
       'STATE_INVALID', 'A state directory is not a real directory.');
     const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try {
-      requireCondition(fstatSync(fd).isDirectory(), 'STATE_INVALID', 'A state directory is invalid.');
+      const stat = fstatSync(fd);
+      requireCondition(stat.isDirectory(), 'STATE_INVALID', 'A state directory is invalid.');
+      checkStoragePermissions(stat, privateMode);
     } finally {
       closeSync(fd);
     }
@@ -169,17 +180,26 @@ function safeDirectory(path, create = false, observe = () => {}) {
 }
 function stateDirectory(repository, create = false, observe = () => {}) {
   let directory = safeDirectory(repository.commonDir);
-  for (const name of ['autoloop', 'scheduler']) directory = safeDirectory(join(directory, name), create, observe);
+  for (const name of ['autoloop', 'scheduler']) directory = safeDirectory(join(directory, name), create, observe, name === 'scheduler');
   return directory;
 }
-function childDirectory(parent, name, create = false, observe = () => {}) {
+function childDirectory(parent, name, create = false, observe = () => {}, privateMode = true) {
   requireCondition(nonempty(name) && !name.includes('/') && name !== '.' && name !== '..', 'INVALID_INPUT', 'A state component is invalid.');
-  return safeDirectory(join(safeDirectory(parent), name), create, observe);
+  return safeDirectory(join(safeDirectory(parent), name), create, observe, privateMode);
+}
+function readStateFile(path) {
+  safeDirectory(dirname(path), false, undefined, true);
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    requireCondition(stat.isFile(), 'STATE_IO_FAILED', 'A state record is not a regular file.');
+    checkStoragePermissions(stat, true);
+    return readFileSync(fd, 'utf8');
+  } finally { closeSync(fd); }
 }
 function stateJson(path, optional = false) {
   try {
-    safeDirectory(dirname(path));
-    return JSON.parse(readRegularFile(path));
+    return JSON.parse(readStateFile(path));
   } catch (error) {
     if (optional && error.code === 'ENOENT') return null;
     if (error instanceof SchedulerError) throw error;
@@ -189,7 +209,9 @@ function stateJson(path, optional = false) {
 function syncDirectory(path) {
   const fd = openSync(safeDirectory(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
-    requireCondition(fstatSync(fd).isDirectory(), 'STATE_INVALID', 'A flush target is not a directory.');
+    const stat = fstatSync(fd);
+    requireCondition(stat.isDirectory(), 'STATE_INVALID', 'A flush target is not a directory.');
+    checkStoragePermissions(stat, false);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -198,7 +220,7 @@ function syncDirectory(path) {
 // Instrumentation is for crash/OS-failure tests, not an alternate filesystem.
 // Acknowledgment follows the file flush, publication and directory flush.
 function durableWrite(path, value, { exclusive = false, observe = () => {} } = {}) {
-  const directory = safeDirectory(dirname(path));
+  const directory = safeDirectory(dirname(path), false, undefined, true);
   const temporary = join(directory, `.${randomUUID()}.tmp`);
   try {
     const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -209,10 +231,10 @@ function durableWrite(path, value, { exclusive = false, observe = () => {} } = {
       closeSync(fd);
     }
     observe('temporary-flushed', path);
-    safeDirectory(directory);
+    safeDirectory(directory, false, undefined, true);
     if (exclusive) linkSync(temporary, path);
     else {
-      if (existsSync(path)) requireCondition(lstatSync(path).isFile(), 'STATE_INVALID', 'A state record is not a regular file.');
+      if (present(path)) readStateFile(path);
       renameSync(temporary, path);
     }
     observe('published', path);
@@ -390,12 +412,17 @@ function present(path) {
   }
 }
 function existingState(repository) {
-  let directory = safeDirectory(repository.commonDir);
+  // Legacy reads and starts impose no daemon mode policy when its namespace
+  // is absent. Protected established authority is checked separately.
+  let directory = safeDirectory(repository.commonDir, false, undefined, null);
+  const ancestors = [directory];
   for (const name of ['autoloop', 'scheduler']) {
     directory = join(directory, name);
     if (!present(directory)) return null;
-    safeDirectory(directory);
+    safeDirectory(directory, false, undefined, name === 'scheduler' ? true : null);
+    if (name === 'autoloop') ancestors.push(directory);
   }
+  for (const path of ancestors) safeDirectory(path);
   return directory;
 }
 function verifyRepository(repository) {
@@ -495,6 +522,7 @@ function currentPointer(repository) {
 export function readSchedulerOwner(repository) {
   verifyRepository(repository);
   const ledger = readLedger(repository);
+  assertEstablishedAuthority(repository, ledger);
   const last = ledger.at(-1);
   if (!last) {
     requireCondition(currentPointer(repository) === null, 'STATE_INVALID', 'A current run has no lease.');
@@ -505,6 +533,7 @@ export function readSchedulerOwner(repository) {
 export function readCheckpoint(repository, runId) {
   verifyRepository(repository);
   const ledger = readLedger(repository);
+  assertEstablishedAuthority(repository, ledger);
   const checkpoint = rawCheckpoint(repository, runId);
   const matching = ledger.filter(({ record: item }) => item.runId === runId).at(-1);
   requireCondition(matching && matching.record.generation === checkpoint.generation
@@ -537,17 +566,53 @@ function newCheckpoint(repository, pins, initiator, owner, generation) {
     createdAt: now, updatedAt: now, stoppedAt: null, error: null,
   };
 }
+const AUTHORITY_SCHEMA = 'autoloop.scheduler-authority/1';
+function admissionDirectory(repository, create = false, observe = () => {}) {
+  requireCondition(hash(repository.repositoryKey), 'INVALID_INPUT', 'The repository key is invalid.');
+  const root = executionAdmissionGuardDirectory(); const directory = join(root, repository.repositoryKey);
+  safeDirectory(dirname(dirname(dirname(root))));
+  for (const path of [dirname(dirname(root)), dirname(root), root, directory]) {
+    if (!create && !present(path)) return null;
+    safeDirectory(path, create, observe, path === root || path === directory);
+  }
+  return directory;
+}
+function readAuthorityMarker(repository) {
+  const directory = admissionDirectory(repository);
+  if (directory === null) return null;
+  const marker = stateJson(join(directory, 'daemon-authority.json'), true);
+  requireCondition(marker === null || (exactKeys(marker, ['schema', 'repositoryKey', 'commonDir', 'leaseId', 'runId', 'createdAt'])
+    && marker.schema === AUTHORITY_SCHEMA && marker.repositoryKey === repository.repositoryKey && marker.commonDir === repository.commonDir
+    && uuid(marker.leaseId) && uuid(marker.runId) && timestamp(marker.createdAt)),
+  'STATE_INVALID', 'The protected daemon authority marker is invalid.');
+  return marker;
+}
+function assertEstablishedAuthority(repository, ledger) {
+  const marker = readAuthorityMarker(repository);
+  requireCondition(marker === null || ledger.some(({ record: item }) => item.leaseId === marker.leaseId && item.runId === marker.runId),
+    'RECOVERY_REQUIRED', 'Protected daemon authority has missing Git state.');
+  return marker;
+}
+function establishAuthorityMarker(repository, identity, ledger, observe) {
+  if (assertEstablishedAuthority(repository, ledger) !== null) return;
+  const directory = admissionDirectory(repository, true, observe);
+  durableWrite(join(directory, 'daemon-authority.json'), { schema: AUTHORITY_SCHEMA, repositoryKey: repository.repositoryKey,
+    commonDir: repository.commonDir, leaseId: identity.leaseId, runId: identity.runId, createdAt: identity.createdAt },
+  { exclusive: true, observe });
+}
+
 // Both upgraded start paths hold this short gate until lifetime ownership is
-// published. The immutable link election is the same primitive as the scheduler
-// lease: no stale rename, age threshold or unknown-owner takeover is used.
+// published. Its private OS-account ledger does not impose daemon storage modes
+// on never-daemon legacy repositories. The immutable link election is unchanged.
 export function withExecutionAdmission(repository, establish, { observe = () => {} } = {}) {
   verifyRepository(repository);
-  const directory = childDirectory(stateDirectory(repository, true, observe), 'admission', true, observe);
+  const directory = admissionDirectory(repository, true, observe);
+  readAuthorityMarker(repository);
   const owner = readProcessIdentity();
   const until = Date.now() + 10_000;
   let identity;
   for (;;) {
-    const names = readdirSync(directory).filter((name) => !/^\.[0-9a-f-]+\.tmp$/u.test(name));
+    const names = readdirSync(directory).filter((name) => name !== 'daemon-authority.json' && !/^\.[0-9a-f-]+\.tmp$/u.test(name));
     requireCondition(names.every((name) => /^[1-9]\d*(?:\.released)?\.json$/u.test(name)), 'STATE_INVALID', 'The admission ledger has an unknown entry.');
     const sequences = names.filter((name) => /^\d+\.json$/u.test(name)).map((name) => Number(name.split('.')[0])).sort((a, b) => a - b);
     requireCondition(sequences.every((sequence, index) => sequence === index + 1), 'STATE_INVALID', 'The admission ledger is not contiguous.');
@@ -592,6 +657,7 @@ export function withExecutionAdmission(repository, establish, { observe = () => 
   };
   try {
     fence();
+    assertEstablishedAuthority(repository, readLedger(repository));
     const result = establish(fence);
     requireCondition(!result || typeof result.then !== 'function', 'INVALID_INPUT', 'Repository admission must be synchronous.');
     fence();
@@ -642,6 +708,7 @@ function acquireSchedulerWithinAdmission(repository, pins, initiator, { observe 
   verifyRepository(repository);
   assertPinsLive(repository, pins);
   requireCondition(validInitiator(initiator), 'INVALID_INPUT', 'The initiating identity is invalid.');
+  assertEstablishedAuthority(repository, readLedger(repository));
   const ledger = readLedger(repository, true, observe);
   const previous = ledger.at(-1);
   if (previous && !previous.released) {
@@ -680,6 +747,7 @@ function acquireSchedulerWithinAdmission(repository, pins, initiator, { observe 
     runId: pins.runId, generation, owner, createdAt: Date.now() };
   const lock = childDirectory(stateDirectory(repository), 'lock');
   try {
+    establishAuthorityMarker(repository, identity, ledger, observe);
     durableWrite(join(lock, `${sequence}.json`), identity, { exclusive: true, observe });
   } catch (error) {
     if (error.code === 'STATE_CONFLICT') throw new SchedulerError('SCHEDULER_ACTIVE', 'Another scheduler acquired the repository.');
@@ -715,7 +783,9 @@ function heldLease(lease, allowWriting = false) {
   requireCondition(binding?.active === true, 'LEASE_INVALID', 'The writer lease is not active.');
   requireCondition(allowWriting || !binding.writing, 'STATE_BUSY', 'Another checkpoint transition is in progress.');
   const owner = readProcessIdentity();
-  const last = readLedger(binding.repository).at(-1);
+  const ledger = readLedger(binding.repository);
+  assertEstablishedAuthority(binding.repository, ledger);
+  const last = ledger.at(-1);
   requireCondition(last && !last.released && canonicalJson(last.record) === canonicalJson(binding.identity)
     && schedulerDigest(owner) === schedulerDigest(binding.identity.owner), 'LEASE_INVALID', 'The writer lease was superseded.');
   return binding;
@@ -864,7 +934,7 @@ export function registerWorker(lease, expectedRevision, worker, { guardDirectory
     const fd = openSync(worker.liveFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try { fsyncSync(fd); } finally { closeSync(fd); }
     syncDirectory(streams);
-  } else readRegularFile(worker.liveFile);
+  } else readStateFile(worker.liveFile);
   return commitTransition(lease, expectedRevision, (value) => ({ ...value, workers: [...value.workers, worker] }));
 }
 
@@ -920,7 +990,7 @@ function controlDirectory(repository, part, create = false, observe = () => {}) 
   for (const name of ['autoloop', 'control', 'v2', part]) {
     const next = join(directory, name);
     if (!create && !present(next)) return null;
-    directory = childDirectory(directory, name, create, observe);
+    directory = childDirectory(directory, name, create, observe, name !== 'autoloop');
   }
   return directory;
 }
@@ -964,8 +1034,10 @@ function responseOf(request) {
 }
 export function readCurrentCheckpoint(repository) {
   verifyRepository(repository);
+  const ledger = readLedger(repository);
+  assertEstablishedAuthority(repository, ledger);
   const pointer = currentPointer(repository);
-  const latest = readLedger(repository).at(-1);
+  const latest = ledger.at(-1);
   if (pointer === null) {
     requireCondition(!latest, 'RECOVERY_REQUIRED', 'The current run pointer needs recovery.');
     return null;
@@ -1404,6 +1476,39 @@ export function settleEffect(lease, operationId, observation, { deferControl = f
   return updated;
 }
 
+// Test-only external OS-account fixture. No production CLI or storage option
+// selects a different authority root. Existing self-tests and their children
+// share one scoped temp account, without relaunching a self-test.
+export async function createSchedulerTestAccount(scratch) {
+  const temporaryRoot = realpathSync(tmpdir());
+  requireCondition(isAbsolute(scratch) && realpathSync(scratch) === scratch && scratch !== temporaryRoot
+    && !relative(temporaryRoot, scratch).startsWith('..'), 'INVALID_INPUT', 'The test account needs a private temporary root.');
+  safeDirectory(scratch, false, undefined, true);
+  const originalUmask = process.umask(0o022); const originalNodeOptions = process.env.NODE_OPTIONS;
+  let fixtureAccount;
+  try {
+    const accountHome = childDirectory(scratch, `account-${randomUUID()}`, true);
+    const preload = join(scratch, `external-account-${randomUUID()}.mjs`);
+    writeFileSync(preload, `import os from 'node:os'; import { syncBuiltinESMExports } from 'node:module';
+const actual = os.userInfo; const actualHome = os.homedir;
+os.userInfo = (...args) => ({ ...actual(...args), homedir: ${JSON.stringify(accountHome)} });
+os.homedir = () => ${JSON.stringify(accountHome)}; syncBuiltinESMExports();
+export function restore() { os.userInfo = actual; os.homedir = actualHome; syncBuiltinESMExports(); }\n`, { flag: 'wx', mode: 0o600 });
+    fixtureAccount = await import(preload);
+    process.env.NODE_OPTIONS = `${originalNodeOptions ?? ''} --import=${JSON.stringify(preload)}`.trim();
+    let active = true;
+    return { accountHome, preload, restore() {
+      if (!active) return;
+      active = false; fixtureAccount.restore(); process.umask(originalUmask);
+      if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = originalNodeOptions;
+    } };
+  } catch (error) {
+    fixtureAccount?.restore(); process.umask(originalUmask);
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = originalNodeOptions;
+    throw error;
+  }
+}
+
 async function selfTest() {
   const results = [];
   const check = async (name, run) => {
@@ -1416,10 +1521,15 @@ async function selfTest() {
     }
   };
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'scheduler-contract-')));
+  const fixtureAccount = await createSchedulerTestAccount(scratch);
+  const { accountHome } = fixtureAccount;
   const children = new Set();
   const moduleUrl = import.meta.url;
   const startChild = (script, args = [], options = {}) => {
-    const scopedScript = `process.on('disconnect', () => process.exit(0));\n${script}`;
+    const home = userInfo().homedir;
+    assert(home.startsWith(`${scratch}/`), 'A fixture child must use a temporary OS account.');
+    const scopedScript = `if ((await import('node:os')).userInfo().homedir !== ${JSON.stringify(home)}) throw Error('The child OS account is not isolated.');
+process.on('disconnect', () => process.exit(0));\n${script}`;
     const child = spawn(process.execPath, ['--input-type=module', '-e', scopedScript, ...args], {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'], ...options,
     });
@@ -1454,6 +1564,18 @@ async function selfTest() {
     git('-C', root, 'worktree', 'add', '-q', '--detach', linked, 'HEAD');
     const alias = join(scratch, 'alias');
     symlinkSync(root, alias);
+    await check('nested asynchronous test accounts restore the outer account and child environment', async () => {
+      const outerHome = userInfo().homedir; const outerOptions = process.env.NODE_OPTIONS;
+      const nestedRoot = join(scratch, randomUUID()); mkdirSync(nestedRoot, { mode: 0o700 });
+      const nested = await createSchedulerTestAccount(nestedRoot);
+      try {
+        assert.equal(userInfo().homedir, nested.accountHome); assert.notEqual(nested.accountHome, outerHome);
+        const child = startChild("process.send({ home: (await import('node:os')).userInfo().homedir }, () => process.disconnect());");
+        assert.equal((await message(child)).home, nested.accountHome); await child.finished;
+      } finally { nested.restore(); }
+      assert.equal(userInfo().homedir, outerHome); assert.equal(process.env.NODE_OPTIONS, outerOptions);
+      assert.equal(outerHome, accountHome);
+    });
     await check('canonical common Git identity is shared by linked worktrees and aliases', () => {
       const repository = resolveRepository(root);
       const other = resolveRepository(linked);
@@ -1482,6 +1604,68 @@ async function selfTest() {
       return { home, repository, pins, initiator, state: join(repository.commonDir, 'autoloop', 'scheduler') };
     };
     const refuses = (code, run) => assert.throws(run, (error) => error instanceof SchedulerError && error.code === code);
+    const admissionOf = (repository) => join(accountHome, '.claude', 'autoloop', 'execution-admission', repository.repositoryKey);
+    await check('the short shared admission ledger uses only the private OS-account runtime', () => {
+      const { repository, state } = fixture();
+      assert.equal(withExecutionAdmission(repository, () => 'held'), 'held');
+      const directory = admissionOf(repository);
+      assert.equal(lstatSync(directory).mode & 0o777, 0o700);
+      assert.equal(lstatSync(join(directory, '1.json')).mode & 0o777, 0o600);
+      assert.equal(existsSync(join(directory, '1.released.json')), true);
+      assert.equal(existsSync(state), false, 'Legacy admission must not create scheduler storage.');
+    });
+    await check('protected established authority is durable before the first daemon lease', () => {
+      const { repository, pins, initiator, state } = fixture(); const operations = [];
+      const acquired = acquireScheduler(repository, pins, initiator, { observe: (phase, path) => operations.push([phase, path]) });
+      const markerPath = join(admissionOf(repository), 'daemon-authority.json');
+      const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+      assert.equal(marker.schema, 'autoloop.scheduler-authority/1'); assert.equal(marker.repositoryKey, repository.repositoryKey);
+      assert.equal(marker.commonDir, repository.commonDir); assert.equal(marker.runId, pins.runId);
+      assert.equal(marker.leaseId, JSON.parse(readFileSync(join(state, 'lock', '1.json'), 'utf8')).leaseId);
+      const flushed = operations.findIndex(([phase, path]) => phase === 'directory-flushed' && path === markerPath);
+      const leasePublished = operations.findIndex(([phase, path]) => phase === 'published' && path === join(state, 'lock', '1.json'));
+      assert(flushed >= 0 && leasePublished > flushed, 'Protected authority must be durable before a daemon lease.');
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+    });
+    await check('authority marker publication failure stops acquisition before daemon authority', () => {
+      const { repository, pins, initiator, state } = fixture();
+      refuses('STATE_IO_FAILED', () => acquireScheduler(repository, pins, initiator, { observe: (phase, path) => {
+        if (phase === 'temporary-flushed' && path.endsWith('/daemon-authority.json')) throw Object.assign(new Error('authority marker write failed'), { code: 'EIO' });
+      } }));
+      assert.equal(existsSync(join(state, 'lock', '1.json')), false); assert.equal(existsSync(join(state, 'current.json')), false);
+      assert.equal(existsSync(join(admissionOf(repository), 'daemon-authority.json')), false);
+    });
+    await check('marked missing or corrupt Git authority cannot become never-started state', () => {
+      const { repository, pins, initiator, state, home } = fixture(); const acquired = acquireScheduler(repository, pins, initiator);
+      assert.equal(existsSync(join(admissionOf(repository), 'daemon-authority.json')), true);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+      const saved = join(home, 'retained-scheduler'); renameSync(state, saved);
+      try {
+        refuses('RECOVERY_REQUIRED', () => readCurrentCheckpoint(repository));
+        refuses('RECOVERY_REQUIRED', () => readSchedulerOwner(repository));
+        refuses('RECOVERY_REQUIRED', () => assertNoSchedulerOwner(repository));
+        const externalPath = join(home, 'unexpected-external-effect');
+        refuses('RECOVERY_REQUIRED', () => withExecutionAdmission(repository, () => writeFileSync(externalPath, 'applied')));
+        assert.equal(existsSync(externalPath), false);
+        refuses('RECOVERY_REQUIRED', () => acquireScheduler(repository, { ...pins, runId: randomUUID() }, initiator));
+      } finally { renameSync(saved, state); }
+      const checkpointPath = join(state, 'runs', pins.runId, 'checkpoint.json'); const checkpoint = readFileSync(checkpointPath, 'utf8');
+      writeFileSync(checkpointPath, '{corrupt');
+      try { refuses('STATE_INVALID', () => readCurrentCheckpoint(repository)); refuses('STATE_INVALID', () => assertNoSchedulerOwner(repository)); }
+      finally { writeFileSync(checkpointPath, checkpoint); }
+    });
+    await check('a crash after protected marker durability and before lease publication retains recovery refusal', async () => {
+      const { repository, pins, initiator, state } = fixture();
+      const owner = startChild(`const api = await import(process.argv[1]); const repo = api.resolveRepository(process.argv[2]);
+        api.acquireScheduler(repo, JSON.parse(process.argv[3]), { kind: 'terminal', sessionId: null, process: api.readProcessIdentity() },
+          { observe: (phase, path) => { if (phase === 'directory-flushed' && path.endsWith('/daemon-authority.json')) process.kill(process.pid, 'SIGKILL'); } });`,
+      [moduleUrl, repository.coordinatorRoot, JSON.stringify(pins)]);
+      assert.equal((await owner.finished).signal, 'SIGKILL');
+      assert.equal(existsSync(join(admissionOf(repository), 'daemon-authority.json')), true);
+      assert.equal(existsSync(join(state, 'lock', '1.json')), false);
+      refuses('RECOVERY_REQUIRED', () => readCurrentCheckpoint(repository));
+      refuses('RECOVERY_REQUIRED', () => acquireScheduler(repository, pins, initiator));
+    });
     await check('pins validate real config, model routes, digests and default containment without credentials', () => {
       const { repository, pins } = fixture();
       assert.equal(pins.schema, PINS_SCHEMA);
@@ -1493,6 +1677,49 @@ async function selfTest() {
       assert.notDeepEqual(validatePins({ ...pins, configDigest: '0'.repeat(64) }), []);
       refuses('INVALID_INPUT', () => createPins(repository, { pluginRoot: pins.pluginRoot, enginePath: pins.enginePath,
         config: { ...pins.config, apiKey: 'fixture' }, models: pins.models }));
+    });
+    await check('shared Git-admin ancestors refuse other-account write permission without changing legacy modes', async () => {
+      const { chmodSync } = await import('node:fs');
+      for (const component of ['git', 'autoloop']) for (const mode of [0o775, 0o777]) {
+        const { repository, pins, initiator, state } = fixture();
+        const path = component === 'git' ? repository.commonDir : join(repository.commonDir, 'autoloop');
+        if (component === 'autoloop') mkdirSync(path, { mode: 0o755 });
+        chmodSync(path, mode);
+        refuses('STATE_INVALID', () => acquireScheduler(repository, pins, initiator));
+        assert.equal(lstatSync(path).mode & 0o777, mode);
+        assert.equal(existsSync(state), false);
+      }
+      const { repository, pins, initiator } = fixture(); const legacy = join(repository.commonDir, 'autoloop');
+      mkdirSync(legacy, { mode: 0o755 }); chmodSync(legacy, 0o755);
+      const acquired = acquireScheduler(repository, pins, initiator);
+      assert.equal(lstatSync(legacy).mode & 0o777, 0o755);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+    });
+    await check('private scheduler namespaces refuse loose existing directories', async () => {
+      const { chmodSync } = await import('node:fs');
+      for (const component of ['scheduler', 'admission', 'lock', 'runs', 'run', 'streams']) {
+        const { repository, pins, initiator, state } = fixture(); const acquired = acquireScheduler(repository, pins, initiator);
+        commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'failed' })); releaseScheduler(acquired.lease);
+        const path = component === 'admission' ? admissionOf(repository) : component === 'scheduler' ? state : component === 'run' ? join(state, 'runs', pins.runId)
+          : component === 'streams' ? join(state, 'runs', pins.runId, 'streams') : join(state, component);
+        chmodSync(path, 0o755);
+        refuses('STATE_INVALID', () => acquireScheduler(repository, pins, initiator));
+        assert.equal(lstatSync(path).mode & 0o777, 0o755);
+      }
+    });
+    await check('authoritative records refuse nonprivate permissions without rewriting content', async () => {
+      const { chmodSync } = await import('node:fs');
+      for (const component of ['authority', 'current.json', 'lease', 'pins.json', 'checkpoint.json']) for (const mode of [0o644, 0o666]) {
+        const { repository, pins, initiator, state } = fixture(); const acquired = acquireScheduler(repository, pins, initiator);
+        const path = component === 'authority' ? join(admissionOf(repository), 'daemon-authority.json')
+          : component === 'current.json' ? join(state, component) : component === 'lease' ? join(state, 'lock', '1.json')
+          : join(state, 'runs', pins.runId, component);
+        const content = readFileSync(path, 'utf8'); chmodSync(path, mode);
+        refuses('STATE_INVALID', () => readCurrentCheckpoint(repository));
+        assert.equal(readFileSync(path, 'utf8'), content); assert.equal(lstatSync(path).mode & 0o777, mode);
+        chmodSync(path, 0o600);
+        commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+      }
     });
     await check('new authoritative directories flush their parents before lease and pointer publication', async () => {
       const { repository, pins, initiator, state } = fixture();
@@ -1736,6 +1963,40 @@ async function selfTest() {
       commitTransition(acquired.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' }));
       releaseScheduler(acquired.lease);
     };
+    await check('unsafe control ancestors and request records cannot become durable claims', async () => {
+      const { chmodSync } = await import('node:fs');
+      for (const component of ['control', 'v2', 'requests', 'request', 'pending', 'processing']) {
+        const { repository, pins, initiator } = fixture(); const acquired = acquireScheduler(repository, pins, initiator);
+        const control = request(pins.runId); submitControl(repository, actor(), control);
+        const root = join(repository.commonDir, 'autoloop', 'control');
+        const path = component === 'control' ? root : component === 'v2' ? join(root, 'v2')
+          : component === 'request' ? join(root, 'v2', 'requests', `${control.requestId}.json`) : join(root, 'v2', component);
+        const mode = component === 'request' ? 0o666 : 0o777; chmodSync(path, mode);
+        refuses('STATE_INVALID', () => claimControl(acquired.lease, control.requestId));
+        assert.equal(lstatSync(path).mode & 0o777, mode);
+        assert.deepEqual(readCheckpoint(repository, pins.runId).requests, {});
+        chmodSync(path, component === 'request' ? 0o600 : 0o700); finish(repository, acquired);
+      }
+    });
+    await check('foreign ownership on directory and record descriptors refuses state admission and claims', async () => {
+      const fs = (await import('node:fs')).default; const { syncBuiltinESMExports } = await import('node:module');
+      for (const component of ['shared', 'directory', 'record']) {
+        const { repository, pins, initiator, state } = fixture(); const acquired = acquireScheduler(repository, pins, initiator);
+        const control = request(pins.runId); submitControl(repository, actor(), control);
+        const path = component === 'shared' ? join(repository.commonDir, 'autoloop') : component === 'directory' ? join(state, 'lock')
+          : join(repository.commonDir, 'autoloop', 'control', 'v2', 'requests', `${control.requestId}.json`);
+        const target = lstatSync(path); const original = fs.fstatSync;
+        try {
+          // External OS ownership fault; all paths and file operations stay real.
+          fs.fstatSync = (...args) => {
+            const stat = original(...args); if (stat.dev === target.dev && stat.ino === target.ino) stat.uid += 1; return stat;
+          };
+          syncBuiltinESMExports();
+          refuses('STATE_INVALID', () => claimControl(acquired.lease, control.requestId));
+        } finally { fs.fstatSync = original; syncBuiltinESMExports(); }
+        assert.deepEqual(readCheckpoint(repository, pins.runId).requests, {}); finish(repository, acquired);
+      }
+    });
     await check('prepared intents block fresh and legacy admission until stopped-before-launch accounting', () => {
       for (const linked of [false, true]) {
         const { repository, pins, initiator } = fixture();
@@ -2153,8 +2414,12 @@ async function selfTest() {
       finish(repository, recovered);
     });
   } finally {
-    await Promise.all([...children].map((child) => endChild(child, 'SIGKILL')));
-    rmSync(scratch, { recursive: true, force: true });
+    try {
+      await Promise.all([...children].map((child) => endChild(child, 'SIGKILL')));
+      rmSync(scratch, { recursive: true, force: true });
+    } finally {
+      fixtureAccount.restore();
+    }
   }
   console.log(results.every(([, passed]) => passed)
     ? `self-test OK (${results.length} cases)`

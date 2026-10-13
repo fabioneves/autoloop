@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  abandonPreparedEffect, acquireScheduler, assertNoKnownLegacyOwner, boundGroupState, claimControl, commitTransition, completeControl, createPins, DEFAULT_SUPERVISOR_PROFILE,
+  abandonPreparedEffect, acquireScheduler, assertNoKnownLegacyOwner, boundGroupState, claimControl, commitTransition, completeControl, createPins, createSchedulerTestAccount, DEFAULT_SUPERVISOR_PROFILE,
   hasUnresolvedEffects as unresolvedEffects,
   listControlRequests, markEffectInFlight, prepareEffect, processGroupOf, processIdentityState,
   readCheckpoint, readCurrentCheckpoint, readPins, readProcessIdentity, readRequest, readSchedulerOwner,
@@ -433,6 +433,7 @@ async function selfTest() {
     catch (error) { results.push([name, false]); console.error(`FAIL ${name}: ${error.message}`); }
   };
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-runtime-')));
+  const fixtureAccount = await createSchedulerTestAccount(scratch);
   const registerFixtureWorker = (lease, revision, binding) => registerWorker(lease, revision, binding, { guardDirectory: join(scratch, 'workers') });
   try {
     const root = join(scratch, 'repo');
@@ -480,7 +481,8 @@ async function selfTest() {
     };
     const children = new Set();
     const startRuntime = async ({ repository, pins }, { tickMs = 25 } = {}) => {
-      const script = `const api = await import(process.argv[1]); const core = await import(process.argv[2]);
+      const script = `if ((await import('node:os')).userInfo().homedir !== ${JSON.stringify(fixtureAccount.accountHome)}) throw Error('The runtime OS account is not isolated.');
+        const api = await import(process.argv[1]); const core = await import(process.argv[2]);
         const root = process.argv[3]; const pins = JSON.parse(process.argv[4]); const tickMs = Number(process.argv[5]);
         process.on('disconnect', () => process.kill(process.pid, 'SIGTERM'));
         const result = await api.runLoop({ repository: core.resolveRepository(root), pins,
@@ -1199,6 +1201,7 @@ finally:
       }));
     }
   } finally {
+    fixtureAccount.restore();
     // Retain test files until removal is permitted in this execution context.
     console.error(`Retained runtime test files: ${scratch}`);
   }
