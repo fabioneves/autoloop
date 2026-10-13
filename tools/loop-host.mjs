@@ -67,6 +67,16 @@ async function selfTest() {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'loop-host-')));
   console.error(`Retained test scratch: ${scratch}`);
   const root = join(scratch, 'repo');
+  const accountHome = join(scratch, 'account');
+  mkdirSync(accountHome, { mode: 0o700 });
+  // Replace only the external OS-account location for the fake host and its
+  // real backend children. Production still derives its fixed store itself.
+  const preload = join(scratch, 'fixture-account.mjs');
+  writeFileSync(preload, `import os from 'node:os'; import { syncBuiltinESMExports } from 'node:module';
+const account = os.userInfo;
+os.userInfo = (...args) => ({ ...account(...args), homedir: ${JSON.stringify(accountHome)} });
+os.homedir = () => ${JSON.stringify(accountHome)};
+syncBuiltinESMExports();\n`);
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', root], { timeout: 15000 }).status, 0);
   const repository = resolveRepository(root);
   const config = resolveConfigText(JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'node --version' } })).config;
@@ -121,6 +131,9 @@ async function selfTest() {
   const hostScript = `import { spawn } from 'node:child_process';
     process.title = 'claude';
     const root = process.argv[1]; const plugin = process.argv[2]; const runId = process.argv[3]; const nodePath = process.argv[4];
+    const { userInfo } = await import('node:os');
+    const assert = (await import('node:assert/strict')).default;
+    assert.equal(userInfo().homedir, process.argv[5], 'The external fixture host must use its temporary OS-account root before publishing receipts.');
     const { randomUUID } = await import('node:crypto');
     const { readFileSync, writeFileSync } = await import('node:fs');
     const call = (argv, input = '') => new Promise((done, fail) => {
@@ -219,7 +232,8 @@ async function selfTest() {
     process.send(output, () => process.disconnect());`;
   let hostResult;
   await check('real direct external host publishes a bound helper receipt and consumes it through status', async () => {
-    const child = spawn(fakeClaude, ['--input-type=module', '-e', hostScript, root, pins.pluginRoot, acquired.runId, pins.nodePath], {
+    const child = spawn(fakeClaude, ['--input-type=module', '-e', hostScript, root, pins.pluginRoot, acquired.runId, pins.nodePath, accountHome], {
+      env: { ...process.env, NODE_OPTIONS: `--import=${preload}` },
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'], detached: true,
     });
     const closed = new Promise((done) => child.once('close', done));
@@ -235,7 +249,7 @@ async function selfTest() {
       await closed;
       assert.equal(hostResult.helper.result.code, 0, JSON.stringify(hostResult.helper.result));
       const envelope = hostResult.helper.result.json.envelope;
-      const receiptPath = hostInvocationPath(envelope.host, envelope.invocationId);
+      const receiptPath = hostInvocationPath(envelope.host, envelope.invocationId, join(accountHome, '.claude', 'autoloop', 'host-invocations'));
       console.error(`Retained host receipts: ${dirname(receiptPath)}`);
       assert.equal(lstatSync(receiptPath).mode & 0o777, 0o600);
       assert.deepEqual(readPrivateJson(receiptPath), envelope);
