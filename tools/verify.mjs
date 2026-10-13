@@ -46,6 +46,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'run-markers.mjs',
   'run-state-guard.mjs',
   'git-budget.mjs',
+  'guard-alias-test.mjs',
   'label-swap-reminder.mjs',
   'lane-contract.mjs',
   'models-config.mjs',
