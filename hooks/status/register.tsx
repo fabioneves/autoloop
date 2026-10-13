@@ -1,18 +1,21 @@
 // The status mod (docs/specs/SPEC-status-mod.md, docs/specs/SPEC-central.md):
 // a band above the prompt and, on request, a pane for the session that owns
-// a run. This module holds the hooks; the reads are in read.ts, the band's
-// text in view.ts, the pane's sections in pane.ts, the palette, glyphs and
-// element builders in kit.ts. The band draws only from a projection that is
+// a run. This module holds the hooks; the reads (the projection, the proxy,
+// the live tails) are in read.ts, the stream's renderer in render.ts, the
+// band's text in view.ts, the pane's sections in pane.ts, the palette,
+// glyphs and element builders in kit.ts. The band draws only from a projection that is
 // owned and enabled, so every other session sees no change; the pane opens
 // only on /autoloop.
 import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
 import { update } from 'claude-code'
 
-import type { StatusProjection, StatusState } from '../../types'
+import type { StatusProjection, StatusState, StatusStream } from '../../types'
 import { GLYPH, PALETTE, cell, header, rule, strip } from './kit'
 import { PANE_ID, PANE_TITLE, paneSections } from './pane'
-import type { ProxyFetch } from './read'
-import { isDrawable, isStale, proxyBase, readProjection, readProxy } from './read'
+import type { ProxyFetch, Runner } from './read'
+import {
+  LIVE_PERIOD_MS, STREAM_LINES_MAX, isDrawable, isStale, proxyBase, pruneStreams, readProjection, readProxy, runningDispatches, tailLive,
+} from './read'
 import {
   HINT, blockedUnits, checkedAgo, columnWidths, headerMarks, isNarrow, loopColumn, needsYouRow, phaseRow, proxyColumn, toastText,
   workColumn,
@@ -22,7 +25,7 @@ const STATUS = { plugin: 'autoloop', key: 'status' } as const
 const PERIOD_MS = 3000
 /** A tick past this is reported once: the period is not raised by itself (tasks/plan-status-mod.md, risks). */
 const SLOW_TICK_MS = 500
-const EMPTY: StatusState = { last: null, lastOkAtMs: null, lastMs: null, proxy: null, seenBlocked: [], paneOpen: false }
+const EMPTY: StatusState = { last: null, lastOkAtMs: null, lastMs: null, proxy: null, seenBlocked: [], paneOpen: false, streams: {} }
 /** The mod's state as last written; EMPTY before the first tick. */
 const heldState = async ($: EngineInterface): Promise<StatusState> => (await $.state.get(STATUS)).value ?? EMPTY
 /** Whether the pane is open, written where the pane opens or closes; the band reads it to draw one row. */
@@ -41,6 +44,13 @@ export const register: Register = (on) => {
   let slowReported = false
   let faultReported = false
   let timer: Timer | null = null
+  // The live tails: a 1 s timer while a dispatch runs, and the last chunk
+  // tail printed per dispatch, so growth is the chunk differing. The chunks
+  // are the tick's working memory, not a drawing's source: a reload drops
+  // them, and the next tick reads every file as grown once.
+  let liveBusy = false
+  let liveTimer: Timer | null = null
+  const chunks = new Map<string, string>()
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'autoloop', description: 'Show the state of the run this session owns.' })
@@ -48,7 +58,7 @@ export const register: Register = (on) => {
     // and nothing is fetched; a base that is not a loopback URL counts as
     // unset. `claudeproxy` sets it before the session starts.
     const base = proxyBase(await $.env.get('ANTHROPIC_BASE_URL'))
-    const run = (argv: readonly string[], init: { timeoutMs: number }) => $.process.run(argv, init)
+    const run: Runner = (argv, init) => $.process.run(argv, init)
     // $.http.fetch has no timeout of its own: the read races a clock wait,
     // which the settled fetch then aborts.
     const fetch: ProxyFetch = (url, { timeoutMs }) => {
@@ -57,6 +67,54 @@ export const register: Register = (on) => {
         throw new Error(`no answer within ${timeoutMs} ms`)
       })
       return Promise.race([$.http.fetch(url), timeout]).finally(() => stop.abort())
+    }
+    // One live tick: tail every running dispatch's file, render, keep the
+    // last 200 lines, and stamp growth. A tail that fails keeps the last
+    // lines; a tick still running is skipped by the next second.
+    const liveTick = async () => {
+      if (liveBusy) return
+      liveBusy = true
+      try {
+        const running = runningDispatches((await heldState($)).last)
+        if (running.length === 0) return
+        const nowMs = await $.clock.now()
+        const tailed = await Promise.all(running.map(async (dispatch) => ({ id: dispatch.dispatch, tail: await tailLive(run, dispatch.liveFile) })))
+        const grown: { id: string; stream: Omit<StatusStream, 'lastGrewAtMs'>; grew: boolean }[] = []
+        for (const { id, tail } of tailed) {
+          if (tail === null) continue
+          grown.push({ id, grew: chunks.get(id) !== tail.chunk, stream: { lines: tail.lines.slice(-STREAM_LINES_MAX), bytes: tail.chunk.length } })
+          chunks.set(id, tail.chunk)
+        }
+        await update($, STATUS, (value) => {
+          const held = value ?? EMPTY
+          const streams = { ...held.streams }
+          for (const { id, stream, grew } of grown) {
+            const before = held.streams[id]
+            streams[id] = { ...stream, lastGrewAtMs: grew || before === undefined ? nowMs : before.lastGrewAtMs }
+          }
+          return { ...held, streams: pruneStreams(streams, running.map((dispatch) => dispatch.dispatch)) }
+        })
+      } catch (error) {
+        if (!faultReported) {
+          faultReported = true
+          $.ui.log(`autoloop status: a live tick failed (${error instanceof Error ? error.message : String(error)})`)
+        }
+      } finally {
+        liveBusy = false
+      }
+    }
+    // The 1 s timer runs only while a dispatch runs: started by the 3 s tick
+    // that sees one, cancelled by the one that sees none.
+    const syncLive = (projection: StatusProjection | null) => {
+      const running = runningDispatches(projection).length > 0
+      if (running && liveTimer === null) {
+        liveTimer = $.clock.every(LIVE_PERIOD_MS, () => {
+          void liveTick()
+        })
+      } else if (!running && liveTimer !== null) {
+        liveTimer.cancel()
+        liveTimer = null
+      }
     }
     const tick = async () => {
       if (busy) return
@@ -89,6 +147,7 @@ export const register: Register = (on) => {
           return { ...held, last: read.projection, lastOkAtMs: nowMs, lastMs, proxy, seenBlocked: [...held.seenBlocked, ...fresh.map((unit) => unit.issue)] }
         })
         for (const unit of fresh) $.ui.toast(toastText({ issue: unit.issue, text: unit.needsYou.text }))
+        if (read.ok) syncLive(isDrawable(read.projection) ? read.projection : null)
         // ui.status false turns the mod off for the project: the tick stops
         // until the next session.start (spec item 6). An unowned projection
         // keeps it, since the session may come to own a run.
@@ -109,6 +168,8 @@ export const register: Register = (on) => {
       }
     }
     timer?.cancel()
+    liveTimer?.cancel()
+    liveTimer = null
     timer = $.clock.every(PERIOD_MS, () => {
       void tick()
     })
@@ -121,6 +182,9 @@ export const register: Register = (on) => {
   on('session.end', async ($, e, next) => {
     timer?.cancel()
     timer = null
+    liveTimer?.cancel()
+    liveTimer = null
+    chunks.clear()
     await $.state.set(STATUS, EMPTY)
     return next(e)
   })

@@ -1,9 +1,11 @@
-// The two reads (docs/specs/SPEC-status-mod.md, items 1 to 4): the
-// projection, `tools/status.mjs --json --session <id>` run as a child of the
-// Claude process and held to its schema; and the proxy, `GET <base>/status`
-// without auth. Each is pure over an injected runner or fetch, so a test
-// doubles the host and not the producer.
-import type { ProxyRead, ProxyRequest, StatusProjection } from '../../types'
+// The three reads (docs/specs/SPEC-status-mod.md, items 1 to 4, and
+// SPEC-central.md item 2): the projection, `tools/status.mjs --json
+// --session <id>` run as a child of the Claude process and held to its
+// schema; the proxy, `GET <base>/status` without auth; and the live tails
+// of running dispatches. Each is pure over an injected runner or fetch, so
+// a test doubles the host and not the producer.
+import type { ProxyRead, ProxyRequest, StatusDispatch, StatusProjection, StatusStream } from '../../types'
+import { createRenderer } from './render'
 
 export const STATUS_SCHEMA = 'autoloop.status/1'
 export const READ_TIMEOUT_MS = 2000
@@ -139,4 +141,74 @@ export async function readProxy(fetch: ProxyFetch, base: string): Promise<ProxyR
   }
   const requests = result.status === 200 ? parseProxyStatus(result.text) : null
   return requests === null ? { state: 'up', requests: [] } : { state: 'on', requests }
+}
+
+// The live tails (docs/specs/SPEC-central.md, item 2): the last 64 KiB of
+// a running dispatch's live file through `tail -c`, since `$.fs.read` is
+// capped at 4 MiB and a stream can be larger; the complete lines rendered
+// as tools/dispatch-render.mjs renders them (render.ts).
+
+export const TAIL_BYTES = 65536
+export const TAIL_TIMEOUT_MS = 2000
+export const LIVE_PERIOD_MS = 1000
+/** A running dispatch whose file did not grow for this long is quiet. */
+export const QUIET_AFTER_MS = 120_000
+/** Rendered lines kept per dispatch. */
+export const STREAM_LINES_MAX = 200
+
+export function tailArgv(liveFile: string): string[] {
+  return ['tail', '-c', String(TAIL_BYTES), liveFile]
+}
+
+const BYTES = new TextEncoder()
+
+/**
+ * The complete lines of a chunk. A chunk that fills the cap starts wherever
+ * tail cut the file, so its first line is a cut line and goes (a cut
+ * multi-byte character at its head decodes to a replacement character, so
+ * the byte count is read with a margin); a chunk under the cap is the whole
+ * file. The text after the last newline is a line still being written.
+ */
+export function splitTail(chunk: string): string[] {
+  const cut = BYTES.encode(chunk).length >= TAIL_BYTES - 3
+  const lines = chunk.split('\n')
+  lines.pop()
+  return cut ? lines.slice(1) : lines
+}
+
+export type Tailed = { chunk: string; lines: string[] }
+
+/** One tail of a live file, rendered; null when tail could not run or failed, so the last lines are kept. */
+export async function tailLive(run: Runner, liveFile: string): Promise<Tailed | null> {
+  try {
+    const result = await run(tailArgv(liveFile), { timeoutMs: TAIL_TIMEOUT_MS })
+    if (result.exitCode !== 0) return null
+    const render = createRenderer()
+    return { chunk: result.stdout, lines: splitTail(result.stdout).flatMap(render) }
+  } catch {
+    return null
+  }
+}
+
+/** The dispatches whose live file the mod tails: running, with a file. */
+export function runningDispatches(projection: StatusProjection | null): (StatusDispatch & { liveFile: string })[] {
+  return (projection?.dispatches ?? []).filter((dispatch): dispatch is StatusDispatch & { liveFile: string } =>
+    dispatch.state === 'running' && dispatch.liveFile !== null)
+}
+
+/**
+ * The streams kept: every running dispatch's, and of the ended ones the
+ * one that grew last (the Live tab shows the last ended dispatch's tail),
+ * so a long session does not carry every dispatch's lines in its state.
+ */
+export function pruneStreams(streams: Record<string, StatusStream>, running: string[]): Record<string, StatusStream> {
+  const ended = Object.entries(streams).filter(([id]) => !running.includes(id))
+    .sort(([, left], [, right]) => right.lastGrewAtMs - left.lastGrewAtMs)
+  const kept = new Set([...running, ...ended.slice(0, 1).map(([id]) => id)])
+  return Object.fromEntries(Object.entries(streams).filter(([id]) => kept.has(id)))
+}
+
+/** Quiet: the dispatch runs and its file did not grow for 120 s. A died or ended dispatch is never quiet. */
+export function isQuiet(stream: StatusStream, dispatch: StatusDispatch, nowMs: number): boolean {
+  return dispatch.state === 'running' && nowMs - stream.lastGrewAtMs >= QUIET_AFTER_MS
 }

@@ -133,6 +133,16 @@ export type ProxyRequest = {
  */
 export type ProxyRead = { state: 'on' | 'up' | 'off'; requests: ProxyRequest[] }
 
+/** One dispatch's live tail as the mod keeps it (SPEC-central item 2). */
+export type StatusStream = {
+  /** The last 200 rendered lines of the live file, oldest first. */
+  lines: string[]
+  /** The length of the last chunk tail printed. */
+  bytes: number
+  /** When the chunk last differed from the one before: quiet 120 s past it while the dispatch runs. */
+  lastGrewAtMs: number
+}
+
 /** The mod's session state: the last reads and what it has already shown. */
 export type StatusState = {
   /** The last projection that parsed, kept through failed reads. */
@@ -147,6 +157,8 @@ export type StatusState = {
   seenBlocked: number[]
   /** True while the pane `autoloop` is open and placed: the band then draws one row. */
   paneOpen: boolean
+  /** The live tails by dispatch id: every running dispatch's, and the last ended one's until session.end. */
+  streams: Record<string, StatusStream>
 }
 
 declare module 'claude-code' {
