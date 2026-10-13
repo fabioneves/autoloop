@@ -666,6 +666,11 @@ async function processCases() {
 async function selfTest() {
   const success = run(process.execPath, ['--version'], process.cwd());
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
+  const diagnosticLines = [];
+  const diagnosticRun = await runChecks([{ name: 'capability fixture', execute: () =>
+    run(process.execPath, ['-e', 'console.log("SKIP fixture capability unavailable")'], process.cwd()) }], {
+    log: (line) => diagnosticLines.push(line), error: (line) => diagnosticLines.push(line),
+  });
   const toolsDir = resolve(fileURLToPath(new URL('.', import.meta.url)));
   // The project doctor: a devendored repository passes; any vendored layout
   // left behind fails and names devendor.
@@ -821,6 +826,13 @@ async function selfTest() {
       JSON.stringify(skillBudgetProblems({ dev: 60001, setup: 100, novel: 5 }, { dev: 60000, setup: 100 }))
         === JSON.stringify(['SKILL_OVER_BUDGET dev 60001/60000 bytes', 'SKILL_BUDGET_MISSING novel'])
         && skillBudgetProblems({ dev: 60000 }, { dev: 60000 }).length === 0],
+    ['a passing child capability skip is printed by the verification runner',
+      diagnosticRun.failures.length === 0 && !diagnosticRun.stopped
+        && diagnosticLines.includes('  SKIP fixture capability unavailable')],
+    ['successful test skips remain visible alongside timing diagnostics',
+      JSON.stringify(visibleTestDiagnostics('self-test OK\nSKIP positive supervision: no cap\nslow checks: fixture 1s\nordinary output\nSKIP Linux-only case'))
+        === JSON.stringify(['SKIP positive supervision: no cap', 'slow checks: fixture 1s', 'SKIP Linux-only case'])
+        && visibleTestDiagnostics(undefined).length === 0],
     ['structured command success', success.ok && success.detail.length > 0],
     ['structured command failure', !failure.ok && failure.detail.length > 0],
     ['invalid JSON is rejected', checkJson(fileURLToPath(import.meta.url)).ok === false],
@@ -883,6 +895,10 @@ function killActiveGroupOn(signal, code) {
   });
 }
 
+export function visibleTestDiagnostics(detail) {
+  return detail?.match(/^(?:(?:slow checks|matrix phases): .+|SKIP(?:[ \t:].*)?)$/gmu) ?? [];
+}
+
 export async function runChecks(checks, { log = console.log, error = console.error } = {}) {
   const failures = [];
   for (const check of checks) {
@@ -897,8 +913,8 @@ export async function runChecks(checks, { log = console.log, error = console.err
     } else if (result.ok) {
       log(`PASS ${check.name}${timing}`);
       // A passing child's stdout is otherwise discarded, which swallowed the
-      // self-tests' diagnostic attribution — surface every such line.
-      for (const line of result.detail?.match(/^(?:slow checks|matrix phases): .+$/gmu) ?? []) {
+      // self-tests' diagnostics and capability skips. Surface both explicitly.
+      for (const line of visibleTestDiagnostics(result.detail)) {
         log(`  ${line}`);
       }
     } else {

@@ -36,6 +36,20 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Verify release and contracts
         run: node tools/verify.mjs --plugin-root .
+      # The portable gate reports unsupported lifecycle cases explicitly. This
+      # Linux step must execute them with the real kernel containment profile.
+      - name: Verify capped supervisor lifecycle
+        if: runner.os == 'Linux'
+        run: |
+          node_path="$(command -v node)"
+          sudo systemd-run --quiet --wait --collect --pipe \
+            --unit="autoloop-supervisor-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --working-directory="$GITHUB_WORKSPACE" \
+            --property="User=$(id -un)" --property="Group=$(id -gn)" \
+            --property=MemoryMax=6G --property=MemorySwapMax=0 \
+            --property=TasksMax=2048 --property=RuntimeMaxSec=300 \
+            --setenv="HOME=$HOME" --setenv="PATH=$PATH" \
+            "$node_path" tools/loop-supervisor.mjs --self-test --require-supervision
       - name: Verify release tag
         if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
         run: >-
