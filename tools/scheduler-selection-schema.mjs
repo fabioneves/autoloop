@@ -224,13 +224,59 @@ export function validateSelectionWait(value) {
     && unique(value.condition.all, canonical) && plan(value.requestedPlan) && validateSnapshotReference(value.snapshot).length === 0
     && positive(value.createdRevision), 'Selection wait');
 }
+const rawText = (value) => typeof value === 'string' && value.length > 0 && !value.includes('\0');
+const rawDigest = (value) => createHash('sha256').update(value, 'utf8').digest('hex');
+export function validatePlanArtifact(value) {
+  return result(keys(value, ['schema', 'repositoryKey', 'unitId', 'unitGeneration', 'issue', 'issueBodyDigest', 'authorizationDigest',
+    'planGeneration', 'baseOid', 'title', 'prBody', 'body', 'boundary']) && value.schema === 'autoloop.plan-artifact/1'
+    && hash(value.repositoryKey) && uuid(value.unitId) && positive(value.unitGeneration) && positive(value.issue)
+    && hash(value.issueBodyDigest) && hash(value.authorizationDigest) && positive(value.planGeneration) && oid(value.baseOid)
+    && [value.title, value.prBody, value.body].every(rawText) && boundary(value.boundary), 'Plan artifact');
+}
+const RELATIONSHIP_KEYS = ['schema', 'relationshipId', 'kind', 'runId', 'schedulerGeneration', 'unitId', 'unitGeneration',
+  'worktreeGitDir', 'currentPlan', 'proposedPlan', 'issueBodyDigest', 'authorizationDigest', 'baseOid', 'headOid', 'treeOid',
+  'worktreeStatusDigest', 'task', 'rationale', 'addedPaths', 'process', 'groupLeader', 'pgid', 'commandDigest', 'status',
+  'exitCode', 'signal', 'stdoutDigest', 'stderrDigest', 'createdRevision', 'completedRevision'];
+export function validatePlanningRelationship(value) {
+  if (!keys(value, RELATIONSHIP_KEYS) || value.schema !== 'autoloop.planning-relationship/1' || value.kind !== 'failing-task'
+    || ![value.relationshipId, value.runId, value.unitId].every(uuid) || !positive(value.schedulerGeneration)
+    || !positive(value.unitGeneration) || !path(value.worktreeGitDir)
+    || !keys(value.currentPlan, ['planGeneration', 'planDigest']) || !positive(value.currentPlan.planGeneration) || !hash(value.currentPlan.planDigest)
+    || !keys(value.proposedPlan, ['planGeneration', 'planDigest', 'boundaryDigest'])
+    || !positive(value.proposedPlan.planGeneration) || value.proposedPlan.planGeneration <= value.currentPlan.planGeneration
+    || ![value.proposedPlan.planDigest, value.proposedPlan.boundaryDigest, value.issueBodyDigest, value.authorizationDigest,
+      value.worktreeStatusDigest, value.commandDigest].every(hash) || ![value.baseOid, value.headOid, value.treeOid].every(oid)
+    || !keys(value.task, ['text', 'textDigest']) || !rawText(value.task.text) || value.task.textDigest !== rawDigest(value.task.text)
+    || !rawText(value.rationale) || !boundary(value.addedPaths) || !processIdentity(value.process) || !processIdentity(value.groupLeader)
+    || !positive(value.pgid) || value.pgid !== value.process.pid || !equal(value.process, value.groupLeader)
+    || !positive(value.createdRevision)) return ['Planning relationship identity is invalid.'];
+  if (value.status === 'observing') return result([value.exitCode, value.signal, value.stdoutDigest, value.stderrDigest, value.completedRevision]
+    .every((item) => item === null), 'Observing planning relationship');
+  if (!['verified-failure', 'not-failed', 'inconclusive'].includes(value.status) || !positive(value.completedRevision)
+    || value.completedRevision <= value.createdRevision || value.exitCode !== null && (!Number.isSafeInteger(value.exitCode) || value.exitCode < 0)
+    || value.signal !== null && (typeof value.signal !== 'string' || !/^SIG[A-Z0-9]+$/u.test(value.signal))
+    || value.exitCode !== null && value.signal !== null
+    || [value.stdoutDigest, value.stderrDigest].some((item) => item !== null && !hash(item))) return ['Planning relationship outcome is invalid.'];
+  if (value.status === 'inconclusive') return [];
+  return result(value.signal === null && [value.stdoutDigest, value.stderrDigest].every(hash)
+    && (value.status === 'verified-failure' ? positive(value.exitCode) : value.exitCode === 0), 'Conclusive planning relationship');
+}
+export function requestedPlanGenerationFloor(unit) {
+  return Object.hasOwn(unit, 'lastRequestedPlanGeneration') ? unit.lastRequestedPlanGeneration
+    : Math.max(unit.plan?.planGeneration ?? 0, unit.wait?.requestedPlan.planGeneration ?? 0);
+}
 export function validateSelectionUnit(value) {
+  const optional = ['planningRelationships', 'lastRequestedPlanGeneration'].filter((key) => value !== null && value !== undefined && Object.hasOwn(value, key));
   return result(keys(value, ['schema', 'runId', 'repositoryKey', 'unitId', 'unitGeneration', 'allocation', 'plan', 'admission', 'wait',
-    'checkedSnapshot', 'replanRequired', 'policy', 'disposition']) && value.schema === 'autoloop.selection-unit/1'
+    'checkedSnapshot', 'replanRequired', 'policy', 'disposition', ...optional]) && value.schema === 'autoloop.selection-unit/1'
     && uuid(value.runId) && hash(value.repositoryKey) && uuid(value.unitId) && positive(value.unitGeneration)
     && (value.allocation === null || validateAllocation(value.allocation).length === 0)
     && (value.plan === null || plan(value.plan)) && (value.admission === null || validateAdmission(value.admission).length === 0)
     && (value.wait === null || validateSelectionWait(value.wait).length === 0) && validateSnapshotReference(value.checkedSnapshot).length === 0
+    && (!optional.includes('planningRelationships') || list(value.planningRelationships, (entry) => validatePlanningRelationship(entry).length === 0)
+      && unique(value.planningRelationships, (entry) => entry.relationshipId))
+    && (!optional.includes('lastRequestedPlanGeneration') || time(value.lastRequestedPlanGeneration)
+      && value.lastRequestedPlanGeneration >= Math.max(value.plan?.planGeneration ?? 0, value.wait?.requestedPlan.planGeneration ?? 0))
     && typeof value.replanRequired === 'boolean' && keys(value.policy, ['authorize'])
     && list(value.policy.authorize, (item) => keys(item, ['file', 'glob']) && boundaryPath(item.file) && text(item.glob))
     && unique(value.policy.authorize, canonical)
@@ -290,6 +336,8 @@ export function validateSelectionRecords(checkpoint) {
         || checkpoint.outbox[intent.operationId].phase !== 'succeeded') return ['Worktree binding is invalid.'];
     }
     if (unit.allocation && checkpoint.outbox[unit.allocation.intent.operationId].phase === 'succeeded' && !reservation.worktree) return ['A completed allocation needs its worktree binding.'];
+    if (reservation.state !== 'released' && (reservation.paths.length > 0 && (!reservation.worktree || !unit.plan)
+      || unit.plan && !equal(unit.plan.boundary, reservation.paths))) return ['Retained paths do not match the last admitted plan.'];
     if (unit.admission && unit.plan && unit.plan.baseOid !== unit.checkedSnapshot.baseOid) return ['The admitted plan does not match its checked base.'];
     if (unit.admission) {
       const admission = unit.admission;
@@ -306,10 +354,17 @@ export function validateSelectionRecords(checkpoint) {
     if (unit.disposition && (reservation.state !== 'released' || unit.disposition.revision > checkpoint.revision
       || reservation.paths.length !== 0 || unit.wait !== null || unit.admission !== null)) return ['Selection disposition is invalid.'];
     if (reservation.state === 'released' && unit.disposition === null) return ['Path release needs disposition.'];
+    if ((unit.planningRelationships ?? []).some((entry) => entry.runId !== checkpoint.runId || entry.unitId !== unit.unitId
+      || entry.unitGeneration !== unit.unitGeneration || entry.schedulerGeneration > checkpoint.generation
+      || !reservation.worktree || entry.worktreeGitDir !== reservation.worktree.gitDir
+      || entry.createdRevision > checkpoint.revision || entry.completedRevision !== null && entry.completedRevision > checkpoint.revision
+      || reservation.state === 'released' && entry.status === 'observing')) return ['Planning relationship binding is invalid.'];
     for (const worker of Array.isArray(checkpoint.workers) ? checkpoint.workers : []) if (worker?.unitId === unit.unitId
       && (worker.runId !== unit.runId || worker.unitGeneration !== unit.unitGeneration || !reservation.worktree
         || worker.worktreeGitDir !== reservation.worktree.gitDir)) return ['Selection worker binding is invalid.'];
   }
+  const relationships = units.flatMap((unit) => unit.planningRelationships ?? []);
+  if (!unique(relationships, (entry) => entry.relationshipId)) return ['Planning relationship IDs are not unique.'];
   for (const effect of Object.values(checkpoint.outbox ?? {})) if (effect?.kind === 'worktree.create'
     && !units.some((unit) => unit.allocation?.intent.operationId === effect.operationId)) return ['A worktree effect needs its allocation intent.'];
   return [];

@@ -6,6 +6,7 @@ import { userInfo } from 'node:os';
 import { dirname, join, parse, relative, resolve } from 'node:path';
 import * as scheduler from './scheduler-contract.mjs';
 import { boundedGit } from './git-budget.mjs';
+import { readGitStatus } from './git-observation.mjs';
 import { parseLoopBranchIssue } from './claim-contract.mjs';
 import { resolveProjectConfig } from './config-contract.mjs';
 
@@ -23,9 +24,9 @@ function gitEnvironment() {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')
     && !['NODE_OPTIONS', 'NODE_PATH'].includes(key)));
   return { ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_REPLACE_OBJECTS: '1',
-    GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' };
+    GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' };
 }
-const GIT_OPTIONS = ['--no-replace-objects', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+const GIT_OPTIONS = ['--no-lazy-fetch', '--no-replace-objects', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
 function git(root, args) {
   const result = boundedGit([...GIT_OPTIONS, '-C', root, ...args], { env: gitEnvironment(), maxBuffer: 1024 * 1024 });
   requireCondition(result.status === 0 && !result.error, 'WORKTREE_UNVERIFIED', 'Workspace Git facts cannot be verified.');
@@ -117,7 +118,7 @@ function observeWorktree(context, allocation) {
     'WORKTREE_UNVERIFIED', 'The workspace administrative backlinks do not match.');
     requireCondition(git(intent.root, ['symbolic-ref', 'HEAD']).trim() === `refs/heads/${intent.branch}`
       && git(intent.root, ['rev-parse', '--verify', 'HEAD^{commit}']).trim() === intent.baseOid
-      && git(intent.root, ['status', '--porcelain=v1', '--untracked-files=all', '--ignored']).trim() === '',
+      && readGitStatus(intent.root, { includeIgnored: true }).toString('utf8').trim() === '',
     'OUTCOME_UNKNOWN', 'The workspace is not clean at its exact creation base.');
     const worktree = { ...checkout, branch: intent.branch, baseOid: intent.baseOid, createdByRun: intent.runId,
       unitId: intent.unitId, unitGeneration: intent.unitGeneration };

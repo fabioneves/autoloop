@@ -3,9 +3,9 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as scheduler from './scheduler-contract.mjs';
 import { resolveConfigText, resolveProjectConfig } from './config-contract.mjs';
@@ -17,6 +17,8 @@ import { deliveredPullRequests, eligibleIssueNumbers, haltIssueNumbers, markerSc
 import { issueAuthorizationEvidence, validateIssueAuthorization, validateIssueAuthorizationEvidence } from './scheduler-selection-schema.mjs';
 import { serializeLifecycleMarker } from './lifecycle-contract.mjs';
 import { createWorktreeAllocator } from './scheduler-worktree.mjs';
+import { createBoundaryService } from './scheduler-boundary.mjs';
+import { isSecretPath } from './lane-contract.mjs';
 
 const equal = (left, right) => scheduler.schedulerDigest(left) === scheduler.schedulerDigest(right);
 function refusal(code, message) {
@@ -33,8 +35,8 @@ function requestObject(value) {
 function localGit(root, args) {
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
-  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_REPLACE_OBJECTS: '1', GIT_OPTIONAL_LOCKS: '0' });
-  const result = boundedGit(['--no-replace-objects', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
+  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0' });
+  const result = boundedGit(['--no-lazy-fetch', '--no-replace-objects', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
     '-c', 'core.fsmonitor=false', '-C', root, ...args], { env, maxBuffer: 1024 * 1024 });
   requireCondition(result.status === 0 && !result.error, 'REPOSITORY_INVALID', 'The requested checkout facts cannot be verified.');
   return result.stdout.trim();
@@ -80,8 +82,9 @@ function authorizeIssue(evidence, reference, number) {
 function recoveryCandidates(evidence, checkpoint) {
   const candidates = [];
   const active = checkpoint.reservations.filter((item) => item.state !== 'released');
+  const pendingRelationships = new Set(scheduler.planningRelationshipRecovery(checkpoint).unitIds);
   for (const reservation of active) candidates.push({ kind: 'unit', unitId: reservation.unitId, issue: reservation.issue,
-    state: reservation.state, gating: checkpoint.state === 'recovering' || reservation.state === 'recovering' });
+    state: reservation.state, gating: checkpoint.state === 'recovering' || reservation.state === 'recovering' || pendingRelationships.has(reservation.unitId) });
   for (const worker of checkpoint.workers) candidates.push({ kind: 'worker', attemptId: worker.attemptId, unitId: worker.unitId,
     gating: !checkpoint.units.some((unit) => unit.unitId === worker.unitId) || worker.generation < checkpoint.generation
       || scheduler.boundGroupState(worker) !== 'empty' });
@@ -210,14 +213,18 @@ export function createSelectionProvider({ lease }) {
         repositoryKey: checkpoint.repositoryKey, issueAuthorization: authorization, slot, baseOid: checked.baseOid,
         worktree: null, paths: [], state: 'planning', createdRevision: checkpoint.revision + 1 };
       const unit = { schema: 'autoloop.selection-unit/1', runId: checkpoint.runId, repositoryKey: checkpoint.repositoryKey, unitId, unitGeneration: 1,
-        allocation: null, plan: null, admission: null, wait: null, checkedSnapshot: reference, replanRequired: false, policy: { authorize: [] }, disposition: null };
+        allocation: null, plan: null, admission: null, wait: null, checkedSnapshot: reference, replanRequired: false, policy: { authorize: [] }, disposition: null,
+        planningRelationships: [], lastRequestedPlanGeneration: 0 };
       return { ...checkpoint, reservations: [...checkpoint.reservations, reservation], units: [...checkpoint.units, unit] };
     });
     return committed.reservations.find((item) => item.unitId === unitId);
   };
   const allocation = createWorktreeAllocator({ lease, scanRepository: scan });
+  const admission = createBoundaryService({ lease, scanRepository: scan });
   return Object.freeze({ scanRepository: boundary(scan), inventoryRecovery: boundary(inventory), reserveIssue: boundary(reserve),
-    allocateWorktree: boundary(allocation.allocateWorktree), reconcileWorktree: boundary(allocation.reconcileWorktree) });
+    allocateWorktree: boundary(allocation.allocateWorktree), reconcileWorktree: boundary(allocation.reconcileWorktree),
+    admitBoundary: boundary(admission.admitBoundary), widenBoundary: boundary(admission.widenBoundary),
+    reconcileWaits: boundary(admission.reconcileWaits) });
 }
 
 // Only the external GitHub boundary is replaced. The collector and Git run unchanged.
@@ -263,8 +270,16 @@ async function fakeGitHub() {
       repository[alias] = { __typename: 'Issue', number, state: repo.dependencyOpen ? 'OPEN' : 'CLOSED',
         comments: page(repo.comments?.[number] ?? []), timelineItems: page([event(number)]) };
     }
+  } else if (query.includes('pullRequest(number:') && query.includes('__typename id number state')) {
+    const fact = repo.waitPrs?.[variables.number];
+    repository = { pullRequest: fact === null || repo.waitUnknown ? null : { __typename: 'PullRequest', id: `PR_${variables.number}`,
+      number: variables.number, state: fact?.state ?? 'OPEN', headRefOid: fact?.headOid ?? repo.waitHeadOid,
+      baseRefName: fact?.baseRefName ?? 'main' } };
+  } else if (query.includes('files(first:100,after:')) {
+    repository = { pullRequest: { files: page((repo.moreFiles?.[variables.number] ?? []).map((path) => ({ path }))) } };
   } else if (query.includes('timelineItems(')) repository = { issue: { timelineItems: page([event(variables.number)]) } };
-  else if (query.includes('issue(number:')) repository = { issue: { id: `I_${variables.number}`, number: variables.number, state: 'OPEN', comments: page([]) } };
+  else if (query.includes('issue(number:')) repository = { issue: repo.waitUnknown ? null : { __typename: 'Issue', id: `I_${variables.number}`,
+    number: variables.number, state: repo.waitIssues?.[variables.number] ?? 'OPEN', comments: page([]) } };
   else if (query.includes('reviewThreads(')) repository = { pullRequest: { reviewThreads: page([]) } };
   else if (query.includes('reviews(')) repository = { pullRequest: { reviews: page([]) } };
   else if (query.includes('comments(')) repository = { pullRequest: { comments: page([]) } };
@@ -292,6 +307,7 @@ async function selfTest() {
     writeFileSync(fixturePath, JSON.stringify(fixtures));
   };
   const check = async (name, action) => {
+    if (process.env.SELECTION_TEST_FILTER && !name.includes(process.env.SELECTION_TEST_FILTER)) return;
     try { await action(); results.push([name, true]); }
     catch (error) { console.error(`FAIL ${name}: ${error.stack}`); results.push([name, false]); }
   };
@@ -301,17 +317,29 @@ async function selfTest() {
     if (code) assert.equal(result.error.code, code);
     assert.equal(typeof result.error.message, 'string');
   };
-  const fixture = ({ base = true, acquire = true } = {}) => {
+  const fixture = ({ base = true, acquire = true, protectedPaths, initialFiles = {}, initialLinks = {} } = {}) => {
     assert(userInfo().homedir.startsWith(`${scratch}/`), 'The account must be isolated before acquisition.');
+    for (const path of [...Object.keys(initialFiles), ...Object.keys(initialLinks), ...Object.values(initialLinks)]) {
+      const normalized = path.replaceAll('\\', '/');
+      assert(!isSecretPath(normalized) && !normalized.split('/').some((part) => part.toLowerCase() === 'auth.json'),
+        'Do not commit secret, environment or authentication fixture paths.');
+    }
     const home = join(scratch, randomUUID()); mkdirSync(home);
     const root = join(home, 'repo'); mkdirSync(root);
     git(root, 'init', '-q', '-b', 'main');
     writeFileSync(join(root, 'tracked.txt'), 'creation base\n'); git(root, 'add', 'tracked.txt');
+    for (const [path, text] of Object.entries(initialFiles)) {
+      mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); git(root, 'add', '--', path);
+    }
+    for (const [path, target] of Object.entries(initialLinks)) {
+      mkdirSync(dirname(join(root, path)), { recursive: true }); symlinkSync(target, join(root, path)); git(root, 'add', '--', path);
+    }
     git(root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base');
     git(root, 'remote', 'add', 'origin', 'https://github.com/fixtures/selection.git');
     const baseOid = git(root, 'rev-parse', 'HEAD');
     if (base) git(root, 'update-ref', 'refs/remotes/origin/main', baseOid);
-    const config = resolveConfigText(JSON.stringify({ version: '0.28.0', baseBranch: 'main', gate: { command: 'node --version' } })).config;
+    const config = resolveConfigText(JSON.stringify({ version: '0.28.0', baseBranch: 'main', gate: { command: 'node --version' },
+      ...(protectedPaths === undefined ? {} : { protectedPaths }) })).config;
     mkdirSync(join(root, '.autoloop')); writeFileSync(join(root, '.autoloop', 'config.json'), JSON.stringify(config));
     const pluginRoot = join(home, 'plugin'); mkdirSync(join(pluginRoot, '.claude-plugin'), { recursive: true });
     writeFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'fixture', version: '1.0.0' }));
@@ -334,6 +362,76 @@ async function selfTest() {
     const candidate = candidates.find((item) => item.kind === 'issue' && item.issue === number);
     assert(candidate, JSON.stringify(candidates));
     return candidate.issueAuthorization;
+  };
+  const allocated = async (setup, number = 7) => {
+    const authorization = await discover(setup, number);
+    const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+    assert.equal(reservation.schema, 'autoloop.reservation/1', JSON.stringify(reservation));
+    const worktree = await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid);
+    assert.equal(worktree.unitId, reservation.unitId, JSON.stringify(worktree));
+    update(worktree.root);
+    return { reservation, worktree };
+  };
+  const planFor = (selection, boundary, { generation = 1, baseOid = selection.worktree.baseOid, body = '## Plan\nImplement the requested behavior.\n' } = {}) => {
+    const { reservation } = selection; const { subject, authorizationDigest } = reservation.issueAuthorization;
+    const artifact = { schema: 'autoloop.plan-artifact/1', repositoryKey: reservation.repositoryKey,
+      unitId: reservation.unitId, unitGeneration: reservation.unitGeneration, issue: reservation.issue,
+      issueBodyDigest: subject.issueBodyDigest, authorizationDigest, planGeneration: generation, baseOid,
+      title: `Implement issue ${reservation.issue}`, prBody: `Closes #${reservation.issue}`, body, boundary };
+    return { unitId: reservation.unitId, unitGeneration: reservation.unitGeneration, planGeneration: generation,
+      planDigest: scheduler.schedulerDigest(artifact), artifact };
+  };
+  const failureTaskText = 'Verify the required fixture file exists.';
+  const observeTask = async (setup, selection, currentPlan, proposedPlan, target, { expectedStatus = 'verified-failure' } = {}) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', `import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+process.once('message', () => {
+  assert.equal(existsSync(process.argv[1]), true, 'The fixture task requires this file.');
+  process.disconnect();
+});
+process.send('ready');`, target], { cwd: selection.worktree.root, detached: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    children.add(child);
+    const closed = new Promise((done) => child.once('close', done));
+    try {
+      await new Promise((done, fail) => {
+        child.once('message', (message) => message === 'ready' ? done() : fail(new Error('The failure fixture did not reach its gate.')));
+        child.once('error', fail); child.once('exit', () => fail(new Error('The failure fixture exited before observer registration.')));
+      });
+      const observed = scheduler.observeFailingTaskRelationship(setup.lease, setup.checkpoint().revision, child, {
+        unitId: selection.reservation.unitId, unitGeneration: selection.reservation.unitGeneration,
+        currentPlanArtifact: currentPlan.artifact, proposedPlanArtifact: proposedPlan.artifact, taskText: failureTaskText,
+        rationale: `The real assertion requires ${target}; the proposed boundary adds the missing file.` });
+      const registered = setup.checkpoint().units.find((unit) => unit.unitId === selection.reservation.unitId)
+        .planningRelationships.find((record) => record.relationshipId === observed.relationshipId);
+      assert.equal(registered.status, 'observing');
+      child.send('run');
+      const record = await observed.completion; await closed;
+      assert.equal(record.status, expectedStatus, JSON.stringify(record));
+      assert.equal(record.exitCode, expectedStatus === 'not-failed' ? 0 : 1); assert.equal(record.signal, null);
+      assert.equal(scheduler.processIdentityState(record.process), 'dead');
+      return record.relationshipId;
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+      await closed; children.delete(child);
+    }
+  };
+  const deliveredFixture = (setup, { files = ['other.mjs'], moreFiles = [], state = 'OPEN', unknown = false } = {}) => {
+    const at = '2026-01-01T00:00:00Z';
+    const page = (nodes) => ({ nodes, pageInfo: { hasNextPage: false, endCursor: null } });
+    const marker = { v: 1, issue: 9, branch: 'feat/gh-9-fixture', intentSource: 'invocation', selector: 'native',
+      issueBodyHash: createHash('sha256').update('Fixture body.\n').digest('hex'), mergePolicy: 'manual',
+      phase: 'ready-head', planHash: scheduler.schedulerDigest({ fixture: 'delivered plan' }), plannedBaseOid: setup.baseOid,
+      runIntentHash: scheduler.schedulerDigest({ fixture: 'delivered intent' }), claimCommit: setup.baseOid, headOid: setup.baseOid, pr: 10 };
+    const comment = { id: 'IC_delivered', author: { login: 'maintainer' }, authorAssociation: 'MEMBER', viewerDidAuthor: true,
+      body: serializeLifecycleMarker(marker), createdAt: at, lastEditedAt: null, updatedAt: at, url: 'https://github.com/fixtures/selection/issues/9#issuecomment-1' };
+    const pr = { id: 'PR_10', number: 10, title: 'Delivered fixture', body: 'Closes #9', isDraft: false, headRefName: marker.branch,
+      headRefOid: setup.baseOid, baseRefName: 'main', mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE', updatedAt: at,
+      author: { login: 'maintainer' }, headRepository: { nameWithOwner: 'fixtures/selection' },
+      files: { nodes: files.map((path) => ({ path })), pageInfo: { hasNextPage: moreFiles.length > 0, endCursor: moreFiles.length ? 'files-next' : null } }, commits: { nodes: [] } };
+    const facts = { prs: state === 'OPEN' ? [pr] : [], comments: { 9: [comment] }, moreFiles: { 10: moreFiles }, waitHeadOid: setup.baseOid,
+      waitPrs: { 10: { state, headOid: setup.baseOid } }, waitUnknown: unknown };
+    for (const root of [setup.root, ...setup.checkpoint().reservations.map((row) => row.worktree?.root).filter(Boolean)]) update(root, facts);
+    return facts;
   };
   try {
     const bin = join(scratch, 'bin'); mkdirSync(bin);
@@ -415,6 +513,497 @@ async function selfTest() {
         tree: readFileSync(join(setup.root, 'tracked.txt'), 'utf8'), status: git(setup.root, 'status', '--porcelain=v1'),
         base: git(setup.root, 'rev-parse', 'refs/remotes/origin/main') }, before);
       assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
+    });
+    await check('boundary: independent real allocated units persist exact plans and admission before success', async () => {
+      const setup = fixture(); const first = await allocated(setup); const second = await allocated(setup, 8);
+      const before = [git(setup.root, 'symbolic-ref', 'HEAD'), git(setup.root, 'rev-parse', 'HEAD'), git(setup.root, 'status', '--porcelain=v1')];
+      for (const [selection, paths] of [[first, ['src/a/']], [second, ['src/ab/']]]) {
+        const plan = planFor(selection, paths, { generation: 3 }); const revision = setup.checkpoint().revision;
+        const result = await setup.provider.admitBoundary(setup.lease, revision, plan);
+        assert.equal(result.schema, 'autoloop.admission/1', JSON.stringify(result));
+        assert.equal(result.planDigest, plan.planDigest); assert.equal(result.reservationRevision, revision + 1);
+        assert.equal(result.runId, setup.runId); assert.equal(result.baseOid, setup.baseOid);
+        assert.deepEqual(result.boundary, paths);
+        const current = setup.checkpoint(); const unit = current.units.find((item) => item.unitId === selection.reservation.unitId);
+        assert.deepEqual(unit.admission, result); assert.deepEqual(unit.plan.boundary, paths); assert.equal(unit.wait, null);
+        assert.deepEqual(current.reservations.find((item) => item.unitId === selection.reservation.unitId).paths, paths);
+        assert.deepEqual(unit.plan, { planGeneration: plan.planGeneration, planDigest: scheduler.schedulerDigest(plan.artifact),
+          baseOid: plan.artifact.baseOid, boundary: paths });
+        assert.equal(existsSync(join(selection.worktree.gitDir, 'autoloop', 'units')), false,
+          'Module 2 does not create a second plan-artifact writer.');
+      }
+      assert.deepEqual([git(setup.root, 'symbolic-ref', 'HEAD'), git(setup.root, 'rev-parse', 'HEAD'), git(setup.root, 'status', '--porcelain=v1')], before);
+      assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
+    });
+    await check('boundary: symmetric file and directory overlaps persist named read-only waits', async () => {
+      for (const [left, right, expected] of [['src/', 'src/nested/a.mjs', 'src/nested/a.mjs'],
+        ['src/nested/a.mjs', 'src/', 'src/nested/a.mjs'], ['src/', 'src/nested/', 'src/nested/'],
+        ['src/nested/', 'src/', 'src/nested/'], ['src/a.mjs', 'src/a.mjs', 'src/a.mjs'], ['Src/a.mjs', 'src/a.mjs', 'Src/a.mjs']]) {
+        const setup = fixture(); const first = await allocated(setup); const second = await allocated(setup, 8);
+        const initial = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(first, [left]));
+        assert.equal(initial.schema, 'autoloop.admission/1', JSON.stringify(initial));
+        const revision = setup.checkpoint().revision;
+        const wait = await setup.provider.admitBoundary(setup.lease, revision, planFor(second, [right]));
+        assert.equal(wait.schema, 'autoloop.selection-wait/1', JSON.stringify(wait));
+        assert.equal(wait.code, 'BOUNDARY_CONFLICT'); assert.equal(wait.createdRevision, revision + 1);
+        assert.deepEqual(wait.conflicts, [{ type: 'unit', id: first.reservation.unitId, paths: [expected] }]);
+        assert.deepEqual(wait.condition.all, [{ on: 'unit-release', unitId: first.reservation.unitId, unitGeneration: 1 }]);
+        const current = setup.checkpoint(); const unit = current.units.find((item) => item.unitId === second.reservation.unitId);
+        assert.deepEqual(unit.wait, wait); assert.equal(unit.admission, null);
+        assert.equal(current.reservations.find((item) => item.unitId === second.reservation.unitId).state, 'waiting');
+        assert.deepEqual(current.reservations.find((item) => item.unitId === second.reservation.unitId).paths, []);
+      }
+    });
+    await check('boundary: exact released generation wakes only to retained read-only replanning and new-base admission', async () => {
+      const setup = fixture(); const first = await allocated(setup); const second = await allocated(setup, 8);
+      assert.equal((await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(first, ['src/']))).schema, 'autoloop.admission/1');
+      const oldPlan = planFor(second, ['src/a.mjs']);
+      const wait = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, oldPlan);
+      assert.equal(wait.schema, 'autoloop.selection-wait/1');
+      let snapshot = await setup.provider.scanRepository({ root: setup.root });
+      const stillWaiting = await setup.provider.reconcileWaits(setup.lease, snapshot);
+      assert.deepEqual(stillWaiting.transitions, []); assert.equal(setup.checkpoint().units[1].admission, null);
+      const disposition = scheduler.observeSelectionNoWork(setup.lease, first.reservation.unitId);
+      scheduler.commitTransition(setup.lease, setup.checkpoint().revision, (checkpoint) => ({ ...checkpoint,
+        reservations: checkpoint.reservations.map((row) => row.unitId === first.reservation.unitId ? { ...row, state: 'released', paths: [] } : row),
+        units: checkpoint.units.map((row) => row.unitId === first.reservation.unitId ? { ...row, admission: null, disposition } : row) }));
+      const upstreamBlob = git(setup.root, 'rev-parse', 'HEAD:tracked.txt');
+      const upstreamTree = spawnSync('git', ['-C', setup.root, 'mktree'], { encoding: 'utf8', timeout: 15000,
+        input: `100644 blob ${upstreamBlob}\ttracked.txt\n100644 blob ${upstreamBlob}\tupstream.txt\n` });
+      assert.equal(upstreamTree.status, 0, upstreamTree.stderr);
+      const nextBase = git(setup.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit-tree',
+        upstreamTree.stdout.trim(), '-p', setup.baseOid, '-m', 'new observed base');
+      git(setup.root, 'update-ref', 'refs/remotes/origin/main', nextBase);
+      snapshot = await setup.provider.scanRepository({ root: setup.root });
+      const woken = await setup.provider.reconcileWaits(setup.lease, snapshot);
+      assert.deepEqual(woken.transitions, [{ unitId: second.reservation.unitId, state: 'planning', replanRequired: true }]);
+      const current = setup.checkpoint(); assert.equal(current.units[1].wait, null); assert.equal(current.units[1].admission, null);
+      assert.equal(current.units[1].replanRequired, true); assert.equal(current.reservations[1].state, 'planning');
+      refuses(await setup.provider.admitBoundary(setup.lease, current.revision, oldPlan), 'PLAN_STALE');
+      refuses(await setup.provider.admitBoundary(setup.lease, current.revision, planFor(second, ['src/a.mjs'], { generation: 2 })), 'BASE_CHANGED');
+      const replanned = planFor(second, ['src/a.mjs'], { generation: 2, baseOid: nextBase });
+      refuses(await setup.provider.admitBoundary(setup.lease, current.revision, replanned), 'BASE_CHANGED');
+      assert.equal(git(second.worktree.root, 'rev-parse', 'HEAD'), setup.baseOid, 'The service must not reset or rebase an old workspace.');
+      git(second.worktree.root, '-c', 'core.hooksPath=/dev/null', 'merge', '--ff-only', nextBase);
+      assert.equal(readFileSync(join(second.worktree.root, 'upstream.txt'), 'utf8'), 'creation base\n');
+      assert.equal(existsSync(join(setup.root, 'upstream.txt')), false, 'The coordinator tree must not change with the observed base ref.');
+      const beforeAdmission = git(second.worktree.root, 'rev-parse', 'HEAD');
+      const admission = await setup.provider.admitBoundary(setup.lease, current.revision, replanned);
+      assert.equal(admission.schema, 'autoloop.admission/1', JSON.stringify(admission)); assert.equal(admission.baseOid, nextBase);
+      assert.equal(git(second.worktree.root, 'rev-parse', 'HEAD'), beforeAdmission, 'Readmission must not change the explicitly advanced workspace.');
+      assert.equal(setup.checkpoint().reservations[1].worktree.baseOid, setup.baseOid);
+      assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
+    });
+    await check('boundary: forged identities, digest, generation, extra authority and missing allocation are refused', async () => {
+      const setup = fixture(); const selection = await allocated(setup); const revision = setup.checkpoint().revision;
+      const valid = planFor(selection, ['src/a.mjs']);
+      for (const alter of [
+        (plan) => { plan.artifact.body += 'changed bytes'; },
+        (plan) => { plan.artifact.issue = 8; plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.artifact.authorizationDigest = 'a'.repeat(64); plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.artifact.issueBodyDigest = 'b'.repeat(64); plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.artifact.repositoryKey = 'c'.repeat(64); plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.artifact.unitGeneration += 1; plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.authorized = true; },
+        (plan) => { plan.artifact.pathRules = { caseSensitive: true }; plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.artifact.boundary = ['src/z.mjs', 'src/a.mjs']; plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.artifact.boundary = ['src\\a.mjs']; plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.artifact.boundary = ['src/a.mjs', 'src/a.mjs']; plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.artifact.boundary = new Array(1); plan.planDigest = scheduler.schedulerDigest(plan.artifact); },
+        (plan) => { plan.artifact.boundary.extra = 'not a JSON array element'; },
+        (plan) => { Object.defineProperty(plan.artifact.boundary, '0', { enumerable: true, get() { throw new Error('Do not invoke an input accessor.'); } }); },
+      ]) {
+        const invalid = structuredClone(valid); alter(invalid);
+        refuses(await setup.provider.admitBoundary(setup.lease, revision, invalid), 'PLAN_INVALID');
+      }
+      refuses(await setup.provider.admitBoundary(null, revision, valid), 'LEASE_INVALID');
+      refuses(await setup.provider.admitBoundary(setup.lease, revision - 1, valid), 'REVISION_MISMATCH');
+      refuses(await setup.provider.admitBoundary(setup.lease, revision, planFor(selection, ['src/a.mjs'], { generation: 0 })), 'PLAN_INVALID');
+      const authorization = await discover(setup, 8);
+      const unallocated = await setup.provider.reserveIssue(setup.lease, revision, authorization);
+      const missing = { reservation: unallocated, worktree: { baseOid: setup.baseOid } };
+      refuses(await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(missing, ['src/b.mjs'])), 'WORKTREE_REQUIRED');
+      assert.equal(setup.checkpoint().units.every((unit) => unit.admission === null), true);
+    });
+    await check('boundary: fresh actual scans reject revoked, edited, missing, halted and incomplete approval', async () => {
+      for (const facts of [{ permission: 'read' }, { edited: true }, { missingIds: true }, { halt: true }, { incomplete: true }, { body: 'changed body' }]) {
+        const setup = fixture(); const selection = await allocated(setup); const before = setup.checkpoint();
+        update(selection.worktree.root, facts);
+        refuses(await setup.provider.admitBoundary(setup.lease, before.revision, planFor(selection, ['src/a.mjs'])));
+        assert.deepEqual(setup.checkpoint(), before);
+      }
+    });
+    await check('boundary: bound workspace branch, dirty state and symlinks never grant admission', async () => {
+      for (const changed of ['branch', 'dirty', 'symlink']) {
+        const setup = fixture(); const selection = await allocated(setup); const candidate = planFor(selection, ['src/a.mjs']);
+        if (changed === 'branch') git(selection.worktree.root, 'branch', '-m', `${selection.worktree.branch}-foreign`);
+        if (changed === 'dirty') writeFileSync(join(selection.worktree.root, 'tracked.txt'), 'foreign dirty bytes\n');
+        if (changed === 'symlink') symlinkSync(setup.root, join(selection.worktree.root, 'src'));
+        const before = setup.checkpoint();
+        refuses(await setup.provider.admitBoundary(setup.lease, before.revision, candidate));
+        assert.deepEqual(setup.checkpoint(), before);
+        if (changed === 'dirty') assert.equal(readFileSync(join(selection.worktree.root, 'tracked.txt'), 'utf8'), 'foreign dirty bytes\n');
+        if (changed === 'symlink') assert.equal(lstatSync(join(selection.worktree.root, 'src')).isSymbolicLink(), true);
+      }
+    });
+    await check('boundary: a queued control during the real admission scan fences the result', async () => {
+      const setup = fixture(); const selection = await allocated(setup);
+      const barrier = { entered: join(setup.home, 'admit-entered'), release: join(setup.home, 'admit-release') };
+      update(selection.worktree.root, { barrier });
+      const decision = setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(selection, ['src/a.mjs']));
+      const deadline = Date.now() + 10000;
+      try {
+        while (!existsSync(barrier.entered) && Date.now() < deadline) await new Promise((done) => setTimeout(done, 10));
+        assert(existsSync(barrier.entered));
+        scheduler.submitControl(setup.repository, { kind: 'terminal', sessionId: null, host: scheduler.readProcessIdentity(), invocationId: randomUUID() }, {
+          schema: 'autoloop.control/2', requestId: randomUUID(), runId: setup.runId,
+          target: { type: 'run', generation: setup.generation }, kind: 'pause', payload: {}, submittedAt: Date.now() });
+      } finally { writeFileSync(barrier.release, 'release'); }
+      refuses(await decision, 'CONTROL_PENDING'); assert.deepEqual(setup.checkpoint().reservations[0].paths, []);
+      assert.equal(setup.checkpoint().units[0].admission, null);
+    });
+    await check('boundary: delivered PR pages exclude paths beyond the first page; direct closure alone wakes', async () => {
+      for (const state of ['MERGED', 'CLOSED']) {
+        const setup = fixture(); const selection = await allocated(setup);
+        deliveredFixture(setup, { files: Array.from({ length: 100 }, (_, index) => `other/file-${index}.mjs`), moreFiles: ['src/overlap.mjs'] });
+        const wait = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(selection, ['src/']));
+        assert.equal(wait.schema, 'autoloop.selection-wait/1', JSON.stringify(wait));
+        assert.deepEqual(wait.conflicts, [{ type: 'pr', id: 10, paths: ['src/overlap.mjs'] }]);
+        assert.deepEqual(wait.condition.all, [{ on: 'pr', number: 10 }]);
+        deliveredFixture(setup, { state: 'CLOSED', unknown: true });
+        refuses(await setup.provider.scanRepository({ root: setup.root }), 'EVIDENCE_INCOMPLETE');
+        assert.equal(setup.checkpoint().reservations[0].state, 'waiting');
+        deliveredFixture(setup, { state: 'CLOSED' });
+        // An empty open inventory cannot substitute for a direct OPEN readback.
+        const facts = { ...fixtures[setup.root], waitPrs: { 10: { state: 'OPEN', headOid: setup.baseOid } } };
+        update(setup.root, facts);
+        let snapshot = await setup.provider.scanRepository({ root: setup.root });
+        assert.equal(snapshot.schema, 'autoloop.snapshot-reference/1', JSON.stringify(snapshot));
+        assert.deepEqual((await setup.provider.reconcileWaits(setup.lease, snapshot)).transitions, []);
+        deliveredFixture(setup, { state });
+        snapshot = await setup.provider.scanRepository({ root: setup.root });
+        const woken = await setup.provider.reconcileWaits(setup.lease, snapshot);
+        assert.deepEqual(woken.transitions, [{ unitId: selection.reservation.unitId, state: 'planning', replanRequired: true }]);
+        assert.equal(setup.checkpoint().units[0].admission, null); assert.equal(setup.checkpoint().units[0].wait, null);
+        assert.equal(git(selection.worktree.root, 'rev-parse', 'HEAD'), setup.baseOid);
+      }
+    });
+    await check('boundary: publication obligations stay separate from existing secret and runtime controls', async () => {
+      const setup = fixture({ protectedPaths: ['spec/**'] }); const selection = await allocated(setup);
+      const paths = ['.github/workflows/ci.yml', 'spec/', 'src/a.mjs'];
+      const admission = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(selection, paths));
+      assert.equal(admission.schema, 'autoloop.admission/1', JSON.stringify(admission));
+      assert.deepEqual(setup.checkpoint().units[0].policy.authorize, [
+        { file: '.github/workflows/ci.yml', glob: '.github/workflows/**' }, { file: 'spec/', glob: 'spec/**' }]);
+      for (const [path, code] of [['.env.local', 'WIDEN_SECRET_PATH'], ['.github/', 'WIDEN_GUARDRAIL_ROOT'],
+        ['.claude/settings.json', 'POLICY_DENIED'], ['.CLAUDE/settings.json', 'POLICY_DENIED']]) {
+        const isolated = fixture(); const allocatedUnit = await allocated(isolated);
+        git(isolated.root, 'config', 'core.hooksPath', 'custom-hooks');
+        const before = isolated.checkpoint();
+        refuses(await isolated.provider.admitBoundary(isolated.lease, before.revision, planFor(allocatedUnit, [path])), code);
+        assert.deepEqual(isolated.checkpoint(), before);
+      }
+    });
+    await check('boundary: parallel contender children submit plans to one actual lease owner and CAS admits once', async () => {
+      for (const conflicting of [false, true]) {
+        const setup = fixture(); const first = await allocated(setup); const second = await allocated(setup, 8);
+        const revision = setup.checkpoint().revision;
+        const proposals = await Promise.all([planFor(first, ['src/a.mjs']), planFor(second, [conflicting ? 'src/' : 'src/ab/a.mjs'])]
+          .map((plan) => new Promise((done, fail) => {
+            const child = spawn(process.execPath, ['--input-type=module', '-e',
+              'process.send(JSON.parse(process.argv[1]),()=>process.disconnect());', JSON.stringify({ revision, plan })],
+            { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+            children.add(child); child.once('close', () => children.delete(child)); child.once('error', fail);
+            child.once('message', done); child.once('close', (code) => { if (code) fail(new Error('The admission contender failed.')); });
+          })));
+        const results = await Promise.all(proposals.map((proposal) => setup.provider.admitBoundary(setup.lease, proposal.revision, proposal.plan)));
+        assert.equal(results.filter((result) => result.schema === 'autoloop.admission/1').length, 1);
+        const staleIndex = results.findIndex((result) => result.ok === false); assert(staleIndex >= 0); refuses(results[staleIndex], 'REVISION_MISMATCH');
+        const retried = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, proposals[staleIndex].plan);
+        assert.equal(retried.schema, conflicting ? 'autoloop.selection-wait/1' : 'autoloop.admission/1', JSON.stringify(retried));
+        assert.equal(setup.checkpoint().units.filter((unit) => unit.admission !== null).length, conflicting ? 1 : 2);
+        assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
+      }
+    });
+    await check('boundary: conjunctive waits require direct issue closure and exact released unit generation', async () => {
+      const setup = fixture(); const first = await allocated(setup); const second = await allocated(setup, 8);
+      await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(first, ['src/']));
+      const wait = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(second, ['src/a.mjs']));
+      assert.equal(wait.schema, 'autoloop.selection-wait/1');
+      const checkedSnapshot = await setup.provider.scanRepository({ root: second.worktree.root });
+      // Set a real durable conjunctive wait through the same fenced reducer. No
+      // dependency or result provider is replaced by a test implementation.
+      scheduler.commitTransition(setup.lease, setup.checkpoint().revision, (checkpoint) => ({ ...checkpoint,
+        units: checkpoint.units.map((unit) => unit.unitId === second.reservation.unitId ? { ...unit, checkedSnapshot,
+          wait: { ...unit.wait, snapshot: checkedSnapshot, createdRevision: checkpoint.revision + 1,
+            conflicts: [...unit.wait.conflicts, { type: 'issue', id: 40, paths: [] }],
+            condition: { all: [{ on: 'unit-release', unitId: first.reservation.unitId, unitGeneration: 2 }, { on: 'issue', number: 40 }] } } } : unit) }));
+      const disposition = scheduler.observeSelectionNoWork(setup.lease, first.reservation.unitId);
+      scheduler.commitTransition(setup.lease, setup.checkpoint().revision, (checkpoint) => ({ ...checkpoint,
+        reservations: checkpoint.reservations.map((row) => row.unitId === first.reservation.unitId ? { ...row, state: 'released', paths: [] } : row),
+        units: checkpoint.units.map((unit) => unit.unitId === first.reservation.unitId ? { ...unit, admission: null, disposition } : unit) }));
+      update(setup.root, { waitIssues: { 40: 'CLOSED' } });
+      let snapshot = await setup.provider.scanRepository({ root: setup.root });
+      assert.deepEqual((await setup.provider.reconcileWaits(setup.lease, snapshot)).transitions, [], 'Release of another generation is not the named release.');
+      const old = setup.checkpoint().units[1];
+      // This fixture corrects its named generation, using fresh authorization.
+      const currentReference = await setup.provider.scanRepository({ root: second.worktree.root });
+      scheduler.commitTransition(setup.lease, setup.checkpoint().revision, (checkpoint) => ({ ...checkpoint,
+        units: checkpoint.units.map((unit) => unit.unitId === second.reservation.unitId ? { ...unit, checkedSnapshot: currentReference,
+          wait: { ...old.wait, snapshot: currentReference, createdRevision: checkpoint.revision + 1,
+            condition: { all: [{ on: 'unit-release', unitId: first.reservation.unitId, unitGeneration: 1 }, { on: 'issue', number: 40 }] } } } : unit) }));
+      update(setup.root, { waitIssues: { 40: 'OPEN' }, openNumbers: [7, 8, 9] });
+      snapshot = await setup.provider.scanRepository({ root: setup.root });
+      assert.deepEqual((await setup.provider.reconcileWaits(setup.lease, snapshot)).transitions, [], 'Absence from the open queue is not issue closure.');
+      update(setup.root, { waitIssues: { 40: 'CLOSED' } });
+      snapshot = await setup.provider.scanRepository({ root: setup.root });
+      const woken = await setup.provider.reconcileWaits(setup.lease, snapshot);
+      assert.equal(woken.transitions[0].unitId, second.reservation.unitId);
+      assert.equal(setup.checkpoint().units[1].replanRequired, true); assert.equal(setup.checkpoint().units[1].admission, null);
+      refuses(await setup.provider.reconcileWaits(setup.lease, snapshot), 'REVISION_MISMATCH');
+    });
+    await check('boundary: directory scopes cannot hide untracked secret paths or publication obligations', async () => {
+      const unsafe = fixture(); const unsafeSelection = await allocated(unsafe);
+      mkdirSync(join(unsafeSelection.worktree.root, 'src'));
+      writeFileSync(join(unsafeSelection.worktree.root, 'src', '.env.example'), 'Harmless untracked fixture.\n');
+      assert.equal(git(unsafeSelection.worktree.root, 'ls-files', '--', 'src/.env.example'), '');
+      refuses(await unsafe.provider.admitBoundary(unsafe.lease, unsafe.checkpoint().revision, planFor(unsafeSelection, ['src/'])), 'WIDEN_SECRET_PATH');
+      assert.deepEqual(unsafe.checkpoint().reservations[0].paths, []);
+      const protectedSetup = fixture({ protectedPaths: ['src/private/**'], initialFiles: { 'src/private/file.mjs': 'export const value = 1;\n' } });
+      const protectedSelection = await allocated(protectedSetup);
+      const admission = await protectedSetup.provider.admitBoundary(protectedSetup.lease, protectedSetup.checkpoint().revision, planFor(protectedSelection, ['src/']));
+      assert.equal(admission.schema, 'autoloop.admission/1', JSON.stringify(admission));
+      assert(protectedSetup.checkpoint().units[0].policy.authorize.some((entry) => entry.file === 'src/private/file.mjs' && entry.glob === 'src/private/**'));
+    });
+    await check('boundary: unsupported widening provenance and model authorization never change admission', async () => {
+      const setup = fixture(); const selection = await allocated(setup);
+      const admitted = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(selection, ['src/a.mjs']));
+      assert.equal(admitted.schema, 'autoloop.admission/1');
+      const before = setup.checkpoint();
+      const plan = planFor(selection, ['src/a.mjs', 'src/b.mjs'], { generation: 2 });
+      refuses(await setup.provider.widenBoundary(setup.lease, before.revision, selection.reservation.unitId,
+        { plan, relationshipId: randomUUID() }), 'TARGET_MISMATCH');
+      for (const request of [{ plan, reason: { kind: 'finding', id: 'model-prose', authorized: true } },
+        { plan, relationshipId: randomUUID(), authorized: true }, { plan, relationshipId: randomUUID(), kind: 'finding' }]) {
+        refuses(await setup.provider.widenBoundary(setup.lease, before.revision, selection.reservation.unitId, request), 'INVALID_INPUT');
+      }
+      assert.deepEqual(setup.checkpoint(), before);
+    });
+    await check('boundary: forbidden fixture names fail before a repository or commit can exist', async () => {
+      const before = readdirSync(scratch).sort();
+      for (const path of ['.env', 'src/.env.example', 'auth.json', 'nested/AUTH.json', 'keys/example.pem', 'config/credentials.json']) {
+        assert.throws(() => fixture({ initialFiles: { [path]: 'Harmless fixture data.' } }), /Do not commit/u);
+        assert.throws(() => fixture({ initialLinks: { [path]: 'tracked.txt' } }), /Do not commit/u);
+        assert.throws(() => fixture({ initialLinks: { 'hook-alias': path } }), /Do not commit/u);
+        assert.deepEqual(readdirSync(scratch).sort(), before, 'Rejected fixture inputs must not create a Git repository or reach git add/commit.');
+      }
+    });
+    await check('boundary: real owner-observed failing task admits the exact full-union next generation', async () => {
+      const setup = fixture(); const selection = await allocated(setup);
+      const body = `## Plan\n${failureTaskText}\n`;
+      const currentPlan = planFor(selection, ['src/a.mjs'], { body });
+      assert.equal((await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, currentPlan)).schema, 'autoloop.admission/1');
+      const plan = planFor(selection, ['src/a.mjs', 'src/new.mjs'], { generation: 2, body });
+      const relationshipId = await observeTask(setup, selection, currentPlan, plan, 'src/new.mjs');
+      const before = setup.checkpoint();
+      assert.equal(before.units[0].lastRequestedPlanGeneration, 1, 'An observation alone does not persist a plan request.');
+      const admission = await setup.provider.widenBoundary(setup.lease, before.revision, selection.reservation.unitId, { plan, relationshipId });
+      assert.equal(admission.schema, 'autoloop.admission/1', JSON.stringify(admission));
+      assert.equal(admission.planGeneration, 2); assert.equal(admission.planDigest, plan.planDigest);
+      assert.deepEqual(admission.boundary, ['src/a.mjs', 'src/new.mjs']);
+      assert.deepEqual(setup.checkpoint().reservations[0].paths, admission.boundary);
+      assert.equal(setup.checkpoint().units[0].lastRequestedPlanGeneration, 2);
+      assert.equal(setup.checkpoint().units[0].plan.planDigest, plan.planDigest);
+      assert.equal(setup.checkpoint().units[0].planningRelationships[0].status, 'verified-failure');
+      assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
+      assert.equal(existsSync(join(selection.worktree.root, 'src', 'new.mjs')), false, 'No fixture model completion or writer is substituted.');
+    });
+    await check('boundary: synthetic queue uses one owner for parallel widening, retained waits and fresh readmission', async () => {
+      const setup = fixture(); const selections = [await allocated(setup), await allocated(setup, 8)];
+      const body = `## Plan\n${failureTaskText}\n`;
+      const originals = selections.map((selection, index) => planFor(selection, [`src/${index ? 'b' : 'a'}.mjs`], { body }));
+      for (const plan of originals) assert.equal((await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, plan)).schema, 'autoloop.admission/1');
+      const plans = selections.map((selection, index) => planFor(selection, ['shared/file.mjs', ...originals[index].artifact.boundary], { generation: 2, body }));
+      const relationshipIds = [];
+      for (const [index, selection] of selections.entries()) relationshipIds.push(await observeTask(setup, selection, originals[index], plans[index], 'shared/file.mjs'));
+      const revision = setup.checkpoint().revision;
+      const proposals = await Promise.all(plans.map((plan, index) => new Promise((done, fail) => {
+        const child = spawn(process.execPath, ['--input-type=module', '-e',
+          'process.send(JSON.parse(process.argv[1]),()=>process.disconnect());', JSON.stringify({ revision, unitId: plan.unitId, plan, relationshipId: relationshipIds[index] })],
+        { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+        children.add(child); child.once('close', () => children.delete(child)); child.once('error', fail); child.once('message', done);
+        child.once('close', (code) => { if (code) fail(new Error('The widening contender failed.')); });
+      })));
+      const results = await Promise.all(proposals.map(({ unitId, revision: expectedRevision, plan, relationshipId }) =>
+        setup.provider.widenBoundary(setup.lease, expectedRevision, unitId, { plan, relationshipId })));
+      assert.equal(results.filter((result) => result.schema === 'autoloop.admission/1').length, 1);
+      const waiterIndex = results.findIndex((result) => result.ok === false); assert(waiterIndex >= 0); refuses(results[waiterIndex], 'REVISION_MISMATCH');
+      const winnerIndex = 1 - waiterIndex; const waiter = selections[waiterIndex]; const winner = selections[winnerIndex];
+      const wait = await setup.provider.widenBoundary(setup.lease, setup.checkpoint().revision, waiter.reservation.unitId,
+        { plan: plans[waiterIndex], relationshipId: relationshipIds[waiterIndex] });
+      assert.equal(wait.schema, 'autoloop.selection-wait/1', JSON.stringify(wait));
+      assert.deepEqual(wait.conflicts, [{ type: 'unit', id: winner.reservation.unitId, paths: ['shared/file.mjs'] }]);
+      let checkpoint = setup.checkpoint(); let waiting = checkpoint.units[waiterIndex];
+      assert.equal(waiting.admission, null); assert.equal(waiting.plan.planDigest, originals[waiterIndex].planDigest);
+      assert.equal(waiting.wait.requestedPlan.planDigest, plans[waiterIndex].planDigest); assert.equal(waiting.lastRequestedPlanGeneration, 2);
+      assert.deepEqual(checkpoint.reservations[waiterIndex].paths, originals[waiterIndex].artifact.boundary);
+      const winnerExpansion = planFor(winner, ['shared/file.mjs', 'src/a.mjs', 'src/b.mjs'], { generation: 3, body });
+      const winnerRelationship = await observeTask(setup, winner, plans[winnerIndex], winnerExpansion, originals[waiterIndex].artifact.boundary[0]);
+      const secondWait = await setup.provider.widenBoundary(setup.lease, setup.checkpoint().revision, winner.reservation.unitId,
+        { plan: winnerExpansion, relationshipId: winnerRelationship });
+      assert.equal(secondWait.schema, 'autoloop.selection-wait/1', JSON.stringify(secondWait));
+      assert.deepEqual(secondWait.conflicts, [{ type: 'unit', id: waiter.reservation.unitId, paths: originals[waiterIndex].artifact.boundary }],
+        'A waiting unit still excludes its previously admitted paths.');
+      assert.deepEqual(setup.checkpoint().reservations[winnerIndex].paths, plans[winnerIndex].artifact.boundary);
+      const disposition = scheduler.observeSelectionNoWork(setup.lease, winner.reservation.unitId);
+      scheduler.commitTransition(setup.lease, setup.checkpoint().revision, (current) => ({ ...current,
+        reservations: current.reservations.map((row) => row.unitId === winner.reservation.unitId ? { ...row, state: 'released', paths: [] } : row),
+        units: current.units.map((unit) => unit.unitId === winner.reservation.unitId ? { ...unit, wait: null, admission: null, disposition } : unit) }));
+      const snapshot = await setup.provider.scanRepository({ root: setup.root });
+      const woken = await setup.provider.reconcileWaits(setup.lease, snapshot);
+      assert.deepEqual(woken.transitions, [{ unitId: waiter.reservation.unitId, state: 'planning', replanRequired: true }]);
+      checkpoint = setup.checkpoint(); waiting = checkpoint.units[waiterIndex];
+      assert.equal(waiting.plan.planDigest, originals[waiterIndex].planDigest); assert.equal(waiting.lastRequestedPlanGeneration, 2);
+      assert.equal(waiting.admission, null); assert.deepEqual(checkpoint.reservations[waiterIndex].paths, originals[waiterIndex].artifact.boundary);
+      refuses(await setup.provider.admitBoundary(setup.lease, checkpoint.revision, plans[waiterIndex]), 'PLAN_STALE');
+      const plainExpansion = planFor(waiter, plans[waiterIndex].artifact.boundary, { generation: 3, body });
+      refuses(await setup.provider.admitBoundary(setup.lease, checkpoint.revision, plainExpansion), 'WIDEN_REASON_REQUIRED');
+      const oldPath = originals[waiterIndex].artifact.boundary[0];
+      const aliasExpansion = planFor(waiter, [oldPath, oldPath.replace('src/', 'Src/')].sort(), { generation: 4, body });
+      // Conservative collision keys must not become a permission/subset proof.
+      refuses(await setup.provider.admitBoundary(setup.lease, checkpoint.revision, aliasExpansion), 'WIDEN_REASON_REQUIRED');
+      const freshPlan = planFor(waiter, plans[waiterIndex].artifact.boundary, { generation: 5, body: `${body}Re-plan after the named release.\n` });
+      refuses(await setup.provider.widenBoundary(setup.lease, checkpoint.revision, waiter.reservation.unitId,
+        { plan: freshPlan, relationshipId: relationshipIds[waiterIndex] }));
+      assert.equal(setup.checkpoint().units[waiterIndex].lastRequestedPlanGeneration, 2, 'Refusals do not advance the persisted request floor.');
+      const freshRelationship = await observeTask(setup, waiter, originals[waiterIndex], freshPlan, 'shared/file.mjs');
+      const admission = await setup.provider.widenBoundary(setup.lease, setup.checkpoint().revision, waiter.reservation.unitId,
+        { plan: freshPlan, relationshipId: freshRelationship });
+      assert.equal(admission.schema, 'autoloop.admission/1', JSON.stringify(admission)); assert.equal(admission.planGeneration, 5);
+      assert.deepEqual(admission.boundary, freshPlan.artifact.boundary); assert.equal(setup.checkpoint().units[waiterIndex].lastRequestedPlanGeneration, 5);
+      assert.equal(git(waiter.worktree.root, 'rev-parse', 'HEAD'), setup.baseOid); assert.equal(git(waiter.worktree.root, 'status', '--porcelain=v1'), '');
+      assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
+      assert(existsSync(winner.worktree.root)); assert.equal(existsSync(join(waiter.worktree.root, 'shared', 'file.mjs')), false);
+    });
+    await check('boundary: actual successful tasks and changed content, index or approval cannot authorize widening', async () => {
+      const expectedCodes = { success: 'WIDEN_REASON_UNVERIFIED', content: 'EVIDENCE_CHANGED', index: 'EVIDENCE_CHANGED',
+        approval: 'AUTHORIZATION_REVOKED', proposal: 'TARGET_MISMATCH' };
+      for (const [changed, expectedCode] of Object.entries(expectedCodes)) {
+        const setup = fixture(); const selection = await allocated(setup);
+        const body = `## Plan\n${failureTaskText}\n`; const currentPlan = planFor(selection, ['tracked.txt'], { body });
+        assert.equal((await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, currentPlan)).schema, 'autoloop.admission/1');
+        const plan = planFor(selection, ['src/new.mjs', 'tracked.txt'], { generation: 2, body });
+        const relationshipId = await observeTask(setup, selection, currentPlan, plan, changed === 'success' ? 'tracked.txt' : 'src/new.mjs',
+          { expectedStatus: changed === 'success' ? 'not-failed' : 'verified-failure' });
+        if (changed === 'content') writeFileSync(join(selection.worktree.root, 'tracked.txt'), 'changed retained bytes\n');
+        if (changed === 'index') {
+          git(selection.worktree.root, 'update-index', '--assume-unchanged', 'tracked.txt');
+          assert.equal(git(selection.worktree.root, 'status', '--porcelain=v1'), '', 'The raw index proof must catch a change hidden from porcelain status.');
+        }
+        if (changed === 'approval') update(selection.worktree.root, { permission: 'read' });
+        const proposed = changed === 'proposal' ? planFor(selection, plan.artifact.boundary, { generation: 3, body: `${body}Changed proposal.\n` }) : plan;
+        const before = setup.checkpoint();
+        const result = await setup.provider.widenBoundary(setup.lease, before.revision, selection.reservation.unitId, { plan: proposed, relationshipId });
+        refuses(result, expectedCode);
+        assert.deepEqual(setup.checkpoint(), before);
+        if (changed === 'content') assert.equal(readFileSync(join(selection.worktree.root, 'tracked.txt'), 'utf8'), 'changed retained bytes\n');
+      }
+    });
+    await check('boundary: observed widening retains publication obligations but never bypasses forbidden path policy', async () => {
+      for (const [target, code] of [['.github/workflows/ci.yml', null], ['.env.example', 'WIDEN_SECRET_PATH'],
+        ['.github/required.yml', 'WIDEN_GUARDRAIL_ROOT'], ['.claude/settings.json', 'POLICY_DENIED']]) {
+        const setup = fixture(); const selection = await allocated(setup);
+        const body = `## Plan\n${failureTaskText}\n`; const currentPlan = planFor(selection, ['src/a.mjs'], { body });
+        assert.equal((await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, currentPlan)).schema, 'autoloop.admission/1');
+        const extra = code === 'WIDEN_GUARDRAIL_ROOT' ? '.github/' : target;
+        const plan = planFor(selection, [extra, 'src/a.mjs'], { generation: 2, body });
+        const relationshipId = await observeTask(setup, selection, currentPlan, plan, target); const before = setup.checkpoint();
+        const result = await setup.provider.widenBoundary(setup.lease, before.revision, selection.reservation.unitId, { plan, relationshipId });
+        if (code) { refuses(result, code); assert.deepEqual(setup.checkpoint(), before); }
+        else {
+          assert.equal(result.schema, 'autoloop.admission/1', JSON.stringify(result));
+          assert.deepEqual(setup.checkpoint().units[0].policy.authorize, [{ file: target, glob: '.github/workflows/**' }]);
+          assert.equal(existsSync(join(selection.worktree.root, target)), false);
+        }
+      }
+    });
+    await check('boundary: same-scope directory replanning does not require a new widening relationship', async () => {
+      const setup = fixture(); const first = await allocated(setup); const second = await allocated(setup, 8);
+      const body = `## Plan\n${failureTaskText}\n`; const current = planFor(first, ['src/'], { body });
+      assert.equal((await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, current)).schema, 'autoloop.admission/1');
+      assert.equal((await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(second, ['other/']))).schema, 'autoloop.admission/1');
+      const proposed = planFor(first, ['other/file.mjs', 'src/'], { generation: 2, body });
+      const relationshipId = await observeTask(setup, first, current, proposed, 'other/file.mjs');
+      const wait = await setup.provider.widenBoundary(setup.lease, setup.checkpoint().revision, first.reservation.unitId, { plan: proposed, relationshipId });
+      assert.equal(wait.schema, 'autoloop.selection-wait/1', JSON.stringify(wait));
+      const disposition = scheduler.observeSelectionNoWork(setup.lease, second.reservation.unitId);
+      scheduler.commitTransition(setup.lease, setup.checkpoint().revision, (checkpoint) => ({ ...checkpoint,
+        reservations: checkpoint.reservations.map((row) => row.unitId === second.reservation.unitId ? { ...row, state: 'released', paths: [] } : row),
+        units: checkpoint.units.map((unit) => unit.unitId === second.reservation.unitId ? { ...unit, admission: null, disposition } : unit) }));
+      const snapshot = await setup.provider.scanRepository({ root: setup.root });
+      assert.equal((await setup.provider.reconcileWaits(setup.lease, snapshot)).transitions[0].unitId, first.reservation.unitId);
+      const sameScope = planFor(first, ['src/', 'src/a.mjs'], { generation: 3, body: `${body}Re-plan within the retained directory.\n` });
+      const admission = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, sameScope);
+      assert.equal(admission.schema, 'autoloop.admission/1', JSON.stringify(admission));
+      assert.deepEqual(admission.boundary, ['src/', 'src/a.mjs']); assert.equal(admission.planGeneration, 3);
+    });
+    await check('boundary: custom Git hook paths keep existing publication policy without a blanket edit denial', async () => {
+      for (const [hooks, paths, authorize, protectedPaths] of [
+        ['custom-hooks', ['custom-hooks/'], [{ file: 'custom-hooks/', glob: 'custom-hooks/**' }], ['custom-hooks/**']],
+        ['.githooks', ['.githooks/pre-commit'], [{ file: '.githooks/pre-commit', glob: '.githooks/**' }], []],
+      ]) {
+        const setup = fixture({ protectedPaths }); const selection = await allocated(setup);
+        git(setup.root, 'config', 'core.hooksPath', hooks);
+        const result = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(selection, paths));
+        assert.equal(result.schema, 'autoloop.admission/1', JSON.stringify(result));
+        assert.deepEqual(setup.checkpoint().units[0].policy.authorize, authorize);
+      }
+      const setup = fixture(); const selection = await allocated(setup); git(setup.root, 'config', 'core.hooksPath', '.githooks');
+      refuses(await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(selection, ['.githooks/'])), 'WIDEN_GUARDRAIL_ROOT');
+    });
+    await check('boundary: a custom Git hook alias does not reclassify ordinary source as runtime state', async () => {
+      const setup = fixture({ initialFiles: { 'src/hooks/pre-commit': 'Harmless fixture hook source.\n' }, initialLinks: { 'hook-alias': 'src/hooks' } });
+      const selection = await allocated(setup);
+      assert.equal(lstatSync(join(selection.worktree.root, 'hook-alias')).isSymbolicLink(), true);
+      git(setup.root, 'config', 'core.hooksPath', 'hook-alias');
+      const result = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(selection, ['src/hooks/pre-commit']));
+      assert.equal(result.schema, 'autoloop.admission/1', JSON.stringify(result));
+      assert.deepEqual(setup.checkpoint().units[0].policy.authorize, []);
+      assert.equal(readFileSync(join(selection.worktree.root, 'src', 'hooks', 'pre-commit'), 'utf8'), 'Harmless fixture hook source.\n');
+    });
+    await check('boundary: existing Claude runtime protection follows physical settings aliases', async () => {
+      const setup = fixture({ initialFiles: { 'src/runtime.json': '{}\n' }, initialLinks: { '.claude/settings.json': '../src/runtime.json' } });
+      const selection = await allocated(setup);
+      assert.equal(realpathSync(join(selection.worktree.root, '.claude', 'settings.json')), join(selection.worktree.root, 'src', 'runtime.json'));
+      const before = setup.checkpoint();
+      refuses(await setup.provider.admitBoundary(setup.lease, before.revision, planFor(selection, ['src/runtime.json'])), 'POLICY_DENIED');
+      assert.deepEqual(setup.checkpoint(), before);
+      assert.equal(readFileSync(join(selection.worktree.root, 'src', 'runtime.json'), 'utf8'), '{}\n');
+    });
+    await check('boundary: initial admission retains and refuses pre-existing ignored data', async () => {
+      const setup = fixture({ initialFiles: { '.gitignore': 'build/\n' } }); const selection = await allocated(setup);
+      mkdirSync(join(selection.worktree.root, 'build')); writeFileSync(join(selection.worktree.root, 'build', 'cache.tmp'), 'Harmless ignored fixture.\n');
+      assert.equal(git(selection.worktree.root, 'ls-files', '--', 'build/cache.tmp'), '');
+      const before = setup.checkpoint();
+      refuses(await setup.provider.admitBoundary(setup.lease, before.revision, planFor(selection, ['src/a.mjs'])));
+      assert.deepEqual(setup.checkpoint(), before);
+      assert.equal(readFileSync(join(selection.worktree.root, 'build', 'cache.tmp'), 'utf8'), 'Harmless ignored fixture.\n');
+    });
+    await check('boundary: admission reads never execute a configured project clean filter', async () => {
+      const setup = fixture({ initialFiles: { '.gitattributes': 'tracked.txt filter=fixture\n' } }); const selection = await allocated(setup);
+      const marker = join(setup.home, 'filter-ran'); const filter = join(setup.home, 'filter.mjs');
+      writeFileSync(filter, `import { readFileSync, writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(marker)}, 'Observed real filter execution.');
+process.stdout.write(readFileSync(0));\n`);
+      const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(filter)}`;
+      git(setup.root, 'config', 'filter.fixture.clean', command); git(setup.root, 'config', 'filter.fixture.required', 'true');
+      utimesSync(join(selection.worktree.root, 'tracked.txt'), 0, 0);
+      const result = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, planFor(selection, ['src/a.mjs']));
+      assert.equal(existsSync(marker), false, 'An admission read must not launch a project clean filter.');
+      assert.equal(result.schema, 'autoloop.admission/1', JSON.stringify(result));
+      assert.equal(git(setup.root, 'config', '--get', 'filter.fixture.clean'), command);
+      assert.equal(git(setup.root, 'config', '--get', 'filter.fixture.required'), 'true', 'Read-only overrides must not change repository settings.');
+      assert.equal(readFileSync(join(selection.worktree.root, 'tracked.txt'), 'utf8'), 'creation base\n');
     });
     await check('foreign targets, existing refs and symlink ancestors are preserved without allocation', async () => {
       for (const collision of ['foreign', 'foreign-worktree', 'dirty-worktree', 'ref', 'symlink', 'target-symlink']) {
@@ -964,6 +1553,46 @@ await allocator.allocateWorktree(acquired.lease, reservation.unitId, baseOid);`;
         await closed;
       }
     });
+    await check('provider scan refuses a missing promised configured-base commit before transport or evidence publication', async () => {
+      const source = fixture({ acquire: false, initialFiles: { 'upstream-only.txt': 'public upstream fixture\n' } });
+      git(source.root, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
+      const helper = join(source.home, 'local-transport.mjs');
+      writeFileSync(helper, `import {writeFileSync} from 'node:fs';import {spawnSync} from 'node:child_process';
+        writeFileSync(process.argv[2],'local transport invoked\\n');
+        const result=spawnSync(process.argv[3],[process.argv[4]],{stdio:'inherit'});process.exit(result.status??1);\n`);
+      const objectBytes = (directory) => readdirSync(directory, { withFileTypes: true }).reduce((total, entry) => total
+        + (entry.isDirectory() ? objectBytes(join(directory, entry.name)) : lstatSync(join(directory, entry.name)).size), 0);
+      const missingBase = () => {
+        const setup = fixture({ base: false }); const marker = join(setup.home, 'transport.marker');
+        git(setup.root, 'config', 'protocol.ext.allow', 'always');
+        git(setup.root, 'config', 'remote.fixture-promisor.url', `ext::${process.execPath} ${helper} ${marker} %S ${source.root}`);
+        git(setup.root, 'config', 'remote.fixture-promisor.promisor', 'true');
+        const refs = join(setup.repository.commonDir, 'refs', 'remotes', 'origin'); mkdirSync(refs, { recursive: true });
+        // Create only a new fixture ref. No existing object is removed to make
+        // this real configured-base commit missing from the local repository.
+        writeFileSync(join(refs, 'main'), source.baseOid + '\n');
+        const absent = spawnSync('git', ['--no-lazy-fetch', '-C', setup.root, 'cat-file', '-e', source.baseOid],
+          { encoding: 'utf8', timeout: 15000 });
+        assert.notEqual(absent.status, 0); assert.equal(existsSync(marker), false);
+        return { ...setup, marker, objects: join(setup.repository.commonDir, 'objects') };
+      };
+      const control = missingBase(); const controlBefore = objectBytes(control.objects);
+      const ordinary = spawnSync('git', ['-C', control.root, 'rev-parse', '--verify', 'refs/remotes/origin/main^{commit}'],
+        { encoding: 'utf8', timeout: 15000, env: { ...process.env, GIT_NO_LAZY_FETCH: '0' } });
+      assert.equal(ordinary.status, 0, ordinary.stderr); assert.equal(ordinary.stdout.trim(), source.baseOid);
+      assert(existsSync(control.marker)); assert(objectBytes(control.objects) > controlBefore);
+      const setup = missingBase(); const before = setup.checkpoint(); const bytesBefore = objectBytes(setup.objects);
+      const previous = process.env.GIT_NO_LAZY_FETCH;
+      let result;
+      try {
+        process.env.GIT_NO_LAZY_FETCH = '1';
+        result = await setup.provider.scanRepository({ root: setup.root, pins: setup.pins });
+      } finally { if (previous === undefined) delete process.env.GIT_NO_LAZY_FETCH; else process.env.GIT_NO_LAZY_FETCH = previous; }
+      assert.deepEqual({ code: result.error?.code ?? null, transport: existsSync(setup.marker), unchanged: objectBytes(setup.objects) === bytesBefore },
+        { code: 'REPOSITORY_INVALID', transport: false, unchanged: true });
+      refuses(result, 'REPOSITORY_INVALID'); assert.deepEqual(setup.checkpoint(), before);
+      assert.equal(existsSync(join(setup.repository.commonDir, 'autoloop', 'scheduler', 'snapshots')), false);
+    });
     await check('changed configured base and coordinator config invalidate current evidence', async () => {
       const setup = fixture(); const authorization = await discover(setup);
       const tree = git(setup.root, 'rev-parse', 'HEAD^{tree}');
@@ -1009,8 +1638,9 @@ await allocator.allocateWorktree(acquired.lease, reservation.unitId, baseOid);`;
     // Retain fixtures when recursive cleanup is not approved by the host.
     console.log(`Fixtures retained at ${scratch}`);
   }
-  console.log(results.every(([, ok]) => ok) ? `self-test OK (${results.length} cases)` : 'self-test FAILED');
-  return results.every(([, ok]) => ok);
+  const passed = results.length > 0 && results.every(([, ok]) => ok);
+  console.log(passed ? `self-test OK (${results.length} cases)` : 'self-test FAILED');
+  return passed;
 }
 
 const isMain = (() => {

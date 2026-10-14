@@ -2,11 +2,12 @@
 
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseGitHubRemote } from './checkout-contract.mjs';
+import { readGitStatus } from './git-observation.mjs';
 import { CLAIM_CONTRACT_FIXTURES, parseLoopClaim } from './claim-contract.mjs';
 import { parseRepair } from './unit.mjs';
 import {
@@ -292,14 +293,14 @@ function createScanRequest(root) {
   delete env.GH_HOST;
   Object.assign(env, {
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_NO_REPLACE_OBJECTS: '1', GIT_OPTIONAL_LOCKS: '0',
+    GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0',
   });
   const request = {
     root, env, limitCommand: createLimiter(MAX_CONCURRENCY),
     repository: null, issueIds: new Map(), approvals: [], roles: new Map(),
   };
   request.gitText = (args) => execFileSync('git', [
-    '--no-replace-objects', '--no-optional-locks',
+    '--no-lazy-fetch', '--no-replace-objects', '--no-optional-locks',
     '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args,
   ], {
     cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
@@ -515,12 +516,7 @@ async function fetchRepo(request) {
 
 function fetchTree(request) {
   try {
-    const dirtyEntries = request.gitText([
-      'status',
-      '--porcelain=v1',
-      '-z',
-      '--untracked-files=all',
-    ]).split('\0').filter(Boolean);
+    const dirtyEntries = readGitStatus(request.root, { zeroTerminated: true }).toString('utf8').split('\0').filter(Boolean);
     return completeSection([{
       dirtyEntries,
       dirtyPaths: dirtyEntries.length,
@@ -1733,8 +1729,9 @@ async function fakeScanGitHub() {
   requireFact(process.env.GH_HOST === repo.host, 'request used an ambient host');
   requireFact(process.env.GH_REPO === `${repo.host}/fixtures/${repo.name}`, 'request used an ambient repository');
   requireFact(!Object.keys(process.env).some((key) => key.startsWith('GIT_') && ![
-    'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_NO_REPLACE_OBJECTS', 'GIT_OPTIONAL_LOCKS',
+    'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_NO_REPLACE_OBJECTS', 'GIT_NO_LAZY_FETCH', 'GIT_OPTIONAL_LOCKS',
   ].includes(key)), 'request retained a Git override');
+  requireFact(process.env.GIT_NO_LAZY_FETCH === '1', 'request did not fix the no-lazy-fetch control');
   const page = (nodes, cursor = null) => ({ nodes, pageInfo: { hasNextPage: cursor !== null, endCursor: cursor } });
   const at = '2026-01-01T00:00:00Z';
   const event = (number, query) => ({
@@ -1830,6 +1827,60 @@ async function fakeScanGitHub() {
   respond({ data: { repository } });
 }
 
+async function noFetchSelfTest() {
+  const assert = (await import('node:assert/strict')).default;
+  const { lstatSync, readdirSync } = await import('node:fs');
+  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-scan-promisor-'));
+  const name = 'request Git reads refuse missing promised objects; fetchTree status already prevents the HEAD bypass';
+  const previous = process.env.GIT_NO_LAZY_FETCH;
+  try {
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_LAZY_FETCH: '0' };
+    const git = (root, args) => execFileSync('git', ['-C', root, ...args],
+      { env, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const source = join(scratch, 'source'); mkdirSync(source); git(source, ['init', '-q', '-b', 'main']);
+    writeFileSync(join(source, 'fixture.txt'), 'public promised fixture\n'); git(source, ['add', 'fixture.txt']);
+    git(source, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'promised fixture']);
+    git(source, ['config', 'uploadpack.allowAnySHA1InWant', 'true']);
+    const missing = git(source, ['rev-parse', 'HEAD']); const helper = join(scratch, 'local-transport.mjs');
+    writeFileSync(helper, `import {writeFileSync} from 'node:fs';import {spawnSync} from 'node:child_process';
+      writeFileSync(process.argv[2],'local transport invoked\\n');
+      const result=spawnSync(process.argv[3],[process.argv[4]],{stdio:'inherit'});process.exit(result.status??1);\n`);
+    const objectBytes = (directory) => readdirSync(directory, { withFileTypes: true }).reduce((total, entry) => total
+      + (entry.isDirectory() ? objectBytes(join(directory, entry.name)) : lstatSync(join(directory, entry.name)).size), 0);
+    const fixture = (name) => {
+      const root = join(scratch, name); mkdirSync(root); git(root, ['init', '-q', '-b', 'main']);
+      const marker = join(scratch, name + '.marker');
+      git(root, ['remote', 'add', 'origin', 'https://github.com/fixtures/scan.git']);
+      git(root, ['config', 'protocol.ext.allow', 'always']);
+      git(root, ['config', 'remote.fixture-promisor.url', `ext::${process.execPath} ${helper} ${marker} %S ${source}`]);
+      git(root, ['config', 'remote.fixture-promisor.promisor', 'true']);
+      // A new ref points at a real commit held only by the local source.
+      // No existing fixture object is deleted to create this missing object.
+      writeFileSync(join(root, '.git', 'refs', 'heads', 'main'), missing + '\n');
+      assert.throws(() => git(root, ['--no-lazy-fetch', 'cat-file', '-e', missing])); assert.equal(existsSync(marker), false);
+      return { root, marker, objects: join(root, '.git', 'objects') };
+    };
+    const control = fixture('ordinary'); const controlBytes = objectBytes(control.objects);
+    assert.equal(git(control.root, ['rev-parse', '--verify', 'HEAD^{commit}']), missing);
+    assert(existsSync(control.marker)); assert(objectBytes(control.objects) > controlBytes);
+    const test = fixture('checked'); const before = objectBytes(test.objects);
+    process.env.GIT_NO_LAZY_FETCH = '1'; const request = createScanRequest(test.root);
+    const tree = fetchTree(request);
+    assert.equal(tree.complete, false); assert.equal(tree.error.code, 'TREE_FETCH_FAILED');
+    assert.equal(existsSync(test.marker), false); assert.equal(objectBytes(test.objects), before);
+    let refused = false; try { request.gitText(['rev-parse', '--verify', 'HEAD^{commit}']); } catch { refused = true; }
+    assert.deepEqual({ refused, transport: existsSync(test.marker), unchanged: objectBytes(test.objects) === before },
+      { refused: true, transport: false, unchanged: true });
+    return [[name, true]];
+  } catch (error) {
+    console.error(`FAIL ${name}: ${error.stack}`); return [[name, false]];
+  } finally {
+    if (previous === undefined) delete process.env.GIT_NO_LAZY_FETCH; else process.env.GIT_NO_LAZY_FETCH = previous;
+    console.log(`Retained scan promisor fixture: ${scratch}`);
+  }
+}
+
 async function sourceSelfTest() {
   const scratch = mkdtempSync(join(tmpdir(), 'autoloop-scan-sources-'));
   const checks = [];
@@ -1847,13 +1898,28 @@ async function sourceSelfTest() {
       git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost', '-c', 'commit.gpgsign=false',
         'commit', '--quiet', '--allow-empty', '-m', 'scan fixture']);
       git(['remote', 'add', 'origin', `https://${host}/fixtures/${name}.git`]);
-      roots[realpathSync(root)] = { name, host, userId, headOid: git(['rev-parse', 'HEAD']).trim() };
+      writeFileSync(join(root, 'fixture.txt'), 'baseline\n');
+      writeFileSync(join(root, '.gitattributes'), 'fixture.txt filter=fixture\n');
+      git(['add', 'fixture.txt', '.gitattributes']);
+      git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'filter fixture']);
+      const marker = join(scratch, `${name}-filter-marker`); const filter = join(scratch, `${name}-filter.mjs`);
+      writeFileSync(filter, `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(marker)}, 'invoked');process.stdin.pipe(process.stdout);\n`, { mode: 0o700 });
+      const included = join(scratch, `${name}-included.config`);
+      git(['config', '--file', included, 'filter.fixture.clean', filter]);
+      git(['config', `includeIf.onbranch:${name}.path`, included]);
+      writeFileSync(join(root, 'fixture.txt'), 'changed!\n');
+      utimesSync(join(root, 'fixture.txt'), new Date(), new Date(Date.now() + 2000));
+      git(['status', '--porcelain=v1']);
+      if (!existsSync(marker)) throw new Error('The ordinary scan fixture status must invoke its real filter.');
+      renameSync(marker, join(scratch, `${name}-retained-control-marker`));
+      roots[realpathSync(root)] = { name, host, userId, filterMarker: marker, headOid: git(['rev-parse', 'HEAD']).trim() };
     }
     const bin = join(scratch, 'bin'); mkdirSync(bin);
     writeFileSync(join(bin, 'gh'), `#!${process.execPath}\n(${fakeScanGitHub.toString()})().catch(error => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o700 });
     const manifest = join(scratch, 'fixture.json'); writeFileSync(manifest, JSON.stringify({ roots }));
     const runner = `
       import assert from 'node:assert/strict';
+      import {existsSync} from 'node:fs';
       const scan = await import(${JSON.stringify(import.meta.url)});
       const {verifySnapshot} = await import(${JSON.stringify(new URL('./snapshot-contract.mjs', import.meta.url).href)});
       const scanSnapshotValid = snapshot => verifySnapshot(snapshot) && Object.values(snapshot.sections).every(section => section.complete);
@@ -1871,6 +1937,8 @@ async function sourceSelfTest() {
         assert.equal(scanSnapshotValid(snapshot), true, JSON.stringify(snapshot.sections));
         assert.equal(snapshot.sections.tree.items[0].branch, repo.name);
         assert.equal(snapshot.sections.tree.items[0].headOid, repo.headOid);
+        assert.deepEqual(snapshot.sections.tree.items[0].dirtyEntries, [' M fixture.txt']);
+        assert.equal(existsSync(repo.filterMarker), false, 'Mandatory fresh scan must not execute a configured clean driver');
         assert.deepEqual(snapshot.sections.openPrs.items[0].files, ['src/a.mjs','src/b.mjs']);
         assert.deepEqual(sources.repository, {host:repo.host,owner:'fixtures',name:repo.name,nodeId:repo.name+'-R'});
         assert.deepEqual(sources.issues, [7,8,9].map(number=>({number,nodeId:number===9?null:repo.name+'-I'+number})));
@@ -1944,10 +2012,11 @@ async function sourceSelfTest() {
       assert.equal(verifySnapshot(focused),true);
       assert.deepEqual(focused.sections.openPrs.items.map(item=>item.number),[40]);
       assert.equal(Object.hasOwn(cli,'sources'),false);
+      for (const [,repo] of roots) assert.equal(existsSync(repo.filterMarker),false,'CLI and continuation scans must keep filters disabled');
       console.log('root/source integration OK');
     `;
     const runEnv = { ...env, PATH: `${bin}:${env.PATH}`, SCAN_FIXTURE: manifest, SCAN_ROOTS: JSON.stringify(Object.entries(roots)),
-      GIT_DIR: join(scratch, 'beta', '.git'), GIT_WORK_TREE: join(scratch, 'beta'),
+      GIT_DIR: join(scratch, 'beta', '.git'), GIT_WORK_TREE: join(scratch, 'beta'), GIT_NO_LAZY_FETCH: '0',
       GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'remote.origin.url', GIT_CONFIG_VALUE_0: 'https://wrong.test/wrong/repo',
       GH_REPO: 'wrong.test/wrong/repo', GH_HOST: 'wrong.test' };
     try {
@@ -2501,6 +2570,7 @@ async function selfTest() {
   };
   const withFiles = await fetchPullRequests({ owner: 'o', name: 'r', nameWithOwner: 'o/r' }, ['OPEN'], { graphql: fakePrGraphql });
   const checks = [
+    ...await noFetchSelfTest(),
     ...await sourceSelfTest(),
     [
       'source approval timestamps retain API strings and reject invalid calendar dates',
