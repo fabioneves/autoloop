@@ -136,6 +136,25 @@ function requirePrimeVersion(text, version, errors) {
   }
 }
 
+// Read the generated export as data. Do not import or execute fixture code.
+function requireDaemonFixtureVersion(text, version, errors) {
+  const matches = typeof text === 'string'
+    ? [...text.matchAll(/^export const DAEMON_HOST_COMMAND = (.+);$/gmu)]
+    : [];
+  let command;
+  if (matches.length === 1) {
+    try {
+      const encoded = JSON.parse(matches[0][1]);
+      if (typeof encoded === 'string') command = JSON.parse(encoded);
+    } catch { /* Report invalid fixture data with the version error below. */ }
+  }
+  if (matches.length !== 1 || command?.pluginVersion !== version) {
+    errors.push(
+      `hooks/status/fixtures/daemon.ts: expected exactly one DAEMON_HOST_COMMAND with pluginVersion equal to ${version}`,
+    );
+  }
+}
+
 function readVersionedManifest(text, path, version, errors) {
   if (typeof text !== 'string') {
     errors.push(`${path}: missing`);
@@ -246,6 +265,7 @@ export function verifyRelease(files, options = {}) {
 
   const configVersion = readConfigVersion(files.configContract, errors);
   requirePrimeVersion(files.primeTool, version, errors);
+  requireDaemonFixtureVersion(files.daemonFixtures, version, errors);
   requireReleaseReference(
     files.README,
     'README.md',
@@ -306,6 +326,7 @@ function fixtureFiles(version = '0.40.0') {
     pitcrewSkill: `∞ pitcrew · v${version} · starting\n`,
     configContract: "export const CONFIG_VERSION = '0.25.0';\n",
     primeTool: `const AUTOLOOP_VERSION = '${version}';\n`,
+    daemonFixtures: `export const DAEMON_HOST_COMMAND = ${JSON.stringify(JSON.stringify({ pluginVersion: version }))};\n`,
         // Shaped like the real workflow, because the release requirements are
     // counted inside the release-verify step rather than across the file.
     verifyWorkflow: [
@@ -431,6 +452,28 @@ async function selfTest() {
         'tools/prime.mjs: expected exactly one AUTOLOOP_VERSION literal equal to 0.40.0',
       ],
     },
+    {
+      name: 'rejects a stale generated daemon command version',
+      files: {
+        ...fixtureFiles('0.40.1'),
+        daemonFixtures: fixtureFiles('0.40.0').daemonFixtures,
+      },
+      expected: [
+        'hooks/status/fixtures/daemon.ts: expected exactly one DAEMON_HOST_COMMAND with pluginVersion equal to 0.40.1',
+      ],
+    },
+    ...[
+      ['missing', undefined],
+      ['duplicate', fixtureFiles().daemonFixtures.repeat(2)],
+      ['invalid JSON', 'export const DAEMON_HOST_COMMAND = "not JSON";\n'],
+      ['executable', 'export const DAEMON_HOST_COMMAND = (() => { throw new Error("Do not execute fixtures"); })();\n'],
+    ].map(([kind, daemonFixtures]) => ({
+      name: `rejects ${kind} generated daemon command data without execution`,
+      files: { ...fixtureFiles(), daemonFixtures },
+      expected: [
+        'hooks/status/fixtures/daemon.ts: expected exactly one DAEMON_HOST_COMMAND with pluginVersion equal to 0.40.0',
+      ],
+    })),
     {
       name: 'derives documented schema references from the contract',
       files: {
@@ -647,6 +690,7 @@ function loadRepository(root) {
     pitcrewSkill: readText(root, 'skills/pitcrew/SKILL.md'),
     configContract: readText(root, 'tools/config-contract.mjs'),
     primeTool: readText(root, 'tools/prime.mjs'),
+    daemonFixtures: readText(root, 'hooks/status/fixtures/daemon.ts'),
     verifyWorkflow: readText(root, '.github/workflows/verify.yml'),
     portabilitySurfaces: Object.fromEntries(
       portabilityPaths.map((path) => [path, readText(root, path)]),
