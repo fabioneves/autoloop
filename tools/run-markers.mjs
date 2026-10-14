@@ -7,15 +7,16 @@
 // self-test exercises it.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
-  closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
+  closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
   readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boundedGit } from './git-budget.mjs';
+import { boundedGit, setGitDeadline } from './git-budget.mjs';
+import { guardPathForms, executionCommandProblemFor, fallbackGuardSegments, knownExecutionStatePath, runStateProblem } from './run-state-guard.mjs';
 
 // The guard is defense-in-depth for commands a run issues; repository rules are
 // the enforcement boundary. Applying it to every Bash call in the project turns
@@ -241,6 +242,7 @@ export function protectedPaths({
     runMarkerDirectory(projectRoot), runMarkerDirectory(cwd), latchDirectory(home),
     pinnedModelsPath(projectRoot), pinnedModelsPath(cwd),
     ...eventsState(projectRoot), ...eventsState(cwd),
+    ...executionProtectedPaths({ projectRoot, cwd }).state,
     join(home, '.claude', 'shell-snapshots'), join(home, '.claude', 'session-env'),
     ...(runOpen ? [
       ...['.claude/settings.json', '.claude/settings.local.json'].map((file) => join(projectRoot, file)),
@@ -262,6 +264,199 @@ export function protectedPaths({
     })])];
   };
   return { state: withReal(state), code: withReal(PLUGIN_CODE_DIRS) };
+}
+
+export function workerGuardDirectory() {
+  return join(userInfo().homedir, '.claude', 'autoloop', 'worker-bindings');
+}
+
+export function executionAdmissionGuardDirectory() {
+  return join(userInfo().homedir, '.claude', 'autoloop', 'execution-admission');
+}
+
+export function readBootIdentity() {
+  try {
+    if (process.platform === 'linux') {
+      const value = readRegularFile('/proc/sys/kernel/random/boot_id').trim();
+      return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value) ? value : null;
+    }
+    if (process.platform === 'darwin') {
+      const result = spawnSync('sysctl', ['-n', 'kern.boottime'], { encoding: 'utf8', timeout: 5000 });
+      const match = /sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)/u.exec(result.stdout ?? '');
+      return result.status === 0 && match ? `darwin:${match[1]}:${match[2]}` : null;
+    }
+  } catch { /* unknown is not proof of death */ }
+  return null;
+}
+
+export function workerGuardProcessKey(identity) {
+  const digest = createHash('sha256').update(JSON.stringify({ bootId: identity.bootId, start: identity.start })).digest('hex');
+  return `${identity.pid}-${digest}`;
+}
+function privateWorkerDirectory(path, create = false) {
+  if (create) mkdirSync(path, { recursive: true, mode: 0o700 });
+  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isDirectory() || realpathSync(path) !== resolve(path) || stat.uid !== userInfo().uid || (stat.mode & 0o077) !== 0) {
+      throw new Error('The worker guard directory is not private.');
+    }
+  } finally { closeSync(fd); }
+}
+// The lease holder publishes this immutable locator before the checkpoint can
+// register a worker. It is corroboration, not an independent write grant.
+export function publishWorkerGuard(repository, worker, { baseBranch, pinsDigest }, { directory = workerGuardDirectory() } = {}) {
+  privateWorkerDirectory(directory, true);
+  const record = { schema: 'autoloop.worker-guard/1', repository, worker, baseBranch, pinsDigest };
+  const paths = [];
+  for (const identity of [worker.process, worker.groupLeader]) {
+    const parent = join(directory, workerGuardProcessKey(identity));
+    privateWorkerDirectory(parent, true);
+    const path = join(parent, `${worker.attemptId}.json`);
+    if (paths.includes(path)) continue;
+    const temporary = join(parent, `.${randomUUID()}.tmp`);
+    try {
+      const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      try { writeFileSync(fd, `${JSON.stringify(record)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
+      try { linkSync(temporary, path); }
+      catch (error) {
+        if (error.code !== 'EEXIST' || JSON.stringify(JSON.parse(readRegularFile(path))) !== JSON.stringify(record)) throw error;
+      }
+      const parentFd = openSync(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(parentFd); } finally { closeSync(parentFd); }
+      paths.push(path);
+    } finally { try { unlinkSync(temporary); } catch { /* only this exclusive staging file */ } }
+  }
+  return paths;
+}
+// Called with OS-observed ancestry identities. A malformed entry for a matching
+// process remains a relevant refusal; another process/session cannot inherit it.
+export function workerGuardClaims(identities, { directory = workerGuardDirectory(), unverifiedPids = [] } = {}) {
+  try {
+    const names = readdirSync(directory);
+    const uncertain = unverifiedPids.find((pid) => names.some((name) => name.startsWith(`${pid}-`)));
+    if (uncertain !== undefined) return { unreadable: true, path: directory, message: 'The indexed worker process identity is unknown.' };
+  } catch { /* absence alone does not grant a worker role */ }
+  const claims = [];
+  for (const identity of identities) {
+    const parent = join(directory, workerGuardProcessKey(identity));
+    if (!existsSync(parent)) continue;
+    try {
+      privateWorkerDirectory(parent);
+      const names = readdirSync(parent).filter((name) => !/^\.[0-9a-f-]+\.tmp$/u.test(name));
+      if (names.length === 0) throw new Error('The worker locator is empty.');
+      for (const name of names) {
+        if (!/^[0-9a-f-]+\.json$/u.test(name)) throw new Error('The worker locator has an invalid entry.');
+        const path = join(parent, name);
+        const stat = lstatSync(path);
+        if (!stat.isFile() || stat.uid !== userInfo().uid || (stat.mode & 0o077) !== 0) throw new Error('The worker locator is not private.');
+        claims.push({ record: JSON.parse(readRegularFile(path)), path, identity });
+      }
+    } catch (error) { return { unreadable: true, path: parent, message: error.message }; }
+  }
+  return claims;
+}
+
+// Bootstrap fallback for a command/edit guard that cannot start. It can only
+// deny a known current worker; it cannot grant a posture or operator authority.
+export function workerGuardFallback({ directory = workerGuardDirectory(), startPid = process.ppid } = {}) {
+  const bootId = readBootIdentity();
+  const identities = [];
+  const unverifiedPids = [];
+  for (const pid of new Set([startPid, ...ancestorChain(startPid, procEntry)])) {
+    const start = processStart(pid);
+    if (bootId === null || start === null) unverifiedPids.push(pid);
+    else identities.push({ pid, start, bootId });
+  }
+  const found = workerGuardClaims(identities, { directory, unverifiedPids });
+  return found.unreadable || found.length > 0 ? 2 : 0;
+}
+
+// Independent, deny-only fallback for a primary/bootstrap load failure. The
+// hook wrapper replays input from shell memory, never a file or environment var.
+export function toolGuardFallbackProblem(payload, { workerDirectory = workerGuardDirectory(), entrypoint } = {}) {
+  if (workerGuardFallback({ directory: workerDirectory }) === 2) return 'autoloop guard — the primary guard failed for a registered worker.';
+  const sessionId = payload?.session_id;
+  if ((typeof sessionId === 'string' && sessionId !== '' ? ownedRun({ sessionId, includeClosed: true }) : heldLatch()) !== null) {
+    return 'autoloop guard — the primary guard failed for this legacy run.';
+  }
+  const cwd = typeof payload?.cwd === 'string' ? payload.cwd : process.cwd();
+  const paths = executionProtectedPaths({ projectRoot: process.env.CLAUDE_PROJECT_DIR || cwd, cwd, entrypoint });
+  if (payload?.tool_name === 'Bash' && typeof payload?.tool_input?.command === 'string') {
+    const segments = fallbackGuardSegments(payload.tool_input.command);
+    return executionCommandProblemFor(segments, { cwd })
+      ?? runStateProblem(segments, { cwd, protectedDirs: paths.state, codeDirs: paths.code, knownOnly: true });
+  }
+  if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(payload?.tool_name)) {
+    const file = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
+    if (typeof file === 'string') {
+      const targets = guardPathForms(file, cwd);
+      if (targets.some(knownExecutionStatePath)
+        || [...paths.state, ...paths.code].some((path) => targets.some((target) => target === path || target.startsWith(`${path}/`)))) {
+        return 'autoloop guard — the primary edit guard failed for protected execution state or code.';
+      }
+    }
+  }
+  return null;
+}
+
+// Filesystem metadata is used only to find paths to deny, never to establish
+// repository ownership. No Git process is started for an unrelated session.
+function executionCommonDir(root) {
+  let directory;
+  try { directory = realpathSync.native(root); } catch { directory = resolve(root); }
+  for (;;) {
+    const gitFile = join(directory, '.git');
+    try {
+      const physical = realpathSync.native(gitFile);
+      const info = lstatSync(physical);
+      let admin = physical;
+      if (info.isFile()) {
+        const match = /^gitdir: (.+)$/u.exec(readRegularFile(physical).trimEnd());
+        if (match === null) return null;
+        // Concatenation is intentional: resolve/join would collapse '..'
+        // before the OS follows any symlink in this metadata path.
+        admin = realpathSync.native(isAbsolute(match[1]) ? match[1] : `${directory}/${match[1]}`);
+      } else if (!info.isDirectory()) return null;
+      if (!lstatSync(admin).isDirectory()) return null;
+      const commonFile = join(admin, 'commondir');
+      try {
+        const common = readRegularFile(commonFile).trimEnd();
+        if (common === '') return null;
+        const path = realpathSync.native(isAbsolute(common) ? common : `${admin}/${common}`);
+        return lstatSync(path).isDirectory() ? path : null;
+      } catch (error) { return error.code === 'ENOENT' ? admin : null; }
+    } catch (error) {
+      if (error.code !== 'ENOENT') return null;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) return null;
+    directory = parent;
+  }
+}
+
+// This narrow protection applies before a legacy latch exists. HOME and
+// CLAUDE_CONFIG_DIR cannot select the host/worker authority directories.
+export function executionProtectedPaths({ projectRoot, cwd = projectRoot, entrypoint = process.argv[1], pluginRoot = process.env.CLAUDE_PLUGIN_ROOT } = {}) {
+  const state = [join(userInfo().homedir, '.claude', 'autoloop', 'host-invocations'), workerGuardDirectory(), executionAdmissionGuardDirectory()];
+  for (const root of new Set([projectRoot, cwd])) {
+    if (typeof root !== 'string') continue;
+    const common = executionCommonDir(root);
+    // Keep literal Git-admin paths too. This does not make an unreadable Git
+    // directory a reason to block ordinary unrelated source edits.
+    for (const base of new Set([common, join(root, '.git')])) {
+      if (base === null) continue;
+      for (const name of ['scheduler', 'control/v2', 'viewers']) state.push(join(base, 'autoloop', name));
+    }
+  }
+  const code = [];
+  for (const root of new Set([pluginRoot, typeof entrypoint === 'string' ? dirname(dirname(resolve(entrypoint))) : null])) {
+    if (typeof root !== 'string' || !root.includes('/.claude/plugins/cache/')) continue;
+    // Protect the installed spelling. A dev-mod link can point at an ordinary
+    // Git source checkout: unowned source development must remain possible.
+    for (const name of ['tools', 'hooks']) code.push(join(root, name));
+  }
+  return { state: [...new Set(state)], code: [...new Set(code)] };
 }
 
 export function commonDirOf(cwd = process.cwd()) {
@@ -770,6 +965,15 @@ const isMain = (() => {
   }
 })();
 if (isMain) {
+  if (process.argv.length === 3 && process.argv[2] === '--tool-guard-fallback') {
+    setGitDeadline(Date.now() + 10_000);
+    let payload = null;
+    try { payload = JSON.parse(readFileSync(0, 'utf8')); } catch { /* known process ownership still refuses */ }
+    const reason = toolGuardFallbackProblem(payload);
+    if (reason !== null) { console.error(reason); process.exit(2); }
+    process.exit(0);
+  }
+  if (process.argv.length === 3 && process.argv[2] === '--worker-guard-fallback') process.exit(workerGuardFallback());
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
   console.error('usage: run-markers.mjs --self-test');
   process.exit(2);

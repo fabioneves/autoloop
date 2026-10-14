@@ -25,7 +25,7 @@
 //
 //   node <plugin-tools>/run-state-guard.mjs --self-test
 
-import { existsSync, realpathSync } from 'node:fs';
+import { lstatSync, opendirSync, realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,12 +74,12 @@ function isAssignment(word) {
 // `sudo -u root rm …` hid the rm). Options that move where or how the command
 // runs are beyond the guard: the operands they change cannot be proven.
 const WRAPPER_VALUED = Object.freeze({
-  env: new Set(['-u', '--unset']),
+  env: new Set(['-u', '--unset', '-C', '--chdir']),
   timeout: new Set(['-s', '--signal', '-k', '--kill-after']),
   nice: new Set(['-n', '--adjustment']),
   ionice: new Set(['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid']),
   sudo: new Set(['-u', '--user', '-g', '--group', '-U', '--other-user', '-h', '--host', '-p', '--prompt',
-    '-r', '--role', '-t', '--type', '-C', '--close-from', '-T', '--command-timeout']),
+    '-r', '--role', '-t', '--type', '-C', '--close-from', '-T', '--command-timeout', '-D', '--chdir']),
   doas: new Set(['-u']),
   stdbuf: new Set(['-i', '-o', '-e']),
 });
@@ -107,7 +107,7 @@ function walkWrappers(words, from, onOption) {
     }
     if (isAssignment(word) || /^\d+[smhd]?$/u.test(word)) continue;
     if (word.startsWith('-') && wrapper !== null) {
-      onOption(wrapper, word);
+      onOption(wrapper, word, index);
       if (WRAPPER_VALUED[wrapper]?.has(word)) index += 1;
       continue;
     }
@@ -273,23 +273,90 @@ function expansions(word, at, home, env) {
   return results;
 }
 
-// The real location of a path whose leading part exists: symlinks made by an
-// earlier command are followed, glob segments are kept as they are.
+// Keep raw components until the OS follows symlinks. resolve/join (and the
+// JavaScript realpath implementation) can collapse hop/.. before that lookup.
+export function rawGuardAbsolutePath(path, cwd = process.cwd()) {
+  return isAbsolute(path) ? path : `${cwd}/${path}`;
+}
+
+// Resolve the existing prefix physically, including a symlink before '..'.
+// New leaves and glob suffixes retain the location of that physical prefix.
 function canonical(path) {
+  try { return realpathSync.native(path); } catch { /* missing leaf or glob */ }
   const parts = path.split('/');
-  const globAt = parts.findIndex((part) => /[*?[]/u.test(part));
-  let prefix = globAt === -1 ? path : parts.slice(0, globAt).join('/') || '/';
-  const rest = globAt === -1 ? [] : parts.slice(globAt);
-  const tail = [];
-  for (let guard = 0; guard < 256 && prefix !== '/' && !existsSync(prefix); guard += 1) {
-    tail.unshift(basename(prefix));
-    prefix = dirname(prefix);
+  let prefix = isAbsolute(path) ? '/' : process.cwd();
+  let index = 0;
+  for (; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part === '') continue;
+    if (/[*?[]/u.test(part)) break;
+    try { prefix = realpathSync.native(`${prefix}/${part}`); }
+    catch { break; }
   }
+  return index === parts.length ? prefix : `${prefix === '/' ? '' : prefix}/${parts.slice(index).join('/')}`;
+}
+
+// The lexical spelling is checked separately: an installed dev-mod alias is
+// protected even when its physical target is an ordinary source checkout.
+export function guardPathForms(path, cwd = process.cwd()) {
+  const raw = rawGuardAbsolutePath(path, cwd);
+  return [...new Set([resolve(raw), canonical(raw)])];
+}
+
+export { canonical as canonicalGuardPath };
+
+// A malformed Git pointer cannot hide an obvious named runtime store. This
+// filesystem shape permits only denial; it cannot establish repository/worker
+// identity or grant an operation. Ordinary source directories are not stores.
+export function knownExecutionStatePath(path) {
+  const match = /^(.*)\/autoloop\/(?:scheduler|viewers|control\/v2)(?:\/|$)/u.exec(path);
+  if (match === null) return false;
+  const admin = match[1];
+  if (basename(admin) === '.git') return true;
   try {
-    return join(realpathSync(prefix), ...tail, ...rest);
-  } catch {
-    return path;
+    return lstatSync(join(admin, 'HEAD')).isFile() && lstatSync(join(admin, 'objects')).isDirectory()
+      && lstatSync(join(admin, 'refs')).isDirectory();
+  } catch { return false; }
+}
+
+// A wildcard before '..' can select a symlink. Resolve its actual matches
+// before parent traversal, rather than normalize the wildcard away. This is
+// only for this physical-path case; ordinary globs keep symbolic matching.
+// null means the physical targets cannot be proven within the guard budget.
+function physicalParentGlobPaths(path) {
+  const parts = path.split('/').filter(Boolean);
+  const globAt = parts.findIndex((part) => /[*?[]/u.test(part));
+  if (globAt === -1 || !parts.slice(globAt + 1).includes('..')) return [];
+  if (parts.includes('**')) return null; // recursive glob semantics cannot be proven here
+  let candidates = ['/'];
+  for (const part of parts) {
+    if (!/[*?[]/u.test(part)) {
+      candidates = candidates.map((prefix) => `${prefix}/${part}`);
+      continue;
+    }
+    const matches = [];
+    for (const prefix of candidates) {
+      let directory;
+      try {
+        directory = opendirSync(prefix);
+        let entry;
+        let scanned = 0;
+        while ((entry = directory.readSync()) !== null) {
+          scanned += 1;
+          if (scanned > MAX_TRACKED_WORDS) return null;
+          if (!segmentMatches(part, entry.name)) continue;
+          matches.push(`${prefix}/${entry.name}`);
+          if (matches.length > MAX_ALTERNATIVES) return null;
+        }
+      } catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return null;
+      } finally { directory?.closeSync(); }
+    }
+    candidates = matches;
   }
+  return candidates.map((candidate) => {
+    try { return realpathSync.native(candidate); } catch { return canonical(candidate); }
+  });
 }
 
 // What a word names where a segment runs: the concrete paths (and their real
@@ -300,18 +367,67 @@ function resolveWord(word, at, home, env) {
   if (alternatives === null) return null;
   const paths = [];
   const unknowns = [];
+  let physicalUnknown = false;
   for (const text of alternatives) {
     if (text === '') continue;
     if (EXPANSION.test(text) || (!isAbsolute(text) && at.dir === null)) {
       unknowns.push(text);
     } else {
-      const path = isAbsolute(text) ? resolve(text) : resolve(at.dir, text);
-      paths.push(path);
-      const real = canonical(path);
-      if (real !== path) paths.push(real);
+      paths.push(...guardPathForms(text, at.dir));
+      const physical = physicalParentGlobPaths(rawGuardAbsolutePath(text, at.dir));
+      if (physical === null) physicalUnknown = true;
+      else paths.push(...physical);
     }
   }
-  return { paths, unknowns };
+  return { paths, unknowns, physicalUnknown };
+}
+
+const POSIX_GLOB_CLASSES = Object.freeze({
+  alnum: 'A-Za-z0-9', alpha: 'A-Za-z', ascii: '\x00-\x7f', blank: ' \t', cntrl: '\x00-\x1f\x7f',
+  digit: '0-9', graph: '!-~', lower: 'a-z', print: ' -~', punct: '!-/:-@[-`{-~',
+  space: '\t-\r ', upper: 'A-Z', xdigit: 'A-Fa-f0-9',
+});
+function globTokens(pattern) {
+  const tokens = [];
+  for (let index = 0; index < pattern.length; index += 1) {
+    let token = pattern[index];
+    if (token === '\\' && index + 1 < pattern.length) {
+      tokens.push(token + pattern[++index]);
+      continue;
+    }
+    if (token === '[') {
+      let end = index + 1;
+      if (['!', '^'].includes(pattern[end])) end += 1;
+      if (pattern[end] === ']') end += 1;
+      for (; end < pattern.length && pattern[end] !== ']'; end += 1) {
+        if (pattern[end] === '\\' && end + 1 < pattern.length) { end += 1; continue; }
+        const marker = pattern[end + 1];
+        if (pattern[end] === '[' && [':', '.', '='].includes(marker)) {
+          const close = pattern.indexOf(`${marker}]`, end + 2);
+          if (close !== -1) end = close + 1;
+        }
+      }
+      if (end < pattern.length) {
+        token = pattern.slice(index, end + 1)
+          .replace(/\[:(\w+):\]/gu, (text, name) => POSIX_GLOB_CLASSES[name] ?? text)
+          .replace(/\[([.=])([^\]]+)\1\]/gu, (text, marker, char) => char.length === 1 ? char : text);
+        index = end;
+      }
+    }
+    if (token !== '*' || tokens.at(-1) !== '*') tokens.push(token);
+  }
+  return tokens;
+}
+function globTokenSource(token) {
+  if (token === '*') return '.*';
+  if (token === '?') return '.';
+  if (token.startsWith('[') && token.endsWith(']')) {
+    const source = token.replace(/^\[!/u, '[^').replace(/^\[(\^?)\]/u, '[$1\\]')
+      .replace(/\\([^\\\]\-^])/gu, '$1');
+    try { new RegExp(source, 'u'); return source; } catch { /* literal invalid class */ }
+  }
+  const literal = token.startsWith('\\') && token.length === 2 ? token.slice(1) : token;
+  return literal.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
 // A glob segment against one name. Runs of `*` collapse, and a segment with
@@ -324,16 +440,9 @@ function segmentMatches(pattern, name, extglob = false) {
   // may match. (Elsewhere — code or SQL handed to a program — they are text.)
   if (extglob && /[(|]/u.test(pattern)) return true;
   if (!/[*?[]/u.test(pattern)) return pattern === name;
-  const collapsed = pattern.replace(/\*+/gu, '*');
-  if ((collapsed.match(/[*?]/gu) ?? []).length > 8) return true;
-  // `[!x]` is the shell's negated class; after quoting, it becomes `[^x]`.
-  const source = collapsed.replace(/[.+^${}()|\\]/gu, '\\$&').replace(/\*/gu, '.*').replace(/\?/gu, '.')
-    .replace(/\[!/gu, '[^').replace(/\[\\\^/gu, '[^');
-  try {
-    return new RegExp(`^${source}$`, 'u').test(name);
-  } catch {
-    return pattern === name; // not a glob the shell could expand either
-  }
+  const tokens = globTokens(pattern);
+  if (tokens.filter((token) => token === '*' || token === '?').length > 8) return true;
+  return new RegExp(`^${tokens.map(globTokenSource).join('')}$`, 'u').test(name);
 }
 
 // How a path (possibly a glob) relates to a protected directory: 'inside'
@@ -388,12 +497,14 @@ function findStarts(words, from) {
 }
 
 // The commands a find's -exec family runs.
-function findActionCommands(words, from) {
+export function findActionCommands(words, from) {
   const commands = [];
   for (let index = from; index < words.length; index += 1) {
     if (!['-exec', '-execdir', '-ok', '-okdir'].includes(words[index])) continue;
     const end = words.findIndex((word, at) => at > index && (word === ';' || word === '\\;' || word === '+'));
     commands.push(words.slice(index + 1, end === -1 ? words.length : end));
+    // Skip the consumed child range. A sibling action starts after its terminator.
+    index = end === -1 ? words.length : end;
   }
   return commands;
 }
@@ -585,7 +696,9 @@ function gitClaims(words, head) {
   // settings), git matters only when it writes; aimed inside it, always.
   // A read-only `git -C <root> worktree list` was refused (LFE run 2026-09-30).
   const aimed = aims.map((word) => ({ word, relations: writes ? ['inside', 'near'] : ['inside'], prove: true }));
-  if (!writes) return aimed;
+  const generated = ['diff', 'log', 'show'].includes(subcommand)
+    ? optionValues(words, index + 1, new Set(['--output'])).map((word) => ({ word, relations: ['inside'], prove: true })) : [];
+  if (!writes) return [...aimed, ...generated];
   const paths = config ? optionValues(words, index, new Set(['--file', '-f']))
     : subcommand === 'archive' ? optionValues(words, index, new Set(['-o', '--output']))
       : operands(words, index + 1, new Set(['-b', '-B', '--orphan', '--reason', '-m', '--message']));
@@ -613,22 +726,23 @@ function unproven(word) {
 // hold the run's state; codeDirs the guard's own code, which only a write
 // (not a program run with it) threatens. env is the session's environment,
 // which the command's variables fall back to.
-export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], home = homedir(), env = process.env }) {
+export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], home = homedir(), env = process.env, knownOnly = false }) {
   const absolute = (list) => [...new Set(list.filter((dir) => typeof dir === 'string' && isAbsolute(dir)))];
   const stateDirs = absolute(protectedDirs);
   const codeOnly = absolute(codeDirs).filter((dir) => !stateDirs.includes(dir));
   const dirs = absolute([...protectedDirs, ...codeDirs]);
   if (dirs.length === 0) return null;
-  if (segments.some((segment) => segment.opaque)) {
+  if (!knownOnly && segments.some((segment) => segment.opaque)) {
     return 'autoloop guard — this command nests more command substitutions than the guard can take '
       + 'apart, so what it changes cannot be proven. Split it into smaller commands.';
   }
   const unfollowable = segments.map((segment) => unfollowableWrapperOption(segment.words)).find((option) => option !== null);
-  if (unfollowable !== undefined) {
+  if (!knownOnly && unfollowable !== undefined) {
     return `autoloop guard — \`${unfollowable}\` changes where or how the command runs, so what it changes `
       + 'cannot be proven. Run the command without it (cd first in its own command).';
   }
   if (segments.reduce((total, segment) => total + segment.words.length, 0) > MAX_TRACKED_WORDS) {
+    if (knownOnly) return null;
     return 'autoloop guard — this command is too large to check for changes to the run\'s own '
       + 'state, so it cannot be proven safe. Split it into smaller commands.';
   }
@@ -636,7 +750,7 @@ export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], h
   for (const at of placed) {
     // Redirections write, whatever the command.
     for (const target of at.writes) {
-      const problem = judge({ word: target, relations: ['inside'], prove: true }, at, dirs, home, env);
+      const problem = judge({ word: target, relations: ['inside'], prove: true }, at, dirs, home, env, knownOnly);
       if (problem !== null) return problem;
     }
     if (at.head === -1) continue;
@@ -655,7 +769,7 @@ export function runStateProblem(segments, { cwd, protectedDirs, codeDirs = [], h
     const runsPluginCode = script !== undefined && resolvesInside(script.word, at, codeOnly, home, env);
     for (const claim of list) {
       const judged = claim.script || (claim.interpreterArg && runsPluginCode) ? stateDirs : dirs;
-      const problem = judge(claim, at, judged, home, env);
+      const problem = judge(claim, at, judged, home, env, knownOnly);
       if (problem !== null) return problem;
     }
   }
@@ -668,6 +782,366 @@ function resolvesInside(word, at, dirs, home, env) {
     && resolved.paths.every((path) => dirs.some((dir) => relation(path, dir) === 'inside'));
 }
 
+const EXECUTION_TOOLS = new Set(['loop.mjs', 'loop-host.mjs', 'loop-viewer.mjs', 'loop-supervisor.mjs',
+  'loop-admission.mjs', 'loop-execution-admission.mjs', 'scheduler-contract.mjs', 'status.mjs']);
+const NODE_VALUED_OPTIONS = new Set(['--require', '-r', '--import', '--loader', '--experimental-loader', '--conditions', '-C', '--input-type']);
+function executionScriptIndex(words, head) {
+  const executable = basename(words[head] ?? '');
+  if (EXECUTION_TOOLS.has(executable)) return head;
+  if (!/^(?:node|nodejs|bun|deno)$/u.test(executable)) return -1;
+  let index = head + 1;
+  if (['bun', 'deno'].includes(executable) && words[index] === 'run') index += 1;
+  for (; index < words.length; index += 1) {
+    const word = words[index];
+    // Arbitrary inline programs remain outside the selective entry guarantee.
+    if (['-e', '--eval', '-p', '--print', '-'].includes(word) || /^--(?:eval|print)=/u.test(word)) return -1;
+    if (word === '--') return index + 1 < words.length ? index + 1 : -1;
+    if (!word.startsWith('-')) return index;
+    if (NODE_VALUED_OPTIONS.has(word)) index += 1;
+  }
+  return -1;
+}
+// Intersect a literal unit glob with the complete Autoloop unit language,
+// not one example hash. Each hash position can be any hexadecimal digit.
+// Dynamic programming bounds the work by pattern length times unit length.
+export function selectsAutoloopService(pattern) {
+  const tokens = globTokens(pattern);
+  const prefix = [...'autoloop-'];
+  const hash = Array(64).fill('0123456789abcdef');
+  return ['', '.service'].some((suffix) => {
+    const alphabet = [...prefix, ...hash, ...suffix];
+    let reachable = Array(alphabet.length + 1).fill(false);
+    reachable[0] = true;
+    for (const token of tokens) {
+      const match = new RegExp(`^${globTokenSource(token)}$`, 'u');
+      const next = Array(alphabet.length + 1).fill(false);
+      if (token === '*') next[0] = reachable[0];
+      for (let at = 1; at <= alphabet.length; at += 1) {
+        next[at] = token === '*' ? reachable[at] || next[at - 1]
+          : reachable[at - 1] && [...alphabet[at - 1]].some((char) => match.test(char));
+      }
+      reachable = next;
+    }
+    return reachable.at(-1);
+  });
+}
+
+const SYSTEMCTL_MUTATIONS = new Set(['start', 'stop', 'reload', 'restart', 'try-restart', 'reload-or-restart',
+  'try-reload-or-restart', 'isolate', 'kill', 'clean', 'freeze', 'thaw', 'set-property', 'bind', 'mount-image',
+  'reset-failed', 'enable', 'link', 'disable', 'reenable', 'preset', 'mask', 'unmask', 'revert', 'add-wants', 'add-requires', 'edit']);
+const SYSTEMCTL_VALUED_OPTIONS = new Set(['--capsule', '-C', '--host', '-H', '--machine', '-M', '--type', '-t',
+  '--state', '--property', '-p', '-P', '--signal', '-s', '--root', '--image', '--lines', '-n', '--output', '-o',
+  '--job-mode', '--kill-whom', '--kill-value', '--what', '--timestamp', '--drop-in', '--preset-mode',
+  '--check-inhibitors', '--legend', '--image-policy', '--message', '--boot-loader-menu', '--boot-loader-entry', '--reboot-argument', '--when', '--kill-subgroup']);
+const SYSTEMCTL_FLAG_OPTIONS = new Set(['--help', '--version', '--all', '--reverse', '--after', '--before', '--show-types',
+  '--failed', '--full', '--fail', '--irreversible', '--ignore-dependencies', '--ignore-inhibitors', '--value', '--user',
+  '--system', '--global', '--wait', '--no-block', '--no-legend', '--no-pager', '--no-wall', '--dry-run', '--quiet', '--verbose',
+  '--no-warn', '--force', '--no-reload', '--no-ask-password', '--runtime', '--plain', '--recursive', '--with-dependencies',
+  '--firmware-setup', '--now', '--show-transaction', '--read-only', '--mkdir', '--marked', '--stdin']);
+const SYSTEMCTL_OPTIONS = {
+  valued: SYSTEMCTL_VALUED_OPTIONS, flags: SYSTEMCTL_FLAG_OPTIONS,
+  longOptions: [...SYSTEMCTL_VALUED_OPTIONS, ...SYSTEMCTL_FLAG_OPTIONS].filter((option) => option.startsWith('--')),
+  shortValued: 'CHMtpPsno', shortFlags: 'halqvfiTr',
+  queryValues: new Set(['--type', 't', '--output', 'o', '--boot-loader-entry', '--state', '--preset-mode', '--what', '--timestamp']),
+};
+
+// Match the systemd 257/258 option tables. A query is distinct from a syntax
+// failure: unknown future options cannot silently permit a service mutation.
+function serviceOption(words, index, { valued, flags, longOptions, shortValued, shortFlags, queryValues }) {
+  const word = words[index];
+  if (word.startsWith('--')) {
+    const equals = word.indexOf('=');
+    const key = equals === -1 ? word : word.slice(0, equals);
+    let name = key;
+    if (!longOptions.includes(key)) {
+      const matches = longOptions.filter((option) => option.startsWith(key));
+      if (matches.length !== 1) return { invalid: true };
+      name = matches[0];
+    }
+    if (flags.has(name)) {
+      if (equals !== -1) return { invalid: true };
+      return ['--help', '--version'].includes(name) ? { readOnly: true } : { index };
+    }
+    if (!valued.has(name)) return { invalid: true };
+    const value = equals === -1 ? words[++index] : word.slice(equals + 1);
+    if (value === undefined) return { invalid: true };
+    if (value === 'help' && queryValues.has(name)) return { readOnly: true };
+    return { name, value, index };
+  }
+  for (let at = 1; at < word.length; at += 1) {
+    const name = word[at];
+    if (name === 'h') return { readOnly: true };
+    if (shortValued.includes(name)) {
+      const value = at + 1 < word.length ? word.slice(at + 1) : words[++index];
+      if (value === undefined) return { invalid: true };
+      if (value === 'help' && queryValues.has(name)) return { readOnly: true };
+      return { name, value, index };
+    }
+    if (!shortFlags.includes(name)) return { invalid: true };
+  }
+  return { index };
+}
+
+function systemctlArguments(words, from, stopAtOperand = false) {
+  const args = [];
+  let options = true;
+  for (let index = from; index < words.length; index += 1) {
+    const word = words[index];
+    if (options && word === '--') { options = false; continue; }
+    if (options && word.startsWith('-') && word !== '-') {
+      const option = serviceOption(words, index, SYSTEMCTL_OPTIONS);
+      if (option.invalid || option.readOnly) return option;
+      index = option.index;
+    } else {
+      args.push(word);
+      if (stopAtOperand) options = false;
+    }
+  }
+  return { args };
+}
+
+const SYSTEMD_RUN_VALUED_OPTIONS = new Set(['--capsule', '--unit', '--description', '--slice', '--expand-environment',
+  '--host', '--machine', '--service-type', '--uid', '--gid', '--nice', '--setenv', '--property', '--on-active',
+  '--on-boot', '--on-startup', '--on-unit-active', '--on-unit-inactive', '--on-calendar', '--timer-property',
+  '--path-property', '--socket-property', '--working-directory', '--background', '--json', '--job-mode']);
+const SYSTEMD_RUN_FLAG_OPTIONS = new Set(['--help', '--version', '--user', '--system', '--scope', '--slice-inherit',
+  '--remain-after-exit', '--send-sighup', '--wait', '--tty', '--pty', '--pty-late', '--pipe', '--quiet', '--verbose', '--on-timezone-change',
+  '--on-clock-change', '--no-block', '--no-ask-password', '--collect', '--same-dir', '--shell', '--ignore-failure', '--no-pager']);
+const SYSTEMD_RUN_OPTIONS = {
+  valued: SYSTEMD_RUN_VALUED_OPTIONS, flags: SYSTEMD_RUN_FLAG_OPTIONS,
+  longOptions: [...SYSTEMD_RUN_VALUED_OPTIONS, ...SYSTEMD_RUN_FLAG_OPTIONS],
+  shortValued: 'CHMEpu', shortFlags: 'hrtTPqvGdS',
+  queryValues: new Set(['--json', '--job-mode']),
+};
+
+// systemd-run stops options at COMMAND. Required short-option values consume
+// the group suffix or the next word; repeated unit options keep the last value.
+function systemdRunArguments(words, from) {
+  let unit = null;
+  let posixlyCorrect = false;
+  let index = from;
+  for (; index < words.length; index += 1) {
+    const word = words[index];
+    if (word === '--') { index += 1; break; }
+    if (!word.startsWith('-') || word === '-') break;
+    const option = serviceOption(words, index, SYSTEMD_RUN_OPTIONS);
+    if (option.invalid || option.readOnly) return option;
+    index = option.index;
+    if (['--unit', 'u'].includes(option.name)) {
+      if (option.value === '') return { invalid: true };
+      unit = option.value;
+    }
+    if (['--setenv', 'E'].includes(option.name) && /^POSIXLY_CORRECT=/u.test(option.value)) posixlyCorrect = true;
+  }
+  return { unit, commandIndex: index < words.length ? index : -1, posixlyCorrect };
+}
+
+// Track only POSIXLY_CORRECT, not a general shell environment. null means the
+// mode is unknown; both getopt interpretations must then be checked.
+function servicePosixMode(words, from, head, at, env, inherited) {
+  let mode = inherited;
+  if (mode === undefined) {
+    mode = at.tainted || at.vars.has('POSIXLY_CORRECT') ? null : Object.hasOwn(env, 'POSIXLY_CORRECT');
+  }
+  let wrapper = null;
+  for (let index = from; index < head; index += 1) {
+    const word = words[index];
+    if (isAssignment(word)) {
+      if (word.startsWith('POSIXLY_CORRECT=')) mode = true;
+      continue;
+    }
+    if (WRAPPERS.has(basename(word))) {
+      wrapper = basename(word);
+      if (['sudo', 'doas', 'npx', 'pnpx', 'bunx'].includes(wrapper)) mode = null;
+      continue;
+    }
+    if (!word.startsWith('-') || wrapper === null) continue;
+    const equals = word.indexOf('=');
+    const key = equals === -1 ? word : word.slice(0, equals);
+    if (wrapper === 'env') {
+      if (['-i', '--ignore-environment'].includes(key)) mode = false;
+      let unset = null;
+      if (['-u', '--unset'].includes(key)) unset = equals === -1 ? words[index + 1] : word.slice(equals + 1);
+      else if (word.startsWith('-u')) unset = word.slice(2);
+      if (unset === 'POSIXLY_CORRECT') mode = false;
+    }
+    if (equals === -1 && WRAPPER_VALUED[wrapper]?.has(key)) index += 1;
+  }
+  return mode;
+}
+
+function executionCommandProblem(words, head, at, options) {
+  const pending = [{ words, head, from: 0 }];
+  while (pending.length > 0) {
+    // Test-only observation can assert traversal counts without a time limit.
+    options.observeCommand?.();
+    const problem = executionSingleCommandProblem(pending.pop(), at, options, pending);
+    if (problem !== null) return problem;
+  }
+  return null;
+}
+
+function executionSingleCommandProblem({ words, head, from, posixMode: inherited }, at, { pluginRoot, home, env }, pending) {
+  if (head < 0) return null;
+  const name = basename(words[head]);
+  const posixMode = servicePosixMode(words, from, head, at, env, inherited);
+  if (name === 'systemctl') {
+    for (const stopAtOperand of posixMode === null ? [false, true] : [posixMode]) {
+      const parsed = systemctlArguments(words, head + 1, stopAtOperand);
+      if (parsed.invalid) return 'autoloop guard — these service options cannot be checked.';
+      if (parsed.readOnly) continue;
+      const [verb, ...targets] = parsed.args;
+      const selectors = ['enable', 'link'].includes(verb) ? targets.map((target) => basename(target)) : targets;
+      const loggingMutation = ['service-log-level', 'service-log-target'].includes(verb) && targets.length > 1;
+      // reset-failed without unit names resets every unit, including its counters.
+      const resetAll = verb === 'reset-failed' && targets.length === 0;
+      if (resetAll || ((SYSTEMCTL_MUTATIONS.has(verb) || loggingMutation) && selectors.some(selectsAutoloopService))) {
+        return 'autoloop guard — model tools cannot change an Autoloop service.';
+      }
+    }
+    return null;
+  }
+  if (name === 'systemd-run') {
+    const parsed = systemdRunArguments(words, head + 1);
+    if (parsed.invalid) return 'autoloop guard — these service options cannot be checked.';
+    if (parsed.readOnly) return null;
+    const { unit, commandIndex } = parsed;
+    if (/^autoloop-[0-9a-f]{64}(?:\.service)?$/u.test(unit ?? '')) {
+      return 'autoloop guard — model tools cannot launch an Autoloop service.';
+    }
+    if (commandIndex >= 0) pending.push({ words, head: headIndex(words, commandIndex), from: commandIndex,
+      posixMode: parsed.posixlyCorrect ? true : null });
+    return null;
+  }
+  if (['xargs', 'parallel'].includes(name)) {
+    let index = head + 1;
+    while (index < words.length && words[index].startsWith('-')) index += /^-[IndPLEs]$/u.test(words[index]) ? 2 : 1;
+    pending.push({ words, head: headIndex(words, index), from: index, posixMode });
+    return null;
+  }
+  if (name === 'find' || name === 'fd') {
+    let inner;
+    if (name === 'find') inner = findActionCommands(words, head + 1);
+    else {
+      // fd gives all words after its first exec option to that child command.
+      const execAt = words.findIndex((word, index) => index > head && ['-x', '-X', '--exec', '--exec-batch'].includes(word));
+      inner = execAt === -1 ? [] : [words.slice(execAt + 1)];
+    }
+    for (let index = inner.length - 1; index >= 0; index -= 1) {
+      const command = inner[index];
+      pending.push({ words: command, head: headIndex(command), from: 0, posixMode });
+    }
+    return null;
+  }
+  const index = executionScriptIndex(words, head);
+  if (index < 0) return null;
+  const script = resolveWord(words[index], at, home, env);
+  if (script === null) return null;
+  const target = script.paths.find((path) => EXECUTION_TOOLS.has(basename(path))
+    && (path === join(pluginRoot, 'tools', basename(path)) || canonical(path) === canonical(join(pluginRoot, 'tools', basename(path)))
+      || /\/\.claude\/plugins\/cache\/[^/]+\/autoloop\/[^/]+\/tools\/[^/]+$/u.test(path)));
+  if (target === undefined) return null;
+  const args = words.slice(index + 1);
+  if (args.length === 1 && args[0] === '--self-test') return null;
+  const tool = basename(target);
+  // Operator-approved development checks only. These exact modes cannot
+  // select a repository/run or issue a control. Installed spellings stay
+  // protected even when a cache entry points at the development checkout.
+  let sourceCheckout = false;
+  if (!target.includes('/.claude/plugins/cache/') && !pluginRoot.includes('/.claude/plugins/cache/')) {
+    try {
+      const git = lstatSync(join(pluginRoot, '.git'));
+      sourceCheckout = git.isDirectory() || git.isFile();
+    } catch { /* not the source checkout */ }
+  }
+  if (sourceCheckout && ((tool === 'loop-viewer.mjs' && args.length === 1 && args[0] === '--fixtures')
+    || (tool === 'loop-supervisor.mjs' && args.length === 2 && args[0] === '--self-test' && args[1] === '--require-supervision'))) return null;
+  if (tool === 'loop.mjs' && ['status', 'request-status'].includes(args[0])) return null;
+  if (tool === 'status.mjs' && !args.some((word) => /^(?:--attach|--disconnect|--control|--viewer-ended)(?:=|$)/u.test(word))) return null;
+  return `autoloop guard — model tools cannot call the scheduler mutation or host helper entry (${tool}). Use a trusted operator command.`;
+}
+// Emergency tokenization covers literal direct/wrapped commands and quoted
+// shell -c bodies. Normal hooks still use command-guard's full lexer.
+export function fallbackGuardSegments(command, depth = 0) {
+  const segments = [];
+  let words = [];
+  let word = '';
+  let quote = null;
+  const flushWord = () => { if (word !== '') words.push(word); word = ''; };
+  const flushSegment = () => { flushWord(); if (words.length) segments.push({ words, opens: 0, closes: 0 }); words = []; };
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (char === '\\' && quote !== "'") { word += command[++index] ?? ''; continue; }
+    if (quote !== null) { if (char === quote) quote = null; else word += char; continue; }
+    if (char === '"' || char === "'") { quote = char; continue; }
+    if (char === '#' && word === '') { while (index < command.length && command[index] !== '\n') index += 1; flushSegment(); continue; }
+    if (char === '>') {
+      flushWord(); word = char;
+      if (['>', '|', '&'].includes(command[index + 1])) word += command[++index];
+      flushWord(); continue;
+    }
+    if (';|&()\n'.includes(char)) { flushSegment(); continue; }
+    if (/\s/u.test(char)) flushWord(); else word += char;
+  }
+  flushSegment();
+  if (depth < 4) {
+    for (const segment of [...segments]) {
+      const shell = segment.words.findIndex((word) => /^(?:ba|da|k|z)?sh$/u.test(word));
+      const flag = segment.words.findIndex((word, index) => index > shell && /^-[A-Za-z]*c[A-Za-z]*$/u.test(word));
+      if (shell >= 0 && flag >= 0 && segment.words[flag + 1]) segments.push(...fallbackGuardSegments(segment.words[flag + 1], depth + 1));
+    }
+  }
+  return segments;
+}
+
+// Uses the existing shell placement, wrappers and path expansion. It does not
+// parse inline JavaScript/Python, nor deny unknown unrelated command forms.
+export function executionCommandProblemFor(segments, { cwd, pluginRoot = dirname(dirname(fileURLToPath(import.meta.url))), home = homedir(), env = process.env, observeCommand } = {}) {
+  for (const at of placeSegments(segments, cwd, home, env)) {
+    const problem = executionCommandProblem(at.argv, at.head, at, { pluginRoot, home, env, observeCommand });
+    if (problem !== null) return problem;
+  }
+  return null;
+}
+
+// Module 1 has no admitted writer boundaries. All registered worker postures
+// therefore have a read-only tool ceiling. Later admission must grant a boundary
+// explicitly; a viewer or an environment flag cannot supply one.
+export function workerReadOnlyProblem(segments, { cwd, pluginRoot = dirname(dirname(fileURLToPath(import.meta.url))), home = homedir(), env = process.env } = {}) {
+  if (segments.some((segment) => segment.opaque)) return 'autoloop guard — the worker command cannot be checked.';
+  for (const at of placeSegments(segments, cwd, home, env)) {
+    if (at.writes.length > 0) return 'autoloop guard — this worker has no admitted write boundary.';
+    if (at.head < 0) continue;
+    const name = basename(at.argv[at.head]);
+    if (['cd', 'pushd', 'popd'].includes(name)) continue;
+    if (READ_ONLY.has(name) && claims(at.argv, at.head).length === 0) continue;
+    if (name === 'git') {
+      let index = at.head + 1;
+      while (index < at.argv.length && at.argv[index].startsWith('-')) {
+        if (at.argv[index] === '-c' || at.argv[index].startsWith('--config-env')) break;
+        index += GIT_VALUED.has(at.argv[index]) ? 2 : 1;
+      }
+      const verb = at.argv[index];
+      const generatesOutput = ['diff', 'log', 'show'].includes(verb)
+        && at.argv.slice(index + 1).some((word) => word === '--output' || word.startsWith('--output='));
+      if (!generatesOutput && (['status', 'diff', 'show', 'log', 'rev-parse', 'rev-list', 'ls-files', 'ls-tree', 'cat-file', 'merge-base', 'blame', 'check-attr', 'check-ignore'].includes(verb)
+        || (verb === 'worktree' && at.argv[index + 1] === 'list'))) continue;
+    }
+    const scriptIndex = executionScriptIndex(at.argv, at.head);
+    if (scriptIndex >= 0) {
+      const script = resolveWord(at.argv[scriptIndex], at, home, env);
+      const tool = script?.paths.find((path) => path === join(pluginRoot, 'tools', basename(path))
+        || canonical(path) === canonical(join(pluginRoot, 'tools', basename(path))));
+      const args = at.argv.slice(scriptIndex + 1);
+      if (tool && ((basename(tool) === 'loop.mjs' && ['status', 'request-status'].includes(args[0]))
+        || (basename(tool) === 'status.mjs' && !args.some((word) => /^(?:--attach|--disconnect|--control|--viewer-ended)(?:=|$)/u.test(word))))) continue;
+    }
+    // No inference of write authority from a role name or copied session.
+    return 'autoloop guard — this worker has no admitted write boundary. Use read-only tools.';
+  }
+  return null;
+}
+
 // Whether a segment only reads: no claim on any path. A command that opens a
 // run may do nothing else (command-guard.mjs).
 export function readsOnly(words) {
@@ -678,10 +1152,16 @@ export function readsOnly(words) {
   return claims(words, head).length === 0;
 }
 
-function judge(claim, at, dirs, home, env) {
+function judge(claim, at, dirs, home, env, knownOnly = false) {
   const resolved = claim.word === null ? null : resolveWord(claim.word, at, home, env);
-  if (resolved === null) return claim.prove ? unproven(claim.word) : null;
+  if (resolved === null) return claim.prove && !knownOnly ? unproven(claim.word) : null;
+  // A literal glob with parent traversal has real physical targets. Failure
+  // to enumerate them must not grant a mutation, including the early fallback.
+  if (resolved.physicalUnknown) return unproven(claim.word);
   for (const path of resolved.paths) {
+    if (knownOnly && claim.relations.includes('inside') && knownExecutionStatePath(path)) {
+      return refusal(path, 'scheduler execution state');
+    }
     for (const protectedDir of dirs) {
       const found = relation(path, protectedDir, claim.prove);
       if (found === null) continue;
@@ -699,7 +1179,7 @@ function judge(claim, at, dirs, home, env) {
   }
   // What a destructive command names must be known: a value the guard cannot
   // see could be anything, `..` included.
-  if (claim.prove && resolved.unknowns.length > 0) return unproven(claim.word);
+  if (claim.prove && !knownOnly && resolved.unknowns.length > 0) return unproven(claim.word);
   return null;
 }
 
@@ -754,8 +1234,14 @@ function placeSegments(segments, cwd, home, env) {
       if (named !== -1 && list[named + 1] !== undefined) unknown(list[named + 1]);
     }
     const scope = { dir, oldDir, vars: new Map(vars), tainted };
-    const chdir = list.findIndex((word, index) => index < head && (word === '-C' || word === '--chdir'));
-    const segmentDir = chdir === -1 ? dir : placeDir(list[chdir + 1] ?? '', scope, home, env);
+    let changedDir;
+    walkWrappers(list, 0, (wrapper, option, index) => {
+      const key = option.split('=')[0];
+      if ((wrapper === 'env' && ['-C', '--chdir'].includes(key)) || (wrapper === 'sudo' && ['-D', '--chdir'].includes(key))) {
+        changedDir = option.includes('=') ? option.slice(option.indexOf('=') + 1) : list[index + 1] ?? '';
+      }
+    });
+    const segmentDir = changedDir === undefined ? dir : placeDir(changedDir, scope, home, env);
     const argv = [];
     const writes = [];
     for (let index = 0; index < list.length; index += 1) {

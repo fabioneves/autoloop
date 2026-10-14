@@ -25,33 +25,21 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { heldLatch, ownedRun, processStart, protectedPaths, sessionOwnerPid } from './run-markers.mjs';
+import { heldLatch, ownedRun, processStart, protectedPaths, sessionOwnerPid, executionProtectedPaths } from './run-markers.mjs';
+import { canonicalGuardPath as canonical, guardPathForms, rawGuardAbsolutePath, knownExecutionStatePath } from './run-state-guard.mjs';
+import { workerToolContext } from './loop-execution-admission.mjs';
 import { hookRoot } from './hook-root.mjs';
 import { gitStalled, setGitDeadline } from './git-budget.mjs';
 
 const EDIT_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const HOOK_WIRING = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);
 
-// A path through a symlink must not fail open: the file (or, for a new file,
-// its directory) is compared by its real location.
-function canonical(path) {
-  try {
-    return realpathSync(path);
-  } catch {
-    try {
-      return join(realpathSync(dirname(path)), basename(path));
-    } catch {
-      return path;
-    }
-  }
-}
-
 export function hookWiringEditProblem(filePath, repoRoot, live) {
   if (!live || typeof filePath !== 'string' || filePath.length === 0) return null;
   const root = canonical(repoRoot);
-  const target = canonical(resolve(repoRoot, filePath));
+  const target = canonical(rawGuardAbsolutePath(filePath, repoRoot));
   const relativePath = relative(root, target).split(sep).join('/');
   if (!HOOK_WIRING.includes(relativePath.toLowerCase())) return null;
   return `autoloop guard — ${relativePath} is this session's hook wiring, and a session that ran `
@@ -59,11 +47,13 @@ export function hookWiringEditProblem(filePath, repoRoot, live) {
     + 'human\'s, or autoloop:setup\'s in a new session.';
 }
 
-export function runStateEditProblem(filePath, repoRoot, protectedDirs, live) {
+export function runStateEditProblem(filePath, repoRoot, protectedDirs, live, { codeAliases = true } = {}) {
   if (!live || typeof filePath !== 'string' || filePath.length === 0) return null;
-  const target = canonical(resolve(repoRoot, filePath));
+  const targets = guardPathForms(filePath, repoRoot);
+  const target = targets.at(-1);
   const hit = protectedDirs.filter((dir) => typeof dir === 'string')
-    .find((dir) => [dir, canonical(dir)].some((form) => target === form || target.startsWith(`${form}${sep}`)));
+    .find((dir) => (codeAliases ? [dir, canonical(dir)] : [dir])
+      .some((form) => targets.some((path) => path === form || path.startsWith(`${form}${sep}`))));
   if (hit === undefined) return null;
   return `autoloop guard — ${target} is this run's own state (${hit}): the run markers and the session `
     + 'latch are how the guard knows a run is open, so a run never writes them.';
@@ -159,32 +149,60 @@ function selfTest() {
   return failures.length === 0;
 }
 
-function main() {
+export function runEditGuard({ workerDirectory, inputText, observe = () => {} } = {}) {
   if (process.argv.includes('--self-test')) process.exit(selfTest() ? 0 : 1);
   // The same budget the command guard keeps: a stalled git (a FIFO for
   // .git/config) must refuse before the host's timeout lets the edit through.
   setGitDeadline(Date.now() + Math.min(10_000, Number(process.env.AUTOLOOP_GUARD_BUDGET_MS) || 10_000));
   let payload = null;
+  let guarded = false;
+  process.on('uncaughtException', () => {
+    const sessionId = payload?.session_id;
+    try {
+      if (guarded || workerToolContext({ sessionId, cwd: payload?.cwd ?? process.cwd(), workerDirectory }) !== null
+        || (typeof sessionId === 'string' && sessionId !== '' ? ownedRun({ sessionId, includeClosed: true }) : heldLatch()) !== null) {
+        console.error('autoloop guard — the edit guard failed for a guarded process.'); process.exit(2);
+      }
+    } catch { process.exit(1); }
+    process.exit(0);
+  });
   try {
-    payload = JSON.parse(readFileSync(0, 'utf8'));
+    payload = JSON.parse(inputText ?? readFileSync(0, 'utf8'));
   } catch { /* names no session: decided below */ }
   const sessionId = typeof payload?.session_id === 'string' && payload.session_id !== '' ? payload.session_id : null;
+  const worker = workerToolContext({ sessionId, cwd: payload?.cwd ?? process.cwd(), workerDirectory });
+  guarded = worker !== null;
+  observe('policy-ready');
+  if (worker !== null) {
+    if (worker.unreadable) { console.error('autoloop guard — the registered worker identity or attempt cannot be verified.'); process.exit(2); }
+    if (EDIT_TOOLS.includes(payload?.tool_name)) {
+      console.error('autoloop guard — this worker has no admitted write boundary.'); process.exit(2);
+    }
+  }
   // A payload that is unreadable or names no session may be the owner's
   // while this process holds a latch (open or closed): refused, as the
   // command guard refuses it.
+  if (!EDIT_TOOLS.includes(payload?.tool_name) && sessionId !== null) process.exit(0);
+  const earlyRoot = process.env.CLAUDE_PROJECT_DIR || payload?.cwd || process.cwd();
+  const filePath = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
+  if (typeof filePath === 'string' && guardPathForms(filePath, payload?.cwd ?? earlyRoot).some(knownExecutionStatePath)) {
+    console.error('autoloop guard — model tools cannot change named scheduler execution state.'); process.exit(2);
+  }
+  const executionPaths = executionProtectedPaths({ projectRoot: earlyRoot, cwd: payload?.cwd ?? earlyRoot });
+  const earlyProblem = runStateEditProblem(filePath, payload?.cwd ?? earlyRoot, executionPaths.state, true)
+    ?? runStateEditProblem(filePath, payload?.cwd ?? earlyRoot, executionPaths.code, true, { codeAliases: false });
+  if (earlyProblem !== null) { console.error(earlyProblem); process.exit(2); }
   if (sessionId === null) {
     if (heldLatch() === null) process.exit(0);
     console.error('autoloop guard — the hook payload is unreadable or names no session, so the edit cannot be checked.');
     process.exit(2);
   }
-  if (!EDIT_TOOLS.includes(payload?.tool_name)) process.exit(0);
   // Plugin hooks fire in every session; this one guards only the session
   // that owns a run (run-markers.mjs ownedRun) — until /clear or exit, a
   // closed run too — before any git call, and then whatever the checkout
   // says (an unreadable latch of its own too).
   if (ownedRun({ sessionId, includeClosed: true }) === null) process.exit(0);
   const repoRoot = hookRoot();
-  const filePath = payload?.tool_input?.file_path ?? payload?.tool_input?.notebook_path;
   // The same paths the command guard protects (run-markers.mjs protectedPaths).
   const paths = protectedPaths({ projectRoot: repoRoot, cwd: payload?.cwd ?? repoRoot, runOpen: true });
   const problem = hookWiringEditProblem(filePath, repoRoot, true)
@@ -209,4 +227,4 @@ const isMain = (() => {
     return false;
   }
 })();
-if (isMain) main();
+if (isMain) runEditGuard();

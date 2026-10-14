@@ -5,7 +5,7 @@
 // by what it was asked (`--json`, `--control`, `tail`), never by call order.
 import { mock } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { HttpInit, On, PaneOpenArgs, ProcessRunResult, RenderElement, RenderViewport, UiPane } from 'claude-code'
+import type { HttpInit, On, PaneOpenArgs, ProcessRunInit, ProcessRunResult, RenderElement, RenderViewport, UiPane } from 'claude-code'
 import type { StatusProjection, StatusState, StatusTick } from '../../../types'
 
 import { PANE_ID } from '../central'
@@ -63,6 +63,9 @@ export type SeatOptions = {
   placed?: boolean
   /** When true, a write of the mod's state is refused. */
   denyState?: () => boolean
+  /** An external host process answer for daemon commands; undefined uses the existing producer fixture. */
+  process?: (argv: readonly string[], init?: ProcessRunInit) => Promise<ProcessRunResult | undefined>
+  root?: string
 }
 
 function answerOf(value: string | Answer): Answer {
@@ -104,11 +107,14 @@ export function seat(on: On, options: SeatOptions = {}) {
     return { value: ran(value.stdout, 'exitCode' in value ? value.exitCode : 0) }
   }
   on('session.id', () => ({ value: sessionId }))
+  on('session.root', () => ({ value: options.root ?? '/work' }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('process.run', async ($, e) => {
     const call = { argv: e.argv, timeoutMs: e.init?.timeoutMs }
+    const external = await options.process?.(e.argv, e.init)
+    if (external !== undefined) return { value: external }
     if (e.argv[0] === 'tail') {
       tails.push(call)
       return answer(options.tail?.() ?? { stdout: STREAM })

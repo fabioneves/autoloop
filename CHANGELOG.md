@@ -3,6 +3,48 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.73.0] - 2026-10-14
+
+### Added
+
+- Module 1 daemon foundation: a named systemd user service on supported Linux hosts.
+  Startup verifies process identity, ownership and applied resource limits before readiness.
+  There is no uncapped fallback or daemon runtime deadline.
+- Durable checkpoints and controls for `pause`, `resume`, `stop` and `stop-now`.
+  Accepted requests remain pending until their outcomes are recorded. Recovery checks
+  unknown outcomes before retry. Daemon controls do not start a model turn.
+- Explicit Central viewer attachment through `/autoloop attach`. Discovery does not attach
+  a viewer. `/autoloop disconnect` and session exit end only that attachment; closing the
+  pane does not stop the daemon. Attached viewers do not gain worker authority.
+
+### Changed
+
+- Updated legacy and daemon entry points share an atomic repository admission gate across
+  linked worktrees. Older binaries cannot use this gate. Before daemon activation, drain
+  old-version legacy runs and detached dispatches, then restart participating sessions.
+- Module 1 reports `queueEnabled:false`. It performs no production issue selection and
+  starts no unit model sessions. Production `/autoloop:dev` is unchanged and remains the
+  execution path. Installation does not activate a service or migrate a running loop.
+  The scheduler initiative (item 7) is not complete.
+
+### Fixed
+
+- Concurrent stale-lock recovery now coordinates reclaimers before step callbacks.
+  Displaced writers acquire ownership again before callbacks; callbacks with effects are
+  not retried. This requires updated cooperative writers, not mixed-version isolation.
+- Guards resolve physical output paths through symlinks and check literal service selectors.
+  Scheduler state and the fixed OS-account admission namespace are protected without a
+  legacy run owner. Unrelated reads and source edits remain allowed.
+- Daemon storage checks ownership and permissions on open directory and record descriptors.
+  Shared ancestors must not be writable by other accounts; scheduler and control storage
+  must be private. Unsafe state is refused without automatic permission changes or migration.
+  Legacy startup still accepts shared Git-directory modes. Both upgraded start paths require
+  a private OS-account admission store with safe ancestors.
+- Authoritative directory parents are flushed before state publication. Failed or unsupported
+  filesystem synchronization prevents publication.
+- Immediate stop checks all verified owned worker targets before it records completion.
+  Worker groups with unknown outcomes remain visible during recovery.
+
 ## [0.72.0] - 2026-10-13
 
 ### Added

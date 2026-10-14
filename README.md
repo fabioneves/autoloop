@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.72.0" src="https://img.shields.io/badge/release-v0.72.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.73.0" src="https://img.shields.io/badge/release-v0.73.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -154,7 +154,8 @@ it installed from its own marketplace, keep either copy.
 
 ## Central
 
-In a session that owns a run, the plugin draws autoloop's own workplace inside Claude Code.
+The plugin draws Central inside Claude Code for a legacy run owner or an explicitly attached
+scheduler viewer.
 
 - **The band** above the prompt is one card: the loop (phase, `#N · PR #M`, role, round, model),
   the work (active, waiting, needs you) and the proxy (`● ON · n requests`, `◐ UP · no status`
@@ -168,11 +169,11 @@ In a session that owns a run, the plugin draws autoloop's own workplace inside C
   the run with its PR, disposition and last step) and **Log** (the autoloop log, every event with
   its timestamp, newest first, with a filter row). The log is the loop's, apart from the agent's
   transcript.
-- **Controls**: `p` pauses and resumes the loop; `x` cancels the shown dispatch after a `y`;
+- **Legacy controls**: `p` pauses and resumes the loop; `x` cancels the shown dispatch after a `y`;
   an input under a needs-you row sends an answer; `merge` and `authorize` buttons sit on a
-  delivered pull request when the loop's gate may act. Each control is one file the loop
+  delivered pull request when the loop's gate may act. Each legacy control is one file the loop
   consumes (see Events and control) and one queued prompt, `autoloop: control`, that wakes a
-  parked session. A refused control is toasted with its reason.
+  parked session. A refused control shows its reason. Scheduler controls are described below.
 - The spinner names the loop's state while a run is owned, and `/autoloop` draws the card in the
   transcript.
 
@@ -180,13 +181,45 @@ Hotkeys work while the pane or the band holds the keyboard (`ctrl+x tab`, or a c
 prompt they type. The pane docks beside the transcript under the fullscreen renderer
 (`/tui fullscreen` or `CLAUDE_CODE_NO_FLICKER=1`) and opens inline above the prompt otherwise.
 The mod reads one projection, `node <plugin-tools>/status.mjs --json --session <id>`, the live
-files it names, and the proxy's `GET /status`; it never calls GitHub and never writes a file: a
-control goes through `status.mjs --control`. A session that owns no run sees nothing. A project
-turns it off with `"ui": { "status": false }` in `.autoloop/config.json`.
+files it names, and the proxy's `GET /status`; it never calls GitHub. Controls and viewer changes
+go through the CLI. Without ownership or attachment, a session does not display the run. A project
+turns the display off with `"ui": { "status": false }` in `.autoloop/config.json`.
+
+## Scheduler backend
+
+The first scheduler module provides a supervised daemon, durable controls and explicit Central
+viewer attachment. It does **not** select issues or launch unit sessions yet. The existing
+`/autoloop:dev` loop remains the production execution path until the scheduler modules are complete.
+Installing the plugin does not start a service or migrate a running loop.
+
+On a supported Linux host, `/autoloop start` requests a named systemd user service. Startup checks
+its process identity, ownership and applied resource limits before it reports readiness. There is
+no uncapped fallback and no daemon runtime deadline. Daemon activation requires owned Git-admin
+ancestors without group/other write permission and private scheduler/control storage. Unsafe existing
+permissions are refused, never changed automatically. Legacy startup still accepts shared Git-directory
+modes. Both upgraded start paths require a private OS-account admission store with safe ancestors.
+`/autoloop attach` connects a viewer to an existing run; discovery alone does not attach.
+`/autoloop disconnect` and session exit end only
+that viewer's attachment. Closing the pane does not stop the run.
+
+Daemon controls are `/autoloop pause`, `/autoloop resume`, `/autoloop stop` and
+`/autoloop stop now`. Graceful stop drains to a completed or recorded waiting state. Immediate stop
+signals only verified owned worker groups. An accepted control is not reported as applied until
+its outcome is recorded. Unknown outcomes remain visible and are reconciled before retry.
+Daemon controls do not wake a model turn. Legacy controls keep their existing wake behavior.
+
+Before activating the daemon, drain old-version legacy runs and detached dispatches and restart
+participating sessions on the upgraded plugin. Updated legacy and daemon entry points share an
+atomic admission gate; an older binary cannot participate in that gate. The plugin does not close
+PRs, relabel issues, terminate existing sessions or delete worktrees as a migration shortcut.
+
+See [the scheduler module map](docs/specs/SPEC-scheduler.md) and
+[the daemon contract](docs/specs/SPEC-loop-daemon.md). The UI reports that production selection is
+disabled in this module, rather than presenting an idle daemon as a working issue processor.
 
 ## Events and control
 
-Every change of the loop's state is one line appended to `.git/autoloop/events.jsonl`: a run
+The legacy loop records state changes in `.git/autoloop/events.jsonl`: a run
 start or end, a step with its round and model, a dispatch start (with its live file and pid) and
 end, a decision, a wait, a resume, a block, a delivery, a merge, a label, a pause. The projection
 reads it to show the worked unit's steps, the run's log, and the running dispatches. The operator's
@@ -198,7 +231,7 @@ its issue on every later ribbon. The contract is `docs/specs/SPEC-events.md`.
 
 ## Configuration and merge policy
 
-v0.72.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
+v0.73.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
 defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
 optional `protectedPaths` and `ui`. The repository owns it; plugin updates never overwrite it.
 
@@ -238,13 +271,14 @@ kill switch stay enforced regardless.
 | `.autoloop/STATE.md` | Policy prose: mission, invariants, protected ground. Every run reads it. |
 | `.autoloop/checklist.md` | Optional review criteria; the plugin's checklist when absent. |
 | `docs/agentic/ARCH.md`, `docs/agentic/LESSONS.md` | Architecture map and durable memory, yours to edit. |
-| The plugin | Every tool, role brief and hook (`hooks/hooks.json`). A hook acts only for the session that owns a run, from its prime to `/clear` or exit; `--close-run` ends all but the command and edit guards. Every other session sees no hook effect. |
-| `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch: step records, the event file, the control directory. Never committed. |
+| The plugin | Every tool, role brief and hook (`hooks/hooks.json`). Legacy ownership guards remain active from prime to `/clear` or exit; `--close-run` retains the command and edit guards. Scheduler state and known service mutations are protected even without a legacy owner. Attached viewers do not gain worker authority. |
+| `.git/autoloop/`, `/tmp/autoloop-*` | Local run state and scratch: step records, events, controls, scheduler pins, leases and checkpoints. Linked worktrees share the common Git directory. Never committed. |
+| OS-account home: `.claude/autoloop/` | Private execution-admission records, host receipts and worker bindings. Not redirected by `HOME`. |
 | Issue labels and comments | `loop-ready`, `loop-started`, `loop:NN-*` step labels, `loop-delivered` / `loop-blocked` / `loop-waiting` / `loop-obsolete` / `loop-decided` / `loop-repair`, the `loop-digest` issue; lifecycle markers, the frozen plan, and the run record. |
 
 ## How it stays safe
 
-v0.72.0 dispatches every role through one call:
+v0.73.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>
@@ -264,8 +298,9 @@ dispatch reads the checkout; a prime command that does anything else; and a hook
 read, for the session that owns a run. The rules also apply to the text a command runs: an
 in-command git or gh alias, a function, case or trap body, and a shell fed by a heredoc or a
 literal echo; a hidden alias is refused. An inline interpreter's program (`python3 -c`, `node
--e`) is not judged. Every other command is allowed; `step.mjs` alone swaps step labels and keeps
-the ladder rules.
+-e`) is not judged. Scheduler execution guards also refuse protected runtime writes and service
+commands whose options cannot be checked. Other commands are allowed. `step.mjs` alone swaps step
+labels and keeps the ladder rules.
 Protected paths stop for `human:authorize`. Dispatch failures are typed and recorded. A
 read-only role retries a transient failure a bounded number of times and moves to its configured
 fallback on a usage limit; any role moves to it when its model is unavailable; a writer never

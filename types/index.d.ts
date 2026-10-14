@@ -95,6 +95,42 @@ export type StatusDispatch = {
   pid: number | null
   startedAtMs: number
   state: 'running' | 'died'
+  observation?: never
+}
+
+/** Daemon-only checkpoint binding. Unknown is retained, not running or dead. */
+export type StatusDaemonDispatch = Omit<StatusDispatch, 'state' | 'observation'> & {
+  state: 'running' | 'died' | 'unknown'
+  observation: 'alive' | 'empty' | 'unknown'
+}
+export type StatusProjectedDispatch = StatusDispatch | StatusDaemonDispatch
+
+/** A durable daemon control receipt. Acceptance does not mean application. */
+export type StatusControlResponse = {
+  requestId: string
+  runId: string
+  status: 'pending' | 'processing' | 'applied' | 'refused' | 'unknown'
+  outcome: null | {
+    schema: 'autoloop.control-outcome/2'
+    requestId: string
+    runId: string
+    requestHash: string
+    status: 'applied' | 'refused' | 'unknown'
+    code: string
+    appliedRevision: number | null
+    operationId: string | null
+    completedAt: number | null
+  }
+}
+export type StatusExecution = {
+  mode: 'daemon'
+  runId: string
+  generation: number
+  state: 'starting' | 'running' | 'paused' | 'draining' | 'recovering' | 'stopped' | 'failed'
+  queueEnabled: false
+  lastCheckpointAt: number
+  eventLogError: string | null
+  supportedControls: ('pause' | 'resume' | 'stop' | 'stop-now')[]
 }
 
 /**
@@ -122,8 +158,11 @@ export type StatusProjection = {
   models?: Record<string, string>
   /** The run's last 50 events, newest first. */
   log?: StatusEvent[]
-  dispatches?: StatusDispatch[]
-  controls?: { refused: StatusRefused[] }
+  /** Legacy dispatches retain their old fields; daemon mode adds uncertain bindings. */
+  dispatches?: StatusProjectedDispatch[]
+  controls?: { refused: StatusRefused[]; requests?: StatusControlResponse[] }
+  execution?: StatusExecution
+  attachment?: { kind: 'viewer'; sessionId: string }
 }
 
 /** One active request as the proxy's `GET /status` lists it (its snake_case fields, read leniently). */
@@ -195,13 +234,13 @@ export type StatusState = {
   paneOpen: boolean
   /** True once the pane was opened unasked in this session (SPEC-central item 13): never twice. */
   autoOpened: boolean
-  /** The live tails by dispatch id: every running dispatch's, and the last ended one's until session.end. */
+  /** Kept output for visible checkpoint bindings (legacy: running), plus the last other stream until session.end. */
   streams: Record<string, StatusStream>
   /** The central pane's tab, kept across a redraw (SPEC-central item 8). */
   tab: 'run' | 'live' | 'units' | 'log'
   /** The Log tab's filter. */
   logFilter: 'all' | 'steps' | 'dispatches' | 'needsYou' | 'controls'
-  /** The Live tab's dispatch, by id; null means the first running one. */
+  /** The Live tab's visible binding, by id; null selects the first. */
   selected: string | null
   /** The Live tab follows the stream's end; a scroll turns it off. */
   follow: boolean

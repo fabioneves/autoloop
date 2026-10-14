@@ -94,6 +94,11 @@ export type LoopColumn = {
 }
 
 export function loopColumn(projection: StatusProjection, narrow: boolean): LoopColumn {
+  if (projection.execution?.mode === 'daemon') {
+    const execution = projection.execution
+    const glyph = execution.state === 'running' ? GLYPH.active : execution.state === 'paused' ? GLYPH.paused : GLYPH.notYet
+    return { glyph, head: `daemon ${execution.state}`, detail: narrow ? null : 'queue disabled · viewer only' }
+  }
   const unit = projection.unit ?? null
   if (unit === null) {
     // The newest delivered unit: issue numbers rise with time, and the
@@ -173,6 +178,9 @@ export type PhaseCell = { label: string; state: 'done' | 'current' | 'notYet' }
 
 /** The producer's phases against the worked unit's: null without a unit (spec item 8). */
 export function phaseRow(projection: StatusProjection): PhaseCell[] | null {
+  // An ordered phase index is not independent review/gate evidence. The daemon
+  // module exposes no such evidence, so it draws no completion row.
+  if (projection.execution?.mode === 'daemon') return null
   const unit = projection.unit ?? null
   if (unit === null) return null
   const phases = projection.phases ?? []

@@ -4,7 +4,7 @@
 // schema; the proxy, `GET <base>/status` without auth; and the live tails
 // of running dispatches. Each is pure over an injected runner or fetch, so
 // a test doubles the host and not the producer.
-import type { ProxyRead, ProxyRequest, StatusDispatch, StatusProjection, StatusStream } from '../../types'
+import type { ProxyRead, ProxyRequest, StatusProjectedDispatch, StatusProjection, StatusStream } from '../../types'
 import { createRenderer } from './render'
 
 export const STATUS_SCHEMA = 'autoloop.status/1'
@@ -14,14 +14,15 @@ export const STALE_AFTER_MS = 30_000
 
 export type Runner = (
   argv: readonly string[],
-  init: { timeoutMs: number },
+  init: { timeoutMs: number; stdin?: string },
 ) => Promise<{ exitCode: number; stdout: string }>
 
 export type ProjectionRead = { ok: true; projection: StatusProjection } | { ok: false }
 
 /** The producer's argv; `logLength` asks for that many log entries (the Log tab's 500), the producer's default otherwise. */
-export function projectionArgv(pluginRoot: string, sessionId: string, logLength: number | null = null): string[] {
-  return ['node', `${pluginRoot}/tools/status.mjs`, '--json', '--session', sessionId, ...(logLength === null ? [] : ['--log', String(logLength)])]
+export function projectionArgv(pluginRoot: string, sessionId: string, logLength: number | null = null, root: string | null = null): string[] {
+  return ['node', `${pluginRoot}/tools/status.mjs`, '--json', '--session', sessionId,
+    ...(logLength === null ? [] : ['--log', String(logLength)]), ...(root === null ? [] : ['--root', root])]
 }
 
 /** The text as one JSON object, or null when it is not one. */
@@ -36,7 +37,7 @@ function parseRecord(text: string): Record<string, unknown> | null {
   return parsed as Record<string, unknown>
 }
 
-/** The producer's stdout as a projection, or null when it is not this mod's schema. */
+/** The parser accepts additive daemon fields without changing the legacy schema. Renderers must not treat an unknown state as success. */
 export function parseProjection(text: string): StatusProjection | null {
   const record = parseRecord(text)
   if (record === null || record['schema'] !== STATUS_SCHEMA || typeof record['owned'] !== 'boolean') return null
@@ -48,9 +49,9 @@ export function parseProjection(text: string): StatusProjection | null {
  * or reports a fault (`owned: false` with `error`, exit 0: the producer never
  * throws) is a failed read, so the last projection is kept and goes stale.
  */
-export async function readProjection(run: Runner, pluginRoot: string, sessionId: string, logLength: number | null = null): Promise<ProjectionRead> {
+export async function readProjection(run: Runner, pluginRoot: string, sessionId: string, logLength: number | null = null, root: string | null = null): Promise<ProjectionRead> {
   try {
-    const result = await run(projectionArgv(pluginRoot, sessionId, logLength), { timeoutMs: READ_TIMEOUT_MS })
+    const result = await run(projectionArgv(pluginRoot, sessionId, logLength, root), { timeoutMs: READ_TIMEOUT_MS })
     if (result.exitCode !== 0) return { ok: false }
     const projection = parseProjection(result.stdout)
     return projection === null || projection.error !== undefined ? { ok: false } : { ok: true, projection }
@@ -192,25 +193,32 @@ export async function tailLive(run: Runner, liveFile: string): Promise<Tailed | 
   }
 }
 
-/** The dispatches whose live file the mod tails: running, with an absolute file path (a relative one is not a dispatch's). */
-export function runningDispatches(projection: StatusProjection | null): (StatusDispatch & { liveFile: string })[] {
-  return (projection?.dispatches ?? []).filter((dispatch): dispatch is StatusDispatch & { liveFile: string } =>
-    dispatch.state === 'running' && dispatch.liveFile !== null && dispatch.liveFile.startsWith('/'))
+/** Tailing requires running state and an absolute path; daemon groups also need verified identity. */
+export function runningDispatches(projection: StatusProjection | null): (StatusProjectedDispatch & { liveFile: string })[] {
+  return (projection?.dispatches ?? []).filter((dispatch): dispatch is StatusProjectedDispatch & { liveFile: string } =>
+    dispatch.state === 'running' && (projection?.execution?.mode !== 'daemon' || dispatch.observation === 'alive')
+      && dispatch.liveFile !== null && dispatch.liveFile.startsWith('/'))
+}
+
+/** Checkpoint bindings stay visible even without a live file, event or cached tail. Legacy visibility stays unchanged. */
+export function visibleDispatches(projection: StatusProjection | null): StatusProjectedDispatch[] {
+  return projection?.execution?.mode === 'daemon' ? projection.dispatches ?? [] : runningDispatches(projection)
 }
 
 /**
- * The streams kept: every running dispatch's, and of the ended ones the
+ * The streams kept: every visible binding's, and of the other ones the
  * one that grew last (the Live tab shows the last ended dispatch's tail),
  * so a long session does not carry every dispatch's lines in its state.
  */
-export function pruneStreams(streams: Record<string, StatusStream>, running: string[]): Record<string, StatusStream> {
-  const ended = Object.entries(streams).filter(([id]) => !running.includes(id))
+export function pruneStreams(streams: Record<string, StatusStream>, retained: string[]): Record<string, StatusStream> {
+  const ended = Object.entries(streams).filter(([id]) => !retained.includes(id))
     .sort(([, left], [, right]) => right.lastGrewAtMs - left.lastGrewAtMs)
-  const kept = new Set([...running, ...ended.slice(0, 1).map(([id]) => id)])
+  const kept = new Set([...retained, ...ended.slice(0, 1).map(([id]) => id)])
   return Object.fromEntries(Object.entries(streams).filter(([id]) => kept.has(id)))
 }
 
 /** Quiet: the dispatch runs and its file did not grow for 120 s. A died or ended dispatch is never quiet. */
-export function isQuiet(stream: StatusStream, dispatch: StatusDispatch, nowMs: number): boolean {
-  return dispatch.state === 'running' && nowMs - stream.lastGrewAtMs >= QUIET_AFTER_MS
+export function isQuiet(stream: StatusStream, dispatch: StatusProjectedDispatch, nowMs: number): boolean {
+  return dispatch.state === 'running' && (dispatch.observation === undefined || dispatch.observation === 'alive')
+    && nowMs - stream.lastGrewAtMs >= QUIET_AFTER_MS
 }

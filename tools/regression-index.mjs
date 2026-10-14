@@ -375,7 +375,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: '../hooks/hooks.json',
-        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/tools/command-guard.mjs\\"',
+        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/tools/loop-execution-admission.mjs\\" --guard-entry command',
       }),
       Object.freeze({
         file: 'verify.mjs',
@@ -616,7 +616,7 @@ export const INCIDENTS = Object.freeze([
     enforcedBy: Object.freeze([
       Object.freeze({
         file: '../hooks/hooks.json',
-        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/tools/command-guard.mjs\\"',
+        anchor: 'node \\"${CLAUDE_PLUGIN_ROOT}/tools/loop-execution-admission.mjs\\" --guard-entry command',
       }),
       Object.freeze({
         file: 'writeback-check.mjs',

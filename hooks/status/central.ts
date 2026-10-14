@@ -3,9 +3,9 @@
 // to row models per tab. They hold no `$`; register.tsx draws what they
 // return with the kit. Each row hands back its glyph apart from its text,
 // so status is carried by the glyph and the words, never by color alone.
-import type { ProxyRead, StatusEvent, StatusPending, StatusProjection, StatusState, StatusStream, StatusUnit, StatusWait, StatusWorkedUnit } from '../../types'
+import type { ProxyRead, StatusEvent, StatusPending, StatusProjectedDispatch, StatusProjection, StatusState, StatusStream, StatusUnit, StatusWait, StatusWorkedUnit } from '../../types'
 import { GLYPH } from './kit'
-import { isQuiet, runningDispatches } from './read'
+import { isQuiet, runningDispatches, visibleDispatches } from './read'
 import { answerText, blockedUnits, duration, loopColumn, parts, ref, requestedName, roundLabel, shortModel, truncate } from './view'
 
 export const PANE_ID = 'autoloop'
@@ -55,6 +55,7 @@ const row = (glyph: string, text: string, right: string | null = null, dim = fal
 
 /** The header's status line: the Loop cell's text, `paused` after it while the run is paused. */
 export function statusLine(projection: StatusProjection): string {
+  if (projection.execution?.mode === 'daemon') return loopColumn(projection, true).head
   return parts([loopColumn(projection, true).head, projection.run?.paused === true ? 'paused' : null])
 }
 
@@ -84,6 +85,7 @@ const utcMinute = (iso: string): string => `${iso.slice(11, 16)} UTC`
 
 /** What the Now section says without a unit: the next selection when the run is parked until a known time. */
 export function noUnitText(projection: StatusProjection): string {
+  if (projection.execution?.mode === 'daemon') return 'module 1 · queue disabled · no production units'
   const until = projection.run?.parkedUntil ?? null
   return until === null ? 'no unit in flight' : `no unit in flight · next selection at ${utcMinute(until)}`
 }
@@ -94,10 +96,14 @@ function unitElapsed(unit: StatusWorkedUnit, nowMs: number): string | null {
   return unit.returnedAtMs === null ? null : `returned ${duration(nowMs - unit.returnedAtMs)} ago`
 }
 
-/** One row per running dispatch: `▶ #517 implement · OPUS 5.5 · 4m 0s`, with its cancel (item 16). */
+/** Running legacy dispatches offer cancel. Every retained daemon binding shows its verified state without a unit action. */
 export function dispatchRows(projection: StatusProjection, nowMs: number): Row[] {
-  return runningDispatches(projection).map((dispatch) => {
+  return visibleDispatches(projection).map((dispatch) => {
     const name = dispatchName(dispatch, dispatch.dispatch)
+    if (projection.execution?.mode === 'daemon') return row(
+      dispatch.state === 'running' && dispatch.observation === 'alive' ? GLYPH.play : GLYPH.waiting,
+      daemonDispatchTitle(dispatch),
+    )
     return row(GLYPH.play, parts([name, dispatch.model === null ? null : shortModel(dispatch.model), duration(nowMs - dispatch.startedAtMs)]), null, false,
       { kind: 'cancel', dispatch: dispatch.dispatch, issue: dispatch.issue, name })
   })
@@ -117,6 +123,7 @@ export const stepName = (step: string): string => step.replace(/^\d+-/u, '')
 
 /** Timeline: one row per step of the worked unit, `✓` returned or `●` in flight; names only when narrow. */
 export function timelineSection(projection: StatusProjection, nowMs: number, narrow: boolean): Section {
+  if (projection.execution?.mode === 'daemon') return { title: 'Timeline', rows: [] }
   const steps = projection.unit?.steps ?? []
   return {
     title: 'Timeline',
@@ -162,6 +169,7 @@ export function pendingQuestion(pending: StatusPending): string {
  * control the run outgrew is dropped by the tick, so its y sends nothing.
  */
 export function pendingOffered(projection: StatusProjection, pending: StatusPending): boolean {
+  if (projection.execution?.mode === 'daemon') return false // Module 1 has no unit actions.
   if (pending.kind === 'cancel') return runningDispatches(projection).some((dispatch) => dispatch.dispatch === pending.dispatch)
   return (projection.units ?? []).some((unit) => {
     const action = prAction(unit)
@@ -217,6 +225,14 @@ export function runTab(projection: StatusProjection, proxy: ProxyRead | null, se
     nowSection(projection, nowMs), timelineSection(projection, nowMs, narrow), needsYouSection(projection), waitingSection(projection),
     deliveredSection(projection), ...(narrow ? [] : [proxySection(proxy, sessionId)]),
   ].filter((section) => section.rows.length > 0)
+  if (projection.execution?.mode === 'daemon') {
+    const requests = projection.controls?.requests ?? []
+    if (requests.length > 0) sections.push({ title: 'Controls', rows: requests.map((request) => row(
+      request.status === 'refused' ? GLYPH.failed : request.status === 'applied' ? GLYPH.done : GLYPH.waiting,
+      parts([`${request.requestId} · ${request.status}`, request.outcome?.code]),
+    )) })
+    if (projection.execution.eventLogError !== null) sections.push({ title: 'History', rows: [row(GLYPH.waiting, projection.execution.eventLogError)] })
+  }
   return { sections, empty: (projection.unit ?? null) === null ? noUnitText(projection) : null }
 }
 
@@ -340,7 +356,7 @@ const LIVE_HOTKEYS = ['a', 'b', 'c', 'd', 'e']
 
 export type LiveLine = { text: string; dim: boolean }
 export type LiveView = {
-  /** One per running dispatch: `#517 implement`, hotkeys `a`..`e` in order (none past the fifth), the selected one active. */
+  /** One per visible binding; legacy shows only running dispatches. */
   buttons: { id: string; label: string; hotkey: string | null; active: boolean }[]
   /** The dispatch shown with its title row and the lines in the window; null when none has run; `cancel` while it runs (item 16). */
   shown: { id: string; title: string; lines: LiveLine[]; cancel: StatusPending | null } | null
@@ -351,10 +367,10 @@ export type LiveState = Pick<StatusState, 'selected' | 'follow' | 'liveOffset' |
 /** `14 lines`, `2.1k lines` from a thousand. */
 export const linesText = (count: number): string => (count >= 1000 ? `${(count / 1000).toFixed(1)}k lines` : `${count} lines`)
 
-/** The dispatch the tab shows: the selected running one, else the first running one, else the ended stream that grew last. */
+/** Show a selected visible binding, then the first, then the cached stream that grew last. Daemon visibility does not imply tail eligibility. */
 export function shownDispatch(projection: StatusProjection, streams: Record<string, StatusStream>, selected: string | null): string | null {
-  const running = runningDispatches(projection).map((dispatch) => dispatch.dispatch)
-  if (running.length > 0) return selected !== null && running.includes(selected) ? selected : running[0] ?? null
+  const visible = visibleDispatches(projection).map((dispatch) => dispatch.dispatch)
+  if (visible.length > 0) return selected !== null && visible.includes(selected) ? selected : visible[0] ?? null
   const ended = Object.entries(streams).sort(([, left], [, right]) => right.lastGrewAtMs - left.lastGrewAtMs)
   return ended[0]?.[0] ?? null
 }
@@ -365,10 +381,23 @@ function dispatchName(dispatch: { issue: number | null; role: string | null }, i
   return words.length === 0 ? id : words.join(' ')
 }
 
+/** Daemon titles use verified process facts, never an event's outcome. */
+function daemonDispatchTitle(dispatch: StatusProjectedDispatch): string {
+  let status = 'process identity unknown'
+  if (dispatch.state === 'running' && dispatch.observation === 'alive') status = 'running'
+  else if (dispatch.observation === 'empty') status = 'process group exited · outcome unknown'
+  return parts([dispatchName(dispatch, dispatch.dispatch), dispatch.model === null ? null : shortModel(dispatch.model), status])
+}
+
 /** The title row of a dispatch: running with its elapsed, lines and `quiet`; ended with its outcome from the log; died when gone. */
 export function liveTitle(projection: StatusProjection, id: string, stream: StatusStream | undefined, nowMs: number, narrow: boolean): string {
   const log = projection.log ?? []
   const listed = (projection.dispatches ?? []).find((dispatch) => dispatch.dispatch === id) ?? null
+  if (projection.execution?.mode === 'daemon') {
+    // An event line cannot establish a daemon worker result. Absence from the
+    // checkpoint is not success; uncertain process identity is not a dead worker.
+    return listed === null ? `${id} · not in checkpoint · outcome unknown` : daemonDispatchTitle(listed)
+  }
   const started = log.find((event) => event.kind === 'dispatch.start' && event.dispatch === id)
   const end = log.find((event) => event.kind === 'dispatch.end' && event.dispatch === id)
   // An ended dispatch is named by its start event, or by its end event when the log no longer holds the start.
@@ -401,12 +430,13 @@ export function liveTab(
 ): LiveView {
   const id = shownDispatch(projection, streams, state.selected)
   const running = runningDispatches(projection)
-  const buttons = running.map((dispatch, index) => ({
+  const buttons = visibleDispatches(projection).map((dispatch, index) => ({
     id: dispatch.dispatch, label: dispatchName(dispatch, dispatch.dispatch), hotkey: LIVE_HOTKEYS[index] ?? null, active: dispatch.dispatch === id,
   }))
   if (id === null) return { buttons, shown: null }
   const runs = running.find((dispatch) => dispatch.dispatch === id)
-  const cancel: StatusPending | null = runs === undefined ? null : { kind: 'cancel', dispatch: id, issue: runs.issue, name: dispatchName(runs, id) }
+  const cancel: StatusPending | null = runs === undefined || projection.execution?.mode === 'daemon' ? null
+    : { kind: 'cancel', dispatch: id, issue: runs.issue, name: dispatchName(runs, id) }
   const stream = streams[id]
   const lines = stream?.lines ?? []
   const room = liveRoom(bodyRows, state.pending !== null)

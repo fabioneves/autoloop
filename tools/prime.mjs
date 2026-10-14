@@ -34,7 +34,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
@@ -59,10 +59,11 @@ import { answeredMarker, liftWaits, postDigest, realRun, triageBlocks } from './
 import { dispatchInheritance } from './inherited-dispatch.mjs';
 import { appendEvent, currentRunId, emitEvent, isPaused, readEvents, resolveCommonDir, setPaused, setRunId, takeControls, writeControl } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
+import { assertNoKnownLegacyOwner, assertNoSchedulerOwner, createSchedulerTestAccount, readProcessIdentity, resolveRepository, withExecutionAdmission } from './scheduler-contract.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.72.0';
+const AUTOLOOP_VERSION = '0.73.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -202,8 +203,9 @@ export function primeDev({
       { runs: held },
     );
   }
-  const models = primeModels(config, root);
-  if (models.ok === false) return models;
+  const checkedModels = primeModels(config, null, { create: false });
+  if (checkedModels.ok === false) return checkedModels;
+  // Model pins are written only after common repository admission below.
   // The conversation the run belongs to is the host's, from the prime
   // command's hook input (the command guard hands it over); the environment
   // a command can change is never trusted (security review H2).
@@ -224,27 +226,9 @@ export function primeDev({
   }
 
   const base = baseSyncFacts(root, config.baseBranch);
-  pruneDeadRunMarkers(root);
-  clearRunParks(root);
-  // The run's second record, outside the repository and owned by the
-  // session's Claude process (run-markers.mjs), written before the marker:
-  // no command between opening the run and the guard's first look can hide
-  // the run, and a latch that cannot be written leaves no marker behind. It
-  // names this conversation: the hooks act for it alone. Read back, it must
-  // say so: an open latch of another conversation is never rebound.
-  if (recordLatch({ owner, baseBranch: config.baseBranch, scope: root, sessionId, directory: latches }) === null) {
-    return failure('run', 'RUN_LATCH_UNWRITABLE', `the session latch could not be written under ${latches}; the run is not opened`);
-  }
-  const owned = ownedRun({ sessionId, owner, directory: latches });
-  if (owned === null || owned.unreadable) {
-    return failure('run', 'RUN_LATCH_UNCONFIRMED', 'this Claude process holds a run latch open for another conversation '
-      + '(/clear started this one), so the run is not opened. Close it with `prime.mjs --close-run`, then prime again.');
-  }
-  // A live own marker before this prime means the same run goes on; none
-  // means a new run, whose predecessor ended without --close-run (an exit,
-  // a kill, a restart): its id is abandoned so the new run's events are its own.
-  const continuing = ownRunMarkers(root).some(({ marker }) => marker.closedAt === undefined);
-  const runMarker = writeRunMarker(root, undefined, undefined, config.baseBranch, sessionId);
+  const opened = openLegacyRun({ root, owner, sessionId, baseBranch: config.baseBranch, latches, config, expectedModels: checkedModels });
+  if (!opened.ok) return opened;
+  const { runMarker, continuing, models } = opened;
   if (!continuing) closeRunEvents(root, { reason: 'abandoned' });
   openRunEvents(root);
   // The operator's controls (SPEC-events items 7 to 9), applied before the
@@ -439,11 +423,55 @@ export function configSummary(config, root = null) {
 // `baseBranch` lets the guards keep enforcing the run's base even if the
 // checkout later stops resolving its own config (a deleted .autoloop, a
 // branch forked before devendor): the open run, not the checkout, decides.
+// Participating upgraded binaries serialize the check and marker publication.
+// Old binaries cannot be made cooperative; drain old runs before migration.
+export function openLegacyRun({ root, owner = sessionOwnerPid(), sessionId, baseBranch, latches = latchDirectory(), config = null, expectedModels = null, observe = () => {} }) {
+  try {
+    const repository = resolveRepository(root);
+    const identity = readProcessIdentity(owner);
+    return withExecutionAdmission(repository, () => {
+      assertNoSchedulerOwner(repository);
+      assertNoKnownLegacyOwner(repository, { owner: identity, sessionId });
+      observe('legacy-admission-checked');
+      if (typeof sessionId !== 'string' || sessionId === '') return failure('run', 'RUN_SESSION_UNKNOWN', 'The host session is unknown.');
+      if (config !== null) {
+        const current = readPrimeConfig(root);
+        if (current.error !== undefined) return current;
+        if (hashValue(current.config) !== hashValue(config)) return failure('config', 'CONFIG_CHANGED', 'The configuration changed during admission. Prime again.');
+      }
+      const models = config === null ? null : primeModels(config, null);
+      if (models?.ok === false) return models;
+      if (expectedModels !== null && hashValue(models.models) !== hashValue(expectedModels.models)) {
+        return failure('models', 'MODELS_CHANGED', 'The model table changed during admission. Prime again.');
+      }
+      if (models !== null && !pinModels(pinnedModelsPath(root), { ok: true, models: models.models, source: models.modelsSource })) {
+        return failure('models', 'MODELS_UNPINNED', 'The model table cannot be pinned.');
+      }
+      // The latch is published before the marker. It keeps the original host
+      // process and session, rather than the short admission process identity.
+      if (recordLatch({ owner, baseBranch, scope: root, sessionId, directory: latches }) === null) {
+        return failure('run', 'RUN_LATCH_UNWRITABLE', `The session latch cannot be written under ${latches}.`);
+      }
+      const owned = ownedRun({ sessionId, owner, directory: latches });
+      if (owned === null || owned.unreadable) return failure('run', 'RUN_LATCH_UNCONFIRMED', 'This process holds a latch for another conversation.');
+      const continuing = ownRunMarkers(root).some(({ marker }) => marker.closedAt === undefined);
+      clearRunParks(root);
+      const runMarker = writeRunMarker(root, undefined, undefined, baseBranch, sessionId, identity);
+      if (runMarker === null) return failure('run', 'RUN_MARKER_UNWRITABLE', 'The legacy owner marker cannot be published.');
+      return { ok: true, sessionId, runMarker, continuing, models };
+    });
+  } catch (error) {
+    return failure('run', error.code ?? 'OWNER_UNVERIFIED', error.message, {
+      ...(error.owner ? { owner: error.owner } : {}), ...(error.runId ? { runId: error.runId } : {}),
+    });
+  }
+}
+
 export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], nowMs = Date.now(), baseBranch = null,
-  sessionId = process.env.CLAUDE_CODE_SESSION_ID || null) {
+  sessionId = process.env.CLAUDE_CODE_SESSION_ID || null, owner = null) {
   const directory = runMarkerDirectory(root);
   if (directory === null) return null;
-  const live = [...new Set(pids)].filter(
+  const live = [...new Set([...pids, ...(owner ? [owner.pid] : [])])].filter(
     (pid) => Number.isSafeInteger(pid) && pid > 1,
   );
   if (live.length === 0) return null;
@@ -455,7 +483,8 @@ export function writeRunMarker(root, pids = [process.ppid, ...ancestorPids()], n
   // starts: each pid's start time, so a later process given the same pid is
   // never taken for the run's.
   const starts = Object.fromEntries(live.map((pid) => [pid, processStart(pid)]));
-  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, starts, openedAtMs: nowMs, baseBranch, sessionId })}\n`);
+  writeFileSync(path, `${JSON.stringify({ version: 1, pids: live, starts, openedAtMs: nowMs, baseBranch, sessionId,
+    ...(owner === null ? {} : { owner }) })}\n`);
   return path;
 }
 
@@ -505,7 +534,7 @@ export function closeRunEvents(root, { nowMs = Date.now(), reason = undefined, c
 // --close-run: the run stops taking work; only the guards still act for the session.
 export function closeRun(root = process.cwd(), { directory = latchDirectory(), now = new Date() } = {}) {
   const outcome = closeRunMarkers(root, now);
-  if (outcome.ok === true) closeRunEvents(root, { nowMs: now.getTime() });
+  if (outcome.ok === true && outcome.closed.length > 0) closeRunEvents(root, { nowMs: now.getTime() });
   return outcome.ok === true ? { ...outcome, latch: closeLatch({ directory, nowMs: now.getTime() }) } : outcome;
 }
 
@@ -712,8 +741,8 @@ function lifecycleDriverIdentity() {
 // Resolving writes the operator's global file when it is missing.
 // The table is pinned for the run's dispatches (run-markers pinnedModelsPath),
 // so what prime reports is what they run.
-export function primeModels(config, root = null) {
-  const resolved = resolveModels({ projectModels: config.models });
+export function primeModels(config, root = null, { create = true } = {}) {
+  const resolved = resolveModels({ projectModels: config.models, create });
   if (!resolved.ok) {
     return failure('models', 'MODELS_INVALID', resolved.errors.join('; '), { errors: resolved.errors });
   }
@@ -1268,7 +1297,9 @@ function selfTest() {
     // latch and switched the session's guards off. The id is the hook
     // input's, handed over by the guard; an open latch is never rebound.
     {
-      const home = join(scratch, 'home');
+      // The scoped external account preload is shared with the guard child;
+      // HOME alone must not point that child at a different authority store.
+      const home = userInfo().homedir;
       const latches = join(home, '.claude', 'autoloop', 'run-latches');
       const quiet = { cwd: root, elsewhere: () => [], lift: () => ({ ok: true, lifted: [] }), triage: () => ({ ok: true, resumed: [] }),
         scanArgs: ['--pr', 'x'], latches };
@@ -1304,6 +1335,7 @@ function selfTest() {
           input: JSON.stringify({ session_id: 'S-host', tool_name: 'Bash', cwd: root, tool_input: { command: 'gh pr merge 42 --squash' } }),
           encoding: 'utf8', cwd: root, timeout: 30000, env: { ...process.env, HOME: home, CLAUDE_PROJECT_DIR: root },
         });
+        if (guard.status !== 2) console.error(`ownership guard fixture: ${JSON.stringify({ status: guard.status, stderr: guard.stderr, home, latch: latchOf()?.sessionId })}`);
         check(
           'prime opens a run only for the host session the guard handed it, refuses without one, and never rebinds an open latch',
           unknown.ok === false && unknown.error.code === 'RUN_SESSION_UNKNOWN' && !unknownWrote
@@ -1346,6 +1378,7 @@ function selfTest() {
         if (envBefore === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
         else process.env.CLAUDE_CODE_SESSION_ID = envBefore;
         rmSync(markerDirectory, { recursive: true, force: true });
+        rmSync(latches, { recursive: true, force: true });
       }
     }
     const claude = [1, 'claude', '/u/.local/share/claude/versions/2.1.284'];
@@ -1523,11 +1556,26 @@ function main() {
   if (parsed.mode === 'self-test') {
     // Resolving models writes the global config when missing: a self-test
     // must never write the operator's own.
-    const configDir = mkdtempSync(join(tmpdir(), 'prime-config-'));
-    process.env.CLAUDE_CONFIG_DIR = configDir;
-    const passed = selfTest();
-    rmSync(configDir, { recursive: true, force: true });
-    process.exit(passed ? 0 : 1);
+    void (async () => {
+      const configDir = realpathSync(mkdtempSync(join(tmpdir(), 'prime-config-')));
+      const previous = process.env.CLAUDE_CONFIG_DIR;
+      let account;
+      try {
+        process.env.CLAUDE_CONFIG_DIR = configDir;
+        account = await createSchedulerTestAccount(configDir);
+        if (!userInfo().homedir.startsWith(`${configDir}/`)) throw new Error('The prime self-test must isolate its OS account before admission.');
+        return selfTest();
+      } finally {
+        account?.restore();
+        if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+        else process.env.CLAUDE_CONFIG_DIR = previous;
+        rmSync(configDir, { recursive: true, force: true });
+      }
+    })().then((passed) => process.exit(passed ? 0 : 1), (error) => {
+      console.error(`prime self-test: ${error.message}`);
+      process.exit(1);
+    });
+    return;
   }
   const digest = () => postDigest({ run: realRun(process.cwd()) });
   if (parsed.mode === 'park') {

@@ -46,11 +46,18 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'run-markers.mjs',
   'run-state-guard.mjs',
   'git-budget.mjs',
+  'guard-alias-test.mjs',
   'label-swap-reminder.mjs',
   'lane-contract.mjs',
   'models-config.mjs',
   'lifecycle-contract.mjs',
   'lifecycle-driver.mjs',
+  'loop-admission.mjs',
+  'loop-execution-admission.mjs',
+  'loop-host.mjs',
+  'loop-viewer.mjs',
+  'loop-supervisor.mjs',
+  'loop.mjs',
   'loop-scope.mjs',
   'loop-smoke.mjs',
   'overlap-report.mjs',
@@ -60,6 +67,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'release-verify.mjs',
   'review-contract.mjs',
   'scan.mjs',
+  'scheduler-contract.mjs',
   'setup.mjs',
   'sizing-contract.mjs',
   'snapshot-contract.mjs',
@@ -76,30 +84,22 @@ const PLUGIN_TOOL_FILES = Object.freeze([
   'auto-merge.mjs',
   'merge-authorization-contract.mjs',
 ]);
-// Global install: the plugin ships these hooks in hooks/hooks.json, each
-// running the plugin's own copy. Exactly one handler per tool, on its event
-// and matcher, with exactly this command, and no statusMessage (it prints in
-// every session). The command guard fails closed only for a session that owns
-// a run: a crashed guard refuses there, while a broken plugin never refuses
-// commands in any other session.
+// Global install: each hook runs the plugin's own copy exactly once. The
+// guarded bootstrap retains stdin in shell memory for an independent fallback.
+// Registered workers and known scheduler mutations fail closed on startup
+// errors; unrelated unowned reads retain the existing silent path.
 const PLUGIN_TOOLS = '${CLAUDE_PLUGIN_ROOT}/tools';
+function toolGuardCommand(kind) {
+  return `payload=$(cat); printf '%s' "$payload" | node "${PLUGIN_TOOLS}/loop-execution-admission.mjs" --guard-entry ${kind}; `
+    + 's=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; '
+    + `printf '%s' "$payload" | node "${PLUGIN_TOOLS}/run-markers.mjs" --tool-guard-fallback; [ $? -eq 2 ] && exit 2; `
+    + 'l="$HOME/.claude/autoloop/run-latches/$PPID.json"; '
+    + 'if [ -e "$l" ] || [ -L "$l" ]; then exit 2; fi; exit 0';
+}
 export const PLUGIN_HOOKS = Object.freeze([
   { name: 'session-preflight.sh', event: 'SessionStart', matcher: null, command: `bash "${PLUGIN_TOOLS}/session-preflight.sh"` },
-  { name: 'edit-guard.mjs', event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|NotebookEdit', command: `node "${PLUGIN_TOOLS}/edit-guard.mjs"` },
-  {
-    name: 'command-guard.mjs',
-    event: 'PreToolUse',
-    matcher: 'Bash|AskUserQuestion',
-    // The guard's own verdict (0 or 2) is final; a guard that throws decides
-    // by ownership itself. Anything else is a guard that could not start: it
-    // refuses while the session's Claude process — $PPID, the hook shell's
-    // parent — holds a latch, decided by the latch file alone with no git
-    // call. Closed or not: the shell cannot read the hook input's session,
-    // and a closed run stays guarded until /clear.
-    command: `node "${PLUGIN_TOOLS}/command-guard.mjs"; s=$?; [ $s -eq 0 ] && exit 0; [ $s -eq 2 ] && exit 2; `
-      + 'l="$HOME/.claude/autoloop/run-latches/$PPID.json"; '
-      + 'if [ -e "$l" ] || [ -L "$l" ]; then exit 2; fi; exit 0',
-  },
+  { name: 'edit-guard.mjs', event: 'PreToolUse', matcher: 'Edit|Write|MultiEdit|NotebookEdit', command: toolGuardCommand('edit') },
+  { name: 'command-guard.mjs', event: 'PreToolUse', matcher: 'Bash|AskUserQuestion', command: toolGuardCommand('command') },
   { name: 'label-swap-reminder.mjs', event: 'PostToolUse', matcher: 'Bash', command: `node "${PLUGIN_TOOLS}/label-swap-reminder.mjs"` },
   { name: 'subagent-transcript.mjs', event: 'SubagentStop', matcher: null, command: `node "${PLUGIN_TOOLS}/subagent-transcript.mjs"` },
   { name: 'writeback-check.mjs', event: 'Stop', matcher: null, command: `node "${PLUGIN_TOOLS}/writeback-check.mjs"` },
@@ -667,6 +667,11 @@ async function processCases() {
 async function selfTest() {
   const success = run(process.execPath, ['--version'], process.cwd());
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
+  const diagnosticLines = [];
+  const diagnosticRun = await runChecks([{ name: 'capability fixture', execute: () =>
+    run(process.execPath, ['-e', 'console.log("SKIP fixture capability unavailable")'], process.cwd()) }], {
+    log: (line) => diagnosticLines.push(line), error: (line) => diagnosticLines.push(line),
+  });
   const toolsDir = resolve(fileURLToPath(new URL('.', import.meta.url)));
   // The project doctor: a devendored repository passes; any vendored layout
   // left behind fails and names devendor.
@@ -749,7 +754,7 @@ async function selfTest() {
   let crashOddLatch;
   let refusalKept;
   try {
-    const stub = join(crashRoot, 'plugin', 'tools', 'command-guard.mjs');
+    const stub = join(crashRoot, 'plugin', 'tools', 'loop-execution-admission.mjs');
     mkdirSync(dirname(stub), { recursive: true });
     mkdirSync(join(crashRoot, 'project', '.autoloop'), { recursive: true });
     writeFileSync(join(crashRoot, 'project', '.autoloop', 'config.json'), '{}');
@@ -786,6 +791,7 @@ async function selfTest() {
       scheduled.includes(`self-test ${basename(own)}`) && !nested.ok && /never runs its own self-test/u.test(nested.detail)
         && !selfTestProcesses.groups.length],
     ['the plugin hook document passes its contract', pluginProblems(pluginHookDocument()).length === 0],
+    ['the shipped hook document matches the declared contract', pluginProblems(JSON.parse(readFileSync(join(toolsDir, '..', 'hooks', 'hooks.json'), 'utf8'))).length === 0],
     ['a missing plugin hook is named',
       pluginProblems(pluginHookDocument(PLUGIN_HOOKS.slice(1))).some((problem) => problem.includes(PLUGIN_HOOKS[0].name))],
     ['a plugin hook on the wrong matcher is refused',
@@ -821,6 +827,13 @@ async function selfTest() {
       JSON.stringify(skillBudgetProblems({ dev: 60001, setup: 100, novel: 5 }, { dev: 60000, setup: 100 }))
         === JSON.stringify(['SKILL_OVER_BUDGET dev 60001/60000 bytes', 'SKILL_BUDGET_MISSING novel'])
         && skillBudgetProblems({ dev: 60000 }, { dev: 60000 }).length === 0],
+    ['a passing child capability skip is printed by the verification runner',
+      diagnosticRun.failures.length === 0 && !diagnosticRun.stopped
+        && diagnosticLines.includes('  SKIP fixture capability unavailable')],
+    ['successful test skips remain visible alongside timing diagnostics',
+      JSON.stringify(visibleTestDiagnostics('self-test OK\nSKIP positive supervision: no cap\nslow checks: fixture 1s\nordinary output\nSKIP Linux-only case'))
+        === JSON.stringify(['SKIP positive supervision: no cap', 'slow checks: fixture 1s', 'SKIP Linux-only case'])
+        && visibleTestDiagnostics(undefined).length === 0],
     ['structured command success', success.ok && success.detail.length > 0],
     ['structured command failure', !failure.ok && failure.detail.length > 0],
     ['invalid JSON is rejected', checkJson(fileURLToPath(import.meta.url)).ok === false],
@@ -883,6 +896,10 @@ function killActiveGroupOn(signal, code) {
   });
 }
 
+export function visibleTestDiagnostics(detail) {
+  return detail?.match(/^(?:(?:slow checks|matrix phases): .+|SKIP(?:[ \t:].*)?)$/gmu) ?? [];
+}
+
 export async function runChecks(checks, { log = console.log, error = console.error } = {}) {
   const failures = [];
   for (const check of checks) {
@@ -897,8 +914,8 @@ export async function runChecks(checks, { log = console.log, error = console.err
     } else if (result.ok) {
       log(`PASS ${check.name}${timing}`);
       // A passing child's stdout is otherwise discarded, which swallowed the
-      // self-tests' diagnostic attribution — surface every such line.
-      for (const line of result.detail?.match(/^(?:slow checks|matrix phases): .+$/gmu) ?? []) {
+      // self-tests' diagnostics and capability skips. Surface both explicitly.
+      for (const line of visibleTestDiagnostics(result.detail)) {
         log(`  ${line}`);
       }
     } else {
