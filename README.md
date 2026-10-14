@@ -298,8 +298,9 @@ dispatch reads the checkout; a prime command that does anything else; and a hook
 read, for the session that owns a run. The rules also apply to the text a command runs: an
 in-command git or gh alias, a function, case or trap body, and a shell fed by a heredoc or a
 literal echo; a hidden alias is refused. An inline interpreter's program (`python3 -c`, `node
--e`) is not judged. Every other command is allowed; `step.mjs` alone swaps step labels and keeps
-the ladder rules.
+-e`) is not judged. Scheduler execution guards also refuse protected runtime writes and service
+commands whose options cannot be checked. Other commands are allowed. `step.mjs` alone swaps step
+labels and keeps the ladder rules.
 Protected paths stop for `human:authorize`. Dispatch failures are typed and recorded. A
 read-only role retries a transient failure a bounded number of times and moves to its configured
 fallback on a usage limit; any role moves to it when its model is unavailable; a writer never

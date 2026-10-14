@@ -497,12 +497,14 @@ function findStarts(words, from) {
 }
 
 // The commands a find's -exec family runs.
-function findActionCommands(words, from) {
+export function findActionCommands(words, from) {
   const commands = [];
   for (let index = from; index < words.length; index += 1) {
     if (!['-exec', '-execdir', '-ok', '-okdir'].includes(words[index])) continue;
     const end = words.findIndex((word, at) => at > index && (word === ';' || word === '\\;' || word === '+'));
     commands.push(words.slice(index + 1, end === -1 ? words.length : end));
+    // Skip the consumed child range. A sibling action starts after its terminator.
+    index = end === -1 ? words.length : end;
   }
   return commands;
 }
@@ -830,56 +832,206 @@ const SYSTEMCTL_MUTATIONS = new Set(['start', 'stop', 'reload', 'restart', 'try-
 const SYSTEMCTL_VALUED_OPTIONS = new Set(['--capsule', '-C', '--host', '-H', '--machine', '-M', '--type', '-t',
   '--state', '--property', '-p', '-P', '--signal', '-s', '--root', '--image', '--lines', '-n', '--output', '-o',
   '--job-mode', '--kill-whom', '--kill-value', '--what', '--timestamp', '--drop-in', '--preset-mode',
-  '--check-inhibitors', '--legend', '--image-policy', '--message', '--boot-loader-menu', '--boot-loader-entry', '--reboot-argument', '--when']);
-function systemctlArguments(words, from) {
+  '--check-inhibitors', '--legend', '--image-policy', '--message', '--boot-loader-menu', '--boot-loader-entry', '--reboot-argument', '--when', '--kill-subgroup']);
+const SYSTEMCTL_FLAG_OPTIONS = new Set(['--help', '--version', '--all', '--reverse', '--after', '--before', '--show-types',
+  '--failed', '--full', '--fail', '--irreversible', '--ignore-dependencies', '--ignore-inhibitors', '--value', '--user',
+  '--system', '--global', '--wait', '--no-block', '--no-legend', '--no-pager', '--no-wall', '--dry-run', '--quiet', '--verbose',
+  '--no-warn', '--force', '--no-reload', '--no-ask-password', '--runtime', '--plain', '--recursive', '--with-dependencies',
+  '--firmware-setup', '--now', '--show-transaction', '--read-only', '--mkdir', '--marked', '--stdin']);
+const SYSTEMCTL_OPTIONS = {
+  valued: SYSTEMCTL_VALUED_OPTIONS, flags: SYSTEMCTL_FLAG_OPTIONS,
+  longOptions: [...SYSTEMCTL_VALUED_OPTIONS, ...SYSTEMCTL_FLAG_OPTIONS].filter((option) => option.startsWith('--')),
+  shortValued: 'CHMtpPsno', shortFlags: 'halqvfiTr',
+  queryValues: new Set(['--type', 't', '--output', 'o', '--boot-loader-entry', '--state', '--preset-mode', '--what', '--timestamp']),
+};
+
+// Match the systemd 257/258 option tables. A query is distinct from a syntax
+// failure: unknown future options cannot silently permit a service mutation.
+function serviceOption(words, index, { valued, flags, longOptions, shortValued, shortFlags, queryValues }) {
+  const word = words[index];
+  if (word.startsWith('--')) {
+    const equals = word.indexOf('=');
+    const key = equals === -1 ? word : word.slice(0, equals);
+    let name = key;
+    if (!longOptions.includes(key)) {
+      const matches = longOptions.filter((option) => option.startsWith(key));
+      if (matches.length !== 1) return { invalid: true };
+      name = matches[0];
+    }
+    if (flags.has(name)) {
+      if (equals !== -1) return { invalid: true };
+      return ['--help', '--version'].includes(name) ? { readOnly: true } : { index };
+    }
+    if (!valued.has(name)) return { invalid: true };
+    const value = equals === -1 ? words[++index] : word.slice(equals + 1);
+    if (value === undefined) return { invalid: true };
+    if (value === 'help' && queryValues.has(name)) return { readOnly: true };
+    return { name, value, index };
+  }
+  for (let at = 1; at < word.length; at += 1) {
+    const name = word[at];
+    if (name === 'h') return { readOnly: true };
+    if (shortValued.includes(name)) {
+      const value = at + 1 < word.length ? word.slice(at + 1) : words[++index];
+      if (value === undefined) return { invalid: true };
+      if (value === 'help' && queryValues.has(name)) return { readOnly: true };
+      return { name, value, index };
+    }
+    if (!shortFlags.includes(name)) return { invalid: true };
+  }
+  return { index };
+}
+
+function systemctlArguments(words, from, stopAtOperand = false) {
   const args = [];
   let options = true;
   for (let index = from; index < words.length; index += 1) {
     const word = words[index];
     if (options && word === '--') { options = false; continue; }
-    if (options && word.startsWith('-')) {
-      const shortValue = word.startsWith('--') ? -1 : [...word.slice(1)].findIndex((letter) => 'CHMtpPsno'.includes(letter));
-      const takesNext = SYSTEMCTL_VALUED_OPTIONS.has(word) || (shortValue !== -1 && shortValue === word.length - 2);
-      if (takesNext) index += 1;
-    } else args.push(word);
+    if (options && word.startsWith('-') && word !== '-') {
+      const option = serviceOption(words, index, SYSTEMCTL_OPTIONS);
+      if (option.invalid || option.readOnly) return option;
+      index = option.index;
+    } else {
+      args.push(word);
+      if (stopAtOperand) options = false;
+    }
   }
-  return args;
+  return { args };
 }
 
-function executionCommandProblem(words, head, at, { pluginRoot, home, env }, depth = 0) {
-  if (head < 0 || depth > 4) return null;
-  const name = basename(words[head]);
-  const rest = words.slice(head + 1);
-  if (name === 'systemctl') {
-    const [verb, ...targets] = systemctlArguments(words, head + 1);
-    const selectors = ['enable', 'link'].includes(verb) ? targets.map((target) => basename(target)) : targets;
-    const loggingMutation = ['service-log-level', 'service-log-target'].includes(verb) && targets.length > 1;
-    if ((SYSTEMCTL_MUTATIONS.has(verb) || loggingMutation) && selectors.some(selectsAutoloopService)) {
-      return 'autoloop guard — model tools cannot change an Autoloop service.';
+const SYSTEMD_RUN_VALUED_OPTIONS = new Set(['--capsule', '--unit', '--description', '--slice', '--expand-environment',
+  '--host', '--machine', '--service-type', '--uid', '--gid', '--nice', '--setenv', '--property', '--on-active',
+  '--on-boot', '--on-startup', '--on-unit-active', '--on-unit-inactive', '--on-calendar', '--timer-property',
+  '--path-property', '--socket-property', '--working-directory', '--background', '--json', '--job-mode']);
+const SYSTEMD_RUN_FLAG_OPTIONS = new Set(['--help', '--version', '--user', '--system', '--scope', '--slice-inherit',
+  '--remain-after-exit', '--send-sighup', '--wait', '--tty', '--pty', '--pty-late', '--pipe', '--quiet', '--verbose', '--on-timezone-change',
+  '--on-clock-change', '--no-block', '--no-ask-password', '--collect', '--same-dir', '--shell', '--ignore-failure', '--no-pager']);
+const SYSTEMD_RUN_OPTIONS = {
+  valued: SYSTEMD_RUN_VALUED_OPTIONS, flags: SYSTEMD_RUN_FLAG_OPTIONS,
+  longOptions: [...SYSTEMD_RUN_VALUED_OPTIONS, ...SYSTEMD_RUN_FLAG_OPTIONS],
+  shortValued: 'CHMEpu', shortFlags: 'hrtTPqvGdS',
+  queryValues: new Set(['--json', '--job-mode']),
+};
+
+// systemd-run stops options at COMMAND. Required short-option values consume
+// the group suffix or the next word; repeated unit options keep the last value.
+function systemdRunArguments(words, from) {
+  let unit = null;
+  let posixlyCorrect = false;
+  let index = from;
+  for (; index < words.length; index += 1) {
+    const word = words[index];
+    if (word === '--') { index += 1; break; }
+    if (!word.startsWith('-') || word === '-') break;
+    const option = serviceOption(words, index, SYSTEMD_RUN_OPTIONS);
+    if (option.invalid || option.readOnly) return option;
+    index = option.index;
+    if (['--unit', 'u'].includes(option.name)) {
+      if (option.value === '') return { invalid: true };
+      unit = option.value;
     }
+    if (['--setenv', 'E'].includes(option.name) && /^POSIXLY_CORRECT=/u.test(option.value)) posixlyCorrect = true;
+  }
+  return { unit, commandIndex: index < words.length ? index : -1, posixlyCorrect };
+}
+
+// Track only POSIXLY_CORRECT, not a general shell environment. null means the
+// mode is unknown; both getopt interpretations must then be checked.
+function servicePosixMode(words, from, head, at, env, inherited) {
+  let mode = inherited;
+  if (mode === undefined) {
+    mode = at.tainted || at.vars.has('POSIXLY_CORRECT') ? null : Object.hasOwn(env, 'POSIXLY_CORRECT');
+  }
+  let wrapper = null;
+  for (let index = from; index < head; index += 1) {
+    const word = words[index];
+    if (isAssignment(word)) {
+      if (word.startsWith('POSIXLY_CORRECT=')) mode = true;
+      continue;
+    }
+    if (WRAPPERS.has(basename(word))) {
+      wrapper = basename(word);
+      if (['sudo', 'doas', 'npx', 'pnpx', 'bunx'].includes(wrapper)) mode = null;
+      continue;
+    }
+    if (!word.startsWith('-') || wrapper === null) continue;
+    const equals = word.indexOf('=');
+    const key = equals === -1 ? word : word.slice(0, equals);
+    if (wrapper === 'env') {
+      if (['-i', '--ignore-environment'].includes(key)) mode = false;
+      let unset = null;
+      if (['-u', '--unset'].includes(key)) unset = equals === -1 ? words[index + 1] : word.slice(equals + 1);
+      else if (word.startsWith('-u')) unset = word.slice(2);
+      if (unset === 'POSIXLY_CORRECT') mode = false;
+    }
+    if (equals === -1 && WRAPPER_VALUED[wrapper]?.has(key)) index += 1;
+  }
+  return mode;
+}
+
+function executionCommandProblem(words, head, at, options) {
+  const pending = [{ words, head, from: 0 }];
+  while (pending.length > 0) {
+    // Test-only observation can assert traversal counts without a time limit.
+    options.observeCommand?.();
+    const problem = executionSingleCommandProblem(pending.pop(), at, options, pending);
+    if (problem !== null) return problem;
+  }
+  return null;
+}
+
+function executionSingleCommandProblem({ words, head, from, posixMode: inherited }, at, { pluginRoot, home, env }, pending) {
+  if (head < 0) return null;
+  const name = basename(words[head]);
+  const posixMode = servicePosixMode(words, from, head, at, env, inherited);
+  if (name === 'systemctl') {
+    for (const stopAtOperand of posixMode === null ? [false, true] : [posixMode]) {
+      const parsed = systemctlArguments(words, head + 1, stopAtOperand);
+      if (parsed.invalid) return 'autoloop guard — these service options cannot be checked.';
+      if (parsed.readOnly) continue;
+      const [verb, ...targets] = parsed.args;
+      const selectors = ['enable', 'link'].includes(verb) ? targets.map((target) => basename(target)) : targets;
+      const loggingMutation = ['service-log-level', 'service-log-target'].includes(verb) && targets.length > 1;
+      // reset-failed without unit names resets every unit, including its counters.
+      const resetAll = verb === 'reset-failed' && targets.length === 0;
+      if (resetAll || ((SYSTEMCTL_MUTATIONS.has(verb) || loggingMutation) && selectors.some(selectsAutoloopService))) {
+        return 'autoloop guard — model tools cannot change an Autoloop service.';
+      }
+    }
+    return null;
   }
   if (name === 'systemd-run') {
-    if (rest.some((word) => /^(?:--unit=)?autoloop-[0-9a-f]{64}(?:\.service)?$/u.test(word))) {
+    const parsed = systemdRunArguments(words, head + 1);
+    if (parsed.invalid) return 'autoloop guard — these service options cannot be checked.';
+    if (parsed.readOnly) return null;
+    const { unit, commandIndex } = parsed;
+    if (/^autoloop-[0-9a-f]{64}(?:\.service)?$/u.test(unit ?? '')) {
       return 'autoloop guard — model tools cannot launch an Autoloop service.';
     }
-    let index = head + 1;
-    for (; index < words.length && words[index].startsWith('-'); index += 1) {
-      if (['--unit', '-u', '--property', '-p', '--working-directory', '--setenv', '--slice'].includes(words[index])) index += 1;
-    }
-    return executionCommandProblem(words, headIndex(words, index), at, { pluginRoot, home, env }, depth + 1);
+    if (commandIndex >= 0) pending.push({ words, head: headIndex(words, commandIndex), from: commandIndex,
+      posixMode: parsed.posixlyCorrect ? true : null });
+    return null;
   }
   if (['xargs', 'parallel'].includes(name)) {
     let index = head + 1;
     while (index < words.length && words[index].startsWith('-')) index += /^-[IndPLEs]$/u.test(words[index]) ? 2 : 1;
-    return executionCommandProblem(words, headIndex(words, index), at, { pluginRoot, home, env }, depth + 1);
+    pending.push({ words, head: headIndex(words, index), from: index, posixMode });
+    return null;
   }
   if (name === 'find' || name === 'fd') {
-    const inner = name === 'find' ? findActionCommands(words, head + 1)
-      : words.flatMap((word, index) => ['-x', '-X', '--exec', '--exec-batch'].includes(word) ? [words.slice(index + 1)] : []);
-    for (const command of inner) {
-      const problem = executionCommandProblem(command, headIndex(command), at, { pluginRoot, home, env }, depth + 1);
-      if (problem !== null) return problem;
+    let inner;
+    if (name === 'find') inner = findActionCommands(words, head + 1);
+    else {
+      // fd gives all words after its first exec option to that child command.
+      const execAt = words.findIndex((word, index) => index > head && ['-x', '-X', '--exec', '--exec-batch'].includes(word));
+      inner = execAt === -1 ? [] : [words.slice(execAt + 1)];
     }
+    for (let index = inner.length - 1; index >= 0; index -= 1) {
+      const command = inner[index];
+      pending.push({ words: command, head: headIndex(command), from: 0, posixMode });
+    }
+    return null;
   }
   const index = executionScriptIndex(words, head);
   if (index < 0) return null;
@@ -944,9 +1096,9 @@ export function fallbackGuardSegments(command, depth = 0) {
 
 // Uses the existing shell placement, wrappers and path expansion. It does not
 // parse inline JavaScript/Python, nor deny unknown unrelated command forms.
-export function executionCommandProblemFor(segments, { cwd, pluginRoot = dirname(dirname(fileURLToPath(import.meta.url))), home = homedir(), env = process.env } = {}) {
+export function executionCommandProblemFor(segments, { cwd, pluginRoot = dirname(dirname(fileURLToPath(import.meta.url))), home = homedir(), env = process.env, observeCommand } = {}) {
   for (const at of placeSegments(segments, cwd, home, env)) {
-    const problem = executionCommandProblem(at.argv, at.head, at, { pluginRoot, home, env });
+    const problem = executionCommandProblem(at.argv, at.head, at, { pluginRoot, home, env, observeCommand });
     if (problem !== null) return problem;
   }
   return null;
