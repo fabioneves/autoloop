@@ -221,8 +221,8 @@ export function runSelfTest(path, cwd, {
   groupAlive = processGroupAlive, killGroup = killProcessGroup, selectionGroup,
 } = {}) {
   if (selectionGroup !== undefined && (basename(path) !== 'scheduler-selection.mjs'
-    || !['foundation', 'boundary'].includes(selectionGroup))) {
-    return Promise.resolve({ ok: false, cleanupFailed: false, detail: 'A selection group requires scheduler-selection.mjs and foundation or boundary.' });
+    || !['foundation', 'boundary-admission', 'boundary-widening'].includes(selectionGroup))) {
+    return Promise.resolve({ ok: false, cleanupFailed: false, detail: 'A selection group requires scheduler-selection.mjs and a canonical selection test group.' });
   }
   if (selfTesting && realOrSelf(path) === realOrSelf(OWN_PATH)) {
     return Promise.resolve({ ok: false, cleanupFailed: false, detail: 'verify.mjs never runs its own self-test from inside it' });
@@ -324,7 +324,7 @@ export function runSelfTest(path, cwd, {
 }
 
 export function selectionSelfTestChecks(path, cwd) {
-  return ['foundation', 'boundary'].map((selectionGroup) => ({
+  return ['foundation', 'boundary-admission', 'boundary-widening'].map((selectionGroup) => ({
     name: `self-test scheduler-selection.mjs [${selectionGroup}]`,
     execute: () => runSelfTest(path, cwd, { selectionGroup }),
   }));
@@ -698,36 +698,59 @@ export async function selectionRegistrationCases() {
   const previousFilter = process.env.SELECTION_TEST_FILTER;
   process.env.SELECTION_TEST_FILTER = 'ambient filter must not reduce complete groups';
   try {
-    mutate("    if (process.env.SELECTION_TEST_FILTER !== undefined) throw new Error('The canonical filter was not removed.');\n    process.exit(4);");
+    mutate("    if (process.env.SELECTION_TEST_FILTER !== undefined) throw new Error('The canonical filter was not removed.');\n    console.log(`selection fixture group ${assignedGroup}`);\n    process.exit(4);");
     const checks = selectionSelfTestChecks(path, scratch);
     const lines = [];
     const failed = await runChecks(checks, { log: (line) => lines.push(line), error: (line) => lines.push(line) });
-    const expectedNames = ['foundation', 'boundary'].map((group) => `self-test scheduler-selection.mjs [${group}]`);
-    const starts = [...lines.join('\n').matchAll(/^selection case START (.+)$/gmu)].map((match) => match[1]);
+    const expectedGroups = ['foundation', 'boundary-admission', 'boundary-widening'];
+    const expectedNames = expectedGroups.map((group) => `self-test scheduler-selection.mjs [${group}]`);
+    const selectedGroups = [...lines.join('\n').matchAll(/^selection fixture group (.+)$/gmu)].map((match) => match[1]);
+    if (failed.stopped) return [['selection failure fixture cleanup must be confirmed before another child starts', false]];
     const beforeInvalid = selfTestProcesses.launched;
-    const invalid = await Promise.all(['', 'unknown', 'all', null].map((selectionGroup) => runSelfTest(path, scratch, { selectionGroup })));
+    const invalid = await Promise.all(['', 'unknown', 'all', 'boundary', null].map((selectionGroup) => runSelfTest(path, scratch, { selectionGroup })));
     const wrongTool = await runSelfTest(join(tools, 'config-contract.mjs'), scratch, { selectionGroup: 'foundation' });
     const invalidDidNotLaunch = selfTestProcesses.launched === beforeInvalid;
-    mutate("    if (process.env.SELECTION_TEST_FILTER !== undefined) throw new Error('The canonical filter was not removed.');\n    const member = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], { stdio: 'ignore' });\n    console.log(`selection group child ${member.pid}`);\n    await new Promise(() => {});");
-    const tally = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
-    let timedOut;
-    const timeoutGate = await runChecks([{ name: 'selection group timeout fixture', execute: async () => {
-      timedOut = await runSelfTest(path, scratch, { selectionGroup: 'foundation', timeoutMs: 5000, tally });
-      return timedOut;
-    } }], { log: () => {}, error: () => {} });
+    const metadataResults = [];
+    const firstDeclaration = "    await check('the facade exists and has no production queue or mutation CLI', async () => {";
+    for (const metadata of ['unknown', ['foundation', 'boundary-admission']]) {
+      mutate('    process.exit(4);');
+      const source = readFileSync(path, 'utf8');
+      writeFileSync(path, source.replace(firstDeclaration,
+        `    await check('invalid metadata fixture', async () => {}, ${JSON.stringify(metadata)});\n${firstDeclaration}`));
+      const result = await runSelfTest(path, scratch, { selectionGroup: 'boundary-widening' });
+      metadataResults.push(result);
+      if (result.cleanupFailed) return [['invalid metadata fixture cleanup must be confirmed before another child starts', false]];
+    }
+    mutate("    if (process.env.SELECTION_TEST_FILTER !== undefined) throw new Error('The canonical filter was not removed.');\n    console.log(`selection fixture group ${assignedGroup}`);\n    const member = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], { stdio: 'ignore' });\n    console.log(`selection group child ${member.pid}`);\n    await new Promise(() => {});");
+    const timeouts = [];
+    for (const selectionGroup of expectedGroups) {
+      const tally = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
+      let result;
+      const gate = await runChecks([{ name: 'selection group timeout fixture', execute: async () => {
+        result = await runSelfTest(path, scratch, { selectionGroup, timeoutMs: 5000, tally });
+        return result;
+      } }], { log: () => {}, error: () => {} });
+      timeouts.push({ selectionGroup, result, gate, tally });
+      if (gate.stopped) break;
+    }
     return [
-      ['the gate registers both selection groups with no ambient focused filter and keeps their real failures',
+      ['the gate registers all selection groups with no ambient focused filter and keeps their real failures',
         JSON.stringify(checks.map(({ name }) => name)) === JSON.stringify(expectedNames)
           && JSON.stringify(failed.failures) === JSON.stringify(expectedNames) && !failed.stopped
-          && starts.length === 2 && !starts[0].startsWith('boundary:') && starts[1].startsWith('boundary:')
-          && lines.filter((line) => /process: run .* exit 4 .* cleanup confirmed/u.test(line)).length === 2],
-      ['invalid, empty and other-tool selection group requests fail before child launch',
+          && JSON.stringify(selectedGroups) === JSON.stringify(expectedGroups)
+          && lines.filter((line) => /process: run .* exit 4 .* cleanup confirmed/u.test(line)).length === expectedGroups.length],
+      ['invalid, empty, obsolete and other-tool selection group requests fail before child launch',
         invalidDidNotLaunch && [...invalid, wrongTool].every((result) => !result.ok && !result.cleanupFailed)],
-      ['a real selection group timeout fails the gate and confirms the child group is gone',
-        timeoutGate.failures.length === 1 && !timeoutGate.stopped && !timedOut.ok && !timedOut.cleanupFailed
-          && /selection group child \d+/u.test(timedOut.detail) && /timed-out true .* cleanup confirmed/u.test(timedOut.detail)
-          && tally.launched === 1 && tally.timedOut === 1 && tally.uncleaned === 0
-          && tally.groups.every((pgid) => !processGroupAlive(pgid))],
+      ['unknown or multiple group metadata fails before an unselected declaration can disappear',
+        metadataResults.every((result) => !result.ok && !result.cleanupFailed
+          && /Each selection test needs one canonical group/u.test(result.detail) && /exit 1 /u.test(result.detail))],
+      ['each real selection group timeout fails the gate and confirms the child group is gone',
+        timeouts.length === expectedGroups.length && timeouts.every(({ selectionGroup, result, gate, tally }) =>
+          gate.failures.length === 1 && !gate.stopped && !result.ok && !result.cleanupFailed
+            && result.detail.includes(`selection fixture group ${selectionGroup}`)
+            && /selection group child \d+/u.test(result.detail) && /timed-out true .* cleanup confirmed/u.test(result.detail)
+            && tally.launched === 1 && tally.timedOut === 1 && tally.uncleaned === 0
+            && tally.groups.every((pgid) => !processGroupAlive(pgid)))],
     ];
   } finally {
     writeFileSync(path, original);
@@ -860,9 +883,10 @@ async function selfTest() {
   const nested = await runSelfTest(own, process.cwd(), { timeoutMs: 5000 });
   const cases = [
     ...processes,
-    ['the canonical gate registers both complete selection groups instead of the aggregate self-test',
+    ['the canonical gate registers all complete selection groups instead of an overlapping aggregate self-test',
       JSON.stringify(scheduled.filter((name) => name.startsWith('self-test scheduler-selection.mjs')))
-        === JSON.stringify(['self-test scheduler-selection.mjs [foundation]', 'self-test scheduler-selection.mjs [boundary]'])],
+        === JSON.stringify(['self-test scheduler-selection.mjs [foundation]', 'self-test scheduler-selection.mjs [boundary-admission]',
+          'self-test scheduler-selection.mjs [boundary-widening]'])],
     ['the gate runs verify.mjs\'s own self-test in its own group, and a self-test never starts it again',
       scheduled.includes(`self-test ${basename(own)}`) && !nested.ok && /never runs its own self-test/u.test(nested.detail)
         && !selfTestProcesses.groups.length],

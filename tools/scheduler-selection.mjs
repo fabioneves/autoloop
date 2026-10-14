@@ -287,8 +287,8 @@ async function fakeGitHub() {
   send({ data: { repository } });
 }
 
-const SELECTION_SELF_TEST_GROUPS = Object.freeze(['foundation', 'boundary']);
-const selectionTestGroup = (name) => name.startsWith('boundary:') ? 'boundary' : 'foundation';
+const SELECTION_SELF_TEST_GROUPS = Object.freeze(['foundation', 'boundary-admission', 'boundary-widening']);
+const defaultSelectionTestGroup = (name) => name.startsWith('boundary:') ? 'boundary-admission' : 'foundation';
 
 async function selfTest(group = null) {
   const filter = group === null ? process.env.SELECTION_TEST_FILTER : undefined;
@@ -303,7 +303,7 @@ async function selfTest(group = null) {
   const fixtures = {};
   const fixturePath = join(scratch, 'github.json');
   const results = [];
-  const declared = [];
+  const declarations = new Map();
   const owned = [];
   const children = new Set();
   const git = (root, ...args) => {
@@ -315,11 +315,12 @@ async function selfTest(group = null) {
     fixtures[root] = { ...facts };
     writeFileSync(fixturePath, JSON.stringify(fixtures));
   };
-  const check = async (name, action) => {
+  const check = async (name, action, assignedGroup = defaultSelectionTestGroup(name)) => {
     assert.equal(typeof name, 'string');
-    assert(name.length > 0 && !declared.includes(name), 'Selection test names must be nonempty and unique.');
-    declared.push(name);
-    if (group !== null && selectionTestGroup(name) !== group) return;
+    assert(name.length > 0 && !declarations.has(name), 'Selection test names must be nonempty and unique.');
+    assert(SELECTION_SELF_TEST_GROUPS.includes(assignedGroup), 'Each selection test needs one canonical group.');
+    declarations.set(name, assignedGroup);
+    if (group !== null && assignedGroup !== group) return;
     if (filter !== undefined && !name.includes(filter)) return;
     const startedAt = process.hrtime.bigint();
     console.error(`selection case START ${name}`);
@@ -468,7 +469,8 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
     });
     await check('test groups: invalid and empty selectors cannot reduce a run to no cases', async () => {
       const path = fileURLToPath(import.meta.url);
-      for (const args of [['--self-test', '--group', ''], ['--self-test', '--group', 'unknown'], ['--self-test', '--group']]) {
+      for (const args of [['--self-test', '--group', ''], ['--self-test', '--group', 'unknown'],
+        ['--self-test', '--group', 'boundary'], ['--self-test', '--group']]) {
         const result = spawnSync(process.execPath, [path, ...args], { encoding: 'utf8', timeout: 5000 });
         assert.equal(result.status, 2, result.stderr);
       }
@@ -625,7 +627,7 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
       assert.equal(git(second.worktree.root, 'rev-parse', 'HEAD'), beforeAdmission, 'Readmission must not change the explicitly advanced workspace.');
       assert.equal(setup.checkpoint().reservations[1].worktree.baseOid, setup.baseOid);
       assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
-    });
+    }, 'boundary-widening');
     await check('boundary: forged identities, digest, generation, extra authority and missing allocation are refused', async () => {
       const setup = fixture(); const selection = await allocated(setup); const revision = setup.checkpoint().revision;
       const valid = planFor(selection, ['src/a.mjs']);
@@ -719,7 +721,7 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
         assert.equal(setup.checkpoint().units[0].admission, null); assert.equal(setup.checkpoint().units[0].wait, null);
         assert.equal(git(selection.worktree.root, 'rev-parse', 'HEAD'), setup.baseOid);
       }
-    });
+    }, 'boundary-widening');
     await check('boundary: publication obligations stay separate from existing secret and runtime controls', async () => {
       const setup = fixture({ protectedPaths: ['spec/**'] }); const selection = await allocated(setup);
       const paths = ['.github/workflows/ci.yml', 'spec/', 'src/a.mjs'];
@@ -793,7 +795,7 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
       assert.equal(woken.transitions[0].unitId, second.reservation.unitId);
       assert.equal(setup.checkpoint().units[1].replanRequired, true); assert.equal(setup.checkpoint().units[1].admission, null);
       refuses(await setup.provider.reconcileWaits(setup.lease, snapshot), 'REVISION_MISMATCH');
-    });
+    }, 'boundary-widening');
     await check('boundary: directory scopes cannot hide untracked secret paths or publication obligations', async () => {
       const unsafe = fixture(); const unsafeSelection = await allocated(unsafe);
       mkdirSync(join(unsafeSelection.worktree.root, 'src'));
@@ -820,7 +822,7 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
         refuses(await setup.provider.widenBoundary(setup.lease, before.revision, selection.reservation.unitId, request), 'INVALID_INPUT');
       }
       assert.deepEqual(setup.checkpoint(), before);
-    });
+    }, 'boundary-widening');
     await check('boundary: forbidden fixture names fail before a repository or commit can exist', async () => {
       const before = readdirSync(scratch).sort();
       for (const path of ['.env', 'src/.env.example', 'auth.json', 'nested/AUTH.json', 'keys/example.pem', 'config/credentials.json']) {
@@ -849,7 +851,7 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
       assert.equal(setup.checkpoint().units[0].planningRelationships[0].status, 'verified-failure');
       assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
       assert.equal(existsSync(join(selection.worktree.root, 'src', 'new.mjs')), false, 'No fixture model completion or writer is substituted.');
-    });
+    }, 'boundary-widening');
     await check('boundary: synthetic queue uses one owner for parallel widening, retained waits and fresh readmission', async () => {
       const setup = fixture(); const selections = [await allocated(setup), await allocated(setup, 8)];
       const body = `## Plan\n${failureTaskText}\n`;
@@ -916,7 +918,7 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
       assert.equal(git(waiter.worktree.root, 'rev-parse', 'HEAD'), setup.baseOid); assert.equal(git(waiter.worktree.root, 'status', '--porcelain=v1'), '');
       assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
       assert(existsSync(winner.worktree.root)); assert.equal(existsSync(join(waiter.worktree.root, 'shared', 'file.mjs')), false);
-    });
+    }, 'boundary-widening');
     await check('boundary: actual successful tasks and changed content, index or approval cannot authorize widening', async () => {
       const expectedCodes = { success: 'WIDEN_REASON_UNVERIFIED', content: 'EVIDENCE_CHANGED', index: 'EVIDENCE_CHANGED',
         approval: 'AUTHORIZATION_REVOKED', proposal: 'TARGET_MISMATCH' };
@@ -940,7 +942,7 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
         assert.deepEqual(setup.checkpoint(), before);
         if (changed === 'content') assert.equal(readFileSync(join(selection.worktree.root, 'tracked.txt'), 'utf8'), 'changed retained bytes\n');
       }
-    });
+    }, 'boundary-widening');
     await check('boundary: observed widening retains publication obligations but never bypasses forbidden path policy', async () => {
       for (const [target, code] of [['.github/workflows/ci.yml', null], ['.env.example', 'WIDEN_SECRET_PATH'],
         ['.github/required.yml', 'WIDEN_GUARDRAIL_ROOT'], ['.claude/settings.json', 'POLICY_DENIED']]) {
@@ -958,7 +960,7 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
           assert.equal(existsSync(join(selection.worktree.root, target)), false);
         }
       }
-    });
+    }, 'boundary-widening');
     await check('boundary: same-scope directory replanning does not require a new widening relationship', async () => {
       const setup = fixture(); const first = await allocated(setup); const second = await allocated(setup, 8);
       const body = `## Plan\n${failureTaskText}\n`; const current = planFor(first, ['src/'], { body });
@@ -978,7 +980,7 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
       const admission = await setup.provider.admitBoundary(setup.lease, setup.checkpoint().revision, sameScope);
       assert.equal(admission.schema, 'autoloop.admission/1', JSON.stringify(admission));
       assert.deepEqual(admission.boundary, ['src/', 'src/a.mjs']); assert.equal(admission.planGeneration, 3);
-    });
+    }, 'boundary-widening');
     await check('boundary: custom Git hook paths keep existing publication policy without a blanket edit denial', async () => {
       for (const [hooks, paths, authorize, protectedPaths] of [
         ['custom-hooks', ['custom-hooks/'], [{ file: 'custom-hooks/', glob: 'custom-hooks/**' }], ['custom-hooks/**']],
@@ -1671,13 +1673,14 @@ await allocator.allocateWorktree(acquired.lease, reservation.unitId, baseOid);`;
     console.log(`Fixtures retained at ${scratch}`);
   }
   const executed = results.map(([name]) => name);
+  const declared = [...declarations.keys()];
+  const groups = Object.fromEntries(SELECTION_SELF_TEST_GROUPS.map((name) => [name, []]));
+  for (const [name, assignedGroup] of declarations) groups[assignedGroup].push(name);
   // Group coverage does not depend on the focused-debug filter.
-  const expected = declared.filter((name) => group === null
-    ? filter === undefined || name.includes(filter)
-    : selectionTestGroup(name) === group);
+  const expected = group === null ? declared.filter((name) => filter === undefined || name.includes(filter)) : groups[group];
   const complete = executed.length === expected.length && executed.every((name, index) => name === expected[index]);
   if (!complete) console.error('FAIL selection case coverage: the executed names do not match the selected declarations.');
-  console.log(`selection cases: ${JSON.stringify({ group: group ?? 'all', filter: filter ?? null, declared, executed })}`);
+  console.log(`selection cases: ${JSON.stringify({ group: group ?? 'all', filter: filter ?? null, declared, executed, groups })}`);
   const passed = complete && results.length > 0 && results.every(([, ok]) => ok);
   console.log(passed ? `self-test OK (${results.length} cases)` : 'self-test FAILED');
   return passed;
@@ -1694,6 +1697,6 @@ if (isMain) {
     || args.length === 3 && args[1] === '--group' && SELECTION_SELF_TEST_GROUPS.includes(args[2]))) {
     process.exit(await selfTest(args[2] ?? null) ? 0 : 1);
   }
-  console.error('usage: scheduler-selection.mjs --self-test [--group foundation|boundary]');
+  console.error('usage: scheduler-selection.mjs --self-test [--group foundation|boundary-admission|boundary-widening]');
   process.exit(2);
 }
