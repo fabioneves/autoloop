@@ -97,9 +97,14 @@ export function resolveRepositoryCheckout(root) {
   requireCondition(nonempty(root), 'INVALID_INPUT', 'A repository root is required.');
   try {
     const directory = realpathSync(resolve(root));
-    const coordinatorRoot = realpathSync(gitFact(directory, ['--show-toplevel']));
-    const commonDir = realpathSync(gitFact(directory, ['--path-format=absolute', '--git-common-dir']));
-    const gitDir = realpathSync(gitFact(directory, ['--absolute-git-dir']));
+    const facts = gitFact(directory, ['--path-format=absolute', '--show-toplevel', '--git-common-dir', '--absolute-git-dir']).split('\n');
+    // Git emits one line per fact, but a valid path can itself contain LF.
+    // Preserve the original fresh reads and per-field trim for that framing.
+    const [coordinatorRoot, commonDir, gitDir] = facts.length === 3
+      ? facts.map((path) => realpathSync(path.trim()))
+      : [realpathSync(gitFact(directory, ['--show-toplevel'])),
+        realpathSync(gitFact(directory, ['--path-format=absolute', '--git-common-dir'])),
+        realpathSync(gitFact(directory, ['--absolute-git-dir']))];
     requireCondition([commonDir, gitDir].every((path) => lstatSync(path).isDirectory()), 'REPOSITORY_INVALID', 'The Git directory is invalid.');
     return Object.freeze({
       repositoryKey: createHash('sha256').update(commonDir, 'utf8').digest('hex'),
@@ -2197,6 +2202,64 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
       assert.equal(repository.repositoryKey, resolveRepository(alias).repositoryKey);
       assert.equal(repository.coordinatorRoot, root);
       assert.equal(other.coordinatorRoot, linked);
+    });
+    await check('fresh checkout identity batches ordinary roots and preserves ambiguous path framing', async () => {
+      const childProcess = (await import('node:child_process')).default;
+      const { syncBuiltinESMExports } = await import('node:module');
+      const unusual = [];
+      for (const name of [' space \tpart ', 'line\nbreak']) {
+        const root = join(scratch, name, 'repo'); mkdirSync(root, { recursive: true });
+        git('init', '-q', '-b', 'main', root);
+        git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'path fixture');
+        const linked = join(scratch, name, 'linked'); git('-C', root, 'worktree', 'add', '-q', '--detach', linked, 'HEAD');
+        unusual.push({ root, linked, commonDir: realpathSync(join(root, '.git')) });
+      }
+      const separateRoot = join(scratch, 'separate-root'); const separateAdmin = join(scratch, 'admin\nwith space', 'git');
+      mkdirSync(dirname(separateAdmin), { recursive: true });
+      git('init', '-q', '--separate-git-dir', separateAdmin, separateRoot);
+      const absent = join(scratch, 'not-a-checkout'); mkdirSync(absent);
+      const actual = childProcess.spawnSync; const calls = [];
+      const names = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_NO_LAZY_FETCH'];
+      const previous = new Map(names.map((name) => [name, process.env[name]]));
+      try {
+        Object.assign(process.env, { GIT_DIR: separateAdmin, GIT_WORK_TREE: separateRoot, GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: 'core.worktree', GIT_CONFIG_VALUE_0: separateRoot, GIT_NO_LAZY_FETCH: '0' });
+        // Count real subprocesses; the command, environment and result are not
+        // replaced. One fresh identity command per ordinary call is specified.
+        childProcess.spawnSync = (file, args, options) => {
+          if (file === 'git' && args.includes('rev-parse')) {
+            calls.push(args);
+            for (const option of ['--no-lazy-fetch', '--no-replace-objects', '--no-optional-locks']) assert(args.includes(option));
+            assert.equal(options.env.GIT_NO_LAZY_FETCH, '1'); assert.equal(options.env.GIT_DIR, undefined);
+          }
+          return actual(file, args, options);
+        };
+        syncBuiltinESMExports();
+        const expectedCommon = realpathSync(join(root, '.git'));
+        for (const requested of [root, linked, alias, root]) {
+          const before = calls.length; const result = resolveRepositoryCheckout(requested);
+          assert.equal(result.root, requested === alias ? root : requested);
+          assert.equal(result.commonDir, expectedCommon);
+          assert.equal(result.gitDir, requested === linked ? realpathSync(join(expectedCommon, 'worktrees', 'linked')) : expectedCommon);
+          assert.equal(result.repositoryKey, createHash('sha256').update(expectedCommon, 'utf8').digest('hex'));
+          assert.equal(calls.length - before, 1, 'Each ordinary checkout read must run one fresh bounded Git process.');
+        }
+        for (const test of unusual) for (const requested of [test.root, test.linked]) {
+          const result = resolveRepositoryCheckout(requested);
+          assert.equal(result.root, requested); assert.equal(result.commonDir, test.commonDir);
+          assert.equal(result.gitDir, requested === test.root ? test.commonDir : realpathSync(join(test.commonDir, 'worktrees', 'linked')));
+          assert.equal(result.repositoryKey, createHash('sha256').update(test.commonDir, 'utf8').digest('hex'));
+        }
+        const separate = resolveRepositoryCheckout(separateRoot);
+        assert.equal(separate.root, separateRoot); assert.equal(separate.commonDir, realpathSync(separateAdmin));
+        assert.equal(separate.gitDir, separate.commonDir);
+        assert.equal(separate.repositoryKey, createHash('sha256').update(separate.commonDir, 'utf8').digest('hex'));
+        assert.throws(() => resolveRepositoryCheckout(absent), (error) => error instanceof SchedulerError && error.code === 'REPOSITORY_INVALID');
+        assert.throws(() => resolveRepositoryCheckout(''), (error) => error instanceof SchedulerError && error.code === 'INVALID_INPUT');
+      } finally {
+        childProcess.spawnSync = actual; syncBuiltinESMExports();
+        for (const [name, value] of previous) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+      }
     });
     const fixture = () => {
       const home = join(scratch, randomUUID());
