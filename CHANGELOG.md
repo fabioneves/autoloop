@@ -3,6 +3,40 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.74.0] - 2026-10-14
+
+### Added
+
+- Module 2 synthetic selection: trusted evidence from scans with an explicit repository root,
+  recovery checks, and atomic issue/slot reservations. Evidence is bound to repository identity,
+  approval and local base/configuration facts. Incomplete or revoked authority cannot select work.
+- Owned local worktrees with durable allocation intent and verified identity, base and clean state.
+  Reconciliation retains uncertain effects, creators and reservations instead of deleting state
+  or retrying without proof.
+- Atomic canonical path exclusion against retained reservations and delivered PR paths.
+  Widening requires an owner-observed failing-task relationship and fresh admission checks.
+  Conflict waits retain prior exclusions and plan-generation floors. A cleared wait requires
+  a new plan and fresh admission; it cannot restore the old admission.
+
+### Changed
+
+- Module 2 keeps `queueEnabled:false`. Synthetic providers do not start a unit model session,
+  enable a writer, or provide claims, PRs or delivery. Production `/autoloop:dev` is unchanged.
+  Module 1 acceptance with the real Claude UI and named service remains open. Installation
+  does not activate the scheduler.
+- Checked selection, scan and allocation Git operations require `--no-lazy-fetch` support and
+  set `GIT_NO_LAZY_FETCH=1`. Missing local objects and unsupported Git cause refusal, not an
+  implicit fetch. Autoloop does not install Git or change the Git installation.
+
+### Fixed
+
+- Snapshot storage and readers use each checkout's Git directory. Linked worktrees cannot use
+  the coordinator's snapshot as their own; events, steps and controls remain shared.
+- Content and status reads suppress external filter drivers without writing objects or refreshing
+  the index. Built-in content conversion remains active. Status checks include initialized and
+  uninitialized submodules and suppress nested filter drivers. Unsupported observations fail
+  closed. Existing secret, runtime and protected-path publication policy is unchanged.
+
 ## [0.73.0] - 2026-10-14
 
 ### Added
