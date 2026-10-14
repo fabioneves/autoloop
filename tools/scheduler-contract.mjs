@@ -655,7 +655,15 @@ export function withExecutionAdmission(repository, establish, { observe = () => 
     requireCondition(names.filter((name) => name.endsWith('.released.json')).every((name) => Number(name.split('.')[0]) <= sequences.length),
       'STATE_INVALID', 'An admission release has no owner.');
     if (previous && !previous.released) {
-      const state = ownerState(previous.item.owner);
+      const state = ownerState(previous.item.owner, observe);
+      if (state === 'unknown') {
+        // Release and exit can occur after the first release read but before
+        // the start probe. Only a valid release permits a fresh pre-effect
+        // ledger observation; unknown ownership is not proof of exit.
+        const release = stateJson(join(directory, `${previous.item.sequence}.released.json`), true);
+        requireCondition(release === null || validRelease(release, previous.item), 'STATE_INVALID', 'An admission release is invalid.');
+        if (release !== null) continue;
+      }
       requireCondition(state !== 'unknown', 'OWNER_UNVERIFIED', 'The admission owner cannot be verified.');
       if (state === 'alive') {
         const error = new SchedulerError('ADMISSION_BUSY', 'Repository admission is held by another process.');
@@ -3864,6 +3872,97 @@ sys.exit(result if result is not None and result>=0 else 128+abs(result or 1))
       renameSync(join(state, 'current.json'), join(home, 'saved-current.json'));
       refuses('STATE_INVALID', () => readSchedulerOwner(repository));
       refuses('STATE_INVALID', () => acquireScheduler(repository, { ...pins, runId: randomUUID() }, initiator));
+    });
+    async function admissionReleaseWindow(mode) {
+      const setup = fixture(); const { repository, pins, initiator } = setup;
+      const winner = acquireScheduler(repository, pins, initiator);
+      const before = readCheckpoint(repository, pins.runId);
+      const ready = join(setup.home, 'admission-ready.json'); const gate = join(setup.home, 'release-admission');
+      const exited = join(setup.home, 'admission-exited.json');
+      const innerSource = `const api=await import(process.argv[1]);const {existsSync,writeFileSync,renameSync}=await import('node:fs');
+        const repository=api.resolveRepository(process.argv[2]),pins=JSON.parse(process.argv[3]);
+        try{api.acquireScheduler(repository,pins,{kind:'terminal',sessionId:null,process:api.readProcessIdentity()},
+          {admissionObserve:()=>{writeFileSync(process.argv[4]+'.tmp',JSON.stringify(api.readProcessIdentity()));renameSync(process.argv[4]+'.tmp',process.argv[4]);
+            const until=Date.now()+15000;while(!existsSync(process.argv[5])){if(Date.now()>until)throw Error('Fixture gate timed out.');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);}}});
+          process.send({ok:true},()=>process.disconnect());
+        }catch(error){process.send({ok:false,code:error.code,message:error.message},()=>process.disconnect());}`;
+      const reaper = startChild(`const {spawn}=await import('node:child_process');const {writeFileSync,renameSync}=await import('node:fs');
+        const child=spawn(process.execPath,['--input-type=module','-e',process.argv[2],...process.argv.slice(3)],{stdio:['ignore','ignore','pipe','ipc']});
+        let result=null,errors='',finished=false,finishRequested=false;
+        child.on('message',value=>{result=value;});child.stderr.on('data',chunk=>{errors+=chunk;});
+        child.once('close',(code,signal)=>{const path=process.argv[8];writeFileSync(path+'.tmp',JSON.stringify({code,signal,result,errors}));renameSync(path+'.tmp',path);
+          finished=true;if(finishRequested)process.disconnect();});
+        process.on('message',command=>{if(command==='finish'){finishRequested=true;if(finished)process.disconnect();}});`,
+      [moduleUrl, innerSource, moduleUrl, repository.coordinatorRoot, JSON.stringify(pins), ready, gate, exited]);
+      const waitFor = async (path) => { const until = Date.now() + 15000;
+        while (!existsSync(path)) { assert(Date.now() < until && reaper.exitCode === null, reaper.errorText); await new Promise((done) => setTimeout(done, 5)); } };
+      let proof = null; let hookError = null; let admissionCalls = 0;
+      const probeFailure = new Error('Injected owner-start observation failure.');
+      try {
+        await waitFor(ready); const priorOwner = JSON.parse(readFileSync(ready, 'utf8'));
+        const directory = admissionOf(repository); const prior = stateJson(join(directory, '2.json'));
+        const releasePath = join(directory, '2.released.json');
+        assert.deepEqual(prior.owner, priorOwner); assert.equal(existsSync(releasePath), false);
+        let outcome;
+        try {
+          acquireScheduler(repository, pins, initiator, { admissionObserve: () => { admissionCalls += 1; }, observe: (phase, owner) => {
+            if (phase !== 'owner-start' || owner.pid !== priorOwner.pid || proof !== null) return;
+            try {
+              proof = { unreleasedBefore: !existsSync(releasePath), aliveBefore: processAlive(owner.pid), startBefore: processStart(owner.pid) === owner.start };
+              assert(proof.unreleasedBefore && proof.aliveBefore && proof.startBefore);
+              if (mode === 'unreleased') {
+                // Inject only the unavailable start-probe failure. The real
+                // owner remains live and its actual gate remains unreleased.
+                proof.injectedStartFailure = true; throw probeFailure;
+              }
+              writeFileSync(gate, 'release'); const until = Date.now() + 15000;
+              while (!existsSync(exited) || processAlive(owner.pid)) {
+                assert(Date.now() < until, 'The real admission owner did not exit.'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+              }
+              const result = JSON.parse(readFileSync(exited, 'utf8'));
+              proof.releaseValid = validRelease(stateJson(releasePath), prior); proof.absentAfter = !processAlive(owner.pid) && processStart(owner.pid) === null;
+              proof.loserCode = result.result?.code; assert.equal(result.code, 0, result.errors);
+              assert(proof.releaseValid && proof.absentAfter); assert.equal(proof.loserCode, 'SCHEDULER_ACTIVE');
+              if (mode === 'malformed') writeFileSync(releasePath, '{');
+              if (mode === 'substituted') {
+                const first = stateJson(join(directory, '1.json'));
+                const substituted = { ...prior, leaseId: first.leaseId, owner: first.owner };
+                const release = { ...stateJson(releasePath), leaseId: first.leaseId, owner: first.owner };
+                // Replace this test-owned pair with matching but different
+                // authority. The fresh release must bind the observed record,
+                // not a replacement that becomes self-consistent on reread.
+                writeFileSync(join(directory, '2.json'), JSON.stringify(substituted)); writeFileSync(releasePath, JSON.stringify(release));
+                proof.substitutionSelfValid = validRelease(release, substituted);
+                proof.substitutionMatchesObserved = validRelease(release, prior);
+                assert(proof.substitutionSelfValid && !proof.substitutionMatchesObserved);
+              }
+            } catch (error) { if (error !== probeFailure) hookError = error; throw error; }
+          } });
+        } catch (error) { outcome = error; }
+        if (hookError) throw hookError;
+        if (mode === 'unreleased') {
+          assert(proof?.injectedStartFailure && proof.unreleasedBefore && proof.aliveBefore && proof.startBefore);
+          assert.equal(processIdentityState(priorOwner), 'alive'); assert.equal(existsSync(releasePath), false);
+        } else assert(proof?.releaseValid && proof.absentAfter, JSON.stringify(proof));
+        assert(outcome instanceof SchedulerError);
+        const expected = { released: 'SCHEDULER_ACTIVE', unreleased: 'OWNER_UNVERIFIED', malformed: 'STATE_INVALID', substituted: 'STATE_INVALID' }[mode];
+        assert.equal(outcome.code, expected, JSON.stringify({ mode, proof, admissionCalls }));
+        assert.equal(admissionCalls, mode === 'released' ? 1 : 0); assert.deepEqual(readCheckpoint(repository, pins.runId), before);
+        assert.deepEqual(readdirSync(join(setup.state, 'lock')), ['1.json']);
+        if (mode === 'released') {
+          const ticket = stateJson(join(directory, '3.json'));
+          assert.deepEqual(ticket.owner, readProcessIdentity()); assert.equal(ticket.sequence, 3);
+          assert(validRelease(stateJson(join(directory, '3.released.json')), ticket));
+        } else assert.equal(existsSync(join(directory, '3.json')), false);
+      } finally {
+        if (!existsSync(gate)) writeFileSync(gate, 'release');
+        if (reaper.connected) reaper.send('finish'); await reaper.finished;
+        const current = readCheckpoint(repository, pins.runId);
+        commitTransition(winner.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(winner.lease);
+      }
+    }
+    await check('admission rechecks real release/exit, rejects substituted releases and refuses injected live-owner probe failure', async () => {
+      for (const mode of ['released', 'malformed', 'substituted', 'unreleased']) await admissionReleaseWindow(mode);
     });
     await check('simultaneous linked-worktree contenders yield one owner and one checkpoint writer', async () => {
       const rounds = 32; const sampleStarted = performance.now();
