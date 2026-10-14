@@ -258,7 +258,8 @@ export async function startSupervised({ repository, pins, initiator, systemdRunP
     throw new SchedulerError('STATE_IO_FAILED', 'The durable launch record could not be published.');
   }
   const profile = pins.supervisorProfile;
-  const args = ['--user', '--collect', `--unit=${unit}`, '--property=Type=exec', '--property=Restart=on-failure', '--property=KillMode=process',
+  // Pinned paths can contain literal dollar expressions; systemd must not expand them.
+  const args = ['--user', '--collect', '--expand-environment=no', `--unit=${unit}`, '--property=Type=exec', '--property=Restart=on-failure', '--property=KillMode=process',
     '--property=TimeoutStopSec=infinity', `--property=MemoryMax=${profile.memoryMaxBytes}`,
     `--property=MemorySwapMax=${profile.memorySwapMaxBytes}`, `--property=TasksMax=${profile.tasksMax}`,
     '--property=MemoryAccounting=yes', '--property=TasksAccounting=yes', `--working-directory=${pins.coordinatorRoot}`,
@@ -352,10 +353,10 @@ async function selfTest({ requireSupervision = false } = {}) {
       await new Promise((done) => setTimeout(done, 10));
     }
   };
-  const fixture = async ({ publicCli = false } = {}) => {
+  const fixture = async ({ publicCli = false, checkoutName = 'repo' } = {}) => {
     const home = join(scratch, randomUUID());
     mkdirSync(home);
-    const checkout = join(home, 'repo');
+    const checkout = join(home, checkoutName);
     assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', checkout], { encoding: 'utf8', timeout: 15000 }).status, 0);
     const repository = resolveRepository(checkout);
     const config = resolveConfigText(JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'node --version' } })).config;
@@ -386,7 +387,7 @@ cp.spawn = (file, args, options) => {
   if (/(?:^|\\/)(?:systemctl|systemd-run)$/u.test(file)) throw Error('Unexpected supervisor fixture executable');
   return actualSpawn(file, args, options);
 }; syncBuiltinESMExports();\n`);
-    const settings = { socket, state, mode, log, node: process.execPath, preload: publicCli ? preload : fixtureAccount.preload };
+    const settings = { socket, state, mode, log, node: process.execPath, accountHome, preload: publicCli ? preload : fixtureAccount.preload };
     const managerFile = join(home, 'manager.mjs');
     writeFileSync(managerFile, `import { createServer } from 'node:net'; import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
@@ -395,7 +396,11 @@ const save = (value) => {writeFileSync(settings.state+'.next', JSON.stringify(va
 save({Id:'',LoadState:'not-found',ActiveState:'inactive',SubState:'dead',MainPID:'0',ControlGroup:''});
 function start(args) {
   const unit = args.find((arg) => arg.startsWith('--unit=')).slice(7);
-  const index = args.indexOf(settings.node); const command = args.slice(index);
+  const index = args.indexOf(settings.node);
+  // The external manager expands braced variables by default. HOME is supplied
+  // by the launch request; literal arguments require expansion to be disabled.
+  const command = args.slice(index).map((value) => args.includes('--expand-environment=no') ? value
+    : value.replace(/\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}/gu, (_match, name) => name === 'HOME' ? settings.accountHome : process.env[name] ?? ''));
   const cwd = args.find((arg) => arg.startsWith('--working-directory=')).slice(20);
   const child = spawn(command[0], [...(settings.preload ? ['--import', settings.preload] : []), ...command.slice(1)], {cwd,detached:true,stdio:['ignore','ignore','pipe']});
   children.add(child); let error=''; child.stderr.on('data',(chunk)=>{error+=chunk;});
@@ -561,6 +566,19 @@ for(const key of args.filter((arg)=>arg.startsWith('--property=')).map((arg)=>ar
           await assert.rejects(launch(setup), (error) => ['HOST_AUTH_REQUIRED', 'STATE_INVALID'].includes(error.code));
           assert.equal(readFileSync(setup.log, 'utf8').includes('"tool":"run"'), false);
         } finally { os.userInfo = original; syncBuiltinESMExports(); }
+      });
+      if (containedFixture) await check('literal dollar expressions in repository paths survive supervised launch unchanged', async () => {
+        const setup = await fixture({ checkoutName: 'repo-${HOME}' });
+        const ready = await launch(setup);
+        assert.equal(ready.state, 'running');
+        assert.equal(ready.runId, setup.pins.runId);
+        const checkpoint = readCheckpoint(setup.repository, ready.runId);
+        assert.equal(checkpoint.pinsDigest, schedulerDigest(setup.pins));
+        assert.equal(processIdentityState(checkpoint.owner), 'alive');
+        submitControl(setup.repository, actor(), { schema: 'autoloop.control/2', requestId: randomUUID(), runId: ready.runId,
+          kind: 'stop', target: { type: 'run', generation: ready.generation }, payload: {}, submittedAt: Date.now() });
+        await waitFor(() => JSON.parse(readFileSync(setup.state)).MainPID === '0', 'The literal-path daemon did not stop.');
+        assert.equal(readCheckpoint(setup.repository, ready.runId).state, 'stopped');
       });
       if (containedFixture) await check('fake systemd starts a real contained daemon and actual checkpoint readiness is required', async () => {
         const setup = await fixture();
