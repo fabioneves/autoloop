@@ -3,7 +3,8 @@
 // queue selection or operator-admission shortcut lives in this module.
 
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { Readable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync,
@@ -13,10 +14,21 @@ import {
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveConfigText, validateConfig } from './config-contract.mjs';
+import { resolveConfigText, resolveProjectConfig, validateConfig } from './config-contract.mjs';
+import {
+  hasRetainedSelection, issueAuthorizationEvidence, selectionSnapshotReference, validateAllocationCreator,
+  validateIssueAuthorizationEvidence, validateSelectionRecords, validateSelectionSnapshot, validateSnapshotReference,
+  validatePlanArtifact, validatePlanningRelationship, requestedPlanGenerationFloor,
+} from './scheduler-selection-schema.mjs';
+import { deliveredPullRequests, markerSchedule, SNAPSHOT_SECTIONS } from './snapshot-contract.mjs';
+export { hasRetainedSelection } from './scheduler-selection-schema.mjs';
 import { DEFAULT_MODELS, invariantProblems, mergeModels, MODEL_ROLES, modelsShapeProblems } from './models-config.mjs';
 import { isClaudeProcess, processAlive, processStart, procEntry, readRegularFile, publishWorkerGuard, readBootIdentity, executionAdmissionGuardDirectory } from './run-markers.mjs';
 import { boundedGit } from './git-budget.mjs';
+import { parseGitHubRemote } from './checkout-contract.mjs';
+import { canonicalBoundary, inLane, intersectBoundaries } from './lane-contract.mjs';
+import { readPlanningWorktreeContext } from './scheduler-planning-context.mjs';
+import { readGitStatus } from './git-observation.mjs';
 import { runningDispatches } from './inherited-dispatch.mjs';
 
 export const CHECKPOINT_SCHEMA = 'autoloop.scheduler-checkpoint/1';
@@ -72,28 +84,41 @@ export function schedulerDigest(value) {
   return createHash('sha256').update(canonicalJson(value)).digest('hex');
 }
 
-function gitFact(root, args) {
-  const result = boundedGit(['-C', root, 'rev-parse', ...args], {
-    maxBuffer: 1024 * 1024,
-  });
+function checkoutGit(root, args) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' });
+  const result = boundedGit(['--no-lazy-fetch', '--no-replace-objects', '--no-optional-locks', '-C', root, '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args],
+    { env, maxBuffer: 1024 * 1024 });
   requireCondition(result.status === 0 && !result.error, 'REPOSITORY_INVALID', 'The repository cannot be verified.');
   return result.stdout.trim();
 }
-export function resolveRepository(root) {
+function gitFact(root, args) { return checkoutGit(root, ['rev-parse', ...args]); }
+export function resolveRepositoryCheckout(root) {
   requireCondition(nonempty(root), 'INVALID_INPUT', 'A repository root is required.');
   try {
     const directory = realpathSync(resolve(root));
-    const coordinatorRoot = realpathSync(gitFact(directory, ['--show-toplevel']));
-    const commonDir = realpathSync(gitFact(directory, ['--path-format=absolute', '--git-common-dir']));
-    requireCondition(lstatSync(commonDir).isDirectory(), 'REPOSITORY_INVALID', 'The common Git directory is invalid.');
+    const facts = gitFact(directory, ['--path-format=absolute', '--show-toplevel', '--git-common-dir', '--absolute-git-dir']).split('\n');
+    // Git emits one line per fact, but a valid path can itself contain LF.
+    // Preserve the original fresh reads and per-field trim for that framing.
+    const [coordinatorRoot, commonDir, gitDir] = facts.length === 3
+      ? facts.map((path) => realpathSync(path.trim()))
+      : [realpathSync(gitFact(directory, ['--show-toplevel'])),
+        realpathSync(gitFact(directory, ['--path-format=absolute', '--git-common-dir'])),
+        realpathSync(gitFact(directory, ['--absolute-git-dir']))];
+    requireCondition([commonDir, gitDir].every((path) => lstatSync(path).isDirectory()), 'REPOSITORY_INVALID', 'The Git directory is invalid.');
     return Object.freeze({
       repositoryKey: createHash('sha256').update(commonDir, 'utf8').digest('hex'),
-      commonDir, coordinatorRoot,
+      commonDir, gitDir, root: coordinatorRoot,
     });
   } catch (error) {
     if (error instanceof SchedulerError) throw error;
     throw new SchedulerError('REPOSITORY_INVALID', 'The repository cannot be verified.');
   }
+}
+
+export function resolveRepository(root) {
+  const checkout = resolveRepositoryCheckout(root);
+  return Object.freeze({ repositoryKey: checkout.repositoryKey, commonDir: checkout.commonDir, coordinatorRoot: checkout.root });
 }
 
 export function assertNoKnownLegacyOwner(repository, { owner = null, sessionId = null } = {}) {
@@ -396,7 +421,7 @@ export function validateCheckpoint(value) {
   if (!timestamp(value.createdAt) || !timestamp(value.updatedAt) || value.updatedAt < value.createdAt
     || (value.stoppedAt !== null && !timestamp(value.stoppedAt)) || !validError(value.error)) errors.push('Checkpoint timestamps or error are invalid.');
   if (value.state === 'stopped' && (value.desiredState !== 'stopped' || value.stoppedAt === null)) errors.push('A stopped checkpoint needs stopped intent and time.');
-  if (!Array.isArray(value.units) || value.units.length !== 0 || !Array.isArray(value.reservations) || value.reservations.length !== 0) errors.push('Unit and reservation providers are not available.');
+  errors.push(...validateSelectionRecords(value));
   if (!Array.isArray(value.workers) || value.workers.some((worker) => !validWorker(worker) || worker.runId !== value.runId
     || worker.generation > value.generation) || new Set(value.workers.map((worker) => worker.attemptId)).size !== value.workers.length) errors.push('Worker bindings are invalid.');
   if (!record(value.requests) || Object.entries(value.requests).some(([id, request]) => !uuid(id) || !validRequestRecord(request, value, id))) errors.push('Request records are invalid.');
@@ -630,7 +655,15 @@ export function withExecutionAdmission(repository, establish, { observe = () => 
     requireCondition(names.filter((name) => name.endsWith('.released.json')).every((name) => Number(name.split('.')[0]) <= sequences.length),
       'STATE_INVALID', 'An admission release has no owner.');
     if (previous && !previous.released) {
-      const state = ownerState(previous.item.owner);
+      const state = ownerState(previous.item.owner, observe);
+      if (state === 'unknown') {
+        // Release and exit can occur after the first release read but before
+        // the start probe. Only a valid release permits a fresh pre-effect
+        // ledger observation; unknown ownership is not proof of exit.
+        const release = stateJson(join(directory, `${previous.item.sequence}.released.json`), true);
+        requireCondition(release === null || validRelease(release, previous.item), 'STATE_INVALID', 'An admission release is invalid.');
+        if (release !== null) continue;
+      }
       requireCondition(state !== 'unknown', 'OWNER_UNVERIFIED', 'The admission owner cannot be verified.');
       if (state === 'alive') {
         const error = new SchedulerError('ADMISSION_BUSY', 'Repository admission is held by another process.');
@@ -680,7 +713,7 @@ export function assertNoSchedulerOwner(repository) {
   if (held.state === 'alive') refuse('SCHEDULER_ACTIVE', 'A scheduler owns this repository.');
   if (held.lease === null) return;
   const current = readCurrentCheckpoint(repository);
-  if (!current || current.state !== 'stopped' || retainedWorkers(current) || hasUnresolvedEffects(current) || pendingRequests(repository, current)) {
+  if (!current || current.state !== 'stopped' || retainedWorkers(current) || hasRetainedSelection(current) || hasUnresolvedEffects(current) || pendingRequests(repository, current)) {
     refuse('SCHEDULER_ACTIVE', 'The scheduler run needs recovery before legacy admission.');
   }
 }
@@ -730,12 +763,12 @@ function acquireSchedulerWithinAdmission(repository, pins, initiator, { observe 
   if (previousId !== null) {
     const path = join(stateDirectory(repository), 'runs', previousId);
     if (present(path) && present(join(safeDirectory(path), 'checkpoint.json'))) recovered = rawCheckpoint(repository, previousId);
-    if (recovered === null || recovered.state !== 'stopped' || retainedWorkers(recovered) || hasUnresolvedEffects(recovered) || pendingRequests(repository, recovered)) {
+    if (recovered === null || recovered.state !== 'stopped' || retainedWorkers(recovered) || hasRetainedSelection(recovered) || hasUnresolvedEffects(recovered) || pendingRequests(repository, recovered)) {
       requireCondition(previousId === pins.runId, 'RUN_MISMATCH', 'Recover the preceding run before starting another.');
     }
   }
   if (recovered && recovered.runId === pins.runId) {
-    requireCondition(recovered.state !== 'stopped' || retainedWorkers(recovered) || hasUnresolvedEffects(recovered) || pendingRequests(repository, recovered),
+    requireCondition(recovered.state !== 'stopped' || retainedWorkers(recovered) || hasRetainedSelection(recovered) || hasUnresolvedEffects(recovered) || pendingRequests(repository, recovered),
       'RUN_ENDED', 'A completed stopped run cannot be reopened.');
     requireCondition(schedulerDigest(readPins(repository, pins.runId)) === schedulerDigest(pins), 'PINS_CHANGED', 'The run pins changed.');
   } else requireCondition(!ledger.some(({ record: item }) => item.runId === pins.runId) || recovered === null,
@@ -754,7 +787,8 @@ function acquireSchedulerWithinAdmission(repository, pins, initiator, { observe 
     throw error;
   }
   const lease = Object.freeze({});
-  const binding = { repository: Object.freeze({ ...repository }), identity, active: true, observe, writing: false };
+  const binding = { repository: Object.freeze({ ...repository }), identity, active: true, observe, writing: false,
+    planningAllowance: null, planningObservers: new Map() };
   leases.set(lease, binding);
   try {
     const directory = runDirectory(repository, pins.runId, true, observe);
@@ -790,6 +824,323 @@ function heldLease(lease, allowWriting = false) {
     && schedulerDigest(owner) === schedulerDigest(binding.identity.owner), 'LEASE_INVALID', 'The writer lease was superseded.');
   return binding;
 }
+// Returned data is a fresh read, not a transferable lease or writer handle.
+export function readSchedulerContext(lease) {
+  const binding = heldLease(lease, true);
+  const checkpoint = readCheckpoint(binding.repository, binding.identity.runId);
+  requireCondition(checkpoint.generation === binding.identity.generation, 'LEASE_INVALID', 'The writer generation changed.');
+  const pins = readPins(binding.repository, checkpoint.runId);
+  assertPinsLive(binding.repository, pins);
+  heldLease(lease, true);
+  return { repository: { ...binding.repository }, pins, checkpoint };
+}
+function selectionIdentity(binding, evidence, checkpoint, pins, current) {
+  requireCondition(evidence.runId === checkpoint.runId && evidence.repositoryKey === binding.repository.repositoryKey
+    && evidence.commonDir === binding.repository.commonDir && evidence.generation <= checkpoint.generation
+    && evidence.checkpointRevision <= checkpoint.revision && evidence.configDigest === pins.configDigest
+    && evidence.configuredBaseBranch === pins.baseBranch, 'EVIDENCE_INVALID', 'The evidence belongs to another run or configuration.');
+  const checkout = resolveRepositoryCheckout(evidence.root);
+  requireCondition(['root', 'gitDir', 'commonDir', 'repositoryKey'].every((key) => checkout[key] === evidence[key]),
+    'EVIDENCE_CHANGED', 'The evidence checkout identity changed.');
+  if (!current) return;
+  requireCondition(evidence.generation === checkpoint.generation && evidence.checkpointRevision === checkpoint.revision,
+    'REVISION_MISMATCH', 'The selection evidence is historical.');
+  requireCondition(evidence.snapshot.invalidation.reasonCodes.length === 0
+    && SNAPSHOT_SECTIONS.every((name) => evidence.snapshot.sections[name].complete)
+    && evidence.sources.waitIssues.complete && evidence.sources.waitPullRequests.complete,
+  'EVIDENCE_INCOMPLETE', 'Selection requires complete current evidence.');
+  const configured = resolveProjectConfig(pins.coordinatorRoot);
+  requireCondition(configured?.ok && schedulerDigest(configured.config) === pins.configDigest,
+    'PINS_CHANGED', 'The pinned repository configuration changed.');
+  const origins = checkoutGit(checkout.root, ['config', '--get-all', 'remote.origin.url']).split(/\r?\n/u).filter(Boolean);
+  const origin = origins.length === 1 ? parseGitHubRemote(origins[0]) : null;
+  requireCondition(origin && origin.host === evidence.repository.host.toLowerCase()
+    && origin.owner === evidence.repository.owner.toLowerCase() && origin.repo === evidence.repository.name.toLowerCase(),
+  'EVIDENCE_CHANGED', 'The canonical repository origin changed.');
+  requireCondition(gitFact(checkout.root, ['--verify', 'HEAD^{commit}']) === evidence.headOid
+    && gitFact(checkout.root, ['--verify', `${evidence.baseRef}^{commit}`]) === evidence.baseOid,
+  'EVIDENCE_CHANGED', 'The checkout HEAD or configured base changed.');
+}
+function selectionEvidenceDirectory(binding, reference, create = false) {
+  const checkout = resolveRepositoryCheckout(reference.root);
+  requireCondition(checkout.gitDir === reference.gitDir && checkout.commonDir === binding.repository.commonDir
+    && checkout.repositoryKey === binding.repository.repositoryKey, 'EVIDENCE_INVALID', 'The evidence administrative directory is invalid.');
+  let directory = safeDirectory(checkout.gitDir);
+  for (const name of ['autoloop', 'scheduler', 'snapshots', reference.runId, 'sha256']) {
+    directory = childDirectory(directory, name, create, binding.observe, name !== 'autoloop');
+  }
+  return directory;
+}
+export function publishSelectionSnapshot(lease, expectedRevision, evidence) {
+  const binding = heldLease(lease);
+  requireCondition(validateSelectionSnapshot(evidence).length === 0 && safeValues(evidence), 'INVALID_INPUT', 'The selection evidence is invalid.');
+  const immutable = JSON.parse(canonicalJson(evidence));
+  const context = readSchedulerContext(lease);
+  requireCondition(context.checkpoint.revision === expectedRevision, 'REVISION_MISMATCH', 'The checkpoint revision changed.');
+  selectionIdentity(binding, immutable, context.checkpoint, context.pins, true);
+  const reference = selectionSnapshotReference(immutable);
+  binding.writing = true;
+  try {
+    const path = join(selectionEvidenceDirectory(binding, reference, true), `${reference.contentDigest}.json`);
+    heldLease(lease, true);
+    try { durableWrite(path, immutable, { exclusive: true, observe: binding.observe }); }
+    catch (error) {
+      if (error.code !== 'STATE_CONFLICT') throw error;
+      requireCondition(schedulerDigest(stateJson(path)) === reference.contentDigest, 'EVIDENCE_INVALID', 'The immutable evidence content changed.');
+      try {
+        syncDirectory(dirname(path));
+        binding.observe('directory-flushed', path);
+      } catch (failure) {
+        if (failure instanceof SchedulerError) throw failure;
+        throw new SchedulerError('STATE_IO_FAILED', 'The immutable evidence publication cannot be flushed.');
+      }
+    }
+    readSelectionSnapshot(lease, reference);
+    return reference;
+  } finally { binding.writing = false; }
+}
+export function readSelectionSnapshot(lease, reference, { current = true } = {}) {
+  const binding = heldLease(lease, true);
+  requireCondition(validateSnapshotReference(reference).length === 0 && typeof current === 'boolean', 'INVALID_INPUT', 'The snapshot reference is invalid.');
+  const context = readSchedulerContext(lease);
+  const path = join(selectionEvidenceDirectory(binding, reference), `${reference.contentDigest}.json`);
+  const evidence = stateJson(path);
+  requireCondition(validateSelectionSnapshot(evidence).length === 0 && safeValues(evidence)
+    && canonicalJson(selectionSnapshotReference(evidence)) === canonicalJson(reference), 'EVIDENCE_INVALID', 'The immutable selection evidence does not match its reference.');
+  selectionIdentity(binding, evidence, context.checkpoint, context.pins, current);
+  heldLease(lease, true);
+  requireCondition(!current || readCheckpoint(binding.repository, context.checkpoint.runId).revision === context.checkpoint.revision,
+    'REVISION_MISMATCH', 'The checkpoint changed during evidence readback.');
+  return evidence;
+}
+
+function planningBoundary(root, paths) {
+  try { return canonicalBoundary(root, paths); }
+  catch (error) { throw new SchedulerError(error.code ?? 'BOUNDARY_PATH_INVALID', 'The canonical planning boundary cannot be verified.'); }
+}
+function planningFacts(root, retained, proposed, baseOid) {
+  try { return readPlanningWorktreeContext(root, retained, proposed, baseOid); }
+  catch (error) { throw new SchedulerError(error.code ?? 'EVIDENCE_CHANGED', 'The planning worktree context cannot be verified.'); }
+}
+function planningTarget(context, unitId, unitGeneration, proposed) {
+  const { checkpoint, pins, repository } = context;
+  const unit = checkpoint.units.find((item) => item.unitId === unitId);
+  const reservation = checkpoint.reservations.find((item) => item.unitId === unitId);
+  requireCondition(unit && reservation && unit.unitGeneration === unitGeneration && reservation.worktree && unit.plan
+    && ['admitted', 'planning'].includes(reservation.state) && reservation.paths.length > 0 && unit.wait === null
+    && unit.disposition === null, 'TARGET_MISMATCH', 'The retained planning unit is not available.');
+  requireCondition(proposed.planGeneration > requestedPlanGenerationFloor(unit), 'TARGET_MISMATCH', 'A new proposal must exceed the requested plan generation floor.');
+  const configured = resolveProjectConfig(pins.coordinatorRoot);
+  requireCondition(configured?.ok && schedulerDigest(configured.config) === pins.configDigest, 'PINS_CHANGED', 'The pinned repository configuration changed.');
+  const origins = checkoutGit(reservation.worktree.root, ['config', '--get-all', 'remote.origin.url']).split(/\r?\n/u).filter(Boolean);
+  const origin = origins.length === 1 ? parseGitHubRemote(origins[0]) : null;
+  const upstream = reservation.issueAuthorization.subject.repository;
+  requireCondition(origin && origin.host === upstream.host.toLowerCase() && origin.owner === upstream.owner.toLowerCase()
+    && origin.repo === upstream.name.toLowerCase(), 'EVIDENCE_CHANGED', 'The planning repository origin changed.');
+  const checkout = resolveRepositoryCheckout(reservation.worktree.root);
+  requireCondition(['root', 'gitDir', 'commonDir', 'repositoryKey'].every((key) => checkout[key] === reservation.worktree[key])
+    && checkout.commonDir === repository.commonDir
+    && checkoutGit(checkout.root, ['symbolic-ref', '--short', 'HEAD']) === reservation.worktree.branch,
+  'EVIDENCE_CHANGED', 'The planning worktree binding changed.');
+  const baseOid = gitFact(checkout.root, ['--verify', `refs/remotes/origin/${pins.baseBranch}^{commit}`]);
+  requireCondition(baseOid === proposed.baseOid, 'EVIDENCE_CHANGED', 'The proposed plan does not use the configured base.');
+  checkoutGit(checkout.root, ['merge-base', '--is-ancestor', baseOid, 'HEAD']);
+  const boundary = planningBoundary(checkout.root, [...reservation.paths, ...proposed.boundary]).boundary;
+  requireCondition(canonicalJson(boundary) === canonicalJson(proposed.boundary), 'TARGET_MISMATCH', 'A proposal must retain the full canonical boundary.');
+  const addedPaths = boundary.filter((path) => !inLane(path, reservation.paths));
+  requireCondition(addedPaths.length > 0, 'TARGET_MISMATCH', 'A failing-task relationship needs an expanded boundary.');
+  return { unit, reservation, addedPaths, facts: planningFacts(checkout.root, reservation.paths, proposed.boundary, baseOid) };
+}
+function artifactMetadata(artifact) {
+  return { planGeneration: artifact.planGeneration, planDigest: schedulerDigest(artifact), baseOid: artifact.baseOid, boundary: artifact.boundary };
+}
+function planningArtifactIdentity(artifact, context, unitId, unitGeneration) {
+  requireCondition(validatePlanArtifact(artifact).length === 0 && safeValues(artifact), 'INVALID_INPUT', 'The full plan artifact is invalid.');
+  const reservation = context.checkpoint.reservations.find((item) => item.unitId === unitId);
+  requireCondition(reservation && artifact.repositoryKey === context.repository.repositoryKey && artifact.unitId === unitId
+    && artifact.unitGeneration === unitGeneration && artifact.issue === reservation.issue
+    && artifact.issueBodyDigest === reservation.issueAuthorization.subject.issueBodyDigest
+    && artifact.authorizationDigest === reservation.issueAuthorization.authorizationDigest, 'TARGET_MISMATCH', 'The plan artifact names another unit or authorization.');
+}
+function checkPlanningRelationship(context, record, proposed) {
+  requireCondition(record.runId === context.checkpoint.runId && record.schedulerGeneration === context.checkpoint.generation,
+    'TARGET_MISMATCH', 'The observation belongs to another scheduler generation.');
+  const target = planningTarget(context, record.unitId, record.unitGeneration, proposed);
+  requireCondition(record.worktreeGitDir === target.reservation.worktree.gitDir
+    && record.currentPlan.planGeneration === target.unit.plan.planGeneration && record.currentPlan.planDigest === target.unit.plan.planDigest
+    && record.proposedPlan.planGeneration === proposed.planGeneration && record.proposedPlan.planDigest === proposed.planDigest
+    && record.proposedPlan.boundaryDigest === schedulerDigest(proposed.boundary) && record.baseOid === proposed.baseOid
+    && record.issueBodyDigest === target.reservation.issueAuthorization.subject.issueBodyDigest
+    && record.authorizationDigest === target.reservation.issueAuthorization.authorizationDigest
+    && canonicalJson(record.addedPaths) === canonicalJson(target.addedPaths), 'TARGET_MISMATCH', 'The observation does not match the retained plan and proposal.');
+  requireCondition(['headOid', 'treeOid', 'worktreeStatusDigest'].every((key) => record[key] === target.facts[key]),
+    'EVIDENCE_CHANGED', 'The observed worktree content or index changed.');
+  return target;
+}
+export function readFailingTaskRelationship(lease, expectedRevision, relationshipId, request) {
+  requireCondition(uuid(relationshipId) && exactKeys(request, ['unitId', 'unitGeneration', 'proposedPlanArtifact'])
+    && uuid(request.unitId) && positive(request.unitGeneration), 'INVALID_INPUT', 'The planning relationship request is invalid.');
+  const context = readSchedulerContext(lease);
+  requireCondition(context.checkpoint.revision === expectedRevision, 'REVISION_MISMATCH', 'The checkpoint revision changed.');
+  requireCondition(context.checkpoint.state === 'running' && context.checkpoint.desiredState === 'running', 'RUN_ACTIVE', 'Widening requires running intent.');
+  requireCondition(!pendingRequests(context.repository, context.checkpoint)
+    && !Object.values(context.checkpoint.requests).some((item) => ['pending', 'processing', 'unknown'].includes(item.status)),
+  'CONTROL_PENDING', 'Apply controls before consuming a planning relationship.');
+  requireCondition(!planningRelationshipRecovery(context.checkpoint).pending, 'RECOVERY_REQUIRED', 'Task observation ownership is still pending.');
+  const unit = context.checkpoint.units.find((item) => item.unitId === request.unitId);
+  const record = unit?.planningRelationships?.find((item) => item.relationshipId === relationshipId);
+  requireCondition(record && record.unitGeneration === request.unitGeneration, 'TARGET_MISMATCH', 'The planning relationship does not name this unit.');
+  requireCondition(record.status === 'verified-failure', 'WIDEN_REASON_UNVERIFIED', 'The task observation is not a verified failure.');
+  planningArtifactIdentity(request.proposedPlanArtifact, context, request.unitId, request.unitGeneration);
+  checkPlanningRelationship(context, record, artifactMetadata(request.proposedPlanArtifact));
+  heldLease(lease, true);
+  requireCondition(readSchedulerContext(lease).checkpoint.revision === expectedRevision, 'REVISION_MISMATCH', 'The checkpoint changed during relationship readback.');
+  return JSON.parse(canonicalJson(record));
+}
+function writePlanningRecord(lease, revision, unitId, before, after) {
+  const binding = heldLease(lease);
+  requireCondition(binding.planningAllowance === null, 'STATE_BUSY', 'A planning observation transition is in progress.');
+  binding.planningAllowance = { unitId, before: before === null ? null : canonicalJson(before), after: canonicalJson(after) };
+  try {
+    return commitTransition(lease, revision, (value) => ({ ...value, units: value.units.map((unit) => unit.unitId !== unitId ? unit : {
+      ...unit, planningRelationships: before === null ? [...(unit.planningRelationships ?? []), after]
+        : unit.planningRelationships.map((record) => record.relationshipId === before.relationshipId ? after : record),
+    }) }));
+  } finally { binding.planningAllowance = null; }
+}
+function ownedPlanningChild(child, pins) {
+  requireCondition(child instanceof ChildProcess, 'INVALID_INPUT', 'A real directly owned child process is required.');
+  requireCondition(child.exitCode === null && child.signalCode === null && child._handle,
+    'OWNER_UNVERIFIED', 'The task child already exited.');
+  requireCondition(child._handle.pid === child.pid && child._handle.constructor?.name === 'Process',
+    'OWNER_UNVERIFIED', 'The native child process handle cannot be verified.');
+  const identity = readProcessIdentity(child.pid); const entry = procEntry(child.pid);
+  let executable = null;
+  try { if (nonempty(entry?.[2])) executable = realpathSync(entry[2]); } catch { /* unverified executable refuses below */ }
+  requireCondition(entry?.[0] === process.pid && executable === pins.nodePath && processGroupOf(child.pid) === child.pid
+    && child.pid !== processGroupOf(process.pid), 'OWNER_UNVERIFIED', 'The Node child parent, executable or isolated group cannot be verified.');
+  for (const [stream, index] of [[child.stdout, 1], [child.stderr, 2]]) requireCondition(stream && stream === child.stdio[index]
+    && stream._handle?.constructor?.name === 'Pipe' && !stream.destroyed && !stream.readableEnded && !Readable.isDisturbed(stream)
+    && stream.readableEncoding === null && stream.readableFlowing !== true && stream.listenerCount('data') === 0 && stream.listenerCount('readable') === 0,
+  'INVALID_INPUT', 'The complete task output needs untouched stdout and stderr pipes.');
+  let command;
+  try {
+    if (process.platform === 'linux') command = regularBytes(`/proc/${child.pid}/cmdline`);
+    else {
+      const observed = spawnSync('ps', ['-ww', '-o', 'command=', '-p', String(child.pid)], { encoding: null, timeout: 5000 });
+      requireCondition(observed.status === 0 && !observed.error, 'OWNER_UNVERIFIED', 'The task command cannot be observed.'); command = observed.stdout;
+    }
+  } catch (error) {
+    if (error instanceof SchedulerError) throw error;
+    throw new SchedulerError('OWNER_UNVERIFIED', 'The task command cannot be observed.');
+  }
+  requireCondition(command.length > 0 && schedulerDigest(readProcessIdentity(child.pid)) === schedulerDigest(identity),
+    'OWNER_UNVERIFIED', 'The task child identity changed.');
+  return { process: identity, groupLeader: identity, pgid: child.pid,
+    commandDigest: schedulerDigest({ nodePath: pins.nodePath, argvDigest: createHash('sha256').update(command).digest('hex') }) };
+}
+export function observeFailingTaskRelationship(lease, expectedRevision, child, request) {
+  const binding = heldLease(lease);
+  requireCondition(exactKeys(request, ['unitId', 'unitGeneration', 'currentPlanArtifact', 'proposedPlanArtifact', 'taskText', 'rationale'])
+    && uuid(request.unitId) && positive(request.unitGeneration) && nonempty(request.taskText) && nonempty(request.rationale) && safeValues(request),
+  'INVALID_INPUT', 'The owner planning judgment is invalid.');
+  const context = readSchedulerContext(lease);
+  requireCondition(context.checkpoint.revision === expectedRevision, 'REVISION_MISMATCH', 'The checkpoint revision changed.');
+  requireCondition(['running', 'paused'].includes(context.checkpoint.state) && context.checkpoint.desiredState !== 'stopped',
+    'RUN_ACTIVE', 'This run cannot start a task observation.');
+  planningArtifactIdentity(request.currentPlanArtifact, context, request.unitId, request.unitGeneration);
+  planningArtifactIdentity(request.proposedPlanArtifact, context, request.unitId, request.unitGeneration);
+  const proposed = artifactMetadata(request.proposedPlanArtifact);
+  const target = planningTarget(context, request.unitId, request.unitGeneration, proposed);
+  requireCondition(canonicalJson(artifactMetadata(request.currentPlanArtifact)) === canonicalJson(target.unit.plan),
+    'TARGET_MISMATCH', 'The complete current artifact does not match the retained plan.');
+  const first = request.currentPlanArtifact.body.indexOf(request.taskText);
+  requireCondition(first >= 0 && request.currentPlanArtifact.body.indexOf(request.taskText, first + 1) === -1,
+    'INVALID_INPUT', 'The owner must identify one exact task excerpt in the current plan.');
+  const childBinding = ownedPlanningChild(child, context.pins);
+  const record = { schema: 'autoloop.planning-relationship/1', relationshipId: randomUUID(), kind: 'failing-task',
+    runId: context.checkpoint.runId, schedulerGeneration: context.checkpoint.generation, unitId: request.unitId,
+    unitGeneration: request.unitGeneration, worktreeGitDir: target.reservation.worktree.gitDir,
+    currentPlan: { planGeneration: target.unit.plan.planGeneration, planDigest: target.unit.plan.planDigest },
+    proposedPlan: { planGeneration: proposed.planGeneration, planDigest: proposed.planDigest, boundaryDigest: schedulerDigest(proposed.boundary) },
+    issueBodyDigest: target.reservation.issueAuthorization.subject.issueBodyDigest,
+    authorizationDigest: target.reservation.issueAuthorization.authorizationDigest, baseOid: proposed.baseOid,
+    headOid: target.facts.headOid, treeOid: target.facts.treeOid, worktreeStatusDigest: target.facts.worktreeStatusDigest,
+    task: { text: request.taskText, textDigest: createHash('sha256').update(request.taskText, 'utf8').digest('hex') },
+    rationale: request.rationale, addedPaths: target.addedPaths, ...childBinding, status: 'observing', exitCode: null, signal: null,
+    stdoutDigest: null, stderrDigest: null, createdRevision: expectedRevision + 1, completedRevision: null };
+  requireCondition(!(target.unit.planningRelationships ?? []).some((item) => item.status === 'observing'),
+    'STATE_BUSY', 'This unit already has an observing task.');
+  let finalized = false; let drainTimer = null;
+  const streams = [child.stdout, child.stderr].map((stream) => {
+    const state = { stream, hash: createHash('sha256'), failed: false };
+    state.onData = (chunk) => { if (finalized) return; if (Buffer.isBuffer(chunk)) state.hash.update(chunk); else state.failed = true; };
+    state.onError = () => { state.failed = true; };
+    stream.on('data', state.onData); stream.on('error', state.onError); return state;
+  });
+  let monitorError = false; const onError = () => { monitorError = true; }; child.on('error', onError);
+  let finish; let reject;
+  const completion = new Promise((resolve, fail) => { finish = resolve; reject = fail; });
+  const settleObservation = (code, signal, forceInconclusive = false) => queueMicrotask(() => {
+    if (finalized) return; finalized = true; clearTimeout(drainTimer);
+    try {
+      const held = heldLease(lease);
+      const checkpoint = readCheckpoint(held.repository, held.identity.runId); const pins = readPins(held.repository, held.identity.runId);
+      const current = { repository: held.repository, checkpoint, pins };
+      let unchanged = false;
+      try { assertPinsLive(held.repository, pins); checkPlanningRelationship(current, record, proposed); unchanged = true; }
+      catch (error) { if (error.code === 'LEASE_INVALID') throw error; }
+      const complete = streams.every((state) => !state.failed && state.stream.readableEnded);
+      const normal = Number.isSafeInteger(code) && code >= 0 && signal === null && child.exitCode === code && child.signalCode === null;
+      const conclusive = !forceInconclusive && complete && !monitorError && normal && observedGroupState(record) === 'empty' && unchanged;
+      let status = 'inconclusive';
+      if (conclusive) status = code === 0 ? 'not-failed' : 'verified-failure';
+      const settled = { ...record, status,
+        exitCode: Number.isSafeInteger(code) && code >= 0 ? code : null, signal: signal ?? null,
+        stdoutDigest: !streams[0].failed && streams[0].stream.readableEnded ? streams[0].hash.digest('hex') : null,
+        stderrDigest: !streams[1].failed && streams[1].stream.readableEnded ? streams[1].hash.digest('hex') : null,
+        completedRevision: checkpoint.revision + 1 };
+      writePlanningRecord(lease, checkpoint.revision, request.unitId, record, settled); finish(JSON.parse(canonicalJson(settled)));
+    } catch (error) { reject(error); }
+    finally { binding.planningObservers.delete(record.relationshipId); }
+  });
+  const onClose = (code, signal) => settleObservation(code, signal);
+  const onExit = (code, signal) => {
+    // This starts only after native exit, not at task launch. Detached children
+    // can retain pipes even when the recorded group is empty. Give buffered
+    // output a finite drain, without inventing EOF or verifying partial bytes.
+    if (observedGroupState(record) !== 'empty') settleObservation(code, signal, true);
+    else drainTimer = setTimeout(() => settleObservation(code, signal, true), 1000);
+  };
+  child.once('exit', onExit); child.once('close', onClose);
+  try {
+    // The gate remains with the trusted caller. Record and stream ownership are
+    // established before returning; text/rationale are the owner's judgment.
+    requireCondition(schedulerDigest(readProcessIdentity(child.pid)) === schedulerDigest(record.process), 'OWNER_UNVERIFIED', 'The task child exited before observation.');
+    checkPlanningRelationship(context, record, proposed);
+    writePlanningRecord(lease, expectedRevision, request.unitId, null, record);
+    binding.planningObservers.set(record.relationshipId, child);
+    return { relationshipId: record.relationshipId, completion };
+  } catch (error) {
+    clearTimeout(drainTimer);
+    child.removeListener('exit', onExit); child.removeListener('close', onClose); child.removeListener('error', onError);
+    for (const state of streams) { state.stream.removeListener('data', state.onData); state.stream.removeListener('error', state.onError); }
+    throw error;
+  }
+}
+export function reconcilePlanningRelationships(lease, expectedRevision) {
+  const context = readSchedulerContext(lease);
+  requireCondition(context.checkpoint.revision === expectedRevision, 'REVISION_MISMATCH', 'The checkpoint revision changed.');
+  let checkpoint = context.checkpoint;
+  for (const unit of context.checkpoint.units) for (const record of unit.planningRelationships ?? []) {
+    if (record.status !== 'observing' || record.schedulerGeneration === checkpoint.generation || observedGroupState(record) !== 'empty') continue;
+    const settled = { ...record, status: 'inconclusive', exitCode: null, signal: null, stdoutDigest: null, stderrDigest: null,
+      completedRevision: checkpoint.revision + 1 };
+    checkpoint = writePlanningRecord(lease, checkpoint.revision, unit.unitId, record, settled);
+  }
+  return checkpoint;
+}
+
 export function commitTransition(lease, expectedRevision, transition) {
   const binding = heldLease(lease);
   binding.writing = true;
@@ -813,7 +1164,7 @@ function writeTransition(lease, binding, expectedRevision, transition) {
   const updated = { ...proposed, revision: current.revision + 1, updatedAt: Date.now(),
     stoppedAt: proposed.state === 'stopped' ? proposed.stoppedAt ?? Date.now() : proposed.stoppedAt };
   requireCondition(validateCheckpoint(updated).length === 0, 'STATE_INVALID', 'The transition returned invalid state.');
-  validatePersistentTransition(binding, current, updated);
+  validatePersistentTransition(binding, current, updated, lease);
   for (const worker of current.workers) {
     const kept = updated.workers.find((item) => item.attemptId === worker.attemptId);
     requireCondition(kept !== undefined || boundGroupState(worker) === 'empty', 'OWNER_UNVERIFIED', 'A live or uncertain worker binding cannot be erased.');
@@ -826,7 +1177,7 @@ function writeTransition(lease, binding, expectedRevision, transition) {
     }
   }
   requireCondition(!(current.state === 'recovering' && ['running', 'paused'].includes(updated.state)
-    && (hasUnresolvedEffects(updated) || updated.workers.some((worker) => worker.generation < updated.generation && boundGroupState(worker) !== 'empty'))),
+    && (hasRetainedSelection(updated) || hasUnresolvedEffects(updated) || updated.workers.some((worker) => worker.generation < updated.generation && boundGroupState(worker) !== 'empty'))),
     'RECOVERY_REQUIRED', 'Uncertain effects and workers must be reconciled first.');
   // Recheck after the reducer and before publication; nested writes are refused.
   heldLease(lease, true);
@@ -863,7 +1214,9 @@ function recoverEffects(checkpoint) {
     const linked = Object.values(outbox).find((effect) => effect.requestId === id && ['in-flight', 'unknown'].includes(effect.phase));
     return [id, { ...request, status: 'unknown', outcome: outcomeFor(request, 'unknown', 'OUTCOME_UNKNOWN', null, linked?.operationId ?? null) }];
   }));
-  return { ...checkpoint, outbox, requests };
+  const units = checkpoint.units.map((unit) => unit.admission === null ? unit : { ...unit, admission: null, replanRequired: true });
+  const reservations = checkpoint.reservations.map((reservation) => reservation.state === 'admitted' ? { ...reservation, state: 'recovering' } : reservation);
+  return { ...checkpoint, outbox, requests, units, reservations };
 }
 export function hasUnresolvedEffects(checkpoint) {
   return Object.values(checkpoint.outbox ?? {}).some((effect) => ['prepared', 'in-flight', 'unknown'].includes(effect.phase));
@@ -874,6 +1227,9 @@ function retainedWorkers(checkpoint) {
 }
 export function boundGroupState(worker) {
   requireCondition(validWorker(worker), 'INVALID_INPUT', 'The worker binding is invalid.');
+  return observedGroupState(worker);
+}
+function observedGroupState(worker) {
   const leader = ownerState(worker.groupLeader);
   const processState = ownerState(worker.process);
   if (leader === 'dead' && processState === 'dead') {
@@ -1165,7 +1521,7 @@ function refuseForeignControl(lease, binding, control) {
   const updated = { ...current, revision: current.revision + 1, updatedAt: Math.max(Date.now(), current.updatedAt),
     requests: { ...current.requests, [control.requestId]: { ...claimed, status: 'refused', outcome } } };
   requireCondition(validateCheckpoint(updated).length === 0, 'STATE_INVALID', 'The historical refusal is invalid.');
-  validatePersistentTransition(binding, current, updated);
+  validatePersistentTransition(binding, current, updated, lease);
   binding.writing = true;
   try {
     heldLease(lease, true);
@@ -1255,10 +1611,250 @@ function validEffect(value) {
   return value.attempt === 1 ? value.receipt === null && value.error === null
     : value.receipt !== null && value.error?.code === 'NOT_APPLIED';
 }
+function verifySelectionWorktree(worktree, { clean = false } = {}) {
+  const actual = resolveRepositoryCheckout(worktree.root);
+  requireCondition(['root', 'gitDir', 'commonDir', 'repositoryKey'].every((key) => actual[key] === worktree[key])
+    && checkoutGit(worktree.root, ['symbolic-ref', '--short', 'HEAD']) === worktree.branch,
+  'EVIDENCE_CHANGED', 'The bound worktree identity changed.');
+  const headOid = gitFact(worktree.root, ['--verify', 'HEAD^{commit}']);
+  if (clean) {
+    let status;
+    try { status = readGitStatus(worktree.root); }
+    catch { throw new SchedulerError('EVIDENCE_CHANGED', 'The clean worktree status cannot be verified.'); }
+    requireCondition(headOid === worktree.baseOid && status.length === 0,
+      'EVIDENCE_CHANGED', 'The worktree is not clean at its creation base.');
+  }
+  return headOid;
+}
+export function boundCreatorState(creator) {
+  requireCondition(validateAllocationCreator(creator).length === 0, 'INVALID_INPUT', 'The allocation creator is invalid.');
+  return observedGroupState(creator);
+}
+function selectionNoWorkObservation(checkpoint, unitId) {
+  const unit = checkpoint.units.find((item) => item.unitId === unitId);
+  const reservation = checkpoint.reservations.find((item) => item.unitId === unitId);
+  requireCondition(unit && reservation, 'TARGET_MISMATCH', 'The selection unit does not exist.');
+  const observations = planningRelationshipRecovery(checkpoint).observations.filter((item) => item.unitId === unitId);
+  requireCondition(observations.length === 0, observations.some((item) => item.status === 'observing') ? 'RECOVERY_REQUIRED' : 'OWNER_UNVERIFIED',
+    'The selection unit retains unresolved task observation ownership.');
+  const workers = checkpoint.workers.filter((item) => item.unitId === unitId);
+  requireCondition(workers.every((item) => boundGroupState(item) === 'empty')
+    && (unit.allocation?.creator === null || !unit.allocation || boundCreatorState(unit.allocation.creator) === 'empty'),
+  'OWNER_UNVERIFIED', 'The selection worker or creator has no verified exit.');
+  requireCondition(!Object.values(checkpoint.outbox).some((effect) => effect.unitId === unitId
+    && ['prepared', 'in-flight', 'unknown'].includes(effect.phase)), 'OUTCOME_UNKNOWN', 'The selection unit retains uncertain effects.');
+  requireCondition(unit.allocation === null || reservation.worktree !== null, 'RECOVERY_REQUIRED', 'The allocation needs a verified worktree disposition.');
+  if (reservation.worktree) verifySelectionWorktree(reservation.worktree, { clean: true });
+  return { unitId, unitGeneration: unit.unitGeneration,
+    workers: workers.map((worker) => ({ attemptId: worker.attemptId, process: worker.process, pgid: worker.pgid, groupLeader: worker.groupLeader, state: 'empty' })),
+    creator: unit.allocation?.creator ? { ...unit.allocation.creator, state: 'empty' } : null,
+    worktree: reservation.worktree ? { ...reservation.worktree, headOid: reservation.worktree.baseOid, clean: true } : null,
+    creatorHistory: unit.allocation?.creatorHistory ?? [], planningRelationshipsDigest: schedulerDigest(unit.planningRelationships ?? []) };
+}
+export function observeSelectionNoWork(lease, unitId) {
+  requireCondition(uuid(unitId), 'INVALID_INPUT', 'The selection unit ID is invalid.');
+  const { checkpoint } = readSchedulerContext(lease);
+  return { kind: 'no-work', observationDigest: schedulerDigest(selectionNoWorkObservation(checkpoint, unitId)),
+    observedAt: Date.now(), revision: checkpoint.revision + 1 };
+}
+function requireSelectionDecision(lease, binding, current, proposed, unit, reservation) {
+  requireCondition(current.state === 'running' && current.desiredState === 'running', 'RUN_ACTIVE', 'Selection requires a running run.');
+  requireCondition(!pendingRequests(binding.repository, current)
+    && !Object.values(current.requests).some((request) => ['pending', 'processing', 'unknown'].includes(request.status)),
+  'CONTROL_PENDING', 'Apply queued controls before a selection decision.');
+  requireCondition(!planningRelationshipRecovery(current).pending, 'RECOVERY_REQUIRED', 'Reconcile task observation ownership before selection.');
+  requireCondition(!hasUnresolvedEffects(current) && !retainedWorkers(current)
+    && !current.reservations.some((item) => item.state === 'recovering'), 'RECOVERY_REQUIRED', 'Reconcile retained local work first.');
+  const evidence = readSelectionSnapshot(lease, unit.checkedSnapshot);
+  const authorization = reservation.issueAuthorization;
+  const original = readSelectionSnapshot(lease, authorization.snapshot, { current: false });
+  requireCondition(validateIssueAuthorizationEvidence(authorization, original).length === 0
+    && issueAuthorizationEvidence({ ...authorization, snapshot: unit.checkedSnapshot }, evidence) !== null,
+  'AUTHORIZATION_INVALID', 'The issue approval or its evidence changed.');
+  const delivered = new Set(deliveredPullRequests(evidence.snapshot).map((item) => item.issue));
+  const gating = markerSchedule(evidence.snapshot).gating.filter((issue) => !delivered.has(issue));
+  requireCondition(gating.length === 0 && !evidence.snapshot.sections.openPrs.items.some((pr) => pr.orphanCandidate),
+    'RECOVERY_REQUIRED', 'Repository recovery must precede selection.');
+  const candidate = unit.wait?.requestedPlan ?? unit.plan;
+  if (reservation.worktree && candidate) {
+    const retained = current.reservations.find((item) => item.unitId === unit.unitId)?.paths ?? [];
+    requireCondition(candidate.baseOid === evidence.baseOid, 'EVIDENCE_CHANGED', 'The candidate plan base changed.');
+    verifySelectionWorktree(reservation.worktree);
+    checkoutGit(reservation.worktree.root, ['merge-base', '--is-ancestor', candidate.baseOid, 'HEAD']);
+    const facts = planningFacts(reservation.worktree.root, retained, candidate.boundary, candidate.baseOid);
+    requireCondition(retained.length > 0 || facts.initialClean, 'EVIDENCE_CHANGED', 'An initial admission requires a clean workspace, including ignored entries.');
+    if (unit.admission) {
+      const boundary = planningBoundary(reservation.worktree.root, unit.admission.boundary);
+      // Exclude every final scope, including admissions in this same reducer.
+      // Authorization and before-scope checks above still use current state.
+      for (const other of proposed.reservations) {
+        if (other.unitId === unit.unitId || other.state === 'released' || other.paths.length === 0) continue;
+        requireCondition(other.worktree !== null, 'RECOVERY_REQUIRED', 'Retained exclusions have no verified worktree.');
+        const excluded = planningBoundary(other.worktree.root, other.paths);
+        const rules = { caseSensitive: boundary.pathRules.caseSensitive && excluded.pathRules.caseSensitive };
+        requireCondition(intersectBoundaries(boundary.boundary, excluded.boundary, rules).length === 0,
+          'BOUNDARY_OVERLAP', 'The admitted boundary overlaps another retained unit.');
+      }
+      for (const delivered of deliveredPullRequests(evidence.snapshot)) {
+        const excluded = planningBoundary(reservation.worktree.root, delivered.files);
+        const rules = { caseSensitive: boundary.pathRules.caseSensitive && excluded.pathRules.caseSensitive };
+        requireCondition(intersectBoundaries(boundary.boundary, excluded.boundary, rules).length === 0,
+          'BOUNDARY_OVERLAP', 'The admitted boundary overlaps delivered work.');
+      }
+    }
+  }
+  return evidence;
+}
+function validateSelectionTransition(lease, binding, current, updated) {
+  for (const old of current.reservations) {
+    const kept = updated.reservations.find((item) => item.unitId === old.unitId);
+    requireCondition(kept, 'STATE_INVALID', 'A retained reservation cannot be removed.');
+    for (const key of ['schema', 'runId', 'unitId', 'unitGeneration', 'issue', 'repositoryKey', 'issueAuthorization', 'slot', 'baseOid', 'createdRevision']) {
+      requireCondition(canonicalJson(old[key]) === canonicalJson(kept[key]), 'STATE_INVALID', 'A reservation changed immutable identity.');
+    }
+    const before = current.units.find((item) => item.unitId === old.unitId);
+    const after = updated.units.find((item) => item.unitId === old.unitId);
+    requireCondition(after && ['schema', 'runId', 'repositoryKey', 'unitId', 'unitGeneration'].every((key) => after[key] === before[key]),
+      'STATE_INVALID', 'A selection unit cannot be removed or replaced.');
+    validatePlanningRecordsTransition(binding, before, after);
+    if (old.state === 'released') {
+      requireCondition(canonicalJson(kept) === canonicalJson(old) && canonicalJson(after) === canonicalJson(before),
+        'STATE_INVALID', 'Released selection history is immutable.');
+      continue;
+    }
+    if (old.worktree) requireCondition(canonicalJson(old.worktree) === canonicalJson(kept.worktree), 'STATE_INVALID', 'The worktree binding cannot be removed or replaced.');
+    if (before.allocation) {
+      requireCondition(after.allocation && canonicalJson(before.allocation.intent) === canonicalJson(after.allocation.intent),
+        'STATE_INVALID', 'The allocation intent cannot be removed or replaced.');
+      const previousEffect = current.outbox[before.allocation.intent.operationId];
+      const nextEffect = updated.outbox[before.allocation.intent.operationId];
+      const retry = ['in-flight', 'unknown'].includes(previousEffect.phase) && nextEffect.phase === 'prepared'
+        && nextEffect.attempt === previousEffect.attempt + 1 && nextEffect.error?.code === 'NOT_APPLIED';
+      const history = retry ? [...before.allocation.creatorHistory,
+        { attempt: previousEffect.attempt, creator: before.allocation.creator, receipt: nextEffect.receipt }] : before.allocation.creatorHistory;
+      requireCondition(canonicalJson(after.allocation.creatorHistory) === canonicalJson(history),
+        'STATE_INVALID', 'Allocation creator history can only append verified not-applied proof.');
+      requireCondition(before.allocation.creator === null || canonicalJson(before.allocation.creator) === canonicalJson(after.allocation.creator)
+        || retry && after.allocation.creator === null, 'STATE_INVALID', 'An allocation creator can only clear after verified not-applied settlement.');
+    }
+    if (after.allocation?.creator && !before.allocation?.creator) {
+      const creator = after.allocation.creator;
+      const effect = updated.outbox[after.allocation.intent.operationId];
+      requireCondition(effect.phase === 'in-flight', 'STATE_INVALID', 'A creator must bind the current in-flight attempt.');
+      requireCondition(boundCreatorState(creator) === 'alive', 'OWNER_UNVERIFIED', 'The allocation creator group cannot be verified.');
+    }
+    if (!before.allocation && after.allocation) {
+      const { intent } = after.allocation;
+      const root = join(dirname(binding.repository.coordinatorRoot), '.autoloop-worktrees', current.repositoryKey, current.runId,
+        `${after.unitId}-g${after.unitGeneration}`);
+      const branch = `feat/gh-${kept.issue}-unit-${after.unitId.replaceAll('-', '')}-g${after.unitGeneration}`;
+      requireCondition(intent.root === root && intent.branch === branch, 'STATE_INVALID', 'Allocation must use its derived workspace and branch.');
+      requireSelectionDecision(lease, binding, current, updated, after, kept);
+    }
+    if (!old.worktree && kept.worktree) {
+      requireCondition(after.allocation.creator !== null && boundCreatorState(after.allocation.creator) === 'empty',
+        'OWNER_UNVERIFIED', 'Worktree settlement needs verified creator exit.');
+      verifySelectionWorktree(kept.worktree, { clean: true });
+    }
+    requireCondition(!before.plan || after.plan !== null, 'STATE_INVALID', 'A retained plan cannot be erased.');
+    if (before.plan && after.plan) {
+      requireCondition(after.plan.planGeneration >= before.plan.planGeneration
+        && (after.plan.planGeneration !== before.plan.planGeneration || canonicalJson(after.plan) === canonicalJson(before.plan)),
+      'STATE_INVALID', 'A changed plan requires a new generation.');
+    }
+    const newAdmission = after.admission && canonicalJson(after.admission) !== canonicalJson(before.admission);
+    const newWait = after.wait && canonicalJson(after.wait) !== canonicalJson(before.wait);
+    const proposal = newWait ? after.wait.requestedPlan : newAdmission ? after.plan : null;
+    const refresh = newWait && before.wait && canonicalJson(after.wait.requestedPlan) === canonicalJson(before.wait.requestedPlan)
+      || newAdmission && before.admission && canonicalJson(after.plan) === canonicalJson(before.plan);
+    const floor = requestedPlanGenerationFloor(before); const nextFloor = requestedPlanGenerationFloor(after);
+    requireCondition(!Object.hasOwn(before, 'lastRequestedPlanGeneration') || Object.hasOwn(after, 'lastRequestedPlanGeneration'),
+      'STATE_INVALID', 'The requested plan generation floor cannot be cleared.');
+    requireCondition(proposal && !refresh ? proposal.planGeneration > floor && nextFloor === proposal.planGeneration : nextFloor === floor,
+      'STATE_INVALID', 'A new admitted or waiting proposal must advance its generation floor.');
+    requireCondition(canonicalJson(before.plan) === canonicalJson(after.plan) || newAdmission,
+      'STATE_INVALID', 'Only admission can replace the last admitted plan.');
+    if (newWait) requireCondition(canonicalJson(before.plan) === canonicalJson(after.plan),
+      'STATE_INVALID', 'A wait must retain the last admitted plan.');
+    if (proposal && !refresh && old.paths.length > 0 && proposal.boundary.some((path) => !inLane(path, old.paths))) {
+      const relationship = (before.planningRelationships ?? []).find((item) => item.status === 'verified-failure'
+        && item.schedulerGeneration === current.generation && item.proposedPlan.planGeneration === proposal.planGeneration
+        && item.proposedPlan.planDigest === proposal.planDigest && item.proposedPlan.boundaryDigest === schedulerDigest(proposal.boundary));
+      requireCondition(relationship, 'WIDEN_REASON_UNVERIFIED', 'Path expansion needs a current owner-observed failing task.');
+      checkPlanningRelationship(readSchedulerContext(lease), relationship, proposal);
+    }
+    if (newAdmission || newWait) {
+      requireSelectionDecision(lease, binding, current, updated, after, kept);
+      if (newAdmission) requireCondition(after.admission.reservationRevision === updated.revision,
+        'STATE_INVALID', 'Admission must bind its committed reservation revision.');
+      if (newWait) requireCondition(after.wait.createdRevision === updated.revision, 'STATE_INVALID', 'The wait must bind its committed revision.');
+    }
+    if (kept.paths.some((path) => !old.paths.includes(path))) requireCondition(kept.state === 'admitted' && newAdmission,
+      'STATE_INVALID', 'Exclusion paths can grow only in a valid admission.');
+    if (kept.state === 'waiting') requireCondition(canonicalJson(kept.paths) === canonicalJson(old.paths),
+      'STATE_INVALID', 'A wait must retain exactly its prior exclusion paths.');
+    if (before.wait && !after.wait && kept.state !== 'released') requireCondition(kept.state === 'planning' && after.replanRequired
+      && after.admission === null && old.paths.every((path) => kept.paths.includes(path)), 'STATE_INVALID', 'Wake requires read-only replanning with retained paths.');
+    if (old.paths.some((path) => !kept.paths.includes(path))) requireCondition(kept.state === 'released', 'STATE_INVALID', 'Exclusion paths cannot be removed before disposition.');
+    for (const obligation of before.policy.authorize) requireCondition(after.policy.authorize.some((item) => canonicalJson(item) === canonicalJson(obligation)),
+      'STATE_INVALID', 'Publication authorization obligations cannot be erased.');
+    if (kept.state === 'released') requireCondition(after.disposition?.revision === updated.revision
+      && after.disposition.observationDigest === schedulerDigest(selectionNoWorkObservation(updated, kept.unitId)),
+    'STATE_INVALID', 'Path release requires verified exit and exact disposition evidence.');
+  }
+  for (const reservation of updated.reservations) if (!current.reservations.some((item) => item.unitId === reservation.unitId)) {
+    const unit = updated.units.find((item) => item.unitId === reservation.unitId);
+    requireCondition(reservation.createdRevision === updated.revision && reservation.state === 'planning' && reservation.worktree === null
+      && reservation.paths.length === 0 && unit.allocation === null && unit.plan === null && unit.admission === null && unit.wait === null
+      && unit.disposition === null && (unit.planningRelationships ?? []).length === 0 && requestedPlanGenerationFloor(unit) === 0
+      && !unit.replanRequired && unit.policy.authorize.length === 0, 'STATE_INVALID', 'New selection pairs require unallocated planning state.');
+    const occupied = new Set(current.reservations.filter((item) => item.state !== 'released').map((item) => item.slot));
+    const free = [1, 2].find((slot) => !occupied.has(slot));
+    requireCondition(free !== undefined, 'SLOTS_FULL', 'Both selection slots are retained.');
+    requireCondition(reservation.slot === free, 'STATE_INVALID', 'Selection must use the lowest free slot.');
+    requireSelectionDecision(lease, binding, current, updated, unit, reservation);
+  }
+}
+
+export function planningRelationshipRecovery(checkpoint) {
+  requireCondition(validateCheckpoint(checkpoint).length === 0, 'INVALID_INPUT', 'The observation checkpoint is invalid.');
+  const observations = [];
+  for (const unit of checkpoint.units) for (const record of unit.planningRelationships ?? []) {
+    if (!['observing', 'inconclusive'].includes(record.status)) continue;
+    const groupState = observedGroupState(record);
+    if (record.status === 'observing' || groupState !== 'empty') observations.push({ unitId: unit.unitId,
+      relationshipId: record.relationshipId, status: record.status, groupState });
+  }
+  return { pending: observations.length > 0, unitIds: [...new Set(observations.map((item) => item.unitId))].sort(), observations };
+}
+function validatePlanningRecordsTransition(binding, before, after) {
+  const previous = before.planningRelationships ?? []; const next = after.planningRelationships ?? [];
+  if (canonicalJson(previous) === canonicalJson(next)) return;
+  const allowance = binding.planningAllowance;
+  requireCondition(allowance?.unitId === before.unitId, 'STATE_INVALID', 'Only the core observer can write planning relationships.');
+  const record = JSON.parse(allowance.after); let expected;
+  if (allowance.before === null) {
+    requireCondition(record.status === 'observing' && !previous.some((item) => item.relationshipId === record.relationshipId),
+      'STATE_INVALID', 'A relationship must start as one new observing record.');
+    expected = [...previous, record];
+  } else {
+    const old = previous.find((item) => canonicalJson(item) === allowance.before);
+    requireCondition(old?.status === 'observing' && record.relationshipId === old.relationshipId && record.status !== 'observing',
+      'STATE_INVALID', 'Only an observing relationship can settle.');
+    const mutable = new Set(['status', 'exitCode', 'signal', 'stdoutDigest', 'stderrDigest', 'completedRevision']);
+    requireCondition(canonicalJson(Object.fromEntries(Object.entries(old).filter(([key]) => !mutable.has(key))))
+      === canonicalJson(Object.fromEntries(Object.entries(record).filter(([key]) => !mutable.has(key)))),
+    'STATE_INVALID', 'Planning relationship identity and judgment are immutable.');
+    expected = previous.map((item) => item.relationshipId === old.relationshipId ? record : item);
+  }
+  requireCondition(canonicalJson(next) === canonicalJson(expected), 'STATE_INVALID', 'A planning observation cannot be forged, removed or reordered.');
+}
+
 function effectIntent(value) {
   return Object.fromEntries(EFFECT_KEYS.filter((key) => !['phase', 'attempt', 'receipt', 'error'].includes(key)).map((key) => [key, value[key]]));
 }
-function validatePersistentTransition(binding, current, updated) {
+function validatePersistentTransition(binding, current, updated, lease) {
+  validateSelectionTransition(lease, binding, current, updated);
   const nextStates = {
     starting: ['starting', 'running', 'paused', 'recovering', 'draining', 'stopped', 'failed'],
     recovering: ['recovering', 'running', 'paused', 'draining', 'stopped', 'failed'],
@@ -1288,6 +1884,16 @@ function validatePersistentTransition(binding, current, updated) {
     requireCondition(kept.attempt === effect.attempt || (kept.attempt === effect.attempt + 1 && kept.phase === 'prepared'
       && kept.error?.code === 'NOT_APPLIED' && kept.receipt !== null), 'STATE_INVALID', 'A retry needs verified not-applied evidence.');
     if (kept.phase !== effect.phase) {
+      if (effect.kind === 'worktree.create' && ['in-flight', 'unknown'].includes(effect.phase)
+        && ['prepared', 'succeeded', 'failed'].includes(kept.phase)) {
+        const allocation = current.units.find((unit) => unit.unitId === effect.unitId)?.allocation;
+        requireCondition(allocation?.creator && boundCreatorState(allocation.creator) === 'empty',
+          'OWNER_UNVERIFIED', 'Allocation readback needs verified creator exit.');
+        if (kept.phase === 'prepared') requireCondition(!present(allocation.intent.root)
+          && checkoutGit(binding.repository.coordinatorRoot, ['for-each-ref', '--format=%(refname)', `refs/heads/${allocation.intent.branch}`]) === ''
+          && !checkoutGit(binding.repository.coordinatorRoot, ['worktree', 'list', '--porcelain']).split('\n')
+            .includes(`worktree ${allocation.intent.root}`), 'OUTCOME_UNKNOWN', 'Allocation absence cannot be verified.');
+      }
       const next = { prepared: ['in-flight', 'succeeded', 'failed'], 'in-flight': ['unknown', 'prepared', 'succeeded', 'failed'],
         unknown: ['prepared', 'succeeded', 'failed'], succeeded: [], failed: [] };
       if (effect.phase === 'prepared' && kept.phase === 'failed') requireCondition(canAbandonPreparedEffect(current, effect)
@@ -1319,8 +1925,9 @@ function explicitRecoveryCancellation(checkpoint, effect) {
     || effect.unitId !== worker.unitId || effect.unitGeneration !== worker.unitGeneration) return false;
   return boundGroupState(worker) === 'alive';
 }
-export function prepareEffect(lease, expectedRevision, effect) {
+export function prepareEffect(lease, expectedRevision, effect, transition = (value) => value) {
   const binding = heldLease(lease);
+  requireCondition(typeof transition === 'function', 'INVALID_INPUT', 'An effect preparation reducer is required.');
   requireCondition(validEffect(effect) && effect.runId === binding.identity.runId && effect.phase === 'prepared'
     && effect.attempt === 1 && effect.receipt === null && effect.error === null, 'INVALID_INPUT', 'The effect intent is invalid.');
   const current = readCheckpoint(binding.repository, binding.identity.runId);
@@ -1337,7 +1944,11 @@ export function prepareEffect(lease, expectedRevision, effect) {
   if (effect.requestId !== null) requireCondition(['processing', 'unknown'].includes(current.requests[effect.requestId]?.status),
     'REQUEST_NOT_FOUND', 'The effect needs a claimed request.');
   assertPinsLive(binding.repository, readPins(binding.repository, current.runId));
-  return commitTransition(lease, expectedRevision, (value) => ({ ...value, outbox: { ...value.outbox, [effect.operationId]: effect } }));
+  return commitTransition(lease, expectedRevision, (value) => {
+    const changed = transition(value);
+    requireCondition(record(changed), 'STATE_INVALID', 'The effect preparation reducer returned invalid state.');
+    return { ...changed, outbox: { ...changed.outbox, [effect.operationId]: effect } };
+  });
 }
 export function markEffectInFlight(lease, operationId) {
   const binding = heldLease(lease);
@@ -1412,8 +2023,9 @@ export function abandonPreparedEffect(lease, operationId) {
   if (outcome) publishOutcome(binding.repository, outcome, binding.observe);
   return updated;
 }
-export function settleEffect(lease, operationId, observation, { deferControl = false } = {}) {
+export function settleEffect(lease, operationId, observation, { deferControl = false, transition = (value) => value } = {}) {
   const binding = heldLease(lease);
+  requireCondition(typeof transition === 'function', 'INVALID_INPUT', 'An effect settlement reducer is required.');
   requireCondition(uuid(operationId) && exactKeys(observation, ['attempt', 'status', 'code', 'receipt'])
     && positive(observation.attempt) && ['applied', 'not-applied', 'unknown', 'failed'].includes(observation.status)
     && nonempty(observation.code) && /^[A-Z][A-Z0-9_]*$/u.test(observation.code) && (observation.receipt === null || validReceipt(observation.receipt)),
@@ -1444,6 +2056,11 @@ export function settleEffect(lease, operationId, observation, { deferControl = f
   }
   requireCondition(['in-flight', 'unknown'].includes(effect.phase) || absentCancellation,
     'EFFECT_SETTLED', 'The effect has no unresolved attempt.');
+  if (effect.kind === 'worktree.create' && observation.status !== 'unknown') {
+    const allocation = current.units.find((unit) => unit.unitId === effect.unitId)?.allocation;
+    requireCondition(allocation?.creator && boundCreatorState(allocation.creator) === 'empty',
+      'OWNER_UNVERIFIED', 'Allocation settlement needs the current creator to have exited.');
+  }
   const conclusions = {
     applied: { phase: 'succeeded', error: null },
     'not-applied': { phase: 'prepared', error: { code: 'NOT_APPLIED', message: 'Readback proves the effect was not applied.' } },
@@ -1455,8 +2072,17 @@ export function settleEffect(lease, operationId, observation, { deferControl = f
     receipt: observation.status === 'unknown' ? null : observation.receipt, error: conclusion.error };
   let outcome = null;
   const updated = commitTransition(lease, current.revision, (value) => {
-    const outbox = { ...value.outbox, [operationId]: settled };
-    const requests = { ...value.requests };
+    let changed = transition(value);
+    requireCondition(record(changed), 'STATE_INVALID', 'The effect settlement reducer returned invalid state.');
+    if (effect.kind === 'worktree.create' && observation.status === 'not-applied') {
+      requireCondition(Array.isArray(changed.units), 'STATE_INVALID', 'The allocation settlement returned invalid units.');
+      const allocation = current.units.find((unit) => unit.unitId === effect.unitId).allocation;
+      changed = { ...changed, units: changed.units.map((unit) => unit.unitId !== effect.unitId ? unit : { ...unit,
+        allocation: { ...unit.allocation, creator: null, creatorHistory: [...allocation.creatorHistory,
+          { attempt: effect.attempt, creator: allocation.creator, receipt: observation.receipt }] } }) };
+    }
+    const outbox = { ...changed.outbox, [operationId]: settled };
+    const requests = { ...changed.requests };
     if (effect.requestId !== null && !deferControl) {
       const request = requests[effect.requestId];
       requireCondition(request && !['applied', 'refused'].includes(request.status), 'REQUEST_SETTLED', 'The linked request is already settled.');
@@ -1470,7 +2096,7 @@ export function settleEffect(lease, operationId, observation, { deferControl = f
         status === 'unknown' ? 'OUTCOME_UNKNOWN' : observation.code, current.revision + 1, operationId);
       requests[effect.requestId] = { ...request, status, outcome };
     }
-    return { ...value, outbox, requests };
+    return { ...changed, outbox, requests };
   });
   if (outcome) publishOutcome(binding.repository, outcome, binding.observe);
   return updated;
@@ -1585,6 +2211,64 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
       assert.equal(repository.coordinatorRoot, root);
       assert.equal(other.coordinatorRoot, linked);
     });
+    await check('fresh checkout identity batches ordinary roots and preserves ambiguous path framing', async () => {
+      const childProcess = (await import('node:child_process')).default;
+      const { syncBuiltinESMExports } = await import('node:module');
+      const unusual = [];
+      for (const name of [' space \tpart ', 'line\nbreak']) {
+        const root = join(scratch, name, 'repo'); mkdirSync(root, { recursive: true });
+        git('init', '-q', '-b', 'main', root);
+        git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'path fixture');
+        const linked = join(scratch, name, 'linked'); git('-C', root, 'worktree', 'add', '-q', '--detach', linked, 'HEAD');
+        unusual.push({ root, linked, commonDir: realpathSync(join(root, '.git')) });
+      }
+      const separateRoot = join(scratch, 'separate-root'); const separateAdmin = join(scratch, 'admin\nwith space', 'git');
+      mkdirSync(dirname(separateAdmin), { recursive: true });
+      git('init', '-q', '--separate-git-dir', separateAdmin, separateRoot);
+      const absent = join(scratch, 'not-a-checkout'); mkdirSync(absent);
+      const actual = childProcess.spawnSync; const calls = [];
+      const names = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_NO_LAZY_FETCH'];
+      const previous = new Map(names.map((name) => [name, process.env[name]]));
+      try {
+        Object.assign(process.env, { GIT_DIR: separateAdmin, GIT_WORK_TREE: separateRoot, GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: 'core.worktree', GIT_CONFIG_VALUE_0: separateRoot, GIT_NO_LAZY_FETCH: '0' });
+        // Count real subprocesses; the command, environment and result are not
+        // replaced. One fresh identity command per ordinary call is specified.
+        childProcess.spawnSync = (file, args, options) => {
+          if (file === 'git' && args.includes('rev-parse')) {
+            calls.push(args);
+            for (const option of ['--no-lazy-fetch', '--no-replace-objects', '--no-optional-locks']) assert(args.includes(option));
+            assert.equal(options.env.GIT_NO_LAZY_FETCH, '1'); assert.equal(options.env.GIT_DIR, undefined);
+          }
+          return actual(file, args, options);
+        };
+        syncBuiltinESMExports();
+        const expectedCommon = realpathSync(join(root, '.git'));
+        for (const requested of [root, linked, alias, root]) {
+          const before = calls.length; const result = resolveRepositoryCheckout(requested);
+          assert.equal(result.root, requested === alias ? root : requested);
+          assert.equal(result.commonDir, expectedCommon);
+          assert.equal(result.gitDir, requested === linked ? realpathSync(join(expectedCommon, 'worktrees', 'linked')) : expectedCommon);
+          assert.equal(result.repositoryKey, createHash('sha256').update(expectedCommon, 'utf8').digest('hex'));
+          assert.equal(calls.length - before, 1, 'Each ordinary checkout read must run one fresh bounded Git process.');
+        }
+        for (const test of unusual) for (const requested of [test.root, test.linked]) {
+          const result = resolveRepositoryCheckout(requested);
+          assert.equal(result.root, requested); assert.equal(result.commonDir, test.commonDir);
+          assert.equal(result.gitDir, requested === test.root ? test.commonDir : realpathSync(join(test.commonDir, 'worktrees', 'linked')));
+          assert.equal(result.repositoryKey, createHash('sha256').update(test.commonDir, 'utf8').digest('hex'));
+        }
+        const separate = resolveRepositoryCheckout(separateRoot);
+        assert.equal(separate.root, separateRoot); assert.equal(separate.commonDir, realpathSync(separateAdmin));
+        assert.equal(separate.gitDir, separate.commonDir);
+        assert.equal(separate.repositoryKey, createHash('sha256').update(separate.commonDir, 'utf8').digest('hex'));
+        assert.throws(() => resolveRepositoryCheckout(absent), (error) => error instanceof SchedulerError && error.code === 'REPOSITORY_INVALID');
+        assert.throws(() => resolveRepositoryCheckout(''), (error) => error instanceof SchedulerError && error.code === 'INVALID_INPUT');
+      } finally {
+        childProcess.spawnSync = actual; syncBuiltinESMExports();
+        for (const [name, value] of previous) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+      }
+    });
     const fixture = () => {
       const home = join(scratch, randomUUID());
       mkdirSync(home);
@@ -1605,6 +2289,1334 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
     };
     const refuses = (code, run) => assert.throws(run, (error) => error instanceof SchedulerError && error.code === code);
     const admissionOf = (repository) => join(accountHome, '.claude', 'autoloop', 'execution-admission', repository.repositoryKey);
+    const selectionFixture = async (setup, revision = 2, issueNumber = 7) => {
+      const { createSnapshot, completeSection, SNAPSHOT_SECTIONS, issueSnapshotItem } = await import('./snapshot-contract.mjs');
+      const root = setup.repository.coordinatorRoot;
+      git('-C', root, 'remote', 'add', 'origin', 'https://github.com/example/scheduler-fixture.git');
+      const baseOid = git('-C', root, 'rev-parse', 'HEAD');
+      git('-C', root, 'update-ref', 'refs/remotes/origin/main', baseOid);
+      mkdirSync(join(root, '.autoloop'));
+      writeFileSync(join(root, '.autoloop', 'config.json'), JSON.stringify(setup.pins.config));
+      const at = '2026-01-01T00:00:00.000Z';
+      const repository = { host: 'github.com', owner: 'example', name: 'scheduler-fixture', nodeId: 'R_fixture' };
+      const issue = issueSnapshotItem({ number: issueNumber, title: 'Fixture work', body: 'Public fixture body.\n', updatedAt: at,
+        lastEditedAt: null, labels: ['loop-ready'] });
+      const queue = { ...issue, blockedBy: [], dependencies: [], provenance: { labeledBy: 'fixture-operator', labeledAt: at } };
+      const role = { login: 'fixture-operator', permission: 'write', roleName: 'write', evidence: [{ kind: 'queue-label',
+        issueNumber, author: 'fixture-operator', authorAssociation: 'MEMBER', body: '', createdAt: at, updatedAt: at, url: null }] };
+      const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+      sections.repo = completeSection([{ owner: repository.owner, name: repository.name, nameWithOwner: 'example/scheduler-fixture', defaultBranch: 'main' }]);
+      sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: baseOid }]);
+      sections.queue = completeSection([queue]); sections.openIssues = completeSection([issue]); sections.authorVerification = completeSection([role]);
+      const snapshot = createSnapshot({ scannedAt: at, sections });
+      const issueSource = { number: issueNumber, nodeId: `I_fixture_${issueNumber}` };
+      const approvalSource = { issue: issueNumber, issueNodeId: issueSource.nodeId, approvalIssue: issueNumber,
+        approvalIssueNodeId: issueSource.nodeId, eventId: `E_fixture_${issueNumber}`, actorLogin: role.login, createdAt: at, kind: 'loop-ready' };
+      const roleSource = { login: role.login, userId: 101, permission: role.permission, roleName: role.roleName };
+      const sources = { schema: 'autoloop.selection-sources/1', repository, issues: [issueSource], approvals: [approvalSource],
+        roles: [roleSource], waitIssues: completeSection([]), waitPullRequests: completeSection([]) };
+      const evidence = { schema: 'autoloop.selection-snapshot/1', runId: setup.pins.runId, generation: 1, checkpointRevision: revision,
+        repositoryKey: setup.repository.repositoryKey, root, gitDir: realpathSync(join(root, '.git')), commonDir: setup.repository.commonDir,
+        repository, configuredBaseBranch: 'main', baseRef: 'refs/remotes/origin/main', baseOid, headOid: baseOid,
+        configDigest: setup.pins.configDigest, snapshot, sources };
+      const { schema, snapshot: ignoredSnapshot, sources: ignoredSources, ...identity } = evidence;
+      const reference = { schema: 'autoloop.snapshot-reference/1', ...identity, snapshotGeneration: snapshot.generation,
+        snapshotFingerprint: snapshot.fingerprint, contentDigest: schedulerDigest(evidence) };
+      const subject = { repositoryKey: evidence.repositoryKey, repository, issue: issueNumber, issueNodeId: issueSource.nodeId,
+        issueBodyDigest: issue.bodySha256, approval: { kind: 'loop-ready', issue: issueNumber, issueNodeId: issueSource.nodeId,
+          eventId: approvalSource.eventId, actorLogin: role.login, actorUserId: roleSource.userId, createdAt: at } };
+      const authorization = { schema: 'autoloop.issue-authorization/1', subject, authorizationDigest: schedulerDigest(subject),
+        evidenceDigest: schedulerDigest({ queue, openIssue: issue, role, issueSource, approvalSource, roleSource }), snapshot: reference };
+      const unitId = randomUUID();
+      const reservation = { schema: 'autoloop.reservation/1', runId: evidence.runId, unitId, unitGeneration: 1, issue: issueNumber,
+        repositoryKey: evidence.repositoryKey, issueAuthorization: authorization, slot: 1, baseOid, worktree: null, paths: [], state: 'planning', createdRevision: revision + 1 };
+      const unit = { schema: 'autoloop.selection-unit/1', runId: evidence.runId, repositoryKey: evidence.repositoryKey, unitId, unitGeneration: 1,
+        allocation: null, plan: null, admission: null, wait: null, checkedSnapshot: reference, replanRequired: false, policy: { authorize: [] }, disposition: null };
+      return { evidence, reference, authorization, reservation, unit };
+    };
+    // This test owner uses real exported transactions, Git and isolated native
+    // children. Its source is also used by crash/reparenting fixture owners.
+    async function createPlanningFixture({ setup, data, api, moduleUrl, accountHome, prepareOnly = false, existingLease = null }) {
+      const assert = (await import('node:assert/strict')).default;
+      const { spawn, spawnSync } = await import('node:child_process');
+      const { join, dirname } = await import('node:path');
+      const { mkdirSync } = await import('node:fs');
+      const { randomUUID } = await import('node:crypto');
+      const { createSnapshot, completeSection } = await import(new URL('./snapshot-contract.mjs', moduleUrl));
+      assert.equal((await import('node:os')).userInfo().homedir, accountHome);
+      const lease = existingLease ?? api.acquireScheduler(setup.repository, setup.pins,
+        { kind: 'terminal', sessionId: null, process: api.readProcessIdentity() }).lease;
+      let revision = existingLease ? api.readSchedulerContext(lease).checkpoint.revision
+        : api.commitTransition(lease, 1, (value) => ({ ...value, state: 'running' })).revision;
+      api.publishSelectionSnapshot(lease, revision, data.evidence);
+      revision = api.commitTransition(lease, revision, (value) => ({ ...value,
+        units: [...value.units, data.unit], reservations: [...value.reservations, data.reservation] })).revision;
+      const checkedSnapshot = api.publishSelectionSnapshot(lease, revision, { ...data.evidence, checkpointRevision: revision });
+      const intent = { operationId: randomUUID(), runId: setup.pins.runId, unitId: data.unit.unitId, unitGeneration: 1,
+        repositoryKey: setup.repository.repositoryKey, root: join(dirname(setup.repository.coordinatorRoot), '.autoloop-worktrees',
+          setup.repository.repositoryKey, setup.pins.runId, data.unit.unitId + '-g1'),
+        branch: 'feat/gh-' + data.reservation.issue + '-unit-' + data.unit.unitId.replaceAll('-', '') + '-g1', baseOid: data.evidence.baseOid };
+      revision = api.prepareEffect(lease, revision, { operationId: intent.operationId, requestId: null, runId: intent.runId, unitId: intent.unitId,
+        unitGeneration: 1, kind: 'worktree.create', target: { type: 'external', id: intent.unitId }, inputDigest: api.schedulerDigest(intent),
+        expectedHead: intent.baseOid, phase: 'prepared', attempt: 1, receipt: null, error: null },
+      (value) => ({ ...value, units: value.units.map((unit) => unit.unitId !== intent.unitId ? unit
+        : { ...unit, checkedSnapshot, allocation: { intent, creator: null, creatorHistory: [] } }) })).revision;
+      revision = api.markEffectInFlight(lease, intent.operationId).revision;
+      mkdirSync(dirname(intent.root), { recursive: true, mode: 0o700 });
+      const child = spawn(process.execPath, ['--input-type=module', '-e', `import {spawnSync} from 'node:child_process';
+        process.on('message', () => { const result=spawnSync('git',['-C',process.argv[1],'-c','core.hooksPath=/dev/null',
+          '-c','core.fsmonitor=false','worktree','add','-q','-b',process.argv[3],process.argv[2],process.argv[4]],{encoding:'utf8',timeout:15000});
+          if(result.status!==0)throw Error(result.stderr);process.disconnect(); });process.send({ready:true});`,
+      setup.repository.coordinatorRoot, intent.root, intent.branch, intent.baseOid], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+      const closed = new Promise((done) => child.once('close', (code) => done(code)));
+      await new Promise((done) => child.once('message', done));
+      const identity = api.readProcessIdentity(child.pid); const creator = { process: identity, groupLeader: identity, pgid: child.pid };
+      revision = api.commitTransition(lease, revision, (value) => ({ ...value,
+        units: value.units.map((unit) => unit.unitId !== intent.unitId ? unit : { ...unit, allocation: { ...unit.allocation, creator } }) })).revision;
+      child.send('create'); assert.equal(await closed, 0);
+      const worktree = { ...api.resolveRepositoryCheckout(intent.root), branch: intent.branch, baseOid: intent.baseOid,
+        createdByRun: intent.runId, unitId: intent.unitId, unitGeneration: 1 };
+      revision = api.settleEffect(lease, intent.operationId, { attempt: 1, status: 'applied', code: 'READBACK_CONFIRMED',
+        receipt: { externalId: intent.operationId, observationDigest: api.schedulerDigest(worktree), observedAt: Date.now() } },
+      { transition: (value) => ({ ...value, reservations: value.reservations.map((item) => item.unitId !== intent.unitId ? item : { ...item, worktree }) }) }).revision;
+      const taskText = '- Read fixture.txt and check its expected contents.';
+      const artifact = { schema: 'autoloop.plan-artifact/1', repositoryKey: setup.repository.repositoryKey, unitId: intent.unitId,
+        unitGeneration: 1, issue: data.reservation.issue, issueBodyDigest: data.authorization.subject.issueBodyDigest,
+        authorizationDigest: data.authorization.authorizationDigest, planGeneration: 1, baseOid: intent.baseOid,
+        title: 'Fixture plan', prBody: 'Closes #' + data.reservation.issue, body: '## Tasks\n' + taskText + '\n', boundary: ['fixture.txt'] };
+      const proposed = { ...artifact, planGeneration: 2, body: artifact.body + '- Repair the extra fixture path.\n', boundary: ['extra.txt', 'fixture.txt'] };
+      const plan = { planGeneration: 1, planDigest: api.schedulerDigest(artifact), baseOid: artifact.baseOid, boundary: artifact.boundary };
+      const sections = { ...data.evidence.snapshot.sections, tree: completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: worktree.branch, headOid: intent.baseOid }]) };
+      const linkedEvidence = { ...data.evidence, root: worktree.root, gitDir: worktree.gitDir,
+        checkpointRevision: revision, snapshot: createSnapshot({ scannedAt: '2026-01-01T00:00:03.000Z', sections }) };
+      const snapshot = api.publishSelectionSnapshot(lease, revision, linkedEvidence);
+      if (prepareOnly) return { lease, setup, data, worktree, artifact, proposed, taskText, linkedEvidence, snapshot, plan };
+      const checkpoint = api.commitTransition(lease, revision, (value) => ({ ...value,
+        units: value.units.map((unit) => unit.unitId !== intent.unitId ? unit : { ...unit, checkedSnapshot: snapshot, plan,
+          admission: { schema: 'autoloop.admission/1', runId: intent.runId, unitId: intent.unitId, unitGeneration: 1, ...plan, reservationRevision: value.revision + 1 } }),
+        reservations: value.reservations.map((item) => item.unitId !== intent.unitId ? item : { ...item, state: 'admitted', paths: artifact.boundary }) }));
+      return { lease, setup, data, worktree, artifact, proposed, taskText, checkpoint, linkedEvidence };
+    }
+    function startPlanningTask(api, root, expected, isolated = true, descendant = false, fromPath = false, executable = process.execPath) {
+      const child = spawn(fromPath ? 'node' : executable, ['--input-type=module', '-e', `import assert from 'node:assert/strict';
+        import {readFileSync} from 'node:fs';import {join} from 'node:path';import {spawn} from 'node:child_process';
+        const hold=setInterval(()=>{},1000);process.on('message', message=>{if(message!=='run')return;
+          clearInterval(hold);process.stdout.write('fixture stdout\\n');process.stderr.write('fixture stderr\\n');
+          if(process.argv[3]!=='single'){const mode=process.argv[3];const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],
+            {detached:mode==='detached-inherit',stdio:mode.includes('inherit')?'inherit':'ignore'});process.send({descendant:child.pid});}
+          assert.equal(readFileSync(join(process.argv[1],'fixture.txt'),'utf8'),process.argv[2]);process.disconnect();});process.send({ready:true});`,
+      root, expected, typeof descendant === 'string' ? descendant : descendant ? 'descendant' : 'single'], { cwd: root, detached: isolated, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+      child.started = api.readProcessIdentity(child.pid).start;
+      child.finished = new Promise((done) => child.once('close', (code, signal) => done({ code, signal })));
+      child.ready = new Promise((done) => child.once('message', done));
+      children.add(child); child.finished.then(() => children.delete(child));
+      return child;
+    }
+    await check('owner observations require real failing assertions and cannot be forged or replayed', async () => {
+      const api = { acquireScheduler, commitTransition, publishSelectionSnapshot, prepareEffect, markEffectInFlight, readProcessIdentity,
+        resolveRepositoryCheckout, schedulerDigest, settleEffect };
+      const setup = fixture(); const root = setup.repository.coordinatorRoot;
+      writeFileSync(join(root, 'fixture.txt'), 'actual fixture contents\n');
+      git('-C', root, 'add', 'fixture.txt'); git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+      const data = await selectionFixture(setup);
+      const ctx = await createPlanningFixture({ setup, data, api, moduleUrl, accountHome });
+      const task = startPlanningTask(api, ctx.worktree.root, 'required fixture contents\n'); await task.ready;
+      let observation;
+      try {
+        const revision = readSchedulerContext(ctx.lease).checkpoint.revision;
+        observation = observeFailingTaskRelationship(ctx.lease, revision, task, { unitId: data.unit.unitId, unitGeneration: 1,
+          currentPlanArtifact: ctx.artifact, proposedPlanArtifact: ctx.proposed, taskText: ctx.taskText,
+          rationale: 'The owner judged that the extra fixture path is needed for this failing task.' });
+        const observing = readSchedulerContext(ctx.lease).checkpoint.units[0].planningRelationships[0];
+        assert.equal(observing.status, 'observing'); assert.equal(observing.completedRevision, null);
+        refuses('STATE_INVALID', () => commitTransition(ctx.lease, revision + 1, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, planningRelationships: [{ ...observing, status: 'verified-failure', exitCode: 1,
+            stdoutDigest: '0'.repeat(64), stderrDigest: '0'.repeat(64), completedRevision: value.revision + 1 }] })) })));
+        task.send('run'); const recorded = await observation.completion;
+        assert.equal((await task.finished).code, 1); assert.equal(recorded.status, 'verified-failure');
+        assert.equal(recorded.stdoutDigest, createHash('sha256').update('fixture stdout\n').digest('hex'));
+        const current = readSchedulerContext(ctx.lease).checkpoint;
+        assert.equal(readFailingTaskRelationship(ctx.lease, current.revision, observation.relationshipId,
+          { unitId: data.unit.unitId, unitGeneration: 1, proposedPlanArtifact: ctx.proposed }).relationshipId, observation.relationshipId);
+        refuses('TARGET_MISMATCH', () => readFailingTaskRelationship(ctx.lease, current.revision, observation.relationshipId,
+          { unitId: randomUUID(), unitGeneration: 1, proposedPlanArtifact: ctx.proposed }));
+        refuses('TARGET_MISMATCH', () => readFailingTaskRelationship(ctx.lease, current.revision, observation.relationshipId,
+          { unitId: data.unit.unitId, unitGeneration: 1, proposedPlanArtifact: { ...ctx.proposed, body: ctx.proposed.body + 'Different proposal.\n' } }));
+        commitTransition(ctx.lease, current.revision, (value) => {
+          assert.equal(readFailingTaskRelationship(ctx.lease, current.revision, observation.relationshipId,
+            { unitId: data.unit.unitId, unitGeneration: 1, proposedPlanArtifact: ctx.proposed }).status, 'verified-failure');
+          return value;
+        });
+      } finally {
+        if (task.exitCode === null && task.signalCode === null) await endChild(task);
+        await observation?.completion.catch(() => {});
+        const current = readSchedulerContext(ctx.lease).checkpoint;
+        commitTransition(ctx.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(ctx.lease);
+      }
+    });
+    await check('owner observations classify zero, signal, pipe errors, pause and changed dirty bytes without JSON grants', async () => {
+      const api = { acquireScheduler, commitTransition, publishSelectionSnapshot, prepareEffect, markEffectInFlight, readProcessIdentity,
+        resolveRepositoryCheckout, schedulerDigest, settleEffect };
+      const setup = fixture(); const root = setup.repository.coordinatorRoot;
+      writeFileSync(join(root, 'fixture.txt'), 'actual fixture contents\n'); git('-C', root, 'add', 'fixture.txt');
+      git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+      const data = await selectionFixture(setup); const ctx = await createPlanningFixture({ setup, data, api, moduleUrl, accountHome });
+      const request = { unitId: data.unit.unitId, unitGeneration: 1, currentPlanArtifact: ctx.artifact, proposedPlanArtifact: ctx.proposed,
+        taskText: ctx.taskText, rationale: 'The trusted owner judged that the added path is needed for the task.' };
+      const tasks = [];
+      const start = async (expected, isolated = true) => { const task = startPlanningTask(api, ctx.worktree.root, expected, isolated); tasks.push(task); await task.ready; return task; };
+      const observe = (task, overrides = {}) => {
+        try {
+          return observeFailingTaskRelationship(ctx.lease, readSchedulerContext(ctx.lease).checkpoint.revision, task, { ...request, ...overrides });
+        } catch (error) {
+          if (error.code === 'OWNER_UNVERIFIED') {
+            // Test-only failure facts. These later observations do not grant
+            // authority or change the production observer's acceptance checks.
+            const entry = procEntry(task.pid); let executable = null;
+            try { if (entry?.[2]) executable = realpathSync(entry[2]); } catch { /* report the unverified path */ }
+            error.message += ' Fixture ownership: ' + JSON.stringify({
+              task: task.fixtureObservation ?? 'input rejection', platform: process.platform, pid: task.pid, nativePid: task._handle?.pid ?? null,
+              launch: task.spawnfile, parentPid: entry?.[0] ?? null, expectedParentPid: process.pid,
+              rawExecutable: entry?.[2] ?? null, executable, pinnedExecutable: setup.pins.nodePath,
+              childGroup: processGroupOf(task.pid), ownerGroup: processGroupOf(process.pid),
+              started: task.started, observedStart: processStart(task.pid), exitCode: task.exitCode, signal: task.signalCode,
+            });
+          }
+          throw error;
+        }
+      };
+      const recordFor = async (label, expected, action, status) => {
+        const task = await start(expected); task.fixtureObservation = label; const observation = observe(task);
+        assert.equal(planningRelationshipRecovery(readSchedulerContext(ctx.lease).checkpoint).pending, true);
+        refuses('RECOVERY_REQUIRED', () => observeSelectionNoWork(ctx.lease, data.unit.unitId));
+        await action(task); const record = await observation.completion; await task.finished;
+        assert.equal(record.status, status); assert.equal(planningRelationshipRecovery(readSchedulerContext(ctx.lease).checkpoint).pending, false);
+        return record;
+      };
+      try {
+        const forgedChild = await start('required\n'); refuses('INVALID_INPUT', () => observe({ pid: forgedChild.pid }));
+        const foreignParent = startChild(`import {spawn} from 'node:child_process';
+          const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+          process.on('message',()=>child.kill('SIGTERM'));child.once('close',()=>process.disconnect());process.send({pid:child.pid});`);
+        const foreign = await message(foreignParent);
+        try {
+          assert.equal(procEntry(foreign.pid)[0], foreignParent.pid);
+          refuses('INVALID_INPUT', () => observe({ pid: foreign.pid }));
+          const actualPid = forgedChild.pid;
+          try { forgedChild.pid = foreign.pid; refuses('OWNER_UNVERIFIED', () => observe(forgedChild)); }
+          finally { forgedChild.pid = actualPid; }
+        } finally { foreignParent.send('cleanup'); await foreignParent.finished; }
+        refuses('TARGET_MISMATCH', () => observe(forgedChild, { currentPlanArtifact: { ...ctx.artifact, body: ctx.artifact.body + 'Edited original.\n' } }));
+        refuses('TARGET_MISMATCH', () => observe(forgedChild, { proposedPlanArtifact: { ...ctx.proposed, unitId: randomUUID() } }));
+        refuses('INVALID_INPUT', () => observe(forgedChild, { taskText: 'Not a task in this plan.' })); await endChild(forgedChild);
+        const exited = await start('actual fixture contents\n'); exited.send('run'); await exited.finished;
+        refuses('OWNER_UNVERIFIED', () => observe(exited));
+        const shared = await start('required\n', false); shared.fixtureObservation = 'shared-group refusal';
+        assert.throws(() => observe(shared), (error) => {
+          assert(error instanceof SchedulerError && error.code === 'OWNER_UNVERIFIED');
+          const marker = ' Fixture ownership: '; const at = error.message.indexOf(marker);
+          assert(at >= 0, 'The fixture must report the rejected ownership facts.');
+          const facts = JSON.parse(error.message.slice(at + marker.length));
+          assert.equal(facts.task, 'shared-group refusal'); assert.equal(facts.pid, shared.pid);
+          assert.equal(facts.nativePid, shared.pid); assert.equal(facts.parentPid, process.pid);
+          assert.equal(facts.childGroup, processGroupOf(process.pid)); assert.notEqual(facts.childGroup, shared.pid);
+          return true;
+        });
+        await endChild(shared);
+        const pathTask = startPlanningTask(api, ctx.worktree.root, 'required\n', true, false, true);
+        pathTask.fixtureObservation = 'PATH launch'; tasks.push(pathTask); await pathTask.ready;
+        const pathEntry = procEntry(pathTask.pid); let pathExecutable = null;
+        try { if (pathEntry?.[2]) pathExecutable = realpathSync(pathEntry[2]); } catch { /* unknown executable must refuse */ }
+        assert.equal(pathTask._handle?.pid, pathTask.pid); assert.equal(pathEntry?.[0], process.pid);
+        assert.equal(processGroupOf(pathTask.pid), pathTask.pid); assert.equal(processStart(pathTask.pid), pathTask.started);
+        if (pathExecutable !== null) {
+          assert.equal(pathExecutable, setup.pins.nodePath);
+          const pathObservation = observe(pathTask); pathTask.send('run');
+          assert.equal((await pathObservation.completion).status, 'verified-failure'); await pathTask.finished;
+        } else {
+          // PATH spelling is not executable proof. Some hosts cannot observe
+          // this child's image; refusal must not register a relationship.
+          const before = readSchedulerContext(ctx.lease).checkpoint;
+          refuses('OWNER_UNVERIFIED', () => observe(pathTask));
+          assert.deepEqual(readSchedulerContext(ctx.lease).checkpoint, before); await endChild(pathTask);
+        }
+        const { copyFileSync, chmodSync } = await import('node:fs');
+        const hiddenDirectory = join(setup.home, 'unresolvable-node'); mkdirSync(hiddenDirectory, { mode: 0o700 });
+        const hiddenExecutable = join(hiddenDirectory, 'node'); copyFileSync(setup.pins.nodePath, hiddenExecutable);
+        const hiddenTask = startPlanningTask(api, ctx.worktree.root, 'required\n', true, false, false, hiddenExecutable);
+        hiddenTask.fixtureObservation = 'unresolvable executable'; tasks.push(hiddenTask); await hiddenTask.ready;
+        try {
+          // A real native child stays live after directory traversal is denied.
+          // This tests unknown executable refusal, not Darwin emulation.
+          chmodSync(hiddenDirectory, 0);
+          assert.throws(() => realpathSync(hiddenExecutable), (error) => error.code === 'EACCES');
+          assert.equal(hiddenTask._handle?.pid, hiddenTask.pid); assert.equal(procEntry(hiddenTask.pid)?.[0], process.pid);
+          assert.equal(processGroupOf(hiddenTask.pid), hiddenTask.pid); assert.equal(processStart(hiddenTask.pid), hiddenTask.started);
+          assert.equal(hiddenTask.exitCode, null); assert.equal(hiddenTask.signalCode, null);
+          const before = readSchedulerContext(ctx.lease).checkpoint;
+          refuses('OWNER_UNVERIFIED', () => observe(hiddenTask));
+          assert.deepEqual(readSchedulerContext(ctx.lease).checkpoint, before);
+        } finally { chmodSync(hiddenDirectory, 0o700); await endChild(hiddenTask); }
+        const zero = await recordFor('zero exit', 'actual fixture contents\n', async (task) => {
+          task.send('run'); await task.finished;
+          const current = readSchedulerContext(ctx.lease).checkpoint;
+          if (current.units[0].planningRelationships.at(-1).status === 'observing') {
+            assert.equal(reconcilePlanningRelationships(ctx.lease, current.revision).units[0].planningRelationships.at(-1).status, 'observing');
+          }
+        }, 'not-failed');
+        refuses('WIDEN_REASON_UNVERIFIED', () => readFailingTaskRelationship(ctx.lease, readSchedulerContext(ctx.lease).checkpoint.revision,
+          zero.relationshipId, { unitId: data.unit.unitId, unitGeneration: 1, proposedPlanArtifact: ctx.proposed }));
+        await recordFor('signal exit', 'required\n', async (task) => { task.kill('SIGTERM'); }, 'inconclusive');
+        await recordFor('output pipe failure', 'required\n', async (task) => { task.stdout.destroy(new Error('fixture output pipe failure')); task.send('run'); }, 'inconclusive');
+        await recordFor('changed HEAD with equal tree', 'required\n', async (task) => {
+          const tree = gitFact(ctx.worktree.root, ['--verify', 'HEAD^{tree}']);
+          git('-C', ctx.worktree.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            'commit', '--allow-empty', '-qm', 'context moved without a tree change');
+          assert.equal(gitFact(ctx.worktree.root, ['--verify', 'HEAD^{tree}']), tree); task.send('run');
+        }, 'inconclusive');
+        writeFileSync(join(ctx.worktree.root, 'fixture.txt'), 'dirty-a\n');
+        await recordFor('changed dirty bytes', 'required\n', async (task) => {
+          const before = checkoutGit(ctx.worktree.root, ['status', '--porcelain=v1']);
+          writeFileSync(join(ctx.worktree.root, 'fixture.txt'), 'dirty-b\n');
+          assert.equal(checkoutGit(ctx.worktree.root, ['status', '--porcelain=v1']), before); task.send('run');
+        }, 'inconclusive');
+        writeFileSync(join(ctx.worktree.root, 'fixture.txt'), 'actual fixture contents\n');
+        const paused = await recordFor('pause during observation', 'required\n', async (task) => {
+          let current = readSchedulerContext(ctx.lease).checkpoint; commitTransition(ctx.lease, current.revision, (value) => value);
+          current = readSchedulerContext(ctx.lease).checkpoint;
+          commitTransition(ctx.lease, current.revision, (value) => ({ ...value, state: 'paused', desiredState: 'paused' })); task.send('run');
+        }, 'verified-failure');
+        let current = readSchedulerContext(ctx.lease).checkpoint;
+        refuses('RUN_ACTIVE', () => readFailingTaskRelationship(ctx.lease, current.revision, paused.relationshipId,
+          { unitId: data.unit.unitId, unitGeneration: 1, proposedPlanArtifact: ctx.proposed }));
+        commitTransition(ctx.lease, current.revision, (value) => ({ ...value, state: 'running', desiredState: 'running' }));
+        current = readSchedulerContext(ctx.lease).checkpoint;
+        for (const next of [[], current.units[0].planningRelationships.map((record) => ({ ...record, rationale: record.rationale + 'Changed.' }))]) {
+          refuses('STATE_INVALID', () => commitTransition(ctx.lease, current.revision, (value) => ({ ...value,
+            units: value.units.map((unit) => ({ ...unit, planningRelationships: next })) })));
+        }
+        const fake = { ...paused, relationshipId: randomUUID(), status: 'observing', exitCode: null, signal: null,
+          stdoutDigest: null, stderrDigest: null, createdRevision: current.revision + 1, completedRevision: null };
+        refuses('STATE_INVALID', () => commitTransition(ctx.lease, current.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, planningRelationships: [...unit.planningRelationships, fake] })) })));
+        writeFileSync(join(ctx.worktree.root, 'extra.txt'), 'pre-edited new path\n');
+        const preEdited = await start('required\n'); refuses('BOUNDARY_EDIT_BEFORE_ADMISSION', () => observe(preEdited)); await endChild(preEdited);
+        refuses('BOUNDARY_EDIT_BEFORE_ADMISSION', () => readFailingTaskRelationship(ctx.lease, current.revision, paused.relationshipId,
+          { unitId: data.unit.unitId, unitGeneration: 1, proposedPlanArtifact: ctx.proposed }));
+        renameSync(join(ctx.worktree.root, 'extra.txt'), join(setup.home, 'retained-pre-edited-extra.txt'));
+      } finally {
+        for (const task of tasks) if (task.exitCode === null && task.signalCode === null) await endChild(task);
+        const current = readSchedulerContext(ctx.lease).checkpoint;
+        commitTransition(ctx.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(ctx.lease);
+      }
+    });
+    await check('raw admission uses before-scope, verified expansion provenance, delivered exclusions and a monotonic proposal floor', async () => {
+      const { createSnapshot, completeSection } = await import('./snapshot-contract.mjs');
+      const api = { acquireScheduler, commitTransition, publishSelectionSnapshot, prepareEffect, markEffectInFlight, readProcessIdentity,
+        resolveRepositoryCheckout, schedulerDigest, settleEffect };
+      const prepare = async (prepareOnly) => {
+        const setup = fixture(); const root = setup.repository.coordinatorRoot;
+        writeFileSync(join(root, 'fixture.txt'), 'actual fixture contents\n'); writeFileSync(join(root, '.gitignore'), 'cache/\n');
+        git('-C', root, 'add', 'fixture.txt', '.gitignore');
+        git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+        const data = await selectionFixture(setup); return createPlanningFixture({ setup, data, api, moduleUrl, accountHome, prepareOnly });
+      };
+      const admit = (ctx, artifact, reference) => {
+        const current = readSchedulerContext(ctx.lease).checkpoint;
+        const plan = artifactMetadata(artifact);
+        return commitTransition(ctx.lease, current.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, plan, admission: { schema: 'autoloop.admission/1', runId: value.runId,
+            unitId: unit.unitId, unitGeneration: unit.unitGeneration, ...plan, reservationRevision: value.revision + 1 },
+          wait: null, replanRequired: false, checkedSnapshot: reference, lastRequestedPlanGeneration: artifact.planGeneration })),
+          reservations: value.reservations.map((item) => ({ ...item, state: 'admitted', paths: artifact.boundary })) }));
+      };
+      const end = (ctx) => { const current = readSchedulerContext(ctx.lease).checkpoint;
+        commitTransition(ctx.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(ctx.lease); };
+      const initial = await prepare(true);
+      try {
+        writeFileSync(join(initial.worktree.root, 'fixture.txt'), 'edited before admission\n');
+        refuses('BOUNDARY_EDIT_BEFORE_ADMISSION', () => admit(initial, initial.artifact, initial.snapshot));
+        assert.deepEqual(readSchedulerContext(initial.lease).checkpoint.reservations[0].paths, []);
+        writeFileSync(join(initial.worktree.root, 'fixture.txt'), 'actual fixture contents\n');
+        mkdirSync(join(initial.worktree.root, 'cache')); writeFileSync(join(initial.worktree.root, 'cache', 'generated.txt'), 'ignored before first admission\n');
+        refuses('EVIDENCE_CHANGED', () => admit(initial, initial.artifact, initial.snapshot));
+        assert.deepEqual(readSchedulerContext(initial.lease).checkpoint.reservations[0].paths, []);
+      } finally { end(initial); }
+      const ctx = await prepare(false);
+      const refresh = (sections = ctx.linkedEvidence.snapshot.sections) => {
+        const current = readSchedulerContext(ctx.lease).checkpoint;
+        return publishSelectionSnapshot(ctx.lease, current.revision, { ...ctx.linkedEvidence, checkpointRevision: current.revision,
+          snapshot: createSnapshot({ scannedAt: '2026-01-01T00:00:04.000Z', sections }) });
+      };
+      try {
+        let reference = refresh();
+        refuses('WIDEN_REASON_UNVERIFIED', () => admit(ctx, ctx.proposed, reference));
+        const task = startPlanningTask(api, ctx.worktree.root, 'required fixture contents\n'); await task.ready;
+        const observation = observeFailingTaskRelationship(ctx.lease, readSchedulerContext(ctx.lease).checkpoint.revision, task,
+          { unitId: ctx.data.unit.unitId, unitGeneration: 1, currentPlanArtifact: ctx.artifact, proposedPlanArtifact: ctx.proposed,
+            taskText: ctx.taskText, rationale: 'The owner judged the additional fixture path necessary.' });
+        task.send('run'); assert.equal((await observation.completion).status, 'verified-failure'); await task.finished;
+        const at = '2026-01-01T00:00:00.000Z';
+        const pr = { number: 90, title: 'Delivered fixture', body: 'Closes #9', isDraft: false, reviewDecision: 'APPROVED',
+          headRefName: 'feat/gh-9-fixture', headRefOid: ctx.artifact.baseOid, baseRefName: 'main', mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE',
+          mergedAt: null, updatedAt: at, author: 'fixture-operator', headRepository: 'example/scheduler-fixture', statusCheckState: 'SUCCESS',
+          statusCheckRollup: [], files: ['extra.txt'], issue: 9, orphanCandidate: false, ownership: 'loop' };
+        const markerBody = { branch: pr.headRefName, intentSource: 'invocation', issue: 9, issueBodyHash: schedulerDigest('public issue'),
+          mergePolicy: 'manual', phase: 'ready-head', planHash: schedulerDigest('public plan'), plannedBaseOid: ctx.artifact.baseOid,
+          pr: 90, runIntentHash: schedulerDigest('public intent'), selector: 'native', v: 1 };
+        const marker = { issueNumber: 9, id: 'IC_public_fixture', tipId: 'IC_public_fixture', sequence: 0, author: 'fixture-operator',
+          authorAssociation: 'MEMBER', body: '<!-- autoloop-lifecycle-v1\n' + JSON.stringify(markerBody) + '\n-->', createdAt: at, updatedAt: at, url: null };
+        reference = refresh({ ...ctx.linkedEvidence.snapshot.sections, openPrs: completeSection([pr]), lifecycleMarkers: completeSection([marker]) });
+        refuses('BOUNDARY_OVERLAP', () => admit(ctx, ctx.proposed, reference));
+        reference = refresh(); admit(ctx, ctx.proposed, reference);
+        writeFileSync(join(ctx.worktree.root, 'fixture.txt'), 'legitimate dirty edit in retained scope\n');
+        const sameScope = { ...ctx.proposed, planGeneration: 5, body: ctx.proposed.body + 'Re-plan the same retained scope.\n' };
+        reference = refresh(); const admitted = admit(ctx, sameScope, reference);
+        assert.equal(admitted.units[0].lastRequestedPlanGeneration, 5);
+        refuses('STATE_INVALID', () => commitTransition(ctx.lease, admitted.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, lastRequestedPlanGeneration: 4 })) })));
+        refuses('STATE_INVALID', () => commitTransition(ctx.lease, admitted.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => { const { lastRequestedPlanGeneration, ...rest } = unit; return rest; }) })));
+        refuses('STATE_INVALID', () => commitTransition(ctx.lease, admitted.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, lastRequestedPlanGeneration: 99 })) })));
+      } finally { end(ctx); }
+    });
+    await check('raw batch admissions exclude final scopes and retained waiting paths with one actual owner', async () => {
+      const { createSnapshot, completeSection } = await import('./snapshot-contract.mjs');
+      const { selectionSnapshotReference } = await import('./scheduler-selection-schema.mjs');
+      const api = { acquireScheduler, commitTransition, publishSelectionSnapshot, prepareEffect, markEffectInFlight, readProcessIdentity,
+        resolveRepositoryCheckout, schedulerDigest, settleEffect, readSchedulerContext };
+      const setup = fixture(); const root = setup.repository.coordinatorRoot;
+      writeFileSync(join(root, 'fixture.txt'), 'actual fixture contents\n'); git('-C', root, 'add', 'fixture.txt');
+      git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+      const data = await selectionFixture(setup);
+      const first = await createPlanningFixture({ setup, data, api, moduleUrl, accountHome, prepareOnly: true });
+      const sections = structuredClone(data.evidence.snapshot.sections); const sources = structuredClone(data.evidence.sources);
+      const queue = { ...sections.queue.items[0], number: 8 }; const openIssue = { ...sections.openIssues.items[0], number: 8 };
+      sections.queue.items.push(queue); sections.openIssues.items.push(openIssue);
+      sections.authorVerification.items[0].evidence.push({ ...sections.authorVerification.items[0].evidence[0], issueNumber: 8 });
+      const issueSource = { number: 8, nodeId: 'I_fixture_8' };
+      const approvalSource = { ...sources.approvals[0], issue: 8, issueNodeId: issueSource.nodeId, approvalIssue: 8,
+        approvalIssueNodeId: issueSource.nodeId, eventId: 'E_fixture_8' };
+      sources.issues.push(issueSource); sources.approvals.push(approvalSource);
+      const revision = readSchedulerContext(first.lease).checkpoint.revision;
+      const evidence = { ...data.evidence, checkpointRevision: revision, sources,
+        snapshot: createSnapshot({ scannedAt: '2026-01-01T00:00:04.000Z', sections }) };
+      const reference = selectionSnapshotReference(evidence);
+      const subject = { ...data.authorization.subject, issue: 8, issueNodeId: issueSource.nodeId,
+        approval: { ...data.authorization.subject.approval, issue: 8, issueNodeId: issueSource.nodeId, eventId: approvalSource.eventId } };
+      const authorization = { ...data.authorization, subject, snapshot: reference, authorizationDigest: schedulerDigest(subject),
+        evidenceDigest: schedulerDigest({ queue, openIssue, role: sections.authorVerification.items[0], issueSource, approvalSource, roleSource: sources.roles[0] }) };
+      const unit = { ...data.unit, unitId: randomUUID(), checkedSnapshot: reference };
+      const reservation = { ...data.reservation, issue: 8, unitId: unit.unitId, slot: 2, issueAuthorization: authorization, createdRevision: revision + 1 };
+      const data8 = { evidence, reference, authorization, unit, reservation };
+      let second;
+      const refresh = (ctx) => { const current = readSchedulerContext(first.lease).checkpoint;
+        return publishSelectionSnapshot(first.lease, current.revision, { ...ctx.linkedEvidence, sources,
+          checkpointRevision: current.revision, snapshot: createSnapshot({ scannedAt: '2026-01-01T00:00:05.000Z',
+            sections: { ...sections, tree: completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: ctx.worktree.branch, headOid: data.evidence.headOid }]) } }) }); };
+      const admit = (ctx, artifact, snapshot) => { const current = readSchedulerContext(first.lease).checkpoint; const plan = artifactMetadata(artifact);
+        return commitTransition(first.lease, current.revision, (value) => ({ ...value,
+          units: value.units.map((item) => item.unitId !== ctx.data.unit.unitId ? item : { ...item, plan, checkedSnapshot: snapshot, wait: null,
+            replanRequired: false, lastRequestedPlanGeneration: artifact.planGeneration,
+            admission: { schema: 'autoloop.admission/1', runId: value.runId, unitId: item.unitId, unitGeneration: 1,
+              ...plan, reservationRevision: value.revision + 1 } }),
+          reservations: value.reservations.map((item) => item.unitId !== ctx.data.unit.unitId ? item : { ...item, state: 'admitted', paths: artifact.boundary }) })); };
+      const failed = async (ctx, currentArtifact, proposedArtifact) => { const task = startPlanningTask(api, ctx.worktree.root, 'required fixture contents\n'); await task.ready;
+        const observation = observeFailingTaskRelationship(first.lease, readSchedulerContext(first.lease).checkpoint.revision, task,
+          { unitId: ctx.data.unit.unitId, unitGeneration: 1, currentPlanArtifact: currentArtifact, proposedPlanArtifact: proposedArtifact,
+            taskText: ctx.taskText, rationale: 'The owner judged the expanded path necessary for the observed task.' });
+        task.send('run'); assert.equal((await observation.completion).status, 'verified-failure'); await task.finished; return observation; };
+      try {
+        second = await createPlanningFixture({ setup, data: data8, api, moduleUrl, accountHome, prepareOnly: true, existingLease: first.lease });
+        assert.equal(second.lease, first.lease);
+        const before = readSchedulerContext(first.lease).checkpoint;
+        assert(before.reservations.every((item) => item.worktree && item.paths.length === 0));
+        const snapshots = new Map([first, second].map((ctx) => [ctx.data.unit.unitId, refresh(ctx)]));
+        const admitBoth = (secondArtifact) => {
+          const plans = new Map([[first.data.unit.unitId, artifactMetadata(first.artifact)], [unit.unitId, artifactMetadata(secondArtifact)]]);
+          return commitTransition(first.lease, before.revision, (value) => ({ ...value,
+            units: value.units.map((item) => { const plan = plans.get(item.unitId); return { ...item, plan,
+              checkedSnapshot: snapshots.get(item.unitId), lastRequestedPlanGeneration: plan.planGeneration,
+              admission: { schema: 'autoloop.admission/1', runId: value.runId, unitId: item.unitId, unitGeneration: 1,
+                ...plan, reservationRevision: value.revision + 1 } }; }),
+            reservations: value.reservations.map((item) => ({ ...item, state: 'admitted', paths: plans.get(item.unitId).boundary })) }));
+        };
+        refuses('BOUNDARY_OVERLAP', () => admitBoth(second.artifact));
+        assert.deepEqual(readSchedulerContext(first.lease).checkpoint, before, 'A refused batch must not change the checkpoint.');
+        const independent = { ...second.artifact, boundary: ['other.txt'] };
+        const admitted = admitBoth(independent);
+        assert.equal(admitted.revision, before.revision + 1);
+        assert.deepEqual(admitted.reservations.map((item) => item.paths), [['fixture.txt'], ['other.txt']]);
+        const secondProposal = { ...independent, planGeneration: 2, body: independent.body + 'Repair fixture.txt.\n', boundary: ['fixture.txt', 'other.txt'] };
+        await failed(second, independent, secondProposal); let snapshot = refresh(second);
+        let current = readSchedulerContext(first.lease).checkpoint;
+        const wait = { schema: 'autoloop.selection-wait/1', code: 'UNIT_OVERLAP', unitId: unit.unitId,
+          conflicts: [{ type: 'unit', id: first.data.unit.unitId, paths: ['fixture.txt'] }],
+          condition: { all: [{ on: 'unit-release', unitId: first.data.unit.unitId, unitGeneration: 1 }] },
+          requestedPlan: artifactMetadata(secondProposal), snapshot, createdRevision: current.revision + 1 };
+        commitTransition(first.lease, current.revision, (value) => ({ ...value,
+          units: value.units.map((item) => item.unitId !== unit.unitId ? item : { ...item, checkedSnapshot: snapshot, admission: null, wait, lastRequestedPlanGeneration: 2 }),
+          reservations: value.reservations.map((item) => item.unitId !== unit.unitId ? item : { ...item, state: 'waiting' }) }));
+        const firstProposal = { ...first.artifact, planGeneration: 2, body: first.artifact.body + 'Repair other.txt.\n', boundary: ['fixture.txt', 'other.txt'] };
+        await failed(first, first.artifact, firstProposal); snapshot = refresh(first);
+        refuses('BOUNDARY_OVERLAP', () => admit(first, firstProposal, snapshot));
+        current = readSchedulerContext(first.lease).checkpoint;
+        const kept = current.reservations.find((item) => item.unitId === unit.unitId);
+        assert.equal(kept.state, 'waiting'); assert.deepEqual(kept.paths, ['other.txt']);
+        assert.deepEqual(current.units.find((item) => item.unitId === unit.unitId).plan, artifactMetadata(independent));
+      } finally {
+        const current = readSchedulerContext(first.lease).checkpoint;
+        commitTransition(first.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(first.lease);
+      }
+    });
+    await check('planning after wake retains the admitted plan and permits canonical child paths already covered by a directory', async () => {
+      const { createSnapshot, completeSection } = await import('./snapshot-contract.mjs');
+      const api = { acquireScheduler, commitTransition, publishSelectionSnapshot, prepareEffect, markEffectInFlight, readProcessIdentity,
+        resolveRepositoryCheckout, schedulerDigest, settleEffect };
+      const setup = fixture(); const root = setup.repository.coordinatorRoot;
+      writeFileSync(join(root, 'fixture.txt'), 'actual fixture contents\n'); git('-C', root, 'add', 'fixture.txt');
+      git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+      const data = await selectionFixture(setup); const ctx = await createPlanningFixture({ setup, data, api, moduleUrl, accountHome, prepareOnly: true });
+      mkdirSync(join(ctx.worktree.root, 'src'));
+      const artifact = { ...ctx.artifact, boundary: ['src/'] }; const plan = artifactMetadata(artifact);
+      const refresh = (closed = false) => { const current = readSchedulerContext(ctx.lease).checkpoint;
+        return publishSelectionSnapshot(ctx.lease, current.revision, { ...ctx.linkedEvidence, checkpointRevision: current.revision,
+          sources: { ...ctx.linkedEvidence.sources, waitIssues: completeSection([{ number: 8, nodeId: 'I_wait_fixture', state: closed ? 'CLOSED' : 'OPEN' }]) },
+          snapshot: createSnapshot({ scannedAt: '2026-01-01T00:00:04.000Z', sections: ctx.linkedEvidence.snapshot.sections }) }); };
+      let observation;
+      try {
+        let current = readSchedulerContext(ctx.lease).checkpoint; let snapshot = refresh();
+        commitTransition(ctx.lease, current.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, checkedSnapshot: snapshot, plan, lastRequestedPlanGeneration: 1,
+            admission: { schema: 'autoloop.admission/1', runId: value.runId, unitId: unit.unitId, unitGeneration: 1, ...plan, reservationRevision: value.revision + 1 } })),
+          reservations: value.reservations.map((item) => ({ ...item, state: 'admitted', paths: plan.boundary })) }));
+        current = readSchedulerContext(ctx.lease).checkpoint; snapshot = refresh();
+        const wait = { schema: 'autoloop.selection-wait/1', code: 'ISSUE_WAIT', unitId: data.unit.unitId,
+          conflicts: [{ type: 'issue', id: 8, paths: [] }], condition: { all: [{ on: 'issue', number: 8 }] },
+          requestedPlan: { ...plan, planGeneration: 2, planDigest: schedulerDigest({ ...artifact, planGeneration: 2 }) },
+          snapshot, createdRevision: current.revision + 1 };
+        commitTransition(ctx.lease, current.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, checkedSnapshot: snapshot, admission: null, wait, lastRequestedPlanGeneration: 2 })),
+          reservations: value.reservations.map((item) => ({ ...item, state: 'waiting' })) }));
+        current = readSchedulerContext(ctx.lease).checkpoint; snapshot = refresh(true);
+        commitTransition(ctx.lease, current.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, checkedSnapshot: snapshot, wait: null, replanRequired: true })),
+          reservations: value.reservations.map((item) => ({ ...item, state: 'planning' })) }));
+        current = readSchedulerContext(ctx.lease).checkpoint;
+        assert.deepEqual(current.units[0].plan, plan); assert.equal(current.units[0].lastRequestedPlanGeneration, 2);
+        const wider = { ...artifact, planGeneration: 4, boundary: ['next/', 'src/'], body: artifact.body + 'Repair next/.\n' };
+        const task = startPlanningTask(api, ctx.worktree.root, 'required fixture contents\n'); await task.ready;
+        observation = observeFailingTaskRelationship(ctx.lease, current.revision, task, { unitId: data.unit.unitId, unitGeneration: 1,
+          currentPlanArtifact: artifact, proposedPlanArtifact: wider, taskText: ctx.taskText, rationale: 'The owner judged that next/ is needed.' });
+        task.send('run'); assert.equal((await observation.completion).status, 'verified-failure'); await task.finished;
+        current = readSchedulerContext(ctx.lease).checkpoint; assert.equal(current.units[0].lastRequestedPlanGeneration, 2);
+        assert.equal(readFailingTaskRelationship(ctx.lease, current.revision, observation.relationshipId,
+          { unitId: data.unit.unitId, unitGeneration: 1, proposedPlanArtifact: wider }).status, 'verified-failure');
+        const refined = { ...artifact, planGeneration: 3, boundary: ['src/', 'src/a.mjs'], body: artifact.body + 'Refine the existing src/ scope.\n' };
+        const refinedPlan = artifactMetadata(refined); snapshot = refresh(true);
+        const admitted = commitTransition(ctx.lease, current.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, checkedSnapshot: snapshot, plan: refinedPlan, replanRequired: false, lastRequestedPlanGeneration: 3,
+            admission: { schema: 'autoloop.admission/1', runId: value.runId, unitId: unit.unitId, unitGeneration: 1,
+              ...refinedPlan, reservationRevision: value.revision + 1 } })),
+          reservations: value.reservations.map((item) => ({ ...item, state: 'admitted', paths: refinedPlan.boundary })) }));
+        assert.deepEqual(admitted.reservations[0].paths, ['src/', 'src/a.mjs']);
+        refuses('TARGET_MISMATCH', () => readFailingTaskRelationship(ctx.lease, admitted.revision, observation.relationshipId,
+          { unitId: data.unit.unitId, unitGeneration: 1, proposedPlanArtifact: wider }));
+      } finally {
+        await observation?.completion.catch(() => {}); const current = readSchedulerContext(ctx.lease).checkpoint;
+        commitTransition(ctx.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(ctx.lease);
+      }
+    });
+    await check('lost observation authority cannot settle into a successor generation or promote a real late exit', async () => {
+      const api = { acquireScheduler, commitTransition, publishSelectionSnapshot, prepareEffect, markEffectInFlight, readProcessIdentity,
+        resolveRepositoryCheckout, schedulerDigest, settleEffect };
+      const setup = fixture(); const root = setup.repository.coordinatorRoot;
+      writeFileSync(join(root, 'fixture.txt'), 'actual fixture contents\n'); git('-C', root, 'add', 'fixture.txt');
+      git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+      const data = await selectionFixture(setup); const ctx = await createPlanningFixture({ setup, data, api, moduleUrl, accountHome });
+      const task = startPlanningTask(api, ctx.worktree.root, 'required fixture contents\n'); await task.ready;
+      const observation = observeFailingTaskRelationship(ctx.lease, readSchedulerContext(ctx.lease).checkpoint.revision, task,
+        { unitId: data.unit.unitId, unitGeneration: 1, currentPlanArtifact: ctx.artifact, proposedPlanArtifact: ctx.proposed,
+          taskText: ctx.taskText, rationale: 'The owner judged the added path necessary.' });
+      const rejected = assert.rejects(observation.completion, (error) => error instanceof SchedulerError && error.code === 'LEASE_INVALID');
+      let current = readSchedulerContext(ctx.lease).checkpoint;
+      commitTransition(ctx.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(ctx.lease);
+      const successor = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      try {
+        task.send('run'); await rejected; assert.equal((await task.finished).code, 1);
+        current = readSchedulerContext(successor.lease).checkpoint;
+        assert.equal(current.units[0].planningRelationships[0].status, 'observing');
+        current = reconcilePlanningRelationships(successor.lease, current.revision);
+        const record = current.units[0].planningRelationships[0];
+        assert.equal(record.status, 'inconclusive'); assert.equal(record.exitCode, null); assert.equal(record.schedulerGeneration, 1);
+        assert.equal(current.generation, 2); assert.equal(planningRelationshipRecovery(current).pending, false);
+      } finally {
+        if (task.exitCode === null && task.signalCode === null) await endChild(task);
+        current = readSchedulerContext(successor.lease).checkpoint;
+        commitTransition(successor.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(successor.lease);
+      }
+    });
+    await check('descendants and crashed observation owners retain scope until real group exit without exit-file promotion', async () => {
+      const reaperScript = `import ctypes,os,subprocess,sys
+if sys.platform.startswith('linux'): ctypes.CDLL(None).prctl(36,1,0,0,0)
+owner=subprocess.Popen([sys.argv[1],'--input-type=module','-e',sys.argv[2],*sys.argv[3:]])
+result=None
+while True:
+    try: pid,status=os.waitpid(-1,0)
+    except ChildProcessError: break
+    if pid==owner.pid:
+        result=os.waitstatus_to_exitcode(status)
+        if not sys.platform.startswith('linux'): break
+sys.exit(result if result is not None and result>=0 else 128+abs(result or 1))
+`;
+      for (const mode of ['descendant', 'inherit', 'detached-inherit', 'crash']) {
+        const setup = fixture(); const root = setup.repository.coordinatorRoot;
+        writeFileSync(join(root, 'fixture.txt'), 'actual fixture contents\n'); git('-C', root, 'add', 'fixture.txt');
+        git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+        const data = await selectionFixture(setup);
+        const ownerScript = `const api=await import(process.argv[1]);const {spawn}=await import('node:child_process');const children=new Set();
+          const setup=JSON.parse(process.argv[2]),data=JSON.parse(process.argv[3]),accountHome=process.argv[4],mode=process.argv[5];
+          const ctx=await (${createPlanningFixture.toString()})({setup,data,api,moduleUrl:process.argv[1],accountHome});
+          const task=(${startPlanningTask.toString()})(api,ctx.worktree.root,'required fixture contents\\n',true,
+            mode.includes('inherit')?mode:mode==='descendant');await task.ready;
+          console.log(JSON.stringify({kind:'child',owner:api.readProcessIdentity(),child:api.readProcessIdentity(task.pid)}));
+          let descendant=null;task.on('message',value=>{if(value.descendant){descendant=api.readProcessIdentity(value.descendant);
+            console.log(JSON.stringify({kind:'descendant',identity:descendant}));}});
+          const current=api.readSchedulerContext(ctx.lease).checkpoint;
+          const observation=api.observeFailingTaskRelationship(ctx.lease,current.revision,task,{unitId:data.unit.unitId,unitGeneration:1,
+            currentPlanArtifact:ctx.artifact,proposedPlanArtifact:ctx.proposed,taskText:ctx.taskText,rationale:'The owner judged the extra fixture path necessary.'});
+          console.log(JSON.stringify({kind:'observing',record:api.readSchedulerContext(ctx.lease).checkpoint.units[0].planningRelationships[0]}));
+          task.once('exit',()=>{const observed=api.readSchedulerContext(ctx.lease).checkpoint.units[0].planningRelationships[0];
+            console.log(JSON.stringify({kind:'exit-facts',groupState:api.boundCreatorState({process:observed.process,groupLeader:observed.groupLeader,pgid:observed.pgid}),
+              descendantState:descendant&&api.processIdentityState(descendant)}));});
+          if(mode==='crash'){await new Promise(()=>{});}else{
+            task.send('run');const record=await observation.completion;
+            if(record.status!=='inconclusive')throw Error('A surviving descendant must not verify failure.');
+            let code=null;try{api.observeSelectionNoWork(ctx.lease,data.unit.unitId);}catch(error){code=error.code;}
+            let widenCode=null;try{api.readFailingTaskRelationship(ctx.lease,api.readSchedulerContext(ctx.lease).checkpoint.revision,
+              observation.relationshipId,{unitId:data.unit.unitId,unitGeneration:1,proposedPlanArtifact:ctx.proposed});}catch(error){widenCode=error.code;}
+            console.log(JSON.stringify({kind:'settled',record,recovery:api.planningRelationshipRecovery(api.readSchedulerContext(ctx.lease).checkpoint),code,widenCode,
+              groupState:api.boundCreatorState({process:record.process,groupLeader:record.groupLeader,pgid:record.pgid}),descendantState:api.processIdentityState(descendant)}));
+            await new Promise(done=>process.stdin.once('data',done));process.stdin.pause();process.stdin.destroy();
+            if(api.processIdentityState(descendant)==='alive')process.kill(descendant.pid,'SIGTERM');
+            const until=Date.now()+15000;while(api.boundCreatorState({process:record.process,groupLeader:record.groupLeader,pgid:record.pgid})!=='empty'){
+              if(Date.now()>until)throw Error('Fixture descendant did not exit.');await new Promise(done=>setTimeout(done,10));}
+            await task.finished;await new Promise(done=>setImmediate(done));const checkpoint=api.readSchedulerContext(ctx.lease).checkpoint;
+            if(checkpoint.revision!==record.completedRevision||JSON.stringify(checkpoint.units[0].planningRelationships.at(-1))!==JSON.stringify(record))
+              throw Error('Late close rewrote the terminal observation.');
+            if(api.planningRelationshipRecovery(checkpoint).pending)throw Error('Exited inconclusive group must be settled history.');
+            api.commitTransition(ctx.lease,checkpoint.revision,value=>({...value,state:'stopped',desiredState:'stopped'}));api.releaseScheduler(ctx.lease);
+          }`;
+        const wrapper = spawn('python3', ['-I', '-u', '-c', reaperScript, process.execPath, ownerScript, moduleUrl,
+          JSON.stringify(setup), JSON.stringify(data), accountHome, mode], { stdio: ['pipe', 'pipe', 'pipe'] });
+        wrapper.started = processStart(wrapper.pid); wrapper.finished = new Promise((done) => wrapper.once('close', (code, signal) => done({ code, signal })));
+        children.add(wrapper); wrapper.finished.then(() => children.delete(wrapper));
+        const events = []; let pending = ''; let errors = '';
+        wrapper.stdout.on('data', (chunk) => { pending += chunk.toString();
+          while (pending.includes('\n')) { const at = pending.indexOf('\n'); const line = pending.slice(0, at); pending = pending.slice(at + 1);
+            if (line) events.push(JSON.parse(line)); } });
+        wrapper.stderr.on('data', (chunk) => { errors += chunk; });
+        const event = async (kind) => { const until = Date.now() + 20000;
+          while (!events.some((item) => item.kind === kind)) { assert(Date.now() < until && wrapper.exitCode === null,
+            'Fixture owner did not report ' + kind + ': ' + errors); await new Promise((done) => setTimeout(done, 10)); }
+          return events.find((item) => item.kind === kind); };
+        const exit = async () => { let timer;
+          try { return await Promise.race([wrapper.finished, new Promise((_, fail) => { timer = setTimeout(() => fail(new Error('Fixture owner exit timed out: ' + errors)), 20000); })]); }
+          finally { clearTimeout(timer); } };
+        let recovered = null;
+        try {
+          const observing = await event('observing'); const child = await event('child');
+          assert.equal(observing.record.status, 'observing');
+          assert.deepEqual(readCheckpoint(setup.repository, setup.pins.runId).owner, child.owner);
+          if (mode !== 'crash') {
+            if (mode === 'detached-inherit') {
+              const facts = await event('exit-facts');
+              assert.equal(facts.groupState, 'empty'); assert.equal(facts.descendantState, 'alive');
+            }
+            const settled = await event('settled'); assert.equal(settled.record.status, 'inconclusive');
+            if (mode.includes('inherit')) {
+              assert.equal(settled.record.stdoutDigest, null); assert.equal(settled.record.stderrDigest, null);
+            }
+            if (mode === 'detached-inherit') {
+              assert.equal(settled.groupState, 'empty'); assert.equal(settled.descendantState, 'alive');
+              assert.equal(settled.recovery.pending, false); assert.equal(settled.widenCode, 'WIDEN_REASON_UNVERIFIED');
+            } else {
+              assert.equal(settled.recovery.pending, true); assert.deepEqual(settled.recovery.unitIds, [data.unit.unitId]);
+              assert.equal(settled.code, 'OWNER_UNVERIFIED');
+            }
+            wrapper.stdin.write('cleanup\n');
+            assert.equal((await exit()).code, 0, errors);
+          } else {
+            assert.equal(processIdentityState(child.owner), 'alive'); process.kill(child.owner.pid, 'SIGKILL');
+            const until = Date.now() + 15000;
+            while (processIdentityState(child.owner) !== 'dead') { assert(Date.now() < until); await new Promise((done) => setTimeout(done, 10)); }
+            recovered = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+            let checkpoint = readSchedulerContext(recovered.lease).checkpoint;
+            assert.equal(checkpoint.generation, 2); assert.equal(checkpoint.units[0].planningRelationships[0].status, 'observing');
+            writeFileSync(join(setup.home, 'untrusted-exit-code.json'), JSON.stringify({ exitCode: 1 }));
+            checkpoint = reconcilePlanningRelationships(recovered.lease, checkpoint.revision);
+            assert.equal(checkpoint.units[0].planningRelationships[0].status, 'observing');
+            assert.equal(planningRelationshipRecovery(checkpoint).pending, true);
+            assert.equal(processIdentityState(child.child), 'alive'); process.kill(child.child.pid, 'SIGTERM'); await exit();
+            checkpoint = reconcilePlanningRelationships(recovered.lease, checkpoint.revision);
+            const record = checkpoint.units[0].planningRelationships[0];
+            assert.equal(record.status, 'inconclusive'); assert.equal(record.schedulerGeneration, 1);
+            assert.equal(record.exitCode, null); assert.equal(record.stdoutDigest, null); assert.equal(record.stderrDigest, null);
+            assert.equal(planningRelationshipRecovery(checkpoint).pending, false);
+          }
+        } finally {
+          for (const identity of [events.find((item) => item.kind === 'descendant')?.identity,
+            events.find((item) => item.kind === 'child')?.child, events.find((item) => item.kind === 'child')?.owner].filter(Boolean)) {
+            if (processIdentityState(identity) === 'alive') process.kill(identity.pid, 'SIGTERM');
+          }
+          await exit();
+          if (recovered) { const current = readSchedulerContext(recovered.lease).checkpoint;
+            commitTransition(recovered.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(recovered.lease); }
+        }
+      }
+    });
+    await check('real allocation reconciliation and no-work readback share the filter-free status policy', async () => {
+      const setup = fixture(); const root = setup.repository.coordinatorRoot;
+      writeFileSync(join(root, 'fixture.txt'), 'actual fixture contents\n'); writeFileSync(join(root, '.gitattributes'), 'fixture.txt filter=fixture\n');
+      git('-C', root, 'add', 'fixture.txt', '.gitattributes');
+      git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+      const data = await selectionFixture(setup);
+      const owner = startChild(`const api=await import(process.argv[1]);const {spawn}=await import('node:child_process');
+        const {spawnSync}=await import('node:child_process');const {writeFileSync,existsSync,renameSync,utimesSync}=await import('node:fs');
+        const {join}=await import('node:path');const setup=JSON.parse(process.argv[2]),data=JSON.parse(process.argv[3]);
+        const ctx=await (${createPlanningFixture.toString()})({setup,data,api,moduleUrl:process.argv[1],accountHome:process.argv[4]});
+        const marker=join(setup.home,'readback-filter-marker'),filter=join(setup.home,'readback-filter.mjs');
+        writeFileSync(filter,'#!'+process.execPath+'\\nimport {writeFileSync} from "node:fs";writeFileSync('+JSON.stringify(marker)+',"invoked");process.stdin.pipe(process.stdout);\\n',{mode:448});
+        const git=(args)=>{const result=spawnSync('git',['-C',ctx.worktree.root,...args],{encoding:'utf8',timeout:15000});
+          if(result.status!==0)throw Error(result.stderr);return result.stdout;};
+        git(['config','extensions.worktreeConfig','true']);git(['config','--worktree','filter.fixture.clean',filter]);
+        git(['config','--worktree','filter.fixture.required','true']);writeFileSync(join(ctx.worktree.root,'fixture.txt'),'actual fixture contents\\n');
+        utimesSync(join(ctx.worktree.root,'fixture.txt'),new Date(),new Date(Date.now()+2000));
+        const {createWorktreeAllocator}=await import(new URL('./scheduler-worktree.mjs',process.argv[1]));
+        const allocator=createWorktreeAllocator({lease:ctx.lease});
+        const binding=await allocator.reconcileWorktree(ctx.lease,data.unit.unitId);
+        if(binding.root!==ctx.worktree.root||existsSync(marker))throw Error('Allocation readback ran a project filter.');
+        api.observeSelectionNoWork(ctx.lease,data.unit.unitId);
+        if(existsSync(marker))throw Error('No-work readback ran a project filter.');
+        git(['status','--porcelain=v1']);if(!existsSync(marker))throw Error('The real readback filter control did not run.');
+        renameSync(marker,join(setup.home,'retained-readback-control-marker'));
+        const checkpoint=api.readSchedulerContext(ctx.lease).checkpoint;
+        api.commitTransition(ctx.lease,checkpoint.revision,value=>({...value,state:'stopped',desiredState:'stopped'}));api.releaseScheduler(ctx.lease);
+        process.send({safe:true},()=>process.disconnect());`, [moduleUrl, JSON.stringify(setup), JSON.stringify(data), accountHome]);
+      assert.deepEqual(await message(owner), { safe: true }); assert.equal((await owner.finished).code, 0, owner.errorText);
+    });
+    await check('read-only Git profiles refuse missing promised objects without transport or object writes', async () => {
+      const setup = fixture(); const source = setup.repository.coordinatorRoot;
+      writeFileSync(join(source, 'fixture.txt'), 'public promised fixture contents\n');
+      git('-C', source, 'add', 'fixture.txt');
+      git('-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'promised fixture');
+      git('-C', source, 'config', 'uploadpack.allowFilter', 'true');
+      git('-C', source, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
+      const omitted = git('-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+        'commit-tree', git('-C', source, 'rev-parse', 'HEAD^{tree}'), '-m', 'unadvertised fixture commit');
+      const helper = join(setup.home, 'local-transport.mjs');
+      writeFileSync(helper, `import {writeFileSync} from 'node:fs';import {spawnSync} from 'node:child_process';
+        writeFileSync(process.argv[2],'local transport invoked\\n');
+        const result=spawnSync(process.argv[3],[process.argv[4]],{stdio:'inherit'});process.exit(result.status??1);\n`);
+      const objectBytes = (directory) => readdirSync(directory, { withFileTypes: true }).reduce((total, entry) => total
+        + (entry.isDirectory() ? objectBytes(join(directory, entry.name)) : lstatSync(join(directory, entry.name)).size), 0);
+      const clone = (name) => {
+        const root = join(setup.home, name); const marker = join(setup.home, name + '.marker');
+        git('clone', '-q', '--no-checkout', '--filter=tree:0', 'file://' + source, root);
+        git('-C', root, 'config', 'protocol.ext.allow', 'always');
+        git('-C', root, 'remote', 'set-url', 'origin', `ext::${process.execPath} ${helper} ${marker} %S ${source}`);
+        assert.equal(git('-C', root, 'config', '--bool', 'remote.origin.promisor'), 'true');
+        return { root, marker, objects: join(root, '.git', 'objects') };
+      };
+      const control = clone('ordinary'); const controlBefore = objectBytes(control.objects);
+      const ordinary = spawnSync('git', ['-C', control.root, 'ls-tree', '-r', 'HEAD'],
+        { encoding: 'utf8', timeout: 15000, env: { ...process.env, GIT_NO_LAZY_FETCH: '0' } });
+      assert.equal(ordinary.status, 0, ordinary.stderr); assert(existsSync(control.marker));
+      assert(objectBytes(control.objects) > controlBefore, 'The real local transport must supply missing objects.');
+      const results = [];
+      const previous = process.env.GIT_NO_LAZY_FETCH;
+      try {
+        process.env.GIT_NO_LAZY_FETCH = '1';
+        for (const [name, observe] of [
+          ['status', (root) => readGitStatus(root)],
+          ['planning', (root) => readPlanningWorktreeContext(root, [], [])],
+          ['core', (root) => gitFact(root, ['--verify', `${omitted}^{commit}`])],
+        ]) {
+          const test = clone(name); const before = objectBytes(test.objects);
+          let code = null; try { observe(test.root); } catch (error) { code = error.code; }
+          results.push({ name, code, transport: existsSync(test.marker), unchanged: objectBytes(test.objects) === before });
+        }
+      } finally { if (previous === undefined) delete process.env.GIT_NO_LAZY_FETCH; else process.env.GIT_NO_LAZY_FETCH = previous; }
+      assert.deepEqual(results, [
+        { name: 'status', code: 'GIT_OBSERVATION_FAILED', transport: false, unchanged: true },
+        { name: 'planning', code: 'EVIDENCE_CHANGED', transport: false, unchanged: true },
+        { name: 'core', code: 'REPOSITORY_INVALID', transport: false, unchanged: true },
+      ]);
+      for (const mode of ['create', 'readback']) {
+        const test = clone('allocation-' + mode);
+        git('-C', test.root, 'remote', 'rename', 'origin', 'fixture-promisor');
+        const repository = resolveRepository(test.root);
+        const allocationSetup = { ...setup, repository, pins: createPins(repository, { pluginRoot: setup.pins.pluginRoot,
+          enginePath: setup.pins.enginePath, config: setup.pins.config, models: setup.pins.models }) };
+        const data = await selectionFixture(allocationSetup);
+        const owner = startChild(`const api=await import(process.argv[1]);
+          const {createWorktreeAllocator}=await import(new URL('./scheduler-worktree.mjs',process.argv[1]));
+          const {spawn}=await import('node:child_process');const {dirname,join}=await import('node:path');
+          const {mkdirSync,existsSync,readdirSync,lstatSync}=await import('node:fs');const assert=(await import('node:assert/strict')).default;
+          const setup=JSON.parse(process.argv[2]),data=JSON.parse(process.argv[3]),test=JSON.parse(process.argv[4]),mode=process.argv[5];
+          const bytes=directory=>readdirSync(directory,{withFileTypes:true}).reduce((total,entry)=>total+(entry.isDirectory()?bytes(join(directory,entry.name)):lstatSync(join(directory,entry.name)).size),0);
+          const beforeBytes=bytes(test.objects);const lease=api.acquireScheduler(setup.repository,setup.pins,
+            {kind:'terminal',sessionId:null,process:api.readProcessIdentity()}).lease;
+          try{
+            api.commitTransition(lease,1,value=>({...value,state:'running'}));api.publishSelectionSnapshot(lease,2,data.evidence);
+            api.commitTransition(lease,2,value=>({...value,units:[data.unit],reservations:[data.reservation]}));
+            const checkedSnapshot=api.publishSelectionSnapshot(lease,3,{...data.evidence,checkpointRevision:3});
+            const intent={operationId:crypto.randomUUID(),runId:setup.pins.runId,unitId:data.unit.unitId,unitGeneration:1,
+              repositoryKey:setup.repository.repositoryKey,root:join(dirname(test.root),'.autoloop-worktrees',setup.repository.repositoryKey,setup.pins.runId,data.unit.unitId+'-g1'),
+              branch:'feat/gh-'+data.reservation.issue+'-unit-'+data.unit.unitId.replaceAll('-','')+'-g1',baseOid:data.evidence.baseOid};
+            api.prepareEffect(lease,3,{operationId:intent.operationId,requestId:null,runId:intent.runId,unitId:intent.unitId,unitGeneration:1,
+              kind:'worktree.create',target:{type:'external',id:intent.unitId},inputDigest:api.schedulerDigest(intent),expectedHead:intent.baseOid,
+              phase:'prepared',attempt:1,receipt:null,error:null},value=>({...value,units:value.units.map(unit=>({...unit,checkedSnapshot,allocation:{intent,creator:null,creatorHistory:[]}}))}));
+            const allocator=createWorktreeAllocator({lease});
+            if(mode==='readback'){
+              mkdirSync(dirname(intent.root),{recursive:true,mode:0o700});
+              const child=spawn(process.execPath,['--input-type=module','-e',
+                'import {spawnSync} from "node:child_process";process.once("message",()=>{const value=spawnSync("git",JSON.parse(process.argv[1]),{stdio:"ignore"});process.exit(value.status===0?0:1);});process.send("ready");',
+                JSON.stringify(['--no-lazy-fetch','-C',test.root,'-c','core.hooksPath=/dev/null','worktree','add','--no-track','--no-checkout','-b',intent.branch,intent.root,intent.baseOid])],
+                {detached:true,stdio:['ignore','ignore','ignore','ipc']});
+              const closed=new Promise(done=>child.once('close',done));await new Promise(done=>child.once('message',done));
+              try{
+                const identity=api.readProcessIdentity(child.pid);api.markEffectInFlight(lease,intent.operationId);
+                api.commitTransition(lease,api.readSchedulerContext(lease).checkpoint.revision,value=>({...value,
+                  units:value.units.map(unit=>({...unit,allocation:{...unit.allocation,creator:{process:identity,groupLeader:identity,pgid:child.pid}}}))}));
+                child.send('create');assert.equal(await closed,0);
+              }finally{if(child.connected)child.disconnect();await closed;}
+              const before=api.readSchedulerContext(lease).checkpoint;
+              await assert.rejects(()=>allocator.reconcileWorktree(lease,data.unit.unitId),error=>error.code==='WORKTREE_UNVERIFIED');
+              assert.deepEqual(api.readSchedulerContext(lease).checkpoint,before,'Missing-object readback must retain uncertain state.');
+            }else{
+              try{await allocator.allocateWorktree(lease,data.unit.unitId,intent.baseOid);}catch(error){assert(['OUTCOME_UNKNOWN','WORKTREE_UNVERIFIED'].includes(error.code),error.code);}
+            }
+            const checkpoint=api.readSchedulerContext(lease).checkpoint;
+            assert.equal(checkpoint.reservations[0].worktree,null);assert.notEqual(checkpoint.outbox[intent.operationId].phase,'succeeded');
+            assert.deepEqual(checkpoint.units[0].allocation.intent,intent);assert.equal(existsSync(test.marker),false);assert.equal(bytes(test.objects),beforeBytes);
+            process.send({mode,phase:checkpoint.outbox[intent.operationId].phase});
+          }finally{const checkpoint=api.readSchedulerContext(lease).checkpoint;
+            api.commitTransition(lease,checkpoint.revision,value=>({...value,state:'stopped',desiredState:'stopped'}));api.releaseScheduler(lease);}
+          process.disconnect();`, [moduleUrl, JSON.stringify(allocationSetup), JSON.stringify(data), JSON.stringify(test), mode]);
+        const result = await message(owner); assert.equal(result.mode, mode); assert.notEqual(result.phase, 'succeeded');
+        if (mode === 'readback') assert.equal(result.phase, 'in-flight');
+        assert.equal((await owner.finished).code, 0, owner.errorText);
+      }
+    });
+    await check('shared status preserves clean uninitialized and initialized submodules and suppresses nested included drivers', async () => {
+      const { readGitStatus } = await import('./git-observation.mjs');
+      const { utimesSync } = await import('node:fs');
+      const setup = fixture(); const root = setup.repository.coordinatorRoot; const source = join(setup.home, 'module-source');
+      git('init', '-q', '-b', 'main', source);
+      writeFileSync(join(source, 'fixture.txt'), 'baseline\n'); writeFileSync(join(source, '.gitattributes'), 'fixture.txt filter=nested\n');
+      git('-C', source, 'add', 'fixture.txt', '.gitattributes');
+      git('-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'module fixture');
+      git('-C', root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', source, 'embedded');
+      git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', 'module binding');
+      const ordinaryStatus = () => { const result = spawnSync('git', ['-C', root, 'status', '--porcelain=v1'], { encoding: 'utf8', timeout: 15000 });
+        assert.equal(result.status, 0, result.stderr); return result.stdout; };
+      assert.equal(readGitStatus(root).toString(), ordinaryStatus());
+      const comparisonBase = git('-C', root, 'rev-parse', 'HEAD');
+      assert.equal(readPlanningWorktreeContext(root, [], [], comparisonBase).initialClean, true);
+      const saved = join(setup.home, 'retained-initialized-module');
+      renameSync(join(root, 'embedded'), saved); mkdirSync(join(root, 'embedded'));
+      assert.equal(readGitStatus(root).toString(), ordinaryStatus());
+      assert.equal(readPlanningWorktreeContext(root, [], [], comparisonBase).initialClean, true);
+      renameSync(join(root, 'embedded'), join(setup.home, 'retained-empty-module-directory'));
+      renameSync(saved, join(root, 'embedded'));
+      const marker = join(setup.home, 'nested-filter-marker'); const filter = join(setup.home, 'nested-filter.mjs');
+      writeFileSync(filter, `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(marker)}, 'invoked');process.stdin.pipe(process.stdout);\n`, { mode: 0o700 });
+      const included = join(setup.home, 'nested-included.config');
+      git('config', '--file', included, 'filter.nested.clean', filter);
+      git('-C', join(root, 'embedded'), 'config', 'include.path', included);
+      git('-C', join(root, 'embedded'), 'config', 'extensions.worktreeConfig', 'true');
+      git('-C', join(root, 'embedded'), 'config', '--worktree', 'filter.nested.required', 'true');
+      writeFileSync(join(root, 'embedded', 'fixture.txt'), 'changed!\n');
+      utimesSync(join(root, 'embedded', 'fixture.txt'), new Date(), new Date(Date.now() + 2000));
+      const safe = readGitStatus(root).toString(); assert.equal(existsSync(marker), false);
+      const ordinary = spawnSync('git', ['-C', root, 'status', '--porcelain=v1'], { encoding: 'utf8', timeout: 15000 });
+      assert.equal(ordinary.status, 0, ordinary.stderr); assert.equal(existsSync(marker), true, 'Ordinary nested status must exercise the real filter.');
+      assert.equal(safe, ordinary.stdout);
+      renameSync(marker, join(setup.home, 'retained-nested-filter-marker'));
+      assert.throws(() => readPlanningWorktreeContext(root, [], [], comparisonBase),
+        (error) => /^(?:BOUNDARY_|EVIDENCE_CHANGED)/u.test(error.code));
+      assert.equal(existsSync(marker), false);
+    });
+    await check('shared status observations disable effective included and worktree filters without an executor API', async () => {
+      const { readGitStatus } = await import('./git-observation.mjs');
+      const setup = fixture(); const root = setup.repository.coordinatorRoot;
+      writeFileSync(join(root, 'fixture.txt'), 'baseline\n'); writeFileSync(join(root, '.gitattributes'), 'fixture.txt filter=fixture\n');
+      git('-C', root, 'add', 'fixture.txt', '.gitattributes');
+      git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+      const marker = join(setup.home, 'filter-invoked'); const filter = join(setup.home, 'filter.mjs');
+      writeFileSync(filter, `#!/usr/bin/env node\nimport {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(marker)}, 'invoked');process.stdin.pipe(process.stdout);\n`, { mode: 0o700 });
+      const included = join(setup.home, 'included.config');
+      git('config', '--file', included, 'filter.fixture.clean', filter); git('config', '--file', included, 'filter.fixture.required', 'true');
+      git('-C', root, 'config', 'includeIf.onbranch:main.path', included);
+      git('-C', root, 'config', 'extensions.worktreeConfig', 'true');
+      git('-C', root, 'config', '--worktree', 'filter.fixture.process', filter);
+      writeFileSync(join(root, 'fixture.txt'), 'changed!\n');
+      assert.equal(readGitStatus(root, { zeroTerminated: true }).toString(), ' M fixture.txt\0');
+      assert.equal(readGitStatus(root).toString(), ' M fixture.txt\n');
+      assert.equal(existsSync(marker), false, 'Safe reads must not start either configured driver.');
+      assert.throws(() => readGitStatus(root, { args: ['clean', '-ffdx'] }), (error) => error.code === 'GIT_OBSERVATION_FAILED');
+      const ordinary = spawnSync('git', ['-C', root, 'status', '--porcelain=v1'], { encoding: 'utf8', timeout: 15000 });
+      assert.equal(existsSync(marker), true, 'The harmless marker must intercept the real filter path. ' + ordinary.status + ': ' + ordinary.stderr);
+      assert(ordinary.status !== null);
+      renameSync(marker, join(setup.home, 'retained-filter-marker'));
+      git('-C', root, '-c', 'filter.fixture.clean=', '-c', 'filter.fixture.process=', '-c', 'filter.fixture.required=false',
+        'update-index', '--add', '--cacheinfo', '160000,' + git('-C', root, 'rev-parse', 'HEAD') + ',embedded');
+      symlinkSync(root, join(root, 'embedded'), 'dir');
+      assert.throws(() => readGitStatus(root), (error) => error.code === 'GIT_OBSERVATION_FAILED');
+      assert.equal(existsSync(marker), false, 'Unsupported submodule reads must refuse before filters can run.');
+    });
+    await check('clean CRLF linked checkouts use built-in Git conversions while raw bytes still identify observations', async () => {
+      const { readGitContentOids } = await import('./git-observation.mjs');
+      const setup = fixture(); const root = setup.repository.coordinatorRoot;
+      writeFileSync(join(root, '.gitattributes'), 'fixture.txt text eol=crlf filter=fixture\n');
+      writeFileSync(join(root, 'fixture.txt'), 'line one\nline two\n');
+      git('-C', root, 'add', '.gitattributes', 'fixture.txt');
+      git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'CRLF fixture');
+      const base = git('-C', root, 'rev-parse', 'HEAD'); const linked = join(setup.home, 'crlf-worktree');
+      git('-C', root, 'worktree', 'add', '-q', '--detach', linked, base);
+      assert.equal(readFileSync(join(linked, 'fixture.txt'), 'utf8'), 'line one\r\nline two\r\n');
+      assert.equal(checkoutGit(linked, ['status', '--porcelain=v1']), '');
+      const marker = join(setup.home, 'hash-filter-marker'); const filter = join(setup.home, 'hash-filter.mjs');
+      writeFileSync(filter, `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(marker)}, 'invoked');process.stdin.pipe(process.stdout);\n`, { mode: 0o700 });
+      git('-C', linked, 'config', 'filter.fixture.clean', filter); git('-C', linked, 'config', 'filter.fixture.process', filter);
+      git('-C', linked, 'config', 'filter.fixture.required', 'true');
+      const indexOid = git('-C', linked, 'rev-parse', ':fixture.txt');
+      assert.deepEqual(readGitContentOids(linked, ['fixture.txt']), [indexOid]);
+      assert.equal(existsSync(marker), false, 'The normalized hash path must suppress both external drivers.');
+      const ordinaryHash = spawnSync('git', ['-C', linked, 'hash-object', '--stdin-paths'],
+        { input: '"fixture.txt"\n', encoding: 'utf8', timeout: 15000 });
+      assert.equal(existsSync(marker), true, 'The ordinary hash control must exercise its actual configured driver. ' + ordinaryHash.stderr);
+      renameSync(marker, join(setup.home, 'retained-hash-filter-control'));
+      const context = (stage) => { try { return readPlanningWorktreeContext(linked, [], ['fixture.txt'], base); }
+        catch (error) { error.message = stage + ': ' + error.code + ': ' + error.message; throw error; } };
+      const crlf = context('fresh CRLF');
+      assert.equal(crlf.initialClean, true); assert.deepEqual(crlf.changedPaths, []);
+      writeFileSync(join(linked, 'fixture.txt'), 'line one\nline two\n');
+      assert.deepEqual(readGitContentOids(linked, ['fixture.txt']), [indexOid]);
+      const lfStatus = (await import('./git-observation.mjs')).readGitStatus(linked, { zeroTerminated: true });
+      const lf = context('same logical LF bytes; status=' + JSON.stringify(lfStatus.toString('utf8')));
+      assert.equal(lf.initialClean, true); assert.deepEqual(lf.changedPaths, []);
+      assert.notEqual(lf.worktreeStatusDigest, crlf.worktreeStatusDigest, 'Raw byte identity must survive logical normalization.');
+      writeFileSync(join(linked, 'fixture.txt'), 'changed content\r\nline two\r\n');
+      assert.throws(() => readPlanningWorktreeContext(linked, [], ['fixture.txt'], base), (error) => error.code === 'BOUNDARY_EDIT_BEFORE_ADMISSION');
+      writeFileSync(join(linked, 'fixture.txt'), 'line one\r\nline two\r\n');
+      git('-C', linked, 'config', 'core.fileMode', 'true');
+      const { chmodSync } = await import('node:fs'); chmodSync(join(linked, 'fixture.txt'), 0o755);
+      assert.deepEqual(readGitContentOids(linked, ['fixture.txt']), [indexOid], 'Mode edits need not change blob content.');
+      assert.throws(() => readPlanningWorktreeContext(linked, [], ['fixture.txt'], base), (error) => error.code === 'BOUNDARY_EDIT_BEFORE_ADMISSION');
+      chmodSync(join(linked, 'fixture.txt'), 0o644);
+      const paths = ['white space.txt', 'quote"file.txt', 'Café-😀.txt', 'back\\slash.txt', '--flag-is-data'];
+      const contents = 'literal path data\n';
+      for (const path of paths) writeFileSync(join(linked, path), contents);
+      const expected = paths.map((path) => git('-C', linked, 'hash-object', '--no-filters', '--', path));
+      assert.deepEqual(readGitContentOids(linked, paths), expected);
+      assert.throws(() => readGitContentOids(linked, ['../outside']), (error) => error.code === 'GIT_OBSERVATION_FAILED');
+      assert.throws(() => readGitContentOids(linked, ['.git/config']), (error) => error.code === 'GIT_OBSERVATION_FAILED');
+      symlinkSync(join(root, 'fixture.txt'), join(linked, 'alias'));
+      assert.throws(() => readGitContentOids(linked, ['alias']), (error) => error.code === 'GIT_OBSERVATION_FAILED');
+      assert.equal(existsSync(marker), false);
+    });
+    await check('planning content fingerprints bind already-dirty bytes, index state and ignored proposed files without filters', async () => {
+      const { readPlanningWorktreeContext } = await import('./scheduler-planning-context.mjs');
+      const setup = fixture(); const root = setup.repository.coordinatorRoot;
+      writeFileSync(join(root, 'fixture.txt'), 'baseline\n');
+      writeFileSync(join(root, '.gitattributes'), 'fixture.txt filter=fixture\n');
+      writeFileSync(join(root, '.gitignore'), 'ignored.txt\ncache/\n');
+      git('-C', root, 'add', 'fixture.txt', '.gitattributes', '.gitignore');
+      git('-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture contents');
+      const marker = join(setup.home, 'filter-invoked'); const filter = join(setup.home, 'fixture-filter.mjs');
+      writeFileSync(filter, `#!/usr/bin/env node\nimport {writeFileSync} from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, 'invoked');\nprocess.stdin.pipe(process.stdout);\n`, { mode: 0o700 });
+      git('-C', root, 'config', 'filter.fixture.clean', filter); git('-C', root, 'config', 'filter.fixture.required', 'true');
+      assert.equal(readPlanningWorktreeContext(root, ['fixture.txt'], ['fixture.txt', 'ignored.txt']).initialClean, true);
+      writeFileSync(join(root, 'fixture.txt'), 'dirty-a\n');
+      const first = readPlanningWorktreeContext(root, ['fixture.txt'], ['fixture.txt', 'ignored.txt']);
+      writeFileSync(join(root, 'fixture.txt'), 'dirty-b\n');
+      const second = readPlanningWorktreeContext(root, ['fixture.txt'], ['fixture.txt', 'ignored.txt']);
+      assert.equal(first.headOid, second.headOid); assert.equal(first.treeOid, second.treeOid);
+      assert.deepEqual(first.changedPaths, second.changedPaths); assert.deepEqual(second.changedPaths, ['fixture.txt']);
+      assert.notEqual(first.worktreeStatusDigest, second.worktreeStatusDigest, 'Dirty status letters cannot stand in for file bytes.');
+      git('-C', root, '-c', 'filter.fixture.clean=', '-c', 'filter.fixture.process=', '-c', 'filter.fixture.required=false', 'add', 'fixture.txt');
+      const staged = readPlanningWorktreeContext(root, ['fixture.txt'], ['fixture.txt', 'ignored.txt']);
+      assert.notEqual(staged.worktreeStatusDigest, second.worktreeStatusDigest, 'Index state must be bound independently of working bytes.');
+      writeFileSync(join(root, 'ignored.txt'), 'already edited outside admission\n');
+      assert.throws(() => readPlanningWorktreeContext(root, ['fixture.txt'], ['fixture.txt', 'ignored.txt']),
+        (error) => error.code === 'BOUNDARY_EDIT_BEFORE_ADMISSION');
+      renameSync(join(root, 'ignored.txt'), join(setup.home, 'retained-ignored.txt'));
+      writeFileSync(join(root, 'elsewhere.txt'), 'visible outside both scopes\n');
+      assert.throws(() => readPlanningWorktreeContext(root, ['fixture.txt'], ['fixture.txt', 'ignored.txt']),
+        (error) => error.code === 'BOUNDARY_EDIT_BEFORE_ADMISSION');
+      renameSync(join(root, 'elsewhere.txt'), join(setup.home, 'retained-elsewhere.txt'));
+      writeFileSync(join(root, 'fixture.txt'), 'baseline\n');
+      git('-C', root, '-c', 'filter.fixture.clean=', '-c', 'filter.fixture.process=', '-c', 'filter.fixture.required=false', 'add', 'fixture.txt');
+      mkdirSync(join(root, 'cache')); writeFileSync(join(root, 'cache', 'generated.txt'), 'ignored output\n');
+      const ignoredOnly = readPlanningWorktreeContext(root, ['fixture.txt'], ['fixture.txt', 'ignored.txt']);
+      assert.deepEqual(ignoredOnly.changedPaths, []); assert.equal(ignoredOnly.initialClean, false);
+      assert.equal(existsSync(marker), false, 'Context reads must not run Git filters.');
+    });
+    await check('selection validators use exact versioned schemas and bind source IDs and body evidence', async () => {
+      const schema = await import('./scheduler-selection-schema.mjs');
+      const setup = fixture(); const data = await selectionFixture(setup);
+      for (const [validate, value] of [[schema.validateSelectionSources, data.evidence.sources], [schema.validateSelectionSnapshot, data.evidence],
+        [schema.validateSnapshotReference, data.reference], [schema.validateIssueAuthorization, data.authorization],
+        [schema.validateReservation, data.reservation], [schema.validateSelectionUnit, data.unit]]) {
+        assert.deepEqual(validate(value), []);
+        assert.notDeepEqual(validate({ ...value, unexpected: true }), []);
+        assert.notDeepEqual(validate({ ...value, schema: 'future/2' }), []);
+      }
+      assert.deepEqual(schema.validateIssueAuthorizationEvidence(data.authorization, data.evidence), []);
+      const changed = structuredClone(data.evidence); changed.sources.approvals[0].eventId = null;
+      assert.notDeepEqual(schema.validateIssueAuthorizationEvidence(data.authorization, changed), []);
+      const edited = structuredClone(data.authorization); edited.subject.issueBodyDigest = schedulerDigest('different body');
+      edited.authorizationDigest = schedulerDigest(edited.subject);
+      assert.notDeepEqual(schema.validateIssueAuthorizationEvidence(edited, data.evidence), []);
+      assert.notDeepEqual(schema.validateReservation({ ...data.reservation, slot: 3 }), []);
+      assert.notDeepEqual(schema.validateSelectionUnit({ ...data.unit, admission: {} }), []);
+      assert.notDeepEqual(schema.validateSelectionSources({ ...data.evidence.sources, waitIssues: { items: [], complete: false, error: null } }), []);
+      const plan = { planGeneration: 1, planDigest: schedulerDigest({ body: 'Fixture plan.', boundary: ['src/a.mjs'], baseOid: data.evidence.baseOid }),
+        baseOid: data.evidence.baseOid, boundary: ['src/a.mjs'] };
+      const admission = { schema: 'autoloop.admission/1', runId: data.unit.runId, unitId: data.unit.unitId, unitGeneration: 1,
+        ...plan, reservationRevision: 3 };
+      const wait = { schema: 'autoloop.selection-wait/1', code: 'ISSUE_WAIT', unitId: data.unit.unitId, conflicts: [{ type: 'issue', id: 8, paths: [] }],
+        condition: { all: [{ on: 'issue', number: 8 }] }, requestedPlan: plan, snapshot: data.reference, createdRevision: 3 };
+      const creator = { process: readProcessIdentity(), pgid: process.pid, groupLeader: readProcessIdentity() };
+      const branch = `feat/gh-7-unit-${data.unit.unitId.replaceAll('-', '')}-g1`;
+      const allocation = { intent: { operationId: randomUUID(), runId: data.unit.runId, unitId: data.unit.unitId, unitGeneration: 1,
+        repositoryKey: data.unit.repositoryKey, root: join(setup.home, 'workspace'), branch, baseOid: plan.baseOid }, creator, creatorHistory: [] };
+      const worktree = { root: allocation.intent.root, gitDir: join(setup.repository.commonDir, 'worktrees', 'fixture'),
+        commonDir: setup.repository.commonDir, repositoryKey: data.unit.repositoryKey, branch, baseOid: plan.baseOid,
+        createdByRun: data.unit.runId, unitId: data.unit.unitId, unitGeneration: 1 };
+      for (const [validate, value] of [[schema.validateSelectionPlan, plan], [schema.validateAdmission, admission],
+        [schema.validateSelectionWait, wait], [schema.validateAllocationCreator, creator], [schema.validateAllocation, allocation],
+        [schema.validateWorktreeBinding, worktree]]) {
+        assert.deepEqual(validate(value), []); assert.notDeepEqual(validate({ ...value, unexpected: true }), []);
+      }
+      assert.notDeepEqual(schema.validateSelectionPlan({ ...plan, boundary: ['../escape'] }), []);
+      assert.notDeepEqual(schema.validateAdmission({ ...admission, boundary: ['src/*.mjs'] }), []);
+      assert.notDeepEqual(schema.validateAllocation({ ...allocation, creator: { ...creator, pgid: 1 } }), []);
+      const activeHistory = { attempt: 1, creator };
+      Object.defineProperty(activeHistory, 'receipt', { enumerable: true, get() { throw new Error('History accessors must not run.'); } });
+      assert.notDeepEqual(schema.validateAllocation({ ...allocation, creatorHistory: [activeHistory] }), []);
+      assert.notDeepEqual(schema.validateSelectionWait({ ...wait, condition: { any: [{ on: 'issue', number: 8 }] } }), []);
+      const missingRepository = { ...data.evidence.sources, repository: null };
+      assert.deepEqual(schema.validateSelectionSources(missingRepository), []);
+      const missingIds = structuredClone(data.evidence.sources); missingIds.repository.nodeId = null;
+      missingIds.approvals[0].eventId = null; missingIds.approvals[0].actorLogin = null; missingIds.approvals[0].createdAt = null;
+      missingIds.roles[0].userId = null; assert.deepEqual(schema.validateSelectionSources(missingIds), []);
+      assert.notDeepEqual(schema.validateIssueAuthorization({ ...data.authorization, subject: { ...data.authorization.subject,
+        approval: { ...data.authorization.subject.approval, actorUserId: '101' } } }), []);
+    });
+    await check('selection context and immutable evidence use the owning lease and computed checkout paths', async () => {
+      const setup = fixture(); const acquired = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const data = await selectionFixture(setup);
+      const context = readSchedulerContext(acquired.lease);
+      assert.deepEqual(Object.keys(context).sort(), ['checkpoint', 'pins', 'repository']);
+      assert.equal(context.checkpoint.revision, 2); assert.equal(context.pins.configDigest, data.evidence.configDigest);
+      context.checkpoint.state = 'failed'; assert.equal(readSchedulerContext(acquired.lease).checkpoint.state, 'running');
+      assert.deepEqual(resolveRepositoryCheckout(setup.repository.coordinatorRoot), {
+        root: setup.repository.coordinatorRoot, gitDir: setup.repository.commonDir, commonDir: setup.repository.commonDir,
+        repositoryKey: setup.repository.repositoryKey });
+      const reference = publishSelectionSnapshot(acquired.lease, 2, data.evidence);
+      assert.deepEqual(reference, data.reference);
+      assert.deepEqual(publishSelectionSnapshot(acquired.lease, 2, data.evidence), reference);
+      assert.deepEqual(readSelectionSnapshot(acquired.lease, reference), data.evidence);
+      const stored = join(data.evidence.gitDir, 'autoloop', 'scheduler', 'snapshots', setup.pins.runId, 'sha256', `${reference.contentDigest}.json`);
+      assert.equal(lstatSync(stored).mode & 0o777, 0o600); assert.equal(lstatSync(dirname(stored)).mode & 0o777, 0o700);
+      refuses('LEASE_INVALID', () => publishSelectionSnapshot({}, 2, data.evidence));
+      refuses('LEASE_INVALID', () => readSchedulerContext({}));
+      refuses('INVALID_INPUT', () => publishSelectionSnapshot(acquired.lease, 2, { ...data.evidence, output: join(setup.home, 'arbitrary.json') }));
+      refuses('EVIDENCE_INVALID', () => readSelectionSnapshot(acquired.lease, { ...reference, baseOid: '1'.repeat(40) }));
+      const saved = readFileSync(stored, 'utf8'); writeFileSync(stored, JSON.stringify({ ...data.evidence, headOid: '1'.repeat(40) }));
+      refuses('EVIDENCE_INVALID', () => readSelectionSnapshot(acquired.lease, reference)); writeFileSync(stored, saved);
+      commitTransition(acquired.lease, 2, (value) => value);
+      refuses('REVISION_MISMATCH', () => readSelectionSnapshot(acquired.lease, reference));
+      assert.deepEqual(readSelectionSnapshot(acquired.lease, reference, { current: false }), data.evidence);
+      refuses('REVISION_MISMATCH', () => publishSelectionSnapshot(acquired.lease, 2, data.evidence));
+      commitTransition(acquired.lease, 3, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+      refuses('LEASE_INVALID', () => readSelectionSnapshot(acquired.lease, reference, { current: false }));
+    });
+    await check('immutable evidence retries flush a prior publication before acknowledgment', async () => {
+      const setup = fixture(); const operations = []; let failPublication = true;
+      const acquired = acquireScheduler(setup.repository, setup.pins, setup.initiator, { observe: (phase, path) => {
+        if (!path.includes('/snapshots/')) return;
+        operations.push([phase, path]);
+        if (phase === 'published' && failPublication) { failPublication = false; throw Object.assign(new Error('fixture evidence flush interruption'), { code: 'EIO' }); }
+      } });
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const data = await selectionFixture(setup);
+      refuses('STATE_IO_FAILED', () => publishSelectionSnapshot(acquired.lease, 2, data.evidence));
+      const before = operations.length;
+      assert.deepEqual(publishSelectionSnapshot(acquired.lease, 2, data.evidence), data.reference);
+      assert(operations.slice(before).some(([phase]) => phase === 'directory-flushed'), 'Retry must flush the immutable publication before acknowledgment.');
+      commitTransition(acquired.lease, 2, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+    });
+    await check('current selection evidence refuses changed origin, config, local head and configured base', async () => {
+      const setup = fixture(); const acquired = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const data = await selectionFixture(setup); const reference = publishSelectionSnapshot(acquired.lease, 2, data.evidence);
+      git('-C', setup.repository.coordinatorRoot, 'remote', 'set-url', 'origin', 'https://github.com/example/other.git');
+      refuses('EVIDENCE_CHANGED', () => readSelectionSnapshot(acquired.lease, reference));
+      git('-C', setup.repository.coordinatorRoot, 'remote', 'set-url', 'origin', 'https://github.com/example/scheduler-fixture.git');
+      const configPath = join(setup.repository.coordinatorRoot, '.autoloop', 'config.json');
+      writeFileSync(configPath, JSON.stringify({ ...setup.pins.config, baseBranch: 'different' }));
+      refuses('PINS_CHANGED', () => readSelectionSnapshot(acquired.lease, reference));
+      writeFileSync(configPath, JSON.stringify(setup.pins.config));
+      git('-C', setup.repository.coordinatorRoot, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'later');
+      refuses('EVIDENCE_CHANGED', () => readSelectionSnapshot(acquired.lease, reference));
+      const later = git('-C', setup.repository.coordinatorRoot, 'rev-parse', 'HEAD');
+      git('-C', setup.repository.coordinatorRoot, 'update-ref', 'refs/remotes/origin/main', later);
+      const moved = { ...data.evidence, headOid: later };
+      refuses('INVALID_INPUT', () => publishSelectionSnapshot(acquired.lease, 2, moved));
+      assert.deepEqual(readSelectionSnapshot(acquired.lease, reference, { current: false }), data.evidence);
+      commitTransition(acquired.lease, 2, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+    });
+    await check('selection records reject changed checked repositories and mixed upstream pairs in one common directory', async () => {
+      const { createSnapshot } = await import('./snapshot-contract.mjs');
+      const setup = fixture(); const acquired = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const data = await selectionFixture(setup); publishSelectionSnapshot(acquired.lease, 2, data.evidence);
+      const persisted = commitTransition(acquired.lease, 2, (value) => ({ ...value, units: [data.unit], reservations: [data.reservation] }));
+      const repositoryB = { host: 'github.com', owner: 'other-example', name: 'other-fixture', nodeId: 'R_other_fixture' };
+      for (const [key, replacement] of [['host', 'git.example.invalid'], ['owner', 'other-example'], ['name', 'other-fixture'], ['nodeId', 'R_other_fixture']]) {
+        const changedReference = { ...data.reference, repository: { ...data.reference.repository, [key]: replacement } };
+        assert.notDeepEqual(validateCheckpoint({ ...persisted, units: [{ ...data.unit, checkedSnapshot: changedReference }] }), []);
+      }
+      const wrongChecked = { ...data.reference, repository: repositoryB };
+      assert.notDeepEqual(validateCheckpoint({ ...persisted, units: [{ ...data.unit, checkedSnapshot: wrongChecked }] }), []);
+      refuses('STATE_INVALID', () => commitTransition(acquired.lease, 3, (value) => ({ ...value,
+        units: value.units.map((unit) => ({ ...unit, checkedSnapshot: wrongChecked })) })));
+      const sections = structuredClone(data.evidence.snapshot.sections);
+      sections.repo.items[0] = { owner: repositoryB.owner, name: repositoryB.name, nameWithOwner: 'other-example/other-fixture', defaultBranch: 'main' };
+      sections.queue.items[0].number = 8; sections.openIssues.items[0].number = 8;
+      sections.authorVerification.items[0].evidence[0].issueNumber = 8;
+      const sources = structuredClone(data.evidence.sources); sources.repository = repositoryB;
+      sources.issues[0] = { number: 8, nodeId: 'I_other_fixture' };
+      sources.approvals[0] = { ...sources.approvals[0], issue: 8, issueNodeId: 'I_other_fixture', approvalIssue: 8,
+        approvalIssueNodeId: 'I_other_fixture', eventId: 'E_other_fixture' };
+      const evidenceB = { ...data.evidence, repository: repositoryB, checkpointRevision: 3, sources,
+        snapshot: createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z', sections }) };
+      git('-C', setup.repository.coordinatorRoot, 'remote', 'set-url', 'origin', 'https://github.com/other-example/other-fixture.git');
+      const referenceB = publishSelectionSnapshot(acquired.lease, 3, evidenceB);
+      const subjectB = { ...data.authorization.subject, repository: repositoryB, issue: 8, issueNodeId: 'I_other_fixture',
+        approval: { ...data.authorization.subject.approval, issue: 8, issueNodeId: 'I_other_fixture', eventId: 'E_other_fixture' } };
+      const authorizationB = { ...data.authorization, subject: subjectB, authorizationDigest: schedulerDigest(subjectB), snapshot: referenceB,
+        evidenceDigest: schedulerDigest({ queue: sections.queue.items[0], openIssue: sections.openIssues.items[0], role: sections.authorVerification.items[0],
+          issueSource: sources.issues[0], approvalSource: sources.approvals[0], roleSource: sources.roles[0] }) };
+      const unitB = { ...data.unit, unitId: randomUUID(), checkedSnapshot: referenceB };
+      const reservationB = { ...data.reservation, unitId: unitB.unitId, issue: 8, issueAuthorization: authorizationB, slot: 2, createdRevision: 4 };
+      const mixed = { ...persisted, revision: 4, units: [data.unit, unitB], reservations: [data.reservation, reservationB] };
+      assert.notDeepEqual(validateCheckpoint(mixed), []);
+      refuses('STATE_INVALID', () => commitTransition(acquired.lease, 3, (value) => ({ ...value,
+        units: [...value.units, unitB], reservations: [...value.reservations, reservationB] })));
+      commitTransition(acquired.lease, 3, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+    });
+    await check('canonical origin and API case agree without changing original authorization subjects', async () => {
+      const { createSnapshot } = await import('./snapshot-contract.mjs');
+      const setup = fixture(); const acquired = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const data = await selectionFixture(setup); publishSelectionSnapshot(acquired.lease, 2, data.evidence);
+      const locator = 'git@GITHUB.COM:Example/SCHEDULER-fixture.git';
+      git('-C', setup.repository.coordinatorRoot, 'remote', 'set-url', 'origin', locator);
+      const repository = { ...data.evidence.repository, owner: 'EXAMPLE', name: 'Scheduler-Fixture' };
+      const sections = structuredClone(data.evidence.snapshot.sections);
+      sections.repo.items[0] = { owner: repository.owner, name: repository.name, nameWithOwner: 'EXAMPLE/Scheduler-Fixture', defaultBranch: 'main' };
+      const evidence = { ...data.evidence, repository, sources: { ...data.evidence.sources, repository },
+        snapshot: createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z', sections }) };
+      const reference = publishSelectionSnapshot(acquired.lease, 2, evidence);
+      assert.deepEqual(readSelectionSnapshot(acquired.lease, reference), evidence);
+      git('-C', setup.repository.coordinatorRoot, 'config', '--add', 'remote.origin.url', locator);
+      refuses('EVIDENCE_CHANGED', () => readSelectionSnapshot(acquired.lease, reference));
+      git('-C', setup.repository.coordinatorRoot, 'config', '--replace-all', 'remote.origin.url', 'https://github.com:8443/example/scheduler-fixture.git');
+      refuses('EVIDENCE_CHANGED', () => readSelectionSnapshot(acquired.lease, reference));
+      git('-C', setup.repository.coordinatorRoot, 'config', '--replace-all', 'remote.origin.url', locator);
+      const reserved = commitTransition(acquired.lease, 2, (value) => ({ ...value,
+        units: [{ ...data.unit, checkedSnapshot: reference }], reservations: [data.reservation] }));
+      assert.deepEqual(reserved.reservations[0].issueAuthorization.subject, data.authorization.subject);
+      assert.equal(reserved.units[0].checkedSnapshot.repository.nodeId, data.authorization.subject.repository.nodeId);
+      commitTransition(acquired.lease, 3, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+    });
+    await check('selection pairs persist in checkpoint v1 and cannot erase or replace retained identities', async () => {
+      const setup = fixture(); const acquired = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const data = await selectionFixture(setup); publishSelectionSnapshot(acquired.lease, 2, data.evidence);
+      const persisted = commitTransition(acquired.lease, 2, (value) => ({ ...value, units: [data.unit], reservations: [data.reservation] }));
+      assert.deepEqual(validateCheckpoint(persisted), []); assert.equal(persisted.schema, CHECKPOINT_SCHEMA);
+      assert.equal(hasRetainedSelection(persisted), true); assert.equal(persisted.queueEnabled, false);
+      for (const mutate of [
+        (value) => ({ ...value, units: [], reservations: [] }),
+        (value) => ({ ...value, reservations: value.reservations.map((item) => ({ ...item, createdRevision: 1 })) }),
+        (value) => ({ ...value, reservations: value.reservations.map((item) => ({ ...item, slot: 2 })) }),
+        (value) => ({ ...value, reservations: value.reservations.map((item) => ({ ...item, issueAuthorization: {
+          ...item.issueAuthorization, evidenceDigest: '0'.repeat(64) } })) }),
+        (value) => ({ ...value, reservations: value.reservations.map((item) => ({ ...item, state: 'released' })) }),
+      ]) refuses('STATE_INVALID', () => commitTransition(acquired.lease, 3, mutate));
+      const duplicate = structuredClone(data.reservation); duplicate.unitId = randomUUID(); duplicate.slot = 2;
+      const duplicateUnit = { ...data.unit, unitId: duplicate.unitId };
+      assert.notDeepEqual(validateCheckpoint({ ...persisted, units: [...persisted.units, duplicateUnit], reservations: [...persisted.reservations, duplicate] }), []);
+      const invalidWorker = { schema: 'autoloop.worker-binding/1', runId: persisted.runId, generation: 1, unitId: data.unit.unitId, unitGeneration: 2,
+        attemptId: randomUUID(), sessionId: randomUUID(), worktreeGitDir: setup.repository.commonDir, process: setup.initiator.process,
+        pgid: setup.initiator.process.pid, groupLeader: setup.initiator.process, role: 'plan', posture: 'plan', actualModel: 'fixture',
+        liveFile: join(setup.home, 'fixture.jsonl'), cancelledByOperator: false };
+      assert.notDeepEqual(validateCheckpoint({ ...persisted, workers: [invalidWorker] }), []);
+      commitTransition(acquired.lease, 3, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+      refuses('SCHEDULER_ACTIVE', () => assertNoSchedulerOwner(setup.repository));
+      const nextPins = createPins(setup.repository, { pluginRoot: setup.pins.pluginRoot, enginePath: setup.pins.enginePath,
+        config: setup.pins.config, models: setup.pins.models });
+      refuses('RUN_MISMATCH', () => acquireScheduler(setup.repository, nextPins, setup.initiator));
+      const recovered = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      assert.equal(readSchedulerContext(recovered.lease).checkpoint.state, 'recovering');
+      refuses('RECOVERY_REQUIRED', () => commitTransition(recovered.lease, readSchedulerContext(recovered.lease).checkpoint.revision,
+        (value) => ({ ...value, state: 'running' })));
+      const checkpoint = readSchedulerContext(recovered.lease).checkpoint;
+      commitTransition(recovered.lease, checkpoint.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(recovered.lease);
+    });
+    await check('immutable original approval survives a fresh role read but not revocation, editing or changed source identity', async () => {
+      const { createSnapshot } = await import('./snapshot-contract.mjs');
+      const setup = fixture(); const acquired = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const data = await selectionFixture(setup); publishSelectionSnapshot(acquired.lease, 2, data.evidence);
+      const proposed = (reference) => (value) => ({ ...value, units: [{ ...data.unit, checkedSnapshot: reference }], reservations: [data.reservation] });
+      for (const change of ['revoked', 'edited', 'event', 'halted']) {
+        const sections = structuredClone(data.evidence.snapshot.sections); const sources = structuredClone(data.evidence.sources);
+        if (change === 'revoked') { sections.authorVerification.items[0].permission = 'read'; sources.roles[0].permission = 'read'; }
+        if (change === 'event') sources.approvals[0].eventId = 'E_different';
+        if (change === 'edited') {
+          const body = 'Changed public fixture body.'; const bodySha256 = createHash('sha256').update(body, 'utf8').digest('hex');
+          for (const name of ['queue', 'openIssues']) Object.assign(sections[name].items[0], { body, bodySha256 });
+        }
+        if (change === 'halted') sections.openIssues.items[0].labels.push('loop-halt');
+        const evidence = { ...data.evidence, sources, snapshot: createSnapshot({ scannedAt: '2026-01-01T00:00:01.000Z', sections }) };
+        const reference = publishSelectionSnapshot(acquired.lease, 2, evidence);
+        refuses('AUTHORIZATION_INVALID', () => commitTransition(acquired.lease, 2, proposed(reference)));
+        assert.deepEqual(readSchedulerContext(acquired.lease).checkpoint.units, []);
+      }
+      const sections = structuredClone(data.evidence.snapshot.sections); const sources = structuredClone(data.evidence.sources);
+      sections.authorVerification.items[0].permission = 'admin'; sources.roles[0].permission = 'admin';
+      const evidence = { ...data.evidence, sources, snapshot: createSnapshot({ scannedAt: '2026-01-01T00:00:02.000Z', sections }) };
+      const fresh = publishSelectionSnapshot(acquired.lease, 2, evidence);
+      assert.notEqual(fresh.contentDigest, data.reference.contentDigest);
+      const reserved = commitTransition(acquired.lease, 2, proposed(fresh));
+      assert.deepEqual(reserved.reservations[0].issueAuthorization, data.authorization);
+      assert.deepEqual(reserved.units[0].checkedSnapshot, fresh);
+      commitTransition(acquired.lease, 3, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+    });
+    await check('selection commit rechecks queued controls and nested readback cannot acquire a second writer', async () => {
+      const setup = fixture(); const acquired = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const data = await selectionFixture(setup); publishSelectionSnapshot(acquired.lease, 2, data.evidence);
+      const actor = { kind: 'terminal', sessionId: null, host: readProcessIdentity(), invocationId: randomUUID() };
+      const request = { schema: CONTROL_SCHEMA, requestId: randomUUID(), runId: setup.pins.runId, kind: 'pause',
+        target: { type: 'run', generation: 1 }, payload: {}, submittedAt: Date.now() };
+      refuses('CONTROL_PENDING', () => commitTransition(acquired.lease, 2, (value) => {
+        assert.deepEqual(readSelectionSnapshot(acquired.lease, data.reference), data.evidence);
+        refuses('STATE_BUSY', () => publishSelectionSnapshot(acquired.lease, 2, data.evidence));
+        refuses('STATE_BUSY', () => commitTransition(acquired.lease, 2, (state) => state));
+        submitControl(setup.repository, actor, request);
+        return { ...value, units: [data.unit], reservations: [data.reservation] };
+      }));
+      assert.equal(readSchedulerContext(acquired.lease).checkpoint.revision, 2);
+      assert.deepEqual(readSchedulerContext(acquired.lease).checkpoint.reservations, []);
+      claimControl(acquired.lease, request.requestId);
+      completeControl(acquired.lease, request.requestId, { status: 'applied', code: 'PAUSED', operationId: null },
+        (value) => ({ ...value, state: 'paused', desiredState: 'paused' }));
+      commitTransition(acquired.lease, 4, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+    });
+    await check('allocation preparation and settlement reducers bind one immutable outbox intent atomically', async () => {
+      const setup = fixture(); const acquired = acquireScheduler(setup.repository, setup.pins, setup.initiator);
+      commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'running' }));
+      const data = await selectionFixture(setup); publishSelectionSnapshot(acquired.lease, 2, data.evidence);
+      commitTransition(acquired.lease, 2, (value) => ({ ...value, units: [data.unit], reservations: [data.reservation] }));
+      const freshEvidence = { ...data.evidence, checkpointRevision: 3 };
+      const freshReference = publishSelectionSnapshot(acquired.lease, 3, freshEvidence);
+      const intent = { operationId: randomUUID(), runId: setup.pins.runId, unitId: data.unit.unitId, unitGeneration: 1,
+        repositoryKey: setup.repository.repositoryKey, root: join(dirname(setup.repository.coordinatorRoot), '.autoloop-worktrees',
+          setup.repository.repositoryKey, setup.pins.runId, `${data.unit.unitId}-g1`),
+        branch: `feat/gh-7-unit-${data.unit.unitId.replaceAll('-', '')}-g1`, baseOid: data.evidence.baseOid };
+      const effect = { operationId: intent.operationId, requestId: null, runId: intent.runId, unitId: intent.unitId, unitGeneration: 1,
+        kind: 'worktree.create', target: { type: 'external', id: intent.unitId }, inputDigest: schedulerDigest(intent), expectedHead: intent.baseOid,
+        phase: 'prepared', attempt: 1, receipt: null, error: null };
+      const prepared = prepareEffect(acquired.lease, 3, effect, (value) => ({ ...value,
+        units: value.units.map((unit) => ({ ...unit, allocation: { intent, creator: null, creatorHistory: [] }, checkedSnapshot: freshReference })) }));
+      assert.deepEqual(prepared.units[0].allocation, { intent, creator: null, creatorHistory: [] });
+      assert.deepEqual(prepared.outbox[intent.operationId], effect);
+      refuses('STATE_INVALID', () => commitTransition(acquired.lease, prepared.revision, (value) => ({ ...value,
+        units: value.units.map((unit) => ({ ...unit, allocation: { ...unit.allocation, intent: { ...intent, root: join(setup.home, 'other') } } })) })));
+      markEffectInFlight(acquired.lease, intent.operationId);
+      refuses('OWNER_UNVERIFIED', () => settleEffect(acquired.lease, intent.operationId, { attempt: 1, status: 'not-applied', code: 'NOT_APPLIED',
+        receipt: { externalId: intent.operationId, observationDigest: schedulerDigest({ absent: true }), observedAt: Date.now() } }));
+      const firstCreator = startChild(`process.send({ready:true}); process.on('message', () => process.disconnect());`, [], { detached: true });
+      await message(firstCreator);
+      const firstIdentity = readProcessIdentity(firstCreator.pid);
+      const firstBinding = { process: firstIdentity, pgid: firstCreator.pid, groupLeader: firstIdentity };
+      let beforeRetry = readSchedulerContext(acquired.lease).checkpoint;
+      commitTransition(acquired.lease, beforeRetry.revision, (value) => ({ ...value,
+        units: value.units.map((unit) => ({ ...unit, allocation: { ...unit.allocation, creator: firstBinding } })) }));
+      firstCreator.send('exit-without-creation'); await firstCreator.finished;
+      assert.equal(boundCreatorState(firstBinding), 'empty'); assert.equal(existsSync(intent.root), false);
+      const absentReceipt = { externalId: intent.operationId,
+        observationDigest: schedulerDigest({ intent, creator: firstBinding, rootExists: false, branchExists: false, registered: false }), observedAt: Date.now() };
+      const retried = settleEffect(acquired.lease, intent.operationId, { attempt: 1, status: 'not-applied', code: 'NOT_APPLIED', receipt: absentReceipt });
+      const history = [{ attempt: 1, creator: firstBinding, receipt: absentReceipt }];
+      assert.equal(retried.outbox[intent.operationId].attempt, 2);
+      assert.equal(retried.units[0].allocation.creator, null, 'A retry must not reuse its prior dead creator.');
+      assert.deepEqual(retried.units[0].allocation.creatorHistory, history);
+      for (const creatorHistory of [[], [{ ...history[0], receipt: { ...absentReceipt, observationDigest: '0'.repeat(64) } }]]) {
+        refuses('STATE_INVALID', () => commitTransition(acquired.lease, retried.revision, (value) => ({ ...value,
+          units: value.units.map((unit) => ({ ...unit, allocation: { ...unit.allocation, creatorHistory } })) })));
+      }
+      markEffectInFlight(acquired.lease, intent.operationId);
+      beforeRetry = readSchedulerContext(acquired.lease).checkpoint;
+      assert.equal(beforeRetry.outbox[intent.operationId].receipt, null);
+      assert.deepEqual(beforeRetry.units[0].allocation.creatorHistory, history);
+      refuses('STATE_INVALID', () => commitTransition(acquired.lease, beforeRetry.revision, (value) => ({ ...value,
+        units: value.units.map((unit) => ({ ...unit, allocation: { ...unit.allocation,
+          creatorHistory: [{ ...history[0], receipt: { ...absentReceipt, observationDigest: '0'.repeat(64) } }] } })) })));
+      const creator = startChild(`import { spawnSync } from 'node:child_process';
+        process.send({ready:true}); process.on('message', () => { const result = spawnSync('git', ['-C', process.argv[1],
+          '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-q', '-b', process.argv[3], process.argv[2], process.argv[4]],
+          { encoding: 'utf8', timeout: 15000 }); process.send({status:result.status,stderr:result.stderr}, () => process.disconnect()); });`,
+      [setup.repository.coordinatorRoot, intent.root, intent.branch, intent.baseOid], { detached: true });
+      await message(creator);
+      const identity = readProcessIdentity(creator.pid); const creatorBinding = { process: identity, pgid: creator.pid, groupLeader: identity };
+      const current = readSchedulerContext(acquired.lease).checkpoint;
+      commitTransition(acquired.lease, current.revision, (value) => ({ ...value,
+        units: value.units.map((unit) => ({ ...unit, allocation: { ...unit.allocation, creator: creatorBinding } })) }));
+      assert.notEqual(schedulerDigest(creatorBinding.process), schedulerDigest(firstBinding.process));
+      refuses('OWNER_UNVERIFIED', () => settleEffect(acquired.lease, intent.operationId, { attempt: 2, status: 'not-applied', code: 'NOT_APPLIED', receipt: absentReceipt }));
+      const finished = message(creator); creator.send('create'); assert.equal((await finished).status, 0); await creator.finished;
+      assert.equal(boundCreatorState(creatorBinding), 'empty');
+      const checkout = resolveRepositoryCheckout(intent.root);
+      const worktree = { ...checkout, branch: intent.branch, baseOid: intent.baseOid, createdByRun: intent.runId,
+        unitId: intent.unitId, unitGeneration: 1 };
+      const receipt = { externalId: intent.operationId, observationDigest: schedulerDigest(worktree), observedAt: Date.now() };
+      const settled = settleEffect(acquired.lease, intent.operationId, { attempt: 2, status: 'applied', code: 'READBACK_CONFIRMED', receipt },
+        { transition: (value) => ({ ...value, reservations: value.reservations.map((reservation) => ({ ...reservation, worktree })) }) });
+      assert.deepEqual(settled.reservations[0].worktree, worktree); assert.equal(settled.outbox[intent.operationId].phase, 'succeeded');
+      const monitorMarker = join(setup.home, 'monitor-invoked'); const monitorHook = join(setup.home, 'fixture-monitor.mjs');
+      writeFileSync(monitorHook, `#!/usr/bin/env node\nimport {writeFileSync} from 'node:fs';\nwriteFileSync(${JSON.stringify(monitorMarker)}, 'invoked');\nprocess.stdout.write('fixture-token\\0');\n`, { mode: 0o700 });
+      git('-C', intent.root, 'config', 'core.fsmonitor', monitorHook);
+      git('-C', intent.root, 'config', 'core.fsmonitorHookVersion', '2');
+      const disposition = observeSelectionNoWork(acquired.lease, intent.unitId);
+      assert.equal(existsSync(monitorMarker), false, 'Readback must not execute a configured Git fsmonitor hook.');
+      const released = commitTransition(acquired.lease, settled.revision, (value) => ({ ...value,
+        reservations: value.reservations.map((reservation) => ({ ...reservation, state: 'released', paths: [] })),
+        units: value.units.map((unit) => ({ ...unit, admission: null, wait: null, disposition })) }));
+      assert.equal(hasRetainedSelection(released), false); assert.equal(existsSync(intent.root), true);
+      commitTransition(acquired.lease, released.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(acquired.lease);
+      assert.doesNotThrow(() => assertNoSchedulerOwner(setup.repository));
+    });
     await check('the short shared admission ledger uses only the private OS-account runtime', () => {
       const { repository, state } = fixture();
       assert.equal(withExecutionAdmission(repository, () => 'held'), 'held');
@@ -1861,10 +3873,99 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
       refuses('STATE_INVALID', () => readSchedulerOwner(repository));
       refuses('STATE_INVALID', () => acquireScheduler(repository, { ...pins, runId: randomUUID() }, initiator));
     });
+    async function admissionReleaseWindow(mode) {
+      const setup = fixture(); const { repository, pins, initiator } = setup;
+      const winner = acquireScheduler(repository, pins, initiator);
+      const before = readCheckpoint(repository, pins.runId);
+      const ready = join(setup.home, 'admission-ready.json'); const gate = join(setup.home, 'release-admission');
+      const exited = join(setup.home, 'admission-exited.json');
+      const innerSource = `const api=await import(process.argv[1]);const {existsSync,writeFileSync,renameSync}=await import('node:fs');
+        const repository=api.resolveRepository(process.argv[2]),pins=JSON.parse(process.argv[3]);
+        try{api.acquireScheduler(repository,pins,{kind:'terminal',sessionId:null,process:api.readProcessIdentity()},
+          {admissionObserve:()=>{writeFileSync(process.argv[4]+'.tmp',JSON.stringify(api.readProcessIdentity()));renameSync(process.argv[4]+'.tmp',process.argv[4]);
+            const until=Date.now()+15000;while(!existsSync(process.argv[5])){if(Date.now()>until)throw Error('Fixture gate timed out.');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);}}});
+          process.send({ok:true},()=>process.disconnect());
+        }catch(error){process.send({ok:false,code:error.code,message:error.message},()=>process.disconnect());}`;
+      const reaper = startChild(`const {spawn}=await import('node:child_process');const {writeFileSync,renameSync}=await import('node:fs');
+        const child=spawn(process.execPath,['--input-type=module','-e',process.argv[2],...process.argv.slice(3)],{stdio:['ignore','ignore','pipe','ipc']});
+        let result=null,errors='',finished=false,finishRequested=false;
+        child.on('message',value=>{result=value;});child.stderr.on('data',chunk=>{errors+=chunk;});
+        child.once('close',(code,signal)=>{const path=process.argv[8];writeFileSync(path+'.tmp',JSON.stringify({code,signal,result,errors}));renameSync(path+'.tmp',path);
+          finished=true;if(finishRequested)process.disconnect();});
+        process.on('message',command=>{if(command==='finish'){finishRequested=true;if(finished)process.disconnect();}});`,
+      [moduleUrl, innerSource, moduleUrl, repository.coordinatorRoot, JSON.stringify(pins), ready, gate, exited]);
+      const waitFor = async (path) => { const until = Date.now() + 15000;
+        while (!existsSync(path)) { assert(Date.now() < until && reaper.exitCode === null, reaper.errorText); await new Promise((done) => setTimeout(done, 5)); } };
+      let proof = null; let hookError = null; let admissionCalls = 0;
+      const probeFailure = new Error('Injected owner-start observation failure.');
+      try {
+        await waitFor(ready); const priorOwner = JSON.parse(readFileSync(ready, 'utf8'));
+        const directory = admissionOf(repository); const prior = stateJson(join(directory, '2.json'));
+        const releasePath = join(directory, '2.released.json');
+        assert.deepEqual(prior.owner, priorOwner); assert.equal(existsSync(releasePath), false);
+        let outcome;
+        try {
+          acquireScheduler(repository, pins, initiator, { admissionObserve: () => { admissionCalls += 1; }, observe: (phase, owner) => {
+            if (phase !== 'owner-start' || owner.pid !== priorOwner.pid || proof !== null) return;
+            try {
+              proof = { unreleasedBefore: !existsSync(releasePath), aliveBefore: processAlive(owner.pid), startBefore: processStart(owner.pid) === owner.start };
+              assert(proof.unreleasedBefore && proof.aliveBefore && proof.startBefore);
+              if (mode === 'unreleased') {
+                // Inject only the unavailable start-probe failure. The real
+                // owner remains live and its actual gate remains unreleased.
+                proof.injectedStartFailure = true; throw probeFailure;
+              }
+              writeFileSync(gate, 'release'); const until = Date.now() + 15000;
+              while (!existsSync(exited) || processAlive(owner.pid)) {
+                assert(Date.now() < until, 'The real admission owner did not exit.'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+              }
+              const result = JSON.parse(readFileSync(exited, 'utf8'));
+              proof.releaseValid = validRelease(stateJson(releasePath), prior); proof.absentAfter = !processAlive(owner.pid) && processStart(owner.pid) === null;
+              proof.loserCode = result.result?.code; assert.equal(result.code, 0, result.errors);
+              assert(proof.releaseValid && proof.absentAfter); assert.equal(proof.loserCode, 'SCHEDULER_ACTIVE');
+              if (mode === 'malformed') writeFileSync(releasePath, '{');
+              if (mode === 'substituted') {
+                const first = stateJson(join(directory, '1.json'));
+                const substituted = { ...prior, leaseId: first.leaseId, owner: first.owner };
+                const release = { ...stateJson(releasePath), leaseId: first.leaseId, owner: first.owner };
+                // Replace this test-owned pair with matching but different
+                // authority. The fresh release must bind the observed record,
+                // not a replacement that becomes self-consistent on reread.
+                writeFileSync(join(directory, '2.json'), JSON.stringify(substituted)); writeFileSync(releasePath, JSON.stringify(release));
+                proof.substitutionSelfValid = validRelease(release, substituted);
+                proof.substitutionMatchesObserved = validRelease(release, prior);
+                assert(proof.substitutionSelfValid && !proof.substitutionMatchesObserved);
+              }
+            } catch (error) { if (error !== probeFailure) hookError = error; throw error; }
+          } });
+        } catch (error) { outcome = error; }
+        if (hookError) throw hookError;
+        if (mode === 'unreleased') {
+          assert(proof?.injectedStartFailure && proof.unreleasedBefore && proof.aliveBefore && proof.startBefore);
+          assert.equal(processIdentityState(priorOwner), 'alive'); assert.equal(existsSync(releasePath), false);
+        } else assert(proof?.releaseValid && proof.absentAfter, JSON.stringify(proof));
+        assert(outcome instanceof SchedulerError);
+        const expected = { released: 'SCHEDULER_ACTIVE', unreleased: 'OWNER_UNVERIFIED', malformed: 'STATE_INVALID', substituted: 'STATE_INVALID' }[mode];
+        assert.equal(outcome.code, expected, JSON.stringify({ mode, proof, admissionCalls }));
+        assert.equal(admissionCalls, mode === 'released' ? 1 : 0); assert.deepEqual(readCheckpoint(repository, pins.runId), before);
+        assert.deepEqual(readdirSync(join(setup.state, 'lock')), ['1.json']);
+        if (mode === 'released') {
+          const ticket = stateJson(join(directory, '3.json'));
+          assert.deepEqual(ticket.owner, readProcessIdentity()); assert.equal(ticket.sequence, 3);
+          assert(validRelease(stateJson(join(directory, '3.released.json')), ticket));
+        } else assert.equal(existsSync(join(directory, '3.json')), false);
+      } finally {
+        if (!existsSync(gate)) writeFileSync(gate, 'release');
+        if (reaper.connected) reaper.send('finish'); await reaper.finished;
+        const current = readCheckpoint(repository, pins.runId);
+        commitTransition(winner.lease, current.revision, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(winner.lease);
+      }
+    }
+    await check('admission rechecks real release/exit, rejects substituted releases and refuses injected live-owner probe failure', async () => {
+      for (const mode of ['released', 'malformed', 'substituted', 'unreleased']) await admissionReleaseWindow(mode);
+    });
     await check('simultaneous linked-worktree contenders yield one owner and one checkpoint writer', async () => {
-      const { repository, pins, state } = fixture();
-      const linkedRoot = join(dirname(repository.coordinatorRoot), 'linked');
-      git('-C', repository.coordinatorRoot, 'worktree', 'add', '-q', '--detach', linkedRoot, 'HEAD');
+      const rounds = 32; const sampleStarted = performance.now();
       const script = `const api = await import(process.argv[1]);
         const repository = api.resolveRepository(process.argv[2]); const pins = JSON.parse(process.argv[3]);
         let acquired;
@@ -1874,26 +3975,54 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
               acquired = api.acquireScheduler(repository, pins, { kind: 'terminal', sessionId: null, process: api.readProcessIdentity() });
               api.commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'paused', desiredState: 'paused' }));
               process.send({ ok: true, pid: process.pid });
-            } catch (error) { process.send({ ok: false, code: error.code }, () => process.disconnect()); }
+            } catch (error) { process.send({ ok: false, pid: process.pid, code: error.code, message: error.message,
+              stack: error.stack, owner: error.owner ?? null }, () => process.disconnect()); }
           } else if (command === 'finish') {
             api.commitTransition(acquired.lease, 2, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' }));
             api.releaseScheduler(acquired.lease); process.disconnect();
           }
         }); process.send({ ready: true });`;
-      const contenders = Array.from({ length: 4 }, (_, index) => startChild(script,
-        [moduleUrl, index % 2 === 0 ? repository.coordinatorRoot : linkedRoot, JSON.stringify(pins)]));
-      await Promise.all(contenders.map(message));
-      const answers = contenders.map(message);
-      for (const child of contenders) child.send('go');
-      const returned = await Promise.all(answers);
-      assert.equal(returned.filter((value) => value.ok).length, 1);
-      assert(returned.filter((value) => !value.ok).every((value) => value.code === 'SCHEDULER_ACTIVE'));
-      const checkpoint = readCheckpoint(repository, pins.runId);
-      assert.equal(checkpoint.revision, 2);
-      assert.equal(checkpoint.owner.pid, returned.find((value) => value.ok).pid);
-      assert.deepEqual(readdirSync(join(state, 'lock')), ['1.json']);
-      contenders[returned.findIndex((value) => value.ok)].send('finish');
-      await Promise.all(contenders.map((child) => child.finished));
+      for (let round = 1; round <= rounds; round += 1) {
+        const roundStarted = performance.now(); const { repository, pins, state } = fixture();
+        const linkedRoot = join(dirname(repository.coordinatorRoot), 'linked');
+        git('-C', repository.coordinatorRoot, 'worktree', 'add', '-q', '--detach', linkedRoot, 'HEAD');
+        const contenders = Array.from({ length: 4 }, (_, index) => startChild(script,
+          [moduleUrl, index % 2 === 0 ? repository.coordinatorRoot : linkedRoot, JSON.stringify(pins)]));
+        const returned = []; let failed = false;
+        const diagnostics = () => 'Contender results: ' + JSON.stringify({ round, rounds,
+          roundElapsedMs: Math.round(performance.now() - roundStarted), sampleElapsedMs: Math.round(performance.now() - sampleStarted),
+          outcomes: contenders.map((child, index) => returned[index] ?? { pid: child.pid, pending: true,
+            exitCode: child.exitCode, signal: child.signalCode, error: child.errorText }) });
+        try {
+          await Promise.all(contenders.map(message));
+          const answers = contenders.map((child, index) => message(child).then((value) => { returned[index] = value; }));
+          for (const child of contenders) child.send('go');
+          await Promise.all(answers);
+          const details = diagnostics();
+          assert.equal(returned.filter((value) => value.ok).length, 1, details);
+          assert(returned.filter((value) => !value.ok).every((value) => value.code === 'SCHEDULER_ACTIVE'), details);
+          const checkpoint = readCheckpoint(repository, pins.runId);
+          assert.equal(checkpoint.revision, 2, details);
+          assert.equal(checkpoint.owner.pid, returned.find((value) => value.ok).pid, details);
+          assert.deepEqual(readdirSync(join(state, 'lock')), ['1.json'], details);
+        } catch (error) {
+          failed = true;
+          if (!error.message.includes('Contender results: ')) error.message += ' ' + diagnostics();
+          throw error;
+        } finally {
+          const ended = await Promise.all(contenders.map(async (child, index) => {
+            if (returned[index]?.ok) {
+              if (child.connected) child.send('finish', () => {});
+            } else await endChild(child);
+            return child.finished;
+          }));
+          if (!failed) {
+            const winner = returned.findIndex((value) => value.ok);
+            assert.equal(ended[winner].code, 0, diagnostics());
+          }
+        }
+      }
+      console.log(`Contender sample: ${rounds} rounds completed in ${Math.round(performance.now() - sampleStarted)}ms.`);
     });
     await check('dead-owner recovery and a crashed successor retain a surviving bound worker', async () => {
       const { repository, pins, initiator, state } = fixture();

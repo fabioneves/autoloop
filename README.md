@@ -2,7 +2,7 @@
 
 **Labelled GitHub issues in. Gated, independently reviewed PRs out.**
 
-<img alt="release v0.73.0" src="https://img.shields.io/badge/release-v0.73.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
+<img alt="release v0.74.0" src="https://img.shields.io/badge/release-v0.74.0-8b5cf6?style=flat-square"> <img alt="Claude Code" src="https://img.shields.io/badge/host-Claude_Code-22d3ee?style=flat-square"> <img alt="code writer does not equal code reviewer" src="https://img.shields.io/badge/invariant-code_writer_%E2%89%A0_code_reviewer-a78bfa?style=flat-square"> <img alt="human merge by default" src="https://img.shields.io/badge/default-human_merge-f59e0b?style=flat-square">
 
 Autoloop is a development loop that runs inside [Claude Code](https://claude.com/claude-code). You
 label a small issue `loop-ready`; it plans, has the plan reviewed, implements, has the code
@@ -187,10 +187,22 @@ turns the display off with `"ui": { "status": false }` in `.autoloop/config.json
 
 ## Scheduler backend
 
-The first scheduler module provides a supervised daemon, durable controls and explicit Central
-viewer attachment. It does **not** select issues or launch unit sessions yet. The existing
-`/autoloop:dev` loop remains the production execution path until the scheduler modules are complete.
-Installing the plugin does not start a service or migrate a running loop.
+Module 1 provides the supervised daemon, durable controls and explicit Central viewer attachment.
+Module 2 adds **synthetic** trusted scan and recovery checks, issue/slot reservations, isolated
+worktree allocation and reconciliation, and atomic path admission. These providers are not connected
+to production execution. `queueEnabled:false` remains enforced. There is no unit model session,
+writer, claim, PR or delivery provider. The existing `/autoloop:dev` production path is unchanged.
+Installing the plugin does not start a service or migrate a running loop. Module 1 acceptance with
+the real Claude UI and named service remains open.
+
+Synthetic admission checks canonical file and directory boundaries against retained units and
+delivered PR paths. Widening requires an owner-observed failing-task relationship. Durable conflict
+waits retain prior exclusions and plan-generation floors. Clearing a wait requires a new plan and
+fresh admission; it never restores permission to write from the old plan.
+
+Checked selection, scan and allocation Git operations require support for `--no-lazy-fetch` and set
+`GIT_NO_LAZY_FETCH=1`. Missing local objects and unsupported Git cause refusal. These operations
+never fetch implicitly, install Git or change the Git installation.
 
 On a supported Linux host, `/autoloop start` requests a named systemd user service. Startup checks
 its process identity, ownership and applied resource limits before it reports readiness. There is
@@ -213,9 +225,10 @@ participating sessions on the upgraded plugin. Updated legacy and daemon entry p
 atomic admission gate; an older binary cannot participate in that gate. The plugin does not close
 PRs, relabel issues, terminate existing sessions or delete worktrees as a migration shortcut.
 
-See [the scheduler module map](docs/specs/SPEC-scheduler.md) and
-[the daemon contract](docs/specs/SPEC-loop-daemon.md). The UI reports that production selection is
-disabled in this module, rather than presenting an idle daemon as a working issue processor.
+See [the scheduler module map](docs/specs/SPEC-scheduler.md),
+[the daemon contract](docs/specs/SPEC-loop-daemon.md) and
+[the selection contract](docs/specs/SPEC-selection.md). The UI reports that production selection is
+disabled, rather than presenting an idle daemon as a working issue processor.
 
 ## Events and control
 
@@ -231,7 +244,7 @@ its issue on every later ribbon. The contract is `docs/specs/SPEC-events.md`.
 
 ## Configuration and merge policy
 
-v0.73.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
+v0.74.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
 defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
 optional `protectedPaths` and `ui`. The repository owns it; plugin updates never overwrite it.
 
@@ -278,7 +291,7 @@ kill switch stay enforced regardless.
 
 ## How it stays safe
 
-v0.73.0 dispatches every role through one call:
+v0.74.0 dispatches every role through one call:
 
 ```bash
 node <plugin-tools>/dispatch.mjs --role <plan|plan-review|implement|simplify|diff-review|code-review|doubt-review|fix> --prompt-file <path>

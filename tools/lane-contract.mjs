@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // The loop's own control files: the project's loop config and policy
@@ -349,6 +354,315 @@ export function widenLane(lane, paths, extraGlobs = []) {
     authorize.push(...matchHumanAuthorization([entry], globs));
   }
   return { ok: true, lane: widened, authorize };
+}
+
+// Selection paths are separate from the legacy lane and authorization policy.
+export class BoundaryPathError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'BoundaryPathError';
+    this.code = code;
+  }
+}
+
+function requireBoundary(ok, code, message) {
+  if (!ok) throw new BoundaryPathError(code, message);
+}
+
+// A conservative Unicode collision key, not a filename. Compatibility forms,
+// case expansions (including capital sharp S), and combining marks may collide
+// even when the filesystem keeps them distinct. Never use this key for access.
+function boundaryCollisionKey(value) {
+  let key = value;
+  const seen = new Set();
+  while (!seen.has(key)) {
+    seen.add(key);
+    const folded = key.normalize('NFKD').toUpperCase().toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '');
+    if (folded === key) return key;
+    key = folded;
+  }
+  return [...seen].sort(compareText)[0];
+}
+
+function boundaryEntry(value, separators = false) {
+  requireBoundary(typeof value === 'string' && value.length > 0
+    && !/^[\\/]|^[a-z]:/i.test(value) && !/[\x00-\x1f\x7f-\x9f*?\[\]{}]/u.test(value),
+  'BOUNDARY_PATH_INVALID', 'A boundary must contain exact repository-relative paths.');
+  const path = separators ? value.replace(/\\/g, '/') : value;
+  requireBoundary(!path.includes('\\'), 'BOUNDARY_PATH_INVALID', 'A canonical path must use slash separators.');
+  const directory = path.endsWith('/');
+  const components = (directory ? path.slice(0, -1) : path).split('/');
+  requireBoundary(components.every((part) => part !== '' && part !== '.' && part !== '..'),
+    'BOUNDARY_PATH_INVALID', 'A boundary path must not contain empty or traversal components.');
+  for (const component of components) {
+    requireBoundary(component.normalize('NFC') === component && !/[\p{Cf}\p{Cs}�]/u.test(component)
+      && !Array.from(component).some((letter) => {
+        const code = letter.codePointAt(0);
+        return code >= 0xfdd0 && code <= 0xfdef || (code & 0xffff) >= 0xfffe;
+      }),
+    'BOUNDARY_PATH_UNSUPPORTED', 'A boundary path uses unsupported encoding or normalization.');
+    const collision = boundaryCollisionKey(component);
+    requireBoundary(collision !== '' && collision !== '.' && collision !== '..',
+      'BOUNDARY_PATH_UNSUPPORTED', 'A component has an unsupported empty or traversal normalization.');
+    requireBoundary(!/^(?:\.git(?:[. ]*|:.*)|git~[0-9]+(?:[. ]*|:.*))$/.test(collision),
+      'BOUNDARY_PATH_UNSAFE', 'A boundary must not include Git administrative paths.');
+    const portable = component.normalize('NFKC');
+    requireBoundary(!/[\\/:~]|[. ]$/u.test(portable)
+      && !/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/.test(collision),
+    'BOUNDARY_PATH_UNSUPPORTED', 'A boundary path uses an unsupported platform alias.');
+  }
+  return { path, directory, components };
+}
+
+// Pure, symmetric exclusion. Return the narrower path for each overlap. Equal
+// collision keys use the first spelling in code-point order, in either direction.
+// Services derive rules at BOTH roots and combine them with logical AND. Never
+// store pathRules in a reservation or accept them from a plan author.
+export function intersectBoundaries(left, right, pathRules = { caseSensitive: false }) {
+  requireBoundary(Array.isArray(left) && Array.isArray(right),
+    'BOUNDARY_PATH_INVALID', 'Boundaries must be arrays of path strings.');
+  requireBoundary(hasExactKeys(pathRules, ['caseSensitive']) && typeof pathRules.caseSensitive === 'boolean',
+    'BOUNDARY_PATH_INVALID', 'Path comparison requires derived case rules.');
+  const key = (path) => pathRules.caseSensitive ? path : boundaryCollisionKey(path);
+  const prepare = (entries) => Array.from(entries, (entry) => {
+    const parsed = boundaryEntry(entry);
+    return { ...parsed, key: key(parsed.path.replace(/\/$/, '')) };
+  });
+  const leftPaths = prepare(left);
+  const rightPaths = prepare(right);
+  const conflicts = new Map();
+  for (const a of leftPaths) {
+    for (const b of rightPaths) {
+      let path;
+      if (a.key === b.key) path = [a.path, b.path].sort(compareText)[0];
+      else if (a.directory && b.key.startsWith(`${a.key}/`)) path = b.path;
+      else if (b.directory && a.key.startsWith(`${b.key}/`)) path = a.path;
+      else continue;
+      const collision = key(path.replace(/\/$/, ''));
+      const prior = conflicts.get(collision);
+      if (prior === undefined || compareText(path, prior) < 0) conflicts.set(collision, path);
+    }
+  }
+  return [...conflicts.values()].sort(compareText);
+}
+
+function boundaryGitEnv() {
+  return { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')
+    && !['NODE_OPTIONS', 'NODE_PATH'].includes(name))),
+  GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_REPLACE_OBJECTS: '1',
+  GIT_OPTIONAL_LOCKS: '0', GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
+}
+
+function boundaryProbe(command, args) {
+  return execFileSync(command, args, {
+    env: boundaryGitEnv(), encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL',
+    maxBuffer: Number.MAX_SAFE_INTEGER, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function boundaryGit(root, args) {
+  return boundaryProbe('git', ['--no-lazy-fetch', '--no-replace-objects', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
+    '-c', 'core.fsmonitor=false', '-C', root, ...args]);
+}
+
+function boundaryStat(path) {
+  try { return lstatSync(path); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
+function sameBoundaryObject(left, right) {
+  return left && right && left.dev === right.dev && left.ino === right.ino;
+}
+
+function boundarySpelling(parent, name, stat) {
+  requireBoundary(!name.includes('\\'), 'BOUNDARY_PATH_UNSUPPORTED', 'Literal backslash filenames are not supported.');
+  const canonical = name.normalize('NFC');
+  boundaryEntry(canonical);
+  requireBoundary(canonical === name || sameBoundaryObject(stat, boundaryStat(join(parent, canonical))),
+    'BOUNDARY_PATH_UNSUPPORTED', 'The filesystem does not resolve canonical Unicode spelling to the observed file.');
+  return canonical;
+}
+
+function belowBoundary(root, path) {
+  const suffix = relative(root, path);
+  return suffix === '' || suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix);
+}
+
+// Read-only observations, not core.ignoreCase. A proof in one directory says
+// nothing about a nested mount or an empty/new directory. Observe each one.
+function observeBoundaryDirectory(path) {
+  const names = readdirSync(path, { encoding: 'buffer' }).map((bytes) => {
+    const name = bytes.toString('utf8');
+    requireBoundary(Buffer.from(name).equals(bytes), 'BOUNDARY_PATH_UNSUPPORTED', 'A directory contains an unsupported filename encoding.');
+    return name;
+  });
+  let caseSensitive = false;
+  for (const name of names) {
+    if (!/^[\x20-\x7e]+$/.test(name) || !/[a-z]/i.test(name)) continue;
+    const variant = name.replace(/[a-z]/i, (letter) => letter === letter.toUpperCase() ? letter.toLowerCase() : letter.toUpperCase());
+    const actual = boundaryStat(join(path, name));
+    const alternate = boundaryStat(join(path, variant));
+    requireBoundary(actual, 'BOUNDARY_IO_ERROR', 'A directory changed during path observation.');
+    if (sameBoundaryObject(actual, alternate)) return { names, caseSensitive: false };
+    caseSensitive = true;
+  }
+  return { names, caseSensitive };
+}
+
+function requireBoundaryMounts(root) {
+  let mounts;
+  if (process.platform === 'linux') {
+    mounts = boundaryProbe(process.execPath, ['--input-type=module', '-e',
+      "import { readFileSync } from 'node:fs'; process.stdout.write(readFileSync('/proc/self/mountinfo'));" ])
+      .trimEnd().split('\n').map((line) => {
+      const fields = line.split(' ');
+      requireBoundary(fields.length >= 10 && fields.includes('-'), 'BOUNDARY_PATH_UNSUPPORTED', 'The filesystem mount table cannot be verified.');
+      return fields[4].replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
+    });
+  } else if (process.platform === 'darwin') {
+    mounts = boundaryProbe('/sbin/mount', [])
+      .trimEnd().split('\n').map((line) => {
+        const match = / on (\/.*) \([^\n]*\)$/.exec(line);
+        requireBoundary(match, 'BOUNDARY_PATH_UNSUPPORTED', 'The filesystem mount table cannot be verified.');
+        return match[1];
+      });
+  } else {
+    throw new BoundaryPathError('BOUNDARY_PATH_UNSUPPORTED', 'This platform has no supported read-only mount observation.');
+  }
+  const rootKey = boundaryCollisionKey(root);
+  requireBoundary(mounts.every((path) => isAbsolute(path)), 'BOUNDARY_PATH_UNSUPPORTED', 'The filesystem mount table contains an unsupported path.');
+  requireBoundary(!mounts.some((path) => {
+    const key = boundaryCollisionKey(path);
+    return key !== rootKey && belowBoundary(rootKey, key);
+  }), 'BOUNDARY_PATH_UNSUPPORTED', 'Nested filesystem mounts are not supported in boundary roots.');
+}
+
+// Synchronous and read-only. Absent targets are valid planned paths. Existing
+// directories need a trailing slash; existing exact targets must be files.
+export function canonicalBoundary(root, entries) {
+  try {
+    requireBoundary(typeof root === 'string' && isAbsolute(root),
+      'BOUNDARY_ROOT_INVALID', 'A boundary requires an absolute repository root.');
+    requireBoundary(Array.isArray(entries), 'BOUNDARY_PATH_INVALID', 'A boundary must be an array of path strings.');
+    const rootStat = boundaryStat(root);
+    requireBoundary(rootStat?.isDirectory() && !rootStat.isSymbolicLink() && realpathSync(root) === resolve(root),
+      'BOUNDARY_ROOT_INVALID', 'The repository root must be a canonical real directory.');
+    const marker = boundaryStat(join(root, '.git'));
+    requireBoundary(marker && !marker.isSymbolicLink() && (marker.isFile() || marker.isDirectory()),
+      'BOUNDARY_ROOT_INVALID', 'The boundary root must be a Git checkout.');
+    let top, admin, common, index;
+    try {
+      top = boundaryGit(root, ['rev-parse', '--show-toplevel']).trim();
+      admin = realpathSync(boundaryGit(root, ['rev-parse', '--absolute-git-dir']).trim());
+      common = realpathSync(resolve(root, boundaryGit(root, ['rev-parse', '--git-common-dir']).trim()));
+      index = boundaryGit(root, ['ls-files', '--stage', '-z']);
+    } catch {
+      throw new BoundaryPathError('BOUNDARY_ROOT_INVALID', 'Repository identity and index paths cannot be verified.');
+    }
+    requireBoundary(realpathSync(top) === root, 'BOUNDARY_ROOT_INVALID', 'The boundary root must be the checkout root.');
+    // realpath does not reveal bind mounts. Refuse nested mounts before any
+    // case proof, including same-device mounts that can alias another path.
+    requireBoundaryMounts(root);
+    const gitlinks = index.split('\0').filter((row) => row.startsWith('160000 ')).map((row) => {
+      const path = row.slice(row.indexOf('\t') + 1);
+      return boundaryCollisionKey(boundaryEntry(path).path);
+    });
+    let caseSensitive = true;
+    const observed = new Map();
+    const directory = (path) => {
+      if (observed.has(path)) return observed.get(path);
+      requireBoundary(belowBoundary(root, path) && ![admin, common].some((base) => belowBoundary(base, path)),
+        'BOUNDARY_PATH_UNSAFE', 'A boundary must not enter administrative state or leave the checkout.');
+      const stat = boundaryStat(path);
+      requireBoundary(stat?.isDirectory() && !stat.isSymbolicLink() && realpathSync(path) === path,
+        'BOUNDARY_PATH_UNSAFE', 'Boundary components must be real directories inside the checkout.');
+      requireBoundary(stat.dev === rootStat.dev, 'BOUNDARY_PATH_UNSUPPORTED', 'A boundary must not cross a filesystem device.');
+      const observation = observeBoundaryDirectory(path);
+      if (path !== root) {
+        const names = new Set(observation.names.map(boundaryCollisionKey));
+        requireBoundary(!names.has('.git') && !['head', 'objects', 'refs'].every((name) => names.has(name)),
+          'BOUNDARY_PATH_UNSAFE', 'A boundary must not enter a nested repository.');
+      }
+      caseSensitive &&= observation.caseSensitive;
+      observed.set(path, observation);
+      return observation;
+    };
+    directory(root);
+    const scanDescendants = (start) => {
+      const pending = [start];
+      const seen = new Set();
+      while (pending.length) {
+        const path = pending.pop();
+        const stat = boundaryStat(path);
+        const identity = `${stat?.dev}:${stat?.ino}`;
+        requireBoundary(!seen.has(identity), 'BOUNDARY_PATH_UNSUPPORTED', 'A directory has an unsupported filesystem alias.');
+        seen.add(identity);
+        for (const name of directory(path).names) {
+          const child = join(path, name);
+          const item = boundaryStat(child);
+          const spelling = boundarySpelling(path, name, item);
+          if (/[^\x00-\x7f]/.test(spelling)) caseSensitive = false;
+          requireBoundary(item && !item.isSymbolicLink(), 'BOUNDARY_PATH_UNSAFE', 'A directory boundary contains a symlink or changed entry.');
+          requireBoundary(item.dev === rootStat.dev, 'BOUNDARY_PATH_UNSUPPORTED', 'A boundary must not cross a filesystem device.');
+          requireBoundary(item.isDirectory() || item.isFile() && item.nlink === 1,
+            'BOUNDARY_PATH_UNSUPPORTED', 'A boundary contains a special object or hard-linked file.');
+          if (item.isDirectory()) pending.push(child);
+        }
+      }
+    };
+    const boundary = Array.from(entries, (raw) => {
+      const parsed = boundaryEntry(raw, true);
+      const folded = boundaryCollisionKey(parsed.path.replace(/\/$/, ''));
+      if (/[^\x00-\x7f]/.test(parsed.path)) caseSensitive = false;
+      requireBoundary(!gitlinks.some((link) => folded === link || folded.startsWith(`${link}/`)
+        || parsed.directory && link.startsWith(`${folded}/`)),
+      'BOUNDARY_PATH_UNSAFE', 'A boundary must not include a submodule path.');
+      let parent = root;
+      const canonical = [];
+      let absent = false;
+      for (const [i, component] of parsed.components.entries()) {
+        if (absent) { canonical.push(component); continue; }
+        const observation = directory(parent);
+        // On POSIX a backslash can be a literal filename character. Never
+        // normalize such a name into an unrelated slash-separated target.
+        if (sep === '/' && raw.includes('\\')) {
+          for (let end = i + 1; end <= parsed.components.length; end++) {
+            const spelling = parsed.components.slice(i, end).join('\\');
+            const candidates = [spelling];
+            if (end === parsed.components.length && raw.endsWith('\\')) candidates.push(`${spelling}\\`);
+            requireBoundary(!candidates.some((name) => name.includes('\\') && boundaryStat(join(parent, name))),
+              'BOUNDARY_PATH_UNSUPPORTED', 'A separator spelling also names a literal backslash target.');
+          }
+        }
+        const target = join(parent, component);
+        const stat = boundaryStat(target);
+        if (!stat) { absent = true; caseSensitive = false; canonical.push(component); continue; }
+        requireBoundary(!stat.isSymbolicLink(), 'BOUNDARY_PATH_UNSAFE', 'A boundary path must not contain symlinks.');
+        requireBoundary(stat.dev === rootStat.dev, 'BOUNDARY_PATH_UNSUPPORTED', 'A boundary must not cross a filesystem device.');
+        const spelling = observation.names.includes(component) ? component : observation.names.find((name) =>
+          sameBoundaryObject(boundaryStat(join(parent, name)), stat));
+        requireBoundary(spelling !== undefined, 'BOUNDARY_IO_ERROR', 'The canonical filename cannot be observed.');
+        canonical.push(boundarySpelling(parent, spelling, stat));
+        parent = join(parent, spelling);
+        requireBoundary(belowBoundary(root, realpathSync(parent)) && ![admin, common].some((base) => belowBoundary(base, parent)),
+          'BOUNDARY_PATH_UNSAFE', 'A boundary must not enter administrative state or leave the checkout.');
+        const last = i === parsed.components.length - 1;
+        if (stat.isDirectory()) {
+          requireBoundary(!last || parsed.directory, 'BOUNDARY_PATH_INVALID', 'A directory boundary must end with a slash.');
+          directory(parent);
+          if (last) scanDescendants(parent);
+        } else {
+          requireBoundary(last && !parsed.directory && stat.isFile(), 'BOUNDARY_PATH_INVALID', 'An exact boundary must name a file.');
+          requireBoundary(stat.nlink === 1, 'BOUNDARY_PATH_UNSUPPORTED', 'Hard-linked file boundaries are not supported.');
+        }
+      }
+      return `${canonical.join('/')}${parsed.directory ? '/' : ''}`;
+    });
+    return { boundary: [...new Set(boundary)].sort(compareText), pathRules: { caseSensitive } };
+  } catch (error) {
+    if (error instanceof BoundaryPathError) throw error;
+    throw new BoundaryPathError('BOUNDARY_IO_ERROR', 'Boundary filesystem observations cannot be completed.');
+  }
 }
 
 function plannedEvidence(raw, reasonCodes) {
@@ -869,7 +1183,140 @@ function final(files, extras = {}) {
   };
 }
 
+function boundarySelfTest() {
+  const sensitive = { caseSensitive: true };
+  const conservative = { caseSensitive: false };
+  const intersections = [
+    [['src/a'], ['src/a'], ['src/a']],
+    [['src/'], ['src/a'], ['src/a']],
+    [['src/a/'], ['src/'], ['src/a/']],
+    [['src/'], ['src/ab/'], ['src/ab/']],
+    [['src/a/'], ['src/ab/'], []],
+    [['src'], ['src/'], ['src']],
+    [['src/a'], ['src/ab'], []],
+    [['src/'], ['srcx/a'], []],
+    [['Src/A'], ['src/a'], []],
+  ];
+  for (const [left, right, expected] of intersections) {
+    assert.deepEqual(intersectBoundaries(left, right, sensitive), expected);
+    assert.deepEqual(intersectBoundaries(right, left, sensitive), expected, 'Intersection must be symmetric.');
+  }
+  assert.deepEqual(intersectBoundaries(['Src/'], ['src/A'], conservative), ['src/A']);
+  assert.deepEqual(intersectBoundaries(['src/A'], ['Src/'], conservative), ['src/A']);
+  assert.deepEqual(intersectBoundaries(['SRC/a', 'src/a'], ['src/a', 'SRC/a'], conservative), ['SRC/a']);
+  assert.deepEqual(intersectBoundaries(['Straße/'], ['STRASSE/a'], conservative), ['STRASSE/a']);
+  assert.deepEqual(intersectBoundaries(['ẞ.txt'], ['SS.TXT'], conservative), ['SS.TXT']);
+  assert.deepEqual(intersectBoundaries(['ς.txt'], ['σ.txt'], conservative), ['ς.txt']);
+  assert.deepEqual(intersectBoundaries(['CAFÉ/'], ['café/a'], conservative), ['café/a']);
+  assert.deepEqual(intersectBoundaries(['z', 'a', 'z'], ['z', 'a'], sensitive), ['a', 'z']);
+  assert.throws(() => intersectBoundaries(['a/.️/x'], [], sensitive), { code: 'BOUNDARY_PATH_UNSUPPORTED' });
+  assert.throws(() => intersectBoundaries(['../x'], ['x'], sensitive), { code: 'BOUNDARY_PATH_INVALID' });
+  assert.throws(() => intersectBoundaries([], ['../x'], sensitive), { code: 'BOUNDARY_PATH_INVALID' });
+  assert.throws(() => intersectBoundaries(Array(1), ['x'], sensitive), { code: 'BOUNDARY_PATH_INVALID' });
+
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'autoloop-lane-paths-')));
+  const root = join(scratch, 'repo');
+  mkdirSync(root);
+  const git = (...args) => boundaryGit(root, args).trim();
+  try {
+    git('init', '-q');
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture');
+    mkdirSync(join(root, 'Src', 'empty'), { recursive: true });
+    writeFileSync(join(root, 'Src', 'File.txt'), 'fixture');
+    const expected = ['Src/File.txt', 'new/file.txt'];
+    const actual = canonicalBoundary(root, ['new\\file.txt', 'Src/File.txt', 'Src/File.txt']);
+    assert.deepEqual(actual.boundary, expected, 'Canonical spelling and unique order must be stable.');
+    assert.throws(() => canonicalBoundary(root, Array(1)), { code: 'BOUNDARY_PATH_INVALID' });
+    assert.throws(() => canonicalBoundary(root, null), { code: 'BOUNDARY_PATH_INVALID' });
+    assert.equal(typeof actual.pathRules.caseSensitive, 'boolean');
+    const observedSensitive = !existsSync(join(root, '.GIT')) && !existsSync(join(root, 'sRC'))
+      && !existsSync(join(root, 'Src', 'file.txt'));
+    const existing = canonicalBoundary(root, ['Src/File.txt']);
+    assert.equal(existing.pathRules.caseSensitive, observedSensitive, 'Existing directory observations, not a host-wide guess, select case rules.');
+    const alias = existsSync(join(root, 'src', 'file.txt'));
+    assert.deepEqual(canonicalBoundary(root, ['src/file.txt']).boundary,
+      alias ? ['Src/File.txt'] : ['src/file.txt'], 'Only a real filesystem alias can change canonical spelling.');
+    git('config', 'core.ignoreCase', !existing.pathRules.caseSensitive ? 'false' : 'true');
+    assert.deepEqual(canonicalBoundary(root, ['Src/File.txt']), existing);
+    git('config', 'core.ignoreCase', actual.pathRules.caseSensitive ? 'true' : 'false');
+    assert.deepEqual(canonicalBoundary(root, ['new/file.txt', 'Src/File.txt']), actual, 'Git config must not select case rules.');
+    assert.equal(canonicalBoundary(root, ['Src/empty/']).pathRules.caseSensitive, false, 'An empty directory gives no case proof.');
+    assert.deepEqual(canonicalBoundary(root, ['Src\\File.txt']).boundary, ['Src/File.txt']);
+    assert.deepEqual(canonicalBoundary(root, ['Src/']).boundary, ['Src/']);
+    assert.deepEqual(canonicalBoundary(root, ['future/']).boundary, ['future/']);
+    mkdirSync(join(root, 'Café'));
+    writeFileSync(join(root, 'Café', 'Résumé.txt'), 'NFC Unicode');
+    writeFileSync(join(root, 'Café', '資料-😀.txt'), 'NFC Unicode without a case mapping');
+    const unicode = canonicalBoundary(root, ['Café/Résumé.txt', 'Café/資料-😀.txt']);
+    assert.deepEqual(unicode.boundary, ['Café/Résumé.txt', 'Café/資料-😀.txt']);
+    assert.equal(unicode.pathRules.caseSensitive, false, 'Unicode comparisons use conservative case and normalization keys.');
+    assert.deepEqual(canonicalBoundary(root, ['Café/']).boundary, ['Café/']);
+    const unicodeAlias = existsSync(join(root, 'café', 'résumé.txt'));
+    assert.deepEqual(canonicalBoundary(root, ['café/résumé.txt']).boundary,
+      unicodeAlias ? ['Café/Résumé.txt'] : ['café/résumé.txt'], 'Unicode case spelling must follow actual filesystem identity.');
+    mkdirSync(join(root, 'normalization'));
+    const decomposed = join(root, 'normalization', 'é.txt');
+    writeFileSync(decomposed, 'decomposed filesystem control');
+    const decomposedStat = lstatSync(decomposed);
+    const normalizedStat = existsSync(join(root, 'normalization', 'é.txt')) ? lstatSync(join(root, 'normalization', 'é.txt')) : null;
+    if (normalizedStat && decomposedStat.dev === normalizedStat.dev && decomposedStat.ino === normalizedStat.ino) {
+      assert.deepEqual(canonicalBoundary(root, ['normalization/é.txt']).boundary, ['normalization/é.txt']);
+      assert.deepEqual(canonicalBoundary(root, ['normalization/']).boundary, ['normalization/']);
+    } else {
+      assert.throws(() => canonicalBoundary(root, ['normalization/']), { code: 'BOUNDARY_PATH_UNSUPPORTED' });
+    }
+    assert.throws(() => canonicalBoundary(root, ['normalization/é.txt']), { code: 'BOUNDARY_PATH_UNSUPPORTED' });
+    assert.throws(() => canonicalBoundary(root, ['Src']), { code: 'BOUNDARY_PATH_INVALID' });
+    assert.throws(() => canonicalBoundary(root, ['Src/File.txt/']), { code: 'BOUNDARY_PATH_INVALID' });
+    for (const entry of ['', '/x', 'C:/x', 'C:x', '//host/x', '\\\\host\\x', '../x', './x', 'a/../x', 'a//x', 'a//', 'a/*', 'a/?', 'a/[x]', 'a/{x,y}', 'a/\0x', 'a/\nx', 'a/\x7fx']) {
+      assert.throws(() => canonicalBoundary(root, [entry]), { code: 'BOUNDARY_PATH_INVALID' }, JSON.stringify(entry));
+    }
+    for (const entry of ['a/\ufffd', 'a/e\u0301', 'a/x‌','a/x.', 'a/x ', 'a/NUL', 'a/file:stream']) {
+      assert.throws(() => canonicalBoundary(root, [entry]), { code: 'BOUNDARY_PATH_UNSUPPORTED' }, JSON.stringify(entry));
+    }
+    for (const entry of ['.git/config', '.GIT/config', '.git./config', '.git /config', '.git::$DATA/config', 'a/.git/x', 'a/GIT~1/config']) {
+      assert.throws(() => canonicalBoundary(root, [entry]), { code: 'BOUNDARY_PATH_UNSAFE' }, entry);
+    }
+    symlinkSync(scratch, join(root, 'outside'));
+    symlinkSync(join(root, 'Src'), join(root, 'inside'));
+    for (const entry of ['outside/x', 'inside/File.txt', 'outside/', 'inside']) {
+      assert.throws(() => canonicalBoundary(root, [entry]), { code: 'BOUNDARY_PATH_UNSAFE' }, entry);
+    }
+    mkdirSync(join(root, 'unsafe'));
+    symlinkSync(scratch, join(root, 'unsafe', 'escape'));
+    assert.throws(() => canonicalBoundary(root, ['unsafe/']), { code: 'BOUNDARY_PATH_UNSAFE' });
+    mkdirSync(join(root, 'nested'));
+    git('-C', join(root, 'nested'), 'init', '-q');
+    assert.throws(() => canonicalBoundary(root, ['nested/new']), { code: 'BOUNDARY_PATH_UNSAFE' });
+    mkdirSync(join(root, 'container'));
+    git('init', '--bare', '-q', join(root, 'container', 'bare'));
+    assert.throws(() => canonicalBoundary(root, ['container/']), { code: 'BOUNDARY_PATH_UNSAFE' });
+    git('update-index', '--add', '--cacheinfo', `160000,${git('rev-parse', 'HEAD')},vendor/submodule`);
+    assert.throws(() => canonicalBoundary(root, ['vendor/']), { code: 'BOUNDARY_PATH_UNSAFE' });
+    assert.throws(() => canonicalBoundary(root, ['vendor/submodule/new']), { code: 'BOUNDARY_PATH_UNSAFE' });
+    if (sep === '/') {
+      writeFileSync(join(root, 'Src\\'), 'literal trailing backslash');
+      assert.throws(() => canonicalBoundary(root, ['Src\\']), { code: 'BOUNDARY_PATH_UNSUPPORTED' });
+      writeFileSync(join(root, 'Src\\File.txt'), 'literal backslash');
+      assert.throws(() => canonicalBoundary(root, ['Src\\File.txt']), { code: 'BOUNDARY_PATH_UNSUPPORTED' });
+      mkdirSync(join(root, 'literal'));
+      writeFileSync(join(root, 'literal', 'a\\b'), 'literal backslash');
+      assert.throws(() => canonicalBoundary(root, ['literal/a\\b']), { code: 'BOUNDARY_PATH_UNSUPPORTED' });
+      assert.throws(() => canonicalBoundary(root, ['literal/']), { code: 'BOUNDARY_PATH_UNSUPPORTED' });
+    }
+    linkSync(join(root, 'Src', 'File.txt'), join(root, 'hardlink'));
+    assert.throws(() => canonicalBoundary(root, ['hardlink']), { code: 'BOUNDARY_PATH_UNSUPPORTED' });
+    assert.throws(() => canonicalBoundary(join(root, 'inside'), ['File.txt']), { code: 'BOUNDARY_ROOT_INVALID' });
+    assert.throws(() => canonicalBoundary(scratch, ['new']), { code: 'BOUNDARY_ROOT_INVALID' });
+    console.log('boundary self-test OK (pure intersections and real Git/filesystem checks)');
+  } finally {
+    // Retain fixtures when cleanup permission is not available.
+    console.log(`Retained boundary fixture: ${scratch}`);
+  }
+}
+
 function selfTest() {
+  boundarySelfTest();
   const docs = classifyLaneProof(planned([{ path: 'docs/guide.md', contentRead: true }]));
   const unreadDocs = classifyLaneProof(planned([{ path: 'docs/guide.md', contentRead: false }]));
   const small = classifyLaneProof(planned([{ path: 'src/one.mjs' }, { path: 'src/two.mjs' }]));

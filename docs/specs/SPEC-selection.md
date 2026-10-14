@@ -20,6 +20,11 @@ in `tools/scan.mjs`; `verifySnapshot`, `eligibleIssueNumbers`, `markerSchedule`,
 `deliveredPullRequests` and `invalidateSnapshot` in `tools/snapshot-contract.mjs`; wait helpers
 in `tools/unit.mjs`. Keep legacy entry points working.
 
+Checked Git operations require support for `--no-lazy-fetch`. Set that option and
+`GIT_NO_LAZY_FETCH=1` for observations and worktree allocation. Missing local objects must
+cause a refusal, not an implicit fetch. Unsupported Git must refuse these operations;
+do not retry without the control or change the installed Git version automatically.
+
 Current commands and required new self-test entry:
 
 ```bash
@@ -47,12 +52,12 @@ or enables production queue execution before cutover.
 - `tools/scheduler-contract.mjs`: transactions and versioned reservation/unit records.
 - `tools/verify.mjs`: register the new executable/tests.
 
-The current `repositorySnapshot` does not take an explicit root (`tools/scan.mjs:1493`).
-The current `persistPrimeSnapshot` constructs `<cwd>/.git/autoloop/prime`
-(`tools/prime.mjs:625–631`); linked worktrees have a `.git` file. Fix these assumptions in module 2. Use Git-resolved administrative paths, not string joins
-through `.git`. Keep shared reservations in common-directory scheduler state. Store a unit's
-snapshot under its verified worktree Git directory. A snapshot reference records that directory,
-repository key, base/head OIDs and content digest.
+`repositorySnapshot({ root, now })` accepts an explicit checkout root. `persistPrimeSnapshot`
+stores snapshots under `<verified-gitDir>/autoloop/prime`; linked worktrees have a `.git` file.
+Use Git-resolved administrative paths, not string joins through `.git`. Keep shared reservations
+in common-directory scheduler state. Store a unit's snapshot under its verified worktree Git
+directory. A snapshot reference records that directory, repository key, base/head OIDs and
+content digest.
 
 ## Provider interfaces
 
@@ -64,8 +69,8 @@ inventoryRecovery({ snapshot, checkpoint }) -> recovery/wait/refusal candidates
 reserveIssue(lease, expectedRevision, issueAuthorization) -> UnitReservation|Refusal
 allocateWorktree(lease, unitId, baseOid) -> WorktreeBinding|Refusal
 admitBoundary(lease, expectedRevision, planCandidate) -> Admission|Wait|Refusal
-widenBoundary(lease, expectedRevision, unitId, proposedBoundary) -> Admission|Wait|Refusal
-reconcileWaits(lease, completeSnapshot) -> persisted transitions
+widenBoundary(lease, expectedRevision, unitId, { plan, relationshipId }) -> Admission|Wait|Refusal
+reconcileWaits(lease, snapshotReference) -> persisted transitions
 ```
 
 A `Refusal` follows the `autoloop.loop/1` error shape. A `Wait` includes `code`, `unitId`,
@@ -91,6 +96,37 @@ planDigest, baseOid, boundary, reservationRevision }`. The plan provider in modu
 real digest/generation values. Module 2 synthetic fixtures use real hashed fixture plans,
 not legacy placeholder hashes. This admission is not review or publication authority.
 
+### Failing-task relationship evidence
+
+Module 2 does not add a task runner or a plan-file writer. It validates complete plan artifacts
+and persists their bound metadata. Immutable plan storage and claim proof remain in module 3.
+
+Core supplies `observeFailingTaskRelationship(lease, expectedRevision, childProcess, context)`.
+The context contains unit identity, complete current/proposed plan artifacts, an exact unique task
+excerpt and the lease owner's rationale. The owner attests the task/path relationship; a failed
+command or a substring match alone does not prove that relationship. The observer accepts a real,
+live, directly owned gated child with separate process group and observable stdout/stderr. It does
+not accept a command to run, a serialized process, a supplied exit result or a verification callback.
+The caller releases the child gate only after the `observing` record is durable.
+
+The recorder binds actual process/start/boot/group identity and Git HEAD/tree/content/index state.
+A verified failure requires complete output, normal nonzero exit, confirmed group exit and unchanged
+relevant context. Zero exit is not failure evidence. Signals, errors, changed context or unknown
+outcomes remain inconclusive. No raw environment or output bytes are persisted as proof.
+
+An optional `planningRelationships` list on the selection unit retains these records; absence means
+empty for earlier records. Only the core recorder can append or settle them through the existing
+private lease binding. Generic checkpoint reducers cannot forge verified observations. Recovery
+cannot promote a lost observation from process absence or an exit-code file. Live/unknown groups
+retain ownership, and old-generation records cannot authorize current widening.
+
+`widenBoundary` receives `{ plan: PlanCandidate, relationshipId }`. Core's read-only
+`readFailingTaskRelationship(lease, expectedRevision, relationshipId, context)` rechecks the exact
+unit/generation, current plan and authorization, actual Git content/index state and proposed artifact.
+The relationship ID is a lookup key, not a bearer capability. All normal policy, control, fresh-scan
+and conflict checks still apply. A finding-only request remains unsupported until its real producer
+exists. Synthetic tests use an actual failing assertion and the real observer, not a fake model result.
+
 ## Admission rules
 
 1. Reserve the issue in one checkpoint transaction before starting planning. One repository
@@ -110,8 +146,11 @@ not legacy placeholder hashes. This admission is not review or publication autho
    it is not parallel-writer exclusion.
    Persist all admitted paths before enabling writer tools. Conflicting units remain read-only.
 7. Widening uses the same transaction before the additional edit. Retain old paths while a widen
-   request waits. A changed plan increments generation through module 3 and invalidates old
-   admission/review/gate proof. Protected paths also require the existing authorization policy.
+   request waits. Keep the last admitted plan identity and store the pending proposal separately.
+   A durable plan-generation floor advances only when a validated admission/wait proposal is
+   persisted, and survives wake/recovery. A changed plan increments generation through module 3
+   and invalidates old admission/review/gate proof. Protected paths also require the existing
+   authorization policy. Re-admission cannot bypass widening provenance for added scope.
 8. Release paths only after verified worker exit and disposition. A delivered PR continues to
    exclude overlapping work through its observed changed files. Merge/closure wakes a waiter
    only after complete readback. Re-plan against the new base in the same unit session before

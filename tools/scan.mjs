@@ -2,8 +2,12 @@
 
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseGitHubRemote } from './checkout-contract.mjs';
+import { readGitStatus } from './git-observation.mjs';
 import { CLAIM_CONTRACT_FIXTURES, parseLoopClaim } from './claim-contract.mjs';
 import { parseRepair } from './unit.mjs';
 import {
@@ -33,7 +37,6 @@ const MAX_ITEMS = 10000;
 const MAX_CONCURRENCY = 4;
 const ROLE_PERMISSIONS = new Set(['admin', 'none', 'read', 'write']);
 const TRUSTED_LIFECYCLE_ROLES = new Set(['admin', 'maintain']);
-const limitCommand = createLimiter(MAX_CONCURRENCY);
 
 const ISSUES_QUERY = `
 query($owner:String!,$name:String!,$cursor:String){
@@ -60,8 +63,8 @@ query($id:ID!,$cursor:String){
 const REPAIR_FACTS_QUERY = `
 query($owner:String!,$name:String!,$number:Int!,$parent:Int!){
   repository(owner:$owner,name:$name){
-    repair: issue(number:$number){viewerDidAuthor}
-    parent: issue(number:$parent){state stateReason lastEditedAt labels(first:100){nodes{name}}}
+    repair: issue(number:$number){id viewerDidAuthor}
+    parent: issue(number:$parent){id state stateReason lastEditedAt labels(first:100){nodes{name}}}
   }
 }`;
 
@@ -70,7 +73,7 @@ query($owner:String!,$name:String!,$number:Int!,$parent:Int!){
 const DEPENDENCY_FIELDS = '__typename number state';
 const COMMENT_CONNECTION = 'nodes{id author{login} authorAssociation body createdAt '
   + 'lastEditedAt updatedAt url viewerDidAuthor} pageInfo{hasNextPage endCursor}';
-const LABEL_EVENT_FIELDS = 'actor{login} createdAt label{name}';
+const LABEL_EVENT_FIELDS = 'id actor{login} createdAt label{name}';
 const TIMELINE_CONNECTION = `nodes{__typename ... on LabeledEvent{${LABEL_EVENT_FIELDS}} `
   + `... on UnlabeledEvent{${LABEL_EVENT_FIELDS}}} pageInfo{hasNextPage endCursor}`;
 const TIMELINE_TYPES = 'itemTypes:[LABELED_EVENT,UNLABELED_EVENT]';
@@ -231,10 +234,12 @@ function commandError(error) {
     .slice(0, 300) || 'command failed';
 }
 
-async function jsonCommandOnce(file, args, input) {
-  return limitCommand(async () => {
+async function jsonCommandOnce(file, args, input, request) {
+  return request.limitCommand(async () => {
     const stdout = await new Promise((resolve, reject) => {
       const child = execFile(file, args, {
+        cwd: request.root,
+        env: request.env,
         encoding: 'utf8',
         timeout: 30000,
         maxBuffer: 64 * 1024 * 1024,
@@ -278,29 +283,61 @@ export async function withCommandRetries(run, delaysMs = COMMAND_RETRY_DELAYS_MS
   }
 }
 
-async function jsonCommand(file, args, input = undefined) {
-  return withCommandRetries(() => jsonCommandOnce(file, args, input));
-}
-
-async function ghJson(args, input = undefined) {
-  return jsonCommand('gh', args, input);
-}
-
-// gh exits non-zero on ANY GraphQL error, but still prints the body: a batch
-// needs that body, because an error on one alias leaves the others' data intact.
-async function ghGraphqlResponse(query, variables) {
-  try {
-    return await ghJson(['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables }));
-  } catch (error) {
-    let body;
+// Capture the environment once per request. Neither retries nor continuations
+// can select a different checkout or inherit a later ambient override.
+function createScanRequest(root) {
+  root = resolve(root);
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
+  delete env.GH_REPO;
+  delete env.GH_HOST;
+  Object.assign(env, {
+    GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0',
+  });
+  const request = {
+    root, env, limitCommand: createLimiter(MAX_CONCURRENCY),
+    repository: null, issueIds: new Map(), approvals: [], roles: new Map(),
+  };
+  request.gitText = (args) => execFileSync('git', [
+    '--no-lazy-fetch', '--no-replace-objects', '--no-optional-locks',
+    '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args,
+  ], {
+    cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 20000, maxBuffer: 64 * 1024 * 1024,
+  });
+  request.bindRepository = () => {
+    if (request.repository) return request.repository;
+    const origins = request.gitText(['config', '--get-all', 'remote.origin.url']).trim().split(/\r?\n/u);
+    const remote = origins.length === 1 ? parseGitHubRemote(origins[0]) : null;
+    if (!remote) throw new Error('repository requires exactly one canonical origin URL');
+    request.repository = { host: remote.host, owner: remote.owner, name: remote.repo };
+    env.GH_HOST = remote.host;
+    env.GH_REPO = `${remote.host}/${remote.owner}/${remote.repo}`;
+    return request.repository;
+  };
+  request.ghJson = (args, input) => {
+    const repository = request.bindRepository();
+    const boundArgs = args[0] === 'api' ? [...args, '--hostname', repository.host] : args;
+    return withCommandRetries(() => jsonCommandOnce('gh', boundArgs, input, request));
+  };
+  request.graphqlResponse = async (query, variables) => {
+    const repository = request.bindRepository();
+    if ((variables.owner !== undefined && variables.owner.toLowerCase() !== repository.owner)
+      || (variables.name !== undefined && variables.name.toLowerCase() !== repository.name)) {
+      throw new Error('GraphQL repository differs from the bound origin');
+    }
     try {
-      body = JSON.parse(error?.stdout ?? '');
-    } catch {
+      return await request.ghJson(['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables }));
+    } catch (error) {
+      let body;
+      try { body = JSON.parse(error?.stdout ?? ''); } catch { throw error; }
+      if (Array.isArray(body?.errors)) return body;
       throw error;
     }
-    if (Array.isArray(body?.errors)) return body;
-    throw error;
-  }
+  };
+  request.graphql = checkedGraphql(request.graphqlResponse);
+  return request;
 }
 
 function checkedGraphql(graphqlResponse) {
@@ -314,25 +351,8 @@ function checkedGraphql(graphqlResponse) {
   };
 }
 
-async function ghGraphql(query, variables) {
-  const response = await ghJson(
-    ['api', 'graphql', '--input', '-'],
-    JSON.stringify({ query, variables }),
-  );
-  if (Array.isArray(response.errors) && response.errors.length) {
-    throw new Error(response.errors.map(({ message }) => message).join('; '));
-  }
-  if (!response.data) throw new Error('GraphQL response omitted data');
-  return response.data;
-}
-
-function gitText(args) {
-  return execFileSync('git', args, {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 20000,
-    maxBuffer: 64 * 1024 * 1024,
-  });
+function repositoryRequest(repo) {
+  return repo.request ?? createScanRequest(process.cwd());
 }
 
 function connectionPage(connection, label) {
@@ -471,14 +491,18 @@ export function labelProvenance(timeline) {
     : null;
 }
 
-async function fetchRepo() {
+async function fetchRepo(request) {
   try {
-    const data = await ghJson(['repo', 'view', '--json', 'nameWithOwner,defaultBranchRef']);
+    const bound = request.bindRepository();
+    const data = await request.ghJson(['repo', 'view', `${bound.host}/${bound.owner}/${bound.name}`, '--json', 'nameWithOwner,defaultBranchRef,id']);
     const [owner, name] = String(data.nameWithOwner ?? '').split('/');
-    if (!owner || !name) throw new Error('repository identity is unavailable');
+    if (!owner || !name || String(data.nameWithOwner).toLowerCase() !== `${bound.owner}/${bound.name}`) {
+      throw new Error('repository identity differs from the bound origin');
+    }
     if (typeof data.defaultBranchRef?.name !== 'string') {
       throw new Error('repository default branch is unavailable');
     }
+    request.repositorySource = { host: bound.host, owner, name, nodeId: sourceId(data.id) };
     return completeSection([{
       owner,
       name,
@@ -490,26 +514,21 @@ async function fetchRepo() {
   }
 }
 
-function fetchTree() {
+function fetchTree(request) {
   try {
-    const dirtyEntries = gitText([
-      'status',
-      '--porcelain=v1',
-      '-z',
-      '--untracked-files=all',
-    ]).split('\0').filter(Boolean);
+    const dirtyEntries = readGitStatus(request.root, { zeroTerminated: true }).toString('utf8').split('\0').filter(Boolean);
     return completeSection([{
       dirtyEntries,
       dirtyPaths: dirtyEntries.length,
-      branch: gitText(['rev-parse', '--abbrev-ref', 'HEAD']).trim(),
-      headOid: gitText(['rev-parse', '--verify', 'HEAD^{commit}']).trim().toLowerCase(),
+      branch: request.gitText(['rev-parse', '--abbrev-ref', 'HEAD']).trim(),
+      headOid: request.gitText(['rev-parse', '--verify', 'HEAD^{commit}']).trim().toLowerCase(),
     }]);
   } catch (error) {
     return incompleteSection('TREE_FETCH_FAILED', commandError(error));
   }
 }
 
-export async function fetchPullRequests(repo, states, { graphql = ghGraphql } = {}) {
+export async function fetchPullRequests(repo, states, { graphql = repositoryRequest(repo).graphql } = {}) {
   const section = await collectPaginated(async (cursor) => {
     const data = await graphql(PULL_REQUESTS_QUERY, {
       owner: repo.owner,
@@ -565,7 +584,7 @@ async function fetchChangedFiles(repo, pr, graphql) {
   }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
 }
 
-async function fetchCheckContexts(repo, pr, graphql = ghGraphql) {
+async function fetchCheckContexts(repo, pr, graphql = repositoryRequest(repo).graphql) {
   const commit = pr.commits?.nodes?.at(-1)?.commit;
   if (!commit?.statusCheckRollup) return completeSection([]);
   let initial = true;
@@ -590,14 +609,14 @@ async function fetchCheckContexts(repo, pr, graphql = ghGraphql) {
   }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
 }
 
-async function fetchIssueLabels(issue) {
+async function fetchIssueLabels(repo, issue) {
   let initial = true;
   return collectPaginated(async (cursor) => {
     if (initial) {
       initial = false;
       return connectionPage(issue.labels, `issue #${issue.number} labels`);
     }
-    const data = await ghGraphql(ISSUE_LABELS_QUERY, {
+    const data = await repositoryRequest(repo).graphql(ISSUE_LABELS_QUERY, {
       id: issue.id,
       cursor,
     });
@@ -626,7 +645,7 @@ export function normalizeDependencyIssueSection(issueNumber, issue) {
 
 async function fetchDependencyIssue(repo, issueNumber) {
   try {
-    const data = await ghGraphql(DEPENDENCY_ISSUE_QUERY, {
+    const data = await repositoryRequest(repo).graphql(DEPENDENCY_ISSUE_QUERY, {
       owner: repo.owner,
       name: repo.name,
       number: issueNumber,
@@ -684,7 +703,7 @@ function splitIssueBatch(response, chunk) {
   }));
 }
 
-export async function fetchIssueBatches(repo, requests, { graphql = ghGraphqlResponse } = {}) {
+export async function fetchIssueBatches(repo, requests, { graphql = repositoryRequest(repo).graphqlResponse } = {}) {
   const continuation = checkedGraphql(graphql);
   const chunks = await mapBounded(issueBatchChunks(requests), MAX_CONCURRENCY, async (chunk) => {
     let response;
@@ -721,7 +740,7 @@ export async function fetchIssueBatches(repo, requests, { graphql = ghGraphqlRes
   return new Map(entries);
 }
 
-async function fetchIssueComments(repo, issueNumber, firstPage = null, graphql = ghGraphql) {
+async function fetchIssueComments(repo, issueNumber, firstPage = null, graphql = repositoryRequest(repo).graphql) {
   return collectPaginated(async (cursor, page) => {
     if (page === 1 && firstPage !== null) return firstPage();
     const data = await graphql(ISSUE_COMMENTS_QUERY, {
@@ -921,7 +940,7 @@ async function fetchLifecycleMarkers(openPrs, openIssues, mergedPrs, repo, issue
 
 async function fetchOpenIssues(repo) {
   const base = await collectPaginated(async (cursor) => {
-    const data = await ghGraphql(ISSUES_QUERY, {
+    const data = await repositoryRequest(repo).graphql(ISSUES_QUERY, {
       owner: repo.owner,
       name: repo.name,
       cursor,
@@ -929,7 +948,8 @@ async function fetchOpenIssues(repo) {
     return connectionPage(data.repository?.issues, 'open issues');
   }, { maxPages: MAX_PAGES, maxItems: MAX_ITEMS });
   const enriched = await mapBounded(base.items, MAX_CONCURRENCY, async (issue) => {
-    const labels = await fetchIssueLabels(issue);
+    repo.request.issueIds.set(issue.number, sourceId(issue.id));
+    const labels = await fetchIssueLabels(repo, issue);
     return {
       section: labels,
       item: issueSnapshotItem({
@@ -996,7 +1016,7 @@ export function repairItemFacts(marker, parentTimeline, facts) {
   };
 }
 
-async function fetchIssueTimeline(repo, issue, firstPage = null, graphql = ghGraphql) {
+async function fetchIssueTimeline(repo, issue, firstPage = null, graphql = repositoryRequest(repo).graphql) {
   return collectPaginated(async (cursor, page) => {
     if (page === 1 && firstPage !== null) return firstPage();
     const data = await graphql(ISSUE_TIMELINE_QUERY, {
@@ -1084,6 +1104,8 @@ async function fetchQueue(openIssues, repo, issueData = new Map()) {
     let section;
     let provenance;
     let repairFacts = {};
+    let approvalIssueNodeId = repo.request.issueIds.get(issue.number) ?? null;
+    let issueNodeId = approvalIssueNodeId;
     if (marker === null) {
       section = issueData.get(issue.number)?.timeline ?? await fetchIssueTimeline(repo, issue);
       provenance = labelProvenance(section.items);
@@ -1096,7 +1118,7 @@ async function fetchQueue(openIssues, repo, issueData = new Map()) {
       let data = null;
       let failure = null;
       try {
-        data = await ghGraphql(REPAIR_FACTS_QUERY, { owner: repo.owner, name: repo.name, number: issue.number, parent: marker.parent });
+        data = await repositoryRequest(repo).graphql(REPAIR_FACTS_QUERY, { owner: repo.owner, name: repo.name, number: issue.number, parent: marker.parent });
       } catch (error) {
         failure = commandError(error);
       }
@@ -1114,6 +1136,8 @@ async function fetchQueue(openIssues, repo, issueData = new Map()) {
         return { item: null, section: completeSection([]), labelEvidence: null };
       }
       section = parentTimeline;
+      approvalIssueNodeId = sourceId(data.repository.parent.id);
+      if (sourceId(data.repository.repair.id) !== issueNodeId) issueNodeId = null;
       const facts = repairItemFacts(marker, parentTimeline.items, data.repository);
       provenance = facts.provenance;
       repairFacts = { repair: facts.repair };
@@ -1123,6 +1147,18 @@ async function fetchQueue(openIssues, repo, issueData = new Map()) {
       && provenance.labeledBy.length > 0
       && typeof provenance.labeledAt === 'string'
       && provenance.labeledAt.length > 0;
+    const event = section.items.filter((entry) => ['LabeledEvent', 'UnlabeledEvent'].includes(entry?.__typename)
+      && entry.label?.name?.toLowerCase() === 'loop-ready').at(-1);
+    const matching = section.complete && event?.__typename === 'LabeledEvent'
+      && event.actor?.login === provenance?.labeledBy && event.createdAt === provenance?.labeledAt;
+    repo.request.approvals.push({
+      issue: issue.number, issueNodeId,
+      approvalIssue: marker?.parent ?? issue.number, approvalIssueNodeId,
+      eventId: matching ? sourceId(event.id) : null,
+      actorLogin: matching ? event.actor.login : null,
+      createdAt: matching ? sourceTimestamp(event.createdAt) : null,
+      kind: marker === null ? 'loop-ready' : 'repair-parent',
+    });
     const item = {
       ...issue,
       blockedBy,
@@ -1201,7 +1237,7 @@ function derivedIssueSection(openIssues, label) {
 
 async function fetchThreadConnection(repo, pr) {
   const section = await collectPaginated(async (cursor) => {
-    const data = await ghGraphql(REVIEW_THREADS_QUERY, {
+    const data = await repositoryRequest(repo).graphql(REVIEW_THREADS_QUERY, {
       owner: repo.owner,
       name: repo.name,
       number: pr.number,
@@ -1221,14 +1257,14 @@ async function fetchThreadConnection(repo, pr) {
     );
 }
 
-async function fetchThreadComments(thread) {
+async function fetchThreadComments(repo, thread) {
   let initial = true;
   return collectPaginated(async (cursor) => {
     if (initial) {
       initial = false;
       return connectionPage(thread.comments, `thread ${thread.id} comments`);
     }
-    const data = await ghGraphql(THREAD_COMMENTS_QUERY, {
+    const data = await repositoryRequest(repo).graphql(THREAD_COMMENTS_QUERY, {
       id: thread.id,
       cursor,
     });
@@ -1308,7 +1344,7 @@ async function fetchUnresolvedThreads(openPrs, repo) {
         validThreadConnectionItem(thread) && thread.isResolved === false)
       .map((thread) => ({ pr, thread })));
   const completed = await mapBounded(unresolved, MAX_CONCURRENCY, async ({ pr, thread }) => {
-    const comments = await fetchThreadComments(thread);
+    const comments = await fetchThreadComments(repo, thread);
     return {
       section: comments,
       item: normalizeReviewThread(thread, pr.number, comments.items),
@@ -1335,7 +1371,7 @@ async function fetchUnresolvedThreads(openPrs, repo) {
 
 async function fetchPrConnection(repo, pr, query, field, label) {
   return collectPaginated(async (cursor) => {
-    const data = await ghGraphql(query, {
+    const data = await repositoryRequest(repo).graphql(query, {
       owner: repo.owner,
       name: repo.name,
       number: pr.number,
@@ -1400,18 +1436,26 @@ function normalizeRoleResponse(data, login) {
 
 async function fetchRole(repo, login) {
   try {
-    const data = await ghJson([
+    const data = await repo.request.ghJson([
       'api',
       '--method',
       'GET',
       `repos/${repo.owner}/${repo.name}/collaborators/${encodeURIComponent(login)}/permission`,
     ]);
     const role = normalizeRoleResponse(data, login);
+    repo.request.roles.set(login, {
+      login,
+      userId: data?.user?.login === login && Number.isSafeInteger(data.user.id) && data.user.id > 0
+        ? data.user.id : null,
+      permission: ROLE_PERMISSIONS.has(data?.permission) ? data.permission : null,
+      roleName: typeof data?.role_name === 'string' ? data.role_name : null,
+    });
     if (!role) {
-      throw new Error(`author permission response for ${login} is incomplete`);
+      return roleFailureSection(new Error(`author permission response for ${login} is incomplete`));
     }
     return completeSection([role]);
   } catch (error) {
+    repo.request.roles.set(login, { login, userId: null, permission: null, roleName: null });
     return roleFailureSection(error);
   }
 }
@@ -1490,19 +1534,90 @@ function dependencySections(error) {
   );
 }
 
-export async function repositorySnapshot({ now = () => new Date().toISOString() } = {}) {
+function sourceId(value) {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function sourceTimestamp(value) {
+  if (typeof value !== 'string'
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u.test(value)
+    || !Number.isFinite(Date.parse(value))) return null;
+  // Date.parse accepts some invalid dates by moving them to the next month.
+  return new Date(value).toISOString().slice(0, 19) === value.slice(0, 19) ? value : null;
+}
+
+const WAIT_ISSUE_QUERY = `
+query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){issue(number:$number){__typename id number state}}
+}`;
+const WAIT_PR_QUERY = `
+query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){pullRequest(number:$number){__typename id number state headRefOid baseRefName}}
+}`;
+
+async function fetchWaitReferences(repo, references, pullRequest = false) {
+  if (!Array.isArray(references) || references.length > MAX_ITEMS
+    || references.some((number) => !Number.isSafeInteger(number) || number < 1)) {
+    return incompleteSection('WAIT_REFERENCES_INVALID', 'wait references must be positive issue or PR numbers');
+  }
+  const sections = await mapBounded([...new Set(references)].sort((a, b) => a - b), MAX_CONCURRENCY, async (number) => {
+    try {
+      const data = await repo.request.graphql(pullRequest ? WAIT_PR_QUERY : WAIT_ISSUE_QUERY, {
+        owner: repo.owner, name: repo.name, number,
+      });
+      const node = data.repository?.[pullRequest ? 'pullRequest' : 'issue'];
+      if (node?.__typename !== (pullRequest ? 'PullRequest' : 'Issue')
+        || node.number !== number || sourceId(node.id) === null
+        || !(pullRequest ? ['OPEN', 'CLOSED', 'MERGED'] : ['OPEN', 'CLOSED']).includes(node.state)
+        || (pullRequest && (!/^[0-9a-f]{40}$/u.test(node.headRefOid)
+          || typeof node.baseRefName !== 'string' || node.baseRefName.length === 0))) {
+        return incompleteSection(pullRequest ? 'WAIT_PR_INVALID' : 'WAIT_ISSUE_INVALID',
+          `wait ${pullRequest ? 'PR' : 'issue'} #${number} is missing or returned invalid typed facts`);
+      }
+      return completeSection([{
+        number, nodeId: node.id, state: node.state,
+        ...(pullRequest ? { headOid: node.headRefOid, baseRefName: node.baseRefName } : {}),
+      }]);
+    } catch (error) {
+      return incompleteSection(pullRequest ? 'WAIT_PR_FETCH_FAILED' : 'WAIT_ISSUE_FETCH_FAILED',
+        `wait #${number}: ${commandError(error)}`);
+    }
+  });
+  return combineSections(sections);
+}
+
+function selectionSources(request, waits) {
+  return {
+    schema: 'autoloop.selection-sources/1',
+    repository: request.repositorySource ?? null,
+    issues: [...request.issueIds].sort(([a], [b]) => a - b).map(([number, nodeId]) => ({ number, nodeId })),
+    approvals: request.approvals.sort((a, b) => a.issue - b.issue),
+    roles: [...request.roles.values()].sort((a, b) => compareText(a.login, b.login)),
+    waitIssues: waits[0], waitPullRequests: waits[1],
+  };
+}
+
+export async function repositorySnapshotWithSources({
+  root = process.cwd(), now = () => new Date().toISOString(), references = {},
+} = {}) {
+  const request = createScanRequest(root);
   const scannedAt = now();
   const [repoSection, tree] = await Promise.all([
-    fetchRepo(),
-    Promise.resolve(fetchTree()),
+    fetchRepo(request),
+    Promise.resolve(fetchTree(request)),
   ]);
   if (!repoSection.complete) {
     const sections = dependencySections(repoSection.error.message);
     sections.repo = repoSection;
     sections.tree = tree;
-    return createSnapshot({ scannedAt, sections });
+    const waits = [0, 1].map(() => incompleteSection('REPOSITORY_DEPENDENCY_FAILED', repoSection.error.message));
+    return { snapshot: createSnapshot({ scannedAt, sections }), sources: selectionSources(request, waits) };
   }
-  const repo = repoSection.items[0];
+  const repo = { ...repoSection.items[0], request };
+  const waitReads = Promise.all([
+    fetchWaitReferences(repo, references?.issues ?? []),
+    fetchWaitReferences(repo, references?.pullRequests ?? [], true),
+  ]);
   const [openPrs, openIssues, mergedPrs] = await Promise.all([
     fetchPullRequests(repo, ['OPEN']),
     fetchOpenIssues(repo),
@@ -1528,7 +1643,7 @@ export async function repositorySnapshot({ now = () => new Date().toISOString() 
     queue,
     repo,
   );
-  return createSnapshot({
+  const snapshot = createSnapshot({
     scannedAt,
     sections: {
       repo: repoSection,
@@ -1543,6 +1658,11 @@ export async function repositorySnapshot({ now = () => new Date().toISOString() 
       authorVerification,
     },
   });
+  return { snapshot, sources: selectionSources(request, await waitReads) };
+}
+
+export async function repositorySnapshot({ root = process.cwd(), now } = {}) {
+  return (await repositorySnapshotWithSources({ root, now })).snapshot;
 }
 
 function focusSection(section, predicate) {
@@ -1596,6 +1716,324 @@ function focusPr(snapshot, number) {
     ),
   };
   return createSnapshot({ scannedAt: snapshot.scannedAt, sections });
+}
+
+// Only the external GitHub boundary is replaced. Git and the scan run unchanged.
+async function fakeScanGitHub() {
+  const fs = await import('node:fs');
+  const fixture = JSON.parse(fs.readFileSync(process.env.SCAN_FIXTURE, 'utf8'));
+  const repo = fixture.roots[process.cwd()];
+  const args = process.argv.slice(2);
+  const requireFact = (passed, message) => { if (!passed) throw new Error(message); };
+  requireFact(repo, 'request used an unrelated cwd');
+  requireFact(process.env.GH_HOST === repo.host, 'request used an ambient host');
+  requireFact(process.env.GH_REPO === `${repo.host}/fixtures/${repo.name}`, 'request used an ambient repository');
+  requireFact(!Object.keys(process.env).some((key) => key.startsWith('GIT_') && ![
+    'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_NO_REPLACE_OBJECTS', 'GIT_NO_LAZY_FETCH', 'GIT_OPTIONAL_LOCKS',
+  ].includes(key)), 'request retained a Git override');
+  requireFact(process.env.GIT_NO_LAZY_FETCH === '1', 'request did not fix the no-lazy-fetch control');
+  const page = (nodes, cursor = null) => ({ nodes, pageInfo: { hasNextPage: cursor !== null, endCursor: cursor } });
+  const at = '2026-01-01T00:00:00Z';
+  const event = (number, query) => ({
+    __typename: number === 20 && process.env.SCAN_CASE === 'unlabeled-parent' ? 'UnlabeledEvent' : 'LabeledEvent',
+    ...(number !== 9 && query.includes('LabeledEvent{id ') ? { id: `${repo.name}-E${number}` } : {}),
+    actor: { login: number === 20 && process.env.SCAN_CASE === 'changed-parent' ? 'other' : 'maintainer' },
+    createdAt: number === 7 && process.env.SCAN_CASE === 'invalid-date' ? '2026-02-30T00:00:00Z' : at,
+    label: { name: 'loop-ready' },
+  });
+  const issue = (number) => ({
+    ...(number !== 9 ? { id: `${repo.name}-I${number}` } : {}), number, title: `issue ${number}`,
+    body: number === 8 ? '<!-- autoloop-repair-v1 ' + JSON.stringify({
+      parent: 20, parentLabeledBy: 'maintainer', parentLabeledAt: at, depth: 1, blocksParent: true,
+    }) + ' -->' : number === 7 ? '## Blocked by\n- #20' : 'body',
+    updatedAt: at, lastEditedAt: null,
+    labels: number === 7 ? page([], 'labels-7') : page([{ name: number === 8 ? 'loop-repair' : 'loop-ready' }]),
+  });
+  const respond = (value) => process.stdout.write(JSON.stringify(value));
+  if (args[0] === 'repo') {
+    requireFact(args[2] === `${repo.host}/fixtures/${repo.name}`, 'repo view was not explicitly bound');
+    respond({ nameWithOwner: process.env.SCAN_CASE === 'wrong-repo' ? 'fixtures/other' : `fixtures/${repo.name}`,
+      defaultBranchRef: process.env.SCAN_CASE === 'missing-branch' ? null : { name: 'main' },
+      ...(process.env.SCAN_CASE !== 'missing-repo-id' && args.at(-1).split(',').includes('id') ? { id: `${repo.name}-R` } : {}) });
+    return;
+  }
+  requireFact(args.includes('--hostname') && args[args.indexOf('--hostname') + 1] === repo.host,
+    'API host was not explicitly bound');
+  if (args.some((arg) => arg.endsWith('/permission'))) {
+    requireFact(args.includes(`repos/fixtures/${repo.name}/collaborators/maintainer/permission`), 'permission repository changed');
+    respond({ permission: 'write', role_name: process.env.SCAN_CASE === 'missing-role' ? null : 'maintain',
+      user: { login: 'maintainer', ...(process.env.SCAN_CASE !== 'missing-user-id' ? { id: repo.userId } : {}) } });
+    return;
+  }
+  const { query, variables: v } = JSON.parse(fs.readFileSync(0, 'utf8'));
+  if (v.owner !== undefined) requireFact(v.owner === 'fixtures' && v.name === repo.name, 'GraphQL repository changed');
+  if (v.id !== undefined) requireFact(v.id.startsWith(`${repo.name}-`), 'node continuation changed repository');
+  // One transient external error exercises the real retry path in each root.
+  if (query.includes('issues(states:OPEN') && !v.cursor) {
+    const retry = `${process.env.SCAN_FIXTURE}.${repo.name}.retry`;
+    if (!fs.existsSync(retry)) {
+      fs.writeFileSync(retry, 'retried');
+      process.stderr.write('HTTP 502 fixture failure'); process.exitCode = 1; return;
+    }
+  }
+  let repository;
+  if (query.includes('issues(states:OPEN')) repository = { issues: v.cursor ? page([issue(9)]) : page([issue(7), issue(8)], 'issues-next') };
+  else if (query.includes('node(id:$id)')) {
+    respond({ data: { node: { labels: page([{ name: 'loop-ready' }]) } } }); return;
+  }
+  else if (query.includes('repair: issue')) repository = {
+    repair: { ...(query.includes('repair: issue(number:$number){id') ? { id: `${repo.name}-I8` } : {}), viewerDidAuthor: true },
+    parent: { ...(query.includes('parent: issue(number:$parent){id') ? { id: `${repo.name}-I20` } : {}),
+      state: 'CLOSED', stateReason: 'COMPLETED', lastEditedAt: null, labels: page([{ name: 'loop-ready' }]) },
+  };
+  else if (/i\d+:issue/u.test(query)) {
+    repository = {};
+    for (const [, alias, raw] of query.matchAll(/(i(\d+)):issue/gu)) {
+      const number = Number(raw);
+      repository[alias] = {
+        __typename: 'Issue', number, state: 'CLOSED', comments: page([]),
+        timelineItems: number === 7 ? page([event(1, query)], 'timeline-next') : page([event(number, query)]),
+      };
+    }
+  }
+  else if (query.includes('timelineItems(')) repository = { issue: { timelineItems: page([event(v.number, query)]) } };
+  else if (query.includes('pullRequests(states:')) repository = { pullRequests: page(v.states.includes('OPEN') ? [{
+    id: `${repo.name}-P40`, number: 40, title: 'delivered', body: 'Closes #7', isDraft: false,
+    headRefName: 'feat/gh-7-fixture', headRefOid: 'a'.repeat(40), baseRefName: 'main',
+    mergeStateStatus: 'CLEAN', mergeable: 'MERGEABLE', mergedAt: null, updatedAt: at,
+    author: { login: 'maintainer' }, headRepository: { nameWithOwner: `fixtures/${repo.name}` },
+    files: page([{ path: 'src/a.mjs' }], 'files-next'),
+    commits: { nodes: [{ commit: { oid: 'a'.repeat(40), statusCheckRollup: {
+      state: 'SUCCESS', contexts: page([], 'checks-next'),
+    } } }] },
+  }] : []) };
+  else if (query.includes('files(first:100,after:')) repository = { pullRequest: { files: page([{ path: 'src/b.mjs' }]) } };
+  else if (query.includes('object(oid:')) repository = { object: { statusCheckRollup: { contexts: page([]) } } };
+  else if (query.includes('reviewThreads(')) repository = { pullRequest: { reviewThreads: page([]) } };
+  else if (query.includes('reviews(')) repository = { pullRequest: { reviews: page([]) } };
+  else if (query.includes('comments(')) repository = { pullRequest: { comments: page([]) }, issue: { comments: page([]) } };
+  else if (query.includes('pullRequest(number:')) repository = { pullRequest: v.number === 404 ? null : {
+    __typename: v.number === 405 ? 'Issue' : 'PullRequest',
+    ...(v.number !== 409 ? { id: `${repo.name}-P${v.number}` } : {}), number: v.number === 408 ? 30 : v.number,
+    state: v.number === 407 ? 'UNKNOWN' : v.number === 31 ? 'CLOSED' : v.number === 32 ? 'MERGED' : 'OPEN',
+    headRefOid: v.number === 406 ? null : 'b'.repeat(40), baseRefName: v.number === 410 ? null : 'main',
+  } };
+  else if (query.includes('issue(number:')) repository = { issue: v.number === 404 ? null : {
+    __typename: v.number === 405 ? 'PullRequest' : 'Issue',
+    ...(v.number !== 409 ? { id: `${repo.name}-I${v.number}` } : {}), number: v.number === 408 ? 20 : v.number,
+    state: v.number === 407 ? 'UNKNOWN' : v.number === 20 ? 'CLOSED' : 'OPEN',
+  } };
+  else throw new Error('unexpected GitHub read');
+  respond({ data: { repository } });
+}
+
+async function noFetchSelfTest() {
+  const assert = (await import('node:assert/strict')).default;
+  const { lstatSync, readdirSync } = await import('node:fs');
+  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-scan-promisor-'));
+  const name = 'request Git reads refuse missing promised objects; fetchTree status already prevents the HEAD bypass';
+  const previous = process.env.GIT_NO_LAZY_FETCH;
+  try {
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_LAZY_FETCH: '0' };
+    const git = (root, args) => execFileSync('git', ['-C', root, ...args],
+      { env, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const source = join(scratch, 'source'); mkdirSync(source); git(source, ['init', '-q', '-b', 'main']);
+    writeFileSync(join(source, 'fixture.txt'), 'public promised fixture\n'); git(source, ['add', 'fixture.txt']);
+    git(source, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'promised fixture']);
+    git(source, ['config', 'uploadpack.allowAnySHA1InWant', 'true']);
+    const missing = git(source, ['rev-parse', 'HEAD']); const helper = join(scratch, 'local-transport.mjs');
+    writeFileSync(helper, `import {writeFileSync} from 'node:fs';import {spawnSync} from 'node:child_process';
+      writeFileSync(process.argv[2],'local transport invoked\\n');
+      const result=spawnSync(process.argv[3],[process.argv[4]],{stdio:'inherit'});process.exit(result.status??1);\n`);
+    const objectBytes = (directory) => readdirSync(directory, { withFileTypes: true }).reduce((total, entry) => total
+      + (entry.isDirectory() ? objectBytes(join(directory, entry.name)) : lstatSync(join(directory, entry.name)).size), 0);
+    const fixture = (name) => {
+      const root = join(scratch, name); mkdirSync(root); git(root, ['init', '-q', '-b', 'main']);
+      const marker = join(scratch, name + '.marker');
+      git(root, ['remote', 'add', 'origin', 'https://github.com/fixtures/scan.git']);
+      git(root, ['config', 'protocol.ext.allow', 'always']);
+      git(root, ['config', 'remote.fixture-promisor.url', `ext::${process.execPath} ${helper} ${marker} %S ${source}`]);
+      git(root, ['config', 'remote.fixture-promisor.promisor', 'true']);
+      // A new ref points at a real commit held only by the local source.
+      // No existing fixture object is deleted to create this missing object.
+      writeFileSync(join(root, '.git', 'refs', 'heads', 'main'), missing + '\n');
+      assert.throws(() => git(root, ['--no-lazy-fetch', 'cat-file', '-e', missing])); assert.equal(existsSync(marker), false);
+      return { root, marker, objects: join(root, '.git', 'objects') };
+    };
+    const control = fixture('ordinary'); const controlBytes = objectBytes(control.objects);
+    assert.equal(git(control.root, ['rev-parse', '--verify', 'HEAD^{commit}']), missing);
+    assert(existsSync(control.marker)); assert(objectBytes(control.objects) > controlBytes);
+    const test = fixture('checked'); const before = objectBytes(test.objects);
+    process.env.GIT_NO_LAZY_FETCH = '1'; const request = createScanRequest(test.root);
+    const tree = fetchTree(request);
+    assert.equal(tree.complete, false); assert.equal(tree.error.code, 'TREE_FETCH_FAILED');
+    assert.equal(existsSync(test.marker), false); assert.equal(objectBytes(test.objects), before);
+    let refused = false; try { request.gitText(['rev-parse', '--verify', 'HEAD^{commit}']); } catch { refused = true; }
+    assert.deepEqual({ refused, transport: existsSync(test.marker), unchanged: objectBytes(test.objects) === before },
+      { refused: true, transport: false, unchanged: true });
+    return [[name, true]];
+  } catch (error) {
+    console.error(`FAIL ${name}: ${error.stack}`); return [[name, false]];
+  } finally {
+    if (previous === undefined) delete process.env.GIT_NO_LAZY_FETCH; else process.env.GIT_NO_LAZY_FETCH = previous;
+    console.log(`Retained scan promisor fixture: ${scratch}`);
+  }
+}
+
+async function sourceSelfTest() {
+  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-scan-sources-'));
+  const checks = [];
+  try {
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
+    env.GIT_CONFIG_NOSYSTEM = '1'; env.GIT_CONFIG_GLOBAL = '/dev/null';
+    const roots = {};
+    for (const [name, host, userId] of [['alpha', 'github.com', 71], ['beta', 'github.example.test', 72]]) {
+      const root = join(scratch, name);
+      mkdirSync(root);
+      const git = (args) => execFileSync('git', args, { cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      git(['init', '--quiet']);
+      git(['symbolic-ref', 'HEAD', `refs/heads/${name}`]);
+      git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost', '-c', 'commit.gpgsign=false',
+        'commit', '--quiet', '--allow-empty', '-m', 'scan fixture']);
+      git(['remote', 'add', 'origin', `https://${host}/fixtures/${name}.git`]);
+      writeFileSync(join(root, 'fixture.txt'), 'baseline\n');
+      writeFileSync(join(root, '.gitattributes'), 'fixture.txt filter=fixture\n');
+      git(['add', 'fixture.txt', '.gitattributes']);
+      git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'filter fixture']);
+      const marker = join(scratch, `${name}-filter-marker`); const filter = join(scratch, `${name}-filter.mjs`);
+      writeFileSync(filter, `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(marker)}, 'invoked');process.stdin.pipe(process.stdout);\n`, { mode: 0o700 });
+      const included = join(scratch, `${name}-included.config`);
+      git(['config', '--file', included, 'filter.fixture.clean', filter]);
+      git(['config', `includeIf.onbranch:${name}.path`, included]);
+      writeFileSync(join(root, 'fixture.txt'), 'changed!\n');
+      utimesSync(join(root, 'fixture.txt'), new Date(), new Date(Date.now() + 2000));
+      git(['status', '--porcelain=v1']);
+      if (!existsSync(marker)) throw new Error('The ordinary scan fixture status must invoke its real filter.');
+      renameSync(marker, join(scratch, `${name}-retained-control-marker`));
+      roots[realpathSync(root)] = { name, host, userId, filterMarker: marker, headOid: git(['rev-parse', 'HEAD']).trim() };
+    }
+    const bin = join(scratch, 'bin'); mkdirSync(bin);
+    writeFileSync(join(bin, 'gh'), `#!${process.execPath}\n(${fakeScanGitHub.toString()})().catch(error => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o700 });
+    const manifest = join(scratch, 'fixture.json'); writeFileSync(manifest, JSON.stringify({ roots }));
+    const runner = `
+      import assert from 'node:assert/strict';
+      import {existsSync} from 'node:fs';
+      const scan = await import(${JSON.stringify(import.meta.url)});
+      const {verifySnapshot} = await import(${JSON.stringify(new URL('./snapshot-contract.mjs', import.meta.url).href)});
+      const scanSnapshotValid = snapshot => verifySnapshot(snapshot) && Object.values(snapshot.sections).every(section => section.complete);
+      const roots = JSON.parse(process.env.SCAN_ROOTS);
+      const cwd = process.cwd();
+      process.chdir = () => { assert.fail('scan must not call process.chdir'); };
+      const now = () => '2026-01-01T00:00:00.000Z';
+      assert.equal(typeof scan.repositorySnapshotWithSources, 'function', 'source provider must exist');
+      const results = await Promise.all(roots.map(([root]) => scan.repositorySnapshotWithSources({
+        root, now, references: {issues:[20,21],pullRequests:[30,31,32]},
+      })));
+      assert.equal(process.cwd(), cwd, 'scan must not change the global cwd');
+      for (const [index, {snapshot,sources}] of results.entries()) {
+        const [root,repo] = roots[index];
+        assert.equal(scanSnapshotValid(snapshot), true, JSON.stringify(snapshot.sections));
+        assert.equal(snapshot.sections.tree.items[0].branch, repo.name);
+        assert.equal(snapshot.sections.tree.items[0].headOid, repo.headOid);
+        assert.deepEqual(snapshot.sections.tree.items[0].dirtyEntries, [' M fixture.txt']);
+        assert.equal(existsSync(repo.filterMarker), false, 'Mandatory fresh scan must not execute a configured clean driver');
+        assert.deepEqual(snapshot.sections.openPrs.items[0].files, ['src/a.mjs','src/b.mjs']);
+        assert.deepEqual(sources.repository, {host:repo.host,owner:'fixtures',name:repo.name,nodeId:repo.name+'-R'});
+        assert.deepEqual(sources.issues, [7,8,9].map(number=>({number,nodeId:number===9?null:repo.name+'-I'+number})));
+        assert.deepEqual(sources.approvals, [
+          {issue:7,issueNodeId:repo.name+'-I7',approvalIssue:7,approvalIssueNodeId:repo.name+'-I7',
+            eventId:repo.name+'-E7',actorLogin:'maintainer',createdAt:'2026-01-01T00:00:00Z',kind:'loop-ready'},
+          {issue:8,issueNodeId:repo.name+'-I8',approvalIssue:20,approvalIssueNodeId:repo.name+'-I20',
+            eventId:repo.name+'-E20',actorLogin:'maintainer',createdAt:'2026-01-01T00:00:00Z',kind:'repair-parent'},
+          {issue:9,issueNodeId:null,approvalIssue:9,approvalIssueNodeId:null,
+            eventId:null,actorLogin:'maintainer',createdAt:'2026-01-01T00:00:00Z',kind:'loop-ready'},
+        ]);
+        assert.deepEqual(sources.roles, [{login:'maintainer',userId:repo.userId,permission:'write',roleName:'maintain'}]);
+        assert.equal(sources.waitIssues.complete,true);
+        assert.deepEqual(sources.waitIssues.items,[{number:20,nodeId:repo.name+'-I20',state:'CLOSED'},
+          {number:21,nodeId:repo.name+'-I21',state:'OPEN'}]);
+        assert.equal(sources.waitPullRequests.complete,true);
+        assert.deepEqual(sources.waitPullRequests.items,[30,31,32].map(number=>({number,nodeId:repo.name+'-P'+number,
+          state:number===31?'CLOSED':number===32?'MERGED':'OPEN',headOid:'b'.repeat(40),baseRefName:'main'})));
+        const legacy = await scan.repositorySnapshot({root,now});
+        assert.deepEqual(legacy,snapshot,'legacy provider must return exactly the same snapshot');
+        assert.equal(JSON.stringify(snapshot).includes('nodeId'),false);
+        assert.equal(JSON.stringify(snapshot).includes('eventId'),false);
+      }
+      const root = roots[0][0];
+      for (const number of [404,405,407,408,409]) {
+        const {sources} = await scan.repositorySnapshotWithSources({root,now,references:{issues:[number],pullRequests:[number]}});
+        assert.equal(sources.waitIssues.complete,false);
+        assert.deepEqual(sources.waitIssues.items,[]);
+        assert.equal(sources.waitPullRequests.complete,false);
+        assert.deepEqual(sources.waitPullRequests.items,[]);
+      }
+      for (const number of [406,410]) {
+        const malformed = await scan.repositorySnapshotWithSources({root,now,references:{pullRequests:[number]}});
+        assert.equal(malformed.sources.waitPullRequests.complete,false);
+        assert.deepEqual(malformed.sources.waitPullRequests.items,[]);
+      }
+      const invalid = await scan.repositorySnapshotWithSources({root,now,references:{issues:[0],pullRequests:['31']}});
+      assert.equal(invalid.sources.waitIssues.complete,false);
+      assert.equal(invalid.sources.waitPullRequests.complete,false);
+      for (const testCase of ['wrong-repo','missing-branch','missing-repo-id','missing-role','missing-user-id',
+        'changed-parent','unlabeled-parent','invalid-date']) {
+        process.env.SCAN_CASE = testCase;
+        const result = await scan.repositorySnapshotWithSources({root,now});
+        if (testCase === 'wrong-repo' || testCase === 'missing-branch') {
+          assert.equal(result.snapshot.sections.repo.complete,false);
+          assert.equal(result.sources.repository,null);
+          assert.equal(result.sources.waitIssues.complete,false);
+        } else if (testCase === 'missing-repo-id') {
+          assert.equal(result.sources.repository.nodeId,null);
+          assert.equal(result.snapshot.sections.repo.complete,true);
+        } else if (testCase === 'missing-role' || testCase === 'missing-user-id') {
+          assert.equal(result.snapshot.sections.authorVerification.complete,false);
+          assert.equal(result.sources.roles[0][testCase === 'missing-role' ? 'roleName' : 'userId'],null);
+        } else {
+          const approval = result.sources.approvals.find(item=>item.issue===(testCase==='invalid-date'?7:8));
+          if (testCase === 'invalid-date') assert.equal(approval.createdAt,null);
+          else {
+            assert.equal(approval.eventId,null);
+            assert.equal(approval.actorLogin,null);
+            assert.equal(approval.createdAt,null);
+          }
+        }
+      }
+      delete process.env.SCAN_CASE;
+      const {execFileSync} = await import('node:child_process');
+      const tool = ${JSON.stringify(fileURLToPath(import.meta.url))};
+      const cli = JSON.parse(execFileSync(process.execPath,[tool],{cwd:root,env:process.env,encoding:'utf8'}));
+      const legacy = await scan.repositorySnapshot({root,now:()=>cli.scannedAt});
+      assert.deepEqual(cli,legacy,'legacy CLI and API must use the same snapshot');
+      const focused = JSON.parse(execFileSync(process.execPath,[tool,'--pr','40'],{cwd:root,env:process.env,encoding:'utf8'}));
+      assert.equal(verifySnapshot(focused),true);
+      assert.deepEqual(focused.sections.openPrs.items.map(item=>item.number),[40]);
+      assert.equal(Object.hasOwn(cli,'sources'),false);
+      for (const [,repo] of roots) assert.equal(existsSync(repo.filterMarker),false,'CLI and continuation scans must keep filters disabled');
+      console.log('root/source integration OK');
+    `;
+    const runEnv = { ...env, PATH: `${bin}:${env.PATH}`, SCAN_FIXTURE: manifest, SCAN_ROOTS: JSON.stringify(Object.entries(roots)),
+      GIT_DIR: join(scratch, 'beta', '.git'), GIT_WORK_TREE: join(scratch, 'beta'), GIT_NO_LAZY_FETCH: '0',
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'remote.origin.url', GIT_CONFIG_VALUE_0: 'https://wrong.test/wrong/repo',
+      GH_REPO: 'wrong.test/wrong/repo', GH_HOST: 'wrong.test' };
+    try {
+      execFileSync(process.execPath, ['--input-type=module', '-e', runner], {
+        cwd: scratch, env: runEnv, encoding: 'utf8', timeout: 60000, maxBuffer: 16 * 1024 * 1024,
+      });
+      checks.push(['interleaved explicit roots retain source IDs, pagination, typed waits and exact legacy snapshots', true]);
+    } catch (error) {
+      console.error(error.stderr || error.message);
+      checks.push(['interleaved explicit roots retain source IDs, pagination, typed waits and exact legacy snapshots', false]);
+    }
+  } finally {
+    // The task permits cleanup of these newly created, test-owned fixtures only.
+    try { rmSync(scratch, { recursive: true, force: true }); }
+    catch (error) { console.error(`Retained scan fixtures ${scratch}: ${error.message}`); }
+  }
+  return checks;
 }
 
 async function selfTest() {
@@ -2132,6 +2570,16 @@ async function selfTest() {
   };
   const withFiles = await fetchPullRequests({ owner: 'o', name: 'r', nameWithOwner: 'o/r' }, ['OPEN'], { graphql: fakePrGraphql });
   const checks = [
+    ...await noFetchSelfTest(),
+    ...await sourceSelfTest(),
+    [
+      'source approval timestamps retain API strings and reject invalid calendar dates',
+      sourceTimestamp('2026-01-01T00:00:00Z') === '2026-01-01T00:00:00Z'
+        && sourceTimestamp('2026-01-01T00:00:00.123Z') === '2026-01-01T00:00:00.123Z'
+        && sourceTimestamp('2026-01-01T00:00:00.1234Z') === null
+        && sourceTimestamp('2026-02-30T00:00:00Z') === null
+        && sourceTimestamp('not-date') === null,
+    ],
     [
       'the PR query fetches changed paths, pages past 100, and the normalized PR carries them sorted and unique',
       PULL_REQUESTS_QUERY.includes('files(first:100){nodes{path}pageInfo{hasNextPage endCursor}}')

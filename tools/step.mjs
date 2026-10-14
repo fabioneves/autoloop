@@ -14,7 +14,7 @@
 
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
-  statSync, writeFileSync,
+  statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -32,6 +32,7 @@ import { mergeCaption, projectParked, stepAttempt } from './parked-disposition.m
 import { resolveProjectConfig, statusBandEnabled } from './config-contract.mjs';
 import { readPinnedModels } from './models-config.mjs';
 import { newAssociationId, readStepBinding, updateStepRecord, validReceipt } from './dispatch-return-association.mjs';
+import { resolveRepositoryCheckout } from './scheduler-contract.mjs';
 
 const LADDER = Object.freeze([
   '01-premise', '02-plan', '03-plan-review', '04-claim', '05-implement',
@@ -114,15 +115,18 @@ function writeAtomically(path, value) {
   renameSync(staged, path);
 }
 
-function autoloopDir(root, run) {
-  const common = run('git', ['rev-parse', '--git-common-dir']);
-  return common.ok ? { dir: join(resolve(root, common.stdout), 'autoloop') } : { dir: null, error: common.stderr };
+function autoloopDir(root) {
+  try {
+    const { commonDir, gitDir } = resolveRepositoryCheckout(realpathSync.native(root));
+    return { dir: join(commonDir, 'autoloop'), snapshotDir: join(gitDir, 'autoloop', 'prime') };
+  } catch (error) {
+    return { dir: null, snapshotDir: null, error: error.message };
+  }
 }
 
-// The retained prime snapshot is the newest one prime wrote.
-function retainedSnapshotPath(dir) {
-  const directory = join(dir, 'prime');
-  if (!existsSync(directory)) return null;
+// Only this checkout's prime directory can supply its retained snapshot.
+function retainedSnapshotPath(directory) {
+  if (directory === null || !existsSync(directory)) return null;
   return readdirSync(directory)
     .filter((name) => name.endsWith('.snapshot.json'))
     .map((name) => join(directory, name))
@@ -135,14 +139,23 @@ function retainedSnapshotPath(dir) {
 // parked view.
 const QUEUE_COUNT = 'queue-count.json';
 
-function invalidateRetainedSnapshot(dir, reason = 'ISSUE_MUTATION') {
-  const path = retainedSnapshotPath(dir);
+function retainedQueueCount(dir, snapshotDir) {
+  const count = readJson(join(dir, QUEUE_COUNT), null);
+  // Old common counts have no checkout attribution. Keep main compatibility,
+  // but a linked checkout must re-prime instead of borrowing that history.
+  const attributable = count?.snapshotDirectory === snapshotDir
+    || (count?.snapshotDirectory === undefined && dirname(snapshotDir) === dir);
+  return attributable ? count : null;
+}
+
+function invalidateRetainedSnapshot(dir, snapshotDir, reason = 'ISSUE_MUTATION') {
+  const path = retainedSnapshotPath(snapshotDir);
   if (path === null) return null;
   const snapshot = readJson(path, null);
   if (!verifySnapshot(snapshot)) return `! retained snapshot ${path}: ${snapshotProblem(snapshot)} before deciding`;
   const eligible = eligibleIssueNumbers(snapshot);
   if (eligible !== null) {
-    writeAtomically(join(dir, QUEUE_COUNT), { eligible: eligible.length, scannedAtMs: Date.parse(snapshot.scannedAt) });
+    writeAtomically(join(dir, QUEUE_COUNT), { eligible: eligible.length, scannedAtMs: Date.parse(snapshot.scannedAt), snapshotDirectory: snapshotDir });
   }
   writeAtomically(path, invalidateSnapshot(snapshot, reason));
   return null;
@@ -169,24 +182,24 @@ function originRepository(run) {
 
 // Every open unit with what it waits for, from the steps files and the
 // retained snapshot. Reads only: no GitHub call, no state change.
-function projectedUnits(dir, run, nowMs, sinceMs) {
+function projectedUnits(dir, snapshotDir, run, nowMs, sinceMs) {
   const directory = join(dir, 'steps');
   const records = existsSync(directory) ? readdirSync(directory)
     .filter((name) => /^\d+\.json$/u.test(name))
     .map((name) => readJson(join(directory, name), null)) : [];
-  const path = retainedSnapshotPath(dir);
+  const path = retainedSnapshotPath(snapshotDir);
   const snapshot = path === null ? null : readJson(path, null);
   return { snapshot, ...projectParked({ records, snapshot, repository: originRepository(run), nowMs, sinceMs }) };
 }
 
 export function parkedView({ root, run = realRun(root), nowMs = Date.now(), markers = ownRunMarkers }) {
-  const { dir } = autoloopDir(root, run);
+  const { dir, snapshotDir } = autoloopDir(root);
   if (dir === null) return renderParked({ nowMs, units: [], eligible: null });
-  const { snapshot, units, humanWaits } = projectedUnits(dir, run, nowMs, runStartMs(markers(root)));
+  const { snapshot, units, humanWaits } = projectedUnits(dir, snapshotDir, run, nowMs, runStartMs(markers(root)));
   // Every step swap marks the snapshot stale, so a parked view nearly always
   // reads one; the count recorded just before that swap is shown with its time.
   const eligible = eligibleIssueNumbers(snapshot);
-  const last = eligible === null ? readJson(join(dir, QUEUE_COUNT), null) : null;
+  const last = eligible === null ? retainedQueueCount(dir, snapshotDir) : null;
   return renderParked({
     nowMs, units, waiting: humanWaits,
     eligible: eligible !== null ? eligible.length : last?.eligible ?? null,
@@ -212,7 +225,7 @@ const REVIEW_ROLES = new Set(['plan-review', 'diff-review', 'code-review', 'doub
 export function noteDispatch({ root, run = realRun(root), issue, model, role = null, binding, previousDispatchId, newRound = true }) {
   if (!Number.isSafeInteger(issue) || issue < 1 || (model !== null && (typeof model !== 'string' || model === ''))
     || typeof role !== 'string' || role === '') return { ok: false };
-  const { dir } = autoloopDir(root, run);
+  const { dir } = autoloopDir(root);
   if (dir === null) return { ok: false };
   const path = join(dir, 'steps', `${issue}.json`);
   const original = binding === undefined ? readStepBinding(path, issue) : binding;
@@ -244,7 +257,7 @@ export function noteDispatch({ root, run = realRun(root), issue, model, role = n
 }
 
 export function markReturned({ root, run = realRun(root), nowMs = Date.now(), issue, receipt }) {
-  const { dir } = autoloopDir(root, run);
+  const { dir } = autoloopDir(root);
   if (dir === null || receipt?.issue !== issue) return { ok: false };
   const path = join(dir, 'steps', `${issue}.json`);
   return updateStepRecord(path, (record) => {
@@ -272,7 +285,7 @@ function mergePolicy(root) {
 // shipped, human or blocked card closes it (the lifecycle driver's verified
 // merged close-out among them, with ifOpen, once).
 export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue, outcome, title = '', pr = null, question = '', reason = '', ifOpen = false }) {
-  const { dir } = autoloopDir(root, run);
+  const { dir, snapshotDir } = autoloopDir(root);
   if (dir === null) return { ok: false, lines: ifOpen ? [] : [`step: no steps recorded for #${issue} (not in a git repository)`] };
   const path = join(dir, 'steps', `${issue}.json`);
   const policy = outcome === 'delivered' ? mergePolicy(root) : null;
@@ -298,7 +311,7 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
       }
       // A merged PR changes the delivered set (SPEC-overlap-wait): the
       // retained snapshot no longer speaks for open PRs.
-      const warning = outcome === 'shipped' ? invalidateRetainedSnapshot(dir, 'PR_MUTATION') : null;
+      const warning = outcome === 'shipped' ? invalidateRetainedSnapshot(dir, snapshotDir, 'PR_MUTATION') : null;
       return { ok: true, changed: true, record, lines: [card, ...(warning ? [warning] : [])] };
     });
   } catch (error) {
@@ -314,7 +327,7 @@ export function transition({
   const refuse = (message) => ({ ok: false, lines: [message] });
   if (!Number.isSafeInteger(issue) || issue < 1) return refuse('step: --issue must be a positive issue number');
   if (STEPS[to] === undefined) return refuse(`step: unknown step ${to}; one of ${Object.keys(STEPS).join(', ')}`);
-  const { dir, error } = autoloopDir(root, run);
+  const { dir, snapshotDir, error } = autoloopDir(root);
   if (dir === null) return refuse(`step: not inside a git repository: ${error}`);
   const stepsPath = join(dir, 'steps', `${issue}.json`);
   // A closed record is a finished run: a unit worked again starts afresh, so
@@ -356,7 +369,7 @@ export function transition({
   // labels have moved, a bookkeeping fault is reported, never thrown.
   let warning = null;
   try {
-    if (!staged && LADDER.includes(to)) warning = invalidateRetainedSnapshot(dir);
+    if (!staged && LADDER.includes(to)) warning = invalidateRetainedSnapshot(dir, snapshotDir);
     const expected = stored?.steps?.at(-1);
     const saved = updateStepRecord(stepsPath, (latest) => {
       const previous = latest?.steps?.at(-1);
@@ -605,13 +618,13 @@ export function renderRunCard({ nowMs, units, park, snapshot }) {
 
 export function runCard({ root, run = realRun(root), nowMs = Date.now(), live = loopRunIsLive, markers = ownRunMarkers }) {
   if (!live(root)) return '';
-  const { dir } = autoloopDir(root, run);
+  const { dir, snapshotDir } = autoloopDir(root);
   if (dir === null) return '';
   const own = markers(root);
   const park = own.map(({ marker }) => marker.park).find((value) => value?.until) ?? null;
-  const newest = retainedSnapshotPath(dir);
+  const newest = retainedSnapshotPath(snapshotDir);
   const snapshot = newest ? { path: newest, ageMs: nowMs - statSync(newest).mtimeMs } : null;
-  const { units } = projectedUnits(dir, run, nowMs, runStartMs(own));
+  const { units } = projectedUnits(dir, snapshotDir, run, nowMs, runStartMs(own));
   return renderRunCard({ nowMs, units, park, snapshot });
 }
 
@@ -749,13 +762,13 @@ export function statusProjection({
   // an open run marker. Pid ancestry alone is not ownership.
   const latch = owned(sessionId);
   if (latch === null || latch.unreadable || !live(root)) return none;
-  const { dir } = autoloopDir(root, run);
+  const { dir, snapshotDir } = autoloopDir(root);
   if (dir === null) return none;
   const own = markers(root);
   const park = own.map(({ marker }) => marker.park).find((value) => value?.until) ?? null;
   const resolved = resolveProjectConfig(root);
   const openedAtMs = runStartMs(own);
-  const { snapshot, authority, units, humanWaits } = projectedUnits(dir, run, nowMs, openedAtMs);
+  const { snapshot, authority, units, humanWaits } = projectedUnits(dir, snapshotDir, run, nowMs, openedAtMs);
   // The run's events: by run id once prime stamped one, else by the marker's
   // opening time (an older plugin opened the run). No file: empty facts.
   const commonDir = dirname(dir);
@@ -839,7 +852,7 @@ export function statusProjection({
     counts: {
       active: count('active'), waiting: count('waiting'), blocked: all.filter((unit) => unit.needsYou !== null).length,
       delivered: count('delivered'),
-      eligible: eligible !== null ? eligible.length : readJson(join(dir, QUEUE_COUNT), null)?.eligible ?? null,
+      eligible: eligible !== null ? eligible.length : retainedQueueCount(dir, snapshotDir)?.eligible ?? null,
     },
     models,
     log: facts.log,
@@ -1358,9 +1371,15 @@ function selfTest() {
   return failures.length === 0;
 }
 
-// A fake repository state directory and gh, with the real command guard.
+// Git-admin storage uses a real fixture repository; gh remains external.
+function initializeStepFixture(root) {
+  const result = spawnSync('git', ['init', '-q', root], { encoding: 'utf8', timeout: 10000 });
+  if (result.status !== 0 || result.error) throw new Error(`Cannot initialize step fixture: ${result.stderr}`);
+}
+
 function transitionChecks(at) {
   const root = mkdtempSync(join(tmpdir(), 'step-'));
+  initializeStepFixture(root);
   const prime = join(root, '.git', 'autoloop', 'prime');
   mkdirSync(prime, { recursive: true });
   const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
@@ -1977,6 +1996,7 @@ function dispositionChecks() {
   const nowMs = day(12, 10, 30);
   const scanMs = day(12, 10, 20);
   const root = mkdtempSync(join(tmpdir(), 'step-disposition-'));
+  initializeStepFixture(root);
   const autoloop = join(root, '.git', 'autoloop');
   const snapshotPath = join(autoloop, 'prime', `${'a'.repeat(40)}.snapshot.json`);
   const issue = (number, labels) => issueSnapshotItem({
@@ -2126,6 +2146,7 @@ function dispositionChecks() {
 function pendingMergeChecks() {
   const day = (hh, mm) => new Date(2026, 9, 12, hh, mm).getTime();
   const base = mkdtempSync(join(tmpdir(), 'step-pending-'));
+  initializeStepFixture(base);
   const stepsDir = join(base, '.git', 'autoloop', 'steps');
   const calls = [];
   const run = (command, args) => {
@@ -2255,7 +2276,13 @@ function pendingMergeChecks() {
 export function statusFixture(at) {
   const nowMs = at(10, 30);
   const scratch = mkdtempSync(join(tmpdir(), 'step-projection-'));
-  const root = join(scratch, 'repo');
+  // Exercise a directory alias on every host, as macOS temporary paths do.
+  const alias = join(scratch, 'alias');
+  symlinkSync(scratch, alias, 'dir');
+  const aliasedRoot = join(alias, 'repo');
+  initializeStepFixture(aliasedRoot);
+  // Match the real Git paths that runCard reads. Keep its strict text check.
+  const root = realpathSync(aliasedRoot);
   const home = join(scratch, 'home');
   const autoloop = join(root, '.git', 'autoloop');
   const issue = (number, title, labels) => issueSnapshotItem({

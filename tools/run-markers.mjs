@@ -16,7 +16,7 @@ import { homedir, tmpdir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boundedGit, setGitDeadline } from './git-budget.mjs';
-import { guardPathForms, executionCommandProblemFor, fallbackGuardSegments, knownExecutionStatePath, runStateProblem } from './run-state-guard.mjs';
+import { guardPathForms, executionCommandProblemFor, fallbackGuardSegments, knownExecutionStatePath, runStateProblem, verifiedExecutionGitAdmin } from './run-state-guard.mjs';
 
 // The guard is defense-in-depth for commands a run issues; repository rules are
 // the enforcement boundary. Applying it to every Bash call in the project turns
@@ -402,7 +402,7 @@ export function toolGuardFallbackProblem(payload, { workerDirectory = workerGuar
 
 // Filesystem metadata is used only to find paths to deny, never to establish
 // repository ownership. No Git process is started for an unrelated session.
-function executionCommonDir(root) {
+function executionGitDirs(root) {
   let directory;
   try { directory = realpathSync.native(root); } catch { directory = resolve(root); }
   for (;;) {
@@ -418,14 +418,7 @@ function executionCommonDir(root) {
         // before the OS follows any symlink in this metadata path.
         admin = realpathSync.native(isAbsolute(match[1]) ? match[1] : `${directory}/${match[1]}`);
       } else if (!info.isDirectory()) return null;
-      if (!lstatSync(admin).isDirectory()) return null;
-      const commonFile = join(admin, 'commondir');
-      try {
-        const common = readRegularFile(commonFile).trimEnd();
-        if (common === '') return null;
-        const path = realpathSync.native(isAbsolute(common) ? common : `${admin}/${common}`);
-        return lstatSync(path).isDirectory() ? path : null;
-      } catch (error) { return error.code === 'ENOENT' ? admin : null; }
+      return verifiedExecutionGitAdmin(admin);
     } catch (error) {
       if (error.code !== 'ENOENT') return null;
     }
@@ -441,7 +434,11 @@ export function executionProtectedPaths({ projectRoot, cwd = projectRoot, entryp
   const state = [join(userInfo().homedir, '.claude', 'autoloop', 'host-invocations'), workerGuardDirectory(), executionAdmissionGuardDirectory()];
   for (const root of new Set([projectRoot, cwd])) {
     if (typeof root !== 'string') continue;
-    const common = executionCommonDir(root);
+    const identity = executionGitDirs(root);
+    const common = identity?.commonDir ?? null;
+    if (identity !== null && identity.gitDir !== identity.commonDir) {
+      state.push(join(identity.gitDir, 'autoloop', 'scheduler', 'snapshots'));
+    }
     // Keep literal Git-admin paths too. This does not make an unreadable Git
     // directory a reason to block ordinary unrelated source edits.
     for (const base of new Set([common, join(root, '.git')])) {

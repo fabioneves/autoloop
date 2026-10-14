@@ -25,7 +25,7 @@
 //
 //   node <plugin-tools>/run-state-guard.mjs --self-test
 
-import { lstatSync, opendirSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -305,18 +305,105 @@ export function guardPathForms(path, cwd = process.cwd()) {
 
 export { canonical as canonicalGuardPath };
 
-// A malformed Git pointer cannot hide an obvious named runtime store. This
-// filesystem shape permits only denial; it cannot establish repository/worker
-// identity or grant an operation. Ordinary source directories are not stores.
-export function knownExecutionStatePath(path) {
-  const match = /^(.*)\/autoloop\/(?:scheduler|viewers|control\/v2)(?:\/|$)/u.exec(path);
-  if (match === null) return false;
-  const admin = match[1];
-  if (basename(admin) === '.git') return true;
+function gitMetadata(path) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    return lstatSync(join(admin, 'HEAD')).isFile() && lstatSync(join(admin, 'objects')).isDirectory()
-      && lstatSync(join(admin, 'refs')).isDirectory();
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > 16384) throw new Error('Git metadata is not a bounded regular file.');
+    return readFileSync(fd, 'utf8').trimEnd();
+  } finally { closeSync(fd); }
+}
+
+function commonGitAdmin(path) {
+  try {
+    return lstatSync(join(path, 'HEAD')).isFile() && lstatSync(join(path, 'objects')).isDirectory()
+      && lstatSync(join(path, 'refs')).isDirectory();
   } catch { return false; }
+}
+
+// Denial-only filesystem proof. A linked admin directory has no objects/refs:
+// its common directory, registration and reciprocal .git pointer prove where
+// evidence is stored. A HEAD file or an arbitrary commondir is not that proof.
+export function verifiedExecutionGitAdmin(path) {
+  try {
+    const gitDir = realpathSync.native(path);
+    if (!lstatSync(gitDir).isDirectory()) return null;
+    let common;
+    try { common = gitMetadata(join(gitDir, 'commondir')); }
+    catch (error) { return error.code === 'ENOENT' && commonGitAdmin(gitDir) ? { gitDir, commonDir: gitDir } : null; }
+    if (!common) return null;
+    const commonDir = realpathSync.native(rawGuardAbsolutePath(common, gitDir));
+    if (!lstatSync(commonDir).isDirectory() || dirname(gitDir) !== join(commonDir, 'worktrees')) return null;
+    const backlink = gitMetadata(join(gitDir, 'gitdir'));
+    if (!isAbsolute(backlink)) return null;
+    const gitFile = realpathSync.native(backlink);
+    if (basename(gitFile) !== '.git') return null;
+    const pointer = /^gitdir: (.+)$/u.exec(gitMetadata(gitFile));
+    if (pointer === null || realpathSync.native(rawGuardAbsolutePath(pointer[1], dirname(gitFile))) !== gitDir) return null;
+    return { gitDir, commonDir, gitFile };
+  } catch { return null; }
+}
+
+// These are denial boundaries, not repository authority. HEAD, objects and
+// refs can change or be absent without hiding a retained linked namespace.
+function linkedExecutionStatePaths(identity) {
+  return typeof identity?.gitFile === 'string' ? [
+    join(identity.gitDir, 'autoloop', 'scheduler', 'snapshots'),
+    join(identity.gitDir, 'commondir'), join(identity.gitDir, 'gitdir'), identity.gitFile,
+  ] : [];
+}
+
+function linkedPointerIdentity(path) {
+  try {
+    const pointer = /^gitdir: (.+)$/u.exec(gitMetadata(path));
+    if (pointer === null) return null;
+    const identity = verifiedExecutionGitAdmin(rawGuardAbsolutePath(pointer[1], dirname(path)));
+    return identity?.gitFile === realpathSync.native(path) ? identity : null;
+  } catch { return null; }
+}
+
+function registeredLinkedStatePaths(common) {
+  let directory;
+  const paths = [];
+  try {
+    const commonDir = realpathSync.native(common);
+    directory = opendirSync(join(commonDir, 'worktrees'));
+    for (let entry; (entry = directory.readSync()) !== null;) {
+      const identity = verifiedExecutionGitAdmin(join(commonDir, 'worktrees', entry.name));
+      if (identity?.commonDir === commonDir) paths.push(...linkedExecutionStatePaths(identity));
+    }
+  } catch { /* No proven linked registration at this location. */ }
+  finally { directory?.closeSync(); }
+  return paths;
+}
+
+// The hook's cwd need not belong to the target repository. Follow only its
+// metadata graph: no Git/GitHub probe and no editable source-tree boundary.
+function targetExecutionStatePaths(path) {
+  for (let candidate = canonical(path);;) {
+    const direct = [verifiedExecutionGitAdmin(candidate),
+      basename(candidate) === '.git' ? linkedPointerIdentity(candidate) : null,
+      linkedPointerIdentity(join(candidate, '.git'))].flatMap(linkedExecutionStatePaths);
+    if (direct.length > 0) return [...new Set(direct)];
+    const registered = [...registeredLinkedStatePaths(candidate), ...registeredLinkedStatePaths(join(candidate, '.git'))];
+    if (registered.length > 0) return registered;
+    const parent = dirname(candidate);
+    if (parent === candidate) return [];
+    candidate = parent;
+  }
+}
+
+// Malformed metadata cannot hide an obvious literal .git runtime store.
+// Other locations need the same linked registration/backlink proof as hooks.
+export function knownExecutionStatePath(path) {
+  for (const match of path.matchAll(/\/autoloop\/(?:scheduler|viewers|control\/v2)(?=\/|$)/gu)) {
+    const admin = path.slice(0, match.index);
+    if (basename(admin) === '.git') return true;
+    const identity = verifiedExecutionGitAdmin(admin);
+    if (identity !== null && (identity.gitDir === identity.commonDir
+      || path.startsWith(`${admin}/autoloop/scheduler/snapshots/`) || path === `${admin}/autoloop/scheduler/snapshots`)) return true;
+  }
+  return targetExecutionStatePaths(path).some((boundary) => relation(path, boundary) === 'inside');
 }
 
 // A wildcard before '..' can select a symlink. Resolve its actual matches
@@ -1162,13 +1249,16 @@ function judge(claim, at, dirs, home, env, knownOnly = false) {
     if (knownOnly && claim.relations.includes('inside') && knownExecutionStatePath(path)) {
       return refusal(path, 'scheduler execution state');
     }
-    for (const protectedDir of dirs) {
+    const targetDirs = knownOnly ? targetExecutionStatePaths(path) : [];
+    for (const protectedDir of new Set([...dirs, ...targetDirs])) {
       const found = relation(path, protectedDir, claim.prove);
       if (found === null) continue;
       if (claim.relations.includes(found)) return refusal(path, protectedDir);
       if (found !== 'ancestor') continue;
       const depth = protectedDir.split('/').filter(Boolean).length - path.split('/').filter(Boolean).length;
-      if (claim.relations.includes('near') && depth <= 2) return refusal(path, protectedDir);
+      // Target-derived metadata protects writes and destructive ancestors,
+      // not Git's normal workspace aim (`git -C <checkout> checkout ...`).
+      if (claim.relations.includes('near') && depth <= 2 && dirs.includes(protectedDir)) return refusal(path, protectedDir);
       // A copy or move into an ancestor lands its sources' names there.
       if (claim.relations.includes('landing')) {
         const landing = childBelow(path, protectedDir);

@@ -21,16 +21,21 @@
 //   node <plugin-tools>/prime.mjs --park <reason> --minutes <1..720>
 //   node <plugin-tools>/prime.mjs --self-test
 
+import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  opendirSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -38,7 +43,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vendoredLeftovers } from './hook-root.mjs';
-import { closeLatch, latchDirectory, processStart, recordHostSession, recordLatch, sessionOwnerPid, takeHostSession } from './run-markers.mjs';
+import { closeLatch, executionProtectedPaths, latchDirectory, processStart, recordHostSession, recordLatch, sessionOwnerPid, takeHostSession } from './run-markers.mjs';
 import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownedRun, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
   effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
@@ -59,11 +64,14 @@ import { answeredMarker, liftWaits, postDigest, realRun, triageBlocks } from './
 import { dispatchInheritance } from './inherited-dispatch.mjs';
 import { appendEvent, currentRunId, emitEvent, isPaused, readEvents, resolveCommonDir, setPaused, setRunId, takeControls, writeControl } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
-import { assertNoKnownLegacyOwner, assertNoSchedulerOwner, createSchedulerTestAccount, readProcessIdentity, resolveRepository, withExecutionAdmission } from './scheduler-contract.mjs';
+import { assertNoKnownLegacyOwner, assertNoSchedulerOwner, createSchedulerTestAccount, readProcessIdentity, resolveRepository, resolveRepositoryCheckout, withExecutionAdmission } from './scheduler-contract.mjs';
+import { closeUnit, parkedView, runCard, statusProjection, transition } from './step.mjs';
+import { fallbackGuardSegments, knownExecutionStatePath, runStateProblem, verifiedExecutionGitAdmin } from './run-state-guard.mjs';
+import { serializeLifecycleMarker } from './lifecycle-contract.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.73.0';
+const AUTOLOOP_VERSION = '0.74.0';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -652,7 +660,8 @@ export function readPrimeConfig(root) {
 // every run. stdout carries decision-sized facts plus the path; the durable
 // file carries every byte and the typed accessors read from it.
 export function persistPrimeSnapshot(result, cwd = process.cwd()) {
-  const directory = resolve(cwd, '.git', 'autoloop', 'prime');
+  const checkout = resolveRepositoryCheckout(realpathSync.native(cwd));
+  const directory = join(checkout.gitDir, 'autoloop', 'prime');
   mkdirSync(directory, { recursive: true });
   const snapshotPath = resolve(
     directory,
@@ -671,7 +680,7 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
     markers: splitKnownRefused(
       markerSchedule(snapshot),
       snapshot.sections.lifecycleMarkers?.items ?? [],
-      readMarkerRefusals(dirname(directory)),
+      readMarkerRefusals(join(checkout.commonDir, 'autoloop')),
       lifecycleDriverIdentity(),
     ),
     sections: sectionSummary(snapshot),
@@ -902,6 +911,350 @@ function buildFixtureRepository(scratch, config) {
   return realpathSync(root);
 }
 
+function linkedGuardChecks({ scratch, root, linked, linkedIdentity }) {
+  const checks = [];
+  const check = (name, test) => {
+    try { test(); checks.push([name, true]); }
+    catch (error) { console.error(`linked guard fixture: ${name}: ${error.message}`); checks.push([name, false]); }
+  };
+  const evidence = join(linkedIdentity.gitDir, 'autoloop', 'scheduler', 'snapshots', 'fixture.json');
+  mkdirSync(dirname(evidence), { recursive: true });
+  writeFileSync(evidence, '{}');
+  const alias = join(scratch, 'admin-alias');
+  symlinkSync(linkedIdentity.gitDir, alias);
+  const aliasedEvidence = join(alias, 'autoloop', 'scheduler', 'snapshots', 'fixture.json');
+  const parentAliasEvidence = `${alias}/../${linkedIdentity.gitDir.split('/').at(-1)}/autoloop/scheduler/snapshots/fixture.json`;
+  const fakeAdmin = join(linkedIdentity.commonDir, 'worktrees', 'unproven-fixture');
+  mkdirSync(fakeAdmin);
+  writeFileSync(join(fakeAdmin, 'HEAD'), 'ref: refs/heads/main\n');
+  writeFileSync(join(fakeAdmin, 'commondir'), `${linkedIdentity.commonDir}\n`);
+  writeFileSync(join(fakeAdmin, 'gitdir'), `${linked}/.git\n`);
+  const fakeEvidence = join(fakeAdmin, 'autoloop', 'scheduler', 'snapshots', 'fixture.json');
+  const nestedEvidence = join(dirname(evidence), 'autoloop', 'scheduler', 'nested.json');
+  check('a nested runtime-store spelling cannot hide an outer linked evidence path', () => {
+    assert.equal(knownExecutionStatePath(nestedEvidence), true);
+  });
+  check('linked execution evidence requires registered common/admin identity and a matching checkout backlink', () => {
+    assert.equal(knownExecutionStatePath(evidence), true);
+    assert.equal(knownExecutionStatePath(aliasedEvidence), true);
+    assert.equal(knownExecutionStatePath(fakeEvidence), false);
+    assert.equal(knownExecutionStatePath(join(linked, 'autoloop', 'scheduler', 'snapshots', 'source.json')), false);
+    assert(executionProtectedPaths({ projectRoot: root, cwd: linked }).state.includes(dirname(evidence)));
+  });
+  check('retained linked registration and backlink still protect evidence when linked HEAD is absent', () => {
+    const head = join(linkedIdentity.gitDir, 'HEAD');
+    const retained = `${head}.fixture-retained`;
+    renameSync(head, retained);
+    try { assert.equal(knownExecutionStatePath(evidence), true); }
+    finally { renameSync(retained, head); }
+  });
+  check('optional Git objects and refs cannot override the linked metadata graph', () => {
+    const optional = ['objects', 'refs'].filter((name) => !existsSync(join(linkedIdentity.gitDir, name)));
+    try {
+      for (const name of optional) mkdirSync(join(linkedIdentity.gitDir, name));
+      assert.equal(knownExecutionStatePath(join(linkedIdentity.gitDir, 'commondir')), true);
+    } finally {
+      for (const name of optional) renameSync(join(linkedIdentity.gitDir, name), join(scratch, `retained-linked-${name}`));
+    }
+  });
+  check('common HEAD, objects and refs are not authority inputs for linked evidence denial', () => {
+    for (const name of ['HEAD', 'objects', 'refs']) {
+      const path = join(linkedIdentity.commonDir, name);
+      const retained = join(scratch, `retained-common-${name}`);
+      renameSync(path, retained);
+      try {
+        assert.equal(knownExecutionStatePath(evidence), true, name);
+        assert.equal(knownExecutionStatePath(join(linkedIdentity.gitDir, 'commondir')), true, name);
+      } finally { renameSync(retained, path); }
+    }
+  });
+  const secondLinked = join(scratch, 'linked-copy');
+  const created = git(root, ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-q', '-b', 'feat/gh-9-copy', secondLinked, 'HEAD']);
+  assert.equal(created.ok, true, created.detail);
+  const registrationDirectory = join(linkedIdentity.commonDir, 'worktrees');
+  const registrations = [];
+  const registrationReader = opendirSync(registrationDirectory);
+  try {
+    for (let entry; (entry = registrationReader.readSync()) !== null;) {
+      const identity = verifiedExecutionGitAdmin(join(registrationDirectory, entry.name));
+      if (identity?.gitFile && identity.commonDir === linkedIdentity.commonDir) registrations.push(entry.name);
+    }
+  } finally { registrationReader.closeSync(); }
+  assert(registrations.length >= 2);
+  const copyCommands = registrations.map((name) => {
+    const source = join(scratch, 'copy-sources', name);
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, 'commondir'), 'fixture source, not Git metadata\n');
+    return `cp -r ${JSON.stringify(source)} ${JSON.stringify(registrationDirectory)}`;
+  });
+  check('copy landing boundaries include every verified registration, not only the first', () => {
+    const paths = executionProtectedPaths({ projectRoot: tmpdir(), cwd: tmpdir() });
+    for (const command of copyCommands) {
+      assert.notEqual(runStateProblem(fallbackGuardSegments(command), {
+        cwd: tmpdir(), protectedDirs: paths.state, codeDirs: paths.code, knownOnly: true,
+      }), null, command);
+    }
+  });
+  const plugin = join(scratch, 'plugin');
+  const fallback = join(scratch, 'fallback-plugin');
+  cpSync(TOOL_DIRECTORY, join(plugin, 'tools'), { recursive: true });
+  // The real primary entry is absent in this immutable fixture. The actual
+  // hook wrapper must replay the input through its independent fallback.
+  cpSync(TOOL_DIRECTORY, join(fallback, 'tools'), { recursive: true,
+    filter: (path) => path !== join(TOOL_DIRECTORY, 'loop-execution-admission.mjs') });
+  const bin = join(scratch, 'no-git-bin');
+  mkdirSync(bin);
+  const trace = join(scratch, 'unexpected-git-gh');
+  for (const name of ['git', 'gh']) {
+    writeFileSync(join(bin, name), `#!/bin/sh\nprintf '%s\\n' ${name} >> '${trace}'\nexit 71\n`, { mode: 0o700 });
+  }
+  const hooks = JSON.parse(readFileSync(join(TOOL_DIRECTORY, '..', 'hooks', 'hooks.json'), 'utf8')).hooks.PreToolUse;
+  const hook = (tool, input, { pluginRoot = plugin, cwd = linked, projectRoot = root } = {}) => {
+    const command = hooks.find((entry) => entry.matcher.split('|').includes(tool)).hooks[0].command;
+    return spawnSync('bash', ['-c', command], {
+      cwd, encoding: 'utf8', timeout: 15000,
+      input: JSON.stringify({ session_id: 'S-unowned', cwd, tool_name: tool, tool_input: input }),
+      env: { ...process.env, HOME: userInfo().homedir, CLAUDE_PROJECT_DIR: projectRoot,
+        CLAUDE_PLUGIN_ROOT: pluginRoot, PATH: `${bin}:${process.env.PATH}` },
+    });
+  };
+  const metadata = [join(linkedIdentity.gitDir, 'commondir'), join(linkedIdentity.gitDir, 'gitdir'), join(linked, '.git')];
+  const metadataBytes = metadata.map((path) => readFileSync(path, 'utf8'));
+  const unrelated = { cwd: scratch, projectRoot: scratch };
+  const evidenceAncestors = [linkedIdentity.gitDir, join(linkedIdentity.gitDir, 'autoloop'),
+    join(linkedIdentity.gitDir, 'autoloop', 'scheduler'), alias, join(alias, 'autoloop', 'scheduler'),
+    linkedIdentity.commonDir, dirname(linkedIdentity.gitDir), linked];
+  check('target-derived linked evidence boundaries refuse destructive ancestors from an unrelated checkout', () => {
+    const paths = executionProtectedPaths({ projectRoot: scratch, cwd: scratch });
+    for (const path of evidenceAncestors) {
+      assert.notEqual(runStateProblem(fallbackGuardSegments(`rm -rf ${JSON.stringify(path)}`), {
+        cwd: scratch, protectedDirs: paths.state, codeDirs: paths.code, knownOnly: true,
+      }), null, path);
+    }
+  });
+  for (const [name, pluginRoot] of [['primary', plugin], ['fallback after primary load failure', fallback]]) {
+    check(`actual ${name} hooks refuse copy landings into non-first linked registrations`, () => {
+      for (const command of copyCommands) {
+        assert.equal(hook('Bash', { command }, { pluginRoot, cwd: tmpdir(), projectRoot: tmpdir() }).status, 2, command);
+      }
+    });
+    check(`actual ${name} hooks refuse destructive linked evidence ancestors from unrelated roots`, () => {
+      for (const path of evidenceAncestors) {
+        assert.equal(hook('Bash', { command: `rm -rf ${JSON.stringify(path)}` }, { pluginRoot, ...unrelated }).status, 2, path);
+      }
+    });
+    check(`actual ${name} hooks refuse metadata-then-evidence mutations without protecting source files`, () => {
+      for (const path of [...metadata, join(alias, 'commondir'), join(scratch, 'linked-alias', '.git')]) {
+        assert.equal(hook('Edit', { file_path: path }, { pluginRoot, ...unrelated }).status, 2, path);
+        assert.equal(hook('Bash', { command: `printf broken > ${JSON.stringify(path)}` }, { pluginRoot, ...unrelated }).status, 2, path);
+        assert.equal(hook('Bash', { command: `printf broken > ${JSON.stringify(path)}; printf x > ${JSON.stringify(evidence)}` },
+          { pluginRoot, ...unrelated }).status, 2, path);
+        assert.equal(hook('Bash', { command: `rm -f ${JSON.stringify(path)}` }, { pluginRoot, ...unrelated }).status, 2, path);
+        assert.equal(hook('Write', { file_path: evidence }, { pluginRoot, ...unrelated }).status, 2);
+      }
+      assert.deepEqual(metadata.map((path) => readFileSync(path, 'utf8')), metadataBytes);
+      for (const path of [join(linked, 'src', 'allowed.mjs'), join(root, 'src', 'allowed.mjs')]) {
+        assert.equal(hook('Edit', { file_path: path }, { pluginRoot, ...unrelated }).status, 0);
+      }
+      assert.equal(hook('Bash', { command: `git -C ${JSON.stringify(linked)} checkout -- src/allowed.mjs` },
+        { pluginRoot, ...unrelated }).status, 0);
+    });
+    check(`actual ${name} hooks retain evidence denial without optional Git state fields`, () => {
+      const optional = [join(linkedIdentity.gitDir, 'HEAD'),
+        ...['HEAD', 'objects', 'refs'].map((field) => join(linkedIdentity.commonDir, field))];
+      for (const [index, path] of optional.entries()) {
+        const retained = join(scratch, `retained-hook-input-${index}`);
+        renameSync(path, retained);
+        try {
+          assert.equal(hook('Write', { file_path: evidence }, { pluginRoot, ...unrelated }).status, 2, path);
+          assert.equal(hook('Bash', { command: `rm -rf ${JSON.stringify(linkedIdentity.gitDir)}` },
+            { pluginRoot, ...unrelated }).status, 2, path);
+        } finally { renameSync(retained, path); }
+      }
+      const workspaceFields = ['HEAD', 'objects', 'refs'].filter((field) => !existsSync(join(linked, field)));
+      try {
+        for (const field of workspaceFields) {
+          if (field === 'HEAD') writeFileSync(join(linked, field), 'fixture source, not Git metadata\n', { flag: 'wx' });
+          else mkdirSync(join(linked, field));
+        }
+        assert.equal(hook('Bash', { command: `rm -rf ${JSON.stringify(linked)}` }, { pluginRoot, ...unrelated }).status, 2);
+      } finally {
+        for (const field of workspaceFields) renameSync(join(linked, field), join(scratch, `retained-workspace-${field}-${name.split(' ')[0]}`));
+      }
+    });
+    check(`actual ${name} hooks refuse linked evidence before any legacy latch, including physical aliases`, () => {
+      for (const path of [evidence, aliasedEvidence, parentAliasEvidence, nestedEvidence]) {
+        assert.equal(hook('Edit', { file_path: path }, { pluginRoot }).status, 2);
+        assert.equal(hook('Bash', { command: `printf x > '${path}'` }, { pluginRoot }).status, 2);
+        // Target metadata alone also proves the denial from an unrelated cwd.
+        assert.equal(hook('Write', { file_path: path }, { pluginRoot, cwd: scratch, projectRoot: scratch }).status, 2);
+      }
+    });
+    check(`actual ${name} hooks allow source/workspace edits and unproven admin paths without Git or gh`, () => {
+      for (const path of [join(root, 'src', 'source.mjs'), join(linked, 'src', 'unit.mjs'), fakeEvidence]) {
+        assert.equal(hook('Edit', { file_path: path }, { pluginRoot }).status, 0);
+        assert.equal(hook('Bash', { command: `printf x > '${path}'` }, { pluginRoot }).status, 0);
+      }
+      assert.equal(hook('Edit', { file_path: join(TOOL_DIRECTORY, 'prime.mjs') }, { pluginRoot }).status, 0);
+      assert.equal(existsSync(trace), false, 'An ordinary unowned hook started Git or gh.');
+    });
+  }
+  return checks;
+}
+
+function linkedSnapshotChecks() {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'prime-linked-')));
+  const checks = [];
+  const check = (name, test) => {
+    try { test(); checks.push([name, true]); }
+    catch (error) { console.error(`linked snapshot fixture: ${name}: ${error.message}`); checks.push([name, false]); }
+  };
+  try {
+    const root = buildFixtureRepository(scratch, fixtureConfig());
+    const runGit = (args) => {
+      const result = git(root, args);
+      assert.equal(result.ok, true, result.detail);
+      return result.value;
+    };
+    const head = runGit(['rev-parse', 'HEAD']);
+    runGit(['update-ref', 'refs/remotes/origin/main', head]);
+    const coordinator = () => JSON.stringify([
+      runGit(['symbolic-ref', 'HEAD']), runGit(['rev-parse', 'HEAD']),
+      createHash('sha256').update(readFileSync(join(root, '.git', 'index'))).digest('hex'),
+      runGit(['status', '--porcelain=v1']), runGit(['write-tree']),
+      runGit(['rev-parse', 'refs/remotes/origin/main']),
+      readFileSync(join(root, '.autoloop', 'config.json'), 'utf8'),
+    ]);
+    const before = coordinator();
+    const linked = join(scratch, 'linked');
+    runGit(['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-q', '-b', 'feat/gh-7-linked', linked, head]);
+    const mainIdentity = resolveRepositoryCheckout(root);
+    const linkedIdentity = resolveRepositoryCheckout(linked);
+    const alias = join(scratch, 'linked-alias');
+    symlinkSync(linked, alias);
+    const common = mainIdentity.commonDir;
+    const shared = join(common, 'autoloop');
+    const sectionsOf = (checkout, issue) => {
+      const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+      const blocked = issueSnapshotItem({ number: issue, title: `Checkout ${issue}`, body: '',
+        updatedAt: '2026-01-01T00:00:00Z', labels: ['loop-blocked', 'human:decide'] });
+      sections.repo = completeSection([{ owner: 'autoloop-fixtures', name: 'prime', nameWithOwner: 'autoloop-fixtures/prime', defaultBranch: 'main' }]);
+      sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: checkout === root ? 'main' : 'feat/gh-7-linked', headOid: head }]);
+      sections.lifecycleMarkers = completeSection([{
+        issueNumber: 7, id: 'IC_fixture', tipId: 'IC_fixture', sequence: 0, author: 'autoloop', authorAssociation: 'MEMBER',
+        body: serializeLifecycleMarker({ v: 1, issue: 7, phase: 'intent-recorded',
+          branch: 'feat/gh-7-contract', intentSource: 'invocation', selector: 'native', mergePolicy: 'manual',
+          issueBodyHash: 'b'.repeat(64), planHash: 'c'.repeat(64), plannedBaseOid: head, runIntentHash: 'd'.repeat(64) }),
+        createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', url: null,
+      }]);
+      sections.openIssues = completeSection([blocked]);
+      sections.blockedIssues = completeSection([blocked]);
+      return createSnapshot({ scannedAt: '2026-01-01T00:00:02.000Z', sections });
+    };
+    const save = (checkout, issue) => persistPrimeSnapshot({ ok: true, checkout: { headOid: head }, snapshot: sectionsOf(checkout, issue) }, checkout);
+    const main = save(root, 501);
+    const nowMs = Date.parse('2026-01-01T00:01:00.000Z');
+    assert(writeRunMarker(root, [process.ppid], 1, 'main', 'S-fixture'));
+    assert(recordLatch({ baseBranch: 'main', scope: root, sessionId: 'S-fixture', directory: latchDirectory(scratch) }));
+    const view = (checkout) => parkedView({ root: checkout, nowMs });
+    const card = (checkout) => runCard({ root: checkout, nowMs });
+    const project = (checkout) => statusProjection({ root: checkout, nowMs, sessionId: 'S-fixture', home: scratch });
+    check('real main and linked identities have distinct Git directories and one common repository key', () => {
+      assert.notEqual(mainIdentity.gitDir, linkedIdentity.gitDir);
+      assert.equal(mainIdentity.repositoryKey, linkedIdentity.repositoryKey);
+      assert.equal(linkedIdentity.commonDir, common);
+      assert.deepEqual(resolveRepositoryCheckout(alias), linkedIdentity);
+    });
+    check('a linked reader does not borrow a main snapshot or an unattributed common queue count', () => {
+      writeFileSync(join(shared, 'queue-count.json'), JSON.stringify({ eligible: 99, scannedAtMs: 1 }));
+      assert.match(view(root), /#501/);
+      assert.doesNotMatch(view(linked), /#501/);
+      assert.match(view(linked), /queue unknown \(re-prime\)/);
+      assert.doesNotMatch(card(linked), /retained snapshot/);
+      assert.equal(project(linked).run.snapshotAuthority, 'none');
+      assert.equal(project(linked).counts.eligible, null);
+    });
+    let unit;
+    check('prime persists linked v3 snapshots under the actual checkout Git directory', () => {
+      unit = save(alias, 502);
+      assert.equal(main.snapshotPath, join(common, 'autoloop', 'prime', `${head}.snapshot.json`));
+      assert.equal(unit.snapshotPath, join(linkedIdentity.gitDir, 'autoloop', 'prime', `${head}.snapshot.json`));
+      assert.deepEqual(JSON.parse(readFileSync(unit.snapshotPath, 'utf8')), sectionsOf(alias, 502));
+      assert.equal(JSON.parse(readFileSync(main.snapshotPath, 'utf8')).sections.openIssues.items[0].number, 501);
+    });
+    if (unit) {
+      check('parked, compaction and status readers use only their checkout snapshot and shared controls/events', () => {
+        setRunId(common, 'linked-fixture');
+        appendEvent(common, { v: 1, at: nowMs, run: 'linked-fixture', by: 'step', kind: 'step', issue: 7, step: '09-gate' });
+        mkdirSync(join(shared, 'control', 'refused'), { recursive: true });
+        writeFileSync(join(shared, 'control', 'refused', 'fixture.json'), JSON.stringify({ at: nowMs, kind: 'merge', reason: 'fixture refusal' }));
+        assert.match(view(linked), /#502/);
+        assert.doesNotMatch(view(linked), /#501/);
+        assert.match(card(alias), new RegExp(unit.snapshotPath));
+        const projection = project(linked);
+        assert.equal(projection.run.snapshotAuthority, 'current');
+        assert.equal(projection.units[0].issue, 502);
+        assert.equal(projection.log[0].issue, 7);
+        assert.equal(projection.controls.refused[0].reason, 'fixture refusal');
+      });
+      check('linked prime reads marker refusals from common storage, not beside its snapshot', () => {
+        const refusals = join(shared, 'marker-refusals');
+        mkdirSync(refusals, { recursive: true });
+        writeFileSync(join(refusals, '7.json'), JSON.stringify({ driver: lifecycleDriverIdentity(), atMs: nowMs, code: 'FIXTURE_REFUSAL' }));
+        const next = save(linked, 502);
+        assert.deepEqual(next.markers, { gating: [], deferred: [], knownRefused: [{ issue: 7, code: 'FIXTURE_REFUSAL' }] });
+      });
+      check('existing snapshot CLI readers accept the unchanged linked v3 snapshot shape', () => {
+        const read = spawnSync(process.execPath, [join(TOOL_DIRECTORY, 'snapshot-contract.mjs'), '--section', 'openIssues', unit.snapshotPath],
+          { encoding: 'utf8', timeout: 10000 });
+        assert.equal(read.status, 0, read.stderr);
+        assert(read.stdout.includes('502'));
+        assert.equal(JSON.parse(readFileSync(unit.snapshotPath, 'utf8')).version, 3);
+      });
+      check('shipped invalidation changes only the linked snapshot and keeps steps/counts in common storage', () => {
+        const mainBytes = readFileSync(main.snapshotPath, 'utf8');
+        assert.equal(transition({ root: linked, nowMs, issue: 7, to: '09-gate', staged: true }).ok, true);
+        const closed = closeUnit({ root: alias, nowMs, issue: 7, outcome: 'shipped' });
+        assert.equal(closed.ok, true);
+        assert(readFileSync(unit.snapshotPath, 'utf8').includes('PR_MUTATION'));
+        assert.equal(readFileSync(main.snapshotPath, 'utf8'), mainBytes);
+        assert.equal(JSON.parse(readFileSync(join(shared, 'steps', '7.json'), 'utf8')).closed.outcome, 'shipped');
+        assert.equal(JSON.parse(readFileSync(join(shared, 'queue-count.json'), 'utf8')).eligible, 0);
+        assert.equal(existsSync(join(linkedIdentity.gitDir, 'autoloop', 'steps')), false);
+      });
+      check('issue mutation invalidates only its checkout and common queue summaries retain checkout attribution', () => {
+        save(linked, 502);
+        const mainBytes = readFileSync(main.snapshotPath, 'utf8');
+        const bin = join(scratch, 'gh-bin');
+        mkdirSync(bin);
+        writeFileSync(join(bin, 'gh'), '#!/bin/sh\nif [ "$1 $2" = "issue view" ]; then printf \'[]\\n\'; exit 0; fi\n[ "$1 $2" = "issue edit" ]\n', { mode: 0o700 });
+        const previousPath = process.env.PATH;
+        try {
+          process.env.PATH = `${bin}:${previousPath}`;
+          assert.equal(transition({ root: linked, nowMs, issue: 8, to: '01-premise' }).ok, true);
+        } finally { process.env.PATH = previousPath; }
+        assert(readFileSync(unit.snapshotPath, 'utf8').includes('ISSUE_MUTATION'));
+        assert.equal(readFileSync(main.snapshotPath, 'utf8'), mainBytes);
+        assert.match(view(linked), /queue 0 eligible as of/);
+        assert.equal(project(linked).counts.eligible, 0);
+        // Neither main nor another unprimed linked checkout may borrow this count.
+        writeFileSync(main.snapshotPath, JSON.stringify({ ...sectionsOf(root, 501), version: 2 }));
+        assert.match(view(root), /queue unknown \(re-prime\)/);
+        assert.equal(project(root).counts.eligible, null);
+        save(root, 501);
+      });
+    }
+    checks.push(...linkedGuardChecks({ scratch, root, linked, linkedIdentity }));
+    check('snapshot operations do not change the coordinator branch, HEAD, index, tree or base ref', () => {
+      assert.equal(coordinator(), before);
+    });
+  } finally {
+    try { rmSync(scratch, { recursive: true, force: true }); }
+    catch (error) { console.error(`Retained approved fixture ${scratch}: ${error.message}`); }
+  }
+  return checks;
+}
+
 function selfTest() {
   const failures = [];
   const cases = [];
@@ -1115,6 +1468,7 @@ function selfTest() {
     && withDigest({ ok: false }, () => { throw new Error('never called'); }).digest === undefined,
   );
 
+  for (const [name, passed] of linkedSnapshotChecks()) check(name, passed);
   const scratch = mkdtempSync(join(tmpdir(), 'autoloop-prime-'));
   try {
     const root = buildFixtureRepository(scratch, fixtureConfig());

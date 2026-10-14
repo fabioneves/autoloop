@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import {
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -68,6 +69,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'review-contract.mjs',
   'scan.mjs',
   'scheduler-contract.mjs',
+  'scheduler-selection.mjs',
   'setup.mjs',
   'sizing-contract.mjs',
   'snapshot-contract.mjs',
@@ -216,8 +218,12 @@ function realOrSelf(path) {
 // output keeps 'close' away until the timeout.
 export function runSelfTest(path, cwd, {
   timeoutMs = SELF_TEST_TIMEOUT_MS, cleanupWaitMs = CLEANUP_WAIT_MS, settleMs = SETTLE_MS, tally = selfTestProcesses,
-  groupAlive = processGroupAlive, killGroup = killProcessGroup,
+  groupAlive = processGroupAlive, killGroup = killProcessGroup, selectionGroup,
 } = {}) {
+  if (selectionGroup !== undefined && (basename(path) !== 'scheduler-selection.mjs'
+    || !['foundation', 'boundary-admission', 'boundary-widening'].includes(selectionGroup))) {
+    return Promise.resolve({ ok: false, cleanupFailed: false, detail: 'A selection group requires scheduler-selection.mjs and a canonical selection test group.' });
+  }
   if (selfTesting && realOrSelf(path) === realOrSelf(OWN_PATH)) {
     return Promise.resolve({ ok: false, cleanupFailed: false, detail: 'verify.mjs never runs its own self-test from inside it' });
   }
@@ -230,10 +236,16 @@ export function runSelfTest(path, cwd, {
     return true;
   };
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [path, '--self-test'], {
+    const args = [path, '--self-test'];
+    const env = { ...process.env, AUTOLOOP_VERIFY_RUN_ID: RUN_ID };
+    if (selectionGroup !== undefined) {
+      args.push('--group', selectionGroup);
+      delete env.SELECTION_TEST_FILTER;
+    }
+    const child = spawn(process.execPath, args, {
       cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
       // Labels the test's processes, so /proc/<pid>/environ attributes them to this run.
-      env: { ...process.env, AUTOLOOP_VERIFY_RUN_ID: RUN_ID },
+      env,
     });
     const pgid = child.pid ?? null;
     let output = '';
@@ -309,6 +321,13 @@ export function runSelfTest(path, cwd, {
       onClose();
     });
   });
+}
+
+export function selectionSelfTestChecks(path, cwd) {
+  return ['foundation', 'boundary-admission', 'boundary-widening'].map((selectionGroup) => ({
+    name: `self-test scheduler-selection.mjs [${selectionGroup}]`,
+    execute: () => runSelfTest(path, cwd, { selectionGroup }),
+  }));
 }
 
 function checkJson(path) {
@@ -508,7 +527,8 @@ function toolChecks(root, toolsDir, requiredFiles) {
     // verify.mjs's own self-test too: its --self-test mode builds none of
     // these checks and refuses to start itself (runSelfTest), so it cannot recurse.
     if (!SELF_TEST_PATTERN.test(readFileSync(path, 'utf8'))) continue;
-    checks.push({
+    if (name === 'scheduler-selection.mjs') checks.push(...selectionSelfTestChecks(path, root));
+    else checks.push({
       name: `self-test ${name}`,
       execute: () => runSelfTest(path, root),
     });
@@ -664,6 +684,82 @@ async function processCases() {
   }
 }
 
+// Use the real selection module, but stop before its first case action. These
+// failure fixtures must not run the full selection suite inside this self-test.
+export async function selectionRegistrationCases() {
+  const scratch = mkdtempSync(join(tmpdir(), 'autoloop-selection-registration-'));
+  const tools = join(scratch, 'tools');
+  cpSync(dirname(OWN_PATH), tools, { recursive: true });
+  const path = join(tools, 'scheduler-selection.mjs');
+  const original = readFileSync(path, 'utf8');
+  const marker = '    console.error(`selection case START ${name}`);';
+  if (original.split(marker).length !== 2) throw new Error('The selection case gate must be unique.');
+  const mutate = (body) => writeFileSync(path, original.replace(marker, `${marker}\n${body}`));
+  const previousFilter = process.env.SELECTION_TEST_FILTER;
+  process.env.SELECTION_TEST_FILTER = 'ambient filter must not reduce complete groups';
+  try {
+    mutate("    if (process.env.SELECTION_TEST_FILTER !== undefined) throw new Error('The canonical filter was not removed.');\n    console.log(`selection fixture group ${assignedGroup}`);\n    process.exit(4);");
+    const checks = selectionSelfTestChecks(path, scratch);
+    const lines = [];
+    const failed = await runChecks(checks, { log: (line) => lines.push(line), error: (line) => lines.push(line) });
+    const expectedGroups = ['foundation', 'boundary-admission', 'boundary-widening'];
+    const expectedNames = expectedGroups.map((group) => `self-test scheduler-selection.mjs [${group}]`);
+    const selectedGroups = [...lines.join('\n').matchAll(/^selection fixture group (.+)$/gmu)].map((match) => match[1]);
+    if (failed.stopped) return [['selection failure fixture cleanup must be confirmed before another child starts', false]];
+    const beforeInvalid = selfTestProcesses.launched;
+    const invalid = await Promise.all(['', 'unknown', 'all', 'boundary', null].map((selectionGroup) => runSelfTest(path, scratch, { selectionGroup })));
+    const wrongTool = await runSelfTest(join(tools, 'config-contract.mjs'), scratch, { selectionGroup: 'foundation' });
+    const invalidDidNotLaunch = selfTestProcesses.launched === beforeInvalid;
+    const metadataResults = [];
+    const firstDeclaration = "    await check('the facade exists and has no production queue or mutation CLI', async () => {";
+    for (const metadata of ['unknown', ['foundation', 'boundary-admission']]) {
+      mutate('    process.exit(4);');
+      const source = readFileSync(path, 'utf8');
+      writeFileSync(path, source.replace(firstDeclaration,
+        `    await check('invalid metadata fixture', async () => {}, ${JSON.stringify(metadata)});\n${firstDeclaration}`));
+      const result = await runSelfTest(path, scratch, { selectionGroup: 'boundary-widening' });
+      metadataResults.push(result);
+      if (result.cleanupFailed) return [['invalid metadata fixture cleanup must be confirmed before another child starts', false]];
+    }
+    mutate("    if (process.env.SELECTION_TEST_FILTER !== undefined) throw new Error('The canonical filter was not removed.');\n    console.log(`selection fixture group ${assignedGroup}`);\n    const member = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], { stdio: 'ignore' });\n    console.log(`selection group child ${member.pid}`);\n    await new Promise(() => {});");
+    const timeouts = [];
+    for (const selectionGroup of expectedGroups) {
+      const tally = { launched: 0, exited: 0, timedOut: 0, leftovers: 0, uncleaned: 0, groups: [] };
+      let result;
+      const gate = await runChecks([{ name: 'selection group timeout fixture', execute: async () => {
+        result = await runSelfTest(path, scratch, { selectionGroup, timeoutMs: 5000, tally });
+        return result;
+      } }], { log: () => {}, error: () => {} });
+      timeouts.push({ selectionGroup, result, gate, tally });
+      if (gate.stopped) break;
+    }
+    return [
+      ['the gate registers all selection groups with no ambient focused filter and keeps their real failures',
+        JSON.stringify(checks.map(({ name }) => name)) === JSON.stringify(expectedNames)
+          && JSON.stringify(failed.failures) === JSON.stringify(expectedNames) && !failed.stopped
+          && JSON.stringify(selectedGroups) === JSON.stringify(expectedGroups)
+          && lines.filter((line) => /process: run .* exit 4 .* cleanup confirmed/u.test(line)).length === expectedGroups.length],
+      ['invalid, empty, obsolete and other-tool selection group requests fail before child launch',
+        invalidDidNotLaunch && [...invalid, wrongTool].every((result) => !result.ok && !result.cleanupFailed)],
+      ['unknown or multiple group metadata fails before an unselected declaration can disappear',
+        metadataResults.every((result) => !result.ok && !result.cleanupFailed
+          && /Each selection test needs one canonical group/u.test(result.detail) && /exit 1 /u.test(result.detail))],
+      ['each real selection group timeout fails the gate and confirms the child group is gone',
+        timeouts.length === expectedGroups.length && timeouts.every(({ selectionGroup, result, gate, tally }) =>
+          gate.failures.length === 1 && !gate.stopped && !result.ok && !result.cleanupFailed
+            && result.detail.includes(`selection fixture group ${selectionGroup}`)
+            && /selection group child \d+/u.test(result.detail) && /timed-out true .* cleanup confirmed/u.test(result.detail)
+            && tally.launched === 1 && tally.timedOut === 1 && tally.uncleaned === 0
+            && tally.groups.every((pgid) => !processGroupAlive(pgid)))],
+    ];
+  } finally {
+    writeFileSync(path, original);
+    if (previousFilter === undefined) delete process.env.SELECTION_TEST_FILTER;
+    else process.env.SELECTION_TEST_FILTER = previousFilter;
+    console.log(`Selection registration fixtures retained at ${scratch}`);
+  }
+}
+
 async function selfTest() {
   const success = run(process.execPath, ['--version'], process.cwd());
   const failure = run(process.execPath, ['--definitely-not-a-node-option'], process.cwd());
@@ -787,6 +883,10 @@ async function selfTest() {
   const nested = await runSelfTest(own, process.cwd(), { timeoutMs: 5000 });
   const cases = [
     ...processes,
+    ['the canonical gate registers all complete selection groups instead of an overlapping aggregate self-test',
+      JSON.stringify(scheduled.filter((name) => name.startsWith('self-test scheduler-selection.mjs')))
+        === JSON.stringify(['self-test scheduler-selection.mjs [foundation]', 'self-test scheduler-selection.mjs [boundary-admission]',
+          'self-test scheduler-selection.mjs [boundary-widening]'])],
     ['the gate runs verify.mjs\'s own self-test in its own group, and a self-test never starts it again',
       scheduled.includes(`self-test ${basename(own)}`) && !nested.ok && /never runs its own self-test/u.test(nested.detail)
         && !selfTestProcesses.groups.length],
@@ -849,6 +949,7 @@ async function selfTest() {
         && checkCompaction({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '60' }).note === undefined
         && checkCompaction({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000' }).note === undefined],
   ];
+  cases.push(...await selectionRegistrationCases());
   const failures = cases.filter(([, passed]) => !passed);
   for (const [name] of failures) console.error(`FAIL ${name}`);
   console.log(

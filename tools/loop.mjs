@@ -14,7 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   abandonPreparedEffect, acquireScheduler, assertNoKnownLegacyOwner, boundGroupState, claimControl, commitTransition, completeControl, createPins, createSchedulerTestAccount, DEFAULT_SUPERVISOR_PROFILE,
-  hasUnresolvedEffects as unresolvedEffects,
+  hasRetainedSelection, boundCreatorState, hasUnresolvedEffects as unresolvedEffects,
   listControlRequests, markEffectInFlight, prepareEffect, processGroupOf, processIdentityState,
   readCheckpoint, readCurrentCheckpoint, readPins, readProcessIdentity, readRequest, readSchedulerOwner,
   releaseScheduler, resolveRepository, schedulerDigest, SchedulerError, settleEffect, submitControl, registerWorker,
@@ -266,7 +266,7 @@ function applyLocalControl(context, requestId) {
 function observeRecovery(context) {
   const checkpoint = readCheckpoint(context.repository, context.runId);
   if (checkpoint.state !== 'recovering') return;
-  const waiting = unresolvedEffects(checkpoint) || liveWorkers(checkpoint).some((worker) => worker.generation < context.generation);
+  const waiting = hasRetainedSelection(checkpoint) || unresolvedEffects(checkpoint) || liveWorkers(checkpoint).some((worker) => worker.generation < context.generation);
   if (waiting) return;
   commitTransition(context.lease, checkpoint.revision, (value) => ({ ...value, state: value.desiredState === 'stopped'
     ? 'draining' : value.desiredState, error: null }));
@@ -277,6 +277,7 @@ function stoppedError(checkpoint, waitingGroup) {
   }
   if (unresolvedEffects(checkpoint)) return { code: 'PREPARED_INTENT_RETAINED', message: 'The run retains unstarted cancellation intent.' };
   if (waitingGroup) return { code: 'OWNER_UNVERIFIED', message: 'The run stopped with a group that needs readback.' };
+  if (hasRetainedSelection(checkpoint)) return { code: 'SELECTION_RETAINED', message: 'The stopped run retains selection ownership.' };
   return checkpoint.error;
 }
 export async function runLoop({ repository, pins, initiator, tickMs = 1000, onReady = () => {} }) {
@@ -314,10 +315,12 @@ export async function runLoop({ repository, pins, initiator, tickMs = 1000, onRe
       const waitingCancellation = checkpoint.stopMode === 'immediate' && Object.values(checkpoint.requests)
         .some((request) => request.request.kind === 'stop-now' && request.status === 'unknown');
       const retained = liveWorkers(checkpoint);
-      const waitingGroup = checkpoint.stopMode === 'graceful' && retained.length > 0
-        && retained.every((worker) => boundGroupState(worker) === 'unknown');
+      const creators = checkpoint.units.flatMap((unit) => unit.allocation?.creator ? [boundCreatorState(unit.allocation.creator)] : [])
+        .filter((state) => state !== 'empty');
+      const waitingGroup = checkpoint.stopMode === 'graceful' && (retained.length > 0 || creators.length > 0)
+        && retained.every((worker) => boundGroupState(worker) === 'unknown') && creators.every((state) => state === 'unknown');
       if (checkpoint.desiredState === 'stopped' && context.cancellations.size === 0
-        && (retained.length === 0 || waitingCancellation || waitingGroup)) {
+        && ((retained.length === 0 && creators.every((state) => state !== 'alive')) || waitingCancellation || waitingGroup)) {
         if (checkpoint.state !== 'stopped') checkpoint = commitTransition(context.lease, checkpoint.revision, (value) => ({ ...value,
           state: 'stopped', desiredState: 'stopped', error: stoppedError(value, waitingGroup) }));
         releaseScheduler(context.lease);
@@ -363,7 +366,7 @@ export function prepareLoopCommand(options) {
   const launching = ['start', 'foreground'].includes(options.operation);
   const recovering = launching && stored && (stored.state !== 'stopped'
     || (stored.workers ?? []).some((worker) => boundGroupState(worker) !== 'empty')
-    || unresolvedEffects(stored)
+    || hasRetainedSelection(stored) || unresolvedEffects(stored)
     || listControlRequests(repository, stored.runId).length > 0);
   let pins;
   if (recovering) pins = readPins(repository, stored.runId);
@@ -964,6 +967,73 @@ async function selfTest() {
           const fresh = acquireScheduler(setup.repository, next, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
           commitTransition(fresh.lease, 1, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(fresh.lease);
         }
+      });
+      await check('stopped selection ownership selects the same run and graceful stop retains waiting work without an infinite drain', async () => {
+        const { createSnapshot, completeSection, issueSnapshotItem, SNAPSHOT_SECTIONS } = await import('./snapshot-contract.mjs');
+        const { selectionSnapshotReference } = await import('./scheduler-selection-schema.mjs');
+        const { publishSelectionSnapshot } = await import('./scheduler-contract.mjs');
+        const setup = fixture(); const root = setup.repository.coordinatorRoot;
+        const git = (...args) => { const value = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', timeout: 15000 });
+          assert.equal(value.status, 0, value.stderr); return value.stdout.trim(); };
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base');
+        git('remote', 'add', 'origin', 'https://github.com/example/runtime-fixture.git');
+        const baseOid = git('rev-parse', 'HEAD'); git('update-ref', 'refs/remotes/origin/main', baseOid);
+        mkdirSync(join(root, '.autoloop')); writeFileSync(join(root, '.autoloop', 'config.json'), JSON.stringify(setup.pins.config));
+        const owner = acquireScheduler(setup.repository, setup.pins, { kind: 'terminal', sessionId: null, process: readProcessIdentity() });
+        commitTransition(owner.lease, 1, (value) => ({ ...value, state: 'running' }));
+        const at = '2026-01-01T00:00:00.000Z';
+        const repository = { host: 'github.com', owner: 'example', name: 'runtime-fixture', nodeId: 'R_fixture' };
+        const issue = issueSnapshotItem({ number: 7, title: 'Fixture work', body: 'Public fixture work.', updatedAt: at, lastEditedAt: null, labels: ['loop-ready'] });
+        const queue = { ...issue, blockedBy: [], dependencies: [], provenance: { labeledBy: 'fixture-operator', labeledAt: at } };
+        const role = { login: 'fixture-operator', roleName: 'write', permission: 'write', evidence: [{ kind: 'queue-label', issueNumber: 7,
+          author: 'fixture-operator', authorAssociation: 'MEMBER', body: '', createdAt: at, updatedAt: at, url: null }] };
+        const issueSource = { number: 7, nodeId: 'I_fixture' };
+        const approvalSource = { issue: 7, issueNodeId: issueSource.nodeId, approvalIssue: 7, approvalIssueNodeId: issueSource.nodeId,
+          eventId: 'E_fixture', actorLogin: role.login, createdAt: at, kind: 'loop-ready' };
+        const roleSource = { login: role.login, userId: 101, permission: 'write', roleName: 'write' };
+        const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+        sections.repo = completeSection([{ owner: 'example', name: 'runtime-fixture', nameWithOwner: 'example/runtime-fixture', defaultBranch: 'main' }]);
+        sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: baseOid }]);
+        sections.queue = completeSection([queue]); sections.openIssues = completeSection([issue]); sections.authorVerification = completeSection([role]);
+        const evidence = { schema: 'autoloop.selection-snapshot/1', runId: setup.pins.runId, generation: 1, checkpointRevision: 2,
+          repositoryKey: setup.repository.repositoryKey, root, gitDir: setup.repository.commonDir, commonDir: setup.repository.commonDir,
+          repository, configuredBaseBranch: 'main', baseRef: 'refs/remotes/origin/main', baseOid, headOid: baseOid,
+          configDigest: setup.pins.configDigest, snapshot: createSnapshot({ scannedAt: at, sections }),
+          sources: { schema: 'autoloop.selection-sources/1', repository, issues: [issueSource], approvals: [approvalSource], roles: [roleSource],
+            waitIssues: completeSection([]), waitPullRequests: completeSection([]) } };
+        const reference = selectionSnapshotReference(evidence); publishSelectionSnapshot(owner.lease, 2, evidence);
+        const subject = { repositoryKey: setup.repository.repositoryKey, repository, issue: 7, issueNodeId: issueSource.nodeId, issueBodyDigest: issue.bodySha256,
+          approval: { kind: 'loop-ready', issue: 7, issueNodeId: issueSource.nodeId, eventId: approvalSource.eventId, actorLogin: role.login,
+            actorUserId: 101, createdAt: at } };
+        const unitId = randomUUID();
+        const authorization = { schema: 'autoloop.issue-authorization/1', subject, authorizationDigest: schedulerDigest(subject),
+          evidenceDigest: schedulerDigest({ queue, openIssue: issue, role, issueSource, approvalSource, roleSource }), snapshot: reference };
+        const unit = { schema: 'autoloop.selection-unit/1', runId: setup.pins.runId, repositoryKey: setup.repository.repositoryKey, unitId,
+          unitGeneration: 1, allocation: null, plan: null, admission: null, wait: null, checkedSnapshot: reference, replanRequired: false,
+          policy: { authorize: [] }, disposition: null };
+        const reservation = { schema: 'autoloop.reservation/1', runId: setup.pins.runId, unitId, unitGeneration: 1, issue: 7,
+          repositoryKey: setup.repository.repositoryKey, issueAuthorization: authorization, slot: 1, baseOid, worktree: null, paths: [], state: 'planning', createdRevision: 3 };
+        commitTransition(owner.lease, 2, (value) => ({ ...value, units: [unit], reservations: [reservation] }));
+        const freshEvidence = { ...evidence, checkpointRevision: 3, sources: { ...evidence.sources,
+          waitIssues: completeSection([{ number: 8, nodeId: 'I_fixture_blocker', state: 'OPEN' }]) } };
+        const freshReference = publishSelectionSnapshot(owner.lease, 3, freshEvidence);
+        const requestedPlan = { planGeneration: 1, planDigest: schedulerDigest({ body: 'Fixture plan for src/', baseOid, boundary: ['src/'] }),
+          baseOid, boundary: ['src/'] };
+        const wait = { schema: 'autoloop.selection-wait/1', code: 'ISSUE_WAIT', unitId,
+          conflicts: [{ type: 'issue', id: 8, paths: [] }], condition: { all: [{ on: 'issue', number: 8 }] },
+          requestedPlan, snapshot: freshReference, createdRevision: 4 };
+        const waitingUnit = { ...unit, wait, checkedSnapshot: freshReference };
+        const waitingReservation = { ...reservation, state: 'waiting' };
+        commitTransition(owner.lease, 3, (value) => ({ ...value, units: [waitingUnit], reservations: [waitingReservation] }));
+        commitTransition(owner.lease, 4, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' })); releaseScheduler(owner.lease);
+        const prepared = prepareLoopCommand(parseLoopArgs(['run', '--foreground', '--root', root, '--operator-terminal']));
+        assert.equal(prepared.pins.runId, setup.pins.runId); assert.equal(prepared.command.runId, setup.pins.runId);
+        const runtime = await startRuntime(setup);
+        assert.equal(runtime.readiness.state, 'recovering');
+        assert.equal((await runtime.closed).code, 0, runtime.errors);
+        const stopped = readCheckpoint(setup.repository, setup.pins.runId);
+        assert.deepEqual(stopped.units, [waitingUnit]); assert.deepEqual(stopped.reservations, [waitingReservation]);
+        assert.equal(stopped.error.code, 'SELECTION_RETAINED');
       });
       await check('launch selection retains stopped prepared intents before accounting', () => {
         const setup = fixture();
