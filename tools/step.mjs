@@ -14,7 +14,7 @@
 
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
-  statSync, writeFileSync,
+  statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -2276,8 +2276,13 @@ function pendingMergeChecks() {
 export function statusFixture(at) {
   const nowMs = at(10, 30);
   const scratch = mkdtempSync(join(tmpdir(), 'step-projection-'));
-  const root = join(scratch, 'repo');
-  initializeStepFixture(root);
+  // Exercise a directory alias on every host, as macOS temporary paths do.
+  const alias = join(scratch, 'alias');
+  symlinkSync(scratch, alias, 'dir');
+  const aliasedRoot = join(alias, 'repo');
+  initializeStepFixture(aliasedRoot);
+  // Match the real Git paths that runCard reads. Keep its strict text check.
+  const root = realpathSync(aliasedRoot);
   const home = join(scratch, 'home');
   const autoloop = join(root, '.git', 'autoloop');
   const issue = (number, title, labels) => issueSnapshotItem({
