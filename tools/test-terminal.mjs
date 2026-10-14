@@ -3,11 +3,29 @@
 // terminal before exec, without changing admission checks or the environment.
 import { spawn } from 'node:child_process';
 
-const adapter = `import errno, os, pty, select, signal, sys
+const adapter = `import errno, os, pty, select, signal, subprocess, sys
 
 pid, master = pty.fork()
 if pid == 0:
     os.execvp(sys.argv[1], sys.argv[1:])
+
+def zombie_only_group():
+    # WNOWAIT reserves the child's PID while the group is inspected.
+    exited = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    if exited is None or exited.si_pid != pid:
+        return False
+    snapshot = subprocess.check_output(['ps', '-axo', 'pid=,pgid=,stat='], text=True, timeout=5)
+    found_child = False
+    for line in snapshot.splitlines():
+        fields = line.split()
+        if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+            raise RuntimeError('The PTY group snapshot is invalid.')
+        member, group, state = fields
+        if int(group) == pid:
+            if not state.startswith('Z'):
+                return False
+            found_child = found_child or int(member) == pid
+    return found_child
 
 def stop(signum, frame):
     raise SystemExit(128 + signum)
@@ -36,12 +54,33 @@ try:
             while data:
                 data = data[os.write(master, data):]
 finally:
-    # The child has not been reaped, so its process-group ID cannot be reused.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # Keep the child unreaped through every group check and signal.
     try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    os.close(master)
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            # XNU filters SZOMB members and returns EPERM for a zombie-only
+            # group. A live child, descendant, or unknown snapshot must fail.
+            if not zombie_only_group():
+                raise
+    except Exception as error:
+        # Reap the owned child on failure, but do not claim group cleanup.
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            os.waitpid(pid, os.WNOHANG)
+            raise RuntimeError('The PTY child and group cleanup are unverified.') from error
+        _, status = os.waitpid(pid, 0)
+        raise RuntimeError('The PTY group cleanup is unverified; child exit ' +
+                           str(os.waitstatus_to_exitcode(status)) + '.') from error
+    finally:
+        os.close(master)
     _, status = os.waitpid(pid, 0)
 
 code = os.waitstatus_to_exitcode(status)

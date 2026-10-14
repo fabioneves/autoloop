@@ -360,6 +360,30 @@ async function admissionTestCases(scratch) {
         assert.equal(processIdentityState(identity), 'dead');
       } finally { terminal.cleanup(); await terminal.closed; }
     });
+    await check('the PTY adapter cleans a live descendant after its leader exits and preserves the leader status', async () => {
+      const { processIdentityState } = await import('./scheduler-contract.mjs');
+      const follower = "process.on('SIGHUP', () => {}); setTimeout(() => process.exit(0), 2000); setInterval(() => {}, 1000); process.send({ ready: true });";
+      const leader = `const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['-e', ${JSON.stringify(follower)}], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+        child.once('message', () => {
+          console.log('PTY DESCENDANT ' + child.pid);
+          process.stdin.once('data', () => process.exit(7));
+        });`;
+      const terminal = spawnTestTerminal([process.execPath, '-e', leader]);
+      try {
+        await terminal.waitForOutput('\n');
+        const pid = Number(/PTY DESCENDANT (\d+)/u.exec(terminal.output)[1]);
+        const identity = readProcessIdentity(pid);
+        assert.equal(processIdentityState(identity), 'alive');
+        terminal.stdin.write('exit\n');
+        assert.equal((await terminal.closed).code, 7, terminal.output + terminal.errors);
+        const deadline = Date.now() + 1000;
+        while (processIdentityState(identity) !== 'dead' && Date.now() < deadline) {
+          await new Promise((done) => setTimeout(done, 10));
+        }
+        assert.equal(processIdentityState(identity), 'dead', 'The live descendant was not cleaned.');
+      } finally { terminal.cleanup(); await terminal.closed; }
+    });
     await check('a real controlling terminal accepts explicit confirmation, not just a flag', async () => {
       const entry = join(scratch, 'terminal-entry.mjs');
       writeFileSync(entry, `import { admitOperatorTerminal } from ${JSON.stringify(import.meta.url)};
