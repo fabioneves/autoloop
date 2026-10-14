@@ -31,7 +31,9 @@ clearly outweighs the added supply-chain and setup cost.
 
 ## Verification
 
-The canonical verification command is the same one CI runs on Linux and macOS:
+The canonical verification command is the same one CI runs on Linux and macOS.
+Terminal fixtures require Python 3.9 or later with its standard-library PTY support; no Python
+packages are required. Production tools do not use this test helper.
 
 ```bash
 node tools/verify.mjs --plugin-root .

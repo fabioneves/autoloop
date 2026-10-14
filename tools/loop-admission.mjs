@@ -199,6 +199,7 @@ async function selfTest() {
 }
 
 async function admissionTestCases(scratch) {
+  const { spawnTestTerminal } = await import('./test-terminal.mjs');
   const cases = [];
   const check = async (name, run) => {
     try { await run(); cases.push([name, true]); }
@@ -327,22 +328,59 @@ async function admissionTestCases(scratch) {
           supervisorProfile: { memoryMaxBytes: 6442450944, memorySwapMaxBytes: 0, tasksMax: 2048 } } };
       assert.deepEqual((await runHost(launch, 'payload')).answers, [{ ok: false, code: 'HOST_AUTH_REQUIRED' }]);
     });
-    await check('a real controlling terminal accepts explicit confirmation, not just a flag', () => {
+    await check('the piped PTY adapter preserves terminal devices, account, literal arguments and child failure', async () => {
+      const literal = `spaces 'quotes' "quotes" $HOME ; $(exit 99)`;
+      const probe = `import assert from 'node:assert/strict'; import { userInfo } from 'node:os';
+        import { openSync, closeSync, fstatSync } from 'node:fs'; import { isatty } from 'node:tty';
+        assert([0, 1, 2].every(isatty)); assert.equal(userInfo().homedir, process.argv[1]);
+        assert.equal(process.argv[2], ${JSON.stringify(literal)});
+        const fd = openSync('/dev/tty', 'r+'); assert(fstatSync(fd).isCharacterDevice() && isatty(fd)); closeSync(fd);
+        console.log('PTY READY'); process.stdin.once('data', (data) => {
+          assert.equal(String(data), 'answer\\n'); console.log('PTY ANSWER'); process.exit(7);
+        });`;
+      const terminal = spawnTestTerminal([process.execPath, '--input-type=module', '-e', probe, userInfo().homedir, literal]);
+      try {
+        await terminal.waitForOutput('PTY READY');
+        terminal.stdin.write('answer\n');
+        await terminal.waitForOutput('PTY ANSWER');
+        assert.equal((await terminal.closed).code, 7, terminal.output + terminal.errors);
+      } finally { terminal.cleanup(); await terminal.closed; }
+    });
+    await check('the PTY adapter kills and reaps its real child on cleanup', async () => {
+      const { processGroupOf, processIdentityState } = await import('./scheduler-contract.mjs');
+      const terminal = spawnTestTerminal([process.execPath, '-e', "console.log('PTY PID ' + process.pid); setInterval(() => {}, 1000);"]);
+      try {
+        await terminal.waitForOutput('\n');
+        const pid = Number(/PTY PID (\d+)/u.exec(terminal.output)[1]);
+        const identity = readProcessIdentity(pid);
+        assert.equal(processGroupOf(pid), pid);
+        assert.equal(processIdentityState(identity), 'alive');
+        terminal.cleanup();
+        await terminal.closed;
+        assert.equal(processIdentityState(identity), 'dead');
+      } finally { terminal.cleanup(); await terminal.closed; }
+    });
+    await check('a real controlling terminal accepts explicit confirmation, not just a flag', async () => {
       const entry = join(scratch, 'terminal-entry.mjs');
       writeFileSync(entry, `import { admitOperatorTerminal } from ${JSON.stringify(import.meta.url)};
         const command = JSON.parse(process.argv[2]); try {
           const actor = await admitOperatorTerminal(command); console.log('RESULT ' + JSON.stringify({ ok: true, kind: actor.kind }));
         } catch (error) { console.log('RESULT ' + JSON.stringify({ ok: false, code: error.code, message: error.message })); }`);
-      const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
-      const args = process.platform === 'darwin'
-        ? ['-q', join(scratch, 'terminal.log'), process.execPath, entry, JSON.stringify(command)]
-        : ['-q', '-e', '-c', [process.execPath, entry, JSON.stringify(command)].map(quote).join(' '), join(scratch, 'terminal.log')];
       for (const [answer, accepted] of [['yes\n', true], ['no\n', false]]) {
-        const result = spawnSync('script', args, { input: answer, encoding: 'utf8', timeout: 15000 });
-        assert.equal(result.status, 0, result.stderr || result.error?.message);
-        const match = /RESULT (\{[^\r\n]+\})/u.exec(result.stdout);
-        assert(match, result.stdout);
-        assert.equal(JSON.parse(match[1]).ok, accepted, result.stdout);
+        const terminal = spawnTestTerminal([process.execPath, entry, JSON.stringify(command)]);
+        try {
+          await terminal.waitForOutput('Type yes');
+          assert(!terminal.output.includes('RESULT '), 'Admission must wait for an answer.');
+          terminal.stdin.write(answer);
+          await terminal.waitForOutput('RESULT ');
+          assert.equal((await terminal.closed).code, 0, terminal.output + terminal.errors);
+          const match = /RESULT (\{[^\r\n]+\})/u.exec(terminal.output);
+          assert(match, terminal.output);
+          const result = JSON.parse(match[1]);
+          assert.equal(result.ok, accepted, terminal.output);
+          if (accepted) assert.equal(result.kind, 'terminal');
+          else assert.equal(result.code, 'HOST_AUTH_REQUIRED');
+        } finally { terminal.cleanup(); await terminal.closed; }
       }
     });
     await check('a nonterminal or copied session environment does not admit a terminal mutation', async () => {

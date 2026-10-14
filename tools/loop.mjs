@@ -427,6 +427,7 @@ function errorExit(code) {
 }
 
 async function selfTest() {
+  const { spawnTestTerminal } = await import('./test-terminal.mjs');
   const results = [];
   const check = async (name, run) => {
     try { await run(); results.push([name, true]); }
@@ -530,26 +531,20 @@ async function selfTest() {
           assert.equal(JSON.parse(refused.stdout).error.code, 'HOST_AUTH_REQUIRED');
           assert.equal(existsSync(join(setup.repository.commonDir, 'autoloop')), false);
         }
-        const quote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
         const argv = [process.execPath, entry, 'run', '--foreground', '--root', setup.repository.coordinatorRoot, '--operator-terminal'];
-        const args = process.platform === 'darwin' ? ['-q', join(setup.home, 'terminal.log'), ...argv]
-          : ['-q', '-e', '-c', argv.map(quote).join(' '), join(setup.home, 'terminal.log')];
-        const terminal = spawn('script', args, { env: { ...process.env, PATH: path }, stdio: ['pipe', 'pipe', 'pipe'] });
-        terminal.identity = readProcessIdentity(terminal.pid);
-        terminal.closed = new Promise((done) => terminal.once('close', (code) => done({ code })));
-        children.add(terminal);
-        terminal.closed.then(() => children.delete(terminal));
-        let output = '';
-        terminal.stdout.on('data', (chunk) => { output += chunk; });
-        await waitFor(() => output.includes('Type yes'), 'Terminal confirmation was not requested.');
-        terminal.stdin.write('yes\n');
-        await waitFor(() => output.includes('"queueEnabled":false'), 'Admitted foreground was not ready.');
-        const checkpoint = readCurrentCheckpoint(setup.repository);
-        assert.equal(checkpoint.initiator.kind, 'terminal');
-        const stop = control(checkpoint.runId, 'stop', checkpoint.generation);
-        submitControl(setup.repository, actor(), stop);
-        assert.equal((await terminal.closed).code, 0);
-        assert.equal(readCheckpoint(setup.repository, checkpoint.runId).state, 'stopped');
+        const terminal = spawnTestTerminal(argv, { env: { ...process.env, PATH: path } });
+        try {
+          await terminal.waitForOutput('Type yes');
+          assert.equal(existsSync(join(setup.repository.commonDir, 'autoloop')), false, 'A flag alone must not acquire the scheduler.');
+          terminal.stdin.write('yes\n');
+          await terminal.waitForOutput('"queueEnabled":false');
+          const checkpoint = readCurrentCheckpoint(setup.repository);
+          assert.equal(checkpoint.initiator.kind, 'terminal');
+          const stop = control(checkpoint.runId, 'stop', checkpoint.generation);
+          submitControl(setup.repository, actor(), stop);
+          assert.equal((await terminal.closed).code, 0, terminal.output + terminal.errors);
+          assert.equal(readCheckpoint(setup.repository, checkpoint.runId).state, 'stopped');
+        } finally { terminal.cleanup(); await terminal.closed; }
       });
       await check('broken legacy ownership links are not treated as absent state', () => {
         const setup = fixture();
