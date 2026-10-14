@@ -2899,8 +2899,7 @@ function selfTest() {
       (() => {
         const base = mkdtempSync(join(tmpdir(), 'lifecycle-closeout-'));
         try {
-          const run = (name, args) => (name === 'git' && args.includes('--git-common-dir')
-            ? { ok: true, stdout: join(base, '.git'), stderr: '' } : { ok: false, stdout: '', stderr: `unexpected ${name}` });
+          command('git', ['init', '-q', base]);
           const stepsDir = join(base, '.git', 'autoloop', 'steps');
           mkdirSync(stepsDir, { recursive: true });
           for (const issue of [370, 371]) {
@@ -2913,7 +2912,7 @@ function selfTest() {
             issueState: () => ({ state: state_reason === 'reopened' ? 'open' : 'closed', state_reason }),
             prCloses: () => true,
             closeIssue: () => {},
-            closeSteps: closeStepsFor(base, issue, run),
+            closeSteps: closeStepsFor(base, issue),
           });
           const first = closeOutMerged(merged, effects(370, 'completed'));
           const again = closeOutMerged(merged, effects(370, 'completed'));

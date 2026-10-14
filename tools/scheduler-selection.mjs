@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,7 @@ import { repositorySnapshotWithSources } from './scan.mjs';
 import { deliveredPullRequests, eligibleIssueNumbers, haltIssueNumbers, markerSchedule, SNAPSHOT_SECTIONS, unitCard, verifySnapshot } from './snapshot-contract.mjs';
 import { issueAuthorizationEvidence, validateIssueAuthorization, validateIssueAuthorizationEvidence } from './scheduler-selection-schema.mjs';
 import { serializeLifecycleMarker } from './lifecycle-contract.mjs';
+import { createWorktreeAllocator } from './scheduler-worktree.mjs';
 
 const equal = (left, right) => scheduler.schedulerDigest(left) === scheduler.schedulerDigest(right);
 function refusal(code, message) {
@@ -214,7 +215,9 @@ export function createSelectionProvider({ lease }) {
     });
     return committed.reservations.find((item) => item.unitId === unitId);
   };
-  return Object.freeze({ scanRepository: boundary(scan), inventoryRecovery: boundary(inventory), reserveIssue: boundary(reserve) });
+  const allocation = createWorktreeAllocator({ lease, scanRepository: scan });
+  return Object.freeze({ scanRepository: boundary(scan), inventoryRecovery: boundary(inventory), reserveIssue: boundary(reserve),
+    allocateWorktree: boundary(allocation.allocateWorktree), reconcileWorktree: boundary(allocation.reconcileWorktree) });
 }
 
 // Only the external GitHub boundary is replaced. The collector and Git run unchanged.
@@ -298,12 +301,13 @@ async function selfTest() {
     if (code) assert.equal(result.error.code, code);
     assert.equal(typeof result.error.message, 'string');
   };
-  const fixture = ({ base = true } = {}) => {
+  const fixture = ({ base = true, acquire = true } = {}) => {
     assert(userInfo().homedir.startsWith(`${scratch}/`), 'The account must be isolated before acquisition.');
     const home = join(scratch, randomUUID()); mkdirSync(home);
     const root = join(home, 'repo'); mkdirSync(root);
     git(root, 'init', '-q', '-b', 'main');
-    git(root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base');
+    writeFileSync(join(root, 'tracked.txt'), 'creation base\n'); git(root, 'add', 'tracked.txt');
+    git(root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base');
     git(root, 'remote', 'add', 'origin', 'https://github.com/fixtures/selection.git');
     const baseOid = git(root, 'rev-parse', 'HEAD');
     if (base) git(root, 'update-ref', 'refs/remotes/origin/main', baseOid);
@@ -313,10 +317,11 @@ async function selfTest() {
     writeFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'fixture', version: '1.0.0' }));
     const repository = scheduler.resolveRepository(root);
     const pins = scheduler.createPins(repository, { pluginRoot, enginePath: realpathSync(process.execPath), config, models: mergeModels(DEFAULT_MODELS) });
+    update(root);
+    if (!acquire) return { home, root, repository, pins, baseOid };
     const acquired = scheduler.acquireScheduler(repository, pins, { kind: 'terminal', sessionId: null, process: scheduler.readProcessIdentity() });
     owned.push({ repository, ...acquired });
     scheduler.commitTransition(acquired.lease, 1, (checkpoint) => ({ ...checkpoint, state: 'running' }));
-    update(root);
     const provider = createSelectionProvider({ lease: acquired.lease });
     return { home, root, repository, pins, baseOid, ...acquired, provider,
       checkpoint: () => scheduler.readCheckpoint(repository, acquired.runId) };
@@ -364,6 +369,415 @@ async function selfTest() {
       assert.deepEqual(checkpoint.reservations, [reservation]); assert.deepEqual(reservation.issueAuthorization, authorization);
       assert.equal(checkpoint.units[0].checkedSnapshot.checkpointRevision, checkpoint.revision - 1);
       assert.deepEqual([git(setup.root, 'symbolic-ref', 'HEAD'), git(setup.root, 'rev-parse', 'HEAD'), git(setup.root, 'status', '--porcelain=v1'), git(setup.root, 'rev-parse', 'refs/remotes/origin/main')], before);
+    });
+    await check('real facade allocation creates two canonical worktrees without changing coordinator state', async () => {
+      const setup = fixture();
+      const firstAuthorization = await discover(setup);
+      const first = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, firstAuthorization);
+      const secondAuthorization = await discover(setup, 8);
+      const second = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, secondAuthorization);
+      git(setup.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'coordinator is not configured base');
+      assert.notEqual(git(setup.root, 'rev-parse', 'HEAD'), setup.baseOid);
+      writeFileSync(join(setup.root, 'tracked.txt'), 'staged coordinator\n'); git(setup.root, 'add', 'tracked.txt');
+      writeFileSync(join(setup.root, 'tracked.txt'), 'unstaged coordinator\n');
+      const before = { branch: git(setup.root, 'symbolic-ref', 'HEAD'), head: git(setup.root, 'rev-parse', 'HEAD'),
+        index: readFileSync(join(setup.repository.commonDir, 'index')).toString('hex'),
+        tree: readFileSync(join(setup.root, 'tracked.txt'), 'utf8'), status: git(setup.root, 'status', '--porcelain=v1'),
+        base: git(setup.root, 'rev-parse', 'refs/remotes/origin/main') };
+      refuses(await setup.provider.allocateWorktree(null, first.unitId, setup.baseOid), 'LEASE_INVALID');
+      refuses(await setup.provider.allocateWorktree(setup.lease, first.unitId, '0'.repeat(40)), 'BASE_CHANGED');
+      for (const reservation of [first, second]) {
+        const worktree = await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid);
+        assert.equal(worktree.unitId, reservation.unitId, JSON.stringify(worktree));
+        assert.equal(worktree.root, join(setup.home, '.autoloop-worktrees', setup.repository.repositoryKey, setup.runId, `${reservation.unitId}-g1`));
+        assert.equal(worktree.branch, `feat/gh-${reservation.issue}-unit-${reservation.unitId.replaceAll('-', '')}-g1`);
+        assert.equal((await import('./claim-contract.mjs')).parseLoopBranchIssue(worktree.branch), reservation.issue);
+        assert.equal(git(worktree.root, 'rev-parse', 'HEAD'), setup.baseOid);
+        assert.equal(git(worktree.root, 'status', '--porcelain=v1', '--untracked-files=all'), '');
+        assert.equal(worktree.gitDir, git(worktree.root, 'rev-parse', '--absolute-git-dir'));
+        assert.equal(lstatSync(join(worktree.root, '.git')).isFile(), true);
+        assert.deepEqual(await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), worktree);
+        const checkpoint = setup.checkpoint(); const allocation = checkpoint.units.find((unit) => unit.unitId === reservation.unitId).allocation;
+        assert.equal(scheduler.boundCreatorState(allocation.creator), 'empty');
+        assert.deepEqual(allocation.creatorHistory, []);
+        assert.equal(checkpoint.outbox[allocation.intent.operationId].phase, 'succeeded');
+        assert.equal(checkpoint.outbox[allocation.intent.operationId].inputDigest, scheduler.schedulerDigest(allocation.intent));
+        assert(checkpoint.outbox[allocation.intent.operationId].receipt.observationDigest);
+        update(worktree.root);
+        const reference = await setup.provider.scanRepository({ root: worktree.root });
+        assert.equal(reference.gitDir, worktree.gitDir); assert.equal(reference.commonDir, setup.repository.commonDir);
+        const blob = join(worktree.gitDir, 'autoloop', 'scheduler', 'snapshots', setup.runId, 'sha256', `${reference.contentDigest}.json`);
+        assert.equal(JSON.parse(readFileSync(blob, 'utf8')).root, worktree.root);
+        assert.equal(existsSync(join(setup.repository.commonDir, 'autoloop', 'scheduler', 'snapshots', setup.runId, 'sha256', `${reference.contentDigest}.json`)), false);
+      }
+      assert.deepEqual({ branch: git(setup.root, 'symbolic-ref', 'HEAD'), head: git(setup.root, 'rev-parse', 'HEAD'),
+        index: readFileSync(join(setup.repository.commonDir, 'index')).toString('hex'),
+        tree: readFileSync(join(setup.root, 'tracked.txt'), 'utf8'), status: git(setup.root, 'status', '--porcelain=v1'),
+        base: git(setup.root, 'rev-parse', 'refs/remotes/origin/main') }, before);
+      assert.equal(setup.checkpoint().queueEnabled, false); assert.deepEqual(setup.checkpoint().workers, []);
+    });
+    await check('foreign targets, existing refs and symlink ancestors are preserved without allocation', async () => {
+      for (const collision of ['foreign', 'foreign-worktree', 'dirty-worktree', 'ref', 'symlink', 'target-symlink']) {
+        const setup = fixture(); const authorization = await discover(setup);
+        const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+        const parent = join(setup.home, '.autoloop-worktrees');
+        const root = join(parent, setup.repository.repositoryKey, setup.runId, `${reservation.unitId}-g1`);
+        const branch = `feat/gh-7-unit-${reservation.unitId.replaceAll('-', '')}-g1`;
+        if (collision === 'foreign') { mkdirSync(root, { recursive: true, mode: 0o700 }); writeFileSync(join(root, 'foreign.txt'), 'retain\n'); }
+        if (['foreign-worktree', 'dirty-worktree', 'target-symlink'].includes(collision)) {
+          mkdirSync(join(parent, setup.repository.repositoryKey, setup.runId), { recursive: true, mode: 0o700 });
+          if (collision === 'target-symlink') { const foreign = join(setup.home, 'foreign'); mkdirSync(foreign); symlinkSync(foreign, root); }
+          else {
+            git(setup.root, 'worktree', 'add', '-q', '-b', branch, root, setup.baseOid);
+            if (collision === 'dirty-worktree') writeFileSync(join(root, 'tracked.txt'), 'retain dirty\n');
+          }
+        }
+        if (collision === 'ref') git(setup.root, 'branch', branch, setup.baseOid);
+        if (collision === 'symlink') { const foreign = join(setup.home, 'foreign'); mkdirSync(foreign); symlinkSync(foreign, parent); }
+        refuses(await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid));
+        assert.equal(setup.checkpoint().units[0].allocation, null); assert.deepEqual(setup.checkpoint().outbox, {});
+        assert.equal(setup.checkpoint().reservations[0].state, 'planning');
+        if (collision === 'foreign') assert.equal(readFileSync(join(root, 'foreign.txt'), 'utf8'), 'retain\n');
+        if (collision === 'ref' || collision.endsWith('-worktree')) assert.equal(git(setup.root, 'rev-parse', `refs/heads/${branch}`), setup.baseOid);
+        if (collision.endsWith('-worktree')) assert.equal(git(root, 'rev-parse', 'HEAD'), setup.baseOid);
+        if (collision === 'dirty-worktree') assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), 'retain dirty\n');
+        if (collision === 'symlink') assert(lstatSync(parent).isSymbolicLink());
+        if (collision === 'target-symlink') assert(lstatSync(root).isSymbolicLink());
+      }
+    });
+    await check('creator readiness is private and Git starts only after durable binding and owner checks', async () => {
+      const setup = fixture(); const authorization = await discover(setup);
+      const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+      const marker = join(setup.home, 'ambient-creator-ran'); const preload = join(setup.home, 'ambient-creator.mjs');
+      writeFileSync(preload, `import {writeFileSync} from 'node:fs';
+try { if (JSON.parse(process.argv[1]).operationId) writeFileSync(${JSON.stringify(marker)}, 'unsafe'); } catch {}\n`);
+      const originalNodeOptions = process.env.NODE_OPTIONS;
+      process.env.NODE_OPTIONS = `${originalNodeOptions ?? ''} --import=${JSON.stringify(preload)}`;
+      const stages = [];
+      try {
+        const allocator = createWorktreeAllocator({ lease: setup.lease, scanRepository: setup.provider.scanRepository,
+          observe: (stage, { intent, creator }) => {
+            stages.push(stage); const checkpoint = setup.checkpoint(); const allocation = checkpoint.units[0].allocation;
+            assert.equal(existsSync(marker), false, 'Ambient Node preload must not run in the trusted creator.');
+            if (stage !== 'created') assert.equal(existsSync(intent.root), false, 'Git must not run before durable binding and final checks.');
+            if (stage === 'ready') { assert.equal(allocation.creator, null); assert.equal(checkpoint.outbox[intent.operationId].phase, 'prepared'); }
+            if (stage === 'bound' || stage === 'created') assert.deepEqual(allocation.creator, creator);
+            if (stage === 'created') assert.equal(scheduler.boundCreatorState(creator), 'empty');
+            // Observation data has no private channel or shared mutable intent.
+            intent.branch = 'not-the-durable-intent';
+          } });
+        const worktree = await allocator.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid);
+        assert.equal(worktree.unitId, reservation.unitId); assert.equal(git(worktree.root, 'rev-parse', 'HEAD'), setup.baseOid);
+        assert.deepEqual(stages, ['prepared', 'ready', 'in-flight', 'bound', 'created']);
+      } finally {
+        if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = originalNodeOptions;
+      }
+    });
+    await check('concurrent prepared allocation contenders create once and keep one current creator', async () => {
+      const setup = fixture(); const authorization = await discover(setup);
+      const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+      const allocator = createWorktreeAllocator({ lease: setup.lease, scanRepository: setup.provider.scanRepository,
+        observe: (stage) => { if (stage === 'prepared') throw new Error('Fixture interruption.'); } });
+      await assert.rejects(allocator.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), /Fixture interruption/u);
+      const outcomes = await Promise.all([1, 2].map(() => setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid)));
+      assert.equal(outcomes.filter((value) => value.unitId === reservation.unitId).length, 1);
+      assert.equal(outcomes.filter((value) => value.ok === false).length, 1);
+      const allocation = setup.checkpoint().units[0].allocation;
+      assert.equal(setup.checkpoint().outbox[allocation.intent.operationId].attempt, 1);
+      assert.equal(setup.checkpoint().outbox[allocation.intent.operationId].phase, 'succeeded');
+      assert.deepEqual(allocation.creatorHistory, []); assert.equal(scheduler.boundCreatorState(allocation.creator), 'empty');
+      assert.equal(git(setup.root, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line === `worktree ${allocation.intent.root}`).length, 1);
+    });
+    await check('allocation interruption readback keeps intent and uses a new creator for a verified absent attempt', async () => {
+      for (const interruption of ['prepared', 'ready', 'bound', 'created']) {
+        const setup = fixture(); const authorization = await discover(setup);
+        const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+        const allocator = createWorktreeAllocator({ lease: setup.lease, scanRepository: setup.provider.scanRepository,
+          observe: (stage) => { if (stage === interruption) throw new Error('Fixture interruption.'); } });
+        await assert.rejects(allocator.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), /Fixture interruption/u);
+        const interrupted = setup.checkpoint().units[0].allocation;
+        const intent = structuredClone(interrupted.intent);
+        assert.equal(setup.checkpoint().reservations[0].worktree, null);
+        assert.equal(setup.checkpoint().reservations[0].slot, 1);
+        if (interrupted.creator) assert.equal(scheduler.boundCreatorState(interrupted.creator), 'empty');
+        const worktree = await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid);
+        assert.equal(worktree.unitId, reservation.unitId, JSON.stringify(worktree));
+        const current = setup.checkpoint().units[0].allocation; const effect = setup.checkpoint().outbox[intent.operationId];
+        assert.deepEqual(current.intent, intent);
+        assert.equal(effect.phase, 'succeeded');
+        if (interruption === 'bound') {
+          assert.equal(effect.attempt, 2); assert.equal(current.creatorHistory.length, 1);
+          assert.deepEqual(current.creatorHistory[0].creator, interrupted.creator);
+          assert.equal(current.creatorHistory[0].attempt, 1);
+          assert.notDeepEqual(current.creator, interrupted.creator, 'A retry must bind its new creator.');
+          assert.equal(current.creatorHistory[0].receipt.externalId, intent.operationId);
+        } else { assert.equal(effect.attempt, 1); assert.deepEqual(current.creatorHistory, []); }
+      }
+    });
+    await check('unbound in-flight creator and partial, dirty or foreign allocation state retain their slots', async () => {
+      for (const collision of ['unbound', 'dirty', 'symlink', 'partial-ref', 'foreign']) {
+        const setup = fixture(); const authorization = await discover(setup); const secondAuthorization = await discover(setup, 8);
+        const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+        const interruption = collision === 'unbound' ? 'in-flight' : collision === 'dirty' || collision === 'symlink' ? 'created' : 'bound';
+        const allocator = createWorktreeAllocator({ lease: setup.lease, scanRepository: setup.provider.scanRepository,
+          observe: (stage) => { if (stage === interruption) throw new Error('Fixture interruption.'); } });
+        await assert.rejects(allocator.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), /Fixture interruption/u);
+        const allocation = setup.checkpoint().units[0].allocation; const { intent } = allocation;
+        let preserved;
+        if (collision === 'dirty') { preserved = join(intent.root, 'tracked.txt'); writeFileSync(preserved, 'retain dirty\n'); }
+        if (collision === 'symlink') {
+          // Keep the real worktree. A symlink in its admin backlink is not adopted.
+          const gitDir = git(intent.root, 'rev-parse', '--absolute-git-dir');
+          preserved = join(gitDir, 'commondir');
+          const fs = await import('node:fs'); fs.renameSync(preserved, `${preserved}.fixture-original`);
+          symlinkSync(`${preserved}.fixture-original`, preserved);
+        }
+        if (collision === 'partial-ref') git(setup.root, 'branch', intent.branch, setup.baseOid);
+        if (collision === 'foreign') { mkdirSync(intent.root); preserved = join(intent.root, 'foreign.txt'); writeFileSync(preserved, 'retain foreign\n'); }
+        const before = setup.checkpoint();
+        refuses(await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid));
+        refuses(await setup.provider.reconcileWorktree(setup.lease, reservation.unitId));
+        assert.deepEqual(setup.checkpoint(), before, 'Unknown readback must not erase or retry retained work.');
+        assert.throws(() => scheduler.observeSelectionNoWork(setup.lease, reservation.unitId));
+        if (collision === 'dirty') assert.equal(readFileSync(preserved, 'utf8'), 'retain dirty\n');
+        if (collision === 'foreign') assert.equal(readFileSync(preserved, 'utf8'), 'retain foreign\n');
+        if (collision === 'symlink') assert(lstatSync(preserved).isSymbolicLink());
+        if (collision === 'partial-ref') assert.equal(git(setup.root, 'rev-parse', `refs/heads/${intent.branch}`), setup.baseOid);
+        const second = await setup.provider.reserveIssue(setup.lease, before.revision, secondAuthorization);
+        refuses(second, 'RECOVERY_REQUIRED');
+        assert.equal(setup.checkpoint().reservations[0].slot, 1);
+      }
+    });
+    await check('live and unverifiable creator groups cannot settle allocation or release its reservation', async () => {
+      const setup = fixture(); const authorization = await discover(setup);
+      const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+      let observed = false;
+      const allocator = createWorktreeAllocator({ lease: setup.lease, scanRepository: setup.provider.scanRepository,
+        observe: async (stage, { creator }) => {
+          if (stage !== 'bound') return;
+          observed = true; const before = setup.checkpoint();
+          assert.equal(scheduler.boundCreatorState(creator), 'alive');
+          refuses(await setup.provider.reconcileWorktree(setup.lease, reservation.unitId), 'OWNER_UNVERIFIED');
+          refuses(await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), 'OWNER_UNVERIFIED');
+          assert.throws(() => scheduler.observeSelectionNoWork(setup.lease, reservation.unitId));
+          assert.deepEqual(setup.checkpoint(), before);
+          throw new Error('Fixture interruption.');
+        } });
+      await assert.rejects(allocator.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), /Fixture interruption/u);
+      assert(observed);
+      const exited = setup.checkpoint().units[0].allocation.creator;
+      assert.equal(scheduler.boundCreatorState(exited), 'empty');
+      assert.equal((await setup.provider.reconcileWorktree(setup.lease, reservation.unitId)).status, 'not-applied');
+      assert.equal(setup.checkpoint().units[0].allocation.creator, null);
+    });
+    await check('a real surviving creator-group member is unknown, not verified absence or permission to retry', async () => {
+      const setup = fixture(); const authorization = await discover(setup);
+      const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+      const allocator = createWorktreeAllocator({ lease: setup.lease, scanRepository: setup.provider.scanRepository,
+        observe: (stage) => { if (stage === 'prepared') throw new Error('Fixture interruption.'); } });
+      await assert.rejects(allocator.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), /Fixture interruption/u);
+      const child = spawn(process.execPath, ['--input-type=module', '-e', `import { spawn } from 'node:child_process';
+const member = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000);'], { stdio: 'ignore' });
+process.send(member.pid); process.once('message', () => process.exit(0)); process.on('disconnect', () => process.exit(0));`],
+        { cwd: setup.root, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+      children.add(child); const exited = new Promise((done) => child.once('exit', done));
+      let member;
+      try {
+        const pid = await new Promise((done, fail) => { child.once('message', done); child.once('error', fail); child.once('exit', () => fail(new Error('The group fixture ended before readiness.'))); });
+        member = scheduler.readProcessIdentity(pid);
+        const identity = scheduler.readProcessIdentity(child.pid); const creator = { process: identity, pgid: child.pid, groupLeader: identity };
+        assert.equal(scheduler.processGroupOf(pid), creator.pgid);
+        const allocation = setup.checkpoint().units[0].allocation;
+        scheduler.markEffectInFlight(setup.lease, allocation.intent.operationId);
+        scheduler.commitTransition(setup.lease, setup.checkpoint().revision, (checkpoint) => ({ ...checkpoint,
+          units: checkpoint.units.map((unit) => ({ ...unit, allocation: { ...unit.allocation, creator } })) }));
+        child.send('end leader'); await exited; children.delete(child);
+        assert.equal(scheduler.boundCreatorState(creator), 'unknown');
+        assert.equal(existsSync(allocation.intent.root), false);
+        const before = setup.checkpoint();
+        refuses(await setup.provider.reconcileWorktree(setup.lease, reservation.unitId), 'OWNER_UNVERIFIED');
+        refuses(await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), 'OWNER_UNVERIFIED');
+        assert.throws(() => scheduler.observeSelectionNoWork(setup.lease, reservation.unitId));
+        assert.deepEqual(setup.checkpoint(), before); assert.equal(before.reservations[0].slot, 1);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+        await exited; children.delete(child);
+        if (member && scheduler.processIdentityState(member) === 'alive') process.kill(member.pid, 'SIGTERM');
+      }
+    });
+    await check('queued control after creator binding stops Git and keeps immutable allocation history', async () => {
+      const setup = fixture(); const authorization = await discover(setup);
+      const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+      const allocator = createWorktreeAllocator({ lease: setup.lease, scanRepository: setup.provider.scanRepository,
+        observe: (stage) => {
+          if (stage !== 'bound') return;
+          scheduler.submitControl(setup.repository, { kind: 'terminal', sessionId: null, host: scheduler.readProcessIdentity(), invocationId: randomUUID() }, {
+            schema: 'autoloop.control/2', requestId: randomUUID(), runId: setup.runId,
+            target: { type: 'run', generation: setup.generation }, kind: 'pause', payload: {}, submittedAt: Date.now() });
+        } });
+      await assert.rejects(allocator.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), (error) => error.code === 'CONTROL_PENDING');
+      const { intent, creator } = setup.checkpoint().units[0].allocation;
+      assert.equal(existsSync(intent.root), false); assert.equal(scheduler.boundCreatorState(creator), 'empty');
+      assert.equal((await setup.provider.reconcileWorktree(setup.lease, reservation.unitId)).status, 'not-applied');
+      refuses(await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), 'CONTROL_PENDING');
+      assert.equal(setup.checkpoint().units[0].allocation.creatorHistory.length, 1);
+    });
+    await check('actual owner loss before go never starts Git; owner loss after creation settles by exact readback', async () => {
+      for (const interruption of ['in-flight', 'bound', 'created']) {
+        const setup = fixture({ acquire: false });
+        const script = `import * as scheduler from ${JSON.stringify(new URL('./scheduler-contract.mjs', import.meta.url).href)};
+import { createSelectionProvider } from ${JSON.stringify(import.meta.url)};
+import { createWorktreeAllocator } from ${JSON.stringify(new URL('./scheduler-worktree.mjs', import.meta.url).href)};
+const { root, pins, baseOid, interruption } = JSON.parse(process.argv[1]);
+const repository = scheduler.resolveRepository(root);
+const acquired = scheduler.acquireScheduler(repository, pins, { kind: 'terminal', sessionId: null, process: scheduler.readProcessIdentity() });
+scheduler.commitTransition(acquired.lease, 1, checkpoint => ({ ...checkpoint, state: 'running' }));
+const provider = createSelectionProvider({ lease: acquired.lease });
+const snapshot = await provider.scanRepository({ root });
+const candidates = await provider.inventoryRecovery({ snapshot, checkpoint: scheduler.readCheckpoint(repository, acquired.runId) });
+const authorization = candidates.find(item => item.kind === 'issue' && item.issue === 7).issueAuthorization;
+const reservation = await provider.reserveIssue(acquired.lease, scheduler.readCheckpoint(repository, acquired.runId).revision, authorization);
+const allocator = createWorktreeAllocator({ lease: acquired.lease, scanRepository: provider.scanRepository, observe: async (stage, facts) => {
+  if (stage !== interruption) return;
+  await new Promise((done, fail) => process.send({ facts, reservation, runId: acquired.runId }, error => error ? fail(error) : done()));
+  process.kill(process.pid, 'SIGKILL');
+} });
+await allocator.allocateWorktree(acquired.lease, reservation.unitId, baseOid);`;
+        const child = spawn(process.execPath, ['--input-type=module', '-e', script, JSON.stringify({ root: setup.root, pins: setup.pins, baseOid: setup.baseOid, interruption })],
+          { cwd: setup.root, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+        children.add(child); let stderr = ''; child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const exited = new Promise((done) => child.once('exit', (code, signal) => done({ code, signal })));
+        const observed = await new Promise((done, fail) => {
+          child.once('message', done); child.once('error', fail);
+          child.once('exit', () => fail(new Error(`The owner ended before its interruption point. ${stderr}`)));
+        });
+        assert.equal((await exited).signal, 'SIGKILL'); children.delete(child);
+        const { intent, creator } = observed.facts;
+        if (interruption !== 'created') {
+          const deadline = Date.now() + 10000;
+          let ended = false;
+          while (Date.now() < deadline) {
+            const state = spawnSync('ps', ['-o', 'stat=', '-p', String(creator.process.pid)], { encoding: 'utf8', timeout: 5000 });
+            if (state.status === 1 || /^Z/u.test(state.stdout.trim())) { ended = true; break; }
+            await new Promise((done) => setTimeout(done, 10));
+          }
+          assert(ended, 'The creator must end on owner IPC loss without a go signal.');
+          assert.equal(existsSync(intent.root), false);
+          assert.equal(git(setup.root, 'for-each-ref', '--format=%(refname)', `refs/heads/${intent.branch}`), '');
+        }
+        const recovered = scheduler.acquireScheduler(setup.repository, setup.pins, { kind: 'terminal', sessionId: null, process: scheduler.readProcessIdentity() });
+        owned.push({ repository: setup.repository, ...recovered });
+        const provider = createSelectionProvider({ lease: recovered.lease });
+        const checkpoint = () => scheduler.readCheckpoint(setup.repository, recovered.runId);
+        assert.equal(checkpoint().state, 'recovering'); assert.equal(checkpoint().outbox[intent.operationId].phase, 'unknown');
+        const creatorState = checkpoint().units[0].allocation.creator === null ? 'unbound' : scheduler.boundCreatorState(creator);
+        const result = await provider.reconcileWorktree(recovered.lease, observed.reservation.unitId);
+        if (interruption === 'created') {
+          assert.equal(result.root, intent.root, JSON.stringify(result));
+          assert.equal(checkpoint().outbox[intent.operationId].phase, 'succeeded');
+          assert.deepEqual(checkpoint().units[0].allocation.intent, intent);
+          assert.equal(checkpoint().reservations[0].worktree.baseOid, setup.baseOid);
+        } else {
+          if (creatorState !== 'empty') refuses(result, 'OWNER_UNVERIFIED');
+          else assert.equal(result.status, 'not-applied');
+          assert.equal(checkpoint().reservations[0].worktree, null); assert.equal(checkpoint().reservations[0].slot, 1);
+          assert.throws(() => scheduler.observeSelectionNoWork(recovered.lease, observed.reservation.unitId));
+        }
+      }
+    });
+    await check('moved and renamed bound worktree returns refusals without retry or metadata adoption', async () => {
+      const setup = fixture(); const authorization = await discover(setup);
+      const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+      const worktree = await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid);
+      assert.equal(worktree.unitId, reservation.unitId, JSON.stringify(worktree));
+      const moved = join(setup.home, 'retained-moved-worktree'); const renamedBranch = `${worktree.branch}-retained`;
+      git(setup.root, 'worktree', 'move', worktree.root, moved);
+      git(moved, 'branch', '-m', renamedBranch);
+      const before = setup.checkpoint();
+      const outcomes = await Promise.allSettled([
+        setup.provider.reconcileWorktree(setup.lease, reservation.unitId),
+        setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid),
+      ]);
+      for (const outcome of outcomes) {
+        assert.equal(outcome.status, 'fulfilled', outcome.reason?.stack);
+        refuses(outcome.value, 'EVIDENCE_CHANGED');
+      }
+      assert.deepEqual(setup.checkpoint(), before);
+      assert.equal(existsSync(worktree.root), false); assert(existsSync(worktree.gitDir));
+      assert.equal(git(moved, 'symbolic-ref', '--short', 'HEAD'), renamedBranch);
+      assert.equal(git(moved, 'rev-parse', 'HEAD'), setup.baseOid);
+      assert.equal(git(moved, 'status', '--porcelain=v1'), '');
+    });
+    await check('replacement clean workspace cannot replace the saved worktree administrative identity', async () => {
+      const setup = fixture(); const authorization = await discover(setup);
+      const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+      const worktree = await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid);
+      assert.equal(worktree.unitId, reservation.unitId, JSON.stringify(worktree));
+      const moved = join(setup.home, 'retained-original-worktree'); const renamedBranch = `${worktree.branch}-retained`;
+      git(setup.root, 'worktree', 'move', worktree.root, moved);
+      git(moved, 'branch', '-m', renamedBranch);
+      git(setup.root, 'worktree', 'add', '-q', '-b', worktree.branch, worktree.root, setup.baseOid);
+      const replacement = scheduler.resolveRepositoryCheckout(worktree.root);
+      assert.notEqual(replacement.gitDir, worktree.gitDir);
+      assert.equal(git(worktree.root, 'rev-parse', 'HEAD'), setup.baseOid);
+      assert.equal(git(worktree.root, 'status', '--porcelain=v1'), '');
+      const before = setup.checkpoint();
+      const outcomes = await Promise.allSettled([
+        setup.provider.reconcileWorktree(setup.lease, reservation.unitId),
+        setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid),
+      ]);
+      for (const outcome of outcomes) {
+        assert.equal(outcome.status, 'fulfilled', outcome.reason?.stack);
+        refuses(outcome.value, 'EVIDENCE_CHANGED');
+      }
+      assert.deepEqual(setup.checkpoint(), before);
+      assert.equal(git(moved, 'rev-parse', '--absolute-git-dir'), worktree.gitDir);
+      assert.equal(git(moved, 'symbolic-ref', '--short', 'HEAD'), renamedBranch);
+      assert.equal(git(worktree.root, 'rev-parse', '--absolute-git-dir'), replacement.gitDir);
+      assert.equal(git(worktree.root, 'symbolic-ref', '--short', 'HEAD'), worktree.branch);
+      assert(existsSync(worktree.gitDir)); assert(existsSync(replacement.gitDir));
+    });
+    await check('no-work release requires actual clean base and exit proof and retains worktree and receipts', async () => {
+      const setup = fixture(); const authorization = await discover(setup);
+      const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+      const worktree = await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid);
+      const before = structuredClone(setup.checkpoint().units[0].allocation);
+      writeFileSync(join(worktree.root, 'tracked.txt'), 'do not release\n');
+      assert.throws(() => scheduler.observeSelectionNoWork(setup.lease, reservation.unitId), (error) => error.code === 'EVIDENCE_CHANGED');
+      assert.equal(setup.checkpoint().reservations[0].state, 'planning');
+      writeFileSync(join(worktree.root, 'tracked.txt'), 'creation base\n');
+      const disposition = scheduler.observeSelectionNoWork(setup.lease, reservation.unitId);
+      const released = scheduler.commitTransition(setup.lease, setup.checkpoint().revision, (checkpoint) => ({ ...checkpoint,
+        reservations: checkpoint.reservations.map((item) => ({ ...item, state: 'released', paths: [] })),
+        units: checkpoint.units.map((item) => ({ ...item, disposition })) }));
+      assert.equal(released.reservations[0].state, 'released');
+      assert.deepEqual(released.units[0].allocation, before); assert.deepEqual(released.reservations[0].worktree, worktree);
+      assert.equal(scheduler.hasRetainedSelection(released), false); assert(existsSync(worktree.root));
+      assert.equal(released.outbox[before.intent.operationId].phase, 'succeeded');
+    });
+    await check('allocation rejects a moved configured base and uncertain success keeps its exact creation base', async () => {
+      for (const interruption of [null, 'created']) {
+        const setup = fixture(); const authorization = await discover(setup);
+        const reservation = await setup.provider.reserveIssue(setup.lease, setup.checkpoint().revision, authorization);
+        if (interruption) {
+          const allocator = createWorktreeAllocator({ lease: setup.lease, scanRepository: setup.provider.scanRepository,
+            observe: (stage) => { if (stage === interruption) throw new Error('Fixture interruption.'); } });
+          await assert.rejects(allocator.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), /Fixture interruption/u);
+        }
+        const next = git(setup.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit-tree',
+          git(setup.root, 'rev-parse', 'HEAD^{tree}'), '-p', setup.baseOid, '-m', 'new configured base');
+        git(setup.root, 'update-ref', 'refs/remotes/origin/main', next);
+        if (interruption) {
+          const worktree = await setup.provider.reconcileWorktree(setup.lease, reservation.unitId);
+          assert.equal(worktree.baseOid, setup.baseOid, JSON.stringify(worktree)); assert.equal(git(worktree.root, 'rev-parse', 'HEAD'), setup.baseOid);
+        } else {
+          refuses(await setup.provider.allocateWorktree(setup.lease, reservation.unitId, setup.baseOid), 'BASE_CHANGED');
+          refuses(await setup.provider.allocateWorktree(setup.lease, reservation.unitId, next), 'BASE_CHANGED');
+          assert.equal(setup.checkpoint().units[0].allocation, null);
+        }
+        assert.equal(git(setup.root, 'rev-parse', 'refs/remotes/origin/main'), next);
+        assert.equal(git(setup.root, 'rev-parse', 'HEAD'), setup.baseOid);
+      }
     });
     await check('origin locator case differs from API spelling without changing source IDs or authorization', async () => {
       const setup = fixture(); update(setup.root, { apiCase: true });
