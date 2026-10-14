@@ -308,8 +308,14 @@ async function selfTest() {
   };
   const check = async (name, action) => {
     if (process.env.SELECTION_TEST_FILTER && !name.includes(process.env.SELECTION_TEST_FILTER)) return;
+    const startedAt = process.hrtime.bigint();
+    console.error(`selection case START ${name}`);
     try { await action(); results.push([name, true]); }
     catch (error) { console.error(`FAIL ${name}: ${error.stack}`); results.push([name, false]); }
+    finally {
+      const elapsedSeconds = Number(process.hrtime.bigint() - startedAt) / 1e9;
+      console.error(`selection case END ${name} (${elapsedSeconds.toFixed(3)}s)`);
+    }
   };
   const refuses = (result, code) => {
     assert.equal(result.schema, 'autoloop.loop/1');
