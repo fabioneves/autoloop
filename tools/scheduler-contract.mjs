@@ -2394,10 +2394,28 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
         taskText: ctx.taskText, rationale: 'The trusted owner judged that the added path is needed for the task.' };
       const tasks = [];
       const start = async (expected, isolated = true) => { const task = startPlanningTask(api, ctx.worktree.root, expected, isolated); tasks.push(task); await task.ready; return task; };
-      const observe = (task, overrides = {}) => observeFailingTaskRelationship(ctx.lease, readSchedulerContext(ctx.lease).checkpoint.revision,
-        task, { ...request, ...overrides });
-      const recordFor = async (expected, action, status) => {
-        const task = await start(expected); const observation = observe(task);
+      const observe = (task, overrides = {}) => {
+        try {
+          return observeFailingTaskRelationship(ctx.lease, readSchedulerContext(ctx.lease).checkpoint.revision, task, { ...request, ...overrides });
+        } catch (error) {
+          if (error.code === 'OWNER_UNVERIFIED') {
+            // Test-only failure facts. These later observations do not grant
+            // authority or change the production observer's acceptance checks.
+            const entry = procEntry(task.pid); let executable = null;
+            try { if (entry?.[2]) executable = realpathSync(entry[2]); } catch { /* report the unverified path */ }
+            error.message += ' Fixture ownership: ' + JSON.stringify({
+              task: task.fixtureObservation ?? 'input rejection', platform: process.platform, pid: task.pid, nativePid: task._handle?.pid ?? null,
+              launch: task.spawnfile, parentPid: entry?.[0] ?? null, expectedParentPid: process.pid,
+              rawExecutable: entry?.[2] ?? null, executable, pinnedExecutable: setup.pins.nodePath,
+              childGroup: processGroupOf(task.pid), ownerGroup: processGroupOf(process.pid),
+              started: task.started, observedStart: processStart(task.pid), exitCode: task.exitCode, signal: task.signalCode,
+            });
+          }
+          throw error;
+        }
+      };
+      const recordFor = async (label, expected, action, status) => {
+        const task = await start(expected); task.fixtureObservation = label; const observation = observe(task);
         assert.equal(planningRelationshipRecovery(readSchedulerContext(ctx.lease).checkpoint).pending, true);
         refuses('RECOVERY_REQUIRED', () => observeSelectionNoWork(ctx.lease, data.unit.unitId));
         await action(task); const record = await observation.completion; await task.finished;
@@ -2422,11 +2440,23 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
         refuses('INVALID_INPUT', () => observe(forgedChild, { taskText: 'Not a task in this plan.' })); await endChild(forgedChild);
         const exited = await start('actual fixture contents\n'); exited.send('run'); await exited.finished;
         refuses('OWNER_UNVERIFIED', () => observe(exited));
-        const shared = await start('required\n', false); refuses('OWNER_UNVERIFIED', () => observe(shared)); await endChild(shared);
-        const pathTask = startPlanningTask(api, ctx.worktree.root, 'required\n', true, false, true); tasks.push(pathTask); await pathTask.ready;
+        const shared = await start('required\n', false); shared.fixtureObservation = 'shared-group refusal';
+        assert.throws(() => observe(shared), (error) => {
+          assert(error instanceof SchedulerError && error.code === 'OWNER_UNVERIFIED');
+          const marker = ' Fixture ownership: '; const at = error.message.indexOf(marker);
+          assert(at >= 0, 'The fixture must report the rejected ownership facts.');
+          const facts = JSON.parse(error.message.slice(at + marker.length));
+          assert.equal(facts.task, 'shared-group refusal'); assert.equal(facts.pid, shared.pid);
+          assert.equal(facts.nativePid, shared.pid); assert.equal(facts.parentPid, process.pid);
+          assert.equal(facts.childGroup, processGroupOf(process.pid)); assert.notEqual(facts.childGroup, shared.pid);
+          return true;
+        });
+        await endChild(shared);
+        const pathTask = startPlanningTask(api, ctx.worktree.root, 'required\n', true, false, true);
+        pathTask.fixtureObservation = 'PATH launch'; tasks.push(pathTask); await pathTask.ready;
         const pathObservation = observe(pathTask); pathTask.send('run');
         assert.equal((await pathObservation.completion).status, 'verified-failure'); await pathTask.finished;
-        const zero = await recordFor('actual fixture contents\n', async (task) => {
+        const zero = await recordFor('zero exit', 'actual fixture contents\n', async (task) => {
           task.send('run'); await task.finished;
           const current = readSchedulerContext(ctx.lease).checkpoint;
           if (current.units[0].planningRelationships.at(-1).status === 'observing') {
@@ -2435,22 +2465,22 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
         }, 'not-failed');
         refuses('WIDEN_REASON_UNVERIFIED', () => readFailingTaskRelationship(ctx.lease, readSchedulerContext(ctx.lease).checkpoint.revision,
           zero.relationshipId, { unitId: data.unit.unitId, unitGeneration: 1, proposedPlanArtifact: ctx.proposed }));
-        await recordFor('required\n', async (task) => { task.kill('SIGTERM'); }, 'inconclusive');
-        await recordFor('required\n', async (task) => { task.stdout.destroy(new Error('fixture output pipe failure')); task.send('run'); }, 'inconclusive');
-        await recordFor('required\n', async (task) => {
+        await recordFor('signal exit', 'required\n', async (task) => { task.kill('SIGTERM'); }, 'inconclusive');
+        await recordFor('output pipe failure', 'required\n', async (task) => { task.stdout.destroy(new Error('fixture output pipe failure')); task.send('run'); }, 'inconclusive');
+        await recordFor('changed HEAD with equal tree', 'required\n', async (task) => {
           const tree = gitFact(ctx.worktree.root, ['--verify', 'HEAD^{tree}']);
           git('-C', ctx.worktree.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
             'commit', '--allow-empty', '-qm', 'context moved without a tree change');
           assert.equal(gitFact(ctx.worktree.root, ['--verify', 'HEAD^{tree}']), tree); task.send('run');
         }, 'inconclusive');
         writeFileSync(join(ctx.worktree.root, 'fixture.txt'), 'dirty-a\n');
-        await recordFor('required\n', async (task) => {
+        await recordFor('changed dirty bytes', 'required\n', async (task) => {
           const before = checkoutGit(ctx.worktree.root, ['status', '--porcelain=v1']);
           writeFileSync(join(ctx.worktree.root, 'fixture.txt'), 'dirty-b\n');
           assert.equal(checkoutGit(ctx.worktree.root, ['status', '--porcelain=v1']), before); task.send('run');
         }, 'inconclusive');
         writeFileSync(join(ctx.worktree.root, 'fixture.txt'), 'actual fixture contents\n');
-        const paused = await recordFor('required\n', async (task) => {
+        const paused = await recordFor('pause during observation', 'required\n', async (task) => {
           let current = readSchedulerContext(ctx.lease).checkpoint; commitTransition(ctx.lease, current.revision, (value) => value);
           current = readSchedulerContext(ctx.lease).checkpoint;
           commitTransition(ctx.lease, current.revision, (value) => ({ ...value, state: 'paused', desiredState: 'paused' })); task.send('run');
